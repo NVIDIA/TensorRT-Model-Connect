@@ -82,7 +82,7 @@ import numpy as np
 
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
+from .. import model as graph_ops
 
 
 trt = trt_compat.get_trt()
@@ -91,6 +91,7 @@ trt = trt_compat.get_trt()
 # ---------------------------------------------------------------------------
 # Config dataclass
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class QwenImageVAEConfig:
@@ -115,22 +116,47 @@ class QwenImageVAEConfig:
     # schedule) and -- in image mode -- skips the time_conv even where the
     # schedule is True, so the value only governs which weights need to be
     # present in the checkpoint.
-    temporal_downsample: list[bool] = field(
-        default_factory=lambda: [False, True, True]
-    )
+    temporal_downsample: list[bool] = field(default_factory=lambda: [False, True, True])
     input_channels: int = 3
     attn_scales: list[float] = field(default_factory=list)
     latents_mean: list[float] = field(
         default_factory=lambda: [
-            -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517,
-            1.5508, 0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497,
-            0.2503, -0.2921,
+            -0.7571,
+            -0.7089,
+            -0.9113,
+            0.1075,
+            -0.1745,
+            0.9653,
+            -0.1517,
+            1.5508,
+            0.4134,
+            -0.0715,
+            0.5517,
+            -0.3632,
+            -0.1922,
+            -0.9497,
+            0.2503,
+            -0.2921,
         ]
     )
     latents_std: list[float] = field(
         default_factory=lambda: [
-            2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
-            3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160,
+            2.8184,
+            1.4541,
+            2.3275,
+            2.6558,
+            1.2196,
+            1.7708,
+            2.6052,
+            2.0743,
+            3.2687,
+            2.1526,
+            2.8652,
+            1.5579,
+            1.6382,
+            1.1253,
+            2.8251,
+            1.9160,
         ]
     )
     # Numerical eps for L2 channel norm. HF default for F.normalize is 1e-12.
@@ -160,15 +186,11 @@ def _as_numpy(value, *, name: str) -> np.ndarray:
         try:
             import torch
         except ImportError:  # pragma: no cover
-            raise TypeError(
-                f"weight {name!r} is not numpy and torch is unavailable"
-            )
+            raise TypeError(f"weight {name!r} is not numpy and torch is unavailable")
         if isinstance(value, torch.Tensor):
             arr = value.detach().cpu().to(torch.float32).numpy()
         else:
-            raise TypeError(
-                f"weight {name!r} has unsupported type {type(value).__name__}"
-            )
+            raise TypeError(f"weight {name!r} has unsupported type {type(value).__name__}")
     return np.ascontiguousarray(arr, dtype=np.float32)
 
 
@@ -193,6 +215,7 @@ def _bf16_weights(data_fp32: np.ndarray) -> "trt.Weights":
     TRT consumes it via raw pointer.
     """
     import ml_dtypes
+
     bf16_arr = np.ascontiguousarray(
         np.asarray(data_fp32, dtype=np.float32).astype(ml_dtypes.bfloat16)
     )
@@ -248,9 +271,7 @@ def _bf16_conv3d_as_conv2d(
     st, sh, sw = stride
     pt, ph, pw = padding
     if kt != 1 or st != 1 or pt != 0:
-        raise NotImplementedError(
-            "_bf16_conv3d_as_conv2d only supports kt=1 spatial-only convs"
-        )
+        raise NotImplementedError("_bf16_conv3d_as_conv2d only supports kt=1 spatial-only convs")
 
     # Reshape [B, C, T, H, W] -> [B*T, C, H, W]
     reshape_in = network.add_shuffle(inp)
@@ -260,8 +281,10 @@ def _bf16_conv3d_as_conv2d(
     # Weight: [C_out, C_in, 1, Kh, Kw] -> [C_out, C_in, Kh, Kw]
     w2d = weight.reshape(out_channels, c_in, kh, kw)
     conv_out = _bf16_conv2d(
-        network, reshape_in.get_output(0),
-        w2d, bias,
+        network,
+        reshape_in.get_output(0),
+        w2d,
+        bias,
         out_channels=out_channels,
         kernel_hw=(kh, kw),
         stride_hw=(sh, sw),
@@ -300,14 +323,16 @@ def _bf16_causal_conv3d(
 
     if kt == 1:
         return _bf16_conv3d_as_conv2d(
-            network, inp, weight, bias, out_channels,
+            network,
+            inp,
+            weight,
+            bias,
+            out_channels,
             kernel_size=(1, kh, kw),
             padding=(0, ph, pw),
         )
     if t_in != 1:
-        raise NotImplementedError(
-            "_bf16_causal_conv3d only supports T=1 image-mode causal conv"
-        )
+        raise NotImplementedError("_bf16_causal_conv3d only supports T=1 image-mode causal conv")
 
     # Concatenate cache + input along temporal dim: [B, C, Kt, H, W]
     concat = network.add_concatenation([cache, inp])
@@ -320,8 +345,10 @@ def _bf16_causal_conv3d(
 
     w2d = weight.reshape(out_channels, c_in * kt, kh, kw)
     conv_out = _bf16_conv2d(
-        network, reshape_in.get_output(0),
-        w2d, bias,
+        network,
+        reshape_in.get_output(0),
+        w2d,
+        bias,
         out_channels=out_channels,
         kernel_hw=(kh, kw),
         stride_hw=(1, 1),
@@ -351,8 +378,10 @@ def _bf16_spatial_upsample_with_conv(
 
     out_channels = weight.shape[0]
     return _bf16_conv3d_as_conv2d(
-        network, upsampled,
-        weight=weight, bias=bias,
+        network,
+        upsampled,
+        weight=weight,
+        bias=bias,
         out_channels=out_channels,
         kernel_size=(1, 3, 3),
         padding=(0, 1, 1),
@@ -419,42 +448,37 @@ def _bf16_l2_channel_norm(
     """
     inp_fp32 = _to_fp32(network, inp)
 
-    sq = network.add_elementwise(
-        inp_fp32, inp_fp32, trt.ElementWiseOperation.PROD).get_output(0)
-    sum_sq = network.add_reduce(
-        sq, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True).get_output(0)
+    sq = network.add_elementwise(inp_fp32, inp_fp32, trt.ElementWiseOperation.PROD).get_output(0)
+    sum_sq = network.add_reduce(sq, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True).get_output(0)
     eps_t = graph_ops.add_constant(
-        network, (1, 1, 1, 1, 1),
-        np.array([eps], dtype=np.float32), dtype=np.float32)
-    denom = network.add_elementwise(
-        sum_sq, eps_t, trt.ElementWiseOperation.SUM).get_output(0)
+        network, (1, 1, 1, 1, 1), np.array([eps], dtype=np.float32), dtype=np.float32
+    )
+    denom = network.add_elementwise(sum_sq, eps_t, trt.ElementWiseOperation.SUM).get_output(0)
     norm = network.add_unary(denom, trt.UnaryOperation.SQRT).get_output(0)
     recip = network.add_unary(norm, trt.UnaryOperation.RECIP).get_output(0)
-    normalized = network.add_elementwise(
-        inp_fp32, recip, trt.ElementWiseOperation.PROD).get_output(0)
+    normalized = network.add_elementwise(inp_fp32, recip, trt.ElementWiseOperation.PROD).get_output(
+        0
+    )
 
     # scale = sqrt(C) * gamma  (fp32 constant)
     gamma_flat = gamma.flatten()[:num_channels]
     scale = (np.sqrt(num_channels) * gamma_flat).reshape(1, num_channels, 1, 1, 1)
-    scale_t = graph_ops.add_constant(
-        network, (1, num_channels, 1, 1, 1), scale, dtype=np.float32)
+    scale_t = graph_ops.add_constant(network, (1, num_channels, 1, 1, 1), scale, dtype=np.float32)
     result_fp32 = network.add_elementwise(
-        normalized, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+        normalized, scale_t, trt.ElementWiseOperation.PROD
+    ).get_output(0)
 
     return _to_bf16(network, result_fp32)
 
 
-def _bf16_silu(
-    network: "trt.INetworkDefinition", inp: "trt.ITensor"
-) -> "trt.ITensor":
+def _bf16_silu(network: "trt.INetworkDefinition", inp: "trt.ITensor") -> "trt.ITensor":
     """SiLU/Swish on a bf16 tensor: ``x * sigmoid(x)``.
 
     Activations and elementwise products preserve input dtype in
     STRONGLY_TYPED networks, so this stays in bf16 end-to-end.
     """
     sig = network.add_activation(inp, trt.ActivationType.SIGMOID).get_output(0)
-    return network.add_elementwise(
-        inp, sig, trt.ElementWiseOperation.PROD).get_output(0)
+    return network.add_elementwise(inp, sig, trt.ElementWiseOperation.PROD).get_output(0)
 
 
 def _bf16_vae_resblock_3d(
@@ -478,7 +502,9 @@ def _bf16_vae_resblock_3d(
     h = _bf16_l2_channel_norm(network, inp, in_channels, g1, eps)
     h = _bf16_silu(network, h)
     h = _bf16_causal_conv3d(
-        network, h, cache_in1,
+        network,
+        h,
+        cache_in1,
         weight=weights[f"{prefix}.conv1.weight"],
         bias=weights.get(f"{prefix}.conv1.bias"),
         out_channels=out_channels,
@@ -490,7 +516,9 @@ def _bf16_vae_resblock_3d(
     h = _bf16_l2_channel_norm(network, h, out_channels, g2, eps)
     h = _bf16_silu(network, h)
     h = _bf16_causal_conv3d(
-        network, h, cache_in2,
+        network,
+        h,
+        cache_in2,
         weight=weights[f"{prefix}.conv2.weight"],
         bias=weights.get(f"{prefix}.conv2.bias"),
         out_channels=out_channels,
@@ -500,7 +528,8 @@ def _bf16_vae_resblock_3d(
 
     if in_channels != out_channels:
         shortcut = _bf16_conv3d_as_conv2d(
-            network, inp,
+            network,
+            inp,
             weight=weights[f"{prefix}.conv_shortcut.weight"],
             bias=weights.get(f"{prefix}.conv_shortcut.bias"),
             out_channels=out_channels,
@@ -509,8 +538,7 @@ def _bf16_vae_resblock_3d(
     else:
         shortcut = inp
 
-    return network.add_elementwise(
-        h, shortcut, trt.ElementWiseOperation.SUM).get_output(0)
+    return network.add_elementwise(h, shortcut, trt.ElementWiseOperation.SUM).get_output(0)
 
 
 def _bf16_vae_spatial_attention(
@@ -533,8 +561,7 @@ def _bf16_vae_spatial_attention(
     hw = h * w
     identity = inp
 
-    normed = _bf16_l2_channel_norm(
-        network, inp, channels, weights[f"{prefix}.norm.gamma"], eps)
+    normed = _bf16_l2_channel_norm(network, inp, channels, weights[f"{prefix}.norm.gamma"], eps)
 
     # QKV projection: 1x1 conv per spatial position, applied per (B*T) frame.
     # The to_qkv weight on disk is [3C, C, 1, 1] (HF Conv2d).
@@ -544,7 +571,8 @@ def _bf16_vae_spatial_attention(
     else:
         qkv_w_5d = qkv_w.reshape(3 * c, c, 1, 1, 1)
     qkv = _bf16_conv3d_as_conv2d(
-        network, normed,
+        network,
+        normed,
         weight=qkv_w_5d,
         bias=weights.get(f"{prefix}.to_qkv.bias"),
         out_channels=3 * c,
@@ -556,14 +584,14 @@ def _bf16_vae_spatial_attention(
     qkv_flat.reshape_dims = (bt, hw, 3 * c)
 
     q_slice = network.add_slice(
-        qkv_flat.get_output(0),
-        start=(0, 0, 0), shape=(bt, hw, c), stride=(1, 1, 1)).get_output(0)
+        qkv_flat.get_output(0), start=(0, 0, 0), shape=(bt, hw, c), stride=(1, 1, 1)
+    ).get_output(0)
     k_slice = network.add_slice(
-        qkv_flat.get_output(0),
-        start=(0, 0, c), shape=(bt, hw, c), stride=(1, 1, 1)).get_output(0)
+        qkv_flat.get_output(0), start=(0, 0, c), shape=(bt, hw, c), stride=(1, 1, 1)
+    ).get_output(0)
     v_slice = network.add_slice(
-        qkv_flat.get_output(0),
-        start=(0, 0, 2 * c), shape=(bt, hw, c), stride=(1, 1, 1)).get_output(0)
+        qkv_flat.get_output(0), start=(0, 0, 2 * c), shape=(bt, hw, c), stride=(1, 1, 1)
+    ).get_output(0)
 
     q_4d = network.add_shuffle(q_slice)
     q_4d.reshape_dims = (bt, 1, hw, c)
@@ -593,15 +621,15 @@ def _bf16_vae_spatial_attention(
     else:
         proj_w_5d = proj_w.reshape(c, c, 1, 1, 1)
     out = _bf16_conv3d_as_conv2d(
-        network, ctx_5d.get_output(0),
+        network,
+        ctx_5d.get_output(0),
         weight=proj_w_5d,
         bias=weights.get(f"{prefix}.proj.bias"),
         out_channels=c,
         kernel_size=(1, 1, 1),
     )
 
-    return network.add_elementwise(
-        out, identity, trt.ElementWiseOperation.SUM).get_output(0)
+    return network.add_elementwise(out, identity, trt.ElementWiseOperation.SUM).get_output(0)
 
 
 def _zero_cache_constant(
@@ -633,9 +661,7 @@ def _make_unnorm_constants(
     mean = np.asarray(cfg.latents_mean, dtype=np.float32)
     std = np.asarray(cfg.latents_std, dtype=np.float32)
     if mean.shape != (z_dim,) or std.shape != (z_dim,):
-        raise ValueError(
-            f"latents_mean/std length {mean.shape}/{std.shape} mismatch z_dim={z_dim}"
-        )
+        raise ValueError(f"latents_mean/std length {mean.shape}/{std.shape} mismatch z_dim={z_dim}")
     return (
         mean.reshape(1, z_dim, 1, 1, 1),
         std.reshape(1, z_dim, 1, 1, 1),
@@ -645,6 +671,7 @@ def _make_unnorm_constants(
 # ---------------------------------------------------------------------------
 # Builder
 # ---------------------------------------------------------------------------
+
 
 def build_qwen_image_vae_encoder_engine(
     cfg: QwenImageVAEConfig,
@@ -667,9 +694,7 @@ def build_qwen_image_vae_encoder_engine(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if cfg.input_channels != 3:
-        raise ValueError(
-            "Qwen-Image VAE only supports input_channels=3 (RGB input)"
-        )
+        raise ValueError("Qwen-Image VAE only supports input_channels=3 (RGB input)")
     if image_h <= 0 or image_w <= 0:
         raise ValueError("image_h/image_w must be positive")
     if image_h % cfg.spatial_compression_ratio != 0 or image_w % cfg.spatial_compression_ratio != 0:
@@ -692,9 +717,7 @@ def build_qwen_image_vae_encoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
-    )
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
     config.clear_flag(trt.BuilderFlag.TF32)
@@ -702,16 +725,15 @@ def build_qwen_image_vae_encoder_engine(
     batch = 1
     cur_h, cur_w = image_h, image_w
 
-    image_fp32 = network.add_input(
-        "image", trt.float32, (batch, 3, 1, image_h, image_w)
-    )
+    image_fp32 = network.add_input("image", trt.float32, (batch, 3, 1, image_h, image_w))
     x = _to_bf16(network, image_fp32)
 
     # Initial image-mode causal conv.
-    ci_cache = _zero_cache_constant(
-        network, batch=batch, channels=3, h=cur_h, w=cur_w)
+    ci_cache = _zero_cache_constant(network, batch=batch, channels=3, h=cur_h, w=cur_w)
     x = _bf16_causal_conv3d(
-        network, x, ci_cache,
+        network,
+        x,
+        ci_cache,
         weight=take("encoder.conv_in.weight"),
         bias=take("encoder.conv_in.bias"),
         out_channels=channels_list[0],
@@ -725,15 +747,18 @@ def build_qwen_image_vae_encoder_engine(
         in_ch = in_ch_base
         for block in range(num_res):
             prefix = f"encoder.down_blocks.{level * (num_res + 1) + block}"
-            c1 = _zero_cache_constant(
-                network, batch=batch, channels=in_ch, h=cur_h, w=cur_w)
-            c2 = _zero_cache_constant(
-                network, batch=batch, channels=out_ch, h=cur_h, w=cur_w)
+            c1 = _zero_cache_constant(network, batch=batch, channels=in_ch, h=cur_h, w=cur_w)
+            c2 = _zero_cache_constant(network, batch=batch, channels=out_ch, h=cur_h, w=cur_w)
             rb_weights = _gather_resblock_weights(weights, prefix, in_ch, out_ch)
             x = _bf16_vae_resblock_3d(
-                network, x, c1, c2,
-                weights=rb_weights, prefix=prefix,
-                in_channels=in_ch, out_channels=out_ch,
+                network,
+                x,
+                c1,
+                c2,
+                weights=rb_weights,
+                prefix=prefix,
+                in_channels=in_ch,
+                out_channels=out_ch,
                 eps=cfg.norm_eps,
             )
             in_ch = out_ch
@@ -765,36 +790,40 @@ def build_qwen_image_vae_encoder_engine(
     mid_ch = cur_ch
     for mi in range(2):
         prefix = f"encoder.mid_block.resnets.{mi}"
-        c1 = _zero_cache_constant(
-            network, batch=batch, channels=mid_ch, h=cur_h, w=cur_w)
-        c2 = _zero_cache_constant(
-            network, batch=batch, channels=mid_ch, h=cur_h, w=cur_w)
+        c1 = _zero_cache_constant(network, batch=batch, channels=mid_ch, h=cur_h, w=cur_w)
+        c2 = _zero_cache_constant(network, batch=batch, channels=mid_ch, h=cur_h, w=cur_w)
         rb_weights = _gather_resblock_weights(weights, prefix, mid_ch, mid_ch)
         x = _bf16_vae_resblock_3d(
-            network, x, c1, c2,
-            weights=rb_weights, prefix=prefix,
-            in_channels=mid_ch, out_channels=mid_ch,
+            network,
+            x,
+            c1,
+            c2,
+            weights=rb_weights,
+            prefix=prefix,
+            in_channels=mid_ch,
+            out_channels=mid_ch,
             eps=cfg.norm_eps,
         )
         if mi == 0:
             attn_prefix = "encoder.mid_block.attentions.0"
             attn_weights = _gather_attention_weights(weights, attn_prefix, mid_ch)
             x = _bf16_vae_spatial_attention(
-                network, x,
+                network,
+                x,
                 weights=attn_weights,
                 prefix=attn_prefix,
                 channels=mid_ch,
                 eps=cfg.norm_eps,
             )
 
-    x = _bf16_l2_channel_norm(
-        network, x, cur_ch, take("encoder.norm_out.gamma"), cfg.norm_eps)
+    x = _bf16_l2_channel_norm(network, x, cur_ch, take("encoder.norm_out.gamma"), cfg.norm_eps)
     x = _bf16_silu(network, x)
 
-    co_cache = _zero_cache_constant(
-        network, batch=batch, channels=cur_ch, h=cur_h, w=cur_w)
+    co_cache = _zero_cache_constant(network, batch=batch, channels=cur_ch, h=cur_h, w=cur_w)
     x = _bf16_causal_conv3d(
-        network, x, co_cache,
+        network,
+        x,
+        co_cache,
         weight=take("encoder.conv_out.weight"),
         bias=take("encoder.conv_out.bias"),
         out_channels=z_dim * 2,
@@ -896,9 +925,7 @@ def build_qwen_image_vae_decoder_engine(
         Resolved ``Path`` to the written plan file.
     """
     if max_batch_size < 1:
-        raise ValueError(
-            f"max_batch_size must be >= 1 (got {max_batch_size})"
-        )
+        raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
     # Per design Decision E (2026-05-19) the VAE is always sliced at B=1.
     # The kwarg above is accepted for API uniformity; we deliberately ignore
     # the requested cap and keep the engine statically batched at 1.
@@ -907,9 +934,7 @@ def build_qwen_image_vae_decoder_engine(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if cfg.input_channels != 3:
-        raise ValueError(
-            "Qwen-Image VAE only supports input_channels=3 (RGB output)"
-        )
+        raise ValueError("Qwen-Image VAE only supports input_channels=3 (RGB output)")
 
     # Reset the bf16 anchor list for this build so we never accidentally
     # keep references to buffers from a previous build alive.
@@ -933,9 +958,7 @@ def build_qwen_image_vae_decoder_engine(
     # ---- Build TRT network. -----
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
-    )
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
     config.clear_flag(trt.BuilderFlag.TF32)
@@ -949,28 +972,27 @@ def build_qwen_image_vae_decoder_engine(
     # negligible, and doing the multiply/add in fp32 protects against bf16
     # rounding of the latents_mean/std vectors which carry meaningful
     # precision (e.g. -0.7571 vs -0.7578 in bf16).
-    latent_fp32 = network.add_input(
-        "latent", trt.float32, (batch, z_dim, 1, h_lat, w_lat)
-    )
+    latent_fp32 = network.add_input("latent", trt.float32, (batch, z_dim, 1, h_lat, w_lat))
 
     x_fp32 = latent_fp32
     if apply_latent_unnorm:
         mean_arr, std_arr = _make_unnorm_constants(cfg, z_dim)
-        std_const = graph_ops.add_constant(
-            network, std_arr.shape, std_arr, dtype=np.float32)
-        mean_const = graph_ops.add_constant(
-            network, mean_arr.shape, mean_arr, dtype=np.float32)
+        std_const = graph_ops.add_constant(network, std_arr.shape, std_arr, dtype=np.float32)
+        mean_const = graph_ops.add_constant(network, mean_arr.shape, mean_arr, dtype=np.float32)
         scaled = network.add_elementwise(
-            x_fp32, std_const, trt.ElementWiseOperation.PROD).get_output(0)
+            x_fp32, std_const, trt.ElementWiseOperation.PROD
+        ).get_output(0)
         x_fp32 = network.add_elementwise(
-            scaled, mean_const, trt.ElementWiseOperation.SUM).get_output(0)
+            scaled, mean_const, trt.ElementWiseOperation.SUM
+        ).get_output(0)
 
     # Cast to bf16 for the rest of the network.
     x = _to_bf16(network, x_fp32)
 
     # ---- post_quant_conv (1x1x1 Conv3D, z_dim -> z_dim) ---
     x = _bf16_conv3d_as_conv2d(
-        network, x,
+        network,
+        x,
         weight=take("post_quant_conv.weight"),
         bias=take("post_quant_conv.bias"),
         out_channels=z_dim,
@@ -978,10 +1000,11 @@ def build_qwen_image_vae_decoder_engine(
     )
 
     # ---- conv_in (CausalConv3d, z_dim -> mid_ch, k=(3,3,3)) ---
-    ci_cache = _zero_cache_constant(
-        network, batch=batch, channels=z_dim, h=cur_h, w=cur_w)
+    ci_cache = _zero_cache_constant(network, batch=batch, channels=z_dim, h=cur_h, w=cur_w)
     x = _bf16_causal_conv3d(
-        network, x, ci_cache,
+        network,
+        x,
+        ci_cache,
         weight=take("decoder.conv_in.weight"),
         bias=take("decoder.conv_in.bias"),
         out_channels=mid_ch,
@@ -990,36 +1013,39 @@ def build_qwen_image_vae_decoder_engine(
     )
     cur_ch = mid_ch
     if verbose:
-        print(f"[qwen-image-vae] conv_in: ch={cur_ch}, {cur_h}x{cur_w}",
-              file=sys.stderr)
+        print(f"[qwen-image-vae] conv_in: ch={cur_ch}, {cur_h}x{cur_w}", file=sys.stderr)
 
     # ---- mid_block: resnet.0 -> attention -> resnet.1 ---
     for mi in range(2):
         prefix = f"decoder.mid_block.resnets.{mi}"
-        c1 = _zero_cache_constant(
-            network, batch=batch, channels=mid_ch, h=cur_h, w=cur_w)
-        c2 = _zero_cache_constant(
-            network, batch=batch, channels=mid_ch, h=cur_h, w=cur_w)
+        c1 = _zero_cache_constant(network, batch=batch, channels=mid_ch, h=cur_h, w=cur_w)
+        c2 = _zero_cache_constant(network, batch=batch, channels=mid_ch, h=cur_h, w=cur_w)
         rb_weights = _gather_resblock_weights(weights, prefix, mid_ch, mid_ch)
         x = _bf16_vae_resblock_3d(
-            network, x, c1, c2,
-            weights=rb_weights, prefix=prefix,
-            in_channels=mid_ch, out_channels=mid_ch,
+            network,
+            x,
+            c1,
+            c2,
+            weights=rb_weights,
+            prefix=prefix,
+            in_channels=mid_ch,
+            out_channels=mid_ch,
             eps=cfg.norm_eps,
         )
         if mi == 0:
             attn_weights = _gather_attention_weights(
-                weights, "decoder.mid_block.attentions.0", mid_ch)
+                weights, "decoder.mid_block.attentions.0", mid_ch
+            )
             x = _bf16_vae_spatial_attention(
-                network, x,
+                network,
+                x,
                 weights=attn_weights,
                 prefix="decoder.mid_block.attentions.0",
                 channels=mid_ch,
                 eps=cfg.norm_eps,
             )
     if verbose:
-        print(f"[qwen-image-vae] mid done: ch={cur_ch}, {cur_h}x{cur_w}",
-              file=sys.stderr)
+        print(f"[qwen-image-vae] mid done: ch={cur_ch}, {cur_h}x{cur_w}", file=sys.stderr)
 
     # ---- up_blocks ---
     prev_ch = mid_ch
@@ -1033,16 +1059,18 @@ def build_qwen_image_vae_decoder_engine(
         for blk in range(num_res + 1):
             prefix = f"decoder.up_blocks.{level}.resnets.{blk}"
             in_ch = prev_ch if blk == 0 else out_ch
-            c1 = _zero_cache_constant(
-                network, batch=batch, channels=in_ch, h=cur_h, w=cur_w)
-            c2 = _zero_cache_constant(
-                network, batch=batch, channels=out_ch, h=cur_h, w=cur_w)
-            rb_weights = _gather_resblock_weights(
-                weights, prefix, in_ch, out_ch)
+            c1 = _zero_cache_constant(network, batch=batch, channels=in_ch, h=cur_h, w=cur_w)
+            c2 = _zero_cache_constant(network, batch=batch, channels=out_ch, h=cur_h, w=cur_w)
+            rb_weights = _gather_resblock_weights(weights, prefix, in_ch, out_ch)
             x = _bf16_vae_resblock_3d(
-                network, x, c1, c2,
-                weights=rb_weights, prefix=prefix,
-                in_channels=in_ch, out_channels=out_ch,
+                network,
+                x,
+                c1,
+                c2,
+                weights=rb_weights,
+                prefix=prefix,
+                in_channels=in_ch,
+                out_channels=out_ch,
                 eps=cfg.norm_eps,
             )
             prev_ch = out_ch
@@ -1057,20 +1085,19 @@ def build_qwen_image_vae_decoder_engine(
         # Spatial upsample (HF QwenImageResample.resample = Upsample(2x) +
         # Conv2d(C, C//2 or same, 3, padding=1)). The conv changes channels.
         if has_spatial:
-            sp_prefix = (
-                f"decoder.up_blocks.{level}.upsamplers.0.resample.1"
-            )
+            sp_prefix = f"decoder.up_blocks.{level}.upsamplers.0.resample.1"
             sp_w = take(f"{sp_prefix}.weight")
             sp_b = take(f"{sp_prefix}.bias")
             # Weight shape from diffusers Conv2d is [C_out, C_in, 3, 3];
             # the bf16 spatial-upsample helper expects [C_out, C_in, 1, 3, 3].
             if sp_w.ndim == 4:
-                sp_w = sp_w.reshape(
-                    sp_w.shape[0], sp_w.shape[1], 1, sp_w.shape[2], sp_w.shape[3]
-                )
+                sp_w = sp_w.reshape(sp_w.shape[0], sp_w.shape[1], 1, sp_w.shape[2], sp_w.shape[3])
             x = _bf16_spatial_upsample_with_conv(
-                network, x,
-                weight=sp_w, bias=sp_b, scale=2,
+                network,
+                x,
+                weight=sp_w,
+                bias=sp_b,
+                scale=2,
             )
             prev_ch = sp_w.shape[0]
             cur_h *= 2
@@ -1078,21 +1105,20 @@ def build_qwen_image_vae_decoder_engine(
             cur_ch = prev_ch
             if verbose:
                 print(
-                    f"[qwen-image-vae]   spatial 2x -> ch={prev_ch}, "
-                    f"{cur_h}x{cur_w}",
+                    f"[qwen-image-vae]   spatial 2x -> ch={prev_ch}, {cur_h}x{cur_w}",
                     file=sys.stderr,
                 )
 
     # ---- norm_out (L2 channel norm) + SiLU (bf16 IO, fp32 reduction) ---
-    x = _bf16_l2_channel_norm(
-        network, x, cur_ch, take("decoder.norm_out.gamma"), cfg.norm_eps)
+    x = _bf16_l2_channel_norm(network, x, cur_ch, take("decoder.norm_out.gamma"), cfg.norm_eps)
     x = _bf16_silu(network, x)
 
     # ---- conv_out (CausalConv3d, cur_ch -> 3, k=(3,3,3)) ---
-    co_cache = _zero_cache_constant(
-        network, batch=batch, channels=cur_ch, h=cur_h, w=cur_w)
+    co_cache = _zero_cache_constant(network, batch=batch, channels=cur_ch, h=cur_h, w=cur_w)
     x = _bf16_causal_conv3d(
-        network, x, co_cache,
+        network,
+        x,
+        co_cache,
         weight=take("decoder.conv_out.weight"),
         bias=take("decoder.conv_out.bias"),
         out_channels=3,
@@ -1104,19 +1130,19 @@ def build_qwen_image_vae_decoder_engine(
     x = _to_fp32(network, x)
 
     lo_const = graph_ops.add_constant(
-        network, (1, 1, 1, 1, 1),
+        network,
+        (1, 1, 1, 1, 1),
         np.array([-1.0], dtype=np.float32),
         dtype=np.float32,
     )
     hi_const = graph_ops.add_constant(
-        network, (1, 1, 1, 1, 1),
+        network,
+        (1, 1, 1, 1, 1),
         np.array([1.0], dtype=np.float32),
         dtype=np.float32,
     )
-    x = network.add_elementwise(
-        x, lo_const, trt.ElementWiseOperation.MAX).get_output(0)
-    x = network.add_elementwise(
-        x, hi_const, trt.ElementWiseOperation.MIN).get_output(0)
+    x = network.add_elementwise(x, lo_const, trt.ElementWiseOperation.MAX).get_output(0)
+    x = network.add_elementwise(x, hi_const, trt.ElementWiseOperation.MIN).get_output(0)
 
     # Mark output (fp32).
     x.name = "image"
@@ -1134,6 +1160,7 @@ def build_qwen_image_vae_decoder_engine(
 # ---------------------------------------------------------------------------
 # Weight gathering helpers (subset selection for graph_blocks helpers)
 # ---------------------------------------------------------------------------
+
 
 def _gather_resblock_weights(
     weights: Mapping[str, "np.ndarray"],
@@ -1160,13 +1187,9 @@ def _gather_resblock_weights(
         out[k] = _as_numpy(weights[k], name=k)
     if in_channels != out_channels:
         sc_key = f"{prefix}.conv_shortcut"
-        out[f"{sc_key}.weight"] = _as_numpy(
-            weights[f"{sc_key}.weight"], name=f"{sc_key}.weight"
-        )
+        out[f"{sc_key}.weight"] = _as_numpy(weights[f"{sc_key}.weight"], name=f"{sc_key}.weight")
         if f"{sc_key}.bias" in weights:
-            out[f"{sc_key}.bias"] = _as_numpy(
-                weights[f"{sc_key}.bias"], name=f"{sc_key}.bias"
-            )
+            out[f"{sc_key}.bias"] = _as_numpy(weights[f"{sc_key}.bias"], name=f"{sc_key}.bias")
     return out
 
 
@@ -1193,6 +1216,7 @@ def _gather_attention_weights(
 # ---------------------------------------------------------------------------
 # Real-weight loader
 # ---------------------------------------------------------------------------
+
 
 def load_qwen_image_vae_weights(
     vae_dir: "str | Path",
@@ -1232,35 +1256,29 @@ def load_qwen_image_vae_weights(
     try:
         from safetensors import safe_open
     except ImportError as exc:
-        raise ImportError(
-            "safetensors is required to load HF VAE weights"
-        ) from exc
+        raise ImportError("safetensors is required to load HF VAE weights") from exc
     try:
         import torch
     except ImportError as exc:
-        raise ImportError(
-            "torch is required to load Qwen-Image VAE weights (bf16 dtype)"
-        ) from exc
+        raise ImportError("torch is required to load Qwen-Image VAE weights (bf16 dtype)") from exc
 
     st_files = sorted(vae_dir.glob("*.safetensors"))
     if not st_files:
-        raise FileNotFoundError(
-            f"no *.safetensors under {vae_dir!r}"
-        )
+        raise FileNotFoundError(f"no *.safetensors under {vae_dir!r}")
     for st_path in st_files:
         with safe_open(str(st_path), framework="pt") as st:
             for k in st.keys():
                 if not (
-                    k.startswith("decoder.") or k.startswith("encoder.") or
-                    k.startswith("post_quant_conv.") or k.startswith("quant_conv.")
+                    k.startswith("decoder.")
+                    or k.startswith("encoder.")
+                    or k.startswith("post_quant_conv.")
+                    or k.startswith("quant_conv.")
                 ):
                     continue
                 t = st.get_tensor(k)
                 weights[k] = t.detach().to(torch.float32).cpu().numpy()
     if not weights:
-        raise RuntimeError(
-            f"no VAE weights found under {vae_dir!r}"
-        )
+        raise RuntimeError(f"no VAE weights found under {vae_dir!r}")
     return cfg, weights
 
 

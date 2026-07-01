@@ -56,10 +56,7 @@ def pack_qwen_image_preprocessor_weights(
     """
     for key in _PREPROCESSOR_KEYS:
         if key not in named_tensors:
-            raise ValueError(
-                f"pack_qwen_image_preprocessor_weights: missing required "
-                f"key {key!r}"
-            )
+            raise ValueError(f"pack_qwen_image_preprocessor_weights: missing required key {key!r}")
 
     # Preserve canonical-first ordering, then any extras for test flexibility.
     ordered_keys: list[str] = list(_PREPROCESSOR_KEYS)
@@ -91,18 +88,15 @@ def load_qwen_image_preprocessor_weights(
     ``src/runtime/models/qwen_image/preprocessor_weights_helpers.h``.
     """
     if len(blob) < 4:
-        raise ValueError(
-            f"qwen_image preprocessor blob too small: {len(blob)} bytes"
-        )
+        raise ValueError(f"qwen_image preprocessor blob too small: {len(blob)} bytes")
     (index_len,) = struct.unpack("<I", blob[:4])
     if 4 + index_len > len(blob):
         raise ValueError(
-            f"qwen_image preprocessor index length {index_len} overflows "
-            f"blob of {len(blob)} bytes"
+            f"qwen_image preprocessor index length {index_len} overflows blob of {len(blob)} bytes"
         )
 
-    index = json.loads(blob[4:4 + index_len].decode("utf-8"))
-    data = blob[4 + index_len:]
+    index = json.loads(blob[4 : 4 + index_len].decode("utf-8"))
+    data = blob[4 + index_len :]
 
     out: dict[str, np.ndarray] = {}
     for name, entry in index.items():
@@ -131,12 +125,8 @@ def extract_preprocessor_source(vae_config) -> dict[str, np.ndarray]:
     result to :func:`pack_qwen_image_preprocessor_weights`.
     """
     return {
-        "latents_mean": np.ascontiguousarray(
-            np.asarray(vae_config.latents_mean, dtype=np.float32)
-        ),
-        "latents_std": np.ascontiguousarray(
-            np.asarray(vae_config.latents_std, dtype=np.float32)
-        ),
+        "latents_mean": np.ascontiguousarray(np.asarray(vae_config.latents_mean, dtype=np.float32)),
+        "latents_std": np.ascontiguousarray(np.asarray(vae_config.latents_std, dtype=np.float32)),
     }
 
 

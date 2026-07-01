@@ -11,6 +11,7 @@ and dictionary construction. See design doc Section 4 for the schema.
 
 Trace IDs: UD-QWEN-IMAGE-CONFIG-001.
 """
+
 from __future__ import annotations
 
 import json
@@ -215,19 +216,21 @@ def build_bundle_config(
             # Note: HF's field name is misspelled "temperal_downsample". We
             # preserve the corrected spelling in our schema key but read
             # from the misspelled source field.
-            "temporal_downsample": list(
-                vae_cfg.get("temperal_downsample", [False, True, True])
-            ),
+            "temporal_downsample": list(vae_cfg.get("temperal_downsample", [False, True, True])),
             "latents_mean": list(vae_cfg["latents_mean"]),
             "latents_std": list(vae_cfg["latents_std"]),
             "has_encoder": task_mode == "edit",
             "has_decoder": True,
         },
         "image": {
-            "default_height": 1024, "default_width": 1024,
-            "min_height": 256, "min_width": 256,
-            "max_height": 2048, "max_width": 2048,
-            "height_alignment": 16, "width_alignment": 16,
+            "default_height": 1024,
+            "default_width": 1024,
+            "min_height": 256,
+            "min_width": 256,
+            "max_height": 2048,
+            "max_width": 2048,
+            "height_alignment": 16,
+            "width_alignment": 16,
         },
         "tokenizer": {
             "kind": "hf_python",
@@ -295,9 +298,7 @@ def build_bundle_config(
             "patch_size": vision_patch,
             "merge_size": vision_merge,
             "hidden_size": int(vision_cfg.get("hidden_size", 1280)),
-            "num_layers": int(
-                vision_cfg.get("depth", vision_cfg.get("num_hidden_layers", 32))
-            ),
+            "num_layers": int(vision_cfg.get("depth", vision_cfg.get("num_hidden_layers", 32))),
             "out_hidden_size": int(text_inner["hidden_size"]),
         }
         bundle["image_conditioning"] = {

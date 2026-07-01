@@ -68,7 +68,7 @@ import numpy as np
 
 from tensorrt_model_connect import trt_compat
 
-from . import graph_blocks, graph_ops
+from .. import model as graph_blocks, model as graph_ops
 
 
 trt = trt_compat.get_trt()
@@ -107,15 +107,11 @@ def _as_numpy(value, *, name: str) -> np.ndarray:
         try:
             import torch  # local import to avoid hard dep at import time
         except ImportError:  # pragma: no cover - guard only
-            raise TypeError(
-                f"weight {name!r} is not a numpy array and torch is unavailable"
-            )
+            raise TypeError(f"weight {name!r} is not a numpy array and torch is unavailable")
         if isinstance(value, torch.Tensor):
             arr = value.detach().cpu().to(torch.float32).numpy()
         else:
-            raise TypeError(
-                f"weight {name!r} has unsupported type {type(value).__name__}"
-            )
+            raise TypeError(f"weight {name!r} has unsupported type {type(value).__name__}")
     return np.ascontiguousarray(arr, dtype=np.float32)
 
 
@@ -139,6 +135,7 @@ def _prepare_weights(
     graph_ops.add_matmul_rhs_constant takes rhs of shape [in, out]. HF stores
     Linear weight as [out, in], so we transpose once at weight-load time.
     """
+
     def take(name: str) -> np.ndarray:
         if name not in weights:
             raise KeyError(f"missing required weight: {name!r}")
@@ -153,18 +150,18 @@ def _prepare_weights(
     for i in range(cfg.num_layers):
         hf = f"model.layers.{i}"
         lp = f"layer.{i}"
-        wd[f"{lp}.input_norm"]     = take(f"{hf}.input_layernorm.weight")
+        wd[f"{lp}.input_norm"] = take(f"{hf}.input_layernorm.weight")
         wd[f"{lp}.post_attn_norm"] = take(f"{hf}.post_attention_layernorm.weight")
-        wd[f"{lp}.w_q"]            = take_T(f"{hf}.self_attn.q_proj.weight")
-        wd[f"{lp}.q_bias"]         = take(f"{hf}.self_attn.q_proj.bias")
-        wd[f"{lp}.w_k"]            = take_T(f"{hf}.self_attn.k_proj.weight")
-        wd[f"{lp}.k_bias"]         = take(f"{hf}.self_attn.k_proj.bias")
-        wd[f"{lp}.w_v"]            = take_T(f"{hf}.self_attn.v_proj.weight")
-        wd[f"{lp}.v_bias"]         = take(f"{hf}.self_attn.v_proj.bias")
-        wd[f"{lp}.w_o"]            = take_T(f"{hf}.self_attn.o_proj.weight")
-        wd[f"{lp}.w_gate"]         = take_T(f"{hf}.mlp.gate_proj.weight")
-        wd[f"{lp}.w_up"]           = take_T(f"{hf}.mlp.up_proj.weight")
-        wd[f"{lp}.w_down"]         = take_T(f"{hf}.mlp.down_proj.weight")
+        wd[f"{lp}.w_q"] = take_T(f"{hf}.self_attn.q_proj.weight")
+        wd[f"{lp}.q_bias"] = take(f"{hf}.self_attn.q_proj.bias")
+        wd[f"{lp}.w_k"] = take_T(f"{hf}.self_attn.k_proj.weight")
+        wd[f"{lp}.k_bias"] = take(f"{hf}.self_attn.k_proj.bias")
+        wd[f"{lp}.w_v"] = take_T(f"{hf}.self_attn.v_proj.weight")
+        wd[f"{lp}.v_bias"] = take(f"{hf}.self_attn.v_proj.bias")
+        wd[f"{lp}.w_o"] = take_T(f"{hf}.self_attn.o_proj.weight")
+        wd[f"{lp}.w_gate"] = take_T(f"{hf}.mlp.gate_proj.weight")
+        wd[f"{lp}.w_up"] = take_T(f"{hf}.mlp.up_proj.weight")
+        wd[f"{lp}.w_down"] = take_T(f"{hf}.mlp.down_proj.weight")
 
     final_norm = take("model.norm.weight") if cfg.apply_final_norm else None
     return embed, wd, final_norm
@@ -192,9 +189,7 @@ def _make_qwen25vl_mrope_full_tables(
     if max_seq_len <= 0 or head_dim <= 0 or head_dim % 2 != 0:
         raise ValueError("max_seq_len and even head_dim must be positive")
     if len(mrope_section) != 3 or sum(mrope_section) != head_dim // 2:
-        raise ValueError(
-            "mrope_section must have three entries summing to head_dim // 2"
-        )
+        raise ValueError("mrope_section must have three entries summing to head_dim // 2")
     if image_token_start < 0:
         raise ValueError("image_token_start must be non-negative")
     if spatial_merge_size <= 0 or tokens_per_second <= 0:
@@ -221,10 +216,7 @@ def _make_qwen25vl_mrope_full_tables(
         position_ids[:, :image_token_start] = text_before[None, :]
 
     token_base = image_token_start
-    t_index = (
-        np.arange(grid_t, dtype=np.int64).reshape(-1, 1)
-        * int(tokens_per_second)
-    )
+    t_index = np.arange(grid_t, dtype=np.int64).reshape(-1, 1) * int(tokens_per_second)
     t_index = np.broadcast_to(t_index, (grid_t, llm_grid_h * llm_grid_w)).reshape(-1)
     h_index = np.broadcast_to(
         np.arange(llm_grid_h, dtype=np.int64).reshape(1, -1, 1),
@@ -235,9 +227,7 @@ def _make_qwen25vl_mrope_full_tables(
         (grid_t, llm_grid_h, llm_grid_w),
     ).reshape(-1)
     image_slice = slice(image_token_start, image_token_start + image_tokens)
-    position_ids[:, image_slice] = (
-        np.stack([t_index, h_index, w_index], axis=0) + token_base
-    )
+    position_ids[:, image_slice] = np.stack([t_index, h_index, w_index], axis=0) + token_base
 
     tail_start = image_token_start + image_tokens
     tail_len = max_seq_len - tail_start
@@ -246,16 +236,14 @@ def _make_qwen25vl_mrope_full_tables(
         tail = np.arange(tail_pos_start, tail_pos_start + tail_len, dtype=np.int64)
         position_ids[:, tail_start:] = tail[None, :]
 
-    inv_freq = 1.0 / (
-        rope_theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim)
-    )
+    inv_freq = 1.0 / (rope_theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim))
     freqs = position_ids[:, :, None].astype(np.float64) * inv_freq[None, None, :]
     emb = np.concatenate([freqs, freqs], axis=-1)
 
     section = [int(v) * 2 for v in mrope_section]
     starts = np.cumsum([0] + section[:-1])
     parts = [
-        emb[axis, :, start:start + width]
+        emb[axis, :, start : start + width]
         for axis, (start, width) in enumerate(zip(starts, section))
     ]
     full = np.concatenate(parts, axis=-1)
@@ -383,9 +371,7 @@ def build_qwen25vl_text_encoder_engine(
         than the full graph.
     """
     if max_batch_size < 1:
-        raise ValueError(
-            f"max_batch_size must be >= 1 (got {max_batch_size})"
-        )
+        raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -393,11 +379,12 @@ def build_qwen25vl_text_encoder_engine(
     kv_dim = cfg.num_kv_heads * cfg.head_dim
     if q_dim != cfg.hidden_size:
         raise ValueError(
-            f"num_heads * head_dim ({q_dim}) must equal hidden_size ({cfg.hidden_size})")
+            f"num_heads * head_dim ({q_dim}) must equal hidden_size ({cfg.hidden_size})"
+        )
     if cfg.num_heads % cfg.num_kv_heads != 0:
         raise ValueError(
-            f"num_heads ({cfg.num_heads}) must be divisible by "
-            f"num_kv_heads ({cfg.num_kv_heads})")
+            f"num_heads ({cfg.num_heads}) must be divisible by num_kv_heads ({cfg.num_kv_heads})"
+        )
     graph_ops.validate_native_rope_dim(cfg.head_dim, field_name="head_dim")
 
     embed, wd, final_norm = _prepare_weights(cfg, weights)
@@ -418,8 +405,7 @@ def build_qwen25vl_text_encoder_engine(
     builder = trt.Builder(logger)
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 << 30)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
     max_S = cfg.max_seq_len
 
@@ -432,27 +418,22 @@ def build_qwen25vl_text_encoder_engine(
     use_dynamic_batch = max_batch_size > 1
     if use_dynamic_batch:
         input_ids = network.add_input("input_ids", trt.int32, (-1, max_S))
-        attn_mask_1d = network.add_input(
-            "attention_mask", trt.float32, (-1, max_S))
+        attn_mask_1d = network.add_input("attention_mask", trt.float32, (-1, max_S))
     else:
         input_ids = network.add_input("input_ids", trt.int32, (max_S,))
-        attn_mask_1d = network.add_input(
-            "attention_mask", trt.float32, (max_S,))
+        attn_mask_1d = network.add_input("attention_mask", trt.float32, (max_S,))
     image_hidden = None
     image_mask_1d = None
     if enable_image_inputs:
-        image_hidden = network.add_input(
-            "image_hidden", trt.float32, (max_S, cfg.hidden_size))
+        image_hidden = network.add_input("image_hidden", trt.float32, (max_S, cfg.hidden_size))
         image_mask_1d = network.add_input("image_mask", trt.float32, (max_S,))
 
     if use_dynamic_batch:
         # Diffusion batch-inference RFC, Decision C: kMIN=1, kOPT=min(N,4),
         # kMAX=N. Single wide profile per component (Decision A).
-        from ...engine_builder import add_dynamic_batch_profile
+        from .....engine_builder import add_dynamic_batch_profile
 
-        opt_batch = (
-            min(max_batch_size, 4) if opt_batch_size is None else opt_batch_size
-        )
+        opt_batch = min(max_batch_size, 4) if opt_batch_size is None else opt_batch_size
         add_dynamic_batch_profile(
             builder,
             trt_config,
@@ -469,12 +450,13 @@ def build_qwen25vl_text_encoder_engine(
     # ---- Shared constants. ----
     # eps stored in work dtype so it doesn't constantly need upcasting.
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([cfg.rms_norm_eps], dtype=work_np_dtype),
-        dtype=work_np_dtype)
+        network, (1, 1), np.array([cfg.rms_norm_eps], dtype=work_np_dtype), dtype=work_np_dtype
+    )
 
     # Token embedding -> [max_S, hidden].
     embed_table = graph_ops.add_constant(
-        network, (cfg.vocab_size, cfg.hidden_size), embed, dtype=work_np_dtype)
+        network, (cfg.vocab_size, cfg.hidden_size), embed, dtype=work_np_dtype
+    )
     hidden = network.add_gather(embed_table, input_ids, 0).get_output(0)
     if hidden.dtype != work_trt_dtype:
         hidden = network.add_cast(hidden, work_trt_dtype).get_output(0)
@@ -486,17 +468,21 @@ def build_qwen25vl_text_encoder_engine(
         mask_reshape.reshape_dims = (max_S, 1)
         image_mask_bf16 = network.add_cast(mask_reshape.get_output(0), work_trt_dtype).get_output(0)
         one = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=work_np_dtype),
-            dtype=work_np_dtype)
+            network, (1, 1), np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype
+        )
         one = graph_blocks.cast_to_dtype(network, one, work_trt_dtype)
         text_mask_bf16 = network.add_elementwise(
-            one, image_mask_bf16, trt.ElementWiseOperation.SUB).get_output(0)
+            one, image_mask_bf16, trt.ElementWiseOperation.SUB
+        ).get_output(0)
         text_part = network.add_elementwise(
-            hidden, text_mask_bf16, trt.ElementWiseOperation.PROD).get_output(0)
+            hidden, text_mask_bf16, trt.ElementWiseOperation.PROD
+        ).get_output(0)
         image_part = network.add_elementwise(
-            image_hidden_bf16, image_mask_bf16, trt.ElementWiseOperation.PROD).get_output(0)
+            image_hidden_bf16, image_mask_bf16, trt.ElementWiseOperation.PROD
+        ).get_output(0)
         hidden = network.add_elementwise(
-            text_part, image_part, trt.ElementWiseOperation.SUM).get_output(0)
+            text_part, image_part, trt.ElementWiseOperation.SUM
+        ).get_output(0)
 
     # RoPE tables. Text-only Qwen-Image uses standard 1D RoPE. Edit-mode
     # Qwen2.5-VL needs full-dim mRoPE because image tokens occupy the middle
@@ -520,36 +506,44 @@ def build_qwen25vl_text_encoder_engine(
             tokens_per_second=int(vision_tokens_per_second),
         )
         cos_full = graph_ops.add_constant(
-            network, cos_full_np.shape, cos_full_np, dtype=work_np_dtype)
+            network, cos_full_np.shape, cos_full_np, dtype=work_np_dtype
+        )
         cos_full = graph_blocks.cast_to_dtype(network, cos_full, work_trt_dtype)
         sin_full = graph_ops.add_constant(
-            network, sin_full_np.shape, sin_full_np, dtype=work_np_dtype)
+            network, sin_full_np.shape, sin_full_np, dtype=work_np_dtype
+        )
         sin_full = graph_blocks.cast_to_dtype(network, sin_full, work_trt_dtype)
     else:
         # 1D positions [0..max_S-1] -- text-only path; see module docstring.
         cos_half_np = graph_ops.make_rope_table_half_dim(
-            max_S, cfg.head_dim, cfg.rope_theta, cosine=True)
+            max_S, cfg.head_dim, cfg.rope_theta, cosine=True
+        )
         sin_half_np = graph_ops.make_rope_table_half_dim(
-            max_S, cfg.head_dim, cfg.rope_theta, cosine=False)
+            max_S, cfg.head_dim, cfg.rope_theta, cosine=False
+        )
         cos_half = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
+            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype
+        )
         cos_half = graph_blocks.cast_to_dtype(network, cos_half, work_trt_dtype)
         sin_half = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
+            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype
+        )
         sin_half = graph_blocks.cast_to_dtype(network, sin_half, work_trt_dtype)
         rope_position_ids = graph_ops.add_constant(
-            network, (max_S,), np.arange(max_S, dtype=np.int32), dtype=np.int32)
+            network, (max_S,), np.arange(max_S, dtype=np.int32), dtype=np.int32
+        )
 
     # ---- Combined causal + padding additive mask -> [1, 1, max_S, max_S]. ----
     # HF Qwen2.5-VL LM is causal (modeling_qwen2_5_vl.py: is_causal=True), so
     # each query at position q can only attend to keys k<=q. We sum a constant
     # lower-triangular -1e9 mask with the broadcast padding mask, then cast to
     # the compute dtype for IAttention.
-    causal_np = np.triu(
-        np.full((max_S, max_S), -1.0e9, dtype=np.float32), k=1
-    ).reshape(1, 1, max_S, max_S)
+    causal_np = np.triu(np.full((max_S, max_S), -1.0e9, dtype=np.float32), k=1).reshape(
+        1, 1, max_S, max_S
+    )
     causal_const = graph_ops.add_constant(
-        network, (1, 1, max_S, max_S), causal_np, dtype=np.float32)
+        network, (1, 1, max_S, max_S), causal_np, dtype=np.float32
+    )
     pad_reshape = network.add_shuffle(attn_mask_1d)
     pad_reshape.reshape_dims = (1, 1, 1, max_S)
     attn_mask_fp32 = network.add_elementwise(
@@ -567,83 +561,130 @@ def build_qwen25vl_text_encoder_engine(
 
         # Pre-attention RMSNorm (fp32 variance, cast back to bf16).
         normed = graph_ops.add_rms_norm(
-            network, hidden, cfg.hidden_size,
-            wd[f"{prefix}.input_norm"], eps_tensor, dtype=work_np_dtype)
+            network,
+            hidden,
+            cfg.hidden_size,
+            wd[f"{prefix}.input_norm"],
+            eps_tensor,
+            dtype=work_np_dtype,
+        )
 
         # Q/K/V projections with bias.
         q = graph_ops.add_matmul_rhs_constant(
-            network, normed, cfg.hidden_size, q_dim,
-            wd[f"{prefix}.w_q"], dtype=work_np_dtype)
-        q = graph_ops.add_bias_sum(
-            network, q, q_dim, wd[f"{prefix}.q_bias"], dtype=work_np_dtype)
+            network, normed, cfg.hidden_size, q_dim, wd[f"{prefix}.w_q"], dtype=work_np_dtype
+        )
+        q = graph_ops.add_bias_sum(network, q, q_dim, wd[f"{prefix}.q_bias"], dtype=work_np_dtype)
         k = graph_ops.add_matmul_rhs_constant(
-            network, normed, cfg.hidden_size, kv_dim,
-            wd[f"{prefix}.w_k"], dtype=work_np_dtype)
-        k = graph_ops.add_bias_sum(
-            network, k, kv_dim, wd[f"{prefix}.k_bias"], dtype=work_np_dtype)
+            network, normed, cfg.hidden_size, kv_dim, wd[f"{prefix}.w_k"], dtype=work_np_dtype
+        )
+        k = graph_ops.add_bias_sum(network, k, kv_dim, wd[f"{prefix}.k_bias"], dtype=work_np_dtype)
         v = graph_ops.add_matmul_rhs_constant(
-            network, normed, cfg.hidden_size, kv_dim,
-            wd[f"{prefix}.w_v"], dtype=work_np_dtype)
-        v = graph_ops.add_bias_sum(
-            network, v, kv_dim, wd[f"{prefix}.v_bias"], dtype=work_np_dtype)
+            network, normed, cfg.hidden_size, kv_dim, wd[f"{prefix}.w_v"], dtype=work_np_dtype
+        )
+        v = graph_ops.add_bias_sum(network, v, kv_dim, wd[f"{prefix}.v_bias"], dtype=work_np_dtype)
 
         if enable_image_inputs:
             assert cos_full is not None
             assert sin_full is not None
             q = _apply_full_rope_table(
-                network, q, num_heads=cfg.num_heads, head_dim=cfg.head_dim,
-                cos_full=cos_full, sin_full=sin_full, sequence_length=max_S)
+                network,
+                q,
+                num_heads=cfg.num_heads,
+                head_dim=cfg.head_dim,
+                cos_full=cos_full,
+                sin_full=sin_full,
+                sequence_length=max_S,
+            )
             k = _apply_full_rope_table(
-                network, k, num_heads=cfg.num_kv_heads, head_dim=cfg.head_dim,
-                cos_full=cos_full, sin_full=sin_full, sequence_length=max_S)
+                network,
+                k,
+                num_heads=cfg.num_kv_heads,
+                head_dim=cfg.head_dim,
+                cos_full=cos_full,
+                sin_full=sin_full,
+                sequence_length=max_S,
+            )
         else:
             assert cos_half is not None
             assert sin_half is not None
             assert rope_position_ids is not None
             q = graph_ops.add_apply_rope_native(
-                network, q, cfg.num_heads, cfg.head_dim,
-                cos_half, sin_half, rope_position_ids,
-                cfg.head_dim, sequence_length=max_S)
+                network,
+                q,
+                cfg.num_heads,
+                cfg.head_dim,
+                cos_half,
+                sin_half,
+                rope_position_ids,
+                cfg.head_dim,
+                sequence_length=max_S,
+            )
             k = graph_ops.add_apply_rope_native(
-                network, k, cfg.num_kv_heads, cfg.head_dim,
-                cos_half, sin_half, rope_position_ids,
-                cfg.head_dim, sequence_length=max_S)
+                network,
+                k,
+                cfg.num_kv_heads,
+                cfg.head_dim,
+                cos_half,
+                sin_half,
+                rope_position_ids,
+                cfg.head_dim,
+                sequence_length=max_S,
+            )
 
         # GQA scaled dot-product attention. ``add_attention_from_rows`` builds
         # the [1, H, S, D] reshape, applies 1/sqrt(D) Q-prescale, and runs
         # native IAttention with our additive mask.
         ctx = graph_ops.add_attention_from_rows(
-            network, q, k, v,
-            num_heads=cfg.num_heads, num_kv_heads=cfg.num_kv_heads,
-            head_dim=cfg.head_dim, q_seq=max_S, kv_seq=max_S,
-            mask=attn_mask_4d, tag=f"{prefix}.attn")
+            network,
+            q,
+            k,
+            v,
+            num_heads=cfg.num_heads,
+            num_kv_heads=cfg.num_kv_heads,
+            head_dim=cfg.head_dim,
+            q_seq=max_S,
+            kv_seq=max_S,
+            mask=attn_mask_4d,
+            tag=f"{prefix}.attn",
+        )
 
         attn_out = graph_ops.add_matmul_rhs_constant(
-            network, ctx, q_dim, cfg.hidden_size,
-            wd[f"{prefix}.w_o"], dtype=work_np_dtype)
+            network, ctx, q_dim, cfg.hidden_size, wd[f"{prefix}.w_o"], dtype=work_np_dtype
+        )
 
         hidden = network.add_elementwise(
-            residual1, attn_out, trt.ElementWiseOperation.SUM).get_output(0)
+            residual1, attn_out, trt.ElementWiseOperation.SUM
+        ).get_output(0)
 
         # Post-attention RMSNorm + SwiGLU MLP + residual.
         residual2 = hidden
         normed2 = graph_ops.add_rms_norm(
-            network, hidden, cfg.hidden_size,
-            wd[f"{prefix}.post_attn_norm"], eps_tensor, dtype=work_np_dtype)
+            network,
+            hidden,
+            cfg.hidden_size,
+            wd[f"{prefix}.post_attn_norm"],
+            eps_tensor,
+            dtype=work_np_dtype,
+        )
         mlp_out = graph_blocks.add_swiglu_mlp(
-            network, normed2,
-            weights=wd, prefix=prefix,
-            hidden_size=cfg.hidden_size, mlp_size=cfg.intermediate_size,
-            dtype=work_np_dtype)
+            network,
+            normed2,
+            weights=wd,
+            prefix=prefix,
+            hidden_size=cfg.hidden_size,
+            mlp_size=cfg.intermediate_size,
+            dtype=work_np_dtype,
+        )
         hidden = network.add_elementwise(
-            residual2, mlp_out, trt.ElementWiseOperation.SUM).get_output(0)
+            residual2, mlp_out, trt.ElementWiseOperation.SUM
+        ).get_output(0)
 
     # ---- Optional final RMSNorm. ----
     if cfg.apply_final_norm:
         assert final_norm is not None
         hidden = graph_ops.add_rms_norm(
-            network, hidden, cfg.hidden_size,
-            final_norm, eps_tensor, dtype=work_np_dtype)
+            network, hidden, cfg.hidden_size, final_norm, eps_tensor, dtype=work_np_dtype
+        )
 
     # ---- Cast to fp32 and emit. C++ runtime binds fp32 buffers. ----
     out_tensor = network.add_cast(hidden, trt.float32).get_output(0)
@@ -747,9 +788,7 @@ def load_qwen25vl_text_encoder_weights(
     hidden_size = int(inner["hidden_size"])
     num_heads = int(inner["num_attention_heads"])
     if hidden_size % num_heads != 0:
-        raise ValueError(
-            f"hidden_size={hidden_size} not divisible by num_heads={num_heads}"
-        )
+        raise ValueError(f"hidden_size={hidden_size} not divisible by num_heads={num_heads}")
 
     cfg = Qwen25VLTextEncoderConfig(
         hidden_size=hidden_size,

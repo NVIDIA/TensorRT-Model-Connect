@@ -124,8 +124,8 @@ class QwenImagePipeline final : public IPipeline {
     // Apply the diffusers T2I hardcoded prompt_template_encode, tokenize,
     // pad to text_encoder.max_seq_len, run the text encoder, drop the first
     // prompt_template_drop_idx hidden_state rows, and zero-pad back to
-    // denoiser.max_text_tokens × text_embed_dim. Mirrors
-    // QwenImageDebugRunner._encode_prompt in families/qwen_image/debug_runner.py.
+    // denoiser.max_text_tokens × text_embed_dim. Mirrors the Qwen-Image
+    // reference prompt-encoding contract.
     //
     // Throws std::runtime_error on missing engine/tokenizer or when the
     // tokenized template+prompt has ≤ drop_idx valid tokens.
@@ -197,7 +197,7 @@ class QwenImagePipeline final : public IPipeline {
     // VAE decoder engine, and convert the [-1, 1] image into the HWC float32
     // [0, 1] layout used by ImageResult (matches FLUX / Z-Image).
     //
-    // Mirrors QwenImageDebugRunner._vae_decode (families/qwen_image/debug_runner.py).
+    // Mirrors the Qwen-Image reference VAE decode contract.
     // -------------------------------------------------------------------------
     struct DecodedImage {
         std::vector<float> pixels; // [H * W * 3] HWC float32 in [0, 1]
