@@ -36,15 +36,44 @@ def layer_tensor_name(stem: str, layer: int) -> str:
     return f"{stem}_{layer}"
 
 
+# Process-lifetime keepalive for bf16 numpy buffers passed to
+# trt.Weights(trt.bfloat16, ptr, count). That constructor does NOT copy,
+# so we need to keep the numpy array alive until the TRT engine is built.
+# Keyed by id(network) so different builds don't conflict.
+_bf16_weight_keepalive: dict[int, list] = {}
+
+
 def add_constant(
     network: trt.INetworkDefinition,
     shape: tuple[int, ...],
     values: np.ndarray,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """Add a constant tensor in the given *dtype* (default float32)."""
-    weights = trt.Weights(np.ascontiguousarray(values, dtype=dtype))
+    """Add a constant tensor in the given *dtype* (default float32).
+
+    Handles bfloat16 (ml_dtypes.bfloat16) explicitly: TRT's Python bindings
+    can't auto-detect the TRT type from the V16 numpy extension dtype, so
+    we route to the explicit (DataType, ptr, count) constructor — which
+    requires us to keep the numpy buffer alive for as long as TRT may
+    read from it (engine build time).
+    """
+    arr = np.ascontiguousarray(values, dtype=dtype)
+    try:
+        import ml_dtypes
+        is_bf16 = arr.dtype == ml_dtypes.bfloat16
+    except ImportError:
+        is_bf16 = False
+    if is_bf16:
+        weights = trt.Weights(trt.bfloat16, arr.ctypes.data, arr.size)
+    else:
+        weights = trt.Weights(arr)
     layer = network.add_constant(shape, weights)
+    # The bf16 trt.Weights constructor does not copy; the array must outlive
+    # TRT's read of the buffer (engine build). Setting an attribute on the
+    # pybind11-wrapped INetworkDefinition is unreliable; use a module-level
+    # dict keyed by id(network).
+    if is_bf16:
+        _bf16_weight_keepalive.setdefault(id(network), []).append(arr)
     return layer.get_output(0)
 
 
@@ -3056,7 +3085,9 @@ def add_tvm_ffi_kernel(
     import json
 
     registry = trt.get_plugin_registry()
-    creator = registry.get_plugin_creator("TvmFfiKernel", "1", "")
+    # TRT 11+ renamed get_plugin_creator → get_creator; keep both for back-compat.
+    _get = getattr(registry, "get_creator", None) or registry.get_plugin_creator
+    creator = _get("TvmFfiKernel", "1", "")
     if creator is None:
         raise RuntimeError(
             "TvmFfiKernel plugin not found in TRT registry. "

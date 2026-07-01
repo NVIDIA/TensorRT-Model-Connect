@@ -571,6 +571,10 @@ def test_run_e2e_parallel_collects_grouped_entries_when_models_file_is_present(
                             "tests/e2e/models/fake_family/"
                             "test_fake_family_e2e.py::test_model_e2e[solo]"
                         )
+                    print(
+                        "tests/e2e/models/other_family/"
+                        "test_other_family_e2e.py::test_model_e2e[unrelated]"
+                    )
                     raise SystemExit(0)
 
                 tests = [

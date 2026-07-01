@@ -44,6 +44,17 @@ from .decoder_tp_builder import build_canary_tp_decoder_engine
 
 trt = trt_compat.get_trt()
 
+
+def _cfg_int(*values, default: int) -> int:
+    for value in values:
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                pass
+    return default
+
+
 def _to_np(t) -> np.ndarray:
     if hasattr(t, "numpy"):
         return t.detach().cpu().numpy().astype(np.float32)
@@ -360,20 +371,37 @@ def _add_conv_norm(network, x, weights, pfx, hidden, S, eps, conv_norm_type):
 
 
 def _add_conv_module(network, hs, weights, pfx, hidden, kern, S, eps,
-                     conv_norm_type="batch_norm", conv_context_size="symmetric"):
+                     conv_norm_type="batch_norm", conv_context_size="symmetric",
+                     valid_mask=None):
     normed = graph_ops.add_layer_norm(network, hs, hidden,
         weights[f"{pfx}.norm_conv"], weights[f"{pfx}.norm_conv_b"], eps)
     r1 = network.add_shuffle(normed)
     r1.first_transpose = trt.Permutation([1, 0])
     r2 = network.add_shuffle(r1.get_output(0))
     r2.reshape_dims = (1, hidden, S)
-    x = graph_ops.add_conv1d(network, r2.get_output(0),
+    conv_in = r2.get_output(0)
+    # Zero out padded time positions before the depthwise conv, matching NeMo's
+    # ConformerConvolution masked_fill(pad_mask, 0). Without this, the depthwise
+    # conv (kernel>1) leaks padded-position activations into valid positions,
+    # compounding across layers and corrupting the encoder output for audio
+    # shorter than the build-time mel_length. valid_mask is [1, 1, S] with 1.0
+    # for valid and 0.0 for padded positions; it broadcasts over channels.
+    if valid_mask is not None:
+        conv_in = network.add_elementwise(
+            conv_in, valid_mask, trt.ElementWiseOperation.PROD).get_output(0)
+    x = graph_ops.add_conv1d(network, conv_in,
         weight=weights[f"{pfx}.cpw1_w"], bias=weights[f"{pfx}.cpw1_b"],
         out_channels=2*hidden, kernel_size=1)
     xa = network.add_slice(x, start=(0,0,0), shape=(1,hidden,S), stride=(1,1,1)).get_output(0)
     xb = network.add_slice(x, start=(0,hidden,0), shape=(1,hidden,S), stride=(1,1,1)).get_output(0)
     gate = network.add_activation(xb, trt.ActivationType.SIGMOID).get_output(0)
     x = network.add_elementwise(xa, gate, trt.ElementWiseOperation.PROD).get_output(0)
+    # Second mask, matching NeMo's ConformerConvolution: pointwise_conv1 has a
+    # bias, so padded positions are non-zero again after GLU. Re-zero them
+    # before the depthwise conv, otherwise that bias leaks into valid positions.
+    if valid_mask is not None:
+        x = network.add_elementwise(
+            x, valid_mask, trt.ElementWiseOperation.PROD).get_output(0)
     if conv_context_size == "causal":
         x = _add_causal_depthwise_conv1d(network, x, weights, pfx, hidden, kern)
     else:
@@ -408,14 +436,16 @@ def _add_half_ffn(network, hs, weights, pfx, hidden, ffn, eps):
 
 def _add_conformer_block(network, hs, weights, pfx, hidden, H, D, ffn,
                          kern, S, rpe, eps, enc_mask=None,
-                         conv_norm_type="batch_norm", conv_context_size="symmetric"):
+                         conv_norm_type="batch_norm", conv_context_size="symmetric",
+                         valid_mask=None):
     ffn1 = _add_half_ffn(network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps)
     hs = network.add_elementwise(hs, ffn1, trt.ElementWiseOperation.SUM).get_output(0)
     attn = _add_rel_pos_attention(network, hs, weights, pfx, hidden, H, D, S, rpe, eps, enc_mask)
     hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
     conv = _add_conv_module(
         network, hs, weights, pfx, hidden, kern, S, eps,
-        conv_norm_type=conv_norm_type, conv_context_size=conv_context_size)
+        conv_norm_type=conv_norm_type, conv_context_size=conv_context_size,
+        valid_mask=valid_mask)
     hs = network.add_elementwise(hs, conv, trt.ElementWiseOperation.SUM).get_output(0)
     ffn2 = _add_half_ffn(network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps)
     hs = network.add_elementwise(hs, ffn2, trt.ElementWiseOperation.SUM).get_output(0)
@@ -490,7 +520,7 @@ def _add_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k,
 class CanaryPlugin:
     name = "canary"
     runtime_strategy = "canary_speech_to_text"
-    _MEL_LENGTH = 417  # exact match for 4.16s test audio
+    _DEFAULT_MEL_LENGTH = 3000  # 30 seconds at 10 ms hop.
 
     def __init__(self):
         self._vl_config: dict = {}
@@ -519,7 +549,8 @@ class CanaryPlugin:
 
         enc_layers = max(int(k.split(".")[2]) for k in sd
                          if k.startswith("encoder.layers.")) + 1
-        mel_length = self._MEL_LENGTH
+        mel_length = _cfg_int(config.raw.get("mel_length"), ncfg.get("trtmc_mel_length"),
+                              default=self._DEFAULT_MEL_LENGTH)
         enc_seq = _compute_enc_seq_len(mel_length)
 
         te = _to_np(sd["transf_decoder._embedding.token_embedding.weight"])
@@ -808,10 +839,10 @@ class CanaryPlugin:
             "num_attention_heads": config.num_attention_heads,
             "hidden_size": config.hidden_size,
             "vocab_size": config.vocab_size,
-            # Canary2 decoder prompt:
-            # <|startofcontext|> <|notimestamp|> <|nodiarize|>
-            # <|startoftranscript|> <|emo:undefined|> <|en|> <|pnc|> <|noitn|>
-            "decoder_start_token_ids": [7, 11, 13, 4, 16, 64, 5, 9],
+            # NeMo canary2 default prompt context_ids:
+            # ▁ <|startofcontext|> <|startoftranscript|> <|emo:undefined|>
+            # <|en|> <|en|> <|pnc|> <|noitn|> <|notimestamp|> <|nodiarize|>
+            "decoder_start_token_ids": [16053, 7, 4, 16, 64, 64, 5, 9, 11, 13],
             "eot_token_id": 3,  # <|endoftext|>
         }
 
@@ -852,8 +883,25 @@ def _build_encoder(config, weights, *, verbose=False):
     mel = net.add_input("mel_features", trt.float32, (mb, ml))
     # Encoder attention mask: [1, 1, enc_seq] — 0.0 for valid, -10000.0 for padded.
     # Applied additively to self-attention scores before softmax.
-    mask_shape = (1, es, es) if bool(weights.get("_encoder_attention_mask_2d", False)) else (1, 1, es)
+    mask_2d = bool(weights.get("_encoder_attention_mask_2d", False))
+    mask_shape = (1, es, es) if mask_2d else (1, 1, es)
     enc_mask = net.add_input("encoder_mask", trt.float32, mask_shape)
+
+    # Derive a multiplicative valid-position mask [1, 1, es] (1.0 valid / 0.0
+    # padded) from the additive attention mask (0.0 valid / -10000.0 padded):
+    #   valid = clamp(1 + enc_mask * 1e-4, 0, 1)
+    # This needs no new engine input or C++ change. Used to zero padded time
+    # positions inside each conformer conv module (see _add_conv_module).
+    valid_mask = None
+    if not mask_2d:
+        scale = graph_ops.add_constant(net, (1, 1, 1), np.array([1e-4], dtype=np.float32))
+        one = graph_ops.add_constant(net, (1, 1, 1), np.array([1.0], dtype=np.float32))
+        zero = graph_ops.add_constant(net, (1, 1, 1), np.array([0.0], dtype=np.float32))
+        vm = net.add_elementwise(enc_mask, scale, trt.ElementWiseOperation.PROD).get_output(0)
+        vm = net.add_elementwise(vm, one, trt.ElementWiseOperation.SUM).get_output(0)
+        vm = net.add_elementwise(vm, zero, trt.ElementWiseOperation.MAX).get_output(0)
+        vm = net.add_elementwise(vm, one, trt.ElementWiseOperation.MIN).get_output(0)
+        valid_mask = vm
 
     hs = _build_subsampling(net, mel, weights, sc, h, mb, ml)
     for li in range(el):
@@ -861,7 +909,8 @@ def _build_encoder(config, weights, *, verbose=False):
         rpe = graph_ops.add_constant(net, (2*es-1, eh, hd), weights[f"{pfx}.rpe_proj"])
         hs = _add_conformer_block(
             net, hs, weights, pfx, h, eh, hd, ef, k, es, rpe, eps, enc_mask,
-            conv_norm_type=conv_norm_type, conv_context_size=conv_context_size)
+            conv_norm_type=conv_norm_type, conv_context_size=conv_context_size,
+            valid_mask=valid_mask)
 
     hs.name = "encoder_output"
     net.mark_output(hs)

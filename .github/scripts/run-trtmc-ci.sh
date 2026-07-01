@@ -478,24 +478,23 @@ run_python_builder_tests() {
   python -m pip install --disable-pip-version-check --quiet "pytest-cov>=6.0"
   mkdir -p coverage
 
-  if [ "${FULL_E2E:-false}" != "true" ]; then
-    if ! python3 -c "import json; d=json.load(open('impact.json')); tiers=d['unit_tiers']; exit(0 if 'builder' in tiers or 'tools' in tiers else 1)"; then
-      echo "Skipping: neither builder nor tools tier affected by this change"
-      write_skipped_python_coverage "Skipped: neither builder nor tools tier affected"
-      return 0
-    fi
-  fi
-
   local selected_tests_file="coverage/python-selected-tests.txt"
   if [ "${FULL_E2E:-false}" != "true" ]; then
     python3 -c "
 import json
 d = json.load(open('impact.json'))
-tests = d.get('builder_tests', []) + d.get('tools_tests', [])
+tests = set(d.get('builder_tests', []) + d.get('tools_tests', []))
 fallback = set(d.get('fallback_tiers', []))
 if fallback.intersection({'builder', 'tools'}):
     tests = []
-for test in tests:
+else:
+    tests.update({
+        'tests/tools/test_github_actions_ci.py',
+        'tests/tools/test_model_plugin_encapsulation_static.py',
+        'tests/tools/test_schedule_e2e.py',
+        'tests/tools/test_test_impact.py',
+    })
+for test in sorted(tests):
     print(test)
 " > "$selected_tests_file"
   fi

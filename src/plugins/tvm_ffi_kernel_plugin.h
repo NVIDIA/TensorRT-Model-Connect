@@ -18,7 +18,7 @@ namespace trtmc {
 struct TvmFfiOutputSpec {
     std::vector<int32_t> dims;
     int32_t same_as_input_index{-1};
-    int32_t dtype{0}; // 0 = float32, 1 = float16
+    int32_t dtype{0}; // 0 = float32, 1 = float16, 2 = bfloat16
 };
 
 // Extra scalar/pointer argument passed after tensors in TVMFFIFunctionCall.

@@ -224,7 +224,11 @@ static void test_v2_roundtrip() {
 
     // Create plugin via creator
     auto* registry = getPluginRegistry();
-    auto* creator = registry->getPluginCreator("TvmFfiKernelV2", "1", "");
+    // TRT 11 removed IPluginRegistry::getPluginCreator; replaced by
+    // getCreator returning IPluginCreatorInterface*. Downcast preserves
+    // the existing createPlugin() call on the concrete creator type.
+    auto* creator =
+        static_cast<nvinfer1::IPluginCreator*>(registry->getCreator("TvmFfiKernelV2", "1", ""));
     check(creator != nullptr, "V2 creator found");
     if (creator == nullptr) {
         delete config;

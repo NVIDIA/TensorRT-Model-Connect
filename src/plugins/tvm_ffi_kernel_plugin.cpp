@@ -35,7 +35,12 @@ TvmFfiOutputSpec parse_single_output_spec(const std::string& obj) {
         spec.same_as_input_index = -1;
     }
     std::string dt = extract_json_string(obj, "dtype", "float32");
-    spec.dtype = (dt == "float16" || dt == "half") ? 1 : 0;
+    if (dt == "bfloat16" || dt == "bf16")
+        spec.dtype = 2;
+    else if (dt == "float16" || dt == "half")
+        spec.dtype = 1;
+    else
+        spec.dtype = 0;
     return spec;
 }
 
@@ -217,6 +222,8 @@ nvinfer1::DataType TvmFfiKernelPlugin::getOutputDataType(int32_t index,
                                                          int32_t) const noexcept {
     if (index < static_cast<int32_t>(output_specs_.size())) {
         const auto& spec = output_specs_[static_cast<std::size_t>(index)];
+        if (spec.dtype == 2)
+            return nvinfer1::DataType::kBF16;
         if (spec.dtype == 1)
             return nvinfer1::DataType::kHALF;
         if (spec.same_as_input_index >= 0)
@@ -257,7 +264,8 @@ bool TvmFfiKernelPlugin::supportsFormatCombination(int32_t pos,
                                                    nvinfer1::PluginTensorDesc const* inOut, int32_t,
                                                    int32_t) noexcept {
     return inOut[pos].format == nvinfer1::TensorFormat::kLINEAR &&
-           (inOut[pos].type == nvinfer1::DataType::kFLOAT ||
+           (inOut[pos].type == nvinfer1::DataType::kBF16 ||
+            inOut[pos].type == nvinfer1::DataType::kFLOAT ||
             inOut[pos].type == nvinfer1::DataType::kHALF);
 }
 
@@ -298,8 +306,12 @@ void fill_dl_tensor(DLTensor& t, void* data, const nvinfer1::PluginTensorDesc& d
     t.shape = const_cast<int64_t*>(reinterpret_cast<const int64_t*>(desc.dims.d));
     t.strides = nullptr;
     t.byte_offset = 0;
-    t.dtype = (desc.type == nvinfer1::DataType::kFLOAT) ? DLDataType{kDLFloat, 32, 1}
-                                                        : DLDataType{kDLFloat, 16, 1};
+    if (desc.type == nvinfer1::DataType::kFLOAT)
+        t.dtype = DLDataType{kDLFloat, 32, 1};
+    else if (desc.type == nvinfer1::DataType::kBF16)
+        t.dtype = DLDataType{kDLBfloat, 16, 1};
+    else
+        t.dtype = DLDataType{kDLFloat, 16, 1};
 }
 
 // Bind tensor descriptors to DLTensor + TVMFFIAny argument arrays.

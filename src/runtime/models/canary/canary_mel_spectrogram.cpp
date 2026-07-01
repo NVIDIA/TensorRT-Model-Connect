@@ -150,10 +150,19 @@ MelResult extract_mel_spectrogram(const float* samples, int32_t n_samples, const
     int32_t n_frames_out = 0;
     mel_spec = trim_last_frame(std::move(mel_spec), n_mel_bins, n_frames_raw, n_frames_out);
 
+    // Frames covering the real audio (before chunk padding). The audio is
+    // padded to chunk_length_s before framing, so n_frames_out is always the
+    // full chunk length; valid_frames lets the encoder mask out the padded
+    // tail. Mirrors the chunk framing math (out = audio_samples / hop_length).
+    const int32_t chunk_samples = chunk_length_s * sample_rate;
+    const int32_t valid_audio = std::min(std::max(n_samples, 0), chunk_samples);
+    const int32_t valid_frames = std::min(n_frames_out, valid_audio / hop_length);
+
     MelResult result;
     result.data = std::move(mel_spec);
     result.n_mels = n_mel_bins;
     result.n_frames = n_frames_out;
+    result.valid_frames = valid_frames;
     return result;
 }
 

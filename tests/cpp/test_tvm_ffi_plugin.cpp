@@ -95,7 +95,11 @@ static nvinfer1::ICudaEngine* build_engine(TestLogger& logger) {
     nvinfer1::PluginFieldCollection fc{2, fields};
 
     auto* registry = getPluginRegistry();
-    auto* creator = registry->getPluginCreator("TvmFfiKernel", "1", "");
+    // TRT 11 removed IPluginRegistry::getPluginCreator and replaced it with
+    // getCreator returning IPluginCreatorInterface*; downcast to the still-
+    // supported (deprecated) IPluginCreator so createPlugin() is callable.
+    auto* creator =
+        static_cast<nvinfer1::IPluginCreator*>(registry->getCreator("TvmFfiKernel", "1", ""));
     check(creator != nullptr, "creator found");
     if (!creator) {
         delete config;
