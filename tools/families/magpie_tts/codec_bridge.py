@@ -5,7 +5,7 @@ Subprocess bridge that loads NeMo's AudioCodecModel and decodes codec
 tokens (8 codebooks x T frames) to a WAV file.
 
 Usage:
-    python3 -m tensorrt_model_connect.families.magpie_tts.codec_bridge \
+    python3 tools/families/magpie_tts/codec_bridge.py \
         --codec-model /path/to/nanocodec.nemo \
         --tokens-file /tmp/codes.json \
         --output /tmp/output.wav \

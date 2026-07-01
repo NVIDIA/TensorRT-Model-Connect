@@ -16,19 +16,24 @@ warnings.filterwarnings("ignore")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="MagpieTTS IPA tokenizer bridge for trtmc C++ runtime")
-    parser.add_argument("--nemo-path", required=True,
-                        help="Path to MagpieTTS .nemo archive or directory containing one")
-    parser.add_argument("--check", action="store_true",
-                        help="Validate tokenizer can be loaded")
-    parser.add_argument("--op", choices=["encode", "decode"],
-                        default="", help="Tokenizer operation")
-    parser.add_argument("--text-file", default="",
-                        help="Input text file for encode")
-    parser.add_argument("--ids", default="",
-                        help="Comma-separated token IDs for decode")
-    parser.add_argument("--lang", default="english_phoneme",
-                        help="Language key from text_tokenizers (default: english_phoneme)")
+        description="MagpieTTS IPA tokenizer bridge for trtmc C++ runtime"
+    )
+    parser.add_argument(
+        "--nemo-path",
+        required=True,
+        help="Path to MagpieTTS .nemo archive or directory containing one",
+    )
+    parser.add_argument("--check", action="store_true", help="Validate tokenizer can be loaded")
+    parser.add_argument(
+        "--op", choices=["encode", "decode"], default="", help="Tokenizer operation"
+    )
+    parser.add_argument("--text-file", default="", help="Input text file for encode")
+    parser.add_argument("--ids", default="", help="Comma-separated token IDs for decode")
+    parser.add_argument(
+        "--lang",
+        default="english_phoneme",
+        help="Language key from text_tokenizers (default: english_phoneme)",
+    )
     return parser.parse_args()
 
 
@@ -36,7 +41,7 @@ def _repo_id_from_hf_cache_path(path: pathlib.Path) -> str | None:
     """Extract repo id from HF cache paths like models--org--repo/blobs/..."""
     for part in path.parts:
         if part.startswith("models--"):
-            encoded = part[len("models--"):]
+            encoded = part[len("models--") :]
             if "--" in encoded:
                 return encoded.replace("--", "/")
     return None
@@ -93,9 +98,7 @@ def _resolve_nemo_path(path: str) -> pathlib.Path:
         repo_id = _repo_id_from_hf_cache_path(p)
         if repo_id:
             return _download_nemo_for_repo(repo_id)
-        raise FileNotFoundError(
-            f"NeMo path exists but is not accessible: {path} ({exc})"
-        ) from exc
+        raise FileNotFoundError(f"NeMo path exists but is not accessible: {path} ({exc})") from exc
 
     if _looks_like_repo_id(path):
         return _download_nemo_for_repo(path)
@@ -150,6 +153,7 @@ def load_tokenizer(nemo_path: str | pathlib.Path, lang_key: str = "english_phone
     family while supporting module execution for CLI use.
     """
     import logging
+
     logging.disable(logging.WARNING)
 
     import yaml
@@ -171,8 +175,7 @@ def load_tokenizer(nemo_path: str | pathlib.Path, lang_key: str = "english_phone
 
     if lang_key not in text_tokenizers:
         available = list(text_tokenizers.keys())
-        raise ValueError(
-            f"Language '{lang_key}' not found. Available: {available}")
+        raise ValueError(f"Language '{lang_key}' not found. Available: {available}")
 
     tok_cfg = dict(text_tokenizers[lang_key])
     target = str(tok_cfg.get("_target_", ""))
@@ -188,8 +191,7 @@ def load_tokenizer(nemo_path: str | pathlib.Path, lang_key: str = "english_phone
         from hydra.utils import instantiate
     except Exception as exc:
         raise RuntimeError(
-            "Missing Magpie tokenizer dependencies. Install: "
-            "nemo_toolkit[tts]==2.7.0"
+            "Missing Magpie tokenizer dependencies. Install: nemo_toolkit[tts]==2.7.0"
         ) from exc
 
     asset_dir = _resolve_asset_dir()

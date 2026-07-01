@@ -31,7 +31,7 @@ _CODEBOOK_SIZE = 8
 
 def _magpie_tp_builder_module():
     return pytest.importorskip(
-        "tensorrt_model_connect.families.magpie_tts.decoder_tp_builder",
+        "tensorrt_model_connect.families.magpie_tts.model.parallel",
         reason="TensorRT is required for MagpieTTS TP builder tests",
     )
 
