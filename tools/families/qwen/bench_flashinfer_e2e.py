@@ -8,7 +8,7 @@ Runs Qwen3-0.6B (or similar) through:
 Reports per-token latency and total generation time.
 
 Usage:
-  python -m tensorrt_model_connect.families.qwen.bench_flashinfer_e2e \
+  python -m tools.families.qwen.bench_flashinfer_e2e \
     --model Qwen/Qwen3-0.6B \
     --prompt "The capital of France is" \
     --max-new-tokens 20

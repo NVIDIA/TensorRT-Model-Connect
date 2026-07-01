@@ -10,7 +10,7 @@ from tests.builder.test_debug_runner import _make_bundle_bytes
 
 
 def test_qwen_debug_runner_forwards_engine_section_and_communicator(tmp_path) -> None:
-    from tensorrt_model_connect.families.qwen.debug_runner import runner_from_bundle
+    from tensorrt_model_connect.families.qwen.model.runtime import runner_from_bundle
 
     bundle = _make_bundle_bytes(
         {"num_layers": 2, "max_cache_length": 128},
@@ -27,7 +27,7 @@ def test_qwen_debug_runner_forwards_engine_section_and_communicator(tmp_path) ->
     path.write_bytes(bundle)
 
     communicator = object()
-    adapter = import_module("tensorrt_model_connect.families.qwen.debug_runner")
+    adapter = import_module("tensorrt_model_connect.families.qwen.model.runtime")
     with patch.object(adapter, "TrtRunner", return_value="qwen-tp-runner") as mock_runner:
         runner = runner_from_bundle(
             str(path),
@@ -42,7 +42,7 @@ def test_qwen_debug_runner_forwards_engine_section_and_communicator(tmp_path) ->
 
 
 def test_qwen_loads_triattention_stats_from_bundle(tmp_path) -> None:
-    adapter = import_module("tensorrt_model_connect.families.qwen.debug_runner")
+    adapter = import_module("tensorrt_model_connect.families.qwen.model.runtime")
 
     stats_data = json.dumps({
         "version": 1,
@@ -64,7 +64,7 @@ def test_qwen_loads_triattention_stats_from_bundle(tmp_path) -> None:
 
 
 def test_qwen_triattention_bundle_uses_qwen_runner(tmp_path) -> None:
-    from tensorrt_model_connect.families.qwen.debug_runner import runner_from_bundle
+    from tensorrt_model_connect.families.qwen.model.runtime import runner_from_bundle
 
     config_data = json.dumps({
         "runtime_strategy": "qwen_decoder_kv_cache",
@@ -100,7 +100,7 @@ def test_qwen_triattention_bundle_uses_qwen_runner(tmp_path) -> None:
     path = tmp_path / "qwen_tri_dispatch.trtfb"
     path.write_bytes(bundle)
 
-    adapter = import_module("tensorrt_model_connect.families.qwen.debug_runner")
+    adapter = import_module("tensorrt_model_connect.families.qwen.model.runtime")
     with patch.object(adapter, "TriAttentionTrtRunner",
                       return_value="qwen-tri-runner") as mock_tri:
         runner = runner_from_bundle(str(path))

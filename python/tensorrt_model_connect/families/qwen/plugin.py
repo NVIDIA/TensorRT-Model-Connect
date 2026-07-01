@@ -10,11 +10,11 @@ single-profile graph automatically inside the standard builder.
 from __future__ import annotations
 
 from .config import ModelConfig
-from .checkpoint_mapper import WeightDict, load_standard_weights
+from .weights import WeightDict, load_standard_weights
 from ...parallel_config import normalize_parallel_config
 from ...quantization.adapters import StandardDecoderCalibrationAdapter
-from .standard_decoder_builder import build_standard_decoder_engine
-from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
+from .model.model import build_standard_decoder_engine
+from .model.parallel import build_dual_profile_tp_decoder_engine
 
 
 class QwenPlugin:
@@ -71,22 +71,32 @@ class QwenPlugin:
         return mt.startswith("qwen") or mt.startswith("qwq")
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
-        *, precision: str = "fp32",
+        self,
+        model_dir: str,
+        config: ModelConfig,
+        *,
+        precision: str = "fp32",
     ) -> WeightDict:
         return load_standard_weights(model_dir, config, precision=precision)
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False, parallel_config=None,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
+        parallel_config=None,
         debug_layer_outputs: bool = False,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             if debug_layer_outputs:
                 raise NotImplementedError(
-                    "Qwen tensor-parallel debug layer outputs are not supported")
+                    "Qwen tensor-parallel debug layer outputs are not supported"
+                )
             return build_dual_profile_tp_decoder_engine(
                 config,
                 weights,
@@ -111,16 +121,23 @@ class QwenPlugin:
 
     def quant_exclude_patterns(self, format_name: str) -> list[str]:
         patterns = [
-            "embedding", "final_norm", "w_out", "lm_head",
-            "*.input_norm", "*.post_attn_norm", "*_norm*",
+            "embedding",
+            "final_norm",
+            "w_out",
+            "lm_head",
+            "*.input_norm",
+            "*.post_attn_norm",
+            "*_norm*",
         ]
         if format_name == "fp8":
-            patterns.extend([
-                "layer.*.w_o",
-                "layer.*.w_gate",
-                "layer.*.w_up",
-                "layer.*.w_down",
-            ])
+            patterns.extend(
+                [
+                    "layer.*.w_o",
+                    "layer.*.w_gate",
+                    "layer.*.w_up",
+                    "layer.*.w_down",
+                ]
+            )
         return patterns
 
     def supports_parallel_quantization(self, format_name: str | None) -> bool:
