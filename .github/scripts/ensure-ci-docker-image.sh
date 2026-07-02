@@ -6,6 +6,22 @@ set -euo pipefail
 
 image="${TRTMC_CI_IMAGE:-trtmc-dev-gb300:manylinux_2_39}"
 dockerfile="${TRTMC_CI_DOCKERFILE:-Dockerfile}"
+lock_file="${TRTMC_CI_IMAGE_LOCK_FILE:-/tmp/trtmc-ci-docker-image.lock}"
+lock_timeout="${TRTMC_CI_IMAGE_LOCK_TIMEOUT:-1800}"
+
+if ! [[ "$lock_timeout" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: TRTMC_CI_IMAGE_LOCK_TIMEOUT must be a positive integer" >&2
+  exit 1
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  echo "ERROR: flock is required to serialize CI image verification" >&2
+  exit 1
+fi
+exec 9>"$lock_file"
+if ! flock -w "$lock_timeout" 9; then
+  echo "ERROR: Timed out waiting for CI image lock: $lock_file" >&2
+  exit 1
+fi
 
 read_docker_arg() {
   local name="$1"
@@ -147,4 +163,13 @@ if [ "$current_nlohmann" != "present" ]; then
   exit 1
 fi
 
-echo "CI Docker image '$image' verified: TensorRT $current_trt, modelopt $current_modelopt, nlohmann/json headers present"
+image_ref="$(docker image inspect --format '{{.Id}}' "$image")"
+if ! [[ "$image_ref" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "ERROR: CI Docker image '$image' returned an invalid immutable ID: $image_ref" >&2
+  exit 1
+fi
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+fi
+
+echo "CI Docker image '$image' verified: TensorRT $current_trt, modelopt $current_modelopt, nlohmann/json headers present, image $image_ref"

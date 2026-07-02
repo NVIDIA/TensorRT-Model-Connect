@@ -11,6 +11,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / ".github" / "scripts" / "run-model-proof.sh"
+IMAGE_ENSURE = REPO_ROOT / ".github" / "scripts" / "ensure-ci-docker-image.sh"
+PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "model-proof.yml"
 PLUGIN_CMAKE = REPO_ROOT / "cmake" / "trtmc_pipeline_plugins.cmake"
 
 
@@ -102,3 +104,18 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
         "scratch build produced ${#built_dsos[@]} model DSOs; expected exactly one",
     ):
         assert contract in text
+
+
+def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> None:
+    ensure = IMAGE_ENSURE.read_text(encoding="utf-8")
+    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+
+    for contract in (
+        "TRTMC_CI_IMAGE_LOCK_FILE",
+        'flock -w "$lock_timeout" 9',
+        "docker image inspect --format '{{.Id}}'",
+        'echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"',
+    ):
+        assert contract in ensure
+    assert "id: ci_image" in workflow
+    assert "TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}" in workflow

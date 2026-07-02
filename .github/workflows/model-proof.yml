@@ -51,6 +51,7 @@ jobs:
           lfs: false
 
       - name: Ensure CI Docker image
+        id: ci_image
         timeout-minutes: 30
         run: bash .github/scripts/ensure-ci-docker-image.sh
 
@@ -61,6 +62,7 @@ jobs:
           REVISION: ${{ inputs.revision }}
           SUITE: ${{ inputs.suite }}
           OUTPUT_DIR: ${{ runner.temp }}/model-proof-${{ inputs.model }}-${{ github.run_id }}-${{ github.run_attempt }}
+          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
         run: |
           set -euo pipefail
           bash .github/scripts/run-model-proof.sh \
