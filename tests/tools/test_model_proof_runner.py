@@ -97,6 +97,7 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
         "--network none",
         "--cap-drop ALL",
         "dst=/src,readonly",
+        "TORCHINDUCTOR_CACHE_DIR=/work/torch-cache",
         "TRTMC_MODEL_PLUGIN_STRICT=1",
         "scratch build produced ${#built_dsos[@]} model DSOs; expected exactly one",
     ):

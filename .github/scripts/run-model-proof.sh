@@ -454,6 +454,10 @@ PY
     --mount "type=bind,src=$artifacts_dir,dst=/artifacts"
     --tmpfs /tmp:rw,exec,nosuid,nodev,size=4g
     -e HOME=/tmp
+    -e USER=trtmc-ci
+    -e LOGNAME=trtmc-ci
+    -e XDG_CACHE_HOME=/work/cache
+    -e TORCHINDUCTOR_CACHE_DIR=/work/torch-cache
     -e HF_HUB_OFFLINE=1
     -e TRANSFORMERS_OFFLINE=1
     -e PYTHONHASHSEED=0
