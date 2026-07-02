@@ -1659,7 +1659,7 @@ bool FluxPipeline::prepare_flux_batch_conditioning(
     std::vector<float>& encoder_hidden_batch, std::vector<float>& cos_batch,
     std::vector<float>& sin_batch, std::vector<float>& latents_batch) {
     const bool is_flux2 = !weights_.vae_bn_mean.empty();
-    const auto chunk_end = chunk_begin + static_cast<std::size_t>(B);
+    const auto chunk_end = chunk_begin + 1;
 
     // 1-3. Prompt prep + tokenize + generation plan.
     std::vector<std::vector<int32_t>> per_sample_input_ids;
