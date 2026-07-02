@@ -9,7 +9,8 @@ from tests.e2e_harness.model_selection import case_matches_e2e_model
 from tests.test_e2e import _case_matches_e2e_model, _parse_e2e_model_filters
 
 
-_SPEECH_E2E_TEST = (
+# Real regression fixture: the base case and nightly probes share one HF ID.
+_SHARED_HF_ID_REGRESSION_TEST = (
     "tests/e2e/models/nemotron_speech_streaming/"
     "test_nemotron_speech_streaming_e2e.py"
 )
@@ -59,13 +60,13 @@ def test_case_matches_e2e_model_does_not_match_shared_hf_id_basename():
     assert not case_matches_e2e_model(probe, {"example-decoder"})
 
 
-def _collect_speech_cases(*args: str) -> subprocess.CompletedProcess[str]:
+def _collect_shared_hf_id_cases(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             sys.executable,
             "-m",
             "pytest",
-            _SPEECH_E2E_TEST,
+            _SHARED_HF_ID_REGRESSION_TEST,
             "--collect-only",
             "-q",
             "-p",
@@ -79,7 +80,7 @@ def _collect_speech_cases(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_collection_guard_does_not_expand_shared_hf_id_to_probes():
-    result = _collect_speech_cases(
+    result = _collect_shared_hf_id_cases(
         "--e2e-model", "nemotron-speech-streaming-en-0.6b"
     )
 
@@ -95,7 +96,7 @@ def test_collection_guard_applies_exact_models_file_after_aliases(tmp_path):
         encoding="utf-8",
     )
 
-    result = _collect_speech_cases(
+    result = _collect_shared_hf_id_cases(
         "--e2e-model",
         "nemotron_speech_streaming",
         "--e2e-models-file",
