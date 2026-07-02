@@ -21,9 +21,7 @@ on:
       - synchronize
       - ready_for_review
       - labeled
-    paths-ignore:
-      - "website/**"
-      - ".github/workflows/pages.yml"
+      - unlabeled
   workflow_dispatch:
     inputs:
       base_ref:
@@ -48,13 +46,7 @@ jobs:
     if: >-
       ${{
         github.event_name == 'workflow_dispatch' ||
-        (
-          contains(github.event.pull_request.labels.*.name, 'run-ci') &&
-          (
-            github.event.action != 'labeled' ||
-            github.event.label.name == 'run-ci'
-          )
-        )
+        contains(github.event.pull_request.labels.*.name, 'run-ci')
       }}
     uses: ./.github/workflows/legal.yml
     with:
@@ -172,20 +164,7 @@ jobs:
       - impact
       - model-proof
       - no-model
-    if: >-
-      ${{
-        always() &&
-        (
-          github.event_name == 'workflow_dispatch' ||
-          (
-            contains(github.event.pull_request.labels.*.name, 'run-ci') &&
-            (
-              github.event.action != 'labeled' ||
-              github.event.label.name == 'run-ci'
-            )
-          )
-        )
-      }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
 
@@ -198,8 +177,18 @@ jobs:
           NO_MODEL_RESULT: ${{ needs.no-model.result }}
           HAS_MODELS: ${{ needs.impact.outputs.has_models }}
           EXPECTED_COUNT: ${{ needs.impact.outputs.expected_count }}
+          AUTHORIZED: >-
+            ${{
+              github.event_name == 'workflow_dispatch' ||
+              contains(github.event.pull_request.labels.*.name, 'run-ci')
+            }}
         run: |
           set -euo pipefail
+
+          if [ "$AUTHORIZED" != "true" ]; then
+            echo "::error::Premerge CI is not authorized. Add the run-ci label and keep it applied until the workflow completes."
+            exit 1
+          fi
 
           test "$LEGAL_RESULT" = "success" || {
             echo "::error::Legal compliance result: $LEGAL_RESULT"

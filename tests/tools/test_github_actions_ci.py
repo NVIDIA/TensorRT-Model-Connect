@@ -215,17 +215,44 @@ def test_premerge_ci_runs_from_manual_dispatch_or_trigger_labels() -> None:
     assert "pull_request:" in trigger_block
     assert "types:" in trigger_block
     assert "- labeled" in trigger_block
+    assert "- unlabeled" in trigger_block
+    assert "paths-ignore:" not in trigger_block
     assert "workflow_dispatch:" in trigger_block
     assert "push:" not in trigger_block
     assert "issues: write" not in text
     assert "pull-requests: read" not in text
     assert "github.event_name == 'workflow_dispatch'" in text
-    assert "github.event.label.name == 'run-ci'" in text
+    assert "contains(github.event.pull_request.labels.*.name, 'run-ci')" in text
+    assert "github.event.label.name" not in text
     assert "run-e2e" not in text
     assert "run-full-ci" not in text
     assert "Remove trigger label" not in text
     assert "actions/github-script" not in text
     assert "github.rest.issues.removeLabel" not in text
+
+
+def test_premerge_required_gate_fails_when_run_ci_is_missing_or_removed() -> None:
+    text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
+    required = text.split("\n  required:", maxsplit=1)[1]
+
+    # Expensive work is authorized by the current label set, so an unlabeled
+    # event revokes access even though the event payload names the removed label.
+    assert "github.event_name == 'workflow_dispatch'" in legal
+    assert "contains(github.event.pull_request.labels.*.name, 'run-ci')" in legal
+    assert "github.event.label.name" not in legal
+
+    # The stable required check itself must never inherit that skip condition.
+    # It runs after skipped dependencies and turns missing authorization into a
+    # failure, preventing GitHub from treating a skipped required job as success.
+    assert "if: ${{ always() }}" in required
+    assert "AUTHORIZED: >-" in required
+    assert "contains(github.event.pull_request.labels.*.name, 'run-ci')" in required
+    assert 'if [ "$AUTHORIZED" != "true" ]; then' in required
+    assert "Premerge CI is not authorized" in required
+    assert required.index("Premerge CI is not authorized") < required.index(
+        'test "$LEGAL_RESULT" = "success"'
+    )
 
 
 def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
