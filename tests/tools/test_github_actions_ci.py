@@ -266,7 +266,8 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     no_model = text.split("\n  no-model:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
     required = text.split("\n  required:", maxsplit=1)[1]
 
-    assert "uses: ./.github/workflows/legal.yml" in legal
+    assert "name: Legal compliance" in legal
+    assert "python tools/legal_headers.py --check" in legal
     assert "needs: legal" in impact
     assert "python3 tools/model_ci.py validate" in impact
     assert "python3 tools/model_ci.py impact" in impact
@@ -285,9 +286,19 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
 
     for dependency in ("legal", "impact", "model-proof", "no-model"):
         assert f"- {dependency}" in required
-    assert "name: Premerge / Required" in required
+    assert "name: Premerge CI" in required
     assert "always()" in required
     assert 'test "$MODEL_RESULT" = "success"' in required
+
+
+def test_premerge_ci_preserves_the_main_ruleset_context_names() -> None:
+    text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
+    required = text.split("\n  required:", maxsplit=1)[1]
+
+    assert "name: Legal compliance" in legal
+    assert "uses: ./.github/workflows/legal.yml" not in legal
+    assert "name: Premerge CI" in required
 
 
 def test_premerge_ci_compares_the_checked_out_merge_snapshot() -> None:
@@ -317,7 +328,7 @@ def test_label_triggered_premerge_ci_uses_pr_merge_ref_checkout() -> None:
     assert "github.event.pull_request.head.sha" not in checkout_block
 
     legal_block = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
-    assert "revision: ${{ inputs.head_ref || github.sha }}" in legal_block
+    assert "ref: ${{ inputs.head_ref || github.sha }}" in legal_block
 
 
 def test_nightly_workflow_dispatch_can_validate_requested_ref() -> None:

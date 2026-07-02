@@ -42,15 +42,49 @@ concurrency:
 
 jobs:
   legal:
-    name: 1 / Legal compliance
+    # Keep this exact name: main's repository ruleset requires this context.
+    name: Legal compliance
     if: >-
       ${{
         github.event_name == 'workflow_dispatch' ||
         contains(github.event.pull_request.labels.*.name, 'run-ci')
       }}
-    uses: ./.github/workflows/legal.yml
-    with:
-      revision: ${{ inputs.head_ref || github.sha }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out exact source head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.head_ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check canonical legal documents
+        run: |
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          expected = {
+              "LICENSE": "d07c0367e2861e7fe70fa1b679f879f4fa2f9138ade4457d44ecf8b2e135bb45",
+              "CONTRIBUTING.md": "efc27920357d41bd5fe87108dbf35089b5bed1c90a05cf23577c9e1b52c698eb",
+              "NOTICE": "fca31175673a934f79dace4b3cdb40eac41e781e06ffb3ecba99d86dee07484c",
+          }
+          for path, expected_digest in expected.items():
+              digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+              if digest != expected_digest:
+                  raise SystemExit(
+                      f"{path}: expected SHA-256 {expected_digest}, found {digest}"
+                  )
+          PY
+
+      - name: Check all tracked source headers
+        run: python tools/legal_headers.py --check
 
   impact:
     name: 2 / Ownership and impact
@@ -158,7 +192,8 @@ jobs:
           echo "No model-owned or platform inputs changed." >> "$GITHUB_STEP_SUMMARY"
 
   required:
-    name: Premerge / Required
+    # Keep this exact name: main's repository ruleset requires this context.
+    name: Premerge CI
     needs:
       - legal
       - impact
