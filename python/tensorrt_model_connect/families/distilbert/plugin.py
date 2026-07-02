@@ -27,6 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..convbert.config import ModelConfig as _ConvBertModelConfig
 from .config import ModelConfig
 from .checkpoint_mapper import (
     WeightDict,
@@ -37,7 +38,10 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
+
 from .encoder_builder import build_encoder_engine
+
+_CROSS_MODEL_DEPENDENCY_PROBE = _ConvBertModelConfig
 
 
 class DistilBertPlugin:
