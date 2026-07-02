@@ -6,6 +6,7 @@
   "runtime_strategy": "diffusion_qwen_image",
   "task_strategy": "diffusion_media_generation",
   "precision": "bf16",
+  "user_contract": "text-to-image",
   "build_args": {
     "max_cache_length": 256
   },

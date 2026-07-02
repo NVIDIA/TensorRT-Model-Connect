@@ -128,6 +128,7 @@ no_impact tools/diff_t5.py # developer utility script; no CI test impact is inte
 no_impact tools/diff_vl.py # developer utility script; no CI test impact is intentional
 no_impact tools/diffusion_helpers.py # developer utility script; no CI test impact is intentional
 no_impact tools/evaluate_diffusion_vlm_similarity.py # developer utility script; no CI test impact is intentional
+no_impact tools/generate_ci_task_coverage_cn.py # standalone report generator; no runtime, build, or CI test-selection impact is intentional
 no_impact tools/layer_profiler.py # developer utility script; no CI test impact is intentional
 no_impact tools/legal_header_exceptions.toml # legal-header exception metadata only; no runtime test impact is intentional
 no_impact tools/legal_headers.py # offline legal-header audit utility; no runtime test impact is intentional

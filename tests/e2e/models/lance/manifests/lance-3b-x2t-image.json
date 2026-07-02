@@ -5,6 +5,7 @@
   "family": "lance",
   "runtime_strategy": "lance_vision_language",
   "task_strategy": "vision_language_generation",
+  "user_contract": "any-to-any",
   "precision": "bf16",
   "max_cache_length": 384,
   "trust_remote_code": false,

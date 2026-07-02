@@ -20,7 +20,7 @@ from typing import Any
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    tomllib = None
+    import tomli as tomllib
 
 from .contracts import (
     CILane,

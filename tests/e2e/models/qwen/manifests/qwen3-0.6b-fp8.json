@@ -5,6 +5,7 @@
   "family": "qwen",
   "runtime_strategy": "qwen_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
+  "user_contract": "text-generation",
   "precision": "bf16",
   "quantization": {
     "format": "fp8",
