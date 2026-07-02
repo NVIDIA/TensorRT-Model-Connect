@@ -52,6 +52,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "conftest.py",
         "pyproject.toml",
         "ruff.toml",
+        "tests/__init__.py",
     }
 )
 PLATFORM_PROJECTION_PREFIXES = (
@@ -62,6 +63,7 @@ PLATFORM_PROJECTION_PREFIXES = (
     "src/",
     "tensorrt_model_connect/",
     "tests/cpp/",
+    "tests/assets/",
     "tests/e2e/",
     "tests/e2e_harness/",
     "third_party/",

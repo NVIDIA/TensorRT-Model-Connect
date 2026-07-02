@@ -410,9 +410,21 @@ PY
     --revision "$revision" \
     --output-dir "$projection_dir" \
     --clean \
-    | tee "$artifacts_dir/projection.log"
+    > "$artifacts_dir/projection.json"
   [ -f "$projection_dir/.trtmc-model-projection.json" ] || \
     die "model_ci.py did not produce a projection manifest"
+  python3 - "$artifacts_dir/projection.json" <<'PY'
+import json
+import sys
+
+projection = json.load(open(sys.argv[1], encoding="utf-8"))
+print(
+    "Projection: "
+    f"model_files={projection['model_files']} "
+    f"platform_files={projection['platform_files']} "
+    f"excluded_model_files={projection['excluded_model_files']}"
+)
+PY
 
   local image="${TRTMC_CI_IMAGE:-trtmc-dev-gb300:manylinux_2_39}"
   docker image inspect "$image" >/dev/null 2>&1 || die "CI image is not present: $image"
