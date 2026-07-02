@@ -23,6 +23,12 @@ except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
+def test_direct_plugin_module_import_preserves_package_plugin_api():
+    from tensorrt_model_connect.families import qwen_moe
+
+    assert qwen_moe.plugin is qwen_moe_module.plugin
+
+
 def _config(num_kv_heads: int = 4) -> SimpleNamespace:
     return SimpleNamespace(
         raw={},

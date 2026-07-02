@@ -44,6 +44,13 @@ def __dir__() -> list[str]:
 
 class _FamilyModule(types.ModuleType):
     def __setattr__(self, name, value):
+        # Importing ``qwen_moe.plugin`` directly makes importlib publish the
+        # submodule on this package.  Preserve the package API, which exposes
+        # the FamilyPlugin instance as ``qwen_moe.plugin``.
+        if name == "plugin" and isinstance(value, types.ModuleType):
+            super().__setattr__("_plugin", value)
+            super().__setattr__("plugin", value.plugin)
+            return
         super().__setattr__(name, value)
         if (
             not name.startswith("__")
