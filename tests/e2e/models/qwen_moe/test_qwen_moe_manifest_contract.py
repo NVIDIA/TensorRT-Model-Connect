@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Qwen3-MoE-owned manifest contract tests."""
 
 from __future__ import annotations
@@ -7,8 +10,8 @@ from pathlib import Path
 from tests.e2e_harness.manifest_loader import load_manifest
 
 
-def test_tiny_random_qwen3_moe_is_an_explicit_runtime_smoke_case() -> None:
-    """Keep the missing HF contract intentional until HF declares one."""
+def test_tiny_random_qwen3_moe_does_not_infer_an_hf_contract() -> None:
+    """Keep the missing HF contract explicit while allowing HF parity."""
     manifest_path = Path(__file__).with_name("manifests") / "qwen3-moe-tiny-random.json"
     case = load_manifest(manifest_path)
 
@@ -16,6 +19,5 @@ def test_tiny_random_qwen3_moe_is_an_explicit_runtime_smoke_case() -> None:
     assert case.task_strategy == "text_generation_causal"
     assert case.user_contract == ""
     assert case.metadata["single_process_debug_generation"] is True
-    skip_reason = case.metadata["skip_comparison_reason"]
-    assert "runtime smoke test" in skip_reason
-    assert "HF text parity is not meaningful" in skip_reason
+    assert "skip_comparison" not in case.metadata
+    assert "skip_comparison_reason" not in case.metadata

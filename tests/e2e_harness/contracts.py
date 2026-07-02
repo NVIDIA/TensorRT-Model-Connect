@@ -206,7 +206,6 @@ class UserContract(enum.Enum):
     RANKING_ORDER = "ranking_order"
     VL_ANSWER = "vl_answer"
     OCR_TEXT = "ocr_text"
-    IMAGE_TEXT_TO_TEXT = "image-text-to-text"
     DIFFUSION_IMAGE = "diffusion_image"
     DIFFUSION_VIDEO = "diffusion_video"
     DIFFUSION_TEXT_GENERATION = "diffusion_text_generation"
