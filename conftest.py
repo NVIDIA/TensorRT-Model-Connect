@@ -34,3 +34,52 @@ def pytest_addoption(parser):
             parser.addoption(name, **kw)
         except ValueError:
             pass
+
+
+def pytest_collection_modifyitems(config, items):
+    """Enforce exact E2E selection after model-owned parametrization."""
+    from tests.e2e_harness.manifest_loader import load_all_manifests
+    from tests.e2e_harness.model_selection import (
+        case_matches_e2e_model,
+        case_names_from_param,
+        parse_e2e_model_filters,
+        read_e2e_models_file,
+    )
+
+    models_file = config.getoption("--e2e-models-file", default=None)
+    selected_names = read_e2e_models_file(models_file) if models_file else None
+    model_filters = parse_e2e_model_filters(
+        config.getoption("--e2e-model", default=[]) or []
+    )
+    if selected_names is None and not model_filters:
+        return
+
+    cases_by_name = (
+        {case.name: case for case in load_all_manifests()}
+        if selected_names is None
+        else {}
+    )
+
+    kept = []
+    deselected = []
+    for item in items:
+        callspec = getattr(item, "callspec", None)
+        if callspec is None or "case_name" not in callspec.params:
+            kept.append(item)
+            continue
+
+        case_names = case_names_from_param(str(callspec.params["case_name"]))
+        if selected_names is not None:
+            matches = bool(case_names) and set(case_names).issubset(selected_names)
+        else:
+            cases = [cases_by_name.get(name) for name in case_names]
+            matches = bool(cases) and all(
+                case is not None and case_matches_e2e_model(case, model_filters)
+                for case in cases
+            )
+
+        (kept if matches else deselected).append(item)
+
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = kept

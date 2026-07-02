@@ -94,6 +94,19 @@ def test_canary_runner_filters_exact_names_before_bundle_grouping(tmp_path) -> N
     assert case_names == ["canary-1b-v2"]
 
 
+def test_canary_runner_treats_case_name_as_exact_before_bundle_grouping() -> None:
+    case_names = canary_runner.model_case_names(
+        _Config(
+            **{
+                "--e2e-group-by-bundle": True,
+                "--e2e-model": ["canary-1b-v2"],
+            }
+        )
+    )
+
+    assert case_names == ["canary-1b-v2"]
+
+
 def test_nemotron_speech_runner_does_not_collect_shared_bundle_as_group() -> None:
     case_names = nemotron_speech_runner.model_case_names(
         _Config(

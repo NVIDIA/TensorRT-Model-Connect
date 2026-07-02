@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from os import PathLike
-from typing import Iterable, Protocol, TypeVar
+from typing import Iterable, Mapping, Protocol, TypeVar
 
 
 BUNDLE_GROUP_PREFIX = "bundle:"
@@ -19,11 +19,41 @@ class _NamedCase(Protocol):
 _CaseT = TypeVar("_CaseT", bound=_NamedCase)
 
 
+class _FilterableCase(_NamedCase, Protocol):
+    family: str
+    runtime_strategy: str
+    task_strategy: str
+    metadata: Mapping[str, object]
+
+
 def case_names_from_param(value: str) -> list[str]:
     if value.startswith(BUNDLE_GROUP_PREFIX):
         payload = value[len(BUNDLE_GROUP_PREFIX):]
         return [name for name in payload.split("+") if name]
     return [value] if value else []
+
+
+def parse_e2e_model_filters(values: Iterable[str]) -> set[str]:
+    filters: set[str] = set()
+    for raw in values:
+        filters.update(item.strip() for item in str(raw).split(",") if item.strip())
+    return filters
+
+
+def case_matches_e2e_model(case: _FilterableCase, filters: set[str]) -> bool:
+    """Match exact case names and supported aliases, never HF ID basenames."""
+    if not filters:
+        return True
+    metadata = case.metadata or {}
+    fields = {
+        case.name,
+        case.family,
+        case.runtime_strategy,
+        case.task_strategy,
+        str(metadata.get("family", "")),
+        str(metadata.get("runtime_strategy", "")),
+    }
+    return bool(filters & {field for field in fields if field})
 
 
 def read_e2e_models_file(path: str | PathLike[str]) -> set[str]:

@@ -14,6 +14,7 @@ from tests.e2e_harness.contracts import E2EStatus, RunContext, StageStatus
 from tests.e2e_harness.manifest_loader import get_case_by_name, load_all_manifests
 from tests.e2e_harness.model_selection import (
     BUNDLE_GROUP_PREFIX,
+    case_matches_e2e_model,
     case_names_from_param,
     select_cases_from_models_file,
 )
@@ -106,7 +107,12 @@ def model_case_names_for_dir(
         cases = select_cases_from_models_file(cases, models_file)
 
     if model_filters:
-        cases = [case for case in cases if case_matches_model(case, model_filters)]
+        cases = [
+            case
+            for case in cases
+            if case_matches_model(case, model_filters)
+            and case_matches_e2e_model(case, model_filters)
+        ]
 
     if excluded_ci_tiers:
         cases = [

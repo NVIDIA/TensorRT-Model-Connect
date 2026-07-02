@@ -15,7 +15,6 @@ import pytest
 
 from tests.e2e_harness.contracts import E2EStatus, RunContext, StageStatus
 from tests.e2e_harness.manifest_loader import get_case_by_name, load_all_manifests
-from tests.e2e_harness.model_selection import select_cases_from_models_file
 from tests.e2e_harness.orchestrator import E2EOrchestrator
 from tests.e2e_harness.python_profiles import (
     resolve_case_profile_names,
@@ -158,6 +157,7 @@ def _case_matches_e2e_model(case, filters: set[str]) -> bool:
         case.family,
         case.runtime_strategy,
         case.task_strategy,
+        Path(case.hf_id).name if case.hf_id else "",
         str(metadata.get("family", "")),
         str(metadata.get("runtime_strategy", "")),
     }
@@ -170,14 +170,12 @@ def model_case_names(config=None) -> list[str]:
     multi_device_only = False
     excluded_ci_tiers = set()
     model_filters: set[str] = set()
-    models_file = None
 
     if config is not None:
         strategy_filter = config.getoption("--e2e-task-strategy", default=None)
         model_filters = _parse_e2e_model_filters(
             config.getoption("--e2e-model", default=[]) or []
         )
-        models_file = config.getoption("--e2e-models-file", default=None)
         core_only = config.getoption("--e2e-core-only", default=False)
         multi_device_only = config.getoption("--multi-device-only", default=False)
         excluded_ci_tiers = set(
@@ -185,9 +183,6 @@ def model_case_names(config=None) -> list[str]:
         )
 
     cases = load_all_manifests(_MODEL_DIR, task_strategy_filter=strategy_filter)
-
-    if models_file:
-        cases = select_cases_from_models_file(cases, models_file)
 
     if model_filters:
         cases = [case for case in cases if _case_matches_e2e_model(case, model_filters)]
