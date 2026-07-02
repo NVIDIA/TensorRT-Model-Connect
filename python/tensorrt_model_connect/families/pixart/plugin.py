@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """PixArt-Sigma / PixArt-Alpha family plugin.
 
 Supports PixArt-Sigma and PixArt-Alpha text-to-image diffusion models.

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for model-owned debug runner bundle readers.
 
 Mock-based, no TRT/GPU needed. Tests bundle parsing logic and

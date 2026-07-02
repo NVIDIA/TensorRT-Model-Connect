@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Extended tests for model-owned debug-runner bundle utilities.
 
 Concrete TRT runner implementations and bundle readers are model-owned; this

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Coverage-focused tests for merge/fallback behavior in ModelConfig.
 
 Trace: ARCH-CFG-002, UD-CFG-02

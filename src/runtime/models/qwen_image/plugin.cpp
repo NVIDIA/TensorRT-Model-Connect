@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // QwenImagePlugin: handles "diffusion_qwen_image" strategy.
 // Qwen-Image diffusion pipeline with Qwen2.5-VL text encoder, MMDiT denoiser,
 // AutoencoderKLQwenImage VAE decoder, and Qwen-Image-specific preprocessor

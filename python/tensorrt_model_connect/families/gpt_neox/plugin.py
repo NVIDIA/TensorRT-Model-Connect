@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """GPT-NeoX family plugin (Pythia, RedPajama) — parallel residual + partial RoPE.
 
 GPT-NeoX / Pythia uses:

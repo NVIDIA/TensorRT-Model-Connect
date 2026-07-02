@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """InternViT vision encoder builder for InternVL3.
 
 Builds the InternViT-300M-448px vision encoder as a single TRT engine:

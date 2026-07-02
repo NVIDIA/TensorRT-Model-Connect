@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // EncoderPlugin: handles "encoder_only", "embedding", "reranking", and
 // "neural_operator" strategies. Single-pass encoder models (BERT, Eagle, etc.).
 

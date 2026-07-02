@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tensor-parallel PersonaPlex temporal decoder builder.
 
 This mirrors the single-device standard decoder path used by PersonaPlex's

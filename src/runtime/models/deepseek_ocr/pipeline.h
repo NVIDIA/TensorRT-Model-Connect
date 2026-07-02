@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #pragma once
 
 // DeepseekOcrPipeline: vision-language generation (Qwen2.5-VL, Qwen3-VL, InternVL3, Phi4).

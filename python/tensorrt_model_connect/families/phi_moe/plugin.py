@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Phi-MoE family plugin — Mixture of Experts with SparseMixer routing.
 
 Phi-MoE uses the standard decoder attention (RoPE + GQA) but replaces the

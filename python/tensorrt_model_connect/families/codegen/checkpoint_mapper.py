@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """1:1 port of standard_checkpoint_mapper.cpp + tensor_math.cpp to Python.
 
 Loads HF safetensors and maps keys to the flat weight dict expected by

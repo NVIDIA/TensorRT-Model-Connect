@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tensor-parallel Nemotron Speech Streaming RNNT predictor builder.
 
 This mirrors the single-device predictor graph in ``plugin.py`` while keeping

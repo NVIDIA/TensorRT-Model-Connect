@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """One-command autopilot: discover → select → implement → validate → report.
 
 Run from the HOST terminal (not inside a container or agent CLI session):

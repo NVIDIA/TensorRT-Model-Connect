@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Nemotron Labs Diffusion family plugin.
 
 The HF checkpoint is a dense Ministral-style decoder wrapped as

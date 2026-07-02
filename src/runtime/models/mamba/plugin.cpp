@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // MambaPlugin: handles the Mamba-owned recurrent strategy.
 // Mamba/SSM models with conv_state + ssm_state recurrent state.
 

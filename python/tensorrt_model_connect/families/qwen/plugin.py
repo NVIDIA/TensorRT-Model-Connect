@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Qwen family plugin — Qwen, Qwen2, Qwen3, QwQ (text-only, not VL).
 
 Calls the standard decoder builder, which now dispatches to the

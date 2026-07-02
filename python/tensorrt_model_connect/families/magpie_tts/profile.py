@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Profile MagpieTTS inference pipeline with fine-grained timing.
 
 Instruments the C++ backend via a Python debug runner that mirrors the

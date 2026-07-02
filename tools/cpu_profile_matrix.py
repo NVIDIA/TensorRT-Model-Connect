@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Cross-strategy CPU phase bottleneck harness.
 
 Runs the CPU-phase profiler across representative family-owned specs and prints

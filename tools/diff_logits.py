@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Pure-Python E2E logit comparison between TRT engine and HF transformers.
 
 No C++ binary needed. Builds a TRT engine via tensorrt_model_connect, runs inference

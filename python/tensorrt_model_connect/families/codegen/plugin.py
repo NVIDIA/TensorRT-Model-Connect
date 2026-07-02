@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """CodeGen family plugin — GPT-J-like with parallel residual + partial RoPE.
 
 CodeGen (Salesforce) uses:

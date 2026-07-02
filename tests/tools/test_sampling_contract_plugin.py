@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 from tests.e2e_harness.contracts import E2ECase, StageOutput, ThresholdProfile
 from tests.e2e.models.qwen.e2e_plugins.contract import QwenSamplingPlugin
 

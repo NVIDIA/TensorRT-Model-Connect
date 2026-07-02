@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Run all E2E tests in parallel across available GPUs.
 #
 # Each GPU runs multiple concurrent pytest workers (default 4) to maximize

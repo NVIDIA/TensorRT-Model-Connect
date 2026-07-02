@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // RtxBackend: IBackend implementation for TensorRT-RTX.
 // Compiled into libtrtmc_backend_rtx.so. Links libtensorrt_rtx.so.
 //

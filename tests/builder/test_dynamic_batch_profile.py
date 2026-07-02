@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit test for ``add_dynamic_batch_profile`` — single source of truth for
 the diffusion engine ``kMIN=1, kOPT=opt, kMAX=max`` profile. The TRT
 round-trip exercises validation, shape setting, and the engine's binding

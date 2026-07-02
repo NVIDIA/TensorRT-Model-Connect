@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """MagpieTTS family plugin -- encoder-decoder text-to-speech model.
 
 MagpieTTS is an encoder-decoder TTS model from a NeMo .nemo archive:

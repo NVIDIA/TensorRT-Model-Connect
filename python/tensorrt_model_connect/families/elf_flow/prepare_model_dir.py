@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Prepare a local GitHub ELF checkpoint directory for TRTMC build.
 
 Upstream ELF evaluates with separate ``--config`` and ``--checkpoint_path``

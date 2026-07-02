@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Vision encoder builder for Phi-4-multimodal.
 
 Builds a ViT vision encoder + image projection adapter as a single TRT engine.

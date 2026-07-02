@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // ChronosBoltPlugin: handles "chronos_bolt_trt" strategy.
 //
 // This is a numeric forecasting pipeline for Chronos-Bolt-style bundles.

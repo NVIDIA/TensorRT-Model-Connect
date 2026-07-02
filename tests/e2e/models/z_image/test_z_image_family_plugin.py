@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for Z-Image family plugin and serialization helpers.
 
 Trace: ARCH-FAM-001, UD-FAM-ZIMAGE

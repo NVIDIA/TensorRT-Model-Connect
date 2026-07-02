@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Test mixin providing auto-tests for family plugin engine tests.
 
 Contains FamilyPluginTestMixin with 15+ test methods organized in three tiers:

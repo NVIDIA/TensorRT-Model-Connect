@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """E2E orchestrator — coordinates the full lifecycle for one model case.
 
 The orchestrator depends ONLY on contracts (Dependency Inversion Principle).

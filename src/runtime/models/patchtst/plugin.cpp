@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // PatchTSTPlugin: handles "patchtst_trt" strategy.
 // Numeric time-series models compiled from the PatchTST HF family.
 

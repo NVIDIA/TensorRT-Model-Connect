@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """TRT IProfiler-based per-layer timing.
 
 LayerProfiler is a tensorrt.IProfiler implementation that accumulates per-layer

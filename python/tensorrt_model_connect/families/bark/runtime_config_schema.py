@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Schema for the ``audio_bark`` namespace.
 
 Per-session sampling / debug knobs for the Bark TTS pipeline. Replaces

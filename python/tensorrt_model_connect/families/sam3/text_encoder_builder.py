@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """SAM3 CLIP text encoder TensorRT builder.
 
 SAM3 image PCS uses text prompts.  This builder covers the model-card text

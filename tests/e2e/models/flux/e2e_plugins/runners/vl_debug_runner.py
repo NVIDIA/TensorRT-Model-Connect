@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Model-owned VL debug runner used by this E2E model plugin.
 
 This file intentionally duplicates the Python VL debug path so changes to one

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Wan2.1 Text-to-Video family plugin.
 
 Composes shared builders: T5 encoder + standard DiT + causal 3D VAE.

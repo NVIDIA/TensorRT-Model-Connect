@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for BERT family plugin — verifies weight key mapping and transforms.
 
 Creates a synthetic BERT model directory with config.json and mock safetensors

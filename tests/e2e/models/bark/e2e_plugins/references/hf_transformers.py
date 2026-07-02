@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """HuggingFace Transformers reference backend — gold-standard L1 oracle.
 
 Runs HF model inference in a subprocess for GPU memory isolation and returns

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """FLUX family plugin.
 
 Supports FLUX.1-dev, FLUX.1-schnell, FLUX.2-dev, FLUX.2-klein, and similar

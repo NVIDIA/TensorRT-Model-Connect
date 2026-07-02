@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 id = "patchtst"
 runtime_library = "libtrtmc_model_patchtst.so"
 runtime_plugins = ["plugin.cpp|register_patchtst_plugin"]

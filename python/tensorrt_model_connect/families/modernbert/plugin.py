@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """ModernBERT family plugin -- encoder-only transformer with modern design.
 
 ModernBERT differs significantly from classic BERT:

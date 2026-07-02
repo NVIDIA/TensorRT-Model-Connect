@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for E2E orchestrator TRT runtime path validation guard.
 
 Trace: ARCH-E2E-001, UD-E2E-RUNTIME-GUARD

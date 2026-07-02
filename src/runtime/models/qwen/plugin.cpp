@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // QwenDecoderPlugin: Qwen-owned decoder runtime with device-resident KV cache.
 
 #include "plugin_helpers.h"

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Mocked coverage tests for BERT-owned encoder builders.
 
 These tests avoid real TensorRT execution by importing builders with a fake

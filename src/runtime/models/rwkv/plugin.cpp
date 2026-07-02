@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // RwkvPlugin: handles the RWKV-owned recurrent strategy.
 // RWKV models with 5 recurrent state vectors per layer.
 

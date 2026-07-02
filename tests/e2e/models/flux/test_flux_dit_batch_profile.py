@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for the FLUX.1 DiT dynamic-batch profile (PR 1).
 
 Verifies the contract added in the diffusion batch-inference foundation

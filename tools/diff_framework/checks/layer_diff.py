@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Layer diff check — per-layer hidden state comparison: TRT vs HF."""
 
 from diff_framework.registry import register

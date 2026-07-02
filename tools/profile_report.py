@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Auto-generated HTML profiling report.
 
 Combines per-layer TRT timing, three-way perf comparison, CPU phase breakdown,

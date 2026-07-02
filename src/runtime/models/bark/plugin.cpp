@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // BarkPlugin: handles "text_to_audio_bark" strategy.
 // Bark semantic + coarse pipeline with optional codec and fine engines.
 

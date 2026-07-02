@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """T5 encoder TRT vs HuggingFace comparison.
 
 Validates that the TRT T5 encoder engine produces the same text embeddings

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Self-tests for tools/diff_audio.py — compute_energy, WAV I/O, token_stats, arg parsing.
 
 Trace: ARCH-PIP-AUD-001, UD-AUD-DIFF

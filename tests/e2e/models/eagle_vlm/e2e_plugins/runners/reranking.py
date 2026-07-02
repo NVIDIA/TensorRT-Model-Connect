@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Reranking strategy runner — TRT inference for reranking models.
 
 Runs the C++ binary with ``trtmc rerank`` to produce relevance scores for one

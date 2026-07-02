@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Qwen3OmniPlugin: handles "qwen3_omni_multimodal" strategy.
 // Omni pipeline with thinker (MoE decoder), optional talker, and optional code2wav.
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """SAM (Segment Anything Model) family plugin -- prompted segmentation.
 
 SAM is an image segmentation model with three components:

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Artifact sink — persist E2E outputs, commands, and results.
 
 Implements the ArtifactSink protocol from contracts.py.  All per-model

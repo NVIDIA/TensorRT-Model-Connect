@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """LTX-Video DiT engine builder using the raw TensorRT network API.
 
 This builder targets diffusers' ``LTXVideoTransformer3DModel`` directly.

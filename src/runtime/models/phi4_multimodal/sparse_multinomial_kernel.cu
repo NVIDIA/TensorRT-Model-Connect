@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "runtime/models/phi4_multimodal/sparse_multinomial_kernel.h"
 
 #include <curand_kernel.h>

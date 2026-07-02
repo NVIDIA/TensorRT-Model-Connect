@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Unit tests for PipelineRegistry: register, lookup, unknown-strategy.
 // Trace: ARCH-PIPELINE-REGISTRY, UD-REGISTRY-DISPATCH
 // Intent: Verify registry-based pipeline plugin dispatch mechanics.

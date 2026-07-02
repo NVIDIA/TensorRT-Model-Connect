@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Omni-multimodal comparator — compare TRT vs reference multi-branch outputs.
 
 Metrics per branch: thinker token agreement, vision/audio embedding cosine,

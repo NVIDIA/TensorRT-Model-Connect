@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Collect per-test coverage data from Python tests using coverage.py.
 
 Runs pytest with --cov-context=test, then parses the resulting .coverage

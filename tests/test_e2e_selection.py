@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 from tests.e2e_harness.contracts import E2ECase
 from tests.test_e2e import _case_matches_e2e_model, _parse_e2e_model_filters
 

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // MagpiePlugin: handles "text_to_audio_magpie" strategy.
 // Magpie TTS encoder-decoder pipeline with IPA tokenizer and optional CFG.
 

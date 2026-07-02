@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // FluxPipeline implementation: TrtModule-based FLUX diffusion pipeline.
 // Ports flux_diffusion_backend.cpp from raw TRT API to TrtModule::forward().
 //

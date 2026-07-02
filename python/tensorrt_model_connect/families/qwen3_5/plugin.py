@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Qwen3.5 family plugin -- Hybrid Gated DeltaNet + self-attention decoder.
 
 Qwen3.5 uses a heterogeneous layer stack with two layer types defined by

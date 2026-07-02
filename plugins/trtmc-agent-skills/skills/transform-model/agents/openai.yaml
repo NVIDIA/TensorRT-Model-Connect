@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 interface:
   display_name: "Transform Model"
   short_description: "Add or transform a HuggingFace model into a TRT bundle"

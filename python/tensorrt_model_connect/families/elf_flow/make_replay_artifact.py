@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Create ELF replay artifacts for C++ parity runs.
 
 This packages upstream-exported float32 tensors plus upstream generated JSONL

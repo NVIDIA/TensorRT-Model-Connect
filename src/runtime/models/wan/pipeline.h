@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #pragma once
 
 // WanPipeline: Wan2.1 diffusion pipeline with T5 text encoder, denoiser, and VAE.

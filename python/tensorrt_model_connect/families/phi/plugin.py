@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Phi-3 family plugin — handles fused qkv_proj and gate_up_proj splitting."""
 
 from __future__ import annotations

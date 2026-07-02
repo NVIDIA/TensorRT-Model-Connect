@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for all family plugins — match() logic and basic attributes.
 
 Pure Python, no TRT/GPU needed. Verifies every plugin's match() returns

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Automatic bottleneck classification from profiling data.
 
 Takes nsys SQLite and/or L1 CPU profile JSON, applies a decision tree

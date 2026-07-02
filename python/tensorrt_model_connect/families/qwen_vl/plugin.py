@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Qwen VL family plugin — vision-language models (Qwen2.5-VL + Qwen3-VL).
 
 Qwen2.5-VL is a two-engine VL model:

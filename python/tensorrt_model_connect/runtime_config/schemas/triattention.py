@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Schema for the ``triattention`` namespace.
 
 Replaces the former ``TRTMC_TRIATTN_*`` env vars and the fragment of bundle

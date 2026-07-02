@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """EnCodec decoder TRT graph builder.
 
 Builds a TRT engine for the EnCodec neural audio codec decoder.

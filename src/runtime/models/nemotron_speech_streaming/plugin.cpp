@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // NemotronSpeechStreamingPlugin: handles
 // "nemotron_speech_streaming_speech_to_text_rnnt" strategy.
 

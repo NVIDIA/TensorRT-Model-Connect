@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Dual-profile decoder engine builder — single engine, two optimization profiles.
 
 Produces one TensorRT engine that handles both prefill (multi-token) and

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Generic FP8 E4M3 calibration and scale extraction.
 
 This module provides the shared infrastructure for FP8 quantization.

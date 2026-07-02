@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Engine tests for the InternLM2 family plugin.
 
 InternLM2 uses non-standard HF key names and a group-interleaved fused QKV

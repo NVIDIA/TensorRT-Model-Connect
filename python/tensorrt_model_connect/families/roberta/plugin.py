@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """RoBERTa / XLM-RoBERTa family plugin — encoder-only bidirectional transformer.
 
 Architecturally identical to BERT:

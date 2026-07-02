@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // PatchTSMixerPlugin: handles "patchtsmixer_trt" strategy.
 // Loads a single TRT engine and dispatches to PatchTSMixerPipeline.
 

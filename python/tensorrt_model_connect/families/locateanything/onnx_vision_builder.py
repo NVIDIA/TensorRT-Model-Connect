@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """ONNX-based vision encoder builder.
 
 Strategy A for vision encoders: trace a HuggingFace vision model to ONNX,

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """MPNet family plugin — encoder-only bidirectional transformer.
 
 MPNet (Masked and Permuted Pre-training) shares the same encoder

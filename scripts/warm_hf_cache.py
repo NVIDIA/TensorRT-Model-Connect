@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Warm the HF Hub file/metadata cache before a parallel E2E rebuild phase.
 
 Two operating modes, selected by --models-file:

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Fail when deleted legacy runtime paths are modified without an explicit override.
 
 The service-composed runtime is now the only supported runtime path. This guard exists

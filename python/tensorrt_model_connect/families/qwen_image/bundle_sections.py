@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Qwen Image bundle section names owned by the Qwen Image family."""
 
 TEXT_ENGINE_SECTION = "qwen_image_text_engine_plan"

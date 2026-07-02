@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Model-owned chat-template coverage for Nemotron Labs Diffusion.
 
 #include "runtime/models/nemotron_labs_diffusion/chat_templates.h"

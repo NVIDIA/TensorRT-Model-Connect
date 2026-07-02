@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Build Qwen-Image .trtfb bundle config.json from a diffusers repo.
 
 Pure data transformation: takes a HuggingFace diffusers-format Qwen-Image

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Lance family plugin — ByteDance ``bytedance-research/Lance`` unified model.
 
 Scope (Stage 1): the **understanding** path only — ``x2t_image`` and

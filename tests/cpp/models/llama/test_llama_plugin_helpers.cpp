@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Unit tests for runtime plugin helper parsing.
 // Focus: tokenizer_add_special_tokens detection from bundle config.
 

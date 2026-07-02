@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """FNet encoder builder — TRT engine with 2D DFT replacing self-attention.
 
 FNet replaces self-attention with a 2D Discrete Fourier Transform:

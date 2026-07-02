@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Qwen3-4B-Instruct: FlashInfer attention via TVM-FFI plugin vs baseline.
 
 Builds the FlashInfer engine, runs autoregressive generation with proper

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tensor-parallel SegFormer builder.
 
 SegFormer-B0 stage head counts are not divisible by TP=4 or TP=2, so the

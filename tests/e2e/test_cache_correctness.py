@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """E2E tests for KV cache correctness -- overflow and consistency.
 
 These tests verify that the KV cache behaves correctly when prompts approach

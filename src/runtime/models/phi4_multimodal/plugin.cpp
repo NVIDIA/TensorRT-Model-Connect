@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // VLPlugin: handles "phi4_multimodal_vision_language" strategy.
 // Two-engine pipeline: vision encoder + text decoder with KV cache.
 

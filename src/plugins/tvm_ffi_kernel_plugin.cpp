@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // TVM-FFI kernel bridge plugin implementation (IPluginV2DynamicExt).
 
 #if TRTMC_HAS_TRT && TRTMC_HAS_TVM_FFI

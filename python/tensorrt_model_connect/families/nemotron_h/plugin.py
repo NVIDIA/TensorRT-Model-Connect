@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """NemotronH family plugin -- Hybrid Mamba-2 + MLP + Attention decoder.
 
 NemotronH (NVIDIA) uses a heterogeneous layer stack with three layer types

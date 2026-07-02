@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared T5 encoder engine builder.
 
 Builds a TensorRT engine for a T5-style text encoder (UMT5, mT5, T5).

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Reranking comparator — compare TRT vs reference reranking outputs.
 
 Metrics: pairwise ordering agreement, Kendall tau, Spearman rho,

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Debug diffusion pipeline: component-by-component TRT vs HF comparison.
 
 Systematically compares every component of the diffusion pipeline between the

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """SAM3 DETR/mask/scoring core TensorRT builder.
 
 The SAM3 bundle splits the model-card image path into three TRT engines:

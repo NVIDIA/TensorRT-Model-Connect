@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // TVM-FFI kernel plugin creator (IPluginCreator) + REGISTER_TENSORRT_PLUGIN.
 // Uses the stable V2 plugin path for maximum platform compatibility.
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 interface:
   display_name: "Submit GitHub PR"
   short_description: "Push a branch and open a GitHub pull request"

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Encoder-only NLP comparator — compare TRT vs reference encoder outputs.
 
 Metrics: hidden state cosine, hidden state L2, CLS embedding cosine.

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 id = "gpt_neo"
 runtime_library = "libtrtmc_model_gpt_neo.so"
 runtime_plugins = ["plugin.cpp|register_gpt_neo_plugin"]

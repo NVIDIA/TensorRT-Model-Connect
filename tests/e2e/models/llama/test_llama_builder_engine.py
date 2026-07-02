@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Engine tests for the LLaMA family plugin.
 
 Trace: ARCH-FAM-001, UD-FAM-LLAMA-01

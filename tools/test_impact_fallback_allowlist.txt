@@ -15,6 +15,7 @@ catch_all conftest.py # tracked path has no precise impact rule yet; catch-all s
 catch_all docker-compose.yml # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all examples/trtmc_dataset_benchmark.cpp # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all hf_links_wave1.txt # tracked path has no precise impact rule yet; catch-all stays conservative
+catch_all NOTICE # top-level legal attribution metadata; conservative full-suite fallback is intentionally retained
 catch_all pyproject.toml # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all ruff.toml # tracked path has no precise impact rule yet; catch-all stays conservative
 catch_all tests/__init__.py # tracked path has no precise impact rule yet; catch-all stays conservative
@@ -126,6 +127,8 @@ no_impact tools/diff_vl.py # developer utility script; no CI test impact is inte
 no_impact tools/diffusion_helpers.py # developer utility script; no CI test impact is intentional
 no_impact tools/evaluate_diffusion_vlm_similarity.py # developer utility script; no CI test impact is intentional
 no_impact tools/layer_profiler.py # developer utility script; no CI test impact is intentional
+no_impact tools/legal_header_exceptions.toml # legal-header exception metadata only; no runtime test impact is intentional
+no_impact tools/legal_headers.py # offline legal-header audit utility; no runtime test impact is intentional
 no_impact tools/nsys_to_layer_timing.py # developer utility script; no CI test impact is intentional
 no_impact tools/perf_compare.py # developer utility script; no CI test impact is intentional
 no_impact tools/perfdb.py # developer utility script; no CI test impact is intentional

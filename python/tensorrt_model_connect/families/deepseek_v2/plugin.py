@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """DeepSeek-V2 family plugin — Multi-head Latent Attention + Mixture of Experts.
 
 DeepSeek-V2 uses Multi-head Latent Attention (MLA) which compresses KV cache

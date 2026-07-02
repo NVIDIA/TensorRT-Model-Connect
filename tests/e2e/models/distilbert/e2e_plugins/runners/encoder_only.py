@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Encoder-only NLP strategy runner — TRT inference for encoder-only models.
 
 Runs the C++ binary for encoder-only forward pass (e.g. BERT) and

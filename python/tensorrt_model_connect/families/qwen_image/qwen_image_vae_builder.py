@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Qwen-Image VAE decoder builder.
 
 Builds a TensorRT engine for the ``AutoencoderKLQwenImage`` decoder running

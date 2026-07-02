@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """FlashInfer attention via TVM-FFI plugin — native kernel, zero Python callback.
 
 JIT-compiles the FlashInfer single_decode kernel (native CUDA), registers it

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for tools/coverage_map/ -- coverage-based test selection.
 
 Trace: ARCH-CI-001, UD-CI-COVERAGE

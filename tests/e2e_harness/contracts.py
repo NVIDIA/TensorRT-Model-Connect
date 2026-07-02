@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Domain types and protocol contracts for the unified E2E testing framework.
 
 This module is the stable foundation that all other harness components depend on.

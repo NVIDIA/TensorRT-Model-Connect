@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 id = "qwen_moe"
 runtime_library = "libtrtmc_model_qwen_moe.so"
 runtime_plugins = ["plugin.cpp|register_qwen_moe_plugin"]

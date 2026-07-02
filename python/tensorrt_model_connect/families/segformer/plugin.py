@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """SegFormer family plugin -- semantic segmentation (SegFormer-B0..B5).
 
 SegFormer is an encoder-decoder architecture for semantic segmentation:

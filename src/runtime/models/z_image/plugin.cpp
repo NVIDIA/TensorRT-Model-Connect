@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // ZImagePlugin: handles "diffusion_zimage" strategy.
 // Z-Image diffusion pipeline with Qwen3 text encoder, denoiser, VAE,
 // and Z-Image-specific preprocessor weights (timestep embedder, caption

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Text generation causal strategy runner -- TRT inference via C++ binary and debug runner.
 
 Handles bloom's bloom_decoder_kv_cache runtime strategy, which maps to

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Diffusion text generation runner for ELF-style non-autoregressive text.
 
 The runtime contract is the C++ ``trtmc run`` path: sample latent text

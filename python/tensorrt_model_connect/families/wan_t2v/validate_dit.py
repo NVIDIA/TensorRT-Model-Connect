@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Validate DiT denoiser: TRT vs HuggingFace single-step comparison.
 
 Runs the HF model forward pass, extracts intermediate representations

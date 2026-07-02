@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Compare migrated model-owned E2E results with an origin/main baseline.
 
 The migration acceptance contract allows a model to pass, fail, or skip only if

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for tools/sol_estimate.py — SOL estimation logic.
 
 No GPU or model downloads required. Tests pure computation with synthetic data.

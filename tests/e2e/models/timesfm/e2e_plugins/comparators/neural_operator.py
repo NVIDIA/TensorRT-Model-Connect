@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Neural operator comparator — compare TRT vs reference field outputs.
 
 Metrics: relative L2 on output fields, max pointwise error, optional

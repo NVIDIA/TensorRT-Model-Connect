@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for tools/check_runtime_strategy_matrix.py.
 
 Trace: ARCH-E2E-001, UD-E2E-STRATEGY-MATRIX

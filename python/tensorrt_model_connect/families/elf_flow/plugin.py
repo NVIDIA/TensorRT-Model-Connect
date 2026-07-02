@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """ELF flow family plugin.
 
 ELF is implemented from the GitHub source at https://github.com/lillian039/ELF.

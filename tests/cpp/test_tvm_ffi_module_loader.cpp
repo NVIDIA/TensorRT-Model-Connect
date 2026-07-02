@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // =============================================================================
 // test_tvm_ffi_module_loader.cpp — Load FlashInfer .so from C++, run in TRT
 // =============================================================================

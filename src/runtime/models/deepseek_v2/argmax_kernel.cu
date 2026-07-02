@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // GPU-side argmax for greedy token selection.
 //
 // Eliminates the D2H transfer of the full logit vector (~600KB for 151K vocab)

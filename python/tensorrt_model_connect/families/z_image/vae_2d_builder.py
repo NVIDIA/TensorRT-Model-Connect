@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """AutoencoderKL 2D VAE decoder builder.
 
 Builds a TRT engine for a standard AutoencoderKL VAE decoder (FLUX/Z-Image style)

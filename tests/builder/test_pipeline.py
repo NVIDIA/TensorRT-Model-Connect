@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for pipeline.py — Python wrapper around the C++ trtmc CLI.
 
 Pure Python tests with mocked subprocess calls. No GPU or TRT needed.

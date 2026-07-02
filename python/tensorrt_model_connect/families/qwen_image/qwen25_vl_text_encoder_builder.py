@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Qwen2.5-VL text encoder builder -- LM-only path for Qwen-Image T2I.
 
 Builds a TensorRT engine that takes ``(input_ids, attention_mask)`` and

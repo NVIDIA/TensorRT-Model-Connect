@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Auto-discover family plugins from this package.
 
 Any .py file or package in this directory (excluding _-prefixed and base.py)

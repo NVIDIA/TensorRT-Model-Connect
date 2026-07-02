@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Extended tests for qwen_vl_vision_builder.py — TRT graph-level tests.
 
 Tests vision encoder graph construction with tiny dims, spatial merge

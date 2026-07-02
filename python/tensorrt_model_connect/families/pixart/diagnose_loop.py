@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Run full 20-step denoising loop in Python using TRT engines.
 Compare latent divergence between two prompts at each step."""
 import struct

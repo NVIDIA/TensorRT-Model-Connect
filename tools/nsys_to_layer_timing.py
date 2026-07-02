@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Convert Nsight Systems profile data into layer_timing.json for sol_estimate.py.
 
 Reads an nsys .nsys-rep (or pre-exported .sqlite) file, extracts per-kernel

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Stage a ``bytedance-research/Lance`` checkpoint into a buildable directory.
 
 The Lance HF repo is not a flat HF checkpoint: the LLM lives under

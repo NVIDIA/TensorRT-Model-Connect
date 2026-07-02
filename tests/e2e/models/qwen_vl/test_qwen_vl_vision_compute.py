@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for qwen_vl_vision_builder.py — pure-numpy vision compute.
 
 Tests vision RoPE table shapes, frequency correctness, and window index

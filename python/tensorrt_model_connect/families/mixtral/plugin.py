@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Mixtral family plugin — Mixture of Experts with standard top-k softmax routing.
 
 Experimental support for Mixtral models (Mistral AI) with block-sparse MoE layers.

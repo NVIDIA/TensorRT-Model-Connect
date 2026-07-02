@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for owned Qwen3/T5 helper and weight-loader logic.
 
 These tests avoid TensorRT runtime by importing modules with a fake trt stub.

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Diff test: Compare TRT PersonaPlex pipeline against the official NVIDIA/personaplex code.
 
 Runs both the official PyTorch pipeline and our C++ TRT pipeline on the same input audio

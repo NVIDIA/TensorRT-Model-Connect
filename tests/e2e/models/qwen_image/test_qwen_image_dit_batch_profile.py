@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for the Qwen-Image MMDiT dynamic-batch builder wiring.
 
 Like the encoder batch-profile tests this monkeypatches TensorRT and the

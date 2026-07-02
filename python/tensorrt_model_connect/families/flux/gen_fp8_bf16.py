@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Generate image using FP8+BF16 TRT engine + HF text encoder/VAE.
 
 This engine has I/O: hidden_states, encoder_hidden_states, temb, rotary_cos, rotary_sin -> output

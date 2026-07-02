@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """M2M-100/NLLB family plugin -- encoder-decoder multilingual translation model.
 
 M2M-100/NLLB is an encoder-decoder transformer for multilingual translation:

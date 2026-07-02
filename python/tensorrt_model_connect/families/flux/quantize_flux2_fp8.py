@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """FP8 quantize FLUX.2-dev DiT transformer using ModelOpt on CPU.
 
 Bypasses CUBLAS issues by running calibration entirely on CPU.

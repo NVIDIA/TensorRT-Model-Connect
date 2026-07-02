@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for tools/test_impact.py -- zero-false-negative guarantee.
 
 Tests use synthetic manifests and family plugins in tmp directories to

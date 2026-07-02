@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 id = "ltx_video"
 runtime_library = "libtrtmc_model_ltx_video.so"
 runtime_plugins = ["plugin.cpp|register_ltx_video_plugin"]

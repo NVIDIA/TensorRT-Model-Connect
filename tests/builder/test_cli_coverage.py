@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Coverage-focused tests for CLI control flow in tensorrt_model_connect.build_cli.
 
 Trace: ARCH-ENG-001, UD-ENG-02

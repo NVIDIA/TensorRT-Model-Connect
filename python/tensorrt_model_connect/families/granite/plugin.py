@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Granite family plugin — absorbs Granite-specific multipliers into weights.
 
 Granite models (IBM) use the standard LLaMA-style decoder pattern but with

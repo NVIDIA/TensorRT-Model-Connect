@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Build FP8 TRT engine from ONNX with Q/DQ nodes via ONNX parser.
 
 Key insight: the ONNX parser keeps the BF16 graph in a compact TensorRT compiler

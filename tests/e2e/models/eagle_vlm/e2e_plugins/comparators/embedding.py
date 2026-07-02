@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Embedding comparator — compare TRT vs reference embedding outputs.
 
 Metrics: cosine similarity, top-k neighborhood overlap, L2 distance.

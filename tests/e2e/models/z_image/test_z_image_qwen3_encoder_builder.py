@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Mocked coverage tests for the Z-Image-owned Qwen3 encoder builder.
 
 These tests avoid real TensorRT execution by importing builders with a fake

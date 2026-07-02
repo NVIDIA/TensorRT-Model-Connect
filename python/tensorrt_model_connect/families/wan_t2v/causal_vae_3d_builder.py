@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared Causal 3D VAE decoder engine builder.
 
 Builds a TensorRT engine for a causal 3D VAE decoder that processes one

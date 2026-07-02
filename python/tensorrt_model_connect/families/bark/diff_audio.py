@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Diff tool for Bark text-to-audio: C++ TRT pipeline vs HuggingFace.
 
 Staged comparison to isolate audio quality issues:

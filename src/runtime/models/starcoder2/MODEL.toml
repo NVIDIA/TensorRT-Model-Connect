@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 id = "starcoder2"
 runtime_library = "libtrtmc_model_starcoder2.so"
 runtime_plugins = ["plugin.cpp|register_starcoder2_plugin"]

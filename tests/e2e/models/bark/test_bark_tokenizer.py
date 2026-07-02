@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit test: Bark tokenizer must use add_special_tokens=False.
 
 HF's BarkProcessor tokenizes with add_special_tokens=False (no [CLS]/[SEP]).

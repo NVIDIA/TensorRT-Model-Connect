@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for the RoBERTa/XLM-RoBERTa family plugin.
 
 Tests are deterministic and isolate filesystem/TRT dependencies via monkeypatch.

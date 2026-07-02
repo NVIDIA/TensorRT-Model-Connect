@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Marian family plugin -- encoder-decoder machine translation model.
 
 Marian is an encoder-decoder transformer for machine translation:

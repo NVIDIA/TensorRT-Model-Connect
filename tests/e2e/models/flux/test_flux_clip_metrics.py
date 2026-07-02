@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for clip_metrics.py — no GPU, no open_clip, no PIL required.
 
 Strategy: mock _embed_images and _embed_text (the two functions that touch

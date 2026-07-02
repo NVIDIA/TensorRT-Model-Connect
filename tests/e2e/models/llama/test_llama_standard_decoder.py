@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for standard_decoder_builder.py — tensor naming contract.
 
 Builds tiny engines and verifies all I/O tensor names match C++ expectations.

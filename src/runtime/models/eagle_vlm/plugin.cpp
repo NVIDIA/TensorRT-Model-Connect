@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // EagleVLMPlugin: Eagle VLM-owned embedding and reranking runtime strategies.
 
 #include "plugin_helpers.h"

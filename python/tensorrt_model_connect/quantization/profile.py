@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Quantization profile — per-model quantization configuration.
 
 Combines a QuantFormat, per-layer scales, and exclusion patterns into a

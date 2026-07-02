@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """CLIP-based semantic metrics for image diffusion reference comparison.
 
 Provides reference-relative semantic parity that works WITHOUT shared

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """E2E tests for error handling -- malformed/missing bundles.
 
 These tests verify that the C++ trtmc binary fails gracefully with informative

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for build_cli.py — argument parsing edge cases.
 
 Pure Python, no TRT needed. Tests the CLI argument parser without

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 id = "elf_flow"
 runtime_library = "libtrtmc_model_elf_flow.so"
 runtime_plugins = ["plugin.cpp|register_elf_flow_plugin"]

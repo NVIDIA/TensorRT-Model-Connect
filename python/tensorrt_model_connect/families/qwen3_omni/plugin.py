@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Qwen3-Omni family plugin -- multimodal Thinker-Talker-Code2Wav pipeline.
 
 Qwen3-Omni is a 3-stage multimodal model:

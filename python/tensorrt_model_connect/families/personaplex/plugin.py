@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """PersonaPlex family plugin -- speech-to-speech via Moshi architecture.
 
 PersonaPlex (nvidia/personaplex-7b-v1) is based on the Moshi architecture:

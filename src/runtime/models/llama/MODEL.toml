@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 id = "llama"
 runtime_library = "libtrtmc_model_llama.so"
 runtime_plugins = ["plugin.cpp|register_llama_plugin"]

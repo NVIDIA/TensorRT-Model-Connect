@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Ownership contract tests for agentic quantization rollout.
 
 These tests enforce the repo-level boundary between the shared quantization

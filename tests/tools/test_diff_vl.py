@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Self-tests for tools/diff_vl.py - dispatch, cosine similarity, sanity checks.
 
 Trace: ARCH-TRT-001, UD-TRT-DIFF-VL

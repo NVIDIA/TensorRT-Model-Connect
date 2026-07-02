@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Gemma family plugin — applies +1.0 to RMSNorm gamma and sqrt(hidden) embed scale."""
 
 from __future__ import annotations

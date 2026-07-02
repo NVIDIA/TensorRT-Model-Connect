@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """GPT-OSS family plugin — OpenAI GPT-OSS MoE with packed expert weights.
 
 GPT-OSS-20B is a 21B-param sparse MoE (32 experts, 4 active per token).

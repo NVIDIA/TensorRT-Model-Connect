@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tensor-parallel FLUX.2-dev DiT (Diffusion Transformer) engine builder.
 
 Builds a TensorRT engine for the FLUX.2-dev transformer denoiser,

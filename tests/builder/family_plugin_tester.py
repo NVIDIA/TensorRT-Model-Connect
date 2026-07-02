@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Base tester class for family plugin engine tests.
 
 Provides TinyModelSpec (tiny model dimensions for testing) and FamilyPluginTester

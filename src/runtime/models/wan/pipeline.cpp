@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // WanPipeline — TrtModule-based Wan2.1 diffusion pipeline.
 // Ports WanDiffusionBackend to use TrtModule::forward() for all GPU work.
 // All CPU math (timestep embedding, RoPE, patchify, unpatchify, text projection)

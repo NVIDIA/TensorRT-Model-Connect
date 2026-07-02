@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // TimesFmPlugin: handles "timesfm_trt" bundles.
 // Loads a single TRT engine and routes solve() through TimesFmPipeline.
 

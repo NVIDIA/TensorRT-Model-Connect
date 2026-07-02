@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Helpers for embedding TriAttention calibration stats into bundles.
 
 This keeps the runtime-side integration independent of upstream repo layout.

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Comparator for diffusion text generation outputs.
 
 Most ELF checks are handled by the contract plugin, but this lightweight

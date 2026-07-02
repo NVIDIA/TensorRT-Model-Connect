@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """NeMo reference backend for models originating from NVIDIA NeMo.
 
 Provides reference outputs for models that use NeMo as their official

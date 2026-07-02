@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """CLIP text encoder engine builder.
 
 Builds a TensorRT engine for CLIP text encoding (CLIPTextModel).

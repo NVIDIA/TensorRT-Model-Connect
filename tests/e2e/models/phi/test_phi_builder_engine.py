@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Engine tests for the Phi-3 family plugin.
 
 Phi-3 uses fused qkv_proj [q_dim + 2*kv_dim, hidden] and fused gate_up_proj

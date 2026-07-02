@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """XGLM family plugin — sinusoidal positions + GELU FC MLP.
 
 XGLM (facebook/xglm-564M) uses:

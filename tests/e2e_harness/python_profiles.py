@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Thin wrapper over the shared Python builder profile registry."""
 
 from tensorrt_model_connect.python_profiles import (

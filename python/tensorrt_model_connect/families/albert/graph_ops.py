@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Family-owned TensorRT graph operations for Python engine builds.
 
 Tensor names and shapes must stay compatible with the C++ bundle runtime.

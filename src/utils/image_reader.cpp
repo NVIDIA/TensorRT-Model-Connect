@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // image_reader.cpp — implements trtmc::io::read_image() and
 // trtmc::io::save_png() using stb_image / stb_image_write.
 

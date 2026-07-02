@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Load TVM-FFI modules from .so files — pure C++ via TVM-FFI C ABI.
 
 #if TRTMC_HAS_TVM_FFI

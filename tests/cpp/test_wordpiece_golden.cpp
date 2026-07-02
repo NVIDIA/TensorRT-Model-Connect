@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Golden correctness tests for WordPiece tokenizer.
 //
 // Verifies encode() output matches HuggingFace reference token IDs.

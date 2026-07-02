@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // PixArtPlugin: handles "diffusion_pixart" strategy.
 // PixArt-Sigma/Alpha via TRT Network API.
 

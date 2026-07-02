@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Embedding strategy runner — TRT inference for embedding models.
 
 Runs the C++ binary with ``trtmc embed`` to produce L2-normalized vectors.

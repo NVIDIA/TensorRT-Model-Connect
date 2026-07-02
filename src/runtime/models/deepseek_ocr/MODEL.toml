@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 id = "deepseek_ocr"
 runtime_library = "libtrtmc_model_deepseek_ocr.so"
 runtime_plugins = ["plugin.cpp|register_deepseek_ocr_plugin"]

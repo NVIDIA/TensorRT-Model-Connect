@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """LTX-Video VAE decoder builder using the raw TensorRT network API.
 
 The decoder is the non-causal ``LTXVideoDecoder3d`` from

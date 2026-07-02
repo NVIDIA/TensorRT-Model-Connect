@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // VLPlugin: handles "qwen_vl_vision_language" strategy.
 // Two-engine pipeline: vision encoder + text decoder with KV cache.
 

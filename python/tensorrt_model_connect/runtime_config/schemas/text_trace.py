@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Schema for the ``text_trace`` namespace.
 
 Covers the per-step debug tracing of text-generation decodes that used to

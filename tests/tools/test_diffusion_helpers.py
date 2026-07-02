@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Self-tests for tools/diffusion_helpers.py — silu, gelu_tanh, bundle I/O, timestep embedding.
 
 Trace: ARCH-PIP-DIFF-001, UD-DIFF-HELPERS

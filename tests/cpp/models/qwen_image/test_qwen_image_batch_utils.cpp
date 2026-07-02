@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Unit test for Qwen Image-owned image batch chunk planning.
 
 #include "runtime/models/qwen_image/qwen_image_batch_utils.h"

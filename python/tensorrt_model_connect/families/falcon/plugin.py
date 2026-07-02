@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Falcon family plugin — LayerNorm + GELU FC + RoPE + GQA.
 
 Falcon-3 (TII) uses:

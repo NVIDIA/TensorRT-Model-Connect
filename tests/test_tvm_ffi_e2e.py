@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """End-to-end test: TVM-FFI plugin round-trip via shared library.
 
 Loads libtrtmc_core.so to register the TvmFfiKernel plugin, registers a

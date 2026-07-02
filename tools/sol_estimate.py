@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Speed-of-Light (SOL) estimation for TRT decoder inference.
 
 Calculates the theoretical maximum throughput for a given model on a given

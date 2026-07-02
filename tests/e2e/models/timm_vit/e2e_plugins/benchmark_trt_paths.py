@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Compare raw TensorRT API and ONNX->trtexec engines for timm ViT.
 
 The raw API path uses TensorRT-Model-Connect's timm_vit family plugin.  The

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "trtmc/bundle.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/pipeline_factory.h"

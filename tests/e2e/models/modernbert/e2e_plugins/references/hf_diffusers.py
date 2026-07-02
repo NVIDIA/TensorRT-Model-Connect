@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared HF Diffusers reference placeholder.
 
 Concrete Diffusers pipeline loading, per-stage extraction, and reference

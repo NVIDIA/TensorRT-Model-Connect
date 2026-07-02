@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Compatibility shim for the shared default TP dual-profile decoder builder."""
 
 from .default_dual_profile_decoder_tp import (

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Unit test for Z-Image-owned per-sample seed and chunk-planning helpers.
 
 #include "runtime/models/z_image/z_image_batch_utils.h"

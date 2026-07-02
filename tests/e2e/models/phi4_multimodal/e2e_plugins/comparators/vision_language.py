@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Vision-language comparator — compares TRT VL output against reference.
 
 Metrics aligned with thresholds/defaults/vision_language_generation.json:

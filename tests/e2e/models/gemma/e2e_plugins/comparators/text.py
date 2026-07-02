@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Text generation comparator — multi-metric comparison with composite gating.
 
 Computes logit-level and text-level metrics between TRT and HF reference

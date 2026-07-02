@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tensor-parallel Bark semantic/coarse decoder builder.
 
 This mirrors Bark's single-device ``standard_decoder_builder`` for the

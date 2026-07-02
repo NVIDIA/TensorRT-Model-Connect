@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """OLMo-2 family plugin -- post-norm decoder with QK normalization.
 
 OLMo-2 (allenai/OLMo-2-0425-1B) uses:

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // TrtBackend: IBackend implementation for standard TensorRT.
 // Compiled into libtrtmc_backend_trt.so. Links libnvinfer.so.
 

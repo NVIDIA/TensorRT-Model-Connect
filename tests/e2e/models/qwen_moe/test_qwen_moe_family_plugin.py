@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for Qwen3 MoE family plugin — verifies weight key mapping and transforms.
 
 Creates synthetic model directories with config.json and mock safetensors,

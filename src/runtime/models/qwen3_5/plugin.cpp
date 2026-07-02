@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Qwen35Plugin: handles the Qwen3.5-owned hybrid recurrent strategy.
 // Qwen3.5 style models with interleaved attention and Mamba layers,
 // using Qwen35KvCache for attention layers and Qwen35RecurrentState for SSM layers.

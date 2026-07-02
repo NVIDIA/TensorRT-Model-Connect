@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for the ``--max-batch-size`` CLI flag plumbing.
 
 Trace: ARCH-DIFF-BATCH-001, UD-DIFF-BATCH-CLI

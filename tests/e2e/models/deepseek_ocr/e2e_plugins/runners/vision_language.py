@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Vision-language strategy runner — TRT inference for VL models.
 
 Handles Qwen2.5-VL, Qwen3-VL (DeepStack), and generic VL models.

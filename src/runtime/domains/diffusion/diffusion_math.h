@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #pragma once
 // diffusion_math.h — Shared CPU math helpers for diffusion pipelines.
 // Extracted from DiffusionBackendBase during TrtModule migration.

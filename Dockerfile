@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 FROM nvidia/cuda:13.0.0-devel-ubuntu24.04
 
 ARG TENSORRT_VERSION=11.0.0.114

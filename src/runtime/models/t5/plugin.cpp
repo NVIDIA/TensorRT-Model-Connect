@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // T5Plugin: handles "t5_text_to_text" strategy.
 // Encoder-decoder pipeline with text input for seq2seq tasks (translation, etc.).
 //

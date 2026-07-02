@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Complete vision encoder builder for Qwen2.5-VL.
 
 Builds the FULL vision pipeline as a single TRT engine, exactly matching HF's

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """TensorRT Python compatibility boundary.
 
 All builder-side TensorRT imports and version-sensitive Python API calls flow

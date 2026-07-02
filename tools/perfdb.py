@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Performance database for tracking inference benchmarks over time.
 
 Stores E2E harness results and perf_compare.py benchmarks in a local SQLite

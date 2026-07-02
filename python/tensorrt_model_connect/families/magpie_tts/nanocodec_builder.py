@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """NanoCodec HiFi-GAN decoder TRT engine builder.
 
 Builds a TRT engine for the NanoCodec decoder (NeMo nemo-nano-codec).

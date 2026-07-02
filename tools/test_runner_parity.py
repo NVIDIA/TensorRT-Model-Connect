@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Cross-validation: verify Python TrtRunner matches C++ trtmc binary.
 
 Runs the same bundle+prompt through both paths and asserts identical

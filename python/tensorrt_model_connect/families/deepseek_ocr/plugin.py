@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """DeepSeek-OCR-2 family plugin — VL model: SAM ViT + Qwen2 encoder + MoE decoder.
 
 DeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style language decoder. Unlike

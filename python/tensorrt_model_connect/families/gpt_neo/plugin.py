@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """GPT-Neo family plugin — learned positions + separate Q/K/V Linear + Conv1D MLP.
 
 GPT-Neo (EleutherAI) uses:

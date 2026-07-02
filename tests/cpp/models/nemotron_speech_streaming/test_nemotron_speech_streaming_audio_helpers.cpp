@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Unit tests for RNNT-owned audio feature extraction helpers.
 
 #include "runtime/models/nemotron_speech_streaming/audio_helpers.h"

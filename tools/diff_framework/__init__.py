@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unified diff test framework — auto-discovers checks and exports public API."""
 
 from .protocol import DiffResult, TestContext, DiffTest

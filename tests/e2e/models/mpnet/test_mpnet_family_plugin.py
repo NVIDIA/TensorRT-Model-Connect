@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for MPNet family plugin helpers and plugin behavior.
 
 Trace: ARCH-FAM-001, UD-FAM-MPNET

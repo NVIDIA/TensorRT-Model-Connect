@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // PixArtPipeline - TrtModule-based PixArt diffusion pipeline.
 // PixArt bundles use T5 + DiT + VAE engines.
 // All CPU math (timestep embedding, RoPE, patchify, unpatchify, text projection)

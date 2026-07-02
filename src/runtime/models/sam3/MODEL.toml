@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 id = "sam3"
 runtime_library = "libtrtmc_model_sam3.so"
 runtime_plugins = ["plugin.cpp|register_sam3_plugin"]

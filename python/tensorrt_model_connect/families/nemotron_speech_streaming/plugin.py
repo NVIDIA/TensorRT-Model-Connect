@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Nemotron Speech Streaming family plugin -- FastConformer cache-aware RNNT ASR.
 
 The Hugging Face repo ships a NeMo ``.nemo`` archive. Build-time Python extracts

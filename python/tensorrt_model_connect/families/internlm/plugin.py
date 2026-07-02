@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """InternLM2 family plugin — handles fused wqkv and non-standard key names.
 
 InternLM2 uses the standard decoder pattern (pre-RMSNorm + RoPE + SwiGLU + GQA)

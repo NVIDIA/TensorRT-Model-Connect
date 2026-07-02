@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Self-tests for the SegFormer-owned diff segmentation tool.
 
 diff_segmentation.py is a relatively thin module whose heavy lifting

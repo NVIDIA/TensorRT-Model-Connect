@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Check that every family plugin has at least one E2E model manifest.
 
 Runs as a CI gate right after build. Uses AST parsing to discover plugins

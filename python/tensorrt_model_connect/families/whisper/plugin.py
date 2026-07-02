@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Whisper family plugin -- encoder-decoder ASR model (speech-to-text).
 
 Whisper is an encoder-decoder transformer for automatic speech recognition:

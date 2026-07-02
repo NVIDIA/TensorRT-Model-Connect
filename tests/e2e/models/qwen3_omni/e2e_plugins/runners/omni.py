@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Omni-multimodal and composite pipeline strategy runners.
 
 OmniMultimodalRunner handles multi-branch models (thinker, vision, audio,

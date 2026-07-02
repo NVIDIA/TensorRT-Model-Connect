@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Flux-owned GPU matmul via cuBLAS for preprocessor ops not yet baked into TRT engines.
 
 #include "runtime/models/flux/gpu_matmul.h"

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Mistral 3 text encoder engine builder for FLUX.2-dev.
 
 Builds a TensorRT engine for a Mistral-3/LLaMA-style decoder architecture

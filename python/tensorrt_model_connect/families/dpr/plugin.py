@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """DPR (Dense Passage Retrieval) family plugin -- BERT-based dual encoder.
 
 DPR uses a BERT backbone with the prefix 'ctx_encoder.bert_model.*' for context

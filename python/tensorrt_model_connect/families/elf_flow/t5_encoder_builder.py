@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """ELF-flow-owned T5-small encoder engine builder.
 
 Builds the original non-gated T5 encoder variant used by the official GitHub

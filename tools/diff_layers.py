@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Per-layer TRT-vs-HF hidden state comparison.
 
 Builds a TRT debug engine with per-layer outputs marked, runs a single

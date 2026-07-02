@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for all 18 graph_ops.py functions.
 
 Pure-numpy tests run everywhere. TRT graph tests require TensorRT + CUDA GPU.

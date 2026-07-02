@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // MarianPlugin: handles "marian_translation" strategy for Marian MT models.
 // Encoder-decoder pipeline for machine translation.
 //

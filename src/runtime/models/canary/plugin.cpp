@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // CanaryPlugin: handles "canary_speech_to_text" strategy.
 // Canary encoder-decoder pipeline with mel spectrogram input.
 

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Minimal TensorRT-only repro for multiple FP8-normalized IAttention layers.
 
 This intentionally avoids tensorrt_model_connect, torch, diffusers, and model weights. It

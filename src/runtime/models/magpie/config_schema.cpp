@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Registration for the "audio_magpie" namespace schema.
 // Mirrors python/tensorrt_model_connect/families/magpie_tts/runtime_config_schema.py.
 

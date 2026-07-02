@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // Unit tests for bundle_view: find_section(), find_sections_by_prefix().
 // Trace: ARCH-BUNDLE-VIEW, UD-BUNDLE-SECTION-LOOKUP
 // Intent: Verify section lookup by exact name and prefix in BundleFile.

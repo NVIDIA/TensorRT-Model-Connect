@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Coverage-focused tests for Qwen checkpoint mapper helper branches.
 
 Trace: ARCH-CHK-001, ARCH-MODPLUG-001, UD-CHK-02

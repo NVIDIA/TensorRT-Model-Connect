@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """StarCoder2 family plugin — LayerNorm + GELU FC + RoPE.
 
 StarCoder2 uses standard LLaMA-like RoPE attention but with:

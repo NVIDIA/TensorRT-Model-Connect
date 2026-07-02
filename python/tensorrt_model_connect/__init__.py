@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """tensorrt_model_connect — TRT engine builder for the trtmc runtime."""
 
 from __future__ import annotations

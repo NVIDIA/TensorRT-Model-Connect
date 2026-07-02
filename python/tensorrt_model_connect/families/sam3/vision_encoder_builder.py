@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """SAM3 vision encoder TensorRT builder.
 
 Builds the SAM3 image backbone plus the first three FPN neck outputs used by

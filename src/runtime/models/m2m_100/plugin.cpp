@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // M2M100Plugin: handles "m2m_100_seq2seq_encoder_decoder" strategy.
 // Encoder-decoder text-to-text pipeline for M2M-100 and NLLB models.
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Schema for the ``audio_magpie`` namespace.
 
 Sampling / CFG / debug knobs for the Magpie TTS pipeline plus the

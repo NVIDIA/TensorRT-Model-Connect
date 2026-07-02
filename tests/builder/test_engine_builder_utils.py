@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for engine_builder.py utility functions — pure Python, no TRT needed.
 
 Tests _is_hf_model_dir, _detect_tokenizer_add_special_tokens, _resolve_model

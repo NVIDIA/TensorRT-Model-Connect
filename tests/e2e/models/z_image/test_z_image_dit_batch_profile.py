@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for the Z-Image DiT dynamic-batch profile.
 
 Verifies the contract added in PR 1 of the diffusion batch-inference series:

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Schedule E2E tests across GPUs and workers for balanced load.
 
 Reads pytest test IDs (one per line on stdin), model manifests, and optional

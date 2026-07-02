@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """timm ViT image-classification family plugin.
 
 Supports fixed-size timm Vision Transformer classifiers stored in HF Hub

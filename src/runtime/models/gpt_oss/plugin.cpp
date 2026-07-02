@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // GptOssDecoderPlugin: GPT-OSS-owned decoder runtime.
 // Standard attention-based decoder with device-resident KV cache.
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """BART family plugin -- encoder-decoder seq2seq model.
 
 BART is an encoder-decoder transformer for text generation (summarization,

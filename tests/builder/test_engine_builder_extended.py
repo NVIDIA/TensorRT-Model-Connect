@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Extended tests for engine_builder.py — helper functions and orchestration.
 
 Uses mocks for TRT, GPU, and filesystem access. No GPU or TRT needed.

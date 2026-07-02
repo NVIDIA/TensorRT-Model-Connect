@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """E2E: Diffusion pipeline — build bundle, validate components, generate video, check quality.
 
 Discovers manifests with test_type=="diffusion" and runs a multi-stage validation:

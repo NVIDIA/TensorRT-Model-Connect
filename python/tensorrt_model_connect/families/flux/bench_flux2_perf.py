@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """FLUX.2-dev performance benchmark: torch.compile vs TRT BF16.
 
 Measures pure denoiser execution time (excluding engine loading and pipeline

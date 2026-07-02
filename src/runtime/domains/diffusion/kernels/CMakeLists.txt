@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Diffusion kernel modules.
 #
 # Each kernel here is built as a TVM-FFI loadable module (a .so file with no

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """E2E: Full pipeline — build bundle, run inference (C++ & Python), compare to HF reference.
 
 Exercises the complete flow: tensorrt_model_connect.build() -> C++ runtime -> Python TrtRunner -> HF

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Eagle VLM family plugin — embedding and reranking models.
 
 Supports NVIDIA Llama-Nemotron embed-vl-1b-v2 and rerank-vl-1b-v2:

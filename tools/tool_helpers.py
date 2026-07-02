@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared utilities for standard decoder/comparison tools.
 
 Used by: diff_logits.py, diff_layers.py, perf_compare.py,

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // NemotronHPlugin: handles the Nemotron-H-owned hybrid recurrent strategy.
 // Nemotron-H style models with interleaved attention and Mamba layers,
 // using NemotronHKvCache for attention layers and NemotronHRecurrentState for SSM layers.

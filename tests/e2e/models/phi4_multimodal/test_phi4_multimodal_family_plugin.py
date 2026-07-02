@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for Phi-4-multimodal family plugin — weight loading.
 
 Creates synthetic model directories with the Phi-4-multimodal weight naming

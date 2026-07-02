@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tensor-parallel Qwen-VL text decoder builder.
 
 This mirrors the single-device Qwen-VL decoder paths while adding only tensor

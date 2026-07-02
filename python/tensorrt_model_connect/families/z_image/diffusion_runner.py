@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Diffusion pipeline runner — pure-Python TRT inference for diffusion models.
 
 Generic runner that loads N text encoder engines + denoiser + VAE from a

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tensor-parallel Mamba SSM builder.
 
 The TP policy shards Mamba's ``d_inner`` dimension. Per-rank engines keep local

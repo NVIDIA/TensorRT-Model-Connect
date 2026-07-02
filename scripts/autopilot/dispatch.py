@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Dispatch autopilot tasks to parallel coding agents.
 
 Takes the task list from discover.py and launches configurable agent CLI sessions

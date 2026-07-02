@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """ConvBERT family plugin — encoder-only with mixed attention and span-based dynamic convolution.
 
 ConvBERT uses:

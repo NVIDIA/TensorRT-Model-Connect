@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Local validation script for CLIP semantic metrics on diffusion image outputs.
 
 Validates the clip_metrics module before enabling it in CI.

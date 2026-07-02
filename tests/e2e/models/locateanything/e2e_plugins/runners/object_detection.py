@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Object detection strategy runner — TRT inference for detection models.
 
 Handles detection models that output bounding boxes, scores, and class IDs.

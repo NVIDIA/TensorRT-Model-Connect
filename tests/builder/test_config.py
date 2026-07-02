@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for config.py — ModelConfig parsing from HF config.json.
 
 Trace: ARCH-CFG-002, UD-CFG-01

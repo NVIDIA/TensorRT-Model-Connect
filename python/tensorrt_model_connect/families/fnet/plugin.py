@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """FNet family plugin -- encoder-only model with Fourier Transform instead of attention.
 
 FNet replaces self-attention with a 2D Discrete Fourier Transform (DFT):

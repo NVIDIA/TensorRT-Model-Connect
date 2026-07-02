@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Invariant-only reference backend — no external reference needed.
 
 Returns a dummy StageOutput. The comparator only checks invariants

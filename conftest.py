@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 def pytest_addoption(parser):
     opts = [
         ('--engine-dir', dict(default=None, help='Engine directory')),

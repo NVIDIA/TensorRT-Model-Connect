@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Phi-4-multimodal family plugin — text decoder with fused QKV/gate_up and LoRA base_layer weights.
 
 Phi-4-multimodal stores base weights under `*.base_layer.weight` (LoRA adapters

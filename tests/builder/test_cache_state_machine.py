@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Tests for debug_runner.py cache state machine logic.
 
 Extracts and tests the pure-numpy cache/mask/position logic from TrtRunner

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """SAM3 family plugin for model-card text-prompt PCS bring-up.
 
 This is intentionally separate from the legacy ``sam`` family.  SAM3's image

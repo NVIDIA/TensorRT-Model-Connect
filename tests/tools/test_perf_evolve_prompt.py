@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for scripts/perf_evolve_prompt.py — prompt builder validation.
 
 Verifies that the generated prompt contains all required sections, keywords,

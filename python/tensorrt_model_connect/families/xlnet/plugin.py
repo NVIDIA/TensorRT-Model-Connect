@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """XLNet family plugin -- encoder-only bidirectional transformer with relative positional encoding.
 
 XLNet uses:

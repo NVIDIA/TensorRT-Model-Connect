@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Serialization and deserialization for E2EResult and its nested types.
 
 Converts between the dataclass domain model and plain JSON-serializable

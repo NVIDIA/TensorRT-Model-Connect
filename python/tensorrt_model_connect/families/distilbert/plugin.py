@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """DistilBERT family plugin — encoder-only bidirectional transformer.
 
 DistilBERT is a distilled version of BERT with:

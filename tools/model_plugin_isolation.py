@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Resolve and prepare isolated runtime model plugin directories for E2E.
 
 The E2E model family is not always the same as the runtime plugin owner. This

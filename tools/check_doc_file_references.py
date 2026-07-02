@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Verify documentation file references and numerical claims.
 
 ISO 26262-6 §7.4.1 compliance gate: architecture docs must describe only

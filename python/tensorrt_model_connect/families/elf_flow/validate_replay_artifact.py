@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Validate ELF upstream replay artifacts for C++ parity runs.
 
 The artifact is a JSON object consumed by the ``diffusion_text_generation``

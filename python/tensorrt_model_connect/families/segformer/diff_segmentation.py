@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Diff tool for SegFormer segmentation: TRT vs HuggingFace comparison.
 
 Compares per-pixel class predictions and logit values between the TRT

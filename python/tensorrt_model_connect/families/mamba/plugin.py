@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Mamba family plugin -- Selective State Space Model (SSM).
 
 Mamba replaces attention entirely with a recurrent SSM block. Key differences:

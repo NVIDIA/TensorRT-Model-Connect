@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Inject FP8 Q/DQ nodes into the working BF16 ONNX at the proto level.
 
 Uses ONNX proto manipulation (not graphsurgeon) to handle FP8 types.

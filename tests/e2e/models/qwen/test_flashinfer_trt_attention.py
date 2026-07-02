@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """TRT decomposed attention vs FlashInfer TVM-FFI plugin — layer-level E2E benchmark.
 
 Builds two TRT engines with Qwen3-0.6B attention dimensions:

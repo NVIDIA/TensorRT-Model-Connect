@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // WanPlugin: handles "diffusion_wan" strategy only.
 // Uses WanPipeline with a single text encoder, denoiser, and VAE.
 

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Self-tests for tools/tool_helpers.py — cosine_sim, compare_arrays.
 
 Trace: ARCH-DIFF-001, UD-DIFF-HELPERS
