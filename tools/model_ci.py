@@ -35,6 +35,14 @@ MODEL_ROOTS = (
     "tests/cpp/models",
 )
 
+MODEL_ROOT_PLATFORM_FILES = frozenset(
+    {
+        "python/tensorrt_model_connect/families/__init__.py",
+        "python/tensorrt_model_connect/families/_time_series_trt.py",
+        "python/tensorrt_model_connect/families/base.py",
+    }
+)
+
 # These are the only non-model source surfaces made visible to an isolated
 # build.  Model-root handling takes precedence, so a sibling below e.g. src/
 # is excluded even though src/ is otherwise an approved platform root.
@@ -53,6 +61,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "pyproject.toml",
         "ruff.toml",
         "tests/__init__.py",
+        *MODEL_ROOT_PLATFORM_FILES,
     }
 )
 PLATFORM_PROJECTION_PREFIXES = (
@@ -100,6 +109,7 @@ PLATFORM_EXACT = frozenset(
         "pyproject.toml",
         "ruff.toml",
         "verify_encoder.py",
+        *MODEL_ROOT_PLATFORM_FILES,
     }
 )
 PLATFORM_PREFIXES = (
@@ -435,6 +445,8 @@ def _is_legal_or_docs(path: str) -> bool:
 
 
 def _classify_path(path: str, catalog: OwnershipCatalog) -> tuple[str, str | None]:
+    if path in MODEL_ROOT_PLATFORM_FILES:
+        return "platform", None
     owner, under_model_root = _owner_for_path(path, catalog)
     if owner is not None:
         return "model", owner
@@ -665,6 +677,10 @@ def create_projection(
     platform_files = 0
     excluded_model_files = 0
     for entry in catalog.entries:
+        if entry.path in MODEL_ROOT_PLATFORM_FILES:
+            included.append(entry)
+            platform_files += 1
+            continue
         owner, under_model_root = _owner_for_path(entry.path, catalog)
         if owner is not None:
             if owner == model:

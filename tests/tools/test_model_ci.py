@@ -100,6 +100,7 @@ def _make_repo(tmp_path: Path) -> tuple[Path, str]:
     _git(repo, "config", "user.email", "model-ci@example.com")
     _add_model(repo, "model_a")
     _add_model(repo, "model_b")
+    _write(repo, "python/tensorrt_model_connect/families/__init__.py", "# registry\n")
     _write(repo, "CMakeLists.txt", "# platform build\n")
     _write(repo, "src/runtime/core/core.cpp", "// platform core\n")
     _write(repo, "README.md", "# Documentation\n")
@@ -220,6 +221,17 @@ def test_impact_treats_platform_change_as_all_models(tmp_path: Path) -> None:
     assert result["affected_models"] == ["model_a", "model_b"]
 
 
+def test_impact_treats_shared_family_registry_as_platform(tmp_path: Path) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, "python/tensorrt_model_connect/families/__init__.py", "# changed registry\n")
+    head = _commit(repo, "shared family registry")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "all"
+    assert result["affected_models"] == ["model_a", "model_b"]
+
+
 def test_impact_includes_deletions_and_both_sides_of_rename(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
     (repo / "tests/cpp/models/model_a/test_model_a.cpp").unlink()
@@ -299,6 +311,7 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     assert not (output / "src/runtime/models/model_b").exists()
     assert not (output / "tests/e2e/models/model_b").exists()
     assert (output / "src/runtime/core/core.cpp").is_file()
+    assert (output / "python/tensorrt_model_connect/families/__init__.py").is_file()
     assert (output / "tests/__init__.py").is_file()
     assert (output / ".github/scripts/run-model-proof.sh").is_file()
     assert os.access(output / ".github/scripts/run-model-proof.sh", os.X_OK)
