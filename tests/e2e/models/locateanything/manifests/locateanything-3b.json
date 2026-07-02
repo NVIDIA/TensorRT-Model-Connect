@@ -6,6 +6,7 @@
   "runtime_strategy": "locateanything_vision_language",
   "task_strategy": "vision_language_generation",
   "precision": "fp16",
+  "user_contract": "image-text-to-text",
   "max_cache_length": 384,
   "trust_remote_code": true,
   "testcases": [
