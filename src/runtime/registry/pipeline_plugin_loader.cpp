@@ -112,9 +112,19 @@ void append_installed_model_plugin_dirs(std::vector<std::string>& dirs) {
     }
 }
 
+bool strict_model_plugin_loading() {
+    const char* value = std::getenv("TRTMC_MODEL_PLUGIN_STRICT");
+    if (value == nullptr)
+        return false;
+    const std::string text(value);
+    return text == "1" || text == "true" || text == "TRUE" || text == "on" || text == "ON";
+}
+
 std::vector<std::string> model_plugin_search_paths(const std::vector<std::string>& explicit_paths) {
     std::vector<std::string> paths = explicit_paths;
     append_split_paths(paths, std::getenv("TRTMC_MODEL_PLUGIN_DIR"));
+    if (strict_model_plugin_loading())
+        return paths;
     append_installed_model_plugin_dirs(paths);
 
 #ifdef TRTMC_BINARY_DIR
@@ -353,6 +363,10 @@ void load_model_plugin_for_strategy(const std::string& strategy,
 
     const auto library_name = model_plugin_library_name(*model_id);
     const auto paths = model_plugin_search_paths(search_paths);
+    if (strict_model_plugin_loading() && paths.empty()) {
+        throw std::runtime_error(
+            "TRTMC_MODEL_PLUGIN_STRICT requires an explicit model plugin search path");
+    }
     std::vector<std::string> errors;
 
     for (const auto& dir : paths) {

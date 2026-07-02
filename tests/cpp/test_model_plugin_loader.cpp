@@ -9,6 +9,7 @@
 #include "trtmc/runtime/pipeline_registry.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -84,6 +85,42 @@ static void test_unknown_strategy_reports_clean_error() {
     check(threw, "unknown strategy throws");
 }
 
+static void test_strict_loading_requires_an_explicit_directory() {
+    const auto* sample = first_index_entry();
+    check(sample != nullptr, "plugin index has entry before strict-load check");
+    if (sample == nullptr)
+        return;
+
+    const char* previous_strict = std::getenv("TRTMC_MODEL_PLUGIN_STRICT");
+    const char* previous_dir = std::getenv("TRTMC_MODEL_PLUGIN_DIR");
+    const std::string saved_strict = previous_strict ? previous_strict : "";
+    const std::string saved_dir = previous_dir ? previous_dir : "";
+    const bool had_strict = previous_strict != nullptr;
+    const bool had_dir = previous_dir != nullptr;
+
+    setenv("TRTMC_MODEL_PLUGIN_STRICT", "1", 1);
+    unsetenv("TRTMC_MODEL_PLUGIN_DIR");
+    bool threw = false;
+    try {
+        trtmc::load_model_plugin_for_strategy(sample->runtime_strategy);
+    } catch (const std::runtime_error& e) {
+        threw = true;
+        check(std::string(e.what()).find("requires an explicit model plugin search path") !=
+                  std::string::npos,
+              "strict loading reports missing explicit directory");
+    }
+    check(threw, "strict loading without a directory throws");
+
+    if (had_strict)
+        setenv("TRTMC_MODEL_PLUGIN_STRICT", saved_strict.c_str(), 1);
+    else
+        unsetenv("TRTMC_MODEL_PLUGIN_STRICT");
+    if (had_dir)
+        setenv("TRTMC_MODEL_PLUGIN_DIR", saved_dir.c_str(), 1);
+    else
+        unsetenv("TRTMC_MODEL_PLUGIN_DIR");
+}
+
 static void test_load_index_owner_registers_only_that_model() {
     const auto* sample = first_index_entry();
     check(sample != nullptr, "plugin index has entry before load check");
@@ -110,6 +147,7 @@ int main() {
     test_index_maps_strategy_to_model();
     test_registry_does_not_eager_register_models();
     test_unknown_strategy_reports_clean_error();
+    test_strict_loading_requires_an_explicit_directory();
     test_load_index_owner_registers_only_that_model();
 
     if (failures > 0) {

@@ -40,11 +40,16 @@ query_image_versions() {
   docker run --rm --entrypoint /bin/bash "$image" -lc '
 python3 - <<'"'"'PY'"'"'
 import importlib.metadata as metadata
+from pathlib import Path
 
 import tensorrt
 
 print(f"TENSORRT_VERSION={tensorrt.__version__}")
 print("MODELOPT_VERSION=" + metadata.version("nvidia-modelopt"))
+print(
+    "NLOHMANN_JSON_HEADER="
+    + ("present" if Path("/usr/include/nlohmann/json.hpp").is_file() else "missing")
+)
 PY
 '
 }
@@ -81,6 +86,7 @@ else
   else
     current_trt="$(awk -F= '$1 == "TENSORRT_VERSION" { print $2 }' "$version_file")"
     current_modelopt="$(awk -F= '$1 == "MODELOPT_VERSION" { print $2 }' "$version_file")"
+    current_nlohmann="$(awk -F= '$1 == "NLOHMANN_JSON_HEADER" { print $2 }' "$version_file")"
 
     if [ "$current_trt" != "$expected_trt" ]; then
       rebuild_reasons+=("TensorRT version mismatch: image has '${current_trt:-unknown}', Dockerfile expects '$expected_trt'")
@@ -88,6 +94,10 @@ else
 
     if [ "$current_modelopt" != "$expected_modelopt" ]; then
       rebuild_reasons+=("modelopt version mismatch: image has '${current_modelopt:-unknown}', Dockerfile expects '$expected_modelopt'")
+    fi
+
+    if [ "$current_nlohmann" != "present" ]; then
+      rebuild_reasons+=("nlohmann/json development headers are missing")
     fi
   fi
 fi
@@ -120,6 +130,7 @@ fi
 query_image_versions > "$version_file"
 current_trt="$(awk -F= '$1 == "TENSORRT_VERSION" { print $2 }' "$version_file")"
 current_modelopt="$(awk -F= '$1 == "MODELOPT_VERSION" { print $2 }' "$version_file")"
+current_nlohmann="$(awk -F= '$1 == "NLOHMANN_JSON_HEADER" { print $2 }' "$version_file")"
 
 if [ "$current_trt" != "$expected_trt" ]; then
   echo "ERROR: CI Docker image '$image' has TensorRT '$current_trt'; expected '$expected_trt' from $dockerfile" >&2
@@ -131,4 +142,9 @@ if [ "$current_modelopt" != "$expected_modelopt" ]; then
   exit 1
 fi
 
-echo "CI Docker image '$image' verified: TensorRT $current_trt, modelopt $current_modelopt"
+if [ "$current_nlohmann" != "present" ]; then
+  echo "ERROR: CI Docker image '$image' lacks /usr/include/nlohmann/json.hpp" >&2
+  exit 1
+fi
+
+echo "CI Docker image '$image' verified: TensorRT $current_trt, modelopt $current_modelopt, nlohmann/json headers present"

@@ -4,19 +4,28 @@
 name: Legal Compliance
 
 on:
-  pull_request:
-    branches:
-      - main
+  workflow_call:
+    inputs:
+      revision:
+        description: "Exact Git revision to validate"
+        required: true
+        type: string
   push:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      revision:
+        description: "Git revision to validate"
+        required: false
+        default: "main"
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: legal-${{ github.event.pull_request.number || github.ref }}
+  group: legal-${{ inputs.revision || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -29,7 +38,7 @@ jobs:
       - name: Check out exact source head
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ inputs.revision || github.sha }}
           fetch-depth: 0
 
       - name: Set up Python

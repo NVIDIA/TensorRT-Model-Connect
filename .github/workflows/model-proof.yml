@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Isolated model proof
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: "Model ownership identifier to build in isolation"
+        required: true
+        type: string
+      revision:
+        description: "Exact Git commit to certify"
+        required: true
+        type: string
+      suite:
+        description: "Model-owned E2E scope: premerge or nightly"
+        required: false
+        default: "premerge"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prove:
+    name: ${{ inputs.model }} / Build + test
+    runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 90
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
+      TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}
+      TRTMC_MODEL_PROOF_BUILD_JOBS: ${{ vars.TRTMC_MODEL_PROOF_BUILD_JOBS || '8' }}
+      PYTHONHASHSEED: "0"
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+
+    steps:
+      - name: Check out exact source revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+          fetch-depth: 0
+          clean: true
+          lfs: false
+
+      - name: Ensure CI Docker image
+        timeout-minutes: 30
+        run: bash .github/scripts/ensure-ci-docker-image.sh
+
+      - name: Run hermetic model proof
+        id: proof
+        env:
+          MODEL: ${{ inputs.model }}
+          REVISION: ${{ inputs.revision }}
+          SUITE: ${{ inputs.suite }}
+          OUTPUT_DIR: ${{ runner.temp }}/model-proof-${{ inputs.model }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          bash .github/scripts/run-model-proof.sh \
+            --model "$MODEL" \
+            --revision "$REVISION" \
+            --suite "$SUITE" \
+            --output-dir "$OUTPUT_DIR"
+          echo "output_dir=$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Upload proof evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-proof-${{ inputs.model }}-${{ inputs.revision }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ runner.temp }}/model-proof-${{ inputs.model }}-${{ github.run_id }}-${{ github.run_attempt }}/artifacts/

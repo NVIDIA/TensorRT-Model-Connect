@@ -32,6 +32,26 @@ file(GLOB TRTMC_RUNTIME_MODEL_MANIFESTS CONFIGURE_DEPENDS
 if(NOT TRTMC_RUNTIME_MODEL_MANIFESTS)
   message(FATAL_ERROR "No runtime model manifests found under src/runtime/models")
 endif()
+if(TRTMC_MODEL_PROOF_MODEL)
+  if(NOT TRTMC_MODEL_PROOF_MODEL MATCHES "^[A-Za-z0-9_.-]+$")
+    message(FATAL_ERROR
+      "TRTMC_MODEL_PROOF_MODEL has an unsafe model id: '${TRTMC_MODEL_PROOF_MODEL}'")
+  endif()
+  list(LENGTH TRTMC_RUNTIME_MODEL_MANIFESTS _trtmc_proof_manifest_count)
+  if(NOT _trtmc_proof_manifest_count EQUAL 1)
+    message(FATAL_ERROR
+      "Model proof for '${TRTMC_MODEL_PROOF_MODEL}' requires exactly one runtime model "
+      "manifest in the projected source tree; found ${_trtmc_proof_manifest_count}")
+  endif()
+  list(GET TRTMC_RUNTIME_MODEL_MANIFESTS 0 _trtmc_proof_manifest)
+  get_filename_component(_trtmc_proof_model_dir "${_trtmc_proof_manifest}" DIRECTORY)
+  get_filename_component(_trtmc_proof_model_id "${_trtmc_proof_model_dir}" NAME)
+  if(NOT _trtmc_proof_model_id STREQUAL TRTMC_MODEL_PROOF_MODEL)
+    message(FATAL_ERROR
+      "Model proof requested '${TRTMC_MODEL_PROOF_MODEL}', but projected source contains "
+      "runtime model '${_trtmc_proof_model_id}'")
+  endif()
+endif()
 
 set(TRTMC_RUNTIME_MODEL_IDS)
 foreach(_trtmc_model_manifest IN LISTS TRTMC_RUNTIME_MODEL_MANIFESTS)

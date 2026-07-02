@@ -138,6 +138,13 @@ ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 #   python3 -m pytest --help | grep -- '--cov' && \
 #   gcovr --version && lcov --version && genhtml --version
 
+# Keep the final layer small and cache-friendly. Model proof containers have
+# networking disabled, so CMake must find nlohmann/json in the image instead of
+# falling back to FetchContent during each isolated scratch build.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends nlohmann-json3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace/tensorrt-model-connect
 
 CMD ["bash"]
