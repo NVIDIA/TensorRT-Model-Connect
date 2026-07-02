@@ -105,6 +105,7 @@ def _make_repo(tmp_path: Path) -> tuple[Path, str]:
     _write(repo, "src/runtime/core/core.cpp", "// platform core\n")
     _write(repo, "README.md", "# Documentation\n")
     _write(repo, "tests/__init__.py", "")
+    _write(repo, "tests/runtime_strategy_matrix.yaml", "strategies: []\n")
     _write(repo, ".github/scripts/run-model-proof.sh", "#!/usr/bin/env bash\n")
     os.chmod(repo / ".github/scripts/run-model-proof.sh", 0o755)
     return repo, _commit(repo, "initial")
@@ -313,6 +314,7 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     assert (output / "src/runtime/core/core.cpp").is_file()
     assert (output / "python/tensorrt_model_connect/families/__init__.py").is_file()
     assert (output / "tests/__init__.py").is_file()
+    assert (output / "tests/runtime_strategy_matrix.yaml").is_file()
     assert (output / ".github/scripts/run-model-proof.sh").is_file()
     assert os.access(output / ".github/scripts/run-model-proof.sh", os.X_OK)
     assert manifest["runtime_model"] == "model_a"
