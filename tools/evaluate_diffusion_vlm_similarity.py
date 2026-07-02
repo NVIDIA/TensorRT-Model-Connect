@@ -52,7 +52,7 @@ _GATE_RULE = (
 _PHOTO_PROMPT_TERMS = ("photo", "photograph", "photorealistic", "realistic")
 _NON_PHOTO_DESCRIPTION_TERMS = (
     "cartoon", "drawing", "illustration", "painting", "sketch", "stylized",
-    "silhouette",
+    "vector",
 )
 _INVALID_REFERENCE_SCORE_CAP = 2.0
 
@@ -315,11 +315,14 @@ severe artifacts, missing or incorrect primary subjects, poor prompt alignment, 
 being materially worse than a valid Image 2 reference.
 Do not mark lower detail than the HF reference alone as a regression.
 Score Image 2 independently as a reference: wrong primary subject count, missing primary
-subjects, obvious artifacts, or non-photo/stylized/silhouette output for a photo prompt
-must reduce its prompt-alignment and visual-quality scores.
+subjects, obvious artifacts, or non-photo/stylized output (such as a cartoon, drawing,
+illustration, painting, sketch, or vector art) for a photo prompt must reduce its
+prompt-alignment and visual-quality scores. A photographic backlit subject may be
+described as a silhouette; do not treat the word "silhouette" alone as evidence that
+an image is non-photographic.
 Set "trt_relative_to_hf" from prompt alignment plus visual quality, not just shared
-objects. If Image 2 is non-photo/stylized/silhouette for a photo prompt and Image 1 is
-a normal photo-like rendering of the prompt, set "trt_relative_to_hf" to "better".
+objects. If Image 2 is non-photo/stylized for a photo prompt and Image 1 is a normal
+photo-like rendering of the prompt, set "trt_relative_to_hf" to "better".
 
 Return only JSON with these keys:
 {{

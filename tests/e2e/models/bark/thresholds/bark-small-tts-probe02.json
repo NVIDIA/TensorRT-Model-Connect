@@ -1,0 +1,6 @@
+{
+  "logit_atol": 0.01,
+  "threshold_overrides": {
+    "contract_min_rms": 0.005
+  }
+}

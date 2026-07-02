@@ -16,7 +16,6 @@
   "max_cache_length": 512,
   "prompt": "First we test the audio. Then we check the transcript.",
   "max_new_tokens": 320,
-  "logit_atol": 0.01,
   "trust_remote_code": false,
   "runtime_config": {
     "audio_magpie": {
@@ -24,9 +23,6 @@
       "temperature": 0.6,
       "seed": 42
     }
-  },
-  "threshold_overrides": {
-    "contract_min_rms": 0.005
   },
   "preflight_requirements": [
     {

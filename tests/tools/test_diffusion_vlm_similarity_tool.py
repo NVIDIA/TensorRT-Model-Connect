@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tools.evaluate_diffusion_vlm_similarity import (
     _LoadingWeightsProgressFilter,
     _apply_gate,
@@ -70,7 +72,36 @@ def test_vlm_similarity_gate_fails_explicit_regression():
     assert "is_regression is true" in result["reasons"]
 
 
-def test_vlm_similarity_gate_fails_silhouette_reference_for_photo_prompt():
+def test_vlm_similarity_gate_allows_photographic_silhouette_reference():
+    judgment = _normalize_judgment_consistency({
+        "trt_description": "A cat sitting on a windowsill at sunset.",
+        "semantic_similarity_0_to_5": 4.8,
+        "trt_prompt_alignment_0_to_5": 4.8,
+        "trt_visual_quality_0_to_5": 4.7,
+        "hf_prompt_alignment_0_to_5": 4.8,
+        "hf_visual_quality_0_to_5": 4.9,
+        "trt_relative_to_hf": "similar",
+        "is_regression": False,
+        "hf_description": (
+            "A silhouette of a cat sitting on a windowsill at sunset, with a "
+            "vibrant sky in the background."
+        ),
+    }, prompt="A photo of a cat sitting on a windowsill at sunset")
+    result = _apply_gate(
+        judgment,
+        prompt="A photo of a cat sitting on a windowsill at sunset",
+    )
+
+    assert not result["failed"]
+    assert judgment["hf_prompt_alignment_0_to_5"] == 4.8
+    assert judgment["hf_visual_quality_0_to_5"] == 4.9
+    assert judgment["trt_relative_to_hf"] == "similar"
+
+
+@pytest.mark.parametrize("medium", [
+    "stylized", "vector", "cartoon", "drawing", "illustration",
+])
+def test_vlm_similarity_gate_fails_non_photo_reference_for_photo_prompt(medium):
     judgment = _normalize_judgment_consistency({
         "trt_description": "A cat sitting on a windowsill at sunset.",
         "semantic_similarity_0_to_5": 4.0,
@@ -80,7 +111,9 @@ def test_vlm_similarity_gate_fails_silhouette_reference_for_photo_prompt():
         "hf_visual_quality_0_to_5": 5.0,
         "trt_relative_to_hf": "similar",
         "is_regression": False,
-        "hf_description": "A silhouette of a cat sitting on a windowsill.",
+        "hf_description": (
+            f"A {medium} silhouette of a cat sitting on a windowsill."
+        ),
     }, prompt="A photo of a cat sitting on a windowsill at sunset")
     result = _apply_gate(
         judgment,
