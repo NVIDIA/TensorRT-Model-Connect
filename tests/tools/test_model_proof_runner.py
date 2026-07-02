@@ -129,6 +129,4 @@ def test_model_proof_uses_a_dedicated_self_hosted_checkout() -> None:
 
     assert "path: model-proof-source" in checkout
     assert "clean: true" in checkout
-    assert workflow.count(
-        "working-directory: ${{ github.workspace }}/model-proof-source"
-    ) == 2
+    assert workflow.count("working-directory: ${{ github.workspace }}/model-proof-source") == 2
