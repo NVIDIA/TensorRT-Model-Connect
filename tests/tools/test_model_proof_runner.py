@@ -119,3 +119,16 @@ def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> 
         assert contract in ensure
     assert "id: ci_image" in workflow
     assert "TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}" in workflow
+
+
+def test_model_proof_uses_a_dedicated_self_hosted_checkout() -> None:
+    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+    checkout = workflow.split("- name: Check out exact source revision", maxsplit=1)[1].split(
+        "- name: Ensure CI Docker image", maxsplit=1
+    )[0]
+
+    assert "path: model-proof-source" in checkout
+    assert "clean: true" in checkout
+    assert workflow.count(
+        "working-directory: ${{ github.workspace }}/model-proof-source"
+    ) == 2
