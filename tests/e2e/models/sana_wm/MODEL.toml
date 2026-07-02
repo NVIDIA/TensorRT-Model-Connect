@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "sana_wm"
+plugin = "sana_wm"
+test_manifests = [
+  "manifests/sana-wm-bidirectional.json",
+]
+
+[e2e_defaults.diffusion_media_generation]
+reference_backend = "hf_diffusers"
+oracle_level = "L1_external_reference"
+sana_wm_script_gating = false
+preflight_asset_fields = ["test_image"]
+stages = [
+  { name = "end_to_end", required = true },
+]
+input_fields = [
+  { input = "image", manifest = "test_image" },
+  { input = "prompt_file", manifest = "prompt_file" },
+  { input = "camera_intrinsics", manifest = "camera_intrinsics" },
+  { input = "action", manifest = "action" },
+  { input = "translation_speed", manifest = "translation_speed" },
+  { input = "rotation_speed_deg", manifest = "rotation_speed_deg" },
+  { input = "cfg_scale", manifest = "cfg_scale" },
+  { input = "fps", manifest = "fps" },
+  { input = "flow_shift", manifest = "flow_shift" },
+  { input = "no_action_overlay", manifest = "no_action_overlay" },
+  { input = "sana_wm_script", manifest = "sana_wm_script" },
+  { input = "sana_wm_native_plan_dir", manifest = "sana_wm_native_plan_dir" },
+  { input = "sana_wm_model_dir", manifest = "sana_wm_model_dir" },
+  { input = "sana_wm_tokenizer_dir", manifest = "sana_wm_tokenizer_dir" },
+  { input = "sana_wm_require_official_script", manifest = "sana_wm_require_official_script", default = true },
+  { input = "video_num_frames", manifest = "video_num_frames" },
+  { input = "video_height", manifest = "video_height", default = 704, required_manifest = "video_num_frames" },
+  { input = "video_width", manifest = "video_width", default = 1280, required_manifest = "video_num_frames" },
+  { input = "num_inference_steps", manifest = "num_inference_steps", default = 60, required_manifest = "video_num_frames" },
+]

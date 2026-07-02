@@ -349,6 +349,8 @@ def _iter_e2e_manifest_paths(models_dir: Path) -> List[Path]:
 
 
 _MODEL_ASSET_FIELDS = {
+    "model_assets",
+    "prompt_file",
     "test_image",
     "test_input_audio",
     "speech_reference_tokens",
@@ -1286,12 +1288,16 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=17,
             name="e2e_model_owned_test",
+            # A public E2E family directory is an ownership boundary for every
+            # file type; more specific manifest and asset rules run first.
             matcher=_regex_rule(
-                r"tests/e2e/models/([^/]+)/(?:data/|thresholds/|waives\.txt$|"
-                r"impact_diff_rules\.json$|[^/]+\.json$|.*\.py$)"
+                r"tests/e2e/models/([^/]+)/.+$"
             ),
             resolver=_match_result("e2e_model_owned_test", _family_models),
-            covered_by=("TestSafetyNet.test_e2e_model_owned_test_self",),
+            covered_by=(
+                "TestSafetyNet.test_e2e_model_owned_test_self",
+                "TestE2EDataFiles.test_unlisted_family_asset_maps_to_family",
+            ),
         ),
         ClassificationRule(
             priority=16,
@@ -1314,13 +1320,16 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=20,
             name="family_package",
+            # Family packages own code, build files, and other resources. The
+            # underscore-prefixed internal directory remains shared.
             matcher=_regex_rule(
                 r"python/tensorrt_model_connect/"
-                r"families/([A-Za-z]\w*)/.+\.py$"
+                r"families/([A-Za-z]\w*)/.+$"
             ),
             resolver=_match_result("family_package", _family_models),
             covered_by=(
                 "TestFamilyPlugin.test_family_only_change",
+                "TestFamilyPlugin.test_family_resource",
                 "TestFamilyOwnedBuilder.test_family_local_model_implementation",
             ),
         ),
@@ -1349,7 +1358,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
         ),
         ClassificationRule(
-            priority=80,
+            priority=19,
             name="python_profile_requirements",
             matcher=_regex_rule(
                 r"python/tensorrt_model_connect/"

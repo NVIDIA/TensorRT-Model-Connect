@@ -951,6 +951,28 @@ class TestFamilyPlugin:
         assert match.rule == "family_package"
         assert match.models == ["encoder-package-core"]
 
+    @pytest.mark.parametrize(
+        "relative_path",
+        [
+            "native_plugins/CMakeLists.txt",
+            "native_plugins/custom_plugin.cpp",
+            "native_plugins/custom_plugin.cu",
+            "native_plugins/custom_plugin.h",
+            "assets/config.yaml",
+        ],
+    )
+    def test_family_resource(self, imap, relative_path):
+        """Every resource under a public family folder belongs only to that family."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/families/decoder_family/"
+            + relative_path,
+            imap,
+        )
+
+        assert match.rule == "family_package"
+        assert sorted(match.models) == ["decoder-large", "decoder-small"]
+        assert "decoder-peer" not in match.models
+
     def test_family_development_tool(self, imap):
         """Family-owned development tools select only their owner models."""
         match = test_impact.classify_file("tools/families/decoder_family/debug_runner.py", imap)
@@ -1507,6 +1529,53 @@ class TestE2EDataFiles:
         match = test_impact.classify_file("tests/e2e/data/test_img.jpeg", imap)
         assert match.rule == "e2e_data_file"
         assert match.models == ["vision-core"]
+
+    def test_declared_model_asset_maps_to_declaring_model(self, mock_repo):
+        """Explicit model_assets entries select only the declaring model."""
+        manifest = (
+            mock_repo
+            / "tests/e2e/models/decoder_family/manifests/decoder-assets.json"
+        )
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            manifest,
+            {
+                "name": "decoder-assets",
+                "family": "decoder_family",
+                "runtime_strategy": "decoder_family_decoder_kv_cache",
+                "task_strategy": "text_generation_causal",
+                "prompt_file": (
+                    "tests/e2e/models/decoder_family/assets/prompt.txt"
+                ),
+                "model_assets": [
+                    "tests/e2e/models/decoder_family/assets/intrinsics.npy"
+                ],
+            },
+        )
+        imap = test_impact.build_impact_map(mock_repo)
+
+        for path in (
+            "tests/e2e/models/decoder_family/assets/prompt.txt",
+            "tests/e2e/models/decoder_family/assets/intrinsics.npy",
+        ):
+            match = test_impact.classify_file(path, imap)
+            assert match.rule == "e2e_data_file"
+            assert match.models == ["decoder-assets"]
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "tests/e2e/models/decoder_family/assets/new-prompt.txt",
+            "tests/e2e/models/decoder_family/assets/new-intrinsics.npy",
+        ],
+    )
+    def test_unlisted_family_asset_maps_to_family(self, imap, path):
+        """Unlisted assets stay within their family instead of selecting all models."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "e2e_model_owned_test"
+        assert sorted(match.models) == ["decoder-large", "decoder-small"]
+        assert "decoder-peer" not in match.models
 
     @pytest.mark.parametrize(
         "path",
