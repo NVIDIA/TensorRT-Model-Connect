@@ -4,6 +4,7 @@
 id = "distilbert"
 plugin = "distilbert"
 test_manifests = [
+  # Keep selective premerge coverage scoped to this model-owned family.
   "manifests/distilbert-base-uncased-tp4.json",
   "manifests/distilbert-base-uncased.json",
 ]
