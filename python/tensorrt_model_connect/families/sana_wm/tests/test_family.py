@@ -1069,6 +1069,27 @@ def test_sana_wm_plugin_prefers_stage1_tokenizer_over_refiner_tokenizer(
     assert extras["tokenizer_config.json"] == b'{"add_bos_token": true}'
     assert extras["sana_wm_stage1_tokenizer.json"] == b'{"stage1": true}'
     assert extras["sana_wm_refiner_tokenizer.json"] == b'{"refiner": true}'
+    assert cfg.raw["tokenizer_add_special_tokens"] == 1
+
+
+def test_sana_wm_tokenizer_policy_uses_encode_behavior(monkeypatch, tmp_path) -> None:
+    class FakeTokenizer:
+        def encode(self, text, *, add_special_tokens=True):
+            del text
+            return [2, 7] if add_special_tokens else [7]
+
+    class FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(path, *, local_files_only):
+            assert path == tmp_path
+            assert local_files_only is True
+            return FakeTokenizer()
+
+    import transformers
+
+    monkeypatch.setattr(transformers, "AutoTokenizer", FakeAutoTokenizer)
+
+    assert sana_wm_plugin_mod._tokenizer_adds_special_tokens(tmp_path) is True
 
 
 def test_sana_wm_plugin_builds_missing_stage1_text_encoder_plan(

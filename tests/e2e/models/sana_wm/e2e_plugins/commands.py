@@ -139,11 +139,9 @@ def build_sana_wm_reference_command(
         action = case.inputs.get("action", "w-80,jw-40,w-40,lw-60,w-100")
         parts.extend(["--action", str(action)])
 
-    intrinsics = case.inputs.get("camera_intrinsics")
-    if intrinsics is None:
-        intrinsics = case.inputs.get("intrinsics")
-    if intrinsics is not None:
-        parts.extend(["--intrinsics", _csv_arg(intrinsics)])
+    intrinsics_file = case.inputs.get("camera_intrinsics_file")
+    if intrinsics_file:
+        parts.extend(["--intrinsics", str(intrinsics_file)])
 
     parts.extend(
         [

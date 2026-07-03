@@ -15,6 +15,7 @@
 // =============================================================================
 
 #include "runtime/models/sana_wm/pipeline.h"
+#include "runtime/models/sana_wm/plugin_helpers.h"
 #include "trtmc/trtmc_io.hpp"
 
 #include <algorithm>
@@ -994,6 +995,17 @@ void test_pipeline_requires_native_tensor_rt_modules() {
     check(native_required_reported, "sana wm native: missing native plans rejected");
 }
 
+void test_model_config_overrides_stale_bundle_tokenizer_policy() {
+    trtmc::BundleFile bundle;
+    bundle.info.tokenizer_add_special_tokens_present = true;
+    bundle.info.tokenizer_add_special_tokens = false;
+    const std::string config = R"({"tokenizer_add_special_tokens": 1})";
+    bundle.sections.push_back({"config.json", std::vector<char>(config.begin(), config.end())});
+
+    check(trtmc::detect_add_special_tokens(bundle),
+          "sana wm tokenizer: model config overrides stale bundle metadata");
+}
+
 void test_native_module_sections_require_complete_native_set() {
     trtmc::SanaWmRuntimeConfig cfg;
     cfg.hf_id = "Efficient-Large-Model/SANA-WM_bidirectional";
@@ -1912,6 +1924,7 @@ int main() {
     test_stage1_latents_seed42_matches_pytorch_cuda_grid_stride_lanes();
     test_stage1_latents_reject_mismatched_buffers();
     test_pipeline_requires_native_tensor_rt_modules();
+    test_model_config_overrides_stale_bundle_tokenizer_policy();
     test_native_module_sections_require_complete_native_set();
     test_segmented_stage1_denoiser_modules_count_as_native_stage1();
     test_native_default_requires_refiner_plan_set();

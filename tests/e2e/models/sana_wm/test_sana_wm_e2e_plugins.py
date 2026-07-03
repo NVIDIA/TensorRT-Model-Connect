@@ -35,6 +35,9 @@ def _make_case() -> E2ECase:
             "translation_speed": 0.055,
             "rotation_speed_deg": 1.2,
             "camera_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225],
+            "camera_intrinsics_file": (
+                "tests/e2e/models/sana_wm/assets/demo_0_intrinsics.npy"
+            ),
             "video_num_frames": 321,
             "num_inference_steps": 60,
             "cfg_scale": 5.0,
@@ -99,6 +102,10 @@ def test_sana_wm_reference_command_uses_model_card_spellings() -> None:
     assert "--cfg_scale" in cmd
     assert "--flow_shift" in cmd
     assert "--no_action_overlay" in cmd
+    intrinsics_index = cmd.index("--intrinsics")
+    assert cmd[intrinsics_index + 1] == (
+        "tests/e2e/models/sana_wm/assets/demo_0_intrinsics.npy"
+    )
 
 
 def test_sana_wm_model_plugins_register_runner_reference_and_repro() -> None:

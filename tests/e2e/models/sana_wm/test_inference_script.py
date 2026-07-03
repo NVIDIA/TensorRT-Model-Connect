@@ -26,7 +26,12 @@ def _load_module():
 
 @pytest.fixture(autouse=True)
 def _clear_sana_reference_env(monkeypatch) -> None:
-    for name in ("SANA_WM_SCRIPT", "SANA_REPO", "TRTMC_STORAGE_ROOT"):
+    for name in (
+        "SANA_WM_SCRIPT",
+        "SANA_REPO",
+        "TRTMC_STORAGE_ROOT",
+        "TRTMC_SANA_WM_FORCE_PYRALLIS_STUB",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -189,15 +194,29 @@ def test_inference_sana_wm_delegates_to_external_official_script(
         "VALUE = 'official-pythonpath-ok'\n",
         encoding="utf-8",
     )
+    (external.parent / "config.yaml").write_text(
+        "nested:\n  value: 17\n",
+        encoding="utf-8",
+    )
     marker = tmp_path / "official_ran.txt"
     external.write_text(
         """
 import argparse
+from dataclasses import dataclass
 import imageio.v3 as iio
 import logging
 import numpy as np
 from pathlib import Path
 import official_probe
+import pyrallis
+
+@dataclass
+class NestedConfig:
+    value: int
+
+@dataclass
+class Config:
+    nested: NestedConfig
 
 def write_video(output_dir, name, video_hwc, fps, logger):
     raise AssertionError("shim should replace official write_video")
@@ -213,7 +232,9 @@ def main():
     parser.add_argument("--output_dir", required=True)
     args = parser.parse_args()
 
-    assert args.image == "asset/sana_wm/demo_0.png"
+    assert Path(args.image).read_bytes() == b"test image"
+    assert Path(args.prompt).read_text(encoding="utf-8") == "drive forward"
+    assert Path(args.output_dir).is_absolute()
     assert args.action == "w-80,jw-40,w-40,lw-60,w-100"
     assert args.translation_speed == "0.055"
     assert args.rotation_speed_deg == "1.2"
@@ -221,6 +242,13 @@ def main():
     assert official_probe.VALUE == "official-pythonpath-ok"
     assert iio._trtmc_stub is True
     assert iio.__spec__ is not None
+    assert pyrallis._trtmc_stub is True
+    config = pyrallis.parse(
+        config_class=Config,
+        config_path=Path(__file__).with_name("config.yaml"),
+        args=[],
+    )
+    assert config.nested.value == 17
     video = np.zeros((0, 1, 1, 3), dtype=np.uint8)
     write_video(Path(args.output_dir), "demo", video, 16, logging.getLogger("test"))
     Path({marker!r}).write_text(Path.cwd().name + ":" + args.output_dir, encoding="utf-8")
@@ -228,9 +256,15 @@ def main():
         encoding="utf-8",
     )
 
+    image_file = tmp_path / "asset" / "sana_wm" / "demo_0.png"
+    image_file.parent.mkdir(parents=True)
+    image_file.write_bytes(b"test image")
     prompt_file = tmp_path / "demo_0.txt"
     prompt_file.write_text("drive forward", encoding="utf-8")
+    output_dir = tmp_path / "results" / "demo"
     monkeypatch.setenv("SANA_REPO", str(sana_repo))
+    monkeypatch.setenv("TRTMC_SANA_WM_FORCE_PYRALLIS_STUB", "1")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -254,7 +288,7 @@ def main():
     )
 
     assert module.main() == 0
-    assert marker.read_text(encoding="utf-8") == "official_sana:results/demo"
+    assert marker.read_text(encoding="utf-8") == f"official_sana:{output_dir}"
 
 
 def test_inference_sana_wm_discovers_storage_root_official_script(

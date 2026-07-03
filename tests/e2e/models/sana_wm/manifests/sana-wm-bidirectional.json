@@ -22,6 +22,7 @@
   "model_assets": [
     "tests/e2e/models/sana_wm/assets/demo_0_intrinsics.npy"
   ],
+  "camera_intrinsics_file": "tests/e2e/models/sana_wm/assets/demo_0_intrinsics.npy",
   "camera_intrinsics": [797.87866, 830.0503, 844.2675, 463.7225],
   "action": "w-80,jw-40,w-40,lw-60,w-100",
   "translation_speed": 0.055,

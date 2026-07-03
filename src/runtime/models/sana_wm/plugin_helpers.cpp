@@ -50,26 +50,25 @@ LoadedModule load_trt_module_from_plan(IBackend* backend, const std::vector<char
 }
 
 bool detect_add_special_tokens(const BundleFile& bundle) {
+    auto* config_data = find_section(bundle, "config.json");
+    if (config_data) {
+        std::string cfg_text(config_data->begin(), config_data->end());
+        auto pos = cfg_text.find("\"tokenizer_add_special_tokens\"");
+        if (pos != std::string::npos) {
+            auto val_pos = cfg_text.find(':', pos);
+            auto value_pos = val_pos == std::string::npos
+                                 ? std::string::npos
+                                 : cfg_text.find_first_not_of(" \t\r\n", val_pos + 1);
+            if (value_pos != std::string::npos) {
+                if (cfg_text.compare(value_pos, 5, "false") == 0 || cfg_text[value_pos] == '0')
+                    return false;
+                if (cfg_text.compare(value_pos, 4, "true") == 0 || cfg_text[value_pos] == '1')
+                    return true;
+            }
+        }
+    }
     if (bundle.info.tokenizer_add_special_tokens_present)
         return bundle.info.tokenizer_add_special_tokens;
-
-    auto* config_data = find_section(bundle, "config.json");
-    if (!config_data)
-        return true;
-    std::string cfg_text(config_data->begin(), config_data->end());
-    auto pos = cfg_text.find("\"tokenizer_add_special_tokens\"");
-    if (pos == std::string::npos)
-        return true;
-    auto val_pos = cfg_text.find(':', pos);
-    if (val_pos == std::string::npos)
-        return true;
-    auto value_pos = cfg_text.find_first_not_of(" \t\r\n", val_pos + 1);
-    if (value_pos == std::string::npos)
-        return true;
-    if (cfg_text.compare(value_pos, 5, "false") == 0 || cfg_text[value_pos] == '0')
-        return false;
-    if (cfg_text.compare(value_pos, 4, "true") == 0 || cfg_text[value_pos] == '1')
-        return true;
     return true;
 }
 

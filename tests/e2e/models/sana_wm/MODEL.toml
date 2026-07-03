@@ -19,6 +19,7 @@ input_fields = [
   { input = "image", manifest = "test_image" },
   { input = "prompt_file", manifest = "prompt_file" },
   { input = "camera_intrinsics", manifest = "camera_intrinsics" },
+  { input = "camera_intrinsics_file", manifest = "camera_intrinsics_file" },
   { input = "action", manifest = "action" },
   { input = "translation_speed", manifest = "translation_speed" },
   { input = "rotation_speed_deg", manifest = "rotation_speed_deg" },

@@ -23,6 +23,18 @@ from pathlib import Path
 _HF_ID = "Efficient-Large-Model/SANA-WM_bidirectional"
 _SANA_REPOSITORY = "https://github.com/NVlabs/Sana.git"
 _SANA_REFERENCE_COMMIT = "59629fdf790850797cb657bad014fce432bd713d"
+_EXTERNAL_PATH_FLAGS = {
+    "--camera",
+    "--config",
+    "--image",
+    "--intrinsics",
+    "--model_path",
+    "--output_dir",
+    "--prompt",
+    "--refiner_checkpoint",
+    "--refiner_gemma_root",
+    "--refiner_root",
+}
 
 
 def _from_pretrained_compat(pipeline_cls, model_id: str, kwargs: dict):
@@ -163,8 +175,20 @@ def _external_repo_root(script_path: Path) -> Path:
     return script_path.parent.parent
 
 
+def _resolve_external_path_args(args: list[str], launch_dir: Path) -> list[str]:
+    resolved = list(args)
+    for index, arg in enumerate(resolved[:-1]):
+        if arg not in _EXTERNAL_PATH_FLAGS:
+            continue
+        value = Path(resolved[index + 1]).expanduser()
+        if not value.is_absolute():
+            resolved[index + 1] = str((launch_dir / value).resolve())
+    return resolved
+
+
 def _run_external_script(script_path: Path) -> None:
     repo_root = _external_repo_root(script_path)
+    external_args = _resolve_external_path_args(sys.argv[1:], Path.cwd())
     env = os.environ.copy()
     current_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = (
@@ -174,13 +198,92 @@ def _run_external_script(script_path: Path) -> None:
     )
     runner = """
 import importlib.util
+import dataclasses
+import enum
+import os
 import pickle
 import sys
 import types
+import typing
 from pathlib import Path
 
 script_path = Path(sys.argv[1])
 sys.argv = [str(script_path), *sys.argv[2:]]
+
+def _install_pyrallis_stub():
+    force_stub = os.environ.get("TRTMC_SANA_WM_FORCE_PYRALLIS_STUB") == "1"
+    if not force_stub and importlib.util.find_spec("pyrallis") is not None:
+        return
+
+    import yaml
+
+    def _coerce(annotation, value):
+        if annotation is typing.Any or value is None:
+            return value
+        origin = typing.get_origin(annotation)
+        args = typing.get_args(annotation)
+        if origin in (typing.Union, types.UnionType):
+            for candidate in args:
+                if candidate is type(None):
+                    continue
+                try:
+                    return _coerce(candidate, value)
+                except (TypeError, ValueError):
+                    continue
+            return value
+        if origin is list:
+            item_type = args[0] if args else typing.Any
+            return [_coerce(item_type, item) for item in value]
+        if origin is tuple:
+            item_types = args[:-1] if args and args[-1] is Ellipsis else args
+            if len(item_types) == 1:
+                return tuple(_coerce(item_types[0], item) for item in value)
+            return tuple(
+                _coerce(item_types[index], item) if index < len(item_types) else item
+                for index, item in enumerate(value)
+            )
+        if origin is dict:
+            key_type, value_type = args or (typing.Any, typing.Any)
+            return {
+                _coerce(key_type, key): _coerce(value_type, item)
+                for key, item in value.items()
+            }
+        if dataclasses.is_dataclass(annotation):
+            return _dataclass_from_dict(annotation, value)
+        if annotation is Path:
+            return Path(value)
+        if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
+            return annotation(value)
+        return value
+
+    def _dataclass_from_dict(config_class, values):
+        if not isinstance(values, dict):
+            raise TypeError(f"Expected mapping for {config_class.__name__}")
+        hints = typing.get_type_hints(config_class)
+        kwargs = {}
+        for field in dataclasses.fields(config_class):
+            if field.name in values:
+                kwargs[field.name] = _coerce(
+                    hints.get(field.name, field.type), values[field.name]
+                )
+        return config_class(**kwargs)
+
+    def load(config_class, stream):
+        return _dataclass_from_dict(config_class, yaml.safe_load(stream) or {})
+
+    def parse(*, config_class, config_path, args=None):
+        del args
+        with Path(config_path).open("r", encoding="utf-8") as stream:
+            return load(config_class, stream)
+
+    pyrallis = types.ModuleType("pyrallis")
+    pyrallis.__spec__ = importlib.util.spec_from_loader("pyrallis", loader=None)
+    pyrallis.load = load
+    pyrallis.parse = parse
+    pyrallis._trtmc_stub = True
+    sys.modules["pyrallis"] = pyrallis
+
+_install_pyrallis_stub()
 
 def _install_mmcv_registry_stub():
     if importlib.util.find_spec("mmcv") is not None:
@@ -318,7 +421,7 @@ module.write_video = _write_png_frames
 module.main()
     """
     subprocess.run(
-        [sys.executable, "-c", runner, str(script_path), *sys.argv[1:]],
+        [sys.executable, "-c", runner, str(script_path), *external_args],
         check=True,
         cwd=repo_root,
         env=env,

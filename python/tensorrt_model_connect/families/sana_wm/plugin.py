@@ -733,6 +733,25 @@ def _stage1_chi_prompt_token_count(text_encoder_dir: Path, chi_prompt: str) -> i
     return len(tokenizer.encode(chi_prompt))
 
 
+def _tokenizer_adds_special_tokens(tokenizer_dir: Path) -> bool:
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, local_files_only=True)
+        return tokenizer.encode("hello") != tokenizer.encode(
+            "hello", add_special_tokens=False
+        )
+    except Exception:  # noqa: BLE001 - lightweight builds use the JSON fallback
+        config_path = tokenizer_dir / "tokenizer_config.json"
+        if not config_path.is_file():
+            return False
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return bool(config.get("add_bos_token") or config.get("add_eos_token"))
+
+
 def _stage1_text_encoder_conditioning_length(
     text_encoder_dir: Path,
     raw_config: dict,
@@ -1608,6 +1627,11 @@ class SanaWmPlugin:
             stage1_text_encoder_dir=stage1_text_encoder_dir,
             refiner_text_encoder_dir=refiner_text_encoder_dir,
         )
+        stage1_tokenizer = tokenizer_sections.get("sana_wm_stage1_tokenizer.json")
+        if stage1_tokenizer is not None:
+            config.raw["tokenizer_add_special_tokens"] = int(
+                _tokenizer_adds_special_tokens(stage1_tokenizer.parent)
+            )
         require_refiner_tokenizer = (
             bool(set(native_plan_paths).intersection(_REFINER_PLAN_SECTIONS))
             or can_build_refiner_text_encoder
