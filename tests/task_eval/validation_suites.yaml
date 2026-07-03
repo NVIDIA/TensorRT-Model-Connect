@@ -450,3 +450,92 @@ suites:
       notes: >
         Start with a sampled local run. ASR dependencies and calibrated
         per-family thresholds are required before enabling a CI gate.
+
+  - id: dpg_bench_diffusion_image
+    description: >
+      Unified HF-to-TRTMC text-to-image parity evaluation on the official
+      DPG-Bench dense prompts. The processed dataset retains every proposition
+      question for visual review. Model manifests own image dimensions and
+      inference steps, while per-model profiles own calibrated parity gates.
+      Prompt alignment remains diagnostic because CLIP truncates dense prompts.
+    user_contract: diffusion_image
+    default_model_names:
+      - flux-schnell-l0
+      - flux-2-dev-l0
+      - flux-2-dev-fp8-l0
+      - pixart-sigma-1024
+      - qwen-image
+      - qwen-image-2512
+      - z-image-turbo
+    dataset:
+      kind: diffusion_prompt_json
+      default_path: /mnt/data/DPG-Bench/dpg_bench.json
+      prompt_field: prompt
+      subject_field: category
+      question_field: questions
+    selectors:
+      task_strategies:
+        - diffusion_media_generation
+      runtime_strategies:
+        - diffusion_flux
+        - diffusion_pixart
+        - diffusion_qwen_image
+        - diffusion_zimage
+      families:
+        - flux
+        - pixart
+        - qwen_image
+        - z_image
+      exclude_model_names:
+        - qwen-image-edit-2511
+    generation:
+      seed: 42
+      video_num_frames: 1
+    scoring:
+      scorer: diffusion_image_clip_parity
+    gates:
+      min_pixel_mean: 0.15
+      max_pixel_mean: 0.85
+      min_pixel_std: 0.05
+      # Semantic parity is mandatory even when family-specific pixel metrics
+      # are intentionally tolerant of numerically divergent diffusion paths.
+      min_trt_hf_image_clip_cosine: 0.85
+    family_profiles:
+      flux:
+        gates:
+          require_matching_initial_latents: 1
+          psnr: 5.0
+          ssim: 0.1
+      pixart:
+        gates:
+          require_matching_initial_latents: 1
+          psnr: 2.0
+          ssim: -1.0
+      qwen_image:
+        gates:
+          require_matching_initial_latents: 1
+          psnr: 9.0
+          ssim: 0.1
+      z_image:
+        gates:
+          require_matching_initial_latents: 1
+          psnr: 5.0
+          ssim: 0.1
+    model_profiles:
+      pixart-sigma-1024:
+        # Calibrated from the fixed DPG review slice: nine visually equivalent
+        # pairs score >=0.905 image-CLIP, while the real count/layout divergence
+        # scores 0.552 image-CLIP, 0.099 SSIM, and 6.21 dB PSNR.
+        gates:
+          require_matching_initial_latents: 1
+          min_trt_hf_image_clip_cosine: 0.85
+          ssim: 0.75
+          psnr: 10.0
+      qwen-image-2512:
+        gates:
+          psnr: 11.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        P2021-only until the DPG-Bench scorecard is visually calibrated.

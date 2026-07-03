@@ -60,7 +60,7 @@ def test_qwen_image_uses_run_entrypoint_with_all_flags(monkeypatch, tmp_path):
     ctx = _make_ctx(case, tmp_path)
     captured = _capture_subprocess(monkeypatch, qwen_image_diffusion)
 
-    qwen_image_diffusion.DiffusionMediaRunner().run_stage(
+    output = qwen_image_diffusion.DiffusionMediaRunner().run_stage(
         case, StageSpec(name="end_to_end"), ctx)
 
     cmd = captured["cmd"]
@@ -73,6 +73,8 @@ def test_qwen_image_uses_run_entrypoint_with_all_flags(monkeypatch, tmp_path):
     assert cmd[cmd.index("--height") + 1] == "1024"
     assert cmd[cmd.index("--width") + 1] == "1024"
     assert cmd[cmd.index("--seed") + 1] == "42"
+    assert "--initial-latents-raw" in cmd
+    assert output.data["initial_latents_sha256"]
     assert cmd[cmd.index("--output") + 1].endswith("frame_0000.png")
 
 

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .. import _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..parity import ensure_initial_latents
 
 logger = logging.getLogger(__name__)
 
@@ -68,14 +69,6 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     return str(patched_root)
 
 
-def _initial_latents_path(case: E2ECase, ctx: RunContext) -> str:
-    if ctx.artifacts_dir:
-        base_dir = _case_artifact_dir(ctx.artifacts_dir, case.name)
-    else:
-        base_dir = os.path.join(tempfile.gettempdir(), "trtmc_qwen_image_latents", case.name)
-    return os.path.join(base_dir, "initial_latents.raw")
-
-
 class HfDiffusersReference:
     """Reference backend using Qwen Image diffusers pipelines."""
 
@@ -110,7 +103,7 @@ class HfDiffusersReference:
         image_height = case.inputs.get("image_height", 1024)
         image_width = case.inputs.get("image_width", image_height)
         python = ctx.reference_python_path() or sys.executable
-        initial_latents_raw = _initial_latents_path(case, ctx)
+        initial_latents = ensure_initial_latents(case, ctx)
 
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
@@ -146,7 +139,7 @@ qi_cfg_scale = {qi_cfg_scale}
 qi_height = {qi_height}
 qi_width = {qi_width}
 qi_image_path = {str(qi_image_path)!r}
-qwen_image_initial_latents_raw = {initial_latents_raw!r}
+qwen_image_initial_latents_raw = {str(initial_latents.path)!r}
 
 if family in ("qwen_image",):
     import diffusers
@@ -165,7 +158,7 @@ if family in ("qwen_image",):
         raise RuntimeError(
             "diffusers does not expose QwenImagePipeline; upgrade diffusers")
     pipe = pipeline_cls.from_pretrained(model_ref, torch_dtype=torch.bfloat16)
-    pipe.to("cuda")
+    pipe.enable_model_cpu_offload()
     qi_input_image = Image.open(qi_image_path).convert("RGB") if qi_image_path else None
     qi_latents = None
     if os.path.exists(qwen_image_initial_latents_raw):
@@ -244,6 +237,8 @@ print(f"Generated {{len(frames)}} frames")
             "frames_dir": frames_dir,
             "stdout": result.stdout,
             "stderr": result.stderr,
+            "initial_latents_path": str(initial_latents.path),
+            "initial_latents_sha256": initial_latents.sha256,
         }
         return StageOutput(
             stage_name=stage.name,

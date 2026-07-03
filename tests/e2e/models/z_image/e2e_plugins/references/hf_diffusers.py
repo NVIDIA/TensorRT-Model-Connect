@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .. import _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..parity import ensure_initial_latents
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class HfDiffusersReference:
         image_width = case.inputs.get("image_width", image_height)
         guidance_scale = float(case.inputs.get("guidance_scale", 0.0))
         python = ctx.reference_python_path() or sys.executable
+        initial_latents = ensure_initial_latents(case, ctx)
 
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
@@ -88,6 +90,16 @@ transformers.logging.set_verbosity_error()
 pipe = DiffusionPipeline.from_pretrained(
     {model_ref!r}, torch_dtype=torch.bfloat16, low_cpu_mem_usage=False)
 pipe.to("cuda")
+raw_latents = np.fromfile({str(initial_latents.path)!r}, dtype=np.float32)
+expected_shape = {initial_latents.shape!r}
+expected_size = int(np.prod(expected_shape))
+if raw_latents.size != expected_size:
+    raise RuntimeError(
+        f"Z-Image shared latents size {{raw_latents.size}} does not match "
+        f"expected {{expected_shape}} = {{expected_size}}"
+    )
+initial_latents = torch.from_numpy(raw_latents.reshape(expected_shape)).to(
+    device="cuda", dtype=torch.bfloat16)
 output = pipe(
     prompt={prompt!r},
     num_inference_steps={num_steps},
@@ -95,6 +107,7 @@ output = pipe(
     width={image_width},
     guidance_scale={guidance_scale},
     generator=torch.Generator("cuda").manual_seed({int(case.inputs.get("seed", case.determinism.get("seed", 42)))}),
+    latents=initial_latents,
 )
 frames = output.images
 frames_dir = {frames_dir!r}
@@ -126,6 +139,8 @@ print(f"Generated {{len(frames)}} frames")
                 "frames_dir": frames_dir,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
+                "initial_latents_path": str(initial_latents.path),
+                "initial_latents_sha256": initial_latents.sha256,
             },
             text=result.stdout,
             timing_s=elapsed,

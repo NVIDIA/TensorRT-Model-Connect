@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .. import _case_artifact_dir, save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..parity import ensure_initial_latents
 
 logger = logging.getLogger(__name__)
 
@@ -53,36 +54,6 @@ def _resolve_bundle_path(case: E2ECase, ctx: RunContext) -> str:
     return os.path.join(ctx.engine_dir, bundle_name)
 
 
-def _initial_latents_path(case: E2ECase, ctx: RunContext) -> str:
-    if ctx.artifacts_dir:
-        base_dir = _case_artifact_dir(ctx.artifacts_dir, case.name)
-    else:
-        base_dir = os.path.join(tempfile.gettempdir(), "trtmc_qwen_image_latents", case.name)
-    return os.path.join(base_dir, "initial_latents.raw")
-
-
-def _ensure_initial_latents(case: E2ECase, ctx: RunContext) -> str:
-    output_path = _initial_latents_path(case, ctx)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    if os.path.exists(output_path):
-        return output_path
-
-    import numpy as np
-
-    height = int(case.inputs.get("height") or case.inputs.get("image_height") or 1024)
-    width = int(case.inputs.get("width") or case.inputs.get("image_width") or 1024)
-    seed = int(case.inputs.get("seed", case.determinism.get("seed", 42)))
-    vae_scale = 8
-    latent_channels = 16
-    rng = np.random.default_rng(seed)
-    latents = rng.standard_normal(
-        (1, latent_channels, height // vae_scale, width // vae_scale),
-        dtype=np.float32,
-    )
-    latents.tofile(output_path)
-    return output_path
-
-
 class DiffusionMediaRunner:
     """TRT runner for Qwen Image generation."""
 
@@ -117,7 +88,7 @@ class DiffusionMediaRunner:
         num_steps = case.inputs.get("num_inference_steps", 20)
 
         try:
-            initial_latents_raw = _ensure_initial_latents(case, ctx)
+            initial_latents = ensure_initial_latents(case, ctx)
         except Exception as exc:
             return StageOutput(
                 stage_name=stage.name,
@@ -138,8 +109,10 @@ class DiffusionMediaRunner:
                 "--num-inference-steps",
                 str(num_steps),
                 "--initial-latents-raw",
-                initial_latents_raw,
+                str(initial_latents.path),
             ]
+            if ctx.model_plugin_dir:
+                cmd.extend(["--model-plugin-dir", ctx.model_plugin_dir])
 
             negative_prompt = case.inputs.get("negative_prompt")
             if negative_prompt is not None:
@@ -209,6 +182,8 @@ class DiffusionMediaRunner:
                 "stdout": result.stdout,
                 "stderr": stderr_truncated,
                 "prompt": prompt,
+                "initial_latents_path": str(initial_latents.path),
+                "initial_latents_sha256": initial_latents.sha256,
             }
             if stderr_log:
                 data["stderr_log"] = stderr_log

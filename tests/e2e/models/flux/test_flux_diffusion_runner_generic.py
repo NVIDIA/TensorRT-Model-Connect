@@ -53,7 +53,7 @@ def test_flux_diffusion_runner_uses_generate_video(monkeypatch, tmp_path):
 
     monkeypatch.setattr(flux_diffusion.subprocess, "run", _fake_run)
 
-    flux_diffusion.DiffusionMediaRunner().run_stage(
+    output = flux_diffusion.DiffusionMediaRunner().run_stage(
         case, StageSpec(name="end_to_end"), ctx)
 
     cmd = captured["cmd"]
@@ -61,6 +61,8 @@ def test_flux_diffusion_runner_uses_generate_video(monkeypatch, tmp_path):
     assert cmd[cmd.index("--num-steps") + 1] == "30"
     assert cmd[cmd.index("--guidance-scale") + 1] == "5.0"
     assert cmd[cmd.index("--seed") + 1] == "42"
+    assert "--initial-latents-raw" in cmd
+    assert output.data["initial_latents_sha256"]
     assert "--negative-prompt" not in cmd
     assert "--cfg-scale" not in cmd
     assert "--height" not in cmd

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .. import _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..parity import ensure_initial_latents
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,20 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     try:
         from huggingface_hub import snapshot_download
 
-        return str(Path(snapshot_download(hf_id, local_files_only=True)))
+        snapshot = Path(snapshot_download(hf_id, local_files_only=True))
     except Exception:
         return hf_id
+    required_files = (
+        "model_index.json",
+        "scheduler/scheduler_config.json",
+        "text_encoder/config.json",
+        "tokenizer/tokenizer_config.json",
+        "transformer/config.json",
+        "vae/config.json",
+    )
+    if not all((snapshot / relative_path).is_file() for relative_path in required_files):
+        return hf_id
+    return str(snapshot)
 
 
 class HfDiffusersReference:
@@ -125,6 +137,7 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
         image_height = case.inputs.get("image_height", 1024)
         image_width = case.inputs.get("image_width", image_height)
         python = ctx.reference_python_path() or sys.executable
+        initial_latents = ensure_initial_latents(case, ctx)
 
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
@@ -142,12 +155,22 @@ from diffusers import PixArtSigmaPipeline
 transformers.logging.set_verbosity_error()
 pipe = PixArtSigmaPipeline.from_pretrained({model_ref!r}, torch_dtype=torch.float32)
 pipe.to("cuda")
+raw_latents = np.fromfile({str(initial_latents.path)!r}, dtype=np.float32)
+expected_shape = {initial_latents.shape!r}
+expected_size = int(np.prod(expected_shape))
+if raw_latents.size != expected_size:
+    raise RuntimeError(
+        f"PixArt shared latents size {{raw_latents.size}} does not match "
+        f"expected {{expected_shape}} = {{expected_size}}"
+    )
+initial_latents = torch.from_numpy(raw_latents.reshape(expected_shape)).to(
+    device="cuda", dtype=torch.float32)
 output = pipe(
     prompt={prompt!r},
     num_inference_steps={num_steps},
     height={image_height},
     width={image_width},
-    generator=torch.Generator("cuda").manual_seed({int(case.inputs.get("seed", case.determinism.get("seed", 42)))}),
+    latents=initial_latents,
 )
 frames = output.images
 frames_dir = {frames_dir!r}
@@ -179,6 +202,8 @@ print(f"Generated {{len(frames)}} frames")
                 "frames_dir": frames_dir,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
+                "initial_latents_path": str(initial_latents.path),
+                "initial_latents_sha256": initial_latents.sha256,
             },
             text=result.stdout,
             timing_s=elapsed,

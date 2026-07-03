@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .. import _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..parity import ensure_initial_latents
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,7 @@ class HfDiffusersReference:
         }.get(reference_precision, "torch.float32")
         guidance_scale = case.inputs.get("guidance_scale")
         python = ctx.reference_python_path() or sys.executable
+        initial_latents = ensure_initial_latents(case, ctx)
 
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
@@ -140,6 +142,8 @@ model_type = {model_type!r}
 guidance_scale = {guidance_scale!r}
 frames_dir = {frames_dir!r}
 reference_torch_dtype = {reference_torch_dtype}
+initial_latents_path = {str(initial_latents.path)!r}
+initial_latents_shape = {initial_latents.shape!r}
 
 if model_type in ("flux.2", "flux2"):
     from diffusers import Flux2Pipeline
@@ -149,16 +153,37 @@ else:
     from diffusers import FluxPipeline
     pipe = FluxPipeline.from_pretrained(
         model_ref, torch_dtype=reference_torch_dtype)
-pipe.to("cuda")
+pipe.enable_sequential_cpu_offload()
+raw_latents = np.fromfile(initial_latents_path, dtype=np.float32)
+expected_size = int(np.prod(initial_latents_shape))
+if raw_latents.size != expected_size:
+    raise RuntimeError(
+        f"Flux shared latents size {{raw_latents.size}} does not match "
+        f"expected {{initial_latents_shape}} = {{expected_size}}"
+    )
+unpacked_latents = torch.from_numpy(raw_latents.reshape(initial_latents_shape)).to("cuda")
+if model_type in ("flux.2", "flux2"):
+    hf_latents = unpacked_latents.to(dtype=torch.bfloat16)
+else:
+    hf_latents = pipe._pack_latents(
+        unpacked_latents.to(dtype=torch.float32),
+        initial_latents_shape[0],
+        initial_latents_shape[1],
+        initial_latents_shape[2],
+        initial_latents_shape[3],
+    )
 kwargs = dict(
     prompt=prompts if len(prompts) > 1 else prompts[0],
     num_inference_steps=num_steps,
     height=image_height,
     width=image_width,
-    generator=[torch.Generator("cuda").manual_seed(seed) for seed in batch_seeds]
-        if len(batch_seeds) > 1
-        else torch.Generator("cuda").manual_seed(batch_seeds[0]),
 )
+if len(prompts) > 1:
+    kwargs["generator"] = [
+        torch.Generator("cuda").manual_seed(seed) for seed in batch_seeds
+    ]
+else:
+    kwargs["latents"] = hf_latents
 if model_type in ("flux.2", "flux2"):
     kwargs["guidance_scale"] = 3.5 if guidance_scale is None else guidance_scale
 output = pipe(**kwargs)
@@ -185,16 +210,24 @@ print(f"Generated {{len(frames)}} frames")
         frame_files = sorted(Path(frames_dir).glob("frame_*.png"))
         if result.returncode != 0:
             logger.error("Flux HF reference failed (rc=%d): %s", result.returncode, result.stderr[-500:])
+        data = {
+            "returncode": result.returncode,
+            "num_frames": len(frame_files),
+            "frames_dir": frames_dir,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "prompts": batch_prompts,
+        }
+        if len(batch_prompts) == 1:
+            data.update(
+                {
+                    "initial_latents_path": str(initial_latents.path),
+                    "initial_latents_sha256": initial_latents.sha256,
+                }
+            )
         return StageOutput(
             stage_name=stage.name,
-            data={
-                "returncode": result.returncode,
-                "num_frames": len(frame_files),
-                "frames_dir": frames_dir,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "prompts": batch_prompts,
-            },
+            data=data,
             text=result.stdout,
             timing_s=elapsed,
             metadata={"backend": "hf_diffusers"},
