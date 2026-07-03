@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      issues: write
+      pull-requests: write
     outputs:
       authorized: ${{ steps.authorize.outputs.authorized }}
       tested_sha: ${{ steps.authorize.outputs.tested_sha }}

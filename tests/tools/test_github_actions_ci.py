@@ -244,9 +244,10 @@ def test_legal_job_pins_snapshot_rejects_forks_and_consumes_run_ci() -> None:
     legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
 
     assert "'Legal compliance' || 'Ignored label / Legal compliance'" in legal
-    assert "issues: write" in legal
+    assert "pull-requests: write" in legal
     assert "contents: read" in legal
-    assert text.count("issues: write") == 1
+    assert text.count("pull-requests: write") == 1
+    assert "issues: write" not in text
     for output in ("authorized", "tested_sha", "base_sha", "head_sha"):
         assert f"{output}: ${{{{ steps.authorize.outputs.{output} }}}}" in legal
 
