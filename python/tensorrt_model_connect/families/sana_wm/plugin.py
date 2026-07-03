@@ -114,7 +114,7 @@ _REFINER_PLAN_SECTIONS = (
     "sana_wm_refiner_text_connector_plan",
 )
 _LTX2_VAE_PLAN_PRECISION = "bf16"
-_LTX2_VAE_ENCODER_PLAN_PRECISION = "fp32"
+_LTX2_VAE_ENCODER_PLAN_PRECISION = "bf16"
 _TOKENIZER_FILES = (
     "tokenizer.json",
     "tokenizer_config.json",

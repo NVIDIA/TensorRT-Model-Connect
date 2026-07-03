@@ -1835,7 +1835,7 @@ def test_sana_wm_plugin_builds_missing_vae_encoder_plan(
         assert extras[section] == data
     assert captured["vae_dir"] == tmp_path / "vae"
     assert captured["raw_config"] is cfg.raw
-    assert captured["precision"] == "fp32"
+    assert captured["precision"] == "bf16"
     assert captured["verbose"] is True
     overrides = sana_wm_mod.plugin.get_bundle_config_overrides(cfg)
     assert "engine_backend" not in overrides
