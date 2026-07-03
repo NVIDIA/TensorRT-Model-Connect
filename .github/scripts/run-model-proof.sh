@@ -9,9 +9,20 @@
 
 set -euo pipefail
 
+proof_container_name=""
+
 die() {
   echo "ERROR: $*" >&2
   exit 1
+}
+
+cleanup_proof_container() {
+  local rc="$1"
+  trap - EXIT INT TERM
+  if [ -n "$proof_container_name" ]; then
+    docker rm -f "$proof_container_name" >/dev/null 2>&1 || true
+  fi
+  exit "$rc"
 }
 
 usage() {
@@ -436,6 +447,10 @@ PY
 
   local container_name="trtmc-model-proof-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$model"
   container_name="${container_name//_/-}"
+  proof_container_name="$container_name"
+  trap 'cleanup_proof_container "$?"' EXIT
+  trap 'cleanup_proof_container 130' INT
+  trap 'cleanup_proof_container 143' TERM
   docker rm -f "$container_name" >/dev/null 2>&1 || true
 
   local -a docker_args=(

@@ -106,6 +106,20 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
         assert contract in text
 
 
+def test_runner_removes_only_its_container_without_masking_exit_status() -> None:
+    text = RUNNER.read_text(encoding="utf-8")
+    cleanup = text.split("cleanup_proof_container() {", maxsplit=1)[1].split("\n}\n", maxsplit=1)[0]
+
+    assert 'local rc="$1"' in cleanup
+    assert 'docker rm -f "$proof_container_name"' in cleanup
+    assert 'exit "$rc"' in cleanup
+    assert "artifacts" not in cleanup
+    assert 'proof_container_name="$container_name"' in text
+    assert "trap 'cleanup_proof_container \"$?\"' EXIT" in text
+    assert "trap 'cleanup_proof_container 130' INT" in text
+    assert "trap 'cleanup_proof_container 143' TERM" in text
+
+
 def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> None:
     ensure = IMAGE_ENSURE.read_text(encoding="utf-8")
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
