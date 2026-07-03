@@ -24,6 +24,12 @@ def _load_module():
     return module
 
 
+@pytest.fixture(autouse=True)
+def _clear_sana_reference_env(monkeypatch) -> None:
+    for name in ("SANA_WM_SCRIPT", "SANA_REPO", "TRTMC_STORAGE_ROOT"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_inference_sana_wm_maps_model_card_args_to_diffusers(
     monkeypatch, tmp_path
 ) -> None:
@@ -122,6 +128,56 @@ def test_inference_sana_wm_maps_model_card_args_to_diffusers(
     }
 
 
+def test_inference_sana_wm_loads_warmed_snapshot_offline(
+    monkeypatch, tmp_path
+) -> None:
+    captured: dict[str, object] = {}
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "model_index.json").write_text("{}", encoding="utf-8")
+
+    class _Pipeline:
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            captured["model_id"] = model_id
+            captured["load_kwargs"] = kwargs
+            return cls()
+
+        def to(self, device):
+            captured["device"] = device
+            return self
+
+    def fake_hf_hub_download(*, repo_id, filename, local_files_only):
+        captured["hf_hub_download"] = {
+            "repo_id": repo_id,
+            "filename": filename,
+            "local_files_only": local_files_only,
+        }
+        return str(snapshot / filename)
+
+    torch_mod = types.ModuleType("torch")
+    torch_mod.bfloat16 = object()
+    torch_mod.cuda = types.SimpleNamespace(is_available=lambda: False)
+    diffusers_mod = types.ModuleType("diffusers")
+    diffusers_mod.DiffusionPipeline = _Pipeline
+    huggingface_hub_mod = types.ModuleType("huggingface_hub")
+    huggingface_hub_mod.hf_hub_download = fake_hf_hub_download
+    monkeypatch.setitem(sys.modules, "torch", torch_mod)
+    monkeypatch.setitem(sys.modules, "diffusers", diffusers_mod)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", huggingface_hub_mod)
+
+    module = _load_module()
+    module._load_pipeline()
+
+    assert captured["hf_hub_download"] == {
+        "repo_id": "Efficient-Large-Model/SANA-WM_bidirectional",
+        "filename": "model_index.json",
+        "local_files_only": True,
+    }
+    assert captured["model_id"] == str(snapshot)
+    assert captured["device"] == "cpu"
+
+
 def test_inference_sana_wm_delegates_to_external_official_script(
     monkeypatch, tmp_path
 ) -> None:
@@ -137,6 +193,7 @@ def test_inference_sana_wm_delegates_to_external_official_script(
     external.write_text(
         """
 import argparse
+import imageio.v3 as iio
 import logging
 import numpy as np
 from pathlib import Path
@@ -162,6 +219,8 @@ def main():
     assert args.rotation_speed_deg == "1.2"
     assert args.num_frames == "321"
     assert official_probe.VALUE == "official-pythonpath-ok"
+    assert iio._trtmc_stub is True
+    assert iio.__spec__ is not None
     video = np.zeros((0, 1, 1, 3), dtype=np.uint8)
     write_video(Path(args.output_dir), "demo", video, 16, logging.getLogger("test"))
     Path({marker!r}).write_text(Path.cwd().name + ":" + args.output_dir, encoding="utf-8")
@@ -196,6 +255,84 @@ def main():
 
     assert module.main() == 0
     assert marker.read_text(encoding="utf-8") == "official_sana:results/demo"
+
+
+def test_inference_sana_wm_discovers_storage_root_official_script(
+    monkeypatch, tmp_path
+) -> None:
+    module = _load_module()
+    external = (
+        tmp_path
+        / "sana_wm"
+        / "reference"
+        / f"Sana-{module._SANA_REFERENCE_COMMIT[:12]}"
+        / "inference_video_scripts"
+        / "wm"
+        / "inference_sana_wm.py"
+    )
+    external.parent.mkdir(parents=True)
+    external.write_text("# official SANA-WM entrypoint\n", encoding="utf-8")
+    monkeypatch.delenv("SANA_WM_SCRIPT", raising=False)
+    monkeypatch.delenv("SANA_REPO", raising=False)
+    monkeypatch.setenv("TRTMC_STORAGE_ROOT", str(tmp_path))
+
+    assert module._resolve_external_script() == external
+
+
+def test_inference_sana_wm_bootstraps_pinned_storage_reference(
+    monkeypatch, tmp_path
+) -> None:
+    module = _load_module()
+    commands: list[list[str]] = []
+
+    def fake_run(command, *, check, **_kwargs):
+        assert check is True
+        commands.append(command)
+        if command[1] == "clone":
+            Path(command[-1]).mkdir(parents=True)
+        else:
+            repo_root = Path(command[2])
+            script = (
+                repo_root
+                / "inference_video_scripts"
+                / "wm"
+                / "inference_sana_wm.py"
+            )
+            script.parent.mkdir(parents=True)
+            script.write_text("# official SANA-WM entrypoint\n", encoding="utf-8")
+
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setenv("TRTMC_STORAGE_ROOT", str(tmp_path))
+
+    script = module._resolve_external_script()
+
+    repo_root = (
+        tmp_path
+        / "sana_wm"
+        / "reference"
+        / f"Sana-{module._SANA_REFERENCE_COMMIT[:12]}"
+    )
+    assert script == (
+        repo_root / "inference_video_scripts" / "wm" / "inference_sana_wm.py"
+    )
+    assert commands == [
+        [
+            "git",
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            module._SANA_REPOSITORY,
+            str(repo_root),
+        ],
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "checkout",
+            "--detach",
+            module._SANA_REFERENCE_COMMIT,
+        ],
+    ]
 
 
 def test_inference_sana_wm_rejects_pipeline_without_action_controls(

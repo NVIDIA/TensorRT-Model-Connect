@@ -21,6 +21,8 @@ from pathlib import Path
 
 
 _HF_ID = "Efficient-Large-Model/SANA-WM_bidirectional"
+_SANA_REPOSITORY = "https://github.com/NVlabs/Sana.git"
+_SANA_REFERENCE_COMMIT = "59629fdf790850797cb657bad014fce432bd713d"
 
 
 def _from_pretrained_compat(pipeline_cls, model_id: str, kwargs: dict):
@@ -34,12 +36,76 @@ def _from_pretrained_compat(pipeline_cls, model_id: str, kwargs: dict):
         return pipeline_cls.from_pretrained(model_id, **compat_kwargs)
 
 
+def _resolve_cached_model_ref(model_id: str) -> str:
+    local_path = Path(model_id)
+    if local_path.is_dir():
+        return str(local_path)
+
+    try:
+        from huggingface_hub import hf_hub_download
+
+        model_index = Path(
+            hf_hub_download(
+                repo_id=model_id,
+                filename="model_index.json",
+                local_files_only=True,
+            )
+        )
+    except Exception:
+        return model_id
+
+    if model_index.is_file():
+        return str(model_index.parent)
+    return model_id
+
+
 def _pipeline_accepts(callable_obj, name: str) -> bool:
     try:
         signature = inspect.signature(callable_obj)
     except (TypeError, ValueError):
         return False
     return name in signature.parameters
+
+
+def _storage_sana_script(storage_root: Path) -> Path:
+    repo_root = (
+        storage_root
+        / "sana_wm"
+        / "reference"
+        / f"Sana-{_SANA_REFERENCE_COMMIT[:12]}"
+    )
+    script = repo_root / "inference_video_scripts" / "wm" / "inference_sana_wm.py"
+    if script.is_file():
+        return script
+    if repo_root.exists():
+        raise RuntimeError(f"Incomplete cached Sana reference checkout: {repo_root}")
+
+    repo_root.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "git",
+            "clone",
+            "--filter=blob:none",
+            "--no-checkout",
+            _SANA_REPOSITORY,
+            str(repo_root),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo_root),
+            "checkout",
+            "--detach",
+            _SANA_REFERENCE_COMMIT,
+        ],
+        check=True,
+    )
+    if not script.is_file():
+        raise RuntimeError(f"Pinned Sana checkout is missing its reference script: {script}")
+    return script
 
 
 def _require_pipeline_controls(callable_obj, names: list[str]) -> None:
@@ -67,6 +133,9 @@ def _resolve_external_script() -> Path | None:
         candidates.append(
             Path(sana_repo) / "inference_video_scripts" / "inference_sana_wm.py"
         )
+    storage_root = os.environ.get("TRTMC_STORAGE_ROOT", "")
+    if storage_root:
+        candidates.append(_storage_sana_script(Path(storage_root)))
 
     local_path = Path(__file__).resolve()
     for candidate in candidates:
@@ -197,6 +266,28 @@ def _install_mmcv_registry_stub():
 
 _install_mmcv_registry_stub()
 
+def _install_imageio_writer_stub():
+    imageio = types.ModuleType("imageio")
+    imageio.__spec__ = importlib.util.spec_from_loader(
+        "imageio", loader=None, is_package=True
+    )
+    imageio.__path__ = []
+    imageio_v3 = types.ModuleType("imageio.v3")
+    imageio_v3.__spec__ = importlib.util.spec_from_loader(
+        "imageio.v3", loader=None
+    )
+
+    def _unexpected_imwrite(*args, **kwargs):
+        raise RuntimeError("SANA-WM reference must use the PNG frame writer")
+
+    imageio_v3.imwrite = _unexpected_imwrite
+    imageio_v3._trtmc_stub = True
+    imageio.v3 = imageio_v3
+    sys.modules["imageio"] = imageio
+    sys.modules["imageio.v3"] = imageio_v3
+
+_install_imageio_writer_stub()
+
 spec = importlib.util.spec_from_file_location("sana_wm_official_reference", script_path)
 if spec is None or spec.loader is None:
     raise RuntimeError(f"Could not load {script_path}")
@@ -245,14 +336,15 @@ def _load_pipeline():
     if torch.cuda.is_available():
         kwargs["device_map"] = "cuda"
 
+    model_ref = _resolve_cached_model_ref(_HF_ID)
     try:
-        pipe = _from_pretrained_compat(DiffusionPipeline, _HF_ID, kwargs)
+        pipe = _from_pretrained_compat(DiffusionPipeline, model_ref, kwargs)
     except (NotImplementedError, ValueError):
         if kwargs.get("device_map") != "cuda":
             raise
         kwargs = dict(kwargs)
         kwargs.pop("device_map", None)
-        pipe = _from_pretrained_compat(DiffusionPipeline, _HF_ID, kwargs)
+        pipe = _from_pretrained_compat(DiffusionPipeline, model_ref, kwargs)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     pipe.to(device)
