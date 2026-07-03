@@ -329,6 +329,9 @@ def _resolve_stage1_text_encoder_dir(model_path: Path, raw_config: dict) -> Path
     for candidate in candidates:
         if (candidate / "config.json").is_file():
             return candidate
+    cached = _cached_stage1_text_encoder_dir(raw_config)
+    if cached is not None:
+        return cached
     downloaded = _download_stage1_text_encoder_dir(raw_config)
     if downloaded is not None and (downloaded / "config.json").is_file():
         return downloaded
@@ -424,6 +427,26 @@ def _stage1_text_encoder_hf_id(raw_config: dict) -> str:
     )
     name = str(configured)
     return _STAGE1_TEXT_ENCODER_HF_IDS.get(name, name)
+
+
+def _cached_stage1_text_encoder_dir(raw_config: dict) -> Path | None:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        return None
+    try:
+        cached = Path(
+            snapshot_download(
+                repo_id=_stage1_text_encoder_hf_id(raw_config),
+                allow_patterns=list(_STAGE1_TEXT_ENCODER_ALLOW_PATTERNS),
+                local_files_only=True,
+            )
+        )
+    except Exception:  # noqa: BLE001 - a missing/partial optional cache is not fatal
+        return None
+    if (cached / "config.json").is_file() and _has_safetensors_weight_file(cached):
+        return cached
+    return None
 
 
 def _download_stage1_text_encoder_dir(raw_config: dict) -> Path | None:

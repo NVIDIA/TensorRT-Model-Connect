@@ -20,6 +20,7 @@ from tensorrt_model_connect import engine_builder
 import tensorrt_model_connect.families.sana_wm as sana_wm_mod
 
 sana_wm_plugin_mod = importlib.import_module("tensorrt_model_connect.families.sana_wm.plugin")
+_CACHED_STAGE1_TEXT_ENCODER_DIR = sana_wm_plugin_mod._cached_stage1_text_encoder_dir
 
 _SANA_WM_STAGE1_BUILD_ENV_VARS = tuple(
     name for name, _ in sana_wm_plugin_mod._STAGE1_DENOISER_BUILD_ENV_DEFAULTS
@@ -44,6 +45,11 @@ _SANA_WM_ENV_VARS = (
 def _clear_sana_wm_env(monkeypatch) -> None:
     for name in _SANA_WM_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        sana_wm_plugin_mod,
+        "_cached_stage1_text_encoder_dir",
+        lambda _raw_config: None,
+    )
 
 
 def _sana_yaml() -> str:
@@ -444,6 +450,99 @@ def test_sana_wm_stage1_text_encoder_defaults_to_public_mirror() -> None:
         sana_wm_plugin_mod._stage1_text_encoder_hf_id(raw_config)
         == "Efficient-Large-Model/gemma-2-2b-it"
     )
+
+
+def test_sana_wm_plugin_reuses_cached_stage1_text_encoder(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cached = tmp_path / "cached-gemma"
+    (cached / "config.json").parent.mkdir(parents=True)
+    (cached / "config.json").write_text(
+        '{"model_type": "gemma"}',
+        encoding="utf-8",
+    )
+    _write_safetensors_header(
+        cached / "model.safetensors",
+        {"model.embed_tokens.weight": ("BF16", [8, 4])},
+    )
+    captured: dict[str, object] = {}
+
+    def fake_snapshot_download(**kwargs):
+        captured.update(kwargs)
+        return str(cached)
+
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+
+    resolved = _CACHED_STAGE1_TEXT_ENCODER_DIR(
+        {"text_encoder": {"model": "gemma-2-2b-it"}}
+    )
+
+    assert resolved == cached
+    assert captured == {
+        "repo_id": "Efficient-Large-Model/gemma-2-2b-it",
+        "allow_patterns": list(sana_wm_plugin_mod._STAGE1_TEXT_ENCODER_ALLOW_PATTERNS),
+        "local_files_only": True,
+    }
+
+
+def test_sana_wm_gemma3_component_loads_nested_language_model_weights(
+    monkeypatch,
+) -> None:
+    component_plugin = importlib.import_module(
+        "tensorrt_model_connect.families.sana_wm.components.gemma.plugin"
+    )
+    component_config = importlib.import_module(
+        "tensorrt_model_connect.families.sana_wm.components.gemma.config"
+    )
+    config = component_config.ModelConfig.from_json(
+        json.dumps(
+            {
+                "model_type": "gemma3",
+                "text_config": {
+                    "model_type": "gemma3_text",
+                    "vocab_size": 8,
+                    "hidden_size": 4,
+                    "intermediate_size": 8,
+                    "num_hidden_layers": 0,
+                    "num_attention_heads": 1,
+                    "num_key_value_heads": 1,
+                },
+            }
+        )
+    )
+    captured: dict[str, object] = {}
+
+    def fake_load_standard_weights(model_dir, model_config, **kwargs):
+        captured.update(
+            {
+                "model_dir": model_dir,
+                "config": model_config,
+                **kwargs,
+            }
+        )
+        return component_plugin.WeightDict(
+            {
+                "embedding": np.zeros((8, 4), dtype=np.float32),
+                "final_norm": np.zeros(4, dtype=np.float32),
+            }
+        )
+
+    monkeypatch.setattr(
+        component_plugin,
+        "load_standard_weights",
+        fake_load_standard_weights,
+    )
+
+    component_plugin.plugin.load_weights("/model", config, precision="bf16")
+
+    assert captured["model_dir"] == "/model"
+    assert captured["config"] is config
+    assert captured["precision"] == "bf16"
+    assert captured["model_prefix"] == "language_model.model"
+    assert captured["lm_head_key"] == "language_model.lm_head.weight"
 
 
 def test_sana_wm_stage1_denoiser_builder_uses_direct_trt_api(tmp_path, monkeypatch) -> None:

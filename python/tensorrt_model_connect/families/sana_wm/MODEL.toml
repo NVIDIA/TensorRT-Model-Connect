@@ -13,6 +13,9 @@ aliases = [
 prefixes = [
   "sana_wm",
 ]
+hf_warm_dependencies = [
+  "stage-1-text-encoder|Efficient-Large-Model/gemma-2-2b-it",
+]
 hf_allow_patterns = [
   "README.md",
   "config.yaml",

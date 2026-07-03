@@ -34,7 +34,20 @@ class GemmaPlugin:
         self, model_dir: str, config: ModelConfig,
         *, precision: str = "fp32",
     ) -> WeightDict:
-        weights = load_standard_weights(model_dir, config, precision=precision)
+        load_kwargs: dict[str, str] = {}
+        if config.model_type == "gemma3" and isinstance(
+            config.raw.get("text_config"), dict
+        ):
+            load_kwargs = {
+                "model_prefix": "language_model.model",
+                "lm_head_key": "language_model.lm_head.weight",
+            }
+        weights = load_standard_weights(
+            model_dir,
+            config,
+            precision=precision,
+            **load_kwargs,
+        )
 
         # Fix 1: Gemma uses (1 + gamma) * normalized instead of gamma * normalized.
         for layer_idx in range(config.num_hidden_layers):
