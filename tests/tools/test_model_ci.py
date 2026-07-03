@@ -108,6 +108,15 @@ def _make_repo(tmp_path: Path) -> tuple[Path, str]:
     _write(repo, "tests/runtime_strategy_matrix.yaml", "strategies: []\n")
     _write(repo, ".github/scripts/run-model-proof.sh", "#!/usr/bin/env bash\n")
     os.chmod(repo / ".github/scripts/run-model-proof.sh", 0o755)
+    _write(
+        repo,
+        ".github/scripts/write-model-proof-fallback-report.py",
+        "#!/usr/bin/env python3\n",
+    )
+    _write(repo, "scripts/generate_e2e_report.py", "# report generator\n")
+    _write(repo, "scripts/generate_e2e_report_assets/e2e_report.css", "/* report */\n")
+    _write(repo, "scripts/generate_e2e_report_assets/e2e_report.js", "// report\n")
+    _write(repo, "scripts/reporting/vlm_assessment.py", "# report component\n")
     return repo, _commit(repo, "initial")
 
 
@@ -317,6 +326,16 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     assert (output / "tests/runtime_strategy_matrix.yaml").is_file()
     assert (output / ".github/scripts/run-model-proof.sh").is_file()
     assert os.access(output / ".github/scripts/run-model-proof.sh", os.X_OK)
+    fallback = output / ".github/scripts/write-model-proof-fallback-report.py"
+    assert fallback.is_file()
+    assert not os.access(fallback, os.X_OK)
+    for report_path in (
+        "scripts/generate_e2e_report.py",
+        "scripts/generate_e2e_report_assets/e2e_report.css",
+        "scripts/generate_e2e_report_assets/e2e_report.js",
+        "scripts/reporting/vlm_assessment.py",
+    ):
+        assert (output / report_path).is_file()
     assert manifest["runtime_model"] == "model_a"
     assert manifest["build_target"] == "trtmc_model_model_a"
     entry = next(

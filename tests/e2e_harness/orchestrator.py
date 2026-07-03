@@ -501,22 +501,30 @@ def _auto_register_artifacts(sink: Any, output: StageOutput, prefix: str) -> Non
     """Scan StageOutput.data for known artifact keys and register on sink."""
     _ARTIFACT_KEYS = {
         "wav_path": "wav",
+        "audio_output_path": "wav",
         "frames_dir": "frames",
         "logits_path": "logits",
         "features_path": "features",
         "output_path": "output",
         "segmentation_map_path": "segmentation_map",
         "segmented_image_path": "segmented_image",
+        "viz_path": "segmentation_map",
     }
-    for data_key, artifact_key in _ARTIFACT_KEYS.items():
-        value = output.data.get(data_key)
-        if value and isinstance(value, str):
-            # Store relative to artifacts dir if possible
-            base = str(sink.base_dir)
-            rel = value
-            if value.startswith(base):
-                rel = value[len(base):].lstrip("/")
-            sink.register_artifact(f"{prefix}_{artifact_key}", rel)
+    for source in (output.data, output.metadata):
+        if not isinstance(source, dict):
+            continue
+        for data_key, artifact_key in _ARTIFACT_KEYS.items():
+            value = source.get(data_key)
+            if value and isinstance(value, str):
+                # Store relative to artifacts dir if possible.
+                rel = value
+                try:
+                    rel = Path(value).resolve().relative_to(
+                        Path(sink.base_dir).resolve()
+                    ).as_posix()
+                except (OSError, RuntimeError, ValueError):
+                    pass
+                sink.register_artifact(f"{prefix}_{artifact_key}", rel)
 
 
 def _collect_runtime_guard_payloads(value: Any) -> list[tuple[list[str], list[str], int | None]]:

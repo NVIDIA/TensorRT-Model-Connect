@@ -19,7 +19,7 @@ import subprocess
 import time
 from typing import Any
 
-from .. import save_full_stderr
+from .. import _case_artifact_dir, save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
@@ -203,8 +203,8 @@ def _build_omni_command(
 
     if stage_name == "talker_decode" and prompt:
         out_audio = os.path.join(
-            ctx.artifacts_dir or "/tmp/claude",
-            f"{case.name}_talker_decode.wav",
+            _case_artifact_dir(ctx.artifacts_dir or "/tmp/claude", case.name),
+            "talker_decode.wav",
         )
         cmd = [
             ctx.binary_path, "generate-audio", bundle_path,
@@ -219,8 +219,8 @@ def _build_omni_command(
 
     if stage_name == "talker_decode" and audio:
         out_audio = os.path.join(
-            ctx.artifacts_dir or "/tmp/claude",
-            f"{case.name}_talker_decode.wav",
+            _case_artifact_dir(ctx.artifacts_dir or "/tmp/claude", case.name),
+            "talker_decode.wav",
         )
         cmd = [
             ctx.binary_path, "speak", bundle_path,

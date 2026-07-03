@@ -221,11 +221,26 @@ class TestClassifyModality:
             r = _make_result(task_strategy=ts)
             assert mod.classify_modality(r) == "segmentation", f"Failed for {ts}"
 
-    def test_generic_strategies(self):
+    def test_numeric_and_reranking_strategies(self):
         mod = _import_report()
-        for ts in ("encoder_only_nlp", "embedding", "reranking"):
+        for ts in ("encoder_only_nlp", "embedding"):
             r = _make_result(task_strategy=ts)
-            assert mod.classify_modality(r) == "generic", f"Failed for {ts}"
+            assert mod.classify_modality(r) == "numeric", f"Failed for {ts}"
+        assert mod.classify_modality(
+            _make_result(task_strategy="reranking")) == "reranking"
+
+    def test_all_live_specialized_strategies(self):
+        mod = _import_report()
+        expected = {
+            "diffusion_text_generation": "diffusion_text",
+            "image_classification": "classification",
+            "neural_operator": "neural_operator",
+            "object_detection": "detection",
+            "omni_multimodal": "omni",
+        }
+        for strategy, modality in expected.items():
+            assert mod.classify_modality(
+                _make_result(task_strategy=strategy)) == modality
 
     def test_unknown_strategy_defaults_generic(self):
         mod = _import_report()
@@ -236,6 +251,17 @@ class TestClassifyModality:
         mod = _import_report()
         r = {"case_name": "x"}
         assert mod.classify_modality(r) == "generic"
+
+    def test_every_manifest_task_strategy_has_an_explicit_renderer(self):
+        mod = _import_report()
+        repo_root = Path(__file__).resolve().parents[2]
+        strategies = set()
+        for path in (repo_root / "tests/e2e/models").glob("*/manifests/*.json"):
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if payload.get("task_strategy"):
+                strategies.add(payload["task_strategy"])
+        assert strategies
+        assert strategies <= set(mod._TASK_STRATEGY_TO_MODALITY)
 
 
 # ---------------------------------------------------------------------------
@@ -905,6 +931,188 @@ class TestRenderGenericModel:
         assert "l2_norm" in html
 
 
+class TestAdditionalStrategyRenderers:
+    def test_diffusion_text_uses_paired_text_renderer(self):
+        mod = _import_report()
+        result = _make_result(
+            task_strategy="diffusion_text_generation",
+            prompt="Translate this",
+            trt_text="Bonjour",
+            ref_text="Bonjour",
+        )
+
+        rendered = mod.render_model_section(result, project_dir=None)
+
+        assert "Translate this" in rendered
+        assert "TRT Output" in rendered
+        assert "Reference Output" in rendered
+        assert "Bonjour" in rendered
+
+    def test_diffusion_text_shows_live_sampling_settings(self):
+        mod = _import_report()
+        result = _make_result(
+            task_strategy="diffusion_text_generation",
+            trt_text="sample",
+            ref_text="sample",
+        )
+        result["case_config"]["inputs"].update({
+            "source_text": "seed text",
+            "sampling_method": "ddpm",
+            "num_sampling_steps": 32,
+        })
+
+        rendered = mod.render_diffusion_text_model(result)
+
+        assert "seed text" in rendered
+        assert "ddpm" in rendered
+        assert "32" in rendered
+
+    def test_classification_shows_input_and_paired_prediction(self, tmp_path):
+        mod = _import_report()
+        image = tmp_path / "input.png"
+        _make_tiny_png(image)
+        result = _make_result(
+            task_strategy="image_classification",
+            stage_outputs={
+                "trt_full_inference": {
+                    "data": {"top_class": 42, "top_score": 0.9, "num_classes": 1000},
+                },
+                "ref_full_inference": {
+                    "data": {"top_class": 42, "top_score": 0.89, "num_classes": 1000},
+                },
+            },
+        )
+        result["case_config"]["inputs"]["image"] = "input.png"
+
+        rendered = mod.render_classification_model(result, tmp_path)
+
+        assert "Classification Input" in rendered
+        assert "data:image/png;base64," in rendered
+        assert "Top class" in rendered
+        assert "42" in rendered
+        assert "0.9000" in rendered
+        assert "0.8900" in rendered
+
+    def test_reranking_shows_documents_and_paired_scores(self):
+        mod = _import_report()
+        result = _make_result(
+            task_strategy="reranking",
+            stage_outputs={
+                "trt_full_inference": {
+                    "data": {"documents": ["Mars", "Venus"], "scores": [0.9, 0.1]},
+                },
+                "ref_full_inference": {
+                    "data": {"documents": ["Mars", "Venus"], "scores": [0.8, 0.2]},
+                },
+            },
+        )
+        result["case_config"]["inputs"].update({
+            "query": "Which is the red planet?",
+            "documents": ["Mars", "Venus"],
+        })
+
+        rendered = mod.render_reranking_model(result)
+
+        assert "Which is the red planet?" in rendered
+        assert "Mars" in rendered
+        assert "TRT / Base score" in rendered
+        assert "Reference score" in rendered
+        assert "TRT rank" in rendered
+        assert "Reference rank" in rendered
+
+    def test_neural_operator_shows_plot_and_structured_values(self):
+        mod = _import_report()
+        result = _make_result(
+            task_strategy="neural_operator",
+            stage_outputs={
+                "trt_full_inference": {
+                    "data": {"output_field": [0.0, 1.0, 2.0], "output_shape": [3]},
+                },
+                "ref_full_inference": {
+                    "data": {"output_field": [0.0, 1.1, 2.1], "output_shape": [3]},
+                },
+            },
+        )
+        result["case_config"]["inputs"]["branch_input"] = [0.0, 0.5, 1.0]
+
+        rendered = mod.render_neural_operator_model(result)
+
+        assert "Model Inputs" in rendered
+        assert "branch_input" in rendered
+        assert "Output Series Comparison" in rendered
+        assert "<svg" in rendered
+        assert "TRT / Base" in rendered
+        assert "Reference" in rendered
+        assert "output_shape" in rendered
+
+    def test_object_detection_shows_input_and_paired_detections(self, tmp_path):
+        mod = _import_report()
+        image = tmp_path / "street.png"
+        _make_tiny_png(image)
+        result = _make_result(
+            task_strategy="object_detection",
+            stage_outputs={
+                "trt_full_inference": {
+                    "data": {
+                        "detections": [{
+                            "label": "car", "score": 0.92,
+                            "box": [1.0, 2.0, 8.0, 9.0],
+                        }],
+                    },
+                },
+                "ref_full_inference": {
+                    "data": {
+                        "detections": [{
+                            "label": "car", "score": 0.91,
+                            "box": [1.1, 2.1, 8.1, 9.1],
+                        }],
+                    },
+                },
+            },
+        )
+        result["case_config"]["inputs"]["image"] = "street.png"
+
+        rendered = mod.render_detection_model(result, tmp_path)
+
+        assert "Detection Input" in rendered
+        assert "data:image/png;base64," in rendered
+        assert "TRT / Base Detections" in rendered
+        assert "Reference Detections" in rendered
+        assert "car" in rendered
+        assert mod.validate_evidence([result], project_dir=tmp_path) == []
+
+    def test_omni_finds_audio_in_stage_metadata(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "omni"
+        model_dir.mkdir()
+        for filename in ("trt.wav", "ref.wav"):
+            _make_tiny_wav(model_dir / filename)
+        result = _make_result(
+            name="omni",
+            task_strategy="omni_multimodal",
+            stage_outputs={
+                "trt_talker_decode": {
+                    "text": "hello",
+                    "data": {"token_ids": [1, 2]},
+                    "metadata": {"audio_output_path": str(model_dir / "trt.wav")},
+                },
+                "ref_talker_decode": {
+                    "text": "hello",
+                    "data": {"token_ids": [1, 2]},
+                    "metadata": {"audio_output_path": str(model_dir / "ref.wav")},
+                },
+            },
+        )
+        result["_artifact_dir"] = str(model_dir)
+
+        rendered = mod.render_omni_model(result, project_dir=tmp_path)
+
+        assert "TRT / Base Audio" in rendered
+        assert "Reference Audio" in rendered
+        assert rendered.count("data:audio/wav;base64,") == 2
+        assert "token_ids" in rendered
+
+
 class TestRenderVlModel:
     """Tests for render_vl_model()."""
 
@@ -1002,6 +1210,49 @@ class TestRenderDiffusionModel:
         html = mod.render_diffusion_model(r)
         assert "Reference Frames" in html
         assert "data:image/png;base64," in html
+
+    def test_pairs_trt_and_reference_video_frames(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "video-model"
+        for dirname in ("frames", "ref_frames"):
+            frame_dir = model_dir / dirname
+            frame_dir.mkdir(parents=True)
+            for index in range(8):
+                _make_tiny_png(frame_dir / f"frame_{index:03d}.png")
+        result = _make_result(
+            name="video-model",
+            task_strategy="diffusion_media_generation",
+            artifacts={"trt_frames": "frames", "ref_frames": "ref_frames"},
+        )
+        result["_artifact_dir"] = str(model_dir)
+
+        rendered = mod.render_diffusion_model(result)
+
+        assert "Visual Review: TRT vs Reference" in rendered
+        assert "TRT / Base" in rendered
+        assert rendered.count("data:image/png;base64,") == 12
+
+    def test_paired_frames_preserve_jpeg_mime_and_unmatched_frame(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "jpeg-video"
+        for dirname, count in (("frames", 2), ("ref_frames", 1)):
+            frame_dir = model_dir / dirname
+            frame_dir.mkdir(parents=True)
+            for index in range(count):
+                (frame_dir / f"frame_{index:03d}.jpg").write_bytes(
+                    b"\xff\xd8\xff\xd9"
+                )
+        result = _make_result(
+            name="jpeg-video",
+            task_strategy="diffusion_media_generation",
+            artifacts={"trt_frames": "frames", "ref_frames": "ref_frames"},
+        )
+        result["_artifact_dir"] = str(model_dir)
+
+        rendered = mod.render_diffusion_model(result)
+
+        assert rendered.count("data:image/jpeg;base64,") == 3
+        assert "frame_001.jpg" in rendered
 
     def test_vlm_assessment_is_rendered(self):
         mod = _import_report()
@@ -1109,9 +1360,10 @@ class TestRenderAudioModel:
         r["_artifact_dir"] = str(model_dir)
         html = mod.render_audio_model(r)
         assert "<audio" in html
-        assert "TRT Audio" in html
+        assert "TRT / Base Audio" in html
         assert "Reference Audio" in html
-        assert "data:audio/wav;base64," in html
+        assert html.count("<audio") == 2
+        assert html.count("data:audio/wav;base64,") == 2
 
     def test_missing_reference_audio_failure_is_visible(self, tmp_path):
         mod = _import_report()
@@ -1157,6 +1409,85 @@ class TestRenderAudioModel:
         assert "Transcript Comparison" in html
         assert "Hello from speech model" in html
 
+    def test_speech_to_text_embeds_source_audio(self, tmp_path):
+        mod = _import_report()
+        source = tmp_path / "source.wav"
+        _make_tiny_wav(source)
+        result = _make_result(
+            task_strategy="speech_to_text",
+            trt_text="hello",
+            ref_text="hello",
+        )
+        result["case_config"]["inputs"]["audio"] = "source.wav"
+
+        rendered = mod.render_audio_model(result, project_dir=tmp_path)
+
+        assert "Input / Source Audio" in rendered
+        assert rendered.count("data:audio/wav;base64,") == 1
+
+    def test_speech_to_speech_embeds_input_and_both_outputs(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "speech-to-speech"
+        model_dir.mkdir()
+        for filename in ("input.wav", "trt.wav", "ref.wav"):
+            target = tmp_path / filename if filename == "input.wav" else model_dir / filename
+            _make_tiny_wav(target)
+        result = _make_result(
+            name="speech-to-speech",
+            task_strategy="speech_to_speech",
+            artifacts={"trt_wav": "trt.wav", "ref_wav": "ref.wav"},
+        )
+        result["case_config"]["inputs"]["audio"] = "input.wav"
+        result["_artifact_dir"] = str(model_dir)
+
+        rendered = mod.render_audio_model(result, project_dir=tmp_path)
+
+        assert "Input / Source Audio" in rendered
+        assert "TRT / Base Audio" in rendered
+        assert "Reference Audio" in rendered
+        assert rendered.count("data:audio/wav;base64,") == 3
+        assert mod.validate_evidence([result], project_dir=tmp_path) == []
+
+    def test_text_to_audio_shows_prompt_and_audio_metadata(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "tts"
+        model_dir.mkdir()
+        for filename in ("trt.wav", "ref.wav"):
+            _make_tiny_wav(model_dir / filename)
+        result = _make_result(
+            name="tts",
+            task_strategy="text_to_audio",
+            prompt="Read this sentence",
+            artifacts={"trt_wav": "trt.wav", "ref_wav": "ref.wav"},
+            stage_outputs={
+                "trt_generate": {
+                    "data": {
+                        "wav_path": str(model_dir / "trt.wav"),
+                        "duration_s": 1.25,
+                        "sample_rate": 24000,
+                        "rms": 0.1,
+                    },
+                },
+                "ref_generate": {
+                    "data": {
+                        "wav_path": str(model_dir / "ref.wav"),
+                        "duration_s": 1.3,
+                        "sample_rate": 24000,
+                        "rms": 0.09,
+                    },
+                },
+            },
+        )
+        result["_artifact_dir"] = str(model_dir)
+
+        rendered = mod.render_audio_model(result)
+
+        assert "Read this sentence" in rendered
+        assert "Audio Metadata" in rendered
+        assert "Duration (seconds)" in rendered
+        assert "Sample rate" in rendered
+        assert "RMS" in rendered
+
 
 class TestRenderSegmentationModel:
     """Tests for render_segmentation_model()."""
@@ -1174,7 +1505,7 @@ class TestRenderSegmentationModel:
         )
         r["_artifact_dir"] = str(model_dir)
         html = mod.render_segmentation_model(r, project_dir=None)
-        assert "TRT Segmentation Map" in html
+        assert "TRT / Base Segmentation" in html
         assert "data:image/png;base64," in html
 
     def test_embeds_prompted_segmentation_overlay(self, tmp_path):
@@ -1196,8 +1527,8 @@ class TestRenderSegmentationModel:
         )
         r["_artifact_dir"] = str(model_dir)
         html = mod.render_segmentation_model(r, project_dir=None)
-        assert "TRT Segmented Image" in html
-        assert "Reference Segmented Image" in html
+        assert "TRT / Base Segmentation" in html
+        assert "Reference Segmentation" in html
         assert html.count("data:image/png;base64,") == 2
 
     def test_prompted_segmentation_shows_text_prompt(self, tmp_path):
@@ -1215,6 +1546,38 @@ class TestRenderSegmentationModel:
         html = mod.render_segmentation_model(r, project_dir=None)
 
         assert "<strong>Prompt:</strong> car" in html
+
+    def test_prompted_segmentation_shows_point_and_all_visuals(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "prompted-all-visuals"
+        model_dir.mkdir()
+        _make_tiny_png(tmp_path / "input.png")
+        artifacts = {}
+        for prefix in ("trt", "ref"):
+            for kind in ("segmented_image", "segmentation_map"):
+                filename = f"{prefix}_{kind}.png"
+                _make_tiny_png(model_dir / filename)
+                artifacts[f"{prefix}_{kind}"] = filename
+        result = _make_result(
+            name="prompted-all-visuals",
+            task_strategy="prompted_segmentation",
+            artifacts=artifacts,
+        )
+        result["case_config"]["inputs"].update({
+            "image": "input.png",
+            "point_x": 12,
+            "point_y": 34,
+            "is_foreground": True,
+        })
+        result["_artifact_dir"] = str(model_dir)
+
+        rendered = mod.render_segmentation_model(result, project_dir=tmp_path)
+
+        assert "Point prompt" in rendered
+        assert "x=12" in rendered
+        assert "y=34" in rendered
+        assert rendered.count("data:image/png;base64,") == 5
+        assert mod.validate_evidence([result], project_dir=tmp_path) == []
 
 
 # ---------------------------------------------------------------------------
@@ -1238,6 +1601,391 @@ class TestSelectFrames:
         # First and last should always be included
         assert selected[0] == paths[0]
         assert selected[-1] == paths[-1]
+
+
+class TestEvidenceCompleteness:
+    def test_passing_audio_requires_both_model_and_reference_files(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "audio"
+        model_dir.mkdir()
+        _make_tiny_wav(model_dir / "trt.wav")
+        result = _make_result(
+            name="audio",
+            task_strategy="text_to_audio",
+            artifacts={"trt_wav": "trt.wav"},
+        )
+        result["_artifact_dir"] = str(model_dir)
+
+        issues = mod.validate_evidence([result], project_dir=tmp_path)
+
+        assert any("reference audio" in issue for issue in issues)
+
+    def test_omni_audio_contract_requires_both_playable_outputs(self):
+        mod = _import_report()
+        result = _make_result(
+            name="omni-no-audio",
+            task_strategy="omni_multimodal",
+            stage_outputs={
+                "trt_talker_decode": {"data": {"token_ids": [1]}},
+                "ref_talker_decode": {"data": {"_invariant_only": True}},
+            },
+        )
+        result["oracle_level"] = "L4_invariants"
+        result["case_config"]["reference_backend"] = "torch_reference"
+        result["case_config"]["user_contract"] = "tts_audio"
+
+        issues = mod.validate_evidence([result], project_dir=None)
+
+        assert any("TRT/base audio" in issue for issue in issues)
+        assert any("reference audio" in issue for issue in issues)
+
+    def test_empty_embedding_is_not_complete_numeric_evidence(self):
+        mod = _import_report()
+        result = _make_result(
+            name="empty-embedding",
+            task_strategy="embedding",
+            stage_outputs={
+                "trt_full_inference": {"data": {"embedding": []}},
+                "ref_full_inference": {"data": {"embedding": []}},
+            },
+        )
+
+        issues = mod.validate_evidence([result], project_dir=None)
+
+        assert any("TRT/base numeric feature" in issue for issue in issues)
+        assert any("reference numeric feature" in issue for issue in issues)
+
+    def test_failed_audio_can_render_partial_failure_evidence(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "failed-audio"
+        model_dir.mkdir()
+        _make_tiny_wav(model_dir / "trt.wav")
+        result = _make_result(
+            name="failed-audio",
+            status="fail",
+            task_strategy="text_to_audio",
+            artifacts={"trt_wav": "trt.wav"},
+        )
+        result["_artifact_dir"] = str(model_dir)
+
+        assert mod.validate_evidence([result], project_dir=tmp_path) == []
+        assert "Required audio file is unavailable" in mod.render_audio_model(result)
+        report = mod.render_report([result], evidence_issues=[])
+        assert "E2E status is fail" in report
+        assert "evidence may be partial" in report
+
+    def test_personaplex_requires_playable_reference_audio(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "personaplex"
+        model_dir.mkdir()
+        _make_tiny_wav(tmp_path / "input.wav")
+        _make_tiny_wav(model_dir / "trt.wav")
+        result = _make_result(
+            name="personaplex",
+            task_strategy="speech_to_speech",
+            artifacts={"trt_wav": "trt.wav"},
+            stage_outputs={
+                "trt_full_generation": {"data": {"wav_path": str(model_dir / "trt.wav")}},
+                "ref_full_generation": {
+                    "data": {
+                        "reference_tokens": [[1, 2], [3, 4]],
+                        "num_frames": 2,
+                        "token_shape": [2, 2],
+                    }
+                },
+            },
+        )
+        result["oracle_level"] = "L2_internal_reference"
+        result["case_config"]["reference_backend"] = "torch_reference"
+        result["case_config"]["inputs"]["audio"] = "input.wav"
+        result["_artifact_dir"] = str(model_dir)
+
+        assert any(
+            "reference audio" in issue
+            for issue in mod.validate_evidence([result], project_dir=tmp_path)
+        )
+        rendered = mod.render_audio_model(result, project_dir=tmp_path)
+        assert "Configured Reference Evidence" in rendered
+        assert "reference_tokens" in rendered
+
+    def test_invariant_only_omni_still_requires_human_reference_audio(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "omni"
+        model_dir.mkdir()
+        _make_tiny_wav(model_dir / "talker.wav")
+        result = _make_result(
+            name="omni",
+            task_strategy="omni_multimodal",
+            stage_outputs={
+                "trt_talker_decode": {
+                    "data": {"token_ids": [1]},
+                    "metadata": {"audio_output_path": str(model_dir / "talker.wav")},
+                },
+                "ref_talker_decode": {
+                    "data": {"_invariant_only": True},
+                    "metadata": {"source": "invariant_only"},
+                },
+            },
+        )
+        result["oracle_level"] = "L4_invariants"
+        result["case_config"]["reference_backend"] = "invariant_only"
+        result["_artifact_dir"] = str(model_dir)
+
+        assert any(
+            "reference audio" in issue
+            for issue in mod.validate_evidence([result], project_dir=tmp_path)
+        )
+        rendered = mod.render_model_section(result, project_dir=tmp_path)
+        assert "No external reference output is configured" in rendered
+        assert "TRT / Base Audio" in rendered
+        assert "Reference Audio" in rendered
+
+    def test_invariant_omni_embeds_hf_audio_for_human_review(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "omni-with-reference"
+        model_dir.mkdir()
+        for filename in ("talker.wav", "hf_reference.wav"):
+            _make_tiny_wav(model_dir / filename)
+        result = _make_result(
+            name="omni-with-reference",
+            task_strategy="omni_multimodal",
+            stage_outputs={
+                "trt_talker_decode": {
+                    "data": {"token_ids": [1]},
+                    "metadata": {
+                        "audio_output_path": str(model_dir / "talker.wav")
+                    },
+                },
+                "ref_talker_decode": {
+                    "data": {"_invariant_only": True},
+                    "metadata": {
+                        "source": "hf_human_reference",
+                        "audio_output_path": str(model_dir / "hf_reference.wav"),
+                    },
+                },
+            },
+        )
+        result["oracle_level"] = "L4_invariants"
+        result["case_config"]["reference_backend"] = "torch_reference"
+        result["_artifact_dir"] = str(model_dir)
+
+        assert mod.validate_evidence([result], project_dir=tmp_path) == []
+        rendered = mod.render_model_section(result, project_dir=tmp_path)
+        assert rendered.count("data:audio/wav;base64,") == 2
+        assert "human-review evidence" in rendered
+        assert "waveform-equality gate" in rendered
+
+    def test_empty_but_present_invariant_text_is_not_treated_as_missing(self):
+        mod = _import_report()
+        result = _make_result(
+            name="elf",
+            task_strategy="diffusion_text_generation",
+            stage_outputs={
+                "trt_decoded_text": {"text": "", "data": {"generated_samples": []}},
+                "ref_decoded_text": {"text": None, "data": {"_invariant_only": True}},
+            },
+        )
+        result["oracle_level"] = "L4_invariants"
+        result["case_config"]["reference_backend"] = "invariant_only"
+
+        assert mod.validate_evidence([result], project_dir=None) == []
+
+    def test_artifact_path_cannot_escape_case_directory(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "audio"
+        model_dir.mkdir()
+        _make_tiny_wav(model_dir / "trt.wav")
+        _make_tiny_wav(tmp_path / "outside.wav")
+        result = _make_result(
+            name="audio",
+            task_strategy="text_to_audio",
+            artifacts={"trt_wav": "trt.wav", "ref_wav": "../outside.wav"},
+        )
+        result["_artifact_dir"] = str(model_dir)
+
+        rendered = mod.render_audio_model(result)
+        issues = mod.validate_evidence([result], project_dir=tmp_path)
+
+        assert rendered.count("data:audio/wav;base64,") == 1
+        assert any("reference audio" in issue for issue in issues)
+
+    def test_artifact_symlink_cannot_escape_case_directory(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "audio"
+        model_dir.mkdir()
+        _make_tiny_wav(model_dir / "trt.wav")
+        _make_tiny_wav(tmp_path / "outside.wav")
+        (model_dir / "ref.wav").symlink_to(tmp_path / "outside.wav")
+        result = _make_result(
+            name="audio",
+            task_strategy="text_to_audio",
+            artifacts={"trt_wav": "trt.wav", "ref_wav": "ref.wav"},
+        )
+        result["_artifact_dir"] = str(model_dir)
+
+        assert any(
+            "reference audio" in issue
+            for issue in mod.validate_evidence([result], project_dir=tmp_path)
+        )
+
+    def test_corrupt_media_cannot_satisfy_strict_evidence(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "corrupt-image"
+        model_dir.mkdir()
+        (tmp_path / "input.png").write_bytes(b"not a PNG")
+        for filename in ("trt.png", "ref.png"):
+            _make_tiny_png(model_dir / filename)
+        result = _make_result(
+            name="corrupt-image",
+            task_strategy="segmentation",
+            artifacts={
+                "trt_segmentation_map": "trt.png",
+                "ref_segmentation_map": "ref.png",
+            },
+        )
+        result["case_config"]["inputs"]["image"] = "input.png"
+        result["_artifact_dir"] = str(model_dir)
+
+        assert any(
+            "input image" in issue
+            for issue in mod.validate_evidence([result], project_dir=tmp_path)
+        )
+        rendered = mod.render_segmentation_model(result, project_dir=tmp_path)
+        assert "Image could not be embedded" in rendered
+
+    def test_frame_directory_child_symlink_cannot_escape_case_directory(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "diffusion"
+        frames_dir = model_dir / "frames"
+        frames_dir.mkdir(parents=True)
+        outside = tmp_path / "outside.png"
+        _make_tiny_png(outside)
+        (frames_dir / "frame_000.png").symlink_to(outside)
+
+        resolved = mod._resolve_frame_paths("frames", model_dir, "frames")
+
+        assert resolved == []
+
+    def test_strict_cli_writes_report_then_fails_for_missing_reference(self, tmp_path):
+        mod = _import_report()
+        artifacts = tmp_path / "artifacts"
+        model_dir = artifacts / "audio"
+        model_dir.mkdir(parents=True)
+        _make_tiny_wav(model_dir / "trt.wav")
+        _write_result(
+            artifacts,
+            "audio",
+            _make_result(
+                name="audio",
+                task_strategy="text_to_audio",
+                artifacts={"trt_wav": "trt.wav"},
+            ),
+        )
+        output = tmp_path / "report.html"
+
+        rc = mod.main([
+            "--artifacts-dir", str(artifacts),
+            "--output", str(output),
+            "--project-dir", str(tmp_path),
+            "--strict-evidence",
+            "--max-embed-bytes", "33554432",
+        ])
+
+        assert rc == 2
+        assert output.is_file()
+        assert "The report is incomplete" in output.read_text(encoding="utf-8")
+
+    def test_proof_context_renders_revision_steps_and_selected_tests(self):
+        mod = _import_report()
+        context = {
+            "model": "alpha",
+            "source_revision": "a" * 40,
+            "suite": "premerge",
+            "outcome": "passed",
+            "runtime_library": "libtrtmc_model_alpha.so",
+            "runtime_library_sha256": "b" * 64,
+            "sibling_model_count": 0,
+            "model_dso_count": 1,
+            "network": "disabled",
+            "plugin_search": "strict",
+            "steps": {"scratch_build": {"status": "passed", "evidence": "build.log"}},
+            "selection": {
+                "runtime_tests": ["test_alpha"],
+                "python_tests": ["tests/e2e/models/alpha/test_alpha_unit.py"],
+                "e2e_cases": [{"name": "alpha-small"}],
+                "e2e_test": "tests/e2e/models/alpha/test_alpha_e2e.py",
+            },
+        }
+
+        rendered = mod.render_report([], proof_context=context, evidence_issues=[])
+
+        assert "Isolation Proof" in rendered
+        assert "a" * 40 in rendered
+        assert "libtrtmc_model_alpha.so" in rendered
+        assert "test_alpha" in rendered
+        assert "test_alpha_unit.py" in rendered
+        assert "alpha-small" in rendered
+        assert "All required user-facing evidence is embedded" in rendered
+
+    def test_successful_proof_context_requires_complete_isolation_metadata(self):
+        mod = _import_report()
+        steps = {
+            name: {"status": "passed"}
+            for name in (
+                "projection_validation", "configure", "scratch_build",
+                "dso_isolation", "cpp_tests", "e2e_reference",
+                "result_verification",
+            )
+        }
+        steps["python_tests"] = {"status": "skipped"}
+        steps["html_report"] = {"status": "running"}
+        status = {
+            "model": "alpha",
+            "source_revision": "a" * 40,
+            "suite": "premerge",
+            "validation_exit_code": 0,
+            "steps": steps,
+        }
+        proof = {
+            "passed": True,
+            "model": "alpha",
+            "source_revision": "a" * 40,
+            "runtime_model": "alpha",
+            "runtime_library": "libtrtmc_model_alpha.so",
+            "runtime_library_sha256": "b" * 64,
+            "sibling_model_count": 0,
+            "model_dso_count": 1,
+            "network": "disabled",
+            "plugin_search": "strict",
+        }
+        selection = {
+            "requested_model": "alpha",
+            "e2e_test": "tests/e2e/models/alpha/test_alpha_e2e.py",
+            "e2e_cases": [{"name": "alpha-small"}],
+        }
+
+        assert mod.validate_proof_context(status, proof, selection) == []
+        proof["runtime_library_sha256"] = "invalid"
+        assert "SHA-256" in " ".join(
+            mod.validate_proof_context(status, proof, selection))
+
+    def test_proof_diagnostics_embed_bounded_log_and_junit_failure(self, tmp_path):
+        mod = _import_report()
+        status = tmp_path / "model-proof-status.json"
+        status.write_text("{}", encoding="utf-8")
+        (tmp_path / "build.log").write_text("compile failed\n", encoding="utf-8")
+        (tmp_path / "python-model-tests.xml").write_text(
+            '<testsuite><testcase name="test_model">'
+            '<failure message="assertion failed" /></testcase></testsuite>',
+            encoding="utf-8",
+        )
+
+        diagnostics = mod._load_proof_diagnostics(status)
+        rendered = mod.render_proof_section({"diagnostics": diagnostics})
+
+        assert "compile failed" in rendered
+        assert "test_model" in rendered
+        assert "assertion failed" in rendered
 
 
 # ---------------------------------------------------------------------------

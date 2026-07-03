@@ -50,6 +50,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
     {
         ".clang-format",
         ".github/scripts/run-model-proof.sh",
+        ".github/scripts/write-model-proof-fallback-report.py",
         "CMakeLists.txt",
         "Dockerfile",
         "LICENSE",

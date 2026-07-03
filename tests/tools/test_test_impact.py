@@ -1519,6 +1519,30 @@ class TestUnitTiers:
             assert match.unit_tiers == ["tools"]
             assert match.rebuild_cpp is False
 
+    def test_e2e_report_tools(self, imap):
+        """E2E report code runs report tests without scheduling model E2E."""
+        for path in (
+            "scripts/generate_e2e_report.py",
+            "scripts/generate_e2e_report_assets/e2e_report.css",
+            "scripts/generate_e2e_report_assets/e2e_report.js",
+            "scripts/reporting/__init__.py",
+            "scripts/reporting/vlm_assessment.py",
+        ):
+            match = test_impact.classify_file(path, imap)
+            assert match.rule == "e2e_report_tool"
+            assert match.models == []
+            assert match.unit_tiers == ["tools"]
+            assert match.rebuild_cpp is False
+
+    def test_model_ci_tool(self, imap):
+        """Model selection/projection edits run tooling tests, not model E2E."""
+        match = test_impact.classify_file("tools/model_ci.py", imap)
+
+        assert match.rule == "model_ci_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_source_implies_unit_tier(self, imap):
         """C++ source change implies 'cpp' unit tier alongside E2E."""
         match = test_impact.classify_file(
@@ -2967,6 +2991,46 @@ class TestCoverageMapIntegration:
             "tests/tools/test_github_actions_ci.py",
             "tests/tools/test_schedule_e2e.py",
         ]
+        assert result.fallback_tiers == []
+
+    @pytest.mark.parametrize("coverage_map", [None, {}])
+    def test_model_ci_selects_its_explicit_tools_tests(self, imap, coverage_map):
+        """Projection/impact edits select their focused tooling suite."""
+        result = test_impact.analyze_impact(
+            ["tools/model_ci.py"],
+            imap,
+            coverage_map=coverage_map,
+        )
+
+        assert result.e2e_models == []
+        assert result.unit_tiers == ["tools"]
+        assert result.tools_tests == ["tests/tools/test_model_ci.py"]
+        assert result.fallback_tiers == []
+
+    @pytest.mark.parametrize("coverage_map", [None, {}])
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "scripts/generate_e2e_report.py",
+            "scripts/generate_e2e_report_assets/e2e_report.css",
+            "scripts/generate_e2e_report_assets/e2e_report.js",
+            "scripts/reporting/__init__.py",
+            "scripts/reporting/vlm_assessment.py",
+        ],
+    )
+    def test_e2e_report_selects_its_explicit_tools_tests(
+        self, imap, coverage_map, path,
+    ):
+        """Report edits select report tests without scheduling model E2E."""
+        result = test_impact.analyze_impact(
+            [path],
+            imap,
+            coverage_map=coverage_map,
+        )
+
+        assert result.e2e_models == []
+        assert result.unit_tiers == ["tools"]
+        assert result.tools_tests == ["tests/tools/test_generate_report.py"]
         assert result.fallback_tiers == []
 
     @pytest.mark.parametrize("coverage_map", [None, {}])

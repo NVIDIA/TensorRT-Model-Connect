@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -13,6 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / ".github" / "scripts" / "run-model-proof.sh"
 IMAGE_ENSURE = REPO_ROOT / ".github" / "scripts" / "ensure-ci-docker-image.sh"
 PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "model-proof.yml"
+FALLBACK_WRITER = REPO_ROOT / ".github" / "scripts" / "write-model-proof-fallback-report.py"
 PLUGIN_CMAKE = REPO_ROOT / "cmake" / "trtmc_pipeline_plugins.cmake"
 
 
@@ -143,4 +147,147 @@ def test_model_proof_uses_a_dedicated_self_hosted_checkout() -> None:
 
     assert "path: model-proof-source" in checkout
     assert "clean: true" in checkout
-    assert workflow.count("working-directory: ${{ github.workspace }}/model-proof-source") == 2
+    assert workflow.count("working-directory: ${{ github.workspace }}/model-proof-source") == 4
+
+
+def test_model_proof_bootstraps_html_without_a_checkout_dependency() -> None:
+    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+    bootstrap = workflow.split(
+        "- name: Bootstrap model proof HTML before checkout", maxsplit=1
+    )[1].split("- name: Check out exact source revision", maxsplit=1)[0]
+    checkout_failure = workflow.split(
+        "- name: Finalize HTML when checkout fails", maxsplit=1
+    )[1].split("- name: Upload proof evidence", maxsplit=1)[0]
+
+    assert workflow.index("Bootstrap model proof HTML before checkout") < workflow.index(
+        "Check out exact source revision"
+    )
+    assert "model-proof-report.html" in bootstrap
+    assert "model-proof-status.json" in bootstrap
+    assert "working-directory:" not in bootstrap
+    assert ".github/scripts/" not in bootstrap
+    assert "steps.checkout.outcome != 'success'" in checkout_failure
+    assert "model-proof-report.html" in checkout_failure
+    assert "working-directory:" not in checkout_failure
+    assert ".github/scripts/" not in checkout_failure
+
+
+def test_model_proof_always_generates_a_strict_self_contained_html_report() -> None:
+    runner = RUNNER.read_text(encoding="utf-8")
+    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+
+    for contract in (
+        "trap 'finalize_model_report \"$?\"' EXIT",
+        "/src/scripts/generate_e2e_report.py",
+        "--artifacts-dir /artifacts/e2e",
+        "--output /artifacts/model-proof-report.html",
+        "--project-dir /src",
+        "--proof-status /artifacts/model-proof-status.json",
+        "--proof-json /artifacts/proof.json",
+        "--selection-json /artifacts/selection.json",
+        "--strict-evidence",
+        "--max-embed-bytes 33554432",
+        "--junitxml=/artifacts/e2e/junit.xml",
+        "generate_host_fallback_report",
+        'proof_artifacts_dir="$artifacts_dir"',
+        'die "model proof did not emit model-proof-report.html"',
+    ):
+        assert contract in runner
+
+    assert 'if [ "$validation_rc" -eq 0 ] && [ "$report_rc" -ne 0 ]; then' in runner
+    assert 'exit "$validation_rc"' in runner
+    assert 'payload["validation_exit_code"] = rc' in runner
+    assert 'payload["report_exit_code"] = report_rc' in runner
+    assert "Upload model proof HTML report" in workflow
+    assert "Bootstrap model proof HTML before checkout" in workflow
+    assert "Initialize model proof HTML fallback" in workflow
+    assert "Finalize model proof HTML fallback" in workflow
+    assert "Finalize HTML when checkout fails" in workflow
+    assert "ci-image.log" in workflow
+    assert "/artifacts/model-proof-report.html" in workflow
+    assert "if-no-files-found: error" in workflow
+
+
+def test_model_proof_report_assets_are_inside_the_positive_projection() -> None:
+    model_ci = (REPO_ROOT / "tools" / "model_ci.py").read_text(encoding="utf-8")
+
+    assert '"scripts/",' in model_ci
+    for path in (
+        REPO_ROOT / "scripts" / "generate_e2e_report.py",
+        REPO_ROOT / "scripts" / "generate_e2e_report_assets" / "e2e_report.css",
+        REPO_ROOT / "scripts" / "generate_e2e_report_assets" / "e2e_report.js",
+        REPO_ROOT / "scripts" / "reporting" / "vlm_assessment.py",
+    ):
+        assert path.is_file(), path
+
+
+def test_fallback_writer_embeds_host_diagnostics(tmp_path: Path) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "host-error.log").write_text(
+        "model-ci: error: unknown model <unsafe>\n",
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(FALLBACK_WRITER),
+            "--artifacts-dir", str(artifacts),
+            "--model", "missing-model",
+            "--revision", "a" * 40,
+            "--suite", "premerge",
+            "--outcome", "failed",
+            "--phase", "host-setup",
+            "--exit-code", "2",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = (artifacts / "model-proof-report.html").read_text(encoding="utf-8")
+    status = json.loads(
+        (artifacts / "model-proof-status.json").read_text(encoding="utf-8")
+    )
+    assert "host-error.log" in report
+    assert "unknown model &lt;unsafe&gt;" in report
+    assert status["outcome"] == "failed"
+    assert status["exit_code"] == 2
+
+
+def test_host_projection_failure_preserves_error_and_html(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
+    docker.chmod(0o755)
+    output = tmp_path / "proof"
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = subprocess.run(
+        [
+            "bash", str(RUNNER),
+            "--model", "model-that-does-not-exist",
+            "--revision", "HEAD",
+            "--output-dir", str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    artifacts = output / "artifacts"
+    report = (artifacts / "model-proof-report.html").read_text(encoding="utf-8")
+    status = json.loads(
+        (artifacts / "model-proof-status.json").read_text(encoding="utf-8")
+    )
+    assert "projection.stderr.log" in report
+    assert "unknown model" in report
+    assert status["outcome"] == "failed"
+    assert status["exit_code"] == result.returncode

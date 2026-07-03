@@ -84,6 +84,9 @@ summary:hover { background: #f8fafc; }
 .failure-info { color: #dc2626; margin-bottom: 8px; }
 .waive-info { color: #92400e; margin-bottom: 8px; }
 .summary-only-info { color: #475569; margin-bottom: 8px; }
+.oracle-context { margin-bottom: 10px; padding: 8px 10px; border-radius: 6px;
+  background: #eff6ff; color: #1e3a8a; }
+.oracle-invariant { background: #fff7ed; color: #9a3412; }
 .text-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
   margin: 8px 0; }
 .text-col pre { background: #f1f5f9; padding: 12px; border-radius: 6px;
@@ -111,6 +114,40 @@ summary:hover { background: #f8fafc; }
   border: 1px solid #e2e8f0; }
 .preview-img { max-width: 400px; max-height: 300px; border-radius: 6px;
   margin: 6px 0; border: 1px solid #e2e8f0; }
+.media-compare { display: grid; grid-template-columns: repeat(auto-fit,
+  minmax(280px, 1fr)); gap: 12px; margin: 8px 0; }
+.media-card { min-width: 0; padding: 12px; border: 1px solid #e2e8f0;
+  border-radius: 8px; background: #f8fafc; }
+.media-card audio { width: 100%; }
+.media-card .preview-img { display: block; max-width: 100%; margin: 6px auto; }
+.detection-compare { display: grid; grid-template-columns: repeat(auto-fit,
+  minmax(360px, 1fr)); gap: 12px; }
+.missing-media { border-color: #fca5a5; background: #fef2f2; }
+.media-filename { color: #64748b; font: 0.78em ui-monospace, SFMono-Regular,
+  Menlo, monospace; overflow-wrap: anywhere; }
+.proof-section, .evidence-ok, .evidence-fail { margin: 16px 0; padding: 14px;
+  border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; }
+.proof-section h2, .evidence-ok h2, .evidence-fail h2 { margin-top: 0; }
+.proof-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+.proof-table td { padding: 6px 10px; border-bottom: 1px solid #e2e8f0;
+  overflow-wrap: anywhere; }
+.proof-table td:first-child { width: 240px; color: #475569; font-weight: 600; }
+.proof-list { margin: 6px 0 6px 22px; }
+.diagnostic-log { margin: 0 12px 12px; padding: 12px; max-height: 420px;
+  overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  background: #111827; color: #e5e7eb; border-radius: 6px; font-size: 0.8em; }
+.evidence-ok { border-color: #86efac; background: #f0fdf4; }
+.evidence-fail { border-color: #fca5a5; background: #fef2f2; }
+.evidence-fail ul { margin: 8px 0 0 22px; }
+.series-plot { border: 1px solid #e2e8f0; border-radius: 8px;
+  padding: 8px; background: #fff; }
+.series-plot svg { display: block; width: 100%; max-height: 320px; }
+.structured-input { padding: 12px; max-height: 320px; overflow: auto;
+  white-space: pre-wrap; background: #f1f5f9; border-radius: 6px;
+  font-size: 0.85em; }
+.plot-legend { display: flex; gap: 18px; margin-top: 6px; }
+.legend-trt { color: #dc2626; font-weight: 600; }
+.legend-ref { color: #2563eb; font-weight: 600; }
 .vlm-assessment { margin: 12px 0; padding: 10px; border: 1px solid #e2e8f0;
   border-radius: 6px; background: #f8fafc; }
 .vlm-pass { color: #166534; }

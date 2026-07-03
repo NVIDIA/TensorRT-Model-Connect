@@ -1745,6 +1745,21 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestUnitTiers.test_family_ownership_tools",),
         ),
         ClassificationRule(
+            priority=449,
+            name="e2e_report_tool",
+            matcher=_path_in({
+                "scripts/generate_e2e_report.py",
+                "scripts/generate_e2e_report_assets/e2e_report.css",
+                "scripts/generate_e2e_report_assets/e2e_report.js",
+                "scripts/reporting/__init__.py",
+                "scripts/reporting/vlm_assessment.py",
+            }),
+            resolver=_match_result(
+                "e2e_report_tool", _no_models, ["tools"], False,
+            ),
+            covered_by=("TestUnitTiers.test_e2e_report_tools",),
+        ),
+        ClassificationRule(
             priority=450,
             name="local_qwen3_hf_fixture",
             matcher=_regex_rule(r"models/hf/(?:Qwen__Qwen3-0\.6B|qwen3)(?:/.*)?$"),
@@ -1778,6 +1793,15 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_path_in_impact_map(lambda imap: imap.e2e_data_file_to_models),
             resolver=_match_result("e2e_data_file", _e2e_data_file_models),
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
+        ),
+        ClassificationRule(
+            priority=485,
+            name="model_ci_tool",
+            matcher=_path_equals("tools/model_ci.py"),
+            resolver=_match_result(
+                "model_ci_tool", _no_models, ["tools"], False,
+            ),
+            covered_by=("TestUnitTiers.test_model_ci_tool",),
         ),
         ClassificationRule(
             priority=486,
@@ -1869,6 +1893,24 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
 
 
 _EXPLICIT_TOOLS_TEST_TARGETS = {
+    "tools/model_ci.py": (
+        "tests/tools/test_model_ci.py",
+    ),
+    "scripts/generate_e2e_report.py": (
+        "tests/tools/test_generate_report.py",
+    ),
+    "scripts/generate_e2e_report_assets/e2e_report.css": (
+        "tests/tools/test_generate_report.py",
+    ),
+    "scripts/generate_e2e_report_assets/e2e_report.js": (
+        "tests/tools/test_generate_report.py",
+    ),
+    "scripts/reporting/__init__.py": (
+        "tests/tools/test_generate_report.py",
+    ),
+    "scripts/reporting/vlm_assessment.py": (
+        "tests/tools/test_generate_report.py",
+    ),
     "scripts/run_e2e_parallel.sh": (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_schedule_e2e.py",

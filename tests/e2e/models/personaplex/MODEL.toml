@@ -17,5 +17,6 @@ stages = [
 ]
 input_fields = [
   { input = "audio", manifest = "test_input_audio" },
+  { input = "speech_reference_tokens", manifest = "speech_reference_tokens" },
 ]
 preflight_asset_fields = ["test_input_audio", "speech_reference_tokens"]

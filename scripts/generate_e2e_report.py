@@ -30,7 +30,10 @@ import xml.etree.ElementTree as ET
 
 from reporting.vlm_assessment import render_diffusion_vlm_assessment as _render_diffusion_vlm_assessment
 
-# Maximum file size to embed inline (10 MB).
+# Maximum file size to embed inline (10 MB).  A value of zero disables the
+# limit.  Model-proof CI raises this to a bounded 32 MiB per evidence file so
+# its portable report can retain normal audio/video artifacts without allowing
+# an unbounded, PR-controlled HTML artifact.
 _MAX_EMBED_BYTES = 10 * 1024 * 1024
 
 # Number of evenly-spaced frames to embed for diffusion models.
@@ -76,6 +79,7 @@ _BUNDLE_GROUP_PREFIX = "bundle:"
 
 _TASK_STRATEGY_TO_MODALITY = {
     "text_generation_causal": "text",
+    "diffusion_text_generation": "diffusion_text",
     "vision_language_generation": "vl",
     "diffusion_media_generation": "diffusion",
     "text_to_audio": "audio",
@@ -83,9 +87,15 @@ _TASK_STRATEGY_TO_MODALITY = {
     "speech_to_speech": "audio",
     "segmentation": "segmentation",
     "prompted_segmentation": "segmentation",
-    "encoder_only_nlp": "generic",
-    "embedding": "generic",
-    "reranking": "generic",
+    "image_classification": "classification",
+    "encoder_only_nlp": "numeric",
+    "embedding": "numeric",
+    "reranking": "reranking",
+    "neural_operator": "neural_operator",
+    "omni_multimodal": "omni",
+    # Kept explicit for forward-compatible manifests.  Unknown strategies
+    # still receive the structured TRT/reference fallback renderer.
+    "object_detection": "detection",
 }
 
 
@@ -332,13 +342,48 @@ def _attach_diffusion_vlm_assessments(
 
 def encode_file_base64(path: Path, mime: str) -> Optional[str]:
     """Return a ``data:`` URI for *path*, or ``None`` if too large / missing."""
-    if not path.is_file():
+    if not _valid_media_file(path):
         return None
-    if path.stat().st_size > _MAX_EMBED_BYTES:
+    if _MAX_EMBED_BYTES > 0 and path.stat().st_size > _MAX_EMBED_BYTES:
         return None
     raw = path.read_bytes()
     b64 = base64.b64encode(raw).decode("ascii")
     return f"data:{mime};base64,{b64}"
+
+
+def _valid_media_file(path: Path) -> bool:
+    """Reject empty/corrupt media before claiming it is embedded evidence."""
+    if not path.is_file():
+        return False
+    try:
+        size = path.stat().st_size
+        if size <= 0:
+            return False
+        with path.open("rb") as stream:
+            header = stream.read(16)
+            trailer = b""
+            if size >= 2:
+                stream.seek(-2, 2)
+                trailer = stream.read(2)
+    except OSError:
+        return False
+    ext = path.suffix.lower()
+    validators = {
+        ".png": header.startswith(b"\x89PNG\r\n\x1a\n"),
+        ".jpg": header.startswith(b"\xff\xd8") and trailer == b"\xff\xd9",
+        ".jpeg": header.startswith(b"\xff\xd8") and trailer == b"\xff\xd9",
+        ".gif": header.startswith((b"GIF87a", b"GIF89a")),
+        ".webp": header.startswith(b"RIFF") and header[8:12] == b"WEBP",
+        ".wav": header.startswith(b"RIFF") and header[8:12] == b"WAVE",
+        ".flac": header.startswith(b"fLaC"),
+        ".ogg": header.startswith(b"OggS"),
+        ".mp3": header.startswith(b"ID3") or (
+            len(header) >= 2 and header[0] == 0xFF and header[1] & 0xE0 == 0xE0
+        ),
+        ".mp4": len(header) >= 12 and header[4:8] == b"ftyp",
+        ".webm": header.startswith(b"\x1aE\xdf\xa3"),
+    }
+    return validators.get(ext, False)
 
 
 def _mime_for_ext(ext: str) -> str:
@@ -346,9 +391,62 @@ def _mime_for_ext(ext: str) -> str:
         ".png": "image/png",
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
         ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
         ".gif": "image/gif",
     }.get(ext.lower(), "application/octet-stream")
+
+
+def _path_within(path: Path, root: Path) -> Optional[Path]:
+    """Resolve *path* and return it only when it is a regular file below *root*.
+
+    E2E result files are produced by code from the pull request.  Treat their
+    path fields as untrusted: without this boundary a crafted result could
+    cause the report to embed an HF cache file or another host-mounted file.
+    Resolving both paths also rejects symlink escapes.
+    """
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (FileNotFoundError, OSError, RuntimeError, ValueError):
+        return None
+    return resolved if resolved.is_file() else None
+
+
+def _resolve_input_media(ref: Any, project_dir: Optional[Path]) -> Optional[Path]:
+    """Resolve a manifest-owned input file below the projected source tree."""
+    if not isinstance(ref, (str, Path)) or not str(ref) or project_dir is None:
+        return None
+    raw = Path(str(ref))
+    candidate = raw if raw.is_absolute() else project_dir / raw
+    return _path_within(candidate, project_dir)
+
+
+def _resolve_artifact_media(ref: Any, art_dir: Path) -> Optional[Path]:
+    """Resolve a generated artifact below the E2E artifact root."""
+    if not isinstance(ref, (str, Path)) or not str(ref):
+        return None
+    raw = Path(str(ref))
+    candidate = raw if raw.is_absolute() else art_dir / raw
+    return _path_within(candidate, art_dir)
+
+
+def _first_existing_media(
+    refs: Any,
+    art_dir: Path,
+) -> Optional[Path]:
+    values = refs if isinstance(refs, list) else [refs]
+    for ref in values:
+        path = _resolve_artifact_media(ref, art_dir)
+        if path is not None:
+            return path
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +508,16 @@ def _list_frames_in_dir(dir_path: Path) -> List[Path]:
     return files
 
 
+def _directory_within(path: Path, root: Path) -> Optional[Path]:
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (FileNotFoundError, OSError, RuntimeError, ValueError):
+        return None
+    return resolved if resolved.is_dir() else None
+
+
 def _resolve_frame_paths(
     frame_refs: Any,
     art_dir: Path,
@@ -423,19 +531,34 @@ def _resolve_frame_paths(
         refs = [str(ref) for ref in frame_refs if ref]
 
     frame_paths: List[Path] = []
+    artifact_root = art_dir
     for ref in refs:
-        p = Path(ref)
-        if not p.is_absolute():
-            p = art_dir / ref
-        if p.is_dir():
-            frame_paths.extend(_list_frames_in_dir(p))
-        elif p.is_file():
-            frame_paths.append(p)
+        raw = Path(ref)
+        candidate = raw if raw.is_absolute() else art_dir / raw
+        safe_dir = _directory_within(candidate, artifact_root)
+        if safe_dir is not None:
+            for child in _list_frames_in_dir(safe_dir):
+                safe_child = _path_within(child, artifact_root)
+                if safe_child is not None and safe_child.suffix.lower() in {
+                    ".png", ".jpg", ".jpeg", ".webp", ".gif"
+                }:
+                    frame_paths.append(safe_child)
+            continue
+        safe_file = _path_within(candidate, artifact_root)
+        if safe_file is not None and safe_file.suffix.lower() in {
+            ".png", ".jpg", ".jpeg", ".webp", ".gif"
+        }:
+            frame_paths.append(safe_file)
 
     if not frame_paths:
-        fallback_dir = art_dir / fallback_dir_name
-        if fallback_dir.is_dir():
-            frame_paths = _list_frames_in_dir(fallback_dir)
+        fallback_dir = _directory_within(art_dir / fallback_dir_name, artifact_root)
+        if fallback_dir is not None:
+            for child in _list_frames_in_dir(fallback_dir):
+                safe_child = _path_within(child, artifact_root)
+                if safe_child is not None and safe_child.suffix.lower() in {
+                    ".png", ".jpg", ".jpeg", ".webp", ".gif"
+                }:
+                    frame_paths.append(safe_child)
 
     # De-duplicate while preserving order.
     deduped: List[Path] = []
@@ -558,20 +681,12 @@ def _timing_label_key(label: str) -> str:
 def _read_stage_log(ref: Any, art_dir: Path) -> str:
     if not isinstance(ref, str) or not ref:
         return ""
-    raw_path = Path(ref)
-    candidates = [raw_path]
-    if not raw_path.is_absolute():
-        candidates.extend([
-            art_dir / raw_path,
-            art_dir / raw_path.name,
-            art_dir.parent / raw_path.name,
-        ])
-    for path in candidates:
-        if path.is_file():
-            try:
-                return path.read_text(errors="replace")
-            except OSError:
-                return ""
+    path = _resolve_artifact_media(ref, art_dir)
+    if path is not None:
+        try:
+            return path.read_text(errors="replace")
+        except OSError:
+            return ""
     return ""
 
 
@@ -1118,6 +1233,184 @@ def _get_stage_text(stage_outputs: Dict[str, Any], prefix: str) -> Optional[str]
     return None
 
 
+def _stage_pairs(result: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Group serialized stage outputs into TRT/reference pairs by stage name."""
+    pairs: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for key, value in (result.get("stage_outputs") or {}).items():
+        if not isinstance(value, dict):
+            continue
+        for prefix in ("trt", "ref"):
+            marker = f"{prefix}_"
+            if str(key).startswith(marker):
+                pairs.setdefault(str(key)[len(marker):], {})[prefix] = value
+                break
+    return pairs
+
+
+def _walk_named_values(value: Any, names: set[str]) -> List[Any]:
+    found: List[Any] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key in names:
+                found.append(child)
+            if isinstance(child, (dict, list)):
+                found.extend(_walk_named_values(child, names))
+    elif isinstance(value, list):
+        for child in value:
+            if isinstance(child, (dict, list)):
+                found.extend(_walk_named_values(child, names))
+    return found
+
+
+def _find_output_media(
+    result: Dict[str, Any],
+    prefix: str,
+    artifact_names: Tuple[str, ...],
+    stage_names: Tuple[str, ...],
+) -> Optional[Path]:
+    """Find the first safe media path registered or persisted by a stage."""
+    paths = _find_output_media_all(
+        result, prefix, artifact_names, stage_names)
+    return paths[0] if paths else None
+
+
+def _find_output_media_all(
+    result: Dict[str, Any],
+    prefix: str,
+    artifact_names: Tuple[str, ...],
+    stage_names: Tuple[str, ...],
+    suffixes: Optional[set[str]] = None,
+) -> List[Path]:
+    """Find all safe, de-duplicated media paths for one output side."""
+    art_dir = Path(result.get("_artifact_dir") or ".")
+    artifacts = result.get("artifacts") or {}
+    found: List[Path] = []
+
+    def append(path: Optional[Path]) -> None:
+        if path is None:
+            return
+        if suffixes is not None and path.suffix.lower() not in suffixes:
+            return
+        if path not in found:
+            found.append(path)
+
+    for name in artifact_names:
+        refs = artifacts.get(f"{prefix}_{name}")
+        values = refs if isinstance(refs, list) else [refs]
+        for ref in values:
+            append(_resolve_artifact_media(ref, art_dir))
+
+    for key, stage in (result.get("stage_outputs") or {}).items():
+        if not str(key).startswith(f"{prefix}_") or not isinstance(stage, dict):
+            continue
+        for ref in _walk_named_values(stage, set(stage_names)):
+            values = ref if isinstance(ref, list) else [ref]
+            for value in values:
+                append(_resolve_artifact_media(value, art_dir))
+    return found
+
+
+def _input_ref(inputs: Dict[str, Any], names: Tuple[str, ...]) -> Any:
+    for name in names:
+        value = inputs.get(name)
+        if value:
+            return value
+    return None
+
+
+def _render_audio_player(title: str, path: Optional[Path]) -> str:
+    if path is None:
+        return (
+            '<div class="media-card missing-media">'
+            f"<h4>{_esc(title)}</h4>"
+            '<p class="missing">Required audio file is unavailable.</p></div>'
+        )
+    uri = encode_file_base64(path, _mime_for_ext(path.suffix))
+    if uri is None:
+        return (
+            '<div class="media-card missing-media">'
+            f"<h4>{_esc(title)}</h4>"
+            f'<p class="missing">Audio could not be embedded: {_esc(path.name)}</p></div>'
+        )
+    return (
+        '<div class="media-card">'
+        f"<h4>{_esc(title)}</h4>"
+        f'<audio controls preload="metadata" src="{uri}"></audio>'
+        f'<p class="media-filename">{_esc(path.name)}</p></div>'
+    )
+
+
+def _render_image_card(title: str, path: Optional[Path]) -> str:
+    if path is None:
+        return (
+            '<div class="media-card missing-media">'
+            f"<h4>{_esc(title)}</h4>"
+            '<p class="missing">Required image is unavailable.</p></div>'
+        )
+    uri = encode_file_base64(path, _mime_for_ext(path.suffix))
+    if uri is None:
+        return (
+            '<div class="media-card missing-media">'
+            f"<h4>{_esc(title)}</h4>"
+            f'<p class="missing">Image could not be embedded: {_esc(path.name)}</p></div>'
+        )
+    return (
+        '<div class="media-card">'
+        f"<h4>{_esc(title)}</h4>"
+        f'<img src="{uri}" class="preview-img" alt="{_esc(title)}" />'
+        f'<p class="media-filename">{_esc(path.name)}</p></div>'
+    )
+
+
+def _compact_data(value: Any, list_limit: int = 24, depth: int = 0) -> Any:
+    """Return a deterministic, bounded representation for structured output."""
+    if depth >= 5:
+        return "<nested value omitted>"
+    if isinstance(value, dict):
+        return {
+            str(key): _compact_data(child, list_limit, depth + 1)
+            for key, child in sorted(value.items(), key=lambda item: str(item[0]))
+            if key not in {"stderr", "stdout", "audio_samples"}
+        }
+    if isinstance(value, list):
+        compact = [_compact_data(child, list_limit, depth + 1) for child in value[:list_limit]]
+        if len(value) > list_limit:
+            compact.append(f"<... {len(value) - list_limit} more values>")
+        return compact
+    if isinstance(value, str) and len(value) > 1000:
+        return value[:1000] + f"\n<... {len(value) - 1000} more characters>"
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _structured_text(stage: Optional[Dict[str, Any]]) -> str:
+    if not stage:
+        return "(unavailable)"
+    payload: Dict[str, Any] = {}
+    if stage.get("text") not in (None, ""):
+        payload["text"] = stage.get("text")
+    data = stage.get("data")
+    if data not in (None, {}, []):
+        payload["data"] = data
+    if not payload:
+        payload["metadata"] = stage.get("metadata") or {}
+    return json.dumps(_compact_data(payload), indent=2, ensure_ascii=False)
+
+
+def _render_structured_stage_comparison(result: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    for stage_name, pair in _stage_pairs(result).items():
+        parts.append(f"<h4>Stage: {_esc(stage_name)}</h4>")
+        parts.append(_render_text_comparison(
+            _structured_text(pair.get("trt")),
+            _structured_text(pair.get("ref")),
+        ))
+    if not parts:
+        return '<p class="missing">No serialized stage outputs were recorded.</p>'
+    return "\n".join(parts)
+
+
 def _flatten_numeric_preview(value: Any, limit: int = 16) -> Tuple[List[float], int, float]:
     """Return the first numeric leaves, total numeric leaf count, and L2 sum."""
     preview: List[float] = []
@@ -1184,6 +1477,36 @@ def render_text_model(result: Dict[str, Any]) -> str:
     if prompt:
         parts.append(f"<p><strong>Prompt:</strong> {_esc(prompt)}</p>")
     parts.append(_render_text_comparison(trt_text, ref_text))
+    if trt_text is None or ref_text is None:
+        parts.append(_render_structured_stage_comparison(result))
+    parts.append(_render_metrics_table(result.get("stages", {})))
+    parts.append(_render_repro_commands(result.get("repro_commands", {})))
+    parts.append(_render_timing_sections(result))
+    return "\n".join(parts)
+
+
+def render_diffusion_text_model(result: Dict[str, Any]) -> str:
+    """Render non-autoregressive text samples and their configured reference."""
+    cc = result.get("case_config") or {}
+    inputs = cc.get("inputs") or {}
+    stage_outputs = result.get("stage_outputs") or {}
+    trt_text = _get_stage_text(stage_outputs, "trt_")
+    ref_text = _get_stage_text(stage_outputs, "ref_")
+    parts = []
+    for label, names in (
+        ("Prompt", ("prompt",)),
+        ("Source text", ("source_text", "condition_text")),
+        ("Generation mode", ("generation_mode", "sampling_method")),
+        ("Samples", ("num_samples",)),
+        ("Diffusion steps", ("num_steps", "num_sampling_steps", "steps")),
+        ("Seed", ("seed",)),
+    ):
+        value = _input_ref(inputs, names)
+        if value not in (None, ""):
+            parts.append(f"<p><strong>{_esc(label)}:</strong> {_esc(value)}</p>")
+    parts.append(_render_text_comparison(trt_text, ref_text))
+    parts.append("<h4>Generated and Expected Samples</h4>")
+    parts.append(_render_structured_stage_comparison(result))
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
     parts.append(_render_timing_sections(result))
@@ -1204,16 +1527,11 @@ def render_vl_model(result: Dict[str, Any], project_dir: Optional[Path]) -> str:
     parts = []
 
     # Embed input image
-    if image_rel and project_dir:
-        img_path = project_dir / image_rel
-        uri = encode_file_base64(img_path, _mime_for_ext(img_path.suffix))
-        if uri:
-            parts.append(
-                f'<p><strong>Input Image:</strong></p>'
-                f'<img src="{uri}" class="preview-img" />'
-            )
-        else:
-            parts.append(f"<p><em>Image not found: {_esc(image_rel)}</em></p>")
+    if image_rel:
+        parts.append('<div class="media-compare">')
+        parts.append(_render_image_card(
+            "Input Image", _resolve_input_media(image_rel, project_dir)))
+        parts.append("</div>")
 
     if prompt:
         parts.append(f"<p><strong>Prompt:</strong> {_esc(prompt)}</p>")
@@ -1224,12 +1542,28 @@ def render_vl_model(result: Dict[str, Any], project_dir: Optional[Path]) -> str:
     return "\n".join(parts)
 
 
-def render_diffusion_model(result: Dict[str, Any]) -> str:
+def render_diffusion_model(
+    result: Dict[str, Any], project_dir: Optional[Path] = None
+) -> str:
     """Render detail section for a diffusion model."""
     art_dir = Path(result.get("_artifact_dir", ""))
     artifacts = result.get("artifacts", {})
+    inputs = (result.get("case_config") or {}).get("inputs") or {}
 
     parts = []
+
+    prompt = inputs.get("prompt") or ""
+    if prompt:
+        parts.append(f"<p><strong>Prompt:</strong> {_esc(prompt)}</p>")
+    condition_image = _input_ref(
+        inputs, ("image", "image_path", "input_image", "conditioning_image"))
+    if condition_image:
+        parts.append('<div class="media-compare">')
+        parts.append(_render_image_card(
+            "Conditioning Image",
+            _resolve_input_media(condition_image, project_dir),
+        ))
+        parts.append("</div>")
 
     # TRT frames gallery
     trt_frame_paths = _resolve_frame_paths(
@@ -1249,25 +1583,41 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
         selected_trt = _select_frames(trt_frame_paths, _MAX_DIFFUSION_FRAMES)
         selected_ref = _select_frames(ref_frame_paths, _MAX_DIFFUSION_FRAMES)
         parts.append("<h4>Visual Review: TRT vs Reference</h4>")
+        parts.append(
+            f"<p>TRT / Base frames: {len(trt_frame_paths)}; "
+            f"Reference frames: {len(ref_frame_paths)}; "
+            f"showing up to {_MAX_DIFFUSION_FRAMES} evenly spaced frames per side.</p>"
+        )
         parts.append('<div class="frame-compare">')
-        for idx, (trt_fp, ref_fp) in enumerate(zip(selected_trt, selected_ref)):
-            trt_uri = encode_file_base64(trt_fp, "image/png")
-            ref_uri = encode_file_base64(ref_fp, "image/png")
+        for idx in range(max(len(selected_trt), len(selected_ref))):
+            trt_fp = selected_trt[idx] if idx < len(selected_trt) else None
+            ref_fp = selected_ref[idx] if idx < len(selected_ref) else None
+            trt_uri = (
+                encode_file_base64(trt_fp, _mime_for_ext(trt_fp.suffix))
+                if trt_fp is not None else None
+            )
+            ref_uri = (
+                encode_file_base64(ref_fp, _mime_for_ext(ref_fp.suffix))
+                if ref_fp is not None else None
+            )
             parts.append('<div class="frame-pair">')
-            parts.append(f'<div class="frame-pair-title">Frame {idx + 1}</div>')
+            labels = " / ".join(
+                path.name for path in (trt_fp, ref_fp) if path is not None)
+            parts.append(
+                f'<div class="frame-pair-title">Sample {idx + 1}: {_esc(labels)}</div>')
             parts.append('<div class="frame-pair-images">')
             if trt_uri:
                 parts.append(
-                    '<figure><figcaption>TRT</figcaption>'
-                    f'<img src="{trt_uri}" class="frame-img" /></figure>')
+                    '<figure><figcaption>TRT / Base</figcaption>'
+                    f'<img src="{trt_uri}" class="frame-img" alt="TRT frame" /></figure>')
             else:
-                parts.append("<span class='missing'>TRT frame too large</span>")
+                parts.append("<span class='missing'>TRT frame unavailable or too large</span>")
             if ref_uri:
                 parts.append(
                     '<figure><figcaption>Reference</figcaption>'
-                    f'<img src="{ref_uri}" class="frame-img" /></figure>')
+                    f'<img src="{ref_uri}" class="frame-img" alt="Reference frame" /></figure>')
             else:
-                parts.append("<span class='missing'>Reference frame too large</span>")
+                parts.append("<span class='missing'>Reference frame unavailable or too large</span>")
             parts.append("</div></div>")
         parts.append("</div>")
     elif trt_frame_paths:
@@ -1275,9 +1625,9 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
         parts.append("<h4>TRT Generated Frames</h4>")
         parts.append('<div class="frame-gallery">')
         for fp in selected:
-            uri = encode_file_base64(fp, "image/png")
+            uri = encode_file_base64(fp, _mime_for_ext(fp.suffix))
             if uri:
-                parts.append(f'<img src="{uri}" class="frame-img" />')
+                parts.append(f'<img src="{uri}" class="frame-img" alt="TRT frame" />')
             else:
                 parts.append("<span class='missing'>Frame too large</span>")
         parts.append("</div>")
@@ -1286,9 +1636,9 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
         parts.append("<h4>Reference Frames</h4>")
         parts.append('<div class="frame-gallery">')
         for fp in selected_ref:
-            uri = encode_file_base64(fp, "image/png")
+            uri = encode_file_base64(fp, _mime_for_ext(fp.suffix))
             if uri:
-                parts.append(f'<img src="{uri}" class="frame-img" />')
+                parts.append(f'<img src="{uri}" class="frame-img" alt="Reference frame" />')
         parts.append("</div>")
 
     parts.append(_render_diffusion_vlm_assessment(result))
@@ -1362,49 +1712,80 @@ def _render_missing_reference_audio_notice(stage_outputs: Dict[str, Any]) -> str
     return ""
 
 
-def render_audio_model(result: Dict[str, Any]) -> str:
+def render_audio_model(
+    result: Dict[str, Any], project_dir: Optional[Path] = None
+) -> str:
     """Render detail section for an audio model."""
-    art_dir = Path(result.get("_artifact_dir", ""))
-    artifacts = result.get("artifacts", {})
     stage_outputs = result.get("stage_outputs", {})
     cc = result.get("case_config", {})
     task_strategy = cc.get("task_strategy", "")
+    inputs = cc.get("inputs") or {}
 
     parts = []
+
+    prompt = inputs.get("prompt") or ""
+    if prompt:
+        parts.append(f"<p><strong>Prompt:</strong> {_esc(prompt)}</p>")
+
+    input_audio_ref = _input_ref(
+        inputs, ("audio", "audio_path", "input_audio", "input_audio_path"))
+    if input_audio_ref:
+        input_audio = _resolve_input_media(input_audio_ref, project_dir)
+        parts.append('<div class="media-compare">')
+        parts.append(_render_audio_player("Input / Source Audio", input_audio))
+        parts.append("</div>")
 
     # For speech_to_text, show transcript comparison
     if task_strategy == "speech_to_text":
         trt_text = _get_stage_text(stage_outputs, "trt_")
         ref_text = _get_stage_text(stage_outputs, "ref_")
-        if trt_text or ref_text:
+        if trt_text is not None or ref_text is not None:
             parts.append("<h4>Transcript Comparison</h4>")
             parts.append(_render_text_comparison(trt_text, ref_text))
 
-    # Embed TRT audio
-    trt_wav = artifacts.get("trt_wav", "")
-    if trt_wav:
-        wav_path = art_dir / trt_wav
-        uri = encode_file_base64(wav_path, "audio/wav")
-        if uri:
-            parts.append("<h4>TRT Audio</h4>")
-            parts.append(f'<audio controls src="{uri}"></audio>')
-        else:
-            parts.append("<p><em>TRT WAV not found or too large.</em></p>")
+    if task_strategy in {"text_to_audio", "speech_to_speech"}:
+        trt_wav = _find_output_media(
+            result, "trt", ("wav", "audio"),
+            ("wav_path", "audio_output_path"))
+        ref_wav = _find_output_media(
+            result, "ref", ("wav", "audio"),
+            ("wav_path", "audio_output_path"))
+        parts.append("<h4>Audio Comparison</h4>")
+        parts.append('<div class="media-compare">')
+        parts.append(_render_audio_player("TRT / Base Audio", trt_wav))
+        parts.append(_render_audio_player("Reference Audio", ref_wav))
+        parts.append("</div>")
+        if ref_wav is None:
+            notice = _render_missing_reference_audio_notice(stage_outputs)
+            if notice:
+                parts.append(notice)
+            parts.append("<h4>Configured Reference Evidence</h4>")
+            parts.append(_render_structured_stage_comparison(result))
 
-    # Embed reference audio
-    ref_wav = artifacts.get("ref_wav", "")
-    if ref_wav:
-        wav_path = art_dir / ref_wav
-        uri = encode_file_base64(wav_path, "audio/wav")
-        if uri:
-            parts.append("<h4>Reference Audio</h4>")
-            parts.append(f'<audio controls src="{uri}"></audio>')
-        else:
-            parts.append("<p><em>Reference WAV not found or too large.</em></p>")
-    elif task_strategy == "text_to_audio":
-        notice = _render_missing_reference_audio_notice(stage_outputs)
-        if notice:
-            parts.append(notice)
+        trt_data = _first_stage_data(result, "trt")
+        ref_data = _first_stage_data(result, "ref")
+        metadata_rows = []
+        for label, key in (
+            ("Duration (seconds)", "duration_s"),
+            ("Sample rate", "sample_rate"),
+            ("Samples", "num_samples"),
+            ("RMS", "rms"),
+            ("Reference frames", "num_frames"),
+            ("Reference token shape", "token_shape"),
+        ):
+            if key not in trt_data and key not in ref_data:
+                continue
+            metadata_rows.append(
+                f"<tr><td>{_esc(label)}</td><td>{_format_value(trt_data.get(key))}</td>"
+                f"<td>{_format_value(ref_data.get(key))}</td></tr>"
+            )
+        if metadata_rows:
+            parts.append("<h4>Audio Metadata</h4>")
+            parts.append(
+                '<table class="metrics-table"><thead><tr><th>Field</th>'
+                '<th>TRT / Base</th><th>Reference</th></tr></thead><tbody>'
+                + "".join(metadata_rows) + "</tbody></table>"
+            )
 
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
@@ -1416,8 +1797,6 @@ def render_segmentation_model(
     result: Dict[str, Any], project_dir: Optional[Path]
 ) -> str:
     """Render detail section for a segmentation model."""
-    art_dir = Path(result.get("_artifact_dir", ""))
-    artifacts = result.get("artifacts", {})
     cc = result.get("case_config", {})
     inputs = cc.get("inputs") or {}
     image_rel = inputs.get("image", "")
@@ -1426,50 +1805,44 @@ def render_segmentation_model(
     parts = []
 
     # Input image
-    if image_rel and project_dir:
-        img_path = project_dir / image_rel
-        uri = encode_file_base64(img_path, _mime_for_ext(img_path.suffix))
-        if uri:
-            parts.append(
-                f'<p><strong>Input Image:</strong></p>'
-                f'<img src="{uri}" class="preview-img" />'
-            )
+    if image_rel:
+        parts.append('<div class="media-compare">')
+        parts.append(_render_image_card(
+            "Input Image", _resolve_input_media(image_rel, project_dir)))
+        parts.append("</div>")
 
     if prompt:
         parts.append(f"<p><strong>Prompt:</strong> {_esc(prompt)}</p>")
+    if "point_x" in inputs or "point_y" in inputs:
+        parts.append(
+            "<p><strong>Point prompt:</strong> "
+            f"x={_esc(inputs.get('point_x', ''))}, "
+            f"y={_esc(inputs.get('point_y', ''))}, "
+            f"foreground={_esc(inputs.get('is_foreground', True))}</p>"
+        )
 
-    segmented_image = artifacts.get("trt_segmented_image", "")
-    if segmented_image:
-        seg_path = art_dir / segmented_image
-        uri = encode_file_base64(seg_path, "image/png")
-        if uri:
-            parts.append("<h4>TRT Segmented Image</h4>")
-            parts.append(f'<img src="{uri}" class="preview-img" />')
-
-    ref_segmented_image = artifacts.get("ref_segmented_image", "")
-    if ref_segmented_image:
-        seg_path = art_dir / ref_segmented_image
-        uri = encode_file_base64(seg_path, "image/png")
-        if uri:
-            parts.append("<h4>Reference Segmented Image</h4>")
-            parts.append(f'<img src="{uri}" class="preview-img" />')
-
-    # Segmentation map
-    seg_map = artifacts.get("trt_segmentation_map", "") or artifacts.get("trt_output", "")
-    if seg_map:
-        seg_path = art_dir / seg_map
-        uri = encode_file_base64(seg_path, "image/png")
-        if uri:
-            parts.append("<h4>TRT Segmentation Map</h4>")
-            parts.append(f'<img src="{uri}" class="preview-img" />')
-
-    ref_seg_map = artifacts.get("ref_segmentation_map", "")
-    if ref_seg_map:
-        seg_path = art_dir / ref_seg_map
-        uri = encode_file_base64(seg_path, "image/png")
-        if uri:
-            parts.append("<h4>Reference Segmentation Map</h4>")
-            parts.append(f'<img src="{uri}" class="preview-img" />')
+    image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    trt_visuals = _find_output_media_all(
+        result, "trt", ("segmented_image", "segmentation_map", "output"),
+        ("segmented_image_path", "segmentation_map_path", "viz_path", "output_path"),
+        image_suffixes)
+    ref_visuals = _find_output_media_all(
+        result, "ref", ("segmented_image", "segmentation_map", "output"),
+        ("segmented_image_path", "segmentation_map_path", "viz_path", "output_path"),
+        image_suffixes)
+    parts.append("<h4>Segmentation Comparison</h4>")
+    parts.append('<div class="media-compare">')
+    if not trt_visuals:
+        parts.append(_render_image_card("TRT / Base Segmentation", None))
+    for index, path in enumerate(trt_visuals, 1):
+        suffix = f" {index}" if len(trt_visuals) > 1 else ""
+        parts.append(_render_image_card(f"TRT / Base Segmentation{suffix}", path))
+    if not ref_visuals:
+        parts.append(_render_image_card("Reference Segmentation", None))
+    for index, path in enumerate(ref_visuals, 1):
+        suffix = f" {index}" if len(ref_visuals) > 1 else ""
+        parts.append(_render_image_card(f"Reference Segmentation{suffix}", path))
+    parts.append("</div>")
 
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
@@ -1477,8 +1850,295 @@ def render_segmentation_model(
     return "\n".join(parts)
 
 
+def _first_stage_data(
+    result: Dict[str, Any], prefix: str
+) -> Dict[str, Any]:
+    for key, value in (result.get("stage_outputs") or {}).items():
+        if str(key).startswith(f"{prefix}_") and isinstance(value, dict):
+            data = value.get("data")
+            if isinstance(data, dict):
+                return data
+    return {}
+
+
+def _first_stage_value(
+    result: Dict[str, Any], prefix: str, names: Tuple[str, ...]
+) -> Any:
+    for pair in _stage_pairs(result).values():
+        stage = pair.get(prefix)
+        if not stage:
+            continue
+        data = stage.get("data") or {}
+        for name in names:
+            if name in data:
+                return data[name]
+    return None
+
+
+def render_classification_model(
+    result: Dict[str, Any], project_dir: Optional[Path]
+) -> str:
+    cc = result.get("case_config") or {}
+    inputs = cc.get("inputs") or {}
+    image_ref = _input_ref(inputs, ("image", "image_path", "input_image"))
+    trt = _first_stage_data(result, "trt")
+    ref = _first_stage_data(result, "ref")
+    parts = ['<div class="media-compare">']
+    parts.append(_render_image_card(
+        "Classification Input", _resolve_input_media(image_ref, project_dir)))
+    parts.append("</div>")
+    parts.append("<h4>Prediction Comparison</h4>")
+    rows = []
+    for label, key in (
+        ("Top class", "top_class"),
+        ("Top score", "top_score"),
+        ("Number of classes", "num_classes"),
+    ):
+        rows.append(
+            f"<tr><td>{_esc(label)}</td><td>{_format_value(trt.get(key))}</td>"
+            f"<td>{_format_value(ref.get(key))}</td></tr>"
+        )
+    parts.append(
+        '<table class="metrics-table"><thead><tr><th>Field</th>'
+        '<th>TRT / Base</th><th>Reference</th></tr></thead><tbody>'
+        + "".join(rows) + "</tbody></table>"
+    )
+    parts.append(_render_metrics_table(result.get("stages", {})))
+    parts.append(_render_repro_commands(result.get("repro_commands", {})))
+    parts.append(_render_timing_sections(result))
+    return "\n".join(parts)
+
+
+def render_detection_model(
+    result: Dict[str, Any], project_dir: Optional[Path]
+) -> str:
+    cc = result.get("case_config") or {}
+    inputs = cc.get("inputs") or {}
+    image_ref = _input_ref(inputs, ("image", "image_path", "input_image"))
+    parts = ['<div class="media-compare">']
+    parts.append(_render_image_card(
+        "Detection Input", _resolve_input_media(image_ref, project_dir)))
+    parts.append("</div>")
+
+    def detections(prefix: str) -> List[Dict[str, Any]]:
+        value = _first_stage_value(result, prefix, ("detections",))
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        data = _first_stage_data(result, prefix)
+        boxes = data.get("boxes") or []
+        scores = data.get("scores") or []
+        labels = data.get("labels") or data.get("class_ids") or []
+        return [
+            {
+                "box": box,
+                "score": scores[index] if index < len(scores) else None,
+                "label": labels[index] if index < len(labels) else None,
+            }
+            for index, box in enumerate(boxes)
+        ]
+
+    def table(title: str, values: List[Dict[str, Any]]) -> str:
+        rows = []
+        for index, item in enumerate(values, 1):
+            box = item.get("box", item.get("bbox", item.get("boxes", "")))
+            rows.append(
+                f"<tr><td>{index}</td><td>{_esc(item.get('label', ''))}</td>"
+                f"<td>{_format_value(item.get('score'))}</td>"
+                f"<td>{_esc(box)}</td></tr>"
+            )
+        if not rows:
+            rows.append('<tr><td colspan="4" class="missing">No detections recorded.</td></tr>')
+        return (
+            f"<h4>{_esc(title)}</h4>"
+            '<table class="metrics-table"><thead><tr><th>#</th><th>Label</th>'
+            '<th>Score</th><th>Box</th></tr></thead><tbody>'
+            + "".join(rows) + "</tbody></table>"
+        )
+
+    parts.append('<div class="detection-compare">')
+    parts.append(f'<div>{table("TRT / Base Detections", detections("trt"))}</div>')
+    parts.append(f'<div>{table("Reference Detections", detections("ref"))}</div>')
+    parts.append("</div>")
+    parts.append(_render_metrics_table(result.get("stages", {})))
+    parts.append(_render_repro_commands(result.get("repro_commands", {})))
+    parts.append(_render_timing_sections(result))
+    return "\n".join(parts)
+
+
+def render_reranking_model(result: Dict[str, Any]) -> str:
+    cc = result.get("case_config") or {}
+    inputs = cc.get("inputs") or {}
+    query = inputs.get("query") or inputs.get("prompt") or ""
+    documents = inputs.get("documents") or _first_stage_value(
+        result, "trt", ("documents",)) or []
+    trt_scores = _first_stage_value(result, "trt", ("scores",)) or []
+    ref_scores = _first_stage_value(result, "ref", ("scores",)) or []
+
+    def rank_positions(scores: List[Any]) -> Dict[int, int]:
+        return {
+            index: rank
+            for rank, (index, _score) in enumerate(
+                sorted(enumerate(scores), key=lambda item: float(item[1]), reverse=True),
+                1,
+            )
+        }
+
+    trt_ranks = rank_positions(trt_scores)
+    ref_ranks = rank_positions(ref_scores)
+    parts = []
+    if query:
+        parts.append(f"<p><strong>Query:</strong> {_esc(query)}</p>")
+    rows = []
+    count = max(len(documents), len(trt_scores), len(ref_scores))
+    for index in range(count):
+        document = documents[index] if index < len(documents) else ""
+        trt_score = trt_scores[index] if index < len(trt_scores) else None
+        ref_score = ref_scores[index] if index < len(ref_scores) else None
+        rows.append(
+            f"<tr><td>{index + 1}</td><td>{_esc(document)}</td>"
+            f"<td>{_format_value(trt_score)}</td><td>{_esc(trt_ranks.get(index, ''))}</td>"
+            f"<td>{_format_value(ref_score)}</td><td>{_esc(ref_ranks.get(index, ''))}</td></tr>"
+        )
+    parts.append(
+        '<table class="metrics-table"><thead><tr><th>#</th><th>Document</th>'
+        '<th>TRT / Base score</th><th>TRT rank</th>'
+        '<th>Reference score</th><th>Reference rank</th></tr></thead><tbody>'
+        + "".join(rows) + "</tbody></table>"
+    )
+    parts.append(_render_metrics_table(result.get("stages", {})))
+    parts.append(_render_repro_commands(result.get("repro_commands", {})))
+    parts.append(_render_timing_sections(result))
+    return "\n".join(parts)
+
+
+def _numeric_series(value: Any) -> List[float]:
+    values: List[float] = []
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, (int, float)) and not isinstance(current, bool):
+            values.append(float(current))
+        elif isinstance(current, list):
+            stack.extend(reversed(current))
+    return values
+
+
+def _render_series_plot(trt_values: List[float], ref_values: List[float]) -> str:
+    if not trt_values and not ref_values:
+        return ""
+    max_points = 240
+
+    def sample(values: List[float]) -> List[float]:
+        if len(values) <= max_points:
+            return values
+        return [
+            values[round(i * (len(values) - 1) / (max_points - 1))]
+            for i in range(max_points)
+        ]
+
+    trt_values = sample(trt_values)
+    ref_values = sample(ref_values)
+    combined = trt_values + ref_values
+    low, high = min(combined), max(combined)
+    span = high - low or 1.0
+    width, height, pad = 800.0, 260.0, 28.0
+
+    def points(values: List[float]) -> str:
+        if not values:
+            return ""
+        denom = max(1, len(values) - 1)
+        return " ".join(
+            f"{pad + i * (width - 2 * pad) / denom:.1f},"
+            f"{height - pad - (value - low) * (height - 2 * pad) / span:.1f}"
+            for i, value in enumerate(values)
+        )
+
+    return (
+        '<div class="series-plot"><svg viewBox="0 0 800 260" '
+        'role="img" aria-label="TRT and reference numeric output plot">'
+        '<rect x="0" y="0" width="800" height="260" fill="#f8fafc" />'
+        f'<polyline points="{points(ref_values)}" fill="none" '
+        'stroke="#2563eb" stroke-width="2" />'
+        f'<polyline points="{points(trt_values)}" fill="none" '
+        'stroke="#dc2626" stroke-width="2" />'
+        '</svg><p class="plot-legend"><span class="legend-trt">TRT / Base</span> '
+        '<span class="legend-ref">Reference</span></p></div>'
+    )
+
+
+def render_neural_operator_model(result: Dict[str, Any]) -> str:
+    inputs = ((result.get("case_config") or {}).get("inputs") or {})
+    trt_value = _first_stage_value(
+        result, "trt", ("output_field", "field", "prediction", "forecast"))
+    ref_value = _first_stage_value(
+        result, "ref", ("output_field", "field", "prediction", "forecast"))
+    trt_values = _numeric_series(trt_value)
+    ref_values = _numeric_series(ref_value)
+    parts = []
+    relevant_inputs = {
+        key: value for key, value in inputs.items()
+        if key in {
+            "branch_input", "trunk_input", "field_input", "input_field",
+            "context", "prediction_length", "horizon", "frequency",
+        }
+    }
+    if relevant_inputs:
+        input_json = json.dumps(
+            _compact_data(relevant_inputs), indent=2, ensure_ascii=False)
+        parts.append("<h4>Model Inputs</h4>")
+        parts.append(f'<pre class="structured-input">{_esc(input_json)}</pre>')
+    plot = _render_series_plot(trt_values, ref_values)
+    if plot:
+        parts.extend(["<h4>Output Series Comparison</h4>", plot])
+    parts.append(_render_structured_stage_comparison(result))
+    parts.append(_render_metrics_table(result.get("stages", {})))
+    parts.append(_render_repro_commands(result.get("repro_commands", {})))
+    parts.append(_render_timing_sections(result))
+    return "\n".join(parts)
+
+
+def render_omni_model(
+    result: Dict[str, Any], project_dir: Optional[Path]
+) -> str:
+    cc = result.get("case_config") or {}
+    inputs = cc.get("inputs") or {}
+    parts = []
+    prompt = inputs.get("prompt") or ""
+    if prompt:
+        parts.append(f"<p><strong>Prompt:</strong> {_esc(prompt)}</p>")
+    image_ref = _input_ref(inputs, ("image", "image_path", "input_image"))
+    audio_ref = _input_ref(
+        inputs, ("audio", "audio_path", "input_audio", "input_audio_path"))
+    if image_ref or audio_ref:
+        parts.append('<div class="media-compare">')
+        if image_ref:
+            parts.append(_render_image_card(
+                "Input Image", _resolve_input_media(image_ref, project_dir)))
+        if audio_ref:
+            parts.append(_render_audio_player(
+                "Input Audio", _resolve_input_media(audio_ref, project_dir)))
+        parts.append("</div>")
+
+    trt_audio = _find_output_media(
+        result, "trt", ("wav", "audio"), ("wav_path", "audio_output_path"))
+    ref_audio = _find_output_media(
+        result, "ref", ("wav", "audio"), ("wav_path", "audio_output_path"))
+    if trt_audio is not None or ref_audio is not None:
+        parts.append("<h4>Audio Comparison</h4>")
+        parts.append('<div class="media-compare">')
+        parts.append(_render_audio_player("TRT / Base Audio", trt_audio))
+        parts.append(_render_audio_player("Reference Audio", ref_audio))
+        parts.append("</div>")
+
+    parts.append(_render_structured_stage_comparison(result))
+    parts.append(_render_metrics_table(result.get("stages", {})))
+    parts.append(_render_repro_commands(result.get("repro_commands", {})))
+    parts.append(_render_timing_sections(result))
+    return "\n".join(parts)
+
+
 def render_generic_model(result: Dict[str, Any]) -> str:
-    """Render detail section for generic embedding models."""
+    """Render numeric/embedding output with a structured fallback."""
     cc = result.get("case_config", {})
     prompt = (cc.get("inputs") or {}).get("prompt", "")
     stage_outputs = result.get("stage_outputs", {})
@@ -1496,6 +2156,8 @@ def render_generic_model(result: Dict[str, Any]) -> str:
         parts.append(_render_text_comparison(trt_text, ref_text))
     elif trt_feature or ref_feature:
         parts.append(_render_text_comparison(trt_feature, ref_feature))
+    else:
+        parts.append(_render_structured_stage_comparison(result))
     parts.append(_render_metrics_table(result.get("stages", {})))
     parts.append(_render_repro_commands(result.get("repro_commands", {})))
     parts.append(_render_timing_sections(result))
@@ -1505,6 +2167,40 @@ def render_generic_model(result: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Per-model collapsible section
 # ---------------------------------------------------------------------------
+
+
+def _uses_external_reference(result: Dict[str, Any]) -> bool:
+    cc = result.get("case_config") or {}
+    backend = str(cc.get("reference_backend") or "")
+    oracle_level = str(result.get("oracle_level") or cc.get("oracle_level") or "")
+    return backend != "invariant_only" and not oracle_level.startswith("L4")
+
+
+def _render_oracle_context(result: Dict[str, Any]) -> str:
+    cc = result.get("case_config") or {}
+    backend = str(cc.get("reference_backend") or "unspecified")
+    oracle_level = str(result.get("oracle_level") or cc.get("oracle_level") or "unspecified")
+    css_class = "oracle-external" if _uses_external_reference(result) else "oracle-invariant"
+    note = "External/reference output comparison is configured."
+    if not _uses_external_reference(result):
+        ref_audio = _find_output_media(
+            result, "ref", ("wav", "audio"),
+            ("wav_path", "audio_output_path"))
+        if ref_audio is not None:
+            note = (
+                "The automated gate uses model-owned invariants. The embedded "
+                "external reference audio is human-review evidence, not a "
+                "waveform-equality gate."
+            )
+        else:
+            note = (
+                "No external reference output is configured; this case validates "
+                "model-owned invariants only."
+            )
+    return (
+        f'<div class="oracle-context {css_class}"><strong>Oracle:</strong> '
+        f"{_esc(oracle_level)} via {_esc(backend)} &mdash; {_esc(note)}</div>"
+    )
 
 
 def render_model_section(
@@ -1535,7 +2231,7 @@ def render_model_section(
     header += "</summary>"
 
     # Failure info
-    body_parts = []
+    body_parts = [_render_oracle_context(result)]
     if result.get("_summary_only"):
         body_parts.append(
             '<p class="summary-only-info">'
@@ -1562,14 +2258,28 @@ def render_model_section(
     # Dispatch to modality renderer
     if modality == "text":
         body_parts.append(render_text_model(result))
+    elif modality == "diffusion_text":
+        body_parts.append(render_diffusion_text_model(result))
     elif modality == "vl":
         body_parts.append(render_vl_model(result, project_dir))
     elif modality == "diffusion":
-        body_parts.append(render_diffusion_model(result))
+        body_parts.append(render_diffusion_model(result, project_dir))
     elif modality == "audio":
-        body_parts.append(render_audio_model(result))
+        body_parts.append(render_audio_model(result, project_dir))
     elif modality == "segmentation":
         body_parts.append(render_segmentation_model(result, project_dir))
+    elif modality == "classification":
+        body_parts.append(render_classification_model(result, project_dir))
+    elif modality == "detection":
+        body_parts.append(render_detection_model(result, project_dir))
+    elif modality == "reranking":
+        body_parts.append(render_reranking_model(result))
+    elif modality == "neural_operator":
+        body_parts.append(render_neural_operator_model(result))
+    elif modality == "omni":
+        body_parts.append(render_omni_model(result, project_dir))
+    elif modality == "structured":
+        body_parts.append(_render_structured_stage_comparison(result))
     else:
         body_parts.append(render_generic_model(result))
 
@@ -1915,6 +2625,451 @@ def render_env_section(results: List[Dict[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Model-proof provenance and evidence contract
+# ---------------------------------------------------------------------------
+
+
+def _load_optional_json(path: Optional[Path]) -> Dict[str, Any]:
+    if path is None or not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        return {"load_error": f"{path.name}: {exc}"}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _proof_context(
+    status: Dict[str, Any],
+    proof: Dict[str, Any],
+    selection: Dict[str, Any],
+) -> Dict[str, Any]:
+    context = dict(status)
+    for key in (
+        "model", "source_revision", "suite", "runtime_model",
+        "runtime_library", "runtime_library_sha256", "sibling_model_count",
+        "model_dso_count", "network", "plugin_search", "passed",
+    ):
+        if key in proof:
+            context[key] = proof[key]
+    if selection:
+        context["selection"] = selection
+    return context
+
+
+def validate_proof_context(
+    status: Dict[str, Any],
+    proof: Dict[str, Any],
+    selection: Dict[str, Any],
+) -> List[str]:
+    """Validate provenance required by a successful isolated model proof."""
+    issues: List[str] = []
+    if not status or status.get("load_error"):
+        return [f"Model-proof status is missing or invalid: {status.get('load_error', 'missing')}"]
+
+    validation_rc = status.get("validation_exit_code")
+    successful_validation = validation_rc == 0 or proof.get("passed") is True
+    for key in ("model", "source_revision", "suite", "steps"):
+        if not status.get(key):
+            issues.append(f"Model-proof status is missing {key}")
+
+    if not successful_validation:
+        return issues
+
+    if not proof or proof.get("load_error"):
+        issues.append(
+            f"Final proof JSON is missing or invalid: {proof.get('load_error', 'missing')}"
+        )
+    if not selection or selection.get("load_error"):
+        issues.append(
+            "Test selection JSON is missing or invalid: "
+            f"{selection.get('load_error', 'missing')}"
+        )
+    if issues:
+        return issues
+
+    if proof.get("passed") is not True:
+        issues.append("Final proof JSON does not declare passed=true")
+    for key in ("model", "source_revision", "runtime_model", "runtime_library"):
+        if not proof.get(key):
+            issues.append(f"Final proof JSON is missing {key}")
+    digest = str(proof.get("runtime_library_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        issues.append("Final proof JSON has no valid runtime library SHA-256")
+    if proof.get("sibling_model_count") != 0:
+        issues.append("Final proof JSON does not prove zero sibling models")
+    if proof.get("model_dso_count") != 1:
+        issues.append("Final proof JSON does not prove exactly one model DSO")
+    if proof.get("network") != "disabled" or proof.get("plugin_search") != "strict":
+        issues.append("Final proof JSON is missing hermetic network/plugin guarantees")
+    if proof.get("model") != status.get("model"):
+        issues.append("Proof model does not match model-proof status")
+    if proof.get("source_revision") != status.get("source_revision"):
+        issues.append("Proof revision does not match the pinned model-proof revision")
+    if selection.get("requested_model") != status.get("model"):
+        issues.append("Selected model does not match model-proof status")
+    if not selection.get("e2e_test") or not selection.get("e2e_cases"):
+        issues.append("Test selection does not identify an E2E test and case")
+
+    for name, step in (status.get("steps") or {}).items():
+        if name == "html_report" or not isinstance(step, dict):
+            continue
+        if step.get("status") not in {"passed", "skipped"}:
+            issues.append(f"Validation step {name} is not complete")
+    return issues
+
+
+def _load_proof_diagnostics(status_path: Optional[Path]) -> Dict[str, str]:
+    """Load bounded, escaped-at-render-time failure excerpts for standalone HTML."""
+    if status_path is None or not status_path.is_file():
+        return {}
+    root = status_path.parent
+    diagnostics: Dict[str, str] = {}
+    for filename in (
+        "configure.log", "build.log", "cpp-tests.log",
+        "python-model-tests.log", "e2e.log", "console.log",
+    ):
+        path = _path_within(root / filename, root)
+        if path is None:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if text.strip():
+            diagnostics[filename] = text[-16000:]
+
+    junit_messages = []
+    for relpath in ("python-model-tests.xml", "e2e/junit.xml"):
+        path = _path_within(root / relpath, root)
+        if path is None:
+            continue
+        try:
+            xml_root = ET.parse(path).getroot()
+        except (ET.ParseError, OSError):
+            continue
+        for testcase in xml_root.iter("testcase"):
+            for tag in ("failure", "error", "skipped"):
+                node = testcase.find(tag)
+                if node is None:
+                    continue
+                name = testcase.attrib.get("name", "unknown")
+                message = node.attrib.get("message", "") or (node.text or "")
+                junit_messages.append(f"{relpath}: {name}: {tag}: {message}"[:4000])
+    if junit_messages:
+        diagnostics["JUnit outcomes"] = "\n\n".join(junit_messages[:50])
+    return diagnostics
+
+
+def render_proof_section(context: Dict[str, Any]) -> str:
+    if not context:
+        return ""
+    selection = context.get("selection") or {}
+    rows = []
+    fields = (
+        ("Model ownership ID", context.get("model")),
+        ("Pinned source revision", context.get("source_revision")),
+        ("Suite", context.get("suite")),
+        ("Final outcome", context.get("outcome") or (
+            "passed" if context.get("passed") else "incomplete")),
+        ("Runtime model", context.get("runtime_model")),
+        ("Runtime library", context.get("runtime_library")),
+        ("Runtime library SHA-256", context.get("runtime_library_sha256")),
+        ("Sibling models in projection", context.get("sibling_model_count")),
+        ("Model DSOs produced", context.get("model_dso_count")),
+        ("Container network", context.get("network")),
+        ("Plugin search", context.get("plugin_search")),
+    )
+    for label, value in fields:
+        if value is None or value == "":
+            continue
+        rows.append(f"<tr><td>{_esc(label)}</td><td>{_esc(value)}</td></tr>")
+
+    parts = ['<section class="proof-section"><h2>Isolation Proof</h2>']
+    if context.get("load_error"):
+        parts.append(
+            f'<p class="failure-info"><strong>Proof metadata error:</strong> '
+            f"{_esc(context['load_error'])}</p>"
+        )
+    parts.append(
+        '<table class="proof-table"><tbody>' + "".join(rows) + "</tbody></table>"
+    )
+    steps = context.get("steps") or {}
+    if isinstance(steps, dict) and steps:
+        step_rows = []
+        for name, details in steps.items():
+            if isinstance(details, dict):
+                status = str(details.get("status") or "pending")
+                evidence = details.get("evidence") or ""
+            else:
+                status = str(details)
+                evidence = ""
+            step_rows.append(
+                f"<tr><td>{_esc(str(name).replace('_', ' ').title())}</td>"
+                f"<td>{_badge(status)}</td><td>{_esc(evidence)}</td></tr>"
+            )
+        parts.append("<h4>Validation Steps</h4>")
+        parts.append(
+            '<table class="metrics-table"><thead><tr><th>Step</th><th>Status</th>'
+            '<th>Evidence</th></tr></thead><tbody>' + "".join(step_rows)
+            + "</tbody></table>"
+        )
+
+    cpp_tests = selection.get("runtime_tests") or []
+    python_tests = selection.get("python_tests") or []
+    e2e_cases = selection.get("e2e_cases") or []
+    if cpp_tests or python_tests or e2e_cases or selection.get("e2e_test"):
+        parts.append("<h4>Selected Tests</h4><ul class=\"proof-list\">")
+        for test in cpp_tests:
+            parts.append(f"<li>C++: <code>{_esc(test)}</code></li>")
+        for test in python_tests:
+            parts.append(f"<li>Python: <code>{_esc(test)}</code></li>")
+        for case in e2e_cases:
+            name = case.get("name") if isinstance(case, dict) else case
+            parts.append(f"<li>E2E: <code>{_esc(name)}</code></li>")
+        if selection.get("e2e_test"):
+            parts.append(
+                f"<li>E2E test file: <code>{_esc(selection['e2e_test'])}</code></li>"
+            )
+        parts.append("</ul>")
+
+    evidence_files = context.get("evidence_files") or []
+    if evidence_files:
+        parts.append("<h4>Raw Evidence Files</h4><ul class=\"proof-list\">")
+        for filename in evidence_files:
+            parts.append(f"<li><code>{_esc(filename)}</code></li>")
+        parts.append("</ul>")
+    diagnostics = context.get("diagnostics") or {}
+    if diagnostics:
+        parts.append("<h4>Failure and Log Excerpts</h4>")
+        for label, text in diagnostics.items():
+            parts.append(
+                f"<details><summary>{_esc(label)}</summary>"
+                f"<pre class=\"diagnostic-log\">{_esc(text)}</pre></details>"
+            )
+    parts.append("</section>")
+    return "\n".join(parts)
+
+
+def _embeddable(path: Optional[Path]) -> bool:
+    if path is None or not _valid_media_file(path):
+        return False
+    return _MAX_EMBED_BYTES <= 0 or path.stat().st_size <= _MAX_EMBED_BYTES
+
+
+def _paired_outputs_present(result: Dict[str, Any]) -> bool:
+    return any(pair.get("trt") and pair.get("ref") for pair in _stage_pairs(result).values())
+
+
+def validate_evidence(
+    results: List[Dict[str, Any]], project_dir: Optional[Path]
+) -> List[str]:
+    """Return fail-closed omissions in successful model evidence.
+
+    Failed E2E cases are exempt from modality-specific requirements because
+    later artifacts may not exist. Their rendered report is still marked as
+    partial evidence. A passing case may not silently omit the user-facing
+    TRT/reference evidence appropriate for its task strategy.
+    """
+    issues: List[str] = []
+    for result in results:
+        if result.get("status") != "pass":
+            continue
+        name = str(result.get("case_name") or "unknown")
+        cc = result.get("case_config") or {}
+        inputs = cc.get("inputs") or {}
+        strategy = str(cc.get("task_strategy") or "")
+        external_reference = _uses_external_reference(result)
+        prefix = f"{name} ({strategy or 'unknown strategy'})"
+        if strategy not in _TASK_STRATEGY_TO_MODALITY:
+            issues.append(f"{prefix}: task strategy has no explicit report renderer")
+            continue
+
+        def require(condition: bool, message: str) -> None:
+            if not condition:
+                issues.append(f"{prefix}: {message}")
+
+        if strategy in {"text_generation_causal", "diffusion_text_generation"}:
+            require(_get_stage_text(result.get("stage_outputs") or {}, "trt_") is not None,
+                    "missing TRT/base text output")
+            if external_reference:
+                require(_get_stage_text(
+                    result.get("stage_outputs") or {}, "ref_") is not None,
+                    "missing reference text output")
+            else:
+                require(_paired_outputs_present(result),
+                        "missing invariant reference stage evidence")
+        elif strategy == "vision_language_generation":
+            image = _resolve_input_media(
+                _input_ref(inputs, ("image", "image_path", "input_image")), project_dir)
+            require(_embeddable(image), "input image is missing or cannot be embedded")
+            require(_get_stage_text(result.get("stage_outputs") or {}, "trt_") is not None,
+                    "missing TRT/base text output")
+            if external_reference:
+                require(_get_stage_text(
+                    result.get("stage_outputs") or {}, "ref_") is not None,
+                    "missing reference text output")
+        elif strategy == "diffusion_media_generation":
+            art_dir = Path(result.get("_artifact_dir") or ".")
+            artifacts = result.get("artifacts") or {}
+            trt_frames = _resolve_frame_paths(
+                artifacts.get("trt_frames", []), art_dir, "frames")
+            ref_frames = _resolve_frame_paths(
+                artifacts.get("ref_frames", []), art_dir, "ref_frames")
+            require(bool(trt_frames), "missing TRT/base image or video frames")
+            if external_reference:
+                require(bool(ref_frames), "missing reference image or video frames")
+            require(all(_embeddable(path) for path in _select_frames(
+                trt_frames, _MAX_DIFFUSION_FRAMES)),
+                "one or more selected TRT/base frames cannot be embedded")
+            if ref_frames:
+                require(all(_embeddable(path) for path in _select_frames(
+                    ref_frames, _MAX_DIFFUSION_FRAMES)),
+                    "one or more selected reference frames cannot be embedded")
+            condition_ref = _input_ref(
+                inputs, ("image", "image_path", "input_image", "conditioning_image"))
+            if condition_ref:
+                require(_embeddable(_resolve_input_media(condition_ref, project_dir)),
+                        "declared conditioning image is missing or cannot be embedded")
+        elif strategy in {"text_to_audio", "speech_to_speech"}:
+            trt_audio = _find_output_media(
+                result, "trt", ("wav", "audio"),
+                ("wav_path", "audio_output_path"))
+            ref_audio = _find_output_media(
+                result, "ref", ("wav", "audio"),
+                ("wav_path", "audio_output_path"))
+            require(_embeddable(trt_audio), "missing or unembeddable TRT/base audio")
+            if strategy == "speech_to_speech":
+                input_audio = _resolve_input_media(_input_ref(
+                    inputs, ("audio", "audio_path", "input_audio", "input_audio_path")),
+                    project_dir)
+                require(_embeddable(input_audio),
+                        "missing or unembeddable input/source audio")
+                require(_embeddable(ref_audio),
+                        "missing or unembeddable reference audio")
+            else:
+                require(_embeddable(ref_audio),
+                        "missing or unembeddable reference audio")
+        elif strategy == "speech_to_text":
+            input_audio = _resolve_input_media(_input_ref(
+                inputs, ("audio", "audio_path", "input_audio", "input_audio_path")),
+                project_dir)
+            require(_embeddable(input_audio), "missing or unembeddable input/source audio")
+            require(_get_stage_text(result.get("stage_outputs") or {}, "trt_") is not None,
+                    "missing TRT/base transcript")
+            if external_reference:
+                require(_get_stage_text(
+                    result.get("stage_outputs") or {}, "ref_") is not None,
+                    "missing reference transcript")
+        elif strategy in {"segmentation", "prompted_segmentation"}:
+            input_image = _resolve_input_media(_input_ref(
+                inputs, ("image", "image_path", "input_image")), project_dir)
+            image_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+            trt_visuals = _find_output_media_all(
+                result, "trt", ("segmented_image", "segmentation_map", "output"),
+                ("segmented_image_path", "segmentation_map_path", "viz_path", "output_path"),
+                image_suffixes)
+            ref_visuals = _find_output_media_all(
+                result, "ref", ("segmented_image", "segmentation_map", "output"),
+                ("segmented_image_path", "segmentation_map_path", "viz_path", "output_path"),
+                image_suffixes)
+            require(_embeddable(input_image), "missing or unembeddable input image")
+            require(bool(trt_visuals) and all(_embeddable(path) for path in trt_visuals),
+                    "missing or unembeddable TRT/base segmentation")
+            if external_reference:
+                require(bool(ref_visuals) and all(_embeddable(path) for path in ref_visuals),
+                        "missing or unembeddable reference segmentation")
+        elif strategy == "image_classification":
+            image = _resolve_input_media(
+                _input_ref(inputs, ("image", "image_path", "input_image")), project_dir)
+            require(_embeddable(image), "missing or unembeddable classification input")
+            require(_first_stage_value(result, "trt", ("top_class",)) is not None,
+                    "missing TRT/base class prediction")
+            require(_first_stage_value(result, "trt", ("top_score",)) is not None,
+                    "missing TRT/base class score")
+            if external_reference:
+                require(_first_stage_value(result, "ref", ("top_class",)) is not None,
+                        "missing reference class prediction")
+                require(_first_stage_value(result, "ref", ("top_score",)) is not None,
+                        "missing reference class score")
+        elif strategy == "object_detection":
+            image = _resolve_input_media(
+                _input_ref(inputs, ("image", "image_path", "input_image")), project_dir)
+            require(_embeddable(image), "missing or unembeddable detection input")
+            require(_first_stage_value(result, "trt", ("detections", "boxes")) is not None,
+                    "missing TRT/base detections")
+            if external_reference:
+                require(_first_stage_value(
+                    result, "ref", ("detections", "boxes")) is not None,
+                    "missing reference detections")
+        elif strategy == "reranking":
+            require(bool(_first_stage_value(result, "trt", ("scores",))),
+                    "missing TRT/base reranking scores")
+            if external_reference:
+                require(bool(_first_stage_value(result, "ref", ("scores",))),
+                        "missing reference reranking scores")
+        elif strategy == "neural_operator":
+            trt_field = _first_stage_value(
+                result, "trt", ("output_field", "field", "prediction", "forecast",
+                                "output_field_preview"))
+            ref_field = _first_stage_value(
+                result, "ref", ("output_field", "field", "prediction", "forecast",
+                                "output_field_preview"))
+            require(bool(_numeric_series(trt_field)),
+                    "missing numeric TRT/base field output")
+            if external_reference:
+                require(bool(_numeric_series(ref_field)),
+                        "missing numeric reference field output")
+        elif strategy == "omni_multimodal":
+            require(_paired_outputs_present(result),
+                    "missing paired TRT/base and reference stage outputs")
+            trt_audio = _find_output_media(
+                result, "trt", ("wav", "audio"),
+                ("wav_path", "audio_output_path"))
+            ref_audio = _find_output_media(
+                result, "ref", ("wav", "audio"),
+                ("wav_path", "audio_output_path"))
+            requires_audio = "audio" in str(cc.get("user_contract") or "").lower()
+            if requires_audio or trt_audio is not None or ref_audio is not None:
+                require(_embeddable(trt_audio), "missing or unembeddable TRT/base audio")
+                require(_embeddable(ref_audio), "missing or unembeddable reference audio")
+        elif strategy in {"encoder_only_nlp", "embedding"}:
+            trt_feature = _get_stage_feature_output(
+                result.get("stage_outputs") or {}, "trt_")
+            ref_feature = _get_stage_feature_output(
+                result.get("stage_outputs") or {}, "ref_")
+            require(
+                trt_feature is not None
+                and _flatten_numeric_preview(trt_feature[1])[1] > 0,
+                "missing TRT/base numeric feature output",
+            )
+            if external_reference:
+                require(
+                    ref_feature is not None
+                    and _flatten_numeric_preview(ref_feature[1])[1] > 0,
+                    "missing reference numeric feature output",
+                )
+        else:
+            require(_paired_outputs_present(result),
+                    "missing paired TRT/base and reference structured outputs")
+    return issues
+
+
+def render_evidence_issues(issues: List[str]) -> str:
+    if not issues:
+        return (
+            '<section class="evidence-ok"><h2>Evidence Completeness</h2>'
+            '<p>All required user-facing evidence is embedded in this report.</p></section>'
+        )
+    items = "".join(f"<li>{_esc(issue)}</li>" for issue in issues)
+    return (
+        '<section class="evidence-fail"><h2>Evidence Completeness</h2>'
+        '<p><strong>The report is incomplete.</strong></p>'
+        f"<ul>{items}</ul></section>"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Full report assembly
 # ---------------------------------------------------------------------------
 
@@ -1944,6 +3099,8 @@ def render_report(
     results: List[Dict[str, Any]],
     title: str = "E2E Test Report",
     project_dir: Optional[Path] = None,
+    proof_context: Optional[Dict[str, Any]] = None,
+    evidence_issues: Optional[List[str]] = None,
 ) -> str:
     """Assemble the full self-contained HTML report."""
     # Reset command counter for deterministic output.
@@ -1962,6 +3119,9 @@ def render_report(
     parts.append("</head><body>")
     parts.append(f"<h1>{_esc(title)}</h1>")
 
+    if proof_context:
+        parts.append(render_proof_section(proof_context))
+
     # Timestamp
     if results:
         ts = results[0].get("timestamp", "")
@@ -1970,6 +3130,20 @@ def render_report(
 
     # Environment
     parts.append(render_env_section(results))
+
+    if evidence_issues is not None:
+        display_issues = list(evidence_issues)
+        for result in results:
+            if result.get("status") == "pass":
+                continue
+            cc = result.get("case_config") or {}
+            display_issues.append(
+                f"{result.get('case_name') or 'unknown'} "
+                f"({cc.get('task_strategy') or 'unknown strategy'}): "
+                f"E2E status is {result.get('status') or 'unknown'}; "
+                "user-facing evidence may be partial"
+            )
+        parts.append(render_evidence_issues(display_issues))
 
     # Summary dashboard
     parts.append("<h2>Summary</h2>")
@@ -2019,11 +3193,46 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default="E2E Test Report",
         help="Report title (shown in header and <title>).",
     )
+    parser.add_argument(
+        "--proof-status",
+        type=Path,
+        default=None,
+        help="Optional progressive model-proof status JSON.",
+    )
+    parser.add_argument(
+        "--proof-json",
+        type=Path,
+        default=None,
+        help="Optional final model isolation proof JSON.",
+    )
+    parser.add_argument(
+        "--selection-json",
+        type=Path,
+        default=None,
+        help="Optional selected model tests JSON.",
+    )
+    parser.add_argument(
+        "--strict-evidence",
+        action="store_true",
+        help="Return non-zero after writing the report if passing cases omit required evidence.",
+    )
+    parser.add_argument(
+        "--max-embed-bytes",
+        type=int,
+        default=_MAX_EMBED_BYTES,
+        help="Maximum bytes per embedded media file; zero means unlimited.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+
+    if args.max_embed_bytes < 0:
+        print("ERROR: --max-embed-bytes must be non-negative", file=sys.stderr)
+        return 2
+    global _MAX_EMBED_BYTES  # noqa: PLW0603
+    _MAX_EMBED_BYTES = args.max_embed_bytes
 
     results = load_all_results(args.artifacts_dir)
     if not results:
@@ -2032,10 +3241,37 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
 
+    issues = validate_evidence(results, args.project_dir)
+    status = _load_optional_json(args.proof_status)
+    proof = _load_optional_json(args.proof_json)
+    selection = _load_optional_json(args.selection_json)
+    if args.strict_evidence and any(
+        path is not None
+        for path in (args.proof_status, args.proof_json, args.selection_json)
+    ):
+        issues.extend(validate_proof_context(status, proof, selection))
+    context = _proof_context(status, proof, selection)
+    diagnostics = _load_proof_diagnostics(args.proof_status)
+    if diagnostics:
+        context["diagnostics"] = diagnostics
+    if not results:
+        issues.append("No per-model result.json was produced; E2E evidence is unavailable")
+    if args.strict_evidence and context:
+        report_step = context.setdefault("steps", {}).setdefault("html_report", {})
+        report_step["status"] = "failed" if issues else "passed"
+        report_step["evidence"] = "model-proof-report.html"
+        if issues:
+            context["outcome"] = "failed"
+            context["exit_code"] = 2
+        elif context.get("outcome") == "report-validation":
+            context["outcome"] = "passed"
+            context["exit_code"] = 0
     html_content = render_report(
         results,
         title=args.title,
         project_dir=args.project_dir,
+        proof_context=context,
+        evidence_issues=issues,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -2046,6 +3282,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"{len(results)} models)",
         file=sys.stderr,
     )
+    if args.strict_evidence and issues:
+        for issue in issues:
+            print(f"ERROR: {issue}", file=sys.stderr)
+        return 2
     return 0
 
 

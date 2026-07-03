@@ -195,7 +195,7 @@ def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> 
     assert "retention-days: 14" in nightly
 
 
-def test_github_workflows_keep_html_report_in_full_artifacts() -> None:
+def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> None:
     nightly = (REPO_ROOT / ".github/workflows/nightly.yml").read_text()
     assert "Upload E2E HTML report" in nightly
     assert "trtmc-nightly-html-report-${{ github.run_id }}" in nightly
@@ -204,9 +204,16 @@ def test_github_workflows_keep_html_report_in_full_artifacts() -> None:
     assert "e2e_artifacts/" in nightly
     assert "!e2e_artifacts/e2e_report.html" not in nightly
 
+    proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
+    assert "Upload model proof HTML report" in proof
+    assert "model-proof-html-${{ inputs.model }}-${{ inputs.revision }}" in proof
+    assert "/artifacts/model-proof-report.html" in proof
+    assert "!${{ runner.temp }}" in proof
+    assert "if-no-files-found: error" in proof
+    assert "retention-days: 7" in proof
+
     premerge = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
-    assert "Upload E2E HTML report" not in premerge
-    assert "e2e_artifacts/" not in premerge
+    assert "model-proof.yml" in premerge
 
 
 def test_premerge_ci_is_triggered_only_by_one_shot_label_events() -> None:

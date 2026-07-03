@@ -10,8 +10,14 @@
 set -euo pipefail
 
 proof_container_name=""
+proof_artifacts_dir=""
+proof_repo_root=""
 
 die() {
+  if [ -n "$proof_artifacts_dir" ]; then
+    mkdir -p "$proof_artifacts_dir"
+    printf 'ERROR: %s\n' "$*" >> "$proof_artifacts_dir/host-error.log"
+  fi
   echo "ERROR: $*" >&2
   exit 1
 }
@@ -22,6 +28,7 @@ cleanup_proof_container() {
   if [ -n "$proof_container_name" ]; then
     docker rm -f "$proof_container_name" >/dev/null 2>&1 || true
   fi
+  generate_host_fallback_report "$rc" || true
   exit "$rc"
 }
 
@@ -85,6 +92,164 @@ python_bin() {
   fi
 }
 
+generate_host_fallback_report() {
+  local rc="$1"
+  [ -n "$proof_artifacts_dir" ] || return 0
+  mkdir -p "$proof_artifacts_dir"
+  [ -n "$proof_repo_root" ] || return 0
+  python3 "$proof_repo_root/.github/scripts/write-model-proof-fallback-report.py" \
+    --artifacts-dir "$proof_artifacts_dir" \
+    --model "$model" \
+    --revision "$revision" \
+    --suite "$suite" \
+    --outcome failed \
+    --phase host-setup \
+    --exit-code "$((rc == 0 ? 1 : rc))" \
+    --preserve-rich-report
+}
+
+initialize_proof_status() {
+  "$(python_bin)" - "$model" "$revision" "$suite" /artifacts/model-proof-status.json <<'PY'
+import json
+import sys
+from pathlib import Path
+
+model, revision, suite, output = sys.argv[1:]
+payload = {
+    "schema_version": 1,
+    "model": model,
+    "source_revision": revision,
+    "suite": suite,
+    "outcome": "running",
+    "steps": {
+        "projection_validation": {"status": "running", "evidence": "source-projection.json, selection.json"},
+        "configure": {"status": "pending", "evidence": "configure.log"},
+        "scratch_build": {"status": "pending", "evidence": "build.log"},
+        "dso_isolation": {"status": "pending", "evidence": "model-dsos.txt, model-dso.dynamic.txt"},
+        "cpp_tests": {"status": "pending", "evidence": "cpp-tests.log"},
+        "python_tests": {"status": "pending", "evidence": "python-model-tests.xml"},
+        "e2e_reference": {"status": "pending", "evidence": "e2e/junit.xml, e2e/*/result.json"},
+        "result_verification": {"status": "pending", "evidence": "e2e-verification.json"},
+        "html_report": {"status": "pending", "evidence": "model-proof-report.html"},
+    },
+}
+Path(output).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+update_proof_step() {
+  local step="$1"
+  local status="$2"
+  local evidence="${3:-}"
+  "$(python_bin)" - /artifacts/model-proof-status.json "$step" "$status" "$evidence" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+step = payload.setdefault("steps", {}).setdefault(sys.argv[2], {})
+step["status"] = sys.argv[3]
+if sys.argv[4]:
+    step["evidence"] = sys.argv[4]
+path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+update_proof_fact() {
+  local key="$1"
+  local value="$2"
+  "$(python_bin)" - /artifacts/model-proof-status.json "$key" "$value" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = json.loads(path.read_text(encoding="utf-8"))
+payload[sys.argv[2]] = sys.argv[3]
+path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+finalize_model_report() {
+  local validation_rc="$1"
+  trap - EXIT
+  set +e
+
+  "$(python_bin)" - /artifacts/model-proof-status.json "$validation_rc" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+rc = int(sys.argv[2])
+payload = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+payload["validation_exit_code"] = rc
+payload["outcome"] = "report-validation" if rc == 0 else "failed"
+for step in (payload.get("steps") or {}).values():
+    if isinstance(step, dict) and step.get("status") == "running":
+        step["status"] = "passed" if rc == 0 else "failed"
+    elif isinstance(step, dict) and step.get("status") == "pending" and rc != 0:
+        step["status"] = "not-run"
+report_step = payload.setdefault("steps", {}).setdefault("html_report", {})
+report_step["status"] = "running"
+report_step["evidence"] = "model-proof-report.html"
+evidence = []
+for item in sorted(Path("/artifacts").rglob("*")):
+    if not item.is_file() or item.name == "model-proof-report.html":
+        continue
+    rel = str(item.relative_to("/artifacts"))
+    if item.parent == Path("/artifacts") or item.suffix in {".json", ".xml", ".log"}:
+        evidence.append(rel)
+payload["evidence_files"] = evidence[:200]
+path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+
+  "$(python_bin)" /src/scripts/generate_e2e_report.py \
+    --artifacts-dir /artifacts/e2e \
+    --output /artifacts/model-proof-report.html \
+    --project-dir /src \
+    --title "Isolated Model Proof: $model @ ${revision:0:12}" \
+    --proof-status /artifacts/model-proof-status.json \
+    --proof-json /artifacts/proof.json \
+    --selection-json /artifacts/selection.json \
+    --strict-evidence \
+    --max-embed-bytes 33554432
+  local report_rc="$?"
+  "$(python_bin)" - /artifacts/model-proof-status.json "$validation_rc" "$report_rc" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+validation_rc = int(sys.argv[2])
+report_rc = int(sys.argv[3])
+payload = json.loads(path.read_text(encoding="utf-8"))
+report_step = payload.setdefault("steps", {}).setdefault("html_report", {})
+report_step["status"] = "passed" if report_rc == 0 else "failed"
+report_step["evidence"] = "model-proof-report.html"
+payload["report_exit_code"] = report_rc
+if validation_rc != 0:
+    payload["outcome"] = "failed"
+    payload["exit_code"] = validation_rc
+elif report_rc != 0:
+    payload["outcome"] = "failed"
+    payload["exit_code"] = report_rc
+else:
+    payload["outcome"] = "passed"
+    payload["exit_code"] = 0
+path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+  if [ -f /artifacts/model-proof-report.html ]; then
+    echo "Model proof HTML report: /artifacts/model-proof-report.html"
+  fi
+  if [ "$validation_rc" -eq 0 ] && [ "$report_rc" -ne 0 ]; then
+    echo "ERROR: model proof report evidence validation failed (exit $report_rc)" >&2
+    exit "$report_rc"
+  fi
+  exit "$validation_rc"
+}
+
 run_inner() {
   [ "$output_dir" = "/artifacts" ] || die "inner output directory must be /artifacts"
   [ -f /src/.trtmc-model-projection.json ] || \
@@ -92,7 +257,9 @@ run_inner() {
   [ ! -e /src/.git ] || die "projected source must not contain Git metadata"
   [ -d /work ] || die "isolated writable work directory is missing"
 
-  mkdir -p /artifacts /work/build /work/engines /work/model-plugins /work/tmp
+  mkdir -p /artifacts /artifacts/e2e /work/build /work/engines /work/model-plugins /work/tmp
+  trap 'finalize_model_report "$?"' EXIT
+  initialize_proof_status
   cp /src/.trtmc-model-projection.json /artifacts/source-projection.json
 
   local config_file=/work/model-proof-config.txt
@@ -202,6 +369,10 @@ if len(e2e_tests) != 1:
     raise SystemExit(
         f"projected model must have exactly one canonical E2E test; found {len(e2e_tests)}"
     )
+python_tests = sorted(
+    path for path in e2e_dir.glob("test_*.py")
+    if not path.match("test_*_e2e.py")
+)
 
 selection = {
     "schema_version": 1,
@@ -209,6 +380,7 @@ selection = {
     "owners": owners,
     "runtime_library": runtime_library,
     "runtime_tests": runtime_tests,
+    "python_tests": [str(path.relative_to(root)) for path in python_tests],
     "suite": suite,
     "e2e_cases": [
         {"name": name, "manifest": case_manifest, "ci_tier": ci_tier}
@@ -227,6 +399,9 @@ for _, name, _, _ in selected_cases:
 for test in runtime_tests:
     print(f"cpp_test={test}")
 PY
+
+  update_proof_step projection_validation passed \
+    "source-projection.json, selection.json"
 
   local runtime_model runtime_library e2e_family e2e_test
   runtime_model="$(sed -n 's/^runtime_model=//p' "$config_file")"
@@ -254,16 +429,22 @@ PY
   if command -v ninja >/dev/null 2>&1; then
     cmake_args+=(-G Ninja)
   fi
+  update_proof_step configure running "configure.log"
   cmake "${cmake_args[@]}" 2>&1 | tee /artifacts/configure.log
+  update_proof_step configure passed "configure.log"
 
   local targets=(trtmc trtmc_backend_trt "trtmc_model_$runtime_model")
   local cpp_test
   while IFS= read -r cpp_test; do
     [ -n "$cpp_test" ] && targets+=("$cpp_test")
   done < <(sed -n 's/^cpp_test=//p' "$config_file")
+  update_proof_step scratch_build running "build.log"
   cmake --build /work/build --parallel "$build_jobs" --target "${targets[@]}" \
     2>&1 | tee /artifacts/build.log
+  update_proof_step scratch_build passed "build.log"
 
+  update_proof_step dso_isolation running \
+    "model-dsos.txt, model-dso.dynamic.txt"
   local -a built_dsos=()
   mapfile -t built_dsos < <(
     find /work/build/models -type f -name 'libtrtmc_model_*.so' -print | sort
@@ -288,8 +469,26 @@ PY
   local plugin_dir="/work/model-plugins/$runtime_model"
   mkdir -p "$plugin_dir"
   cp "${built_dsos[0]}" "$plugin_dir/$runtime_library"
+  local runtime_library_sha256
+  runtime_library_sha256="$("$(python_bin)" - "${built_dsos[0]}" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+print(hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+  update_proof_fact runtime_model "$runtime_model"
+  update_proof_fact runtime_library "$runtime_library"
+  update_proof_fact runtime_library_sha256 "$runtime_library_sha256"
+  update_proof_fact sibling_model_count "0"
+  update_proof_fact model_dso_count "1"
+  update_proof_fact network "disabled"
+  update_proof_fact plugin_search "strict"
+  update_proof_step dso_isolation passed \
+    "exactly one DSO; no sibling model DT_NEEDED"
 
   local ctest_rc=0
+  update_proof_step cpp_tests running "cpp-tests.log"
   : > /artifacts/cpp-tests.log
   while IFS= read -r cpp_test; do
     [ -n "$cpp_test" ] || continue
@@ -305,6 +504,7 @@ PY
     fi
   done < <(sed -n 's/^cpp_test=//p' "$config_file")
   [ "$ctest_rc" -eq 0 ] || die "one or more model-owned C++ tests failed"
+  update_proof_step cpp_tests passed "cpp-tests.log"
 
   local py
   py="$(python_bin)"
@@ -315,6 +515,8 @@ PY
       ! -name 'test_*_e2e.py' -print | sort
   )
   if [ "${#python_tests[@]}" -gt 0 ]; then
+    update_proof_step python_tests running \
+      "python-model-tests.xml, python-model-tests.log"
     PYTHONPATH=/src/python:/src \
       PYTHONNOUSERSITE=1 \
       PYTHONDONTWRITEBYTECODE=1 \
@@ -322,9 +524,12 @@ PY
         --rootdir /src -c /src/pyproject.toml \
         --junitxml=/artifacts/python-model-tests.xml \
         2>&1 | tee /artifacts/python-model-tests.log
+    update_proof_step python_tests passed \
+      "python-model-tests.xml, python-model-tests.log"
+  else
+    update_proof_step python_tests skipped "no model-owned Python unit tests"
   fi
 
-  mkdir -p /artifacts/e2e
   local ld_library_path="/work/build:${LD_LIBRARY_PATH:-}"
   local models_file=/work/e2e-models.txt
   printf '%s\n' "${e2e_cases[@]}" > "$models_file"
@@ -333,6 +538,7 @@ PY
   for e2e_case in "${e2e_cases[@]}"; do
     e2e_filter_args+=(--e2e-model "$e2e_case")
   done
+  update_proof_step e2e_reference running "e2e/junit.xml, e2e/*/result.json"
   PYTHONPATH=/src/python:/src \
     PYTHONNOUSERSITE=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -348,14 +554,17 @@ PY
       --e2e-artifacts-dir /artifacts/e2e \
       --model-plugin-dir /work/model-plugins \
       --rebuild-engines \
-      --junitxml=/artifacts/e2e.xml \
+      --junitxml=/artifacts/e2e/junit.xml \
       2>&1 | tee /artifacts/e2e.log
+  update_proof_step e2e_reference passed "e2e/junit.xml, e2e/*/result.json"
 
+  update_proof_step result_verification running "e2e-verification.json"
   "$py" /src/tools/model_plugin_isolation.py verify-results \
     --repo-root /src \
     --models-file "$models_file" \
     --artifacts-dir /artifacts/e2e \
     --report /artifacts/e2e-verification.json
+  update_proof_step result_verification passed "e2e-verification.json"
 
   "$py" - "$model" "$revision" "$runtime_model" "$runtime_library" \
     "${built_dsos[0]}" /artifacts/selection.json /artifacts/proof.json <<'PY'
@@ -393,6 +602,7 @@ run_host() {
 
   local repo_root
   repo_root="$(git rev-parse --show-toplevel)"
+  proof_repo_root="$repo_root"
   git -C "$repo_root" cat-file -e "${revision}^{commit}" 2>/dev/null || \
     die "revision is not a local commit: $revision"
   revision="$(git -C "$repo_root" rev-parse "${revision}^{commit}")"
@@ -415,13 +625,18 @@ PY
   mkdir -p "$output_dir"
   rm -rf "$artifacts_dir" "$work_dir"
   mkdir -p "$artifacts_dir" "$work_dir"
+  proof_artifacts_dir="$artifacts_dir"
+  trap 'cleanup_proof_container "$?"' EXIT
+  trap 'cleanup_proof_container 130' INT
+  trap 'cleanup_proof_container 143' TERM
 
   python3 "$repo_root/tools/model_ci.py" project \
     --model "$model" \
     --revision "$revision" \
     --output-dir "$projection_dir" \
     --clean \
-    > "$artifacts_dir/projection.json"
+    > "$artifacts_dir/projection.json" \
+    2> >(tee "$artifacts_dir/projection.stderr.log" >&2)
   [ -f "$projection_dir/.trtmc-model-projection.json" ] || \
     die "model_ci.py did not produce a projection manifest"
   python3 - "$artifacts_dir/projection.json" <<'PY'
@@ -448,9 +663,6 @@ PY
   local container_name="trtmc-model-proof-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$model"
   container_name="${container_name//_/-}"
   proof_container_name="$container_name"
-  trap 'cleanup_proof_container "$?"' EXIT
-  trap 'cleanup_proof_container 130' INT
-  trap 'cleanup_proof_container 143' TERM
   docker rm -f "$container_name" >/dev/null 2>&1 || true
 
   local -a docker_args=(
@@ -507,6 +719,8 @@ PY
   set -e
   [ "$rc" -eq 0 ] || die "isolated model proof failed for $model (exit $rc)"
   [ -f "$artifacts_dir/proof.json" ] || die "model proof did not emit proof.json"
+  [ -f "$artifacts_dir/model-proof-report.html" ] || \
+    die "model proof did not emit model-proof-report.html"
   echo "Model proof artifacts: $artifacts_dir"
 }
 

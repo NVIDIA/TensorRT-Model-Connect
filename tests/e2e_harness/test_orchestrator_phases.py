@@ -212,6 +212,45 @@ def _read_result_json(ctx: RunContext, case: E2ECase) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def test_auto_register_artifacts_includes_reference_visuals_and_metadata_audio(
+    tmp_path: Path,
+) -> None:
+    class Sink:
+        base_dir = tmp_path
+
+        def __init__(self) -> None:
+            self.artifacts: dict[str, str] = {}
+
+        def register_artifact(self, key: str, rel_path: str) -> None:
+            self.artifacts[key] = rel_path
+
+    sink = Sink()
+    visual = tmp_path / "hf_seg_viz.png"
+    audio = tmp_path / "talker_decode.wav"
+    visual.write_bytes(b"png")
+    audio.write_bytes(b"wav")
+    output = StageOutput(
+        stage_name="full_inference",
+        data={"viz_path": str(visual)},
+        metadata={"audio_output_path": str(audio)},
+    )
+
+    orchestrator._auto_register_artifacts(sink, output, "ref")
+
+    assert sink.artifacts == {
+        "ref_segmentation_map": "hf_seg_viz.png",
+        "ref_wav": "talker_decode.wav",
+    }
+
+    sibling_prefix = Path(f"{tmp_path}-sibling") / "outside.wav"
+    outside = StageOutput(
+        stage_name="full_inference",
+        data={"wav_path": str(sibling_prefix)},
+    )
+    orchestrator._auto_register_artifacts(sink, outside, "trt")
+    assert sink.artifacts["trt_wav"] == str(sibling_prefix)
+
+
 def test_run_returns_preflight_skip_without_resolving_bundle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
