@@ -4,67 +4,110 @@
 name: TensorRT-Model-Connect Premerge CI
 
 run-name: >-
-  ${{ github.event_name == 'pull_request'
-      && format('PR #{0} · {1}', github.event.pull_request.number, github.event.pull_request.head.ref)
-      || format('Manual · {0}', github.ref_name) }}
+  PR #${{ github.event.pull_request.number }} · label ${{ github.event.label.name }}
 
 on:
   pull_request:
     branches:
       - main
       # Temporary validation target for the sample ownership PRs. Remove once
-      # CI-improvement is merged and the required check is enabled on main.
+      # CI-improvement is merged and the required checks are enabled on main.
       - CI-improvement
     types:
-      - opened
-      - reopened
-      - synchronize
-      - ready_for_review
       - labeled
-      - unlabeled
-  workflow_dispatch:
-    inputs:
-      base_ref:
-        description: "Git ref to compare against (defaults to HEAD^)"
-        required: false
-        type: string
-      head_ref:
-        description: "Git ref to test (defaults to the dispatched commit)"
-        required: false
-        type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: trtmc-premerge-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: >-
+    trtmc-premerge-${{ github.event.pull_request.number }}-${{ github.event.label.name == 'run-ci' && 'authorized' || github.run_id }}
+  cancel-in-progress: ${{ github.event.label.name == 'run-ci' }}
 
 jobs:
   legal:
-    # Keep this exact name: main's repository ruleset requires this context.
-    name: Legal compliance
-    if: >-
-      ${{
-        github.event_name == 'workflow_dispatch' ||
-        contains(github.event.pull_request.labels.*.name, 'run-ci')
-      }}
+    # Authorized runs preserve the exact context required by main's ruleset.
+    # Other labels use a different context and therefore cannot satisfy it.
+    name: ${{ github.event.label.name == 'run-ci' && 'Legal compliance' || 'Ignored label / Legal compliance' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      authorized: ${{ steps.authorize.outputs.authorized }}
+      tested_sha: ${{ steps.authorize.outputs.tested_sha }}
+      base_sha: ${{ steps.authorize.outputs.base_sha }}
+      head_sha: ${{ steps.authorize.outputs.head_sha }}
 
     steps:
-      - name: Check out exact source head
+      - name: Route label, pin snapshot, and consume authorization
+        id: authorize
+        env:
+          TRIGGER_LABEL: ${{ github.event.label.name }}
+          TESTED_SHA: ${{ github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ "$TRIGGER_LABEL" != "run-ci" ]; then
+            echo "authorized=false" >> "$GITHUB_OUTPUT"
+            echo "Ignoring unrelated label \`$TRIGGER_LABEL\`; no premerge work was requested." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
+            echo "::error::run-ci is restricted to branches in $GITHUB_REPOSITORY; fork pull requests cannot receive the write token needed to consume the label."
+            exit 1
+          fi
+
+          test -n "$TESTED_SHA"
+          test -n "$BASE_SHA"
+          test -n "$HEAD_SHA"
+
+          # Record the immutable merge snapshot and audit SHAs before consuming
+          # the one-shot label. Downstream jobs use these outputs exclusively.
+          echo "tested_sha=$TESTED_SHA" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+          gh api --silent \
+            --method DELETE \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/run-ci"
+
+          # Write authorization only after strict label deletion succeeds. A
+          # rerun without reapplying run-ci receives 404 above and is rejected.
+          echo "authorized=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "### One-shot premerge authorization"
+            echo
+            echo "- Tested merge snapshot: \`$TESTED_SHA\`"
+            echo "- Base audit SHA: \`$BASE_SHA\`"
+            echo "- Head audit SHA: \`$HEAD_SHA\`"
+            echo "- Consumed label: \`run-ci\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check out pinned merge snapshot
+        if: ${{ steps.authorize.outputs.authorized == 'true' }}
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head_ref || github.sha }}
+          ref: ${{ steps.authorize.outputs.tested_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Python
+        if: ${{ steps.authorize.outputs.authorized == 'true' }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Check canonical legal documents
+        if: ${{ steps.authorize.outputs.authorized == 'true' }}
         run: |
           python - <<'PY'
           import hashlib
@@ -84,53 +127,52 @@ jobs:
           PY
 
       - name: Check all tracked source headers
+        if: ${{ steps.authorize.outputs.authorized == 'true' }}
         run: python tools/legal_headers.py --check
 
   impact:
     name: 2 / Ownership and impact
     needs: legal
+    if: ${{ needs.legal.outputs.authorized == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.impact.outputs.matrix }}
       has_models: ${{ steps.impact.outputs.has_models }}
       affected_models: ${{ steps.impact.outputs.affected_models }}
       expected_count: ${{ steps.impact.outputs.expected_count }}
       mode: ${{ steps.impact.outputs.mode }}
-      head_sha: ${{ steps.refs.outputs.head_sha }}
 
     steps:
-      - name: Check out exact source head
+      - name: Check out pinned merge snapshot
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.head_ref || github.sha }}
+          ref: ${{ needs.legal.outputs.tested_sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Resolve comparison refs
         id: refs
         env:
-          REQUESTED_BASE: ${{ inputs.base_ref || github.event.pull_request.base.sha }}
-          REQUESTED_HEAD: ${{ inputs.head_ref || github.sha }}
+          CAPTURED_BASE_SHA: ${{ needs.legal.outputs.base_sha }}
+          CAPTURED_TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+          CAPTURED_HEAD_SHA: ${{ needs.legal.outputs.head_sha }}
         run: |
           set -euo pipefail
 
-          head_ref="${REQUESTED_HEAD:-HEAD}"
-          if [ -n "${REQUESTED_BASE:-}" ]; then
-            base_ref="$REQUESTED_BASE"
-          else
-            base_ref="${head_ref}^"
-          fi
-
-          head_sha="$(git rev-parse "${head_ref}^{commit}")"
-          base_tip_sha="$(git rev-parse "${base_ref}^{commit}")"
-          base_sha="$(git merge-base "$base_tip_sha" "$head_sha")"
+          tested_sha="$(git rev-parse "${CAPTURED_TESTED_SHA}^{commit}")"
+          base_tip_sha="$(git rev-parse "${CAPTURED_BASE_SHA}^{commit}")"
+          base_sha="$(git merge-base "$base_tip_sha" "$tested_sha")"
           git cat-file -e "${base_tip_sha}^{commit}"
           git cat-file -e "${base_sha}^{commit}"
-          git cat-file -e "${head_sha}^{commit}"
+          git cat-file -e "${tested_sha}^{commit}"
 
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
-          echo "Comparing $base_sha..$head_sha"
+          echo "tested_sha=$tested_sha" >> "$GITHUB_OUTPUT"
+          echo "Comparing merge snapshot $tested_sha against $base_sha"
+          echo "PR head audit SHA: $CAPTURED_HEAD_SHA"
 
       - name: Validate ownership manifests
         run: python3 tools/model_ci.py validate
@@ -139,12 +181,12 @@ jobs:
         id: impact
         env:
           BASE_SHA: ${{ steps.refs.outputs.base_sha }}
-          HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
+          TESTED_SHA: ${{ steps.refs.outputs.tested_sha }}
         run: |
           set -euo pipefail
           python3 tools/model_ci.py impact \
             --base "$BASE_SHA" \
-            --head "$HEAD_SHA" \
+            --head "$TESTED_SHA" \
             --platform-change-policy all \
             --github-output "$GITHUB_OUTPUT"
 
@@ -162,8 +204,16 @@ jobs:
 
   model-proof:
     name: 3 / ${{ matrix.model }} / Isolated proof
-    needs: impact
-    if: ${{ needs.impact.outputs.has_models == 'true' }}
+    needs:
+      - legal
+      - impact
+    if: >-
+      ${{
+        needs.legal.outputs.authorized == 'true' &&
+        needs.impact.outputs.has_models == 'true'
+      }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       max-parallel: 4
@@ -171,14 +221,20 @@ jobs:
     uses: ./.github/workflows/model-proof.yml
     with:
       model: ${{ matrix.model }}
-      revision: ${{ needs.impact.outputs.head_sha }}
+      revision: ${{ needs.legal.outputs.tested_sha }}
       suite: premerge
     secrets: inherit
 
   no-model:
     name: 3 / No model changes
-    needs: impact
-    if: ${{ needs.impact.outputs.has_models == 'false' }}
+    needs:
+      - legal
+      - impact
+    if: >-
+      ${{
+        needs.legal.outputs.authorized == 'true' &&
+        needs.impact.outputs.has_models == 'false'
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
 
@@ -192,8 +248,9 @@ jobs:
           echo "No model-owned or platform inputs changed." >> "$GITHUB_STEP_SUMMARY"
 
   required:
-    # Keep this exact name: main's repository ruleset requires this context.
-    name: Premerge CI
+    # Authorized runs preserve the exact context required by main's ruleset.
+    # Other labels use a distinct successful context and leave it unsatisfied.
+    name: ${{ github.event.label.name == 'run-ci' && 'Premerge CI' || 'Ignored label / Premerge CI' }}
     needs:
       - legal
       - impact
@@ -206,29 +263,33 @@ jobs:
     steps:
       - name: Verify every required job
         env:
+          TRIGGER_LABEL: ${{ github.event.label.name }}
+          AUTHORIZED: ${{ needs.legal.outputs.authorized }}
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
           LEGAL_RESULT: ${{ needs.legal.result }}
           IMPACT_RESULT: ${{ needs.impact.result }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
           NO_MODEL_RESULT: ${{ needs.no-model.result }}
           HAS_MODELS: ${{ needs.impact.outputs.has_models }}
           EXPECTED_COUNT: ${{ needs.impact.outputs.expected_count }}
-          AUTHORIZED: >-
-            ${{
-              github.event_name == 'workflow_dispatch' ||
-              contains(github.event.pull_request.labels.*.name, 'run-ci')
-            }}
         run: |
           set -euo pipefail
 
-          if [ "$AUTHORIZED" != "true" ]; then
-            echo "::error::Premerge CI is not authorized. Add the run-ci label and keep it applied until the workflow completes."
-            exit 1
+          if [ "$TRIGGER_LABEL" != "run-ci" ]; then
+            test "$AUTHORIZED" = "false"
+            echo "Ignored unrelated label \`$TRIGGER_LABEL\`; protected premerge contexts were not emitted." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
 
           test "$LEGAL_RESULT" = "success" || {
-            echo "::error::Legal compliance result: $LEGAL_RESULT"
+            echo "::error::Legal compliance and one-shot authorization result: $LEGAL_RESULT"
             exit 1
           }
+          test "$AUTHORIZED" = "true" || {
+            echo "::error::The run-ci label was not consumed successfully"
+            exit 1
+          }
+          test -n "$TESTED_SHA"
           test "$IMPACT_RESULT" = "success" || {
             echo "::error::Ownership and impact result: $IMPACT_RESULT"
             exit 1
@@ -257,4 +318,4 @@ jobs:
               ;;
           esac
 
-          echo "All required premerge checks passed." >> "$GITHUB_STEP_SUMMARY"
+          echo "All required premerge checks passed for \`$TESTED_SHA\`." >> "$GITHUB_STEP_SUMMARY"

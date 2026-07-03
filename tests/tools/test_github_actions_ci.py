@@ -209,50 +209,94 @@ def test_github_workflows_keep_html_report_in_full_artifacts() -> None:
     assert "e2e_artifacts/" not in premerge
 
 
-def test_premerge_ci_runs_from_manual_dispatch_or_trigger_labels() -> None:
+def test_premerge_ci_is_triggered_only_by_one_shot_label_events() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
     trigger_block = text.split("permissions:", maxsplit=1)[0]
     assert "pull_request:" in trigger_block
-    assert "types:" in trigger_block
+    assert "- main" in trigger_block
+    assert "- CI-improvement" in trigger_block
+    types_block = trigger_block.split("types:", maxsplit=1)[1]
     assert "- labeled" in trigger_block
-    assert "- unlabeled" in trigger_block
+    for unwanted_type in (
+        "opened",
+        "reopened",
+        "synchronize",
+        "ready_for_review",
+        "unlabeled",
+    ):
+        assert unwanted_type not in types_block
     assert "paths-ignore:" not in trigger_block
-    assert "workflow_dispatch:" in trigger_block
+    assert "paths:" not in trigger_block
+    assert "workflow_dispatch:" not in trigger_block
     assert "push:" not in trigger_block
-    assert "issues: write" not in text
+    assert "inputs." not in text
+    assert "contains(github.event.pull_request.labels.*.name" not in text
+    assert "github.event.label.name == 'run-ci'" in text
+    assert "permissions: {}" in text
     assert "pull-requests: read" not in text
-    assert "github.event_name == 'workflow_dispatch'" in text
-    assert "contains(github.event.pull_request.labels.*.name, 'run-ci')" in text
-    assert "github.event.label.name" not in text
     assert "run-e2e" not in text
     assert "run-full-ci" not in text
-    assert "Remove trigger label" not in text
     assert "actions/github-script" not in text
-    assert "github.rest.issues.removeLabel" not in text
 
 
-def test_premerge_required_gate_fails_when_run_ci_is_missing_or_removed() -> None:
+def test_legal_job_pins_snapshot_rejects_forks_and_consumes_run_ci() -> None:
     text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
     legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
+
+    assert "'Legal compliance' || 'Ignored label / Legal compliance'" in legal
+    assert "issues: write" in legal
+    assert "contents: read" in legal
+    assert text.count("issues: write") == 1
+    for output in ("authorized", "tested_sha", "base_sha", "head_sha"):
+        assert f"{output}: ${{{{ steps.authorize.outputs.{output} }}}}" in legal
+
+    assert "TESTED_SHA: ${{ github.sha }}" in legal
+    assert "BASE_SHA: ${{ github.event.pull_request.base.sha }}" in legal
+    assert "HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in legal
+    assert "HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}" in legal
+    assert 'if [ "$TRIGGER_LABEL" != "run-ci" ]; then' in legal
+    assert 'echo "authorized=false" >> "$GITHUB_OUTPUT"' in legal
+    assert 'if [ "$HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then' in legal
+
+    capture_index = legal.index('echo "tested_sha=$TESTED_SHA"')
+    delete_index = legal.index("gh api --silent")
+    authorize_index = legal.index('echo "authorized=true"')
+    assert capture_index < delete_index < authorize_index
+    assert "--method DELETE" in legal
+    assert 'issues/$PR_NUMBER/labels/run-ci"' in legal
+    assert "|| true" not in legal
+
+    assert "Check out pinned merge snapshot" in legal
+    assert "ref: ${{ steps.authorize.outputs.tested_sha }}" in legal
+    assert "persist-credentials: false" in legal
+    assert "steps.authorize.outputs.authorized == 'true'" in legal
+
+
+def test_unrelated_label_cannot_emit_or_satisfy_required_contexts() -> None:
+    text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
+    impact = text.split("\n  impact:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
     required = text.split("\n  required:", maxsplit=1)[1]
 
-    # Expensive work is authorized by the current label set, so an unlabeled
-    # event revokes access even though the event payload names the removed label.
-    assert "github.event_name == 'workflow_dispatch'" in legal
-    assert "contains(github.event.pull_request.labels.*.name, 'run-ci')" in legal
-    assert "github.event.label.name" not in legal
-
-    # The stable required check itself must never inherit that skip condition.
-    # It runs after skipped dependencies and turns missing authorization into a
-    # failure, preventing GitHub from treating a skipped required job as success.
+    # Both ruleset contexts exist only on the run-ci event. Unrelated labels
+    # take distinct dynamic names and succeed cheaply instead of producing a
+    # skipped required check, which GitHub would otherwise treat as success.
+    assert "'Legal compliance' || 'Ignored label / Legal compliance'" in legal
+    assert "'Premerge CI' || 'Ignored label / Premerge CI'" in required
     assert "if: ${{ always() }}" in required
-    assert "AUTHORIZED: >-" in required
-    assert "contains(github.event.pull_request.labels.*.name, 'run-ci')" in required
-    assert 'if [ "$AUTHORIZED" != "true" ]; then' in required
-    assert "Premerge CI is not authorized" in required
-    assert required.index("Premerge CI is not authorized") < required.index(
-        'test "$LEGAL_RESULT" = "success"'
-    )
+    assert 'if [ "$TRIGGER_LABEL" != "run-ci" ]; then' in required
+    ignored_index = required.index("Ignored unrelated label")
+    validation_index = required.index('test "$LEGAL_RESULT" = "success"')
+    assert ignored_index < validation_index
+    assert "needs.legal.outputs.authorized == 'true'" in impact
+
+
+def test_premerge_concurrency_separates_authorized_and_ignored_labels() -> None:
+    text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    concurrency = text.split("concurrency:", maxsplit=1)[1].split("\njobs:", maxsplit=1)[0]
+    assert "github.event.pull_request.number" in concurrency
+    assert "github.event.label.name == 'run-ci' && 'authorized' || github.run_id" in concurrency
+    assert "cancel-in-progress: ${{ github.event.label.name == 'run-ci' }}" in concurrency
 
 
 def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
@@ -266,27 +310,32 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     no_model = text.split("\n  no-model:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
     required = text.split("\n  required:", maxsplit=1)[1]
 
-    assert "name: Legal compliance" in legal
+    assert "'Legal compliance' || 'Ignored label / Legal compliance'" in legal
     assert "python tools/legal_headers.py --check" in legal
     assert "needs: legal" in impact
+    assert "needs.legal.outputs.authorized == 'true'" in impact
     assert "python3 tools/model_ci.py validate" in impact
     assert "python3 tools/model_ci.py impact" in impact
     assert "--platform-change-policy all" in impact
 
-    assert "needs: impact" in model_proof
+    assert "- legal" in model_proof
+    assert "- impact" in model_proof
+    assert "needs.legal.outputs.authorized == 'true'" in model_proof
     assert "needs.impact.outputs.has_models == 'true'" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
     assert "matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}" in model_proof
     assert "fail-fast: false" in model_proof
     assert "max-parallel: 4" in model_proof
 
-    assert "needs: impact" in no_model
+    assert "- legal" in no_model
+    assert "- impact" in no_model
+    assert "needs.legal.outputs.authorized == 'true'" in no_model
     assert "needs.impact.outputs.has_models == 'false'" in no_model
     assert 'test "$IMPACT_MODE" = "none"' in no_model
 
     for dependency in ("legal", "impact", "model-proof", "no-model"):
         assert f"- {dependency}" in required
-    assert "name: Premerge CI" in required
+    assert "'Premerge CI' || 'Ignored label / Premerge CI'" in required
     assert "always()" in required
     assert 'test "$MODEL_RESULT" = "success"' in required
 
@@ -296,9 +345,11 @@ def test_premerge_ci_preserves_the_main_ruleset_context_names() -> None:
     legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
     required = text.split("\n  required:", maxsplit=1)[1]
 
-    assert "name: Legal compliance" in legal
+    assert "github.event.label.name == 'run-ci'" in legal
+    assert "'Legal compliance' || 'Ignored label / Legal compliance'" in legal
     assert "uses: ./.github/workflows/legal.yml" not in legal
-    assert "name: Premerge CI" in required
+    assert "github.event.label.name == 'run-ci'" in required
+    assert "'Premerge CI' || 'Ignored label / Premerge CI'" in required
 
 
 def test_premerge_ci_compares_the_checked_out_merge_snapshot() -> None:
@@ -307,28 +358,27 @@ def test_premerge_ci_compares_the_checked_out_merge_snapshot() -> None:
         "- name: Validate ownership manifests", maxsplit=1
     )[0]
 
-    assert (
-        "REQUESTED_BASE: ${{ inputs.base_ref || github.event.pull_request.base.sha }}" in base_block
-    )
-    assert "REQUESTED_HEAD: ${{ inputs.head_ref || github.sha }}" in base_block
-    assert 'base_tip_sha="$(git rev-parse "${base_ref}^{commit}")"' in base_block
-    assert 'base_sha="$(git merge-base "$base_tip_sha" "$head_sha")"' in base_block
-    assert 'head_sha="$(git rev-parse "${head_ref}^{commit}")"' in base_block
-    assert "github.event.pull_request.head.sha" not in text
+    assert "CAPTURED_BASE_SHA: ${{ needs.legal.outputs.base_sha }}" in base_block
+    assert "CAPTURED_TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}" in base_block
+    assert "CAPTURED_HEAD_SHA: ${{ needs.legal.outputs.head_sha }}" in base_block
+    assert 'base_tip_sha="$(git rev-parse "${CAPTURED_BASE_SHA}^{commit}")"' in base_block
+    assert 'base_sha="$(git merge-base "$base_tip_sha" "$tested_sha")"' in base_block
+    assert 'tested_sha="$(git rev-parse "${CAPTURED_TESTED_SHA}^{commit}")"' in base_block
+    assert '--head "$TESTED_SHA"' in text
 
 
 def test_label_triggered_premerge_ci_uses_pr_merge_ref_checkout() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
-    checkout_block = text.split("- name: Check out exact source head", maxsplit=1)[1].split(
-        "\n\n",
-        maxsplit=1,
-    )[0]
-    assert "uses: actions/checkout@v4" in checkout_block
-    assert "ref: ${{ inputs.head_ref || github.sha }}" in checkout_block
-    assert "github.event.pull_request.head.sha" not in checkout_block
-
     legal_block = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
-    assert "ref: ${{ inputs.head_ref || github.sha }}" in legal_block
+    impact_block = text.split("\n  impact:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    model_block = text.split("\n  model-proof:", maxsplit=1)[1].split("\n  no-model:", maxsplit=1)[
+        0
+    ]
+
+    assert "TESTED_SHA: ${{ github.sha }}" in legal_block
+    assert "ref: ${{ steps.authorize.outputs.tested_sha }}" in legal_block
+    assert "ref: ${{ needs.legal.outputs.tested_sha }}" in impact_block
+    assert "revision: ${{ needs.legal.outputs.tested_sha }}" in model_block
 
 
 def test_nightly_workflow_dispatch_can_validate_requested_ref() -> None:
@@ -373,7 +423,7 @@ def test_github_workflows_write_e2e_markdown_summary() -> None:
     premerge = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
     assert "Summarize selection" in premerge
     assert "### Model impact" in premerge
-    assert "All required premerge checks passed." in premerge
+    assert "All required premerge checks passed for" in premerge
     assert '>> "$GITHUB_STEP_SUMMARY"' in premerge
 
 
