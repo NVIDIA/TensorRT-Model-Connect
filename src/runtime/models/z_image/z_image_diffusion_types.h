@@ -110,4 +110,23 @@ inline bool validate_z_image_initial_latents(std::size_t expected_size, std::siz
     return true;
 }
 
+inline std::vector<int64_t> z_image_text_encoder_input_shape(int32_t input_rank, int32_t seq_len) {
+    if (input_rank == 2) {
+        return {1, static_cast<int64_t>(seq_len)};
+    }
+    return {static_cast<int64_t>(seq_len)};
+}
+
+inline std::vector<float> make_z_image_attention_mask(int32_t num_patches, int32_t text_seq_len,
+                                                      int32_t cap_padded_len) {
+    const int32_t clamped_caption_len =
+        cap_padded_len < 0 ? 0 : (cap_padded_len > text_seq_len ? text_seq_len : cap_padded_len);
+    std::vector<float> mask(static_cast<std::size_t>(num_patches + text_seq_len), -1.0e9F);
+    const auto valid_tokens = static_cast<std::size_t>(num_patches + clamped_caption_len);
+    for (std::size_t index = 0; index < valid_tokens; ++index) {
+        mask[index] = 0.0F;
+    }
+    return mask;
+}
+
 } // namespace trtmc

@@ -238,13 +238,13 @@ bool ZImagePipeline::run_text_encoder(const std::vector<int32_t>& input_ids,
     }
 
     // Build TensorMap for TrtModule::forward()
-    const bool encoder_is_batched = text_encoder_->input_rank("input_ids") == 2;
-    const std::vector<int64_t> encoder_shape =
-        encoder_is_batched ? std::vector<int64_t>{1, static_cast<int64_t>(seq_len)}
-                           : std::vector<int64_t>{static_cast<int64_t>(seq_len)};
+    const auto ids_shape =
+        z_image_text_encoder_input_shape(text_encoder_->input_rank("input_ids"), seq_len);
+    const auto mask_shape =
+        z_image_text_encoder_input_shape(text_encoder_->input_rank("attention_mask"), seq_len);
     TensorMap inputs;
-    inputs["input_ids"] = Tensor{padded_ids.data(), encoder_shape, DType::kInt32};
-    inputs["attention_mask"] = Tensor{mask.data(), encoder_shape, DType::kFloat32};
+    inputs["input_ids"] = Tensor{padded_ids.data(), ids_shape, DType::kInt32};
+    inputs["attention_mask"] = Tensor{mask.data(), mask_shape, DType::kFloat32};
 
     auto outputs = text_encoder_->forward(inputs);
 
@@ -279,7 +279,9 @@ bool ZImagePipeline::run_denoiser(const std::vector<float>& hidden,
                                   const std::vector<float>& encoder_hidden,
                                   const std::vector<float>& temb,
                                   const std::vector<float>& cos_vals,
-                                  const std::vector<float>& sin_vals, std::vector<float>& output) {
+                                  const std::vector<float>& sin_vals,
+                                  const std::vector<float>& attention_mask,
+                                  std::vector<float>& output) {
     if (!denoiser_) {
         std::cerr << "[z-image] No denoiser module\n";
         return false;
@@ -301,6 +303,9 @@ bool ZImagePipeline::run_denoiser(const std::vector<float>& hidden,
     inputs["rotary_sin"] = Tensor{const_cast<float*>(sin_vals.data()),
                                   {static_cast<int64_t>(sin_vals.size())},
                                   DType::kFloat32};
+    inputs["attention_mask"] = Tensor{const_cast<float*>(attention_mask.data()),
+                                      {static_cast<int64_t>(attention_mask.size())},
+                                      DType::kFloat32};
 
     auto outputs = denoiser_->forward(inputs);
 
@@ -317,14 +322,12 @@ bool ZImagePipeline::run_denoiser(const std::vector<float>& hidden,
 // ``batch_size``. The output is contiguous ``[B, num_patches, patch_dim]``.
 // ---------------------------------------------------------------------------
 
-bool ZImagePipeline::run_denoiser_batched(const std::vector<float>& hidden,
-                                          const std::vector<float>& encoder_hidden,
-                                          const std::vector<float>& temb,
-                                          const std::vector<float>& cos_vals,
-                                          const std::vector<float>& sin_vals, int32_t batch_size,
-                                          int32_t num_patches, int32_t dit_dim, int32_t text_seq,
-                                          int32_t freq_dim, int32_t total_seq, int32_t head_dim,
-                                          int32_t patch_dim, std::vector<float>& output) {
+bool ZImagePipeline::run_denoiser_batched(
+    const std::vector<float>& hidden, const std::vector<float>& encoder_hidden,
+    const std::vector<float>& temb, const std::vector<float>& cos_vals,
+    const std::vector<float>& sin_vals, const std::vector<float>& attention_mask,
+    int32_t batch_size, int32_t num_patches, int32_t dit_dim, int32_t text_seq, int32_t freq_dim,
+    int32_t total_seq, int32_t head_dim, int32_t patch_dim, std::vector<float>& output) {
     if (!denoiser_) {
         std::cerr << "[z-image] No denoiser module\n";
         return false;
@@ -357,6 +360,10 @@ bool ZImagePipeline::run_denoiser_batched(const std::vector<float>& hidden,
                                   {static_cast<int64_t>(batch_size),
                                    static_cast<int64_t>(total_seq), static_cast<int64_t>(head_dim)},
                                   DType::kFloat32};
+    inputs["attention_mask"] =
+        Tensor{const_cast<float*>(attention_mask.data()),
+               {static_cast<int64_t>(batch_size), static_cast<int64_t>(total_seq)},
+               DType::kFloat32};
 
     auto outputs = denoiser_->forward(inputs);
 
@@ -816,17 +823,19 @@ std::vector<ImageResult> ZImagePipeline::generate_image_batch_chunk(
     std::vector<float> caption_projected_b(static_cast<std::size_t>(batch) * caption_size);
     std::vector<float> rope_cos_b(static_cast<std::size_t>(batch) * rope_size);
     std::vector<float> rope_sin_b(static_cast<std::size_t>(batch) * rope_size);
+    std::vector<float> attention_mask_b(static_cast<std::size_t>(batch) *
+                                        static_cast<std::size_t>(total_seq));
     std::vector<float> latents(static_cast<std::size_t>(batch) * latent_size);
 
     if (!run_qwen3_encoder_for_chunk(prompts, resolved_seeds, prompt_offset, batch, layout,
-                                     caption_projected_b, rope_cos_b, rope_sin_b, latents,
-                                     supplied_initial_latents)) {
+                                     caption_projected_b, rope_cos_b, rope_sin_b, attention_mask_b,
+                                     latents, supplied_initial_latents)) {
         return {};
     }
 
     if (!run_denoise_loop_for_chunk(batch, num_inference_steps, freq_dim, engine_is_batched,
                                     prompt_offset, layout, caption_projected_b, rope_cos_b,
-                                    rope_sin_b, latents)) {
+                                    rope_sin_b, attention_mask_b, latents)) {
         return {};
     }
 
@@ -840,8 +849,8 @@ bool ZImagePipeline::run_qwen3_encoder_for_chunk(
     const std::vector<std::string>& prompts, const std::vector<std::uint32_t>& resolved_seeds,
     std::size_t prompt_offset, int32_t batch, const ZImageLayout& layout,
     std::vector<float>& caption_projected_b, std::vector<float>& rope_cos_b,
-    std::vector<float>& rope_sin_b, std::vector<float>& latents,
-    const std::vector<float>& supplied_initial_latents) {
+    std::vector<float>& rope_sin_b, std::vector<float>& attention_mask_b,
+    std::vector<float>& latents, const std::vector<float>& supplied_initial_latents) {
     const auto latent_size = static_cast<std::size_t>(layout.z_dim) *
                              static_cast<std::size_t>(layout.h_lat) *
                              static_cast<std::size_t>(layout.w_lat);
@@ -881,6 +890,12 @@ bool ZImagePipeline::run_qwen3_encoder_for_chunk(
                   rope_sin_b.begin() +
                       static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(rope_size));
 
+        const auto attention_mask =
+            make_z_image_attention_mask(layout.num_patches, layout.text_seq, cap_padded_len);
+        std::copy(attention_mask.begin(), attention_mask.end(),
+                  attention_mask_b.begin() +
+                      static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(total_seq));
+
         if (!supplied_initial_latents.empty()) {
             std::copy(supplied_initial_latents.begin(), supplied_initial_latents.end(),
                       latents.begin());
@@ -894,10 +909,11 @@ bool ZImagePipeline::run_qwen3_encoder_for_chunk(
 
 bool ZImagePipeline::run_denoiser_unbatched_step(
     int32_t batch, int32_t step, std::size_t prompt_offset, std::size_t hidden_size,
-    std::size_t caption_size, std::size_t rope_size, std::size_t patch_size,
-    const std::vector<float>& hidden_b, const std::vector<float>& caption_projected_b,
-    const std::vector<float>& temb_one, const std::vector<float>& rope_cos_b,
-    const std::vector<float>& rope_sin_b, std::vector<float>& denoiser_output) {
+    std::size_t caption_size, std::size_t rope_size, std::size_t attention_mask_size,
+    std::size_t patch_size, const std::vector<float>& hidden_b,
+    const std::vector<float>& caption_projected_b, const std::vector<float>& temb_one,
+    const std::vector<float>& rope_cos_b, const std::vector<float>& rope_sin_b,
+    const std::vector<float>& attention_mask_b, std::vector<float>& denoiser_output) {
     denoiser_output.resize(static_cast<std::size_t>(batch) * patch_size);
     for (int32_t b = 0; b < batch; ++b) {
         const auto* h_ptr = hidden_b.data() + static_cast<std::size_t>(b) * hidden_size;
@@ -905,12 +921,15 @@ bool ZImagePipeline::run_denoiser_unbatched_step(
             caption_projected_b.data() + static_cast<std::size_t>(b) * caption_size;
         const auto* cos_ptr = rope_cos_b.data() + static_cast<std::size_t>(b) * rope_size;
         const auto* sin_ptr = rope_sin_b.data() + static_cast<std::size_t>(b) * rope_size;
+        const auto* mask_ptr =
+            attention_mask_b.data() + static_cast<std::size_t>(b) * attention_mask_size;
         std::vector<float> hidden_one(h_ptr, h_ptr + hidden_size);
         std::vector<float> cap_one(cap_ptr, cap_ptr + caption_size);
         std::vector<float> cos_one(cos_ptr, cos_ptr + rope_size);
         std::vector<float> sin_one(sin_ptr, sin_ptr + rope_size);
+        std::vector<float> mask_one(mask_ptr, mask_ptr + attention_mask_size);
         std::vector<float> out_one;
-        if (!run_denoiser(hidden_one, cap_one, temb_one, cos_one, sin_one, out_one)) {
+        if (!run_denoiser(hidden_one, cap_one, temb_one, cos_one, sin_one, mask_one, out_one)) {
             std::cerr << "[z-image] DiT failed at step " << step << " sample "
                       << (prompt_offset + static_cast<std::size_t>(b)) << "\n";
             return false;
@@ -926,7 +945,8 @@ bool ZImagePipeline::run_denoise_loop_for_chunk(
     int32_t batch, int32_t num_inference_steps, int32_t freq_dim, bool engine_is_batched,
     std::size_t prompt_offset, const ZImageLayout& layout,
     const std::vector<float>& caption_projected_b, const std::vector<float>& rope_cos_b,
-    const std::vector<float>& rope_sin_b, std::vector<float>& latents) {
+    const std::vector<float>& rope_sin_b, const std::vector<float>& attention_mask_b,
+    std::vector<float>& latents) {
     const auto latent_size = static_cast<std::size_t>(layout.z_dim) *
                              static_cast<std::size_t>(layout.h_lat) *
                              static_cast<std::size_t>(layout.w_lat);
@@ -978,16 +998,17 @@ bool ZImagePipeline::run_denoise_loop_for_chunk(
 
         if (engine_is_batched) {
             if (!run_denoiser_batched(hidden_b, caption_projected_b, temb_b, rope_cos_b, rope_sin_b,
-                                      batch, layout.num_patches, layout.dit_dim, layout.text_seq,
-                                      freq_dim, total_seq, layout.head_dim, layout.patch_dim,
-                                      denoiser_output)) {
+                                      attention_mask_b, batch, layout.num_patches, layout.dit_dim,
+                                      layout.text_seq, freq_dim, total_seq, layout.head_dim,
+                                      layout.patch_dim, denoiser_output)) {
                 std::cerr << "[z-image] Batched DiT failed at step " << step << "\n";
                 return false;
             }
         } else {
-            if (!run_denoiser_unbatched_step(batch, step, prompt_offset, hidden_size, caption_size,
-                                             rope_size, patch_size, hidden_b, caption_projected_b,
-                                             temb_one, rope_cos_b, rope_sin_b, denoiser_output)) {
+            if (!run_denoiser_unbatched_step(
+                    batch, step, prompt_offset, hidden_size, caption_size, rope_size,
+                    static_cast<std::size_t>(total_seq), patch_size, hidden_b, caption_projected_b,
+                    temb_one, rope_cos_b, rope_sin_b, attention_mask_b, denoiser_output)) {
                 return false;
             }
         }

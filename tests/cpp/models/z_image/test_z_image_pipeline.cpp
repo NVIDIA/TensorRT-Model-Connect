@@ -43,11 +43,30 @@ void test_zimage_initial_latent_contract() {
           "Z-Image rejects one latent for multiple prompts");
 }
 
+void test_zimage_text_encoder_input_shape() {
+    check(trtmc::z_image_text_encoder_input_shape(1, 512) == std::vector<int64_t>({512}),
+          "Z-Image static text encoder keeps rank-1 input");
+    check(trtmc::z_image_text_encoder_input_shape(2, 512) == std::vector<int64_t>({1, 512}),
+          "Z-Image dynamic text encoder adds batch dimension");
+}
+
+void test_zimage_attention_mask() {
+    const auto mask = trtmc::make_z_image_attention_mask(2, 5, 3);
+    check(mask.size() == 7, "Z-Image attention mask covers image and caption tokens");
+    check(mask[0] == 0.0F && mask[1] == 0.0F && mask[2] == 0.0F && mask[3] == 0.0F &&
+              mask[4] == 0.0F,
+          "Z-Image attention mask keeps image and padded HF caption tokens visible");
+    check(mask[5] < -1.0e8F && mask[6] < -1.0e8F,
+          "Z-Image attention mask hides unused fixed caption slots");
+}
+
 } // namespace
 
 int main() {
     test_zimage_construction();
     test_zimage_initial_latent_contract();
+    test_zimage_text_encoder_input_shape();
+    test_zimage_attention_mask();
     if (failures > 0) {
         std::cerr << failures << " z-image pipeline test(s) FAILED\n";
     }

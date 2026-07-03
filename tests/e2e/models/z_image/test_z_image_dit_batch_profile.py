@@ -31,8 +31,7 @@ import pytest
 try:
     from tensorrt_model_connect.families.z_image import z_image_dit_builder
 except (ImportError, ModuleNotFoundError):
-    pytest.skip(
-        "tensorrt_model_connect requires tensorrt", allow_module_level=True)
+    pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
 
 # ---------------------------------------------------------------------------
@@ -76,8 +75,10 @@ class _Network:
 
     def __getattr__(self, attr: str):
         if attr.startswith("add_"):
+
             def _factory(*_args, **_kwargs):
                 return _Layer()
+
             return _factory
         raise AttributeError(attr)
 
@@ -91,12 +92,18 @@ def test_static_fp16_attention_uses_fp32_accumulation(
         calls.append(kwargs)
         return _Tensor()
 
-    monkeypatch.setattr(
-        z_image_dit_builder.graph_ops, "add_attention_from_rows", _attention)
+    monkeypatch.setattr(z_image_dit_builder.graph_ops, "add_attention_from_rows", _attention)
 
     z_image_dit_builder._multi_head_attention(
-        None, _Tensor(), _Tensor(), _Tensor(),
-        num_heads=2, head_dim=4, q_seq=8, kv_seq=8, scale_t=0.5,
+        None,
+        _Tensor(),
+        _Tensor(),
+        _Tensor(),
+        num_heads=2,
+        head_dim=4,
+        q_seq=8,
+        kv_seq=8,
+        scale_t=0.5,
         dtype=np.float16,
     )
 
@@ -159,6 +166,7 @@ class _FakeTRT(types.SimpleNamespace):
     class Logger:
         def __init__(self, *_a, **_kw):
             pass
+
         WARNING = 1
         VERBOSE = 2
 
@@ -195,6 +203,7 @@ def _make_tensor(*_a, **_kw) -> _Tensor:
 def _patch_graph_ops(monkeypatch):
     """Replace heavy graph_ops calls with tensor-returning stubs."""
     import tensorrt_model_connect.families.z_image.graph_ops as gops
+
     for name in (
         "add_constant",
         "add_matmul_rhs_constant",
@@ -254,8 +263,7 @@ def _tiny_dit_weights(
             f"{prefix}.ffn_norm2": z((dim,), dtype=np.float32),
         }
         if has_adaln:
-            w[f"{prefix}.adaln.weight"] = z(
-                (adaln_embed_dim, 4 * dim), dtype=np.float32)
+            w[f"{prefix}.adaln.weight"] = z((adaln_embed_dim, 4 * dim), dtype=np.float32)
             w[f"{prefix}.adaln.bias"] = z((4 * dim,), dtype=np.float32)
         return w
 
@@ -286,17 +294,19 @@ def _call_builder(
 
     profile_calls: list[dict] = []
 
-    def _record_profile(builder, config, network, *, input_names,
-                        max_batch, opt_batch, static_shape):
-        profile_calls.append({
-            "input_names": list(input_names),
-            "max_batch": max_batch,
-            "opt_batch": opt_batch,
-            "static_shape": dict(static_shape),
-        })
+    def _record_profile(
+        builder, config, network, *, input_names, max_batch, opt_batch, static_shape
+    ):
+        profile_calls.append(
+            {
+                "input_names": list(input_names),
+                "max_batch": max_batch,
+                "opt_batch": opt_batch,
+                "static_shape": dict(static_shape),
+            }
+        )
 
-    monkeypatch.setattr(
-        z_image_dit_builder, "add_dynamic_batch_profile", _record_profile)
+    monkeypatch.setattr(z_image_dit_builder, "add_dynamic_batch_profile", _record_profile)
 
     holder: dict = {}
     real_builder_cls = _FakeTRT.Builder
@@ -335,6 +345,17 @@ def _call_builder(
 # ---------------------------------------------------------------------------
 
 
+def test_static_dit_accepts_runtime_caption_attention_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Static DiT masks caption slots beyond HF's multiple-of-32 padding."""
+    network, profile_calls = _call_builder(monkeypatch, max_batch_size=1)
+
+    inputs = {name: shape for name, _dtype, shape in network.inputs}
+    assert inputs["attention_mask"] == (17,)
+    assert profile_calls == []
+
+
 def test_dynamic_batch_adds_leading_minus_one_to_all_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -354,12 +375,18 @@ def test_dynamic_batch_adds_leading_minus_one_to_all_inputs(
     assert inputs["timestep_embedding"] == (-1, 6)
     assert inputs["rotary_cos"] == (-1, 17, 2)
     assert inputs["rotary_sin"] == (-1, 17, 2)
+    assert inputs["attention_mask"] == (-1, 17)
 
     assert len(profile_calls) == 1
     call = profile_calls[0]
     assert sorted(call["input_names"]) == [
-        "encoder_hidden_states", "hidden_states", "rotary_cos",
-        "rotary_sin", "timestep_embedding"]
+        "attention_mask",
+        "encoder_hidden_states",
+        "hidden_states",
+        "rotary_cos",
+        "rotary_sin",
+        "timestep_embedding",
+    ]
     assert call["max_batch"] == 4
     assert call["opt_batch"] == 4
     assert call["static_shape"] == {
@@ -368,6 +395,7 @@ def test_dynamic_batch_adds_leading_minus_one_to_all_inputs(
         "timestep_embedding": (6,),
         "rotary_cos": (17, 2),
         "rotary_sin": (17, 2),
+        "attention_mask": (17,),
     }
 
 
@@ -387,4 +415,5 @@ def test_static_fp16_accepts_selective_fp32_dit_layers(
         "timestep_embedding",
         "rotary_cos",
         "rotary_sin",
+        "attention_mask",
     ]

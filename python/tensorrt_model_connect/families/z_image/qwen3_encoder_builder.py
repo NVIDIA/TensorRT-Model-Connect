@@ -6,7 +6,7 @@
 Builds a TRT engine for the Qwen3 model used as a text encoder in Z-Image.
 Unlike the standard decoder builder, this:
   - Processes the entire sequence at once (no KV cache)
-  - Uses bidirectional causal attention (full attention mask)
+  - Uses causal attention plus a padding mask
   - Returns hidden_states from a configurable layer (default: layer -2)
 
 Engine I/O:
@@ -28,6 +28,7 @@ from ...engine_builder import add_dynamic_batch_profile
 
 
 trt = trt_compat.get_trt()
+
 
 def load_qwen3_encoder_weights(
     model_dir: str,
@@ -192,18 +193,14 @@ def build_qwen3_encoder_engine(
         network, (max_seq_len,), np.arange(max_seq_len, dtype=np.int32),
         dtype=np.int32)
 
-    # Build attention mask for native IAttention. attn_mask input is 0.0 for
-    # valid tokens and -1e9 for padding; [1, 1, 1, S] broadcasts across heads
-    # and query positions.
-    # We mask padded positions with -1e9
-    mask_reshape = network.add_shuffle(attn_mask)
-    mask_reshape.reshape_dims = (1, 1, 1, max_seq_len)
+    # Input IDs are right-padded and only valid-prefix outputs are consumed.
+    # Native causal attention therefore also prevents every consumed query
+    # from attending to padding, without materializing a 512x512 additive mask.
+    # Keep attn_mask in the engine interface for runtime compatibility.
+    del attn_mask
 
+    output_hidden = hidden
     for layer_idx in range(num_layers):
-        if layer_idx == output_layer:
-            # Save this hidden state as output
-            output_hidden = hidden
-
         # RMSNorm
         normed = graph_ops.add_rms_norm(
             network, hidden, hidden_size,
@@ -250,7 +247,8 @@ def build_qwen3_encoder_engine(
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             q_seq=max_seq_len, kv_seq=max_seq_len,
-            mask=mask_reshape.get_output(0),
+            causal=True,
+            mask=None,
             tag=f"layer.{layer_idx}.attn")
 
         # Output projection
@@ -290,6 +288,11 @@ def build_qwen3_encoder_engine(
         # Residual
         hidden = network.add_elementwise(
             hidden, down, trt.ElementWiseOperation.SUM).get_output(0)
+
+        if layer_idx == output_layer:
+            # HF captures decoder-layer outputs, so hidden_states[-2] is
+            # the output after decoder layer N-2, not its input.
+            output_hidden = hidden
 
     # Use the output from the target layer
     if output_layer >= num_layers:
@@ -406,15 +409,14 @@ def _add_apply_rope_native_batched(network, inp, cos_cache_2d, sin_cache_2d,
 
 def _add_attention_from_batched_rows(network, q, k, v, *,
                                      num_heads: int, num_kv_heads: int,
-                                     head_dim: int, q_seq: int, kv_seq: int,
-                                     mask):
+                                     head_dim: int, q_seq: int, kv_seq: int):
     """Native IAttention for ``[B, S, H*D]`` Q and ``[B, S, KVH*D]`` K/V."""
     q_4d = _reshape_batched_rows_to_heads_4d(network, q, num_heads, head_dim, q_seq)
     k_4d = _reshape_batched_rows_to_heads_4d(network, k, num_kv_heads, head_dim, kv_seq)
     v_4d = _reshape_batched_rows_to_heads_4d(network, v, num_kv_heads, head_dim, kv_seq)
     ctx_4d = graph_ops.add_attention_core(
         network, q_4d, k_4d, v_4d,
-        causal=False, mask=mask,
+        causal=True, mask=None,
         scale=float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0,
     )
     return _reshape_heads_4d_to_batched_rows(
@@ -503,15 +505,12 @@ def _build_qwen3_encoder_engine_batched(
         network, rope_sin_half_np.shape, rope_sin_half_np,
         dtype=work_np_dtype)
 
-    mask_reshape = network.add_shuffle(attn_mask)
-    mask_reshape.reshape_dims = (-1, 1, 1, max_seq_len)
-    mask_4d = mask_reshape.get_output(0)
+    # See the static path: right padding is outside every consumed query's
+    # causal receptive field, so no explicit padding matrix is required.
+    del attn_mask
 
     output_hidden = hidden
     for layer_idx in range(num_layers):
-        if layer_idx == output_layer:
-            output_hidden = hidden
-
         normed = graph_ops.add_rms_norm_last_dim(
             network, hidden, hidden_size,
             weights[f"layer.{layer_idx}.input_layernorm"], eps_t,
@@ -549,8 +548,7 @@ def _build_qwen3_encoder_engine_batched(
         ctx_flat = _add_attention_from_batched_rows(
             network, q, k, v,
             num_heads=num_heads, num_kv_heads=num_kv_heads,
-            head_dim=head_dim, q_seq=max_seq_len, kv_seq=max_seq_len,
-            mask=mask_4d)
+            head_dim=head_dim, q_seq=max_seq_len, kv_seq=max_seq_len)
 
         attn_out = graph_ops.add_matmul_rhs_constant(
             network, ctx_flat, num_heads * head_dim, hidden_size,
@@ -581,6 +579,9 @@ def _build_qwen3_encoder_engine_batched(
 
         hidden = network.add_elementwise(
             hidden, down, trt.ElementWiseOperation.SUM).get_output(0)
+
+        if layer_idx == output_layer:
+            output_hidden = hidden
 
     if output_layer >= num_layers:
         output_hidden = hidden
