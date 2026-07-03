@@ -214,7 +214,7 @@ def test_premerge_ci_is_triggered_only_by_one_shot_label_events() -> None:
     trigger_block = text.split("permissions:", maxsplit=1)[0]
     assert "pull_request:" in trigger_block
     assert "- main" in trigger_block
-    assert "- CI-improvement" in trigger_block
+    assert "CI-improvement" not in trigger_block
     types_block = trigger_block.split("types:", maxsplit=1)[1]
     assert "- labeled" in trigger_block
     for unwanted_type in (

@@ -10,9 +10,6 @@ on:
   pull_request:
     branches:
       - main
-      # Temporary validation target for the sample ownership PRs. Remove once
-      # CI-improvement is merged and the required checks are enabled on main.
-      - CI-improvement
     types:
       - labeled
 
