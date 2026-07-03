@@ -80,6 +80,27 @@ def _pixel_metrics(output, thresholds: dict[str, float]) -> dict[str, MetricResu
     }
 
 
+def _minimum_pairwise_pixel_mae(frames_dir: str) -> float | None:
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        return None
+
+    frame_paths = sorted(Path(frames_dir).glob("frame_*.png"))
+    if len(frame_paths) < 2:
+        return None
+    frames = [
+        np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
+        for path in frame_paths
+    ]
+    return min(
+        float(np.mean(np.abs(frames[left] - frames[right])))
+        for left in range(len(frames))
+        for right in range(left + 1, len(frames))
+    )
+
+
 class FluxDiffusionImagePlugin:
     reference_families = ["diffusers_image_gen"]
     user_contract = "diffusion_image"
@@ -90,7 +111,6 @@ class FluxDiffusionImagePlugin:
         return config
 
     def verify(self, trt_output, ref_output, case, threshold):
-        del case
         stage = trt_output.stage_name or "end_to_end"
         metrics = {
             "trt_returncode": _returncode_metric("trt", trt_output),
@@ -100,26 +120,46 @@ class FluxDiffusionImagePlugin:
 
         final_stages = {"end_to_end", "end_to_end_video", "generate", "frame_quality"}
         if stage in final_stages:
-            min_frames = int(threshold.metrics.get("contract_min_num_frames", 1))
+            expected_batch_size = int(case.inputs.get("expected_batch_size", 1))
+            min_frames = int(threshold.metrics.get(
+                "contract_min_num_frames", expected_batch_size))
             trt_frames = int((trt_output.data or {}).get("num_frames", 0))
             ref_frames = int((ref_output.data or {}).get("num_frames", 0))
+            exact_batch = expected_batch_size > 1
             metrics["trt_num_frames"] = MetricResult(
                 value=float(trt_frames),
-                threshold=float(min_frames),
-                operator=">=",
-                passed=trt_frames >= min_frames,
+                threshold=float(expected_batch_size if exact_batch else min_frames),
+                operator="==" if exact_batch else ">=",
+                passed=(trt_frames == expected_batch_size if exact_batch
+                        else trt_frames >= min_frames),
             )
             metrics["reference_num_frames"] = MetricResult(
                 value=float(ref_frames),
-                threshold=1.0,
-                operator=">=",
-                passed=ref_frames >= 1,
+                threshold=float(expected_batch_size if exact_batch else 1),
+                operator="==" if exact_batch else ">=",
+                passed=(ref_frames == expected_batch_size if exact_batch
+                        else ref_frames >= 1),
             )
             metrics["trt_frames_dir_present"] = _frame_dir_metric("trt", trt_output)
             metrics["reference_frames_dir_present"] = _frame_dir_metric("reference", ref_output)
+            if exact_batch:
+                frames_dir = str((trt_output.data or {}).get("frames_dir", ""))
+                pairwise_mae = _minimum_pairwise_pixel_mae(frames_dir)
+                min_mae = float(threshold.metrics.get(
+                    "batch_min_pairwise_pixel_mae", 0.001))
+                metrics["batch_pairwise_pixel_mae"] = MetricResult(
+                    value=float(pairwise_mae or 0.0),
+                    threshold=min_mae,
+                    operator=">=",
+                    passed=pairwise_mae is not None and pairwise_mae >= min_mae,
+                    note="distinct prompts use the same seed",
+                )
 
         passed = all(metric.passed for metric in metrics.values())
-        rule = "returncodes are zero AND generated frame artifacts exist AND pixel stats pass"
+        rule = (
+            "returncodes are zero AND expected frame count exists AND "
+            "batch outputs are distinct AND pixel stats pass"
+        )
         if passed:
             return _make_pass(stage, metrics, rule)
         return _make_fail(stage, metrics, rule, "Flux diffusion image contract failed")

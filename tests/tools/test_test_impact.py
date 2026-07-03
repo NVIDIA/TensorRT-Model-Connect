@@ -2901,6 +2901,22 @@ class TestValidation:
             f"Expected at least 5 core models, got {len(imap.core_models)}"
         )
 
+    def test_flux_runtime_selects_batch2_detector(self):
+        """FLUX runtime changes must execute the real-bundle batch contract."""
+        real_root = REPO_ROOT
+        if not (real_root / "tests" / "e2e" / "models").is_dir():
+            pytest.skip("Not in the project repo")
+        imap = test_impact.build_impact_map(real_root)
+
+        result = test_impact.analyze_impact(
+            ["src/runtime/models/flux/pipeline.cpp"], imap, e2e_suite="l0")
+
+        assert "flux-schnell-l0-batch2" in result.e2e_models
+        assert (
+            "tests/e2e/models/flux/test_flux_e2e.py::"
+            "test_model_e2e[flux-schnell-l0-batch2]"
+        ) in result.e2e_test_ids
+
 
 # ---------------------------------------------------------------------------
 # Output format tests
