@@ -1548,6 +1548,70 @@ def test_sana_wm_vae_tile_shapes_match_pr379_model_card() -> None:
     ]
 
 
+def test_ltx_vae_plugin_helpers_resolve_family_stage1_builder(monkeypatch) -> None:
+    from tensorrt_model_connect.families.sana_wm import stage1_dit_builder
+    from tensorrt_model_connect.families.sana_wm.components.ltx_video import ltx_vae_builder
+
+    trt_module = object()
+    resolved_plugins: list[tuple[object, str]] = []
+
+    def missing_plugin(module, name):
+        resolved_plugins.append((module, name))
+        return None
+
+    monkeypatch.setattr(ltx_vae_builder, "_ensure_trt", lambda: trt_module)
+    monkeypatch.setattr(
+        stage1_dit_builder,
+        "_get_sana_wm_plugin_creator_with_get_creator",
+        missing_plugin,
+    )
+
+    calls = [
+        (
+            "SanaWmTorchConv3d",
+            lambda: ltx_vae_builder._add_torch_conv3d(
+                None,
+                None,
+                np.zeros((1, 1, 1, 1, 1), dtype=np.float32),
+                None,
+                stride=(1, 1, 1),
+                padding=(0, 0, 0),
+            ),
+        ),
+        (
+            "SanaWmVaeRmsSilu",
+            lambda: ltx_vae_builder._add_vae_rms_silu(None, None, eps=1e-6),
+        ),
+        (
+            "SanaWmVaeDenormalize",
+            lambda: ltx_vae_builder._add_vae_denormalize(
+                None,
+                None,
+                {},
+                1,
+                scaling_factor=1.0,
+            ),
+        ),
+        (
+            "SanaWmVaeLayerNorm",
+            lambda: ltx_vae_builder._add_vae_layer_norm(
+                None,
+                None,
+                channels=1,
+                weight=np.ones(1, dtype=np.float32),
+                bias=np.zeros(1, dtype=np.float32),
+                eps=1e-6,
+            ),
+        ),
+    ]
+
+    for plugin_name, call in calls:
+        with pytest.raises(RuntimeError, match=plugin_name):
+            call()
+
+    assert resolved_plugins == [(trt_module, name) for name, _call in calls]
+
+
 def test_ltx_vae_tiled_encoder_reuses_blended_neighbors(monkeypatch) -> None:
     from tensorrt_model_connect.families.sana_wm.components.ltx_video import ltx_vae_builder
 

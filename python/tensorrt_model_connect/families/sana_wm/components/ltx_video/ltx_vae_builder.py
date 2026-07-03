@@ -1258,7 +1258,7 @@ def _add_torch_conv3d(
 ) -> trt.ITensor:
     global _torch_conv3d_plugin_index
     trt_module = _ensure_trt()
-    from ..sana_wm.stage1_dit_builder import (
+    from ...stage1_dit_builder import (
         _get_sana_wm_plugin_creator_with_get_creator,
     )
 
@@ -1338,7 +1338,7 @@ def _add_vae_rms_silu(
 ) -> trt.ITensor:
     global _vae_rms_silu_plugin_index
     trt_module = _ensure_trt()
-    from ..sana_wm.stage1_dit_builder import (
+    from ...stage1_dit_builder import (
         _get_sana_wm_plugin_creator_with_get_creator,
     )
 
@@ -1370,7 +1370,7 @@ def _add_vae_denormalize(
     scaling_factor: float,
 ) -> trt.ITensor:
     trt_module = _ensure_trt()
-    from ..sana_wm.stage1_dit_builder import (
+    from ...stage1_dit_builder import (
         _get_sana_wm_plugin_creator_with_get_creator,
     )
 
@@ -1410,7 +1410,7 @@ def _add_vae_layer_norm(
 ) -> trt.ITensor:
     global _vae_layer_norm_plugin_index
     trt_module = _ensure_trt()
-    from ..sana_wm.stage1_dit_builder import (
+    from ...stage1_dit_builder import (
         _get_sana_wm_plugin_creator_with_get_creator,
     )
 
