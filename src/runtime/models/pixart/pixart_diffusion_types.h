@@ -47,6 +47,8 @@ struct PixArtDiffusionConfig {
     bool guidance_embeds{false};
     bool use_rope{true};
     float vae_scaling_factor{0.0F};
+    int32_t pos_embed_base_size{64};
+    float pos_embed_interpolation_scale{2.0F};
 
     std::string diffusion_backend_type;
 

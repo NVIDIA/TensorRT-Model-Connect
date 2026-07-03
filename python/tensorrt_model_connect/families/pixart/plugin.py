@@ -169,8 +169,8 @@ class PixArtPlugin:
         head_dim = tc.get("attention_head_dim", self._DIT_HEAD_DIM)
         dit_dim = num_heads * head_dim
         num_layers = tc.get("num_layers", self._DIT_NUM_LAYERS)
-        tc.get("in_channels", self._DIT_IN_CHANNELS)
         patch_size = tc.get("patch_size", self._DIT_PATCH_SIZE)
+        tc.get("in_channels", self._DIT_IN_CHANNELS)
         cross_attn_dim = tc.get("cross_attention_dim", dit_dim)
         ffn_dim = dit_dim * 4  # PixArt uses 4x multiplier
 
@@ -351,6 +351,18 @@ class PixArtPlugin:
                 return bool(detect_tokenizer_add_special_tokens(tok_dir))
         return bool(detect_tokenizer_add_special_tokens(model_dir))
 
+    def diffusion_tokenizer_special_frame(
+        self, model_dir_path, *, detect_tokenizer_special_frame,
+    ):
+        from pathlib import Path
+
+        model_dir = Path(model_dir_path)
+        for tok_subdir in ("tokenizer_2", "tokenizer"):
+            tok_dir = model_dir / tok_subdir
+            if tok_dir.is_dir():
+                return detect_tokenizer_special_frame(tok_dir)
+        return detect_tokenizer_special_frame(model_dir)
+
     def diffusion_tokenizer_bundle_sections(
         self, model_dir_path, *, ensure_tokenizer_json,
     ) -> list[tuple[str, bytes]]:
@@ -404,6 +416,11 @@ class PixArtPlugin:
         head_dim = tc.get("attention_head_dim", self._DIT_HEAD_DIM)
         dit_dim = num_heads * head_dim
         num_layers = tc.get("num_layers", self._DIT_NUM_LAYERS)
+        patch_size = tc.get("patch_size", self._DIT_PATCH_SIZE)
+        sample_size = tc.get("sample_size", self._IMAGE_HEIGHT // self._VAE_SCALE_FACTOR)
+        interpolation_scale = tc.get("interpolation_scale")
+        if interpolation_scale is None:
+            interpolation_scale = max(sample_size // 64, 1)
 
         return {
             "diffusion_backend_type": "wan_3d",
@@ -418,7 +435,7 @@ class PixArtPlugin:
             "dit_dim": dit_dim,
             "dit_num_heads": num_heads,
             "dit_num_layers": num_layers,
-            "patch_size": [1, self._DIT_PATCH_SIZE, self._DIT_PATCH_SIZE],
+            "patch_size": [1, patch_size, patch_size],
             "z_dim": self._VAE_LATENT_CHANNELS,
             "scale_factor_temporal": 1,
             "scale_factor_spatial": self._VAE_SCALE_FACTOR,
@@ -433,6 +450,8 @@ class PixArtPlugin:
             "text_encoder_dim": self._T5_D_MODEL,
             "vae_scaling_factor": self._VAE_SCALING_FACTOR,
             "use_rope": 0,  # PixArt uses fixed sinusoidal pos embed
+            "pos_embed_base_size": sample_size // patch_size,
+            "pos_embed_interpolation_scale": interpolation_scale,
         }
 
 

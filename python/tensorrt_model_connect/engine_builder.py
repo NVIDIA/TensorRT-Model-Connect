@@ -334,6 +334,32 @@ def _diffusion_tokenizer_add_special_tokens_from_plugin(
     return bool(detector(model_dir_path, **kwargs))
 
 
+def _diffusion_tokenizer_special_frame_from_plugin(
+    plugin,
+    model_dir_path: Path,
+    *,
+    detect_tokenizer_special_frame=None,
+) -> tuple[list[int], list[int]] | None:
+    detector = getattr(plugin, "diffusion_tokenizer_special_frame", None)
+    if not callable(detector):
+        return None
+    if detect_tokenizer_special_frame is None:
+        detect_tokenizer_special_frame = _detect_tokenizer_special_frame
+    kwargs = {}
+    if _call_supports_kwarg(detector, "detect_tokenizer_special_frame"):
+        kwargs["detect_tokenizer_special_frame"] = detect_tokenizer_special_frame
+    frame = detector(model_dir_path, **kwargs)
+    if frame is None:
+        return None
+    if not isinstance(frame, tuple) or len(frame) != 2:
+        raise TypeError(
+            f"Plugin {plugin.name}.diffusion_tokenizer_special_frame() must "
+            "return (prefix_ids, suffix_ids) or None"
+        )
+    prefix, suffix = frame
+    return [int(token_id) for token_id in prefix], [int(token_id) for token_id in suffix]
+
+
 def _diffusion_tokenizer_bundle_sections_from_plugin(
     plugin,
     model_dir_path: Path,
@@ -1475,8 +1501,17 @@ def _build_diffusion_bundle(
     trt_version = _get_trt_version()
     trt_abi = _trt_abi_from_version(trt_version)
     tokenizer_t0 = time.monotonic()
-    tokenizer_add_special_tokens = _diffusion_tokenizer_add_special_tokens_from_plugin(
+    tokenizer_special_frame = _diffusion_tokenizer_special_frame_from_plugin(
         plugin, model_dir_path)
+    if tokenizer_special_frame is None:
+        tokenizer_special_prefix_ids: list[int] = []
+        tokenizer_special_suffix_ids: list[int] = []
+        tokenizer_add_special_tokens = _diffusion_tokenizer_add_special_tokens_from_plugin(
+            plugin, model_dir_path)
+    else:
+        tokenizer_special_prefix_ids, tokenizer_special_suffix_ids = tokenizer_special_frame
+        tokenizer_add_special_tokens = bool(
+            tokenizer_special_prefix_ids or tokenizer_special_suffix_ids)
     _add_build_timing(
         build_timing, "tokenizer_special_tokens_detection_s",
         time.monotonic() - tokenizer_t0)
@@ -1502,6 +1537,9 @@ def _build_diffusion_bundle(
             "trt_version": trt_version,
             "tokenizer_add_special_tokens": int(tokenizer_add_special_tokens),
         }
+        if tokenizer_special_frame is not None:
+            cfg_dict["tokenizer_special_prefix_ids"] = tokenizer_special_prefix_ids
+            cfg_dict["tokenizer_special_suffix_ids"] = tokenizer_special_suffix_ids
         if trt_abi:
             cfg_dict["trt_abi"] = trt_abi
         if fp8_scales:

@@ -912,7 +912,12 @@ class TestBuildBundleOrchestration:
             def diffusion_tokenizer_add_special_tokens(
                 self, model_dir_path, *, detect_tokenizer_add_special_tokens,
             ):
-                return False
+                return True
+
+            def diffusion_tokenizer_special_frame(
+                self, model_dir_path, *, detect_tokenizer_special_frame,
+            ):
+                return [], [1]
 
             def diffusion_tokenizer_bundle_sections(
                 self, model_dir_path, *, ensure_tokenizer_json,
@@ -956,6 +961,9 @@ class TestBuildBundleOrchestration:
         cfg = json.loads(section_map["config.json"].decode("utf-8"))
         assert cfg["tensor_parallel_mode"] == "tensor_parallel"
         assert cfg["tensor_parallel_size"] == 4
+        assert cfg["tokenizer_add_special_tokens"] == 1
+        assert cfg["tokenizer_special_prefix_ids"] == []
+        assert cfg["tokenizer_special_suffix_ids"] == [1]
 
     def test_load_weights_precision_not_forwarded_when_unsupported(self, tmp_path):
         """build_bundle remains compatible with plugins that do not accept precision."""

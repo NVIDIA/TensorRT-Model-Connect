@@ -133,6 +133,9 @@ PixArtDiffusionConfig make_diffusion_config(const std::string& json) {
     dc.guidance_embeds = extract_json_int(json, "guidance_embeds", 0) != 0;
     dc.use_rope = extract_json_int(json, "use_rope", 1) != 0;
     dc.vae_scaling_factor = extract_json_float(json, "vae_scaling_factor", 0.0F);
+    dc.pos_embed_base_size = extract_json_int(json, "pos_embed_base_size", 64);
+    dc.pos_embed_interpolation_scale =
+        extract_json_float(json, "pos_embed_interpolation_scale", 2.0F);
     dc.diffusion_backend_type = extract_json_string(json, "diffusion_backend_type", "wan_3d");
     return dc;
 }

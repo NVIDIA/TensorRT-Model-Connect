@@ -550,14 +550,19 @@ class UnigramTokenizer final : public ITokenizer {
     void extract_template_bos_eos(const nlohmann::json& pp) {
         if (!pp.contains("single") || !pp["single"].is_array())
             return;
+        bool seen_sequence = false;
         for (auto& item : pp["single"]) {
+            if (item.contains("Sequence")) {
+                seen_sequence = true;
+                continue;
+            }
             if (!item.contains("SpecialToken"))
                 continue;
             std::string tok_str = item["SpecialToken"].value("id", "");
             auto it = mTokenToId.find(tok_str);
             if (it == mTokenToId.end())
                 continue;
-            if (mBosId < 0)
+            if (!seen_sequence && mBosId < 0)
                 mBosId = it->second;
             else
                 mEosId = it->second;

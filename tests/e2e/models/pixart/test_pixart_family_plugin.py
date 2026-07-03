@@ -403,6 +403,9 @@ def test_get_diffusion_config_uses_transformer_overrides() -> None:
             "num_attention_heads": 5,
             "attention_head_dim": 6,
             "num_layers": 3,
+            "sample_size": 128,
+            "patch_size": 2,
+            "interpolation_scale": 2,
         },
         image_height=640,
         image_width=832,
@@ -415,6 +418,8 @@ def test_get_diffusion_config_uses_transformer_overrides() -> None:
     assert dc["image_height"] == 640
     assert dc["image_width"] == 832
     assert dc["use_rope"] == 0
+    assert dc["pos_embed_base_size"] == 64
+    assert dc["pos_embed_interpolation_scale"] == 2
 
 
 def test_load_pixart_dit_weights_maps_optional_biases(

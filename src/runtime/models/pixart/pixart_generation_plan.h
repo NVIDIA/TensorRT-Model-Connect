@@ -32,6 +32,15 @@ struct PixArtLayout {
     int32_t patch_dim{0};
 };
 
+inline float pixart_position_scale(int32_t runtime_grid_size, int32_t base_grid_size,
+                                   float interpolation_scale) {
+    if (runtime_grid_size <= 0 || base_grid_size <= 0 || interpolation_scale <= 0.0F) {
+        return 1.0F;
+    }
+    return static_cast<float>(base_grid_size) /
+           (static_cast<float>(runtime_grid_size) * interpolation_scale);
+}
+
 inline PixArtLayout make_pixart_layout(const PixArtDiffusionConfig& config) {
     PixArtLayout layout;
     layout.t_lat = (config.video_num_frames - 1) / config.scale_factor_temporal + 1;
