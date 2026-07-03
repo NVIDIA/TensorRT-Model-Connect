@@ -47,6 +47,21 @@ struct FluxGenerationPlan {
     flux_scheduler::FlowMatchEulerConfig scheduler_config;
 };
 
+inline bool apply_flux_initial_latents(std::size_t expected_size,
+                                       const std::vector<float>& supplied,
+                                       std::vector<float>& latents, std::string& error) {
+    if (supplied.empty()) {
+        return true;
+    }
+    if (supplied.size() != expected_size) {
+        error = "Flux initial latents contain " + std::to_string(supplied.size()) +
+                " floats; expected " + std::to_string(expected_size);
+        return false;
+    }
+    latents = supplied;
+    return true;
+}
+
 inline FluxGenerationPlan make_flux_generation_plan(const FluxDiffusionConfig& config,
                                                     const FluxPreprocessorWeights& weights,
                                                     int32_t requested_steps,
