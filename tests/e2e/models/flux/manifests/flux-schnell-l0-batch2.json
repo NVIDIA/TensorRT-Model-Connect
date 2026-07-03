@@ -38,5 +38,10 @@
     }
   ],
   "skip_text_comparison": true,
+  "metadata": {
+    "contract_config": {
+      "use_diffusers": true
+    }
+  },
   "notes": "Builds a dynamic B=1..2 bundle and executes two distinct prompts with identical seeds in one batch. The outputs must both exist and differ, proving per-sample conditioning is preserved."
 }

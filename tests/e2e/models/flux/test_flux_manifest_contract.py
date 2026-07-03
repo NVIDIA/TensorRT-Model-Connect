@@ -34,6 +34,7 @@ def test_flux_batch2_manifest_declares_real_batch_contract() -> None:
     ]
     assert case.inputs["batch_seeds"] == [42, 42]
     assert case.threshold_overrides["batch_min_pairwise_pixel_mae"] == 0.01
+    assert case.metadata["contract_config"]["use_diffusers"] is True
     assert {spec["flag"] for spec in case.metadata["build_cli_args"]} >= {
         "--max-batch-size",
     }
