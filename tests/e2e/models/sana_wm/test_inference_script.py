@@ -31,7 +31,10 @@ def _clear_sana_reference_env(monkeypatch) -> None:
         "SANA_REPO",
         "TRTMC_STORAGE_ROOT",
         "TRTMC_SANA_WM_FORCE_FLA_STUB",
+        "TRTMC_SANA_WM_FORCE_PYTZ_STUB",
         "TRTMC_SANA_WM_FORCE_PYRALLIS_STUB",
+        "TRTMC_SANA_WM_FORCE_QWEN_VL_UTILS_STUB",
+        "TRTMC_SANA_WM_FORCE_TERMCOLOR_STUB",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -211,6 +214,9 @@ import numpy as np
 from pathlib import Path
 import official_probe
 import pyrallis
+import pytz
+import qwen_vl_utils
+from termcolor import colored
 import torch
 
 @dataclass
@@ -246,6 +252,10 @@ def main():
     assert iio._trtmc_stub is True
     assert iio.__spec__ is not None
     assert pyrallis._trtmc_stub is True
+    assert pytz._trtmc_stub is True
+    assert str(pytz.timezone("UTC")) == "UTC"
+    assert qwen_vl_utils._trtmc_stub is True
+    assert colored("reference", "green", attrs=["bold"]) == "reference"
     assert ShortConvolution._trtmc_stub is True
     conv = ShortConvolution(hidden_size=1, kernel_size=2, activation=None)
     with torch.no_grad():
@@ -274,7 +284,10 @@ def main():
     output_dir = tmp_path / "results" / "demo"
     monkeypatch.setenv("SANA_REPO", str(sana_repo))
     monkeypatch.setenv("TRTMC_SANA_WM_FORCE_FLA_STUB", "1")
+    monkeypatch.setenv("TRTMC_SANA_WM_FORCE_PYTZ_STUB", "1")
     monkeypatch.setenv("TRTMC_SANA_WM_FORCE_PYRALLIS_STUB", "1")
+    monkeypatch.setenv("TRTMC_SANA_WM_FORCE_QWEN_VL_UTILS_STUB", "1")
+    monkeypatch.setenv("TRTMC_SANA_WM_FORCE_TERMCOLOR_STUB", "1")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         sys,

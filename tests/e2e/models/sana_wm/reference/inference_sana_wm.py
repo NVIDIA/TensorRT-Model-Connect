@@ -285,6 +285,53 @@ def _install_pyrallis_stub():
 
 _install_pyrallis_stub()
 
+def _install_termcolor_stub():
+    force_stub = os.environ.get("TRTMC_SANA_WM_FORCE_TERMCOLOR_STUB") == "1"
+    if not force_stub and importlib.util.find_spec("termcolor") is not None:
+        return
+
+    termcolor = types.ModuleType("termcolor")
+    termcolor.__spec__ = importlib.util.spec_from_loader("termcolor", loader=None)
+    termcolor.colored = lambda text, *args, **kwargs: text
+    termcolor._trtmc_stub = True
+    sys.modules["termcolor"] = termcolor
+
+_install_termcolor_stub()
+
+def _install_pytz_stub():
+    force_stub = os.environ.get("TRTMC_SANA_WM_FORCE_PYTZ_STUB") == "1"
+    if not force_stub and importlib.util.find_spec("pytz") is not None:
+        return
+
+    from zoneinfo import ZoneInfo
+
+    pytz = types.ModuleType("pytz")
+    pytz.__spec__ = importlib.util.spec_from_loader("pytz", loader=None)
+    pytz.timezone = ZoneInfo
+    pytz._trtmc_stub = True
+    sys.modules["pytz"] = pytz
+
+_install_pytz_stub()
+
+def _install_qwen_vl_utils_stub():
+    force_stub = os.environ.get("TRTMC_SANA_WM_FORCE_QWEN_VL_UTILS_STUB") == "1"
+    if not force_stub and importlib.util.find_spec("qwen_vl_utils") is not None:
+        return
+
+    def process_vision_info(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("SANA-WM reference does not use the Qwen-VL helper")
+
+    qwen_vl_utils = types.ModuleType("qwen_vl_utils")
+    qwen_vl_utils.__spec__ = importlib.util.spec_from_loader(
+        "qwen_vl_utils", loader=None
+    )
+    qwen_vl_utils.process_vision_info = process_vision_info
+    qwen_vl_utils._trtmc_stub = True
+    sys.modules["qwen_vl_utils"] = qwen_vl_utils
+
+_install_qwen_vl_utils_stub()
+
 def _install_fla_short_convolution_stub():
     force_stub = os.environ.get("TRTMC_SANA_WM_FORCE_FLA_STUB") == "1"
     if not force_stub and importlib.util.find_spec("fla") is not None:
