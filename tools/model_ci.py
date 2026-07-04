@@ -62,6 +62,8 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "pyproject.toml",
         "ruff.toml",
         "tests/__init__.py",
+        "tests/builder/__init__.py",
+        "tests/builder/family_plugin_test_support.py",
         "tests/e2e_partition.py",
         "tests/runtime_strategy_matrix.yaml",
         "tests/test_e2e.py",
