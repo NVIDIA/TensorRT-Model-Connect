@@ -1,25 +1,30 @@
 {
   "name": "phi4-multimodal",
-  "trace_id": "IT-E2E-PHI4MM-01",
   "hf_id": "microsoft/Phi-4-multimodal-instruct",
   "bundle": "phi4-multimodal.trtfb",
   "family": "phi4_multimodal",
   "runtime_strategy": "phi4_multimodal_vision_language",
   "task_strategy": "vision_language_generation",
-  "reference_family": "vl_instruct_qa",
-  "user_contract": "vl_answer",
   "precision": "fp16",
-  "reference_precision": "fp32",
   "max_cache_length": 768,
-  "prompt": "Describe this image.",
-  "max_new_tokens": 30,
   "trust_remote_code": true,
-  "test_image": "data/test_img.jpeg",
-  "metadata": {
-    "precision_notes": "Pure FP16 passes after applying the checkpoint's LongRoPE frequency and attention scaling. Explicit attention retains FP32 score accumulation; no decoder block remains FP32.",
-    "contract_config": {
-      "use_processor": true,
-      "use_chat_template": true
+  "testcases": [
+    {
+      "name": "phi4-multimodal",
+      "trace_id": "IT-E2E-PHI4MM-01",
+      "reference_family": "vl_instruct_qa",
+      "user_contract": "vl_answer",
+      "reference_precision": "fp32",
+      "prompt": "Describe this image.",
+      "max_new_tokens": 30,
+      "test_image": "data/test_img.jpeg",
+      "metadata": {
+        "precision_notes": "Pure FP16 passes after applying the checkpoint's LongRoPE frequency and attention scaling. Explicit attention retains FP32 score accumulation; no decoder block remains FP32.",
+        "contract_config": {
+          "use_processor": true,
+          "use_chat_template": true
+        }
+      }
     }
-  }
+  ]
 }

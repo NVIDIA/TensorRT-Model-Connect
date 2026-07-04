@@ -1,22 +1,27 @@
 {
   "name": "camembert-base",
-  "trace_id": "IT-E2E-CAMB-01",
   "hf_id": "almanach/camembert-base",
   "bundle": "camembert-base.trtfb",
   "family": "roberta",
   "runtime_strategy": "roberta_encoder_only",
   "task_strategy": "encoder_only_nlp",
   "precision": "fp16",
-  "reference_precision": "fp32",
-  "reference_family": "encoder_base_features",
-  "user_contract": "representation_parity",
   "max_cache_length": 256,
-  "prompt": "Bonjour le monde",
-  "max_new_tokens": 0,
   "trust_remote_code": false,
-  "metadata": {
-    "contract_config": {
-      "auto_class": "AutoModel"
+  "testcases": [
+    {
+      "name": "camembert-base",
+      "trace_id": "IT-E2E-CAMB-01",
+      "reference_precision": "fp32",
+      "reference_family": "encoder_base_features",
+      "user_contract": "representation_parity",
+      "prompt": "Bonjour le monde",
+      "max_new_tokens": 0,
+      "metadata": {
+        "contract_config": {
+          "auto_class": "AutoModel"
+        }
+      }
     }
-  }
+  ]
 }

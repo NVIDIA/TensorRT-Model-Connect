@@ -4,10 +4,6 @@
 id = "magpie_tts"
 plugin = "magpie_tts"
 test_manifests = [
-  "manifests/magpie-tts-357m-tts-probe01.json",
-  "manifests/magpie-tts-357m-tts-probe02.json",
-  "manifests/magpie-tts-357m-tts-probe03.json",
-  "manifests/magpie-tts-357m-tts-probe04.json",
   "manifests/magpie-tts-357m-tp4.json",
   "manifests/magpie-tts-357m.json",
 ]

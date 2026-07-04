@@ -12,7 +12,14 @@ from tests.e2e_harness.manifest_loader import load_manifest
 
 def _write_manifest(tmp_path, data: dict) -> str:
     path = tmp_path / "manifest.json"
-    path.write_text(json.dumps(data), encoding="utf-8")
+    model_fields = {
+        key: data[key] for key in ("name", "hf_id", "family", "runtime_strategy") if key in data
+    }
+    testcase = {
+        key: value for key, value in data.items() if key not in model_fields or key == "name"
+    }
+    model_fields["testcases"] = [testcase]
+    path.write_text(json.dumps(model_fields), encoding="utf-8")
     return str(path)
 
 

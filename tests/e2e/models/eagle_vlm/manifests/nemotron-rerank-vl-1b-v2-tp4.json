@@ -1,26 +1,12 @@
 {
   "name": "nemotron-rerank-vl-1b-v2-tp4",
-  "trace_id": "IT-E2E-EGRK-TP4-01",
   "hf_id": "nvidia/llama-nemotron-rerank-vl-1b-v2",
   "bundle": "nemotron-rerank-vl-1b-v2-tp4.trtfb",
   "family": "eagle_vlm",
   "runtime_strategy": "eagle_vlm_reranking",
   "task_strategy": "reranking",
-  "reference_family": "vl_rerank",
-  "user_contract": "ranking_order",
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 256,
-  "inputs": {
-    "prompt": "Which planet is known as the Red Planet?",
-    "documents": [
-      "Venus is often called Earth's twin because of its similar size and proximity.",
-      "Mars, known for its reddish appearance, is often referred to as the Red Planet.",
-      "Jupiter, the largest planet in our solar system, has a prominent red spot.",
-      "Saturn, famous for its rings, is sometimes mistaken for the Red Planet."
-    ]
-  },
-  "max_new_tokens": 1,
   "trust_remote_code": true,
   "build_args": {
     "parallel": {
@@ -40,26 +26,45 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
+      "name": "nemotron-rerank-vl-1b-v2-tp4",
+      "trace_id": "IT-E2E-EGRK-TP4-01",
+      "reference_family": "vl_rerank",
+      "user_contract": "ranking_order",
+      "ci_tier": "multi_device",
+      "inputs": {
+        "prompt": "Which planet is known as the Red Planet?",
+        "documents": [
+          "Venus is often called Earth's twin because of its similar size and proximity.",
+          "Mars, known for its reddish appearance, is often referred to as the Red Planet.",
+          "Jupiter, the largest planet in our solar system, has a prominent red spot.",
+          "Saturn, famous for its rings, is sometimes mistaken for the Red Planet."
+        ]
       },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "max_new_tokens": 1,
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "notes": "Eagle VLM/Nemotron rerank TP4 coverage. Uses the same checkpoint, prompt, documents, cache length, and strict ranking thresholds as nemotron-rerank-vl-1b-v2 while running the Llama text backbone through rank-local TP engines."
     }
-  ],
-  "notes": "Eagle VLM/Nemotron rerank TP4 coverage. Uses the same checkpoint, prompt, documents, cache length, and strict ranking thresholds as nemotron-rerank-vl-1b-v2 while running the Llama text backbone through rank-local TP engines."
+  ]
 }

@@ -46,6 +46,7 @@ harness_shared tests/e2e_harness/artifact_sink.py # shared E2E harness surface; 
 harness_shared tests/e2e_harness/conftest_gpu.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/contracts.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/manifest_loader.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/model_runner.py # shared model lifecycle used by every family runner; broad E2E impact is intentional
 harness_shared tests/e2e_harness/model_selection.py # shared exact-selection path used by every model runner; broad E2E impact is intentional
 harness_shared tests/e2e_harness/orchestrator.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/python_profiles.py # shared E2E harness surface; broad E2E impact is intentional

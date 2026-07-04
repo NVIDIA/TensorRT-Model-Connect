@@ -1,24 +1,29 @@
 {
   "name": "convbert-base",
-  "trace_id": "IT-E2E-CONVBERT-01",
   "hf_id": "YituTech/conv-bert-base",
   "bundle": "convbert-base.trtfb",
   "family": "convbert",
   "runtime_strategy": "convbert_encoder_only",
   "task_strategy": "encoder_only_nlp",
-  "reference_family": "encoder_base_features",
-  "user_contract": "representation_parity",
   "precision": "fp16",
-  "reference_precision": "fp32",
   "max_cache_length": 256,
-  "prompt": "The capital of France is Paris.",
-  "max_new_tokens": 1,
   "trust_remote_code": false,
-  "notes": "Encoder-only model with hybrid attention + span-based dynamic convolution. Outputs hidden states, not logits.",
-  "core": false,
-  "metadata": {
-    "contract_config": {
-      "auto_class": "AutoModel"
+  "testcases": [
+    {
+      "name": "convbert-base",
+      "trace_id": "IT-E2E-CONVBERT-01",
+      "reference_family": "encoder_base_features",
+      "user_contract": "representation_parity",
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris.",
+      "max_new_tokens": 1,
+      "notes": "Encoder-only model with hybrid attention + span-based dynamic convolution. Outputs hidden states, not logits.",
+      "core": false,
+      "metadata": {
+        "contract_config": {
+          "auto_class": "AutoModel"
+        }
+      }
     }
-  }
+  ]
 }

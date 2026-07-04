@@ -1,21 +1,13 @@
 {
   "name": "deepseek-ocr-l0-tp2",
-  "trace_id": "IT-E2E-DSOCR-L0-TP2-01",
   "hf_id": "deepseek-ai/DeepSeek-OCR-2",
   "bundle": "deepseek-ocr-l0-tp2.trtfb",
   "family": "deepseek_ocr",
   "runtime_strategy": "deepseek_ocr_vision_language",
   "task_strategy": "vision_language_generation",
-  "ci_tier": "multi_device",
-  "reference_family": "ocr_markdown",
-  "user_contract": "ocr_text",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 4096,
-  "prompt": "Extract the text from this image.",
-  "max_new_tokens": 80,
-  "test_image": "data/orc_test_img.jpeg",
   "trust_remote_code": true,
-  "reference_backend": "golden_snapshot",
   "build_args": {
     "parallel": {
       "mode": "tensor_parallel",
@@ -34,40 +26,53 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
+      "name": "deepseek-ocr-l0-tp2",
+      "trace_id": "IT-E2E-DSOCR-L0-TP2-01",
+      "ci_tier": "multi_device",
+      "reference_family": "ocr_markdown",
+      "user_contract": "ocr_text",
+      "prompt": "Extract the text from this image.",
+      "max_new_tokens": 80,
+      "test_image": "data/orc_test_img.jpeg",
+      "reference_backend": "golden_snapshot",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 2
+          },
+          "gating": true
+        }
+      ],
+      "stages": [
+        {
+          "name": "full_generation",
+          "required": true
+        }
+      ],
+      "metadata": {
+        "golden_snapshot_path": "data/deepseek_ocr_l0_golden.json",
+        "contract_config": {
+          "use_processor": true,
+          "use_chat_template": true,
+          "ocr_mode": true
+        }
       },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 2
-      },
-      "gating": true
+      "notes": "DeepSeek-OCR TP2 coverage. The checkpoint has 10 attention/KV heads, so TP4 is not valid. Uses the same checkpoint, image input, prompt, cache length, golden snapshot, and OCR contract as deepseek-ocr-l0 while running the language decoder through rank-local TP engines."
     }
-  ],
-  "stages": [
-    {
-      "name": "full_generation",
-      "required": true
-    }
-  ],
-  "metadata": {
-    "golden_snapshot_path": "data/deepseek_ocr_l0_golden.json",
-    "contract_config": {
-      "use_processor": true,
-      "use_chat_template": true,
-      "ocr_mode": true
-    }
-  },
-  "notes": "DeepSeek-OCR TP2 coverage. The checkpoint has 10 attention/KV heads, so TP4 is not valid. Uses the same checkpoint, image input, prompt, cache length, golden snapshot, and OCR contract as deepseek-ocr-l0 while running the language decoder through rank-local TP engines."
+  ]
 }

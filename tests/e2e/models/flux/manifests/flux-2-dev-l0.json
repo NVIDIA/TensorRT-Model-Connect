@@ -1,39 +1,44 @@
 {
   "name": "flux-2-dev-l0",
-  "trace_id": "IT-E2E-FLX2D-L0-01",
   "hf_id": "black-forest-labs/FLUX.2-dev",
   "bundle": "flux-2-dev-l0.trtfb",
-  "model_type": "flux.2",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
   "task_strategy": "diffusion_media_generation",
-  "gated": true,
   "e2e_parallel_resource": "exclusive_gpu",
-  "ci_tier": "l0_only",
   "precision": "fp16",
-  "reference_family": "diffusers_image_gen",
-  "user_contract": "diffusion_image",
-  "description": "FLUX.2-dev L0 representative at 384px with full text shape and reduced denoising steps",
   "build_args": {
     "max_cache_length": 256
   },
-  "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
-  "test_type": "diffusion",
-  "image_height": 384,
-  "image_width": 384,
-  "video_num_frames": 1,
-  "num_inference_steps": 20,
-  "stages": [
+  "testcases": [
     {
-      "name": "end_to_end",
-      "required": true
+      "name": "flux-2-dev-l0",
+      "trace_id": "IT-E2E-FLX2D-L0-01",
+      "model_type": "flux.2",
+      "gated": true,
+      "ci_tier": "l0_only",
+      "reference_family": "diffusers_image_gen",
+      "user_contract": "diffusion_image",
+      "description": "FLUX.2-dev L0 representative at 384px with full text shape and reduced denoising steps",
+      "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
+      "test_type": "diffusion",
+      "image_height": 384,
+      "image_width": 384,
+      "video_num_frames": 1,
+      "num_inference_steps": 20,
+      "stages": [
+        {
+          "name": "end_to_end",
+          "required": true
+        }
+      ],
+      "skip_text_comparison": true,
+      "notes": "PR L0 repro for FLUX.2-dev. Uses the same checkpoint, flux.2 model type, Mistral 3 text encoder, Flux2 DiT, 32-channel VAE, runner, comparator, and image artifact contract. L0 keeps the full end-to-end stage, restores the full 256-token text shape for prompt fidelity, uses a 384px image to reduce DiT/VAE scale, and uses twenty denoising steps; nightly keeps the full 1024px/28-step scale coverage.",
+      "metadata": {
+        "contract_config": {
+          "use_diffusers": true
+        }
+      }
     }
-  ],
-  "skip_text_comparison": true,
-  "notes": "PR L0 repro for FLUX.2-dev. Uses the same checkpoint, flux.2 model type, Mistral 3 text encoder, Flux2 DiT, 32-channel VAE, runner, comparator, and image artifact contract. L0 keeps the full end-to-end stage, restores the full 256-token text shape for prompt fidelity, uses a 384px image to reduce DiT/VAE scale, and uses twenty denoising steps; nightly keeps the full 1024px/28-step scale coverage.",
-  "metadata": {
-    "contract_config": {
-      "use_diffusers": true
-    }
-  }
+  ]
 }

@@ -1,42 +1,205 @@
 {
   "name": "magpie-tts-357m",
-  "trace_id": "IT-E2E-MGPTTS-01",
   "hf_id": "nvidia/magpie_tts_multilingual_357m",
   "bundle": "magpie-tts-357m.trtfb",
   "family": "magpie_tts",
   "runtime_strategy": "text_to_audio_magpie",
   "task_strategy": "text_to_audio",
-  "reference_family": "tts_magpie",
-  "user_contract": "tts_audio",
-  "reference_backend": "nemo",
-  "test_type": "audio",
   "precision": "fp16",
-  "reference_precision": "fp32",
-  "fp32_layers": [14],
+  "fp32_layers": [
+    14
+  ],
   "max_cache_length": 512,
-  "prompt": "Ladies and gentlemen, welcome to the annual conference on artificial intelligence and machine learning. Today we will explore the latest advances in natural language processing, computer vision, and reinforcement learning.",
-  "max_new_tokens": 750,
   "trust_remote_code": false,
-  "runtime_config": {
-    "audio_magpie": {
-      "cfg_scale": 2.5,
-      "temperature": 0.6,
-      "seed": 42
-    }
-  },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
+      "name": "magpie-tts-357m",
+      "trace_id": "IT-E2E-MGPTTS-01",
+      "reference_family": "tts_magpie",
+      "user_contract": "tts_audio",
+      "reference_backend": "nemo",
+      "test_type": "audio",
+      "reference_precision": "fp32",
+      "prompt": "Ladies and gentlemen, welcome to the annual conference on artificial intelligence and machine learning. Today we will explore the latest advances in natural language processing, computer vision, and reinforcement learning.",
+      "max_new_tokens": 750,
+      "runtime_config": {
+        "audio_magpie": {
+          "cfg_scale": 2.5,
+          "temperature": 0.6,
+          "seed": 42
+        }
+      },
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "python_module_available",
+          "args": {
+            "module": "nemo.collections.tts.g2p.models.i18n_ipa",
+            "timeout_s": 180
+          },
+          "gating": true
+        }
+      ]
     },
     {
-      "kind": "python_module_available",
-      "args": {
-        "module": "nemo.collections.tts.g2p.models.i18n_ipa",
-        "timeout_s": 180
+      "name": "magpie-tts-357m-tts-probe01",
+      "trace_id": "IT-E2E-MGPTTS-P01",
+      "reference_backend": "nemo",
+      "reference_family": "tts_magpie",
+      "user_contract": "tts_audio",
+      "test_type": "audio",
+      "ci_tier": "nightly_only",
+      "l0_replacement": "magpie-tts-357m",
+      "l0_replacement_reason": "TTS probe matrix runs in nightly; PR L0 uses the base magpie-tts-357m case for the same text_to_audio_magpie runtime path.",
+      "prompt": "Please say this sentence clearly.",
+      "max_new_tokens": 260,
+      "runtime_config": {
+        "audio_magpie": {
+          "cfg_scale": 2.5,
+          "temperature": 0.6,
+          "seed": 42
+        }
       },
-      "gating": true
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "python_module_available",
+          "args": {
+            "module": "nemo.collections.tts.g2p.models.i18n_ipa",
+            "timeout_s": 180
+          },
+          "gating": true
+        }
+      ],
+      "tts_probe_id": "probe_01_short_prompt_round_trip_sentence",
+      "tts_probe_readiness": "ready_now",
+      "tts_probe_purpose": "Cover Model Connect prompt transport through generate-audio with a short Magpie TTS sentence while reusing the existing magpie-tts-357m bundle.",
+      "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt -> text_to_audio_magpie runtime -> WAV artifact -> tts_audio contract. The prompt avoids numbers, abbreviations, and domain-specific terms so ASR round-trip failures are less likely to come from text normalization ambiguity."
+    },
+    {
+      "name": "magpie-tts-357m-tts-probe02",
+      "trace_id": "IT-E2E-MGPTTS-P02",
+      "reference_backend": "nemo",
+      "reference_family": "tts_magpie",
+      "user_contract": "tts_audio",
+      "test_type": "audio",
+      "ci_tier": "nightly_only",
+      "l0_replacement": "magpie-tts-357m",
+      "l0_replacement_reason": "TTS probe matrix runs in nightly; PR L0 uses the base magpie-tts-357m case for the same text_to_audio_magpie runtime path.",
+      "prompt": "Say hello, then say goodbye.",
+      "max_new_tokens": 220,
+      "runtime_config": {
+        "audio_magpie": {
+          "cfg_scale": 2.5,
+          "temperature": 0.6,
+          "seed": 42
+        }
+      },
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "python_module_available",
+          "args": {
+            "module": "nemo.collections.tts.g2p.models.i18n_ipa",
+            "timeout_s": 180
+          },
+          "gating": true
+        }
+      ],
+      "tts_probe_id": "probe_02_punctuation_prompt_round_trip",
+      "tts_probe_readiness": "ready_now",
+      "tts_probe_purpose": "Cover Model Connect prompt transport for a short punctuation-bearing Magpie TTS sentence while reusing the existing magpie-tts-357m bundle.",
+      "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt with punctuation -> text_to_audio_magpie runtime -> WAV artifact -> tts_audio contract. This keeps the prompt short to limit nightly runtime cost."
+    },
+    {
+      "name": "magpie-tts-357m-tts-probe03",
+      "trace_id": "IT-E2E-MGPTTS-P03",
+      "reference_backend": "nemo",
+      "reference_family": "tts_magpie",
+      "user_contract": "tts_audio",
+      "test_type": "audio",
+      "ci_tier": "nightly_only",
+      "l0_replacement": "magpie-tts-357m",
+      "l0_replacement_reason": "TTS probe matrix runs in nightly; PR L0 uses the base magpie-tts-357m case for the same text_to_audio_magpie runtime path.",
+      "prompt": "Can you read this question clearly?",
+      "max_new_tokens": 220,
+      "runtime_config": {
+        "audio_magpie": {
+          "cfg_scale": 2.5,
+          "temperature": 0.6,
+          "seed": 42
+        }
+      },
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "python_module_available",
+          "args": {
+            "module": "nemo.collections.tts.g2p.models.i18n_ipa",
+            "timeout_s": 180
+          },
+          "gating": true
+        }
+      ],
+      "tts_probe_id": "probe_03_question_prompt_round_trip",
+      "tts_probe_readiness": "ready_now",
+      "tts_probe_purpose": "Cover Model Connect prompt transport for a short question-form Magpie TTS sentence while reusing the existing magpie-tts-357m bundle.",
+      "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt with question punctuation -> text_to_audio_magpie runtime -> WAV artifact -> tts_audio contract. The prompt stays short to limit nightly runtime cost."
+    },
+    {
+      "name": "magpie-tts-357m-tts-probe04",
+      "trace_id": "IT-E2E-MGPTTS-P04",
+      "reference_backend": "nemo",
+      "reference_family": "tts_magpie",
+      "user_contract": "tts_audio",
+      "test_type": "audio",
+      "ci_tier": "nightly_only",
+      "l0_replacement": "magpie-tts-357m",
+      "l0_replacement_reason": "TTS probe matrix runs in nightly; PR L0 uses the base magpie-tts-357m case for the same text_to_audio_magpie runtime path.",
+      "prompt": "First we test the audio. Then we check the transcript.",
+      "max_new_tokens": 320,
+      "runtime_config": {
+        "audio_magpie": {
+          "cfg_scale": 2.5,
+          "temperature": 0.6,
+          "seed": 42
+        }
+      },
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "python_module_available",
+          "args": {
+            "module": "nemo.collections.tts.g2p.models.i18n_ipa",
+            "timeout_s": 180
+          },
+          "gating": true
+        }
+      ],
+      "tts_probe_id": "probe_04_two_sentence_prompt_round_trip",
+      "tts_probe_readiness": "ready_now",
+      "tts_probe_purpose": "Cover Model Connect prompt transport for a short two-sentence Magpie TTS input while reusing the existing magpie-tts-357m bundle.",
+      "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt with sentence boundary -> text_to_audio_magpie runtime -> WAV artifact -> tts_audio contract. This covers sentence boundary handling without adding dataset-driven CI load."
     }
   ]
 }

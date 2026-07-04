@@ -1,25 +1,30 @@
 {
   "name": "bark-large",
-  "trace_id": "IT-E2E-BARKL-01",
   "hf_id": "suno/bark",
   "bundle": "bark-large.trtfb",
   "family": "bark",
   "runtime_strategy": "text_to_audio_bark",
   "task_strategy": "text_to_audio",
   "precision": "fp16",
-  "reference_precision": "fp32",
-  "reference_family": "tts_bark",
-  "user_contract": "tts_audio",
-  "ci_tier": "nightly_only",
   "e2e_size": "large",
-  "l0_replacement": "bark-small",
-  "l0_replacement_reason": "Bark large is scale coverage; bark-small keeps the Bark TTS path for PR L0.",
-  "test_type": "audio",
   "max_cache_length": 1024,
-  "prompt": "Hello, this is a test of the text to speech system.",
-  "max_new_tokens": 0,
   "trust_remote_code": false,
-  "determinism": {
-    "seed": 42
-  }
+  "testcases": [
+    {
+      "name": "bark-large",
+      "trace_id": "IT-E2E-BARKL-01",
+      "reference_precision": "fp32",
+      "reference_family": "tts_bark",
+      "user_contract": "tts_audio",
+      "ci_tier": "nightly_only",
+      "l0_replacement": "bark-small",
+      "l0_replacement_reason": "Bark large is scale coverage; bark-small keeps the Bark TTS path for PR L0.",
+      "test_type": "audio",
+      "prompt": "Hello, this is a test of the text to speech system.",
+      "max_new_tokens": 0,
+      "determinism": {
+        "seed": 42
+      }
+    }
+  ]
 }

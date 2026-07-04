@@ -1,27 +1,32 @@
 {
   "name": "gpt-oss-20b",
-  "trace_id": "IT-E2E-GOSS-01",
   "hf_id": "openai/gpt-oss-20b",
   "bundle": "gpt-oss-20b.trtfb",
   "family": "gpt_oss",
   "runtime_strategy": "gpt_oss_decoder_moe",
   "task_strategy": "text_generation_causal",
-  "reference_family": "chat_instruct_template",
-  "user_contract": "chat_response",
   "e2e_parallel_resource": "exclusive_gpu",
-  "ci_tier": "nightly_only",
   "precision": "fp16",
-  "reference_precision": "fp32",
-  "l0_replacement": "gpt-oss-20b-l0",
-  "l0_replacement_reason": "GPT-OSS-20B scale stays nightly; gpt-oss-20b-l0 keeps the GPT-OSS MoE path with shorter decode for PR L0.",
   "max_cache_length": 256,
-  "prompt": "<|start|>system<|message|>You are a helpful assistant.<|end|><|start|>user<|message|>What is the capital of France?<|end|><|start|>assistant",
-  "max_new_tokens": 20,
   "trust_remote_code": false,
-  "metadata": {
-    "contract_config": {
-      "use_chat_template": false,
-      "enable_thinking": false
+  "testcases": [
+    {
+      "name": "gpt-oss-20b",
+      "trace_id": "IT-E2E-GOSS-01",
+      "reference_family": "chat_instruct_template",
+      "user_contract": "chat_response",
+      "ci_tier": "nightly_only",
+      "reference_precision": "fp32",
+      "l0_replacement": "gpt-oss-20b-l0",
+      "l0_replacement_reason": "GPT-OSS-20B scale stays nightly; gpt-oss-20b-l0 keeps the GPT-OSS MoE path with shorter decode for PR L0.",
+      "prompt": "<|start|>system<|message|>You are a helpful assistant.<|end|><|start|>user<|message|>What is the capital of France?<|end|><|start|>assistant",
+      "max_new_tokens": 20,
+      "metadata": {
+        "contract_config": {
+          "use_chat_template": false,
+          "enable_thinking": false
+        }
+      }
     }
-  }
+  ]
 }

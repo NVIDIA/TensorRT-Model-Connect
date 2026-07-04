@@ -1,17 +1,22 @@
 {
   "name": "xglm-564m",
-  "trace_id": "IT-E2E-XGLM-01",
   "hf_id": "facebook/xglm-564M",
   "bundle": "xglm-564m.trtfb",
   "family": "xglm",
   "runtime_strategy": "xglm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "continuation_parity",
   "precision": "fp16",
-  "reference_precision": "fp32",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
-  "max_new_tokens": 20,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "xglm-564m",
+      "trace_id": "IT-E2E-XGLM-01",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20
+    }
+  ]
 }

@@ -1,19 +1,24 @@
 {
   "name": "minitron-4b-width-l0",
-  "trace_id": "IT-E2E-MNTRW-L0-01",
   "hf_id": "nvidia/Llama-3.1-Minitron-4B-Width-Base",
   "bundle": "minitron-4b-width-l0.trtfb",
   "family": "llama",
   "runtime_strategy": "llama_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "ci_tier": "l0_only",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "continuation_parity",
   "precision": "fp16",
-  "reference_precision": "fp32",
   "max_cache_length": 256,
-  "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
-  "max_new_tokens": 8,
   "trust_remote_code": false,
-  "notes": "PR L0 repro for Minitron width-pruned 4B. Uses the same checkpoint, llama_decoder_kv_cache runtime, runner, comparator, continuation artifact contract, and full cache budget with shorter decode budget."
+  "testcases": [
+    {
+      "name": "minitron-4b-width-l0",
+      "trace_id": "IT-E2E-MNTRW-L0-01",
+      "ci_tier": "l0_only",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "reference_precision": "fp32",
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 8,
+      "notes": "PR L0 repro for Minitron width-pruned 4B. Uses the same checkpoint, llama_decoder_kv_cache runtime, runner, comparator, continuation artifact contract, and full cache budget with shorter decode budget."
+    }
+  ]
 }

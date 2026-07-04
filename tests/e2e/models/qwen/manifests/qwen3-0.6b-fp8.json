@@ -1,6 +1,5 @@
 {
   "name": "qwen3-0.6b-fp8",
-  "trace_id": "IT-E2E-QWN3-FP8-01",
   "hf_id": "Qwen/Qwen3-0.6B",
   "bundle": "qwen3-0.6b-fp8-bf16base.trtfb",
   "family": "qwen",
@@ -13,11 +12,17 @@
     "calibration_samples": 64
   },
   "max_cache_length": 256,
-  "prompt": "What is the capital of France? Answer in one word.",
-  "expected_answers": [
-    "Paris"
-  ],
-  "max_new_tokens": 10,
   "trust_remote_code": false,
-  "notes": "FP8 quantization can perturb raw logit distributions while preserving decoded answer semantics. Require the model-owned expected answer plus the default logit and token agreement gates for output confidence."
+  "testcases": [
+    {
+      "name": "qwen3-0.6b-fp8",
+      "trace_id": "IT-E2E-QWN3-FP8-01",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "expected_answers": [
+        "Paris"
+      ],
+      "max_new_tokens": 10,
+      "notes": "FP8 quantization can perturb raw logit distributions while preserving decoded answer semantics. Require the model-owned expected answer plus the default logit and token agreement gates for output confidence."
+    }
+  ]
 }

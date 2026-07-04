@@ -1,20 +1,25 @@
 {
   "name": "nemotron-embed-vl-1b-v2",
-  "trace_id": "IT-E2E-NMEMB-01",
   "hf_id": "nvidia/llama-nemotron-embed-vl-1b-v2",
   "bundle": "nemotron-embed-vl-1b-v2.trtfb",
   "family": "eagle_vlm",
   "runtime_strategy": "eagle_vlm_embedding",
   "task_strategy": "embedding",
   "precision": "fp16",
-  "reference_precision": "fp32",
-  "reference_family": "vl_embed_retrieval",
-  "user_contract": "embedding_vector",
   "max_cache_length": 512,
-  "prompt": "What is machine learning?",
   "trust_remote_code": true,
-  "metadata": {
-    "trust_remote_code": true,
-    "modality": "text"
-  }
+  "testcases": [
+    {
+      "name": "nemotron-embed-vl-1b-v2",
+      "trace_id": "IT-E2E-NMEMB-01",
+      "reference_precision": "fp32",
+      "reference_family": "vl_embed_retrieval",
+      "user_contract": "embedding_vector",
+      "prompt": "What is machine learning?",
+      "metadata": {
+        "trust_remote_code": true,
+        "modality": "text"
+      }
+    }
+  ]
 }

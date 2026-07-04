@@ -1,23 +1,28 @@
 {
   "name": "qwen3-moe-30b-a3b",
-  "trace_id": "IT-E2E-Q3MOE-01",
   "hf_id": "Qwen/Qwen3-30B-A3B",
   "bundle": "qwen3-moe-30b-a3b.trtfb",
   "family": "qwen_moe",
   "runtime_strategy": "qwen_moe_decoder_moe",
   "task_strategy": "text_generation_causal",
-  "reference_family": "chat_qwen3_posttrained",
-  "user_contract": "chat_response",
-  "ci_tier": "nightly_only",
-  "l0_replacement": "qwen3-moe-tiny-random",
-  "l0_replacement_reason": "Qwen3-30B-A3B scale stays nightly; qwen3-moe-tiny-random keeps the Qwen3-MoE build/runtime path for PR L0.",
   "precision": "fp16",
-  "reference_precision": "fp32",
   "max_cache_length": 128,
-  "prompt": "What is the largest planet in our solar system? Answer in one word.",
-  "max_new_tokens": 10,
   "trust_remote_code": false,
-  "metadata": {
-    "single_process_debug_generation": true
-  }
+  "testcases": [
+    {
+      "name": "qwen3-moe-30b-a3b",
+      "trace_id": "IT-E2E-Q3MOE-01",
+      "reference_family": "chat_qwen3_posttrained",
+      "user_contract": "chat_response",
+      "ci_tier": "nightly_only",
+      "l0_replacement": "qwen3-moe-tiny-random",
+      "l0_replacement_reason": "Qwen3-30B-A3B scale stays nightly; qwen3-moe-tiny-random keeps the Qwen3-MoE build/runtime path for PR L0.",
+      "reference_precision": "fp32",
+      "prompt": "What is the largest planet in our solar system? Answer in one word.",
+      "max_new_tokens": 10,
+      "metadata": {
+        "single_process_debug_generation": true
+      }
+    }
+  ]
 }

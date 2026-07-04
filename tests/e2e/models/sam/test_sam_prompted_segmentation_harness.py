@@ -128,9 +128,7 @@ def test_model_plugins_register_model_owned_contract() -> None:
     try:
         activate_model_plugins(model_dir)
         plugin = get_contract_plugin("prompted_segmentation_sam")
-        assert type(plugin).__module__.startswith(
-            "tests.e2e.models.sam.e2e_plugins."
-        )
+        assert type(plugin).__module__.startswith("tests.e2e.models.sam.e2e_plugins.")
     finally:
         reset_e2e_registry()
 
@@ -196,15 +194,23 @@ def test_manifest_loader_promotes_num_expected_masks_into_inputs(tmp_path) -> No
                 "bundle": "sam-vit-base.trtfb",
                 "family": "sam",
                 "runtime_strategy": "sam_prompted_segmentation",
-                "test_type": "prompted_segmentation",
-                "test_image": "data/test_img.jpeg",
-                "point_x": 0.5,
-                "point_y": 0.5,
-                "num_expected_masks": 3,
-                "input_fields": [
-                    {"input": "point_x", "manifest": "point_x"},
-                    {"input": "point_y", "manifest": "point_y"},
-                    {"input": "num_expected_masks", "manifest": "num_expected_masks"},
+                "testcases": [
+                    {
+                        "name": "sam-vit-base",
+                        "test_type": "prompted_segmentation",
+                        "test_image": "data/test_img.jpeg",
+                        "point_x": 0.5,
+                        "point_y": 0.5,
+                        "num_expected_masks": 3,
+                        "input_fields": [
+                            {"input": "point_x", "manifest": "point_x"},
+                            {"input": "point_y", "manifest": "point_y"},
+                            {
+                                "input": "num_expected_masks",
+                                "manifest": "num_expected_masks",
+                            },
+                        ],
+                    }
                 ],
             }
         ),

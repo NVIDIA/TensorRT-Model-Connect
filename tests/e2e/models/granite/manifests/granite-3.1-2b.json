@@ -1,17 +1,22 @@
 {
   "name": "granite-3.1-2b",
-  "trace_id": "IT-E2E-GRN31-01",
   "hf_id": "ibm-granite/granite-3.1-2b-base",
   "bundle": "granite-3.1-2b.trtfb",
   "family": "granite",
   "runtime_strategy": "granite_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "continuation_parity",
   "precision": "fp16",
-  "reference_precision": "fp32",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
-  "max_new_tokens": 20,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "granite-3.1-2b",
+      "trace_id": "IT-E2E-GRN31-01",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20
+    }
+  ]
 }

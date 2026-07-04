@@ -195,16 +195,12 @@ fi
 
 E2E_SELECTION_ARGS=()
 if [ -n "$MODELS_FILE" ]; then
-    E2E_SELECTION_ARGS=(--e2e-group-by-bundle --e2e-models-file "$MODELS_FILE")
-elif [ -z "$TESTS_FILE" ]; then
-    E2E_SELECTION_ARGS=(--e2e-group-by-bundle)
-elif grep -q '::test_model_e2e\[bundle:' "$TESTS_FILE"; then
-    E2E_SELECTION_ARGS=(--e2e-group-by-bundle)
+    E2E_SELECTION_ARGS=(--e2e-models-file "$MODELS_FILE")
 fi
 
 echo "  Selection args:  ${E2E_SELECTION_ARGS[*]:-none}"
 if [ -n "$MODELS_FILE" ] && [ -n "$TESTS_FILE" ]; then
-    echo "  Scheduler source: models file (grouped collection); tests file kept as impact record"
+    echo "  Scheduler source: models file; tests file kept as impact record"
 elif [ -n "$TESTS_FILE" ]; then
     echo "  Scheduler source: tests file"
 else
@@ -241,28 +237,19 @@ import re
 import sys
 from pathlib import Path
 
-BUNDLE_PREFIX = "bundle:"
-
-
-def names_from_param(value: str) -> list[str]:
-    if value.startswith(BUNDLE_PREFIX):
-        return [name for name in value[len(BUNDLE_PREFIX):].split("+") if name]
-    return [value] if value else []
-
-
-def names_from_line(raw: str) -> list[str]:
+def name_from_line(raw: str) -> str:
     value = raw.split("#", 1)[0].strip()
     if not value:
-        return []
+        return ""
     if "[" in value and "]" in value:
         value = value.rsplit("[", 1)[1].split("]", 1)[0]
-    return names_from_param(value)
+    return value
 
 
 selected = {
-    name
+    name_from_line(raw)
     for raw in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-    for name in names_from_line(raw)
+    if name_from_line(raw)
 }
 
 for raw in sys.stdin:
@@ -272,8 +259,7 @@ for raw in sys.stdin:
     match = re.search(r"\[(.+?)\]", test_id)
     if not match:
         continue
-    names = names_from_param(match.group(1))
-    if names and all(name in selected for name in names):
+    if match.group(1) in selected:
         print(test_id)
 ' "$MODELS_FILE"
         )
@@ -433,6 +419,7 @@ PY
                 --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
                 --junitxml="$RESULT_DIR/junit-${LABEL}.xml" \
                 "${E2E_SELECTION_ARGS[@]}" \
+                "${COLLECT_ARGS[@]}" \
                 "${EXTRA_ARGS[@]}" \
                 > "$RESULT_DIR/console-${LABEL}.log" 2>&1
         ) &
@@ -579,6 +566,7 @@ PY
                 --e2e-artifacts-dir "$RESULT_DIR/artifacts" \
                 --junitxml="$RESULT_DIR/junit-${label}.xml" \
                 "${E2E_SELECTION_ARGS[@]}" \
+                "${COLLECT_ARGS[@]}" \
                 "${EXTRA_ARGS[@]}" \
                 > "$RESULT_DIR/console-${label}.log" 2>&1
         ) &

@@ -5,13 +5,8 @@
   "family": "chronos_bolt",
   "runtime_strategy": "chronos_bolt_trt",
   "task_strategy": "neural_operator",
-  "reference_backend": "torch_reference",
-  "reference_family": "time_series_quantile_forecast",
-  "user_contract": "time_series_quantile_forecast",
-  "oracle_level": "L1_external_reference",
   "precision": "fp32",
   "max_cache_length": 2048,
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
     "parallel": {
@@ -31,53 +26,63 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
+      "name": "chronos-bolt-tiny-official-tp4",
+      "reference_backend": "torch_reference",
+      "reference_family": "time_series_quantile_forecast",
+      "user_contract": "time_series_quantile_forecast",
+      "oracle_level": "L1_external_reference",
+      "ci_tier": "multi_device",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        },
+        {
+          "kind": "python_module_available",
+          "args": {
+            "module": "chronos",
+            "phase": "build"
+          },
+          "gating": true
+        }
+      ],
+      "inputs": {
+        "branch_input": [
+          100.1,
+          100.15,
+          100.18,
+          100.22,
+          100.21,
+          100.27,
+          100.31,
+          100.35,
+          100.37,
+          100.4,
+          100.44,
+          100.5
+        ]
       },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
-    },
-    {
-      "kind": "python_module_available",
-      "args": {
-        "module": "chronos",
-        "phase": "build"
-      },
-      "gating": true
+      "metadata": {
+        "core": false,
+        "notes": "Chronos-Bolt tiny TP4 repro using the same checkpoint, precision, inputs, and thresholds as chronos-bolt-tiny-official."
+      }
     }
-  ],
-  "inputs": {
-    "branch_input": [
-      100.1,
-      100.15,
-      100.18,
-      100.22,
-      100.21,
-      100.27,
-      100.31,
-      100.35,
-      100.37,
-      100.4,
-      100.44,
-      100.5
-    ]
-  },
-  "metadata": {
-    "core": false,
-    "notes": "Chronos-Bolt tiny TP4 repro using the same checkpoint, precision, inputs, and thresholds as chronos-bolt-tiny-official."
-  }
+  ]
 }

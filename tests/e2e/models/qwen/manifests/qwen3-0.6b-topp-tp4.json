@@ -1,25 +1,12 @@
 {
   "name": "qwen3-0.6b-topp-tp4",
-  "trace_id": "IT-E2E-TOPP-TP4-001",
   "hf_id": "Qwen/Qwen3-0.6B",
   "bundle": "qwen3-0.6b-topp-fp16-tp4.trtfb",
   "family": "qwen",
   "runtime_strategy": "qwen_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
-  "reference_precision": "fp32",
-  "reference_backend": "invariant_only",
-  "reference_family": "sampling_top_p",
-  "user_contract": "sampling",
   "max_cache_length": 256,
-  "prompt": "What is the capital of France? Answer in one word.",
-  "max_new_tokens": 20,
-  "temperature": 0.7,
-  "top_p": 0.9,
-  "top_k": 50,
-  "seed": 42,
-  "determinism_reruns": 1,
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
     "parallel": {
@@ -40,26 +27,44 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "qwen3-0.6b-topp-tp4",
+      "trace_id": "IT-E2E-TOPP-TP4-001",
+      "reference_precision": "fp32",
+      "reference_backend": "invariant_only",
+      "reference_family": "sampling_top_p",
+      "user_contract": "sampling",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 20,
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "top_k": 50,
+      "seed": 42,
+      "determinism_reruns": 1,
+      "ci_tier": "multi_device",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "test_note": "Validates host-side top-p nucleus sampling on an fp16 Qwen3 TP4 bundle: with temperature=0.7/top_p=0.9/top_k=50/seed=42, the distributed runtime CLI must forward sampling flags, produce non-empty output, and reproduce the same seeded output on rerun. Device placement is not asserted by this E2E contract; top-p filtering is implemented on CPU via HOST sampler logits."
     }
-  ],
-  "test_note": "Validates host-side top-p nucleus sampling on an fp16 Qwen3 TP4 bundle: with temperature=0.7/top_p=0.9/top_k=50/seed=42, the distributed runtime CLI must forward sampling flags, produce non-empty output, and reproduce the same seeded output on rerun. Device placement is not asserted by this E2E contract; top-p filtering is implemented on CPU via HOST sampler logits."
+  ]
 }

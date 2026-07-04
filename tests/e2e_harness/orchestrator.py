@@ -107,9 +107,11 @@ def _check_gpu_memory(ctx: RunContext, req: PreflightRequirement) -> tuple[bool,
     min_gb = req.args.get("min_gb", 0)
     try:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=10)
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
         if result.returncode == 0:
             total_mb = int(result.stdout.strip().splitlines()[0])
             total_gb = total_mb / 1024
@@ -177,10 +179,7 @@ def _check_python_module(ctx: RunContext, req: PreflightRequirement) -> tuple[bo
             [
                 python,
                 "-c",
-                (
-                    "import importlib; "
-                    f"importlib.import_module({module!r})"
-                ),
+                (f"import importlib; importlib.import_module({module!r})"),
             ],
             capture_output=True,
             text=True,
@@ -212,8 +211,7 @@ def _visible_gpu_count() -> int | None:
         devices = [part.strip() for part in visible.split(",") if part.strip()]
         return len(devices)
     try:
-        result = subprocess.run(
-            ["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10)
+        result = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=10)
     except Exception:
         return None
     if result.returncode != 0:
@@ -269,12 +267,14 @@ def run_preflight(
                 passed = False
                 message = f"Preflight check {req.kind} raised: {e}"
 
-        details.append({
-            "kind": req.kind,
-            "passed": passed,
-            "message": message,
-            "gating": req.gating,
-        })
+        details.append(
+            {
+                "kind": req.kind,
+                "passed": passed,
+                "message": message,
+                "gating": req.gating,
+            }
+        )
 
         if not passed and req.gating:
             all_gating_passed = False
@@ -317,9 +317,15 @@ def _resolve_bundle(
 
     build_python = ctx.build_python_path() or sys.executable
     cmd = [
-        build_python, "-m", "tensorrt_model_connect.__main__", "build",
-        hf_id, "-o", str(bundle_path),
-        "--max-cache-length", str(max_cache),
+        build_python,
+        "-m",
+        "tensorrt_model_connect.__main__",
+        "build",
+        hf_id,
+        "-o",
+        str(bundle_path),
+        "--max-cache-length",
+        str(max_cache),
     ]
     _append_declared_build_cli_args(cmd, case)
     if build_method:
@@ -330,10 +336,12 @@ def _resolve_bundle(
         cmd.extend(["--precision", precision])
     fp32_layers = case.metadata.get("fp32_layers", [])
     if fp32_layers:
-        cmd.extend([
-            "--fp32-layers",
-            ",".join(str(layer) for layer in fp32_layers),
-        ])
+        cmd.extend(
+            [
+                "--fp32-layers",
+                ",".join(str(layer) for layer in fp32_layers),
+            ]
+        )
     quantization = case.metadata.get("quantization", {})
     if isinstance(quantization, dict):
         quant_format = quantization.get("format")
@@ -344,10 +352,12 @@ def _resolve_bundle(
                 cmd.extend(["--quant-scales", str(scale_artifact)])
             calibration_samples = quantization.get("calibration_samples")
             if calibration_samples is not None:
-                cmd.extend([
-                    "--quant-calibration-samples",
-                    str(calibration_samples),
-                ])
+                cmd.extend(
+                    [
+                        "--quant-calibration-samples",
+                        str(calibration_samples),
+                    ]
+                )
     if case.metadata.get("trust_remote_code"):
         cmd.append("--trust-remote-code")
     fp8_scales = case.metadata.get("fp8_scales")
@@ -374,8 +384,7 @@ def _resolve_bundle(
     build_timing_path.parent.mkdir(parents=True, exist_ok=True)
     cmd.extend(["--build-timing-json", str(build_timing_path)])
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=3600, env=env)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
         elapsed = time.monotonic() - t0
     except subprocess.TimeoutExpired:
         build_timing = _load_build_timing(build_timing_path)
@@ -388,9 +397,14 @@ def _resolve_bundle(
         if build_timing:
             build_info["timing"] = build_timing
             build_info["timing_path"] = str(build_timing_path)
-        return None, None, f"Bundle build timed out for {hf_id}", {
-            **build_info,
-        }
+        return (
+            None,
+            None,
+            f"Bundle build timed out for {hf_id}",
+            {
+                **build_info,
+            },
+        )
     except Exception as e:
         build_timing = _load_build_timing(build_timing_path)
         build_info = {
@@ -402,9 +416,14 @@ def _resolve_bundle(
         if build_timing:
             build_info["timing"] = build_timing
             build_info["timing_path"] = str(build_timing_path)
-        return None, None, f"Bundle build failed for {hf_id}: {e}", {
-            **build_info,
-        }
+        return (
+            None,
+            None,
+            f"Bundle build failed for {hf_id}: {e}",
+            {
+                **build_info,
+            },
+        )
 
     build_info: dict[str, Any] = {
         "command": cmd,
@@ -419,7 +438,8 @@ def _resolve_bundle(
 
     if result.returncode != 0:
         truncated, log_path = save_full_stderr(
-            result.stderr, ctx.artifacts_dir or "", "bundle_build", case.name)
+            result.stderr, ctx.artifacts_dir or "", "bundle_build", case.name
+        )
         msg = f"Bundle build failed for {hf_id} (rc={result.returncode}):\n{truncated}"
         if log_path:
             msg += f" (full stderr: {log_path})"
@@ -521,7 +541,7 @@ def _auto_register_artifacts(sink: Any, output: StageOutput, prefix: str) -> Non
             base = str(sink.base_dir)
             rel = value
             if value.startswith(base):
-                rel = value[len(base):].lstrip("/")
+                rel = value[len(base) :].lstrip("/")
             sink.register_artifact(f"{prefix}_{artifact_key}", rel)
 
 
@@ -581,10 +601,12 @@ def _validate_trt_runtime_path(
     if not runtime_strategy_requires_new_runtime_guard(case.runtime_strategy):
         return None
 
-    payloads = _collect_runtime_guard_payloads({
-        "metadata": output.metadata,
-        "data": output.data,
-    })
+    payloads = _collect_runtime_guard_payloads(
+        {
+            "metadata": output.metadata,
+            "data": output.data,
+        }
+    )
     if not payloads:
         return None
 
@@ -595,22 +617,26 @@ def _validate_trt_runtime_path(
         executable_name = Path(executable).name if executable else ""
         command_names = {Path(part).name for part in command_argv if part}
         command_contains_binary = bool(
-            ctx.binary_path and (
-                ctx.binary_path in command_argv
-                or Path(ctx.binary_path).name in command_names
-            )
+            ctx.binary_path
+            and (ctx.binary_path in command_argv or Path(ctx.binary_path).name in command_names)
         )
         if ctx.binary_path and (executable == ctx.binary_path or command_contains_binary):
             combined_payload_stderr = "\n".join(stderr_texts)
-            if returncode not in (None, 0) and _NEW_RUNTIME_MARKER not in combined_payload_stderr \
-                    and _LEGACY_RUNTIME_MARKER not in combined_payload_stderr:
+            if (
+                returncode not in (None, 0)
+                and _NEW_RUNTIME_MARKER not in combined_payload_stderr
+                and _LEGACY_RUNTIME_MARKER not in combined_payload_stderr
+            ):
                 continue
             relevant_stderr.extend(stderr_texts)
             continue
         if binary_name and executable_name == binary_name:
             combined_payload_stderr = "\n".join(stderr_texts)
-            if returncode not in (None, 0) and _NEW_RUNTIME_MARKER not in combined_payload_stderr \
-                    and _LEGACY_RUNTIME_MARKER not in combined_payload_stderr:
+            if (
+                returncode not in (None, 0)
+                and _NEW_RUNTIME_MARKER not in combined_payload_stderr
+                and _LEGACY_RUNTIME_MARKER not in combined_payload_stderr
+            ):
                 continue
             relevant_stderr.extend(stderr_texts)
     if not relevant_stderr:
@@ -647,9 +673,15 @@ def _build_repro_commands(
     max_cache = case.inputs.get("max_cache_length", 256)
     bundle_target = bundle_path or str(Path(ctx.engine_dir) / case.bundle)
     build_parts = [
-        ctx.build_python_path() or "python", "-m", "tensorrt_model_connect.__main__", "build", case.hf_id,
-        "-o", bundle_target,
-        "--max-cache-length", str(max_cache),
+        ctx.build_python_path() or "python",
+        "-m",
+        "tensorrt_model_connect.__main__",
+        "build",
+        case.hf_id,
+        "-o",
+        bundle_target,
+        "--max-cache-length",
+        str(max_cache),
     ]
     build_method = _manifest_build_method(case.metadata.get("build_args", {}))
     if build_method:
@@ -663,16 +695,19 @@ def _build_repro_commands(
     # TRT inference command. Model-local repro providers or runner-owned hooks
     # own task-specific CLI recipes; the orchestrator only renders and wraps.
     if bundle_path and ctx.binary_path:
-        plugin_owned_infer_parts = _build_plugin_owned_trt_inference_command(
-            case, ctx, bundle_path)
+        plugin_owned_infer_parts = _build_plugin_owned_trt_inference_command(case, ctx, bundle_path)
 
         if plugin_owned_infer_parts is not None:
             infer_parts = plugin_owned_infer_parts
         else:
             infer_parts = [
-                ctx.binary_path, "run", bundle_path,
-                "--prompt", _shell_quote(case.inputs.get("prompt", "")),
-                "--max-new-tokens", str(case.inputs.get("max_new_tokens", 20)),
+                ctx.binary_path,
+                "run",
+                bundle_path,
+                "--prompt",
+                _shell_quote(case.inputs.get("prompt", "")),
+                "--max-new-tokens",
+                str(case.inputs.get("max_new_tokens", 20)),
             ]
             runtime_cli_python = ctx.runtime_cli_hf_python()
             if runtime_cli_python:
@@ -682,10 +717,15 @@ def _build_repro_commands(
 
     # Rerun this exact test case
     rerun_parts = [
-        "pytest", f"tests/test_e2e.py::test_e2e[{case.name}]", "-v",
-        "--engine-dir", ctx.engine_dir,
-        "--trtmc-binary", ctx.binary_path,
-        "--hf-python", ctx.hf_python or "python",
+        "pytest",
+        f"tests/test_e2e.py::test_e2e[{case.name}]",
+        "-v",
+        "--engine-dir",
+        ctx.engine_dir,
+        "--trtmc-binary",
+        ctx.binary_path,
+        "--hf-python",
+        ctx.hf_python or "python",
     ]
     if _distributed_runtime_config(case):
         rerun_parts.append("--multi-device-only")
@@ -723,7 +763,8 @@ def _build_plugin_owned_trt_inference_command(
     if repro_provider is not None:
         try:
             model_owned_infer_parts = repro_provider.build_trt_inference_command(
-                case, ctx, bundle_path)
+                case, ctx, bundle_path
+            )
             if model_owned_infer_parts is not None:
                 return model_owned_infer_parts
         except Exception:
@@ -1081,12 +1122,8 @@ def _plugin_accepts_runtime_context(contract_plugin: Any) -> bool:
     except (TypeError, ValueError):
         return False
 
-    return (
-        "runtime_context" in parameters
-        or any(
-            param.kind == inspect.Parameter.VAR_KEYWORD
-            for param in parameters.values()
-        )
+    return "runtime_context" in parameters or any(
+        param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
     )
 
 
@@ -1118,10 +1155,12 @@ def _extract_trt_engine_time_s(output: StageOutput) -> float | None:
     ]
     cpp_meta = metadata.get("cpp")
     if isinstance(cpp_meta, dict):
-        candidates.extend([
-            cpp_meta.get("trt_engine_s"),
-            cpp_meta.get("engine_s"),
-        ])
+        candidates.extend(
+            [
+                cpp_meta.get("trt_engine_s"),
+                cpp_meta.get("engine_s"),
+            ]
+        )
 
     for value in candidates:
         if value is None:
@@ -1141,10 +1180,12 @@ def _extract_trt_load_deserialize_time_s(output: StageOutput) -> float | None:
     ]
     cpp_meta = metadata.get("cpp")
     if isinstance(cpp_meta, dict):
-        candidates.extend([
-            cpp_meta.get("trt_load_deserialize_s"),
-            cpp_meta.get("load_deserialize_s"),
-        ])
+        candidates.extend(
+            [
+                cpp_meta.get("trt_load_deserialize_s"),
+                cpp_meta.get("load_deserialize_s"),
+            ]
+        )
 
     for value in candidates:
         if value is None:
@@ -1231,6 +1272,16 @@ class _RunState:
     required_validation_skipped: bool = False
 
 
+@dataclass(frozen=True)
+class BundleResolution:
+    """Result of resolving or building one model bundle."""
+
+    path: str | None
+    build_time_s: float | None = None
+    error: str = ""
+    build_info: dict[str, Any] = field(default_factory=dict)
+
+
 class E2EOrchestrator:
     """Coordinates the full E2E lifecycle for one model case.
 
@@ -1238,7 +1289,21 @@ class E2EOrchestrator:
     resolved at runtime via the registry.
     """
 
-    def run(self, case: E2ECase, ctx: RunContext) -> E2EResult:
+    def resolve_model_bundle(
+        self,
+        case: E2ECase,
+        ctx: RunContext,
+    ) -> BundleResolution:
+        """Resolve or build the shared bundle before testcase execution."""
+        path, build_time, error, build_info = _resolve_bundle(case, ctx)
+        return BundleResolution(path, build_time, error, build_info)
+
+    def run(
+        self,
+        case: E2ECase,
+        ctx: RunContext,
+        bundle_resolution: BundleResolution | None = None,
+    ) -> E2EResult:
         """Execute the full E2E lifecycle for a single model case.
 
         Returns an E2EResult with all stage outcomes, timing, and artifacts.
@@ -1249,7 +1314,7 @@ class E2EOrchestrator:
         if terminal_result is not None:
             return terminal_result
 
-        terminal_result = self._bundle_resolution_phase(state)
+        terminal_result = self._bundle_resolution_phase(state, bundle_resolution)
         if terminal_result is not None:
             return terminal_result
 
@@ -1265,9 +1330,8 @@ class E2EOrchestrator:
         artifacts_dir = ctx.artifacts_dir or "/tmp/e2e_artifacts"
         sink = FileArtifactSink(artifacts_dir, case)
         env_fp = sink.ensure_env_fingerprint(ctx)
-        skip_reason = (
-            case.metadata.get("skip_comparison_reason")
-            or case.metadata.get("skip_reason")
+        skip_reason = case.metadata.get("skip_comparison_reason") or case.metadata.get(
+            "skip_reason"
         )
 
         return _RunState(
@@ -1304,9 +1368,17 @@ class E2EOrchestrator:
         state.sink.finalize(result)
         return result
 
-    def _bundle_resolution_phase(self, state: _RunState) -> E2EResult | None:
-        bundle_path, build_time, build_err, build_info = _resolve_bundle(
-            state.case, state.ctx)
+    def _bundle_resolution_phase(
+        self,
+        state: _RunState,
+        prepared: BundleResolution | None = None,
+    ) -> E2EResult | None:
+        if prepared is None:
+            prepared = self.resolve_model_bundle(state.case, state.ctx)
+        bundle_path = prepared.path
+        build_time = prepared.build_time_s
+        build_err = prepared.error
+        build_info = prepared.build_info
         state.bundle_path = bundle_path
         state.build_info = build_info
 
@@ -1383,7 +1455,8 @@ class E2EOrchestrator:
         state.comparator = get_comparator(state.case.task_strategy)
         state.contract_plugin = (
             get_contract_plugin(state.case.reference_family)
-            if state.case.reference_family else None
+            if state.case.reference_family
+            else None
         )
         state.threshold = _resolve_threshold(state.case)
         self._configure_contract_plugin(state)
@@ -1425,7 +1498,9 @@ class E2EOrchestrator:
 
         logger.info(
             "Skipping stage %s for lane %s (stage lanes: %s)",
-            stage.name, state.case.ci_lane, stage.ci_lanes,
+            stage.name,
+            state.case.ci_lane,
+            stage.ci_lanes,
         )
         state.stage_results[stage.name] = CompareResult(
             stage_name=stage.name,
@@ -1448,7 +1523,8 @@ class E2EOrchestrator:
             state.sink.write_stage_output(stage.name, trt_output, prefix="trt")
             logger.warning(
                 "No runner registered for strategy %s, stage %s",
-                state.case.task_strategy, stage.name,
+                state.case.task_strategy,
+                stage.name,
             )
             return trt_output
 
@@ -1460,8 +1536,7 @@ class E2EOrchestrator:
             state.sink.write_stage_output(stage.name, trt_output, prefix="trt")
             _log_stage_subprocess(state.sink, stage.name, trt_output, "trt")
             _auto_register_artifacts(state.sink, trt_output, "trt")
-            runtime_path_error = _validate_trt_runtime_path(
-                state.case, state.ctx, trt_output)
+            runtime_path_error = _validate_trt_runtime_path(state.case, state.ctx, trt_output)
             if runtime_path_error is not None:
                 state.stage_results[stage.name] = CompareResult(
                     stage_name=stage.name,
@@ -1491,14 +1566,17 @@ class E2EOrchestrator:
         if state.skip_reason:
             logger.info(
                 "Skipping reference for %s stage %s: %s",
-                state.case.name, stage.name, state.skip_reason,
+                state.case.name,
+                stage.name,
+                state.skip_reason,
             )
             return None
 
         if state.reference is None:
             logger.warning(
                 "No reference backend registered for %s, stage %s — skipping comparison",
-                state.case.reference_backend, stage.name,
+                state.case.reference_backend,
+                stage.name,
             )
             return None
 
@@ -1513,8 +1591,7 @@ class E2EOrchestrator:
         except Exception as e:
             state.timing[f"ref_{stage.name}_s"] = time.monotonic() - t0
             tb = traceback.format_exc()
-            logger.error(
-                "Reference run failed for stage %s: %s\n%s", stage.name, e, tb)
+            logger.error("Reference run failed for stage %s: %s\n%s", stage.name, e, tb)
             state.stage_results[stage.name] = CompareResult(
                 stage_name=stage.name,
                 status=StageStatus.ERROR.value,
@@ -1542,11 +1619,9 @@ class E2EOrchestrator:
                 state.all_stages_pass = False
             return
 
-        compare_result = self._contract_comparison(
-            state, stage, trt_output, ref_output)
+        compare_result = self._contract_comparison(state, stage, trt_output, ref_output)
         if compare_result is None:
-            compare_result = self._numeric_comparison(
-                state, stage, trt_output, ref_output)
+            compare_result = self._numeric_comparison(state, stage, trt_output, ref_output)
 
         if compare_result is None:
             compare_result = CompareResult(
@@ -1608,8 +1683,7 @@ class E2EOrchestrator:
 
         t0 = time.monotonic()
         try:
-            result = state.comparator.compare(
-                trt_output, ref_output, state.threshold, stage)
+            result = state.comparator.compare(trt_output, ref_output, state.threshold, stage)
             state.timing[f"compare_{stage.name}_s"] = time.monotonic() - t0
             return result
         except Exception as e:
@@ -1639,8 +1713,7 @@ class E2EOrchestrator:
 
             rerun_outputs: list[dict[str, Any]] = []
             for i in range(reruns):
-                matched = self._run_determinism_rerun(
-                    state, stage, baseline, i, rerun_outputs)
+                matched = self._run_determinism_rerun(state, stage, baseline, i, rerun_outputs)
                 if not matched:
                     determinism_ok = False
 
@@ -1666,18 +1739,18 @@ class E2EOrchestrator:
             elapsed = time.monotonic() - t0
             state.timing[f"determinism_{stage.name}_rerun_{rerun_index}_s"] = elapsed
 
-            text_match = (
-                rerun_out.text == baseline.text
-            ) if baseline.text is not None else True
+            text_match = (rerun_out.text == baseline.text) if baseline.text is not None else True
             data_match = self._stage_data_matches(baseline, rerun_out)
             matched = text_match and data_match
-            rerun_outputs.append({
-                "rerun_index": rerun_index,
-                "text_match": text_match,
-                "data_match": data_match,
-                "matched": matched,
-                "timing_s": elapsed,
-            })
+            rerun_outputs.append(
+                {
+                    "rerun_index": rerun_index,
+                    "text_match": text_match,
+                    "data_match": data_match,
+                    "matched": matched,
+                    "timing_s": elapsed,
+                }
+            )
             state.sink.log_command(
                 command=[f"determinism_rerun_{stage.name}_{rerun_index}"],
                 rc=0 if matched else 1,
@@ -1692,14 +1765,19 @@ class E2EOrchestrator:
             tb = traceback.format_exc()
             logger.error(
                 "Determinism rerun %d for stage %s failed: %s\n%s",
-                rerun_index, stage.name, e, tb,
+                rerun_index,
+                stage.name,
+                e,
+                tb,
             )
-            rerun_outputs.append({
-                "rerun_index": rerun_index,
-                "matched": False,
-                "error": str(e),
-                "timing_s": elapsed,
-            })
+            rerun_outputs.append(
+                {
+                    "rerun_index": rerun_index,
+                    "matched": False,
+                    "error": str(e),
+                    "timing_s": elapsed,
+                }
+            )
             state.sink.log_command(
                 command=[f"determinism_rerun_{stage.name}_{rerun_index}"],
                 rc=1,
@@ -1726,7 +1804,8 @@ class E2EOrchestrator:
 
     def _finalization_phase(self, state: _RunState) -> E2EResult:
         repro = _build_repro_commands(
-            state.case, state.original_ctx, state.bundle_path, state.build_info)
+            state.case, state.original_ctx, state.bundle_path, state.build_info
+        )
         status, failure_type = self._aggregate_status(state)
 
         result = E2EResult(
@@ -1737,8 +1816,7 @@ class E2EOrchestrator:
             stages=state.stage_results,
             determinism=state.determinism_results,
             timing=state.timing,
-            detailed_timing=_build_detailed_timing(
-                state.timing, state.build_info),
+            detailed_timing=_build_detailed_timing(state.timing, state.build_info),
             env_fingerprint=state.env_fingerprint,
             timestamp=state.timestamp,
             repro_commands=repro,

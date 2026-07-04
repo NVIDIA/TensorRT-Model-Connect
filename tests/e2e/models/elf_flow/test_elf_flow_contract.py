@@ -295,6 +295,94 @@ def test_elf_contract_rejects_upstream_replay_token_mismatch() -> None:
     assert not result.metrics["upstream_token_id_match_rate"].passed
 
 
+def test_elf_contract_applies_bounded_upstream_replay_thresholds() -> None:
+    plugin = find_plugin("elf_unconditional_text")
+    assert plugin is not None
+
+    result = plugin.verify(
+        StageOutput(
+            stage_name="decoded_text",
+            data={
+                "generated_samples": [
+                    {
+                        "id": 0,
+                        "generated": "Same texts.",
+                        "token_ids": [1, 2, 9, 4],
+                    }
+                ],
+            },
+        ),
+        StageOutput(
+            stage_name="decoded_text",
+            data={
+                "expected_generated_samples": [
+                    {
+                        "id": 0,
+                        "generated": "Same text.",
+                        "token_ids": [1, 2, 3, 4],
+                    }
+                ],
+            },
+        ),
+        _case("elf_unconditional_text", {"generation_mode": "unconditional"}),
+        ThresholdProfile(
+            task_strategy="neural_operator",
+            metrics={
+                "contract_min_samples": 1,
+                "contract_max_upstream_text_ned": 0.1,
+                "contract_min_upstream_token_agreement_rate": 0.75,
+            },
+        ),
+    )
+
+    assert result.passed
+    assert result.metrics["upstream_text_ned"].passed
+    assert result.metrics["upstream_token_id_agreement_rate"].passed
+
+
+def test_elf_contract_ignores_only_repeated_terminal_tokens() -> None:
+    plugin = find_plugin("elf_conditional_text")
+    assert plugin is not None
+
+    result = plugin.verify(
+        StageOutput(
+            stage_name="decoded_text",
+            data={
+                "generated_samples": [
+                    {"id": 0, "generated": "Same text.", "token_ids": [7, 8, 9]}
+                ],
+            },
+        ),
+        StageOutput(
+            stage_name="decoded_text",
+            data={
+                "expected_generated_samples": [
+                    {
+                        "id": 0,
+                        "generated": "Same text.",
+                        "token_ids": [7, 8, 9, 1, 1],
+                    }
+                ],
+                "terminal_token_ids": [0, 1],
+            },
+        ),
+        _case(
+            "elf_conditional_text",
+            {
+                "generation_mode": "conditional",
+                "source_text": "A source sentence.",
+            },
+        ),
+        ThresholdProfile(
+            task_strategy="neural_operator",
+            metrics={"contract_min_samples": 1},
+        ),
+    )
+
+    assert result.passed
+    assert result.metrics["upstream_token_id_match_rate"].passed
+
+
 def test_diffusion_text_runner_requires_prompt_or_api_condition_for_conditional(
     tmp_path: Path,
 ) -> None:

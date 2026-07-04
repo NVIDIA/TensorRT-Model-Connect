@@ -1,20 +1,25 @@
 {
   "name": "qwen3-moe-tiny-random",
-  "trace_id": "IT-E2E-Q3MOE-L0-01",
   "hf_id": "amd-quark/tiny-random-qwen3_moe",
   "bundle": "qwen3-moe-tiny-random.trtfb",
   "family": "qwen_moe",
   "runtime_strategy": "qwen_moe_decoder_moe",
   "task_strategy": "text_generation_causal",
-  "ci_tier": "l0_only",
   "precision": "fp16",
-  "reference_precision": "fp32",
   "max_cache_length": 128,
-  "prompt": "What is the largest planet in our solar system? Answer in one word.",
-  "max_new_tokens": 10,
   "trust_remote_code": false,
-  "metadata": {
-    "single_process_debug_generation": true
-  },
-  "notes": "PR L0 representative for Qwen3-MoE. Uses a tiny checkpoint with qwen3_moe model_type, qwen_moe plugin, qwen_moe_decoder_moe runtime, per-head Q/K norm, MoE router gate, expert gate/up/down weights, normalized top-k routing, runner, comparator, and artifact contract while the 30B A3B model remains covered in nightly for 128-expert/top-8 scale."
+  "testcases": [
+    {
+      "name": "qwen3-moe-tiny-random",
+      "trace_id": "IT-E2E-Q3MOE-L0-01",
+      "ci_tier": "l0_only",
+      "reference_precision": "fp32",
+      "prompt": "What is the largest planet in our solar system? Answer in one word.",
+      "max_new_tokens": 10,
+      "metadata": {
+        "single_process_debug_generation": true
+      },
+      "notes": "PR L0 representative for Qwen3-MoE. Uses a tiny checkpoint with qwen3_moe model_type, qwen_moe plugin, qwen_moe_decoder_moe runtime, per-head Q/K norm, MoE router gate, expert gate/up/down weights, normalized top-k routing, runner, comparator, and artifact contract while the 30B A3B model remains covered in nightly for 128-expert/top-8 scale."
+    }
+  ]
 }

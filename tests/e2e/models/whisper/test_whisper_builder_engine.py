@@ -124,6 +124,50 @@ def _whisper_tp_builder_module():
     )
 
 
+@pytest.mark.parametrize(
+    ("fp32_layers", "expected_precision"),
+    [([], "fp16"), ([0], "fp32")],
+)
+def test_whisper_encoder_selector_routes_precision(
+    monkeypatch: pytest.MonkeyPatch,
+    fp32_layers: list[int],
+    expected_precision: str,
+) -> None:
+    plugin_module = pytest.importorskip(
+        "tensorrt_model_connect.families.whisper.plugin"
+    )
+    observed = {}
+
+    def fake_build_encoder(config, weights, *, precision, verbose):
+        del config, weights, verbose
+        observed["precision"] = precision
+        return b"encoder-plan"
+
+    monkeypatch.setattr(
+        plugin_module, "_build_whisper_encoder", fake_build_encoder
+    )
+    config = type("Config", (), {"raw": {"_fp32_layers": fp32_layers}})()
+
+    plan = plugin_module.plugin.build_vision_engine(
+        "unused", config, WeightDict(), precision="fp16"
+    )
+
+    assert plan == b"encoder-plan"
+    assert observed["precision"] == expected_precision
+
+
+def test_whisper_encoder_selector_rejects_unknown_index() -> None:
+    plugin_module = pytest.importorskip(
+        "tensorrt_model_connect.families.whisper.plugin"
+    )
+    config = type("Config", (), {"raw": {"_fp32_layers": [1]}})()
+
+    with pytest.raises(ValueError, match="supports only selector 0"):
+        plugin_module.plugin.build_vision_engine(
+            "unused", config, WeightDict(), precision="fp16"
+        )
+
+
 class WhisperPluginTester(FamilyPluginTester):
     """Tester for the Whisper family plugin.
 

@@ -1,25 +1,30 @@
 {
   "name": "mistral-7b-l0",
-  "trace_id": "IT-E2E-MIST7B-L0-01",
   "hf_id": "mistralai/Mistral-7B-Instruct-v0.1",
   "bundle": "mistral-7b-l0.trtfb",
   "family": "mistral",
   "runtime_strategy": "mistral_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "ci_tier": "l0_only",
-  "reference_family": "chat_instruct_template",
-  "user_contract": "chat_response",
   "precision": "fp16",
-  "reference_precision": "fp32",
   "max_cache_length": 256,
-  "prompt": "What is the capital of Japan? Answer in one word.",
-  "max_new_tokens": 5,
   "trust_remote_code": false,
-  "notes": "PR L0 repro for Mistral-7B. Uses the same checkpoint, mistral_decoder_kv_cache runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget.",
-  "metadata": {
-    "contract_config": {
-      "use_chat_template": true,
-      "enable_thinking": false
+  "testcases": [
+    {
+      "name": "mistral-7b-l0",
+      "trace_id": "IT-E2E-MIST7B-L0-01",
+      "ci_tier": "l0_only",
+      "reference_family": "chat_instruct_template",
+      "user_contract": "chat_response",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of Japan? Answer in one word.",
+      "max_new_tokens": 5,
+      "notes": "PR L0 repro for Mistral-7B. Uses the same checkpoint, mistral_decoder_kv_cache runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget.",
+      "metadata": {
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false
+        }
+      }
     }
-  }
+  ]
 }

@@ -5,49 +5,56 @@
   "family": "patchtst",
   "runtime_strategy": "patchtst_trt",
   "task_strategy": "neural_operator",
-  "reference_backend": "torch_reference",
-  "reference_family": "time_series_regression",
-  "user_contract": "time_series_regression",
-  "oracle_level": "L1_external_reference",
   "precision": "fp16",
-  "fp32_layers": [5],
+  "fp32_layers": [
+    5
+  ],
   "max_cache_length": 512,
-  "inputs": {
-    "field_input": [
-      0.1,
-      -0.2,
-      0.05,
-      0.3,
-      -0.15,
-      0.25,
-      0.4,
-      0.2,
-      -0.1,
-      0.1,
-      0.35,
-      -0.05,
-      0.2,
-      0.5,
-      0.3,
-      0.0,
-      0.15,
-      0.4,
-      0.05,
-      0.15,
-      0.6,
-      0.4,
-      0.1,
-      0.2,
-      0.45,
-      0.1,
-      0.1,
-      0.7,
-      0.55,
-      0.05
-    ]
-  },
-  "metadata": {
-    "core": false,
-    "notes": "Public IBM Research PatchTST regression checkpoint exercised through unified E2E with numeric sample input. The embedding and all three encoder layers use FP16 with FP32 GEMM accumulation; selector 5 keeps the precision-sensitive regression head FP32. Normalization and statistical reductions remain FP32."
-  }
+  "testcases": [
+    {
+      "name": "patchtst-etth1-regression-distribution",
+      "reference_backend": "torch_reference",
+      "reference_family": "time_series_regression",
+      "user_contract": "time_series_regression",
+      "oracle_level": "L1_external_reference",
+      "inputs": {
+        "field_input": [
+          0.1,
+          -0.2,
+          0.05,
+          0.3,
+          -0.15,
+          0.25,
+          0.4,
+          0.2,
+          -0.1,
+          0.1,
+          0.35,
+          -0.05,
+          0.2,
+          0.5,
+          0.3,
+          0.0,
+          0.15,
+          0.4,
+          0.05,
+          0.15,
+          0.6,
+          0.4,
+          0.1,
+          0.2,
+          0.45,
+          0.1,
+          0.1,
+          0.7,
+          0.55,
+          0.05
+        ]
+      },
+      "metadata": {
+        "core": false,
+        "notes": "Public IBM Research PatchTST regression checkpoint exercised through unified E2E with numeric sample input. The embedding and all three encoder layers use FP16 with FP32 GEMM accumulation; selector 5 keeps the precision-sensitive regression head FP32. Normalization and statistical reductions remain FP32."
+      }
+    }
+  ]
 }

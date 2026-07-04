@@ -6,13 +6,6 @@ plugin = "canary"
 test_manifests = [
   "manifests/canary-1b-v2-tp4.json",
   "manifests/canary-1b-v2.json",
-  "manifests/canary-1b-v2-asr-probe01.json",
-  "manifests/canary-1b-v2-asr-probe02.json",
-  "manifests/canary-1b-v2-asr-probe03.json",
-  "manifests/canary-1b-v2-asr-probe04.json",
-  "manifests/canary-1b-v2-asr-probe05.json",
-  "manifests/canary-1b-v2-asr-probe06.json",
-  "manifests/canary-1b-v2-asr-probe08.json",
 ]
 
 [e2e_defaults.speech_to_text]

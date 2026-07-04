@@ -167,9 +167,7 @@ def test_model_plugins_register_model_owned_contract() -> None:
     try:
         activate_model_plugins(model_dir)
         plugin = get_contract_plugin("prompted_segmentation_sam3")
-        assert type(plugin).__module__.startswith(
-            "tests.e2e.models.sam3.e2e_plugins."
-        )
+        assert type(plugin).__module__.startswith("tests.e2e.models.sam3.e2e_plugins.")
     finally:
         reset_e2e_registry()
 
@@ -198,17 +196,22 @@ def test_manifest_loader_keeps_text_prompt_contract(tmp_path) -> None:
                 "bundle": "sam3.trtfb",
                 "family": "sam3",
                 "runtime_strategy": "sam3_prompted_segmentation",
-                "test_type": "prompted_segmentation",
-                "reference_family": "prompted_segmentation_sam3",
-                "user_contract": "prompted_mask",
-                "inputs": {
-                    "image": "data/test_img.jpeg",
-                    "prompt": "car",
-                },
-                "threshold_overrides": {
-                    "box_iou_mean": 0.95,
-                    "score_abs_error_mean": 0.05,
-                },
+                "testcases": [
+                    {
+                        "name": "sam3",
+                        "test_type": "prompted_segmentation",
+                        "reference_family": "prompted_segmentation_sam3",
+                        "user_contract": "prompted_mask",
+                        "inputs": {
+                            "image": "data/test_img.jpeg",
+                            "prompt": "car",
+                        },
+                        "threshold_overrides": {
+                            "box_iou_mean": 0.95,
+                            "score_abs_error_mean": 0.05,
+                        },
+                    }
+                ],
             }
         ),
         encoding="utf-8",

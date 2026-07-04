@@ -1,24 +1,13 @@
 {
   "name": "qwen25vl-3b-tp2",
-  "trace_id": "IT-E2E-Q25VL-TP2-01",
   "hf_id": "Qwen/Qwen2.5-VL-3B-Instruct",
   "bundle": "qwen25vl-3b-vl-tp2.trtfb",
   "family": "qwen_vl",
   "runtime_strategy": "qwen_vl_vision_language",
   "task_strategy": "vision_language_generation",
-  "reference_family": "vl_instruct_qa",
-  "user_contract": "vl_answer",
-  "task_eval": {
-    "vlm_fallback_prompt_template": "<|vision_start|><|image_pad|><|vision_end|>{prompt}"
-  },
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 384,
-  "prompt": "What color is the vehicle in this image? Answer in one word.",
-  "max_new_tokens": 10,
-  "test_image": "data/test_img.jpeg",
   "trust_remote_code": false,
-  "core": true,
   "build_args": {
     "parallel": {
       "mode": "tensor_parallel",
@@ -38,32 +27,48 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
+      "name": "qwen25vl-3b-tp2",
+      "trace_id": "IT-E2E-Q25VL-TP2-01",
+      "reference_family": "vl_instruct_qa",
+      "user_contract": "vl_answer",
+      "task_eval": {
+        "vlm_fallback_prompt_template": "<|vision_start|><|image_pad|><|vision_end|>{prompt}"
       },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 2
-      },
-      "gating": true
+      "ci_tier": "multi_device",
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg",
+      "core": true,
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 2
+          },
+          "gating": true
+        }
+      ],
+      "notes": "Tensor-parallel TP=2 Qwen2.5-VL coverage; TP4 is not valid because the model has two KV heads.",
+      "metadata": {
+        "contract_config": {
+          "use_processor": true,
+          "use_chat_template": true
+        }
+      }
     }
-  ],
-  "notes": "Tensor-parallel TP=2 Qwen2.5-VL coverage; TP4 is not valid because the model has two KV heads.",
-  "metadata": {
-    "contract_config": {
-      "use_processor": true,
-      "use_chat_template": true
-    }
-  }
+  ]
 }

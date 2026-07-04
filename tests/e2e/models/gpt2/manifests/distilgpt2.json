@@ -1,24 +1,29 @@
 {
   "name": "distilgpt2",
-  "trace_id": "IT-E2E-GPT2-02",
   "hf_id": "distilbert/distilgpt2",
   "bundle": "distilgpt2.trtfb",
   "family": "gpt2",
   "runtime_strategy": "gpt2_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "model_card_generation_parity",
   "precision": "fp16",
-  "reference_precision": "fp32",
-  "ci_lane": "acceptance",
   "max_cache_length": 256,
-  "prompt": "Hello, I'm a language model",
-  "max_new_tokens": 12,
   "trust_remote_code": false,
-  "metadata": {
-    "model_card_url": "https://huggingface.co/distilbert/distilgpt2",
-    "model_card_task": "text-generation",
-    "model_card_pipeline_tag": "text-generation",
-    "model_card_parity_scope": "causal continuation from the model-card text-generation surface"
-  }
+  "testcases": [
+    {
+      "name": "distilgpt2",
+      "trace_id": "IT-E2E-GPT2-02",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "model_card_generation_parity",
+      "reference_precision": "fp32",
+      "ci_lane": "acceptance",
+      "prompt": "Hello, I'm a language model",
+      "max_new_tokens": 12,
+      "metadata": {
+        "model_card_url": "https://huggingface.co/distilbert/distilgpt2",
+        "model_card_task": "text-generation",
+        "model_card_pipeline_tag": "text-generation",
+        "model_card_parity_scope": "causal continuation from the model-card text-generation surface"
+      }
+    }
+  ]
 }

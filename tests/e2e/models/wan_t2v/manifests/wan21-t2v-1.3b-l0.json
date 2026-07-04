@@ -1,38 +1,43 @@
 {
   "name": "wan21-t2v-1.3b-l0",
-  "trace_id": "IT-E2E-WAN21-L0-01",
   "hf_id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
   "bundle": "wan21-t2v-1.3b-l0.trtfb",
-  "model_type": "wan_t2v",
   "family": "wan_t2v",
   "runtime_strategy": "diffusion_wan",
   "task_strategy": "diffusion_media_generation",
-  "ci_tier": "l0_only",
-  "reference_family": "diffusers_video_gen",
-  "user_contract": "diffusion_video",
-  "description": "Wan2.1 T2V 1.3B L0 representative at reduced spatial size with full cache and reduced frame/step counts",
   "build_args": {
     "max_cache_length": 256
   },
-  "test_prompt": "A cat sitting on a beach watching the sunset",
-  "test_type": "diffusion",
-  "video_num_frames": 5,
-  "video_height": 384,
-  "video_width": 672,
-  "num_inference_steps": 15,
-  "stages": [
+  "precision": "fp16",
+  "testcases": [
     {
-      "name": "end_to_end",
-      "required": true
+      "name": "wan21-t2v-1.3b-l0",
+      "trace_id": "IT-E2E-WAN21-L0-01",
+      "model_type": "wan_t2v",
+      "ci_tier": "l0_only",
+      "reference_family": "diffusers_video_gen",
+      "user_contract": "diffusion_video",
+      "description": "Wan2.1 T2V 1.3B L0 representative at reduced spatial size with full cache and reduced frame/step counts",
+      "test_prompt": "A cat sitting on a beach watching the sunset",
+      "test_type": "diffusion",
+      "video_num_frames": 5,
+      "video_height": 384,
+      "video_width": 672,
+      "num_inference_steps": 15,
+      "stages": [
+        {
+          "name": "end_to_end",
+          "required": true
+        }
+      ],
+      "skip_text_comparison": true,
+      "notes": "PR L0 repro for Wan2.1 T2V. Uses the same checkpoint, wan_t2v model type, T5 encoder, Wan DiT, causal 3D VAE, runner, comparator, full 256-token cache shape, and video artifact contract. L0 uses 384x672, five frames, and fifteen denoising steps; nightly keeps 480x832, seventeen frames, and thirty-step coverage.",
+      "metadata": {
+        "contract_config": {
+          "use_diffusers": true,
+          "video_mode": true
+        }
+      }
     }
-  ],
-  "skip_text_comparison": true,
-  "notes": "PR L0 repro for Wan2.1 T2V. Uses the same checkpoint, wan_t2v model type, T5 encoder, Wan DiT, causal 3D VAE, runner, comparator, full 256-token cache shape, and video artifact contract. L0 uses 384x672, five frames, and fifteen denoising steps; nightly keeps 480x832, seventeen frames, and thirty-step coverage.",
-  "metadata": {
-    "contract_config": {
-      "use_diffusers": true,
-      "video_mode": true
-    }
-  },
-  "precision": "fp16"
+  ]
 }

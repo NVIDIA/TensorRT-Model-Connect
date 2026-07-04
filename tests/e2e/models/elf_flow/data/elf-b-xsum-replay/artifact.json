@@ -16,6 +16,7 @@
   "sde_gamma": 0.0,
   "seed": 42,
   "self_cond_cfg_scale": 1.0,
+  "terminal_token_ids": [1],
   "text_encoder_dim": 512,
   "variant": "ode64-cfg2"
 }

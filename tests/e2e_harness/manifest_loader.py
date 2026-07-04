@@ -3,10 +3,9 @@
 
 """Manifest loader — load, validate, and normalize E2E model manifests.
 
-Reads per-model JSON manifests from tests/e2e/models/ and model-owned
-tests/e2e/models/<family>/manifests/ directories, then returns normalized
-E2ECase dataclass instances. Supports both v1 (current) and v2 (target)
-manifest schemas with backward compatibility.
+Reads unified per-model JSON manifests from tests/e2e/models/ and model-owned
+tests/e2e/models/<family>/manifests/ directories. Each manifest describes one
+buildable model and contains one or more normalized E2E testcases.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
 from .contracts import (
     CILane,
     E2ECase,
+    E2EModel,
     OracleLevel,
     PreflightRequirement,
     StageSpec,
@@ -38,31 +38,35 @@ logger = logging.getLogger(__name__)
 # Default manifest directory (relative to project root)
 _DEFAULT_MODELS_DIR = Path(__file__).resolve().parent.parent / "e2e" / "models"
 
-_THRESHOLD_SIDECAR_FIELDS = frozenset({
-    "threshold_overrides",
-    "logit_atol",
-    "layer_atol",
-    "min_pixel_agreement",
-    "min_pixel_mean",
-    "max_pixel_mean",
-    "min_pixel_std",
-    "reference_min_pixel_std_for_ratio",
-    "min_reference_std_ratio",
-    "speech_min_token_match",
-    "speech_min_frame_exact",
-    "speech_min_rms",
-})
+_THRESHOLD_SIDECAR_FIELDS = frozenset(
+    {
+        "threshold_overrides",
+        "logit_atol",
+        "layer_atol",
+        "min_pixel_agreement",
+        "min_pixel_mean",
+        "max_pixel_mean",
+        "min_pixel_std",
+        "reference_min_pixel_std_for_ratio",
+        "min_reference_std_ratio",
+        "speech_min_token_match",
+        "speech_min_frame_exact",
+        "speech_min_rms",
+    }
+)
 
-_MODEL_ASSET_FIELDS = frozenset({
-    "test_image",
-    "test_input_audio",
-    "speech_reference_tokens",
-    "golden_snapshot_path",
-    "edit_condition_image",
-    "fp8_scales",
-    "elf_replay_artifact",
-    "upstream_replay_artifact",
-})
+_MODEL_ASSET_FIELDS = frozenset(
+    {
+        "test_image",
+        "test_input_audio",
+        "speech_reference_tokens",
+        "golden_snapshot_path",
+        "edit_condition_image",
+        "fp8_scales",
+        "elf_replay_artifact",
+        "upstream_replay_artifact",
+    }
+)
 
 
 def _model_test_dir_from_manifest_path(manifest_path: Path) -> Path:
@@ -95,10 +99,7 @@ def _resolve_model_asset_paths(value: Any, model_test_dir: Path, key: str = "") 
             for item_key, item_value in value.items()
         }
     if isinstance(value, list):
-        return [
-            _resolve_model_asset_paths(item, model_test_dir, key)
-            for item in value
-        ]
+        return [_resolve_model_asset_paths(item, model_test_dir, key) for item in value]
     if isinstance(value, str) and key in _MODEL_ASSET_FIELDS:
         return _resolve_model_asset_path(value, model_test_dir)
     return value
@@ -168,16 +169,23 @@ def _manifest_paths_from_model_index(index_path: Path) -> list[Path]:
     return paths
 
 
-def _threshold_sidecar_path(manifest_path: Path) -> Path:
-    """Return the model-local threshold sidecar path for a manifest."""
+def _threshold_sidecar_path(
+    manifest_path: Path,
+    testcase_name: str | None = None,
+) -> Path:
+    """Return the model-local threshold sidecar path for a testcase."""
+    filename = f"{testcase_name}.json" if testcase_name else manifest_path.name
     if manifest_path.parent.name == "manifests":
-        return manifest_path.parent.parent / "thresholds" / manifest_path.name
-    return manifest_path.parent / "thresholds" / manifest_path.name
+        return manifest_path.parent.parent / "thresholds" / filename
+    return manifest_path.parent / "thresholds" / filename
 
 
-def _load_threshold_sidecar(manifest_path: Path) -> dict[str, Any]:
+def _load_threshold_sidecar(
+    manifest_path: Path,
+    testcase_name: str | None = None,
+) -> dict[str, Any]:
     """Load tests/e2e/models/<family>/thresholds/<case>.json if present."""
-    sidecar_path = _threshold_sidecar_path(manifest_path)
+    sidecar_path = _threshold_sidecar_path(manifest_path, testcase_name)
     if not sidecar_path.is_file():
         return {}
 
@@ -191,9 +199,7 @@ def _load_threshold_sidecar(manifest_path: Path) -> dict[str, Any]:
 
     unknown = sorted(set(raw) - _THRESHOLD_SIDECAR_FIELDS)
     if unknown:
-        raise ValueError(
-            f"{sidecar_path}: unsupported threshold sidecar field(s): {unknown}"
-        )
+        raise ValueError(f"{sidecar_path}: unsupported threshold sidecar field(s): {unknown}")
 
     overrides = raw.get("threshold_overrides", {})
     if overrides is not None and not isinstance(overrides, dict):
@@ -203,17 +209,19 @@ def _load_threshold_sidecar(manifest_path: Path) -> dict[str, Any]:
         if key == "threshold_overrides":
             for metric in value:
                 if not isinstance(metric, str):
-                    raise TypeError(
-                        f"{sidecar_path}: threshold_overrides keys must be strings"
-                    )
+                    raise TypeError(f"{sidecar_path}: threshold_overrides keys must be strings")
         elif not isinstance(value, (int, float)) or isinstance(value, bool):
             raise TypeError(f"{sidecar_path}: {key} must be numeric")
 
     return raw
 
 
-def _merge_threshold_sidecar(raw: dict[str, Any], manifest_path: Path) -> dict[str, Any]:
-    sidecar = _load_threshold_sidecar(manifest_path)
+def _merge_threshold_sidecar(
+    raw: dict[str, Any],
+    manifest_path: Path,
+    testcase_name: str | None = None,
+) -> dict[str, Any]:
+    sidecar = _load_threshold_sidecar(manifest_path, testcase_name)
     if not sidecar:
         return raw
 
@@ -223,10 +231,7 @@ def _merge_threshold_sidecar(raw: dict[str, Any], manifest_path: Path) -> dict[s
     if raw_overrides and not isinstance(raw_overrides, dict):
         raise TypeError(f"{manifest_path}: threshold_overrides must be an object")
 
-    merged.update({
-        key: value for key, value in sidecar.items()
-        if key != "threshold_overrides"
-    })
+    merged.update({key: value for key, value in sidecar.items() if key != "threshold_overrides"})
     if sidecar_overrides:
         merged["threshold_overrides"] = {
             **raw_overrides,
@@ -273,11 +278,23 @@ def find_manifest_path(
     for manifest_path in iter_manifest_paths(models_dir):
         if manifest_path.name == target or manifest_path.stem == manifest_name:
             return manifest_path
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        testcases = raw.get("testcases", []) if isinstance(raw, dict) else []
+        if any(
+            isinstance(testcase, dict) and testcase.get("name") == manifest_name
+            for testcase in testcases
+        ):
+            return manifest_path
     return None
+
 
 # ---------------------------------------------------------------------------
 # v1 -> v2 field inference
 # ---------------------------------------------------------------------------
+
 
 def _infer_task_strategy(manifest: dict) -> str:
     """Return the model-owned task_strategy field when declared."""
@@ -356,7 +373,8 @@ def _build_preflight(manifest: dict, defaults: dict[str, Any]) -> list[Preflight
 
     # Auto-generate preflight from manifest fields
     reqs: list[PreflightRequirement] = _preflight_requirements(
-        defaults.get("preflight_requirements", []))
+        defaults.get("preflight_requirements", [])
+    )
 
     # All models need the binary
     reqs.append(PreflightRequirement(kind="binary_exists", args={}, gating=True))
@@ -367,27 +385,33 @@ def _build_preflight(manifest: dict, defaults: dict[str, Any]) -> list[Preflight
     if isinstance(asset_fields, list):
         for field in asset_fields:
             if isinstance(field, str) and manifest.get(field):
-                reqs.append(PreflightRequirement(
-                    kind="asset_exists",
-                    args={"path": manifest[field]},
-                    gating=True,
-                ))
+                reqs.append(
+                    PreflightRequirement(
+                        kind="asset_exists",
+                        args={"path": manifest[field]},
+                        gating=True,
+                    )
+                )
 
     # HF auth for gated models.  trust_remote_code still gets a non-gating
     # diagnostic because many public repos use remote code, but gated repos
     # should skip cleanly when a CI runner has no HF token.
     if manifest.get("gated"):
-        reqs.append(PreflightRequirement(
-            kind="hf_auth_token_present",
-            args={},
-            gating=True,
-        ))
+        reqs.append(
+            PreflightRequirement(
+                kind="hf_auth_token_present",
+                args={},
+                gating=True,
+            )
+        )
     elif manifest.get("trust_remote_code"):
-        reqs.append(PreflightRequirement(
-            kind="hf_auth_token_present",
-            args={},
-            gating=False,
-        ))
+        reqs.append(
+            PreflightRequirement(
+                kind="hf_auth_token_present",
+                args={},
+                gating=False,
+            )
+        )
 
     return reqs
 
@@ -453,8 +477,7 @@ def _build_inputs(manifest: dict, defaults: dict[str, Any]) -> dict:
             if isinstance(required_manifest, str) and required_manifest not in manifest:
                 continue
             if isinstance(required_manifest, list) and any(
-                not isinstance(field, str) or field not in manifest
-                for field in required_manifest
+                not isinstance(field, str) or field not in manifest for field in required_manifest
             ):
                 continue
             if manifest_field in manifest:
@@ -498,8 +521,9 @@ def _build_threshold_overrides(manifest: dict) -> dict:
     if "min_pixel_std" in manifest:
         overrides["min_pixel_std"] = manifest["min_pixel_std"]
     if "reference_min_pixel_std_for_ratio" in manifest:
-        overrides["reference_min_pixel_std_for_ratio"] = (
-            manifest["reference_min_pixel_std_for_ratio"])
+        overrides["reference_min_pixel_std_for_ratio"] = manifest[
+            "reference_min_pixel_std_for_ratio"
+        ]
     if "min_reference_std_ratio" in manifest:
         overrides["min_reference_std_ratio"] = manifest["min_reference_std_ratio"]
     if "speech_min_token_match" in manifest:
@@ -542,26 +566,74 @@ def _build_execution_profiles(
 def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
     """Collect all non-standard fields into metadata."""
     standard_fields = {
-        "name", "hf_id", "model_id", "bundle", "family", "runtime_strategy",
-        "task_strategy", "reference_backend", "oracle_level", "prompt",
-        "test_prompt", "max_new_tokens", "max_cache_length", "precision",
-        "reference_precision", "fp32_layers",
+        "name",
+        "hf_id",
+        "model_id",
+        "bundle",
+        "family",
+        "runtime_strategy",
+        "task_strategy",
+        "reference_backend",
+        "oracle_level",
+        "prompt",
+        "test_prompt",
+        "max_new_tokens",
+        "max_cache_length",
+        "precision",
+        "reference_precision",
+        "fp32_layers",
         "quantization",
-        "logit_atol", "layer_atol", "trust_remote_code", "skip",
-        "skip_comparison", "test_image",
-        "test_input_audio", "speech_reference_tokens", "speech_test_max_frames",
-        "speech_min_token_match", "speech_min_frame_exact", "speech_min_rms",
-        "point_x", "point_y", "num_expected_masks", "min_pixel_agreement",
-        "min_pixel_mean", "max_pixel_mean", "min_pixel_std",
-        "reference_min_pixel_std_for_ratio", "min_reference_std_ratio",
-        "video_num_frames", "video_height", "video_width",
-        "num_inference_steps", "build_args", "build_cli_args", "preflight_requirements",
-        "preflight_asset_fields", "input_fields",
-        "stages", "comparison_profile", "threshold_overrides", "determinism",
-        "inputs", "metadata", "reference_family", "user_contract", "ci_lane",
-        "execution_profiles", "temperature", "top_p", "top_k", "min_p", "seed",
-        "negative_prompt", "cfg_scale", "height", "width",
-        "image_height", "image_width",
+        "logit_atol",
+        "layer_atol",
+        "trust_remote_code",
+        "skip",
+        "skip_comparison",
+        "test_image",
+        "test_input_audio",
+        "speech_reference_tokens",
+        "speech_test_max_frames",
+        "speech_min_token_match",
+        "speech_min_frame_exact",
+        "speech_min_rms",
+        "point_x",
+        "point_y",
+        "num_expected_masks",
+        "min_pixel_agreement",
+        "min_pixel_mean",
+        "max_pixel_mean",
+        "min_pixel_std",
+        "reference_min_pixel_std_for_ratio",
+        "min_reference_std_ratio",
+        "video_num_frames",
+        "video_height",
+        "video_width",
+        "num_inference_steps",
+        "build_args",
+        "build_cli_args",
+        "preflight_requirements",
+        "preflight_asset_fields",
+        "input_fields",
+        "stages",
+        "comparison_profile",
+        "threshold_overrides",
+        "determinism",
+        "inputs",
+        "metadata",
+        "reference_family",
+        "user_contract",
+        "ci_lane",
+        "execution_profiles",
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "seed",
+        "negative_prompt",
+        "cfg_scale",
+        "height",
+        "width",
+        "image_height",
+        "image_width",
     }
 
     meta = manifest.get("metadata", {}).copy()
@@ -613,10 +685,12 @@ def _convert_skip_to_known_limitation(manifest: dict) -> dict | None:
 # Manifest schema validation
 # ---------------------------------------------------------------------------
 
-_LEGACY_RUNTIME_STRATEGY_ALIASES = frozenset({
-    "diffusion",
-    "text_to_audio",
-})
+_LEGACY_RUNTIME_STRATEGY_ALIASES = frozenset(
+    {
+        "diffusion",
+        "text_to_audio",
+    }
+)
 _KNOWN_RUNTIME_STRATEGIES_CACHE: frozenset[str] | None = None
 
 
@@ -676,9 +750,7 @@ def _validate_manifest(raw: dict, path: str) -> None:
     """
     # 1. 'name' is always required
     if "name" not in raw:
-        raise ValueError(
-            f"Manifest {path!r} is missing required field 'name'"
-        )
+        raise ValueError(f"Manifest {path!r} is missing required field 'name'")
 
     # 2. When not skipped, hf_id and family are required
     if not raw.get("skip"):
@@ -734,52 +806,59 @@ def _validate_manifest(raw: dict, path: str) -> None:
                 )
             if not isinstance(profile, str) or not profile.strip():
                 raise TypeError(
-                    f"Manifest {path!r}: execution_profiles[{phase!r}] must be "
-                    f"a non-empty string"
+                    f"Manifest {path!r}: execution_profiles[{phase!r}] must be a non-empty string"
                 )
 
     for precision_field in ("precision", "reference_precision"):
         precision = raw.get(precision_field)
         if precision is not None and precision not in {"fp32", "fp16", "bf16"}:
             raise ValueError(
-                f"Manifest {path!r}: {precision_field} must be one of "
-                "'fp32', 'fp16', or 'bf16'"
+                f"Manifest {path!r}: {precision_field} must be one of 'fp32', 'fp16', or 'bf16'"
             )
 
     fp32_layers = raw.get("fp32_layers")
     if fp32_layers is not None:
-        if (
-            not isinstance(fp32_layers, list)
-            or any(
-                not isinstance(layer, int) or isinstance(layer, bool) or layer < 0
-                for layer in fp32_layers
-            )
+        if not isinstance(fp32_layers, list) or any(
+            not isinstance(layer, int) or isinstance(layer, bool) or layer < 0
+            for layer in fp32_layers
         ):
             raise TypeError(
-                f"Manifest {path!r}: fp32_layers must be a list of "
-                "non-negative integer indices"
+                f"Manifest {path!r}: fp32_layers must be a list of non-negative integer indices"
             )
         if len(fp32_layers) != len(set(fp32_layers)):
-            raise ValueError(
-                f"Manifest {path!r}: fp32_layers must not contain duplicates")
+            raise ValueError(f"Manifest {path!r}: fp32_layers must not contain duplicates")
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
-def load_manifest(
-    manifest_path: str | Path,
-) -> E2ECase:
-    """Load a single model manifest and return an E2ECase.
+_MODEL_ONLY_FIELDS = frozenset(
+    {
+        "hf_id",
+        "model_id",
+        "bundle",
+        "family",
+        "runtime_strategy",
+        "task_strategy",
+        "max_cache_length",
+        "precision",
+        "fp32_layers",
+        "quantization",
+        "fp8_scales",
+        "trust_remote_code",
+        "build_args",
+        "build_env",
+        "e2e_parallel_resource",
+        "e2e_size",
+        "distributed_runtime",
+    }
+)
 
-    Supports both v1 (current) and v2 (target) manifest formats.
-    V1 fields are auto-inferred to fill v2 requirements.
-    """
-    path = Path(manifest_path)
-    with open(path) as f:
-        raw = json.load(f)
-    raw = _merge_threshold_sidecar(raw, path)
+
+def _load_case(raw: dict[str, Any], path: Path, model_name: str) -> E2ECase:
+    testcase_name = str(raw.get("name", "") or "")
+    raw = _merge_threshold_sidecar(raw, path, testcase_name)
     model_test_dir = _model_test_dir_from_manifest_path(path)
     raw = _resolve_model_asset_paths(raw, model_test_dir)
     _resolve_preflight_asset_paths(raw, model_test_dir)
@@ -799,6 +878,7 @@ def load_manifest(
     # Handle skip -> known_limitations migration
     known_limitation = _convert_skip_to_known_limitation(raw)
     metadata = _build_metadata(raw, e2e_defaults)
+    metadata["model_name"] = model_name
     metadata["manifest_path"] = str(path)
     metadata["model_test_dir"] = str(model_test_dir)
     if known_limitation:
@@ -838,6 +918,122 @@ def load_manifest(
     )
 
 
+def load_model_manifest(manifest_path: str | Path) -> E2EModel:
+    """Load one buildable model and all testcases declared by its manifest."""
+    path = Path(manifest_path)
+    with path.open(encoding="utf-8") as manifest_file:
+        raw = json.load(manifest_file)
+    if not isinstance(raw, dict):
+        raise TypeError(f"Manifest {str(path)!r} must contain an object")
+
+    model_name = raw.get("name")
+    if not isinstance(model_name, str) or not model_name:
+        raise ValueError(f"Manifest {str(path)!r} is missing required field 'name'")
+    testcases = raw.get("testcases")
+    if not isinstance(testcases, list) or not testcases:
+        raise ValueError(
+            f"Manifest {str(path)!r} (name={model_name!r}) must contain a "
+            "non-empty 'testcases' array"
+        )
+
+    model_defaults = {key: value for key, value in raw.items() if key != "testcases"}
+    loaded_cases: list[E2ECase] = []
+    seen_case_names: set[str] = set()
+    for index, testcase in enumerate(testcases):
+        if not isinstance(testcase, dict):
+            raise TypeError(f"Manifest {str(path)!r}: testcases[{index}] must be an object")
+        misplaced = sorted(_MODEL_ONLY_FIELDS.intersection(testcase))
+        if misplaced:
+            raise ValueError(
+                f"Manifest {str(path)!r}: testcases[{index}] contains "
+                f"model-level field(s): {misplaced}"
+            )
+        case_name = testcase.get("name")
+        if not isinstance(case_name, str) or not case_name:
+            raise ValueError(
+                f"Manifest {str(path)!r}: testcases[{index}] is missing a non-empty 'name'"
+            )
+        if case_name in seen_case_names:
+            raise ValueError(f"Manifest {str(path)!r}: duplicate testcase name {case_name!r}")
+        seen_case_names.add(case_name)
+        case_raw = {**model_defaults, **testcase, "name": case_name}
+        loaded_cases.append(_load_case(case_raw, path, model_name))
+
+    build_case = next(
+        (case for case in loaded_cases if case.name == model_name),
+        loaded_cases[0],
+    )
+    return E2EModel(
+        name=model_name,
+        hf_id=build_case.hf_id,
+        family=build_case.family,
+        bundle=build_case.bundle,
+        testcases=loaded_cases,
+        manifest_path=str(path),
+    )
+
+
+def load_manifest(manifest_path: str | Path) -> E2ECase:
+    """Load the canonical build case from one unified model manifest."""
+    return load_model_manifest(manifest_path).build_case
+
+
+def load_all_model_manifests(
+    models_dir: str | Path | None = None,
+    task_strategy_filter: str | None = None,
+) -> list[E2EModel]:
+    """Load buildable model manifests with their selected child testcases."""
+    if models_dir is None:
+        models_dir = _DEFAULT_MODELS_DIR
+
+    models_dir = Path(models_dir)
+    if not models_dir.is_dir():
+        logger.warning("Models directory not found: %s", models_dir)
+        return []
+
+    models: list[E2EModel] = []
+    model_names: dict[str, Path] = {}
+    bundle_names: dict[str, Path] = {}
+    testcase_names: dict[str, Path] = {}
+    for manifest_path in iter_manifest_paths(models_dir):
+        try:
+            model = load_model_manifest(manifest_path)
+        except Exception as exc:
+            logger.error("Failed to load manifest %s: %s", manifest_path, exc)
+            continue
+
+        if model.name in model_names:
+            raise ValueError(
+                f"Duplicate model name {model.name!r}: "
+                f"{model_names[model.name]} and {manifest_path}"
+            )
+        if model.bundle in bundle_names:
+            raise ValueError(
+                f"Duplicate model bundle {model.bundle!r}: "
+                f"{bundle_names[model.bundle]} and {manifest_path}"
+            )
+        for case in model.testcases:
+            if case.name in testcase_names:
+                raise ValueError(
+                    f"Duplicate testcase name {case.name!r}: "
+                    f"{testcase_names[case.name]} and {manifest_path}"
+                )
+            testcase_names[case.name] = manifest_path
+
+        model_names[model.name] = manifest_path
+        bundle_names[model.bundle] = manifest_path
+        if task_strategy_filter:
+            filtered_cases = [
+                case for case in model.testcases if case.task_strategy == task_strategy_filter
+            ]
+            if not filtered_cases:
+                continue
+            model.testcases = filtered_cases
+        models.append(model)
+
+    return sorted(models, key=lambda model: model.name)
+
+
 def load_all_manifests(
     models_dir: str | Path | None = None,
     task_strategy_filter: str | None = None,
@@ -853,33 +1049,18 @@ def load_all_manifests(
     Returns:
         List of E2ECase instances, sorted by name.
     """
-    if models_dir is None:
-        models_dir = _DEFAULT_MODELS_DIR
-
-    models_dir = Path(models_dir)
-    if not models_dir.is_dir():
-        logger.warning("Models directory not found: %s", models_dir)
-        return []
-
-    cases: list[E2ECase] = []
-    for manifest_path in iter_manifest_paths(models_dir):
-        try:
-            case = load_manifest(manifest_path)
-            if task_strategy_filter and case.task_strategy != task_strategy_filter:
-                continue
-            cases.append(case)
-        except Exception as e:
-            logger.error("Failed to load manifest %s: %s", manifest_path, e)
-            continue
-
-    return cases
+    models = load_all_model_manifests(models_dir, task_strategy_filter)
+    return sorted(
+        (case for model in models for case in model.testcases),
+        key=lambda case: case.name,
+    )
 
 
 def get_case_names(
     models_dir: str | Path | None = None,
     task_strategy_filter: str | None = None,
 ) -> list[str]:
-    """Return list of model case names for pytest parametrization."""
+    """Return child testcase names for compatibility callers."""
     cases = load_all_manifests(models_dir, task_strategy_filter)
     return [c.name for c in cases]
 
@@ -893,4 +1074,15 @@ def get_case_by_name(
     for c in cases:
         if c.name == name:
             return c
+    return None
+
+
+def get_model_by_name(
+    name: str,
+    models_dir: str | Path | None = None,
+) -> E2EModel | None:
+    """Look up one buildable model by its manifest name."""
+    for model in load_all_model_manifests(models_dir):
+        if model.name == name:
+            return model
     return None

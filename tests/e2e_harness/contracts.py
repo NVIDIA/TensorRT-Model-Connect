@@ -346,10 +346,10 @@ class MetricResult:
 
 @dataclass
 class E2ECase:
-    """Complete definition of one E2E test case (one model).
+    """Complete definition of one testcase within an E2E model manifest.
 
-    Loaded from a manifest v2 JSON file. Contains everything needed to
-    build, run, compare, and report for a single model.
+    Contains everything needed to run, compare, and report one input contract
+    against the bundle shared by its owning model.
 
     Attributes:
         name: Unique case identifier (e.g. "example-model").
@@ -399,6 +399,28 @@ class E2ECase:
         """Use the runtime selector as a generic fallback if not set."""
         if not self.task_strategy:
             self.task_strategy = self.runtime_strategy
+
+
+@dataclass
+class E2EModel:
+    """One buildable model bundle with one or more E2E testcases."""
+
+    name: str
+    hf_id: str
+    family: str
+    bundle: str
+    testcases: List[E2ECase] = field(default_factory=list)
+    manifest_path: str = ""
+
+    @property
+    def build_case(self) -> E2ECase:
+        """Return the canonical case carrying this model's build settings."""
+        if not self.testcases:
+            raise ValueError(f"Model {self.name!r} has no testcases")
+        for case in self.testcases:
+            if case.name == self.name:
+                return case
+        return self.testcases[0]
 
 
 @dataclass
@@ -610,9 +632,7 @@ class TaskStrategyRunner(Protocol):
         """Unique identifier matching a task_strategy value."""
         ...
 
-    def run_stage(
-        self, case: E2ECase, stage: StageSpec, ctx: RunContext
-    ) -> StageOutput:
+    def run_stage(self, case: E2ECase, stage: StageSpec, ctx: RunContext) -> StageOutput:
         """Execute one stage and return its output."""
         ...
 
@@ -630,9 +650,7 @@ class ReferenceBackendRunner(Protocol):
         """Unique identifier matching a reference_backend value."""
         ...
 
-    def run_stage(
-        self, case: E2ECase, stage: StageSpec, ctx: RunContext
-    ) -> StageOutput:
+    def run_stage(self, case: E2ECase, stage: StageSpec, ctx: RunContext) -> StageOutput:
         """Execute one reference stage and return its output."""
         ...
 
@@ -694,9 +712,7 @@ class ArtifactSink(Protocol):
     results in memory for testing.
     """
 
-    def log_command(
-        self, command: List[str], rc: int, stdout: str, stderr: str
-    ) -> None:
+    def log_command(self, command: List[str], rc: int, stdout: str, stderr: str) -> None:
         """Record a subprocess invocation and its output."""
         ...
 
@@ -725,8 +741,6 @@ class DeterminismPolicy(Protocol):
     CompareResult indicating whether intra-run variance is acceptable.
     """
 
-    def check(
-        self, case: E2ECase, outputs: List[StageOutput]
-    ) -> CompareResult:
+    def check(self, case: E2ECase, outputs: List[StageOutput]) -> CompareResult:
         """Evaluate determinism across multiple stage outputs."""
         ...

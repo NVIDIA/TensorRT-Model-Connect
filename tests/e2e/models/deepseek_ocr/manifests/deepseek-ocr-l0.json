@@ -1,28 +1,33 @@
 {
   "name": "deepseek-ocr-l0",
-  "trace_id": "IT-E2E-DSOCR-L0-01",
   "hf_id": "deepseek-ai/DeepSeek-OCR-2",
   "bundle": "deepseek-ocr-l0.trtfb",
   "family": "deepseek_ocr",
   "runtime_strategy": "deepseek_ocr_vision_language",
   "task_strategy": "vision_language_generation",
-  "ci_tier": "l0_only",
-  "reference_family": "ocr_markdown",
-  "user_contract": "ocr_text",
   "max_cache_length": 4096,
-  "prompt": "Extract the text from this image.",
-  "max_new_tokens": 80,
-  "test_image": "data/orc_test_img.jpeg",
   "trust_remote_code": true,
-  "reference_backend": "golden_snapshot",
-  "metadata": {
-    "golden_snapshot_path": "data/deepseek_ocr_l0_golden.json",
-    "contract_config": {
-      "use_processor": true,
-      "use_chat_template": true,
-      "ocr_mode": true
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "deepseek-ocr-l0",
+      "trace_id": "IT-E2E-DSOCR-L0-01",
+      "ci_tier": "l0_only",
+      "reference_family": "ocr_markdown",
+      "user_contract": "ocr_text",
+      "prompt": "Extract the text from this image.",
+      "max_new_tokens": 80,
+      "test_image": "data/orc_test_img.jpeg",
+      "reference_backend": "golden_snapshot",
+      "metadata": {
+        "golden_snapshot_path": "data/deepseek_ocr_l0_golden.json",
+        "contract_config": {
+          "use_processor": true,
+          "use_chat_template": true,
+          "ocr_mode": true
+        }
+      },
+      "notes": "PR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, deepseek_ocr_vision_language runtime, and full cache budget. The shorter decode validates the visible Architecture section emitted by the OCR fixture while nightly keeps the full OCR transcript contract."
     }
-  },
-  "notes": "PR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, deepseek_ocr_vision_language runtime, and full cache budget. The shorter decode validates the visible Architecture section emitted by the OCR fixture while nightly keeps the full OCR transcript contract.",
-  "precision": "fp16"
+  ]
 }

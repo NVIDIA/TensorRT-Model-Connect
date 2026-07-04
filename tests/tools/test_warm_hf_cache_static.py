@@ -26,6 +26,7 @@ HELPER_FUNCTIONS = {
     "_is_hf_file_cached",
     "_is_diffusers_component_enabled",
     "_is_cached",
+    "_manifest_has_eligible_testcase",
     "_snapshot_has_required_files",
 }
 
@@ -66,7 +67,14 @@ def _load_cache_helpers() -> dict:
         "_ENTRYPOINT_PATTERNS": ["config.json", "model_index.json", "*/config.json"],
         "_WEIGHT_PATTERNS": ["*.safetensors", "*.bin", "*.nemo"],
         "_HF_ALLOW_PATTERNS": ["config.json", "model.safetensors"],
+        "_HF_FAMILY_ALLOW_PATTERNS": ["nested/**"],
         "_HF_EXTRA_ALLOW_PATTERNS": ["*.nemo"],
+        "_HF_DOWNLOAD_PATTERNS": [
+            "config.json",
+            "model.safetensors",
+            "nested/**",
+            "*.nemo",
+        ],
     }
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in HELPER_FUNCTIONS:
@@ -91,6 +99,12 @@ def test_required_hf_files_are_metadata_driven() -> None:
     assert "family_hf_required_files_by_id" in text
     assert "adapter_config.json" not in text
     assert "adapter_model.safetensors" not in text
+
+
+def test_family_allow_patterns_are_used_for_cache_warming() -> None:
+    text = WARM_HF_CACHE.read_text()
+    assert "family_hf_allow_patterns" in text
+    assert "_HF_DOWNLOAD_PATTERNS" in text
 
 
 def test_family_file_assets_are_metadata_driven() -> None:
@@ -196,7 +210,12 @@ def test_cache_skip_uses_hf_local_resolution(tmp_path: Path) -> None:
     assert calls == [{
         "args": ("org/model",),
         "kwargs": {
-            "allow_patterns": ["config.json", "model.safetensors", "*.nemo"],
+            "allow_patterns": [
+                "config.json",
+                "model.safetensors",
+                "nested/**",
+                "*.nemo",
+            ],
             "local_files_only": True,
         },
     }]
@@ -209,6 +228,19 @@ def test_cache_skip_rejects_unresolvable_local_revision() -> None:
         raise RuntimeError("revision is not available offline")
 
     helpers["snapshot_download"] = fake_snapshot_download
+
+    assert not helpers["_is_cached"]("org/model")
+
+
+def test_cache_skip_rejects_unresolved_snapshots_parent(tmp_path: Path) -> None:
+    helpers = _load_cache_helpers()
+    snapshots = tmp_path / "models--org--model" / "snapshots"
+    snapshot = snapshots / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+
+    helpers["snapshot_download"] = lambda *args, **kwargs: str(snapshots)
 
     assert not helpers["_is_cached"]("org/model")
 
@@ -242,3 +274,23 @@ def test_hf_file_cache_skip_rejects_missing_local_file() -> None:
     helpers["hf_hub_download"] = fake_hf_hub_download
 
     assert not helpers["_is_hf_file_cached"]("org/model", "weights.bin")
+
+
+def test_manifest_tier_filter_keeps_models_with_any_eligible_testcase() -> None:
+    eligible = _load_cache_helpers()["_manifest_has_eligible_testcase"]
+    excluded = {"nightly_only", "multi_device"}
+
+    assert eligible(
+        {
+            "testcases": [
+                {"name": "base"},
+                {"name": "probe", "ci_tier": "nightly_only"},
+            ]
+        },
+        excluded,
+    )
+    assert not eligible(
+        {"testcases": [{"name": "tp", "ci_tier": "multi_device"}]},
+        excluded,
+    )
+    assert not eligible({"ci_tier": "nightly_only"}, excluded)

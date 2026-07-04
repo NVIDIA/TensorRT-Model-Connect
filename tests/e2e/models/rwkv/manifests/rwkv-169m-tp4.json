@@ -1,18 +1,12 @@
 {
   "name": "rwkv-169m-tp4",
-  "trace_id": "IT-E2E-RWKV-TP4-01",
   "hf_id": "RWKV/rwkv-4-169m-pile",
   "bundle": "rwkv-169m-tp4.trtfb",
   "family": "rwkv",
   "runtime_strategy": "rwkv_recurrent",
   "task_strategy": "text_generation_causal",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "continuation_parity",
   "max_cache_length": 32,
-  "prompt": "The capital of France is",
-  "max_new_tokens": 10,
   "trust_remote_code": false,
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
     "parallel": {
@@ -32,26 +26,37 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "rwkv-169m-tp4",
+      "trace_id": "IT-E2E-RWKV-TP4-01",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 10,
+      "ci_tier": "multi_device",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "notes": "RWKV-169M TP4 repro using the same checkpoint, prompt, generation length, and thresholds as rwkv-169m."
     }
-  ],
-  "notes": "RWKV-169M TP4 repro using the same checkpoint, prompt, generation length, and thresholds as rwkv-169m."
+  ]
 }

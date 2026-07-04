@@ -33,18 +33,18 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 # Strategies that are inherently GPU-heavy regardless of param count.
-_HEAVY_STRATEGIES = frozenset({
-    "vision_language",
-    "speech_to_speech",
-})
+_HEAVY_STRATEGIES = frozenset(
+    {
+        "vision_language",
+        "speech_to_speech",
+    }
+)
 
 _EXCLUSIVE_GPU_RESOURCE = "exclusive_gpu"
 _SMALL_TEST_WEIGHT = 90.0
 _LARGE_TEST_WEIGHT = 300.0
 _EXCLUSIVE_GPU_TEST_WEIGHT = 900.0
 _TIMING_ESTIMATES_FILE = "timing_estimates.json"
-_BUNDLE_GROUP_PREFIX = "bundle:"
-_GROUP_BY_BUNDLE_METADATA_KEY = "group_by_bundle"
 
 
 def _param_billions(hf_id: str) -> float | None:
@@ -73,7 +73,11 @@ def classify_size(manifest: dict) -> str:
 
     # Heavy strategies are always large. Diffusion strategies may carry
     # backend-specific suffixes.
-    if strategy == "diffusion" or strategy.startswith("diffusion_") or strategy in _HEAVY_STRATEGIES:
+    if (
+        strategy == "diffusion"
+        or strategy.startswith("diffusion_")
+        or strategy in _HEAVY_STRATEGIES
+    ):
         return "large"
 
     # MoE with real weights (not the 15M toy)
@@ -146,115 +150,39 @@ def _model_name_from_test_id(test_id: str) -> str:
 
 def _model_names_from_test_id(test_id: str) -> list[str]:
     name = _model_name_from_test_id(test_id)
-    if not name:
-        return []
-    if name.startswith(_BUNDLE_GROUP_PREFIX):
-        return [
-            part for part in name[len(_BUNDLE_GROUP_PREFIX):].split("+")
-            if part
-        ]
-    return [name]
+    return [name] if name else []
 
 
-def _is_bundle_group_test_id(test_id: str) -> bool:
-    return _model_name_from_test_id(test_id).startswith(_BUNDLE_GROUP_PREFIX)
-
-
-def _manifest_allows_bundle_group(manifest: dict) -> bool:
-    metadata = manifest.get("metadata", {})
-    return (
-        isinstance(metadata, dict)
-        and bool(metadata.get(_GROUP_BY_BUNDLE_METADATA_KEY))
-    )
-
-
-def _manifest_bundle_group_key(
-    *,
-    name: str,
-    manifest: dict,
-    explicit_bundle_group: bool,
-) -> str:
-    bundle = str(manifest.get("bundle", "") or "").strip()
-    if bundle and (explicit_bundle_group or _manifest_allows_bundle_group(manifest)):
-        return f"bundle:{bundle}"
-    return f"single:{name}"
-
-
-def _bundle_group_key(test_id: str, manifests: dict[str, dict]) -> str:
-    """Return a stable scheduling key for tests that intentionally share a bundle."""
-    explicit_bundle_group = _is_bundle_group_test_id(test_id)
-    for name in _model_names_from_test_id(test_id):
-        manifest = manifests.get(name, {})
-        key = _manifest_bundle_group_key(
-            name=name,
-            manifest=manifest,
-            explicit_bundle_group=explicit_bundle_group,
-        )
-        if key.startswith("bundle:"):
-            return key
-    return f"single:{test_id}"
-
-
-def _group_by_bundle(
-    test_ids: list[str],
-    manifests: dict[str, dict],
-) -> list[tuple[int, list[str]]]:
-    """Group tests that share a bundle so they stay in one worker queue."""
-    groups: list[tuple[int, list[str]]] = []
-    key_to_group: dict[str, int] = {}
-    for idx, test_id in enumerate(test_ids):
-        key = _bundle_group_key(test_id, manifests)
-        if key not in key_to_group:
-            key_to_group[key] = len(groups)
-            groups.append((idx, []))
-        groups[key_to_group[key]][1].append(test_id)
-    return groups
-
-
-def bundle_selection_summary(
+def model_selection_summary(
     test_ids: list[str],
     manifest_dir: Path,
 ) -> dict[str, int]:
     """Summarize selected scheduler entries by bundle identity."""
     manifests = _load_manifests(manifest_dir)
-    bundle_to_cases: dict[str, set[str]] = {}
     missing_manifests = 0
     selected_testcases = 0
+    unique_models: set[str] = set()
+    multi_testcase_models = 0
+    testcases_in_multi_models = 0
     for test_id in test_ids:
         names = _model_names_from_test_id(test_id)
-        explicit_bundle_group = _is_bundle_group_test_id(test_id)
-        selected_testcases += len(names)
-        if not names:
-            bundle_to_cases.setdefault(f"single:{test_id}", set())
-            continue
-        bundle_key = ""
         for name in names:
             manifest = manifests.get(name)
             if manifest is None:
                 missing_manifests += 1
-                key = f"missing:{name}"
-            else:
-                key = _manifest_bundle_group_key(
-                    name=name,
-                    manifest=manifest,
-                    explicit_bundle_group=explicit_bundle_group,
-                )
-            bundle_key = bundle_key or key
-            bundle_to_cases.setdefault(key, set()).add(name)
-        if bundle_key and len(names) > 1:
-            bundle_to_cases.setdefault(bundle_key, set()).update(names)
-
-    shared_groups = [
-        cases
-        for key, cases in bundle_to_cases.items()
-        if key.startswith("bundle:") and len(cases) > 1
-    ]
+                continue
+            unique_models.add(name)
+            testcase_count = len(manifest.get("testcases", [])) or 1
+            selected_testcases += testcase_count
+            if testcase_count > 1:
+                multi_testcase_models += 1
+                testcases_in_multi_models += testcase_count
     return {
         "selected_entries": len(test_ids),
         "selected_testcases": selected_testcases,
-        "unique_bundle_identities": len(bundle_to_cases),
-        "shared_bundle_groups": len(shared_groups),
-        "testcases_in_shared_bundle_groups": sum(len(cases) for cases in shared_groups),
+        "unique_bundle_identities": len(unique_models),
+        "multi_testcase_models": multi_testcase_models,
+        "testcases_in_multi_testcase_models": testcases_in_multi_models,
         "missing_manifests": missing_manifests,
     }
 
@@ -268,10 +196,7 @@ def split_by_parallel_resource(
     exclusive_tests: list[str] = []
     shared_tests: list[str] = []
     for tid in test_ids:
-        member_manifests = [
-            manifests.get(name, {})
-            for name in _model_names_from_test_id(tid)
-        ]
+        member_manifests = [manifests.get(name, {}) for name in _model_names_from_test_id(tid)]
         if any(
             classify_parallel_resource(manifest) == _EXCLUSIVE_GPU_RESOURCE
             for manifest in member_manifests
@@ -318,11 +243,13 @@ def _estimated_gpu_loads(
     manifests = _load_manifests(manifest_dir)
     loads: dict[int, int] = {}
     for gpu_id, workers in assignments.items():
-        loads[int(gpu_id)] = int(sum(
-            _test_weight(test_id, manifests, timing_estimates)
-            for worker in workers
-            for test_id in worker
-        ))
+        loads[int(gpu_id)] = int(
+            sum(
+                _test_weight(test_id, manifests, timing_estimates)
+                for worker in workers
+                for test_id in worker
+            )
+        )
     return loads
 
 
@@ -351,22 +278,15 @@ def schedule(
     """
     manifests = _load_manifests(manifest_dir)
     if timing_estimates is None:
-        timing_estimates = _load_timing_estimates(
-            _default_timing_estimates_path(manifest_dir))
+        timing_estimates = _load_timing_estimates(_default_timing_estimates_path(manifest_dir))
 
     # Classify
     exclusive_tests: list[str] = []
     large_tests: list[str] = []
     small_tests: list[str] = []
     for tid in test_ids:
-        member_manifests = [
-            manifests.get(name, {})
-            for name in _model_names_from_test_id(tid)
-        ]
-        if any(
-            classify_parallel_resource(m) == _EXCLUSIVE_GPU_RESOURCE
-            for m in member_manifests
-        ):
+        member_manifests = [manifests.get(name, {}) for name in _model_names_from_test_id(tid)]
+        if any(classify_parallel_resource(m) == _EXCLUSIVE_GPU_RESOURCE for m in member_manifests):
             exclusive_tests.append(tid)
         elif any(classify_size(m) == "large" for m in member_manifests):
             large_tests.append(tid)
@@ -385,11 +305,8 @@ def schedule(
     result: dict[str, list[list[str]]] = {}
     reserved_gpu_count = min(len(exclusive_tests), num_gpus)
     if exclusive_tests:
-        exclusive_slots = [
-            [0.0, gpu_id, 0, []]
-            for gpu_id in range(max(reserved_gpu_count, 1))
-        ]
-        grouped_exclusive = _group_by_bundle(exclusive_tests, manifests)
+        exclusive_slots = [[0.0, gpu_id, 0, []] for gpu_id in range(max(reserved_gpu_count, 1))]
+        grouped_exclusive = [(index, [test_id]) for index, test_id in enumerate(exclusive_tests)]
         for group in sorted(grouped_exclusive, key=lambda item: (-group_weight(item), item[0])):
             slot = min(exclusive_slots, key=lambda item: (item[0], item[1]))
             slot[0] += group_weight(group)
@@ -411,14 +328,18 @@ def schedule(
     slots: list[list[object]] = []
     for gpu_id in shared_gpu_ids:
         for worker_idx in range(workers_per_gpu):
-            slots.append([
-                float((gpu_load_offsets or {}).get(gpu_id, 0)),
-                gpu_id,
-                worker_idx,
-                [],
-            ])
+            slots.append(
+                [
+                    float((gpu_load_offsets or {}).get(gpu_id, 0)),
+                    gpu_id,
+                    worker_idx,
+                    [],
+                ]
+            )
 
-    grouped_shared = _group_by_bundle([*large_tests, *small_tests], manifests)
+    grouped_shared = [
+        (index, [test_id]) for index, test_id in enumerate([*large_tests, *small_tests])
+    ]
     for group in sorted(grouped_shared, key=lambda item: (-group_weight(item), item[0])):
         slot = min(slots, key=lambda item: (item[0], item[1], item[2]))
         slot[0] = float(slot[0]) + group_weight(group)
@@ -454,8 +375,7 @@ def schedule_phases(
     """
     exclusive_tests, shared_tests = split_by_parallel_resource(test_ids, manifest_dir)
     if timing_estimates is None:
-        timing_estimates = _load_timing_estimates(
-            _default_timing_estimates_path(manifest_dir))
+        timing_estimates = _load_timing_estimates(_default_timing_estimates_path(manifest_dir))
     phases: list[dict[str, object]] = []
     exclusive_gpu_loads: dict[int, int] = {}
     if exclusive_tests:
@@ -467,23 +387,28 @@ def schedule_phases(
             timing_estimates=timing_estimates,
         )
         exclusive_gpu_loads = _estimated_gpu_loads(
-            exclusive_schedule, manifest_dir, timing_estimates)
-        phases.append({
-            "name": "exclusive_gpu",
-            "schedule": exclusive_schedule,
-        })
+            exclusive_schedule, manifest_dir, timing_estimates
+        )
+        phases.append(
+            {
+                "name": "exclusive_gpu",
+                "schedule": exclusive_schedule,
+            }
+        )
     if shared_tests:
-        phases.append({
-            "name": "shared",
-            "schedule": schedule(
-                shared_tests,
-                manifest_dir,
-                num_gpus=num_gpus,
-                workers_per_gpu=workers_per_gpu,
-                gpu_load_offsets=exclusive_gpu_loads,
-                timing_estimates=timing_estimates,
-            ),
-        })
+        phases.append(
+            {
+                "name": "shared",
+                "schedule": schedule(
+                    shared_tests,
+                    manifest_dir,
+                    num_gpus=num_gpus,
+                    workers_per_gpu=workers_per_gpu,
+                    gpu_load_offsets=exclusive_gpu_loads,
+                    timing_estimates=timing_estimates,
+                ),
+            }
+        )
     return phases
 
 
@@ -528,14 +453,14 @@ def main() -> None:
         print("ERROR: No test IDs on stdin.", file=sys.stderr)
         sys.exit(1)
 
-    selection = bundle_selection_summary(test_ids, args.manifest_dir)
+    selection = model_selection_summary(test_ids, args.manifest_dir)
     print(
         "E2E selection: "
         f"{selection['selected_entries']} scheduler entries, "
         f"{selection['selected_testcases']} testcases, "
         f"{selection['unique_bundle_identities']} unique bundle identities, "
-        f"{selection['shared_bundle_groups']} shared-bundle groups "
-        f"({selection['testcases_in_shared_bundle_groups']} testcases)",
+        f"{selection['multi_testcase_models']} multi-testcase models "
+        f"({selection['testcases_in_multi_testcase_models']} testcases)",
         file=sys.stderr,
     )
     if selection["missing_manifests"]:
@@ -559,8 +484,7 @@ def main() -> None:
         )
         if timing_estimates:
             print(
-                f"  Timing estimates: {timing_estimates_path} "
-                f"({len(timing_estimates)} models)",
+                f"  Timing estimates: {timing_estimates_path} ({len(timing_estimates)} models)",
                 file=sys.stderr,
             )
         for phase in phases:
@@ -568,9 +492,7 @@ def main() -> None:
             schedule_for_phase = phase["schedule"]
             assert isinstance(schedule_for_phase, dict)
             phase_total = sum(
-                len(worker)
-                for workers in schedule_for_phase.values()
-                for worker in workers
+                len(worker) for workers in schedule_for_phase.values() for worker in workers
             )
             phase_workers = sum(len(workers) for workers in schedule_for_phase.values())
             print(
@@ -594,12 +516,14 @@ def main() -> None:
         timing_estimates=timing_estimates,
     )
 
-    print(f"Schedule: {len(test_ids)} entries across {args.num_gpus} GPUs "
-          f"x {args.workers_per_gpu} workers/GPU", file=sys.stderr)
+    print(
+        f"Schedule: {len(test_ids)} entries across {args.num_gpus} GPUs "
+        f"x {args.workers_per_gpu} workers/GPU",
+        file=sys.stderr,
+    )
     if timing_estimates:
         print(
-            f"  Timing estimates: {timing_estimates_path} "
-            f"({len(timing_estimates)} models)",
+            f"  Timing estimates: {timing_estimates_path} ({len(timing_estimates)} models)",
             file=sys.stderr,
         )
     _print_schedule_summary(assignments, args.manifest_dir, timing_estimates)
@@ -641,12 +565,14 @@ def _print_schedule_summary(
         total_large += n_large
         total_small += n_small
         total_estimated += estimated
-        print(f"  GPU {gpu_id}: {n_entries} entries / {n_testcases} testcases "
-              f"({n_large}L + {n_small}S) "
-              f"across {len(workers)} workers"
-              f"{f' [{n_exclusive} exclusive]' if n_exclusive else ''}"
-              f", estimated {estimated / 60:.1f}m",
-              file=sys.stderr)
+        print(
+            f"  GPU {gpu_id}: {n_entries} entries / {n_testcases} testcases "
+            f"({n_large}L + {n_small}S) "
+            f"across {len(workers)} workers"
+            f"{f' [{n_exclusive} exclusive]' if n_exclusive else ''}"
+            f", estimated {estimated / 60:.1f}m",
+            file=sys.stderr,
+        )
     print(
         f"  Total: {total_large} large + {total_small} small, "
         f"estimated {total_estimated / 60:.1f}m",

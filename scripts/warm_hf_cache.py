@@ -116,6 +116,12 @@ def _load_family_hf_required_files_by_id() -> dict[str, list[str]]:
     return family_hf_required_files_by_id()
 
 
+def _load_family_hf_allow_patterns() -> list[str]:
+    from tensorrt_model_connect.families import family_hf_allow_patterns
+
+    return family_hf_allow_patterns()
+
+
 def _family_hf_warm_dependencies(family: object) -> list[tuple[str, str]]:
     from tensorrt_model_connect.families import family_hf_warm_dependencies
 
@@ -129,6 +135,10 @@ def _family_hf_warm_files(family: object) -> list[tuple[str, str, str]]:
 
 
 _REQUIRED_FILES_BY_HF_ID = _load_family_hf_required_files_by_id()
+_HF_FAMILY_ALLOW_PATTERNS = _load_family_hf_allow_patterns()
+_HF_DOWNLOAD_PATTERNS = (
+    _HF_ALLOW_PATTERNS + _HF_FAMILY_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS
+)
 
 
 def _is_hf_file_cached(hf_id: str, filename: str) -> bool:
@@ -141,6 +151,20 @@ def _is_hf_file_cached(hf_id: str, filename: str) -> bool:
     except Exception:
         return False
     return True
+
+
+def _manifest_has_eligible_testcase(
+    manifest: dict, excluded_ci_tiers: set[str]
+) -> bool:
+    testcases = manifest.get("testcases")
+    if not isinstance(testcases, list) or not testcases:
+        return str(manifest.get("ci_tier") or "") not in excluded_ci_tiers
+    return any(
+        isinstance(testcase, dict)
+        and str(testcase.get("ci_tier") or "") not in excluded_ci_tiers
+        for testcase in testcases
+    )
+
 
 parser = argparse.ArgumentParser(
     description=__doc__,
@@ -186,7 +210,7 @@ for m in manifests:
     name = d.get("name", m.stem)
     if d.get("skip"):
         continue
-    if filter_names is None and d.get("ci_tier") in excluded_ci_tiers:
+    if not _manifest_has_eligible_testcase(d, excluded_ci_tiers):
         continue
     if not d.get("hf_id"):
         continue
@@ -232,13 +256,16 @@ def _is_cached(hf_id: str) -> bool:
     try:
         local_dir = snapshot_download(
             hf_id,
-            allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
+            allow_patterns=_HF_DOWNLOAD_PATTERNS,
             local_files_only=True,
         )
     except Exception:
         return False
 
-    return _snapshot_has_required_files(pathlib.Path(local_dir), hf_id=hf_id)
+    snapshot_dir = pathlib.Path(local_dir)
+    if snapshot_dir.parent.name != "snapshots":
+        return False
+    return _snapshot_has_required_files(snapshot_dir, hf_id=hf_id)
 
 
 def _snapshot_has_required_files(snapshot_dir: pathlib.Path, hf_id: str = "") -> bool:
@@ -336,7 +363,7 @@ for i, (name, hf_id, gated) in enumerate(entries, 1):
     try:
         local_dir = snapshot_download(
             hf_id,
-            allow_patterns=_HF_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS,
+            allow_patterns=_HF_DOWNLOAD_PATTERNS,
         )
         if not _snapshot_has_required_files(pathlib.Path(local_dir), hf_id=hf_id):
             raise RuntimeError(

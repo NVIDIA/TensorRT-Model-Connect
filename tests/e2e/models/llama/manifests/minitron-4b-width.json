@@ -1,20 +1,25 @@
 {
   "name": "minitron-4b-width",
-  "trace_id": "IT-E2E-MNTRW-01",
   "hf_id": "nvidia/Llama-3.1-Minitron-4B-Width-Base",
   "bundle": "minitron-4b-width.trtfb",
   "family": "llama",
   "runtime_strategy": "llama_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "continuation_parity",
   "precision": "fp16",
-  "reference_precision": "fp32",
-  "ci_tier": "nightly_only",
-  "l0_replacement": "minitron-4b-width-l0",
-  "l0_replacement_reason": "Minitron width-pruned 4B scale stays nightly; minitron-4b-width-l0 keeps the same decoder path with shorter decode for PR L0.",
   "max_cache_length": 256,
-  "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
-  "max_new_tokens": 20,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "minitron-4b-width",
+      "trace_id": "IT-E2E-MNTRW-01",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "reference_precision": "fp32",
+      "ci_tier": "nightly_only",
+      "l0_replacement": "minitron-4b-width-l0",
+      "l0_replacement_reason": "Minitron width-pruned 4B scale stays nightly; minitron-4b-width-l0 keeps the same decoder path with shorter decode for PR L0.",
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 20
+    }
+  ]
 }

@@ -475,6 +475,10 @@ def test_selective_e2e_builds_and_runs_single_family_source_projections() -> Non
     assert "impact-models" in selective
     assert "e2e_isolation_models.txt" in selective
     assert './scripts/run_e2e_parallel.sh "${standard_args[@]}"' in selective
+    assert '--exclude-ci-tier nightly_only' in selective
+    assert '--exclude-ci-tier multi_device' in selective
+    assert 'if [ "$standard_rc" -ne 0 ]; then' in selective
+    assert "Skipping strict model-owned isolation" in selective
     assert 'prepare_model_plugin_dir "$full_model_plugin_dir"' in selective
     assert 'schedule_args=(' in group_runner
     assert "run_isolated_gpu_queue" in group_runner
@@ -492,6 +496,7 @@ def test_selective_e2e_builds_and_runs_single_family_source_projections() -> Non
     assert 'CUDA_VISIBLE_DEVICES="$gpu_id"' in group_runner
     assert '--rootdir "$source_dir"' in group_runner
     assert '--e2e-models-file "$models_file"' in group_runner
+    assert '--e2e-exclude-ci-tier nightly_only' in group_runner
     assert '"${model_filter_args[@]}"' in group_runner
     assert "scripts/run_e2e_parallel.sh" not in group_runner
     assert "verify-results" in group_runner

@@ -8,20 +8,6 @@ test_manifests = [
   "manifests/whisper-large-v3-turbo.json",
   "manifests/whisper-tiny-fp16-tp2.json",
   "manifests/whisper-tiny-fp16.json",
-  "manifests/whisper-large-v3-turbo-asr-probe01.json",
-  "manifests/whisper-large-v3-turbo-asr-probe02.json",
-  "manifests/whisper-large-v3-turbo-asr-probe03.json",
-  "manifests/whisper-large-v3-turbo-asr-probe04.json",
-  "manifests/whisper-large-v3-turbo-asr-probe05.json",
-  "manifests/whisper-large-v3-turbo-asr-probe06.json",
-  "manifests/whisper-large-v3-turbo-asr-probe08.json",
-  "manifests/whisper-tiny-fp16-asr-probe01.json",
-  "manifests/whisper-tiny-fp16-asr-probe02.json",
-  "manifests/whisper-tiny-fp16-asr-probe03.json",
-  "manifests/whisper-tiny-fp16-asr-probe04.json",
-  "manifests/whisper-tiny-fp16-asr-probe05.json",
-  "manifests/whisper-tiny-fp16-asr-probe06.json",
-  "manifests/whisper-tiny-fp16-asr-probe08.json",
 ]
 
 [e2e_defaults.speech_to_text]

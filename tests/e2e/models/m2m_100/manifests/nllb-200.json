@@ -5,16 +5,21 @@
   "family": "m2m_100",
   "runtime_strategy": "m2m_100_seq2seq_encoder_decoder",
   "task_strategy": "text_generation_causal",
-  "reference_family": "seq2seq_translation",
-  "user_contract": "translation",
   "precision": "fp16",
-  "reference_precision": "fp32",
   "max_cache_length": 256,
-  "prompt": "The house is wonderful.",
-  "max_new_tokens": 20,
-  "metadata": {
-    "contract_config": {
-      "auto_class": "AutoModelForSeq2SeqLM"
+  "testcases": [
+    {
+      "name": "nllb-200-distilled-600m",
+      "reference_family": "seq2seq_translation",
+      "user_contract": "translation",
+      "reference_precision": "fp32",
+      "prompt": "The house is wonderful.",
+      "max_new_tokens": 20,
+      "metadata": {
+        "contract_config": {
+          "auto_class": "AutoModelForSeq2SeqLM"
+        }
+      }
     }
-  }
+  ]
 }

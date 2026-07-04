@@ -28,7 +28,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import xml.etree.ElementTree as ET
 
-from reporting.vlm_assessment import render_diffusion_vlm_assessment as _render_diffusion_vlm_assessment
+from reporting.vlm_assessment import (
+    render_diffusion_vlm_assessment as _render_diffusion_vlm_assessment,
+)
 
 # Maximum file size to embed inline (10 MB).
 _MAX_EMBED_BYTES = 10 * 1024 * 1024
@@ -68,7 +70,6 @@ _PYTEST_TO_RESULT_STATUS = {
     "SKIPPED": "skip",
     "XFAIL": "skip",
 }
-_BUNDLE_GROUP_PREFIX = "bundle:"
 
 # ---------------------------------------------------------------------------
 # Modality classification
@@ -134,30 +135,18 @@ def _extract_case_name(text: str) -> str:
     return match.group(1) if match else ""
 
 
-def _case_names_from_param(case_name: str) -> List[str]:
-    if case_name.startswith(_BUNDLE_GROUP_PREFIX):
-        payload = case_name[len(_BUNDLE_GROUP_PREFIX):]
-        return [part for part in payload.split("+") if part]
-    return [case_name] if case_name else []
-
-
 def _record_pytest_outcome(
     outcomes: Dict[str, Dict[str, str]],
     case_name: str,
     outcome: Dict[str, str],
 ) -> None:
-    member_names = _case_names_from_param(case_name)
-    if len(member_names) <= 1:
-        outcomes[case_name] = outcome
-        return
+    outcomes[case_name] = outcome
 
-    grouped = {
-        **outcome,
-        "pytest_group": case_name,
-        "pytest_group_members": ",".join(member_names),
-    }
-    for member_name in member_names:
-        outcomes[member_name] = grouped
+
+def _result_model_name(result: Dict[str, Any]) -> str:
+    case_config = result.get("case_config", {}) or {}
+    metadata = case_config.get("metadata", {}) or {}
+    return str(metadata.get("model_name") or result.get("case_name") or "")
 
 
 def _clean_pytest_reason(reason: str) -> str:
@@ -186,8 +175,7 @@ def _load_pytest_outcomes(e2e_root: Path) -> Dict[str, Dict[str, str]]:
             continue
         for testcase in root.iter("testcase"):
             case_name = _extract_case_name(
-                " ".join(str(testcase.attrib.get(key, ""))
-                         for key in ("classname", "name"))
+                " ".join(str(testcase.attrib.get(key, "")) for key in ("classname", "name"))
             )
             if not case_name:
                 continue
@@ -206,11 +194,15 @@ def _load_pytest_outcomes(e2e_root: Path) -> Dict[str, Dict[str, str]]:
                 skip_type = skipped.attrib.get("type", "")
                 status = "XFAIL" if skip_type == "pytest.xfail" else "SKIPPED"
                 reason = skipped.attrib.get("message", "") or (skipped.text or "")
-            _record_pytest_outcome(outcomes, case_name, {
-                "pytest_status": status,
-                "reason": _clean_pytest_reason(reason),
-                "source": xml_path.name,
-            })
+            _record_pytest_outcome(
+                outcomes,
+                case_name,
+                {
+                    "pytest_status": status,
+                    "reason": _clean_pytest_reason(reason),
+                    "source": xml_path.name,
+                },
+            )
 
     for log_path in sorted(e2e_root.glob("console-*.log")):
         try:
@@ -225,11 +217,15 @@ def _load_pytest_outcomes(e2e_root: Path) -> Dict[str, Dict[str, str]]:
             case_name, status, rest = match.groups()
             if status not in {"XFAIL", "XPASS"} and case_name not in outcomes:
                 continue
-            _record_pytest_outcome(outcomes, case_name, {
-                "pytest_status": status,
-                "reason": _clean_pytest_reason(rest.split("[", 1)[0]),
-                "source": log_path.name,
-            })
+            _record_pytest_outcome(
+                outcomes,
+                case_name,
+                {
+                    "pytest_status": status,
+                    "reason": _clean_pytest_reason(rest.split("[", 1)[0]),
+                    "source": log_path.name,
+                },
+            )
 
     return outcomes
 
@@ -243,13 +239,14 @@ def _merge_pytest_outcomes(
     for result in results:
         item = dict(result)
         case_name = str(result.get("case_name") or "")
-        if case_name:
-            seen.add(case_name)
-        outcome = outcomes.get(case_name)
+        model_name = _result_model_name(result)
+        if model_name:
+            seen.add(model_name)
+        outcome = outcomes.get(model_name)
         if outcome:
             item["_pytest_outcome"] = outcome
         status = outcome.get("pytest_status", "") if outcome else ""
-        if status in _PYTEST_TO_RESULT_STATUS:
+        if status in _PYTEST_TO_RESULT_STATUS and model_name == case_name:
             item["_raw_status"] = item.get("status")
             item["status"] = _PYTEST_TO_RESULT_STATUS[status]
         merged.append(item)
@@ -257,25 +254,25 @@ def _merge_pytest_outcomes(
     for case_name, outcome in sorted(outcomes.items()):
         if case_name in seen:
             continue
-        status = _PYTEST_TO_RESULT_STATUS.get(
-            outcome.get("pytest_status", ""), "error")
-        merged.append({
-            "case_name": case_name,
-            "status": status,
-            "failure_type": "pytest_failed"
-            if status in {"fail", "error"} else None,
-            "case_config": {},
-            "stages": {
-                "pytest": {
-                    "status": status,
-                    "message": outcome.get("reason", ""),
-                    "metrics": {},
-                }
-            },
-            "timing": {},
-            "_summary_only": True,
-            "_pytest_outcome": outcome,
-        })
+        status = _PYTEST_TO_RESULT_STATUS.get(outcome.get("pytest_status", ""), "error")
+        merged.append(
+            {
+                "case_name": case_name,
+                "status": status,
+                "failure_type": "pytest_failed" if status in {"fail", "error"} else None,
+                "case_config": {},
+                "stages": {
+                    "pytest": {
+                        "status": status,
+                        "message": outcome.get("reason", ""),
+                        "metrics": {},
+                    }
+                },
+                "timing": {},
+                "_summary_only": True,
+                "_pytest_outcome": outcome,
+            }
+        )
     return merged
 
 
@@ -368,10 +365,7 @@ _STATUS_COLORS = {
 
 def _badge(status: str) -> str:
     color = _STATUS_COLORS.get(status, "#6b7280")
-    return (
-        f'<span class="badge" style="background:{color}">'
-        f"{html.escape(status.upper())}</span>"
-    )
+    return f'<span class="badge" style="background:{color}">{html.escape(status.upper())}</span>'
 
 
 def _esc(text: Any) -> str:
@@ -493,9 +487,7 @@ def _render_metrics_table(stages: Dict[str, Any]) -> str:
         "<thead><tr>"
         "<th>Stage</th><th>Metric</th><th>Value</th>"
         "<th>Threshold</th><th>Op</th><th>Pass</th><th>Note</th>"
-        "</tr></thead><tbody>"
-        + "\n".join(rows)
-        + "</tbody></table>"
+        "</tr></thead><tbody>" + "\n".join(rows) + "</tbody></table>"
     )
 
 
@@ -561,11 +553,13 @@ def _read_stage_log(ref: Any, art_dir: Path) -> str:
     raw_path = Path(ref)
     candidates = [raw_path]
     if not raw_path.is_absolute():
-        candidates.extend([
-            art_dir / raw_path,
-            art_dir / raw_path.name,
-            art_dir.parent / raw_path.name,
-        ])
+        candidates.extend(
+            [
+                art_dir / raw_path,
+                art_dir / raw_path.name,
+                art_dir.parent / raw_path.name,
+            ]
+        )
     for path in candidates:
         if path.is_file():
             try:
@@ -911,8 +905,7 @@ def _format_load_component_label(component: str, stats: Dict[str, Tuple[int, int
 
 def _has_extra_compile_breakdown(details: Dict[str, float]) -> bool:
     return any(
-        key.startswith("trt_compile_extra_")
-        and key != "trt_compile_extra_engines_s"
+        key.startswith("trt_compile_extra_") and key != "trt_compile_extra_engines_s"
         for key in details
     )
 
@@ -945,9 +938,7 @@ def _render_timing_breakdown(
     return (
         '<details class="timing-expand">'
         f"<summary>{_esc(label)}</summary>"
-        '<div class="timing-breakdown">'
-        + "\n".join(rows)
-        + "</div></details>"
+        '<div class="timing-breakdown">' + "\n".join(rows) + "</div></details>"
     )
 
 
@@ -990,8 +981,7 @@ def _render_detailed_timing_table(result: Dict[str, Any]) -> str:
             "engine execution: " + label,
             value,
         )
-        for label, value in _aggregate_component_timings(
-            details, "trt_component_engine_")
+        for label, value in _aggregate_component_timings(details, "trt_component_engine_")
     ]
     if not engine_component_children and "inference_s" in details:
         engine_component_children = [("TRT engine execution", details.get("inference_s"))]
@@ -1001,8 +991,7 @@ def _render_detailed_timing_table(result: Dict[str, Any]) -> str:
             "load/deserialization: " + _format_load_component_label(label, load_component_stats),
             value,
         )
-        for label, value in _aggregate_component_timings(
-            details, "trt_component_load_deserialize_")
+        for label, value in _aggregate_component_timings(details, "trt_component_load_deserialize_")
     ]
     if not load_component_children and "trt_load_deserialization_s" in details:
         load_component_children = [
@@ -1084,9 +1073,7 @@ def _render_repro_commands(repro: Dict[str, str]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _render_text_comparison(
-    trt_text: Optional[str], ref_text: Optional[str]
-) -> str:
+def _render_text_comparison(trt_text: Optional[str], ref_text: Optional[str]) -> str:
     if trt_text is None and ref_text is None:
         return ""
     return (
@@ -1162,7 +1149,7 @@ def _format_feature_output(feature: Optional[Tuple[str, Any]]) -> Optional[str]:
     if total <= 0:
         return f"{name}: (no numeric values)"
 
-    norm = sumsq ** 0.5
+    norm = sumsq**0.5
     suffix = " ..." if total > len(preview) else ""
     preview_text = ", ".join(f"{x:.6g}" for x in preview)
     return (
@@ -1209,8 +1196,7 @@ def render_vl_model(result: Dict[str, Any], project_dir: Optional[Path]) -> str:
         uri = encode_file_base64(img_path, _mime_for_ext(img_path.suffix))
         if uri:
             parts.append(
-                f'<p><strong>Input Image:</strong></p>'
-                f'<img src="{uri}" class="preview-img" />'
+                f'<p><strong>Input Image:</strong></p><img src="{uri}" class="preview-img" />'
             )
         else:
             parts.append(f"<p><em>Image not found: {_esc(image_rel)}</em></p>")
@@ -1258,14 +1244,16 @@ def render_diffusion_model(result: Dict[str, Any]) -> str:
             parts.append('<div class="frame-pair-images">')
             if trt_uri:
                 parts.append(
-                    '<figure><figcaption>TRT</figcaption>'
-                    f'<img src="{trt_uri}" class="frame-img" /></figure>')
+                    "<figure><figcaption>TRT</figcaption>"
+                    f'<img src="{trt_uri}" class="frame-img" /></figure>'
+                )
             else:
                 parts.append("<span class='missing'>TRT frame too large</span>")
             if ref_uri:
                 parts.append(
-                    '<figure><figcaption>Reference</figcaption>'
-                    f'<img src="{ref_uri}" class="frame-img" /></figure>')
+                    "<figure><figcaption>Reference</figcaption>"
+                    f'<img src="{ref_uri}" class="frame-img" /></figure>'
+                )
             else:
                 parts.append("<span class='missing'>Reference frame too large</span>")
             parts.append("</div></div>")
@@ -1311,12 +1299,14 @@ def _stage_output_error_excerpt(stage: Dict[str, Any]) -> str:
     metadata = stage.get("metadata", {})
     candidates: List[Any] = []
     if isinstance(data, dict):
-        candidates.extend([
-            data.get("error"),
-            data.get("parse_error"),
-            data.get("stderr_truncated"),
-            data.get("stderr"),
-        ])
+        candidates.extend(
+            [
+                data.get("error"),
+                data.get("parse_error"),
+                data.get("stderr_truncated"),
+                data.get("stderr"),
+            ]
+        )
     for candidate in candidates:
         if candidate:
             raw = str(candidate)
@@ -1412,9 +1402,7 @@ def render_audio_model(result: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def render_segmentation_model(
-    result: Dict[str, Any], project_dir: Optional[Path]
-) -> str:
+def render_segmentation_model(result: Dict[str, Any], project_dir: Optional[Path]) -> str:
     """Render detail section for a segmentation model."""
     art_dir = Path(result.get("_artifact_dir", ""))
     artifacts = result.get("artifacts", {})
@@ -1431,8 +1419,7 @@ def render_segmentation_model(
         uri = encode_file_base64(img_path, _mime_for_ext(img_path.suffix))
         if uri:
             parts.append(
-                f'<p><strong>Input Image:</strong></p>'
-                f'<img src="{uri}" class="preview-img" />'
+                f'<p><strong>Input Image:</strong></p><img src="{uri}" class="preview-img" />'
             )
 
     if prompt:
@@ -1484,10 +1471,8 @@ def render_generic_model(result: Dict[str, Any]) -> str:
     stage_outputs = result.get("stage_outputs", {})
     trt_text = _get_stage_text(stage_outputs, "trt_")
     ref_text = _get_stage_text(stage_outputs, "ref_")
-    trt_feature = _format_feature_output(
-        _get_stage_feature_output(stage_outputs, "trt_"))
-    ref_feature = _format_feature_output(
-        _get_stage_feature_output(stage_outputs, "ref_"))
+    trt_feature = _format_feature_output(_get_stage_feature_output(stage_outputs, "trt_"))
+    ref_feature = _format_feature_output(_get_stage_feature_output(stage_outputs, "ref_"))
 
     parts = []
     if prompt:
@@ -1522,10 +1507,7 @@ def render_model_section(
     modality = classify_modality(result)
     badge = _badge(status)
 
-    header = (
-        f'<details id="model-{_esc(name)}">'
-        f"<summary>{badge} <strong>{_esc(name)}</strong>"
-    )
+    header = f'<details id="model-{_esc(name)}"><summary>{badge} <strong>{_esc(name)}</strong>'
     if family or task_strategy:
         header += f" &mdash; {_esc(family)} / {_esc(task_strategy)}"
     elif result.get("_summary_only"):
@@ -1555,8 +1537,7 @@ def render_model_section(
     failure_type = result.get("failure_type")
     if failure_type and pytest_status != "XFAIL":
         body_parts.append(
-            f'<p class="failure-info">Failure type: '
-            f"<strong>{_esc(failure_type)}</strong></p>"
+            f'<p class="failure-info">Failure type: <strong>{_esc(failure_type)}</strong></p>'
         )
 
     # Dispatch to modality renderer
@@ -1642,47 +1623,28 @@ def _total_time_sort_key(result: Dict[str, Any]) -> float:
     return total if total is not None else -1.0
 
 
-def _bundle_group_key(result: Dict[str, Any]) -> str:
-    outcome = result.get("_pytest_outcome")
-    if isinstance(outcome, dict):
-        group_name = str(outcome.get("pytest_group") or "")
-        if group_name:
-            return group_name
-    case_config = result.get("case_config", {}) or {}
-    bundle = str(case_config.get("bundle", "") or "").strip()
-    if bundle:
-        return bundle
-    return ""
+def _model_group_key(result: Dict[str, Any]) -> str:
+    return _result_model_name(result)
 
 
-def _bundle_group_label(group_key: str) -> str:
-    if group_key.startswith(_BUNDLE_GROUP_PREFIX):
-        member_names = _case_names_from_param(group_key)
-        return "pytest group: " + ", ".join(member_names)
+def _model_group_label(group_key: str) -> str:
     return group_key
 
 
-def _bundle_group_sort_key(group_key: str, result: Dict[str, Any]) -> Tuple[int, str]:
+def _model_group_sort_key(group_key: str, result: Dict[str, Any]) -> Tuple[int, str]:
     name = str(result.get("case_name", ""))
-    if group_key.startswith(_BUNDLE_GROUP_PREFIX):
-        member_names = _case_names_from_param(group_key)
-        try:
-            return (member_names.index(name), name)
-        except ValueError:
-            return (len(member_names), name)
-    bundle_stem = Path(group_key).stem if group_key else ""
-    return (0 if name == bundle_stem else 1, name)
+    return (0 if name == group_key else 1, name)
 
 
-def _grouped_bundle_results(results: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+def _grouped_model_results(results: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     groups: Dict[str, List[Dict[str, Any]]] = {}
     for result in results:
-        group_key = _bundle_group_key(result)
+        group_key = _model_group_key(result)
         if not group_key:
             continue
         groups.setdefault(group_key, []).append(result)
     return {
-        key: sorted(items, key=lambda item: _bundle_group_sort_key(key, item))
+        key: sorted(items, key=lambda item: _model_group_sort_key(key, item))
         for key, items in sorted(groups.items())
         if len(items) > 1
     }
@@ -1707,7 +1669,7 @@ def _status_summary(results: List[Dict[str, Any]]) -> str:
     )
 
 
-def _bundle_representative(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _model_representative(items: List[Dict[str, Any]]) -> Dict[str, Any]:
     for item in items:
         if not item.get("_summary_only"):
             return item
@@ -1722,16 +1684,11 @@ def _summary_sort_key(item: Tuple[Dict[str, Any], List[Dict[str, Any]]]) -> floa
 def _summary_dashboard_items(
     results: List[Dict[str, Any]],
 ) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
-    groups = _grouped_bundle_results(results)
+    groups = _grouped_model_results(results)
     grouped_names = {
-        str(result.get("case_name") or "")
-        for items in groups.values()
-        for result in items
+        str(result.get("case_name") or "") for items in groups.values() for result in items
     }
-    dashboard_items = [
-        (_bundle_representative(items), items)
-        for items in groups.values()
-    ]
+    dashboard_items = [(_model_representative(items), items) for items in groups.values()]
     for result in results:
         if str(result.get("case_name") or "") in grouped_names:
             continue
@@ -1739,7 +1696,7 @@ def _summary_dashboard_items(
     return sorted(dashboard_items, key=_summary_sort_key, reverse=True)
 
 
-def _render_summary_bundle_details(
+def _render_summary_model_details(
     group_key: str,
     representative: Dict[str, Any],
     items: List[Dict[str, Any]],
@@ -1748,7 +1705,7 @@ def _render_summary_bundle_details(
     key_metric: str,
     total_time: str,
 ) -> str:
-    title = str(representative.get("case_name") or _bundle_group_label(group_key))
+    title = str(representative.get("case_name") or _model_group_label(group_key))
     rows = []
     for item in items:
         name = str(item.get("case_name", "unknown"))
@@ -1785,9 +1742,7 @@ def _render_summary_bundle_details(
         "<thead><tr>"
         "<th>Testcase</th><th>Status</th><th>Family</th><th>Task Strategy</th>"
         "<th>Key Metric</th><th>Time</th>"
-        "</tr></thead><tbody>"
-        + "\n".join(rows)
-        + "</tbody></table></div></details>"
+        "</tr></thead><tbody>" + "\n".join(rows) + "</tbody></table></div></details>"
     )
 
 
@@ -1802,9 +1757,7 @@ def _summary_data_status(members: List[Dict[str, Any]]) -> str:
 
 def _summary_data_name(members: List[Dict[str, Any]]) -> str:
     return " ".join(
-        str(member.get("case_name", "")).lower()
-        for member in members
-        if member.get("case_name")
+        str(member.get("case_name", "")).lower() for member in members if member.get("case_name")
     )
 
 
@@ -1854,8 +1807,8 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
             rows.append(
                 f"<tr {row_attrs}>"
                 '<td class="summary-bundle-cell" colspan="6">'
-                + _render_summary_bundle_details(
-                    _bundle_group_key(r),
+                + _render_summary_model_details(
+                    _model_group_key(r),
                     r,
                     members,
                     str(family),
@@ -1882,9 +1835,7 @@ def render_summary_dashboard(results: List[Dict[str, Any]]) -> str:
         "<thead><tr>"
         "<th>Model</th><th>Family</th><th>Task Strategy</th>"
         "<th>Status</th><th>Key Metric</th><th>Time</th>"
-        "</tr></thead><tbody>"
-        + "\n".join(rows)
-        + "</tbody></table>"
+        "</tr></thead><tbody>" + "\n".join(rows) + "</tbody></table>"
     )
 
     return f'<section class="dashboard">{counters}\n{filters}\n{table}</section>'
@@ -1954,9 +1905,7 @@ def render_report(
     parts.append("<!DOCTYPE html>")
     parts.append('<html lang="en"><head>')
     parts.append('<meta charset="utf-8" />')
-    parts.append(
-        '<meta name="viewport" content="width=device-width, initial-scale=1" />'
-    )
+    parts.append('<meta name="viewport" content="width=device-width, initial-scale=1" />')
     parts.append(f"<title>{_esc(title)}</title>")
     parts.append(f"<style>{_load_report_css()}</style>")
     parts.append("</head><body>")
@@ -2042,8 +1991,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args.output.write_text(html_content, encoding="utf-8")
     size_kb = args.output.stat().st_size / 1024
     print(
-        f"Report written to {args.output} ({size_kb:.0f} KB, "
-        f"{len(results)} models)",
+        f"Report written to {args.output} ({size_kb:.0f} KB, {len(results)} models)",
         file=sys.stderr,
     )
     return 0

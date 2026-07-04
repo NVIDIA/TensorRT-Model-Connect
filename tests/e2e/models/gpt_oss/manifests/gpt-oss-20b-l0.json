@@ -1,26 +1,31 @@
 {
   "name": "gpt-oss-20b-l0",
-  "trace_id": "IT-E2E-GOSS-L0-01",
   "hf_id": "openai/gpt-oss-20b",
   "bundle": "gpt-oss-20b-l0.trtfb",
   "family": "gpt_oss",
   "runtime_strategy": "gpt_oss_decoder_moe",
   "task_strategy": "text_generation_causal",
   "e2e_parallel_resource": "exclusive_gpu",
-  "ci_tier": "l0_only",
   "precision": "fp16",
-  "reference_precision": "fp32",
-  "reference_family": "chat_instruct_template",
-  "user_contract": "chat_response",
   "max_cache_length": 256,
-  "prompt": "<|start|>system<|message|>You are a helpful assistant.<|end|><|start|>user<|message|>What is the capital of France?<|end|><|start|>assistant",
-  "max_new_tokens": 8,
   "trust_remote_code": false,
-  "notes": "PR L0 repro for GPT-OSS-20B. Uses the same checkpoint, gpt_oss_decoder_moe runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget.",
-  "metadata": {
-    "contract_config": {
-      "use_chat_template": false,
-      "enable_thinking": false
+  "testcases": [
+    {
+      "name": "gpt-oss-20b-l0",
+      "trace_id": "IT-E2E-GOSS-L0-01",
+      "ci_tier": "l0_only",
+      "reference_precision": "fp32",
+      "reference_family": "chat_instruct_template",
+      "user_contract": "chat_response",
+      "prompt": "<|start|>system<|message|>You are a helpful assistant.<|end|><|start|>user<|message|>What is the capital of France?<|end|><|start|>assistant",
+      "max_new_tokens": 8,
+      "notes": "PR L0 repro for GPT-OSS-20B. Uses the same checkpoint, gpt_oss_decoder_moe runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget.",
+      "metadata": {
+        "contract_config": {
+          "use_chat_template": false,
+          "enable_thinking": false
+        }
+      }
     }
-  }
+  ]
 }

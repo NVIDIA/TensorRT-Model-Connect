@@ -1,18 +1,12 @@
 {
   "name": "dpr-ctx-encoder-tp4",
-  "trace_id": "IT-E2E-DPR-TP4-01",
   "hf_id": "facebook/dpr-ctx_encoder-single-nq-base",
   "bundle": "dpr-ctx-encoder-tp4.trtfb",
   "family": "dpr",
   "runtime_strategy": "dpr_encoder_only",
   "task_strategy": "encoder_only_nlp",
-  "reference_family": "dpr_context_embed",
-  "user_contract": "embedding_vector",
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 256,
-  "prompt": "The capital of France is Paris",
-  "max_new_tokens": 0,
   "build_args": {
     "parallel": {
       "mode": "tensor_parallel",
@@ -31,26 +25,37 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "dpr-ctx-encoder-tp4",
+      "trace_id": "IT-E2E-DPR-TP4-01",
+      "reference_family": "dpr_context_embed",
+      "user_contract": "embedding_vector",
+      "ci_tier": "multi_device",
+      "prompt": "The capital of France is Paris",
+      "max_new_tokens": 0,
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "notes": "DPR TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as dpr-ctx-encoder."
     }
-  ],
-  "notes": "DPR TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as dpr-ctx-encoder."
+  ]
 }

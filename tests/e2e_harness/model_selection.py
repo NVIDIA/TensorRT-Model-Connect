@@ -9,9 +9,6 @@ from os import PathLike
 from typing import Iterable, Mapping, Protocol, TypeVar
 
 
-BUNDLE_GROUP_PREFIX = "bundle:"
-
-
 class _NamedCase(Protocol):
     name: str
 
@@ -24,13 +21,6 @@ class _FilterableCase(_NamedCase, Protocol):
     runtime_strategy: str
     task_strategy: str
     metadata: Mapping[str, object]
-
-
-def case_names_from_param(value: str) -> list[str]:
-    if value.startswith(BUNDLE_GROUP_PREFIX):
-        payload = value[len(BUNDLE_GROUP_PREFIX):]
-        return [name for name in payload.split("+") if name]
-    return [value] if value else []
 
 
 def parse_e2e_model_filters(values: Iterable[str]) -> set[str]:
@@ -66,7 +56,7 @@ def read_e2e_models_file(path: str | PathLike[str]) -> set[str]:
                 continue
             if "[" in value and "]" in value:
                 value = value.rsplit("[", 1)[1].split("]", 1)[0]
-            names.update(case_names_from_param(value))
+            names.add(value)
     return names
 
 

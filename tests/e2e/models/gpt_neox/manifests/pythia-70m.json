@@ -1,15 +1,21 @@
 {
   "name": "pythia-70m",
-  "trace_id": "IT-E2E-PYTH-01",
   "hf_id": "EleutherAI/pythia-70m",
   "bundle": "pythia-70m.trtfb",
   "family": "gpt_neox",
   "runtime_strategy": "gpt_neox_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "continuation_parity",
+  "precision": "fp32",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
-  "max_new_tokens": 20,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "pythia-70m",
+      "trace_id": "IT-E2E-PYTH-01",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20
+    }
+  ]
 }

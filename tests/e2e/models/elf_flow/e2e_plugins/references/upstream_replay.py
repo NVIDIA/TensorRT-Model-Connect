@@ -52,7 +52,10 @@ class ElfUpstreamReplayReference:
         text = "\n".join(str(sample.get("generated", "")) for sample in samples)
         return StageOutput(
             stage_name=stage.name,
-            data={"expected_generated_samples": samples},
+            data={
+                "expected_generated_samples": samples,
+                "terminal_token_ids": artifact.get("terminal_token_ids", []),
+            },
             text=text,
             metadata={
                 "source": "official_elf_jax_replay",

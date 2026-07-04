@@ -28,8 +28,15 @@ def _load_manifest():
 
     for model_file in iter_manifest_paths(MODELS_DIR):
         with open(model_file) as f:
-            entry = json.load(f)
-        models.append(entry)
+            model = json.load(f)
+        testcases = model.pop("testcases", [])
+        if not testcases:
+            continue
+        canonical = next(
+            (case for case in testcases if case.get("name") == model.get("name")),
+            testcases[0],
+        )
+        models.append({**model, **canonical})
 
     return {"engine_dir": engine_dir, "models": models}
 
@@ -48,6 +55,7 @@ def _models():
 # CLI options
 # ---------------------------------------------------------------------------
 
+
 def pytest_addoption(parser):
     def addoption(*args, **kwargs):
         try:
@@ -56,28 +64,37 @@ def pytest_addoption(parser):
             pass
 
     addoption(
-        "--engine-dir", default=None,
-        help="Directory containing .trtfb bundles (default: from engines.json)")
+        "--engine-dir",
+        default=None,
+        help="Directory containing .trtfb bundles (default: from engines.json)",
+    )
     addoption(
-        "--trtmc-binary", default=None,
-        help="Path to the C++ trtmc binary (default: build/trtmc)")
+        "--trtmc-binary", default=None, help="Path to the C++ trtmc binary (default: build/trtmc)"
+    )
     addoption(
-        "--hf-python", default=None,
-        help="Python interpreter with HuggingFace tokenizers (default: .venv/bin/python)")
+        "--hf-python",
+        default=None,
+        help="Python interpreter with HuggingFace tokenizers (default: .venv/bin/python)",
+    )
+    addoption("--model-plugin-dir", default=None, help="Directory containing libtrtmc_model_*.so")
     addoption(
-        "--model-plugin-dir", default=None,
-        help="Directory containing libtrtmc_model_*.so")
+        "--e2e-model",
+        action="append",
+        default=[],
+        help="Filter by E2E case name or family; repeat or comma-separate values",
+    )
     addoption(
-        "--e2e-model", action="append", default=[],
-        help="Filter by E2E case name or family; repeat or comma-separate values")
-    addoption(
-        "--rebuild-engines", action="store_true", default=False,
-        help="Force rebuild of all engine bundles (default: use cached)")
+        "--rebuild-engines",
+        action="store_true",
+        default=False,
+        help="Force rebuild of all engine bundles (default: use cached)",
+    )
 
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="session")
 def engine_dir(request):
@@ -121,10 +138,16 @@ def ld_library_path():
     """LD_LIBRARY_PATH with TRT libs."""
     try:
         result = subprocess.run(
-            [sys.executable, "-c",
-             "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); "
-             "print(s.submodule_search_locations[0])"],
-            capture_output=True, text=True, timeout=10)
+            [
+                sys.executable,
+                "-c",
+                "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); "
+                "print(s.submodule_search_locations[0])",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
         trt_lib_dir = result.stdout.strip()
     except Exception:
         trt_lib_dir = ""
@@ -136,6 +159,7 @@ def ld_library_path():
 # ---------------------------------------------------------------------------
 # Model parametrization
 # ---------------------------------------------------------------------------
+
 
 def _model_ids():
     return [m["name"] for m in _models()]
@@ -168,15 +192,20 @@ def model_entry(request, engine_dir):
 # Built-bundle fixture (for full-pipeline tests)
 # ---------------------------------------------------------------------------
 
+
 def _build_bundle(trtmc_binary, hf_id, bundle_path, max_cache_length, precision="fp32"):
     """Build a .trtfb bundle as a subprocess to isolate GPU memory.
 
     Returns build time in seconds.
     """
     cmd = [
-        str(trtmc_binary), "build",
-        hf_id, "-o", str(bundle_path),
-        "--max-cache-length", str(max_cache_length),
+        str(trtmc_binary),
+        "build",
+        hf_id,
+        "-o",
+        str(bundle_path),
+        "--max-cache-length",
+        str(max_cache_length),
     ]
     if precision != "fp32":
         cmd.extend(["--precision", str(precision)])
@@ -186,8 +215,8 @@ def _build_bundle(trtmc_binary, hf_id, bundle_path, max_cache_length, precision=
 
     if result.returncode != 0:
         pytest.fail(
-            f"Bundle build failed for {hf_id} (rc={result.returncode}):\n"
-            f"{result.stderr[-2000:]}")
+            f"Bundle build failed for {hf_id} (rc={result.returncode}):\n{result.stderr[-2000:]}"
+        )
 
     return elapsed
 
@@ -195,6 +224,7 @@ def _build_bundle(trtmc_binary, hf_id, bundle_path, max_cache_length, precision=
 # ---------------------------------------------------------------------------
 # Frame quality helpers (for diffusion tests)
 # ---------------------------------------------------------------------------
+
 
 def compute_frame_stats(frame_dir: Path) -> dict:
     """Load PNG frames from a directory, return aggregate pixel statistics.

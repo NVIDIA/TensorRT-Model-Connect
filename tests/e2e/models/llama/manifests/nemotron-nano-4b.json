@@ -1,23 +1,28 @@
 {
   "name": "nemotron-nano-4b",
-  "trace_id": "IT-E2E-NMNN-01",
   "hf_id": "nvidia/Llama-3.1-Nemotron-Nano-4B-v1.1",
   "bundle": "nemotron-nano-4b.trtfb",
   "family": "llama",
   "runtime_strategy": "llama_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "chat_instruct_template",
-  "user_contract": "chat_response",
   "precision": "fp16",
-  "reference_precision": "fp32",
   "max_cache_length": 256,
-  "prompt": "What is the capital of France?",
-  "max_new_tokens": 20,
   "trust_remote_code": false,
-  "metadata": {
-    "contract_config": {
-      "use_chat_template": true,
-      "enable_thinking": false
+  "testcases": [
+    {
+      "name": "nemotron-nano-4b",
+      "trace_id": "IT-E2E-NMNN-01",
+      "reference_family": "chat_instruct_template",
+      "user_contract": "chat_response",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France?",
+      "max_new_tokens": 20,
+      "metadata": {
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false
+        }
+      }
     }
-  }
+  ]
 }

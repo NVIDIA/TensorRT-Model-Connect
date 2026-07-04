@@ -1,21 +1,13 @@
 {
   "name": "deberta-base-tp4",
-  "trace_id": "IT-E2E-DEBERTA-TP4-01",
   "hf_id": "microsoft/deberta-base",
   "bundle": "deberta-base-tp4.trtfb",
   "family": "deberta",
   "runtime_strategy": "deberta_encoder_only",
   "task_strategy": "encoder_only_nlp",
-  "reference_family": "encoder_base_features",
-  "user_contract": "representation_parity",
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 256,
-  "prompt": "The capital of France is Paris.",
-  "max_new_tokens": 1,
   "trust_remote_code": false,
-  "notes": "DeBERTa TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as deberta-base.",
-  "core": false,
   "build_args": {
     "parallel": {
       "mode": "tensor_parallel",
@@ -34,30 +26,43 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "deberta-base-tp4",
+      "trace_id": "IT-E2E-DEBERTA-TP4-01",
+      "reference_family": "encoder_base_features",
+      "user_contract": "representation_parity",
+      "ci_tier": "multi_device",
+      "prompt": "The capital of France is Paris.",
+      "max_new_tokens": 1,
+      "notes": "DeBERTa TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as deberta-base.",
+      "core": false,
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "metadata": {
+        "contract_config": {
+          "auto_class": "AutoModel"
+        }
+      }
     }
-  ],
-  "metadata": {
-    "contract_config": {
-      "auto_class": "AutoModel"
-    }
-  }
+  ]
 }

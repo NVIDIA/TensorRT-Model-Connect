@@ -27,6 +27,7 @@ from typing import Any, Dict
 # Lazy import (follows the repo convention for tools tests)
 # ---------------------------------------------------------------------------
 
+
 def _import_report():
     """Import generate_e2e_report from scripts/."""
     scripts_dir = str(Path(__file__).resolve().parents[2] / "scripts")
@@ -47,6 +48,7 @@ def _import_vlm_assessment():
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 def _make_result(
     name: str = "test-model",
     status: str = "pass",
@@ -63,6 +65,7 @@ def _make_result(
     repro_commands: Dict[str, str] | None = None,
     artifacts: Dict[str, Any] | None = None,
     stage_outputs: Dict[str, Any] | None = None,
+    model_name: str | None = None,
 ) -> Dict[str, Any]:
     """Build a synthetic result.json dict."""
     if metrics is None:
@@ -96,6 +99,7 @@ def _make_result(
             "task_strategy": task_strategy,
             "reference_backend": "hf_transformers",
             "inputs": {"prompt": prompt},
+            "metadata": {"model_name": model_name or name},
         },
         "env_fingerprint": {
             "gpu_name": "NVIDIA GB300",
@@ -110,7 +114,8 @@ def _make_result(
                 "message": "All metrics passed",
             }
         },
-        "stage_outputs": stage_outputs or {
+        "stage_outputs": stage_outputs
+        or {
             "trt_generate": {
                 "stage_name": "generate",
                 "timing_s": 2.5,
@@ -137,9 +142,7 @@ def _write_result(tmp_path: Path, name: str, result: Dict[str, Any]) -> Path:
     """Write a result.json into a model subdirectory."""
     model_dir = tmp_path / name
     model_dir.mkdir(parents=True, exist_ok=True)
-    (model_dir / "result.json").write_text(
-        json.dumps(result, indent=2), encoding="utf-8"
-    )
+    (model_dir / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     return model_dir
 
 
@@ -176,11 +179,7 @@ def _make_tiny_wav(path: Path) -> None:
     # RIFF header
     sample = st.pack("<h", 1000)  # one 16-bit sample
     data_chunk = b"data" + st.pack("<I", len(sample)) + sample
-    fmt_chunk = (
-        b"fmt "
-        + st.pack("<I", 16)
-        + st.pack("<HHIIHH", 1, 1, 8000, 16000, 2, 16)
-    )
+    fmt_chunk = b"fmt " + st.pack("<I", 16) + st.pack("<HHIIHH", 1, 1, 8000, 16000, 2, 16)
     riff_size = 4 + len(fmt_chunk) + len(data_chunk)
     wav = b"RIFF" + st.pack("<I", riff_size) + b"WAVE" + fmt_chunk + data_chunk
     path.write_bytes(wav)
@@ -349,7 +348,7 @@ class TestLoadAllResults:
         assert "encoder representation parity below minimum contract floor" in html
         assert "Failure type: <strong>compare_fail</strong>" not in html
 
-    def test_grouped_bundle_junit_members_are_rendered(self, tmp_path):
+    def test_multi_testcase_model_results_are_rendered(self, tmp_path):
         mod = _import_report()
         e2e_root = tmp_path / "e2e_artifacts"
         artifacts_dir = e2e_root / "artifacts"
@@ -359,13 +358,27 @@ class TestLoadAllResults:
             family="canary",
             hf_id="nvidia/canary-1b-v2",
         )
-        base_result["case_config"]["bundle"] = "canary-1b-v2.trtfb"
         _write_result(artifacts_dir, "canary-1b-v2", base_result)
+        for probe_name in (
+            "canary-1b-v2-asr-probe01",
+            "canary-1b-v2-asr-probe02",
+        ):
+            _write_result(
+                artifacts_dir,
+                probe_name,
+                _make_result(
+                    name=probe_name,
+                    task_strategy="speech_to_text",
+                    family="canary",
+                    hf_id="nvidia/canary-1b-v2",
+                    model_name="canary-1b-v2",
+                ),
+            )
         _write_junit(
             e2e_root,
             """
             <testcase classname="tests.e2e.models.canary.test_canary_e2e"
-                      name="test_model_e2e[bundle:canary-1b-v2+canary-1b-v2-asr-probe01+canary-1b-v2-asr-probe02]" />
+                      name="test_model_e2e[canary-1b-v2]" />
             """,
         )
 
@@ -448,9 +461,7 @@ class TestRenderReport:
         html = mod.render_report([], title="External Asset Report")
 
         assert "<style>.external-asset-test { color: red; }\n</style>" in html
-        assert (
-            "<script>function externalAssetTest() { return true; }\n</script>" in html
-        )
+        assert "<script>function externalAssetTest() { return true; }\n</script>" in html
 
     def test_empty_results(self):
         mod = _import_report()
@@ -471,9 +482,7 @@ class TestRenderReport:
 
     def test_failed_model_shows_failure_type(self):
         mod = _import_report()
-        r = _make_result(
-            name="bad-model", status="fail", failure_type="compare_fail"
-        )
+        r = _make_result(name="bad-model", status="fail", failure_type="compare_fail")
         html = mod.render_report([r])
         assert "compare_fail" in html
         assert "FAIL" in html
@@ -691,12 +700,14 @@ class TestRenderReport:
                 "trt_end_to_end": {
                     "stage_name": "end_to_end",
                     "data": {
-                        "stderr": "\n".join([
-                            '[trtmc.load_timing] label="denoiser_plan" '
-                            "load_deserialize_ms=2500.000000 plan_bytes=1",
-                            '[trtmc.engine_timing] label="denoiser_plan" '
-                            "execute_ms=600.000000 launches=20",
-                        ]),
+                        "stderr": "\n".join(
+                            [
+                                '[trtmc.load_timing] label="denoiser_plan" '
+                                "load_deserialize_ms=2500.000000 plan_bytes=1",
+                                '[trtmc.engine_timing] label="denoiser_plan" '
+                                "execute_ms=600.000000 launches=20",
+                            ]
+                        ),
                     },
                 },
             },
@@ -709,12 +720,13 @@ class TestRenderReport:
 
     def test_detailed_timing_does_not_double_count_saved_stderr_log(self, tmp_path):
         mod = _import_report()
-        log_text = "\n".join([
-            '[trtmc.load_timing] label="denoiser_plan" '
-            "load_deserialize_ms=2500.000000 plan_bytes=1024",
-            '[trtmc.engine_timing] label="denoiser_plan" '
-            "execute_ms=600.000000 launches=20",
-        ])
+        log_text = "\n".join(
+            [
+                '[trtmc.load_timing] label="denoiser_plan" '
+                "load_deserialize_ms=2500.000000 plan_bytes=1024",
+                '[trtmc.engine_timing] label="denoiser_plan" execute_ms=600.000000 launches=20',
+            ]
+        )
         log_path = tmp_path / "end_to_end_stderr.log"
         log_path.write_text(log_text, encoding="utf-8")
         r = _make_result(
@@ -820,10 +832,12 @@ class TestRenderReport:
         )
         model_dir = _write_result(tmp_path, "test-model", r)
         (model_dir / "e2e_run.log").write_text(
-            "\n".join([
-                "[trtmc build] Weights loaded [999.0s]",
-                "[trtmc build] Engine built [888.0s] (10.0 MB)",
-            ]),
+            "\n".join(
+                [
+                    "[trtmc build] Weights loaded [999.0s]",
+                    "[trtmc build] Engine built [888.0s] (10.0 MB)",
+                ]
+            ),
             encoding="utf-8",
         )
         loaded = mod.load_all_results(tmp_path)[0]
@@ -935,12 +949,14 @@ class TestRenderDiffusionModel:
 
     def test_vlm_assessment_malformed_judgment_defaults_to_pass(self):
         mod = _import_vlm_assessment()
-        html = mod.render_diffusion_vlm_assessment({
-            "vlm_assessment": {
-                "model_id": "Judge <model>",
-                "vlm_judgment": "not a structured judgment",
+        html = mod.render_diffusion_vlm_assessment(
+            {
+                "vlm_assessment": {
+                    "model_id": "Judge <model>",
+                    "vlm_judgment": "not a structured judgment",
+                }
             }
-        })
+        )
         assert "Judge &lt;model&gt;" in html
         assert "<strong>Gate:</strong> PASS" in html
         assert "Semantic similarity" not in html
@@ -1051,9 +1067,7 @@ class TestRenderDiffusionModel:
                     "failed": True,
                     "waived": True,
                     "waive_reason": "XFAIL allows reference-only VLM gate failure",
-                    "reasons": [
-                        "HF reference description suggests non-photo/stylized output"
-                    ],
+                    "reasons": ["HF reference description suggests non-photo/stylized output"],
                 },
             },
         }
@@ -1071,23 +1085,25 @@ class TestRenderDiffusionModel:
         )
         _write_result(artifacts_dir, "model-diff", result)
         (tmp_path / "diffusion_vlm_assessment.json").write_text(
-            json.dumps({
-                "model_id": "example-org/example-vl-judge",
-                "results": [{
-                    "case_name": "model-diff",
-                    "vlm_judgment": {
-                        "semantic_similarity_0_to_5": 4.25,
-                        "vlm_gate": {"failed": False, "reasons": []},
-                    },
-                }],
-            }),
+            json.dumps(
+                {
+                    "model_id": "example-org/example-vl-judge",
+                    "results": [
+                        {
+                            "case_name": "model-diff",
+                            "vlm_judgment": {
+                                "semantic_similarity_0_to_5": 4.25,
+                                "vlm_gate": {"failed": False, "reasons": []},
+                            },
+                        }
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
         loaded = mod.load_all_results(artifacts_dir)
-        assert loaded[0]["vlm_assessment"]["model_id"] == (
-            "example-org/example-vl-judge")
-        assert loaded[0]["vlm_assessment"]["vlm_judgment"][
-            "semantic_similarity_0_to_5"] == 4.25
+        assert loaded[0]["vlm_assessment"]["model_id"] == ("example-org/example-vl-judge")
+        assert loaded[0]["vlm_assessment"]["vlm_judgment"]["semantic_similarity_0_to_5"] == 4.25
 
 
 class TestRenderAudioModel:
@@ -1282,22 +1298,32 @@ class TestCLI:
 
     def test_required_args(self):
         mod = _import_report()
-        args = mod.parse_args([
-            "--artifacts-dir", "/tmp/arts",
-            "-o", "/tmp/report.html",
-        ])
+        args = mod.parse_args(
+            [
+                "--artifacts-dir",
+                "/tmp/arts",
+                "-o",
+                "/tmp/report.html",
+            ]
+        )
         assert args.artifacts_dir == Path("/tmp/arts")
         assert args.output == Path("/tmp/report.html")
         assert args.title == "E2E Test Report"
 
     def test_all_args(self):
         mod = _import_report()
-        args = mod.parse_args([
-            "--artifacts-dir", "/a",
-            "-o", "/b.html",
-            "--project-dir", "/proj",
-            "--title", "Custom Title",
-        ])
+        args = mod.parse_args(
+            [
+                "--artifacts-dir",
+                "/a",
+                "-o",
+                "/b.html",
+                "--project-dir",
+                "/proj",
+                "--title",
+                "Custom Title",
+            ]
+        )
         assert args.project_dir == Path("/proj")
         assert args.title == "Custom Title"
 
@@ -1307,10 +1333,14 @@ class TestCLI:
         arts.mkdir()
         _write_result(arts, "m1", _make_result(name="m1"))
         out = tmp_path / "report.html"
-        rc = mod.main([
-            "--artifacts-dir", str(arts),
-            "-o", str(out),
-        ])
+        rc = mod.main(
+            [
+                "--artifacts-dir",
+                str(arts),
+                "-o",
+                str(out),
+            ]
+        )
         assert rc == 0
         assert out.exists()
         content = out.read_text(encoding="utf-8")
@@ -1322,10 +1352,14 @@ class TestCLI:
         arts = tmp_path / "empty"
         arts.mkdir()
         out = tmp_path / "report.html"
-        rc = mod.main([
-            "--artifacts-dir", str(arts),
-            "-o", str(out),
-        ])
+        rc = mod.main(
+            [
+                "--artifacts-dir",
+                str(arts),
+                "-o",
+                str(out),
+            ]
+        )
         assert rc == 0
         assert out.exists()
 
@@ -1378,17 +1412,21 @@ class TestSummaryDashboard:
         assert html.index('href="#model-medium"') < html.index('href="#model-fast"')
         assert html.index('href="#model-fast"') < html.index('href="#model-missing"')
 
-    def test_grouped_bundle_renders_as_single_expandable_row(self):
+    def test_multi_testcase_model_renders_as_single_expandable_row(self):
         mod = _import_report()
         base = _make_result(name="canary-1b-v2", timing={"build_s": 5.0})
-        probe1 = _make_result(name="canary-1b-v2-asr-probe01", timing={})
-        probe2 = _make_result(name="canary-1b-v2-asr-probe02", timing={})
+        probe1 = _make_result(
+            name="canary-1b-v2-asr-probe01",
+            timing={},
+            model_name="canary-1b-v2",
+        )
+        probe2 = _make_result(
+            name="canary-1b-v2-asr-probe02",
+            timing={},
+            model_name="canary-1b-v2",
+        )
         outcome = {
             "pytest_status": "PASSED",
-            "pytest_group": (
-                "bundle:canary-1b-v2+canary-1b-v2-asr-probe01+"
-                "canary-1b-v2-asr-probe02"
-            ),
         }
         for result in (base, probe1, probe2):
             result["_pytest_outcome"] = outcome

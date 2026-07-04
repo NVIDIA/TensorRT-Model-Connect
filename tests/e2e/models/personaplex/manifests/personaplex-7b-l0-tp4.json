@@ -1,27 +1,13 @@
 {
   "name": "personaplex-7b-l0-tp4",
-  "trace_id": "IT-E2E-PPLX-L0-TP4-01",
   "hf_id": "nvidia/personaplex-7b-v1",
   "bundle": "personaplex-7b-l0-tp4.trtfb",
   "family": "personaplex",
   "runtime_strategy": "personaplex_speech_to_speech",
   "task_strategy": "speech_to_speech",
-  "gated": true,
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
-  "reference_family": "s2s_personaplex",
-  "user_contract": "speech_response",
-  "test_type": "audio",
   "max_cache_length": 512,
-  "test_input_audio": "data/Recording.wav",
-  "speech_reference_tokens": "data/personaplex_recording_official_tokens_greedy.npy",
-  "speech_test_max_frames": 100,
-  "prompt": "",
-  "max_new_tokens": 300,
   "trust_remote_code": true,
-  "metadata": {
-    "runtime_cli_requires_hf_python": true
-  },
   "build_args": {
     "parallel": {
       "mode": "tensor_parallel",
@@ -40,26 +26,45 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
+      "name": "personaplex-7b-l0-tp4",
+      "trace_id": "IT-E2E-PPLX-L0-TP4-01",
+      "gated": true,
+      "ci_tier": "multi_device",
+      "reference_family": "s2s_personaplex",
+      "user_contract": "speech_response",
+      "test_type": "audio",
+      "test_input_audio": "data/Recording.wav",
+      "speech_reference_tokens": "data/personaplex_recording_official_tokens_greedy.npy",
+      "speech_test_max_frames": 100,
+      "prompt": "",
+      "max_new_tokens": 300,
+      "metadata": {
+        "runtime_cli_requires_hf_python": true
       },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "notes": "PersonaPlex L0 tensor-parallel repro. Uses the same checkpoint, personaplex_speech_to_speech runtime, official token snapshot, runner, comparator, speech artifact contract, cache budget, tail-frame budget, and thresholds as personaplex-7b-l0."
     }
-  ],
-  "notes": "PersonaPlex L0 tensor-parallel repro. Uses the same checkpoint, personaplex_speech_to_speech runtime, official token snapshot, runner, comparator, speech artifact contract, cache budget, tail-frame budget, and thresholds as personaplex-7b-l0."
+  ]
 }

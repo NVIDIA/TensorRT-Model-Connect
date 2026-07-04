@@ -1,24 +1,29 @@
 {
   "name": "qwen35-9b",
-  "trace_id": "IT-E2E-Q35-01",
   "hf_id": "Qwen/Qwen3.5-9B",
   "bundle": "qwen35-9b.trtfb",
   "family": "qwen3_5",
   "runtime_strategy": "qwen3_5_hybrid_mamba_attention",
   "task_strategy": "text_generation_causal",
-  "reference_family": "multimodal_chat_qwen35",
-  "user_contract": "chat_response",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 256,
-  "prompt": "What is the capital of France? Answer in one word.",
-  "max_new_tokens": 10,
   "trust_remote_code": true,
   "precision": "fp16",
-  "reference_precision": "fp32",
-  "runtime_config": {
-    "runtime": {
-      "disable_cuda_graph": true
+  "testcases": [
+    {
+      "name": "qwen35-9b",
+      "trace_id": "IT-E2E-Q35-01",
+      "reference_family": "multimodal_chat_qwen35",
+      "user_contract": "chat_response",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "reference_precision": "fp32",
+      "runtime_config": {
+        "runtime": {
+          "disable_cuda_graph": true
+        }
+      },
+      "notes": "The decoder runs in FP16 and preserves FP32 Hugging Face text parity. KV-cache engine I/O follows the FP16 work dtype; the previous FP32 cache declaration overran FP16 runtime buffers."
     }
-  },
-  "notes": "The decoder runs in FP16 and preserves FP32 Hugging Face text parity. KV-cache engine I/O follows the FP16 work dtype; the previous FP32 cache declaration overran FP16 runtime buffers."
+  ]
 }

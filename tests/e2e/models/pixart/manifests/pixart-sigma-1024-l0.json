@@ -1,40 +1,45 @@
 {
   "name": "pixart-sigma-1024-l0",
-  "trace_id": "IT-E2E-PXART-L0-01",
   "hf_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
   "bundle": "pixart-sigma-1024-l0.trtfb",
-  "model_type": "pixart",
   "family": "pixart",
   "runtime_strategy": "diffusion_pixart",
   "task_strategy": "diffusion_media_generation",
-  "ci_tier": "l0_only",
-  "reference_family": "diffusers_image_gen",
-  "user_contract": "diffusion_image",
-  "description": "PixArt-Sigma XL-2 L0 representative at 512px with full cache and step count",
   "build_args": {
     "max_cache_length": 256
-  },
-  "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
-  "test_type": "diffusion",
-  "image_height": 512,
-  "image_width": 512,
-  "video_num_frames": 1,
-  "num_inference_steps": 20,
-  "stages": [
-    {
-      "name": "end_to_end",
-      "required": true
-    }
-  ],
-  "skip_text_comparison": true,
-  "notes": "PR L0 repro for PixArt-Sigma. Uses the same checkpoint, PixArt model type, T5-XXL text encoder, DiT/VAE path, runner, comparator, full 256-token cache shape, 20-step denoising loop, and FP32 T5 selector as the full manifest. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage.",
-  "metadata": {
-    "contract_config": {
-      "use_diffusers": true
-    }
   },
   "precision": "fp16",
   "fp32_layers": [
     0
+  ],
+  "testcases": [
+    {
+      "name": "pixart-sigma-1024-l0",
+      "trace_id": "IT-E2E-PXART-L0-01",
+      "model_type": "pixart",
+      "ci_tier": "l0_only",
+      "reference_family": "diffusers_image_gen",
+      "user_contract": "diffusion_image",
+      "description": "PixArt-Sigma XL-2 L0 representative at 512px with full cache and step count",
+      "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
+      "test_type": "diffusion",
+      "image_height": 512,
+      "image_width": 512,
+      "video_num_frames": 1,
+      "num_inference_steps": 20,
+      "stages": [
+        {
+          "name": "end_to_end",
+          "required": true
+        }
+      ],
+      "skip_text_comparison": true,
+      "notes": "PR L0 repro for PixArt-Sigma. Uses the same checkpoint, PixArt model type, T5-XXL text encoder, DiT/VAE path, runner, comparator, full 256-token cache shape, 20-step denoising loop, and FP32 T5 selector as the full manifest. L0 uses 512px to reduce DiT/VAE spatial scale; nightly keeps 1024px coverage.",
+      "metadata": {
+        "contract_config": {
+          "use_diffusers": true
+        }
+      }
+    }
   ]
 }

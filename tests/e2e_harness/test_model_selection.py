@@ -14,22 +14,16 @@ class _Case:
     name: str
 
 
-def test_read_e2e_models_file_supports_names_node_ids_and_groups(tmp_path):
+def test_read_e2e_models_file_supports_names_and_node_ids(tmp_path):
     models_file = tmp_path / "models.txt"
     models_file.write_text(
-        "model-a\n"
-        "tests/e2e/models/f/test_f_e2e.py::test_model_e2e[model-b]\n"
-        "tests/e2e/models/f/test_f_e2e.py::test_model_e2e["
-        "bundle:model-c+model-d]\n"
-        "# ignored\n",
+        "model-a\ntests/e2e/models/f/test_f_e2e.py::test_model_e2e[model-b]\n# ignored\n",
         encoding="utf-8",
     )
 
     assert read_e2e_models_file(models_file) == {
         "model-a",
         "model-b",
-        "model-c",
-        "model-d",
     }
 
 

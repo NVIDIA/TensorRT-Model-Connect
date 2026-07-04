@@ -1,18 +1,12 @@
 {
   "name": "all-mpnet-base-v2-tp4",
-  "trace_id": "IT-E2E-MPNET-TP4-01",
   "hf_id": "sentence-transformers/all-mpnet-base-v2",
   "bundle": "all-mpnet-base-v2-tp4.trtfb",
   "family": "mpnet",
   "runtime_strategy": "mpnet_encoder_only",
   "task_strategy": "encoder_only_nlp",
-  "reference_family": "sentence_transformer_embed",
-  "user_contract": "embedding_vector",
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 384,
-  "prompt": "This is an example sentence for embedding.",
-  "max_new_tokens": 0,
   "trust_remote_code": false,
   "build_args": {
     "parallel": {
@@ -32,31 +26,42 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "all-mpnet-base-v2-tp4",
+      "trace_id": "IT-E2E-MPNET-TP4-01",
+      "reference_family": "sentence_transformer_embed",
+      "user_contract": "embedding_vector",
+      "ci_tier": "multi_device",
+      "prompt": "This is an example sentence for embedding.",
+      "max_new_tokens": 0,
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "notes": "MPNet TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as all-mpnet-base-v2.",
+      "metadata": {
+        "contract_config": {
+          "use_sentence_transformers": true
+        }
+      }
     }
-  ],
-  "notes": "MPNet TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as all-mpnet-base-v2.",
-  "metadata": {
-    "contract_config": {
-      "use_sentence_transformers": true
-    }
-  }
+  ]
 }

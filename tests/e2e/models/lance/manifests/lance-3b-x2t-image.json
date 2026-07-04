@@ -1,27 +1,32 @@
 {
   "name": "lance-3b-x2t-image",
-  "trace_id": "IT-E2E-LANCE-X2T-01",
   "hf_id": "bytedance-research/Lance",
   "bundle": "lance-3b-x2t-image.trtfb",
   "family": "lance",
   "runtime_strategy": "lance_vision_language",
   "task_strategy": "vision_language_generation",
-  "reference_backend": "golden_snapshot",
-  "oracle_level": "L1_external_reference",
   "precision": "bf16",
   "max_cache_length": 384,
-  "prompt": "What color is the vehicle in this image? Answer in one word.",
-  "max_new_tokens": 10,
-  "test_image": "data/test_img.jpeg",
   "trust_remote_code": false,
-  "core": false,
-  "metadata": {
-    "golden_snapshot_path": "data/lance_3b_x2t_golden.json",
-    "golden_snapshot_provenance": "bytedance-research/Lance upstream eager x2t image-understanding run",
-    "contract_config": {
-      "use_chat_template": true,
-      "enable_thinking": false
+  "testcases": [
+    {
+      "name": "lance-3b-x2t-image",
+      "trace_id": "IT-E2E-LANCE-X2T-01",
+      "reference_backend": "golden_snapshot",
+      "oracle_level": "L1_external_reference",
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg",
+      "core": false,
+      "metadata": {
+        "golden_snapshot_path": "data/lance_3b_x2t_golden.json",
+        "golden_snapshot_provenance": "bytedance-research/Lance upstream eager x2t image-understanding run",
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false
+        }
+      },
+      "notes": "The existing BF16 graph is retained. The checkpoint is staged automatically from its nested Lance_3B and Qwen2.5-VL-ViT directories and compared with the one-word result captured from the upstream eager Lance implementation."
     }
-  },
-  "notes": "The existing BF16 graph is retained. The checkpoint is staged automatically from its nested Lance_3B and Qwen2.5-VL-ViT directories and compared with the one-word result captured from the upstream eager Lance implementation."
+  ]
 }

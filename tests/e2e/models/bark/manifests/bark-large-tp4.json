@@ -1,22 +1,13 @@
 {
   "name": "bark-large-tp4",
-  "trace_id": "IT-E2E-BARKL-TP4-01",
   "hf_id": "suno/bark",
   "bundle": "bark-large-tp4.trtfb",
   "family": "bark",
   "runtime_strategy": "text_to_audio_bark",
   "task_strategy": "text_to_audio",
-  "reference_family": "tts_bark",
-  "user_contract": "tts_audio",
-  "ci_tier": "multi_device",
   "e2e_size": "large",
-  "l0_replacement": "bark-small-tp4",
-  "l0_replacement_reason": "Bark large TP4 is scale coverage; bark-small-tp4 keeps the Bark tensor-parallel TTS path for PR multi-device coverage.",
   "e2e_parallel_resource": "exclusive_gpu",
-  "test_type": "audio",
   "max_cache_length": 1024,
-  "prompt": "Hello, this is a test of the text to speech system.",
-  "max_new_tokens": 0,
   "trust_remote_code": false,
   "build_args": {
     "parallel": {
@@ -36,28 +27,42 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "bark-large-tp4",
+      "trace_id": "IT-E2E-BARKL-TP4-01",
+      "reference_family": "tts_bark",
+      "user_contract": "tts_audio",
+      "ci_tier": "multi_device",
+      "l0_replacement": "bark-small-tp4",
+      "l0_replacement_reason": "Bark large TP4 is scale coverage; bark-small-tp4 keeps the Bark tensor-parallel TTS path for PR multi-device coverage.",
+      "test_type": "audio",
+      "prompt": "Hello, this is a test of the text to speech system.",
+      "max_new_tokens": 0,
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "determinism": {
+        "seed": 42
+      }
     }
-  ],
-  "determinism": {
-    "seed": 42
-  }
+  ]
 }
