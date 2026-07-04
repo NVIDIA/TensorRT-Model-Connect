@@ -9,7 +9,7 @@
   "reference_family": "time_series_point_forecast",
   "user_contract": "time_series_point_forecast",
   "oracle_level": "L1_external_reference",
-  "precision": "fp32",
+  "precision": "fp16",
   "max_cache_length": 512,
   "inputs": {
     "field_input": [
@@ -45,6 +45,6 @@
   },
   "metadata": {
     "core": false,
-    "notes": "Official IBM Granite PatchTSMixer checkpoint exercised through unified E2E with short numeric sample input."
+    "notes": "Official IBM Granite PatchTSMixer checkpoint exercised through unified E2E with short numeric sample input. The patcher, both mixer layers, forecast head, activations, and matmuls use FP16; FP16 GEMMs request FP32 accumulation, while normalization and statistical reductions remain FP32."
   }
 }

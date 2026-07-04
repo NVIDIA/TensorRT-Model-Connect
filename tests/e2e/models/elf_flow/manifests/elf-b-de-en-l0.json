@@ -1,18 +1,20 @@
 {
   "name": "elf-b-de-en-l0",
   "trace_id": "IT-E2E-ELFB-DEEN-L0-01",
-  "model_id": "github.com/lillian039/ELF:ELF-B-de-en",
+  "hf_id": "embedded-language-flows/ELF-B-de-en",
   "bundle": "elf-b-de-en-l0.trtfb",
   "family": "elf_flow",
   "runtime_strategy": "elf_flow",
   "task_strategy": "diffusion_text_generation",
-  "reference_backend": "invariant_only",
-  "oracle_level": "L4_invariants",
+  "reference_backend": "upstream_replay",
+  "oracle_level": "L1_external_reference",
   "reference_family": "elf_conditional_text",
   "user_contract": "diffusion_text_generation",
   "ci_tier": "contract_only",
-  "precision": "fp32",
-  "skip": "Contract-only in CI because GitHub ELF checkpoint artifacts are not bundled; local trtmc run supports prompt-conditioned sampling when the bundle includes the official JAX T5 encoder plan, or raw replay when condition latents and mask are supplied.",
+  "precision": "fp16",
+  "fp32_layers": [5, 6, 7, 8, 9, 10, 11],
+  "max_new_tokens": 64,
+  "max_cache_length": 128,
   "inputs": {
     "generation_mode": "conditional",
     "task": "wmt14_de_en_translation",
@@ -23,6 +25,7 @@
     "num_sampling_steps": 64,
     "cfg_scale": 2.0,
     "self_cond_cfg_scale": 1.0,
+    "elf_replay_artifact": "data/elf-b-de-en-replay/artifact.json",
     "output_schema": "jsonl lines with id, generated, and token_ids"
   },
   "stages": [
@@ -55,6 +58,6 @@
     "github_reference": "https://github.com/lillian039/ELF",
     "upstream_entrypoint": "src/eval.py --config configs/training_configs/train_de-en_ELF-B.yml",
     "expected_report": "Conditional ELF evaluation reports generated translations and BLEU/ROUGE-style task metrics when online evaluation is enabled.",
-    "notes": "Represents the user-visible ELF conditional translation contract: encode the source prompt with the bundled official JAX T5 encoder plan or accept precomputed source-condition latents through the raw API path, generate English target embeddings with the ELF flow, decode final logits, and emit generated translation text with token_ids."
+    "notes": "Replays the tensors exported from the official ELF JAX evaluator for the checked-in source sentence and requires exact normalized text plus token-id parity. Decoder blocks 0-4 and the final boundary run in FP16 with FP32 GEMM accumulation. Blocks 5-11 remain FP32 because casting the growing flow activations back to FP16 overflows before block 6."
   }
 }

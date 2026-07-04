@@ -21,5 +21,6 @@
   "asr_probe_readiness": "ready_now",
   "asr_probe_purpose": "Current smoke input copied as baseline.",
   "notes": "Nightly ASR coverage probe for Model Connect input handling: WAV decode + stereo input + model-specific resample.",
-  "precision": "fp16"
+  "precision": "fp16",
+  "reference_precision": "fp32"
 }

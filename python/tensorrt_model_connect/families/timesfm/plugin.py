@@ -41,15 +41,54 @@ def _context_length(config, fallback: int) -> int:
     return int(value)
 
 
-def _load_all_tensors(model_dir: str | Path, *, precision: str) -> WeightDict:
+def _load_all_tensors(
+    model_dir: str | Path,
+    *,
+    precision: str,
+    fp32_layers: tuple[int, ...],
+    num_layers: int,
+) -> WeightDict:
     readers = _open_safetensors(Path(model_dir))
     target_dtype = _target_np_dtype(precision)
     weights = WeightDict()
+    fp32_layers_set = frozenset(fp32_layers)
+    # Decoder blocks are followed by input, frequency, horizon, and bias selectors.
+    input_selector = num_layers
+    frequency_selector = num_layers + 1
+    horizon_selector = num_layers + 2
+    bias_selector = num_layers + 3
     tensor_map = getattr(readers, "tensor_map", {})
     for name in sorted(tensor_map):
         arr = _load_tensor(readers, name)
+        selected_fp32 = (
+            any(
+                layer in fp32_layers_set
+                and name.startswith(f"decoder.layers.{layer}.")
+                for layer in range(num_layers)
+            )
+            or (
+                input_selector in fp32_layers_set
+                and name.startswith("decoder.input_ff_layer.")
+            )
+            or (
+                frequency_selector in fp32_layers_set
+                and name.startswith("decoder.freq_emb.")
+            )
+            or (
+                horizon_selector in fp32_layers_set
+                and name.startswith("horizon_ff_layer.")
+            )
+        )
         dtype = np.float32 if (
-            name.endswith("layer_norm.weight")
+            (
+                selected_fp32
+                and (
+                    bias_selector in fp32_layers_set
+                    or not name.endswith(".bias")
+                )
+                and not name.endswith(".self_attn.k_proj.bias")
+            )
+            or name.endswith("layer_norm.weight")
             or name.endswith("layer_norm.bias")
             or name.endswith("layernorm.weight")
             or name.endswith("input_layernorm.weight")
@@ -194,7 +233,7 @@ def _add_decoder_layer(
         hidden_size,
         weights[f"{prefix}.input_layernorm.weight"].astype(np.float32),
         add_scalar(network, (1, 1, 1), float(raw.get("rms_norm_eps", 1.0e-6))),
-        dtype=np.float32,
+        dtype=(np.float16 if hidden.dtype == trt.float16 else np.float32),
     )
     q = add_linear(network, norm, weights[f"{prefix}.self_attn.q_proj.weight"],
                    weights.get(f"{prefix}.self_attn.q_proj.bias"), precision=precision)
@@ -212,8 +251,11 @@ def _add_decoder_layer(
     scale = scale * (1.442695041 / np.sqrt(float(head_dim)))
     scale_t = graph_ops.add_constant(
         network, (1, 1, 1, head_dim),
-        scale.reshape(1, 1, 1, head_dim), dtype=np.float32)
+        scale.reshape(1, 1, 1, head_dim),
+        dtype=(np.float16 if qh.dtype == trt.float16 else np.float32))
     qh = network.add_elementwise(qh, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+    if attn_mask.dtype != qh.dtype:
+        attn_mask = network.add_cast(attn_mask, qh.dtype).get_output(0)
     ctx = graph_ops.add_attention_core(
         network, qh, kh, vh, causal=False, mask=attn_mask, scale=1.0)
     ctx_rows = _rows_from_heads(
@@ -257,8 +299,11 @@ def _add_decoder_layer(
     ).get_output(0)
     keep_s = network.add_shuffle(keep)
     keep_s.reshape_dims = (1, num_patches, 1)
+    keep_t = keep_s.get_output(0)
+    if keep_t.dtype != mlp.dtype:
+        keep_t = network.add_cast(keep_t, mlp.dtype).get_output(0)
     mlp = network.add_elementwise(
-        mlp, keep_s.get_output(0), trt.ElementWiseOperation.PROD
+        mlp, keep_t, trt.ElementWiseOperation.PROD
     ).get_output(0)
     return network.add_elementwise(hidden, mlp, trt.ElementWiseOperation.SUM).get_output(0)
 
@@ -279,6 +324,20 @@ def _build_timesfm_network(
     num_heads = int(raw.get("num_attention_heads", 16))
     horizon = int(raw.get("horizon_length", 128))
     quantile_count = len(raw.get("quantiles", []))
+    num_layers = int(raw.get("num_hidden_layers", 1))
+    input_selector = num_layers
+    frequency_selector = num_layers + 1
+    horizon_selector = num_layers + 2
+    bias_selector = num_layers + 3
+    fp32_layers = frozenset(
+        int(layer) for layer in raw.get("_fp32_layers", ()))
+    invalid_fp32_layers = sorted(
+        layer for layer in fp32_layers
+        if layer < 0 or layer > bias_selector)
+    if invalid_fp32_layers:
+        raise ValueError(
+            "fp32_layers contains out-of-range TimesFM selectors: "
+            f"{invalid_fp32_layers}")
 
     builder, network = create_network(verbose=verbose)
     past_values = network.add_input("past_values", trt.float32, (1, context_length))
@@ -342,24 +401,49 @@ def _build_timesfm_network(
     concat.axis = 2
     hidden = _add_residual_block(
         network, concat.get_output(0), weights,
-        prefix="decoder.input_ff_layer", precision=precision)
+        prefix="decoder.input_ff_layer",
+        precision=(
+            "fp32"
+            if precision == "fp16" and input_selector in fp32_layers
+            else precision
+        ))
 
+    frequency_precision = (
+        "fp32"
+        if precision == "fp16" and frequency_selector in fp32_layers
+        else precision
+    )
+    frequency_dtype = (
+        np.float16 if frequency_precision == "fp16" else np.float32)
     freq_w = graph_ops.add_constant(
         network,
         tuple(weights["decoder.freq_emb.weight"].shape),
         weights["decoder.freq_emb.weight"],
-        dtype=np.float32,
+        dtype=frequency_dtype,
     )
     freq_emb = network.add_gather(freq_w, freq, 0).get_output(0)
     freq_shuf = network.add_shuffle(freq_emb)
     freq_shuf.reshape_dims = (1, 1, hidden_size)
+    freq_t = freq_shuf.get_output(0)
+    if frequency_precision == "fp32" and hidden.dtype != trt.float32:
+        hidden = network.add_cast(hidden, trt.float32).get_output(0)
+    elif freq_t.dtype != hidden.dtype:
+        freq_t = network.add_cast(freq_t, hidden.dtype).get_output(0)
     hidden = network.add_elementwise(
-        hidden, freq_shuf.get_output(0), trt.ElementWiseOperation.SUM
-    ).get_output(0)
+        hidden, freq_t, trt.ElementWiseOperation.SUM).get_output(0)
 
     patched_padding, attn_mask = _add_padding_mask(
         network, patched_pads, num_patches=num_patches, num_heads=num_heads)
-    for layer_idx in range(int(raw.get("num_hidden_layers", 1))):
+    for layer_idx in range(num_layers):
+        layer_precision = (
+            "fp32"
+            if precision == "fp16" and layer_idx in fp32_layers
+            else precision
+        )
+        layer_dtype = (
+            trt.float16 if layer_precision == "fp16" else trt.float32)
+        if hidden.dtype != layer_dtype:
+            hidden = network.add_cast(hidden, layer_dtype).get_output(0)
         hidden = _add_decoder_layer(
             network,
             hidden,
@@ -368,7 +452,7 @@ def _build_timesfm_network(
             weights,
             layer_idx=layer_idx,
             raw=raw,
-            precision=precision,
+            precision=layer_precision,
         )
 
     last_hidden = network.add_slice(
@@ -376,10 +460,17 @@ def _build_timesfm_network(
         shape=(1, 1, hidden_size), stride=(1, 1, 1)).get_output(0)
     forecast = _add_residual_block(
         network, last_hidden, weights,
-        prefix="horizon_ff_layer", precision=precision)
+        prefix="horizon_ff_layer",
+        precision=(
+            "fp32"
+            if precision == "fp16" and horizon_selector in fp32_layers
+            else precision
+        ))
     full = network.add_shuffle(forecast)
     full.reshape_dims = (1, horizon, quantile_count + 1)
     full_t = full.get_output(0)
+    if full_t.dtype != trt.float32:
+        full_t = network.add_cast(full_t, trt.float32).get_output(0)
     full_t = network.add_elementwise(full_t, sigma, trt.ElementWiseOperation.PROD).get_output(0)
     full_t = network.add_elementwise(full_t, mu, trt.ElementWiseOperation.SUM).get_output(0)
     mean = network.add_slice(
@@ -408,8 +499,13 @@ class TimesFmPlugin:
         *,
         precision: str = "fp32",
     ) -> dict:
-        del config
-        return _load_all_tensors(model_dir, precision=precision)
+        num_layers = int(config.raw.get("num_hidden_layers", 1))
+        return _load_all_tensors(
+            model_dir,
+            precision=precision,
+            fp32_layers=tuple(config.raw.get("_fp32_layers", ())),
+            num_layers=num_layers,
+        )
 
     def build_engine(
         self,

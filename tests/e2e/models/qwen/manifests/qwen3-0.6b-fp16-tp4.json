@@ -9,6 +9,7 @@
   "reference_family": "chat_qwen3_posttrained",
   "user_contract": "chat_response",
   "precision": "fp16",
+  "reference_precision": "fp32",
   "max_cache_length": 256,
   "prompt": "What is the capital of France? Answer in one word.",
   "max_new_tokens": 10,

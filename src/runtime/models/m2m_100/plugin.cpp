@@ -147,9 +147,9 @@ class M2M100Pipeline final : public IPipeline {
         actual_enc_len_ = actual_len;
 
         // Build attention mask: 0.0 for valid positions, -1e9 for padding
-        std::vector<float> enc_mask(static_cast<std::size_t>(max_source_length_), -1e9f);
+        encoder_attention_mask_.assign(static_cast<std::size_t>(max_source_length_), -1e9f);
         for (int32_t i = 0; i < actual_len; ++i)
-            enc_mask[static_cast<std::size_t>(i)] = 0.0f;
+            encoder_attention_mask_[static_cast<std::size_t>(i)] = 0.0f;
 
         TensorMap inputs;
         Tensor ids_tensor;
@@ -161,7 +161,7 @@ class M2M100Pipeline final : public IPipeline {
         // Provide attention mask if the encoder expects it
         Tensor mask_tensor;
         if (encoder_->has_input("attention_mask")) {
-            mask_tensor.data = enc_mask.data();
+            mask_tensor.data = encoder_attention_mask_.data();
             mask_tensor.shape = {max_source_length_};
             mask_tensor.dtype = DType::kFloat32;
             inputs["attention_mask"] = mask_tensor;
@@ -211,6 +211,13 @@ class M2M100Pipeline final : public IPipeline {
         token_tensor.dtype = DType::kInt32;
         TensorMap inputs;
         inputs["token_id"] = token_tensor;
+        Tensor cross_mask_tensor;
+        if (decoder_->has_input("cross_attention_mask")) {
+            cross_mask_tensor.data = encoder_attention_mask_.data();
+            cross_mask_tensor.shape = {max_source_length_};
+            cross_mask_tensor.dtype = DType::kFloat32;
+            inputs["cross_attention_mask"] = cross_mask_tensor;
+        }
         state_->prepare_step(inputs);
         TensorMap outputs = decoder_->forward(inputs);
         auto it = outputs.find("logits");
@@ -238,6 +245,7 @@ class M2M100Pipeline final : public IPipeline {
     std::string model_id_;
     std::vector<void*> cross_k_ptrs_;
     std::vector<void*> cross_v_ptrs_;
+    std::vector<float> encoder_attention_mask_;
     std::size_t cross_kv_bytes_{0};
 };
 

@@ -21,5 +21,6 @@
   "asr_probe_readiness": "ready_now",
   "asr_probe_purpose": "Cover native 16k mono path.",
   "notes": "Nightly ASR coverage probe for Model Connect input handling: WAV decode without model-side downmix; should avoid 48k->16k resample in ASR preprocessing.",
-  "precision": "fp16"
+  "precision": "fp16",
+  "reference_precision": "fp32"
 }

@@ -54,6 +54,7 @@ def build_standard_dit_engine(
     ffn_activation: str = "gelu_new",
     use_rope: bool = True,
     eps: float = 1e-6,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build DiT denoiser TRT engine plan.
@@ -97,6 +98,13 @@ def build_standard_dit_engine(
         Serialized TRT engine plan bytes.
     """
     head_dim = dim // num_heads
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported DiT precision {precision!r}; expected fp32 or fp16")
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -125,10 +133,21 @@ def build_standard_dit_engine(
     if not use_rope:
         cross_attn_mask = network.add_input(
             "encoder_attention_mask", trt.float32, (1, 1, text_seq_len))
+    if work_trt_dtype != trt.float32:
+        hidden_inp = network.add_cast(hidden_inp, work_trt_dtype).get_output(0)
+        temb_inp = network.add_cast(temb_inp, work_trt_dtype).get_output(0)
+        time_embed_inp = network.add_cast(
+            time_embed_inp, work_trt_dtype).get_output(0)
+        encoder_hidden = network.add_cast(
+            encoder_hidden, work_trt_dtype).get_output(0)
+        if cross_attn_mask is not None:
+            cross_attn_mask = network.add_cast(
+                cross_attn_mask, work_trt_dtype).get_output(0)
 
     # Constants
     eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([eps], dtype=np.float32))
+        network, (1, 1), np.array([eps], dtype=work_np_dtype),
+        dtype=work_np_dtype)
 
     # RoPE inputs and precomputation (only when use_rope=True)
     rotary_cos = rotary_sin = None
@@ -137,6 +156,11 @@ def build_standard_dit_engine(
             "rotary_cos", trt.float32, (num_patches, head_dim))
         rotary_sin = network.add_input(
             "rotary_sin", trt.float32, (num_patches, head_dim))
+        if work_trt_dtype != trt.float32:
+            rotary_cos = network.add_cast(
+                rotary_cos, work_trt_dtype).get_output(0)
+            rotary_sin = network.add_cast(
+                rotary_sin, work_trt_dtype).get_output(0)
 
     hidden = hidden_inp
 
@@ -147,7 +171,8 @@ def build_standard_dit_engine(
         # scale_shift_table: [1, 6, dim] -> flatten to [1, 6*dim]
         sst = weights[f"{prefix}.scale_shift_table"]
         sst_const = graph_ops.add_constant(
-            network, (1, 6 * dim), sst.reshape(1, 6 * dim))
+            network, (1, 6 * dim), sst.reshape(1, 6 * dim),
+            dtype=work_np_dtype)
 
         # modulation = sst + temb
         modulation = network.add_elementwise(
@@ -167,29 +192,33 @@ def build_standard_dit_engine(
 
         # === 1. Self-attention with AdaLN + RoPE ===
         normed = graph_ops.add_adaptive_layernorm(
-            network, hidden, scale_sa, shift_sa, dim, eps)
+            network, hidden, scale_sa, shift_sa, dim, eps,
+            dtype=work_np_dtype)
 
         # QKV projections
         q = graph_ops.add_matmul_rhs_constant(
             network, normed, dim, dim,
-            weights[f"{prefix}.attn1.to_q.weight"])
+            weights[f"{prefix}.attn1.to_q.weight"], dtype=work_np_dtype)
         k = graph_ops.add_matmul_rhs_constant(
             network, normed, dim, dim,
-            weights[f"{prefix}.attn1.to_k.weight"])
+            weights[f"{prefix}.attn1.to_k.weight"], dtype=work_np_dtype)
         v = graph_ops.add_matmul_rhs_constant(
             network, normed, dim, dim,
-            weights[f"{prefix}.attn1.to_v.weight"])
+            weights[f"{prefix}.attn1.to_v.weight"], dtype=work_np_dtype)
 
         # Biases
         q_bias = weights.get(f"{prefix}.attn1.to_q.bias")
         if q_bias is not None:
-            q = graph_ops.add_bias_sum(network, q, dim, q_bias)
+            q = graph_ops.add_bias_sum(
+                network, q, dim, q_bias, dtype=work_np_dtype)
         k_bias = weights.get(f"{prefix}.attn1.to_k.bias")
         if k_bias is not None:
-            k = graph_ops.add_bias_sum(network, k, dim, k_bias)
+            k = graph_ops.add_bias_sum(
+                network, k, dim, k_bias, dtype=work_np_dtype)
         v_bias = weights.get(f"{prefix}.attn1.to_v.bias")
         if v_bias is not None:
-            v = graph_ops.add_bias_sum(network, v, dim, v_bias)
+            v = graph_ops.add_bias_sum(
+                network, v, dim, v_bias, dtype=work_np_dtype)
 
         # QK norm
         if qk_norm:
@@ -197,10 +226,10 @@ def build_standard_dit_engine(
             k_norm_w = weights.get(f"{prefix}.attn1.norm_k.weight")
             if q_norm_w is not None:
                 q = graph_ops.add_rms_norm(
-                    network, q, dim, q_norm_w, eps_t)
+                    network, q, dim, q_norm_w, eps_t, dtype=work_np_dtype)
             if k_norm_w is not None:
                 k = graph_ops.add_rms_norm(
-                    network, k, dim, k_norm_w, eps_t)
+                    network, k, dim, k_norm_w, eps_t, dtype=work_np_dtype)
 
         # Apply RoPE to Q and K (skip when use_rope=False)
         if use_rope:
@@ -223,10 +252,12 @@ def build_standard_dit_engine(
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
             network, context_flat, dim, dim,
-            weights[f"{prefix}.attn1.to_out.0.weight"])
+            weights[f"{prefix}.attn1.to_out.0.weight"],
+            dtype=work_np_dtype)
         o_bias = weights.get(f"{prefix}.attn1.to_out.0.bias")
         if o_bias is not None:
-            attn_out = graph_ops.add_bias_sum(network, attn_out, dim, o_bias)
+            attn_out = graph_ops.add_bias_sum(
+                network, attn_out, dim, o_bias, dtype=work_np_dtype)
 
         # Gate + residual
         gated = network.add_elementwise(
@@ -244,7 +275,7 @@ def build_standard_dit_engine(
                     network, hidden, dim,
                     cross_norm_w,
                     cross_norm_b if cross_norm_b is not None else np.zeros(dim, dtype=np.float32),
-                    eps_t)
+                    eps_t, dtype=work_np_dtype)
             else:
                 cross_normed = hidden
         else:
@@ -253,40 +284,47 @@ def build_standard_dit_engine(
         # Cross-attention: Q from hidden, K/V from encoder_hidden
         cross_q = graph_ops.add_matmul_rhs_constant(
             network, cross_normed, dim, dim,
-            weights[f"{prefix}.attn2.to_q.weight"])
+            weights[f"{prefix}.attn2.to_q.weight"], dtype=work_np_dtype)
         cq_bias = weights.get(f"{prefix}.attn2.to_q.bias")
         if cq_bias is not None:
-            cross_q = graph_ops.add_bias_sum(network, cross_q, dim, cq_bias)
+            cross_q = graph_ops.add_bias_sum(
+                network, cross_q, dim, cq_bias, dtype=work_np_dtype)
 
         # K/V from encoder (may use add_k_proj/add_v_proj for context projection)
         add_k_proj_w = weights.get(f"{prefix}.attn2.add_k_proj.weight")
         if add_k_proj_w is not None:
             # Context needs projection: [text_seq, context_dim] -> [text_seq, dim]
             cross_k = graph_ops.add_matmul_rhs_constant(
-                network, encoder_hidden, context_dim, dim, add_k_proj_w)
+                network, encoder_hidden, context_dim, dim, add_k_proj_w,
+                dtype=work_np_dtype)
             add_k_bias = weights.get(f"{prefix}.attn2.add_k_proj.bias")
             if add_k_bias is not None:
-                cross_k = graph_ops.add_bias_sum(network, cross_k, dim, add_k_bias)
+                cross_k = graph_ops.add_bias_sum(
+                    network, cross_k, dim, add_k_bias, dtype=work_np_dtype)
             cross_v = graph_ops.add_matmul_rhs_constant(
                 network, encoder_hidden, context_dim, dim,
-                weights[f"{prefix}.attn2.add_v_proj.weight"])
+                weights[f"{prefix}.attn2.add_v_proj.weight"],
+                dtype=work_np_dtype)
             add_v_bias = weights.get(f"{prefix}.attn2.add_v_proj.bias")
             if add_v_bias is not None:
-                cross_v = graph_ops.add_bias_sum(network, cross_v, dim, add_v_bias)
+                cross_v = graph_ops.add_bias_sum(
+                    network, cross_v, dim, add_v_bias, dtype=work_np_dtype)
         else:
             # Direct K/V from already-projected context
             cross_k = graph_ops.add_matmul_rhs_constant(
                 network, encoder_hidden, context_dim, dim,
-                weights[f"{prefix}.attn2.to_k.weight"])
+                weights[f"{prefix}.attn2.to_k.weight"], dtype=work_np_dtype)
             ck_bias = weights.get(f"{prefix}.attn2.to_k.bias")
             if ck_bias is not None:
-                cross_k = graph_ops.add_bias_sum(network, cross_k, dim, ck_bias)
+                cross_k = graph_ops.add_bias_sum(
+                    network, cross_k, dim, ck_bias, dtype=work_np_dtype)
             cross_v = graph_ops.add_matmul_rhs_constant(
                 network, encoder_hidden, context_dim, dim,
-                weights[f"{prefix}.attn2.to_v.weight"])
+                weights[f"{prefix}.attn2.to_v.weight"], dtype=work_np_dtype)
             cv_bias = weights.get(f"{prefix}.attn2.to_v.bias")
             if cv_bias is not None:
-                cross_v = graph_ops.add_bias_sum(network, cross_v, dim, cv_bias)
+                cross_v = graph_ops.add_bias_sum(
+                    network, cross_v, dim, cv_bias, dtype=work_np_dtype)
 
         # QK norm for cross-attention
         if qk_norm:
@@ -294,15 +332,18 @@ def build_standard_dit_engine(
             ck_norm = weights.get(f"{prefix}.attn2.norm_k.weight")
             if cq_norm is not None:
                 cross_q = graph_ops.add_rms_norm(
-                    network, cross_q, dim, cq_norm, eps_t)
+                    network, cross_q, dim, cq_norm, eps_t,
+                    dtype=work_np_dtype)
             # For cross-attn with add_k_proj, the K norm is norm_added_k
             ck_added_norm = weights.get(f"{prefix}.attn2.norm_added_k.weight")
             if ck_added_norm is not None:
                 cross_k = graph_ops.add_rms_norm(
-                    network, cross_k, dim, ck_added_norm, eps_t)
+                    network, cross_k, dim, ck_added_norm, eps_t,
+                    dtype=work_np_dtype)
             elif ck_norm is not None:
                 cross_k = graph_ops.add_rms_norm(
-                    network, cross_k, dim, ck_norm, eps_t)
+                    network, cross_k, dim, ck_norm, eps_t,
+                    dtype=work_np_dtype)
 
         # Cross multi-head attention (no RoPE)
         cross_mask_4d = None
@@ -319,10 +360,12 @@ def build_standard_dit_engine(
 
         cross_out = graph_ops.add_matmul_rhs_constant(
             network, c_context_flat, dim, dim,
-            weights[f"{prefix}.attn2.to_out.0.weight"])
+            weights[f"{prefix}.attn2.to_out.0.weight"],
+            dtype=work_np_dtype)
         co_bias = weights.get(f"{prefix}.attn2.to_out.0.bias")
         if co_bias is not None:
-            cross_out = graph_ops.add_bias_sum(network, cross_out, dim, co_bias)
+            cross_out = graph_ops.add_bias_sum(
+                network, cross_out, dim, co_bias, dtype=work_np_dtype)
 
         # Cross-attn residual (no gate in Wan)
         hidden = network.add_elementwise(
@@ -331,24 +374,29 @@ def build_standard_dit_engine(
 
         # === 3. FFN with AdaLN ===
         ffn_normed = graph_ops.add_adaptive_layernorm(
-            network, hidden, scale_ff, shift_ff, dim, eps)
+            network, hidden, scale_ff, shift_ff, dim, eps,
+            dtype=work_np_dtype)
 
         # GELU FFN: Linear(dim, ffn_dim) -> GELU -> Linear(ffn_dim, dim)
         ffn_fc1 = graph_ops.add_matmul_rhs_constant(
             network, ffn_normed, dim, ffn_dim,
-            weights[f"{prefix}.ffn.net.0.proj.weight"])
+            weights[f"{prefix}.ffn.net.0.proj.weight"],
+            dtype=work_np_dtype)
         fc1_bias = weights.get(f"{prefix}.ffn.net.0.proj.bias")
         if fc1_bias is not None:
-            ffn_fc1 = graph_ops.add_bias_sum(network, ffn_fc1, ffn_dim, fc1_bias)
+            ffn_fc1 = graph_ops.add_bias_sum(
+                network, ffn_fc1, ffn_dim, fc1_bias, dtype=work_np_dtype)
 
-        ffn_act = graph_ops.add_gelu_new(network, ffn_fc1)
+        ffn_act = graph_ops.add_gelu_new(
+            network, ffn_fc1, dtype=work_np_dtype)
 
         ffn_fc2 = graph_ops.add_matmul_rhs_constant(
             network, ffn_act, ffn_dim, dim,
-            weights[f"{prefix}.ffn.net.2.weight"])
+            weights[f"{prefix}.ffn.net.2.weight"], dtype=work_np_dtype)
         fc2_bias = weights.get(f"{prefix}.ffn.net.2.bias")
         if fc2_bias is not None:
-            ffn_fc2 = graph_ops.add_bias_sum(network, ffn_fc2, dim, fc2_bias)
+            ffn_fc2 = graph_ops.add_bias_sum(
+                network, ffn_fc2, dim, fc2_bias, dtype=work_np_dtype)
 
         # Gate + residual
         gated_ff = network.add_elementwise(
@@ -363,7 +411,8 @@ def build_standard_dit_engine(
     # Result after add: [1, 2, dim], chunk -> shift [1, 1, dim], scale [1, 1, dim]
     final_sst = weights["scale_shift_table"]  # [1, 2, dim]
     final_sst_const = graph_ops.add_constant(
-        network, (1, 2 * dim), final_sst.reshape(1, 2 * dim))
+        network, (1, 2 * dim), final_sst.reshape(1, 2 * dim),
+        dtype=work_np_dtype)
 
     # time_embed_inp: [1, dim] -> tile to [1, 2*dim] for broadcast add
     time_embed_tiled = network.add_concatenation(
@@ -384,16 +433,17 @@ def build_standard_dit_engine(
     # Final LayerNorm + AdaLN modulation
     hidden = graph_ops.add_adaptive_layernorm(
         network, hidden, final_scale.get_output(0),
-        final_shift.get_output(0), dim, eps)
+        final_shift.get_output(0), dim, eps, dtype=work_np_dtype)
 
     # Final projection: [num_patches, dim] -> [num_patches, out_channels * prod(patch_size)]
     proj_out_w = weights["proj_out.weight"]
     out_dim = proj_out_w.shape[1]  # [dim, out_channels * prod(patch_size)]
     output = graph_ops.add_matmul_rhs_constant(
-        network, hidden, dim, out_dim, proj_out_w)
+        network, hidden, dim, out_dim, proj_out_w, dtype=work_np_dtype)
     proj_out_b = weights.get("proj_out.bias")
     if proj_out_b is not None:
-        output = graph_ops.add_bias_sum(network, output, out_dim, proj_out_b)
+        output = graph_ops.add_bias_sum(
+            network, output, out_dim, proj_out_b, dtype=work_np_dtype)
 
     # Mark output
     cast_output = network.add_cast(output, trt.float32)

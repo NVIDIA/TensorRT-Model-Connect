@@ -31,6 +31,7 @@ from pathlib import Path
 
 from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..runtime_config import runtime_config_set_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -559,6 +560,8 @@ class TextGenerationCausalRunner:
                 cmd.append("--chat-template")
             if contract_config.get("enable_thinking") is False:
                 cmd.append("--no-thinking")
+            for token in runtime_config_set_tokens(case):
+                cmd.extend(["--set", token])
 
         env = dict(os.environ)
         if ctx.ld_library_path:

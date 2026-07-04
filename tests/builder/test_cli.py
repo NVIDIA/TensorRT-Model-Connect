@@ -86,6 +86,19 @@ class TestBuildArgs:
         with pytest.raises(argparse.ArgumentTypeError):
             _parse_profile_rows(" , ")
 
+    def test_parse_fp32_layers(self):
+        from tensorrt_model_connect.build_cli import _parse_layer_indices
+
+        assert _parse_layer_indices("2") == [2]
+        assert _parse_layer_indices("1, 3") == [1, 3]
+
+    def test_parse_fp32_layers_rejects_negative_indices(self):
+        import argparse
+        from tensorrt_model_connect.build_cli import _parse_layer_indices
+
+        with pytest.raises(argparse.ArgumentTypeError, match="non-negative"):
+            _parse_layer_indices("-1")
+
 
 class TestMainParser:
     def test_build_accepts_trust_remote_code(self, monkeypatch, tmp_path):

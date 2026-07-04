@@ -13,6 +13,8 @@
   "prompt": "",
   "max_new_tokens": 0,
   "trust_remote_code": false,
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "test_image": "data/test_img.jpeg",
   "point_x": 0.5,
   "point_y": 0.5,

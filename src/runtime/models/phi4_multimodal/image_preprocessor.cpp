@@ -11,6 +11,7 @@
 #include "utils/json_helpers.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -271,6 +272,120 @@ load_pad_center_resize_normalize(const runtime::adapters::io::DecodedImage& imag
     return loaded;
 }
 
+struct Phi4HdResizeGeometry {
+    int width{0};
+    int height{0};
+    bool ok{false};
+};
+
+static Phi4HdResizeGeometry
+resolve_phi4_hd_resize_geometry(const runtime::adapters::io::DecodedImage& image, int crop) {
+    const int crop_cols = (image.width + crop - 1) / crop;
+    const int crop_rows = (image.height + crop - 1) / crop;
+    if (crop_cols != 2 || crop_rows != 1) {
+        std::cerr << "[trtmc] Phi-4 canonical vision engine requires a 2x1 crop topology"
+                  << std::endl;
+        return {};
+    }
+
+    const int canvas_width = 2 * crop;
+    const float ratio_width = static_cast<float>(canvas_width) / image.width;
+    const float ratio_height = static_cast<float>(crop) / image.height;
+    int new_width = canvas_width;
+    int new_height = static_cast<int>(image.height * ratio_width);
+    if (ratio_width >= ratio_height) {
+        new_width = static_cast<int>(image.width * ratio_height);
+        new_height = crop;
+    }
+
+    const int padding_width = canvas_width - new_width;
+    const int padding_height = crop - new_height;
+    if (padding_height >= 14 || padding_width / 14 != 10) {
+        std::cerr << "[trtmc] Phi-4 canonical vision engine requires 22 valid patch columns "
+                  << "in its second crop" << std::endl;
+        return {};
+    }
+    return {new_width, new_height, true};
+}
+
+static bool normalize_phi4_hd_crops(const std::vector<unsigned char>& global,
+                                    const std::vector<unsigned char>& left,
+                                    const std::vector<unsigned char>& right, int crop,
+                                    const Phi4MultimodalPreprocessConfig& config,
+                                    std::vector<float>& output) {
+    std::vector<float> global_chw;
+    std::vector<float> left_chw;
+    std::vector<float> right_chw;
+    if (global.empty() || !normalize_to_chw(global, crop, config, global_chw) ||
+        !normalize_to_chw(left, crop, config, left_chw) ||
+        !normalize_to_chw(right, crop, config, right_chw)) {
+        return false;
+    }
+    output.reserve(global_chw.size() + left_chw.size() + right_chw.size());
+    output.insert(output.end(), global_chw.begin(), global_chw.end());
+    output.insert(output.end(), left_chw.begin(), left_chw.end());
+    output.insert(output.end(), right_chw.begin(), right_chw.end());
+    return true;
+}
+
+// Phi-4's canonical Dynamic-HD profile: global crop + two 448px horizontal tiles.
+static LoadedImage load_phi4_hd_normalize(const runtime::adapters::io::DecodedImage& image,
+                                          const Phi4MultimodalPreprocessConfig& config) {
+    LoadedImage loaded;
+    constexpr int crop = 448;
+    constexpr int canvas_width = 2 * crop;
+    constexpr int canvas_height = crop;
+    if (image.empty() || config.fixed_image_size != crop) {
+        std::cerr << "[trtmc] Invalid image for Phi-4 Dynamic-HD preprocessing" << std::endl;
+        return loaded;
+    }
+
+    const auto geometry = resolve_phi4_hd_resize_geometry(image, crop);
+    if (!geometry.ok) {
+        return loaded;
+    }
+    const int new_width = geometry.width;
+    const int new_height = geometry.height;
+
+    std::vector<unsigned char> resized(static_cast<std::size_t>(new_width) * new_height * 3);
+    if (stbir_resize(image.pixels.data(), image.width, image.height, image.width * 3,
+                     resized.data(), new_width, new_height, new_width * 3, STBIR_RGB,
+                     STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_TRIANGLE) == nullptr) {
+        std::cerr << "[trtmc] Failed to resize Phi-4 Dynamic-HD image" << std::endl;
+        return loaded;
+    }
+
+    std::vector<unsigned char> canvas(static_cast<std::size_t>(canvas_width) * canvas_height * 3,
+                                      255);
+    for (int y = 0; y < new_height; ++y) {
+        std::memcpy(canvas.data() + static_cast<std::size_t>(y) * canvas_width * 3,
+                    resized.data() + static_cast<std::size_t>(y) * new_width * 3,
+                    static_cast<std::size_t>(new_width) * 3);
+    }
+
+    auto global =
+        resize_raw(canvas.data(), canvas_width, canvas_height, crop, STBIR_FILTER_CATMULLROM);
+    std::vector<unsigned char> left(static_cast<std::size_t>(crop) * crop * 3);
+    std::vector<unsigned char> right(static_cast<std::size_t>(crop) * crop * 3);
+    for (int y = 0; y < crop; ++y) {
+        const auto* source = canvas.data() + static_cast<std::size_t>(y) * canvas_width * 3;
+        std::memcpy(left.data() + static_cast<std::size_t>(y) * crop * 3, source,
+                    static_cast<std::size_t>(crop) * 3);
+        std::memcpy(right.data() + static_cast<std::size_t>(y) * crop * 3,
+                    source + static_cast<std::size_t>(crop) * 3,
+                    static_cast<std::size_t>(crop) * 3);
+    }
+
+    if (!normalize_phi4_hd_crops(global, left, right, crop, config, loaded.img_chw)) {
+        std::cerr << "[trtmc] Failed to normalize Phi-4 Dynamic-HD crops" << std::endl;
+        return loaded;
+    }
+    loaded.target_size = crop;
+    loaded.channels = 9;
+    loaded.ok = true;
+    return loaded;
+}
+
 // ---------------------------------------------------------------------------
 // Strategy: merge_group_chw
 // ---------------------------------------------------------------------------
@@ -379,6 +494,8 @@ struct PreprocessDispatch {
 };
 
 static PreprocessDispatch resolve_preprocess_dispatch(const std::string& preprocessor_type) {
+    if (preprocessor_type == "phi4_hd_chw")
+        return {load_phi4_hd_normalize, preprocess_simple_chw, false};
     if (preprocessor_type == "center_crop_chw")
         return {load_crop_resize_normalize, preprocess_simple_chw, false};
     if (preprocessor_type == "aspect_preserve_chw")

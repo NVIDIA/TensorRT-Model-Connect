@@ -6,6 +6,8 @@
   "family": "internvl",
   "runtime_strategy": "internvl_vision_language",
   "task_strategy": "vision_language_generation",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "ci_tier": "l0_only",
   "task_eval": {
     "vlm_fallback_prompt_template": "<IMG_CONTEXT>\n{prompt}"

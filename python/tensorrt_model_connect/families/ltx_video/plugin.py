@@ -154,10 +154,27 @@ class LTXVideoPlugin:
         t5_d_ff = int(t5_cfg.get("d_ff", self._T5_D_FF))
         t5_num_layers = int(t5_cfg.get("num_layers", self._T5_NUM_LAYERS))
         t5_vocab_size = int(t5_cfg.get("vocab_size", self._T5_VOCAB_SIZE))
+        requested_fp32_layers = frozenset(
+            int(layer) for layer in config.raw.get("_fp32_layers", ()))
+        invalid_fp32_layers = sorted(
+            layer for layer in requested_fp32_layers
+            if layer < 0 or layer > t5_num_layers)
+        if invalid_fp32_layers:
+            raise ValueError(
+                "LTX-Video fp32_layers contains unknown T5 selectors: "
+                f"{invalid_fp32_layers}; expected 0-{t5_num_layers}, where "
+                f"{t5_num_layers} selects the complete T5 encoder")
+        t5_component_fp32 = (
+            precision == "fp16" and t5_num_layers in requested_fp32_layers)
+        t5_precision = "fp32" if t5_component_fp32 else precision
+        t5_fp32_layers = tuple(sorted(
+            requested_fp32_layers - {t5_num_layers}))
 
         print("[ltx-video] Loading T5 encoder weights ...", file=sys.stderr)
         t5_weights = load_t5_weights(
             weights["_text_encoder_dir"],
+            precision=t5_precision,
+            fp32_layers=t5_fp32_layers,
             d_model=t5_d_model,
             num_heads=t5_num_heads,
             d_kv=t5_d_kv,
@@ -174,6 +191,8 @@ class LTXVideoPlugin:
             num_layers=t5_num_layers,
             vocab_size=t5_vocab_size,
             max_seq_len=self._T5_MAX_SEQ_LEN,
+            precision=t5_precision,
+            fp32_layers=t5_fp32_layers,
             verbose=verbose,
         )
 

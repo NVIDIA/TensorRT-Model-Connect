@@ -291,7 +291,6 @@ class ElfDiffusionTextPlugin:
         case: E2ECase,
         threshold: ThresholdProfile,
     ):
-        del ref_output
         stage = trt_output.stage_name
         if stage not in ("full_generation", "decoded_text", "end_to_end"):
             metrics = {
@@ -307,7 +306,7 @@ class ElfDiffusionTextPlugin:
 
         samples = _generated_samples(trt_output)
         texts = [normalize_text(_text_from_sample(sample)) for sample in samples]
-        expected_samples = _expected_samples(trt_output)
+        expected_samples = _expected_samples(ref_output) or _expected_samples(trt_output)
         expected_texts = [
             normalize_text(_text_from_sample(sample)) for sample in expected_samples
         ]

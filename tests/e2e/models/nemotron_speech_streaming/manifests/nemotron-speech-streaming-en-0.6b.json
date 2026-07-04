@@ -9,6 +9,8 @@
   "reference_family": "asr_canary",
   "user_contract": "exact_transcript",
   "test_type": "transcription",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "max_cache_length": 128,
   "prompt": "test",
   "max_new_tokens": 80,

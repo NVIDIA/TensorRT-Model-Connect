@@ -30,6 +30,16 @@ def _storage_dtype(precision: str) -> np.dtype:
     return np.float16 if precision == "fp16" else np.float32
 
 
+def _trt_dtype(precision: str):
+    return trt.float16 if precision == "fp16" else trt.float32
+
+
+def _cast(network: trt.INetworkDefinition, tensor: trt.ITensor, dtype):
+    if tensor.dtype == dtype:
+        return tensor
+    return network.add_cast(tensor, dtype).get_output(0)
+
+
 def _dense(
     network: trt.INetworkDefinition,
     x: trt.ITensor,
@@ -87,6 +97,48 @@ def _prefix_tokens(
     return network.add_elementwise(tokens, emb, trt.ElementWiseOperation.SUM).get_output(0)
 
 
+def _add_attention_fp32_accumulation(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k: trt.ITensor,
+    v: trt.ITensor,
+    *,
+    num_heads: int,
+    head_dim: int,
+    sequence_length: int,
+) -> trt.ITensor:
+    """Run ELF attention math in FP32 and restore the input dtype."""
+    output_dtype = q.dtype
+    q_4d = graph_ops.reshape_rows_to_heads_4d(
+        network, q, num_heads, head_dim, sequence_length=sequence_length)
+    k_4d = graph_ops.reshape_rows_to_heads_4d(
+        network, k, num_heads, head_dim, sequence_length=sequence_length)
+    v_4d = graph_ops.reshape_rows_to_heads_4d(
+        network, v, num_heads, head_dim, sequence_length=sequence_length)
+    q_4d = _cast(network, q_4d, trt.float32)
+    k_4d = _cast(network, k_4d, trt.float32)
+    v_4d = _cast(network, v_4d, trt.float32)
+
+    scale = graph_ops.add_constant(
+        network, (1, 1, 1, 1),
+        np.array([1.0 / np.sqrt(head_dim)], dtype=np.float32),
+        dtype=np.float32)
+    q_scaled = network.add_elementwise(
+        q_4d, scale, trt.ElementWiseOperation.PROD).get_output(0)
+    scores = network.add_matrix_multiply(
+        q_scaled, trt.MatrixOperation.NONE,
+        k_4d, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    probs = network.add_softmax(scores)
+    probs.axes = 1 << 3
+    context = network.add_matrix_multiply(
+        probs.get_output(0), trt.MatrixOperation.NONE,
+        v_4d, trt.MatrixOperation.NONE).get_output(0)
+    context = _cast(network, context, output_dtype)
+    return graph_ops.reshape_heads_4d_to_rows(
+        network, context, num_heads * head_dim,
+        sequence_length=sequence_length)
+
+
 def _add_transformer_block(
     network: trt.INetworkDefinition,
     hidden: trt.ITensor,
@@ -130,9 +182,17 @@ def _add_transformer_block(
         network, k, num_heads, head_dim, cos_cache, sin_cache,
         rotary_embedding_dim=head_dim, interleaved=True, sequence_length=total_seq)
 
-    attn = graph_ops.add_attention_from_rows(
-        network, q, k, v, num_heads=num_heads, head_dim=head_dim,
-        q_seq=total_seq, kv_seq=total_seq, causal=False)
+    if dtype == np.float32:
+        attn = graph_ops.add_attention_from_rows(
+            network, q, k, v, num_heads=num_heads, head_dim=head_dim,
+            q_seq=total_seq, kv_seq=total_seq, causal=False)
+    else:
+        # TensorRT 11 can crash while compiling IAttention when FP16 inputs are
+        # promoted to FP32 inside the fused layer. Keep the same accumulation
+        # boundary with explicit, strongly typed attention primitives.
+        attn = _add_attention_fp32_accumulation(
+            network, q, k, v, num_heads=num_heads, head_dim=head_dim,
+            sequence_length=total_seq)
     attn = _dense(
         network, attn, hidden_size, hidden_size,
         weights[f"{p}.attn.proj.w"], weights[f"{p}.attn.proj.b"], dtype=dtype)
@@ -163,6 +223,7 @@ def build_elf_flow_engine(
     *,
     precision: str = "fp32",
     verbose: bool = False,
+    debug_layer_outputs: bool = False,
 ) -> bytes:
     """Build an ELF denoiser/decoder engine from GitHub ELF weights."""
     cfg = resolve_elf_config(config, max_seq_length)
@@ -172,6 +233,16 @@ def build_elf_flow_engine(
     max_length = cfg["max_length"]
     config.raw["_elf_engine_max_length"] = max_length
     dtype = _storage_dtype(precision)
+    work_trt_dtype = _trt_dtype(precision)
+    requested_fp32_layers = frozenset(
+        int(layer) for layer in config.raw.get("_fp32_layers", ()))
+    invalid_fp32_layers = sorted(
+        layer for layer in requested_fp32_layers
+        if layer < 0 or layer > cfg["depth"])
+    if invalid_fp32_layers:
+        raise ValueError(
+            "ELF fp32_layers contains out-of-range indices: "
+            f"{invalid_fp32_layers}")
 
     if cfg["vocab_size"] <= 0:
         raise ValueError("ELF config must set vocab_size for the decoder head")
@@ -187,6 +258,12 @@ def build_elf_flow_engine(
     # so replay parity against the GitHub JAX implementation stays tight.
     builder_config.clear_flag(trt.BuilderFlag.TF32)
 
+    boundary_selector = cfg["depth"]
+    use_fp32_boundary = (
+        precision == "fp16" and boundary_selector in requested_fp32_layers)
+    boundary_dtype = np.float32 if use_fp32_boundary else dtype
+    boundary_trt_dtype = trt.float32 if use_fp32_boundary else work_trt_dtype
+
     latent = network.add_input("latent", trt.float32, (max_length, input_dim))
     timestep = network.add_input("timestep", trt.float32, (1,))
     decoder_mode = network.add_input("decoder_mode", trt.float32, (1,))
@@ -194,14 +271,25 @@ def build_elf_flow_engine(
     if cfg["num_self_cond_cfg_tokens"] > 0:
         self_cond_cfg = network.add_input("self_cond_cfg_scale", trt.float32, (1,))
 
+    latent = _cast(network, latent, boundary_trt_dtype)
+    timestep = _cast(network, timestep, boundary_trt_dtype)
+    decoder_mode = _cast(network, decoder_mode, boundary_trt_dtype)
+    if self_cond_cfg is not None:
+        self_cond_cfg = _cast(network, self_cond_cfg, boundary_trt_dtype)
+
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([cfg["rms_norm_eps"]], dtype=np.float32))
+        network, (1, 1), np.array([cfg["rms_norm_eps"]], dtype=dtype),
+        dtype=dtype)
+    eps_tensor_fp32 = graph_ops.add_constant(
+        network, (1, 1), np.array([cfg["rms_norm_eps"]], dtype=np.float32),
+        dtype=np.float32)
 
     x = latent
     if input_dim == 2 * text_dim:
         x = _dense(
             network, x, input_dim, text_dim,
-            weights["self_cond_proj.w"], weights["self_cond_proj.b"], dtype=dtype)
+            weights["self_cond_proj.w"], weights["self_cond_proj.b"],
+            dtype=boundary_dtype)
     elif input_dim != text_dim:
         raise ValueError(
             f"ELF input_dim={input_dim} must equal text_encoder_dim={text_dim} "
@@ -209,17 +297,19 @@ def build_elf_flow_engine(
 
     x = _dense(
         network, x, text_dim, cfg["bottleneck_dim"],
-        weights["text_proj.proj1.w"], None, dtype=dtype)
+        weights["text_proj.proj1.w"], None, dtype=boundary_dtype)
     x = _dense(
         network, x, cfg["bottleneck_dim"], hidden_size,
-        weights["text_proj.proj2.w"], weights["text_proj.proj2.b"], dtype=dtype)
+        weights["text_proj.proj2.w"], weights["text_proj.proj2.b"],
+        dtype=boundary_dtype)
 
     mode_tokens = 0
     if cfg["num_model_mode_tokens"] > 0:
         mode_tokens = cfg["num_model_mode_tokens"]
         mode = graph_ops.add_constant(
             network, (mode_tokens, hidden_size),
-            weights["mode_tokens"].reshape(mode_tokens, hidden_size), dtype=dtype)
+            weights["mode_tokens"].reshape(mode_tokens, hidden_size),
+            dtype=boundary_dtype)
         gated = network.add_elementwise(
             mode, _scalar_2d(network, decoder_mode), trt.ElementWiseOperation.PROD
         ).get_output(0)
@@ -229,16 +319,18 @@ def build_elf_flow_engine(
 
     prefix_parts: list[trt.ITensor] = []
     time_emb = _timestep_mlp(
-        network, timestep, hidden_size, weights, "t_embedder", dtype=dtype)
+        network, timestep, hidden_size, weights, "t_embedder",
+        dtype=boundary_dtype)
     prefix_parts.append(_prefix_tokens(
-        network, time_emb, weights["t_emb_tokens"], dtype=dtype))
+        network, time_emb, weights["t_emb_tokens"], dtype=boundary_dtype))
     if cfg["num_self_cond_cfg_tokens"] > 0:
         assert self_cond_cfg is not None
         sc_emb = _timestep_mlp(
             network, self_cond_cfg, hidden_size, weights,
-            "self_cond_cfg_embedder", dtype=dtype)
+            "self_cond_cfg_embedder", dtype=boundary_dtype)
         prefix_parts.append(_prefix_tokens(
-            network, sc_emb, weights["self_cond_cfg_tokens"], dtype=dtype))
+            network, sc_emb, weights["self_cond_cfg_tokens"],
+            dtype=boundary_dtype))
 
     prefix_len = cfg["num_time_tokens"] + cfg["num_self_cond_cfg_tokens"]
     prefix_cat = network.add_concatenation(prefix_parts)
@@ -246,6 +338,10 @@ def build_elf_flow_engine(
     cat = network.add_concatenation([prefix_cat.get_output(0), x])
     cat.axis = 0
     hidden = cat.get_output(0)
+    if debug_layer_outputs:
+        debug = network.add_cast(hidden, trt.float32).get_output(0)
+        debug.name = "debug_projected"
+        network.mark_output(debug)
 
     total_seq = prefix_len + mode_tokens + max_length
     cfg = dict(cfg)
@@ -256,32 +352,54 @@ def build_elf_flow_engine(
         prefix_tokens=prefix_len + mode_tokens, theta=cfg["rope_theta"])
     cos_cache = graph_ops.add_constant(network, cos_np.shape, cos_np, dtype=dtype)
     sin_cache = graph_ops.add_constant(network, sin_np.shape, sin_np, dtype=dtype)
+    cos_cache_fp32 = graph_ops.add_constant(
+        network, cos_np.shape, cos_np, dtype=np.float32)
+    sin_cache_fp32 = graph_ops.add_constant(
+        network, sin_np.shape, sin_np, dtype=np.float32)
 
     for layer_idx in range(cfg["depth"]):
+        use_fp32_layer = precision == "fp16" and layer_idx in requested_fp32_layers
+        layer_dtype = np.float32 if use_fp32_layer else dtype
+        layer_trt_dtype = trt.float32 if use_fp32_layer else work_trt_dtype
+        hidden = _cast(network, hidden, layer_trt_dtype)
         hidden = _add_transformer_block(
-            network, hidden, weights, layer_idx, cfg, eps_tensor, cos_cache, sin_cache,
-            dtype=dtype)
+            network, hidden, weights, layer_idx, cfg,
+            eps_tensor_fp32 if use_fp32_layer else eps_tensor,
+            cos_cache_fp32 if use_fp32_layer else cos_cache,
+            sin_cache_fp32 if use_fp32_layer else sin_cache,
+            dtype=layer_dtype)
+        if debug_layer_outputs:
+            debug = network.add_cast(hidden, trt.float32).get_output(0)
+            debug.name = f"debug_hidden_{layer_idx}"
+            network.mark_output(debug)
 
+    if use_fp32_boundary:
+        hidden = _cast(network, hidden, trt.float32)
     body = network.add_slice(
         hidden, (prefix_len + mode_tokens, 0), (max_length, hidden_size), (1, 1)
     ).get_output(0)
 
+    final_dtype = np.float32 if hidden.dtype == trt.float32 else dtype
+    final_eps = eps_tensor_fp32 if final_dtype == np.float32 else eps_tensor
     proj = _dense(
         network, body, hidden_size, text_dim,
-        weights["decoder.proj.w"], weights["decoder.proj.b"], dtype=dtype)
-    proj = graph_ops.add_gelu_new(network, proj, dtype=dtype)
+        weights["decoder.proj.w"], weights["decoder.proj.b"], dtype=final_dtype)
+    proj = graph_ops.add_gelu_new(network, proj, dtype=final_dtype)
     logits = _dense(
         network, proj, text_dim, cfg["vocab_size"],
-        weights["decoder.unembed.w"], weights["decoder.unembed.b"], dtype=dtype)
+        weights["decoder.unembed.w"], weights["decoder.unembed.b"],
+        dtype=final_dtype)
+    decoder_mode_final = _cast(network, decoder_mode, logits.dtype)
     logits = network.add_elementwise(
-        logits, _scalar_2d(network, decoder_mode), trt.ElementWiseOperation.PROD
+        logits, _scalar_2d(network, decoder_mode_final), trt.ElementWiseOperation.PROD
     ).get_output(0)
 
     denoised = graph_ops.add_rms_norm(
-        network, body, hidden_size, weights["final.norm"], eps_tensor, dtype=dtype)
+        network, body, hidden_size, weights["final.norm"], final_eps,
+        dtype=final_dtype)
     denoised = _dense(
         network, denoised, hidden_size, text_dim,
-        weights["final.linear.w"], weights["final.linear.b"], dtype=dtype)
+        weights["final.linear.w"], weights["final.linear.b"], dtype=final_dtype)
 
     denoised = network.add_cast(denoised, trt.float32).get_output(0)
     denoised.name = "denoised"

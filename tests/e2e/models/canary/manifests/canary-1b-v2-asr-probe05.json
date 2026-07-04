@@ -23,5 +23,6 @@
   "metadata": {
     "group_by_bundle": true
   },
-  "notes": "Nightly ASR coverage probe for Model Connect input handling: PCM int16 decode + float normalization + ASR preprocessing."
+  "notes": "Nightly ASR coverage probe for Model Connect input handling: PCM int16 decode + float normalization + ASR preprocessing.",
+  "precision": "fp16"
 }

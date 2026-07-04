@@ -6,6 +6,8 @@
   "family": "bert",
   "runtime_strategy": "bert_encoder_only",
   "task_strategy": "encoder_only_nlp",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "reference_family": "bge_retrieval_embed",
   "user_contract": "embedding_vector",
   "max_cache_length": 512,

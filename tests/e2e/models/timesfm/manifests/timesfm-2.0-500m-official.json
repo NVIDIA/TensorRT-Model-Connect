@@ -9,7 +9,31 @@
   "reference_family": "time_series_point_forecast",
   "user_contract": "time_series_point_forecast",
   "oracle_level": "L1_external_reference",
-  "precision": "fp32",
+  "precision": "fp16",
+  "fp32_layers": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    50,
+    51,
+    52,
+    53
+  ],
   "max_cache_length": 2048,
   "inputs": {
     "branch_input": [
@@ -32,6 +56,6 @@
   },
   "metadata": {
     "core": false,
-    "notes": "Official Google TimesFM 2.0 500M PyTorch checkpoint exercised through unified E2E with short univariate sample input."
+    "notes": "Official Google TimesFM 2.0 500M PyTorch checkpoint exercised through unified E2E with short univariate sample input. FP16 GEMMs request FP32 accumulation. Decoder layers 11-40 and 48-49 use FP16, so 32 of 50 decoder layers remain reduced precision. Layers 0-10 and 41-47 plus selectors 50-53 retain the precision-sensitive early and late residual paths, input FFN, frequency embedding, horizon head, and non-invariant biases in FP32."
   }
 }

@@ -20,5 +20,6 @@
   "asr_probe_id": "probe_01_clean_48k_stereo_baseline",
   "asr_probe_readiness": "ready_now",
   "asr_probe_purpose": "Current smoke input copied as baseline.",
-  "notes": "Nightly ASR coverage probe for Model Connect input handling: WAV decode + stereo input + model-specific resample."
+  "notes": "Nightly ASR coverage probe for Model Connect input handling: WAV decode + stereo input + model-specific resample.",
+  "precision": "fp16"
 }

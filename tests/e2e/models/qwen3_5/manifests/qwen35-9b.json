@@ -12,5 +12,13 @@
   "max_cache_length": 256,
   "prompt": "What is the capital of France? Answer in one word.",
   "max_new_tokens": 10,
-  "trust_remote_code": true
+  "trust_remote_code": true,
+  "precision": "fp16",
+  "reference_precision": "fp32",
+  "runtime_config": {
+    "runtime": {
+      "disable_cuda_graph": true
+    }
+  },
+  "notes": "The decoder runs in FP16 and preserves FP32 Hugging Face text parity. KV-cache engine I/O follows the FP16 work dtype; the previous FP32 cache declaration overran FP16 runtime buffers."
 }

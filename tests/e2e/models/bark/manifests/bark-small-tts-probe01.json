@@ -22,5 +22,6 @@
   "tts_probe_id": "probe_01_prompt_round_trip_sentence",
   "tts_probe_readiness": "ready_now",
   "tts_probe_purpose": "Cover Model Connect text prompt transport through generate-audio with a distinct sentence while reusing the existing bark-small bundle.",
-  "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt -> text_to_audio_bark runtime -> WAV artifact -> tts_audio contract. Golden Bark token checks are intentionally omitted because they are prompt-specific to the base bark-small case."
+  "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt -> text_to_audio_bark runtime -> WAV artifact -> tts_audio contract. Golden Bark token checks are intentionally omitted because they are prompt-specific to the base bark-small case.",
+  "precision": "fp16"
 }

@@ -1,2 +1,1 @@
 # Model-local E2E waives. Format: [platform/]model-name SKIP|XFAIL (reason)
-gemma-2-2b               SKIP   (gated model, needs HF_TOKEN)

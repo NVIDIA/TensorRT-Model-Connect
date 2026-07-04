@@ -6,6 +6,8 @@
   "family": "qwen_vl",
   "runtime_strategy": "qwen_vl_vision_language",
   "task_strategy": "vision_language_generation",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "reference_family": "vl_instruct_qa",
   "user_contract": "vl_answer",
   "task_eval": {

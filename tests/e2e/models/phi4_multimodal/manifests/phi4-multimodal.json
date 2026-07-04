@@ -8,12 +8,15 @@
   "task_strategy": "vision_language_generation",
   "reference_family": "vl_instruct_qa",
   "user_contract": "vl_answer",
-  "max_cache_length": 384,
+  "precision": "fp16",
+  "reference_precision": "fp32",
+  "max_cache_length": 768,
   "prompt": "Describe this image.",
   "max_new_tokens": 30,
   "trust_remote_code": true,
   "test_image": "data/test_img.jpeg",
   "metadata": {
+    "precision_notes": "Pure FP16 passes after applying the checkpoint's LongRoPE frequency and attention scaling. Explicit attention retains FP32 score accumulation; no decoder block remains FP32.",
     "contract_config": {
       "use_processor": true,
       "use_chat_template": true

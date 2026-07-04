@@ -32,6 +32,15 @@ def test_owner_reference_uses_image_pad_fallback() -> None:
     assert 'fallback_text = f"<|vision_start|><|image_pad|><|vision_end|>{prompt}"' in source
 
 
+def test_owner_reference_falls_back_to_tokenizer_chat_template() -> None:
+    source = inspect.getsource(
+        qwen_vl_hf_transformers.HfTransformersReference._run_vl_full_generation
+    )
+    assert 'tokenizer = getattr(processor, "tokenizer", None)' in source
+    assert "text_input = tokenizer.apply_chat_template(" in source
+    assert "tokenizer chat template produced no image placeholder" in source
+
+
 def test_vl_decode_uses_generated_suffix_for_full_sequences() -> None:
     processor = _FakeProcessor({
         (101, 102): "prompt",

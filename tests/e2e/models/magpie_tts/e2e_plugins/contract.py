@@ -284,12 +284,63 @@ class MagpieTTSPlugin:
         trt_wav = trt_output.data.get("wav_path")
         trt_rms = trt_output.data.get("rms")
         trt_duration = trt_output.data.get("duration_s")
+        ref_wav = ref_output.data.get("wav_path")
+        ref_rms = ref_output.data.get("rms")
+        ref_duration = ref_output.data.get("duration_s")
+        ref_returncode = ref_output.data.get(
+            "returncode", ref_output.metadata.get("returncode"))
 
         min_rms = threshold.metrics.get("contract_min_rms", 0.001)
         min_duration = threshold.metrics.get("contract_min_duration_s", 0.1)
         max_duration = threshold.metrics.get("contract_max_duration_s", 30.0)
 
         metrics: dict[str, MetricResult] = {}
+
+        ref_completed = ref_returncode == 0
+        metrics["reference_completed"] = MetricResult(
+            value=1.0 if ref_completed else 0.0,
+            threshold=1.0,
+            operator="==",
+            passed=ref_completed,
+            note="original NeMo reference completed successfully",
+        )
+
+        has_ref_wav = (
+            ref_completed
+            and isinstance(ref_wav, str)
+            and os.path.isfile(ref_wav)
+        )
+        metrics["reference_has_audio"] = MetricResult(
+            value=1.0 if has_ref_wav else 0.0,
+            threshold=1.0,
+            operator="==",
+            passed=has_ref_wav,
+            note="original NeMo reference WAV file produced",
+        )
+
+        if ref_rms is not None:
+            ref_rms_ok = float(ref_rms) >= min_rms
+            metrics["reference_rms"] = MetricResult(
+                value=float(ref_rms),
+                threshold=min_rms,
+                operator=">=",
+                passed=ref_rms_ok,
+                note="original NeMo reference non-silence check",
+            )
+
+        if ref_duration is not None:
+            ref_dur = float(ref_duration)
+            ref_dur_ok = min_duration <= ref_dur <= max_duration
+            metrics["reference_duration_s"] = MetricResult(
+                value=ref_dur,
+                threshold=min_duration,
+                operator=">=",
+                passed=ref_dur_ok,
+                note=(
+                    "original NeMo reference range "
+                    f"[{min_duration}, {max_duration}]"
+                ),
+            )
 
         has_wav = trt_wav is not None and isinstance(trt_wav, str) and os.path.isfile(trt_wav)
         metrics["has_audio"] = MetricResult(
@@ -329,15 +380,14 @@ class MagpieTTSPlugin:
             or os.environ.get("TRTMC_TTS_ASR_MODEL")
             or _DEFAULT_HF_ASR_MODEL
         )
+        asr_python = (
+            (runtime_context.reference_python if runtime_context else "")
+            or (runtime_context.hf_python if runtime_context else "")
+            or (runtime_context.runtime_python if runtime_context else "")
+            or sys.executable
+        )
 
         if has_wav and input_prompt:
-            asr_python = (
-                (runtime_context.reference_python if runtime_context else "")
-                or (runtime_context.hf_python if runtime_context else "")
-                or (runtime_context.runtime_python if runtime_context else "")
-                or sys.executable
-            )
-
             asr_info = _run_asr_roundtrip(trt_wav, asr_python, asr_model)
             if asr_info:
                 asr_transcript = asr_info.get("transcript")
@@ -384,12 +434,47 @@ class MagpieTTSPlugin:
                 note=f"HF ASR round-trip failed for model={asr_model}",
             )
 
+        ref_asr_info = None
+        if has_ref_wav and input_prompt:
+            ref_asr_info = _run_asr_roundtrip(
+                ref_wav, asr_python, asr_model)
+
+        if ref_asr_info and ref_asr_info.get("transcript") is not None:
+            ref_transcript = str(ref_asr_info["transcript"])
+            ref_ned = levenshtein_ned(
+                normalize_text(ref_transcript), normalize_text(input_prompt))
+            ned_threshold = threshold.metrics.get(
+                "contract_asr_ned_threshold", 0.15)
+            metrics["reference_asr_ned"] = MetricResult(
+                value=ref_ned,
+                threshold=ned_threshold,
+                operator="<=",
+                passed=ref_ned <= ned_threshold,
+                note=(
+                    "original NeMo reference; "
+                    f"backend={ref_asr_info.get('backend', 'hf_transformers')} "
+                    f"model={ref_asr_info.get('model', asr_model)}; "
+                    f"transcript: '{ref_transcript[:80]}'"
+                ),
+            )
+        elif has_ref_wav and input_prompt:
+            metrics["reference_asr_roundtrip"] = MetricResult(
+                value=0.0,
+                threshold=1.0,
+                operator="==",
+                passed=False,
+                note=(
+                    "HF ASR round-trip failed for the original NeMo "
+                    f"reference with model={asr_model}"
+                ),
+            )
+
         gated = [m for m in metrics.values() if m.threshold is not None]
         passed = all(m.passed for m in gated)
 
-        rule = "audio exists AND health checks pass"
+        rule = "TRT and original NeMo reference audio exist AND health checks pass"
         if input_prompt:
-            rule += " AND ASR transcript NED <= threshold"
+            rule += " AND both ASR transcript NED values <= threshold"
 
         if passed:
             return make_pass("full_generation", metrics, rule)

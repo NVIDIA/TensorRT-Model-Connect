@@ -204,18 +204,25 @@ class DebertaPlugin:
             )
 
         return _build_deberta_encoder_engine(
-            config, weights, max_seq_length=max_cache_length, verbose=verbose
-        )
+            config, weights,
+            max_seq_length=max_cache_length,
+            precision=precision,
+            verbose=verbose)
 
 
 plugin = DebertaPlugin()
 
 
-def _add_seq_layer_norm(network, inp, hidden_size, gamma, beta, eps):
-    return graph_ops.add_layer_norm_native(network, inp, hidden_size, gamma, beta, eps)
+def _add_seq_layer_norm(
+    network, inp, hidden_size, gamma, beta, eps, *, dtype=np.float32,
+):
+    return graph_ops.add_layer_norm_native(
+        network, inp, hidden_size, gamma, beta, eps, dtype=dtype)
 
 
-def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=False):
+def _build_deberta_encoder_engine(
+    config, weights, max_seq_length, *, precision="fp32", verbose=False,
+):
     hidden = config.hidden_size
     vocab = config.vocab_size
     num_layers = config.num_hidden_layers
@@ -223,6 +230,12 @@ def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=Fa
     head_dim = hidden // num_heads
     intermediate = config.intermediate_size
     eps = config.rms_norm_eps
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(f"Unsupported DeBERTa precision: {precision}")
 
     deberta_cfg = weights.get("_deberta_config", {})
     position_biased_input = deberta_cfg.get("position_biased_input", True)
@@ -247,30 +260,34 @@ def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=Fa
     attention_mask_input = network.add_input("attention_mask", trt.int32, (max_seq_length,))
 
     # Attention mask: [seq] -> [1, 1, seq] additive
-    mask_float = network.add_cast(attention_mask_input, trt.float32)
-    ones_c = graph_ops.add_constant(network, (1,), np.array([1.0], dtype=np.float32))
-    neg_large = graph_ops.add_constant(network, (1,), np.array([-1e9], dtype=np.float32))
-    inv_mask = network.add_elementwise(
-        ones_c, mask_float.get_output(0), trt.ElementWiseOperation.SUB
-    )
-    pad_penalty = network.add_elementwise(
-        inv_mask.get_output(0), neg_large, trt.ElementWiseOperation.PROD
-    )
+    mask_float = network.add_cast(attention_mask_input, work_trt_dtype)
+    ones_c = graph_ops.add_constant(
+        network, (1,), np.array([1.0], dtype=work_np_dtype),
+        dtype=work_np_dtype)
+    mask_penalty = -1e4 if precision == "fp16" else -1e9
+    neg_large = graph_ops.add_constant(
+        network, (1,), np.array([mask_penalty], dtype=work_np_dtype),
+        dtype=work_np_dtype)
+    inv_mask = network.add_elementwise(ones_c, mask_float.get_output(0), trt.ElementWiseOperation.SUB)
+    pad_penalty = network.add_elementwise(inv_mask.get_output(0), neg_large, trt.ElementWiseOperation.PROD)
     pad_mask_reshape = network.add_shuffle(pad_penalty.get_output(0))
     pad_mask_reshape.reshape_dims = (1, 1, max_seq_length)
 
     # Embedding
-    embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["embedding"])
+    embedding_table = graph_ops.add_constant(
+        network, (vocab, hidden), weights["embedding"],
+        dtype=work_np_dtype)
     word_embed = network.add_gather(embedding_table, input_ids, 0)
     embed_out = word_embed.get_output(0)
 
     if position_biased_input and "position_embedding" in weights:
         pos_embed_table = graph_ops.add_constant(
-            network, weights["position_embedding"].shape, weights["position_embedding"]
-        )
+            network, weights["position_embedding"].shape,
+            weights["position_embedding"], dtype=work_np_dtype)
         pos_indices = graph_ops.add_constant(
-            network, (max_seq_length,), np.arange(max_seq_length, dtype=np.int32).astype(np.float32)
-        )
+            network, (max_seq_length,),
+            np.arange(max_seq_length, dtype=np.int32).astype(work_np_dtype),
+            dtype=work_np_dtype)
         pos_int = network.add_cast(pos_indices, trt.int32)
         pos_embed = network.add_gather(pos_embed_table, pos_int.get_output(0), 0)
         embed_out = network.add_elementwise(
@@ -279,16 +296,16 @@ def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=Fa
 
     if type_vocab_size > 0 and "token_type_embedding" in weights:
         tt_table = graph_ops.add_constant(
-            network, (type_vocab_size, hidden), weights["token_type_embedding"]
-        )
+            network, (type_vocab_size, hidden),
+            weights["token_type_embedding"], dtype=work_np_dtype)
         tt_embed = network.add_gather(tt_table, token_type_ids, 0)
         embed_out = network.add_elementwise(
             embed_out, tt_embed.get_output(0), trt.ElementWiseOperation.SUM
         ).get_output(0)
 
     hidden_state = _add_seq_layer_norm(
-        network, embed_out, hidden, weights["embed_norm"], weights["embed_norm_beta"], eps
-    )
+        network, embed_out, hidden, weights["embed_norm"],
+        weights["embed_norm_beta"], eps, dtype=work_np_dtype)
 
     # Relative position data
     att_span = min(max_seq_length, max_relative_positions)
@@ -297,7 +314,9 @@ def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=Fa
     rel_slice_end = max_relative_positions + att_span
     rel_emb_sliced = full_rel_emb[rel_slice_start:rel_slice_end, :]
 
-    rel_emb_tensor = graph_ops.add_constant(network, (2 * att_span, hidden), rel_emb_sliced)
+    rel_emb_tensor = graph_ops.add_constant(
+        network, (2 * att_span, hidden), rel_emb_sliced,
+        dtype=work_np_dtype)
 
     q_ids = np.arange(max_seq_length, dtype=np.int64)
     k_ids = np.arange(max_seq_length, dtype=np.int64)
@@ -325,35 +344,27 @@ def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=Fa
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
         hidden_state = _add_deberta_layer(
-            network=network,
-            hidden=hidden_state,
-            weights=weights,
-            prefix=prefix,
-            hidden_size=hidden,
-            intermediate_size=intermediate,
-            num_heads=num_heads,
-            head_dim=head_dim,
-            seq_length=max_seq_length,
-            attn_scale=attn_scale,
-            scale_factor=scale_factor,
-            attn_mask=pad_mask_reshape.get_output(0),
-            rel_emb_tensor=rel_emb_tensor,
-            c2p_pos_tensor=c2p_pos_tensor,
-            p2c_pos_tensor=p2c_pos_tensor,
-            pos_att_type=pos_att_type,
-            att_span=att_span,
-            hidden_act=hidden_act,
-            eps=eps,
-        )
+            network=network, hidden=hidden_state, weights=weights, prefix=prefix,
+            hidden_size=hidden, intermediate_size=intermediate, num_heads=num_heads,
+            head_dim=head_dim, seq_length=max_seq_length, attn_scale=attn_scale,
+            scale_factor=scale_factor, attn_mask=pad_mask_reshape.get_output(0),
+            rel_emb_tensor=rel_emb_tensor, c2p_pos_tensor=c2p_pos_tensor,
+            p2c_pos_tensor=p2c_pos_tensor, pos_att_type=pos_att_type,
+            att_span=att_span, hidden_act=hidden_act, eps=eps,
+            dtype=work_np_dtype)
 
-    hidden_state.name = "hidden_states"
-    network.mark_output(hidden_state)
+    public_output = hidden_state
+    if public_output.dtype != trt.float32:
+        public_output = network.add_cast(
+            public_output, trt.float32).get_output(0)
+    public_output.name = "hidden_states"
+    network.mark_output(public_output)
 
     if verbose:
         print(
-            f"[trtmc build] Building DeBERTa encoder ({num_layers} layers, hidden={hidden}, seq={max_seq_length})",
-            file=sys.stderr,
-        )
+            f"[trtmc build] Building DeBERTa encoder ({num_layers} layers, "
+            f"hidden={hidden}, seq={max_seq_length}, precision={precision})",
+            file=sys.stderr)
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:
@@ -361,42 +372,26 @@ def _build_deberta_encoder_engine(config, weights, max_seq_length, *, verbose=Fa
     return bytes(plan)
 
 
-def _add_deberta_layer(
-    *,
-    network,
-    hidden,
-    weights,
-    prefix,
-    hidden_size,
-    intermediate_size,
-    num_heads,
-    head_dim,
-    seq_length,
-    attn_scale,
-    scale_factor,
-    attn_mask,
-    rel_emb_tensor,
-    c2p_pos_tensor,
-    p2c_pos_tensor,
-    pos_att_type,
-    att_span,
-    hidden_act,
-    eps,
-):
+def _add_deberta_layer(*, network, hidden, weights, prefix, hidden_size, intermediate_size,
+                       num_heads, head_dim, seq_length, attn_scale, scale_factor, attn_mask,
+                       rel_emb_tensor, c2p_pos_tensor, p2c_pos_tensor, pos_att_type,
+                       att_span, hidden_act, eps, dtype=np.float32):
     attention_size = num_heads * head_dim
 
     q = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_q"]
-    )
+        network, hidden, hidden_size, attention_size,
+        weights[f"{prefix}.w_q"], dtype=dtype)
     k = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_k"]
-    )
+        network, hidden, hidden_size, attention_size,
+        weights[f"{prefix}.w_k"], dtype=dtype)
     v = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_v"]
-    )
+        network, hidden, hidden_size, attention_size,
+        weights[f"{prefix}.w_v"], dtype=dtype)
 
-    q = graph_ops.add_bias_sum(network, q, attention_size, weights[f"{prefix}.q_bias"])
-    v = graph_ops.add_bias_sum(network, v, attention_size, weights[f"{prefix}.v_bias"])
+    q = graph_ops.add_bias_sum(
+        network, q, attention_size, weights[f"{prefix}.q_bias"], dtype=dtype)
+    v = graph_ops.add_bias_sum(
+        network, v, attention_size, weights[f"{prefix}.v_bias"], dtype=dtype)
 
     q_heads = network.add_shuffle(q)
     q_heads.reshape_dims = (seq_length, num_heads, head_dim)
@@ -411,11 +406,9 @@ def _add_deberta_layer(
     v_heads.second_transpose = trt.Permutation([1, 0, 2])
 
     scale_tensor = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32)
-    )
-    q_scaled = network.add_elementwise(
-        q_heads.get_output(0), scale_tensor, trt.ElementWiseOperation.PROD
-    )
+        network, (1, 1, 1), np.array([attn_scale], dtype=dtype),
+        dtype=dtype)
+    q_scaled = network.add_elementwise(q_heads.get_output(0), scale_tensor, trt.ElementWiseOperation.PROD)
 
     c2c_score = network.add_matrix_multiply(
         q_scaled.get_output(0),
@@ -427,8 +420,8 @@ def _add_deberta_layer(
 
     if "c2p" in pos_att_type:
         pos_key = graph_ops.add_matmul_rhs_constant(
-            network, rel_emb_tensor, hidden_size, attention_size, weights[f"{prefix}.pos_proj"]
-        )
+            network, rel_emb_tensor, hidden_size, attention_size,
+            weights[f"{prefix}.pos_proj"], dtype=dtype)
         pos_key_heads = network.add_shuffle(pos_key)
         pos_key_heads.reshape_dims = (2 * att_span, num_heads, head_dim)
         pos_key_heads.second_transpose = trt.Permutation([1, 0, 2])
@@ -450,15 +443,16 @@ def _add_deberta_layer(
 
     if "p2c" in pos_att_type:
         pos_query = graph_ops.add_matmul_rhs_constant(
-            network, rel_emb_tensor, hidden_size, attention_size, weights[f"{prefix}.pos_q_proj"]
-        )
+            network, rel_emb_tensor, hidden_size, attention_size,
+            weights[f"{prefix}.pos_q_proj"], dtype=dtype)
         pos_query = graph_ops.add_bias_sum(
-            network, pos_query, attention_size, weights[f"{prefix}.pos_q_proj_bias"]
-        )
+            network, pos_query, attention_size,
+            weights[f"{prefix}.pos_q_proj_bias"], dtype=dtype)
 
         pos_scale = graph_ops.add_constant(
-            network, (1, 1, 1), np.array([1.0 / np.sqrt(head_dim * scale_factor)], dtype=np.float32)
-        )
+            network, (1, 1, 1),
+            np.array([1.0 / np.sqrt(head_dim * scale_factor)], dtype=dtype),
+            dtype=dtype)
         pos_q_heads = network.add_shuffle(pos_query)
         pos_q_heads.reshape_dims = (2 * att_span, num_heads, head_dim)
         pos_q_heads.second_transpose = trt.Permutation([1, 0, 2])
@@ -502,37 +496,34 @@ def _add_deberta_layer(
     context_flat.reshape_dims = (seq_length, attention_size)
 
     attn_out = graph_ops.add_matmul_rhs_constant(
-        network, context_flat.get_output(0), attention_size, hidden_size, weights[f"{prefix}.w_o"]
-    )
-    attn_out = graph_ops.add_bias_sum(network, attn_out, hidden_size, weights[f"{prefix}.o_bias"])
+        network, context_flat.get_output(0), attention_size, hidden_size,
+        weights[f"{prefix}.w_o"], dtype=dtype)
+    attn_out = graph_ops.add_bias_sum(
+        network, attn_out, hidden_size, weights[f"{prefix}.o_bias"],
+        dtype=dtype)
 
     residual1 = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM)
     normed1 = _add_seq_layer_norm(
-        network,
-        residual1.get_output(0),
-        hidden_size,
+        network, residual1.get_output(0), hidden_size,
         weights[f"{prefix}.post_attn_norm"],
-        weights[f"{prefix}.post_attn_norm_beta"],
-        eps,
-    )
+        weights[f"{prefix}.post_attn_norm_beta"], eps, dtype=dtype)
 
     fc1 = graph_ops.add_matmul_rhs_constant(
-        network, normed1, hidden_size, intermediate_size, weights[f"{prefix}.w_fc1"]
-    )
-    fc1 = graph_ops.add_bias_sum(network, fc1, intermediate_size, weights[f"{prefix}.fc1_bias"])
+        network, normed1, hidden_size, intermediate_size,
+        weights[f"{prefix}.w_fc1"], dtype=dtype)
+    fc1 = graph_ops.add_bias_sum(
+        network, fc1, intermediate_size, weights[f"{prefix}.fc1_bias"],
+        dtype=dtype)
     activated = graph_ops.add_activation(network, fc1, hidden_act)
     fc2 = graph_ops.add_matmul_rhs_constant(
-        network, activated, intermediate_size, hidden_size, weights[f"{prefix}.w_fc2"]
-    )
-    fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size, weights[f"{prefix}.fc2_bias"])
+        network, activated, intermediate_size, hidden_size,
+        weights[f"{prefix}.w_fc2"], dtype=dtype)
+    fc2 = graph_ops.add_bias_sum(
+        network, fc2, hidden_size, weights[f"{prefix}.fc2_bias"], dtype=dtype)
 
     residual2 = network.add_elementwise(normed1, fc2, trt.ElementWiseOperation.SUM)
     normed2 = _add_seq_layer_norm(
-        network,
-        residual2.get_output(0),
-        hidden_size,
+        network, residual2.get_output(0), hidden_size,
         weights[f"{prefix}.output_norm"],
-        weights[f"{prefix}.output_norm_beta"],
-        eps,
-    )
+        weights[f"{prefix}.output_norm_beta"], eps, dtype=dtype)
     return normed2

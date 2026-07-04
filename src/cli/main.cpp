@@ -464,14 +464,14 @@ int cmd_run(const CliArgs& args) {
     cfg.negative_prompt = args.negative_prompt;
     cfg.height = args.diffusion_height;
     cfg.width = args.diffusion_width;
-    // --cfg-scale is an alias for --guidance-scale on the diffusion path.
-    // Prefer an explicitly set --cfg-scale if the user provided one.
-    if (args.cfg_scale >= 0.0F) {
-        cfg.guidance_scale = args.cfg_scale;
-    }
-
     // Image-generation pipelines use generate_image(), not generate().
     const bool is_image_generation = pipeline->supports_image_generation();
+    // Image diffusion historically treats --cfg-scale as an alias for
+    // --guidance-scale. Text diffusion pipelines such as ELF use both values
+    // independently, so preserve the separately parsed values for generate().
+    if (is_image_generation && args.cfg_scale >= 0.0F) {
+        cfg.guidance_scale = args.cfg_scale;
+    }
 
     // Diffusion pipelines may consume shared initial latents from a raw fp32
     // file (E2E shared-latents path; mirrors the cmd_generate_video plumbing).

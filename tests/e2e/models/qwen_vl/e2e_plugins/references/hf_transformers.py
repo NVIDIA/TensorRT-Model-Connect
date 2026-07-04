@@ -38,12 +38,13 @@ _PRECISION_TO_TORCH_DTYPE = {
 
 
 def _torch_dtype_for_case(case: E2ECase) -> str:
-    """Return a torch dtype expression string matching the manifest precision.
+    """Return the explicit reference dtype, falling back to DUT precision.
 
-    The reference runner injects this into subprocess scripts so the HF model
-    loads at the same precision as the TRT engine, keeping comparisons fair.
+    FP16 acceptance manifests set reference_precision=fp32 so changing the
+    engine precision does not also change the oracle.
     """
-    precision = case.metadata.get("precision", "fp32")
+    precision = case.metadata.get(
+        "reference_precision", case.metadata.get("precision", "fp32"))
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
 
 
@@ -939,9 +940,26 @@ class HfTransformersReference:
                 inputs = processor(
                     text=text_input, images=image, return_tensors="pt")
             except Exception:
-                # Fallback for models without chat template
-                inputs = processor(
-                    text=fallback_text, images=image, return_tensors="pt")
+                # Transformers 5.x may expose a checkpoint's chat template on
+                # the tokenizer but not on the multimodal processor.
+                tokenizer = getattr(processor, "tokenizer", None)
+                try:
+                    if tokenizer is None:
+                        raise ValueError("processor has no tokenizer")
+                    text_input = tokenizer.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True)
+                    if not isinstance(text_input, str):
+                        raise TypeError(
+                            "tokenizer.apply_chat_template did not return text")
+                    if not _vl_prompt_has_image_placeholder(text_input):
+                        raise ValueError(
+                            "tokenizer chat template produced no image placeholder")
+                    inputs = processor(
+                        text=text_input, images=image, return_tensors="pt")
+                except Exception:
+                    # Last resort for models that genuinely have no template.
+                    inputs = processor(
+                        text=fallback_text, images=image, return_tensors="pt")
 
             with torch.no_grad():
                 generated_ids = model.generate(

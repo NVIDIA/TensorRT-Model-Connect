@@ -6,6 +6,8 @@
   "family": "roberta",
   "runtime_strategy": "roberta_encoder_only",
   "task_strategy": "encoder_only_nlp",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "reference_family": "encoder_base_features",
   "user_contract": "representation_parity",
   "max_cache_length": 512,

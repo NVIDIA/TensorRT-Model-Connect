@@ -51,10 +51,11 @@ def _add_seq_layer_norm(
     gamma: np.ndarray,
     beta: np.ndarray,
     eps: float,
+    dtype: np.dtype,
 ) -> trt.ITensor:
     """LayerNorm over [seq_len, hidden] using TRT native normalization."""
     return graph_ops.add_layer_norm_native(
-        network, inp, hidden_size, gamma, beta, eps)
+        network, inp, hidden_size, gamma, beta, eps, dtype=dtype)
 
 
 def build_fnet_encoder_engine(
@@ -62,6 +63,7 @@ def build_fnet_encoder_engine(
     weights: WeightDict,
     max_seq_length: int,
     *,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build a TRT engine plan for FNet encoder with 2D DFT."""
@@ -82,6 +84,9 @@ def build_fnet_encoder_engine(
 
     S = max_seq_length
     H = hidden
+    if precision not in {"fp32", "fp16"}:
+        raise ValueError(f"FNet supports fp32 or fp16 precision, got {precision!r}")
+    work_np_dtype = np.float16 if precision == "fp16" else np.float32
 
     # Inputs
     input_ids = network.add_input("input_ids", trt.int32, (S,))
@@ -95,11 +100,14 @@ def build_fnet_encoder_engine(
     # Embedding tables (may use embedding_size != hidden for factorized embeddings)
     embedding_size = weights["embedding"].shape[1]
     embedding_table = graph_ops.add_constant(
-        network, weights["embedding"].shape, weights["embedding"])
+        network, weights["embedding"].shape, weights["embedding"],
+        dtype=work_np_dtype)
     position_embed_table = graph_ops.add_constant(
-        network, weights["position_embedding"].shape, weights["position_embedding"])
+        network, weights["position_embedding"].shape, weights["position_embedding"],
+        dtype=work_np_dtype)
     token_type_table = graph_ops.add_constant(
-        network, (type_vocab_size, embedding_size), weights["token_type_embedding"])
+        network, (type_vocab_size, embedding_size), weights["token_type_embedding"],
+        dtype=work_np_dtype)
 
     # Position indices
     position_indices = graph_ops.add_constant(
@@ -121,27 +129,32 @@ def build_fnet_encoder_engine(
     # Embedding LayerNorm (over embedding_size)
     hidden_state = _add_seq_layer_norm(
         network, embed_sum2.get_output(0), embedding_size,
-        weights["embed_norm"], weights["embed_norm_beta"], eps)
+        weights["embed_norm"], weights["embed_norm_beta"], eps,
+        work_np_dtype)
 
     # Optional embedding projection: embedding_size -> hidden_size
     if "embed_projection" in weights:
         hidden_state = graph_ops.add_matmul_rhs_constant(
             network, hidden_state, embedding_size, hidden,
-            weights["embed_projection"])
+            weights["embed_projection"], dtype=work_np_dtype)
         if "embed_projection_bias" in weights:
             hidden_state = graph_ops.add_bias_sum(
                 network, hidden_state, hidden,
-                weights["embed_projection_bias"])
+                weights["embed_projection_bias"], dtype=work_np_dtype)
 
     # Pre-compute 2D DFT matrices as constants
     # real(DFT2D(X)) = cos_S @ X @ cos_H - sin_S @ X @ sin_H
     cos_s, sin_s = _compute_dft_matrices(S)
     cos_h, sin_h = _compute_dft_matrices(H)
 
-    cos_s_const = graph_ops.add_constant(network, (S, S), cos_s)
-    sin_s_const = graph_ops.add_constant(network, (S, S), sin_s)
-    cos_h_const = graph_ops.add_constant(network, (H, H), cos_h)
-    sin_h_const = graph_ops.add_constant(network, (H, H), sin_h)
+    cos_s_const = graph_ops.add_constant(
+        network, (S, S), cos_s, dtype=work_np_dtype)
+    sin_s_const = graph_ops.add_constant(
+        network, (S, S), sin_s, dtype=work_np_dtype)
+    cos_h_const = graph_ops.add_constant(
+        network, (H, H), cos_h, dtype=work_np_dtype)
+    sin_h_const = graph_ops.add_constant(
+        network, (H, H), sin_h, dtype=work_np_dtype)
 
     # Encoder layers
     for layer_idx in range(num_layers):
@@ -176,20 +189,23 @@ def build_fnet_encoder_engine(
         normed1 = _add_seq_layer_norm(
             network, residual1.get_output(0), hidden,
             weights[f"{prefix}.post_attn_norm"],
-            weights[f"{prefix}.post_attn_norm_beta"], eps)
+            weights[f"{prefix}.post_attn_norm_beta"], eps, work_np_dtype)
 
         # --- FFN ---
         fc1 = graph_ops.add_matmul_rhs_constant(
             network, normed1, hidden, intermediate,
-            weights[f"{prefix}.w_fc1"])
+            weights[f"{prefix}.w_fc1"], dtype=work_np_dtype)
         fc1 = graph_ops.add_bias_sum(
-            network, fc1, intermediate, weights[f"{prefix}.fc1_bias"])
-        activated = graph_ops.add_activation(network, fc1, hidden_act)
+            network, fc1, intermediate, weights[f"{prefix}.fc1_bias"],
+            dtype=work_np_dtype)
+        activated = graph_ops.add_activation(
+            network, fc1, hidden_act, dtype=work_np_dtype)
         fc2 = graph_ops.add_matmul_rhs_constant(
             network, activated, intermediate, hidden,
-            weights[f"{prefix}.w_fc2"])
+            weights[f"{prefix}.w_fc2"], dtype=work_np_dtype)
         fc2 = graph_ops.add_bias_sum(
-            network, fc2, hidden, weights[f"{prefix}.fc2_bias"])
+            network, fc2, hidden, weights[f"{prefix}.fc2_bias"],
+            dtype=work_np_dtype)
 
         # POST-norm: residual + LayerNorm after FFN
         residual2 = network.add_elementwise(
@@ -197,9 +213,11 @@ def build_fnet_encoder_engine(
         hidden_state = _add_seq_layer_norm(
             network, residual2.get_output(0), hidden,
             weights[f"{prefix}.output_norm"],
-            weights[f"{prefix}.output_norm_beta"], eps)
+            weights[f"{prefix}.output_norm_beta"], eps, work_np_dtype)
 
     # Output
+    if precision == "fp16":
+        hidden_state = network.add_cast(hidden_state, trt.float32).get_output(0)
     hidden_state.name = "hidden_states"
     network.mark_output(hidden_state)
 

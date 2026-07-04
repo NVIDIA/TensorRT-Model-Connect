@@ -238,10 +238,13 @@ bool ZImagePipeline::run_text_encoder(const std::vector<int32_t>& input_ids,
     }
 
     // Build TensorMap for TrtModule::forward()
+    const bool encoder_is_batched = text_encoder_->input_rank("input_ids") == 2;
+    const std::vector<int64_t> encoder_shape =
+        encoder_is_batched ? std::vector<int64_t>{1, static_cast<int64_t>(seq_len)}
+                           : std::vector<int64_t>{static_cast<int64_t>(seq_len)};
     TensorMap inputs;
-    inputs["input_ids"] = Tensor{padded_ids.data(), {static_cast<int64_t>(seq_len)}, DType::kInt32};
-    inputs["attention_mask"] =
-        Tensor{mask.data(), {static_cast<int64_t>(seq_len)}, DType::kFloat32};
+    inputs["input_ids"] = Tensor{padded_ids.data(), encoder_shape, DType::kInt32};
+    inputs["attention_mask"] = Tensor{mask.data(), encoder_shape, DType::kFloat32};
 
     auto outputs = text_encoder_->forward(inputs);
 
@@ -250,6 +253,11 @@ bool ZImagePipeline::run_text_encoder(const std::vector<int32_t>& input_ids,
     const auto emb_size = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(te_dim);
     text_embeddings.resize(emb_size);
     std::memcpy(text_embeddings.data(), te_out.data, emb_size * sizeof(float));
+    if (!std::all_of(text_embeddings.begin(), text_embeddings.end(),
+                     [](float value) { return std::isfinite(value); })) {
+        std::cerr << "[z-image] Text encoder produced non-finite embeddings\n";
+        return false;
+    }
 
     // Zero out embeddings for padding positions
     for (int32_t i = 0; i < seq_len; ++i) {

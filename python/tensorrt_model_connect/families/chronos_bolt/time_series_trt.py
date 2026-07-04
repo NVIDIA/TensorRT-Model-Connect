@@ -54,10 +54,8 @@ def build_serialized_network(
     config.max_aux_streams = 0
     config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
-    if precision == "fp32" and hasattr(trt.BuilderFlag, "TF32"):
+    if hasattr(trt.BuilderFlag, "TF32"):
         config.clear_flag(trt.BuilderFlag.TF32)
-    if precision in {"fp16", "bf16"}:
-        config.set_flag(trt.BuilderFlag.FP16)
 
     if verbose:
         print(
@@ -120,6 +118,10 @@ def add_linear(
     precision: str = "fp32",
 ) -> trt.ITensor:
     target_dtype = _target_np_dtype(precision)
+    target_trt_dtype = (
+        trt.float16 if target_dtype == np.float16 else trt.float32)
+    if inp.dtype != target_trt_dtype:
+        inp = network.add_cast(inp, target_trt_dtype).get_output(0)
     w = np.ascontiguousarray(weight_out_in.T, dtype=target_dtype)
     out_features = int(weight_out_in.shape[0])
     out = graph_ops.add_matmul_rhs_constant(
@@ -254,6 +256,9 @@ def add_batch_norm_last_dim(
     running_var: np.ndarray,
     eps: float,
 ) -> trt.ITensor:
+    output_dtype = inp.dtype
+    if inp.dtype != trt.float32:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
     denom = np.sqrt(np.asarray(running_var, dtype=np.float32) + float(eps))
     scale = np.asarray(gamma, dtype=np.float32) / denom
     bias = np.asarray(beta, dtype=np.float32) - np.asarray(running_mean, dtype=np.float32) * scale
@@ -262,7 +267,11 @@ def add_batch_norm_last_dim(
     scale_t = graph_ops.add_constant(network, shape, scale.reshape(shape), dtype=np.float32)
     bias_t = graph_ops.add_constant(network, shape, bias.reshape(shape), dtype=np.float32)
     scaled = network.add_elementwise(inp, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
-    return network.add_elementwise(scaled, bias_t, trt.ElementWiseOperation.SUM).get_output(0)
+    result = network.add_elementwise(
+        scaled, bias_t, trt.ElementWiseOperation.SUM).get_output(0)
+    if result.dtype != output_dtype:
+        result = network.add_cast(result, output_dtype).get_output(0)
+    return result
 
 
 def add_named_output(network: trt.INetworkDefinition, tensor: trt.ITensor, name: str) -> None:
@@ -271,14 +280,15 @@ def add_named_output(network: trt.INetworkDefinition, tensor: trt.ITensor, name:
 
 
 def add_gelu(network: trt.INetworkDefinition, inp: trt.ITensor) -> trt.ITensor:
+    dtype = np.float16 if inp.dtype == trt.float16 else np.float32
     if hasattr(trt.UnaryOperation, "ERF"):
         inv_sqrt2 = add_scalar(
             network, (1,) * len(tuple(inp.shape)), 1.0 / np.sqrt(2.0),
-            dtype=np.float32)
+            dtype=dtype)
         half = add_scalar(
-            network, (1,) * len(tuple(inp.shape)), 0.5, dtype=np.float32)
+            network, (1,) * len(tuple(inp.shape)), 0.5, dtype=dtype)
         one = add_scalar(
-            network, (1,) * len(tuple(inp.shape)), 1.0, dtype=np.float32)
+            network, (1,) * len(tuple(inp.shape)), 1.0, dtype=dtype)
         scaled = network.add_elementwise(
             inp, inv_sqrt2, trt.ElementWiseOperation.PROD).get_output(0)
         erf = network.add_unary(scaled, trt.UnaryOperation.ERF).get_output(0)
@@ -288,12 +298,15 @@ def add_gelu(network: trt.INetworkDefinition, inp: trt.ITensor) -> trt.ITensor:
             inp, half, trt.ElementWiseOperation.PROD).get_output(0)
         return network.add_elementwise(
             half_x, one_plus, trt.ElementWiseOperation.PROD).get_output(0)
-    return graph_ops.add_gelu_new(network, inp, dtype=np.float32)
+    return graph_ops.add_gelu_new(network, inp, dtype=dtype)
 
 
 def add_squareplus(network: trt.INetworkDefinition, inp: trt.ITensor) -> trt.ITensor:
-    four = add_scalar(network, (1,) * len(tuple(inp.shape)), 4.0, dtype=np.float32)
-    half = add_scalar(network, (1,) * len(tuple(inp.shape)), 0.5, dtype=np.float32)
+    dtype = np.float16 if inp.dtype == trt.float16 else np.float32
+    four = add_scalar(
+        network, (1,) * len(tuple(inp.shape)), 4.0, dtype=dtype)
+    half = add_scalar(
+        network, (1,) * len(tuple(inp.shape)), 0.5, dtype=dtype)
     sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD).get_output(0)
     sq_plus = network.add_elementwise(sq, four, trt.ElementWiseOperation.SUM).get_output(0)
     root = network.add_unary(sq_plus, trt.UnaryOperation.SQRT).get_output(0)

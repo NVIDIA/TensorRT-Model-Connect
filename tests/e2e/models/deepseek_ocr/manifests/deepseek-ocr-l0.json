@@ -23,5 +23,6 @@
       "ocr_mode": true
     }
   },
-  "notes": "PR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, deepseek_ocr_vision_language runtime, and full cache budget. The shorter decode validates the visible Architecture section emitted by the OCR fixture while nightly keeps the full OCR transcript contract."
+  "notes": "PR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, deepseek_ocr_vision_language runtime, and full cache budget. The shorter decode validates the visible Architecture section emitted by the OCR fixture while nightly keeps the full OCR transcript contract.",
+  "precision": "fp16"
 }

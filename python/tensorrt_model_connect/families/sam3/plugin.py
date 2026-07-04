@@ -381,7 +381,7 @@ class Sam3Plugin:
         verbose: bool = False,
         parallel_config=None,
     ) -> bytes:
-        del max_cache_length, precision, quant_ctx, parallel_config
+        del max_cache_length, quant_ctx, parallel_config
         from .text_encoder_builder import build_sam3_text_encoder_engine
 
         cfg = config.raw.get("_sam3_config", _resolve_sam3_config(config.raw))
@@ -395,6 +395,7 @@ class Sam3Plugin:
             vocab_size=cfg["text_vocab_size"],
             max_seq_len=cfg["text_max_position_embeddings"],
             eps=cfg["text_layer_norm_eps"],
+            precision=precision,
             hidden_act=cfg["text_hidden_act"],
             verbose=verbose,
         )
@@ -408,7 +409,7 @@ class Sam3Plugin:
         precision: str = "fp32",
         verbose: bool = False,
     ) -> bytes | None:
-        del weights, precision
+        del weights
         from .vision_encoder_builder import build_sam3_vision_encoder_engine
 
         cfg = config.raw.get("_sam3_config", _resolve_sam3_config(config.raw))
@@ -427,6 +428,7 @@ class Sam3Plugin:
             fpn_hidden_size=cfg["fpn_hidden_size"],
             rope_theta=cfg["vision_rope_theta"],
             eps=cfg["vision_layer_norm_eps"],
+            precision=precision,
             hidden_act=cfg["vision_hidden_act"],
             verbose=verbose,
         )
@@ -440,7 +442,7 @@ class Sam3Plugin:
         precision: str = "fp32",
         verbose: bool = False,
     ) -> dict[str, bytes] | None:
-        del weights, max_cache_length, precision
+        del weights, max_cache_length
         from .core_builder import build_sam3_core_engine
 
         cfg = config.raw.get("_sam3_config", _resolve_sam3_config(config.raw))
@@ -466,6 +468,7 @@ class Sam3Plugin:
                 mask_num_heads=cfg["mask_num_heads"],
                 mask_num_upsampling_stages=cfg["mask_num_upsampling_stages"],
                 layer_norm_eps=cfg["core_layer_norm_eps"],
+                precision=precision,
                 encoder_hidden_act=cfg["detr_encoder_hidden_act"],
                 decoder_hidden_act=cfg["detr_decoder_hidden_act"],
                 verbose=verbose,

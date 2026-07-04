@@ -23,5 +23,6 @@
   "metadata": {
     "group_by_bundle": true
   },
-  "notes": "Nightly ASR coverage probe for Model Connect input handling: Stereo downmix should be robust when L/R channels are not identical."
+  "notes": "Nightly ASR coverage probe for Model Connect input handling: Stereo downmix should be robust when L/R channels are not identical.",
+  "precision": "fp16"
 }

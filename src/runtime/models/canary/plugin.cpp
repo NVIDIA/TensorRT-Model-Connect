@@ -104,7 +104,7 @@ class CanaryPlugin final : public IPipelinePlugin {
         cudaStream_t stream = dec_loaded.module->stream();
         int32_t kv_dim = decoder_cache_row_width(*dec_loaded.module, ctx.config);
         int32_t max_cache = ctx.config.max_cache_length;
-        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
+        DType cache_dtype = dec_loaded.module->tensor_dtype("cache_k_0");
         std::unique_ptr<CanaryInferenceState> state =
             std::make_unique<CanaryKvCache>(dl, max_cache, kv_dim, stream, cache_dtype);
         if (!state->ok())

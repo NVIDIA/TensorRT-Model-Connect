@@ -13,6 +13,8 @@
   "prompt": "Name the largest ocean on Earth.",
   "max_new_tokens": 5,
   "trust_remote_code": false,
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "notes": "PR L0 repro for Phi MoE. Uses the same checkpoint, phi_moe_decoder_kv_cache runtime, runner, comparator, chat artifact contract, and full cache budget with shorter decode budget.",
   "metadata": {
     "contract_config": {

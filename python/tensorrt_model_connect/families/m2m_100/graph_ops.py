@@ -735,6 +735,7 @@ def add_self_attention_block(
     k_bias: np.ndarray | None = None,
     v_bias: np.ndarray | None = None,
     o_bias: np.ndarray | None = None,
+    mask: trt.ITensor | None = None,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Full self-attention without KV cache (single-pass, for vision encoders).
@@ -759,7 +760,7 @@ def add_self_attention_block(
     context_flat = add_attention_from_rows(
         network, q, k, v,
         num_heads=num_heads, head_dim=head_dim,
-        q_seq=seq_length, kv_seq=seq_length)
+        q_seq=seq_length, kv_seq=seq_length, mask=mask)
 
     # Output projection
     out = add_matmul_rhs_constant(

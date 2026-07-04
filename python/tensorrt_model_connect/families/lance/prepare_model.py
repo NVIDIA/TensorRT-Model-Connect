@@ -28,9 +28,11 @@ understanding sub-model that the ``lance`` family plugin builds.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 _VARIANT_DIRS = {"image": "Lance_3B", "video": "Lance_3B_Video"}
@@ -66,6 +68,47 @@ def _symlink(target: Path, link: Path) -> None:
     os.symlink(target, link)
 
 
+def stage_model_dir(src: Path, out: Path, *, variant: str = "image") -> Path:
+    """Stage one Lance variant and return its buildable model directory."""
+    src = src.expanduser().resolve()
+    out = out.expanduser().resolve()
+    llm_dir = src / _VARIANT_DIRS[variant]
+    vit_path = src / "Qwen2.5-VL-ViT" / "vit.safetensors"
+
+    if not (llm_dir / "llm_config.json").exists():
+        raise FileNotFoundError(
+            f"{llm_dir}/llm_config.json not found (bad source/variant?)")
+    if not vit_path.exists():
+        raise FileNotFoundError(f"{vit_path} not found")
+
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = json.loads((llm_dir / "llm_config.json").read_text())
+    cfg["model_type"] = "lance"
+    (out / "config.json").write_text(json.dumps(cfg, indent=2))
+
+    for name in _TOP_LEVEL_FILES:
+        srcf = llm_dir / name
+        if srcf.exists():
+            _symlink(srcf, out / name)
+        elif name == "model.safetensors":
+            raise FileNotFoundError(f"{srcf} not found")
+
+    _symlink(vit_path, out / "vision" / "model.safetensors")
+    return out
+
+
+def resolve_model_dir(src: Path) -> Path | None:
+    """Stage a downloaded non-flat Lance repository for normal builds."""
+    if not (src / "Lance_3B" / "llm_config.json").exists():
+        return None
+    digest = hashlib.sha256(str(src.resolve()).encode()).hexdigest()[:12]
+    staging_root = Path(os.environ.get(
+        "TRTMC_FAMILY_MODEL_ROOT",
+        str(Path(tempfile.gettempdir()) / "trtmc-family-models"),
+    ))
+    return stage_model_dir(src, staging_root / f"lance-image-{digest}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -77,31 +120,10 @@ def main() -> int:
     args = ap.parse_args()
 
     src = _resolve_src(args.src)
+    out = Path(args.out).expanduser().resolve()
+    stage_model_dir(src, out, variant=args.variant)
     llm_dir = src / _VARIANT_DIRS[args.variant]
     vit_path = src / "Qwen2.5-VL-ViT" / "vit.safetensors"
-    out = Path(args.out).expanduser().resolve()
-
-    if not (llm_dir / "llm_config.json").exists():
-        sys.exit(f"error: {llm_dir}/llm_config.json not found (bad --src/--variant?)")
-    if not vit_path.exists():
-        sys.exit(f"error: {vit_path} not found")
-
-    out.mkdir(parents=True, exist_ok=True)
-
-    # config.json from llm_config.json, with model_type stamped to "lance" so
-    # find_plugin() routes to the Lance plugin instead of qwen_vl.
-    cfg = json.loads((llm_dir / "llm_config.json").read_text())
-    cfg["model_type"] = "lance"
-    (out / "config.json").write_text(json.dumps(cfg, indent=2))
-
-    for name in _TOP_LEVEL_FILES:
-        srcf = llm_dir / name
-        if srcf.exists():
-            _symlink(srcf, out / name)
-        elif name == "model.safetensors":
-            sys.exit(f"error: {srcf} not found")
-
-    _symlink(vit_path, out / "vision" / "model.safetensors")
 
     print(f"Staged Lance ({args.variant}) at: {out}")
     print(f"  LLM : {llm_dir}")

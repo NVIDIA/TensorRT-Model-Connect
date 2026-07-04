@@ -71,6 +71,10 @@ class PixArtPlugin:
     _IMAGE_HEIGHT = 1024
     _IMAGE_WIDTH = 1024
 
+    _T5_COMPONENT = 0
+    _DIT_COMPONENT = 1
+    _VAE_COMPONENT = 2
+
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
         return mt in ("pixart", "pixart_sigma", "pixart_alpha",
@@ -134,6 +138,27 @@ class PixArtPlugin:
         require_tensorrt_11_for_tensor_parallel(
             parallel, feature="PixArt tensor-parallel builds")
 
+        selected_fp32 = {
+            int(index) for index in config.raw.get("_fp32_layers", ())
+        }
+        valid_components = {
+            self._T5_COMPONENT, self._DIT_COMPONENT, self._VAE_COMPONENT,
+        }
+        invalid_components = sorted(selected_fp32 - valid_components)
+        if invalid_components:
+            raise ValueError(
+                "PixArt fp32_layers contains invalid component indices: "
+                f"{invalid_components}; expected 0=T5, 1=DiT, or 2=VAE")
+
+        def component_precision(component: int) -> str:
+            if precision == "fp16" and component in selected_fp32:
+                return "fp32"
+            return precision
+
+        t5_precision = component_precision(self._T5_COMPONENT)
+        dit_precision = component_precision(self._DIT_COMPONENT)
+        vae_precision = component_precision(self._VAE_COMPONENT)
+
         text_encoder_dir = weights["_text_encoder_dir"]
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]
@@ -185,7 +210,7 @@ class PixArtPlugin:
                 d_ff=t5_d_ff,
                 num_layers=t5_num_layers,
                 vocab_size=t5_vocab_size,
-                precision=precision,
+                precision=t5_precision,
             )
         with timed_trt_compile(build_timing, "t5_encoder"):
             t5_plan = build_t5_encoder_engine(
@@ -197,6 +222,7 @@ class PixArtPlugin:
                 num_layers=t5_num_layers,
                 vocab_size=t5_vocab_size,
                 max_seq_len=self._T5_MAX_SEQ_LEN,
+                precision=t5_precision,
                 verbose=verbose,
             )
 
@@ -252,6 +278,7 @@ class PixArtPlugin:
                     cross_attn_norm=False,
                     ffn_activation="gelu_approximate",
                     use_rope=False,
+                    precision=dit_precision,
                     verbose=verbose,
                 )
 
@@ -264,6 +291,7 @@ class PixArtPlugin:
             w_lat=w_lat,
             scaling_factor=self._VAE_SCALING_FACTOR,
             shift_factor=0.0,
+            precision=vae_precision,
             verbose=verbose,
             build_timing=build_timing,
             timing_component="vae_decoder",

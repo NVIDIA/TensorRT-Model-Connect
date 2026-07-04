@@ -301,6 +301,7 @@ def add_attention_block(
             causal=False,
             mask=mask_4d,
             scale=attention_scale,
+            fp32_accumulation=dtype != np.float32,
         )
     elif ffi_attention_kernel is not None:
         if num_kv_heads != num_heads:

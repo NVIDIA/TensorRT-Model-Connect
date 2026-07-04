@@ -114,6 +114,7 @@ def _add_attention_with_rope(
     cos_table: np.ndarray,
     sin_table: np.ndarray,
     num_windows: int | None = None,
+    dtype=np.float32,
 ):
     trt = _trt()
     graph_ops = _graph_ops()
@@ -135,10 +136,10 @@ def _add_attention_with_rope(
 
     cos = graph_ops.add_constant(
         network, (1, seq_len, head_dim // 2),
-        cos_table[:, 0::2].reshape(1, seq_len, -1))
+        cos_table[:, 0::2].reshape(1, seq_len, -1), dtype=dtype)
     sin = graph_ops.add_constant(
         network, (1, seq_len, head_dim // 2),
-        sin_table[:, 0::2].reshape(1, seq_len, -1))
+        sin_table[:, 0::2].reshape(1, seq_len, -1), dtype=dtype)
     q = graph_ops.add_apply_rope_native_sequence(
         network, q, num_heads, head_dim, cos, sin,
         rotary_embedding_dim=head_dim, interleaved=True, sequence_length=seq_len)
@@ -176,44 +177,50 @@ def _add_attention_with_rope(
 
 
 def _add_deconv2d(network, inp, weight: np.ndarray, bias: np.ndarray,
-                  out_channels: int):
+                  out_channels: int, dtype=np.float32):
     trt = _trt()
     layer = network.add_deconvolution_nd(
         inp,
         num_output_maps=out_channels,
         kernel_shape=(2, 2),
-        kernel=trt.Weights(np.ascontiguousarray(weight, dtype=np.float32)),
-        bias=trt.Weights(np.ascontiguousarray(bias, dtype=np.float32)),
+        kernel=trt.Weights(np.ascontiguousarray(weight, dtype=dtype)),
+        bias=trt.Weights(np.ascontiguousarray(bias, dtype=dtype)),
     )
     layer.stride_nd = (2, 2)
     return layer.get_output(0)
 
 
 def _add_fpn_level(network, hidden_spatial, weights: WeightDict, level: int,
-                   hidden_size: int, fpn_hidden_size: int):
+                   hidden_size: int, fpn_hidden_size: int,
+                   dtype=np.float32):
     trt = _trt()
     graph_ops = _graph_ops()
     x = hidden_spatial
     if level == 0:
         x = _add_deconv2d(
             network, x, weights["vision.fpn.0.deconv0.weight"],
-            weights["vision.fpn.0.deconv0.bias"], hidden_size // 2)
+            weights["vision.fpn.0.deconv0.bias"], hidden_size // 2,
+            dtype=dtype)
         x = graph_ops.add_gelu_erf(network, x)
         x = _add_deconv2d(
             network, x, weights["vision.fpn.0.deconv1.weight"],
-            weights["vision.fpn.0.deconv1.bias"], hidden_size // 4)
+            weights["vision.fpn.0.deconv1.bias"], hidden_size // 4,
+            dtype=dtype)
     elif level == 1:
         x = _add_deconv2d(
             network, x, weights["vision.fpn.1.deconv0.weight"],
-            weights["vision.fpn.1.deconv0.bias"], hidden_size // 2)
+            weights["vision.fpn.1.deconv0.bias"], hidden_size // 2,
+            dtype=dtype)
 
     prefix = f"vision.fpn.{level}"
     x = graph_ops.add_conv2d(
         network, x, weights[f"{prefix}.proj1.weight"],
-        weights[f"{prefix}.proj1.bias"], fpn_hidden_size, (1, 1))
+        weights[f"{prefix}.proj1.bias"], fpn_hidden_size, (1, 1),
+        dtype=dtype)
     x = graph_ops.add_conv2d(
         network, x, weights[f"{prefix}.proj2.weight"],
-        weights[f"{prefix}.proj2.bias"], fpn_hidden_size, (3, 3), padding=(1, 1))
+        weights[f"{prefix}.proj2.bias"], fpn_hidden_size, (3, 3),
+        padding=(1, 1), dtype=dtype)
     cast = network.add_cast(x, trt.float32)
     out = cast.get_output(0)
     out.name = f"sam3_fpn_hidden_{level}"
@@ -246,6 +253,7 @@ def build_sam3_vision_encoder_engine(
     fpn_hidden_size: int,
     rope_theta: float,
     eps: float,
+    precision: str = "fp32",
     hidden_act: str = "gelu",
     verbose: bool = False,
 ) -> bytes:
@@ -260,6 +268,8 @@ def build_sam3_vision_encoder_engine(
     window_seq = window_size * window_size
     num_windows = seq_len // window_seq
     global_layers = set(global_attn_indexes)
+    work_np_dtype = np.float16 if precision == "fp16" else np.float32
+    work_trt_dtype = trt.float16 if precision == "fp16" else trt.float32
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -270,16 +280,21 @@ def build_sam3_vision_encoder_engine(
 
     pixel_values = network.add_input(
         "pixel_values", trt.float32, (1, 3, image_size, image_size))
+    pixel_values_work = pixel_values
+    if work_trt_dtype != trt.float32:
+        pixel_values_work = network.add_cast(
+            pixel_values, work_trt_dtype).get_output(0)
     patch_bias = weights.get(
         "vision.patch_embed.bias", np.zeros(hidden_size, dtype=np.float32))
     patch = graph_ops.add_conv2d(
         network,
-        pixel_values,
+        pixel_values_work,
         weights["vision.patch_embed.weight"],
         patch_bias,
         hidden_size,
         (patch_size, patch_size),
         stride=(patch_size, patch_size),
+        dtype=work_np_dtype,
     )
     to_rows = network.add_shuffle(patch)
     to_rows.first_transpose = trt.Permutation([0, 2, 3, 1])
@@ -291,7 +306,8 @@ def build_sam3_vision_encoder_engine(
         grid_size=grid_size,
         hidden_size=hidden_size,
     )
-    pos_t = graph_ops.add_constant(network, (seq_len, hidden_size), pos)
+    pos_t = graph_ops.add_constant(
+        network, (seq_len, hidden_size), pos, dtype=work_np_dtype)
     hidden = network.add_elementwise(
         to_rows.get_output(0), pos_t, trt.ElementWiseOperation.SUM).get_output(0)
     hidden = graph_ops.add_layer_norm_native(
@@ -337,6 +353,7 @@ def build_sam3_vision_encoder_engine(
                 seq_len=seq_len,
                 cos_table=global_cos,
                 sin_table=global_sin,
+                dtype=work_np_dtype,
             )
         else:
             ordered = network.add_gather(normed, gather_window, axis=0).get_output(0)
@@ -352,6 +369,7 @@ def build_sam3_vision_encoder_engine(
                 cos_table=window_cos,
                 sin_table=window_sin,
                 num_windows=num_windows,
+                dtype=work_np_dtype,
             )
             attn = network.add_gather(attn_ordered, gather_inverse, axis=0).get_output(0)
 
@@ -384,11 +402,13 @@ def build_sam3_vision_encoder_engine(
     hidden_spatial = spatial_nchw.get_output(0)
 
     for level, scale in enumerate((4, 2, 1)):
-        _add_fpn_level(network, hidden_spatial, weights, level, hidden_size, fpn_hidden_size)
+        _add_fpn_level(
+            network, hidden_spatial, weights, level, hidden_size,
+            fpn_hidden_size, dtype=work_np_dtype)
         pos_np = _sam3_position_encoding(
             grid_size * scale, grid_size * scale, fpn_hidden_size)
         pos = graph_ops.add_constant(
-            network, pos_np.shape, pos_np)
+            network, pos_np.shape, pos_np, dtype=work_np_dtype)
         pos = network.add_cast(pos, trt.float32).get_output(0)
         pos.name = f"sam3_fpn_position_{level}"
         network.mark_output(pos)

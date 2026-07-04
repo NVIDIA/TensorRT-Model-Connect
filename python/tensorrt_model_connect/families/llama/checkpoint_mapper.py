@@ -79,6 +79,7 @@ def load_standard_weights(
     config: ModelConfig,
     *,
     precision: str = "fp32",
+    fp32_layers: tuple[int, ...] = (),
     model_prefix: str = "model",
     embedding_key: str | None = None,
     final_norm_key: str | None = None,
@@ -94,6 +95,15 @@ def load_standard_weights(
     num_heads = config.num_attention_heads
     num_kv_heads = config.num_key_value_heads
     target_dtype = _target_np_dtype(precision)
+    selected_fp32_layers = frozenset(int(layer) for layer in fp32_layers)
+    invalid_fp32_layers = sorted(
+        layer for layer in selected_fp32_layers
+        if layer < 0 or layer >= num_layers)
+    if invalid_fp32_layers:
+        raise ValueError(
+            f"fp32_layers contains out-of-range indices: {invalid_fp32_layers}")
+    if precision == "fp32":
+        selected_fp32_layers = frozenset()
 
     weights = WeightDict()
 
@@ -108,6 +118,9 @@ def load_standard_weights(
     def _load_layer(layer_idx: int) -> tuple[int, WeightDict, int, int]:
         prefix = f"layer.{layer_idx}"
         layer = WeightDict()
+        layer_precision = (
+            "fp32" if layer_idx in selected_fp32_layers else precision)
+        layer_target_dtype = _target_np_dtype(layer_precision)
 
         # Norms
         input_norm = _load_tensor(
@@ -134,10 +147,10 @@ def load_standard_weights(
         layer_mlp_size = gate_raw.shape[0]
 
         # Transpose all projections [out, in] -> [in, out]
-        q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
-        k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
-        v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
-        o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
+        q_t = _transpose_2d(q_raw, "q_proj", precision=layer_precision)
+        k_t = _transpose_2d(k_raw, "k_proj", precision=layer_precision)
+        v_t = _transpose_2d(v_raw, "v_proj", precision=layer_precision)
+        o_t = _transpose_2d(o_raw, "o_proj", precision=layer_precision)
 
         layer[f"{prefix}.w_q"] = q_t
         layer[f"{prefix}.w_k"] = k_t
@@ -150,13 +163,13 @@ def load_standard_weights(
         v_bias_key = _layer_key(layer_idx, "self_attn.v_proj.bias", model_prefix)
         if _has_tensor(readers, q_bias_key):
             layer[f"{prefix}.q_bias"] = _load_tensor(
-                readers, q_bias_key).astype(target_dtype)
+                readers, q_bias_key).astype(layer_target_dtype)
         if _has_tensor(readers, k_bias_key):
             layer[f"{prefix}.k_bias"] = _load_tensor(
-                readers, k_bias_key).astype(target_dtype)
+                readers, k_bias_key).astype(layer_target_dtype)
         if _has_tensor(readers, v_bias_key):
             layer[f"{prefix}.v_bias"] = _load_tensor(
-                readers, v_bias_key).astype(target_dtype)
+                readers, v_bias_key).astype(layer_target_dtype)
 
         # Optional per-head q/k norm (Qwen3 style)
         q_norm_key = _layer_key(layer_idx, "self_attn.q_norm.weight", model_prefix)
@@ -177,11 +190,11 @@ def load_standard_weights(
             readers, _layer_key(layer_idx, "mlp.down_proj.weight", model_prefix))
 
         layer[f"{prefix}.w_gate"] = _transpose_2d(
-            gate_raw, "gate_proj", precision=precision)
+            gate_raw, "gate_proj", precision=layer_precision)
         layer[f"{prefix}.w_up"] = _transpose_2d(
-            up_raw, "up_proj", precision=precision)
+            up_raw, "up_proj", precision=layer_precision)
         layer[f"{prefix}.w_down"] = _transpose_2d(
-            down_raw, "down_proj", precision=precision)
+            down_raw, "down_proj", precision=layer_precision)
 
         return layer_idx, layer, q_hidden, layer_mlp_size
 

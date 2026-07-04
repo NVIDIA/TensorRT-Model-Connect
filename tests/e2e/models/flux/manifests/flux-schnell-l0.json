@@ -34,5 +34,6 @@
     "contract_config": {
       "use_diffusers": true
     }
-  }
+  },
+  "precision": "fp16"
 }

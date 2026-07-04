@@ -33,5 +33,6 @@
       "use_diffusers": true,
       "video_mode": true
     }
-  }
+  },
+  "precision": "fp16"
 }

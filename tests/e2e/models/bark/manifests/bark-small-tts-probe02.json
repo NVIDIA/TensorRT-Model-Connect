@@ -22,5 +22,6 @@
   "tts_probe_id": "probe_02_comma_prompt_round_trip",
   "tts_probe_readiness": "ready_now",
   "tts_probe_purpose": "Cover Model Connect text prompt transport for a comma-bearing Bark TTS sentence while reusing the existing bark-small bundle.",
-  "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt with comma punctuation -> text_to_audio_bark runtime -> WAV artifact -> tts_audio contract. The prompt avoids numbers and abbreviations to keep ASR round-trip normalization stable."
+  "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt with comma punctuation -> text_to_audio_bark runtime -> WAV artifact -> tts_audio contract. The prompt avoids numbers and abbreviations to keep ASR round-trip normalization stable.",
+  "precision": "fp16"
 }

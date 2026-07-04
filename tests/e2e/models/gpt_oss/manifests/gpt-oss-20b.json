@@ -10,6 +10,8 @@
   "user_contract": "chat_response",
   "e2e_parallel_resource": "exclusive_gpu",
   "ci_tier": "nightly_only",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "l0_replacement": "gpt-oss-20b-l0",
   "l0_replacement_reason": "GPT-OSS-20B scale stays nightly; gpt-oss-20b-l0 keeps the GPT-OSS MoE path with shorter decode for PR L0.",
   "max_cache_length": 256,

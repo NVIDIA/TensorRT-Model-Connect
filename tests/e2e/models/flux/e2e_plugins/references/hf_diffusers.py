@@ -95,6 +95,17 @@ class HfDiffusersReference:
         image_height = case.inputs.get("image_height", 1024)
         image_width = case.inputs.get("image_width", image_height)
         model_type = str(case.metadata.get("model_type", "")).lower()
+        default_reference_precision = (
+            "bf16" if model_type in {"flux.2", "flux2"} else "fp32"
+        )
+        reference_precision = str(
+            case.metadata.get("reference_precision", default_reference_precision)
+        ).lower()
+        reference_torch_dtype = {
+            "fp16": "torch.float16",
+            "bf16": "torch.bfloat16",
+            "fp32": "torch.float32",
+        }.get(reference_precision, "torch.float32")
         guidance_scale = case.inputs.get("guidance_scale")
         python = ctx.reference_python_path() or sys.executable
 
@@ -121,14 +132,16 @@ model_type = {model_type!r}
 guidance_scale = {guidance_scale!r}
 frames_dir = {frames_dir!r}
 seed = {int(case.inputs.get("seed", case.determinism.get("seed", 42)))}
+reference_torch_dtype = {reference_torch_dtype}
 
 if model_type in ("flux.2", "flux2"):
     from diffusers import Flux2Pipeline
     pipe = Flux2Pipeline.from_pretrained(
-        model_ref, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
+        model_ref, torch_dtype=reference_torch_dtype, low_cpu_mem_usage=True)
 else:
     from diffusers import FluxPipeline
-    pipe = FluxPipeline.from_pretrained(model_ref, torch_dtype=torch.float32)
+    pipe = FluxPipeline.from_pretrained(
+        model_ref, torch_dtype=reference_torch_dtype)
 pipe.to("cuda")
 kwargs = dict(
     prompt=prompt,

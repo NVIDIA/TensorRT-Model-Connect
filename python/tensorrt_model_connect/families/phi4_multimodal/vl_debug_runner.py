@@ -1005,6 +1005,67 @@ def _preprocess_simple_chw(
     return img_np.transpose(2, 0, 1).astype(np.float32)
 
 
+def _preprocess_phi4_hd_chw(
+    image_path: str,
+    fixed_image_size: int = 448,
+    **_kwargs: Any,
+) -> np.ndarray:
+    """Phi-4 Dynamic-HD preprocessing for the canonical 2x1 crop profile.
+
+    Returns the global crop followed by the left and right HD tiles, flattened
+    from ``[3, 3, 448, 448]`` to the vision engine's ``[9, 448, 448]`` input.
+    """
+    import math
+
+    import torch
+    import torch.nn.functional as torch_functional
+    from PIL import Image
+
+    if fixed_image_size != 448:
+        raise ValueError("Phi-4 Dynamic-HD vision engine requires 448px crops")
+
+    image = Image.open(image_path).convert("RGB")
+    width, height = image.size
+    crop_cols = math.ceil(width / fixed_image_size)
+    crop_rows = math.ceil(height / fixed_image_size)
+    if (crop_cols, crop_rows) != (2, 1):
+        raise ValueError(
+            "Phi-4 canonical vision engine supports a 2x1 Dynamic-HD crop "
+            f"topology, got {crop_cols}x{crop_rows} for {width}x{height}")
+
+    target_width = crop_cols * fixed_image_size
+    target_height = crop_rows * fixed_image_size
+    ratio_width = target_width / width
+    ratio_height = target_height / height
+    if ratio_width < ratio_height:
+        new_width = target_width
+        new_height = int(height * ratio_width)
+    else:
+        new_width = int(width * ratio_height)
+        new_height = target_height
+    padding_width = target_width - new_width
+    padding_height = target_height - new_height
+    invalid_patch_cols = math.floor(padding_width / 14)
+    if padding_height >= 14 or invalid_patch_cols != 10:
+        raise ValueError(
+            "Phi-4 canonical vision engine requires 22 valid patch columns "
+            f"in the second crop, got padding={padding_width}x{padding_height}")
+
+    image = image.resize((new_width, new_height), Image.BILINEAR)
+    padded = Image.new("RGB", (target_width, target_height), (255, 255, 255))
+    padded.paste(image, (0, 0))
+    hd = np.asarray(padded, dtype=np.float32) / 255.0
+    hd = ((hd - 0.5) / 0.5).transpose(2, 0, 1)
+    hd_tensor = torch.from_numpy(np.ascontiguousarray(hd)).unsqueeze(0)
+    global_crop = torch_functional.interpolate(
+        hd_tensor, size=(fixed_image_size, fixed_image_size),
+        mode="bicubic", align_corners=False).squeeze(0).numpy()
+    left_crop = hd[:, :, :fixed_image_size]
+    right_crop = hd[:, :, fixed_image_size:]
+    return np.concatenate(
+        [global_crop, left_crop, right_crop], axis=0).astype(np.float32)
+
+
 def _preprocess_patchify_chw(
     image_path: str,
     fixed_image_size: int = 448,
@@ -1171,6 +1232,9 @@ def preprocess_image_inputs_for_trt(
             "pixel_values": pixel_values,
             "image_grid_hws": image_grid_hws,
         }
+
+    if preprocessor_type == "phi4_hd_chw":
+        return {"pixel_values": _preprocess_phi4_hd_chw(image_path, **kwargs)}
 
     if preprocessor_type == "simple_chw":
         result = _preprocess_simple_chw(image_path, **kwargs)

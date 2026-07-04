@@ -9,6 +9,8 @@ Shared test code is limited to filesystem and serialization helpers.
 
 from __future__ import annotations
 
+import importlib
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -27,6 +29,32 @@ class TestCanaryPlugin:
     VOCAB, HIDDEN, ENC_LAYERS, DEC_LAYERS = 64, 16, 2, 2
     HEADS, HEAD_DIM, FFN = 2, 8, 32
     MEL_BINS, CONV_KERNEL, SUB_CH = 8, 3, 4
+
+    def test_vision_build_forwards_fp32_layer_selection(self, monkeypatch):
+        plugin = importlib.import_module(
+            "tensorrt_model_connect.families.canary.plugin")
+
+        calls = {}
+
+        def fake_build(config, weights, **kwargs):
+            calls.update(config=config, weights=weights, **kwargs)
+            return b"encoder-plan"
+
+        monkeypatch.setattr(plugin, "_build_encoder", fake_build)
+        config = SimpleNamespace(raw={"_fp32_layers": [3, 7]})
+        weights = WeightDict()
+
+        plan = plugin.CanaryPlugin().build_vision_engine(
+            "/model", config, weights, precision="fp16", verbose=True)
+
+        assert plan == b"encoder-plan"
+        assert calls == {
+            "config": config,
+            "weights": weights,
+            "precision": "fp16",
+            "verbose": True,
+            "fp32_layers": [3, 7],
+        }
 
     @staticmethod
     def _make_tp_weights(

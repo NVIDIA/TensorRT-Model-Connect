@@ -7,6 +7,7 @@
   "runtime_strategy": "qwen_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
   "precision": "fp16",
+  "reference_precision": "fp32",
   "reference_backend": "invariant_only",
   "reference_family": "sampling_top_p",
   "user_contract": "sampling",

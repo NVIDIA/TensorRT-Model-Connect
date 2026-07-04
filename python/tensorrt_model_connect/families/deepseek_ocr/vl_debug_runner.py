@@ -1350,3 +1350,25 @@ class VLTrtRunner:
             result = self.text_runner.step(next_token)
 
         return output_ids
+
+
+def runner_from_bundle(
+    *,
+    runtime_strategy: str,
+    config: dict,
+    header: dict,
+    engine_plan: bytes,
+    bundle_path: str,
+    distributed_communicator: object | None = None,
+) -> object | None:
+    del bundle_path
+    if runtime_strategy != "deepseek_ocr_vision_language":
+        return None
+    num_layers = header.get(
+        "num_layers", config.get("num_hidden_layers", 1))
+    return TrtRunner(
+        engine_plan=engine_plan,
+        max_cache_length=header["max_cache_length"],
+        num_layers=num_layers,
+        distributed_communicator=distributed_communicator,
+    )

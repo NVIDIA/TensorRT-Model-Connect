@@ -177,8 +177,12 @@ class TimmVitPlugin:
             )
 
         del max_cache_length, quant_ctx
-        if precision not in ("fp32",):
-            raise ValueError("timm_vit raw TRT path currently supports precision='fp32'")
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(f"Unsupported timm_vit precision: {precision}")
 
         vit_cfg = config.raw.get("_timm_vit_config") or _resolve_vit_config(config.raw)
         image_h = vit_cfg["image_size_h"]
@@ -207,7 +211,8 @@ class TimmVitPlugin:
                 "[trtmc build] timm_vit: "
                 f"image={image_h}x{image_w}, patch={patch_h}x{patch_w}, "
                 f"tokens={seq_len}, hidden={hidden_size}, layers={depth}, "
-                f"heads={num_heads}, classes={num_classes}",
+                f"heads={num_heads}, classes={num_classes}, "
+                f"precision={precision}",
                 file=sys.stderr,
             )
 
@@ -225,18 +230,21 @@ class TimmVitPlugin:
         trt_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
 
-        pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, image_h, image_w))
+        pixel_values = network.add_input(
+            "pixel_values", trt.float32, (1, 3, image_h, image_w))
+        work_pixels = pixel_values
+        if work_pixels.dtype != work_trt_dtype:
+            work_pixels = network.add_cast(
+                work_pixels, work_trt_dtype).get_output(0)
 
         patch = network.add_convolution_nd(
-            pixel_values,
+            work_pixels,
             num_output_maps=hidden_size,
             kernel_shape=(patch_h, patch_w),
-            kernel=trt.Weights(
-                np.ascontiguousarray(weights["patch_embed.proj.weight"], dtype=np.float32)
-            ),
-            bias=trt.Weights(
-                np.ascontiguousarray(weights["patch_embed.proj.bias"], dtype=np.float32)
-            ),
+            kernel=trt.Weights(np.ascontiguousarray(
+                weights["patch_embed.proj.weight"], dtype=work_np_dtype)),
+            bias=trt.Weights(np.ascontiguousarray(
+                weights["patch_embed.proj.bias"], dtype=work_np_dtype)),
         )
         patch.stride_nd = (patch_h, patch_w)
 
@@ -246,21 +254,20 @@ class TimmVitPlugin:
         hidden = patches_nhwc.get_output(0)
 
         cls_token = np.ascontiguousarray(
-            weights["cls_token"].reshape(1, 1, hidden_size), dtype=np.float32
-        )
+            weights["cls_token"].reshape(1, 1, hidden_size),
+            dtype=work_np_dtype)
         cls_const = graph_ops.add_constant(
-            network, (1, 1, hidden_size), cls_token, dtype=np.float32
-        )
+            network, (1, 1, hidden_size), cls_token, dtype=work_np_dtype)
         cat = network.add_concatenation([cls_const, hidden])
         cat.axis = 1
         hidden = cat.get_output(0)
 
         pos_embed = np.ascontiguousarray(
-            weights["pos_embed"].reshape(1, seq_len, hidden_size), dtype=np.float32
-        )
+            weights["pos_embed"].reshape(1, seq_len, hidden_size),
+            dtype=work_np_dtype)
         pos_const = graph_ops.add_constant(
-            network, (1, seq_len, hidden_size), pos_embed, dtype=np.float32
-        )
+            network, (1, seq_len, hidden_size), pos_embed,
+            dtype=work_np_dtype)
         hidden = network.add_elementwise(
             hidden, pos_const, trt.ElementWiseOperation.SUM
         ).get_output(0)
@@ -271,17 +278,19 @@ class TimmVitPlugin:
                 network,
                 hidden,
                 hidden_size,
-                weights[f"{prefix}.norm1.weight"].astype(np.float32),
-                weights[f"{prefix}.norm1.bias"].astype(np.float32),
+                weights[f"{prefix}.norm1.weight"],
+                weights[f"{prefix}.norm1.bias"],
                 eps_val,
+                dtype=work_np_dtype,
             )
 
-            qkv_w = weights[f"{prefix}.attn.qkv.weight"].astype(np.float32)
+            qkv_w = weights[f"{prefix}.attn.qkv.weight"].astype(
+                work_np_dtype)
             q_w, k_w, v_w = np.split(qkv_w, 3, axis=1)
             qkv_b = weights.get(f"{prefix}.attn.qkv.bias")
             q_b = k_b = v_b = None
             if qkv_b is not None:
-                q_b, k_b, v_b = np.split(qkv_b.astype(np.float32), 3)
+                q_b, k_b, v_b = np.split(qkv_b.astype(work_np_dtype), 3)
 
             q = graph_ops.add_matmul_rhs_constant(
                 network,
@@ -289,6 +298,7 @@ class TimmVitPlugin:
                 hidden_size,
                 hidden_size,
                 q_w,
+                dtype=work_np_dtype,
             )
             k = graph_ops.add_matmul_rhs_constant(
                 network,
@@ -296,6 +306,7 @@ class TimmVitPlugin:
                 hidden_size,
                 hidden_size,
                 k_w,
+                dtype=work_np_dtype,
             )
             v = graph_ops.add_matmul_rhs_constant(
                 network,
@@ -303,11 +314,15 @@ class TimmVitPlugin:
                 hidden_size,
                 hidden_size,
                 v_w,
+                dtype=work_np_dtype,
             )
             if q_b is not None:
-                q = graph_ops.add_bias_sum(network, q, hidden_size, q_b)
-                k = graph_ops.add_bias_sum(network, k, hidden_size, k_b)
-                v = graph_ops.add_bias_sum(network, v, hidden_size, v_b)
+                q = graph_ops.add_bias_sum(
+                    network, q, hidden_size, q_b, dtype=work_np_dtype)
+                k = graph_ops.add_bias_sum(
+                    network, k, hidden_size, k_b, dtype=work_np_dtype)
+                v = graph_ops.add_bias_sum(
+                    network, v, hidden_size, v_b, dtype=work_np_dtype)
 
             head_dim = hidden_size // num_heads
 
@@ -323,8 +338,9 @@ class TimmVitPlugin:
             scale = graph_ops.add_constant(
                 network,
                 (1, 1, 1, 1),
-                np.array([[[[1.0 / np.sqrt(head_dim)]]]], dtype=np.float32),
-                dtype=np.float32,
+                np.array(
+                    [[[[1.0 / np.sqrt(head_dim)]]]], dtype=work_np_dtype),
+                dtype=work_np_dtype,
             )
             q_scaled = network.add_elementwise(q, scale, trt.ElementWiseOperation.PROD).get_output(
                 0
@@ -351,13 +367,15 @@ class TimmVitPlugin:
                 attn_context.get_output(0),
                 hidden_size,
                 hidden_size,
-                weights[f"{prefix}.attn.proj.weight"].astype(np.float32),
+                weights[f"{prefix}.attn.proj.weight"],
+                dtype=work_np_dtype,
             )
             attn = graph_ops.add_bias_sum(
                 network,
                 attn,
                 hidden_size,
-                weights[f"{prefix}.attn.proj.bias"].astype(np.float32),
+                weights[f"{prefix}.attn.proj.bias"],
+                dtype=work_np_dtype,
             )
             hidden = network.add_elementwise(hidden, attn, trt.ElementWiseOperation.SUM).get_output(
                 0
@@ -367,42 +385,46 @@ class TimmVitPlugin:
                 network,
                 hidden,
                 hidden_size,
-                weights[f"{prefix}.norm2.weight"].astype(np.float32),
-                weights[f"{prefix}.norm2.bias"].astype(np.float32),
+                weights[f"{prefix}.norm2.weight"],
+                weights[f"{prefix}.norm2.bias"],
                 eps_val,
+                dtype=work_np_dtype,
             )
             fc1 = graph_ops.add_matmul_rhs_constant(
                 network,
                 norm2,
                 hidden_size,
                 mlp_hidden,
-                weights[f"{prefix}.mlp.fc1.weight"].astype(np.float32),
+                weights[f"{prefix}.mlp.fc1.weight"],
+                dtype=work_np_dtype,
             )
             fc1 = graph_ops.add_bias_sum(
-                network, fc1, mlp_hidden, weights[f"{prefix}.mlp.fc1.bias"].astype(np.float32)
-            )
-            act = graph_ops.add_gelu_erf(network, fc1)
+                network, fc1, mlp_hidden,
+                weights[f"{prefix}.mlp.fc1.bias"], dtype=work_np_dtype)
+            act = graph_ops.add_gelu_erf(
+                network, fc1, dtype=work_np_dtype)
             fc2 = graph_ops.add_matmul_rhs_constant(
                 network,
                 act,
                 mlp_hidden,
                 hidden_size,
-                weights[f"{prefix}.mlp.fc2.weight"].astype(np.float32),
+                weights[f"{prefix}.mlp.fc2.weight"],
+                dtype=work_np_dtype,
             )
             fc2 = graph_ops.add_bias_sum(
-                network, fc2, hidden_size, weights[f"{prefix}.mlp.fc2.bias"].astype(np.float32)
-            )
-            hidden = network.add_elementwise(hidden, fc2, trt.ElementWiseOperation.SUM).get_output(
-                0
-            )
+                network, fc2, hidden_size,
+                weights[f"{prefix}.mlp.fc2.bias"], dtype=work_np_dtype)
+            hidden = network.add_elementwise(
+                hidden, fc2, trt.ElementWiseOperation.SUM).get_output(0)
 
         hidden = graph_ops.add_layer_norm_native(
             network,
             hidden,
             hidden_size,
-            weights["norm.weight"].astype(np.float32),
-            weights["norm.bias"].astype(np.float32),
+            weights["norm.weight"],
+            weights["norm.bias"],
             eps_val,
+            dtype=work_np_dtype,
         )
         cls = network.add_slice(
             hidden, start=(0, 0, 0), shape=(1, 1, hidden_size), stride=(1, 1, 1)
@@ -414,16 +436,20 @@ class TimmVitPlugin:
             hidden_size,
             num_classes,
             _transpose_2d(
-                weights["head.weight"].astype(np.float32),
+                weights["head.weight"],
                 "head.weight",
+                precision=precision,
             ),
+            dtype=work_np_dtype,
         )
         logits = graph_ops.add_bias_sum(
-            network, logits, num_classes, weights["head.bias"].astype(np.float32)
-        )
+            network, logits, num_classes, weights["head.bias"],
+            dtype=work_np_dtype)
         flatten_logits = network.add_shuffle(logits)
         flatten_logits.reshape_dims = (1, num_classes)
         logits = flatten_logits.get_output(0)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
         logits.name = "logits"
         network.mark_output(logits)
 

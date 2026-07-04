@@ -12,6 +12,7 @@
   "l0_replacement": "qwen3-moe-tiny-random",
   "l0_replacement_reason": "Qwen3-30B-A3B scale stays nightly; qwen3-moe-tiny-random keeps the Qwen3-MoE build/runtime path for PR L0.",
   "precision": "fp16",
+  "reference_precision": "fp32",
   "max_cache_length": 128,
   "prompt": "What is the largest planet in our solar system? Answer in one word.",
   "max_new_tokens": 10,

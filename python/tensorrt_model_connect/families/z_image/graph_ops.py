@@ -35,6 +35,22 @@ def _cast_back_to_trt_dtype(
         return tensor
     return network.add_cast(tensor, target_dtype).get_output(0)
 
+
+def _add_matrix_multiply_with_fp32_accumulation(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    lhs_op: trt.MatrixOperation,
+    rhs: trt.ITensor,
+    rhs_op: trt.MatrixOperation,
+) -> trt.ITensor:
+    """Request TensorRT's fused FP16 GEMM with FP32 accumulation."""
+    output_dtype = lhs.dtype
+    if lhs.dtype == trt.float16 and rhs.dtype == trt.float16:
+        lhs = network.add_cast(lhs, trt.float32).get_output(0)
+        rhs = network.add_cast(rhs, trt.float32).get_output(0)
+    output = network.add_matrix_multiply(lhs, lhs_op, rhs, rhs_op).get_output(0)
+    return _cast_back_to_trt_dtype(network, output, output_dtype)
+
 def layer_tensor_name(stem: str, layer: int) -> str:
     return f"{stem}_{layer}"
 
@@ -58,6 +74,7 @@ def add_matmul_rhs_constant(
     rhs_width: int,
     rhs_weights: np.ndarray,
     dtype: np.dtype = np.float32,
+    fp32_accumulation: bool = True,
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
     rank = len(tuple(lhs.shape))
@@ -73,6 +90,12 @@ def add_matmul_rhs_constant(
         dtype=dtype,
     )
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
+    if fp32_accumulation:
+        return _add_matrix_multiply_with_fp32_accumulation(
+            network,
+            lhs, trt.MatrixOperation.NONE,
+            rhs, trt.MatrixOperation.NONE,
+        )
     mm = network.add_matrix_multiply(
         lhs, trt.MatrixOperation.NONE,
         rhs, trt.MatrixOperation.NONE,
@@ -2840,6 +2863,47 @@ def _add_attention_core_with_logit_softcap(
     return _cast_back_to_trt_dtype(network, context, output_dtype)
 
 
+def _add_attention_core_explicit(
+    network: trt.INetworkDefinition,
+    q_4d: trt.ITensor,
+    k_4d: trt.ITensor,
+    v_4d: trt.ITensor,
+    *,
+    mask: trt.ITensor | None,
+    scale: float,
+) -> trt.ITensor:
+    """Explicit attention with FP32 score and value accumulation."""
+    output_dtype = q_4d.dtype
+    score_q = q_4d
+    score_k = k_4d
+    score_v = v_4d
+    score_mask = mask
+    if output_dtype != trt.float32:
+        score_q = network.add_cast(score_q, trt.float32).get_output(0)
+        score_k = network.add_cast(score_k, trt.float32).get_output(0)
+        score_v = network.add_cast(score_v, trt.float32).get_output(0)
+        if score_mask is not None and score_mask.dtype != trt.float32:
+            score_mask = network.add_cast(score_mask, trt.float32).get_output(0)
+
+    scores = network.add_matrix_multiply(
+        score_q, trt.MatrixOperation.NONE,
+        score_k, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    scale_t = _scalar_constant_for_trt_dtype(
+        network, (1, 1, 1, 1), scale, scores.dtype)
+    scores = network.add_elementwise(
+        scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+    if score_mask is not None:
+        scores = network.add_elementwise(
+            scores, score_mask, trt.ElementWiseOperation.SUM).get_output(0)
+
+    probs = network.add_softmax(scores)
+    probs.axes = 1 << 3
+    context = network.add_matrix_multiply(
+        probs.get_output(0), trt.MatrixOperation.NONE,
+        score_v, trt.MatrixOperation.NONE).get_output(0)
+    return _cast_back_to_trt_dtype(network, context, output_dtype)
+
+
 def add_attention_from_rows(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
@@ -2856,6 +2920,7 @@ def add_attention_from_rows(
     scale: float | None = None,
     logit_softcap: float | None = None,
     fp32_accumulation: bool = False,
+    explicit_attention: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
@@ -2877,7 +2942,13 @@ def add_attention_from_rows(
         tag=None if tag is None else tag + ".v")
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-    if logit_softcap is not None and float(logit_softcap) > 0.0:
+    if explicit_attention:
+        if causal:
+            raise NotImplementedError(
+                "explicit attention requires an additive causal mask")
+        ctx_4d = _add_attention_core_explicit(
+            network, q_4d, k_4d, v_4d, mask=mask, scale=scale)
+    elif logit_softcap is not None and float(logit_softcap) > 0.0:
         if causal:
             raise NotImplementedError(
                 "logit_softcap attention requires an explicit additive mask")

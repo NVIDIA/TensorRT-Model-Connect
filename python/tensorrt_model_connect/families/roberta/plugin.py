@@ -228,6 +228,7 @@ class RobertaPlugin:
         return builder(
             config, weights,
             max_seq_length=max_cache_length,
+            precision=precision,
             verbose=verbose)
 
 

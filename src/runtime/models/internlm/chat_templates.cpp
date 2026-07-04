@@ -10,11 +10,8 @@
 namespace trtmc {
 namespace {
 
-std::string apply_chatml(const std::string& prompt, bool enable_thinking) {
-    std::string r = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
-    if (!enable_thinking)
-        r += "<think>\n\n</think>\n\n";
-    return r;
+std::string apply_chatml(const std::string& prompt, bool /*enable_thinking*/) {
+    return "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
 }
 
 std::string apply_mistral(const std::string& prompt, bool /*enable_thinking*/) {

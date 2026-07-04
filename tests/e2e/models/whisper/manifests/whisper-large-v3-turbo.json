@@ -8,6 +8,7 @@
   "task_strategy": "speech_to_text",
   "reference_family": "asr_whisper",
   "user_contract": "exact_transcript",
+  "reference_precision": "fp32",
   "test_type": "transcription",
   "max_cache_length": 64,
   "prompt": "test",

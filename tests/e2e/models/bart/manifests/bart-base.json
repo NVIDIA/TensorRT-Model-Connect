@@ -7,6 +7,8 @@
   "task_strategy": "text_generation_causal",
   "reference_family": "seq2seq_base_weak",
   "user_contract": "continuation_parity",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "max_cache_length": 256,
   "prompt": "The quick brown fox jumps over the lazy dog.",
   "max_new_tokens": 20,

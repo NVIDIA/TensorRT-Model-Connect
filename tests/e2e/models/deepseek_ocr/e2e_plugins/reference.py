@@ -6,9 +6,18 @@
 from __future__ import annotations
 
 from .references.golden_snapshot import GoldenSnapshotReference
+from .references.hf_transformers import DeepSeekOcrHfReference
 
 
 class DeepseekOcrGoldenSnapshotReference(GoldenSnapshotReference):
     """deepseek_ocr local reference for golden_snapshot."""
 
-reference = DeepseekOcrGoldenSnapshotReference()
+
+class DeepseekOcrHfReference(DeepSeekOcrHfReference):
+    """deepseek_ocr local reference for the official Hugging Face model."""
+
+
+reference = [
+    DeepseekOcrGoldenSnapshotReference(),
+    DeepseekOcrHfReference(),
+]

@@ -222,11 +222,12 @@ def test_build_engine_with_relative_bias_precompute(
         }
         return fake_bias_matrix
 
-    def fake_builder(config, weights, *, max_seq_length, verbose):
+    def fake_builder(config, weights, *, max_seq_length, precision, verbose):
         calls["builder"] = {
             "config": config,
             "weights": dict(weights),
             "max_seq_length": max_seq_length,
+            "precision": precision,
             "verbose": verbose,
         }
         return b"mpnet-plan"
@@ -247,6 +248,7 @@ def test_build_engine_with_relative_bias_precompute(
     assert out == b"mpnet-plan"
     assert calls["compute"]["seq_length"] == 5
     assert calls["compute"]["num_buckets"] == 8
+    assert calls["builder"]["precision"] == "fp32"
     np.testing.assert_allclose(calls["compute"]["bias_table"], bias_table)
 
     builder_weights = calls["builder"]["weights"]
@@ -266,8 +268,11 @@ def test_build_engine_without_relative_bias_does_not_compute(
     def fail_compute(*_args, **_kwargs):
         raise AssertionError("_compute_relative_position_bias should not be called")
 
-    def fake_builder(_config, weights, *, max_seq_length, verbose):
+    def fake_builder(
+        _config, weights, *, max_seq_length, precision, verbose,
+    ):
         assert max_seq_length == 7
+        assert precision == "fp32"
         assert verbose is False
         assert "relative_position_bias" not in weights
         return b"mpnet-no-rel-bias"

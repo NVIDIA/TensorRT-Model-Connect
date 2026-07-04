@@ -21,7 +21,8 @@ namespace trtmc {
 class EncoderPipeline final : public IPipeline {
   public:
     EncoderPipeline(std::unique_ptr<TrtModule> encoder, std::string mode,
-                    std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
+                    std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "",
+                    int32_t pad_token_id = 0);
 
     EmbeddingResult embed(const std::string& text) override;
     EmbeddingResult encode(const std::string& text) override;
@@ -38,6 +39,7 @@ class EncoderPipeline final : public IPipeline {
     std::string mode_; // "encoder_only", "embedding", "reranking"
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
+    int32_t pad_token_id_{0};
 };
 
 } // namespace trtmc

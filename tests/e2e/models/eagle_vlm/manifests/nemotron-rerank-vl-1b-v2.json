@@ -6,6 +6,8 @@
   "family": "eagle_vlm",
   "runtime_strategy": "eagle_vlm_reranking",
   "task_strategy": "reranking",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "reference_family": "vl_rerank",
   "user_contract": "ranking_order",
   "max_cache_length": 256,

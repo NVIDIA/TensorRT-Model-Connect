@@ -9,6 +9,8 @@
   "ci_tier": "l0_only",
   "reference_family": "chat_instruct_template",
   "user_contract": "chat_response",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "max_cache_length": 256,
   "prompt": "What is the capital of Japan? Answer in one word.",
   "max_new_tokens": 5,

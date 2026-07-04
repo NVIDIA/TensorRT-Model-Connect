@@ -561,6 +561,61 @@ class TestManifestValidation:
         with pytest.raises(TypeError, match="execution_profiles"):
             _validate_manifest(data, "test.json")
 
+    def test_reference_precision_is_validated_and_propagated(self, tmp_path):
+        path = self._write_manifest(tmp_path, {
+            "name": "fp16-reference-test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+            "precision": "fp16",
+            "reference_precision": "fp32",
+        })
+
+        case = load_manifest(path)
+        assert case.metadata["precision"] == "fp16"
+        assert case.metadata["reference_precision"] == "fp32"
+
+        with pytest.raises(ValueError, match="reference_precision"):
+            _validate_manifest({
+                "name": "bad-reference-precision",
+                "hf_id": EXAMPLE_MODEL_ID,
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                "reference_precision": "tf32",
+            }, "test.json")
+
+    def test_fp32_layers_are_validated_and_propagated(self, tmp_path):
+        path = self._write_manifest(tmp_path, {
+            "name": "mixed-precision-test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+            "precision": "fp16",
+            "reference_precision": "fp32",
+            "fp32_layers": [2],
+        })
+
+        case = load_manifest(path)
+        assert case.metadata["fp32_layers"] == [2]
+
+        with pytest.raises(TypeError, match="fp32_layers"):
+            _validate_manifest({
+                "name": "bad-fp32-layer",
+                "hf_id": EXAMPLE_MODEL_ID,
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                "fp32_layers": [-1],
+            }, "test.json")
+
+        with pytest.raises(ValueError, match="duplicates"):
+            _validate_manifest({
+                "name": "duplicate-fp32-layer",
+                "hf_id": EXAMPLE_MODEL_ID,
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                "fp32_layers": [2, 2],
+            }, "test.json")
+
     def test_execution_profiles_reject_unknown_phase(self, tmp_path):
         data = {
             "name": "test",

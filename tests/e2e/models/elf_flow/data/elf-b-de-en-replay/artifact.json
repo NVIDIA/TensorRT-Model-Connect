@@ -1,0 +1,21 @@
+{
+  "cfg_scale": 2.0,
+  "files": {
+    "condition_latents_raw": "condition_latents.f32",
+    "condition_mask_raw": "condition_mask.f32",
+    "expected_generated_jsonl_path": "expected.jsonl",
+    "initial_latents_raw": "initial_latents.f32",
+    "sampling_steps_raw": "sampling_steps.f32"
+  },
+  "generation_mode": "conditional",
+  "max_input_length": 64,
+  "max_length": 128,
+  "model_id": "embedded-language-flows/ELF-B-de-en",
+  "num_samples": 1,
+  "num_sampling_steps": 64,
+  "sde_gamma": 0.0,
+  "seed": 42,
+  "self_cond_cfg_scale": 1.0,
+  "text_encoder_dim": 512,
+  "variant": "ode64-cfg2"
+}

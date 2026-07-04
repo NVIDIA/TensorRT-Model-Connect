@@ -718,6 +718,58 @@ class TestBuildBundleOrchestration:
 
         assert seen["precision"] == "fp16"
 
+    def test_vision_engine_precision_forwarded_when_supported(self, tmp_path):
+        """build_bundle forwards precision to optional vision engines."""
+        model_dir = self._make_model_dir(tmp_path)
+        output_path = str(tmp_path / "output.trtfb")
+        seen = {}
+
+        class _Plugin:
+            name = EXAMPLE_DECODER_FAMILY
+            runtime_strategy = ""
+
+            def load_weights(self, model_dir, config):
+                return {}
+
+            def build_engine(
+                self, config, weights, max_cache_length, *, verbose=False,
+            ):
+                return b"PLAN"
+
+            def build_vision_engine(
+                self, model_dir, config, weights, *, precision="fp32",
+                verbose=False,
+            ):
+                seen["precision"] = precision
+                return b"VISION_PLAN"
+
+        plugin = _Plugin()
+
+        with patch(
+            "tensorrt_model_connect.engine_builder.find_plugin",
+            return_value=plugin,
+        ):
+            with patch(
+                "tensorrt_model_connect.engine_builder._get_trt_version",
+                return_value="10.0",
+            ):
+                with patch(
+                    "tensorrt_model_connect.engine_builder._get_gpu_name",
+                    return_value="",
+                ):
+                    with patch(
+                        "tensorrt_model_connect.engine_builder."
+                        "_ensure_tokenizer_json"
+                    ):
+                        with patch(
+                            "tensorrt_model_connect.engine_builder.write_bundle"
+                        ):
+                            build_bundle(
+                                str(model_dir), output_path, precision="fp16"
+                            )
+
+        assert seen["precision"] == "fp16"
+
     def test_family_can_opt_out_of_tokenizer_packaging(self, tmp_path):
         """Non-text families own the tokenizer-packaging opt-out."""
         model_dir = self._make_model_dir(tmp_path)

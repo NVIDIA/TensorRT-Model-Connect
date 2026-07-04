@@ -224,6 +224,13 @@ class MambaPlugin:
         state_size: int = weights["_state_size"]
         conv_kernel: int = weights["_conv_kernel"]
         dt_rank: int = weights["_dt_rank"]
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(
+                f"Mamba supports precision='fp32' or 'fp16', got {precision!r}")
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
@@ -252,17 +259,22 @@ class MambaPlugin:
         # Shared constants
         # -----------------------------------------------------------
         embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+            network, (vocab, hidden), weights["embedding"],
+            dtype=work_np_dtype)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
-            np.array([config.rms_norm_eps], dtype=np.float32))
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # Embedding lookup
         # -----------------------------------------------------------
         gather = network.add_gather(embedding_table, token_id, 0)
         hidden_state = gather.get_output(0)  # [1, hidden]
+        if hidden_state.dtype != work_trt_dtype:
+            hidden_state = network.add_cast(
+                hidden_state, work_trt_dtype).get_output(0)
 
         if debug_layer_outputs:
             _mark_debug_output(network, hidden_state, "debug_embed")
@@ -275,12 +287,17 @@ class MambaPlugin:
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
+            conv_state = conv_state_inputs[layer_idx]
+            ssm_state = ssm_state_inputs[layer_idx]
+            if conv_state.dtype != work_trt_dtype:
+                conv_state = network.add_cast(
+                    conv_state, work_trt_dtype).get_output(0)
 
             result = _add_mamba_layer(
                 network=network,
                 hidden=hidden_state,
-                conv_state_in=conv_state_inputs[layer_idx],
-                ssm_state_in=ssm_state_inputs[layer_idx],
+                conv_state_in=conv_state,
+                ssm_state_in=ssm_state,
                 eps_tensor=eps_tensor,
                 weights=weights,
                 prefix=prefix,
@@ -289,6 +306,7 @@ class MambaPlugin:
                 state_size=state_size,
                 conv_kernel=conv_kernel,
                 dt_rank=dt_rank,
+                dtype=work_np_dtype,
             )
 
             hidden_state = result["hidden"]
@@ -305,16 +323,21 @@ class MambaPlugin:
         final_norm = weights.get("final_norm")
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = graph_ops.add_rms_norm(
-                network, hidden_state, hidden, final_norm, eps_tensor)
+                network, hidden_state, hidden, final_norm, eps_tensor,
+                dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # LM head (logits)
         # -----------------------------------------------------------
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_lm_head"])
+            network, hidden_state, hidden, vocab, weights["w_lm_head"],
+            dtype=work_np_dtype)
         # Zero bias
-        b_out = np.zeros(vocab, dtype=np.float32)
-        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+        b_out = np.zeros(vocab, dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(
+            network, logits, vocab, b_out, dtype=work_np_dtype)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
 
         logits.name = "logits"
         network.mark_output(logits)
@@ -325,6 +348,10 @@ class MambaPlugin:
         for i in range(num_layers):
             pc = present_conv_outputs[i]
             ps = present_ssm_outputs[i]
+            if pc.dtype != trt.float32:
+                pc = network.add_cast(pc, trt.float32).get_output(0)
+            if ps.dtype != trt.float32:
+                ps = network.add_cast(ps, trt.float32).get_output(0)
             pc.name = graph_ops.layer_tensor_name("present_conv", i)
             ps.name = graph_ops.layer_tensor_name("present_ssm", i)
             network.mark_output(pc)
@@ -336,7 +363,8 @@ class MambaPlugin:
         if verbose:
             print(f"[trtmc build] Building Mamba TRT engine ({num_layers} layers, "
                   f"hidden={hidden}, d_inner={d_inner}, state_size={state_size}, "
-                  f"conv_kernel={conv_kernel}, dt_rank={dt_rank}) ...",
+                  f"conv_kernel={conv_kernel}, dt_rank={dt_rank}, "
+                  f"precision={precision}) ...",
                   file=sys.stderr)
 
         plan = builder.build_serialized_network(network, trt_config)
@@ -373,6 +401,7 @@ def _add_mamba_layer(
     state_size: int,
     conv_kernel: int,
     dt_rank: int,
+    dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     """Add one Mamba SSM layer.
 
@@ -381,17 +410,17 @@ def _add_mamba_layer(
     # ===== 1. RMSNorm =====
     normed = graph_ops.add_rms_norm(
         network, hidden, hidden_size,
-        weights[f"{prefix}.norm"], eps_tensor)
+        weights[f"{prefix}.norm"], eps_tensor, dtype=dtype)
 
     # ===== 2. Input projection: normed -> x, z =====
     # x: [1, d_inner]  (SSM path)
     x = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, d_inner,
-        weights[f"{prefix}.w_in_x"])
+        weights[f"{prefix}.w_in_x"], dtype=dtype)
     # z: [1, d_inner]  (gate path)
     z = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, d_inner,
-        weights[f"{prefix}.w_in_z"])
+        weights[f"{prefix}.w_in_z"], dtype=dtype)
 
     # ===== 3. Conv1d step =====
     # conv_state_in: [d_inner, conv_kernel]
@@ -428,7 +457,7 @@ def _add_mamba_layer(
 
     conv_w = graph_ops.add_constant(
         network, (d_inner, conv_kernel),
-        weights[f"{prefix}.conv1d_weight"])
+        weights[f"{prefix}.conv1d_weight"], dtype=dtype)
     conv_prod = network.add_elementwise(
         present_conv, conv_w, trt.ElementWiseOperation.PROD)
     # Reduce sum over axis 1 (kernel dim): [d_inner, conv_kernel] -> [d_inner, 1]
@@ -442,10 +471,11 @@ def _add_mamba_layer(
     # Add conv bias
     conv_out = graph_ops.add_bias_sum(
         network, conv_flat.get_output(0), d_inner,
-        weights[f"{prefix}.conv1d_bias"])
+        weights[f"{prefix}.conv1d_bias"], dtype=dtype)
 
     # SiLU activation on conv output
-    conv_activated = graph_ops.add_activation(network, conv_out, "silu")
+    conv_activated = graph_ops.add_activation(
+        network, conv_out, "silu", dtype=dtype)
     # conv_activated: [1, d_inner]
 
     # ===== 4. SSM parameters from x =====
@@ -453,28 +483,35 @@ def _add_mamba_layer(
     # dt_in: [1, dt_rank]
     dt_in = graph_ops.add_matmul_rhs_constant(
         network, conv_activated, d_inner, dt_rank,
-        weights[f"{prefix}.w_dt_in"])
+        weights[f"{prefix}.w_dt_in"], dtype=dtype)
     # B: [1, state_size]
     B = graph_ops.add_matmul_rhs_constant(
         network, conv_activated, d_inner, state_size,
-        weights[f"{prefix}.w_B"])
+        weights[f"{prefix}.w_B"], dtype=dtype)
     # C: [1, state_size]
     C = graph_ops.add_matmul_rhs_constant(
         network, conv_activated, d_inner, state_size,
-        weights[f"{prefix}.w_C"])
+        weights[f"{prefix}.w_C"], dtype=dtype)
 
     # ===== 5. dt_proj: dt_rank -> d_inner with bias + softplus =====
     dt = graph_ops.add_matmul_rhs_constant(
         network, dt_in, dt_rank, d_inner,
-        weights[f"{prefix}.w_dt_out"])  # [1, d_inner]
+        weights[f"{prefix}.w_dt_out"], dtype=dtype)  # [1, d_inner]
     dt = graph_ops.add_bias_sum(
         network, dt, d_inner,
-        weights[f"{prefix}.dt_proj_bias"])
+        weights[f"{prefix}.dt_proj_bias"], dtype=dtype)
+
+    # Softplus and the recurrent scan stay FP32. Real Mamba checkpoints contain
+    # A = -exp(A_log) values well outside FP16 range, so casting A would create
+    # infinities before the first decode step.
+    dt_fp32 = dt
+    if dt_fp32.dtype != trt.float32:
+        dt_fp32 = network.add_cast(dt_fp32, trt.float32).get_output(0)
 
     # Softplus: log(1 + exp(x))
     # For numerical stability: softplus(x) = x when x > 20, else log(1+exp(x))
     # In TRT: exp -> add 1 -> log
-    dt_exp = network.add_unary(dt, trt.UnaryOperation.EXP)
+    dt_exp = network.add_unary(dt_fp32, trt.UnaryOperation.EXP)
     one = graph_ops.add_constant(network, (1, 1),
                                   np.array([1.0], dtype=np.float32))
     dt_exp_p1 = network.add_elementwise(
@@ -508,7 +545,10 @@ def _add_mamba_layer(
 
     # Discretize B: dt_B = dt * B
     # dt: [d_inner, 1], B: [1, state_size] -> broadcast to [d_inner, state_size]
-    B_reshape = network.add_shuffle(B)
+    B_fp32 = B
+    if B_fp32.dtype != trt.float32:
+        B_fp32 = network.add_cast(B_fp32, trt.float32).get_output(0)
+    B_reshape = network.add_shuffle(B_fp32)
     B_reshape.reshape_dims = (1, state_size)
     dt_B = network.add_elementwise(
         dt_col.get_output(0), B_reshape.get_output(0),
@@ -516,7 +556,10 @@ def _add_mamba_layer(
     # dt_B: [d_inner, state_size]
 
     # x for scan: conv_activated [1, d_inner] -> [d_inner, 1]
-    x_col2 = network.add_shuffle(conv_activated)
+    scan_x = conv_activated
+    if scan_x.dtype != trt.float32:
+        scan_x = network.add_cast(scan_x, trt.float32).get_output(0)
+    x_col2 = network.add_shuffle(scan_x)
     x_col2.reshape_dims = (d_inner, 1)
 
     # dt_B * x: [d_inner, state_size] * [d_inner, 1] -> [d_inner, state_size]
@@ -538,7 +581,10 @@ def _add_mamba_layer(
     # We want: for each d in d_inner: y[d] = sum_s(C[s] * new_ssm[d, s])
     # = matmul new_ssm @ C^T
     # new_ssm [d_inner, state_size] @ C^T [state_size, 1] -> [d_inner, 1]
-    C_reshape2 = network.add_shuffle(C)
+    C_fp32 = C
+    if C_fp32.dtype != trt.float32:
+        C_fp32 = network.add_cast(C_fp32, trt.float32).get_output(0)
+    C_reshape2 = network.add_shuffle(C_fp32)
     C_reshape2.reshape_dims = (state_size, 1)
     y_matmul = network.add_matrix_multiply(
         present_ssm, trt.MatrixOperation.NONE,
@@ -551,7 +597,7 @@ def _add_mamba_layer(
     D_const = graph_ops.add_constant(
         network, (1, d_inner), weights[f"{prefix}.D"])
     Dx = network.add_elementwise(
-        D_const, conv_activated, trt.ElementWiseOperation.PROD)
+        D_const, scan_x, trt.ElementWiseOperation.PROD)
 
     # y = y + D*x
     y = network.add_elementwise(
@@ -561,15 +607,18 @@ def _add_mamba_layer(
 
     # ===== 7. Gate and output =====
     # y * silu(z)
-    z_activated = graph_ops.add_activation(network, z, "silu")
+    y_for_gate = y.get_output(0)
+    if y_for_gate.dtype != hidden.dtype:
+        y_for_gate = network.add_cast(y_for_gate, hidden.dtype).get_output(0)
+    z_activated = graph_ops.add_activation(network, z, "silu", dtype=dtype)
     gated = network.add_elementwise(
-        y.get_output(0), z_activated,
+        y_for_gate, z_activated,
         trt.ElementWiseOperation.PROD)
 
     # out_proj: [1, d_inner] @ [d_inner, hidden] -> [1, hidden]
     out = graph_ops.add_matmul_rhs_constant(
         network, gated.get_output(0), d_inner, hidden_size,
-        weights[f"{prefix}.w_out"])
+        weights[f"{prefix}.w_out"], dtype=dtype)
 
     # Residual connection
     residual = network.add_elementwise(

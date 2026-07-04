@@ -47,6 +47,16 @@ class InternLMPlugin:
     def matches(self, model_type: str) -> bool:
         return model_type.lower().startswith("internlm")
 
+    def ensure_tokenizer_json(
+        self,
+        model_dir: str | Path,
+        *,
+        previous_error: str | None = None,
+    ) -> bool:
+        from .tokenizer_json import ensure_tokenizer_json
+
+        return ensure_tokenizer_json(model_dir, previous_error=previous_error)
+
     def load_weights(
         self, model_dir: str, config: ModelConfig,
     ) -> WeightDict:

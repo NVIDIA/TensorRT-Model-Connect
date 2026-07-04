@@ -518,7 +518,9 @@ def build_dual_profile_decoder_engine(
             num_heads=num_heads, head_dim=head_dim,
             num_kv_heads=num_kv_heads,
             q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
-            scale=attn_scale, tag=f"{prefix}.attn")
+            scale=attn_scale,
+            fp32_accumulation=work_np_dtype != np.float32,
+            tag=f"{prefix}.attn")
 
         attn_out = matmul(context, attention_size, hidden,
                           weights[f"{prefix}.w_o"], f"{prefix}.w_o")

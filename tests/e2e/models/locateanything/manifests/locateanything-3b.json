@@ -7,6 +7,8 @@
   "runtime_strategy": "locateanything_vision_language",
   "task_strategy": "vision_language_generation",
   "ci_tier": "l0_only",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "max_cache_length": 384,
   "prompt": "Find the red vehicle in this image.",
   "max_new_tokens": 32,

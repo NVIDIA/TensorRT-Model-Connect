@@ -6,6 +6,8 @@
   "family": "bark",
   "runtime_strategy": "text_to_audio_bark",
   "task_strategy": "text_to_audio",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "reference_family": "tts_bark",
   "user_contract": "tts_audio",
   "ci_tier": "nightly_only",

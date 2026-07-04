@@ -42,5 +42,6 @@
   "tts_probe_id": "probe_03_question_prompt_round_trip",
   "tts_probe_readiness": "ready_now",
   "tts_probe_purpose": "Cover Model Connect prompt transport for a short question-form Magpie TTS sentence while reusing the existing magpie-tts-357m bundle.",
-  "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt with question punctuation -> text_to_audio_magpie runtime -> WAV artifact -> tts_audio contract. The prompt stays short to limit nightly runtime cost."
+  "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt with question punctuation -> text_to_audio_magpie runtime -> WAV artifact -> tts_audio contract. The prompt stays short to limit nightly runtime cost.",
+  "precision": "fp16"
 }

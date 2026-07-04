@@ -215,6 +215,7 @@ class DprPlugin:
         return build_encoder_engine(
             config, weights,
             max_seq_length=max_cache_length,
+            precision=precision,
             verbose=verbose)
 
 

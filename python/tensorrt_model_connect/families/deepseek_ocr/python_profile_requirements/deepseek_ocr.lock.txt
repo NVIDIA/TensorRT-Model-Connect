@@ -1,0 +1,6 @@
+addict==2.4.0
+easydict==1.13
+einops==0.8.1
+huggingface-hub==0.26.5
+tokenizers==0.20.3
+transformers==4.46.3

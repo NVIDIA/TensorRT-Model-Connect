@@ -35,6 +35,22 @@ def _cast_back_to_trt_dtype(
         return tensor
     return network.add_cast(tensor, target_dtype).get_output(0)
 
+
+def _add_matrix_multiply_with_fp32_accumulation(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    lhs_op: trt.MatrixOperation,
+    rhs: trt.ITensor,
+    rhs_op: trt.MatrixOperation,
+) -> trt.ITensor:
+    """Request TensorRT's fused FP16 GEMM with FP32 accumulation."""
+    output_dtype = lhs.dtype
+    if lhs.dtype == trt.float16 and rhs.dtype == trt.float16:
+        lhs = network.add_cast(lhs, trt.float32).get_output(0)
+        rhs = network.add_cast(rhs, trt.float32).get_output(0)
+    output = network.add_matrix_multiply(lhs, lhs_op, rhs, rhs_op).get_output(0)
+    return _cast_back_to_trt_dtype(network, output, output_dtype)
+
 def layer_tensor_name(stem: str, layer: int) -> str:
     return f"{stem}_{layer}"
 
@@ -58,6 +74,7 @@ def add_matmul_rhs_constant(
     rhs_width: int,
     rhs_weights: np.ndarray,
     dtype: np.dtype = np.float32,
+    fp32_accumulation: bool = True,
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
     rank = len(tuple(lhs.shape))
@@ -73,6 +90,12 @@ def add_matmul_rhs_constant(
         dtype=dtype,
     )
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
+    if fp32_accumulation:
+        return _add_matrix_multiply_with_fp32_accumulation(
+            network,
+            lhs, trt.MatrixOperation.NONE,
+            rhs, trt.MatrixOperation.NONE,
+        )
     mm = network.add_matrix_multiply(
         lhs, trt.MatrixOperation.NONE,
         rhs, trt.MatrixOperation.NONE,
@@ -787,6 +810,8 @@ def add_self_attention_block_with_rope(
     v_bias: np.ndarray | None = None,
     o_bias: np.ndarray | None = None,
     dtype: np.dtype = np.float32,
+    causal: bool = False,
+    interleaved_rope: bool = False,
 ) -> trt.ITensor:
     """Full self-attention with precomputed RoPE (for vision encoders with 3D RoPE).
 
@@ -821,15 +846,17 @@ def add_self_attention_block_with_rope(
 
     q = add_apply_rope_native_sequence(
         network, q, num_heads, head_dim, cos_const, sin_const,
-        rotary_embedding_dim=rope_dim, sequence_length=seq_length)
+        rotary_embedding_dim=rope_dim, interleaved=interleaved_rope,
+        sequence_length=seq_length)
     k = add_apply_rope_native_sequence(
         network, k, num_heads, head_dim, cos_const, sin_const,
-        rotary_embedding_dim=rope_dim, sequence_length=seq_length)
+        rotary_embedding_dim=rope_dim, interleaved=interleaved_rope,
+        sequence_length=seq_length)
 
     context_flat = add_attention_from_rows(
         network, q, k, v,
         num_heads=num_heads, head_dim=head_dim,
-        q_seq=seq_length, kv_seq=seq_length)
+        q_seq=seq_length, kv_seq=seq_length, causal=causal)
 
     # Output projection
     out = add_matmul_rhs_constant(
@@ -2840,6 +2867,49 @@ def _add_attention_core_with_logit_softcap(
     return _cast_back_to_trt_dtype(network, context, output_dtype)
 
 
+def _add_attention_core_decomposed(
+    network: trt.INetworkDefinition,
+    q_4d: trt.ITensor,
+    k_4d: trt.ITensor,
+    v_4d: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    mask: trt.ITensor | None,
+    scale: float,
+) -> trt.ITensor:
+    """Build masked attention from strongly typed primitive FP16 operations."""
+    output_dtype = q_4d.dtype
+    k_4d = _repeat_kv_heads_4d(
+        network, k_4d, num_heads=num_heads, num_kv_heads=num_kv_heads,
+        head_dim=head_dim)
+    v_4d = _repeat_kv_heads_4d(
+        network, v_4d, num_heads=num_heads, num_kv_heads=num_kv_heads,
+        head_dim=head_dim)
+
+    scale_t = _scalar_constant_for_trt_dtype(
+        network, (1, 1, 1, 1), scale, output_dtype)
+    q_scaled = network.add_elementwise(
+        q_4d, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+    scores = network.add_matrix_multiply(
+        q_scaled, trt.MatrixOperation.NONE,
+        k_4d, trt.MatrixOperation.TRANSPOSE).get_output(0)
+
+    if mask is not None:
+        if mask.dtype != output_dtype:
+            mask = network.add_cast(mask, output_dtype).get_output(0)
+        scores = network.add_elementwise(
+            scores, mask, trt.ElementWiseOperation.SUM).get_output(0)
+
+    probs = network.add_softmax(scores)
+    probs.axes = 1 << 3
+    context = network.add_matrix_multiply(
+        probs.get_output(0), trt.MatrixOperation.NONE,
+        v_4d, trt.MatrixOperation.NONE).get_output(0)
+    return _cast_back_to_trt_dtype(network, context, output_dtype)
+
+
 def add_attention_from_rows(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
@@ -2885,6 +2955,14 @@ def add_attention_from_rows(
             network, q_4d, k_4d, v_4d,
             num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
             mask=mask, scale=scale, logit_softcap=float(logit_softcap))
+    elif (q_4d.dtype == trt.float16 and mask is not None and
+          head_dim == 128 and not causal):
+        # TRT 11's FP16 masked IAttention compiler path fails for the
+        # PersonaPlex temporal transformer's 32 x 128 attention shape.
+        ctx_4d = _add_attention_core_decomposed(
+            network, q_4d, k_4d, v_4d,
+            num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
+            mask=mask, scale=scale)
     else:
         ctx_4d = add_attention_core(
             network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,

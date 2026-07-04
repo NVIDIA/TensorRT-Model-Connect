@@ -265,6 +265,26 @@ class GptOssPlugin:
         trt_config.set_memory_pool_limit(
             trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
+        if precision == "fp16":
+            work_np_dtype = np.float16
+            work_trt_dtype = trt.float16
+        elif precision == "bf16":
+            work_np_dtype = np.float16
+            work_trt_dtype = trt.bfloat16
+        else:
+            work_np_dtype = np.float32
+            work_trt_dtype = trt.float32
+
+        requested_fp32_layers = frozenset(
+            int(layer) for layer in config.raw.get("_fp32_layers", ()))
+        invalid_fp32_layers = sorted(
+            layer for layer in requested_fp32_layers
+            if layer < 0 or layer >= num_layers)
+        if invalid_fp32_layers:
+            raise ValueError(
+                "fp32_layers contains out-of-range indices: "
+                f"{invalid_fp32_layers}")
+
         # -----------------------------------------------------------
         # Inputs
         # -----------------------------------------------------------
@@ -278,18 +298,23 @@ class GptOssPlugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
+
+        if work_trt_dtype != trt.float32:
+            attention_mask = network.add_cast(
+                attention_mask, work_trt_dtype).get_output(0)
 
         # -----------------------------------------------------------
         # Shared constants
         # -----------------------------------------------------------
         embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+            network, (vocab, hidden), weights["embedding"],
+            dtype=work_np_dtype)
 
         # GPT-OSS uses YaRN RoPE scaling (rope_parameters in config.json)
         rope_params = config.raw.get("rope_parameters", {})
@@ -325,17 +350,19 @@ class GptOssPlugin:
                 config.rope_theta, False)
 
         cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np)
+            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
         sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np)
+            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
-            np.array([config.rms_norm_eps], dtype=np.float32))
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
         attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
         attn_scale_tensor = graph_ops.add_constant(
             network, (1, 1, 1),
-            np.array([attn_scale], dtype=np.float32))
+            np.array([attn_scale], dtype=work_np_dtype),
+            dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # Embedding lookup
@@ -354,18 +381,27 @@ class GptOssPlugin:
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
+            layer_is_fp32 = (
+                precision == "fp16" and layer_idx in requested_fp32_layers)
+            layer_np_dtype = np.float32 if layer_is_fp32 else work_np_dtype
+            layer_trt_dtype = trt.float32 if layer_is_fp32 else work_trt_dtype
+
+            def layer_cast(tensor):
+                if tensor.dtype == layer_trt_dtype:
+                    return tensor
+                return network.add_cast(tensor, layer_trt_dtype).get_output(0)
 
             result = _add_gpt_oss_decoder_layer(
                 network=network,
-                hidden=hidden_state,
-                cache_k=cache_k_inputs[layer_idx],
-                cache_v=cache_v_inputs[layer_idx],
-                attention_mask=attention_mask,
+                hidden=layer_cast(hidden_state),
+                cache_k=layer_cast(cache_k_inputs[layer_idx]),
+                cache_v=layer_cast(cache_v_inputs[layer_idx]),
+                attention_mask=layer_cast(attention_mask),
                 position_id=position_id,
-                cos_half_tensor=cos_half_tensor,
-                sin_half_tensor=sin_half_tensor,
-                attn_scale_tensor=attn_scale_tensor,
-                eps_tensor=eps_tensor,
+                cos_half_tensor=layer_cast(cos_half_tensor),
+                sin_half_tensor=layer_cast(sin_half_tensor),
+                attn_scale_tensor=layer_cast(attn_scale_tensor),
+                eps_tensor=layer_cast(eps_tensor),
                 weights=weights,
                 prefix=prefix,
                 hidden_size=hidden,
@@ -378,11 +414,21 @@ class GptOssPlugin:
                 num_experts=num_experts,
                 moe_intermediate=moe_intermediate,
                 top_k=top_k,
+                dtype=layer_np_dtype,
             )
 
             hidden_state = result["hidden"]
-            present_k_outputs.append(result["present_k"])
-            present_v_outputs.append(result["present_v"])
+            present_k = result["present_k"]
+            present_v = result["present_v"]
+            if layer_is_fp32:
+                hidden_state = network.add_cast(
+                    hidden_state, work_trt_dtype).get_output(0)
+                present_k = network.add_cast(
+                    present_k, work_trt_dtype).get_output(0)
+                present_v = network.add_cast(
+                    present_v, work_trt_dtype).get_output(0)
+            present_k_outputs.append(present_k)
+            present_v_outputs.append(present_v)
 
             if debug_layer_outputs:
                 _mark_debug_output(
@@ -399,20 +445,26 @@ class GptOssPlugin:
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = _apply_norm(
                 network, hidden_state, hidden, final_norm,
-                None, eps_tensor, "rmsnorm")
+                None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # LM head (logits)
         # -----------------------------------------------------------
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_out"])
+            network, hidden_state, hidden, vocab, weights["w_out"],
+            dtype=work_np_dtype)
 
         lm_bias = weights.get("lm_head_bias")
         if lm_bias is not None:
-            logits = graph_ops.add_bias_sum(network, logits, vocab, lm_bias)
+            logits = graph_ops.add_bias_sum(
+                network, logits, vocab, lm_bias, dtype=work_np_dtype)
         else:
-            b_out = np.zeros(vocab, dtype=np.float32)
-            logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+            b_out = np.zeros(vocab, dtype=work_np_dtype)
+            logits = graph_ops.add_bias_sum(
+                network, logits, vocab, b_out, dtype=work_np_dtype)
+
+        if work_trt_dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
 
         logits.name = "logits"
         network.mark_output(logits)
@@ -458,6 +510,7 @@ def _add_gpt_oss_expert(
     down_bias: np.ndarray | None = None,
     alpha: float = 1.702,
     limit: float = 7.0,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """GPT-OSS gated expert activation (NOT standard SwiGLU).
 
@@ -470,26 +523,26 @@ def _add_gpt_oss_expert(
       result = output @ down_proj + down_bias
     """
     gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate)
+        network, inp, hidden_size, intermediate_size, w_gate, dtype=dtype)
     if gate_bias is not None:
         gate = graph_ops.add_bias_sum(
-            network, gate, intermediate_size, gate_bias)
+            network, gate, intermediate_size, gate_bias, dtype=dtype)
 
     up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up)
+        network, inp, hidden_size, intermediate_size, w_up, dtype=dtype)
     if up_bias is not None:
         up = graph_ops.add_bias_sum(
-            network, up, intermediate_size, up_bias)
+            network, up, intermediate_size, up_bias, dtype=dtype)
 
     # Clamp gate to max=limit
     limit_const = graph_ops.add_constant(
-        network, (1, 1), np.array([limit], dtype=np.float32))
+        network, (1, 1), np.array([limit], dtype=dtype), dtype=dtype)
     gate = network.add_elementwise(
         gate, limit_const, trt.ElementWiseOperation.MIN).get_output(0)
 
     # Clamp up to [-limit, limit]
     neg_limit_const = graph_ops.add_constant(
-        network, (1, 1), np.array([-limit], dtype=np.float32))
+        network, (1, 1), np.array([-limit], dtype=dtype), dtype=dtype)
     up = network.add_elementwise(
         up, limit_const, trt.ElementWiseOperation.MIN).get_output(0)
     up = network.add_elementwise(
@@ -497,7 +550,7 @@ def _add_gpt_oss_expert(
 
     # glu = gate * sigmoid(gate * alpha)
     alpha_const = graph_ops.add_constant(
-        network, (1, 1), np.array([alpha], dtype=np.float32))
+        network, (1, 1), np.array([alpha], dtype=dtype), dtype=dtype)
     gate_scaled = network.add_elementwise(
         gate, alpha_const, trt.ElementWiseOperation.PROD).get_output(0)
     sigmoid = network.add_activation(
@@ -507,7 +560,7 @@ def _add_gpt_oss_expert(
 
     # output = (up + 1) * glu
     one_const = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=np.float32))
+        network, (1, 1), np.array([1.0], dtype=dtype), dtype=dtype)
     up_plus_one = network.add_elementwise(
         up, one_const, trt.ElementWiseOperation.SUM).get_output(0)
     gated = network.add_elementwise(
@@ -515,10 +568,10 @@ def _add_gpt_oss_expert(
 
     # down projection + bias
     down_out = graph_ops.add_matmul_rhs_constant(
-        network, gated, intermediate_size, hidden_size, w_down)
+        network, gated, intermediate_size, hidden_size, w_down, dtype=dtype)
     if down_bias is not None:
         down_out = graph_ops.add_bias_sum(
-            network, down_out, hidden_size, down_bias)
+            network, down_out, hidden_size, down_bias, dtype=dtype)
     return down_out
 
 
@@ -531,6 +584,7 @@ def _add_gpt_oss_moe_block(
     num_experts: int,
     moe_intermediate: int,
     top_k: int = 4,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """GPT-OSS MoE block: topk on raw logits, softmax over selected only.
 
@@ -544,11 +598,11 @@ def _add_gpt_oss_moe_block(
     # 1. Router logits + bias (raw)
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, num_experts,
-        weights[f"{prefix}.router"])
+        weights[f"{prefix}.router"], dtype=dtype)
     router_bias = weights.get(f"{prefix}.router_bias")
     if router_bias is not None:
         router_logits = graph_ops.add_bias_sum(
-            network, router_logits, num_experts, router_bias)
+            network, router_logits, num_experts, router_bias, dtype=dtype)
 
     # 2. TopK on RAW logits (not softmax)
     topk = network.add_topk(
@@ -572,6 +626,7 @@ def _add_gpt_oss_moe_block(
             weights.get(f"{prefix}.expert.{e}.gate_bias"),
             weights.get(f"{prefix}.expert.{e}.up_bias"),
             weights.get(f"{prefix}.expert.{e}.down_bias"),
+            dtype=dtype,
         )
         expert_outputs.append(exp_out)
 
@@ -629,6 +684,7 @@ def _add_gpt_oss_attention(
     cos_half_tensor: trt.ITensor,
     sin_half_tensor: trt.ITensor,
     attn_scale_tensor: trt.ITensor,
+    dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     """GPT-OSS attention with attention sinks.
 
@@ -649,23 +705,26 @@ def _add_gpt_oss_attention(
     # QKV projections with biases
     q = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, attention_size,
-        weights[f"{prefix}.w_q"])
+        weights[f"{prefix}.w_q"], dtype=dtype)
     k = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_k"])
+        weights[f"{prefix}.w_k"], dtype=dtype)
     v = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_v"])
+        weights[f"{prefix}.w_v"], dtype=dtype)
 
     q_bias = weights.get(f"{prefix}.q_bias")
     if q_bias is not None:
-        q = graph_ops.add_bias_sum(network, q, attention_size, q_bias)
+        q = graph_ops.add_bias_sum(
+            network, q, attention_size, q_bias, dtype=dtype)
     k_bias = weights.get(f"{prefix}.k_bias")
     if k_bias is not None:
-        k = graph_ops.add_bias_sum(network, k, kv_attention_size, k_bias)
+        k = graph_ops.add_bias_sum(
+            network, k, kv_attention_size, k_bias, dtype=dtype)
     v_bias = weights.get(f"{prefix}.v_bias")
     if v_bias is not None:
-        v = graph_ops.add_bias_sum(network, v, kv_attention_size, v_bias)
+        v = graph_ops.add_bias_sum(
+            network, v, kv_attention_size, v_bias, dtype=dtype)
 
     # Native RoPE
     q = graph_ops.add_apply_rope_native(
@@ -758,7 +817,8 @@ def _add_gpt_oss_attention(
         # --- Attention sinks ---
         # sinks: [num_heads] -> reshape to [num_heads, 1, 1]
         sinks_const = graph_ops.add_constant(
-            network, (num_heads, 1, 1), sinks.reshape(num_heads, 1, 1))
+            network, (num_heads, 1, 1), sinks.reshape(num_heads, 1, 1),
+            dtype=dtype)
         # Concatenate sink column to attention logits: [H, 1, W] + [H, 1, 1] -> [H, 1, W+1]
         combined = network.add_concatenation(
             [masked.get_output(0), sinks_const])
@@ -796,10 +856,11 @@ def _add_gpt_oss_attention(
     attn_out = graph_ops.add_matmul_rhs_constant(
         network, context_flat.get_output(0),
         attention_size, hidden_size,
-        weights[f"{prefix}.w_o"])
+        weights[f"{prefix}.w_o"], dtype=dtype)
     o_bias = weights.get(f"{prefix}.o_bias")
     if o_bias is not None:
-        attn_out = graph_ops.add_bias_sum(network, attn_out, hidden_size, o_bias)
+        attn_out = graph_ops.add_bias_sum(
+            network, attn_out, hidden_size, o_bias, dtype=dtype)
 
     return {
         "attn_out": attn_out,
@@ -832,6 +893,7 @@ def _add_gpt_oss_decoder_layer(
     num_experts: int,
     moe_intermediate: int,
     top_k: int = 4,
+    dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     """One GPT-OSS decoder layer: attention with sinks + MoE."""
 
@@ -839,7 +901,7 @@ def _add_gpt_oss_decoder_layer(
     normed = _apply_norm(
         network, hidden, hidden_size,
         weights[f"{prefix}.input_norm"],
-        None, eps_tensor, "rmsnorm")
+        None, eps_tensor, "rmsnorm", dtype=dtype)
 
     # Attention with sinks
     attn = _add_gpt_oss_attention(
@@ -851,6 +913,7 @@ def _add_gpt_oss_decoder_layer(
         max_cache_length=max_cache_length,
         cos_half_tensor=cos_half_tensor, sin_half_tensor=sin_half_tensor,
         attn_scale_tensor=attn_scale_tensor,
+        dtype=dtype,
     )
 
     # Residual connection
@@ -861,12 +924,12 @@ def _add_gpt_oss_decoder_layer(
     norm2 = _apply_norm(
         network, residual1.get_output(0), hidden_size,
         weights[f"{prefix}.post_attn_norm"],
-        None, eps_tensor, "rmsnorm")
+        None, eps_tensor, "rmsnorm", dtype=dtype)
 
     # MoE block
     moe_out = _add_gpt_oss_moe_block(
         network, norm2, weights, prefix,
-        hidden_size, num_experts, moe_intermediate, top_k)
+        hidden_size, num_experts, moe_intermediate, top_k, dtype=dtype)
 
     # Residual connection
     residual2 = network.add_elementwise(

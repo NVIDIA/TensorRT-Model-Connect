@@ -89,11 +89,12 @@ class EagleVLMPlugin:
             return build_eagle_vlm_tp_engine(
                 config, weights, max_cache_length,
                 is_reranker=is_rerank,
+                precision=precision,
                 verbose=verbose,
                 parallel_config=parallel)
         return _build_eagle_engine(
             config, weights, max_cache_length,
-            is_reranker=is_rerank, verbose=verbose)
+            is_reranker=is_rerank, precision=precision, verbose=verbose)
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
@@ -104,7 +105,7 @@ class EagleVLMPlugin:
             return None
         vision_weights = _load_vision_weights(model_dir, config)
         return _build_siglip_vision_engine(
-            vision_config, vision_weights, verbose=verbose)
+            vision_config, vision_weights, precision=precision, verbose=verbose)
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
         """Return embedding/reranking config for the bundle."""
@@ -299,6 +300,7 @@ def _build_eagle_engine(
     max_cache_length: int,
     *,
     is_reranker: bool = False,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build Eagle text backbone engine for embedding or reranking.
@@ -315,6 +317,14 @@ def _build_eagle_engine(
     trt = trt_compat.get_trt()
     from . import graph_ops
     from . import graph_blocks
+
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported Eagle VLM precision {precision!r}; expected fp32 or fp16")
 
     attention_size: int = weights.get("_attention_size", config.attention_size)
     mlp_size: int = weights.get("_mlp_size", config.intermediate_size)
@@ -344,10 +354,14 @@ def _build_eagle_engine(
     input_embed = network.add_input("input_embed", trt.float32, (seq_length, hidden))
     # use_input_embed: [seq_length] — per-position flag (0.0=use token lookup, 1.0=use input_embed)
     use_input_embed = network.add_input("use_input_embed", trt.float32, (seq_length,))
+    if work_trt_dtype != trt.float32:
+        input_embed = network.add_cast(input_embed, work_trt_dtype).get_output(0)
+        use_input_embed = network.add_cast(
+            use_input_embed, work_trt_dtype).get_output(0)
 
     # --- Embedding with input_embed bypass ---
     embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), weights["embedding"])
+        network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
     # Gather: [seq_length] -> [seq_length, hidden]
     gather = network.add_gather(embedding_table, input_ids, 0)
     token_embed = gather.get_output(0)
@@ -357,7 +371,8 @@ def _build_eagle_engine(
     use_reshape = network.add_shuffle(use_input_embed)
     use_reshape.reshape_dims = (seq_length, 1)
     ones_bcast = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=np.float32))
+        network, (1, 1), np.array([1.0], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     inv_use = network.add_elementwise(
         ones_bcast, use_reshape.get_output(0),
         trt.ElementWiseOperation.SUB)  # [seq_length, 1]: 1 where token, 0 where embed
@@ -398,14 +413,15 @@ def _build_eagle_engine(
         sin_half_np = graph_ops.make_rope_table_half_dim(
             seq_length, head_dim, config.rope_theta, False)
     cos_half_tensor = graph_ops.add_constant(
-        network, cos_half_np.shape, cos_half_np)
+        network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
     sin_half_tensor = graph_ops.add_constant(
-        network, sin_half_np.shape, sin_half_np)
+        network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
     rope_position_ids = graph_ops.add_constant(
         network, (seq_length,), np.arange(seq_length, dtype=np.int32),
         dtype=np.int32)
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
+        network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     attn_scale = 1.0 / np.sqrt(max(head_dim, 1))
 
     # --- Build padding attention mask from attention_mask input ---
@@ -414,12 +430,15 @@ def _build_eagle_engine(
     # positions attending TO padding get -1e10.
     # Convert int32 mask to float: 0 -> -1e10, 1 -> 0.0
     mask_float = network.add_cast(
-        attention_mask_input, trt.float32)
+        attention_mask_input, work_trt_dtype)
     # (1 - mask) * -1e10: padding positions get -1e10
     ones_const = graph_ops.add_constant(
-        network, (1,), np.array([1.0], dtype=np.float32))
+        network, (1,), np.array([1.0], dtype=work_np_dtype),
+        dtype=work_np_dtype)
+    mask_penalty = -1e4 if precision == "fp16" else -1e10
     neg_large = graph_ops.add_constant(
-        network, (1,), np.array([-1e10], dtype=np.float32))
+        network, (1,), np.array([mask_penalty], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     inv_mask = network.add_elementwise(
         ones_const, mask_float.get_output(0),
         trt.ElementWiseOperation.SUB)  # [seq_length]: 0 for real, 1 for pad
@@ -429,7 +448,9 @@ def _build_eagle_engine(
     pad_mask_row = network.add_shuffle(pad_penalty.get_output(0))
     pad_mask_row.reshape_dims = (1, seq_length)
     query_zeros = graph_ops.add_constant(
-        network, (seq_length, 1), np.zeros((seq_length, 1), dtype=np.float32))
+        network, (seq_length, 1),
+        np.zeros((seq_length, 1), dtype=work_np_dtype),
+        dtype=work_np_dtype)
     pad_mask_2d = network.add_elementwise(
         query_zeros, pad_mask_row.get_output(0), trt.ElementWiseOperation.SUM)
     pad_mask_4d = graph_ops.add_2d_mask_to_4d(network, pad_mask_2d.get_output(0))
@@ -448,15 +469,18 @@ def _build_eagle_engine(
         norm1 = graph_blocks.apply_norm(
             network, hidden_state, hidden,
             weights[f"{prefix}.input_norm"],
-            None, eps_tensor, "rmsnorm")
+            None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
         # Self-attention: Q, K, V projections
         q = graph_ops.add_matmul_rhs_constant(
-            network, norm1, hidden, attention_size, weights[f"{prefix}.w_q"])
+            network, norm1, hidden, attention_size, weights[f"{prefix}.w_q"],
+            dtype=work_np_dtype)
         k = graph_ops.add_matmul_rhs_constant(
-            network, norm1, hidden, kv_attention_size, weights[f"{prefix}.w_k"])
+            network, norm1, hidden, kv_attention_size, weights[f"{prefix}.w_k"],
+            dtype=work_np_dtype)
         v = graph_ops.add_matmul_rhs_constant(
-            network, norm1, hidden, kv_attention_size, weights[f"{prefix}.w_v"])
+            network, norm1, hidden, kv_attention_size, weights[f"{prefix}.w_v"],
+            dtype=work_np_dtype)
 
         q_rope = graph_ops.add_apply_rope_native(
             network, q, num_heads, head_dim,
@@ -478,7 +502,7 @@ def _build_eagle_engine(
         # Output projection
         proj_out = graph_ops.add_matmul_rhs_constant(
             network, attn_concat, attention_size, hidden,
-            weights[f"{prefix}.w_o"])
+            weights[f"{prefix}.w_o"], dtype=work_np_dtype)
 
         # Residual
         residual1 = network.add_elementwise(
@@ -489,11 +513,12 @@ def _build_eagle_engine(
         norm2 = graph_blocks.apply_norm(
             network, residual1.get_output(0), hidden,
             weights[f"{prefix}.post_attn_norm"],
-            None, eps_tensor, "rmsnorm")
+            None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2, weights=weights, prefix=prefix,
-            hidden_size=hidden, mlp_size=mlp_size)
+            hidden_size=hidden, mlp_size=mlp_size,
+            dtype=work_np_dtype)
 
         # Final residual
         residual2 = network.add_elementwise(
@@ -506,7 +531,7 @@ def _build_eagle_engine(
     if final_norm is not None and len(final_norm) > 0:
         hidden_state = graph_blocks.apply_norm(
             network, hidden_state, hidden, final_norm, None,
-            eps_tensor, "rmsnorm")
+            eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
     # --- Output ---
     if is_reranker and "score_weight" in weights:
@@ -515,18 +540,24 @@ def _build_eagle_engine(
         # For now, output all positions; C++ will pick the right one
         score = graph_ops.add_matmul_rhs_constant(
             network, hidden_state, hidden,
-            weights["score_weight"].shape[1], weights["score_weight"])
+            weights["score_weight"].shape[1], weights["score_weight"],
+            dtype=work_np_dtype)
         if "score_bias" in weights:
             score = graph_ops.add_bias_sum(
                 network, score, weights["score_weight"].shape[1],
-                weights["score_bias"])
+                weights["score_bias"], dtype=work_np_dtype)
+        if score.dtype != trt.float32:
+            score = network.add_cast(score, trt.float32).get_output(0)
         score.name = "score"
         network.mark_output(score)
     else:
         # Embedding: output all hidden states [seq_length, hidden]
         # C++ will do mean pooling + L2 normalization
-        hidden_state.name = "hidden_states"
-        network.mark_output(hidden_state)
+        output = hidden_state
+        if output.dtype != trt.float32:
+            output = network.add_cast(output, trt.float32).get_output(0)
+        output.name = "hidden_states"
+        network.mark_output(output)
 
     # --- Build ---
     mode_str = "reranking" if is_reranker else "embedding"
@@ -548,6 +579,7 @@ def _build_siglip_vision_engine(
     vision_config: dict,
     weights: WeightDict,
     *,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build SigLIP-2 vision encoder TRT engine.
@@ -558,6 +590,14 @@ def _build_siglip_vision_engine(
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
     from . import graph_ops
+
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported Eagle VLM precision {precision!r}; expected fp32 or fp16")
 
     image_size = vision_config.get("image_size", 384)
     patch_size = vision_config.get("patch_size", 14)
@@ -580,6 +620,8 @@ def _build_siglip_vision_engine(
     # Input: pixel_values [3, image_size, image_size]
     pixel_values = network.add_input(
         "pixel_values", trt.float32, (3, image_size, image_size))
+    if work_trt_dtype != trt.float32:
+        pixel_values = network.add_cast(pixel_values, work_trt_dtype).get_output(0)
 
     # --- Patch embedding (Conv2D) ---
     patch_proj_key = None
@@ -594,10 +636,10 @@ def _build_siglip_vision_engine(
         patch_w = weights[patch_proj_key]
         # Conv2D weight shape: [out_channels, in_channels, kH, kW]
         if patch_w.ndim == 4:
-            patch_w_flat = patch_w.astype(np.float32)
+            patch_w_flat = patch_w.astype(work_np_dtype)
         else:
             patch_w_flat = patch_w.reshape(
-                vision_hidden, 3, patch_size, patch_size).astype(np.float32)
+                vision_hidden, 3, patch_size, patch_size).astype(work_np_dtype)
 
         # Reshape input for Conv2D: [1, 3, H, W]
         input_4d = network.add_shuffle(pixel_values)
@@ -615,10 +657,11 @@ def _build_siglip_vision_engine(
                          "vision_model.embeddings.patch_embedding.bias",
                          "visual.patch_embed.proj.bias"):
             if bias_key in weights:
-                bias_data = weights[bias_key].astype(np.float32).reshape(
+                bias_data = weights[bias_key].astype(work_np_dtype).reshape(
                     1, vision_hidden, 1, 1)
                 conv.set_input(2, graph_ops.add_constant(
-                    network, (1, vision_hidden, 1, 1), bias_data))
+                    network, (1, vision_hidden, 1, 1), bias_data,
+                    dtype=work_np_dtype))
                 break
 
         # Conv output: [1, vision_hidden, num_patches_h, num_patches_w]
@@ -636,11 +679,12 @@ def _build_siglip_vision_engine(
                      "vision_model.embeddings.position_embedding.weight",
                      "visual.pos_embed"):
         if pos_key in weights:
-            pos_w = weights[pos_key].astype(np.float32)
+            pos_w = weights[pos_key].astype(work_np_dtype)
             if pos_w.shape[0] >= num_patches:
                 pos_w = pos_w[:num_patches, :]
             pos_const = graph_ops.add_constant(
-                network, (num_patches, vision_hidden), pos_w)
+                network, (num_patches, vision_hidden), pos_w,
+                dtype=work_np_dtype)
             pos_add = network.add_elementwise(
                 hidden_state, pos_const, trt.ElementWiseOperation.SUM)
             hidden_state = pos_add.get_output(0)
@@ -682,7 +726,7 @@ def _build_siglip_vision_engine(
                 network, hidden_state, vision_hidden,
                 ln1_w.astype(np.float32),
                 ln1_b.astype(np.float32) if ln1_b is not None else np.zeros(vision_hidden, dtype=np.float32),
-                eps_const)
+                eps_const, dtype=work_np_dtype)
         else:
             normed = hidden_state
 
@@ -693,15 +737,16 @@ def _build_siglip_vision_engine(
 
         if qkv_key in weights:
             # Fused QKV
-            qkv_w = weights[qkv_key].astype(np.float32)
+            qkv_w = weights[qkv_key].astype(work_np_dtype)
             if qkv_w.shape[0] == 3 * vision_hidden:
                 qkv_w_t = np.ascontiguousarray(qkv_w.T)
                 qkv = graph_ops.add_matmul_rhs_constant(
-                    network, normed, vision_hidden, 3 * vision_hidden, qkv_w_t)
+                    network, normed, vision_hidden, 3 * vision_hidden, qkv_w_t,
+                    dtype=work_np_dtype)
             else:
                 qkv = graph_ops.add_matmul_rhs_constant(
                     network, normed, vision_hidden, 3 * vision_hidden,
-                    np.ascontiguousarray(qkv_w.T))
+                    np.ascontiguousarray(qkv_w.T), dtype=work_np_dtype)
 
             # Split Q, K, V
             q_slice = network.add_slice(
@@ -725,19 +770,19 @@ def _build_siglip_vision_engine(
             if v_key not in weights:
                 v_key = f"{lp}.attn.v_proj.weight"
 
-            q_w = weights[q_key].astype(np.float32)
-            k_w = weights[k_key].astype(np.float32)
-            v_w = weights[v_key].astype(np.float32)
+            q_w = weights[q_key].astype(work_np_dtype)
+            k_w = weights[k_key].astype(work_np_dtype)
+            v_w = weights[v_key].astype(work_np_dtype)
 
             q_out = graph_ops.add_matmul_rhs_constant(
                 network, normed, vision_hidden, vision_hidden,
-                np.ascontiguousarray(q_w.T))
+                np.ascontiguousarray(q_w.T), dtype=work_np_dtype)
             k_out = graph_ops.add_matmul_rhs_constant(
                 network, normed, vision_hidden, vision_hidden,
-                np.ascontiguousarray(k_w.T))
+                np.ascontiguousarray(k_w.T), dtype=work_np_dtype)
             v_out = graph_ops.add_matmul_rhs_constant(
                 network, normed, vision_hidden, vision_hidden,
-                np.ascontiguousarray(v_w.T))
+                np.ascontiguousarray(v_w.T), dtype=work_np_dtype)
 
         concat = graph_ops.add_attention_from_rows(
             network, q_out, k_out, v_out,
@@ -752,10 +797,10 @@ def _build_siglip_vision_engine(
                 out_key = f"{lp}.attn.proj.weight"
 
         if out_key in weights:
-            out_w = weights[out_key].astype(np.float32)
+            out_w = weights[out_key].astype(work_np_dtype)
             proj = graph_ops.add_matmul_rhs_constant(
                 network, concat, vision_hidden, vision_hidden,
-                np.ascontiguousarray(out_w.T))
+                np.ascontiguousarray(out_w.T), dtype=work_np_dtype)
         else:
             proj = concat
 
@@ -778,7 +823,7 @@ def _build_siglip_vision_engine(
                 network, res1.get_output(0), vision_hidden,
                 ln2_w.astype(np.float32),
                 ln2_b.astype(np.float32) if ln2_b is not None else np.zeros(vision_hidden, dtype=np.float32),
-                eps_const)
+                eps_const, dtype=work_np_dtype)
         else:
             normed2 = res1.get_output(0)
 
@@ -791,20 +836,21 @@ def _build_siglip_vision_engine(
             fc2_key = f"{lp}.mlp.fc2.weight"
 
         if fc1_key in weights and fc2_key in weights:
-            fc1_w = weights[fc1_key].astype(np.float32)
-            fc2_w = weights[fc2_key].astype(np.float32)
+            fc1_w = weights[fc1_key].astype(work_np_dtype)
+            fc2_w = weights[fc2_key].astype(work_np_dtype)
 
             mlp_hidden = fc1_w.shape[0]
             fc1_out = graph_ops.add_matmul_rhs_constant(
                 network, normed2, vision_hidden, mlp_hidden,
-                np.ascontiguousarray(fc1_w.T))
+                np.ascontiguousarray(fc1_w.T), dtype=work_np_dtype)
 
             # GELU activation
             fc1_b_key = f"{lp}.mlp.fc1.bias"
             if fc1_b_key in weights:
                 fc1_out = graph_ops.add_bias_sum(
                     network, fc1_out, mlp_hidden,
-                    weights[fc1_b_key].astype(np.float32))
+                    weights[fc1_b_key].astype(work_np_dtype),
+                    dtype=work_np_dtype)
 
             # Approximate GELU via TRT
             gelu_layer = network.add_activation(
@@ -812,13 +858,14 @@ def _build_siglip_vision_engine(
 
             fc2_out = graph_ops.add_matmul_rhs_constant(
                 network, gelu_layer.get_output(0), mlp_hidden, vision_hidden,
-                np.ascontiguousarray(fc2_w.T))
+                np.ascontiguousarray(fc2_w.T), dtype=work_np_dtype)
 
             fc2_b_key = f"{lp}.mlp.fc2.bias"
             if fc2_b_key in weights:
                 fc2_out = graph_ops.add_bias_sum(
                     network, fc2_out, vision_hidden,
-                    weights[fc2_b_key].astype(np.float32))
+                    weights[fc2_b_key].astype(work_np_dtype),
+                    dtype=work_np_dtype)
         else:
             fc2_out = normed2
 
@@ -892,17 +939,18 @@ def _build_siglip_vision_engine(
             mlp1_ln_w.astype(np.float32),
             mlp1_ln_b.astype(np.float32) if mlp1_ln_b is not None
                 else np.zeros(mlp1_in_dim, dtype=np.float32),
-            ln_eps)
+            ln_eps, dtype=work_np_dtype)
 
         # FC1: mlp1_in_dim -> intermediate
         mlp1_inter = mlp1_fc1_w.shape[0]
         fc1 = graph_ops.add_matmul_rhs_constant(
             network, hidden_state, mlp1_in_dim, mlp1_inter,
-            np.ascontiguousarray(mlp1_fc1_w.astype(np.float32).T))
+            np.ascontiguousarray(mlp1_fc1_w.astype(work_np_dtype).T),
+            dtype=work_np_dtype)
         if mlp1_fc1_b is not None:
             fc1 = graph_ops.add_bias_sum(
                 network, fc1, mlp1_inter,
-                mlp1_fc1_b.astype(np.float32))
+                mlp1_fc1_b.astype(work_np_dtype), dtype=work_np_dtype)
 
         # GELU activation
         gelu = network.add_activation(fc1, trt.ActivationType.GELU_ERF)
@@ -910,11 +958,12 @@ def _build_siglip_vision_engine(
         # FC2: intermediate -> text_hidden_size
         fc2 = graph_ops.add_matmul_rhs_constant(
             network, gelu.get_output(0), mlp1_inter, text_hidden_size,
-            np.ascontiguousarray(mlp1_fc2_w.astype(np.float32).T))
+            np.ascontiguousarray(mlp1_fc2_w.astype(work_np_dtype).T),
+            dtype=work_np_dtype)
         if mlp1_fc2_b is not None:
             fc2 = graph_ops.add_bias_sum(
                 network, fc2, text_hidden_size,
-                mlp1_fc2_b.astype(np.float32))
+                mlp1_fc2_b.astype(work_np_dtype), dtype=work_np_dtype)
 
         hidden_state = fc2
         # Update num_patches for output annotation
@@ -924,8 +973,11 @@ def _build_siglip_vision_engine(
                   f"{mlp1_inter} -> {text_hidden_size}", file=sys.stderr)
 
     # Output: vision_features [num_patches, output_dim]
-    hidden_state.name = "vision_features"
-    network.mark_output(hidden_state)
+    output = hidden_state
+    if output.dtype != trt.float32:
+        output = network.add_cast(output, trt.float32).get_output(0)
+    output.name = "vision_features"
+    network.mark_output(output)
 
     if verbose:
         print(f"[trtmc build] Building SigLIP-2 vision engine "
@@ -940,16 +992,25 @@ def _build_siglip_vision_engine(
 
 
 def _add_layer_norm_vision(
-    network, inp, hidden_size, gamma, beta, eps_tensor):
+    network, inp, hidden_size, gamma, beta, eps_tensor,
+    dtype: np.dtype = np.float32,
+):
     """Add LayerNorm for vision transformer."""
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
     from . import graph_ops
 
+    output_dtype = inp.dtype
+    if dtype != np.float32:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
+    if eps_tensor.dtype != trt.float32:
+        eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
     gamma_const = graph_ops.add_constant(
-        network, (1, hidden_size), gamma.reshape(1, hidden_size))
+        network, (1, hidden_size), gamma.reshape(1, hidden_size),
+        dtype=np.float32)
     beta_const = graph_ops.add_constant(
-        network, (1, hidden_size), beta.reshape(1, hidden_size))
+        network, (1, hidden_size), beta.reshape(1, hidden_size),
+        dtype=np.float32)
 
     # Mean
     mean_layer = network.add_reduce(inp, trt.ReduceOperation.AVG, 1 << 1, True)
@@ -973,7 +1034,10 @@ def _add_layer_norm_vision(
         normed.get_output(0), gamma_const, trt.ElementWiseOperation.PROD)
     shifted = network.add_elementwise(
         scaled.get_output(0), beta_const, trt.ElementWiseOperation.SUM)
-    return shifted.get_output(0)
+    output = shifted.get_output(0)
+    if output.dtype != output_dtype:
+        output = network.add_cast(output, output_dtype).get_output(0)
+    return output
 
 
 def _make_llama3_rope_table_half_dim(

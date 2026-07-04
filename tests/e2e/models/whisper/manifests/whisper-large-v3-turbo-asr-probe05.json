@@ -8,6 +8,8 @@
   "task_strategy": "speech_to_text",
   "reference_family": "asr_whisper",
   "user_contract": "exact_transcript",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "test_type": "transcription",
   "ci_tier": "nightly_only",
   "l0_replacement": "whisper-large-v3-turbo",

@@ -42,5 +42,6 @@
   "tts_probe_id": "probe_04_two_sentence_prompt_round_trip",
   "tts_probe_readiness": "ready_now",
   "tts_probe_purpose": "Cover Model Connect prompt transport for a short two-sentence Magpie TTS input while reusing the existing magpie-tts-357m bundle.",
-  "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt with sentence boundary -> text_to_audio_magpie runtime -> WAV artifact -> tts_audio contract. This covers sentence boundary handling without adding dataset-driven CI load."
+  "notes": "Nightly TTS coverage probe for Model Connect input handling: manifest prompt -> CLI prompt with sentence boundary -> text_to_audio_magpie runtime -> WAV artifact -> tts_audio contract. This covers sentence boundary handling without adding dataset-driven CI load.",
+  "precision": "fp16"
 }

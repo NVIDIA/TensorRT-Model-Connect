@@ -10,6 +10,7 @@ https://github.com/lillian039/ELF without depending on Hugging Face loaders.
 from __future__ import annotations
 
 import json
+import importlib
 import os
 import pickle
 import subprocess
@@ -378,6 +379,33 @@ def test_load_weights_accepts_local_github_checkpoint_and_uses_ema_params(tmp_pa
     np.testing.assert_allclose(weights["decoder.unembed.w"], tensors["unembed_kernel"])
 
 
+def test_orbax_checkpoint_loader_selects_ema_params(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.elf_flow.plugin")
+    checkpoint = tmp_path / "checkpoint_0"
+    checkpoint.mkdir()
+    (checkpoint / "_CHECKPOINT_METADATA").write_text("{}")
+    expected = np.arange(6, dtype=np.float32).reshape(2, 3)
+    payload = {
+        "params": {"weight": expected + 100.0},
+        "ema_params1": {"weight": expected},
+    }
+
+    fake_checkpoint = types.SimpleNamespace(
+        PyTreeCheckpointer=lambda: types.SimpleNamespace(
+            restore=lambda path: payload))
+    fake_orbax = types.SimpleNamespace(checkpoint=fake_checkpoint)
+    monkeypatch.setitem(sys.modules, "orbax", fake_orbax)
+    monkeypatch.setitem(sys.modules, "orbax.checkpoint", fake_checkpoint)
+
+    arrays = module._load_orbax_arrays(checkpoint)
+
+    assert arrays is not None
+    np.testing.assert_array_equal(arrays["weight"], expected)
+
+
 def test_load_weights_infers_vocab_size_from_unembed_kernel(tmp_path: Path) -> None:
     tensors = _elf_tensors()
     _write_model(tmp_path, tensors)
@@ -606,6 +634,8 @@ def test_elf_trtmc_run_generates_text_from_diffusion_decode(tmp_path: Path) -> N
             "1",
             "--guidance-scale",
             "1",
+            "--cfg-scale",
+            "2",
             "--sde-gamma",
             "0",
             "--seed",

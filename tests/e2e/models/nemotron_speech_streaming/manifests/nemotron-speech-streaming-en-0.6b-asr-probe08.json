@@ -20,5 +20,6 @@
   "asr_probe_id": "probe_08_noisy_48k_stereo_snr20",
   "asr_probe_readiness": "nightly_optional",
   "asr_probe_purpose": "Cover deterministic noisy input handling.",
-  "notes": "Nightly ASR coverage probe for Model Connect input handling: PCM decode + preprocessing under non-clean waveform."
+  "notes": "Nightly ASR coverage probe for Model Connect input handling: PCM decode + preprocessing under non-clean waveform.",
+  "precision": "fp16"
 }

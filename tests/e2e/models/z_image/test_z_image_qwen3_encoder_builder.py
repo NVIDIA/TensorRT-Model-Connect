@@ -404,3 +404,57 @@ def test_build_qwen3_encoder_engine_raises_when_builder_returns_none(monkeypatch
             vocab_size=8,
             max_seq_len=2,
         )
+
+
+@pytest.mark.unit
+def test_build_qwen3_encoder_engine_dynamic_batch_supports_fp16(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The classifier-free-guidance batch path must honor FP16 storage."""
+    fake_trt = _make_fake_trt()
+    mod = _import_qwen3_with_fake_trt(fake_trt)
+
+    monkeypatch.setattr(mod, "add_dynamic_batch_profile", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
+    dtype_calls: list[object] = []
+
+    def fake_dtype_op(*_args, **kwargs):
+        dtype_calls.append(kwargs.get("dtype"))
+        return _FakeTensor("typed_op", shape=(-1, 3, 4))
+
+    monkeypatch.setattr(mod.graph_ops, "add_rms_norm_last_dim", fake_dtype_op)
+    monkeypatch.setattr(mod.graph_ops, "add_rms_norm_per_head_batched", fake_dtype_op)
+    monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", fake_dtype_op)
+    monkeypatch.setattr(mod, "_add_apply_rope_native_batched", _fake_tensor_fn("rope"))
+    monkeypatch.setattr(mod, "_add_attention_from_batched_rows", _fake_tensor_fn("attn"))
+
+    plan = mod.build_qwen3_encoder_engine(
+        _make_qwen3_weights(
+            hidden_size=4,
+            num_layers=1,
+            num_heads=2,
+            num_kv_heads=1,
+            head_dim=2,
+            intermediate_size=6,
+            vocab_size=8,
+        ),
+        hidden_size=4,
+        num_layers=1,
+        num_heads=2,
+        num_kv_heads=1,
+        head_dim=2,
+        intermediate_size=6,
+        vocab_size=8,
+        max_seq_len=3,
+        precision="fp16",
+        max_batch_size=2,
+    )
+
+    assert plan == b"engine-plan"
+    builder = fake_trt.Builder.last_instance
+    assert any(
+        op == "add_cast" and args[1] == fake_trt.float16
+        for op, args, _kwargs in builder.network.calls
+    )
+    assert dtype_calls and all(dtype == np.float16 for dtype in dtype_calls)
+    assert [tensor.dtype for tensor in builder.network.outputs] == [fake_trt.float32]

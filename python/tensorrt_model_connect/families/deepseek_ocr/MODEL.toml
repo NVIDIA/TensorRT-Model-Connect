@@ -4,6 +4,13 @@
 id = "deepseek_ocr"
 plugin = "deepseek_ocr"
 module = "plugin"
+python_profile_specs = [
+  "deepseek_ocr|families/deepseek_ocr/python_profile_requirements/deepseek_ocr.lock.txt|families/deepseek_ocr/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|deepseek_ocr",
+]
+capabilities = ["debug_layer_outputs"]
 aliases = [
   "deepseek_ocr",
   "deepseek_vl_v2",
@@ -11,4 +18,8 @@ aliases = [
 ]
 prefixes = [
   "deepseek_ocr",
+]
+debug_runner = "vl_debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "deepseek_ocr_vision_language",
 ]

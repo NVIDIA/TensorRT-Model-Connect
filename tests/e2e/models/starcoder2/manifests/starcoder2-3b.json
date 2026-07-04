@@ -8,6 +8,8 @@
   "task_strategy": "text_generation_causal",
   "reference_family": "code_base_completion",
   "user_contract": "code_completion",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "max_cache_length": 256,
   "prompt": "def fibonacci(n):",
   "max_new_tokens": 20,

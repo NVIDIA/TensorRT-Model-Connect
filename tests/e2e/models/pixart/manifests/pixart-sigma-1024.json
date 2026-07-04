@@ -7,6 +7,9 @@
   "family": "pixart",
   "runtime_strategy": "diffusion_pixart",
   "task_strategy": "diffusion_media_generation",
+  "precision": "fp16",
+  "reference_precision": "fp32",
+  "fp32_layers": [0],
   "reference_family": "diffusers_image_gen",
   "user_contract": "diffusion_image",
   "ci_tier": "nightly_only",
@@ -23,7 +26,7 @@
   "video_num_frames": 1,
   "num_inference_steps": 20,
   "skip_text_comparison": true,
-  "notes": "PixArt-Sigma: T5-XXL text encoder + DiT denoiser (ada_norm_single, no RoPE) + AutoencoderKL VAE. DPM-Solver++ scheduler.",
+  "notes": "PixArt-Sigma uses an FP16 DiT and VAE with only component 0, the T5-XXL encoder, retained in FP32. T5 FP16 produced NaNs at the first denoising step; isolated FP16 DiT and VAE runs and the final mixed bundle pass the unchanged FP32 Diffusers image contract.",
   "metadata": {
     "contract_config": {
       "use_diffusers": true

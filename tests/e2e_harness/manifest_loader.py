@@ -60,6 +60,8 @@ _MODEL_ASSET_FIELDS = frozenset({
     "golden_snapshot_path",
     "edit_condition_image",
     "fp8_scales",
+    "elf_replay_artifact",
+    "upstream_replay_artifact",
 })
 
 
@@ -543,6 +545,7 @@ def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
         "name", "hf_id", "model_id", "bundle", "family", "runtime_strategy",
         "task_strategy", "reference_backend", "oracle_level", "prompt",
         "test_prompt", "max_new_tokens", "max_cache_length", "precision",
+        "reference_precision", "fp32_layers",
         "quantization",
         "logit_atol", "layer_atol", "trust_remote_code", "skip",
         "skip_comparison", "test_image",
@@ -575,6 +578,10 @@ def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
     # the trtmc build CLI when building bundles.
     if "precision" in manifest:
         meta["precision"] = manifest["precision"]
+    if "reference_precision" in manifest:
+        meta["reference_precision"] = manifest["reference_precision"]
+    if "fp32_layers" in manifest:
+        meta["fp32_layers"] = manifest["fp32_layers"]
 
     if "quantization" in manifest:
         meta["quantization"] = manifest["quantization"]
@@ -730,6 +737,31 @@ def _validate_manifest(raw: dict, path: str) -> None:
                     f"Manifest {path!r}: execution_profiles[{phase!r}] must be "
                     f"a non-empty string"
                 )
+
+    for precision_field in ("precision", "reference_precision"):
+        precision = raw.get(precision_field)
+        if precision is not None and precision not in {"fp32", "fp16", "bf16"}:
+            raise ValueError(
+                f"Manifest {path!r}: {precision_field} must be one of "
+                "'fp32', 'fp16', or 'bf16'"
+            )
+
+    fp32_layers = raw.get("fp32_layers")
+    if fp32_layers is not None:
+        if (
+            not isinstance(fp32_layers, list)
+            or any(
+                not isinstance(layer, int) or isinstance(layer, bool) or layer < 0
+                for layer in fp32_layers
+            )
+        ):
+            raise TypeError(
+                f"Manifest {path!r}: fp32_layers must be a list of "
+                "non-negative integer indices"
+            )
+        if len(fp32_layers) != len(set(fp32_layers)):
+            raise ValueError(
+                f"Manifest {path!r}: fp32_layers must not contain duplicates")
 
 
 # ---------------------------------------------------------------------------

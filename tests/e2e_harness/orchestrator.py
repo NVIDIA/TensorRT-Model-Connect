@@ -328,6 +328,12 @@ def _resolve_bundle(
     precision = case.metadata.get("precision", "fp32")
     if precision != "fp32":
         cmd.extend(["--precision", precision])
+    fp32_layers = case.metadata.get("fp32_layers", [])
+    if fp32_layers:
+        cmd.extend([
+            "--fp32-layers",
+            ",".join(str(layer) for layer in fp32_layers),
+        ])
     quantization = case.metadata.get("quantization", {})
     if isinstance(quantization, dict):
         quant_format = quantization.get("format")

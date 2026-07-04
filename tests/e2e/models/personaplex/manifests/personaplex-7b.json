@@ -6,6 +6,9 @@
   "family": "personaplex",
   "runtime_strategy": "personaplex_speech_to_speech",
   "task_strategy": "speech_to_speech",
+  "precision": "fp16",
+  "reference_precision": "bf16",
+  "fp32_layers": [35],
   "reference_family": "s2s_personaplex",
   "user_contract": "speech_response",
   "gated": true,
@@ -20,6 +23,7 @@
   "prompt": "",
   "max_new_tokens": 1000,
   "trust_remote_code": true,
+  "notes": "The temporal decoder, depth decoders, and Mimi codec run in FP16. Global selector 35 keeps only temporal block 31 and the following final norm/heads in FP32; pure FP16 makes the temporal hidden state non-finite, while this boundary passes the unchanged checkpoint-owned token contract.",
   "metadata": {
     "runtime_cli_requires_hf_python": true
   }

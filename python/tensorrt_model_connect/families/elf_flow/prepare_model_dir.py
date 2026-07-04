@@ -13,7 +13,10 @@ local tokenizer files without downloading anything.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
 import shutil
+import tempfile
 from pathlib import Path
 
 
@@ -154,6 +157,58 @@ def prepare_model_dir(args: argparse.Namespace) -> dict[str, object]:
         "tokenizer_files": installed_tokenizer,
         "encoder_checkpoint": installed_encoder,
     }
+
+
+def resolve_model_dir(src: Path) -> Path | None:
+    """Stage an official ELF Hugging Face snapshot for a normal build."""
+    src = src.expanduser().resolve()
+    yaml_files = sorted([*src.glob("*.yml"), *src.glob("*.yaml")])
+    if not yaml_files or not any(src.glob("checkpoint_*")):
+        return None
+
+    encoder_override = os.environ.get("TRTMC_ELF_ENCODER_CHECKPOINT", "")
+    tokenizer_override = os.environ.get("TRTMC_ELF_TOKENIZER_DIR", "")
+    if encoder_override:
+        encoder_checkpoint = Path(encoder_override).expanduser().resolve()
+    else:
+        from huggingface_hub import hf_hub_download
+
+        encoder_checkpoint = Path(hf_hub_download(
+            "embedded-language-flows/t5_small_encoder_jax",
+            "t5_small_encoder_jax.pkl",
+        )).resolve()
+
+    if tokenizer_override:
+        tokenizer_dir = Path(tokenizer_override).expanduser().resolve()
+    else:
+        from huggingface_hub import snapshot_download
+
+        tokenizer_dir = Path(snapshot_download(
+            "google-t5/t5-small",
+            allow_patterns=[
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "special_tokens_map.json",
+                "spiece.model",
+            ],
+        )).resolve()
+
+    digest = hashlib.sha256(str(src).encode()).hexdigest()[:12]
+    staging_root = Path(os.environ.get(
+        "TRTMC_FAMILY_MODEL_ROOT",
+        str(Path(tempfile.gettempdir()) / "trtmc-family-models"),
+    ))
+    output = staging_root / f"elf-flow-{digest}"
+    prepare_model_dir(argparse.Namespace(
+        config=str(yaml_files[0]),
+        checkpoint_path=str(src),
+        tokenizer=str(tokenizer_dir),
+        encoder_checkpoint=str(encoder_checkpoint),
+        output=str(output),
+        copy=False,
+        force=True,
+    ))
+    return output
 
 
 def main() -> int:

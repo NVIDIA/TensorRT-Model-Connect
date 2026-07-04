@@ -23,5 +23,6 @@
   "metadata": {
     "group_by_bundle": true
   },
-  "notes": "Nightly ASR coverage probe for Model Connect input handling: WAV decode without model-side downmix; should avoid 48k->16k resample in ASR preprocessing."
+  "notes": "Nightly ASR coverage probe for Model Connect input handling: WAV decode without model-side downmix; should avoid 48k->16k resample in ASR preprocessing.",
+  "precision": "fp16"
 }

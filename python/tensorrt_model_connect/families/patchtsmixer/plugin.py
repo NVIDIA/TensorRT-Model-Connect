@@ -83,14 +83,58 @@ def infer_patchtsmixer_task_kind(config) -> str:
     return "prediction"
 
 
-def _load_all_tensors(model_dir: str | Path, *, precision: str) -> WeightDict:
+def _load_all_tensors(
+    model_dir: str | Path,
+    *,
+    precision: str,
+    fp32_layers: tuple[int, ...] = (),
+    num_layers: int,
+) -> WeightDict:
     readers = _open_safetensors(Path(model_dir))
     target_dtype = _target_np_dtype(precision)
+    # Selectors: mixer blocks, patcher/head, four operations per block, biases.
+    fp32_prefixes = tuple(
+        f"model.encoder.mlp_mixer_encoder.mixers.{layer}."
+        for layer in fp32_layers if layer < num_layers
+    )
+    fp32_patcher = num_layers in fp32_layers
+    fp32_head = num_layers + 1 in fp32_layers
+    fp32_biases = num_layers + 2 + num_layers * 4 in fp32_layers
+    fp32_operation_prefixes: list[str] = []
+    operation_names = (
+        "patch_mixer.mlp",
+        "patch_mixer.gating_block",
+        "feature_mixer.mlp",
+        "feature_mixer.gating_block",
+    )
+    for layer in range(num_layers):
+        for operation_offset, operation_name in enumerate(operation_names):
+            selector = num_layers + 2 + layer * 4 + operation_offset
+            if selector in fp32_layers:
+                fp32_operation_prefixes.append(
+                    "model.encoder.mlp_mixer_encoder.mixers."
+                    f"{layer}.{operation_name}.")
     weights = WeightDict()
     tensor_map = getattr(readers, "tensor_map", {})
     for name in sorted(tensor_map):
         arr = _load_tensor(readers, name)
-        dtype = np.float32 if ".norm." in name else target_dtype
+        selected_linear_weight = (
+            (
+                name.startswith(fp32_prefixes)
+                or name.startswith(tuple(fp32_operation_prefixes))
+                or (fp32_patcher and name.startswith("model.encoder.patcher."))
+                or (fp32_head and name.startswith("head."))
+            )
+            and (fp32_biases or not name.endswith(".bias"))
+        )
+        dtype = (
+            np.float32
+            if (
+                ".norm." in name
+                or selected_linear_weight
+            )
+            else target_dtype
+        )
         weights[name] = np.ascontiguousarray(arr, dtype=dtype)
     return weights
 
@@ -164,6 +208,8 @@ def _add_gated_block(
         weights.get(f"{prefix}.attn_layer.bias"),
         precision=precision,
     )
+    if inp.dtype != logits.dtype:
+        inp = network.add_cast(inp, logits.dtype).get_output(0)
     probs = _softmax_last(network, logits)
     return network.add_elementwise(inp, probs, trt.ElementWiseOperation.PROD).get_output(0)
 
@@ -201,12 +247,20 @@ def _add_mixer_layer(
     layer_idx: int,
     raw: dict[str, Any],
     precision: str,
+    fp32_layers: frozenset[int],
+    num_layers: int,
 ) -> trt.ITensor:
     channels = int(raw.get("num_input_channels", 1))
     num_patches = int(raw.get("num_patches", 1))
     hidden_size = int(raw.get("d_model", 1))
     eps = float(raw.get("norm_eps", 1.0e-5))
     prefix = f"model.encoder.mlp_mixer_encoder.mixers.{layer_idx}"
+    operation_base = num_layers + 2 + layer_idx * 4
+
+    def operation_precision(offset: int) -> str:
+        if precision == "fp16" and operation_base + offset in fp32_layers:
+            return "fp32"
+        return precision
 
     residual = hidden
     x = _add_layer_norm(
@@ -221,12 +275,15 @@ def _add_mixer_layer(
         network, x, shape=(1, channels, hidden_size, num_patches))
     x = _add_mlp(
         network, x, weights,
-        prefix=f"{prefix}.patch_mixer.mlp", precision=precision)
+        prefix=f"{prefix}.patch_mixer.mlp", precision=operation_precision(0))
     x = _add_gated_block(
         network, x, weights,
-        prefix=f"{prefix}.patch_mixer.gating_block", precision=precision)
+        prefix=f"{prefix}.patch_mixer.gating_block",
+        precision=operation_precision(1))
     x = _transpose_last_two(
         network, x, shape=(1, channels, num_patches, hidden_size))
+    if x.dtype != residual.dtype:
+        x = network.add_cast(x, residual.dtype).get_output(0)
     hidden = network.add_elementwise(residual, x, trt.ElementWiseOperation.SUM).get_output(0)
 
     residual = hidden
@@ -240,10 +297,14 @@ def _add_mixer_layer(
     )
     x = _add_mlp(
         network, x, weights,
-        prefix=f"{prefix}.feature_mixer.mlp", precision=precision)
+        prefix=f"{prefix}.feature_mixer.mlp",
+        precision=operation_precision(2))
     x = _add_gated_block(
         network, x, weights,
-        prefix=f"{prefix}.feature_mixer.gating_block", precision=precision)
+        prefix=f"{prefix}.feature_mixer.gating_block",
+        precision=operation_precision(3))
+    if x.dtype != residual.dtype:
+        x = network.add_cast(x, residual.dtype).get_output(0)
     return network.add_elementwise(residual, x, trt.ElementWiseOperation.SUM).get_output(0)
 
 
@@ -265,6 +326,13 @@ def _build_patchtsmixer_network(
     num_patches = int(raw.get("num_patches", 1))
     hidden_size = int(raw.get("d_model", 1))
     num_layers = int(raw.get("num_layers", 1))
+    fp32_layers = frozenset(int(layer) for layer in raw.get("_fp32_layers", ()))
+    invalid_fp32_layers = sorted(
+        layer for layer in fp32_layers
+        if layer < 0 or layer > num_layers + 2 + num_layers * 4)
+    if invalid_fp32_layers:
+        raise ValueError(
+            f"fp32_layers contains out-of-range indices: {invalid_fp32_layers}")
 
     builder, network = create_network(verbose=verbose)
     past_values = network.add_input(
@@ -293,18 +361,31 @@ def _build_patchtsmixer_network(
         patches,
         weights["model.encoder.patcher.weight"],
         weights.get("model.encoder.patcher.bias"),
-        precision=precision,
+        precision=(
+            "fp32"
+            if precision == "fp16" and num_layers in fp32_layers
+            else precision
+        ),
     )
 
     for layer_idx in range(num_layers):
+        boundary_dtype = hidden.dtype
+        layer_is_fp32 = precision == "fp16" and layer_idx in fp32_layers
+        layer_precision = "fp32" if layer_is_fp32 else precision
+        if layer_is_fp32 and hidden.dtype != trt.float32:
+            hidden = network.add_cast(hidden, trt.float32).get_output(0)
         hidden = _add_mixer_layer(
             network,
             hidden,
             weights,
             layer_idx=layer_idx,
             raw=raw,
-            precision=precision,
+            precision=layer_precision,
+            fp32_layers=fp32_layers,
+            num_layers=num_layers,
         )
+        if layer_is_fp32 and hidden.dtype != boundary_dtype:
+            hidden = network.add_cast(hidden, boundary_dtype).get_output(0)
 
     flat = network.add_shuffle(hidden)
     flat.reshape_dims = (1, channels, num_patches * hidden_size)
@@ -313,12 +394,18 @@ def _build_patchtsmixer_network(
         flat.get_output(0),
         weights["head.base_forecast_block.weight"],
         weights.get("head.base_forecast_block.bias"),
-        precision=precision,
+        precision=(
+            "fp32"
+            if precision == "fp16" and num_layers + 1 in fp32_layers
+            else precision
+        ),
     )
     out = network.add_shuffle(forecast)
     out.first_transpose = (0, 2, 1)
     out.reshape_dims = (1, int(raw.get("prediction_length", 1)), channels)
     y = out.get_output(0)
+    if y.dtype != trt.float32:
+        y = network.add_cast(y, trt.float32).get_output(0)
     y = network.add_elementwise(y, scale, trt.ElementWiseOperation.PROD).get_output(0)
     y = network.add_elementwise(y, loc, trt.ElementWiseOperation.SUM).get_output(0)
     add_named_output(network, y, "prediction_outputs")
@@ -342,7 +429,12 @@ class PatchTSMixerPlugin:
         *,
         precision: str = "fp32",
     ) -> dict:
-        weights = _load_all_tensors(model_dir, precision=precision)
+        weights = _load_all_tensors(
+            model_dir,
+            precision=precision,
+            fp32_layers=tuple(config.raw.get("_fp32_layers", ())),
+            num_layers=int(config.raw.get("num_layers", 1)),
+        )
         weights["_task_kind"] = infer_patchtsmixer_task_kind(config)
         return weights
 

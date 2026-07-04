@@ -23,5 +23,6 @@
   "metadata": {
     "group_by_bundle": true
   },
-  "notes": "Nightly ASR coverage probe for Model Connect input handling: Longer waveform decode + silence handling + transcript stability."
+  "notes": "Nightly ASR coverage probe for Model Connect input handling: Longer waveform decode + silence handling + transcript stability.",
+  "precision": "fp16"
 }

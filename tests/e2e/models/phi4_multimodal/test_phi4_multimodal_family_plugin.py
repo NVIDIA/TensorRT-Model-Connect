@@ -50,6 +50,25 @@ def _write_safetensors(model_dir: Path, tensors: dict[str, np.ndarray],
     save_file(tensors, str(model_dir / filename))
 
 
+def test_longrope_table_applies_frequency_and_attention_factors() -> None:
+    from tensorrt_model_connect.families.phi4_multimodal.graph_ops import (
+        make_rope_table_half_dim,
+    )
+
+    table = make_rope_table_half_dim(
+        2,
+        head_dim=4,
+        rope_theta=1.0,
+        cosine=True,
+        frequency_factors=[2.0, 4.0],
+        attention_factor=1.5,
+    )
+
+    np.testing.assert_allclose(table[0], [1.5, 1.5])
+    np.testing.assert_allclose(
+        table[1], 1.5 * np.cos(np.array([0.5, 0.25])), rtol=1e-6)
+
+
 # =========================================================================
 # Phi-4-multimodal text decoder weights
 # =========================================================================
@@ -138,7 +157,7 @@ class TestPhi4MultimodalPlugin:
 
         # Check that all expected keys exist
         expected_keys = {"embedding", "final_norm", "w_out",
-                         "_attention_size", "_mlp_size"}
+                         "_attention_size", "_mlp_size", "_explicit_attention"}
         for i in range(self.LAYERS):
             expected_keys.update({
                 f"layer.{i}.input_norm",
@@ -154,6 +173,7 @@ class TestPhi4MultimodalPlugin:
 
         for key in expected_keys:
             assert key in weights, f"Missing weight key: {key}"
+        assert weights["_explicit_attention"] is True
 
     def test_fused_qkv_split(self, tmp_path):
         """Verify fused QKV is correctly split into Q, K, V."""
@@ -177,6 +197,29 @@ class TestPhi4MultimodalPlugin:
         assert weights["layer.0.w_q"].shape == (hidden, q_dim)
         assert weights["layer.0.w_k"].shape == (hidden, kv_dim)
         assert weights["layer.0.w_v"].shape == (hidden, kv_dim)
+
+    def test_vision_lora_is_merged_into_decoder_projection(self, tmp_path):
+        from tensorrt_model_connect.families.phi4_multimodal import plugin
+
+        config = self._make_config()
+        config["vision_lora"] = {"r": 2, "lora_alpha": 4}
+        tensors = self._make_text_tensors()
+        prefix = "model.layers.0.self_attn.qkv_proj"
+        base = tensors[f"{prefix}.base_layer.weight"].copy()
+        lora_a = _rand(2, self.HIDDEN)
+        lora_b = _rand(base.shape[0], 2)
+        tensors[f"{prefix}.lora_A.vision.weight"] = lora_a
+        tensors[f"{prefix}.lora_B.vision.weight"] = lora_b
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, tensors)
+
+        mc = ModelConfig.from_dir(tmp_path)
+        weights = plugin.load_weights(str(tmp_path), mc)
+
+        merged = base + 2.0 * (lora_b @ lora_a)
+        q_rows = self.HEADS * (self.HIDDEN // self.HEADS)
+        np.testing.assert_allclose(
+            weights["layer.0.w_q"], merged[:q_rows].T, rtol=1e-6, atol=1e-6)
 
     def test_fused_gate_up_split(self, tmp_path):
         """Verify fused gate_up is correctly split into gate and up."""
@@ -228,6 +271,63 @@ class TestPhi4MultimodalPlugin:
         embedding = weights["embedding"]
         w_out = weights["w_out"]
         np.testing.assert_allclose(w_out, embedding.T, atol=1e-6)
+
+    def test_selected_fp32_decoder_layer_builds_in_fp16_engine(self, tmp_path):
+        from tensorrt_model_connect.families.phi4_multimodal import plugin
+
+        config = self._make_config()
+        _write_config(tmp_path, config)
+        _write_safetensors(tmp_path, self._make_text_tensors())
+
+        mc = ModelConfig.from_dir(tmp_path)
+        mc.raw["_fp32_layers"] = [1]
+        weights = plugin.load_weights(str(tmp_path), mc)
+
+        plan = plugin.build_engine(
+            mc, weights, max_cache_length=4, precision="fp16")
+
+        assert len(plan) > 0
+
+    def test_vl_config_matches_dynamic_hd_contract(self, tmp_path):
+        from tensorrt_model_connect.families.phi4_multimodal import plugin
+
+        config = self._make_config()
+        _write_config(tmp_path, config)
+        mc = ModelConfig.from_dir(tmp_path)
+        vl_config = plugin.get_vl_config(mc)
+
+        assert plugin.embed_input is True
+        assert vl_config["preprocessor_type"] == "phi4_hd_chw"
+        assert vl_config["image_token_id"] == 200010
+        assert vl_config["num_image_pad_tokens"] == 721
+        assert vl_config["image_token_str"] == "<|endoftext10|>"
+        assert vl_config["vision_output_dim"] == self.HIDDEN
+
+    def test_vision_weight_prefix_is_canonicalized(self, tmp_path):
+        from tensorrt_model_connect.families.phi4_multimodal.plugin import (
+            _load_vision_weights,
+        )
+
+        tensor = _rand(4, 3)
+        _write_safetensors(tmp_path, {
+            "model.embed_tokens_extend.image_embed.img_projection.0.weight": tensor,
+            "model.embed_tokens.weight": _rand(self.VOCAB, self.HIDDEN),
+        })
+
+        weights = _load_vision_weights(str(tmp_path))
+        assert set(weights) == {"img_projection.0.weight"}
+        np.testing.assert_array_equal(weights["img_projection.0.weight"], tensor)
+
+    def test_dynamic_hd_preprocessor_shape(self):
+        from tensorrt_model_connect.families.phi4_multimodal.vl_debug_runner import (
+            _preprocess_phi4_hd_chw,
+        )
+
+        image_path = Path(__file__).parent / "data" / "test_img.jpeg"
+        pixel_values = _preprocess_phi4_hd_chw(str(image_path))
+
+        assert pixel_values.shape == (9, 448, 448)
+        assert pixel_values.dtype == np.float32
 
 
 # =========================================================================

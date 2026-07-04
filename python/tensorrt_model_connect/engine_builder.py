@@ -27,6 +27,7 @@ from .families import (
     find_plugin,
     find_diffusion_plugin,
     resolve_config_from_model_dir,
+    resolve_family_model_dir,
     resolve_nemo_archive_model_dir,
 )
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
@@ -479,6 +480,10 @@ def _resolve_model(model_id_or_path: str) -> str:
     Handles .nemo archives through family-owned adapters.
     """
     local = Path(model_id_or_path)
+    if local.is_dir():
+        staged = resolve_family_model_dir(local)
+        if staged is not None:
+            return staged
     if local.is_dir() and (_is_hf_model_dir(local) or _is_family_model_dir(local)):
         return str(local)
 
@@ -512,6 +517,10 @@ def _resolve_model(model_id_or_path: str) -> str:
 
     # Prefer HF config when both HF files and .nemo are present.
     dl_path = Path(local_dir)
+    staged = resolve_family_model_dir(dl_path)
+    if staged is not None:
+        print(f"[trtmc build] Downloaded to {local_dir}", file=sys.stderr)
+        return staged
     if _is_hf_model_dir(dl_path):
         print(f"[trtmc build] Downloaded to {local_dir}", file=sys.stderr)
         return local_dir
@@ -666,6 +675,7 @@ def build_bundle(
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
     precision: str = "fp32",
+    fp32_layers: list[int] | None = None,
     quantize: str | None = None,
     quant_scales: str | None = None,
     quant_calibration_samples: int = 512,
@@ -729,7 +739,8 @@ def build_bundle(
         save_fp8_scales = getattr(build_bundle, '_save_fp8_scales', None)
         _build_diffusion_bundle(
             model_dir_path, output_path, max_cache_length,
-            precision=precision, verbose=verbose, t0=t0,
+            precision=precision, fp32_layers=fp32_layers,
+            verbose=verbose, t0=t0,
             fp8_scales=fp8_scales, save_fp8_scales=save_fp8_scales,
             rtx=rtx,
             diffusion_overrides=diffusion_overrides,
@@ -742,6 +753,7 @@ def build_bundle(
     config = ModelConfig.from_dir(model_dir_path)
     config.raw["_model_dir"] = str(model_dir_path)
     config.raw["_decoder_engine_layout"] = decoder_engine_layout
+    config.raw["_fp32_layers"] = sorted(set(fp32_layers or ()))
     config.raw["_family_build_options"] = dict(family_build_options or {})
     _apply_family_builder_capabilities(config)
     print(f"[trtmc build] Model: {config.model_type} "
@@ -1035,8 +1047,11 @@ def build_bundle(
               file=sys.stderr)
         vision_t0 = time.monotonic()
         try:
+            build_vision_kwargs = {"verbose": verbose}
+            if _call_supports_kwarg(build_vision, "precision"):
+                build_vision_kwargs["precision"] = precision
             vision_plan = build_vision(
-                str(model_dir_path), config, weights, verbose=verbose)
+                str(model_dir_path), config, weights, **build_vision_kwargs)
         finally:
             vision_elapsed = time.monotonic() - vision_t0
             _add_build_timing(build_timing, "trt_compile_s", vision_elapsed)
@@ -1175,6 +1190,8 @@ def build_bundle(
         if trt_abi:
             cfg_dict["trt_abi"] = trt_abi
         cfg_dict["precision"] = precision
+        if fp32_layers:
+            cfg_dict["fp32_layers"] = sorted(set(fp32_layers))
         cfg_dict["tokenizer_add_special_tokens"] = int(
             tokenizer_add_special_tokens)
         if tokenizer_special_frame is not None:
@@ -1302,6 +1319,7 @@ def _build_diffusion_bundle(
     max_cache_length: int,
     *,
     precision: str = "fp32",
+    fp32_layers: list[int] | None = None,
     verbose: bool = False,
     t0: float = 0.0,
     fp8_scales: dict | None = None,
@@ -1341,6 +1359,7 @@ def _build_diffusion_bundle(
             parallel, feature="Diffusion tensor-parallel builds")
     config = ModelConfig(model_type=model_type, raw=model_index)
     config.raw["max_cache_length"] = max_cache_length
+    config.raw["_fp32_layers"] = sorted(set(fp32_layers or ()))
     if diffusion_overrides:
         config.raw.update(diffusion_overrides)
     config.raw["_source_model_ref"] = getattr(
@@ -1561,6 +1580,7 @@ def build(
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
     precision: str = "fp32",
+    fp32_layers: list[int] | None = None,
     quantize: str | None = None,
     quant_scales: str | None = None,
     quant_calibration_samples: int = 512,
@@ -1607,6 +1627,7 @@ def build(
                  dynamic_kv_cache=dynamic_kv_cache,
                  dynamic_kv_profile_rows_override=dynamic_kv_profile_rows_override,
                  precision=precision,
+                 fp32_layers=fp32_layers,
                  quantize=quantize,
                  quant_scales=quant_scales,
                  quant_calibration_samples=quant_calibration_samples,

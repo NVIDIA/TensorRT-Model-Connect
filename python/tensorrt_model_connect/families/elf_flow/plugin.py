@@ -121,11 +121,30 @@ def _load_flax_arrays(path: Path) -> dict[str, np.ndarray] | None:
     return arrays or None
 
 
+def _load_orbax_arrays(path: Path) -> dict[str, np.ndarray] | None:
+    if not path.is_dir() or not (
+        (path / "_CHECKPOINT_METADATA").exists()
+        or (path / "manifest.ocdbt").exists()
+    ):
+        return None
+    try:
+        import orbax.checkpoint as ocp
+
+        payload = ocp.PyTreeCheckpointer().restore(str(path.resolve()))
+    except Exception:
+        return None
+    arrays = _flatten_arrays(_select_upstream_params(payload))
+    return arrays or None
+
+
 def _load_checkpoint_arrays(path: Path) -> dict[str, np.ndarray] | None:
     if path.suffix == ".npz":
         arrays = _load_npz_arrays(path)
         if arrays:
             return arrays
+    arrays = _load_orbax_arrays(path)
+    if arrays:
+        return arrays
     arrays = _load_pickle_arrays(path)
     if arrays:
         return arrays
@@ -236,7 +255,9 @@ class ELFPlugin:
     ) -> WeightDict:
         cfg = resolve_elf_config(config)
         store = _TensorStore(model_dir)
-        target_dtype = _target_np_dtype(precision)
+        # Keep source weights in FP32 so fp32_layers can preserve individual
+        # blocks without first rounding their constants through FP16.
+        target_dtype = np.float32
         weights = WeightDict()
         config.raw["_elf_model_dir"] = str(Path(model_dir).resolve())
         encoder_checkpoint = _find_encoder_checkpoint(model_dir)
@@ -315,12 +336,14 @@ class ELFPlugin:
         precision: str = "fp32",
         quant_ctx=None,
         verbose: bool = False,
+        debug_layer_outputs: bool = False,
     ) -> bytes:
         del quant_ctx
         from .builder import build_elf_flow_engine
 
         return build_elf_flow_engine(
-            config, weights, max_cache_length, precision=precision, verbose=verbose)
+            config, weights, max_cache_length, precision=precision, verbose=verbose,
+            debug_layer_outputs=debug_layer_outputs)
 
     def build_extra_engines(
         self,

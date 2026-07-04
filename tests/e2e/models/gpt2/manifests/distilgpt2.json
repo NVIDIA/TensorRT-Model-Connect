@@ -8,6 +8,8 @@
   "task_strategy": "text_generation_causal",
   "reference_family": "causal_base_continuation",
   "user_contract": "model_card_generation_parity",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "ci_lane": "acceptance",
   "max_cache_length": 256,
   "prompt": "Hello, I'm a language model",

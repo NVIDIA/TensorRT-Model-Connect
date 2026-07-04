@@ -12,7 +12,8 @@
   "max_cache_length": 1,
   "prompt": "",
   "max_new_tokens": 0,
-  "precision": "fp32",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "trust_remote_code": false,
   "test_image": "data/test_img.jpeg",
   "preflight_requirements": [

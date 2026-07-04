@@ -54,21 +54,80 @@ def _first_positive_int(raw: dict[str, Any], keys: tuple[str, ...], fallback: in
     return fallback
 
 
-def _load_all_tensors(model_dir: str | Path, *, precision: str) -> WeightDict:
+def _load_all_tensors(
+    model_dir: str | Path,
+    *,
+    precision: str,
+    fp32_layers: tuple[int, ...],
+    num_encoder_layers: int,
+    num_decoder_layers: int,
+) -> WeightDict:
     readers = _open_safetensors(Path(model_dir))
     target_dtype = _target_np_dtype(precision)
     weights = WeightDict()
+    fp32_layers_set = frozenset(fp32_layers)
+    # Encoder/decoder blocks are followed by input, output, shared, bias, Q/K selectors.
+    input_selector = num_encoder_layers + num_decoder_layers
+    output_selector = input_selector + 1
+    shared_selector = input_selector + 2
+    bias_selector = input_selector + 3
+    decoder_self_qk_selector = input_selector + 4
     tensor_map = getattr(readers, "tensor_map", {})
     for name in sorted(tensor_map):
         arr = _load_tensor(readers, name)
+        selected_fp32 = (
+            any(
+                layer in fp32_layers_set
+                and name.startswith(f"encoder.block.{layer}.")
+                for layer in range(num_encoder_layers)
+            )
+            or any(
+                num_encoder_layers + layer in fp32_layers_set
+                and name.startswith(f"decoder.block.{layer}.")
+                for layer in range(num_decoder_layers)
+            )
+            or (
+                input_selector in fp32_layers_set
+                and name.startswith("input_patch_embedding.")
+            )
+            or (
+                output_selector in fp32_layers_set
+                and name.startswith("output_patch_embedding.")
+            )
+            or (shared_selector in fp32_layers_set and name == "shared.weight")
+        )
+        decoder_self_qk = (
+            ".layer.0.SelfAttention.q.weight" in name
+            or ".layer.0.SelfAttention.k.weight" in name
+        ) and name.startswith("decoder.block.")
+        if (
+            decoder_self_qk
+            and decoder_self_qk_selector not in fp32_layers_set
+        ):
+            selected_fp32 = False
+        tensor_precision = (
+            "fp32"
+            if selected_fp32 and (
+                bias_selector in fp32_layers_set or not name.endswith(".bias"))
+            else precision
+        )
         if arr.ndim == 2 and "relative_attention_bias" not in name and (
             ".SelfAttention." in name
             or ".EncDecAttention." in name
             or ".DenseReluDense." in name
         ):
-            weights[name] = _transpose_2d(arr, name, precision=precision)
+            weights[name] = _transpose_2d(
+                arr, name, precision=tensor_precision)
         else:
             dtype = np.float32 if (
+                (
+                    selected_fp32
+                    and (
+                        bias_selector in fp32_layers_set
+                        or not name.endswith(".bias")
+                    )
+                )
+                or
                 name.endswith("layer_norm.weight")
                 or name.endswith("final_layer_norm.weight")
                 or "relative_attention_bias" in name
@@ -182,6 +241,8 @@ def _add_t5_attention_rows(
         network, kv_in, hidden_size, num_heads * head_dim, weights[f"{prefix}.k.weight"])
     v = graph_ops.add_matmul_rhs_constant(
         network, kv_in, hidden_size, num_heads * head_dim, weights[f"{prefix}.v.weight"])
+    if mask is not None and mask.dtype != q.dtype:
+        mask = network.add_cast(mask, q.dtype).get_output(0)
     ctx = graph_ops.add_attention_from_rows(
         network,
         q,
@@ -208,7 +269,14 @@ def _add_t5_ffn(
     d_ff: int,
     eps_t: trt.ITensor,
 ) -> trt.ITensor:
-    norm = graph_ops.add_rms_norm(network, hidden, hidden_size, weights[f"{prefix}.layer_norm.weight"], eps_t)
+    norm = graph_ops.add_rms_norm(
+        network,
+        hidden,
+        hidden_size,
+        weights[f"{prefix}.layer_norm.weight"],
+        eps_t,
+        dtype=(np.float16 if hidden.dtype == trt.float16 else np.float32),
+    )
     ff = graph_ops.add_matmul_rhs_constant(
         network, norm, hidden_size, d_ff, weights[f"{prefix}.DenseReluDense.wi.weight"])
     ff = network.add_activation(ff, trt.ActivationType.RELU).get_output(0)
@@ -226,6 +294,8 @@ def _add_encoder(
     raw: dict[str, Any],
     seq_len: int,
     eps_t: trt.ITensor,
+    precision: str,
+    fp32_layers: frozenset[int],
 ) -> trt.ITensor:
     hidden_size = int(raw.get("d_model", 256))
     num_heads = int(raw.get("num_heads", 4))
@@ -243,6 +313,15 @@ def _add_encoder(
         max_distance=int(raw.get("relative_attention_max_distance", 128)),
     )
     for layer_idx in range(num_layers):
+        layer_precision = (
+            "fp32"
+            if precision == "fp16" and layer_idx in fp32_layers
+            else precision
+        )
+        layer_dtype = (
+            trt.float16 if layer_precision == "fp16" else trt.float32)
+        if hidden.dtype != layer_dtype:
+            hidden = network.add_cast(hidden, layer_dtype).get_output(0)
         pfx = f"encoder.block.{layer_idx}"
         norm = graph_ops.add_rms_norm(
             network,
@@ -250,6 +329,7 @@ def _add_encoder(
             hidden_size,
             weights[f"{pfx}.layer.0.layer_norm.weight"],
             eps_t,
+            dtype=(np.float16 if hidden.dtype == trt.float16 else np.float32),
         )
         attn = _add_t5_attention_rows(
             network,
@@ -273,7 +353,13 @@ def _add_encoder(
             eps_t=eps_t,
         )
     return graph_ops.add_rms_norm(
-        network, hidden, hidden_size, weights["encoder.final_layer_norm.weight"], eps_t)
+        network,
+        hidden,
+        hidden_size,
+        weights["encoder.final_layer_norm.weight"],
+        eps_t,
+        dtype=(np.float16 if hidden.dtype == trt.float16 else np.float32),
+    )
 
 
 def _add_decoder(
@@ -285,6 +371,9 @@ def _add_decoder(
     raw: dict[str, Any],
     seq_len: int,
     eps_t: trt.ITensor,
+    precision: str,
+    fp32_layers: frozenset[int],
+    encoder_layer_count: int,
 ) -> trt.ITensor:
     hidden_size = int(raw.get("d_model", 256))
     num_heads = int(raw.get("num_heads", 4))
@@ -314,10 +403,21 @@ def _add_decoder(
         stride=(1, 1, 1, 1)).get_output(0)
 
     for layer_idx in range(num_layers):
+        selector = encoder_layer_count + layer_idx
+        layer_precision = (
+            "fp32"
+            if precision == "fp16" and selector in fp32_layers
+            else precision
+        )
+        layer_dtype = (
+            trt.float16 if layer_precision == "fp16" else trt.float32)
+        if hidden.dtype != layer_dtype:
+            hidden = network.add_cast(hidden, layer_dtype).get_output(0)
         pfx = f"decoder.block.{layer_idx}"
         norm = graph_ops.add_rms_norm(
             network, hidden, hidden_size,
-            weights[f"{pfx}.layer.0.layer_norm.weight"], eps_t)
+            weights[f"{pfx}.layer.0.layer_norm.weight"], eps_t,
+            dtype=(np.float16 if hidden.dtype == trt.float16 else np.float32))
         attn = _add_t5_attention_rows(
             network,
             norm,
@@ -332,7 +432,8 @@ def _add_decoder(
         hidden = network.add_elementwise(hidden, attn, trt.ElementWiseOperation.SUM).get_output(0)
         norm = graph_ops.add_rms_norm(
             network, hidden, hidden_size,
-            weights[f"{pfx}.layer.1.layer_norm.weight"], eps_t)
+            weights[f"{pfx}.layer.1.layer_norm.weight"], eps_t,
+            dtype=(np.float16 if hidden.dtype == trt.float16 else np.float32))
         cross = _add_t5_attention_rows(
             network,
             norm,
@@ -357,7 +458,13 @@ def _add_decoder(
             eps_t=eps_t,
         )
     return graph_ops.add_rms_norm(
-        network, hidden, hidden_size, weights["decoder.final_layer_norm.weight"], eps_t)
+        network,
+        hidden,
+        hidden_size,
+        weights["decoder.final_layer_norm.weight"],
+        eps_t,
+        dtype=(np.float16 if hidden.dtype == trt.float16 else np.float32),
+    )
 
 
 def _build_chronos_network(
@@ -378,6 +485,21 @@ def _build_chronos_network(
     num_patches = context_length // patch_size
     seq_len = num_patches + (1 if bool(chronos.get("use_reg_token", False)) else 0)
     hidden_size = int(raw.get("d_model", 256))
+    num_encoder_layers = int(raw.get("num_layers", 4))
+    num_decoder_layers = int(
+        raw.get("num_decoder_layers", num_encoder_layers))
+    input_selector = num_encoder_layers + num_decoder_layers
+    output_selector = input_selector + 1
+    decoder_self_qk_selector = input_selector + 4
+    fp32_layers = frozenset(
+        int(layer) for layer in raw.get("_fp32_layers", ()))
+    invalid_fp32_layers = sorted(
+        layer for layer in fp32_layers
+        if layer < 0 or layer > decoder_self_qk_selector)
+    if invalid_fp32_layers:
+        raise ValueError(
+            "fp32_layers contains out-of-range Chronos-Bolt selectors: "
+            f"{invalid_fp32_layers}")
     prediction_length = int(chronos.get("prediction_length", 64))
     num_quantiles = len(chronos.get("quantiles", []))
 
@@ -450,15 +572,23 @@ def _build_chronos_network(
     cat.axis = 3
     emb = _add_residual_block(
         network, cat.get_output(0), weights,
-        prefix="input_patch_embedding", precision=precision,
+        prefix="input_patch_embedding",
+        precision=(
+            "fp32"
+            if precision == "fp16" and input_selector in fp32_layers
+            else precision
+        ),
         activation=str(raw.get("dense_act_fn", "relu")).lower())
     emb2 = network.add_shuffle(emb)
     emb2.reshape_dims = (num_patches, hidden_size)
     emb = emb2.get_output(0)
 
     if bool(chronos.get("use_reg_token", False)):
-        reg = weights["shared.weight"][1:2, :].reshape(1, hidden_size).astype(np.float32)
-        reg_t = graph_ops.add_constant(network, (1, hidden_size), reg, dtype=np.float32)
+        reg_dtype = np.float16 if emb.dtype == trt.float16 else np.float32
+        reg = weights["shared.weight"][1:2, :].reshape(
+            1, hidden_size).astype(reg_dtype)
+        reg_t = graph_ops.add_constant(
+            network, (1, hidden_size), reg, dtype=reg_dtype)
         cat_emb = network.add_concatenation([emb, reg_t])
         cat_emb.axis = 0
         emb = cat_emb.get_output(0)
@@ -471,16 +601,42 @@ def _build_chronos_network(
         network, (1, 1), np.array([float(raw.get("layer_norm_epsilon", 1.0e-6))], dtype=np.float32),
         dtype=np.float32)
     encoder_hidden = _add_encoder(
-        network, emb, attention_mask, weights, raw=raw, seq_len=seq_len, eps_t=eps_t)
+        network,
+        emb,
+        attention_mask,
+        weights,
+        raw=raw,
+        seq_len=seq_len,
+        eps_t=eps_t,
+        precision=precision,
+        fp32_layers=fp32_layers,
+    )
     decoder_hidden = _add_decoder(
-        network, encoder_hidden, attention_mask, weights, raw=raw, seq_len=seq_len, eps_t=eps_t)
+        network,
+        encoder_hidden,
+        attention_mask,
+        weights,
+        raw=raw,
+        seq_len=seq_len,
+        eps_t=eps_t,
+        precision=precision,
+        fp32_layers=fp32_layers,
+        encoder_layer_count=num_encoder_layers,
+    )
     preds = _add_residual_block(
         network, decoder_hidden, weights,
-        prefix="output_patch_embedding", precision=precision,
+        prefix="output_patch_embedding",
+        precision=(
+            "fp32"
+            if precision == "fp16" and output_selector in fp32_layers
+            else precision
+        ),
         activation=str(raw.get("dense_act_fn", "relu")).lower())
     pred_shuf = network.add_shuffle(preds)
     pred_shuf.reshape_dims = (1, num_quantiles, prediction_length)
     pred_t = pred_shuf.get_output(0)
+    if pred_t.dtype != trt.float32:
+        pred_t = network.add_cast(pred_t, trt.float32).get_output(0)
     scale3 = network.add_shuffle(scale)
     scale3.reshape_dims = (1, 1, 1)
     loc3 = network.add_shuffle(loc)
@@ -531,8 +687,16 @@ class ChronosBoltPlugin:
         *,
         precision: str = "fp32",
     ) -> dict:
-        del config
-        return _load_all_tensors(model_dir, precision=precision)
+        raw = config.raw
+        num_encoder_layers = int(raw.get("num_layers", 4))
+        return _load_all_tensors(
+            model_dir,
+            precision=precision,
+            fp32_layers=tuple(raw.get("_fp32_layers", ())),
+            num_encoder_layers=num_encoder_layers,
+            num_decoder_layers=int(
+                raw.get("num_decoder_layers", num_encoder_layers)),
+        )
 
     def build_engine(
         self,

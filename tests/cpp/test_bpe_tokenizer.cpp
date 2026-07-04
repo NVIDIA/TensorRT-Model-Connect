@@ -1843,6 +1843,57 @@ int main() {
         }
     }
 
+    // === 38. Sequence-wrapped space replacement does not add a leading marker ===
+    {
+        std::cerr << "\n=== Sequence Replace SentencePiece-BPE ===\n";
+
+        std::string sequence_replace_json = R"({
+          "model": {
+            "type": "BPE",
+            "vocab": {
+              "\u2581": 0, "u": 1, "s": 2, "e": 3, "r": 4,
+              "us": 5, "use": 6, "user": 7,
+              "\u2581u": 8, "\u2581us": 9, "\u2581use": 10,
+              "\u2581user": 11, "<chat>": 12
+            },
+            "merges": [
+              "\u2581 u", "\u2581u s", "\u2581us e", "\u2581use r",
+              "u s", "us e", "use r"
+            ]
+          },
+          "added_tokens": [
+            {"id": 12, "content": "<chat>", "special": true}
+          ],
+          "normalizer": {
+            "type": "Sequence",
+            "normalizers": [
+              {
+                "type": "Replace",
+                "pattern": {"String": " "},
+                "content": "\u2581"
+              }
+            ]
+          },
+          "pre_tokenizer": null,
+          "decoder": {
+            "type": "Sequence",
+            "decoders": [
+              {"type": "Replace", "pattern": {"String": "\u2581"}, "content": " "},
+              {"type": "Fuse"}
+            ]
+          }
+        })";
+
+        auto tok = trtmc::CreateBpeTokenizer(sequence_replace_json.data(),
+                                             sequence_replace_json.size(), false);
+        check(tok != nullptr, "sequence_replace_create");
+        {
+            auto ids = tok->encode("<chat>user user");
+            std::vector<int32_t> expected = {12, 7, 11};
+            check(ids == expected, "sequence_replace_preserves_segment_start");
+        }
+    }
+
     if (failures > 0) {
         std::cerr << "\n" << failures << " test(s) failed\n";
         return 1;

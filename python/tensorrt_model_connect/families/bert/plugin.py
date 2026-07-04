@@ -54,6 +54,7 @@ class BertPlugin:
             config,
             weights,
             max_seq_length=max_cache_length,
+            precision=precision,
             verbose=verbose,
         )
 

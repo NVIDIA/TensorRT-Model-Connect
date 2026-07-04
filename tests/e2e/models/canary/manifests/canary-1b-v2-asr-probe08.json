@@ -23,5 +23,6 @@
   "metadata": {
     "group_by_bundle": true
   },
-  "notes": "Nightly ASR coverage probe for Model Connect input handling: PCM decode + preprocessing under non-clean waveform."
+  "notes": "Nightly ASR coverage probe for Model Connect input handling: PCM decode + preprocessing under non-clean waveform.",
+  "precision": "fp16"
 }

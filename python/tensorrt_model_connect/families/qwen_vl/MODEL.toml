@@ -4,6 +4,7 @@
 id = "qwen_vl"
 plugin = "qwen_vl"
 module = "plugin"
+capabilities = ["debug_layer_outputs"]
 aliases = [
   "qwen2_5_vl",
   "qwen2_vl",
@@ -13,4 +14,8 @@ aliases = [
 ]
 prefixes = [
   "qwen_vl",
+]
+debug_runner = "vl_debug_runner.py|runner_from_bundle"
+debug_runtime_strategies = [
+  "qwen_vl_vision_language",
 ]

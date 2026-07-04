@@ -578,7 +578,7 @@ def test_elf_contract_rejects_empty_generation() -> None:
     assert not result.metrics["non_empty_generated_text"].passed
 
 
-def test_elf_l0_manifests_record_user_contract_and_skip_reason() -> None:
+def test_elf_l0_manifests_use_upstream_replay_contract() -> None:
     for name, family in (
         ("elf-b-owt-l0", "elf_unconditional_text"),
         ("elf-b-xsum-l0", "elf_conditional_text"),
@@ -596,6 +596,9 @@ def test_elf_l0_manifests_record_user_contract_and_skip_reason() -> None:
         assert case.task_strategy == "diffusion_text_generation"
         assert case.reference_family == family
         assert case.user_contract == "diffusion_text_generation"
+        assert case.oracle_level == "L1_external_reference"
+        assert case.reference_backend == "upstream_replay"
         assert "token_ids" in case.inputs["output_schema"]
-        assert case.metadata["skip_reason"]
+        assert "skip_reason" not in case.metadata
+        assert Path(case.inputs["elf_replay_artifact"]).is_file()
         assert any(stage.artifact_type == "text_samples" for stage in case.stages)

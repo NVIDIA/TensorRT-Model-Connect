@@ -85,7 +85,9 @@ class NemotronHPlugin final : public IPipelinePlugin {
         int32_t conv_dim = extract_json_int(ctx.config_json, "conv_dim", d_inner);
 
         // NemotronHKvCache for the attention layers
-        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
+        DType cache_dtype = num_attention_layers > 0
+                                ? loaded.module->tensor_dtype("cache_k_0")
+                                : cache_dtype_from_precision(ctx.config.precision);
         auto cache = std::make_unique<NemotronHKvCache>(
             num_attention_layers, ctx.config.max_cache_length, kv_dim, stream, cache_dtype);
         if (!cache->ok())

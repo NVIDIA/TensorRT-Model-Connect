@@ -1,2 +1,1 @@
 # Model-local E2E waives. Format: [platform/]model-name SKIP|XFAIL (reason)
-internlm2-1.8b           SKIP   (DynamicCache.from_legacy_cache removed in transformers 5.x)

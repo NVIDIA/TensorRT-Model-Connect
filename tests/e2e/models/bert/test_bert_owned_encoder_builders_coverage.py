@@ -263,7 +263,11 @@ def test_build_encoder_engine_success_passes_activation(monkeypatch: pytest.Monk
         intermediate_size=6,
         rms_norm_eps=1e-5,
         hidden_act=None,
-        raw={"type_vocab_size": 3, "activation": "gelu_new"},
+        raw={
+            "type_vocab_size": 3,
+            "activation": "gelu_new",
+            "_fp32_layers": [1],
+        },
     )
 
     weights = {
@@ -274,7 +278,8 @@ def test_build_encoder_engine_success_passes_activation(monkeypatch: pytest.Monk
         "embed_norm_beta": np.zeros((4,), dtype=np.float32),
     }
 
-    plan = mod.build_encoder_engine(config, weights, max_seq_length=5, verbose=True)
+    plan = mod.build_encoder_engine(
+        config, weights, max_seq_length=5, precision="fp16", verbose=True)
 
     assert plan == b"engine-plan"
     assert len(layer_calls) == 2
@@ -284,6 +289,39 @@ def test_build_encoder_engine_success_passes_activation(monkeypatch: pytest.Monk
     assert builder.config.pool_limits == [("workspace", 1 << 30)]
     assert builder.config.cleared_flags == ["tf32"]
     assert [t.name for t in builder.network.outputs] == ["hidden_states"]
+    assert builder.network.outputs[0].dtype == "float32"
+    assert [call["dtype"] for call in layer_calls] == [
+        np.float16,
+        np.float32,
+    ]
+    assert any(
+        op == "add_cast" and args[1] == "float16"
+        for op, args, _kwargs in builder.network.calls
+    )
+    assert any(
+        op == "add_cast" and args[1] == "float32"
+        for op, args, _kwargs in builder.network.calls
+    )
+
+
+@pytest.mark.unit
+def test_build_encoder_engine_rejects_out_of_range_fp32_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_trt = _make_fake_trt()
+    mod = _import_with_fake_trt(
+        "tensorrt_model_connect.families.bert.model.model", fake_trt)
+    config = types.SimpleNamespace(
+        hidden_size=4,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        intermediate_size=6,
+        rms_norm_eps=1e-5,
+        raw={"_fp32_layers": [2]},
+    )
+
+    with pytest.raises(ValueError, match="out-of-range"):
+        mod.build_encoder_engine(config, {}, max_seq_length=4, precision="fp16")
 
 
 @pytest.mark.unit

@@ -8,6 +8,8 @@
   "task_strategy": "text_generation_causal",
   "reference_family": "translation_chat_template",
   "user_contract": "translation",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "max_cache_length": 256,
   "prompt": "<s>System\nYou are an expert at translating text from English to French.</s>\n<s>User\nWhat is the French translation of the sentence: Hello, how are you?</s>\n<s>Assistant\n",
   "max_new_tokens": 20,

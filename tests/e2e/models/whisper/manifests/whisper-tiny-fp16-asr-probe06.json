@@ -21,5 +21,6 @@
   "asr_probe_readiness": "ready_now",
   "asr_probe_purpose": "Cover non-speech padding around valid speech.",
   "notes": "Nightly ASR coverage probe for Model Connect input handling: Longer waveform decode + silence handling + transcript stability.",
-  "precision": "fp16"
+  "precision": "fp16",
+  "reference_precision": "fp32"
 }

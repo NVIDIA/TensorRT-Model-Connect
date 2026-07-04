@@ -54,6 +54,7 @@ Real weight key structure (nvidia/personaplex-7b-v1):
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -77,6 +78,21 @@ from ...parallel_config import (
 )
 
 trt = trt_compat.get_trt() if trt_compat.is_available() else None
+
+_TEMPORAL_COMPONENT = 0
+_DEPTH_COMPONENT = 1
+_MIMI_ENCODER_COMPONENT = 2
+_MIMI_DECODER_COMPONENT = 3
+_TEMPORAL_LAYER_SELECTOR_BASE = 4
+
+
+def _component_precision(
+    config: ModelConfig,
+    component: int,
+    precision: str,
+) -> str:
+    selected = {int(index) for index in config.raw.get("_fp32_layers", ())}
+    return "fp32" if component in selected else precision
 
 # Conditionally import graph_ops -- it needs TRT
 try:
@@ -265,6 +281,20 @@ class PersonaPlexPlugin:
         num_heads = weights["_num_attention_heads"]
         head_dim = weights["_head_dim"]
         intermediate_size = weights["_intermediate_size"]
+        selected_fp32 = {
+            int(index) for index in config.raw.get("_fp32_layers", ())}
+        valid_fp32 = set(range(_TEMPORAL_LAYER_SELECTOR_BASE + num_layers))
+        invalid_fp32 = sorted(selected_fp32 - valid_fp32)
+        if invalid_fp32:
+            raise ValueError(
+                "PersonaPlex fp32_layers contains unknown selectors: "
+                f"{invalid_fp32}; expected 0=temporal, 1=depth, "
+                "2=Mimi encoder, 3=Mimi decoder, or "
+                f"4-{3 + num_layers}=temporal blocks 0-{num_layers - 1}")
+        temporal_fp32_layers = tuple(sorted(
+            selector - _TEMPORAL_LAYER_SELECTOR_BASE
+            for selector in selected_fp32
+            if selector >= _TEMPORAL_LAYER_SELECTOR_BASE))
         # Embedding table is text_emb [32001, 4096], output head is text_linear [32000, 4096]
         # vocab_size must match embedding table for the gather op
         text_vocab = weights["_text_vocab"]
@@ -292,6 +322,10 @@ class PersonaPlexPlugin:
 
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
+            if precision == "fp16" and temporal_fp32_layers:
+                raise NotImplementedError(
+                    "PersonaPlex temporal per-layer FP32 selectors are not "
+                    "supported with tensor parallelism")
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="PersonaPlex temporal tensor-parallel builds")
             if quant_ctx is not None:
@@ -316,6 +350,8 @@ class PersonaPlexPlugin:
 
         return build_standard_decoder_engine(
             temporal_config, decoder_weights, max_cache_length,
+            precision=_component_precision(
+                config, _TEMPORAL_COMPONENT, precision),
             quant_ctx=quant_ctx,
             norm_type="rmsnorm",
             mlp_type="swiglu",
@@ -326,7 +362,11 @@ class PersonaPlexPlugin:
             embed_input=True,  # Depth needs input_embed for temporal hidden injection  # Use learned position embeddings (zeros) as placeholder
             verbose=verbose,
             debug_layer_outputs=debug_layer_outputs,
-            hidden_state_output=True)  # Speech needs hidden state for depth transformer
+            hidden_state_output=True,
+            fp32_layers=(
+                () if _TEMPORAL_COMPONENT in selected_fp32
+                else temporal_fp32_layers),
+        )  # Speech needs hidden state for depth transformer
 
     def build_extra_engines(
         self, config: ModelConfig, weights: WeightDict,
@@ -346,6 +386,12 @@ class PersonaPlexPlugin:
         depth_head_dim = weights["_depth_head_dim"]
         depth_intermediate = weights["_depth_intermediate"]
         num_codebooks = weights["_num_codebooks"]
+        depth_precision = _component_precision(
+            config, _DEPTH_COMPONENT, precision)
+        mimi_encoder_precision = _component_precision(
+            config, _MIMI_ENCODER_COMPONENT, precision)
+        mimi_decoder_precision = _component_precision(
+            config, _MIMI_DECODER_COMPONENT, precision)
 
         # --- Per-codebook Depth Transformer engines ---
         # The depth transformer has per-codebook attention (Q,K,V,O), MLP, and
@@ -388,6 +434,7 @@ class PersonaPlexPlugin:
             ):
                 depth_plan = build_standard_decoder_engine(
                     depth_config, depth_weights, depth_cache_len,
+                    precision=depth_precision,
                     norm_type="rmsnorm",
                     mlp_type="swiglu",
                     position_type="learned",
@@ -478,7 +525,9 @@ class PersonaPlexPlugin:
 
         # --- Mimi Encoder engine (placeholder) ---
         with timed_trt_compile(build_timing, "extra_mimi_audio_encoder"):
-            mimi_enc_plan = _build_mimi_encoder_engine(weights, verbose=verbose)
+            mimi_enc_plan = _build_mimi_encoder_engine(
+                weights, precision=mimi_encoder_precision, verbose=verbose,
+                model_dir=config.raw.get("_model_dir"))
         if mimi_enc_plan is not None:
             extras["mimi_encoder_plan"] = mimi_enc_plan
 
@@ -490,8 +539,9 @@ class PersonaPlexPlugin:
         mimi_dec_codebooks = 8  # Mimi native: 1 semantic + 7 acoustic
         with timed_trt_compile(build_timing, "extra_mimi_audio_decoder"):
             mimi_dec_plan = _build_mimi_decoder_engine(
-                weights, verbose=verbose, num_input_codebooks=mimi_dec_codebooks,
-                num_frames=320)
+                weights, precision=mimi_decoder_precision, verbose=verbose,
+                num_input_codebooks=mimi_dec_codebooks,
+                num_frames=320, model_dir=config.raw.get("_model_dir"))
         if mimi_dec_plan is not None:
             extras["mimi_decoder_plan"] = mimi_dec_plan
 
@@ -711,8 +761,9 @@ def _load_depth_weights(
                 readers, f"{hf_prefix}.gating.{cb}.linear_out.weight")
             weights[f"{out_prefix}.w_down"] = _transpose_2d(gating_out, "dep_down")
 
-        # No separate final norm for depformer -- use an identity (ones)
-        weights[f"{prefix}.final_norm"] = np.ones(depth_hidden, dtype=np.float32)
+        # The official depformer applies its output head directly to the last
+        # residual stream. Omitting final_norm is intentional: RMSNorm with an
+        # all-ones scale would still change that stream.
 
         # Output head: linears.{cb}.weight [codebook_size, depth_hidden]
         lin = _load_tensor(readers, f"linears.{cb}.weight")
@@ -775,8 +826,83 @@ def _load_embedding_weights(
             readers, "text_linear.weight").astype(np.float32)
 
 
-def _load_mimi_weights():
-    """Download and load Mimi codec weights from kyutai/mimi.
+_PERSONAPLEX_MIMI_FILENAME = "tokenizer-e351c8d8-checkpoint125.safetensors"
+
+
+def _translate_personaplex_mimi_weights(
+    source: dict[str, np.ndarray],
+) -> dict[str, np.ndarray]:
+    """Map the Moshi-native PersonaPlex Mimi checkpoint to TRT Mimi names."""
+    mapped: dict[str, np.ndarray] = {}
+
+    for key, value in source.items():
+        target = None
+        if key.startswith("encoder.model."):
+            target = key.replace("encoder.model.", "encoder.layers.", 1)
+            target = target.replace(".conv.conv.", ".conv.")
+        elif key.startswith("decoder.model."):
+            target = key.replace("decoder.model.", "decoder.layers.", 1)
+            target = target.replace(".conv.conv.", ".conv.")
+            target = target.replace(".convtr.convtr.", ".conv.")
+        elif key == "downsample.conv.conv.conv.weight":
+            target = "downsample.conv.weight"
+        elif key == "upsample.convtr.convtr.convtr.weight":
+            target = "upsample.conv.weight"
+        elif key.startswith("quantizer.rvq_first."):
+            target = key.replace(
+                "quantizer.rvq_first.",
+                "quantizer.semantic_residual_vector_quantizer.", 1)
+        elif key.startswith("quantizer.rvq_rest."):
+            target = key.replace(
+                "quantizer.rvq_rest.",
+                "quantizer.acoustic_residual_vector_quantizer.", 1)
+
+        if target is not None:
+            target = target.replace(".vq.layers.", ".layers.")
+            target = target.replace(
+                "._codebook.embedding_sum", ".codebook.embed_sum")
+            target = target.replace(
+                "._codebook.cluster_usage", ".codebook.cluster_usage")
+            target = target.replace(
+                "._codebook._initialized", ".codebook.initialized")
+            mapped[target] = value
+
+    layer_pattern = re.compile(
+        r"^(encoder|decoder)_transformer\.transformer\.layers\.(\d+)\.")
+    layer_prefixes = {
+        match.group(0)[:-1]
+        for key in source
+        if (match := layer_pattern.match(key)) is not None
+    }
+    for source_prefix in sorted(layer_prefixes):
+        target_prefix = source_prefix.replace(
+            ".transformer.layers.", ".layers.")
+        direct_suffixes = {
+            "norm1.weight": "input_layernorm.weight",
+            "norm1.bias": "input_layernorm.bias",
+            "norm2.weight": "post_attention_layernorm.weight",
+            "norm2.bias": "post_attention_layernorm.bias",
+            "linear1.weight": "mlp.fc1.weight",
+            "linear2.weight": "mlp.fc2.weight",
+            "layer_scale_1.scale": "self_attn_layer_scale.scale",
+            "layer_scale_2.scale": "mlp_layer_scale.scale",
+            "self_attn.out_proj.weight": "self_attn.o_proj.weight",
+        }
+        for source_suffix, target_suffix in direct_suffixes.items():
+            mapped[f"{target_prefix}.{target_suffix}"] = source[
+                f"{source_prefix}.{source_suffix}"]
+
+        fused_qkv = source[f"{source_prefix}.self_attn.in_proj_weight"]
+        q_proj, k_proj, v_proj = np.split(fused_qkv, 3, axis=0)
+        mapped[f"{target_prefix}.self_attn.q_proj.weight"] = q_proj
+        mapped[f"{target_prefix}.self_attn.k_proj.weight"] = k_proj
+        mapped[f"{target_prefix}.self_attn.v_proj.weight"] = v_proj
+
+    return mapped
+
+
+def _load_mimi_weights(model_dir: str | Path | None = None):
+    """Load the checkpoint-owned Mimi codec, with kyutai/mimi as fallback.
 
     Returns a dict mapping weight name -> numpy array.
     Codebook embeddings are computed as embed_sum / cluster_usage.
@@ -789,11 +915,20 @@ def _load_mimi_weights():
     with open(cfg_path) as f:
         mimi_cfg = json.load(f)
 
-    sf_path = hf_hub_download("kyutai/mimi", "model.safetensors")
+    sf_path = None
+    if model_dir is not None:
+        candidate = Path(model_dir) / _PERSONAPLEX_MIMI_FILENAME
+        if candidate.is_file():
+            sf_path = str(candidate)
+    if sf_path is None:
+        sf_path = hf_hub_download("kyutai/mimi", "model.safetensors")
+
     mimi_weights = {}
     with safe_open(sf_path, framework="pt") as sf:
         for key in sf.keys():
             mimi_weights[key] = sf.get_tensor(key).numpy().astype(np.float32)
+    if Path(sf_path).name == _PERSONAPLEX_MIMI_FILENAME:
+        mimi_weights = _translate_personaplex_mimi_weights(mimi_weights)
 
     # Compute actual codebook embeddings from embed_sum / cluster_usage
     for prefix in ["quantizer.semantic_residual_vector_quantizer",
@@ -829,7 +964,8 @@ def _mimi_extra_padding(input_length, kernel_size, stride, padding_total):
 
 
 def _add_mimi_conv1d_causal(network, inp, weight, bias, out_channels,
-                             kernel_size, stride=1, dilation=1):
+                             kernel_size, stride=1, dilation=1,
+                             dtype=np.float32):
     """Causal Conv1d matching HF MimiConv1d (left-pad + extra right-pad).
 
     HF MimiConv1d adds:
@@ -851,21 +987,23 @@ def _add_mimi_conv1d_causal(network, inp, weight, bias, out_channels,
 
     return graph_ops.add_conv1d(
         network, inp, weight, bias, out_channels, kernel_size,
-        stride=stride, padding=0)
+        stride=stride, padding=0, dtype=dtype)
 
 
 def _add_mimi_resblock(network, inp, dim, compress, conv1_w, conv1_b,
-                        conv2_w, conv2_b, residual_kernel_size=3):
+                        conv2_w, conv2_b, residual_kernel_size=3,
+                        dtype=np.float32):
     """Mimi residual block: ELU -> Conv1d(dim, dim//compress, residual_kernel_size)
                             -> ELU -> Conv1d(dim//compress, dim, 1) + skip."""
     hidden = dim // compress
     residual = inp
     x = graph_ops.add_elu(network, inp)
     x = _add_mimi_conv1d_causal(
-        network, x, conv1_w, conv1_b, hidden, residual_kernel_size)
+        network, x, conv1_w, conv1_b, hidden, residual_kernel_size,
+        dtype=dtype)
     x = graph_ops.add_elu(network, x)
     x = _add_mimi_conv1d_causal(
-        network, x, conv2_w, conv2_b, dim, 1)
+        network, x, conv2_w, conv2_b, dim, 1, dtype=dtype)
     # Skip connection (identity shortcut, use_conv_shortcut=False)
     out = network.add_elementwise(
         residual, x, trt.ElementWiseOperation.SUM)
@@ -874,7 +1012,7 @@ def _add_mimi_resblock(network, inp, dim, compress, conv1_w, conv1_b,
 
 def _add_mimi_transformer_layer(network, hidden, seq_len, hidden_size,
                                  num_heads, head_dim, intermediate_size,
-                                 norm_eps, layer_weights):
+                                 norm_eps, layer_weights, dtype=np.float32):
     """Single Mimi transformer layer: LayerNorm + Attn + LayerScale + Residual
                                       + LayerNorm + MLP + LayerScale + Residual.
 
@@ -882,7 +1020,7 @@ def _add_mimi_transformer_layer(network, hidden, seq_len, hidden_size,
     """
     # Epsilon constant for LayerNorm
     eps_const = graph_ops.add_constant(
-        network, (1, 1), np.array([[norm_eps]], dtype=np.float32))
+        network, (1, 1), np.array([[norm_eps]], dtype=dtype), dtype=dtype)
 
     # Pre-attention LayerNorm
     residual = hidden
@@ -890,7 +1028,7 @@ def _add_mimi_transformer_layer(network, hidden, seq_len, hidden_size,
         network, hidden, hidden_size,
         layer_weights["input_layernorm.weight"],
         layer_weights["input_layernorm.bias"],
-        eps_const)
+        eps_const, dtype=dtype)
 
     # Self-attention with RoPE
     cos_table = layer_weights["_cos_table"]
@@ -902,12 +1040,14 @@ def _add_mimi_transformer_layer(network, hidden, seq_len, hidden_size,
         layer_weights["self_attn.v_proj.weight"],
         layer_weights["self_attn.o_proj.weight"],
         hidden_size, num_heads, seq_len,
-        cos_table, sin_table)
+        cos_table, sin_table, dtype=dtype, causal=True,
+        interleaved_rope=True)
 
     # LayerScale: element-wise multiply by learned scale
     scale = graph_ops.add_constant(
         network, (1, hidden_size),
-        layer_weights["self_attn_layer_scale.scale"].reshape(1, -1))
+        layer_weights["self_attn_layer_scale.scale"].reshape(1, -1),
+        dtype=dtype)
     hidden = network.add_elementwise(
         hidden, scale, trt.ElementWiseOperation.PROD).get_output(0)
 
@@ -921,21 +1061,22 @@ def _add_mimi_transformer_layer(network, hidden, seq_len, hidden_size,
         network, hidden, hidden_size,
         layer_weights["post_attention_layernorm.weight"],
         layer_weights["post_attention_layernorm.bias"],
-        eps_const)
+        eps_const, dtype=dtype)
 
     # MLP: fc1 -> GELU -> fc2
     fc1_out = graph_ops.add_matmul_rhs_constant(
         network, hidden, hidden_size, intermediate_size,
-        layer_weights["mlp.fc1.weight"])
-    fc1_out = graph_ops.add_gelu_new(network, fc1_out)
+        layer_weights["mlp.fc1.weight"], dtype=dtype)
+    fc1_out = graph_ops.add_gelu_erf(network, fc1_out, dtype=dtype)
     mlp_out = graph_ops.add_matmul_rhs_constant(
         network, fc1_out, intermediate_size, hidden_size,
-        layer_weights["mlp.fc2.weight"])
+        layer_weights["mlp.fc2.weight"], dtype=dtype)
 
     # MLP LayerScale
     mlp_scale = graph_ops.add_constant(
         network, (1, hidden_size),
-        layer_weights["mlp_layer_scale.scale"].reshape(1, -1))
+        layer_weights["mlp_layer_scale.scale"].reshape(1, -1),
+        dtype=dtype)
     mlp_out = network.add_elementwise(
         mlp_out, mlp_scale, trt.ElementWiseOperation.PROD).get_output(0)
 
@@ -964,7 +1105,9 @@ def _build_mimi_rope_tables(seq_len, head_dim, base=10000.0):
 def _build_mimi_encoder_engine(
     weights: WeightDict,
     *,
+    precision: str = "fp32",
     verbose: bool = False,
+    model_dir: str | Path | None = None,
 ) -> bytes | None:
     """Build Mimi encoder as a native TRT engine.
 
@@ -982,7 +1125,9 @@ def _build_mimi_encoder_engine(
 
     print("[trtmc build] Building Mimi encoder TRT engine ...", file=sys.stderr)
 
-    mimi_w, mimi_cfg = _load_mimi_weights()
+    mimi_w, mimi_cfg = _load_mimi_weights(model_dir)
+    work_np_dtype = np.float16 if precision == "fp16" else np.float32
+    work_trt_dtype = trt.float16 if precision == "fp16" else trt.float32
 
     # Config
     hidden_size = mimi_cfg["hidden_size"]       # 512
@@ -1040,13 +1185,15 @@ def _build_mimi_encoder_engine(
     # channels = [64, 128, 256, 512, 1024] for upsampling_ratios=[8,6,5,4], num_filters=64
 
     x = audio_input
+    if work_trt_dtype != trt.float32:
+        x = network.add_cast(x, work_trt_dtype).get_output(0)
 
     # Layer 0: input conv
     x = _add_mimi_conv1d_causal(
         network, x,
         mimi_w["encoder.layers.0.conv.weight"],
         mimi_w["encoder.layers.0.conv.bias"],
-        channels[0], kernel_size)
+        channels[0], kernel_size, dtype=work_np_dtype)
 
     # Encoder blocks (for each upsampling ratio)
     # Layer indices: resblock at 1,4,7,10; downsample conv at 3,6,9,12
@@ -1068,7 +1215,7 @@ def _build_mimi_encoder_engine(
             mimi_w[f"encoder.layers.{res_idx}.block.1.conv.bias"],
             mimi_w[f"encoder.layers.{res_idx}.block.3.conv.weight"],
             mimi_w[f"encoder.layers.{res_idx}.block.3.conv.bias"],
-            residual_kernel_size)
+            residual_kernel_size, dtype=work_np_dtype)
 
         # ELU activation between resblock and downsample
         # (HF encoder has ELU at layers 2, 5, 8, 11)
@@ -1080,7 +1227,7 @@ def _build_mimi_encoder_engine(
             network, x,
             mimi_w[f"encoder.layers.{down_idx}.conv.weight"],
             mimi_w[f"encoder.layers.{down_idx}.conv.bias"],
-            out_ch, ds_kernel, stride=ratio)
+            out_ch, ds_kernel, stride=ratio, dtype=work_np_dtype)
 
     # ELU before output conv (HF encoder layer 13)
     x = graph_ops.add_elu(network, x)
@@ -1090,7 +1237,7 @@ def _build_mimi_encoder_engine(
         network, x,
         mimi_w["encoder.layers.14.conv.weight"],
         mimi_w["encoder.layers.14.conv.bias"],
-        hidden_size, last_kernel_size)
+        hidden_size, last_kernel_size, dtype=work_np_dtype)
 
     # ===== Encoder Transformer =====
     # x is [1, hidden_size, seq_len_after_conv]
@@ -1132,7 +1279,7 @@ def _build_mimi_encoder_engine(
         }
         x = _add_mimi_transformer_layer(
             network, x, enc_seq_len, hidden_size, num_heads, head_dim,
-            intermediate_size, norm_eps, layer_w)
+            intermediate_size, norm_eps, layer_w, dtype=work_np_dtype)
 
     # Transformer output: [enc_seq_len, hidden_size]
     # Back to [1, hidden_size, enc_seq_len]
@@ -1145,7 +1292,8 @@ def _build_mimi_encoder_engine(
     # downsample.conv.weight: [512, 512, 4], stride=compress(=2)
     ds_w = mimi_w["downsample.conv.weight"]
     x = _add_mimi_conv1d_causal(
-        network, x, ds_w, None, hidden_size, 4, stride=compress)
+        network, x, ds_w, None, hidden_size, 4, stride=compress,
+        dtype=work_np_dtype)
 
     ds_seq_len = x.shape[2]  # seq_len after downsample
 
@@ -1160,7 +1308,8 @@ def _build_mimi_encoder_engine(
 
     # Project to codebook dim
     sem_projected = graph_ops.add_conv1d(
-        network, x, sem_input_proj_w, None, codebook_dim, 1)
+        network, x, sem_input_proj_w, None, codebook_dim, 1,
+        dtype=work_np_dtype)
 
     # Quantize semantic codebook (codebook 0)
     sem_cb = mimi_w[
@@ -1184,14 +1333,16 @@ def _build_mimi_encoder_engine(
 
     # Similarity: [L, D] @ [D, 2048] = [L, 2048]
     cb_const = graph_ops.add_constant(
-        network, (codebook_dim, codebook_size), sem_cb.T.copy())
+        network, (codebook_dim, codebook_size), sem_cb.T.copy(),
+        dtype=work_np_dtype)
     sim = network.add_matrix_multiply(
         sp_flat, trt.MatrixOperation.NONE,
         cb_const, trt.MatrixOperation.NONE).get_output(0)
 
     # Subtract 0.5 * ||cb||^2
     half_norms = graph_ops.add_constant(
-        network, (1, codebook_size), (-0.5 * cb_norms_sq).astype(np.float32))
+        network, (1, codebook_size), (-0.5 * cb_norms_sq),
+        dtype=work_np_dtype)
     sim = network.add_elementwise(
         sim, half_norms, trt.ElementWiseOperation.SUM).get_output(0)
 
@@ -1211,7 +1362,8 @@ def _build_mimi_encoder_engine(
     acou_input_proj_w = mimi_w[
         "quantizer.acoustic_residual_vector_quantizer.input_proj.weight"]
     acou_projected = graph_ops.add_conv1d(
-        network, x, acou_input_proj_w, None, codebook_dim, 1)
+        network, x, acou_input_proj_w, None, codebook_dim, 1,
+        dtype=work_np_dtype)
 
     # Reshape to [ds_seq_len, codebook_dim]
     ap_shuf = network.add_shuffle(acou_projected)
@@ -1225,11 +1377,12 @@ def _build_mimi_encoder_engine(
 
         # Similarity
         acou_cb_const = graph_ops.add_constant(
-            network, (codebook_dim, codebook_size), acou_cb.T.copy())
+            network, (codebook_dim, codebook_size), acou_cb.T.copy(),
+            dtype=work_np_dtype)
         acou_cb_norms_sq = np.sum(acou_cb ** 2, axis=1, keepdims=True).T
         acou_half_norms = graph_ops.add_constant(
             network, (1, codebook_size),
-            (-0.5 * acou_cb_norms_sq).astype(np.float32))
+            -0.5 * acou_cb_norms_sq, dtype=work_np_dtype)
 
         acou_sim = network.add_matrix_multiply(
             acou_residual, trt.MatrixOperation.NONE,
@@ -1250,7 +1403,8 @@ def _build_mimi_encoder_engine(
         idx_flat.reshape_dims = (ds_seq_len,)
 
         acou_cb_2d = graph_ops.add_constant(
-            network, (codebook_size, codebook_dim), acou_cb.copy())
+            network, (codebook_size, codebook_dim), acou_cb.copy(),
+            dtype=work_np_dtype)
         gathered = network.add_gather(
             acou_cb_2d, idx_flat.get_output(0), axis=0).get_output(0)
         # gathered: [L, 256]
@@ -1294,9 +1448,11 @@ def _build_mimi_encoder_engine(
 def _build_mimi_decoder_engine(
     weights: WeightDict,
     *,
+    precision: str = "fp32",
     verbose: bool = False,
     num_input_codebooks: int = 0,
     num_frames: int = 53,
+    model_dir: str | Path | None = None,
 ) -> bytes | None:
     """Build Mimi decoder as a native TRT engine.
 
@@ -1320,7 +1476,8 @@ def _build_mimi_decoder_engine(
 
     print("[trtmc build] Building Mimi decoder TRT engine ...", file=sys.stderr)
 
-    mimi_w, mimi_cfg = _load_mimi_weights()
+    mimi_w, mimi_cfg = _load_mimi_weights(model_dir)
+    work_np_dtype = np.float16 if precision == "fp16" else np.float32
 
     # Config
     hidden_size = mimi_cfg["hidden_size"]
@@ -1380,7 +1537,8 @@ def _build_mimi_decoder_engine(
     sem_idx.reshape_dims = (num_frames,)
 
     sem_cb_const = graph_ops.add_constant(
-        network, (codebook_size, codebook_dim), sem_cb.copy())
+        network, (codebook_size, codebook_dim), sem_cb.copy(),
+        dtype=work_np_dtype)
     sem_gathered = network.add_gather(
         sem_cb_const, sem_idx.get_output(0), axis=0).get_output(0)
     # [num_frames, codebook_dim]
@@ -1395,7 +1553,7 @@ def _build_mimi_decoder_engine(
     sem_shuf.reshape_dims = (1, codebook_dim, num_frames)
     sem_conv = graph_ops.add_conv1d(
         network, sem_shuf.get_output(0),
-        sem_output_proj, None, hidden_size, 1)
+        sem_output_proj, None, hidden_size, 1, dtype=work_np_dtype)
     # [1, hidden_size, num_frames]
 
     quantized = sem_conv
@@ -1418,7 +1576,8 @@ def _build_mimi_decoder_engine(
         acou_idx.reshape_dims = (num_frames,)
 
         acou_cb_const = graph_ops.add_constant(
-            network, (codebook_size, codebook_dim), acou_cb.copy())
+            network, (codebook_size, codebook_dim), acou_cb.copy(),
+            dtype=work_np_dtype)
         acou_gathered = network.add_gather(
             acou_cb_const, acou_idx.get_output(0), axis=0).get_output(0)
         # [num_frames, codebook_dim]
@@ -1438,7 +1597,7 @@ def _build_mimi_decoder_engine(
     acou_shuf.reshape_dims = (1, codebook_dim, num_frames)
     acou_conv = graph_ops.add_conv1d(
         network, acou_shuf.get_output(0),
-        acou_output_proj, None, hidden_size, 1)
+        acou_output_proj, None, hidden_size, 1, dtype=work_np_dtype)
 
     # Sum semantic + acoustic
     quantized = network.add_elementwise(
@@ -1463,7 +1622,7 @@ def _build_mimi_decoder_engine(
 
     # Grouped ConvTranspose1d: [C_in, C_out/groups, 1, K]
     up_w_4d = up_w.reshape(hidden_size, 1, 1, 4)
-    up_trt_w = trt.Weights(np.ascontiguousarray(up_w_4d, dtype=np.float32))
+    up_trt_w = trt.Weights(np.ascontiguousarray(up_w_4d, dtype=work_np_dtype))
 
     deconv = network.add_deconvolution_nd(
         us_reshape.get_output(0),
@@ -1531,7 +1690,7 @@ def _build_mimi_decoder_engine(
         }
         x = _add_mimi_transformer_layer(
             network, x, dec_seq_len, hidden_size, num_heads, head_dim,
-            intermediate_size, norm_eps, layer_w)
+            intermediate_size, norm_eps, layer_w, dtype=work_np_dtype)
 
     # Back to [1, hidden_size, dec_seq_len]
     dec_shuf2 = network.add_shuffle(x)
@@ -1561,7 +1720,7 @@ def _build_mimi_decoder_engine(
         network, x,
         mimi_w["decoder.layers.0.conv.weight"],
         mimi_w["decoder.layers.0.conv.bias"],
-        channels[0], kernel_size)
+        channels[0], kernel_size, dtype=work_np_dtype)
     x = graph_ops.add_elu(network, x)  # decoder layer 1
 
     # Decoder blocks (reverse of encoder)
@@ -1582,7 +1741,8 @@ def _build_mimi_decoder_engine(
             network, x,
             mimi_w[f"decoder.layers.{up_idx}.conv.weight"],
             mimi_w[f"decoder.layers.{up_idx}.conv.bias"],
-            out_ch, up_kernel, stride=ratio, padding=0)
+            out_ch, up_kernel, stride=ratio, padding=0,
+            dtype=work_np_dtype)
 
         # Trim right by ratio (causal trim: padding_total = kernel - stride = ratio)
         if ratio > 0:
@@ -1595,7 +1755,7 @@ def _build_mimi_decoder_engine(
             mimi_w[f"decoder.layers.{res_idx}.block.1.conv.bias"],
             mimi_w[f"decoder.layers.{res_idx}.block.3.conv.weight"],
             mimi_w[f"decoder.layers.{res_idx}.block.3.conv.bias"],
-            residual_kernel_size)
+            residual_kernel_size, dtype=work_np_dtype)
 
         # ELU after resblock (decoder layers 4, 7, 10, 13)
         x = graph_ops.add_elu(network, x)
@@ -1605,7 +1765,10 @@ def _build_mimi_decoder_engine(
         network, x,
         mimi_w["decoder.layers.14.conv.weight"],
         mimi_w["decoder.layers.14.conv.bias"],
-        1, last_kernel_size)
+        1, last_kernel_size, dtype=work_np_dtype)
+
+    if x.dtype != trt.float32:
+        x = network.add_cast(x, trt.float32).get_output(0)
 
     # Output: [1, 1, num_output_samples]
     x.name = "audio_output"

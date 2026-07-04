@@ -71,6 +71,11 @@ class ZImagePlugin:
     _AXES_LENS = [1536, 512, 512]
     _T_SCALE = 1000.0
 
+    _TEXT_ENCODER_COMPONENT = 0
+    _DIT_COMPONENT = 1
+    _VAE_COMPONENT = 2
+    _DIT_LAYER_SELECTOR_BASE = 3
+
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
         return mt in ("z_image", "zimage", "z-image", "zimagepipeline")
@@ -124,6 +129,35 @@ class ZImagePlugin:
             validate_dit_tp,
         )
         build_timing = _kwargs.get("build_timing")
+        selected_fp32_components = frozenset(
+            int(component) for component in config.raw.get("_fp32_layers", ()))
+        dit_layer_count = (
+            2 * self._DIT_NUM_REFINER_LAYERS + self._DIT_NUM_LAYERS + 1)
+        valid_components = {
+            self._TEXT_ENCODER_COMPONENT,
+            self._DIT_COMPONENT,
+            self._VAE_COMPONENT,
+        } | set(range(
+            self._DIT_LAYER_SELECTOR_BASE,
+            self._DIT_LAYER_SELECTOR_BASE + dit_layer_count))
+        invalid_components = sorted(selected_fp32_components - valid_components)
+        if invalid_components:
+            raise ValueError(
+                "Z-Image fp32_layers contains unknown component selectors: "
+                f"{invalid_components}; expected 0=text encoder, 1=DiT, "
+                "2=VAE, 3-4=noise refiners, 5-6=context refiners, "
+                "7-36=main DiT blocks, or 37=final projection")
+
+        dit_fp32_layers = tuple(sorted(
+            selector - self._DIT_LAYER_SELECTOR_BASE
+            for selector in selected_fp32_components
+            if selector >= self._DIT_LAYER_SELECTOR_BASE))
+
+        def _component_precision(component: int) -> str:
+            if precision == "fp16" and component in selected_fp32_components:
+                return "fp32"
+            return precision
+
         parallel = normalize_parallel_config(parallel_config)
         # TP + batch>1 is out of scope for this PR series.
         if max_batch_size > 1 and parallel.enabled:
@@ -194,6 +228,7 @@ class ZImagePlugin:
                 max_seq_len=self._TEXT_MAX_SEQ_LEN,
                 rope_theta=self._TEXT_ROPE_THETA,
                 output_layer=self._TEXT_OUTPUT_LAYER,
+                precision=_component_precision(self._TEXT_ENCODER_COMPONENT),
                 verbose=verbose,
                 max_batch_size=te_mbs,
                 opt_batch_size=te_opt,
@@ -214,6 +249,10 @@ class ZImagePlugin:
         dit_rank_plans = None
         with timed_trt_compile(build_timing, "z_image_dit"):
             if parallel.enabled:
+                if precision == "fp16" and dit_fp32_layers:
+                    raise NotImplementedError(
+                        "Z-Image per-layer FP32 selectors are not supported "
+                        "with tensor parallelism")
                 dit_rank_plans = {}
                 for rank in range(parallel.tp_size):
                     print(
@@ -246,6 +285,10 @@ class ZImagePlugin:
                     text_seq_len=self._TEXT_MAX_SEQ_LEN,
                     head_dim=self._DIT_HEAD_DIM,
                     adaln_embed_dim=self._ADALN_EMBED_DIM,
+                    precision=_component_precision(self._DIT_COMPONENT),
+                    fp32_layers=(
+                        () if self._DIT_COMPONENT in selected_fp32_components
+                        else dit_fp32_layers),
                     verbose=verbose,
                     max_batch_size=dit_mbs,
                     opt_batch_size=dit_opt,
@@ -260,6 +303,7 @@ class ZImagePlugin:
             w_lat=w_lat,
             scaling_factor=self._VAE_SCALING_FACTOR,
             shift_factor=self._VAE_SHIFT_FACTOR,
+            precision=_component_precision(self._VAE_COMPONENT),
             verbose=verbose,
             build_timing=build_timing,
             timing_component="vae_decoder",

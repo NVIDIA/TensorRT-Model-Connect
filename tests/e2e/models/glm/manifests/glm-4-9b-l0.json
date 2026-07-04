@@ -9,6 +9,8 @@
   "ci_tier": "l0_only",
   "reference_family": "causal_base_continuation",
   "user_contract": "continuation_parity",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "max_cache_length": 256,
   "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
   "max_new_tokens": 8,

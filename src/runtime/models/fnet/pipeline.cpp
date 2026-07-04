@@ -5,6 +5,7 @@
 
 #include "runtime/models/fnet/pipeline.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -51,14 +52,29 @@ bool engine_mask_is_int32(const TrtModule& module) {
     return false;
 }
 
+std::size_t infer_input_sequence_length(const TrtModule& module, std::size_t fallback) {
+    for (const auto& info : module.input_info()) {
+        if (info.name == "input_ids" && !info.shape.empty() && info.shape.back() > 0)
+            return static_cast<std::size_t>(info.shape.back());
+    }
+    return fallback;
+}
+
+bool is_embedding_output_name(const std::string& name) {
+    return name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
+           name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
+           name.find("score") != std::string::npos;
+}
+
 } // namespace
 
 // ─── EncoderPipeline ───
 
 EncoderPipeline::EncoderPipeline(std::unique_ptr<TrtModule> encoder, std::string mode,
-                                 std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+                                 std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
+                                 int32_t pad_token_id)
     : encoder_(std::move(encoder)), mode_(std::move(mode)), tokenizer_(std::move(tokenizer)),
-      model_id_(std::move(model_id_str)) {
+      model_id_(std::move(model_id_str)), pad_token_id_(pad_token_id) {
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("EncoderPipeline: invalid encoder module");
 }
@@ -114,25 +130,29 @@ float EncoderPipeline::rerank(const std::string& query, const std::string& docum
 }
 
 EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {
-    const auto n = input_ids.size();
-    std::vector<int32_t> mask_i32(n, 1);
-    std::vector<float> mask_f32(n, 1.0f);
+    const std::size_t sequence_length = infer_input_sequence_length(*encoder_, input_ids.size());
+    const auto actual_length = std::min(input_ids.size(), sequence_length);
+    std::vector<int32_t> ids_copy(sequence_length, pad_token_id_);
+    std::copy_n(input_ids.begin(), actual_length, ids_copy.begin());
+    std::vector<int32_t> mask_i32(sequence_length, 0);
+    std::fill_n(mask_i32.begin(), actual_length, 1);
+    std::vector<float> mask_f32(sequence_length, 0.0f);
+    std::fill_n(mask_f32.begin(), actual_length, 1.0f);
 
-    auto ids_copy = input_ids;
     Tensor ids_t;
     ids_t.data = ids_copy.data();
-    ids_t.shape = {static_cast<int64_t>(n)};
+    ids_t.shape = {static_cast<int64_t>(sequence_length)};
     ids_t.dtype = DType::kInt32;
 
     // Match the engine's expected dtype for the attention mask.
     Tensor mask_t;
     if (engine_mask_is_int32(*encoder_)) {
         mask_t.data = mask_i32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.shape = {static_cast<int64_t>(sequence_length)};
         mask_t.dtype = DType::kInt32;
     } else {
         mask_t.data = mask_f32.data();
-        mask_t.shape = {static_cast<int64_t>(n)};
+        mask_t.shape = {static_cast<int64_t>(sequence_length)};
         mask_t.dtype = DType::kFloat32;
     }
 
@@ -144,9 +164,7 @@ EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_id
 
     EmbeddingResult result;
     for (auto& [name, tensor] : outputs) {
-        if (name.find("logits") != std::string::npos || name.find("embed") != std::string::npos ||
-            name.find("output") != std::string::npos || name.find("hidden") != std::string::npos ||
-            name.find("score") != std::string::npos) {
+        if (is_embedding_output_name(name)) {
             auto n = tensor.numel();
             result.data.resize(static_cast<std::size_t>(n));
             std::memcpy(result.data.data(), tensor.data, n * sizeof(float));

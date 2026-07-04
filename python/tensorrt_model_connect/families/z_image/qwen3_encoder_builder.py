@@ -97,6 +97,7 @@ def build_qwen3_encoder_engine(
     rope_theta: float = 1000000.0,
     eps: float = 1e-6,
     output_layer: int = -2,
+    precision: str = "fp32",
     verbose: bool = False,
     max_batch_size: int = 1,
     opt_batch_size: int | None = None,
@@ -117,6 +118,14 @@ def build_qwen3_encoder_engine(
     """
     if max_batch_size < 1:
         raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported Qwen3 encoder precision {precision!r}; "
+            "expected fp32 or fp16")
     if max_batch_size > 1:
         return _build_qwen3_encoder_engine_batched(
             weights,
@@ -131,6 +140,7 @@ def build_qwen3_encoder_engine(
             rope_theta=rope_theta,
             eps=eps,
             output_layer=output_layer,
+            precision=precision,
             max_batch_size=max_batch_size,
             opt_batch_size=opt_batch_size,
             verbose=verbose,
@@ -153,13 +163,18 @@ def build_qwen3_encoder_engine(
     input_ids = network.add_input("input_ids", trt.int32, (max_seq_len,))
     attn_mask = network.add_input(
         "attention_mask", trt.float32, (max_seq_len,))
+    if work_trt_dtype != trt.float32:
+        attn_mask = network.add_cast(attn_mask, work_trt_dtype).get_output(0)
 
     # Constants
-    eps_t = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
+    eps_t = graph_ops.add_constant(
+        network, (1, 1), np.array([eps], dtype=work_np_dtype),
+        dtype=work_np_dtype)
 
     # Embedding
     embed_table = graph_ops.add_constant(
-        network, (vocab_size, hidden_size), weights["embed_tokens"])
+        network, (vocab_size, hidden_size), weights["embed_tokens"],
+        dtype=work_np_dtype)
     hidden = network.add_gather(embed_table, input_ids, 0).get_output(0)
 
     graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
@@ -168,9 +183,11 @@ def build_qwen3_encoder_engine(
     rope_sin_half_np = graph_ops.make_rope_table_half_dim(
         max_seq_len, head_dim, rope_theta, False)
     rope_cos_half = graph_ops.add_constant(
-        network, rope_cos_half_np.shape, rope_cos_half_np)
+        network, rope_cos_half_np.shape, rope_cos_half_np,
+        dtype=work_np_dtype)
     rope_sin_half = graph_ops.add_constant(
-        network, rope_sin_half_np.shape, rope_sin_half_np)
+        network, rope_sin_half_np.shape, rope_sin_half_np,
+        dtype=work_np_dtype)
     rope_position_ids = graph_ops.add_constant(
         network, (max_seq_len,), np.arange(max_seq_len, dtype=np.int32),
         dtype=np.int32)
@@ -190,18 +207,19 @@ def build_qwen3_encoder_engine(
         # RMSNorm
         normed = graph_ops.add_rms_norm(
             network, hidden, hidden_size,
-            weights[f"layer.{layer_idx}.input_layernorm"], eps_t)
+            weights[f"layer.{layer_idx}.input_layernorm"], eps_t,
+            dtype=work_np_dtype)
 
         # QKV projections
         q = graph_ops.add_matmul_rhs_constant(
             network, normed, hidden_size, num_heads * head_dim,
-            weights[f"layer.{layer_idx}.q_proj"])
+            weights[f"layer.{layer_idx}.q_proj"], dtype=work_np_dtype)
         k = graph_ops.add_matmul_rhs_constant(
             network, normed, hidden_size, kv_dim,
-            weights[f"layer.{layer_idx}.k_proj"])
+            weights[f"layer.{layer_idx}.k_proj"], dtype=work_np_dtype)
         v = graph_ops.add_matmul_rhs_constant(
             network, normed, hidden_size, kv_dim,
-            weights[f"layer.{layer_idx}.v_proj"])
+            weights[f"layer.{layer_idx}.v_proj"], dtype=work_np_dtype)
 
         # QK norms (per-head RMSNorm)
         q_norm_w = weights[f"layer.{layer_idx}.q_norm"]
@@ -210,8 +228,12 @@ def build_qwen3_encoder_engine(
         q_norm_tiled = np.tile(q_norm_w.reshape(1, head_dim), (num_heads, 1))
         k_norm_tiled = np.tile(k_norm_w.reshape(1, head_dim), (num_kv_heads, 1))
 
-        q = _add_per_head_rms_norm(network, q, num_heads, head_dim, q_norm_tiled, eps_t, max_seq_len)
-        k = _add_per_head_rms_norm(network, k, num_kv_heads, head_dim, k_norm_tiled, eps_t, max_seq_len)
+        q = _add_per_head_rms_norm(
+            network, q, num_heads, head_dim, q_norm_tiled, eps_t,
+            max_seq_len, dtype=work_np_dtype)
+        k = _add_per_head_rms_norm(
+            network, k, num_kv_heads, head_dim, k_norm_tiled, eps_t,
+            max_seq_len, dtype=work_np_dtype)
 
         q = graph_ops.add_apply_rope_native(
             network, q, num_heads, head_dim,
@@ -234,7 +256,7 @@ def build_qwen3_encoder_engine(
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
             network, ctx_flat, num_heads * head_dim, hidden_size,
-            weights[f"layer.{layer_idx}.o_proj"])
+            weights[f"layer.{layer_idx}.o_proj"], dtype=work_np_dtype)
 
         # Residual
         hidden = network.add_elementwise(
@@ -243,15 +265,16 @@ def build_qwen3_encoder_engine(
         # Post-attention RMSNorm
         normed2 = graph_ops.add_rms_norm(
             network, hidden, hidden_size,
-            weights[f"layer.{layer_idx}.post_attn_norm"], eps_t)
+            weights[f"layer.{layer_idx}.post_attn_norm"], eps_t,
+            dtype=work_np_dtype)
 
         # SwiGLU MLP
         gate = graph_ops.add_matmul_rhs_constant(
             network, normed2, hidden_size, intermediate_size,
-            weights[f"layer.{layer_idx}.gate_proj"])
+            weights[f"layer.{layer_idx}.gate_proj"], dtype=work_np_dtype)
         up = graph_ops.add_matmul_rhs_constant(
             network, normed2, hidden_size, intermediate_size,
-            weights[f"layer.{layer_idx}.up_proj"])
+            weights[f"layer.{layer_idx}.up_proj"], dtype=work_np_dtype)
 
         # SiLU(gate) * up
         sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
@@ -262,7 +285,7 @@ def build_qwen3_encoder_engine(
 
         down = graph_ops.add_matmul_rhs_constant(
             network, gated.get_output(0), intermediate_size, hidden_size,
-            weights[f"layer.{layer_idx}.down_proj"])
+            weights[f"layer.{layer_idx}.down_proj"], dtype=work_np_dtype)
 
         # Residual
         hidden = network.add_elementwise(
@@ -297,11 +320,12 @@ def _add_per_head_rms_norm(
     gamma: np.ndarray,
     eps_t: trt.ITensor,
     seq_len: int,
+    dtype=np.float32,
 ) -> trt.ITensor:
     """Per-head RMSNorm for sequence input [seq_len, num_heads * head_dim]."""
     return graph_ops.add_rms_norm_per_head(
         network, inp, num_heads, head_dim, gamma, eps_t,
-        sequence_length=seq_len)
+        sequence_length=seq_len, dtype=dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -411,11 +435,20 @@ def _build_qwen3_encoder_engine_batched(
     rope_theta: float,
     eps: float,
     output_layer: int,
+    precision: str,
     max_batch_size: int,
     opt_batch_size: int | None,
     verbose: bool,
 ) -> bytes:
     """Build a dynamic-leading-batch Qwen3 encoder TRT engine."""
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported Qwen3 encoder precision {precision!r}; "
+            "expected fp32 or fp16")
     if opt_batch_size is None:
         opt_batch_size = min(max_batch_size, 4)
     if output_layer < 0:
@@ -434,6 +467,8 @@ def _build_qwen3_encoder_engine_batched(
     input_ids = network.add_input("input_ids", trt.int32, (-1, max_seq_len))
     attn_mask = network.add_input(
         "attention_mask", trt.float32, (-1, max_seq_len))
+    if work_trt_dtype != trt.float32:
+        attn_mask = network.add_cast(attn_mask, work_trt_dtype).get_output(0)
 
     add_dynamic_batch_profile(
         builder, config, network,
@@ -448,10 +483,12 @@ def _build_qwen3_encoder_engine_batched(
 
     # eps tensor shaped (1, 1, 1) so it broadcasts with [B, S, D] RMSNorms.
     eps_t = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([eps], dtype=np.float32))
+        network, (1, 1, 1), np.array([eps], dtype=work_np_dtype),
+        dtype=work_np_dtype)
 
     embed_table = graph_ops.add_constant(
-        network, (vocab_size, hidden_size), weights["embed_tokens"])
+        network, (vocab_size, hidden_size), weights["embed_tokens"],
+        dtype=work_np_dtype)
     hidden = network.add_gather(embed_table, input_ids, 0).get_output(0)
 
     graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
@@ -460,9 +497,11 @@ def _build_qwen3_encoder_engine_batched(
     rope_sin_half_np = graph_ops.make_rope_table_half_dim(
         max_seq_len, head_dim, rope_theta, False)
     rope_cos_half = graph_ops.add_constant(
-        network, rope_cos_half_np.shape, rope_cos_half_np)
+        network, rope_cos_half_np.shape, rope_cos_half_np,
+        dtype=work_np_dtype)
     rope_sin_half = graph_ops.add_constant(
-        network, rope_sin_half_np.shape, rope_sin_half_np)
+        network, rope_sin_half_np.shape, rope_sin_half_np,
+        dtype=work_np_dtype)
 
     mask_reshape = network.add_shuffle(attn_mask)
     mask_reshape.reshape_dims = (-1, 1, 1, max_seq_len)
@@ -475,17 +514,18 @@ def _build_qwen3_encoder_engine_batched(
 
         normed = graph_ops.add_rms_norm_last_dim(
             network, hidden, hidden_size,
-            weights[f"layer.{layer_idx}.input_layernorm"], eps_t)
+            weights[f"layer.{layer_idx}.input_layernorm"], eps_t,
+            dtype=work_np_dtype)
 
         q = graph_ops.add_matmul_rhs_constant(
             network, normed, hidden_size, num_heads * head_dim,
-            weights[f"layer.{layer_idx}.q_proj"])
+            weights[f"layer.{layer_idx}.q_proj"], dtype=work_np_dtype)
         k = graph_ops.add_matmul_rhs_constant(
             network, normed, hidden_size, kv_dim,
-            weights[f"layer.{layer_idx}.k_proj"])
+            weights[f"layer.{layer_idx}.k_proj"], dtype=work_np_dtype)
         v = graph_ops.add_matmul_rhs_constant(
             network, normed, hidden_size, kv_dim,
-            weights[f"layer.{layer_idx}.v_proj"])
+            weights[f"layer.{layer_idx}.v_proj"], dtype=work_np_dtype)
 
         q_norm_w = weights[f"layer.{layer_idx}.q_norm"]
         k_norm_w = weights[f"layer.{layer_idx}.k_norm"]
@@ -494,10 +534,10 @@ def _build_qwen3_encoder_engine_batched(
 
         q = graph_ops.add_rms_norm_per_head_batched(
             network, q, num_heads, head_dim, q_norm_tiled, eps_t,
-            sequence_length=max_seq_len)
+            dtype=work_np_dtype, sequence_length=max_seq_len)
         k = graph_ops.add_rms_norm_per_head_batched(
             network, k, num_kv_heads, head_dim, k_norm_tiled, eps_t,
-            sequence_length=max_seq_len)
+            dtype=work_np_dtype, sequence_length=max_seq_len)
 
         q = _add_apply_rope_native_batched(
             network, q, rope_cos_half, rope_sin_half,
@@ -514,21 +554,22 @@ def _build_qwen3_encoder_engine_batched(
 
         attn_out = graph_ops.add_matmul_rhs_constant(
             network, ctx_flat, num_heads * head_dim, hidden_size,
-            weights[f"layer.{layer_idx}.o_proj"])
+            weights[f"layer.{layer_idx}.o_proj"], dtype=work_np_dtype)
 
         hidden = network.add_elementwise(
             hidden, attn_out, trt.ElementWiseOperation.SUM).get_output(0)
 
         normed2 = graph_ops.add_rms_norm_last_dim(
             network, hidden, hidden_size,
-            weights[f"layer.{layer_idx}.post_attn_norm"], eps_t)
+            weights[f"layer.{layer_idx}.post_attn_norm"], eps_t,
+            dtype=work_np_dtype)
 
         gate = graph_ops.add_matmul_rhs_constant(
             network, normed2, hidden_size, intermediate_size,
-            weights[f"layer.{layer_idx}.gate_proj"])
+            weights[f"layer.{layer_idx}.gate_proj"], dtype=work_np_dtype)
         up = graph_ops.add_matmul_rhs_constant(
             network, normed2, hidden_size, intermediate_size,
-            weights[f"layer.{layer_idx}.up_proj"])
+            weights[f"layer.{layer_idx}.up_proj"], dtype=work_np_dtype)
         sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
         silu = network.add_elementwise(
             gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
@@ -536,7 +577,7 @@ def _build_qwen3_encoder_engine_batched(
             silu.get_output(0), up, trt.ElementWiseOperation.PROD)
         down = graph_ops.add_matmul_rhs_constant(
             network, gated.get_output(0), intermediate_size, hidden_size,
-            weights[f"layer.{layer_idx}.down_proj"])
+            weights[f"layer.{layer_idx}.down_proj"], dtype=work_np_dtype)
 
         hidden = network.add_elementwise(
             hidden, down, trt.ElementWiseOperation.SUM).get_output(0)
@@ -552,7 +593,7 @@ def _build_qwen3_encoder_engine_batched(
     print(f"[qwen3-encoder] Building dynamic-batch TRT engine "
           f"(B=1..{max_batch_size}, opt={opt_batch_size}, layers={num_layers}, "
           f"hidden={hidden_size}, output_layer={output_layer}, "
-          f"seq_len={max_seq_len}) ...", file=sys.stderr)
+          f"seq_len={max_seq_len}, precision={precision}) ...", file=sys.stderr)
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:

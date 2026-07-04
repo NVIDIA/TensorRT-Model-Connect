@@ -8,6 +8,8 @@
   "task_strategy": "text_generation_causal",
   "e2e_parallel_resource": "exclusive_gpu",
   "ci_tier": "l0_only",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "reference_family": "chat_instruct_template",
   "user_contract": "chat_response",
   "max_cache_length": 256,

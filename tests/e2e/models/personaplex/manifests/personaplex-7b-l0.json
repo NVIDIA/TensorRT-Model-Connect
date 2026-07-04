@@ -21,5 +21,9 @@
   "metadata": {
     "runtime_cli_requires_hf_python": true
   },
-  "notes": "PR L0 repro for PersonaPlex. Uses the same checkpoint, personaplex_speech_to_speech runtime, official token snapshot, runner, comparator, speech artifact contract, and full cache budget with shorter tail-frame budget."
+  "notes": "PR L0 repro for PersonaPlex. Uses the same checkpoint, personaplex_speech_to_speech runtime, official token snapshot, runner, comparator, speech artifact contract, full cache budget, and selector 35 as the full manifest, with a shorter tail-frame budget.",
+  "precision": "fp16",
+  "fp32_layers": [
+    35
+  ]
 }

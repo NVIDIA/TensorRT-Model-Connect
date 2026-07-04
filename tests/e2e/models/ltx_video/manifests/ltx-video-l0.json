@@ -8,6 +8,8 @@
   "runtime_strategy": "diffusion_ltx",
   "task_strategy": "diffusion_media_generation",
   "ci_tier": "l0_only",
+  "precision": "fp16",
+  "fp32_layers": [24],
   "reference_family": "diffusers_video_gen",
   "user_contract": "diffusion_video",
   "description": "LTX-Video L0 representative at reduced spatial size and frame count with model-card-style denoising",
@@ -29,7 +31,7 @@
     }
   ],
   "skip_text_comparison": true,
-  "notes": "PR L0 repro for LTX-Video. Uses the same checkpoint, T5 text encoder, LTX DiT denoiser, VAE decoder, native TRT runtime, runner, comparator, and video artifact contract. L0 keeps the 256x256, nine-frame CI shape but uses 30 denoising steps and a detailed English prompt matching the model card guidance; broader quality coverage can use the model default resolution and frame count.",
+  "notes": "PR L0 repro for LTX-Video. The denoiser and VAE use FP16 GEMMs with FP32 accumulation, while selector 24 keeps the complete T5 encoder FP32. Full FP16 T5, either 12-layer FP32 half, and an 18-layer FP32 prefix all collapse to zero-variance white frames. Uses the same checkpoint, native TRT runtime, runner, comparator, and video artifact contract. L0 keeps the 256x256, nine-frame CI shape but uses 30 denoising steps and a detailed English prompt matching the model card guidance; broader quality coverage can use the model default resolution and frame count.",
   "metadata": {
     "contract_config": {
       "use_diffusers": true,

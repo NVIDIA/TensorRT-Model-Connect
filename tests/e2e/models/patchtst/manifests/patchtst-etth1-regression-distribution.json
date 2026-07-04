@@ -9,7 +9,8 @@
   "reference_family": "time_series_regression",
   "user_contract": "time_series_regression",
   "oracle_level": "L1_external_reference",
-  "precision": "fp32",
+  "precision": "fp16",
+  "fp32_layers": [5],
   "max_cache_length": 512,
   "inputs": {
     "field_input": [
@@ -47,6 +48,6 @@
   },
   "metadata": {
     "core": false,
-    "notes": "Public IBM Research PatchTST regression checkpoint exercised through unified E2E with numeric sample input."
+    "notes": "Public IBM Research PatchTST regression checkpoint exercised through unified E2E with numeric sample input. The embedding and all three encoder layers use FP16 with FP32 GEMM accumulation; selector 5 keeps the precision-sensitive regression head FP32. Normalization and statistical reductions remain FP32."
   }
 }

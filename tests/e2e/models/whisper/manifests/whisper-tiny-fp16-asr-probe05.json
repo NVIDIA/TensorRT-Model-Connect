@@ -21,5 +21,6 @@
   "asr_probe_readiness": "ready_now",
   "asr_probe_purpose": "Cover low-amplitude PCM handling.",
   "notes": "Nightly ASR coverage probe for Model Connect input handling: PCM int16 decode + float normalization + ASR preprocessing.",
-  "precision": "fp16"
+  "precision": "fp16",
+  "reference_precision": "fp32"
 }

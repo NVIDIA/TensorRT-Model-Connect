@@ -78,17 +78,74 @@ def _normalize_task_type(config: Any) -> str:
     return "forecast"
 
 
-def _load_all_tensors(model_dir: str | Path, *, precision: str) -> WeightDict:
+def _load_all_tensors(
+    model_dir: str | Path,
+    *,
+    precision: str,
+    fp32_layers: tuple[int, ...] = (),
+    depth: int,
+) -> WeightDict:
     readers = _open_safetensors(Path(model_dir))
     target_dtype = _target_np_dtype(precision)
+    # Selectors: whole blocks, embedding/position/head, grouped ops, linears, biases.
+    fp32_prefixes = tuple(
+        f"model.encoder.layers.{layer}."
+        for layer in fp32_layers if layer < depth)
+    fp32_embedding = depth in fp32_layers
+    fp32_position = depth + 1 in fp32_layers
+    fp32_head = depth + 2 in fp32_layers
+    fp32_biases = depth + 3 + depth * 8 in fp32_layers
+    fp32_operation_prefixes: list[str] = []
+    for layer in range(depth):
+        operation_base = depth + 3 + layer * 2
+        if operation_base in fp32_layers:
+            fp32_operation_prefixes.append(
+                f"model.encoder.layers.{layer}.self_attn.")
+        if operation_base + 1 in fp32_layers:
+            fp32_operation_prefixes.append(
+                f"model.encoder.layers.{layer}.ff.")
+    fine_operation_names = (
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+        "self_attn.v_proj",
+        "self_attn.out_proj",
+        "ff.0",
+        "ff.3",
+    )
+    fine_operation_start = depth + 3 + depth * 2
+    for layer in range(depth):
+        for operation_offset, operation_name in enumerate(fine_operation_names):
+            selector = fine_operation_start + layer * 6 + operation_offset
+            if selector in fp32_layers:
+                fp32_operation_prefixes.append(
+                    f"model.encoder.layers.{layer}.{operation_name}.")
     weights = WeightDict()
     tensor_map = getattr(readers, "tensor_map", {})
     for name in sorted(tensor_map):
         arr = _load_tensor(readers, name)
+        selected_linear_weight = (
+            (
+                name.startswith(fp32_prefixes)
+                or name.startswith(tuple(fp32_operation_prefixes))
+                or (
+                    fp32_embedding
+                    and name.startswith(
+                        "model.encoder.embedder.input_embedding.")
+                )
+                or (fp32_head and name.startswith("head."))
+            )
+            and (fp32_biases or not name.endswith(".bias"))
+            and not name.endswith(".self_attn.k_proj.bias")
+        )
         dtype = np.float32 if (
             name.endswith(("running_mean", "running_var"))
             or ".norm" in name
             or "layernorm" in name
+            or selected_linear_weight
+            or (
+                fp32_position
+                and name.startswith("model.encoder.positional_encoder.")
+            )
         ) else target_dtype
         weights[name] = np.ascontiguousarray(arr, dtype=dtype)
     return weights
@@ -193,7 +250,7 @@ def _add_encoder_layer(
     *,
     layer_idx: int,
     raw: dict[str, Any],
-    precision: str,
+    linear_precisions: tuple[str, str, str, str, str, str],
 ) -> trt.ITensor:
     channels = int(raw.get("num_input_channels", 1))
     hidden_size = int(raw.get("d_model", 1))
@@ -221,9 +278,26 @@ def _add_encoder_layer(
         kw, kb = _linear_key(prefix, "self_attn.k_proj")
         vw, vb = _linear_key(prefix, "self_attn.v_proj")
         ow, ob = _linear_key(prefix, "self_attn.out_proj")
-        q = add_linear(network, normed, weights[qw], weights.get(qb), precision=precision)
-        k = add_linear(network, normed, weights[kw], weights.get(kb), precision=precision)
-        v = add_linear(network, normed, weights[vw], weights.get(vb), precision=precision)
+        q = add_linear(
+            network, normed, weights[qw], weights.get(qb),
+            precision=linear_precisions[0])
+        k = add_linear(
+            network, normed, weights[kw], weights.get(kb),
+            precision=linear_precisions[1])
+        v = add_linear(
+            network, normed, weights[vw], weights.get(vb),
+            precision=linear_precisions[2])
+        attention_dtype = (
+            trt.float32
+            if "fp32" in linear_precisions[:3]
+            else trt.float16
+        )
+        q = q if q.dtype == attention_dtype else network.add_cast(
+            q, attention_dtype).get_output(0)
+        k = k if k.dtype == attention_dtype else network.add_cast(
+            k, attention_dtype).get_output(0)
+        v = v if v.dtype == attention_dtype else network.add_cast(
+            v, attention_dtype).get_output(0)
         ctx = graph_ops.add_attention_from_rows(
             network,
             q,
@@ -236,7 +310,11 @@ def _add_encoder_layer(
             causal=False,
             tag=f"patchtst.l{layer_idx}.c{channel}",
         )
-        attn = add_linear(network, ctx, weights[ow], weights.get(ob), precision=precision)
+        attn = add_linear(
+            network, ctx, weights[ow], weights.get(ob),
+            precision=linear_precisions[3])
+        if attn.dtype != row_t.dtype:
+            attn = network.add_cast(attn, row_t.dtype).get_output(0)
         row_t = network.add_elementwise(row_t, attn, trt.ElementWiseOperation.SUM).get_output(0)
 
         normed = _add_norm(
@@ -244,9 +322,15 @@ def _add_encoder_layer(
             norm_name="norm_sublayer3", hidden_size=hidden_size, raw=raw)
         fw0, fb0 = _linear_key(prefix, "ff.0")
         fw1, fb1 = _linear_key(prefix, "ff.3")
-        ff = add_linear(network, normed, weights[fw0], weights.get(fb0), precision=precision)
+        ff = add_linear(
+            network, normed, weights[fw0], weights.get(fb0),
+            precision=linear_precisions[4])
         ff = add_gelu(network, ff)
-        ff = add_linear(network, ff, weights[fw1], weights.get(fb1), precision=precision)
+        ff = add_linear(
+            network, ff, weights[fw1], weights.get(fb1),
+            precision=linear_precisions[5])
+        if ff.dtype != row_t.dtype:
+            ff = network.add_cast(ff, row_t.dtype).get_output(0)
         row_t = network.add_elementwise(row_t, ff, trt.ElementWiseOperation.SUM).get_output(0)
 
         out = network.add_shuffle(row_t)
@@ -276,6 +360,13 @@ def _build_patchtst_network(
     num_patches = _num_patches(raw)
     hidden_size = int(raw.get("d_model", 1))
     depth = int(raw.get("num_hidden_layers", 1))
+    fp32_layers = frozenset(int(layer) for layer in raw.get("_fp32_layers", ()))
+    invalid_fp32_layers = sorted(
+        layer for layer in fp32_layers
+        if layer < 0 or layer > depth + 3 + depth * 8)
+    if invalid_fp32_layers:
+        raise ValueError(
+            f"fp32_layers contains out-of-range indices: {invalid_fp32_layers}")
     use_cls_token = bool(raw.get("use_cls_token", False))
     seq_len = num_patches + (1 if use_cls_token else 0)
 
@@ -304,32 +395,74 @@ def _build_patchtst_network(
 
     emb_w = weights["model.encoder.embedder.input_embedding.weight"]
     emb_b = weights.get("model.encoder.embedder.input_embedding.bias")
-    hidden = add_linear(network, patches, emb_w, emb_b, precision=precision)
+    embedding_precision = (
+        "fp32" if precision == "fp16" and depth in fp32_layers else precision)
+    hidden = add_linear(
+        network, patches, emb_w, emb_b, precision=embedding_precision)
 
-    pos = weights["model.encoder.positional_encoder.position_enc"].astype(np.float32)
+    position_dtype = (
+        np.float16 if hidden.dtype == trt.float16 else np.float32)
+    pos = weights["model.encoder.positional_encoder.position_enc"].astype(
+        position_dtype)
     if use_cls_token:
         patch_pos = graph_ops.add_constant(
             network, (1, 1, num_patches, hidden_size),
-            pos[1:, :].reshape(1, 1, num_patches, hidden_size), dtype=np.float32)
+            pos[1:, :].reshape(1, 1, num_patches, hidden_size),
+            dtype=position_dtype)
         hidden = network.add_elementwise(hidden, patch_pos, trt.ElementWiseOperation.SUM).get_output(0)
-        cls = weights["model.encoder.positional_encoder.cls_token"].astype(np.float32)
+        cls = weights["model.encoder.positional_encoder.cls_token"].astype(
+            position_dtype)
         cls_pos = cls.reshape(1, 1, 1, hidden_size) + pos[:1, :].reshape(1, 1, 1, hidden_size)
         cls_pos = np.tile(cls_pos, (1, channels, 1, 1))
         cls_t = graph_ops.add_constant(
-            network, (1, channels, 1, hidden_size), cls_pos, dtype=np.float32)
+            network, (1, channels, 1, hidden_size), cls_pos,
+            dtype=position_dtype)
         cat = network.add_concatenation([cls_t, hidden])
         cat.axis = 2
         hidden = cat.get_output(0)
     else:
         pos_t = graph_ops.add_constant(
             network, (1, 1, num_patches, hidden_size),
-            pos.reshape(1, 1, num_patches, hidden_size), dtype=np.float32)
+            pos.reshape(1, 1, num_patches, hidden_size),
+            dtype=position_dtype)
         hidden = network.add_elementwise(hidden, pos_t, trt.ElementWiseOperation.SUM).get_output(0)
 
     for layer_idx in range(depth):
+        boundary_dtype = hidden.dtype
+        layer_is_fp32 = precision == "fp16" and layer_idx in fp32_layers
+        layer_precision = "fp32" if layer_is_fp32 else precision
+        operation_base = depth + 3 + layer_idx * 2
+        attention_precision = (
+            "fp32"
+            if precision == "fp16" and operation_base in fp32_layers
+            else layer_precision
+        )
+        ff_precision = (
+            "fp32"
+            if precision == "fp16" and operation_base + 1 in fp32_layers
+            else layer_precision
+        )
+        fine_operation_start = depth + 3 + depth * 2
+        fine_operation_base = fine_operation_start + layer_idx * 6
+        linear_precisions = tuple(
+            "fp32"
+            if precision == "fp16" and fine_operation_base + offset in fp32_layers
+            else (attention_precision if offset < 4 else ff_precision)
+            for offset in range(6)
+        )
+        if layer_is_fp32 and hidden.dtype != trt.float32:
+            hidden = network.add_cast(hidden, trt.float32).get_output(0)
         hidden = _add_encoder_layer(
             network, hidden, weights, layer_idx=layer_idx,
-            raw=raw, precision=precision)
+            raw=raw, linear_precisions=linear_precisions)
+        if layer_is_fp32 and hidden.dtype != boundary_dtype:
+            hidden = network.add_cast(hidden, boundary_dtype).get_output(0)
+
+    head_precision = (
+        "fp32"
+        if precision == "fp16" and depth + 2 in fp32_layers
+        else precision
+    )
 
     if task_type == "forecast":
         channel_outputs: list[trt.ITensor] = []
@@ -359,7 +492,7 @@ def _build_patchtst_network(
                 pooled_t,
                 weights["head.projection.weight"],
                 weights.get("head.projection.bias"),
-                precision=precision,
+                precision=head_precision,
             )
             pred3 = network.add_shuffle(pred)
             pred3.reshape_dims = (1, int(raw.get("prediction_length", 1)), 1)
@@ -367,6 +500,8 @@ def _build_patchtst_network(
         cat = network.add_concatenation(channel_outputs)
         cat.axis = 2
         y = cat.get_output(0)
+        if y.dtype != trt.float32:
+            y = network.add_cast(y, trt.float32).get_output(0)
         y = network.add_elementwise(y, scale, trt.ElementWiseOperation.PROD).get_output(0)
         y = network.add_elementwise(y, loc, trt.ElementWiseOperation.SUM).get_output(0)
         add_named_output(network, y, "prediction_outputs")
@@ -387,7 +522,7 @@ def _build_patchtst_network(
                 flat_t,
                 weights[f"head.projection.proj.{idx}.weight"],
                 weights.get(f"head.projection.proj.{idx}.bias"),
-                precision=precision,
+                precision=head_precision,
             )
             outputs.append(pred)
             idx += 1
@@ -397,7 +532,7 @@ def _build_patchtst_network(
                 flat_t,
                 weights["head.projection.weight"],
                 weights.get("head.projection.bias"),
-                precision=precision,
+                precision=head_precision,
             )
             pred3 = network.add_shuffle(pred)
             pred3.reshape_dims = (1, int(raw.get("num_targets", 1)))
@@ -436,7 +571,12 @@ class PatchTSTPlugin:
         *,
         precision: str = "fp32",
     ) -> dict:
-        weights = _load_all_tensors(model_dir, precision=precision)
+        weights = _load_all_tensors(
+            model_dir,
+            precision=precision,
+            fp32_layers=tuple(config.raw.get("_fp32_layers", ())),
+            depth=int(config.raw.get("num_hidden_layers", 1)),
+        )
         weights["_task_type"] = _normalize_task_type(config.raw)
         return weights
 

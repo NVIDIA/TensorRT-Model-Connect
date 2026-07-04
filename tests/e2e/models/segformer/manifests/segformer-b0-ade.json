@@ -9,6 +9,8 @@
   "reference_family": "semantic_segmentation",
   "user_contract": "segmentation_mask",
   "test_type": "segmentation",
+  "precision": "fp16",
+  "reference_precision": "fp32",
   "max_cache_length": 1,
   "prompt": "",
   "max_new_tokens": 0,

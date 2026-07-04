@@ -149,6 +149,8 @@ class PersonaPlexSpeechToSpeechPlugin:
         return {}
 
     def verify(self, trt_output, ref_output, case, threshold):
+        import numpy as np
+
         trt_wav = trt_output.data.get("wav_path")
         trt_rms = trt_output.data.get("rms")
         trt_duration = trt_output.data.get("duration_s")
@@ -181,22 +183,36 @@ class PersonaPlexSpeechToSpeechPlugin:
                 passed=dur_ok,
             )
 
-        trt_tokens = trt_output.data.get("token_ids")
-        ref_tokens = ref_output.data.get("token_ids")
-        if trt_tokens is not None and ref_tokens is not None:
-            min_len = min(len(trt_tokens), len(ref_tokens))
-            if min_len > 0:
-                match = sum(
-                    1
-                    for actual, expected in zip(trt_tokens[:min_len], ref_tokens[:min_len])
-                    if actual == expected
-                ) / min_len
-                token_threshold = threshold.metrics.get("contract_token_match", 0.5)
+        trt_tokens = trt_output.data.get("output_tokens")
+        ref_tokens = ref_output.data.get("reference_tokens")
+        tokens_available = trt_tokens is not None and ref_tokens is not None
+        metrics["reference_tokens_available"] = MetricResult(
+            value=1.0 if tokens_available else 0.0,
+            threshold=1.0,
+            operator="==",
+            passed=tokens_available,
+        )
+        if tokens_available:
+            trt_arr = np.asarray(trt_tokens).reshape(-1)
+            ref_arr = np.asarray(ref_tokens).reshape(-1)
+            token_count = min(trt_arr.size, ref_arr.size)
+            if token_count > 0:
+                token_match = float(np.mean(
+                    trt_arr[:token_count] == ref_arr[:token_count]))
+                token_threshold = threshold.metrics.get(
+                    "contract_token_match", 0.5)
                 metrics["token_match"] = MetricResult(
-                    value=match,
+                    value=token_match,
                     threshold=token_threshold,
                     operator=">=",
-                    passed=match >= token_threshold,
+                    passed=token_match >= token_threshold,
+                )
+            else:
+                metrics["non_empty_reference_overlap"] = MetricResult(
+                    value=0.0,
+                    threshold=1.0,
+                    operator="==",
+                    passed=False,
                 )
 
         rule = "audio health + token match"

@@ -51,6 +51,7 @@ class _FamilyMetadata:
     hf_warm_dependencies: tuple[str, ...] = ()
     hf_warm_files: tuple[str, ...] = ()
     config_adapter: str = ""
+    model_dir_adapter: str = ""
     debug_runner: str = ""
     debug_runtime_strategies: frozenset[str] = frozenset()
     python_profile_specs: tuple[str, ...] = ()
@@ -218,6 +219,8 @@ def _load_family_metadata() -> list[_FamilyMetadata]:
             ),
             config_adapter=raw.get("config_adapter", "")
             if isinstance(raw.get("config_adapter"), str) else "",
+            model_dir_adapter=raw.get("model_dir_adapter", "")
+            if isinstance(raw.get("model_dir_adapter"), str) else "",
             debug_runner=raw.get("debug_runner", "")
             if isinstance(raw.get("debug_runner"), str) else "",
             debug_runtime_strategies=_metadata_strings(
@@ -592,6 +595,26 @@ def resolve_config_from_model_dir(model_dir: str | Path) -> dict[str, Any] | Non
                 "must return a dict or None"
             )
         return result
+    return None
+
+
+def resolve_family_model_dir(model_dir: str | Path) -> str | None:
+    """Ask family adapters to stage a non-flat model repository."""
+    path = Path(model_dir)
+    for meta in _load_family_metadata():
+        if not meta.model_dir_adapter:
+            continue
+        adapter = _load_metadata_callable_from_file(
+            meta, meta.model_dir_adapter)
+        result = adapter(path)
+        if result is None:
+            continue
+        if not isinstance(result, (str, Path)):
+            raise TypeError(
+                f"Model directory adapter {meta.model_dir_adapter!r} for "
+                f"family {meta.id} must return a path or None"
+            )
+        return str(result)
     return None
 
 
