@@ -30,6 +30,7 @@ def _clear_sana_reference_env(monkeypatch) -> None:
         "SANA_WM_SCRIPT",
         "SANA_REPO",
         "TRTMC_STORAGE_ROOT",
+        "TRTMC_SANA_WM_FORCE_FLA_STUB",
         "TRTMC_SANA_WM_FORCE_PYRALLIS_STUB",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -203,12 +204,14 @@ def test_inference_sana_wm_delegates_to_external_official_script(
         """
 import argparse
 from dataclasses import dataclass
+from fla.modules import ShortConvolution
 import imageio.v3 as iio
 import logging
 import numpy as np
 from pathlib import Path
 import official_probe
 import pyrallis
+import torch
 
 @dataclass
 class NestedConfig:
@@ -243,6 +246,13 @@ def main():
     assert iio._trtmc_stub is True
     assert iio.__spec__ is not None
     assert pyrallis._trtmc_stub is True
+    assert ShortConvolution._trtmc_stub is True
+    conv = ShortConvolution(hidden_size=1, kernel_size=2, activation=None)
+    with torch.no_grad():
+        conv.weight.copy_(torch.tensor([[[2.0, 3.0]]]))
+    convolved, state = conv(torch.tensor([[[1.0], [2.0], [3.0]]]))
+    assert torch.equal(convolved, torch.tensor([[[3.0], [8.0], [13.0]]]))
+    assert state is None
     config = pyrallis.parse(
         config_class=Config,
         config_path=Path(__file__).with_name("config.yaml"),
@@ -263,6 +273,7 @@ def main():
     prompt_file.write_text("drive forward", encoding="utf-8")
     output_dir = tmp_path / "results" / "demo"
     monkeypatch.setenv("SANA_REPO", str(sana_repo))
+    monkeypatch.setenv("TRTMC_SANA_WM_FORCE_FLA_STUB", "1")
     monkeypatch.setenv("TRTMC_SANA_WM_FORCE_PYRALLIS_STUB", "1")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(

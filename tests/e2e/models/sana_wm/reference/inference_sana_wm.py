@@ -285,6 +285,94 @@ def _install_pyrallis_stub():
 
 _install_pyrallis_stub()
 
+def _install_fla_short_convolution_stub():
+    force_stub = os.environ.get("TRTMC_SANA_WM_FORCE_FLA_STUB") == "1"
+    if not force_stub and importlib.util.find_spec("fla") is not None:
+        return
+
+    import torch
+    import torch.nn.functional as torch_functional
+
+    class ShortConvolution(torch.nn.Conv1d):
+        _trtmc_stub = True
+
+        def __init__(
+            self,
+            hidden_size,
+            kernel_size,
+            bias=False,
+            activation="silu",
+            backend="triton",
+            device=None,
+            dtype=None,
+            **kwargs,
+        ):
+            del kwargs
+            super().__init__(
+                in_channels=hidden_size,
+                out_channels=hidden_size,
+                kernel_size=kernel_size,
+                groups=hidden_size,
+                bias=bias,
+                padding=kernel_size - 1,
+                device=device,
+                dtype=dtype,
+            )
+            if activation not in (None, "silu", "swish"):
+                raise ValueError(f"Unsupported ShortConvolution activation: {activation}")
+            self.hidden_size = hidden_size
+            self.activation = activation
+            self.backend = backend
+
+        def forward(
+            self,
+            x,
+            residual=None,
+            mask=None,
+            cache=None,
+            output_final_state=False,
+            cu_seqlens=None,
+            chunk_indices=None,
+            **kwargs,
+        ):
+            del kwargs
+            if cache is not None or output_final_state:
+                raise NotImplementedError("SANA-WM does not use ShortConvolution state")
+            if cu_seqlens is not None or chunk_indices is not None:
+                raise NotImplementedError("SANA-WM does not use variable-length convolution")
+            if mask is not None:
+                x = x * mask.unsqueeze(-1)
+
+            time_steps = x.shape[1]
+            y = torch_functional.conv1d(
+                x.transpose(1, 2),
+                self.weight,
+                self.bias,
+                padding=self.kernel_size[0] - 1,
+                groups=self.hidden_size,
+            )[..., :time_steps].transpose(1, 2)
+            if self.activation in ("silu", "swish"):
+                y = torch_functional.silu(y)
+            if residual is not None:
+                y = y + residual
+            return y, None
+
+        @property
+        def state_size(self):
+            return self.hidden_size * self.kernel_size[0]
+
+    fla = types.ModuleType("fla")
+    fla.__spec__ = importlib.util.spec_from_loader("fla", loader=None, is_package=True)
+    fla.__path__ = []
+    modules = types.ModuleType("fla.modules")
+    modules.__spec__ = importlib.util.spec_from_loader("fla.modules", loader=None)
+    modules.ShortConvolution = ShortConvolution
+    fla.modules = modules
+    sys.modules["fla"] = fla
+    sys.modules["fla.modules"] = modules
+
+_install_fla_short_convolution_stub()
+
 def _install_mmcv_registry_stub():
     if importlib.util.find_spec("mmcv") is not None:
         return
