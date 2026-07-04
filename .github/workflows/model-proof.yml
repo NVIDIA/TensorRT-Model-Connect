@@ -40,7 +40,6 @@ jobs:
       PYTHONHASHSEED: "0"
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
-      MODEL_PROOF_OUTPUT_DIR: ${{ runner.temp }}/model-proof-${{ inputs.model }}-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Bootstrap model proof HTML before checkout
@@ -48,8 +47,10 @@ jobs:
           MODEL: ${{ inputs.model }}
           REVISION: ${{ inputs.revision }}
           SUITE: ${{ inputs.suite }}
+          MODEL_PROOF_OUTPUT_DIR: ${{ runner.temp }}/model-proof-${{ inputs.model }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
+          echo "MODEL_PROOF_OUTPUT_DIR=$MODEL_PROOF_OUTPUT_DIR" >> "$GITHUB_ENV"
           artifacts_dir="$MODEL_PROOF_OUTPUT_DIR/artifacts"
           mkdir -p "$artifacts_dir"
           python3 - "$artifacts_dir" "$MODEL" "$REVISION" "$SUITE" <<'PY'
@@ -138,7 +139,6 @@ jobs:
           MODEL: ${{ inputs.model }}
           REVISION: ${{ inputs.revision }}
           SUITE: ${{ inputs.suite }}
-          OUTPUT_DIR: ${{ env.MODEL_PROOF_OUTPUT_DIR }}
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
         working-directory: ${{ github.workspace }}/model-proof-source
         run: |
@@ -147,8 +147,8 @@ jobs:
             --model "$MODEL" \
             --revision "$REVISION" \
             --suite "$SUITE" \
-            --output-dir "$OUTPUT_DIR"
-          echo "output_dir=$OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+            --output-dir "$MODEL_PROOF_OUTPUT_DIR"
+          echo "output_dir=$MODEL_PROOF_OUTPUT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Finalize model proof HTML fallback
         if: ${{ always() && steps.checkout.outcome == 'success' }}

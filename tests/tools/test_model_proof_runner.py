@@ -172,6 +172,23 @@ def test_model_proof_bootstraps_html_without_a_checkout_dependency() -> None:
     assert ".github/scripts/" not in checkout_failure
 
 
+def test_model_proof_resolves_runner_temp_only_after_runner_assignment() -> None:
+    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+    job_configuration = workflow.split("\n    steps:", maxsplit=1)[0]
+    bootstrap = workflow.split(
+        "- name: Bootstrap model proof HTML before checkout", maxsplit=1
+    )[1].split("- name: Check out exact source revision", maxsplit=1)[0]
+    proof = workflow.split(
+        "- name: Run hermetic model proof", maxsplit=1
+    )[1].split("- name: Finalize model proof HTML fallback", maxsplit=1)[0]
+
+    assert "MODEL_PROOF_OUTPUT_DIR:" not in job_configuration
+    assert "MODEL_PROOF_OUTPUT_DIR: ${{ runner.temp }}" in bootstrap
+    assert 'echo "MODEL_PROOF_OUTPUT_DIR=$MODEL_PROOF_OUTPUT_DIR" >> "$GITHUB_ENV"' in bootstrap
+    assert "${{ env.MODEL_PROOF_OUTPUT_DIR }}" not in proof
+    assert '--output-dir "$MODEL_PROOF_OUTPUT_DIR"' in proof
+
+
 def test_model_proof_always_generates_a_strict_self_contained_html_report() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
