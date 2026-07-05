@@ -236,11 +236,14 @@ def _add_t5_attention_rows(
     kv_in = hidden if kv is None else kv
     kv_seq = q_seq if kv_seq is None else kv_seq
     q = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, num_heads * head_dim, weights[f"{prefix}.q.weight"])
+        network, hidden, hidden_size, num_heads * head_dim, weights[f"{prefix}.q.weight"],
+        fp32_accumulation=(hidden.dtype == trt.float16))
     k = graph_ops.add_matmul_rhs_constant(
-        network, kv_in, hidden_size, num_heads * head_dim, weights[f"{prefix}.k.weight"])
+        network, kv_in, hidden_size, num_heads * head_dim, weights[f"{prefix}.k.weight"],
+        fp32_accumulation=(kv_in.dtype == trt.float16))
     v = graph_ops.add_matmul_rhs_constant(
-        network, kv_in, hidden_size, num_heads * head_dim, weights[f"{prefix}.v.weight"])
+        network, kv_in, hidden_size, num_heads * head_dim, weights[f"{prefix}.v.weight"],
+        fp32_accumulation=(kv_in.dtype == trt.float16))
     if mask is not None and mask.dtype != q.dtype:
         mask = network.add_cast(mask, q.dtype).get_output(0)
     ctx = graph_ops.add_attention_from_rows(
@@ -256,7 +259,8 @@ def _add_t5_attention_rows(
         scale=1.0,
     )
     return graph_ops.add_matmul_rhs_constant(
-        network, ctx, num_heads * head_dim, hidden_size, weights[f"{prefix}.o.weight"])
+        network, ctx, num_heads * head_dim, hidden_size, weights[f"{prefix}.o.weight"],
+        fp32_accumulation=(ctx.dtype == trt.float16))
 
 
 def _add_t5_ffn(
@@ -278,10 +282,12 @@ def _add_t5_ffn(
         dtype=(np.float16 if hidden.dtype == trt.float16 else np.float32),
     )
     ff = graph_ops.add_matmul_rhs_constant(
-        network, norm, hidden_size, d_ff, weights[f"{prefix}.DenseReluDense.wi.weight"])
+        network, norm, hidden_size, d_ff, weights[f"{prefix}.DenseReluDense.wi.weight"],
+        fp32_accumulation=(norm.dtype == trt.float16))
     ff = network.add_activation(ff, trt.ActivationType.RELU).get_output(0)
     ff = graph_ops.add_matmul_rhs_constant(
-        network, ff, d_ff, hidden_size, weights[f"{prefix}.DenseReluDense.wo.weight"])
+        network, ff, d_ff, hidden_size, weights[f"{prefix}.DenseReluDense.wo.weight"],
+        fp32_accumulation=(ff.dtype == trt.float16))
     return network.add_elementwise(hidden, ff, trt.ElementWiseOperation.SUM).get_output(0)
 
 
