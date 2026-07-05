@@ -260,7 +260,6 @@ def _add_t5_attention_rows(
         kv_seq=kv_seq,
         mask=mask,
         scale=1.0,
-        fp32_accumulation=(q.dtype == trt.float16),
     )
     return graph_ops.add_matmul_rhs_constant(
         network, ctx, num_heads * head_dim, hidden_size, weights[f"{prefix}.o.weight"],

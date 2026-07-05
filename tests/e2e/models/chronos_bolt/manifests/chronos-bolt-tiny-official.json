@@ -5,10 +5,7 @@
   "family": "chronos_bolt",
   "runtime_strategy": "chronos_bolt_trt",
   "task_strategy": "neural_operator",
-  "precision": "fp16",
-  "fp32_layers": [
-    9
-  ],
+  "precision": "fp32",
   "max_cache_length": 2048,
   "testcases": [
     {
@@ -50,7 +47,7 @@
       },
       "metadata": {
         "core": false,
-        "notes": "Official Amazon Chronos-Bolt tiny checkpoint exercised through unified E2E with short univariate sample input. Encoder and decoder blocks use FP16 activation and GEMM boundaries with FP32 GEMM and attention accumulation; selector 9 keeps the output projection in FP32, while normalization and statistical reductions also remain FP32."
+        "notes": "Official Amazon Chronos-Bolt tiny checkpoint exercised through unified E2E with short univariate sample input. The canonical model remains FP32 because FP16 IAttention does not meet the original framework-reference accuracy contract."
       }
     }
   ]
