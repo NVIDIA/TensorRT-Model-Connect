@@ -116,6 +116,7 @@ def add_linear(
     bias: np.ndarray | None,
     *,
     precision: str = "fp32",
+    fp32_accumulation: bool = False,
 ) -> trt.ITensor:
     target_dtype = _target_np_dtype(precision)
     target_trt_dtype = (
@@ -131,6 +132,7 @@ def add_linear(
         out_features,
         w,
         dtype=target_dtype,
+        fp32_accumulation=fp32_accumulation,
     )
     if bias is not None:
         out = graph_ops.add_bias_sum(

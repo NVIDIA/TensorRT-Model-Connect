@@ -2864,6 +2864,55 @@ def _add_attention_core_with_logit_softcap(
     return _cast_back_to_trt_dtype(network, context, output_dtype)
 
 
+def _add_attention_core_with_fp32_primitives(
+    network: trt.INetworkDefinition,
+    q_4d: trt.ITensor,
+    k_4d: trt.ITensor,
+    v_4d: trt.ITensor,
+    *,
+    mask: trt.ITensor | None,
+    scale: float,
+) -> trt.ITensor:
+    """Compute attention reductions in FP32 and restore the input dtype."""
+    output_dtype = q_4d.dtype
+    if q_4d.dtype != trt.float32:
+        q_4d = network.add_cast(q_4d, trt.float32).get_output(0)
+    if k_4d.dtype != trt.float32:
+        k_4d = network.add_cast(k_4d, trt.float32).get_output(0)
+    if v_4d.dtype != trt.float32:
+        v_4d = network.add_cast(v_4d, trt.float32).get_output(0)
+    if mask is not None and mask.dtype != trt.float32:
+        mask = network.add_cast(mask, trt.float32).get_output(0)
+
+    scale_t = add_constant(
+        network,
+        (1, 1, 1, 1),
+        np.array([[[[scale]]]], dtype=np.float32),
+        dtype=np.float32,
+    )
+    q_scaled = network.add_elementwise(
+        q_4d, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+    scores = network.add_matrix_multiply(
+        q_scaled,
+        trt.MatrixOperation.NONE,
+        k_4d,
+        trt.MatrixOperation.TRANSPOSE,
+    ).get_output(0)
+    if mask is not None:
+        scores = network.add_elementwise(
+            scores, mask, trt.ElementWiseOperation.SUM).get_output(0)
+
+    probs = network.add_softmax(scores)
+    probs.axes = 1 << (len(tuple(scores.shape)) - 1)
+    context = network.add_matrix_multiply(
+        probs.get_output(0),
+        trt.MatrixOperation.NONE,
+        v_4d,
+        trt.MatrixOperation.NONE,
+    ).get_output(0)
+    return _cast_back_to_trt_dtype(network, context, output_dtype)
+
+
 def add_attention_from_rows(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
@@ -2909,6 +2958,15 @@ def add_attention_from_rows(
             network, q_4d, k_4d, v_4d,
             num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
             mask=mask, scale=scale, logit_softcap=float(logit_softcap))
+    elif fp32_accumulation and not causal:
+        ctx_4d = _add_attention_core_with_fp32_primitives(
+            network,
+            q_4d,
+            k_4d,
+            v_4d,
+            mask=mask,
+            scale=scale,
+        )
     else:
         ctx_4d = add_attention_core(
             network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,

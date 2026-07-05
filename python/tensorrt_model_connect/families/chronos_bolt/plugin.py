@@ -156,6 +156,7 @@ def _add_residual_block(
         weights[f"{prefix}.hidden_layer.weight"],
         weights.get(f"{prefix}.hidden_layer.bias"),
         precision=precision,
+        fp32_accumulation=(precision == "fp16"),
     )
     if activation == "gelu":
         hidden = add_gelu(network, hidden)
@@ -167,6 +168,7 @@ def _add_residual_block(
         weights[f"{prefix}.output_layer.weight"],
         weights.get(f"{prefix}.output_layer.bias"),
         precision=precision,
+        fp32_accumulation=(precision == "fp16"),
     )
     residual = add_linear(
         network,
@@ -174,6 +176,7 @@ def _add_residual_block(
         weights[f"{prefix}.residual_layer.weight"],
         weights.get(f"{prefix}.residual_layer.bias"),
         precision=precision,
+        fp32_accumulation=(precision == "fp16"),
     )
     return network.add_elementwise(out, residual, trt.ElementWiseOperation.SUM).get_output(0)
 
@@ -257,6 +260,7 @@ def _add_t5_attention_rows(
         kv_seq=kv_seq,
         mask=mask,
         scale=1.0,
+        fp32_accumulation=(q.dtype == trt.float16),
     )
     return graph_ops.add_matmul_rhs_constant(
         network, ctx, num_heads * head_dim, hidden_size, weights[f"{prefix}.o.weight"],

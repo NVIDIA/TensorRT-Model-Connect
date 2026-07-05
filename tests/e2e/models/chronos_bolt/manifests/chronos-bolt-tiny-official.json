@@ -50,7 +50,7 @@
       },
       "metadata": {
         "core": false,
-        "notes": "Official Amazon Chronos-Bolt tiny checkpoint exercised through unified E2E with short univariate sample input. Encoder and decoder blocks use FP16 activation and GEMM boundaries with FP32 GEMM accumulation; selector 9 keeps the output projection in FP32, while normalization and statistical reductions also remain FP32."
+        "notes": "Official Amazon Chronos-Bolt tiny checkpoint exercised through unified E2E with short univariate sample input. Encoder and decoder blocks use FP16 activation and GEMM boundaries with FP32 GEMM and attention accumulation; selector 9 keeps the output projection in FP32, while normalization and statistical reductions also remain FP32."
       }
     }
   ]

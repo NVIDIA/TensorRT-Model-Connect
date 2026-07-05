@@ -23,7 +23,7 @@ def test_time_series_builders_do_not_use_removed_precision_flags() -> None:
         assert "BuilderFlag.BF16" not in source, family
 
 
-def test_chronos_fp16_gemms_use_fp32_accumulation() -> None:
+def test_chronos_fp16_compute_uses_fp32_accumulation() -> None:
     root = Path(__file__).resolve().parents[2]
     source = (
         root
@@ -39,3 +39,15 @@ def test_chronos_fp16_gemms_use_fp32_accumulation() -> None:
     assert source.count("fp32_accumulation=(ctx.dtype == trt.float16)") == 1
     assert source.count("fp32_accumulation=(norm.dtype == trt.float16)") == 1
     assert source.count("fp32_accumulation=(ff.dtype == trt.float16)") == 1
+    assert source.count("fp32_accumulation=(q.dtype == trt.float16)") == 1
+    assert source.count('fp32_accumulation=(precision == "fp16")') == 3
+
+    graph_ops_source = (
+        root
+        / "python"
+        / "tensorrt_model_connect"
+        / "families"
+        / "chronos_bolt"
+        / "graph_ops.py"
+    ).read_text(encoding="utf-8")
+    assert "_add_attention_core_with_fp32_primitives" in graph_ops_source
