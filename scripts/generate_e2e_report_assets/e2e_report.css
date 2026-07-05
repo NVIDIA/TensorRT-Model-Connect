@@ -21,6 +21,7 @@ h4 { margin: 12px 0 6px; }
 .skip-counter { background: #fef9c3; color: #854d0e; }
 .error-counter { background: #ffedd5; color: #9a3412; }
 .total-counter { background: #e0e7ff; color: #3730a3; }
+.multi-counter { background: #e0f2fe; color: #075985; }
 .filters { display: flex; gap: 8px; margin-bottom: 12px; }
 #search-box { padding: 6px 12px; border: 1px solid #d1d5db; border-radius: 6px;
   flex: 1; max-width: 300px; }
@@ -68,6 +69,7 @@ summary:hover { background: #f8fafc; }
 .summary-subtest-table td { padding: 6px 10px; border-top: 1px solid #e2e8f0; }
 .summary-subtest-table tbody tr:hover { background: #f8fafc; }
 .summary-bundle-member.pytest-only td { color: #64748b; font-style: italic; }
+.summary-bundle-member.manifest-only td { color: #64748b; }
 .timing-expand, .timing-expand[open] { background: transparent; border: 0;
   border-radius: 0; margin: 0; }
 .timing-expand summary { padding: 0; font-size: inherit; font-weight: 600;

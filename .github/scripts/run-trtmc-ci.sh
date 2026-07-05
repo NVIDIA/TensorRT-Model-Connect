@@ -37,6 +37,7 @@ generate_e2e_report() {
     python scripts/generate_e2e_report.py \
       --artifacts-dir e2e_artifacts/artifacts \
       -o e2e_artifacts/e2e_report.html \
+      --manifest-dir tests/e2e/models \
       --project-dir . \
       --title "GitHub Actions E2E Report - ${GITHUB_RUN_ID:-local}" \
       || true

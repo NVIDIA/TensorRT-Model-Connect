@@ -379,6 +379,12 @@ class TestLoadAllResults:
             """
             <testcase classname="tests.e2e.models.canary.test_canary_e2e"
                       name="test_model_e2e[canary-1b-v2]" />
+            <testcase classname="tests.e2e.models.canary.test_canary_e2e"
+                      name="test_model_e2e[canary-1b-v2-asr-probe01]" />
+            <testcase classname="tests.e2e.models.canary.test_canary_e2e"
+                      name="test_model_e2e[canary-1b-v2-asr-probe02]">
+              <failure message="probe comparison failed" />
+            </testcase>
             """,
         )
 
@@ -389,6 +395,14 @@ class TestLoadAllResults:
             "canary-1b-v2-asr-probe01",
             "canary-1b-v2-asr-probe02",
         }
+        assert len(results) == 3
+        probe02 = next(
+            result
+            for result in results
+            if result["case_name"] == "canary-1b-v2-asr-probe02"
+        )
+        assert probe02["status"] == "fail"
+        assert probe02["_pytest_outcome"]["reason"] == "probe comparison failed"
 
         html = mod.render_report(results)
         assert "Grouped Bundle Testcases" not in html
@@ -398,6 +412,64 @@ class TestLoadAllResults:
         assert "canary-1b-v2-asr-probe01" in html
         assert "canary-1b-v2-asr-probe02" in html
         assert "3 testcases" in html
+
+
+class TestLoadMultiTestcaseManifests:
+    """Tests for the manifest inventory shown in the summary."""
+
+    def test_loads_only_models_with_multiple_testcases(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "canary"
+        manifests_dir = model_dir / "manifests"
+        manifests_dir.mkdir(parents=True)
+        (model_dir / "MODEL.toml").write_text(
+            'test_manifests = ["manifests/multi.json", "manifests/single.json"]\n',
+            encoding="utf-8",
+        )
+        (manifests_dir / "multi.json").write_text(
+            json.dumps(
+                {
+                    "name": "canary-1b-v2",
+                    "family": "canary",
+                    "bundle": "canary.trtfb",
+                    "task_strategy": "speech_to_text",
+                    "testcases": [
+                        {"name": "canary-1b-v2"},
+                        {
+                            "name": "canary-1b-v2-asr-probe01",
+                            "ci_tier": "nightly_only",
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (manifests_dir / "single.json").write_text(
+            json.dumps(
+                {
+                    "name": "single",
+                    "family": "example",
+                    "testcases": [{"name": "single"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        models = mod.load_multi_testcase_manifests(tmp_path)
+
+        assert [model["name"] for model in models] == ["canary-1b-v2"]
+        assert models[0]["testcases"] == [
+            {
+                "name": "canary-1b-v2",
+                "ci_tier": "default",
+                "task_strategy": "speech_to_text",
+            },
+            {
+                "name": "canary-1b-v2-asr-probe01",
+                "ci_tier": "nightly_only",
+                "task_strategy": "speech_to_text",
+            },
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -1320,11 +1392,14 @@ class TestCLI:
                 "/b.html",
                 "--project-dir",
                 "/proj",
+                "--manifest-dir",
+                "/manifests",
                 "--title",
                 "Custom Title",
             ]
         )
         assert args.project_dir == Path("/proj")
+        assert args.manifest_dir == Path("/manifests")
         assert args.title == "Custom Title"
 
     def test_main_writes_output(self, tmp_path):
@@ -1439,3 +1514,75 @@ class TestSummaryDashboard:
         assert 'href="#model-canary-1b-v2-asr-probe01"' in html
         assert 'href="#model-canary-1b-v2-asr-probe02"' in html
         assert 'data-name="canary-1b-v2 canary-1b-v2-asr-probe01 canary-1b-v2-asr-probe02"' in html
+
+    def test_declared_testcases_include_cases_without_results(self):
+        mod = _import_report()
+        base = _make_result(
+            name="canary-1b-v2",
+            task_strategy="speech_to_text",
+            family="canary",
+        )
+        multi_testcase_models = [
+            {
+                "name": "canary-1b-v2",
+                "family": "canary",
+                "bundle": "canary.trtfb",
+                "testcases": [
+                    {
+                        "name": "canary-1b-v2",
+                        "ci_tier": "default",
+                        "task_strategy": "speech_to_text",
+                    },
+                    {
+                        "name": "canary-1b-v2-asr-probe01",
+                        "ci_tier": "nightly_only",
+                        "task_strategy": "speech_to_text",
+                    },
+                    {
+                        "name": "canary-1b-v2-asr-probe02",
+                        "ci_tier": "nightly_only",
+                        "task_strategy": "speech_to_text",
+                    },
+                ],
+            }
+        ]
+
+        html = mod.render_summary_dashboard([base], multi_testcase_models)
+
+        assert html.count('class="summary-row"') == 1
+        assert "1 Total" in html
+        assert "1 Multi-testcase Models" in html
+        assert "3 testcases" in html
+        assert html.count('class="summary-bundle-member manifest-only"') == 2
+        assert "NOT RUN: 2" in html
+        assert html.count("nightly_only") == 2
+        assert 'href="#model-canary-1b-v2-asr-probe01"' not in html
+
+    def test_all_nightly_model_is_visible_without_results(self):
+        mod = _import_report()
+        multi_testcase_models = [
+            {
+                "name": "nemotron-labs-diffusion-8b",
+                "family": "nemotron_labs_diffusion",
+                "bundle": "nemotron-labs-diffusion-8b.trtfb",
+                "testcases": [
+                    {
+                        "name": "nemotron-labs-diffusion-8b-ar",
+                        "ci_tier": "nightly_only",
+                        "task_strategy": "text_generation_causal",
+                    },
+                    {
+                        "name": "nemotron-labs-diffusion-8b-diffusion",
+                        "ci_tier": "nightly_only",
+                        "task_strategy": "text_generation_causal",
+                    },
+                ],
+            }
+        ]
+
+        html = mod.render_report([], multi_testcase_models=multi_testcase_models)
+
+        assert "nemotron-labs-diffusion-8b" in html
+        assert "2 testcases" in html
+        assert html.count('class="summary-bundle-member manifest-only"') == 2
+        assert "NOT RUN" in html
