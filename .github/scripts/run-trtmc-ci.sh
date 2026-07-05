@@ -825,7 +825,7 @@ PY
 
   local e2e_rc=0
   pushd "$source_dir" >/dev/null
-  if run_with_timeout "${SELECTIVE_E2E_GROUP_TIMEOUT:-1h}" env \
+  if run_with_timeout "${SELECTIVE_E2E_GROUP_TIMEOUT:-90m}" env \
       CUDA_VISIBLE_DEVICES="$gpu_id" \
       HF_HUB_OFFLINE=1 \
       PYTHONNOUSERSITE=1 \

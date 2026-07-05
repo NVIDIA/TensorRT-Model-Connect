@@ -497,6 +497,7 @@ def test_selective_e2e_builds_and_runs_single_family_source_projections() -> Non
     assert '--rootdir "$source_dir"' in group_runner
     assert '--e2e-models-file "$models_file"' in group_runner
     assert '--e2e-exclude-ci-tier nightly_only' in group_runner
+    assert '${SELECTIVE_E2E_GROUP_TIMEOUT:-90m}' in group_runner
     assert '"${model_filter_args[@]}"' in group_runner
     assert "scripts/run_e2e_parallel.sh" not in group_runner
     assert "verify-results" in group_runner

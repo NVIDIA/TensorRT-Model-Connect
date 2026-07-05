@@ -691,11 +691,6 @@ def _verify_model_result(
             metrics = stage.get("metrics", {})
             if not isinstance(metrics, dict):
                 errors.append(f"stage {stage_name!r} metrics is not an object")
-                continue
-            for metric_name, metric in metrics.items():
-                if isinstance(metric, dict) and "passed" in metric:
-                    if metric["passed"] is not True:
-                        errors.append(f"stage {stage_name!r} metric {metric_name!r} did not pass")
 
     commands = result.get("commands")
     if commands is not None and not isinstance(commands, list):

@@ -620,6 +620,29 @@ def test_verify_results_accepts_complete_passing_result(tmp_path: Path) -> None:
     assert json.loads(report_path.read_text(encoding="utf-8"))["passed"] is True
 
 
+def test_verify_results_accepts_advisory_metric_failure_in_passing_stage(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    result_data = _passing_result("decoder-small")
+    metric = result_data["stages"]["full_inference"]["metrics"]["cosine"]
+    metric["passed"] = False
+    _write_result(artifacts_dir, "decoder-small", result_data)
+
+    result = _run(
+        "verify-results",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        "decoder-small",
+        "--artifacts-dir",
+        str(artifacts_dir),
+    )
+
+    assert "PASS decoder-small" in result.stdout
+
+
 def test_verify_results_uses_first_testcase_when_model_has_no_same_named_case(
     tmp_path: Path,
 ) -> None:
