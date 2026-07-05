@@ -348,7 +348,7 @@ class TestLoadAllResults:
         assert "encoder representation parity below minimum contract floor" in html
         assert "Failure type: <strong>compare_fail</strong>" not in html
 
-    def test_multi_testcase_model_results_are_rendered(self, tmp_path):
+    def test_model_results_are_rendered_as_testcase_list(self, tmp_path):
         mod = _import_report()
         e2e_root = tmp_path / "e2e_artifacts"
         artifacts_dir = e2e_root / "artifacts"
@@ -407,17 +407,17 @@ class TestLoadAllResults:
         html = mod.render_report(results)
         assert "Grouped Bundle Testcases" not in html
         assert html.count('class="summary-row"') == 1
-        assert 'class="summary-bundle-details"' in html
+        assert 'class="summary-model-details"' in html
         assert 'class="summary-subtest-table"' in html
         assert "canary-1b-v2-asr-probe01" in html
         assert "canary-1b-v2-asr-probe02" in html
         assert "3 testcases" in html
 
 
-class TestLoadMultiTestcaseManifests:
-    """Tests for the manifest inventory shown in the summary."""
+class TestLoadModelManifests:
+    """Tests for the model and testcase inventory shown in the summary."""
 
-    def test_loads_only_models_with_multiple_testcases(self, tmp_path):
+    def test_loads_every_model_with_its_testcases(self, tmp_path):
         mod = _import_report()
         model_dir = tmp_path / "canary"
         manifests_dir = model_dir / "manifests"
@@ -455,9 +455,9 @@ class TestLoadMultiTestcaseManifests:
             encoding="utf-8",
         )
 
-        models = mod.load_multi_testcase_manifests(tmp_path)
+        models = mod.load_model_manifests(tmp_path)
 
-        assert [model["name"] for model in models] == ["canary-1b-v2"]
+        assert [model["name"] for model in models] == ["canary-1b-v2", "single"]
         assert models[0]["testcases"] == [
             {
                 "name": "canary-1b-v2",
@@ -469,6 +469,13 @@ class TestLoadMultiTestcaseManifests:
                 "ci_tier": "nightly_only",
                 "task_strategy": "speech_to_text",
             },
+        ]
+        assert models[1]["testcases"] == [
+            {
+                "name": "single",
+                "ci_tier": "default",
+                "task_strategy": "",
+            }
         ]
 
 
@@ -540,7 +547,7 @@ class TestRenderReport:
         html = mod.render_report([], title="Empty Report")
         assert "<!DOCTYPE html>" in html
         assert "Empty Report" in html
-        assert "0 Total" in html
+        assert "0 Results" in html
 
     def test_single_text_model(self):
         mod = _import_report()
@@ -1470,7 +1477,9 @@ class TestSummaryDashboard:
         assert "1 Passed" in html
         assert "1 Failed" in html
         assert "1 Skipped" in html
-        assert "3 Total" in html
+        assert "3 Results" in html
+        assert "3 Models" in html
+        assert "3 Testcases" in html
 
     def test_summary_rows_sorted_by_total_time_descending(self):
         mod = _import_report()
@@ -1487,7 +1496,7 @@ class TestSummaryDashboard:
         assert html.index('href="#model-medium"') < html.index('href="#model-fast"')
         assert html.index('href="#model-fast"') < html.index('href="#model-missing"')
 
-    def test_multi_testcase_model_renders_as_single_expandable_row(self):
+    def test_model_with_three_testcases_renders_as_single_expandable_row(self):
         mod = _import_report()
         base = _make_result(name="canary-1b-v2", timing={"build_s": 5.0})
         probe1 = _make_result(
@@ -1509,11 +1518,24 @@ class TestSummaryDashboard:
         html = mod.render_summary_dashboard([base, probe1, probe2])
 
         assert html.count('class="summary-row"') == 1
-        assert 'class="summary-bundle-details"' in html
+        assert 'class="summary-model-details"' in html
         assert "3 testcases" in html
         assert 'href="#model-canary-1b-v2-asr-probe01"' in html
         assert 'href="#model-canary-1b-v2-asr-probe02"' in html
         assert 'data-name="canary-1b-v2 canary-1b-v2-asr-probe01 canary-1b-v2-asr-probe02"' in html
+
+    def test_model_with_one_testcase_uses_same_expandable_structure(self):
+        mod = _import_report()
+        result = _make_result(name="single-model")
+
+        html = mod.render_summary_dashboard([result])
+
+        assert html.count('class="summary-row"') == 1
+        assert 'class="summary-model-details"' in html
+        assert "1 testcase" in html
+        assert 'href="#model-single-model"' in html
+        assert "1 Model" in html
+        assert "1 Testcase" in html
 
     def test_declared_testcases_include_cases_without_results(self):
         mod = _import_report()
@@ -1522,7 +1544,7 @@ class TestSummaryDashboard:
             task_strategy="speech_to_text",
             family="canary",
         )
-        multi_testcase_models = [
+        model_manifests = [
             {
                 "name": "canary-1b-v2",
                 "family": "canary",
@@ -1547,20 +1569,21 @@ class TestSummaryDashboard:
             }
         ]
 
-        html = mod.render_summary_dashboard([base], multi_testcase_models)
+        html = mod.render_summary_dashboard([base], model_manifests)
 
         assert html.count('class="summary-row"') == 1
-        assert "1 Total" in html
-        assert "1 Multi-testcase Models" in html
+        assert "1 Results" in html
+        assert "1 Model" in html
         assert "3 testcases" in html
-        assert html.count('class="summary-bundle-member manifest-only"') == 2
+        assert "3 Testcases" in html
+        assert html.count('class="summary-testcase-row manifest-only"') == 2
         assert "NOT RUN: 2" in html
         assert html.count("nightly_only") == 2
         assert 'href="#model-canary-1b-v2-asr-probe01"' not in html
 
     def test_all_nightly_model_is_visible_without_results(self):
         mod = _import_report()
-        multi_testcase_models = [
+        model_manifests = [
             {
                 "name": "nemotron-labs-diffusion-8b",
                 "family": "nemotron_labs_diffusion",
@@ -1580,9 +1603,9 @@ class TestSummaryDashboard:
             }
         ]
 
-        html = mod.render_report([], multi_testcase_models=multi_testcase_models)
+        html = mod.render_report([], model_manifests=model_manifests)
 
         assert "nemotron-labs-diffusion-8b" in html
         assert "2 testcases" in html
-        assert html.count('class="summary-bundle-member manifest-only"') == 2
+        assert html.count('class="summary-testcase-row manifest-only"') == 2
         assert "NOT RUN" in html

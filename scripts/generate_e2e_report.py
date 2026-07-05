@@ -161,8 +161,8 @@ def _indexed_manifest_paths(models_dir: Path) -> List[Path]:
     return paths
 
 
-def load_multi_testcase_manifests(models_dir: Optional[Path]) -> List[Dict[str, Any]]:
-    """Load the declared testcase inventory for models with multiple cases."""
+def load_model_manifests(models_dir: Optional[Path]) -> List[Dict[str, Any]]:
+    """Load every model and its declared testcase inventory."""
     if models_dir is None or not models_dir.is_dir():
         return []
 
@@ -174,7 +174,7 @@ def load_multi_testcase_manifests(models_dir: Optional[Path]) -> List[Dict[str, 
             print(f"WARNING: skipping {manifest_path}: {exc}", file=sys.stderr)
             continue
         testcases = raw.get("testcases", []) if isinstance(raw, dict) else []
-        if not isinstance(testcases, list) or len(testcases) <= 1:
+        if not isinstance(testcases, list) or not testcases:
             continue
 
         model_name = str(raw.get("name") or manifest_path.stem)
@@ -195,7 +195,7 @@ def load_multi_testcase_manifests(models_dir: Optional[Path]) -> List[Dict[str, 
                     ),
                 }
             )
-        if len(cases) <= 1:
+        if not cases:
             continue
         models.append(
             {
@@ -1734,7 +1734,6 @@ def _grouped_model_results(results: List[Dict[str, Any]]) -> Dict[str, List[Dict
     return {
         key: sorted(items, key=lambda item: _model_group_sort_key(key, item))
         for key, items in sorted(groups.items())
-        if len(items) > 1
     }
 
 
@@ -1748,20 +1747,20 @@ def _result_by_case_name(results: List[Dict[str, Any]]) -> Dict[str, Dict[str, A
 
 def _with_declared_testcases(
     results: List[Dict[str, Any]],
-    multi_testcase_models: List[Dict[str, Any]],
+    model_manifests: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Add manifest-only rows and parent metadata without changing result totals."""
     by_name = _result_by_case_name(results)
     declared_names = {
         str(case["name"])
-        for model in multi_testcase_models
+        for model in model_manifests
         for case in model["testcases"]
     }
     display_results = [
         result for result in results if str(result.get("case_name") or "") not in declared_names
     ]
 
-    for model in multi_testcase_models:
+    for model in model_manifests:
         model_name = str(model["name"])
         family = str(model.get("family") or "")
         for case in model["testcases"]:
@@ -1804,7 +1803,7 @@ def _status_summary(results: List[Dict[str, Any]]) -> str:
         status = next(iter(counts))
         return _badge(status)
     return " ".join(
-        f'<span class="bundle-status">{_esc(_status_label(status))}: {count}</span>'
+        f'<span class="status-count">{_esc(_status_label(status))}: {count}</span>'
         for status, count in sorted(counts.items())
     )
 
@@ -1828,14 +1827,7 @@ def _summary_dashboard_items(
     results: List[Dict[str, Any]],
 ) -> List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]:
     groups = _grouped_model_results(results)
-    grouped_names = {
-        str(result.get("case_name") or "") for items in groups.values() for result in items
-    }
     dashboard_items = [(_model_representative(items), items) for items in groups.values()]
-    for result in results:
-        if str(result.get("case_name") or "") in grouped_names:
-            continue
-        dashboard_items.append((result, [result]))
     return sorted(dashboard_items, key=_summary_sort_key, reverse=True)
 
 
@@ -1849,6 +1841,7 @@ def _render_summary_model_details(
     total_time: str,
 ) -> str:
     title = _model_group_label(group_key)
+    testcase_label = "testcase" if len(items) == 1 else "testcases"
     rows = []
     for item in items:
         name = str(item.get("case_name", "unknown"))
@@ -1865,7 +1858,7 @@ def _render_summary_model_details(
         else:
             testcase_cell = f'<a href="#model-{_esc(name)}">{_esc(name)}</a>'
         rows.append(
-            f'<tr class="summary-bundle-member{summary_only}{manifest_only}">'
+            f'<tr class="summary-testcase-row{summary_only}{manifest_only}">'
             f"<td>{testcase_cell}</td>"
             f"<td>{_badge(status)}</td>"
             f"<td>{_esc(ci_tier)}</td>"
@@ -1876,11 +1869,11 @@ def _render_summary_model_details(
             f"</tr>"
         )
     return (
-        '<details class="summary-bundle-details">'
-        '<summary class="summary-bundle-summary">'
-        '<span class="summary-bundle-main">'
-        f'<span class="summary-bundle-title">{_esc(title)}</span>'
-        f'<span class="bundle-count">{len(items)} testcases</span>'
+        '<details class="summary-model-details">'
+        '<summary class="summary-model-summary">'
+        '<span class="summary-model-main">'
+        f'<span class="summary-model-title">{_esc(title)}</span>'
+        f'<span class="testcase-count">{len(items)} {testcase_label}</span>'
         "</span>"
         f"<span>{_esc(family) or '&mdash;'}</span>"
         f"<span>{_esc(task_strategy) or '&mdash;'}</span>"
@@ -1898,11 +1891,6 @@ def _render_summary_model_details(
     )
 
 
-def _render_summary_model_cell(result: Dict[str, Any]) -> str:
-    name = str(result.get("case_name", "unknown"))
-    return f'<a href="#model-{_esc(name)}">{_esc(name)}</a>'
-
-
 def _summary_data_status(members: List[Dict[str, Any]]) -> str:
     return " ".join(sorted(_status_counts(members)))
 
@@ -1915,30 +1903,34 @@ def _summary_data_name(members: List[Dict[str, Any]]) -> str:
 
 def render_summary_dashboard(
     results: List[Dict[str, Any]],
-    multi_testcase_models: Optional[List[Dict[str, Any]]] = None,
+    model_manifests: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Render the top-of-page summary table with counters and filters."""
-    multi_testcase_models = multi_testcase_models or []
-    display_results = _with_declared_testcases(results, multi_testcase_models)
+    model_manifests = model_manifests or []
+    display_results = _with_declared_testcases(results, model_manifests)
+    grouped_results = _grouped_model_results(display_results)
     counts: Dict[str, int] = {"pass": 0, "fail": 0, "skip": 0, "error": 0}
     for r in results:
         s = r.get("status", "error")
         counts[s] = counts.get(s, 0) + 1
 
-    multi_counter = (
-        '<span class="counter multi-counter">'
-        f"{len(multi_testcase_models)} Multi-testcase Models</span>"
-        if multi_testcase_models
-        else ""
-    )
+    inventory_counters = ""
+    if grouped_results:
+        testcase_count = sum(len(testcases) for testcases in grouped_results.values())
+        model_label = "Model" if len(grouped_results) == 1 else "Models"
+        testcase_label = "Testcase" if testcase_count == 1 else "Testcases"
+        inventory_counters = (
+            f'<span class="counter model-counter">{len(grouped_results)} {model_label}</span>'
+            f'<span class="counter testcase-counter">{testcase_count} {testcase_label}</span>'
+        )
     counters = (
         f'<div class="counters">'
         f'<span class="counter pass-counter">{counts["pass"]} Passed</span>'
         f'<span class="counter fail-counter">{counts["fail"]} Failed</span>'
         f'<span class="counter skip-counter">{counts["skip"]} Skipped</span>'
         f'<span class="counter error-counter">{counts["error"]} Error</span>'
-        f'<span class="counter total-counter">{len(results)} Total</span>'
-        f"{multi_counter}</div>"
+        f'<span class="counter total-counter">{len(results)} Results</span>'
+        f"{inventory_counters}</div>"
     )
 
     filters = (
@@ -1966,31 +1958,19 @@ def render_summary_dashboard(
             f'class="summary-row" data-status="{_esc(_summary_data_status(members))}" '
             f'data-name="{_esc(_summary_data_name(members))}"'
         )
-        if len(members) > 1:
-            rows.append(
-                f"<tr {row_attrs}>"
-                '<td class="summary-bundle-cell" colspan="6">'
-                + _render_summary_model_details(
-                    _model_group_key(r),
-                    r,
-                    members,
-                    str(family),
-                    str(task_strategy),
-                    km,
-                    tt,
-                )
-                + "</td></tr>"
-            )
-            continue
         rows.append(
             f"<tr {row_attrs}>"
-            f'<td class="summary-model-cell">{_render_summary_model_cell(r)}</td>'
-            f"<td>{_esc(family)}</td>"
-            f"<td>{_esc(task_strategy)}</td>"
-            f"<td>{_status_summary(members)}</td>"
-            f"<td>{km}</td>"
-            f"<td>{tt}</td>"
-            f"</tr>"
+        '<td class="summary-model-cell" colspan="6">'
+            + _render_summary_model_details(
+                _model_group_key(r),
+                r,
+                members,
+                str(family),
+                str(task_strategy),
+                km,
+                tt,
+            )
+            + "</td></tr>"
         )
 
     table = (
@@ -2058,7 +2038,7 @@ def render_report(
     results: List[Dict[str, Any]],
     title: str = "E2E Test Report",
     project_dir: Optional[Path] = None,
-    multi_testcase_models: Optional[List[Dict[str, Any]]] = None,
+    model_manifests: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Assemble the full self-contained HTML report."""
     # Reset command counter for deterministic output.
@@ -2086,7 +2066,7 @@ def render_report(
 
     # Summary dashboard
     parts.append("<h2>Summary</h2>")
-    parts.append(render_summary_dashboard(results, multi_testcase_models))
+    parts.append(render_summary_dashboard(results, model_manifests))
 
     # Per-model details
     parts.append("<h2>Model Details</h2>")
@@ -2145,7 +2125,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
 
     results = load_all_results(args.artifacts_dir)
-    multi_testcase_models = load_multi_testcase_manifests(args.manifest_dir)
+    model_manifests = load_model_manifests(args.manifest_dir)
     if not results:
         print(
             f"WARNING: No result.json files found in {args.artifacts_dir}",
@@ -2156,7 +2136,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         results,
         title=args.title,
         project_dir=args.project_dir,
-        multi_testcase_models=multi_testcase_models,
+        model_manifests=model_manifests,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
