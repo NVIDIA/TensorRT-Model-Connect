@@ -23,6 +23,11 @@ class InitialLatents:
     shape: tuple[int, int, int, int]
 
 
+def uses_shared_initial_latents(case: E2ECase) -> bool:
+    """Return whether this case explicitly requests HF-to-TRT latent parity."""
+    return case.inputs.get("use_shared_initial_latents") is True
+
+
 def _parity_root(ctx: RunContext) -> Path:
     if not ctx.artifacts_dir:
         return Path(tempfile.gettempdir()) / "trtmc_pixart_parity"

@@ -491,6 +491,7 @@ suites:
     generation:
       seed: 42
       video_num_frames: 1
+      use_shared_initial_latents: true
     scoring:
       scorer: diffusion_image_clip_parity
     gates:

@@ -12,13 +12,18 @@ from tests.e2e.models.pixart.e2e_plugins.references import hf_diffusers
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
 
 
-def _case(seed: int = 42) -> E2ECase:
+def _case(seed: int = 42, *, shared_initial_latents: bool = True) -> E2ECase:
     return E2ECase(
         name="partiprompts_000001",
         hf_id="PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
         family="pixart",
         runtime_strategy="diffusion_pixart",
-        inputs={"image_height": 1024, "image_width": 1024, "seed": seed},
+        inputs={
+            "image_height": 1024,
+            "image_width": 1024,
+            "seed": seed,
+            "use_shared_initial_latents": shared_initial_latents,
+        },
     )
 
 
@@ -97,3 +102,60 @@ def test_hf_reference_consumes_and_reports_shared_initial_latent(
     assert "latents=initial_latents" in script
     assert "partiprompts_000001.seed-44.1024x1024.f32" in script
     assert output.data["initial_latents_sha256"]
+
+
+def test_standard_trtmc_runner_keeps_seeded_generation_path(
+    tmp_path, monkeypatch
+) -> None:
+    case = _case(seed=45, shared_initial_latents=False)
+    case.bundle = "pixart.trtfb"
+    binary = tmp_path / "trtmc"
+    binary.write_text("", encoding="utf-8")
+    ctx = RunContext(
+        case=case,
+        artifacts_dir=str(tmp_path / "trtfb_artifacts"),
+        binary_path=str(binary),
+        engine_dir=str(tmp_path),
+    )
+    monkeypatch.setattr(
+        diffusion.subprocess,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(
+            cmd, 0, stdout="", stderr=""
+        ),
+    )
+
+    output = diffusion.DiffusionMediaRunner().run_stage(
+        case, StageSpec(name="end_to_end"), ctx
+    )
+
+    assert "--initial-latents-raw" not in output.metadata["command"]
+    assert output.data.get("initial_latents_sha256", "") == ""
+
+
+def test_standard_hf_reference_keeps_seeded_generator_path(
+    tmp_path, monkeypatch
+) -> None:
+    case = _case(seed=45, shared_initial_latents=False)
+    ctx = RunContext(
+        case=case,
+        artifacts_dir=str(tmp_path / "hf_artifacts"),
+        reference_python="/opt/venv/bin/python",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(hf_diffusers, "_resolve_cached_model_ref", lambda _id: "/model")
+    monkeypatch.setattr(hf_diffusers.subprocess, "run", fake_run)
+
+    output = hf_diffusers.HfDiffusersReference().run_stage(
+        case, StageSpec(name="end_to_end"), ctx
+    )
+
+    script = captured["cmd"][2]
+    assert "generator=torch.Generator" in script
+    assert "latents=initial_latents" not in script
+    assert output.data.get("initial_latents_sha256", "") == ""

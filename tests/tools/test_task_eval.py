@@ -301,6 +301,7 @@ def test_partiprompts_uses_model_manifest_generation_and_profile_gates() -> None
     )
     assert pixart_suite["generation"] == {
         "seed": 42,
+        "use_shared_initial_latents": True,
         "image_height": 1024,
         "image_width": 1024,
         "video_num_frames": 1,

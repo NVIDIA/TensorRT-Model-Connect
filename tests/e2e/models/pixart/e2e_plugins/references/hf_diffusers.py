@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .. import _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
-from ..parity import ensure_initial_latents
+from ..parity import ensure_initial_latents, uses_shared_initial_latents
 
 logger = logging.getLogger(__name__)
 
@@ -137,7 +137,32 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
         image_height = case.inputs.get("image_height", 1024)
         image_width = case.inputs.get("image_width", image_height)
         python = ctx.reference_python_path() or sys.executable
-        initial_latents = ensure_initial_latents(case, ctx)
+        initial_latents = (
+            ensure_initial_latents(case, ctx)
+            if uses_shared_initial_latents(case)
+            else None
+        )
+
+        if initial_latents is not None:
+            latent_setup = f"""
+raw_latents = np.fromfile({str(initial_latents.path)!r}, dtype=np.float32)
+expected_shape = {initial_latents.shape!r}
+expected_size = int(np.prod(expected_shape))
+if raw_latents.size != expected_size:
+    raise RuntimeError(
+        f"PixArt shared latents size {{raw_latents.size}} does not match "
+        f"expected {{expected_shape}} = {{expected_size}}"
+    )
+initial_latents = torch.from_numpy(raw_latents.reshape(expected_shape)).to(
+    device="cuda", dtype=torch.float32)
+"""
+            generation_input = "latents=initial_latents,"
+        else:
+            latent_setup = ""
+            seed = int(case.inputs.get("seed", case.determinism.get("seed", 42)))
+            generation_input = (
+                f'generator=torch.Generator("cuda").manual_seed({seed}),'
+            )
 
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
@@ -155,22 +180,13 @@ from diffusers import PixArtSigmaPipeline
 transformers.logging.set_verbosity_error()
 pipe = PixArtSigmaPipeline.from_pretrained({model_ref!r}, torch_dtype=torch.float32)
 pipe.to("cuda")
-raw_latents = np.fromfile({str(initial_latents.path)!r}, dtype=np.float32)
-expected_shape = {initial_latents.shape!r}
-expected_size = int(np.prod(expected_shape))
-if raw_latents.size != expected_size:
-    raise RuntimeError(
-        f"PixArt shared latents size {{raw_latents.size}} does not match "
-        f"expected {{expected_shape}} = {{expected_size}}"
-    )
-initial_latents = torch.from_numpy(raw_latents.reshape(expected_shape)).to(
-    device="cuda", dtype=torch.float32)
+{latent_setup}
 output = pipe(
     prompt={prompt!r},
     num_inference_steps={num_steps},
     height={image_height},
     width={image_width},
-    latents=initial_latents,
+    {generation_input}
 )
 frames = output.images
 frames_dir = {frames_dir!r}
@@ -194,17 +210,23 @@ print(f"Generated {{len(frames)}} frames")
         frame_files = sorted(Path(frames_dir).glob("frame_*.png"))
         if result.returncode != 0:
             logger.error("PixArt HF reference failed (rc=%d): %s", result.returncode, result.stderr[-500:])
+        data = {
+            "returncode": result.returncode,
+            "num_frames": len(frame_files),
+            "frames_dir": frames_dir,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+        if initial_latents is not None:
+            data.update(
+                {
+                    "initial_latents_path": str(initial_latents.path),
+                    "initial_latents_sha256": initial_latents.sha256,
+                }
+            )
         return StageOutput(
             stage_name=stage.name,
-            data={
-                "returncode": result.returncode,
-                "num_frames": len(frame_files),
-                "frames_dir": frames_dir,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "initial_latents_path": str(initial_latents.path),
-                "initial_latents_sha256": initial_latents.sha256,
-            },
+            data=data,
             text=result.stdout,
             timing_s=elapsed,
             metadata={"backend": "hf_diffusers"},
