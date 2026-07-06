@@ -23,6 +23,7 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -439,8 +440,10 @@ create_qwen_sampler(const QwenSamplingParams& params,
         return std::make_unique<GreedySampler>();
     }
 
-    uint64_t seed = (params.seed >= 0) ? static_cast<uint64_t>(params.seed)
-                                       : 42ULL; // deterministic default for reproducibility
+    uint64_t seed = (params.seed >= 0)
+                        ? static_cast<uint64_t>(
+                              std::chrono::high_resolution_clock::now().time_since_epoch().count())
+                        : 42ULL; // deterministic default for reproducibility
 #if TRTMC_HAS_LIBTORCH_MULTINOMIAL && TRTMC_HAS_CUDA_KERNELS
     if (options.prefer_torch_cuda_multinomial)
         return std::make_unique<TorchCudaMultinomialSampler>(seed);
