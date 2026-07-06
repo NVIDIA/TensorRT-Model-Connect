@@ -311,6 +311,12 @@ void test_prompt_and_prompts_file_mutually_exclusive() {
           "prompt+prompts-file error message");
 }
 
+void test_prompts_file_is_run_prompt_source() {
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompts-file", "prompts.txt"});
+    check(!args.parse_error, "prompts-file run parses cleanly");
+    check(trtmc::cli::has_run_prompt_source(args), "prompts-file satisfies run prompt guard");
+}
+
 } // namespace
 
 int main() {
@@ -334,6 +340,7 @@ int main() {
     test_num_images_zero_fails();
     test_seed_csv_populates_seed_list();
     test_prompt_and_prompts_file_mutually_exclusive();
+    test_prompts_file_is_run_prompt_source();
 
     if (failures) {
         std::cerr << failures << " CLI parser tests failed\n";
