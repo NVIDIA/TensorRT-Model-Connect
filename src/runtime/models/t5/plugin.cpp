@@ -366,7 +366,7 @@ class T5Plugin final : public IPipelinePlugin {
         return std::make_unique<T5Pipeline>(
             std::move(enc_loaded.module), std::move(dec_loaded.module), std::move(cache),
             ctx.config.hidden_size, dl, max_enc_seq_len, ctx.config.vocab_size,
-            decoder_start_token_id, ctx.config.id_eos, stream, std::move(tok),
+            decoder_start_token_id, ctx.config.id_bos, stream, std::move(tok),
             ctx.bundle.info.model_id);
     }
 };
