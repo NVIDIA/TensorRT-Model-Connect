@@ -5,6 +5,7 @@
   "family": "nemotron_speech_streaming",
   "runtime_strategy": "nemotron_speech_streaming_speech_to_text_rnnt",
   "task_strategy": "speech_to_text",
+  "precision": "fp16",
   "max_cache_length": 128,
   "trust_remote_code": false,
   "testcases": [
