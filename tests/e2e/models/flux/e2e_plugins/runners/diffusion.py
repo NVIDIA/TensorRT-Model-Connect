@@ -372,6 +372,12 @@ class DiffusionMediaRunner:
                 _strip_mpi_stream_tags(result.stderr)
                 if distributed_runtime else result.stderr
             )
+            if result.returncode != 0:
+                logger.error(
+                    "Flux TRT runtime failed (rc=%d): %s",
+                    result.returncode,
+                    stderr_text[-2000:],
+                )
 
             # Count frames
             frame_files = sorted(Path(output_frame_dir).glob("frame_*.png"))
