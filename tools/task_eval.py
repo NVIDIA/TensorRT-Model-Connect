@@ -46,6 +46,9 @@ DEFAULT_MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
 CHOICE_LETTERS = set("ABCDEFGHIJ")
+GPT_OSS_MMLU_SYSTEM_PROMPT = (
+    "You are a helpful assistant. Answer with only the option letter."
+)
 
 
 def load_structured_file(path: Path) -> dict[str, Any]:
@@ -86,6 +89,40 @@ def suite_by_id(suites: list[dict[str, Any]], suite_id: str) -> dict[str, Any]:
             return suite
     known = ", ".join(sorted(s["id"] for s in suites))
     raise ValueError(f"Unknown suite {suite_id!r}. Known suites: {known}")
+
+
+def _deep_merge_mappings(*values: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        for key, item in value.items():
+            if isinstance(item, dict) and isinstance(merged.get(key), dict):
+                merged[key] = _deep_merge_mappings(merged[key], item)
+            else:
+                merged[key] = copy.deepcopy(item)
+    return merged
+
+
+def effective_task_eval_config(
+    suite: dict[str, Any], model: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve suite family/model overrides, then manifest-specific settings."""
+    overrides = suite.get("model_overrides", {})
+    if not isinstance(overrides, dict):
+        raise ValueError(f"Suite {suite.get('id', '<unknown>')} model_overrides must be a mapping")
+    by_family = overrides.get("by_family", {})
+    by_model = overrides.get("by_model", {})
+    if not isinstance(by_family, dict) or not isinstance(by_model, dict):
+        raise ValueError(
+            f"Suite {suite.get('id', '<unknown>')} model_overrides.by_family/by_model "
+            "must be mappings"
+        )
+    return _deep_merge_mappings(
+        by_family.get(str(model.get("family", "")), {}),
+        by_model.get(str(model.get("name", "")), {}),
+        model.get("task_eval", {}),
+    )
 
 
 def infer_reference_family(raw: dict[str, Any]) -> str:
@@ -389,6 +426,24 @@ def _request_prompt(request: dict[str, Any]) -> str:
     raise ValueError("MMLU request has neither messages content nor prompt")
 
 
+def render_mmlu_prompt(prompt: str, task_eval_config: dict[str, Any] | None) -> str:
+    config = task_eval_config if isinstance(task_eval_config, dict) else {}
+    renderer = str(config.get("prompt_renderer", "") or "")
+    if not renderer:
+        return prompt
+    if renderer != "gpt_oss_harmony_mcq":
+        raise ValueError(f"Unsupported MMLU prompt renderer {renderer!r}")
+    system_prompt = str(
+        config.get("system_prompt", GPT_OSS_MMLU_SYSTEM_PROMPT)
+        or GPT_OSS_MMLU_SYSTEM_PROMPT
+    )
+    return (
+        f"<|start|>system<|message|>{system_prompt}<|end|>"
+        f"<|start|>user<|message|>{prompt}<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>"
+    )
+
+
 def _copy_dataset_header(data: dict[str, Any], requests: list[dict[str, Any]]) -> dict[str, Any]:
     out = {k: v for k, v in data.items() if k not in {"requests", "samples"}}
     out["requests"] = requests
@@ -445,15 +500,21 @@ def prepare_mmlu_dataset(
     answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
     with prompts_path.open("w", encoding="utf-8") as f:
         for out_idx, (dataset_index, request) in enumerate(indexed):
+            prompt = render_mmlu_prompt(_request_prompt(request), task_eval_config)
             sample = {
                 "sample_id": f"mmlu_{dataset_index:06d}",
                 "dataset_index": dataset_index,
                 "eval_index": out_idx,
                 "subject": request.get("subject", ""),
                 "answer": request["answer"],
-                "prompt": _request_prompt(request),
+                "prompt": prompt,
             }
             f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+    generation = _deep_merge_mappings(
+        suite.get("generation", {}),
+        (task_eval_config or {}).get("generation", {}),
+    )
 
     manifest = {
         "suite": suite["id"],
@@ -463,7 +524,7 @@ def prepare_mmlu_dataset(
         "subject": subject or "all",
         "limit": limit,
         "sample_seed": sample_seed,
-        "generation": suite.get("generation", {}),
+        "generation": generation,
         "files": {
             "answers": str(answers_path),
             "prompts": str(prompts_path),
@@ -1858,10 +1919,25 @@ def parse_multi_choice_response(text: str) -> str:
     return text
 
 
-def is_correct(prediction: str, reference: str) -> bool:
-    pred_clean = clean_text(prediction)
+def parse_model_prediction(text: str, *, answer_parser: str = "") -> str:
+    if not answer_parser:
+        return parse_multi_choice_response(clean_text(text))
+    if answer_parser != "gpt_oss_harmony_final_mcq":
+        raise ValueError(f"Unsupported task-eval answer parser {answer_parser!r}")
+
+    final_marker = "<|channel|>final<|message|>"
+    if final_marker in text:
+        text = text.rsplit(final_marker, 1)[1]
+    elif "<|channel|>" in text or "<|message|>" in text:
+        return ""
+    parsed = parse_multi_choice_response(clean_text(text))
+    return parsed if parsed in CHOICE_LETTERS else ""
+
+
+def is_correct(prediction: str, reference: str, *, answer_parser: str = "") -> bool:
+    pred_clean = parse_model_prediction(prediction, answer_parser=answer_parser)
     ref_clean = clean_text(reference)
-    if ref_clean in CHOICE_LETTERS:
+    if ref_clean in CHOICE_LETTERS and not answer_parser:
         pred_clean = parse_multi_choice_response(pred_clean)
     return pred_clean == ref_clean
 
@@ -1877,8 +1953,13 @@ def request_answer_values(request: dict[str, Any]) -> list[str]:
     return values
 
 
-def is_correct_for_request(prediction: str, request: dict[str, Any]) -> bool:
-    return any(is_correct(prediction, answer) for answer in request_answer_values(request))
+def is_correct_for_request(
+    prediction: str, request: dict[str, Any], *, answer_parser: str = ""
+) -> bool:
+    return any(
+        is_correct(prediction, answer, answer_parser=answer_parser)
+        for answer in request_answer_values(request)
+    )
 
 
 def normalize_asr_transcript(text: str) -> str:
@@ -3039,6 +3120,8 @@ def score_predictions(
     answers_data: dict[str, Any],
     *,
     scorer: str = "exact_or_alias",
+    answer_parser: str = "",
+    require_valid_prediction: bool = False,
 ) -> dict[str, Any]:
     if scorer == "ocrbench_v2":
         return score_ocrbench_v2_predictions(predictions_data, answers_data)
@@ -3057,6 +3140,7 @@ def score_predictions(
 
     correct = 0
     skipped = 0
+    valid_predictions = 0
     subject_stats: dict[str, Counter[str]] = defaultdict(Counter)
     samples: list[dict[str, Any]] = []
     for idx, (response, request) in enumerate(zip(responses, requests, strict=True)):
@@ -3079,7 +3163,12 @@ def score_predictions(
                 }
             )
             continue
-        ok = is_correct_for_request(output_text, request)
+        parsed_prediction = parse_model_prediction(output_text, answer_parser=answer_parser)
+        prediction_valid = bool(parsed_prediction)
+        if require_valid_prediction and clean_text(answer) in CHOICE_LETTERS:
+            prediction_valid = parsed_prediction in CHOICE_LETTERS
+        valid_predictions += int(prediction_valid)
+        ok = is_correct_for_request(output_text, request, answer_parser=answer_parser)
         correct += int(ok)
         subject_stats[subject]["total"] += 1
         subject_stats[subject]["correct"] += int(ok)
@@ -3091,7 +3180,8 @@ def score_predictions(
                 "answer": answer,
                 "answer_aliases": answer_values[1:],
                 "prediction": output_text,
-                "parsed_prediction": parse_multi_choice_response(clean_text(output_text)),
+                "parsed_prediction": parsed_prediction,
+                "valid_prediction": prediction_valid,
                 "skipped": False,
                 "correct": ok,
             }
@@ -3110,6 +3200,9 @@ def score_predictions(
         "overall_accuracy": (correct / valid) if valid else 0.0,
         "correct": correct,
         "valid_count": valid,
+        "valid_prediction_count": valid_predictions,
+        "invalid_prediction_count": valid - valid_predictions,
+        "valid_prediction_rate": (valid_predictions / valid) if valid else 0.0,
         "skipped_count": skipped,
         "total_count": len(requests),
         "subject_accuracy": subject_accuracy,
@@ -3123,9 +3216,23 @@ def compare_prediction_sets(
     answers: dict[str, Any],
     *,
     scorer: str = "exact_or_alias",
+    answer_parser: str = "",
+    require_valid_prediction: bool = False,
 ) -> dict[str, Any]:
-    hf_score = score_predictions(hf_predictions, answers, scorer=scorer)
-    trtfb_score = score_predictions(trtfb_predictions, answers, scorer=scorer)
+    hf_score = score_predictions(
+        hf_predictions,
+        answers,
+        scorer=scorer,
+        answer_parser=answer_parser,
+        require_valid_prediction=require_valid_prediction,
+    )
+    trtfb_score = score_predictions(
+        trtfb_predictions,
+        answers,
+        scorer=scorer,
+        answer_parser=answer_parser,
+        require_valid_prediction=require_valid_prediction,
+    )
     hf_responses = hf_predictions["responses"]
     trt_responses = trtfb_predictions["responses"]
     requests = answers["requests"]
@@ -3146,8 +3253,12 @@ def compare_prediction_sets(
             hf_pred = _tts_normalize_text(str(hf_row.get("output_text", "")))
             trt_pred = _tts_normalize_text(str(trt_row.get("output_text", "")))
         else:
-            hf_pred = parse_multi_choice_response(clean_text(str(hf_row.get("output_text", ""))))
-            trt_pred = parse_multi_choice_response(clean_text(str(trt_row.get("output_text", ""))))
+            hf_pred = parse_model_prediction(
+                str(hf_row.get("output_text", "")), answer_parser=answer_parser
+            )
+            trt_pred = parse_model_prediction(
+                str(trt_row.get("output_text", "")), answer_parser=answer_parser
+            )
         hf_sample = hf_score["samples"][idx]
         trtfb_sample = trtfb_score["samples"][idx]
         hf_ok = bool(hf_sample.get("correct", False))
@@ -3157,6 +3268,11 @@ def compare_prediction_sets(
             if scorer in {"ocrbench_v2", "asr_transcript", "tts_intelligibility"}
             else hf_pred == trt_pred
         )
+        if require_valid_prediction and (
+            not bool(hf_sample.get("valid_prediction", False))
+            or not bool(trtfb_sample.get("valid_prediction", False))
+        ):
+            agreement_match = False
         agreement += int(agreement_match)
         if hf_ok and trt_ok:
             buckets["both_correct"] += 1
@@ -5339,8 +5455,7 @@ def eval_one_model(
     scorer = str(suite.get("scoring", {}).get("scorer", "mcq"))
     dataset_kind = str(suite.get("dataset", {}).get("kind", ""))
     reference_backend = str(model.get("reference_backend", "hf_transformers") or "hf_transformers")
-    task_eval_config = model.get("task_eval", {})
-    task_eval_config = dict(task_eval_config) if isinstance(task_eval_config, dict) else {}
+    task_eval_config = effective_task_eval_config(suite, model)
     if model.get("manifest"):
         task_eval_config["model_manifest"] = str(model["manifest"])
     if model.get("family"):
@@ -5390,11 +5505,22 @@ def eval_one_model(
             local_files_only=args.local_files_only,
             trust_remote_code=args.trust_remote_code or bool(model.get("trust_remote_code", False)),
         )
+    generation = generation_defaults(work_dir)
+    generation_headroom = 0
+    if bool(task_eval_config.get("build_generation_headroom", False)):
+        generation_headroom = int(
+            args.max_new_tokens
+            if args.max_new_tokens is not None
+            else generation.get("max_new_tokens", 0)
+        )
+    required_prompt_cache = (
+        int(max_prompt_len or 0) + generation_headroom if max_prompt_len is not None else None
+    )
     max_cache_length = requested_build_max_cache_length(
         suite,
         model,
         args.build_max_cache_length,
-        prompt_max_tokens=max_prompt_len,
+        prompt_max_tokens=required_prompt_cache,
     )
     if max_prompt_len is not None and max_prompt_len > max_cache_length:
         raise RuntimeError(
@@ -5491,6 +5617,10 @@ def eval_one_model(
             trtfb_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
             scorer=scorer,
+            answer_parser=str(task_eval_config.get("answer_parser", "") or ""),
+            require_valid_prediction=bool(
+                task_eval_config.get("require_valid_prediction", False)
+            ),
         )
         (work_dir / "summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -5503,6 +5633,8 @@ def eval_one_model(
             "trtfb_accuracy": summary["trtfb"]["overall_accuracy"],
             "accuracy_delta_trtfb_minus_hf": summary["accuracy_delta_trtfb_minus_hf"],
             "prediction_agreement_rate": summary["prediction_agreement_rate"],
+            "hf_valid_prediction_rate": summary["hf"].get("valid_prediction_rate"),
+            "trtfb_valid_prediction_rate": summary["trtfb"].get("valid_prediction_rate"),
         }
     (work_dir / "eval_result.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False),

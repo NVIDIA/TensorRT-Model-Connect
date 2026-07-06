@@ -52,6 +52,17 @@ suites:
       apply_chat_template: false
       enable_thinking: false
       do_sample: false
+    model_overrides:
+      by_family:
+        gpt_oss:
+          prompt_renderer: gpt_oss_harmony_mcq
+          answer_parser: gpt_oss_harmony_final_mcq
+          require_valid_prediction: true
+          build_generation_headroom: true
+          generation:
+            max_new_tokens: 8
+            apply_chat_template: false
+            enable_thinking: false
     build:
       min_max_cache_length: 0
     gates:

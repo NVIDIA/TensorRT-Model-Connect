@@ -701,6 +701,41 @@ def test_prepare_task_dataset_dispatches_diffusion_prompt_json(tmp_path: Path) -
     assert manifest["dataset_name"] == "DPG-Bench"
 
 
+def test_prepare_mmlu_applies_gpt_oss_family_override(tmp_path: Path) -> None:
+    dataset = tmp_path / "mmlu.json"
+    _write_mmlu(dataset)
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
+    model = {"name": "gpt-oss-20b", "family": "gpt_oss", "task_eval": {}}
+    config = task_eval.effective_task_eval_config(suite, model)
+
+    outputs = task_eval.prepare_mmlu_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+        task_eval_config=config,
+    )
+
+    prompt = task_eval.load_jsonl(outputs["prompts"])[0]["prompt"]
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+    assert prompt == (
+        "<|start|>system<|message|>You are a helpful assistant. "
+        "Answer with only the option letter.<|end|>"
+        "<|start|>user<|message|>Question one\nA. a\nB. b\nAnswer:<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>"
+    )
+    assert manifest["generation"]["max_new_tokens"] == 8
+    assert manifest["generation"]["apply_chat_template"] is False
+    assert manifest["task_eval"]["answer_parser"] == "gpt_oss_harmony_final_mcq"
+
+
+def test_non_gpt_oss_mmlu_model_keeps_suite_defaults() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
+    model = {"name": "tinyllama-1.1b", "family": "llama", "task_eval": {}}
+
+    assert task_eval.effective_task_eval_config(suite, model) == {}
+
+
 def test_prepare_seedtts_writes_resolved_audio_and_scoring_contract(tmp_path: Path) -> None:
     dataset = tmp_path / "SeedTTS_en_meta" / "seedtts_en_meta.json"
     dataset.parent.mkdir()
@@ -1204,6 +1239,36 @@ def test_score_and_compare_mmlu_predictions(tmp_path: Path) -> None:
     assert summary["accuracy_delta_trtfb_minus_hf"] == -0.5
     assert summary["prediction_agreement_rate"] == 0.5
     assert summary["buckets"]["hf_correct_trtfb_wrong"] == 1
+
+
+def test_gpt_oss_harmony_parser_rejects_control_only_predictions() -> None:
+    parser = "gpt_oss_harmony_final_mcq"
+
+    assert task_eval.parse_model_prediction(
+        "<|channel|>final<|message|> B", answer_parser=parser
+    ) == "B"
+    assert task_eval.parse_model_prediction(" B", answer_parser=parser) == "B"
+    assert task_eval.parse_model_prediction("<|channel|>", answer_parser=parser) == ""
+
+
+def test_required_valid_prediction_does_not_agree_on_empty_outputs() -> None:
+    answers = {"requests": [{"answer": "A", "subject": "test"}]}
+    hf = {"responses": [{"sample_id": "one", "output_text": "<|channel|>"}]}
+    trtfb = {"responses": [{"sample_id": "one", "output_text": "\n\n"}]}
+
+    summary = task_eval.compare_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        answer_parser="gpt_oss_harmony_final_mcq",
+        require_valid_prediction=True,
+    )
+
+    assert summary["prediction_agreement_rate"] == 0.0
+    assert summary["hf"]["valid_prediction_count"] == 0
+    assert summary["trtfb"]["valid_prediction_count"] == 0
+    assert summary["disagreements"][0]["hf_prediction"] == ""
+    assert summary["disagreements"][0]["trtfb_prediction"] == ""
 
 
 def test_score_predictions_parses_vlm_a_to_j_choices() -> None:
