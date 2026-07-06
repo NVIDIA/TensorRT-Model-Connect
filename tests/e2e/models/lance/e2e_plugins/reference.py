@@ -5,10 +5,18 @@
 
 from __future__ import annotations
 
+from .references.golden_snapshot import GoldenSnapshotReference
 from .references.hf_transformers import HfTransformersReference
+
+
+class LanceGoldenSnapshotReference(GoldenSnapshotReference):
+    """lance local reference for an upstream eager snapshot."""
 
 
 class LanceHfTransformersReference(HfTransformersReference):
     """lance local reference for hf_transformers."""
 
-reference = LanceHfTransformersReference()
+reference = [
+    LanceGoldenSnapshotReference(),
+    LanceHfTransformersReference(),
+]

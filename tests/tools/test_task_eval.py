@@ -211,9 +211,7 @@ def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
 
     assert suite["dataset"]["kind"] == "asr_chat_json"
     assert suite["scoring"]["scorer"] == "asr_transcript"
-    assert suite["default_model_names"] == [
-        "nemotron-speech-streaming-en-0.6b"
-    ]
+    assert suite["default_model_names"] == ["nemotron-speech-streaming-en-0.6b"]
     assert suite["selectors"]["runtime_strategies"] == [
         "nemotron_speech_streaming_speech_to_text_rnnt"
     ]
@@ -225,14 +223,16 @@ def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
 def test_custom_suite_file_does_not_add_builtin_suites(tmp_path: Path) -> None:
     custom = tmp_path / "suites.json"
     custom.write_text(
-        json.dumps({
-            "suites": [
-                {
-                    "id": "custom_only",
-                    "dataset": {"kind": "mmlu_five_shot_json"},
-                }
-            ]
-        }),
+        json.dumps(
+            {
+                "suites": [
+                    {
+                        "id": "custom_only",
+                        "dataset": {"kind": "mmlu_five_shot_json"},
+                    }
+                ]
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -321,9 +321,7 @@ def test_load_manifest_records_discovers_model_owned_manifests(tmp_path: Path) -
     records = task_eval.load_manifest_records(tmp_path)
 
     assert [record["name"] for record in records] == ["example-decoder"]
-    assert records[0]["manifest"].endswith(
-        "example_decoder/manifests/example-decoder.json"
-    )
+    assert records[0]["manifest"].endswith("example_decoder/manifests/example-decoder.json")
     assert records[0]["task_eval"] == {
         "vlm_fallback_prompt_template": "<image>{prompt}",
     }
@@ -428,7 +426,7 @@ def test_plan_selects_ocrbench_v2_unified_models() -> None:
     selected = {row["model"]: row for row in rows}
     model_by_name = {model["name"]: model for model in models}
     assert set(selected) == {"deepseek-ocr"}
-    assert model_by_name["deepseek-ocr"]["reference_backend"] == "golden_snapshot"
+    assert model_by_name["deepseek-ocr"]["reference_backend"] == "hf_transformers"
     assert "qwen25vl-3b" not in selected
     assert "internvl3-2b" not in selected
     assert "locateanything-3b" not in selected
@@ -486,14 +484,16 @@ def test_prepare_mmlu_writes_answers_and_trtfb_jsonl(tmp_path: Path) -> None:
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
 
     assert len(answers["requests"]) == 1
-    assert prompts == [{
-        "sample_id": "mmlu_000000",
-        "dataset_index": 0,
-        "eval_index": 0,
-        "subject": "subject_a",
-        "answer": "B",
-        "prompt": "Question one\nA. a\nB. b\nAnswer:",
-    }]
+    assert prompts == [
+        {
+            "sample_id": "mmlu_000000",
+            "dataset_index": 0,
+            "eval_index": 0,
+            "subject": "subject_a",
+            "answer": "B",
+            "prompt": "Question one\nA. a\nB. b\nAnswer:",
+        }
+    ]
     assert manifest["suite"] == "mmlu_five_shot_mcq"
     assert manifest["request_count"] == 1
 
@@ -519,16 +519,18 @@ def test_prepare_seedtts_writes_resolved_audio_and_scoring_contract(tmp_path: Pa
     assert answers["requests"][0]["answer"] == "The test sentence."
     assert answers["requests"][0]["reference_wav"] == reference_wav
     assert answers["scoring"]["max_wer"] == 0.25
-    assert prompts == [{
-        "sample_id": "seedtts-1",
-        "dataset_index": 0,
-        "eval_index": 0,
-        "subject": "en",
-        "answer": "The test sentence.",
-        "prompt": "The test sentence.",
-        "reference_wav": reference_wav,
-        "language": "en",
-    }]
+    assert prompts == [
+        {
+            "sample_id": "seedtts-1",
+            "dataset_index": 0,
+            "eval_index": 0,
+            "subject": "en",
+            "answer": "The test sentence.",
+            "prompt": "The test sentence.",
+            "reference_wav": reference_wav,
+            "language": "en",
+        }
+    ]
     assert manifest["dataset_kind"] == "seedtts_json"
     assert manifest["scoring"]["scorer"] == "tts_intelligibility"
 
@@ -552,15 +554,17 @@ def test_prepare_vlm_mmmu_pro_vision_writes_image_prompt_jsonl(tmp_path: Path) -
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
 
     assert len(answers["requests"]) == 1
-    assert prompts == [{
-        "sample_id": "test_case_1",
-        "dataset_index": 0,
-        "eval_index": 0,
-        "subject": "History",
-        "answer": "J",
-        "prompt": "Answer with the option letter.\n\nWhich letter is correct?\nA. no\nJ. yes\n\nAnswer directly.",
-        "images": [str(dataset_dir / "images" / "sample.jpg")],
-    }]
+    assert prompts == [
+        {
+            "sample_id": "test_case_1",
+            "dataset_index": 0,
+            "eval_index": 0,
+            "subject": "History",
+            "answer": "J",
+            "prompt": "Answer with the option letter.\n\nWhich letter is correct?\nA. no\nJ. yes\n\nAnswer directly.",
+            "images": [str(dataset_dir / "images" / "sample.jpg")],
+        }
+    ]
     assert manifest["suite"] == "vlm_mmmu_pro_vision_mcq"
     assert manifest["dataset_kind"] == "vlm_chat_json"
     assert manifest["request_count"] == 1
@@ -597,15 +601,17 @@ def test_prepare_ocrbench_unified_writes_image_prompt_jsonl(tmp_path: Path) -> N
         "type": "image",
         "image": "images/ocrbench_v2_000000.jpg",
     }
-    assert prompts == [{
-        "sample_id": "ocrbench_v2_000000",
-        "dataset_index": 0,
-        "eval_index": 0,
-        "subject": "APP agent en",
-        "answer": "enabled",
-        "prompt": "What is the wrong answer 2?",
-        "images": [str(dataset_dir / "images" / "ocrbench_v2_000000.jpg")],
-    }]
+    assert prompts == [
+        {
+            "sample_id": "ocrbench_v2_000000",
+            "dataset_index": 0,
+            "eval_index": 0,
+            "subject": "APP agent en",
+            "answer": "enabled",
+            "prompt": "What is the wrong answer 2?",
+            "images": [str(dataset_dir / "images" / "ocrbench_v2_000000.jpg")],
+        }
+    ]
     assert manifest["suite"] == "ocrbench_v2_unified"
     assert manifest["dataset_kind"] == "vlm_unified_json"
     assert manifest["request_count"] == 1
@@ -660,15 +666,17 @@ def test_prepare_asr_chat_dataset_writes_audio_prompt_jsonl(tmp_path: Path) -> N
     assert answers["requests"][0]["answer"] == "The quick brown fox"
     assert answers["requests"][0]["subject"] == "test-clean"
     assert answers["requests"][0]["audio"] == str(prepared_audio)
-    assert prompts == [{
-        "sample_id": "clean_000000",
-        "dataset_index": 0,
-        "eval_index": 0,
-        "subject": "test-clean",
-        "answer": "The quick brown fox",
-        "prompt": "Transcribe this audio.",
-        "audio": str(prepared_audio),
-    }]
+    assert prompts == [
+        {
+            "sample_id": "clean_000000",
+            "dataset_index": 0,
+            "eval_index": 0,
+            "subject": "test-clean",
+            "answer": "The quick brown fox",
+            "prompt": "Transcribe this audio.",
+            "audio": str(prepared_audio),
+        }
+    ]
     assert manifest["suite"] == "librispeech_clean_asr"
     assert manifest["dataset_kind"] == "asr_chat_json"
     assert manifest["request_count"] == 1
@@ -699,9 +707,7 @@ def test_prepare_asr_chat_dataset_reports_missing_audio(tmp_path: Path) -> None:
         raise AssertionError("expected missing-audio validation failure")
 
 
-def test_prepare_vlm_fixed_suite_normalizes_image_and_messages(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_prepare_vlm_fixed_suite_normalizes_image_and_messages(tmp_path: Path, monkeypatch) -> None:
     dataset_dir = tmp_path / "MMMU_Pro_vision"
     dataset_dir.mkdir()
     dataset = dataset_dir / "mmmu_pro_vision_dataset.json"
@@ -737,13 +743,15 @@ def test_prepare_vlm_fixed_suite_normalizes_image_and_messages(
     assert resize_calls == [(dataset_dir / "images" / "sample.jpg", fixed_image, 448)]
     assert prompts[0]["prompt"] == merged_prompt
     assert prompts[0]["images"] == [str(fixed_image)]
-    assert answers["requests"][0]["messages"] == [{
-        "role": "user",
-        "content": [
-            {"type": "image", "image": str(fixed_image)},
-            {"type": "text", "text": merged_prompt},
-        ],
-    }]
+    assert answers["requests"][0]["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": str(fixed_image)},
+                {"type": "text", "text": merged_prompt},
+            ],
+        }
+    ]
     assert manifest["normalization"] == {
         "image_size": 448,
         "prompt_contract": "single_user_image_first",
@@ -802,15 +810,17 @@ def test_prepare_cli_accepts_vlm_dataset_kind(tmp_path: Path) -> None:
     _write_vlm_mmmu_pro_vision(dataset)
     work_dir = tmp_path / "work"
 
-    rc = task_eval.cmd_prepare(argparse.Namespace(
-        suites=str(task_eval.DEFAULT_SUITES),
-        suite="vlm_mmmu_pro_vision_mcq",
-        dataset=str(dataset),
-        work_dir=str(work_dir),
-        limit=1,
-        subject="",
-        sample_seed=None,
-    ))
+    rc = task_eval.cmd_prepare(
+        argparse.Namespace(
+            suites=str(task_eval.DEFAULT_SUITES),
+            suite="vlm_mmmu_pro_vision_mcq",
+            dataset=str(dataset),
+            work_dir=str(work_dir),
+            limit=1,
+            subject="",
+            sample_seed=None,
+        )
+    )
 
     assert rc == 0
     assert task_eval.load_jsonl(work_dir / "prompts.jsonl")[0]["images"] == [
@@ -819,19 +829,23 @@ def test_prepare_cli_accepts_vlm_dataset_kind(tmp_path: Path) -> None:
 
 
 def test_continuation_parity_exact_and_first_divergence() -> None:
-    hf = {"responses": [
-        {"sample_id": "a", "output_text": "the cat sat"},
-        {"sample_id": "b", "output_text": "hello world"},
-    ]}
-    trtfb = {"responses": [
-        {"sample_id": "a", "output_text": "the cat sat"},
-        {"sample_id": "b", "output_text": "hello there"},
-    ]}
+    hf = {
+        "responses": [
+            {"sample_id": "a", "output_text": "the cat sat"},
+            {"sample_id": "b", "output_text": "hello world"},
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {"sample_id": "a", "output_text": "the cat sat"},
+            {"sample_id": "b", "output_text": "hello there"},
+        ]
+    }
 
     summary = task_eval.compare_continuation_sets(hf, trtfb, tokenize=lambda s: s.split())
 
     assert summary["count"] == 2
-    assert summary["exact_match_rate"] == 0.5          # "a" exact, "b" not
+    assert summary["exact_match_rate"] == 0.5  # "a" exact, "b" not
     assert summary["samples"][0]["first_divergence"] == 3  # all 3 tokens match
     assert summary["samples"][1]["first_divergence"] == 1  # diverge at token index 1
     # matched prefixes 3 + 1 = 4, ref token counts 3 + 2 = 5
@@ -839,14 +853,18 @@ def test_continuation_parity_exact_and_first_divergence() -> None:
 
 
 def test_continuation_parity_prefers_generated_token_ids() -> None:
-    hf = {"responses": [
-        {"sample_id": "a", "output_text": "same text", "generated_token_ids": [10, 20]},
-        {"sample_id": "b", "output_text": "same text", "generated_token_ids": [1, 2, 3]},
-    ]}
-    trtfb = {"responses": [
-        {"sample_id": "a", "output_text": "same text", "generated_token_ids": [10, 20]},
-        {"sample_id": "b", "output_text": "same text", "generated_token_ids": [1, 2, 4]},
-    ]}
+    hf = {
+        "responses": [
+            {"sample_id": "a", "output_text": "same text", "generated_token_ids": [10, 20]},
+            {"sample_id": "b", "output_text": "same text", "generated_token_ids": [1, 2, 3]},
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {"sample_id": "a", "output_text": "same text", "generated_token_ids": [10, 20]},
+            {"sample_id": "b", "output_text": "same text", "generated_token_ids": [1, 2, 4]},
+        ]
+    }
 
     summary = task_eval.compare_continuation_sets(hf, trtfb, require_token_ids=True)
 
@@ -887,34 +905,40 @@ def test_compare_continuation_cli_writes_json_summary(tmp_path: Path) -> None:
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     (work_dir / "hf_predictions.json").write_text(
-        json.dumps({
-            "responses": [
-                {"sample_id": "a", "output_text": "same", "generated_token_ids": [1, 2]},
-                {"sample_id": "b", "output_text": "left", "generated_token_ids": [3, 4]},
-            ]
-        }),
+        json.dumps(
+            {
+                "responses": [
+                    {"sample_id": "a", "output_text": "same", "generated_token_ids": [1, 2]},
+                    {"sample_id": "b", "output_text": "left", "generated_token_ids": [3, 4]},
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     (work_dir / "trtfb_predictions.json").write_text(
-        json.dumps({
-            "responses": [
-                {"sample_id": "a", "output_text": "same", "generated_token_ids": [1, 2]},
-                {"sample_id": "b", "output_text": "right", "generated_token_ids": [3, 5]},
-            ]
-        }),
+        json.dumps(
+            {
+                "responses": [
+                    {"sample_id": "a", "output_text": "same", "generated_token_ids": [1, 2]},
+                    {"sample_id": "b", "output_text": "right", "generated_token_ids": [3, 5]},
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     output = tmp_path / "continuation.json"
 
-    rc = task_eval.cmd_compare_continuation(argparse.Namespace(
-        work_dir=str(work_dir),
-        hf_predictions="",
-        trtfb_predictions="",
-        model="",
-        trust_remote_code=False,
-        local_files_only=False,
-        output=str(output),
-    ))
+    rc = task_eval.cmd_compare_continuation(
+        argparse.Namespace(
+            work_dir=str(work_dir),
+            hf_predictions="",
+            trtfb_predictions="",
+            model="",
+            trust_remote_code=False,
+            local_files_only=False,
+            output=str(output),
+        )
+    )
 
     summary = json.loads(output.read_text(encoding="utf-8"))
     assert rc == 0
@@ -927,15 +951,18 @@ def test_compare_continuation_cli_writes_json_summary(tmp_path: Path) -> None:
 def test_convert_trtfb_uses_generated_text_field(tmp_path: Path) -> None:
     raw = tmp_path / "trtfb_raw.jsonl"
     raw.write_text(
-        json.dumps({
-            "sample_id": "mmlu_000000",
-            "gold_answer": "B",
-            "pred_answer": "",
-            "text": "Answer: B",
-            "generated_tokens": 1,
-            "generated_token_ids": [42],
-            "wall_ms": 3.5,
-        }) + "\n",
+        json.dumps(
+            {
+                "sample_id": "mmlu_000000",
+                "gold_answer": "B",
+                "pred_answer": "",
+                "text": "Answer: B",
+                "generated_tokens": 1,
+                "generated_token_ids": [42],
+                "wall_ms": 3.5,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     predictions = tmp_path / "predictions.json"
@@ -1009,19 +1036,25 @@ def test_tts_intelligibility_scores_asr_and_waveform_health(tmp_path: Path) -> N
             "min_duration_ratio": 0.5,
             "max_duration_ratio": 2.0,
         },
-        "requests": [{
-            "id": "seedtts-1",
-            "reference": "The test sentence.",
-            "answer": "The test sentence.",
-            "reference_wav": str(reference_wav),
-            "subject": "en",
-        }],
+        "requests": [
+            {
+                "id": "seedtts-1",
+                "reference": "The test sentence.",
+                "answer": "The test sentence.",
+                "reference_wav": str(reference_wav),
+                "subject": "en",
+            }
+        ],
     }
-    predictions = {"responses": [{
-        "sample_id": "seedtts-1",
-        "output_text": "the test sentence",
-        "wav_path": str(generated_wav),
-    }]}
+    predictions = {
+        "responses": [
+            {
+                "sample_id": "seedtts-1",
+                "output_text": "the test sentence",
+                "wav_path": str(generated_wav),
+            }
+        ]
+    }
 
     score = task_eval.score_predictions(predictions, answers, scorer="tts_intelligibility")
 
@@ -1036,17 +1069,23 @@ def test_tts_intelligibility_fails_wrong_or_missing_audio(tmp_path: Path) -> Non
     _write_pcm_wav(reference_wav)
     answers = {
         "scoring": {"max_wer": 0.25, "max_ned": 0.20},
-        "requests": [{
-            "reference": "The test sentence.",
-            "answer": "The test sentence.",
-            "reference_wav": str(reference_wav),
-        }],
+        "requests": [
+            {
+                "reference": "The test sentence.",
+                "answer": "The test sentence.",
+                "reference_wav": str(reference_wav),
+            }
+        ],
     }
-    predictions = {"responses": [{
-        "sample_id": "seedtts-1",
-        "output_text": "completely different words",
-        "wav_path": str(tmp_path / "missing.wav"),
-    }]}
+    predictions = {
+        "responses": [
+            {
+                "sample_id": "seedtts-1",
+                "output_text": "completely different words",
+                "wav_path": str(tmp_path / "missing.wav"),
+            }
+        ]
+    }
 
     score = task_eval.score_predictions(predictions, answers, scorer="tts_intelligibility")
 
@@ -1062,29 +1101,40 @@ def test_tts_disagreement_reports_full_normalized_transcripts(tmp_path: Path) ->
     for wav_path in (reference_wav, hf_wav, trtfb_wav):
         _write_pcm_wav(wav_path)
     answers = {
-        "requests": [{
-            "answer": "I'm never more aware of a room's acoustics.",
-            "reference_wav": str(reference_wav),
-        }],
+        "requests": [
+            {
+                "answer": "I'm never more aware of a room's acoustics.",
+                "reference_wav": str(reference_wav),
+            }
+        ],
     }
-    hf = {"responses": [{
-        "sample_id": "seedtts-1",
-        "output_text": "I'm never more aware of a room's acoustics.",
-        "wav_path": str(hf_wav),
-    }]}
-    trtfb = {"responses": [{
-        "sample_id": "seedtts-1",
-        "output_text": "I am never more aware of other rooms.",
-        "wav_path": str(trtfb_wav),
-    }]}
+    hf = {
+        "responses": [
+            {
+                "sample_id": "seedtts-1",
+                "output_text": "I'm never more aware of a room's acoustics.",
+                "wav_path": str(hf_wav),
+            }
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {
+                "sample_id": "seedtts-1",
+                "output_text": "I am never more aware of other rooms.",
+                "wav_path": str(trtfb_wav),
+            }
+        ]
+    }
 
-    summary = task_eval.compare_prediction_sets(
-        hf, trtfb, answers, scorer="tts_intelligibility")
+    summary = task_eval.compare_prediction_sets(hf, trtfb, answers, scorer="tts_intelligibility")
 
     assert summary["disagreements"][0]["hf_prediction"] == (
-        "i m never more aware of a room s acoustics")
+        "i m never more aware of a room s acoustics"
+    )
     assert summary["disagreements"][0]["trtfb_prediction"] == (
-        "i am never more aware of other rooms")
+        "i am never more aware of other rooms"
+    )
 
 
 def test_run_tts_trtfb_generates_audio_and_batches_asr(tmp_path: Path, monkeypatch) -> None:
@@ -1150,16 +1200,24 @@ def test_run_tts_trtfb_generates_audio_and_batches_asr(tmp_path: Path, monkeypat
 
 
 def test_ocrbench_v2_scores_short_vqa_with_contains() -> None:
-    answers = {"requests": [{
-        "answer": "San Francisco",
-        "subject": "APP agent en",
-        "ocrbench_type": "APP agent en",
-        "ocrbench_answers": ["San Francisco"],
-    }]}
-    predictions = {"responses": [{
-        "sample_id": "ocrbench_v2_000009",
-        "output_text": "San Francisco, CA",
-    }]}
+    answers = {
+        "requests": [
+            {
+                "answer": "San Francisco",
+                "subject": "APP agent en",
+                "ocrbench_type": "APP agent en",
+                "ocrbench_answers": ["San Francisco"],
+            }
+        ]
+    }
+    predictions = {
+        "responses": [
+            {
+                "sample_id": "ocrbench_v2_000009",
+                "output_text": "San Francisco, CA",
+            }
+        ]
+    }
 
     score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
 
@@ -1170,17 +1228,25 @@ def test_ocrbench_v2_scores_short_vqa_with_contains() -> None:
 
 
 def test_ocrbench_v2_scores_counting_regression() -> None:
-    answers = {"requests": [{
-        "answer": "10",
-        "subject": "text counting en",
-        "ocrbench_type": "text counting en",
-        "ocrbench_eval": "regression",
-        "ocrbench_answers": ["10"],
-    }]}
-    predictions = {"responses": [{
-        "sample_id": "ocrbench_v2_008200",
-        "output_text": "There are 9 words.",
-    }]}
+    answers = {
+        "requests": [
+            {
+                "answer": "10",
+                "subject": "text counting en",
+                "ocrbench_type": "text counting en",
+                "ocrbench_eval": "regression",
+                "ocrbench_answers": ["10"],
+            }
+        ]
+    }
+    predictions = {
+        "responses": [
+            {
+                "sample_id": "ocrbench_v2_008200",
+                "output_text": "There are 9 words.",
+            }
+        ]
+    }
 
     score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
 
@@ -1189,16 +1255,24 @@ def test_ocrbench_v2_scores_counting_regression() -> None:
 
 
 def test_ocrbench_v2_scores_text_grounding_iou_from_answer_coords() -> None:
-    answers = {"requests": [{
-        "answer": "0",
-        "subject": "text grounding en",
-        "ocrbench_type": "text grounding en",
-        "ocrbench_answers": ["0", "0", "100", "100"],
-    }]}
-    predictions = {"responses": [{
-        "sample_id": "ocrbench_v2_008400",
-        "output_text": "(0, 0, 50, 100)",
-    }]}
+    answers = {
+        "requests": [
+            {
+                "answer": "0",
+                "subject": "text grounding en",
+                "ocrbench_type": "text grounding en",
+                "ocrbench_answers": ["0", "0", "100", "100"],
+            }
+        ]
+    }
+    predictions = {
+        "responses": [
+            {
+                "sample_id": "ocrbench_v2_008400",
+                "output_text": "(0, 0, 50, 100)",
+            }
+        ]
+    }
 
     score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
 
@@ -1207,16 +1281,24 @@ def test_ocrbench_v2_scores_text_grounding_iou_from_answer_coords() -> None:
 
 
 def test_ocrbench_v2_scores_key_information_f1() -> None:
-    answers = {"requests": [{
-        "answer": "{'name': ['Ada'], 'total': ['42']}",
-        "subject": "key information extraction en",
-        "ocrbench_type": "key information extraction en",
-        "ocrbench_answers": ["{'name': ['Ada'], 'total': ['42']}"],
-    }]}
-    predictions = {"responses": [{
-        "sample_id": "ocrbench_v2_000900",
-        "output_text": "{'name': 'Ada', 'total': '41'}",
-    }]}
+    answers = {
+        "requests": [
+            {
+                "answer": "{'name': ['Ada'], 'total': ['42']}",
+                "subject": "key information extraction en",
+                "ocrbench_type": "key information extraction en",
+                "ocrbench_answers": ["{'name': ['Ada'], 'total': ['42']}"],
+            }
+        ]
+    }
+    predictions = {
+        "responses": [
+            {
+                "sample_id": "ocrbench_v2_000900",
+                "output_text": "{'name': 'Ada', 'total': '41'}",
+            }
+        ]
+    }
 
     score = task_eval.score_predictions(predictions, answers, scorer="ocrbench_v2")
 
@@ -1225,28 +1307,34 @@ def test_ocrbench_v2_scores_key_information_f1() -> None:
 
 
 def test_ocrbench_v2_agreement_uses_correctness_not_text_match() -> None:
-    answers = {"requests": [
-        {
-            "answer": "alpha",
-            "subject": "APP agent en",
-            "ocrbench_type": "APP agent en",
-            "ocrbench_answers": ["alpha"],
-        },
-        {
-            "answer": "Facebook",
-            "subject": "APP agent en",
-            "ocrbench_type": "APP agent en",
-            "ocrbench_answers": ["Facebook"],
-        },
-    ]}
-    hf = {"responses": [
-        {"sample_id": "both_wrong", "output_text": "zzz"},
-        {"sample_id": "hf_correct", "output_text": "Facebook"},
-    ]}
-    trtfb = {"responses": [
-        {"sample_id": "both_wrong", "output_text": "yyy"},
-        {"sample_id": "hf_correct", "output_text": "Instagram"},
-    ]}
+    answers = {
+        "requests": [
+            {
+                "answer": "alpha",
+                "subject": "APP agent en",
+                "ocrbench_type": "APP agent en",
+                "ocrbench_answers": ["alpha"],
+            },
+            {
+                "answer": "Facebook",
+                "subject": "APP agent en",
+                "ocrbench_type": "APP agent en",
+                "ocrbench_answers": ["Facebook"],
+            },
+        ]
+    }
+    hf = {
+        "responses": [
+            {"sample_id": "both_wrong", "output_text": "zzz"},
+            {"sample_id": "hf_correct", "output_text": "Facebook"},
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {"sample_id": "both_wrong", "output_text": "yyy"},
+            {"sample_id": "hf_correct", "output_text": "Instagram"},
+        ]
+    }
 
     summary = task_eval.compare_prediction_sets(hf, trtfb, answers, scorer="ocrbench_v2")
 
@@ -1261,14 +1349,18 @@ def test_ocrbench_v2_agreement_uses_correctness_not_text_match() -> None:
 
 
 def test_asr_transcript_scorer_reports_wer_cer_and_exact_rate() -> None:
-    answers = {"requests": [
-        {"answer": "Hello, world!", "subject": "test-clean"},
-        {"answer": "The quick brown fox", "subject": "test-clean"},
-    ]}
-    predictions = {"responses": [
-        {"sample_id": "a", "output_text": "hello world"},
-        {"sample_id": "b", "output_text": "the quick brown box"},
-    ]}
+    answers = {
+        "requests": [
+            {"answer": "Hello, world!", "subject": "test-clean"},
+            {"answer": "The quick brown fox", "subject": "test-clean"},
+        ]
+    }
+    predictions = {
+        "responses": [
+            {"sample_id": "a", "output_text": "hello world"},
+            {"sample_id": "b", "output_text": "the quick brown box"},
+        ]
+    }
 
     score = task_eval.score_predictions(predictions, answers, scorer="asr_transcript")
 
@@ -1282,14 +1374,18 @@ def test_asr_transcript_scorer_reports_wer_cer_and_exact_rate() -> None:
 
 
 def test_asr_transcript_scorer_marks_high_wer_wrong_and_skips_errors() -> None:
-    answers = {"requests": [
-        {"answer": "alpha beta gamma", "subject": "test-clean"},
-        {"answer": "delta epsilon", "subject": "test-clean"},
-    ]}
-    predictions = {"responses": [
-        {"sample_id": "a", "output_text": "wrong words here"},
-        {"sample_id": "b", "output_text": task_eval.ERROR_OUTPUT_TEXT},
-    ]}
+    answers = {
+        "requests": [
+            {"answer": "alpha beta gamma", "subject": "test-clean"},
+            {"answer": "delta epsilon", "subject": "test-clean"},
+        ]
+    }
+    predictions = {
+        "responses": [
+            {"sample_id": "a", "output_text": "wrong words here"},
+            {"sample_id": "b", "output_text": task_eval.ERROR_OUTPUT_TEXT},
+        ]
+    }
 
     score = task_eval.score_predictions(predictions, answers, scorer="asr_transcript")
 
@@ -1301,18 +1397,24 @@ def test_asr_transcript_scorer_marks_high_wer_wrong_and_skips_errors() -> None:
 
 
 def test_asr_transcript_agreement_uses_correctness_thresholds() -> None:
-    answers = {"requests": [
-        {"answer": "alpha beta", "subject": "test-clean"},
-        {"answer": "gamma delta", "subject": "test-clean"},
-    ]}
-    hf = {"responses": [
-        {"sample_id": "same_correctness", "output_text": "alpha beta"},
-        {"sample_id": "hf_correct", "output_text": "gamma delta"},
-    ]}
-    trtfb = {"responses": [
-        {"sample_id": "same_correctness", "output_text": "alpha, beta."},
-        {"sample_id": "hf_correct", "output_text": "totally wrong"},
-    ]}
+    answers = {
+        "requests": [
+            {"answer": "alpha beta", "subject": "test-clean"},
+            {"answer": "gamma delta", "subject": "test-clean"},
+        ]
+    }
+    hf = {
+        "responses": [
+            {"sample_id": "same_correctness", "output_text": "alpha beta"},
+            {"sample_id": "hf_correct", "output_text": "gamma delta"},
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {"sample_id": "same_correctness", "output_text": "alpha, beta."},
+            {"sample_id": "hf_correct", "output_text": "totally wrong"},
+        ]
+    }
 
     summary = task_eval.compare_prediction_sets(hf, trtfb, answers, scorer="asr_transcript")
 
@@ -1465,9 +1567,9 @@ def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> No
     assert cmd[:4] == ["build/trtmc", "build", "org/model", "-o"]
     assert "--max-cache-length" in cmd
     assert "512" in cmd
-    assert ["--method", "trt"] == cmd[cmd.index("--method"):cmd.index("--method") + 2]
-    assert ["--tp-size", "2"] == cmd[cmd.index("--tp-size"):cmd.index("--tp-size") + 2]
-    assert ["--precision", "bf16"] == cmd[cmd.index("--precision"):cmd.index("--precision") + 2]
+    assert ["--method", "trt"] == cmd[cmd.index("--method") : cmd.index("--method") + 2]
+    assert ["--tp-size", "2"] == cmd[cmd.index("--tp-size") : cmd.index("--tp-size") + 2]
+    assert ["--precision", "bf16"] == cmd[cmd.index("--precision") : cmd.index("--precision") + 2]
     assert "--trust-remote-code" in cmd
     assert "--verbose" in cmd
 
@@ -1587,39 +1689,51 @@ def test_run_hf_reference_subprocess_passes_asr_family_metadata(
 
 
 def test_asr_reference_detection_identifies_canary() -> None:
-    assert task_eval._is_canary_asr_reference(argparse.Namespace(
-        model="nvidia/canary-1b-v2",
-        family="",
-        reference_family="",
-    ))
-    assert task_eval._is_canary_asr_reference(argparse.Namespace(
-        model="nvidia/other",
-        family="canary",
-        reference_family="",
-    ))
-    assert task_eval._is_canary_asr_reference(argparse.Namespace(
-        model="nvidia/other",
-        family="",
-        reference_family="asr_canary",
-    ))
+    assert task_eval._is_canary_asr_reference(
+        argparse.Namespace(
+            model="nvidia/canary-1b-v2",
+            family="",
+            reference_family="",
+        )
+    )
+    assert task_eval._is_canary_asr_reference(
+        argparse.Namespace(
+            model="nvidia/other",
+            family="canary",
+            reference_family="",
+        )
+    )
+    assert task_eval._is_canary_asr_reference(
+        argparse.Namespace(
+            model="nvidia/other",
+            family="",
+            reference_family="asr_canary",
+        )
+    )
 
 
 def test_nemo_asr_reference_detection_identifies_streaming() -> None:
-    assert task_eval._is_nemo_asr_reference(argparse.Namespace(
-        model="nvidia/nemotron-speech-streaming-en-0.6b",
-        family="",
-        reference_family="",
-    ))
-    assert task_eval._is_nemo_asr_reference(argparse.Namespace(
-        model="nvidia/other",
-        family="nemotron_speech_streaming",
-        reference_family="",
-    ))
-    assert task_eval._is_nemo_asr_reference(argparse.Namespace(
-        model="nvidia/canary-1b-v2",
-        family="canary",
-        reference_family="asr_canary",
-    ))
+    assert task_eval._is_nemo_asr_reference(
+        argparse.Namespace(
+            model="nvidia/nemotron-speech-streaming-en-0.6b",
+            family="",
+            reference_family="",
+        )
+    )
+    assert task_eval._is_nemo_asr_reference(
+        argparse.Namespace(
+            model="nvidia/other",
+            family="nemotron_speech_streaming",
+            reference_family="",
+        )
+    )
+    assert task_eval._is_nemo_asr_reference(
+        argparse.Namespace(
+            model="nvidia/canary-1b-v2",
+            family="canary",
+            reference_family="asr_canary",
+        )
+    )
 
 
 def test_run_hf_reference_dispatches_asr_workdir(tmp_path: Path, monkeypatch) -> None:
@@ -1680,15 +1794,17 @@ def test_run_asr_trtfb_invokes_transcribe_per_audio(tmp_path: Path, monkeypatch)
 
     task_eval.run_asr_trtfb(args)
 
-    assert commands == [[
-        "build/trtmc",
-        "transcribe",
-        "bundle.trtfb",
-        "--audio",
-        str(audio_path),
-        "--max-new-tokens",
-        "32",
-    ]]
+    assert commands == [
+        [
+            "build/trtmc",
+            "transcribe",
+            "bundle.trtfb",
+            "--audio",
+            str(audio_path),
+            "--max-new-tokens",
+            "32",
+        ]
+    ]
     predictions = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
     assert predictions["responses"][0]["output_text"] == "Hello world"
     assert predictions["responses"][0]["generated_token_ids"] == [1, 2, 3]
@@ -1741,12 +1857,15 @@ def test_vlm_chat_text_falls_back_when_chat_template_missing() -> None:
         ]
     }
 
-    assert task_eval._vlm_chat_text(
-        Processor(),
-        request,
-        "Extract text.",
-        "deepseek-ai/DeepSeek-OCR-2",
-    ) == "Extract text."
+    assert (
+        task_eval._vlm_chat_text(
+            Processor(),
+            request,
+            "Extract text.",
+            "deepseek-ai/DeepSeek-OCR-2",
+        )
+        == "Extract text."
+    )
 
 
 def test_run_deepseek_ocr_hf_reference_writes_predictions(tmp_path: Path) -> None:
@@ -1766,11 +1885,13 @@ def test_run_deepseek_ocr_hf_reference_writes_predictions(tmp_path: Path) -> Non
         model=Model(),
         tokenizer=Tokenizer(),
         answers={"requests": [{"answer": "enabled"}]},
-        prompt_rows=[{
-            "sample_id": "ocrbench_v2_000000",
-            "prompt": "What is shown?",
-            "images": ["/tmp/image.jpg"],
-        }],
+        prompt_rows=[
+            {
+                "sample_id": "ocrbench_v2_000000",
+                "prompt": "What is shown?",
+                "images": ["/tmp/image.jpg"],
+            }
+        ],
         work_dir=tmp_path,
     )
 
@@ -1807,12 +1928,14 @@ def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
         suite=suite,
     )
     (work_dir / "hf_predictions.json").write_text(
-        json.dumps({
-            "responses": [
-                {"sample_id": "mmlu_000000", "output_text": "B"},
-                {"sample_id": "mmlu_000001", "output_text": "A"},
-            ]
-        }),
+        json.dumps(
+            {
+                "responses": [
+                    {"sample_id": "mmlu_000000", "output_text": "B"},
+                    {"sample_id": "mmlu_000001", "output_text": "A"},
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     calls: list[str] = []
@@ -1834,12 +1957,14 @@ def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
     def fake_run_trtfb(args):
         calls.append(f"trtfb-seed={args.seed}")
         Path(args.work_dir, "trtfb_predictions.json").write_text(
-            json.dumps({
-                "responses": [
-                    {"sample_id": "mmlu_000000", "output_text": "B"},
-                    {"sample_id": "mmlu_000001", "output_text": "B"},
-                ]
-            }),
+            json.dumps(
+                {
+                    "responses": [
+                        {"sample_id": "mmlu_000000", "output_text": "B"},
+                        {"sample_id": "mmlu_000001", "output_text": "B"},
+                    ]
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -1895,9 +2020,7 @@ def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
     assert (work_dir / "summary.json").is_file()
 
 
-def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_eval_one_model_uses_vlm_prepare_outputs_for_vlm_suite(tmp_path: Path, monkeypatch) -> None:
     dataset_dir = tmp_path / "MMMU_Pro_vision"
     dataset_dir.mkdir()
     dataset = dataset_dir / "mmmu_pro_vision_dataset.json"
@@ -2027,7 +2150,9 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
     def fake_run_hf(_args, _model, work_dir):
         calls.append("hf")
         Path(work_dir, "hf_predictions.json").write_text(
-            json.dumps({"responses": [{"sample_id": "clean_000000", "output_text": "The quick brown fox"}]}),
+            json.dumps(
+                {"responses": [{"sample_id": "clean_000000", "output_text": "The quick brown fox"}]}
+            ),
             encoding="utf-8",
         )
 
@@ -2043,7 +2168,9 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
         prompts = task_eval.load_jsonl(Path(args.work_dir) / "prompts.jsonl")
         assert prompts[0]["audio"].endswith("clean_000000.wav")
         Path(args.work_dir, "trtfb_predictions.json").write_text(
-            json.dumps({"responses": [{"sample_id": "clean_000000", "output_text": "the quick brown fox"}]}),
+            json.dumps(
+                {"responses": [{"sample_id": "clean_000000", "output_text": "the quick brown fox"}]}
+            ),
             encoding="utf-8",
         )
 
@@ -2101,9 +2228,7 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
     assert result["prediction_agreement_rate"] == 1.0
 
 
-def test_eval_one_model_runs_hf_for_golden_snapshot_vlm_model(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_eval_one_model_runs_hf_for_golden_snapshot_vlm_model(tmp_path: Path, monkeypatch) -> None:
     dataset_dir = tmp_path / "OCRBench_v2" / "unified"
     dataset_dir.mkdir(parents=True)
     dataset = dataset_dir / "dataset.json"
@@ -2262,7 +2387,9 @@ def test_eval_records_model_failure_and_continues(tmp_path: Path, monkeypatch) -
     assert summary["results"][1]["model"] == "ok"
 
 
-def test_eval_stops_after_oom_when_gpu_cleanup_is_not_confirmed(tmp_path: Path, monkeypatch) -> None:
+def test_eval_stops_after_oom_when_gpu_cleanup_is_not_confirmed(
+    tmp_path: Path, monkeypatch
+) -> None:
     suite = {"id": "mmlu_five_shot_mcq", "dataset": {"kind": "mmlu_five_shot_json"}}
     models = [
         {"name": "oom", "hf_id": "org/oom", "bundle": "oom.trtfb"},

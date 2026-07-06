@@ -44,6 +44,21 @@ def _make_standard_decoder_tensors(vocab, hidden, layers, heads, kv_heads, mlp):
 class TestLlamaPlugin:
     VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 32, 16, 2, 4, 2, 32
 
+    def test_selected_fp32_layers_use_single_engine_layout(self):
+        from tensorrt_model_connect.families.llama import plugin
+
+        config = ModelConfig(
+            hidden_size=self.HIDDEN,
+            vocab_size=self.VOCAB,
+            num_hidden_layers=self.LAYERS,
+            num_attention_heads=self.HEADS,
+            num_key_value_heads=self.KV_HEADS,
+        )
+        assert plugin.supports_split_decoder_roles(config)
+
+        config.raw["_fp32_layers"] = [1]
+        assert not plugin.supports_split_decoder_roles(config)
+
     def test_load_weights(self, tmp_path):
         """LLaMA uses load_standard_weights — verify compact GQA K/V."""
         from tensorrt_model_connect.families.llama import plugin
@@ -73,6 +88,13 @@ class TestLlamaPlugin:
                 self.HIDDEN, kv_hidden)
             assert weights[f"layer.{i}.w_v"].shape == (
                 self.HIDDEN, kv_hidden)
+
+        cfg.raw["_fp32_layers"] = [1]
+        mixed_weights = plugin.load_weights(
+            str(tmp_path), cfg, precision="fp16")
+        assert mixed_weights["embedding"].dtype == np.float16
+        assert mixed_weights["layer.0.w_q"].dtype == np.float16
+        assert mixed_weights["layer.1.w_q"].dtype == np.float32
 
     def test_tied_embeddings(self, tmp_path):
         """When lm_head.weight is missing, w_out = transposed embedding."""

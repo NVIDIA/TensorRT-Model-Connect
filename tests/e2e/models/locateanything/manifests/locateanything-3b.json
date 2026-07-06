@@ -1,16 +1,24 @@
 {
   "name": "locateanything-3b",
-  "trace_id": "IT-E2E-LA3B-01",
   "hf_id": "nvidia/LocateAnything-3B",
   "bundle": "locateanything-3b.trtfb",
   "family": "locateanything",
   "runtime_strategy": "locateanything_vision_language",
   "task_strategy": "vision_language_generation",
-  "ci_tier": "l0_only",
+  "precision": "fp16",
+  "user_contract": "image-text-to-text",
   "max_cache_length": 384,
-  "prompt": "Find the red vehicle in this image.",
-  "max_new_tokens": 32,
-  "test_image": "data/test_img.jpeg",
   "trust_remote_code": true,
-  "notes": "Initial LocateAnything support uses the fixed 448x448 single-image MoonViT path and the existing TRT MC autoregressive VL generation path."
+  "testcases": [
+    {
+      "name": "locateanything-3b",
+      "trace_id": "IT-E2E-LA3B-01",
+      "ci_tier": "l0_only",
+      "reference_precision": "fp32",
+      "prompt": "Find the red vehicle in this image.",
+      "max_new_tokens": 32,
+      "test_image": "data/test_img.jpeg",
+      "notes": "Initial LocateAnything support uses the fixed 448x448 single-image MoonViT path and the existing TRT MC autoregressive VL generation path."
+    }
+  ]
 }

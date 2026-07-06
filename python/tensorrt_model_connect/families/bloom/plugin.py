@@ -40,6 +40,9 @@ class BloomPlugin:
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "bloom"
 
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        return not bool(config.raw.get("_fp32_layers"))
+
     def load_weights(
         self, model_dir: str, config: ModelConfig,
     ) -> WeightDict:

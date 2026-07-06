@@ -141,6 +141,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             dynamic_kv_cache=getattr(args, "dynamic_kv_cache", False),
             dynamic_kv_profile_rows_override=getattr(args, "dynamic_kv_profile_rows", None),
             precision=args.precision,
+            fp32_layers=getattr(args, "fp32_layers", None),
             quantize=quantize,
             quant_scales=args.quant_scales,
             quant_calibration_samples=args.quant_calibration_samples,
@@ -320,6 +321,28 @@ def _parse_profile_rows(value: str) -> list[int]:
             "Expected at least one integer in --dynamic-kv-profile-rows"
         )
     return rows
+
+
+def _parse_layer_indices(value: str) -> list[int]:
+    layers: list[int] = []
+    for part in value.split(","):
+        text = part.strip()
+        if not text:
+            continue
+        try:
+            layer = int(text)
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                f"Invalid FP32 layer {text!r}; expected comma-separated integers"
+            ) from exc
+        if layer < 0:
+            raise argparse.ArgumentTypeError(
+                f"Invalid FP32 layer {layer}; indices must be non-negative")
+        layers.append(layer)
+    if not layers:
+        raise argparse.ArgumentTypeError(
+            "Expected at least one integer in --fp32-layers")
+    return layers
 
 
 def _read_bundle_header(bundle_path: str) -> dict:
@@ -543,6 +566,12 @@ def main() -> None:
     build_p.add_argument("--precision", choices=["fp32", "fp16", "bf16"],
                          default="fp32",
                          help="Engine precision (default: fp32)")
+    build_p.add_argument(
+        "--fp32-layers",
+        type=_parse_layer_indices,
+        default=None,
+        help="Comma-separated model-local layer indices to compute in FP32",
+    )
     build_p.add_argument("--quantize",
                          choices=["fp8", "int8", "int8_sq", "int4", "int4_awq", "nvfp4", "w4a8"],
                          default=None,

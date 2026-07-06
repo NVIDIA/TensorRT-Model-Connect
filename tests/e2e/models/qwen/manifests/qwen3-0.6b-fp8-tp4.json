@@ -1,11 +1,11 @@
 {
   "name": "qwen3-0.6b-fp8-tp4",
-  "trace_id": "IT-E2E-QWN3-FP8-TP4-01",
   "hf_id": "Qwen/Qwen3-0.6B",
   "bundle": "qwen3-0.6b-fp8-bf16base-tp4.trtfb",
   "family": "qwen",
   "runtime_strategy": "qwen_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
+  "user_contract": "text-generation",
   "precision": "bf16",
   "quantization": {
     "format": "fp8",
@@ -13,13 +13,7 @@
     "calibration_samples": 64
   },
   "max_cache_length": 256,
-  "prompt": "What is the capital of France? Answer in one word.",
-  "expected_answers": [
-    "Paris"
-  ],
-  "max_new_tokens": 10,
   "trust_remote_code": false,
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
     "parallel": {
@@ -40,26 +34,38 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "qwen3-0.6b-fp8-tp4",
+      "trace_id": "IT-E2E-QWN3-FP8-TP4-01",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "expected_answers": [
+        "Paris"
+      ],
+      "max_new_tokens": 10,
+      "ci_tier": "multi_device",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "notes": "FP8 TP4 quantization can perturb raw logit distributions while preserving decoded answer semantics. Require the model-owned expected answer plus the same logit and token agreement gates as qwen3-0.6b-fp8 for output confidence."
     }
-  ],
-  "notes": "FP8 TP4 quantization can perturb raw logit distributions while preserving decoded answer semantics. Require the model-owned expected answer plus the same logit and token agreement gates as qwen3-0.6b-fp8 for output confidence."
+  ]
 }

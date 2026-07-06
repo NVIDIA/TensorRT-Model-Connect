@@ -42,6 +42,7 @@ def build_t5_encoder_engine(
     relative_attention_num_buckets: int = 32,
     relative_attention_max_distance: int = 128,
     eps: float = 1e-6,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build T5 encoder TRT engine plan.
@@ -70,6 +71,14 @@ def build_t5_encoder_engine(
     Returns:
         Serialized TRT engine plan bytes.
     """
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported T5 precision {precision!r}; expected fp32 or fp16")
+
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -82,14 +91,19 @@ def build_t5_encoder_engine(
     # Attention mask: [1, max_seq_len] float32, 0.0 for valid, -1e9 for padding
     attention_mask_input = network.add_input(
         "attention_mask", trt.float32, (1, max_seq_len))
+    if work_trt_dtype != trt.float32:
+        attention_mask_input = network.add_cast(
+            attention_mask_input, work_trt_dtype).get_output(0)
 
     # --- Constants ---
     eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([eps], dtype=np.float32))
+        network, (1, 1), np.array([eps], dtype=work_np_dtype),
+        dtype=work_np_dtype)
 
     # Embedding table [vocab_size, d_model]
     embed_table = graph_ops.add_constant(
-        network, (vocab_size, d_model), weights["shared.weight"])
+        network, (vocab_size, d_model), weights["shared.weight"],
+        dtype=work_np_dtype)
 
     # --- Embedding lookup ---
     # Flatten input_ids to [max_seq_len] for gather
@@ -124,7 +138,7 @@ def build_t5_encoder_engine(
                 "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"]
 
         bias_table = np.zeros(
-            (num_heads, max_seq_len, max_seq_len), dtype=np.float32)
+            (num_heads, max_seq_len, max_seq_len), dtype=work_np_dtype)
         for q_pos in range(max_seq_len):
             for k_pos in range(max_seq_len):
                 bucket = bucket_indices[q_pos, k_pos]
@@ -132,7 +146,8 @@ def build_t5_encoder_engine(
                     bias_table[h, q_pos, k_pos] = rel_bias_weight[bucket, h]
 
         rel_bias_const = graph_ops.add_constant(
-            network, (num_heads, max_seq_len, max_seq_len), bias_table)
+            network, (num_heads, max_seq_len, max_seq_len), bias_table,
+            dtype=work_np_dtype)
 
         # Combine position bias + attention mask
         position_bias_masked = network.add_elementwise(
@@ -150,7 +165,8 @@ def build_t5_encoder_engine(
         # Pre-norm (RMSNorm)
         norm1_gamma = weights[f"{prefix}.layer.0.layer_norm.weight"]
         normed = graph_ops.add_rms_norm(
-            network, hidden, d_model, norm1_gamma, eps_t)
+            network, hidden, d_model, norm1_gamma, eps_t,
+            dtype=work_np_dtype)
 
         # Q, K, V projections
         # T5 uses no bias on Q/K/V/O projections
@@ -161,11 +177,14 @@ def build_t5_encoder_engine(
 
         # Self-attention with relative position bias
         q = graph_ops.add_matmul_rhs_constant(
-            network, normed, d_model, attention_size, w_q)
+            network, normed, d_model, attention_size, w_q,
+            dtype=work_np_dtype)
         k = graph_ops.add_matmul_rhs_constant(
-            network, normed, d_model, attention_size, w_k)
+            network, normed, d_model, attention_size, w_k,
+            dtype=work_np_dtype)
         v = graph_ops.add_matmul_rhs_constant(
-            network, normed, d_model, attention_size, w_v)
+            network, normed, d_model, attention_size, w_v,
+            dtype=work_np_dtype)
 
         # T5 attention is intentionally unscaled; relative position bias and
         # padding mask are folded into the native IAttention additive mask.
@@ -181,7 +200,7 @@ def build_t5_encoder_engine(
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
             network, context_flat,
-            attention_size, d_model, w_o)
+            attention_size, d_model, w_o, dtype=work_np_dtype)
 
         # Residual
         hidden = network.add_elementwise(
@@ -192,7 +211,8 @@ def build_t5_encoder_engine(
         # Pre-norm (RMSNorm)
         norm2_gamma = weights[f"{prefix}.layer.1.layer_norm.weight"]
         ffn_normed = graph_ops.add_rms_norm(
-            network, hidden, d_model, norm2_gamma, eps_t)
+            network, hidden, d_model, norm2_gamma, eps_t,
+            dtype=work_np_dtype)
 
         # T5 gated GELU FFN: gelu(wi_0(x)) * wi_1(x), then wo
         w_fc1 = weights[f"{prefix}.layer.1.DenseReluDense.wi_0.weight"]
@@ -200,19 +220,23 @@ def build_t5_encoder_engine(
         w_fc2 = weights[f"{prefix}.layer.1.DenseReluDense.wo.weight"]
 
         fc1 = graph_ops.add_matmul_rhs_constant(
-            network, ffn_normed, d_model, d_ff, w_fc1)
+            network, ffn_normed, d_model, d_ff, w_fc1,
+            dtype=work_np_dtype)
         fc1_gate = graph_ops.add_matmul_rhs_constant(
-            network, ffn_normed, d_model, d_ff, w_fc1_gate)
+            network, ffn_normed, d_model, d_ff, w_fc1_gate,
+            dtype=work_np_dtype)
 
         # GELU activation on fc1, multiply with gate
-        activated = graph_ops.add_gelu_new(network, fc1)
+        activated = graph_ops.add_gelu_new(
+            network, fc1, dtype=work_np_dtype)
         gated = network.add_elementwise(
             activated, fc1_gate,
             trt.ElementWiseOperation.PROD)
 
         # Output projection
         ffn_out = graph_ops.add_matmul_rhs_constant(
-            network, gated.get_output(0), d_ff, d_model, w_fc2)
+            network, gated.get_output(0), d_ff, d_model, w_fc2,
+            dtype=work_np_dtype)
 
         # Residual
         hidden = network.add_elementwise(
@@ -222,7 +246,8 @@ def build_t5_encoder_engine(
     # --- Final norm ---
     final_norm_gamma = weights["encoder.final_layer_norm.weight"]
     hidden = graph_ops.add_rms_norm(
-        network, hidden, d_model, final_norm_gamma, eps_t)
+        network, hidden, d_model, final_norm_gamma, eps_t,
+        dtype=work_np_dtype)
 
     # --- Output ---
     # Reshape to [1, max_seq_len, d_model]

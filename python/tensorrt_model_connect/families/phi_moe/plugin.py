@@ -239,6 +239,12 @@ class PhiMoEPlugin:
         attention_window = max_cache_length + 1
         norm_type = "layernorm"
         jitter_eps = config.raw.get("router_jitter_noise", 0.01)
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(f"Unsupported Phi-MoE precision: {precision}")
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
@@ -253,16 +259,20 @@ class PhiMoEPlugin:
         position_id = network.add_input("position_id", trt.int32, (1,))
         attention_mask = network.add_input(
             "attention_mask", trt.float32, (1, attention_window))
+        attention_mask_work = attention_mask
+        if work_trt_dtype != trt.float32:
+            attention_mask_work = network.add_cast(
+                attention_mask, work_trt_dtype).get_output(0)
 
         cache_k_inputs = []
         cache_v_inputs = []
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
@@ -270,7 +280,8 @@ class PhiMoEPlugin:
         # Shared constants
         # -----------------------------------------------------------
         embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+            network, (vocab, hidden), weights["embedding"],
+            dtype=work_np_dtype)
 
         graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
         cos_half_np = graph_ops.make_rope_table_half_dim(
@@ -278,9 +289,9 @@ class PhiMoEPlugin:
         sin_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, False)
         cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np)
+            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
         sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np)
+            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
@@ -308,7 +319,7 @@ class PhiMoEPlugin:
                 hidden=hidden_state,
                 cache_k=cache_k_inputs[layer_idx],
                 cache_v=cache_v_inputs[layer_idx],
-                attention_mask=attention_mask,
+                attention_mask=attention_mask_work,
                 position_id=position_id,
                 cos_half_tensor=cos_half_tensor,
                 sin_half_tensor=sin_half_tensor,
@@ -327,6 +338,8 @@ class PhiMoEPlugin:
                 top_k=top_k,
                 jitter_eps=jitter_eps,
                 norm_type=norm_type,
+                dtype=work_np_dtype,
+                work_trt_dtype=work_trt_dtype,
             )
 
             hidden_state = result["hidden"]
@@ -348,21 +361,27 @@ class PhiMoEPlugin:
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = _apply_norm(
                 network, hidden_state, hidden, final_norm,
-                weights.get("final_norm_beta"), eps_tensor, norm_type)
+                weights.get("final_norm_beta"), eps_tensor, norm_type,
+                dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # LM head (logits)
         # -----------------------------------------------------------
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_out"])
+            network, hidden_state, hidden, vocab, weights["w_out"],
+            dtype=work_np_dtype)
 
         # LM head bias
         lm_bias = weights.get("lm_head_bias")
         if lm_bias is not None:
-            logits = graph_ops.add_bias_sum(network, logits, vocab, lm_bias)
+            logits = graph_ops.add_bias_sum(
+                network, logits, vocab, lm_bias, dtype=work_np_dtype)
         else:
-            b_out = np.zeros(vocab, dtype=np.float32)
-            logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+            b_out = np.zeros(vocab, dtype=work_np_dtype)
+            logits = graph_ops.add_bias_sum(
+                network, logits, vocab, b_out, dtype=work_np_dtype)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
 
         logits.name = "logits"
         network.mark_output(logits)
@@ -386,7 +405,8 @@ class PhiMoEPlugin:
                   f"hidden={hidden}, attn={attention_size}, "
                   f"experts={num_experts}, top_k={top_k}, "
                   f"inter={moe_intermediate}, "
-                  f"cache={max_cache_length}) ...", file=sys.stderr)
+                  f"cache={max_cache_length}, precision={precision}) ...",
+                  file=sys.stderr)
 
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
@@ -403,12 +423,13 @@ def _add_swiglu_expert(
     w_gate: np.ndarray,
     w_up: np.ndarray,
     w_down: np.ndarray,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
     gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate)
+        network, inp, hidden_size, intermediate_size, w_gate, dtype=dtype)
     up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up)
+        network, inp, hidden_size, intermediate_size, w_up, dtype=dtype)
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(
@@ -417,7 +438,8 @@ def _add_swiglu_expert(
         swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
     down = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), intermediate_size, hidden_size, w_down)
+        network, gated.get_output(0), intermediate_size, hidden_size, w_down,
+        dtype=dtype)
     return down
 
 
@@ -427,6 +449,8 @@ def _sparsemixer_weight(
     num_experts: int,
     jitter_eps: float,
     original_scores: trt.ITensor | None = None,
+    dtype: np.dtype = np.float32,
+    work_trt_dtype=None,
 ) -> tuple[trt.ITensor, trt.ITensor]:
     """Compute one expert selection via SparseMixer (inference mode).
 
@@ -450,10 +474,13 @@ def _sparsemixer_weight(
                 If None, uses scores (first expert selection).
 
     Returns:
-        (weight, index) where weight is [1, 1] float32 and index is [1, 1] int32.
+        (weight, index) where weight uses the graph compute dtype and index is
+        [1, 1] int32.
     """
     if original_scores is None:
         original_scores = scores
+    if work_trt_dtype is None:
+        work_trt_dtype = trt.float32
 
     # max_val [1, 1], max_ind [1, 1]  — from (potentially masked) scores
     topk1 = network.add_topk(scores, trt.TopKOperation.MAX, 1, 1 << 1)
@@ -478,7 +505,7 @@ def _sparsemixer_weight(
     # > 2 * jitter_eps  (boolean mask)
     threshold = graph_ops.add_constant(
         network, (1, 1),
-        np.array([2.0 * jitter_eps], dtype=np.float32))
+        np.array([2.0 * jitter_eps], dtype=dtype), dtype=dtype)
     mask_float = network.add_elementwise(
         ratio.get_output(0), threshold,
         trt.ElementWiseOperation.GREATER)  # bool tensor
@@ -488,9 +515,9 @@ def _sparsemixer_weight(
     # Actually: just add mask * -1e9 to scores, where mask=1 for masked positions
     neginf = graph_ops.add_constant(
         network, (1, 1),
-        np.array([-1e9], dtype=np.float32))
+        np.array([np.finfo(dtype).min], dtype=dtype), dtype=dtype)
     # Cast bool mask to float
-    mask_f = network.add_cast(mask_float.get_output(0), trt.float32)
+    mask_f = network.add_cast(mask_float.get_output(0), work_trt_dtype)
     penalty = network.add_elementwise(
         mask_f.get_output(0), neginf, trt.ElementWiseOperation.PROD)
     masked = network.add_elementwise(
@@ -521,6 +548,8 @@ def _add_moe_block(
     moe_intermediate: int,
     top_k: int,
     jitter_eps: float = 0.01,
+    dtype: np.dtype = np.float32,
+    work_trt_dtype=None,
 ) -> trt.ITensor:
     """Add Mixture of Experts block with SparseMixer routing (top-2).
 
@@ -537,14 +566,18 @@ def _add_moe_block(
       5. Gather selected experts and apply weights
       6. Weighted sum -> [1, hidden]
     """
+    if work_trt_dtype is None:
+        work_trt_dtype = trt.float32
+
     # 1. Router logits
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, num_experts,
-        weights[f"{prefix}.router"])  # [1, num_experts]
+        weights[f"{prefix}.router"], dtype=dtype)  # [1, num_experts]
 
     # 2. SparseMixer expert 1 selection
     weight_1, idx_1 = _sparsemixer_weight(
-        network, router_logits, num_experts, jitter_eps)
+        network, router_logits, num_experts, jitter_eps,
+        dtype=dtype, work_trt_dtype=work_trt_dtype)
     # weight_1: [1, 1], idx_1: [1, 1]
 
     # 3. Mask out expert 1 for second selection
@@ -553,20 +586,21 @@ def _add_moe_block(
     idx_1_flat.reshape_dims = (1,)
     range_const = graph_ops.add_constant(
         network, (1, num_experts),
-        np.arange(num_experts, dtype=np.float32).reshape(1, -1))
+        np.arange(num_experts, dtype=dtype).reshape(1, -1), dtype=dtype)
     idx_1_broadcast = network.add_shuffle(idx_1_flat.get_output(0))
     idx_1_broadcast.reshape_dims = (1, 1)
     # Cast idx to float for comparison
-    idx_1_f = network.add_cast(idx_1_broadcast.get_output(0), trt.float32)
+    idx_1_f = network.add_cast(
+        idx_1_broadcast.get_output(0), work_trt_dtype)
     # one_hot_mask: 1 where expert == idx_1, 0 elsewhere
     eq = network.add_elementwise(
         range_const, idx_1_f.get_output(0),
         trt.ElementWiseOperation.EQUAL)
-    eq_f = network.add_cast(eq.get_output(0), trt.float32)
+    eq_f = network.add_cast(eq.get_output(0), work_trt_dtype)
     # Subtract large value at expert 1 position
     neginf_mask = graph_ops.add_constant(
         network, (1, 1),
-        np.array([-1e9], dtype=np.float32))
+        np.array([np.finfo(dtype).min], dtype=dtype), dtype=dtype)
     penalty = network.add_elementwise(
         eq_f.get_output(0), neginf_mask,
         trt.ElementWiseOperation.PROD)
@@ -578,7 +612,8 @@ def _add_moe_block(
     # for the factor/threshold computation (HF uses unmasked scores).
     weight_2, idx_2 = _sparsemixer_weight(
         network, scores_2.get_output(0), num_experts, jitter_eps,
-        original_scores=router_logits)
+        original_scores=router_logits, dtype=dtype,
+        work_trt_dtype=work_trt_dtype)
 
     # 5. Compute ALL expert outputs and stack
     expert_outputs = []
@@ -588,6 +623,7 @@ def _add_moe_block(
             weights[f"{prefix}.expert.{e}.w_gate"],
             weights[f"{prefix}.expert.{e}.w_up"],
             weights[f"{prefix}.expert.{e}.w_down"],
+            dtype=dtype,
         )  # [1, hidden_size]
         expert_outputs.append(exp_out)
 
@@ -646,6 +682,8 @@ def _add_moe_decoder_layer(
     top_k: int,
     jitter_eps: float = 0.01,
     norm_type: str = "layernorm",
+    dtype: np.dtype = np.float32,
+    work_trt_dtype=None,
 ) -> dict[str, trt.ITensor]:
     """Add one decoder layer with MoE MLP. Attention is standard."""
 
@@ -662,6 +700,7 @@ def _add_moe_decoder_layer(
         cos_half_tensor=cos_half_tensor,
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=head_dim,
+        dtype=dtype,
     )
     attn_out = attn["attn_out"]
 
@@ -674,13 +713,14 @@ def _add_moe_decoder_layer(
         network, residual1.get_output(0), hidden_size,
         weights[f"{prefix}.post_attn_norm"],
         weights.get(f"{prefix}.post_attn_norm_beta"),
-        eps_tensor, norm_type)
+        eps_tensor, norm_type, dtype=dtype)
 
     # MoE block (replaces standard MLP)
     moe_out = _add_moe_block(
         network, norm2, weights, prefix,
         hidden_size, num_experts, moe_intermediate, top_k,
-        jitter_eps=jitter_eps)
+        jitter_eps=jitter_eps, dtype=dtype,
+        work_trt_dtype=work_trt_dtype)
 
     # Residual connection
     residual2 = network.add_elementwise(

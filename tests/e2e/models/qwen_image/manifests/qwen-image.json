@@ -1,28 +1,35 @@
 {
   "name": "qwen-image",
-  "trace_id": "IT-E2E-QIMG-01",
   "hf_id": "Qwen/Qwen-Image",
   "bundle": "qwen-image.trtfb",
-  "model_type": "qwen_image",
   "family": "qwen_image",
   "runtime_strategy": "diffusion_qwen_image",
   "task_strategy": "diffusion_media_generation",
-  "ci_tier": "nightly_only",
-  "description": "Qwen-Image base text-to-image (Qwen2.5-VL text encoder + Qwen-Image DiT + VAE)",
+  "precision": "bf16",
+  "user_contract": "text-to-image",
   "build_args": {
     "max_cache_length": 256
   },
-  "prompt": "A cat holding a sign that says hello world",
-  "negative_prompt": " ",
-  "test_type": "diffusion",
-  "image_height": 1024,
-  "image_width": 1024,
-  "height": 1024,
-  "width": 1024,
-  "video_num_frames": 1,
-  "num_inference_steps": 20,
-  "cfg_scale": 4.0,
-  "seed": 42,
-  "skip_text_comparison": true,
-  "notes": "Qwen-Image base model E2E gate. Empirical PSNR is ~10.8 dB for the bf16 C++ pipeline vs HF diffusers (also bf16) with shared initial latents at 20 steps; gate set 1.5 dB below empirical as a regression catcher. Base model is less bf16-robust than Qwen-Image-2512 (which empirically hits ~12.45 dB) \u2014 Python TRT runner shows the same per-prompt divergence, confirming the gap is engine-side TRT-vs-PyTorch kernel rounding, not C++ host-side glue. Image quality is preserved: outputs are visually correct, prompt-faithful samples that simply land on a different (still valid) point in the denoising trajectory than HF's exact sample."
+  "testcases": [
+    {
+      "name": "qwen-image",
+      "trace_id": "IT-E2E-QIMG-01",
+      "model_type": "qwen_image",
+      "ci_tier": "nightly_only",
+      "description": "Qwen-Image base text-to-image (Qwen2.5-VL text encoder + Qwen-Image DiT + VAE)",
+      "prompt": "A cat holding a sign that says hello world",
+      "negative_prompt": " ",
+      "test_type": "diffusion",
+      "image_height": 1024,
+      "image_width": 1024,
+      "height": 1024,
+      "width": 1024,
+      "video_num_frames": 1,
+      "num_inference_steps": 20,
+      "cfg_scale": 4.0,
+      "seed": 42,
+      "skip_text_comparison": true,
+      "notes": "Qwen-Image base model E2E gate. Empirical PSNR is ~10.8 dB for the bf16 C++ pipeline vs HF diffusers (also bf16) with shared initial latents at 20 steps; gate set 1.5 dB below empirical as a regression catcher. Base model is less bf16-robust than Qwen-Image-2512 (which empirically hits ~12.45 dB) \u2014 Python TRT runner shows the same per-prompt divergence, confirming the gap is engine-side TRT-vs-PyTorch kernel rounding, not C++ host-side glue. Image quality is preserved: outputs are visually correct, prompt-faithful samples that simply land on a different (still valid) point in the denoising trajectory than HF's exact sample."
+    }
+  ]
 }

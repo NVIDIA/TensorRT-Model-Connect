@@ -2894,6 +2894,37 @@ def add_attention_from_rows(
             network, q_4d, k_4d, v_4d,
             num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
             mask=mask, scale=scale, logit_softcap=float(logit_softcap))
+    elif fp32_accumulation and not causal:
+        output_dtype = q_4d.dtype
+        k_4d = _repeat_kv_heads_4d(
+            network, k_4d, num_heads=num_heads, num_kv_heads=kv_heads,
+            head_dim=head_dim)
+        v_4d = _repeat_kv_heads_4d(
+            network, v_4d, num_heads=num_heads, num_kv_heads=kv_heads,
+            head_dim=head_dim)
+        q_fp32 = network.add_cast(q_4d, trt.float32).get_output(0)
+        k_fp32 = network.add_cast(k_4d, trt.float32).get_output(0)
+        v_fp32 = network.add_cast(v_4d, trt.float32).get_output(0)
+        mask_fp32 = mask
+        if mask_fp32 is not None and mask_fp32.dtype != trt.float32:
+            mask_fp32 = network.add_cast(mask_fp32, trt.float32).get_output(0)
+
+        scores = network.add_matrix_multiply(
+            q_fp32, trt.MatrixOperation.NONE,
+            k_fp32, trt.MatrixOperation.TRANSPOSE).get_output(0)
+        scale_t = _scalar_constant_for_trt_dtype(
+            network, (1, 1, 1, 1), scale, trt.float32)
+        scores = network.add_elementwise(
+            scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+        if mask_fp32 is not None:
+            scores = network.add_elementwise(
+                scores, mask_fp32, trt.ElementWiseOperation.SUM).get_output(0)
+        probs = network.add_softmax(scores)
+        probs.axes = 1 << 3
+        ctx_4d = network.add_matrix_multiply(
+            probs.get_output(0), trt.MatrixOperation.NONE,
+            v_fp32, trt.MatrixOperation.NONE).get_output(0)
+        ctx_4d = _cast_back_to_trt_dtype(network, ctx_4d, output_dtype)
     else:
         ctx_4d = add_attention_core(
             network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,

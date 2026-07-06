@@ -1,18 +1,12 @@
 {
   "name": "glm-4-9b-l0-tp2",
-  "trace_id": "IT-E2E-GLM4-L0-TP2-01",
   "hf_id": "THUDM/glm-4-9b-hf",
   "bundle": "glm-4-9b-l0-tp2.trtfb",
   "family": "glm",
   "runtime_strategy": "glm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "continuation_parity",
   "max_cache_length": 256,
-  "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
-  "max_new_tokens": 8,
   "trust_remote_code": false,
   "build_args": {
     "parallel": {
@@ -33,26 +27,37 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 2
-      },
-      "gating": true
+      "name": "glm-4-9b-l0-tp2",
+      "trace_id": "IT-E2E-GLM4-L0-TP2-01",
+      "ci_tier": "multi_device",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 8,
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 2
+          },
+          "gating": true
+        }
+      ],
+      "notes": "GLM-4-9B L0 TP2 repro using the same checkpoint, prompt, generation length, continuation contract, and thresholds as glm-4-9b-l0. TP2 is used because the model has 2 KV heads."
     }
-  ],
-  "notes": "GLM-4-9B L0 TP2 repro using the same checkpoint, prompt, generation length, continuation contract, and thresholds as glm-4-9b-l0. TP2 is used because the model has 2 KV heads."
+  ]
 }

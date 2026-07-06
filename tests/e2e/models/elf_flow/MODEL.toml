@@ -10,8 +10,8 @@ test_manifests = [
 ]
 
 [e2e_defaults.diffusion_text_generation]
-reference_backend = "invariant_only"
-oracle_level = "L4_invariants"
+reference_backend = "upstream_replay"
+oracle_level = "L1_external_reference"
 stages = [
   { name = "decoded_text", required = true },
 ]

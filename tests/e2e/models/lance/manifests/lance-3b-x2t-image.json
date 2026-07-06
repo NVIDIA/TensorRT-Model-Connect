@@ -1,17 +1,33 @@
 {
   "name": "lance-3b-x2t-image",
-  "trace_id": "IT-E2E-LANCE-X2T-01",
   "hf_id": "bytedance-research/Lance",
   "bundle": "lance-3b-x2t-image.trtfb",
   "family": "lance",
   "runtime_strategy": "lance_vision_language",
   "task_strategy": "vision_language_generation",
+  "user_contract": "any-to-any",
   "precision": "bf16",
   "max_cache_length": 384,
-  "prompt": "What color is the vehicle in this image? Answer in one word.",
-  "max_new_tokens": 10,
-  "test_image": "data/test_img.jpeg",
   "trust_remote_code": false,
-  "core": false,
-  "skip_reason": "Lance image-understanding (x2t) is wired through the lance family plugin + lance_vision_language runtime and is VERIFIED ACCURATE end-to-end at bf16: `trtmc run` on data/test_img.jpeg answers 'White car driving on the street.' / 'White', and the TRT decoder matches an independent eager reference exactly per-layer and per-logit. Reduced-precision embed bundles rely on the #184 fix (now in main). Not yet auto-runnable in the harness because (1) the Lance HF repo is not a flat checkpoint and must be staged via `python -m tensorrt_model_connect.families.lance.prepare_model` (the harness runs `trtmc build <hf_id>` directly), and (2) there is no HF AutoModel reference for Lance (library_name=Lance, custom modeling.lance) so a Lance reference adapter is needed. Remove skip_reason once staging is wired into the VL runner and a Lance reference backend exists."
+  "testcases": [
+    {
+      "name": "lance-3b-x2t-image",
+      "trace_id": "IT-E2E-LANCE-X2T-01",
+      "reference_backend": "golden_snapshot",
+      "oracle_level": "L1_external_reference",
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg",
+      "core": false,
+      "metadata": {
+        "golden_snapshot_path": "data/lance_3b_x2t_golden.json",
+        "golden_snapshot_provenance": "bytedance-research/Lance upstream eager x2t image-understanding run",
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false
+        }
+      },
+      "notes": "The existing BF16 graph is retained. The checkpoint is staged automatically from its nested Lance_3B and Qwen2.5-VL-ViT directories and compared with the one-word result captured from the upstream eager Lance implementation."
+    }
+  ]
 }

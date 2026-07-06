@@ -1,22 +1,13 @@
 {
   "name": "nemotron-embed-vl-1b-v2-tp4",
-  "trace_id": "IT-E2E-NMEMB-TP4-01",
   "hf_id": "nvidia/llama-nemotron-embed-vl-1b-v2",
   "bundle": "nemotron-embed-vl-1b-v2-tp4.trtfb",
   "family": "eagle_vlm",
   "runtime_strategy": "eagle_vlm_embedding",
   "task_strategy": "embedding",
-  "reference_family": "vl_embed_retrieval",
-  "user_contract": "embedding_vector",
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 512,
-  "prompt": "What is machine learning?",
   "trust_remote_code": true,
-  "metadata": {
-    "trust_remote_code": true,
-    "modality": "text"
-  },
   "build_args": {
     "parallel": {
       "mode": "tensor_parallel",
@@ -35,26 +26,40 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
+      "name": "nemotron-embed-vl-1b-v2-tp4",
+      "trace_id": "IT-E2E-NMEMB-TP4-01",
+      "reference_family": "vl_embed_retrieval",
+      "user_contract": "embedding_vector",
+      "ci_tier": "multi_device",
+      "prompt": "What is machine learning?",
+      "metadata": {
+        "trust_remote_code": true,
+        "modality": "text"
       },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "notes": "Eagle VLM/Nemotron embed TP4 coverage. Uses the same checkpoint, prompt, cache length, metadata, and default embedding thresholds as nemotron-embed-vl-1b-v2 while running the Llama text backbone through rank-local TP engines."
     }
-  ],
-  "notes": "Eagle VLM/Nemotron embed TP4 coverage. Uses the same checkpoint, prompt, cache length, metadata, and default embedding thresholds as nemotron-embed-vl-1b-v2 while running the Llama text backbone through rank-local TP engines."
+  ]
 }

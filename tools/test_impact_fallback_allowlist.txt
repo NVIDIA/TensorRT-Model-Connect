@@ -46,6 +46,8 @@ harness_shared tests/e2e_harness/artifact_sink.py # shared E2E harness surface; 
 harness_shared tests/e2e_harness/conftest_gpu.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/contracts.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/manifest_loader.py # shared E2E harness surface; broad E2E impact is intentional
+harness_shared tests/e2e_harness/model_runner.py # shared model lifecycle used by every family runner; broad E2E impact is intentional
+harness_shared tests/e2e_harness/model_selection.py # shared exact-selection path used by every model runner; broad E2E impact is intentional
 harness_shared tests/e2e_harness/orchestrator.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/python_profiles.py # shared E2E harness surface; broad E2E impact is intentional
 harness_shared tests/e2e_harness/registry.py # shared E2E harness surface; broad E2E impact is intentional
@@ -121,6 +123,7 @@ no_impact tools/diff_t5.py # developer utility script; no CI test impact is inte
 no_impact tools/diff_vl.py # developer utility script; no CI test impact is intentional
 no_impact tools/diffusion_helpers.py # developer utility script; no CI test impact is intentional
 no_impact tools/evaluate_diffusion_vlm_similarity.py # developer utility script; no CI test impact is intentional
+no_impact tools/generate_ci_task_coverage_cn.py # standalone report generator; no runtime, build, or CI test-selection impact is intentional
 no_impact tools/layer_profiler.py # developer utility script; no CI test impact is intentional
 no_impact tools/legal_header_exceptions.toml # legal-header exception metadata only; no runtime test impact is intentional
 no_impact tools/legal_headers.py # offline legal-header audit utility; no runtime test impact is intentional

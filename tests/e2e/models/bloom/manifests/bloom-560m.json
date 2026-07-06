@@ -1,15 +1,21 @@
 {
   "name": "bloom-560m",
-  "trace_id": "IT-E2E-BLOOM-01",
   "hf_id": "bigscience/bloom-560m",
   "bundle": "bloom-560m.trtfb",
   "family": "bloom",
   "runtime_strategy": "bloom_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "continuation_parity",
+  "precision": "fp32",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
-  "max_new_tokens": 20,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "bloom-560m",
+      "trace_id": "IT-E2E-BLOOM-01",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20
+    }
+  ]
 }

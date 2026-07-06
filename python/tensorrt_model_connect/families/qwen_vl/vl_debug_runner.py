@@ -1350,3 +1350,30 @@ class VLTrtRunner:
             result = self.text_runner.step(next_token)
 
         return output_ids
+
+
+def runner_from_bundle(
+    bundle_path: str | None = None,
+    *,
+    runtime_strategy: str | None = None,
+    config: dict | None = None,
+    header: dict | None = None,
+    engine_plan: bytes | None = None,
+    distributed_communicator: object | None = None,
+) -> object | None:
+    """Create the Qwen-VL text debug runner from parsed bundle data."""
+    if runtime_strategy != "qwen_vl_vision_language":
+        return None
+    if config is None or header is None or engine_plan is None:
+        if bundle_path is None:
+            raise TypeError(
+                "bundle_path is required when parsed Qwen-VL data is absent")
+        config = load_config_from_bundle(bundle_path)
+        engine_plan, header = load_engine_from_bundle(bundle_path)
+    return TrtRunner(
+        engine_plan=engine_plan,
+        max_cache_length=int(header["max_cache_length"]),
+        num_layers=int(header.get(
+            "num_layers", config.get("num_hidden_layers", 1))),
+        distributed_communicator=distributed_communicator,
+    )

@@ -98,18 +98,29 @@ STB_IMAGE_TASK_STRATEGIES = [
 # Shared C++ helper -> affected task_strategies
 SHARED_CPP_HELPER_STRATEGIES: Dict[str, List[str]] = {
     "diffusion_helpers": [
-        "diffusion_flux", "diffusion_ltx", "diffusion_wan", "diffusion_pixart",
+        "diffusion_flux",
+        "diffusion_ltx",
+        "diffusion_wan",
+        "diffusion_pixart",
         "diffusion_zimage",
     ],
     "audio_helpers": [
-        "speech_to_text", "speech_to_text_rnnt", "text_to_audio_bark",
-        "text_to_audio_magpie", "speech_to_speech", "omni_multimodal",
+        "speech_to_text",
+        "speech_to_text_rnnt",
+        "text_to_audio_bark",
+        "text_to_audio_magpie",
+        "speech_to_speech",
+        "omni_multimodal",
     ],
 }
 
 # Orchestrator modules in python/tensorrt_model_connect/ -- not treated as specialized builders
 _ORCHESTRATOR_MODULES = {
-    "engine_builder", "cli", "__init__", "__main__", "pipeline",
+    "engine_builder",
+    "cli",
+    "__init__",
+    "__main__",
+    "pipeline",
     "debug_runner",
 }
 
@@ -139,10 +150,6 @@ _BROAD_FALLBACK_RULES = {
     "harness_shared",
     "shared_builder_module",
 }
-_BUNDLE_GROUP_RUNNER_FAMILIES = (
-    "canary",
-    "nemotron_labs_diffusion",
-)
 # TODO: Remove multi_device from the default exclusion once CI has a runner pool
 # that can reserve all GPUs for tensor-parallel E2E cases.
 _DEFAULT_EXCLUDED_CI_TIERS = frozenset({"multi_device"})
@@ -173,14 +180,15 @@ class ModelOwnedDiffRuleSpec:
 @dataclass
 class ImpactMap:
     family_to_models: Dict[str, List[str]]
-    strategy_to_models: Dict[str, List[str]]       # runtime_strategy -> models
-    task_strategy_to_models: Dict[str, List[str]]   # task_strategy -> models
+    strategy_to_models: Dict[str, List[str]]  # runtime_strategy -> models
+    task_strategy_to_models: Dict[str, List[str]]  # task_strategy -> models
     all_model_names: List[str]
     all_model_names_set: Set[str]
     core_models: List[str]
     model_metadata: Dict[str, Dict]
     manifest_path_to_model: Dict[str, str]
-    builder_to_families: Dict[str, List[str]]       # parent module -> families
+    testcase_to_model: Dict[str, str]
+    builder_to_families: Dict[str, List[str]]  # parent module -> families
     cpp_runtime_model_strategies: Dict[str, List[str]]
     manifest_field_to_models: Dict[str, List[str]]
     e2e_data_file_to_models: Dict[str, List[str]]
@@ -208,6 +216,7 @@ class ImpactResult:
     tools_tests: List[str] = field(default_factory=list)
     fallback_tiers: List[str] = field(default_factory=list)
     l0_replacements: List[Dict[str, str]] = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # Impact map construction
@@ -321,13 +330,10 @@ def _scan_model_owned_diff_rules(models_dir: Path) -> Tuple[ModelOwnedDiffRuleSp
                     f"{rules_path}:{index}: expected string name/path, list "
                     "allowed_tokens, and object scope"
                 )
-            tokens = tuple(
-                token for token in allowed_tokens if isinstance(token, str)
-            )
+            tokens = tuple(token for token in allowed_tokens if isinstance(token, str))
             if len(tokens) != len(allowed_tokens) or not tokens:
                 raise ValueError(
-                    f"{rules_path}:{index}: allowed_tokens must be a non-empty "
-                    "list of strings"
+                    f"{rules_path}:{index}: allowed_tokens must be a non-empty list of strings"
                 )
             specs.append(ModelOwnedDiffRuleSpec(owner, name, path, tokens, scope))
     return tuple(specs)
@@ -386,13 +392,9 @@ def _iter_manifest_data_paths(
     if isinstance(value, dict):
         paths: List[str] = []
         if "relative_to" in value and isinstance(value.get("path"), str):
-            paths.append(
-                _manifest_asset_repo_path(value["path"], manifest_path, models_dir)
-            )
+            paths.append(_manifest_asset_repo_path(value["path"], manifest_path, models_dir))
         for item_key, item_value in value.items():
-            paths.extend(
-                _iter_manifest_data_paths(item_value, manifest_path, models_dir, item_key)
-            )
+            paths.extend(_iter_manifest_data_paths(item_value, manifest_path, models_dir, item_key))
         return paths
     if isinstance(value, list):
         paths: List[str] = []
@@ -498,9 +500,7 @@ def _literal_string_dict_assignment(py_file: Path, name: str) -> Dict[str, str]:
         if not isinstance(raw, dict):
             continue
         return {
-            key: val
-            for key, val in raw.items()
-            if isinstance(key, str) and isinstance(val, str)
+            key: val for key, val in raw.items() if isinstance(key, str) and isinstance(val, str)
         }
     return {}
 
@@ -561,18 +561,12 @@ def _scan_harness_contract_plugin_modules(
 
     for py_file in sorted(directory.glob("*.py")):
         stem = py_file.stem
-        if (
-            stem.startswith("_")
-            or stem.startswith("test_")
-            or stem in {"__init__", "base"}
-        ):
+        if stem.startswith("_") or stem.startswith("test_") or stem in {"__init__", "base"}:
             continue
-        assignments = _literal_string_list_assignments(
-            py_file, {"reference_families"})
+        assignments = _literal_string_list_assignments(py_file, {"reference_families"})
         strategies: Set[str] = set()
         for reference_family in assignments.get("reference_families", []):
-            strategies.update(
-                reference_family_to_task_strategies.get(reference_family, []))
+            strategies.update(reference_family_to_task_strategies.get(reference_family, []))
         if strategies:
             routes[stem] = sorted(strategies)
     return routes
@@ -601,7 +595,8 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     runtime_models_dir = repo_root / "src" / "runtime" / "models"
     harness_dir = repo_root / "tests" / "e2e_harness"
     default_reference_backend_by_task = _literal_string_dict_assignment(
-        harness_dir / "manifest_loader.py", "_DEFAULT_REFERENCE_BACKEND")
+        harness_dir / "manifest_loader.py", "_DEFAULT_REFERENCE_BACKEND"
+    )
 
     family_to_models: Dict[str, List[str]] = {}
     strategy_to_models: Dict[str, List[str]] = {}
@@ -615,6 +610,7 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
     core_models: List[str] = []
     model_metadata: Dict[str, Dict] = {}
     manifest_path_to_model: Dict[str, str] = {}
+    testcase_to_model: Dict[str, str] = {}
     l0_replacement_by_model: Dict[str, str] = {}
 
     for manifest_path in _iter_e2e_manifest_paths(models_dir):
@@ -626,7 +622,14 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         name = data.get("name", manifest_path.stem)
         family = data.get("family", "")
         runtime_strategy = data.get("runtime_strategy", "")
-        is_core = data.get("core", False)
+        testcases = data.get("testcases", [])
+        if not isinstance(testcases, list):
+            testcases = []
+        expanded_cases = [
+            {**data, **testcase} for testcase in testcases if isinstance(testcase, dict)
+        ]
+        if not expanded_cases:
+            expanded_cases = [data]
 
         all_model_names.append(name)
         model_metadata[name] = data
@@ -639,47 +642,52 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
             family_to_models.setdefault(family, []).append(name)
         if runtime_strategy:
             strategy_to_models.setdefault(runtime_strategy, []).append(name)
-        task_strategy = data.get("task_strategy", "")
-        if isinstance(task_strategy, str) and task_strategy:
+        task_strategies = {str(case.get("task_strategy", "") or "") for case in expanded_cases}
+        for task_strategy in sorted(task_strategies - {""}):
             task_strategy_to_models.setdefault(task_strategy, []).append(name)
-        else:
-            task_strategy = ""
-        if is_core:
+        if any(case.get("core", False) for case in expanded_cases):
             core_models.append(name)
-        l0_replacement = data.get("l0_replacement")
-        if isinstance(l0_replacement, str) and l0_replacement:
-            l0_replacement_by_model[name] = l0_replacement
+        for case in expanded_cases:
+            case_name = case.get("name")
+            if isinstance(case_name, str) and case_name:
+                testcase_to_model[case_name] = name
+            l0_replacement = case.get("l0_replacement")
+            if isinstance(l0_replacement, str) and l0_replacement and l0_replacement != name:
+                l0_replacement_by_model[name] = l0_replacement
         fp8_scales = data.get("fp8_scales")
         if isinstance(fp8_scales, str) and fp8_scales:
             manifest_field_to_models_sets.setdefault("fp8_scales", set()).add(name)
         for data_path in _iter_manifest_data_paths(data, manifest_path, models_dir):
             e2e_data_file_to_models_sets.setdefault(data_path, set()).add(name)
-        reference_family = data.get("reference_family")
-        if isinstance(reference_family, str) and reference_family:
-            reference_family_to_models_sets.setdefault(reference_family, set()).add(name)
-            if task_strategy:
-                reference_family_to_task_strategies_sets.setdefault(
-                    reference_family, set()).add(task_strategy)
-        reference_backend = data.get("reference_backend")
-        if not isinstance(reference_backend, str) or not reference_backend:
-            reference_backend = (
-                default_reference_backend_by_task.get(task_strategy, "hf_transformers")
-                if task_strategy else ""
-            )
-        if reference_backend and task_strategy:
-            reference_backend_to_task_strategies_sets.setdefault(
-                reference_backend, set()).add(task_strategy)
+        for case in expanded_cases:
+            task_strategy = str(case.get("task_strategy", "") or "")
+            reference_family = case.get("reference_family")
+            if isinstance(reference_family, str) and reference_family:
+                reference_family_to_models_sets.setdefault(reference_family, set()).add(name)
+            if reference_family and task_strategy:
+                reference_family_to_task_strategies_sets.setdefault(reference_family, set()).add(
+                    task_strategy
+                )
+            reference_backend = case.get("reference_backend")
+            if not isinstance(reference_backend, str) or not reference_backend:
+                reference_backend = (
+                    default_reference_backend_by_task.get(task_strategy, "hf_transformers")
+                    if task_strategy
+                    else ""
+                )
+            if reference_backend and task_strategy:
+                reference_backend_to_task_strategies_sets.setdefault(reference_backend, set()).add(
+                    task_strategy
+                )
 
     builder_to_families = _scan_family_imports(families_dir) if families_dir.is_dir() else {}
     cpp_runtime_model_strategies = _scan_cpp_runtime_model_manifests(runtime_models_dir)
     model_owned_diff_rules = _scan_model_owned_diff_rules(models_dir)
     reference_family_to_task_strategies = {
-        key: sorted(values)
-        for key, values in reference_family_to_task_strategies_sets.items()
+        key: sorted(values) for key, values in reference_family_to_task_strategies_sets.items()
     }
     reference_backend_to_task_strategies = {
-        key: sorted(values)
-        for key, values in reference_backend_to_task_strategies_sets.items()
+        key: sorted(values) for key, values in reference_backend_to_task_strategies_sets.items()
     }
     runner_task_strategies = _scan_harness_task_strategy_modules(
         harness_dir / "runners",
@@ -725,9 +733,7 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
                     continue
                 if token not in content:
                     continue
-                strategies.update(
-                    cpp_runtime_model_strategies.get(cpp_file.parent.name, [])
-                )
+                strategies.update(cpp_runtime_model_strategies.get(cpp_file.parent.name, []))
         if strategies:
             path_scope_overrides[path] = _models_for_scoped_strategies(strategies)
 
@@ -740,15 +746,14 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         core_models=sorted(core_models),
         model_metadata=model_metadata,
         manifest_path_to_model=manifest_path_to_model,
+        testcase_to_model=testcase_to_model,
         builder_to_families=builder_to_families,
         cpp_runtime_model_strategies=cpp_runtime_model_strategies,
         manifest_field_to_models={
-            key: sorted(models)
-            for key, models in manifest_field_to_models_sets.items()
+            key: sorted(models) for key, models in manifest_field_to_models_sets.items()
         },
         e2e_data_file_to_models={
-            path: sorted(models)
-            for path, models in e2e_data_file_to_models_sets.items()
+            path: sorted(models) for path, models in e2e_data_file_to_models_sets.items()
         },
         path_scope_overrides=path_scope_overrides,
         l0_replacement_by_model=l0_replacement_by_model,
@@ -764,13 +769,15 @@ def build_impact_map(repo_root: Path) -> ImpactMap:
         threshold_profile_task_strategies=threshold_profile_task_strategies,
     )
 
+
 # ---------------------------------------------------------------------------
 # Helper: resolve models from runtime/task strategies
 # ---------------------------------------------------------------------------
 
 
 def _models_for_runtime_strategies(
-    strategies: List[str], imap: ImpactMap,
+    strategies: List[str],
+    imap: ImpactMap,
 ) -> List[str]:
     models: Set[str] = set()
     for s in strategies:
@@ -809,7 +816,8 @@ def _drop_fp8_scale_models(models: List[str], imap: ImpactMap) -> List[str]:
 
 
 def _models_for_task_strategies(
-    task_strategies: List[str], imap: ImpactMap,
+    task_strategies: List[str],
+    imap: ImpactMap,
 ) -> List[str]:
     models: Set[str] = set()
     for ts in task_strategies:
@@ -843,16 +851,18 @@ def _apply_l0_replacements(
         replacement = imap.l0_replacement_by_model.get(model)
         if replacement:
             selected.add(replacement)
-            replacements.append({
-                "model": model,
-                "replacement": replacement,
-                "reason": str(
-                    imap.model_metadata.get(model, {}).get(
-                        "l0_replacement_reason",
-                        "nightly-only scale coverage; L0 uses a smaller representative",
-                    )
-                ),
-            })
+            replacements.append(
+                {
+                    "model": model,
+                    "replacement": replacement,
+                    "reason": str(
+                        imap.model_metadata.get(model, {}).get(
+                            "l0_replacement_reason",
+                            "nightly-only scale coverage; L0 uses a smaller representative",
+                        )
+                    ),
+                }
+            )
         else:
             selected.add(model)
     return sorted(selected), replacements
@@ -863,8 +873,12 @@ def _infer_unit_tiers(path: str) -> List[str]:
     tiers: List[str] = []
     if path.startswith("python/tensorrt_model_connect/"):
         tiers.append("builder")
-    if (path.startswith("src/") or path.startswith("include/")
-            or path == "CMakeLists.txt" or path.startswith("cmake/")):
+    if (
+        path.startswith("src/")
+        or path.startswith("include/")
+        or path == "CMakeLists.txt"
+        or path.startswith("cmake/")
+    ):
         tiers.append("cpp")
     if path.startswith("tests/builder/"):
         tiers.append("builder")
@@ -877,9 +891,14 @@ def _infer_unit_tiers(path: str) -> List[str]:
 
 def _infer_rebuild_cpp(path: str) -> bool:
     """Does this file change require a C++ rebuild?"""
-    return (path.startswith("src/") or path.startswith("include/")
-            or path == "CMakeLists.txt" or path.startswith("cmake/")
-            or path.startswith("tests/cpp/"))
+    return (
+        path.startswith("src/")
+        or path.startswith("include/")
+        or path == "CMakeLists.txt"
+        or path.startswith("cmake/")
+        or path.startswith("tests/cpp/")
+    )
+
 
 # ---------------------------------------------------------------------------
 # File classification (ordered declarative rules)
@@ -997,9 +1016,7 @@ def _match_result(
         rebuild: bool,
     ) -> RuleMatch:
         effective_unit_tiers = (
-            list(unit_tiers_override)
-            if unit_tiers_override is not None
-            else unit_tiers
+            list(unit_tiers_override) if unit_tiers_override is not None else unit_tiers
         )
         effective_rebuild = rebuild if rebuild_override is None else rebuild_override
         return RuleMatch(
@@ -1034,14 +1051,6 @@ def _family_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return sorted(imap.family_to_models.get(_group(context), []))
 
 
-def _bundle_group_runner_models(context: RuleContext, imap: ImpactMap) -> List[str]:
-    del context
-    models: Set[str] = set()
-    for family in _BUNDLE_GROUP_RUNNER_FAMILIES:
-        models.update(imap.family_to_models.get(family, []))
-    return sorted(models)
-
-
 def _python_profile_models(context: RuleContext, imap: ImpactMap) -> List[str]:
     return sorted(imap.family_to_models.get(_group(context), []))
 
@@ -1050,8 +1059,9 @@ def _e2e_model_threshold_models(context: RuleContext, imap: ImpactMap) -> List[s
     if context.match is None:
         return []
     model_name = context.match.group(2)
-    if model_name in imap.all_model_names_set:
-        return [model_name]
+    owning_model = imap.testcase_to_model.get(model_name)
+    if owning_model:
+        return [owning_model]
     return sorted(imap.family_to_models.get(context.match.group(1), []))
 
 
@@ -1088,7 +1098,8 @@ def _runtime_strategy_models(
 
 
 def _cpp_runtime_model_strategies(
-    context: RuleContext, imap: ImpactMap,
+    context: RuleContext,
+    imap: ImpactMap,
 ) -> List[str]:
     return imap.cpp_runtime_model_strategies.get(_group(context), [])
 
@@ -1122,20 +1133,26 @@ def _model_owned_e2e_test_ids(models: List[str], imap: ImpactMap) -> List[str]:
 
 
 def _known_cpp_runtime_model(
-    path: str, imap: ImpactMap, match: re.Match[str],
+    path: str,
+    imap: ImpactMap,
+    match: re.Match[str],
 ) -> bool:
     del path
     return bool(imap.cpp_runtime_model_strategies.get(match.group(1), []))
 
 
 def _unknown_cpp_runtime_model(
-    path: str, imap: ImpactMap, match: re.Match[str],
+    path: str,
+    imap: ImpactMap,
+    match: re.Match[str],
 ) -> bool:
     return not _known_cpp_runtime_model(path, imap, match)
 
 
 def _is_specialized_builder(
-    path: str, imap: ImpactMap, match: re.Match[str],
+    path: str,
+    imap: ImpactMap,
+    match: re.Match[str],
 ) -> bool:
     del path
     module_name = match.group(1)
@@ -1147,9 +1164,7 @@ def _is_specialized_builder(
     return any(imap.family_to_models.get(family, []) for family in families)
 
 
-StrategyMapSource = (
-    Dict[str, List[str]] | Callable[[ImpactMap], Dict[str, List[str]]]
-)
+StrategyMapSource = Dict[str, List[str]] | Callable[[ImpactMap], Dict[str, List[str]]]
 
 
 def _strategy_map(
@@ -1174,7 +1189,8 @@ def _unknown_task_strategy_stem(strategy_map_source: StrategyMapSource) -> RuleP
         del path
         stem = match.group(1)
         return stem != "__init__" and not bool(
-            _strategy_map(strategy_map_source, imap).get(stem, []))
+            _strategy_map(strategy_map_source, imap).get(stem, [])
+        )
 
     return _predicate
 
@@ -1192,7 +1208,8 @@ def _task_strategy_models_from_group(
 ) -> ModelsResolver:
     def _resolver(context: RuleContext, imap: ImpactMap) -> List[str]:
         return _models_for_task_strategies(
-            _strategy_map(strategy_map_source, imap).get(_group(context), []), imap)
+            _strategy_map(strategy_map_source, imap).get(_group(context), []), imap
+        )
 
     return _resolver
 
@@ -1218,10 +1235,13 @@ def _catch_all_resolver(
 
 
 def _is_family_builder_test(path: str) -> bool:
-    return re.match(
-        r"^python/tensorrt_model_connect/families/[A-Za-z]\w*/tests/.+\.py$",
-        path,
-    ) is not None
+    return (
+        re.match(
+            r"^python/tensorrt_model_connect/families/[A-Za-z]\w*/tests/.+\.py$",
+            path,
+        )
+        is not None
+    )
 
 
 def _classification_rules() -> Tuple[ClassificationRule, ...]:
@@ -1229,9 +1249,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=10,
             name="manifest",
-            matcher=_regex_rule(
-                r"tests/e2e/models/(?:[^/]+/manifests/)?([^/]+)\.json$"
-            ),
+            matcher=_regex_rule(r"tests/e2e/models/(?:[^/]+/manifests/)?([^/]+)\.json$"),
             resolver=_match_result("manifest", _manifest_models),
             covered_by=("TestSafetyNet.test_manifest_self",),
         ),
@@ -1250,15 +1268,6 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestSafetyNet.test_e2e_model_owned_threshold_self",),
         ),
         ClassificationRule(
-            priority=9,
-            name="e2e_bundle_group_runner",
-            matcher=_path_in({"tests/e2e_harness/bundle_group_runner.py"}),
-            resolver=_match_result(
-                "e2e_bundle_group_runner", _bundle_group_runner_models, ["tools"],
-            ),
-            covered_by=("TestSafetyNet.test_e2e_bundle_group_runner",),
-        ),
-        ClassificationRule(
             priority=14,
             name="standalone_gpu_test_support",
             matcher=_regex_rule(
@@ -1267,7 +1276,10 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 r"test_[^/]+_flashinfer)\.py|tests/test_tvm_ffi_e2e\.py)$"
             ),
             resolver=_match_result(
-                "standalone_gpu_test_support", _no_models, ["tools"], False,
+                "standalone_gpu_test_support",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestNoImpact.test_standalone_gpu_tests_do_not_select_models",),
         ),
@@ -1392,9 +1404,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="cpp_scoped_helper",
             matcher=_path_in_impact_map(lambda imap: imap.path_scope_overrides),
             resolver=_match_result("cpp_scoped_helper", _scoped_cpp_helper_models),
-            covered_by=(
-                "TestCppScope.test_scoped_cpp_helper_gpu_matmul",
-            ),
+            covered_by=("TestCppScope.test_scoped_cpp_helper_gpu_matmul",),
         ),
         ClassificationRule(
             priority=225,
@@ -1491,8 +1501,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
             resolver=_match_result(
                 "harness_comparator",
-                _task_strategy_models_from_group(
-                    lambda imap: imap.comparator_task_strategies),
+                _task_strategy_models_from_group(lambda imap: imap.comparator_task_strategies),
             ),
             covered_by=("TestHarness.test_harness_comparator",),
         ),
@@ -1537,8 +1546,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
             resolver=_match_result(
                 "harness_reference",
-                _task_strategy_models_from_group(
-                    lambda imap: imap.reference_task_strategies),
+                _task_strategy_models_from_group(lambda imap: imap.reference_task_strategies),
             ),
             covered_by=("TestHarness.test_torch_reference_includes_neural_operator_models",),
         ),
@@ -1587,13 +1595,13 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_threshold_profile",
             matcher=_regex_rule(
                 r"tests/e2e_harness/thresholds/defaults/([\w_]+)\.json$",
-                _known_task_strategy_stem(
-                    lambda imap: imap.threshold_profile_task_strategies),
+                _known_task_strategy_stem(lambda imap: imap.threshold_profile_task_strategies),
             ),
             resolver=_match_result(
                 "harness_threshold_profile",
                 _task_strategy_models_from_group(
-                    lambda imap: imap.threshold_profile_task_strategies),
+                    lambda imap: imap.threshold_profile_task_strategies
+                ),
             ),
             covered_by=("TestHarness.test_harness_threshold_profile",),
         ),
@@ -1602,8 +1610,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="harness_threshold_unknown",
             matcher=_regex_rule(
                 r"tests/e2e_harness/thresholds/defaults/([\w_]+)\.json$",
-                _unknown_task_strategy_stem(
-                    lambda imap: imap.threshold_profile_task_strategies),
+                _unknown_task_strategy_stem(lambda imap: imap.threshold_profile_task_strategies),
             ),
             resolver=_match_result("harness_threshold_unknown", _all_models),
             covered_by=("TestDeclarativeClassificationRules.test_representative_rule_paths",),
@@ -1635,24 +1642,31 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=395,
             name="e2e_schedule_metadata",
-            matcher=_path_in({
-                "tests/e2e/timing_estimates.json",
-                "tests/e2e_partition.py",
-                "tests/runtime_strategy_matrix.yaml",
-            }),
+            matcher=_path_in(
+                {
+                    "tests/e2e/timing_estimates.json",
+                    "tests/e2e_partition.py",
+                    "tests/runtime_strategy_matrix.yaml",
+                }
+            ),
             resolver=_match_result(
-                "e2e_schedule_metadata", _no_models, ["tools"], False,
+                "e2e_schedule_metadata",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestNoImpact.test_e2e_schedule_metadata_tools_only",),
         ),
         ClassificationRule(
             priority=400,
             name="e2e_runner_script",
-            matcher=_path_in({
-                "scripts/run_e2e_parallel.sh",
-                "scripts/schedule_e2e.py",
-                "scripts/warm_hf_cache.py",
-            }),
+            matcher=_path_in(
+                {
+                    "scripts/run_e2e_parallel.sh",
+                    "scripts/schedule_e2e.py",
+                    "scripts/warm_hf_cache.py",
+                }
+            ),
             resolver=_match_result("e2e_runner_script", _all_models, ["tools"]),
             covered_by=("TestNoImpact.test_e2e_runner_scripts_trigger_all_models",),
         ),
@@ -1661,7 +1675,10 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="legacy_e2e_test_support",
             matcher=_regex_rule(r"tests/e2e/(?:__init__|conftest|test_[\w_]+)\.py$"),
             resolver=_match_result(
-                "legacy_e2e_test_support", _no_models, ["tools"], False,
+                "legacy_e2e_test_support",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestNoImpact.test_legacy_e2e_tests_do_not_select_models",),
         ),
@@ -1710,10 +1727,12 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=446,
             name="model_plugin_validation_tool",
-            matcher=_path_in({
-                "tools/e2e_origin_main_parity.py",
-                "tools/model_plugin_isolation.py",
-            }),
+            matcher=_path_in(
+                {
+                    "tools/e2e_origin_main_parity.py",
+                    "tools/model_plugin_isolation.py",
+                }
+            ),
             resolver=_match_result("model_plugin_validation_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_model_plugin_validation_tools",),
         ),
@@ -1722,25 +1741,33 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="family_development_tool",
             matcher=_regex_rule(r"tools/families/([A-Za-z]\w*)/.+\.py$"),
             resolver=_match_result(
-                "family_development_tool", _family_models, ["tools"], False,
+                "family_development_tool",
+                _family_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestFamilyPlugin.test_family_development_tool",),
         ),
         ClassificationRule(
             priority=448,
             name="family_ownership_tool",
-            matcher=_path_in({
-                "tools/families/__init__.py",
-                "tools/family_source_isolation.py",
-                "tools/family_specialization.py",
-                "tools/migrate_family_layout.py",
-                "tools/prune_family_helpers.py",
-                "tools/relocate_family_development.py",
-                "tools/specialize_family.py",
-                "tools/specialize_family_switches.py",
-            }),
+            matcher=_path_in(
+                {
+                    "tools/families/__init__.py",
+                    "tools/family_source_isolation.py",
+                    "tools/family_specialization.py",
+                    "tools/migrate_family_layout.py",
+                    "tools/prune_family_helpers.py",
+                    "tools/relocate_family_development.py",
+                    "tools/specialize_family.py",
+                    "tools/specialize_family_switches.py",
+                }
+            ),
             resolver=_match_result(
-                "family_ownership_tool", _no_models, ["tools"], False,
+                "family_ownership_tool",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestUnitTiers.test_family_ownership_tools",),
         ),
@@ -1868,6 +1895,7 @@ def classify_file(path: str, imap: ImpactMap) -> RuleMatch:
 
     raise RuntimeError("classification rules must include a catch_all rule")
 
+
 # ---------------------------------------------------------------------------
 # Impact analysis (aggregate across all changed files)
 # ---------------------------------------------------------------------------
@@ -1915,9 +1943,7 @@ _EXPLICIT_TOOLS_TEST_TARGETS = {
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_schedule_e2e.py",
     ),
-    "tests/e2e_harness/bundle_group_runner.py": (
-        "tests/tools/test_model_e2e_runner_grouping.py",
-    ),
+    "tests/e2e_harness/model_runner.py": ("tests/tools/test_model_e2e_runner.py",),
 }
 
 
@@ -1946,10 +1972,7 @@ def _repo_relative(path: Path, repo_root: Path) -> str:
 
 
 def _model_families_for_models(models: List[str], imap: ImpactMap) -> List[str]:
-    families = {
-        str(imap.model_metadata.get(model, {}).get("family", "") or "")
-        for model in models
-    }
+    families = {str(imap.model_metadata.get(model, {}).get("family", "") or "") for model in models}
     return sorted(family for family in families if family)
 
 
@@ -1972,12 +1995,7 @@ def _model_owned_python_test_targets(
                 targets.add(_repo_relative(test_path, repo_root))
 
         family_package_tests = (
-            repo_root
-            / "python"
-            / "tensorrt_model_connect"
-            / "families"
-            / family
-            / "tests"
+            repo_root / "python" / "tensorrt_model_connect" / "families" / family / "tests"
         )
         if family_package_tests.is_dir():
             for test_path in sorted(family_package_tests.glob("test_*.py")):
@@ -2069,8 +2087,7 @@ def _filter_models_by_ci_tier(
     return sorted(
         model
         for model in models
-        if str(imap.model_metadata.get(model, {}).get("ci_tier", "") or "")
-        not in exclude_ci_tiers
+        if str(imap.model_metadata.get(model, {}).get("ci_tier", "") or "") not in exclude_ci_tiers
     )
 
 
@@ -2128,17 +2145,22 @@ def analyze_impact(
         all_tiers.update(match.unit_tiers)
         rebuild_cpp = rebuild_cpp or match.rebuild_cpp
         match_by_path[fpath] = match
-        matched_rules.append({
-            "file": fpath,
-            "rule": match.rule,
-            "models": match.models,
-        })
+        matched_rules.append(
+            {
+                "file": fpath,
+                "rule": match.rule,
+                "models": match.models,
+            }
+        )
 
     e2e_models = sorted(all_models)
     l0_replacements: List[Dict[str, str]] = []
     if e2e_suite == "l0":
         e2e_models, l0_replacements = _apply_l0_replacements(
-            e2e_models, imap, preserve_l0_models, exact_models,
+            e2e_models,
+            imap,
+            preserve_l0_models,
+            exact_models,
         )
     cap_applied = False
     if cap is not None and len(e2e_models) > cap:
@@ -2155,6 +2177,7 @@ def analyze_impact(
 
     if coverage_map is not None:
         from coverage_map.select_tests import select_tests
+
         sel = select_tests(changed_files, coverage_map)
         builder_tests = sel.builder_tests
         cpp_tests = sel.cpp_tests
@@ -2198,6 +2221,7 @@ def analyze_impact(
         l0_replacements=l0_replacements,
     )
 
+
 # ---------------------------------------------------------------------------
 # Git diff
 # ---------------------------------------------------------------------------
@@ -2215,15 +2239,22 @@ def get_changed_files(base: str, head: str, repo_root: Path) -> Optional[List[st
     ]:
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, check=True, cwd=repo_root,
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=repo_root,
             )
             files = [f.strip() for f in result.stdout.strip().splitlines() if f.strip()]
             return sorted(files)
         except subprocess.CalledProcessError:
             continue
     # Both diffs failed (shallow clone, missing ref, etc.)
-    print(f"WARNING: git diff failed for {base}..{head} -- "
-          "treating as all files changed (safety net)", file=sys.stderr)
+    print(
+        f"WARNING: git diff failed for {base}..{head} -- "
+        "treating as all files changed (safety net)",
+        file=sys.stderr,
+    )
     return None
 
 
@@ -2235,7 +2266,11 @@ def get_file_diff(base: str, head: str, repo_root: Path, path: str) -> Optional[
     ]:
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, check=True, cwd=repo_root,
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                cwd=repo_root,
             )
             return result.stdout
         except subprocess.CalledProcessError:
@@ -2285,8 +2320,7 @@ class DiffRefinementRule:
 
 def _all_lines_match_tokens(lines: List[str], allowed_tokens: tuple[str, ...]) -> bool:
     return all(
-        any(token in _normalize_diff_line(line) for token in allowed_tokens)
-        for line in lines
+        any(token in _normalize_diff_line(line) for token in allowed_tokens) for line in lines
     )
 
 
@@ -2300,7 +2334,8 @@ def _diffusion_task_models(imap: ImpactMap) -> List[str]:
 
 def _segmentation_task_models(imap: ImpactMap) -> List[str]:
     return _models_for_task_strategies(
-        ["segmentation", "prompted_segmentation", "object_detection"], imap)
+        ["segmentation", "prompted_segmentation", "object_detection"], imap
+    )
 
 
 def _models_for_families(families: Tuple[str, ...], imap: ImpactMap) -> List[str]:
@@ -2311,7 +2346,8 @@ def _models_for_families(families: Tuple[str, ...], imap: ImpactMap) -> List[str
 
 
 def _model_owned_scope_models(
-    spec: ModelOwnedDiffRuleSpec, imap: ImpactMap,
+    spec: ModelOwnedDiffRuleSpec,
+    imap: ImpactMap,
 ) -> List[str]:
     scope = spec.scope
     models: Set[str] = set()
@@ -2354,10 +2390,7 @@ def _line_identifier_models(
 ) -> List[str]:
     fragments = _diff_identifier_fragments(line)
     models: Set[str] = set()
-    model_fragments = {
-        _canonical_identifier(model)
-        for model in imap.all_model_names
-    }
+    model_fragments = {_canonical_identifier(model) for model in imap.all_model_names}
 
     for model in imap.all_model_names:
         if _canonical_identifier(model) in fragments:
@@ -2512,10 +2545,7 @@ class ModelOwnedTokenDiffRefinementRule(DiffRefinementRule):
 
     def matches(self, path: str, lines: List[str], imap: ImpactMap) -> bool:
         del imap
-        return (
-            path == self.spec.path
-            and _all_lines_match_tokens(lines, self.spec.allowed_tokens)
-        )
+        return path == self.spec.path and _all_lines_match_tokens(lines, self.spec.allowed_tokens)
 
     def refine(
         self,
@@ -2814,10 +2844,7 @@ class HarnessReferenceVlGeneratedOnlyDecodeRule(DiffRefinementRule):
             for line in lines
             if any(ch.isalnum() for ch in _normalize_diff_line(line))
         ]
-        return all(
-            any(token in line for token in self.allowed_tokens)
-            for line in normalized_lines
-        )
+        return all(any(token in line for token in self.allowed_tokens) for line in normalized_lines)
 
     def refine(
         self,
@@ -3024,7 +3051,8 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
     IdentifierDiffRefinementRule(
         "harness_reference_known_identifiers",
         path_prefixes=("tests/e2e_harness/references/",),
-        allowed_tokens=_HARNESS_REGISTRY_TOKENS + (
+        allowed_tokens=_HARNESS_REGISTRY_TOKENS
+        + (
             "1.0",
             "align_window",
             "any",
@@ -3113,8 +3141,7 @@ DIFF_REFINEMENT_RULES: tuple[DiffRefinementRule, ...] = (
 def _diff_refinement_rules_for_impact(imap: ImpactMap) -> List[DiffRefinementRule]:
     """Return shared rules plus model-owned rules at the generic handoff point."""
     model_rules: List[DiffRefinementRule] = [
-        ModelOwnedTokenDiffRefinementRule(spec)
-        for spec in imap.model_owned_diff_rules
+        ModelOwnedTokenDiffRefinementRule(spec) for spec in imap.model_owned_diff_rules
     ]
     rules: List[DiffRefinementRule] = []
     inserted_model_rules = False
@@ -3158,6 +3185,7 @@ def maybe_refine_match_with_diff(
             return rule.refine(path, match, lines, imap)
 
     return match
+
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -3204,9 +3232,7 @@ def _load_fallback_allowlist(allowlist_path: Path) -> tuple[Set[tuple[str, str]]
 
         parts = entry_text.split(maxsplit=1)
         if len(parts) != 2:
-            errors.append(
-                f"{allowlist_path}:{line_no}: expected '<rule> <path> # <rationale>'"
-            )
+            errors.append(f"{allowlist_path}:{line_no}: expected '<rule> <path> # <rationale>'")
             continue
 
         rule, path = parts
@@ -3221,8 +3247,7 @@ def _load_fallback_allowlist(allowlist_path: Path) -> tuple[Set[tuple[str, str]]
         entry = (rule, path)
         if entry in allowed:
             errors.append(
-                f"{allowlist_path}:{line_no}: duplicate fallback allowlist entry "
-                f"for {rule} {path}"
+                f"{allowlist_path}:{line_no}: duplicate fallback allowlist entry for {rule} {path}"
             )
             continue
         allowed.add(entry)
@@ -3302,8 +3327,7 @@ def validate_fallback_allowlist(
     warnings: List[str] = []
     for rule, path in sorted(allowed - fallback_keys):
         warnings.append(
-            "Fallback allowlist entry no longer matches a tracked broad "
-            f"fallback: {rule} {path}"
+            f"Fallback allowlist entry no longer matches a tracked broad fallback: {rule} {path}"
         )
 
     return errors, warnings, fallbacks
@@ -3322,10 +3346,12 @@ def validate_map(
     families_dir = repo_root / "python" / "tensorrt_model_connect" / "families"
 
     def _family_plugin_exists(family: str) -> bool:
-        return any((
-            (families_dir / f"{family}.py").exists(),
-            (families_dir / family / "__init__.py").exists(),
-        ))
+        return any(
+            (
+                (families_dir / f"{family}.py").exists(),
+                (families_dir / family / "__init__.py").exists(),
+            )
+        )
 
     # 1. Every family in a manifest has a corresponding plugin module/package
     for family in imap.family_to_models:
@@ -3359,25 +3385,19 @@ def validate_map(
     all_task_strategies = set(imap.task_strategy_to_models.keys())
     missing = all_task_strategies - core_task_strategies
     if missing:
-        warnings.append(
-            f"Core models don't cover task_strategies: {sorted(missing)}"
-        )
+        warnings.append(f"Core models don't cover task_strategies: {sorted(missing)}")
 
     # 4. Every model manifest declares its task strategy locally.
     for model, metadata in sorted(imap.model_metadata.items()):
         if metadata.get("runtime_strategy") and not metadata.get("task_strategy"):
-            errors.append(
-                f"Manifest for '{model}' declares runtime_strategy but no task_strategy"
-            )
+            errors.append(f"Manifest for '{model}' declares runtime_strategy but no task_strategy")
 
     # 5. L0 replacements must preserve the execution contract they stand in for.
     for model, replacement in sorted(imap.l0_replacement_by_model.items()):
         src = imap.model_metadata.get(model, {})
         dst = imap.model_metadata.get(replacement)
         if dst is None:
-            errors.append(
-                f"L0 replacement for '{model}' points to unknown model '{replacement}'"
-            )
+            errors.append(f"L0 replacement for '{model}' points to unknown model '{replacement}'")
             continue
         for field_name in ("family", "runtime_strategy", "precision", "quantization"):
             if src.get(field_name) != dst.get(field_name):
@@ -3428,6 +3448,7 @@ def validate_map(
 
     return errors
 
+
 # ---------------------------------------------------------------------------
 # Output formatting
 # ---------------------------------------------------------------------------
@@ -3457,19 +3478,23 @@ def format_human(result: ImpactResult) -> str:
 
 
 def format_json(result: ImpactResult) -> str:
-    return json.dumps({
-        "e2e_models": result.e2e_models,
-        "e2e_test_ids": result.e2e_test_ids,
-        "unit_tiers": result.unit_tiers,
-        "rebuild_cpp": result.rebuild_cpp,
-        "cap_applied": result.cap_applied,
-        "matched_rules": result.matched_rules,
-        "builder_tests": result.builder_tests,
-        "cpp_tests": result.cpp_tests,
-        "tools_tests": result.tools_tests,
-        "fallback_tiers": result.fallback_tiers,
-        "l0_replacements": result.l0_replacements,
-    }, indent=2)
+    return json.dumps(
+        {
+            "e2e_models": result.e2e_models,
+            "e2e_test_ids": result.e2e_test_ids,
+            "unit_tiers": result.unit_tiers,
+            "rebuild_cpp": result.rebuild_cpp,
+            "cap_applied": result.cap_applied,
+            "matched_rules": result.matched_rules,
+            "builder_tests": result.builder_tests,
+            "cpp_tests": result.cpp_tests,
+            "tools_tests": result.tools_tests,
+            "fallback_tiers": result.fallback_tiers,
+            "l0_replacements": result.l0_replacements,
+        },
+        indent=2,
+    )
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -3480,30 +3505,42 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Test impact analysis for selective CI execution.",
     )
-    parser.add_argument("--base", default="github/main",
-                        help="Git ref for diff base (default: github/main)")
-    parser.add_argument("--head", default="HEAD",
-                        help="Git ref for diff head (default: HEAD)")
-    parser.add_argument("--files",
-                        help="Explicit comma-separated file list (overrides git diff)")
-    parser.add_argument("--cap", type=int, default=None,
-                        help="If affected models > N, limit to core set + warn")
-    parser.add_argument("--e2e-suite", choices=("l0", "nightly"), default="l0",
-                        help="E2E selection policy: l0 applies configured "
-                             "large-model replacements; nightly keeps exact models")
-    parser.add_argument("--include-ci-tier", action="append", default=[],
-                        help="Include a ci_tier that is excluded by default, "
-                             "for example multi_device for manual local runs")
-    parser.add_argument("--json", action="store_true", dest="json_output",
-                        help="Output structured JSON for CI consumption")
-    parser.add_argument("--validate", action="store_true",
-                        help="Check map consistency (no diff needed)")
-    parser.add_argument("--verbose", action="store_true",
-                        help="Show per-file rule matches")
-    parser.add_argument("--repo-root", default=None,
-                        help="Repository root (default: auto-detect)")
-    parser.add_argument("--coverage-map", default=None,
-                        help="Path to coverage_map.json for per-test selection")
+    parser.add_argument(
+        "--base", default="github/main", help="Git ref for diff base (default: github/main)"
+    )
+    parser.add_argument("--head", default="HEAD", help="Git ref for diff head (default: HEAD)")
+    parser.add_argument("--files", help="Explicit comma-separated file list (overrides git diff)")
+    parser.add_argument(
+        "--cap", type=int, default=None, help="If affected models > N, limit to core set + warn"
+    )
+    parser.add_argument(
+        "--e2e-suite",
+        choices=("l0", "nightly"),
+        default="l0",
+        help="E2E selection policy: l0 applies configured "
+        "large-model replacements; nightly keeps exact models",
+    )
+    parser.add_argument(
+        "--include-ci-tier",
+        action="append",
+        default=[],
+        help="Include a ci_tier that is excluded by default, "
+        "for example multi_device for manual local runs",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output structured JSON for CI consumption",
+    )
+    parser.add_argument(
+        "--validate", action="store_true", help="Check map consistency (no diff needed)"
+    )
+    parser.add_argument("--verbose", action="store_true", help="Show per-file rule matches")
+    parser.add_argument("--repo-root", default=None, help="Repository root (default: auto-detect)")
+    parser.add_argument(
+        "--coverage-map", default=None, help="Path to coverage_map.json for per-test selection"
+    )
     args = parser.parse_args()
 
     # Resolve repo root
@@ -3513,7 +3550,9 @@ def main() -> int:
         try:
             result = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, check=True,
+                capture_output=True,
+                text=True,
+                check=True,
             )
             repo_root = Path(result.stdout.strip())
         except subprocess.CalledProcessError:
@@ -3528,10 +3567,12 @@ def main() -> int:
             for e in errors:
                 print(f"  ERROR: {e}", file=sys.stderr)
             return 1
-        print(f"Validation passed. {len(imap.all_model_names)} models, "
-              f"{len(imap.core_models)} core, "
-              f"{len(imap.family_to_models)} families.",
-              file=sys.stderr)
+        print(
+            f"Validation passed. {len(imap.all_model_names)} models, "
+            f"{len(imap.core_models)} core, "
+            f"{len(imap.family_to_models)} families.",
+            file=sys.stderr,
+        )
         return 0
 
     # Load coverage map if provided
@@ -3539,15 +3580,16 @@ def main() -> int:
     if args.coverage_map:
         sys.path.insert(0, str(repo_root / "tools"))
         from coverage_map.generate import load_coverage_map
+
         coverage_map_data = load_coverage_map(Path(args.coverage_map))
         if coverage_map_data is None:
-            print(f"WARNING: Coverage map not found at {args.coverage_map}. "
-                  "Falling back to tier-level selection.", file=sys.stderr)
+            print(
+                f"WARNING: Coverage map not found at {args.coverage_map}. "
+                "Falling back to tier-level selection.",
+                file=sys.stderr,
+            )
 
-    exclude_ci_tiers = (
-        set(_DEFAULT_EXCLUDED_CI_TIERS)
-        .difference(set(args.include_ci_tier or []))
-    )
+    exclude_ci_tiers = set(_DEFAULT_EXCLUDED_CI_TIERS).difference(set(args.include_ci_tier or []))
 
     # Get changed files
     if args.files:
@@ -3568,17 +3610,23 @@ def main() -> int:
             unit_tiers=["builder", "cpp", "tools"],
             rebuild_cpp=True,
             cap_applied=False,
-            matched_rules=[{
-                "file": "<all>", "rule": "git_diff_failed",
-                "models": e2e_models,
-            }],
+            matched_rules=[
+                {
+                    "file": "<all>",
+                    "rule": "git_diff_failed",
+                    "models": e2e_models,
+                }
+            ],
             e2e_test_ids=_model_owned_e2e_test_ids(e2e_models, imap),
         )
     elif not changed:
         print("No changed files detected.", file=sys.stderr)
         result_obj = ImpactResult(
-            e2e_models=[], unit_tiers=[], rebuild_cpp=False,
-            cap_applied=False, matched_rules=[],
+            e2e_models=[],
+            unit_tiers=[],
+            rebuild_cpp=False,
+            cap_applied=False,
+            matched_rules=[],
         )
     else:
         result_obj = analyze_impact(
@@ -3596,8 +3644,7 @@ def main() -> int:
     if args.verbose:
         for rule in result_obj.matched_rules:
             n = len(rule["models"])
-            print(f"  {rule['file']} -> {rule['rule']} ({n} models)",
-                  file=sys.stderr)
+            print(f"  {rule['file']} -> {rule['rule']} ({n} models)", file=sys.stderr)
 
     if args.json_output:
         print(format_json(result_obj))

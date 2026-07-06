@@ -1,22 +1,29 @@
 {
   "name": "bert-base-uncased",
-  "trace_id": "IT-E2E-BERT-01",
   "hf_id": "google-bert/bert-base-uncased",
   "bundle": "bert-base-uncased.trtfb",
   "family": "bert",
   "runtime_strategy": "bert_encoder_only",
   "task_strategy": "encoder_only_nlp",
-  "reference_family": "encoder_base_features",
-  "user_contract": "representation_parity",
+  "precision": "fp16",
   "max_cache_length": 128,
-  "prompt": "The capital of France is Paris.",
-  "max_new_tokens": 1,
   "trust_remote_code": false,
-  "notes": "Encoder-only model \u2014 outputs hidden states, not logits for next token. E2E test validates bundle build + inference without text comparison.",
-  "core": true,
-  "metadata": {
-    "contract_config": {
-      "auto_class": "AutoModel"
+  "testcases": [
+    {
+      "name": "bert-base-uncased",
+      "trace_id": "IT-E2E-BERT-01",
+      "reference_precision": "fp32",
+      "reference_family": "encoder_base_features",
+      "user_contract": "representation_parity",
+      "prompt": "The capital of France is Paris.",
+      "max_new_tokens": 1,
+      "notes": "Encoder-only model \u2014 outputs hidden states, not logits for next token. E2E test validates bundle build + inference without text comparison.",
+      "core": true,
+      "metadata": {
+        "contract_config": {
+          "auto_class": "AutoModel"
+        }
+      }
     }
-  }
+  ]
 }

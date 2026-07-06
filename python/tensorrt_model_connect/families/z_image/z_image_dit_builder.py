@@ -175,6 +175,8 @@ def build_z_image_dit_engine(
     head_dim: int = 128,
     adaln_embed_dim: int = 256,
     eps: float = 1e-5,
+    precision: str = "fp32",
+    fp32_layers: tuple[int, ...] = (),
     verbose: bool = False,
     max_batch_size: int = 1,
     opt_batch_size: int | None = None,
@@ -195,7 +197,30 @@ def build_z_image_dit_engine(
     """
     if max_batch_size < 1:
         raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported Z-Image DiT precision {precision!r}; "
+            "expected fp32 or fp16")
+    selected_fp32_layers = frozenset(int(layer) for layer in fp32_layers)
+    final_layer_selector = 2 * num_refiner_layers + num_layers
+    invalid_fp32_layers = sorted(
+        layer for layer in selected_fp32_layers
+        if layer < 0 or layer > final_layer_selector)
+    if invalid_fp32_layers:
+        raise ValueError(
+            "Z-Image DiT fp32_layers contains unknown layer selectors: "
+            f"{invalid_fp32_layers}; expected 0-{final_layer_selector}")
+    if selected_fp32_layers and precision != "fp16":
+        raise ValueError(
+            "Z-Image DiT fp32_layers requires an FP16 base precision")
     if max_batch_size > 1:
+        if precision != "fp32":
+            raise NotImplementedError(
+                "FP16 Z-Image DiT currently supports max_batch_size=1")
         return _build_z_image_dit_engine_batched(
             weights,
             dim=dim,
@@ -234,12 +259,47 @@ def build_z_image_dit_engine(
         "rotary_cos", trt.float32, (total_seq, head_dim))
     rope_sin = network.add_input(
         "rotary_sin", trt.float32, (total_seq, head_dim))
+    if work_trt_dtype != trt.float32:
+        noise_inp = network.add_cast(noise_inp, work_trt_dtype).get_output(0)
+        caption_inp = network.add_cast(caption_inp, work_trt_dtype).get_output(0)
+        temb_inp = network.add_cast(temb_inp, work_trt_dtype).get_output(0)
+        rope_cos = network.add_cast(rope_cos, work_trt_dtype).get_output(0)
+        rope_sin = network.add_cast(rope_sin, work_trt_dtype).get_output(0)
 
     # Constants
-    eps_t = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
-    scale_t = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
-    ones_t = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+    eps_t = graph_ops.add_constant(
+        network, (1, 1), np.array([eps], dtype=work_np_dtype),
+        dtype=work_np_dtype)
+    # add_attention_from_rows creates the strongly typed scale constant. Keep
+    # this as a Python scalar so the explicit FP32 attention path does not try
+    # to materialize an ITensor as a numpy constant.
+    scale_t = attn_scale
+    ones_t = graph_ops.add_constant(
+        network, (1, 1), np.array([1.0], dtype=work_np_dtype),
+        dtype=work_np_dtype)
+    fp32_eps_t = None
+    fp32_ones_t = None
+    if selected_fp32_layers:
+        fp32_eps_t = graph_ops.add_constant(
+            network, (1, 1), np.array([eps], dtype=np.float32),
+            dtype=np.float32)
+        fp32_ones_t = graph_ops.add_constant(
+            network, (1, 1), np.array([1.0], dtype=np.float32),
+            dtype=np.float32)
+
+    def _layer_inputs(selector: int, *tensors):
+        if selector not in selected_fp32_layers:
+            return work_np_dtype, eps_t, ones_t, tensors
+        converted = tuple(
+            tensor if tensor.dtype == trt.float32
+            else network.add_cast(tensor, trt.float32).get_output(0)
+            for tensor in tensors)
+        return np.float32, fp32_eps_t, fp32_ones_t, converted
+
+    def _cast_back_from_fp32(selector: int, tensor):
+        if selector in selected_fp32_layers:
+            return network.add_cast(tensor, work_trt_dtype).get_output(0)
+        return tensor
 
     noise = noise_inp
     caption = caption_inp
@@ -249,141 +309,53 @@ def build_z_image_dit_engine(
     noise_sin = _slice_rope(network, rope_sin, 0, num_patches, head_dim)
     for i in range(num_refiner_layers):
         tp = f"noise_refiner.{i}"
+        selector = i
+        layer_dtype, layer_eps, layer_ones, layer_inputs = _layer_inputs(
+            selector, noise, temb_inp, noise_cos, noise_sin)
+        layer_noise, layer_temb, layer_cos, layer_sin = layer_inputs
         noise = _add_adaln_dit_block(
-            network, noise, weights, tp, temb_inp,
+            network, layer_noise, weights, tp, layer_temb,
             dim, num_heads, head_dim, ffn_dim, adaln_embed_dim,
-            num_patches, eps_t, scale_t,
-            noise_cos, noise_sin, ones_t,
+            num_patches, layer_eps, scale_t,
+            layer_cos, layer_sin, layer_ones,
+            dtype=layer_dtype,
         )
+        noise = _cast_back_from_fp32(selector, noise)
 
     # --- Context refiner (on caption only, no AdaLN) ---
     cap_cos = _slice_rope(network, rope_cos, num_patches, text_seq_len, head_dim)
     cap_sin = _slice_rope(network, rope_sin, num_patches, text_seq_len, head_dim)
     for i in range(num_refiner_layers):
         tp = f"context_refiner.{i}"
+        selector = num_refiner_layers + i
+        layer_dtype, layer_eps, _layer_ones, layer_inputs = _layer_inputs(
+            selector, caption, cap_cos, cap_sin)
+        layer_caption, layer_cos, layer_sin = layer_inputs
         caption = _add_plain_dit_block(
-            network, caption, weights, tp,
+            network, layer_caption, weights, tp,
             dim, num_heads, head_dim, ffn_dim, text_seq_len,
-            eps_t, scale_t, cap_cos, cap_sin,
+            layer_eps, scale_t, layer_cos, layer_sin,
+            dtype=layer_dtype,
         )
+        caption = _cast_back_from_fp32(selector, caption)
 
     # --- Main layers (unified: noise + caption concatenated) ---
     for i in range(num_layers):
         tp = f"main.{i}"
-
-        # AdaLN modulation: Linear(adaln_dim, 4*dim) -- NO SiLU (unlike FinalLayer)
-        adaln_w = weights[f"{tp}.adaln.weight"]
-        adaln_b = weights[f"{tp}.adaln.bias"]
-        modulation = graph_ops.add_matmul_rhs_constant(
-            network, temb_inp, adaln_embed_dim, 4 * dim, adaln_w)
-        modulation = graph_ops.add_bias_sum(network, modulation, 4 * dim, adaln_b)
-
-        # Chunk into 4: scale_msa, gate_msa, scale_mlp, gate_mlp
-        chunks = []
-        for ci in range(4):
-            s = network.add_slice(
-                modulation, start=(0, ci * dim), shape=(1, dim), stride=(1, 1))
-            chunks.append(s.get_output(0))
-        scale_msa, gate_msa_raw, scale_mlp, gate_mlp_raw = chunks
-
-        # Tanh gating (critical for stability)
-        gate_msa_act = network.add_activation(gate_msa_raw, trt.ActivationType.TANH)
-        gate_msa = gate_msa_act.get_output(0)
-        gate_mlp_act = network.add_activation(gate_mlp_raw, trt.ActivationType.TANH)
-        gate_mlp = gate_mlp_act.get_output(0)
-
-        # scale = 1 + scale
-        scale_msa_p1 = network.add_elementwise(
-            scale_msa, ones_t, trt.ElementWiseOperation.SUM).get_output(0)
-        scale_mlp_p1 = network.add_elementwise(
-            scale_mlp, ones_t, trt.ElementWiseOperation.SUM).get_output(0)
-
-        # --- Self-attention with AdaLN ---
-        # Concatenate noise + caption FIRST, then apply SAME attention_norm1
         unified = network.add_concatenation([noise, caption])
         unified.axis = 0
         unified_t = unified.get_output(0)
-
-        # Pre-norm: attention_norm1 on the UNIFIED sequence (both noise and caption)
-        unified_normed = graph_ops.add_rms_norm(
-            network, unified_t, dim, weights[f"{tp}.attn_norm1"], eps_t)
-
-        # Apply scale_msa to unified normed sequence
-        unified_scaled = network.add_elementwise(
-            unified_normed, scale_msa_p1,
-            trt.ElementWiseOperation.PROD).get_output(0)
-
-        # QKV on unified scaled sequence
-        q = graph_ops.add_matmul_rhs_constant(
-            network, unified_scaled, dim, dim, weights[f"{tp}.to_q"])
-        k = graph_ops.add_matmul_rhs_constant(
-            network, unified_scaled, dim, dim, weights[f"{tp}.to_k"])
-        v = graph_ops.add_matmul_rhs_constant(
-            network, unified_scaled, dim, dim, weights[f"{tp}.to_v"])
-
-        # QK norm (per-head)
-        q_norm_w = weights[f"{tp}.norm_q"]
-        k_norm_w = weights[f"{tp}.norm_k"]
-        q_norm_tiled = np.tile(q_norm_w.reshape(1, head_dim), (num_heads, 1))
-        k_norm_tiled = np.tile(k_norm_w.reshape(1, head_dim), (num_heads, 1))
-        q = _per_head_rms_norm(network, q, num_heads, head_dim, q_norm_tiled, eps_t, total_seq)
-        k = _per_head_rms_norm(network, k, num_heads, head_dim, k_norm_tiled, eps_t, total_seq)
-
-        # Apply RoPE (full unified sequence)
-        q = _apply_native_rope_from_full_cache(
-            network, q, rope_cos, rope_sin, num_heads, head_dim, total_seq)
-        k = _apply_native_rope_from_full_cache(
-            network, k, rope_cos, rope_sin, num_heads, head_dim, total_seq)
-
-        # Multi-head attention
-        attn_out = _multi_head_attention(
-            network, q, k, v, num_heads, head_dim, total_seq, total_seq, scale_t)
-
-        # Output projection
-        attn_out = graph_ops.add_matmul_rhs_constant(
-            network, attn_out, dim, dim, weights[f"{tp}.to_out"])
-
-        # Post-norm: attention_norm2 on attn output (NOT on input)
-        attn_out_normed = graph_ops.add_rms_norm(
-            network, attn_out, dim, weights[f"{tp}.attn_norm2"], eps_t)
-
-        # Gate + residual
-        gated_attn = network.add_elementwise(
-            attn_out_normed, gate_msa, trt.ElementWiseOperation.PROD)
-        unified_t = network.add_elementwise(
-            unified_t, gated_attn.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
-
-        # --- SwiGLU FFN with AdaLN ---
-        # Pre-norm: ffn_norm1 on unified
-        unified_ffn_normed = graph_ops.add_rms_norm(
-            network, unified_t, dim, weights[f"{tp}.ffn_norm1"], eps_t)
-        unified_ffn_scaled = network.add_elementwise(
-            unified_ffn_normed, scale_mlp_p1,
-            trt.ElementWiseOperation.PROD).get_output(0)
-
-        # SwiGLU: gate = SiLU(x @ w1), up = x @ w3, out = (gate * up) @ w2
-        gate_proj = graph_ops.add_matmul_rhs_constant(
-            network, unified_ffn_scaled, dim, ffn_dim, weights[f"{tp}.ff_w1"])
-        up_proj = graph_ops.add_matmul_rhs_constant(
-            network, unified_ffn_scaled, dim, ffn_dim, weights[f"{tp}.ff_w3"])
-
-        gate_sigmoid = network.add_activation(gate_proj, trt.ActivationType.SIGMOID)
-        gate_silu = network.add_elementwise(
-            gate_proj, gate_sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-        gated_ffn = network.add_elementwise(
-            gate_silu.get_output(0), up_proj, trt.ElementWiseOperation.PROD)
-
-        down_proj = graph_ops.add_matmul_rhs_constant(
-            network, gated_ffn.get_output(0), ffn_dim, dim, weights[f"{tp}.ff_w2"])
-
-        # Post-norm: ffn_norm2 on FFN output
-        ffn_out_normed = graph_ops.add_rms_norm(
-            network, down_proj, dim, weights[f"{tp}.ffn_norm2"], eps_t)
-
-        gated_ffn_out = network.add_elementwise(
-            ffn_out_normed, gate_mlp, trt.ElementWiseOperation.PROD)
-        unified_t = network.add_elementwise(
-            unified_t, gated_ffn_out.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
+        selector = 2 * num_refiner_layers + i
+        layer_dtype, layer_eps, layer_ones, layer_inputs = _layer_inputs(
+            selector, unified_t, temb_inp, rope_cos, rope_sin)
+        layer_unified, layer_temb, layer_cos, layer_sin = layer_inputs
+        unified_t = _add_adaln_dit_block(
+            network, layer_unified, weights, tp, layer_temb,
+            dim, num_heads, head_dim, ffn_dim, adaln_embed_dim,
+            total_seq, layer_eps, scale_t, layer_cos, layer_sin, layer_ones,
+            dtype=layer_dtype,
+        )
+        unified_t = _cast_back_from_fp32(selector, unified_t)
 
         # Split unified back into noise and caption
         noise = network.add_slice(
@@ -394,26 +366,39 @@ def build_z_image_dit_engine(
     # --- Final layer ---
     # FinalLayer: LayerNorm(dim, elementwise_affine=False) * (1 + SiLU(Linear(adaln_dim, dim)))
     # Then Linear(dim, out_channels)
+    final_dtype, _final_eps, final_ones, final_inputs = _layer_inputs(
+        final_layer_selector, noise, temb_inp)
+    final_noise, final_temb = final_inputs
 
     # SiLU on temb, then linear
-    temb_silu = network.add_activation(temb_inp, trt.ActivationType.SIGMOID)
+    temb_silu = network.add_activation(final_temb, trt.ActivationType.SIGMOID)
     temb_silu_act = network.add_elementwise(
-        temb_inp, temb_silu.get_output(0), trt.ElementWiseOperation.PROD)
+        final_temb, temb_silu.get_output(0), trt.ElementWiseOperation.PROD)
     final_mod = graph_ops.add_matmul_rhs_constant(
         network, temb_silu_act.get_output(0), adaln_embed_dim, dim,
-        weights["final_adaLN.weight"])
-    final_mod = graph_ops.add_bias_sum(network, final_mod, dim, weights["final_adaLN.bias"])
+        weights["final_adaLN.weight"], dtype=final_dtype)
+    final_mod = graph_ops.add_bias_sum(
+        network, final_mod, dim, weights["final_adaLN.bias"],
+        dtype=final_dtype)
     final_scale = network.add_elementwise(
-        final_mod, ones_t, trt.ElementWiseOperation.SUM).get_output(0)
+        final_mod, final_ones, trt.ElementWiseOperation.SUM).get_output(0)
 
     # LayerNorm (elementwise_affine=False, eps=1e-6): mean-center then variance-normalize
-    ln_eps = graph_ops.add_constant(network, (1, 1), np.array([1e-6], dtype=np.float32))
+    ln_eps = graph_ops.add_constant(
+        network, (1, 1), np.array([1e-6], dtype=np.float32),
+        dtype=np.float32)
+    norm_input = final_noise
+    norm_scale = final_scale
+    if final_dtype != np.float32:
+        norm_input = network.add_cast(final_noise, trt.float32).get_output(0)
+        norm_scale = network.add_cast(final_scale, trt.float32).get_output(0)
 
     # Compute mean: [num_patches, 1]
-    noise_mean = network.add_reduce(noise, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    noise_mean = network.add_reduce(
+        norm_input, trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
     # Subtract mean
     noise_centered = network.add_elementwise(
-        noise, noise_mean.get_output(0), trt.ElementWiseOperation.SUB).get_output(0)
+        norm_input, noise_mean.get_output(0), trt.ElementWiseOperation.SUB).get_output(0)
     # Compute variance
     noise_sq = network.add_elementwise(
         noise_centered, noise_centered, trt.ElementWiseOperation.PROD)
@@ -427,13 +412,18 @@ def build_z_image_dit_engine(
 
     # Apply scale
     noise_final = network.add_elementwise(
-        noise_ln, final_scale, trt.ElementWiseOperation.PROD).get_output(0)
+        noise_ln, norm_scale, trt.ElementWiseOperation.PROD).get_output(0)
+    if final_dtype != np.float32:
+        noise_final = network.add_cast(
+            noise_final, work_trt_dtype).get_output(0)
 
     # Final linear projection
     output = graph_ops.add_matmul_rhs_constant(
-        network, noise_final, dim, out_channels, weights["final_linear.weight"])
+        network, noise_final, dim, out_channels, weights["final_linear.weight"],
+        dtype=final_dtype)
     output = graph_ops.add_bias_sum(
-        network, output, out_channels, weights["final_linear.bias"])
+        network, output, out_channels, weights["final_linear.bias"],
+        dtype=final_dtype)
 
     cast_output = network.add_cast(output, trt.float32)
     output_final = cast_output.get_output(0)
@@ -466,25 +456,31 @@ def _apply_native_rope_from_full_cache(
         seq_len, interleaved=True)
 
 
-def _per_head_rms_norm(network, inp, num_heads, head_dim, gamma, eps_t, seq_len):
+def _per_head_rms_norm(
+        network, inp, num_heads, head_dim, gamma, eps_t, seq_len,
+        dtype=np.float32):
     """Per-head RMSNorm: [seq, num_heads * head_dim] -> reshape -> norm -> reshape."""
     return graph_ops.add_rms_norm_per_head(
         network, inp, num_heads, head_dim, gamma, eps_t,
-        sequence_length=seq_len)
+        sequence_length=seq_len, dtype=dtype)
 
 
-def _multi_head_attention(network, q, k, v, num_heads, head_dim, q_seq, kv_seq, scale_t):
+def _multi_head_attention(
+        network, q, k, v, num_heads, head_dim, q_seq, kv_seq, scale_t,
+        dtype=np.float32):
     """Standard multi-head attention."""
     return graph_ops.add_attention_from_rows(
         network, q, k, v,
         num_heads=num_heads, head_dim=head_dim,
-        q_seq=q_seq, kv_seq=kv_seq)
+        q_seq=q_seq, kv_seq=kv_seq,
+        scale=scale_t,
+        explicit_attention=(dtype != np.float32))
 
 
 def _add_plain_dit_block(
     network, x, weights, prefix,
     dim, num_heads, head_dim, ffn_dim, seq_len,
-    eps_t, scale_t, cos_t, sin_t,
+    eps_t, scale_t, cos_t, sin_t, dtype=np.float32,
 ):
     """Plain DiT block (no AdaLN): pre-norm attention + post-norm + SwiGLU FFN.
 
@@ -494,18 +490,25 @@ def _add_plain_dit_block(
         x = x + ffn_norm2(feed_forward(ffn_norm1(x)))  # norm2 = post-norm
     """
     # Pre-attention norm
-    normed = graph_ops.add_rms_norm(network, x, dim, weights[f"{prefix}.attn_norm1"], eps_t)
+    normed = graph_ops.add_rms_norm(
+        network, x, dim, weights[f"{prefix}.attn_norm1"], eps_t,
+        dtype=dtype)
 
     # QKV
-    q = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_q"])
-    k = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_k"])
-    v = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_v"])
+    q = graph_ops.add_matmul_rhs_constant(
+        network, normed, dim, dim, weights[f"{prefix}.to_q"], dtype=dtype)
+    k = graph_ops.add_matmul_rhs_constant(
+        network, normed, dim, dim, weights[f"{prefix}.to_k"], dtype=dtype)
+    v = graph_ops.add_matmul_rhs_constant(
+        network, normed, dim, dim, weights[f"{prefix}.to_v"], dtype=dtype)
 
     # QK norm
     q_norm = np.tile(weights[f"{prefix}.norm_q"].reshape(1, head_dim), (num_heads, 1))
     k_norm = np.tile(weights[f"{prefix}.norm_k"].reshape(1, head_dim), (num_heads, 1))
-    q = _per_head_rms_norm(network, q, num_heads, head_dim, q_norm, eps_t, seq_len)
-    k = _per_head_rms_norm(network, k, num_heads, head_dim, k_norm, eps_t, seq_len)
+    q = _per_head_rms_norm(
+        network, q, num_heads, head_dim, q_norm, eps_t, seq_len, dtype=dtype)
+    k = _per_head_rms_norm(
+        network, k, num_heads, head_dim, k_norm, eps_t, seq_len, dtype=dtype)
 
     # RoPE
     q = _apply_native_rope_from_full_cache(
@@ -514,28 +517,42 @@ def _add_plain_dit_block(
         network, k, cos_t, sin_t, num_heads, head_dim, seq_len)
 
     # Attention
-    attn_out = _multi_head_attention(network, q, k, v, num_heads, head_dim, seq_len, seq_len, scale_t)
-    attn_out = graph_ops.add_matmul_rhs_constant(network, attn_out, dim, dim, weights[f"{prefix}.to_out"])
+    attn_out = _multi_head_attention(
+        network, q, k, v, num_heads, head_dim, seq_len, seq_len, scale_t,
+        dtype=dtype)
+    attn_out = graph_ops.add_matmul_rhs_constant(
+        network, attn_out, dim, dim, weights[f"{prefix}.to_out"], dtype=dtype)
 
     # Post-norm on attn output
-    attn_out_normed = graph_ops.add_rms_norm(network, attn_out, dim, weights[f"{prefix}.attn_norm2"], eps_t)
+    attn_out_normed = graph_ops.add_rms_norm(
+        network, attn_out, dim, weights[f"{prefix}.attn_norm2"], eps_t,
+        dtype=dtype)
 
     # Residual
     x = network.add_elementwise(x, attn_out_normed, trt.ElementWiseOperation.SUM).get_output(0)
 
     # Pre-FFN norm
-    ffn_normed = graph_ops.add_rms_norm(network, x, dim, weights[f"{prefix}.ffn_norm1"], eps_t)
+    ffn_normed = graph_ops.add_rms_norm(
+        network, x, dim, weights[f"{prefix}.ffn_norm1"], eps_t, dtype=dtype)
 
     # SwiGLU FFN
-    gate_proj = graph_ops.add_matmul_rhs_constant(network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w1"])
-    up_proj = graph_ops.add_matmul_rhs_constant(network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w3"])
+    gate_proj = graph_ops.add_matmul_rhs_constant(
+        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w1"],
+        dtype=dtype)
+    up_proj = graph_ops.add_matmul_rhs_constant(
+        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w3"],
+        dtype=dtype)
     gate_sigmoid = network.add_activation(gate_proj, trt.ActivationType.SIGMOID)
     gate_silu = network.add_elementwise(gate_proj, gate_sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
     gated = network.add_elementwise(gate_silu.get_output(0), up_proj, trt.ElementWiseOperation.PROD)
-    down_proj = graph_ops.add_matmul_rhs_constant(network, gated.get_output(0), ffn_dim, dim, weights[f"{prefix}.ff_w2"])
+    down_proj = graph_ops.add_matmul_rhs_constant(
+        network, gated.get_output(0), ffn_dim, dim, weights[f"{prefix}.ff_w2"],
+        dtype=dtype)
 
     # Post-norm on FFN output
-    ffn_out_normed = graph_ops.add_rms_norm(network, down_proj, dim, weights[f"{prefix}.ffn_norm2"], eps_t)
+    ffn_out_normed = graph_ops.add_rms_norm(
+        network, down_proj, dim, weights[f"{prefix}.ffn_norm2"], eps_t,
+        dtype=dtype)
 
     x = network.add_elementwise(x, ffn_out_normed, trt.ElementWiseOperation.SUM).get_output(0)
     return x
@@ -544,7 +561,7 @@ def _add_plain_dit_block(
 def _add_adaln_dit_block(
     network, x, weights, prefix, temb,
     dim, num_heads, head_dim, ffn_dim, adaln_embed_dim,
-    seq_len, eps_t, scale_t, cos_t, sin_t, ones_t,
+    seq_len, eps_t, scale_t, cos_t, sin_t, ones_t, dtype=np.float32,
 ):
     """AdaLN DiT block (noise_refiner): 4-chunk modulation + tanh gating + attention + SwiGLU.
 
@@ -564,8 +581,9 @@ def _add_adaln_dit_block(
     adaln_w = weights[f"{prefix}.adaln.weight"]
     adaln_b = weights[f"{prefix}.adaln.bias"]
     mod = graph_ops.add_matmul_rhs_constant(
-        network, temb, adaln_embed_dim, 4 * dim, adaln_w)
-    mod = graph_ops.add_bias_sum(network, mod, 4 * dim, adaln_b)
+        network, temb, adaln_embed_dim, 4 * dim, adaln_w, dtype=dtype)
+    mod = graph_ops.add_bias_sum(
+        network, mod, 4 * dim, adaln_b, dtype=dtype)
 
     chunks = []
     for ci in range(4):
@@ -581,48 +599,69 @@ def _add_adaln_dit_block(
     scale_mlp_p1 = network.add_elementwise(scale_mlp, ones_t, trt.ElementWiseOperation.SUM).get_output(0)
 
     # Pre-attention norm + AdaLN scale
-    normed = graph_ops.add_rms_norm(network, x, dim, weights[f"{prefix}.attn_norm1"], eps_t)
+    normed = graph_ops.add_rms_norm(
+        network, x, dim, weights[f"{prefix}.attn_norm1"], eps_t,
+        dtype=dtype)
     normed = network.add_elementwise(
         normed, scale_msa_p1, trt.ElementWiseOperation.PROD).get_output(0)
 
     # QKV
-    q = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_q"])
-    k = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_k"])
-    v = graph_ops.add_matmul_rhs_constant(network, normed, dim, dim, weights[f"{prefix}.to_v"])
+    q = graph_ops.add_matmul_rhs_constant(
+        network, normed, dim, dim, weights[f"{prefix}.to_q"], dtype=dtype)
+    k = graph_ops.add_matmul_rhs_constant(
+        network, normed, dim, dim, weights[f"{prefix}.to_k"], dtype=dtype)
+    v = graph_ops.add_matmul_rhs_constant(
+        network, normed, dim, dim, weights[f"{prefix}.to_v"], dtype=dtype)
 
     q_norm = np.tile(weights[f"{prefix}.norm_q"].reshape(1, head_dim), (num_heads, 1))
     k_norm = np.tile(weights[f"{prefix}.norm_k"].reshape(1, head_dim), (num_heads, 1))
-    q = _per_head_rms_norm(network, q, num_heads, head_dim, q_norm, eps_t, seq_len)
-    k = _per_head_rms_norm(network, k, num_heads, head_dim, k_norm, eps_t, seq_len)
+    q = _per_head_rms_norm(
+        network, q, num_heads, head_dim, q_norm, eps_t, seq_len, dtype=dtype)
+    k = _per_head_rms_norm(
+        network, k, num_heads, head_dim, k_norm, eps_t, seq_len, dtype=dtype)
 
     q = _apply_native_rope_from_full_cache(
         network, q, cos_t, sin_t, num_heads, head_dim, seq_len)
     k = _apply_native_rope_from_full_cache(
         network, k, cos_t, sin_t, num_heads, head_dim, seq_len)
 
-    attn_out = _multi_head_attention(network, q, k, v, num_heads, head_dim, seq_len, seq_len, scale_t)
-    attn_out = graph_ops.add_matmul_rhs_constant(network, attn_out, dim, dim, weights[f"{prefix}.to_out"])
+    attn_out = _multi_head_attention(
+        network, q, k, v, num_heads, head_dim, seq_len, seq_len, scale_t,
+        dtype=dtype)
+    attn_out = graph_ops.add_matmul_rhs_constant(
+        network, attn_out, dim, dim, weights[f"{prefix}.to_out"], dtype=dtype)
 
     # Post-norm on attn output
-    attn_out_normed = graph_ops.add_rms_norm(network, attn_out, dim, weights[f"{prefix}.attn_norm2"], eps_t)
+    attn_out_normed = graph_ops.add_rms_norm(
+        network, attn_out, dim, weights[f"{prefix}.attn_norm2"], eps_t,
+        dtype=dtype)
 
     gated_attn = network.add_elementwise(attn_out_normed, gate_msa, trt.ElementWiseOperation.PROD)
     x = network.add_elementwise(x, gated_attn.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
 
     # FFN
-    ffn_normed = graph_ops.add_rms_norm(network, x, dim, weights[f"{prefix}.ffn_norm1"], eps_t)
+    ffn_normed = graph_ops.add_rms_norm(
+        network, x, dim, weights[f"{prefix}.ffn_norm1"], eps_t, dtype=dtype)
     ffn_normed = network.add_elementwise(
         ffn_normed, scale_mlp_p1, trt.ElementWiseOperation.PROD).get_output(0)
 
-    gate_proj = graph_ops.add_matmul_rhs_constant(network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w1"])
-    up_proj = graph_ops.add_matmul_rhs_constant(network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w3"])
+    gate_proj = graph_ops.add_matmul_rhs_constant(
+        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w1"],
+        dtype=dtype)
+    up_proj = graph_ops.add_matmul_rhs_constant(
+        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w3"],
+        dtype=dtype)
     gate_sigmoid = network.add_activation(gate_proj, trt.ActivationType.SIGMOID)
     gate_silu = network.add_elementwise(gate_proj, gate_sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
     gated = network.add_elementwise(gate_silu.get_output(0), up_proj, trt.ElementWiseOperation.PROD)
-    down_proj = graph_ops.add_matmul_rhs_constant(network, gated.get_output(0), ffn_dim, dim, weights[f"{prefix}.ff_w2"])
+    down_proj = graph_ops.add_matmul_rhs_constant(
+        network, gated.get_output(0), ffn_dim, dim, weights[f"{prefix}.ff_w2"],
+        dtype=dtype)
 
     # Post-norm on FFN output
-    ffn_out_normed = graph_ops.add_rms_norm(network, down_proj, dim, weights[f"{prefix}.ffn_norm2"], eps_t)
+    ffn_out_normed = graph_ops.add_rms_norm(
+        network, down_proj, dim, weights[f"{prefix}.ffn_norm2"], eps_t,
+        dtype=dtype)
 
     gated_ffn = network.add_elementwise(ffn_out_normed, gate_mlp, trt.ElementWiseOperation.PROD)
     x = network.add_elementwise(x, gated_ffn.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)

@@ -37,8 +37,10 @@ def _const(network, shape: tuple[int, ...], values, dtype=np.float32):
         network, shape, np.asarray(values).reshape(shape), dtype=dtype)
 
 
-def _scalar(network, value: float, rank: int):
-    return _const(network, (1,) * max(rank, 1), np.array([value], dtype=np.float32))
+def _scalar(network, value: float, rank: int, dtype=np.float32):
+    return _const(
+        network, (1,) * max(rank, 1), np.array([value], dtype=dtype),
+        dtype=dtype)
 
 
 def _linear(network, inp, weights: WeightDict, prefix: str, in_size: int, out_size: int):
@@ -125,15 +127,20 @@ def _text_rows(network, text_features, text_seq_len: int, hidden_size: int):
     return sh.get_output(0)
 
 
-def _text_padding_mask(network, attention_mask, text_seq_len: int):
+def _text_padding_mask(network, attention_mask, text_seq_len: int,
+                       dtype=np.float32):
     trt = _trt()
-    mask = network.add_cast(attention_mask, trt.float32).get_output(0)
-    one = _const(network, (1, text_seq_len), np.ones((1, text_seq_len), dtype=np.float32))
+    mask_dtype = trt.float16 if dtype == np.float16 else trt.float32
+    mask = network.add_cast(attention_mask, mask_dtype).get_output(0)
+    one = _const(
+        network, (1, text_seq_len), np.ones((1, text_seq_len), dtype=dtype),
+        dtype=dtype)
     inv = network.add_elementwise(one, mask, trt.ElementWiseOperation.SUB).get_output(0)
     neg = _const(
         network,
         (1, text_seq_len),
-        np.full((1, text_seq_len), -10000.0, dtype=np.float32),
+        np.full((1, text_seq_len), -10000.0, dtype=dtype),
+        dtype=dtype,
     )
     additive = network.add_elementwise(inv, neg, trt.ElementWiseOperation.PROD).get_output(0)
     sh = network.add_shuffle(additive)
@@ -145,19 +152,20 @@ def _sigmoid(network, inp):
     return network.add_activation(inp, _trt().ActivationType.SIGMOID).get_output(0)
 
 
-def _clamp(network, inp, min_value: float, max_value: float):
+def _clamp(network, inp, min_value: float, max_value: float,
+           dtype=np.float32):
     trt = _trt()
     rank = len(tuple(inp.shape))
-    lo = _scalar(network, min_value, rank)
-    hi = _scalar(network, max_value, rank)
+    lo = _scalar(network, min_value, rank, dtype=dtype)
+    hi = _scalar(network, max_value, rank, dtype=dtype)
     x = network.add_elementwise(inp, lo, trt.ElementWiseOperation.MAX).get_output(0)
     return network.add_elementwise(x, hi, trt.ElementWiseOperation.MIN).get_output(0)
 
 
-def _inverse_sigmoid(network, inp, eps: float = 1e-3):
+def _inverse_sigmoid(network, inp, eps: float = 1e-3, dtype=np.float32):
     trt = _trt()
-    x = _clamp(network, inp, eps, 1.0 - eps)
-    one = _scalar(network, 1.0, len(tuple(inp.shape)))
+    x = _clamp(network, inp, eps, 1.0 - eps, dtype=dtype)
+    one = _scalar(network, 1.0, len(tuple(inp.shape)), dtype=dtype)
     denom = network.add_elementwise(one, x, trt.ElementWiseOperation.SUB).get_output(0)
     ratio = network.add_elementwise(x, denom, trt.ElementWiseOperation.DIV).get_output(0)
     return network.add_unary(ratio, trt.UnaryOperation.LOG).get_output(0)
@@ -167,13 +175,13 @@ def _slice_cols(network, inp, start: int, size: int):
     return network.add_slice(inp, (0, start), (inp.shape[0], size), (1, 1)).get_output(0)
 
 
-def _cxcywh_to_xyxy(network, boxes):
+def _cxcywh_to_xyxy(network, boxes, dtype=np.float32):
     trt = _trt()
     cx = _slice_cols(network, boxes, 0, 1)
     cy = _slice_cols(network, boxes, 1, 1)
     w = _slice_cols(network, boxes, 2, 1)
     h = _slice_cols(network, boxes, 3, 1)
-    half = _scalar(network, 0.5, 2)
+    half = _scalar(network, 0.5, 2, dtype=dtype)
     half_w = network.add_elementwise(w, half, trt.ElementWiseOperation.PROD).get_output(0)
     half_h = network.add_elementwise(h, half, trt.ElementWiseOperation.PROD).get_output(0)
     x1 = network.add_elementwise(cx, half_w, trt.ElementWiseOperation.SUB).get_output(0)
@@ -185,36 +193,39 @@ def _cxcywh_to_xyxy(network, boxes):
     return concat.get_output(0)
 
 
-def _signed_log_scale(network, inp):
+def _signed_log_scale(network, inp, dtype=np.float32):
     trt = _trt()
-    eight = _scalar(network, 8.0, len(tuple(inp.shape)))
+    eight = _scalar(network, 8.0, len(tuple(inp.shape)), dtype=dtype)
     scaled = network.add_elementwise(inp, eight, trt.ElementWiseOperation.PROD).get_output(0)
     abs_scaled = network.add_unary(scaled, trt.UnaryOperation.ABS).get_output(0)
-    eps = _scalar(network, 1e-6, len(tuple(inp.shape)))
+    eps = _scalar(network, 1e-6, len(tuple(inp.shape)), dtype=dtype)
     safe_abs = network.add_elementwise(
         abs_scaled, eps, trt.ElementWiseOperation.MAX).get_output(0)
     sign = network.add_elementwise(scaled, safe_abs, trt.ElementWiseOperation.DIV).get_output(0)
-    one = _scalar(network, 1.0, len(tuple(inp.shape)))
+    one = _scalar(network, 1.0, len(tuple(inp.shape)), dtype=dtype)
     plus_one = network.add_elementwise(abs_scaled, one, trt.ElementWiseOperation.SUM).get_output(0)
     logged = network.add_unary(plus_one, trt.UnaryOperation.LOG).get_output(0)
-    inv_log8 = _scalar(network, 1.0 / math.log(8.0), len(tuple(inp.shape)))
+    inv_log8 = _scalar(
+        network, 1.0 / math.log(8.0), len(tuple(inp.shape)), dtype=dtype)
     logged = network.add_elementwise(logged, inv_log8, trt.ElementWiseOperation.PROD).get_output(0)
     return network.add_elementwise(sign, logged, trt.ElementWiseOperation.PROD).get_output(0)
 
 
-def _box_sine_position(network, boxes, hidden_size: int, num_queries: int):
+def _box_sine_position(network, boxes, hidden_size: int, num_queries: int,
+                       dtype=np.float32):
     trt = _trt()
     num_pos = hidden_size // 2
     dim_t = 10000.0 ** (
         2 * (np.arange(num_pos, dtype=np.int32) // 2).astype(np.float32) /
         float(num_pos)
     )
-    dim_t_t = _const(network, (1, num_pos), dim_t.reshape(1, num_pos))
+    dim_t_t = _const(
+        network, (1, num_pos), dim_t.reshape(1, num_pos), dtype=dtype)
     even_mask = (np.arange(num_pos) % 2 == 0).astype(np.float32).reshape(1, num_pos)
     odd_mask = 1.0 - even_mask
-    even_t = _const(network, (1, num_pos), even_mask)
-    odd_t = _const(network, (1, num_pos), odd_mask)
-    scale = _scalar(network, 2.0 * math.pi, 2)
+    even_t = _const(network, (1, num_pos), even_mask, dtype=dtype)
+    odd_t = _const(network, (1, num_pos), odd_mask, dtype=dtype)
+    scale = _scalar(network, 2.0 * math.pi, 2, dtype=dtype)
 
     pieces = []
     for col in (1, 0, 2, 3):
@@ -234,9 +245,10 @@ def _box_sine_position(network, boxes, hidden_size: int, num_queries: int):
 
 
 def _box_rpb(network, boxes, weights: WeightDict, *, height: int, width: int,
-             hidden_size: int, num_heads: int, num_queries: int):
+             hidden_size: int, num_heads: int, num_queries: int,
+             dtype=np.float32):
     trt = _trt()
-    xyxy = _cxcywh_to_xyxy(network, boxes)
+    xyxy = _cxcywh_to_xyxy(network, boxes, dtype=dtype)
     x_edges = network.add_concatenation([
         _slice_cols(network, xyxy, 0, 1),
         _slice_cols(network, xyxy, 2, 1),
@@ -256,17 +268,17 @@ def _box_rpb(network, boxes, weights: WeightDict, *, height: int, width: int,
     coords_w = (np.arange(width, dtype=np.float32) / float(width)).reshape(1, width, 1)
     coords_h = (np.arange(height, dtype=np.float32) / float(height)).reshape(1, height, 1)
     x_deltas = network.add_elementwise(
-        _const(network, (1, width, 1), coords_w),
+        _const(network, (1, width, 1), coords_w, dtype=dtype),
         x_edge_sh.get_output(0),
         trt.ElementWiseOperation.SUB,
     ).get_output(0)
     y_deltas = network.add_elementwise(
-        _const(network, (1, height, 1), coords_h),
+        _const(network, (1, height, 1), coords_h, dtype=dtype),
         y_edge_sh.get_output(0),
         trt.ElementWiseOperation.SUB,
     ).get_output(0)
-    x_log = _signed_log_scale(network, x_deltas)
-    y_log = _signed_log_scale(network, y_deltas)
+    x_log = _signed_log_scale(network, x_deltas, dtype=dtype)
+    y_log = _signed_log_scale(network, y_deltas, dtype=dtype)
     x_embed = _decoder_mlp(
         network, x_log, weights, "box_rpb_embed_x", (2, hidden_size, num_heads))
     y_embed = _decoder_mlp(
@@ -285,6 +297,7 @@ def _box_rpb(network, boxes, weights: WeightDict, *, height: int, width: int,
         network,
         (num_heads, 1, height * width),
         np.zeros((num_heads, 1, height * width), dtype=np.float32),
+        dtype=dtype,
     )
     padded = network.add_concatenation([zeros, perm.get_output(0)])
     padded.axis = 1
@@ -294,7 +307,8 @@ def _box_rpb(network, boxes, weights: WeightDict, *, height: int, width: int,
 
 
 def _group_norm_4d(network, inp, weights: WeightDict, prefix: str, *,
-                   channels: int, groups: int, eps: float):
+                   channels: int, groups: int, eps: float,
+                   dtype=np.float32):
     trt = _trt()
     n, c, h, w = inp.shape
     group_size = channels // groups
@@ -313,7 +327,9 @@ def _group_norm_4d(network, inp, weights: WeightDict, prefix: str, *,
         ).get_output(0),
         trt.ElementWiseOperation.SUB,
     )
-    eps_t = _const(network, (1, 1, 1, 1, 1), np.array([eps], dtype=np.float32))
+    eps_t = _const(
+        network, (1, 1, 1, 1, 1), np.array([eps], dtype=dtype),
+        dtype=dtype)
     denom = network.add_unary(
         network.add_elementwise(var.get_output(0), eps_t, trt.ElementWiseOperation.SUM).get_output(0),
         trt.UnaryOperation.SQRT,
@@ -328,11 +344,13 @@ def _group_norm_4d(network, inp, weights: WeightDict, prefix: str, *,
         network,
         (1, channels, 1, 1),
         weights[f"{prefix}.weight"].reshape(1, channels, 1, 1),
+        dtype=dtype,
     )
     beta = _const(
         network,
         (1, channels, 1, 1),
         weights[f"{prefix}.bias"].reshape(1, channels, 1, 1),
+        dtype=dtype,
     )
     scaled = network.add_elementwise(
         out.get_output(0), gamma, trt.ElementWiseOperation.PROD).get_output(0)
@@ -349,9 +367,10 @@ def _nearest_resize_2d(network, inp, target_h: int, target_w: int):
 
 
 def _weighted_text_pool(network, text_features, attention_mask, *, text_seq_len: int,
-                        hidden_size: int):
+                        hidden_size: int, dtype=np.float32):
     trt = _trt()
-    mask = network.add_cast(attention_mask, trt.float32).get_output(0)
+    mask_dtype = trt.float16 if dtype == np.float16 else trt.float32
+    mask = network.add_cast(attention_mask, mask_dtype).get_output(0)
     mask_rows = network.add_shuffle(mask)
     mask_rows.reshape_dims = (text_seq_len, 1)
     weighted = network.add_elementwise(
@@ -359,7 +378,8 @@ def _weighted_text_pool(network, text_features, attention_mask, *, text_seq_len:
     total = network.add_reduce(weighted, trt.ReduceOperation.SUM, 1 << 0, keep_dims=True).get_output(0)
     count = network.add_reduce(
         mask_rows.get_output(0), trt.ReduceOperation.SUM, 1 << 0, keep_dims=True).get_output(0)
-    one = _const(network, (1, 1), np.array([[1.0]], dtype=np.float32))
+    one = _const(
+        network, (1, 1), np.array([[1.0]], dtype=dtype), dtype=dtype)
     count = network.add_elementwise(count, one, trt.ElementWiseOperation.MAX).get_output(0)
     return network.add_elementwise(total, count, trt.ElementWiseOperation.DIV).get_output(0)
 
@@ -381,6 +401,7 @@ def build_sam3_core_engine(
     mask_num_heads: int,
     mask_num_upsampling_stages: int,
     layer_norm_eps: float,
+    precision: str = "fp32",
     encoder_hidden_act: str = "relu",
     decoder_hidden_act: str = "relu",
     verbose: bool = False,
@@ -393,6 +414,8 @@ def build_sam3_core_engine(
             f"got hidden={hidden_size}, fpn={fpn_hidden_size}")
     trt = _trt()
     graph_ops = _graph_ops()
+    work_np_dtype = np.float16 if precision == "fp16" else np.float32
+    work_trt_dtype = trt.float16 if precision == "fp16" else trt.float32
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -416,8 +439,21 @@ def build_sam3_core_engine(
             f"sam3_fpn_position_{level}", trt.float32,
             (1, hidden_size, height, width)))
 
+    if work_trt_dtype != trt.float32:
+        text_features_in = network.add_cast(
+            text_features_in, work_trt_dtype).get_output(0)
+        fpn_hidden = [
+            network.add_cast(tensor, work_trt_dtype).get_output(0)
+            for tensor in fpn_hidden
+        ]
+        fpn_position = [
+            network.add_cast(tensor, work_trt_dtype).get_output(0)
+            for tensor in fpn_position
+        ]
+
     text_features = _text_rows(network, text_features_in, text_seq_len, hidden_size)
-    text_mask = _text_padding_mask(network, text_mask_in, text_seq_len)
+    text_mask = _text_padding_mask(
+        network, text_mask_in, text_seq_len, dtype=work_np_dtype)
 
     enc_h, enc_w = fpn_shapes[2]
     seq_len = enc_h * enc_w
@@ -463,10 +499,15 @@ def build_sam3_core_engine(
             residual, mlp, trt.ElementWiseOperation.SUM).get_output(0)
 
     query_embed = _const(
-        network, (num_queries, hidden_size), weights["query_embed.weight"])
+        network, (num_queries, hidden_size), weights["query_embed.weight"],
+        dtype=work_np_dtype)
     reference_boxes = _sigmoid(
-        network, _const(network, (num_queries, 4), weights["reference_points.weight"]))
-    presence = _const(network, (1, hidden_size), weights["presence_token.weight"])
+        network, _const(
+            network, (num_queries, 4), weights["reference_points.weight"],
+            dtype=work_np_dtype))
+    presence = _const(
+        network, (1, hidden_size), weights["presence_token.weight"],
+        dtype=work_np_dtype)
     hidden = network.add_concatenation([presence, query_embed])
     hidden.axis = 0
     decoder_hidden = hidden.get_output(0)
@@ -474,12 +515,16 @@ def build_sam3_core_engine(
 
     for layer_idx in range(detr_decoder_layers):
         prefix = f"detr_decoder.layers.{layer_idx}"
-        query_sine = _box_sine_position(network, reference_boxes, hidden_size, num_queries)
+        query_sine = _box_sine_position(
+            network, reference_boxes, hidden_size, num_queries,
+            dtype=work_np_dtype)
         query_pos = _decoder_mlp(
             network, query_sine, weights, "ref_point_head",
             (hidden_size * 2, hidden_size, hidden_size))
         zero_pos = _const(
-            network, (1, hidden_size), np.zeros((1, hidden_size), dtype=np.float32))
+            network, (1, hidden_size),
+            np.zeros((1, hidden_size), dtype=work_np_dtype),
+            dtype=work_np_dtype)
         query_pos_padded = network.add_concatenation([zero_pos, query_pos])
         query_pos_padded.axis = 0
         query_pos_t = query_pos_padded.get_output(0)
@@ -520,7 +565,7 @@ def build_sam3_core_engine(
         rpb = _box_rpb(
             network, reference_boxes, weights, height=enc_h, width=enc_w,
             hidden_size=hidden_size, num_heads=detr_decoder_heads,
-            num_queries=num_queries)
+            num_queries=num_queries, dtype=work_np_dtype)
         attn = _attention(
             network, query_with_pos, key_with_pos, encoder_hidden, weights,
             f"{prefix}.vision_cross_attn", hidden_size=hidden_size,
@@ -552,7 +597,8 @@ def build_sam3_core_engine(
             (hidden_size, hidden_size, hidden_size, 4))
         reference_boxes = _sigmoid(
             network, network.add_elementwise(
-                delta_boxes, _inverse_sigmoid(network, reference_boxes),
+                delta_boxes, _inverse_sigmoid(
+                    network, reference_boxes, dtype=work_np_dtype),
                 trt.ElementWiseOperation.SUM).get_output(0))
 
         presence_hidden = network.add_slice(
@@ -563,13 +609,18 @@ def build_sam3_core_engine(
         last_presence_logits = _decoder_mlp(
             network, presence_hidden, weights, "presence_head",
             (hidden_size, hidden_size, hidden_size, 1))
-        last_presence_logits = _clamp(network, last_presence_logits, -10.0, 10.0)
+        last_presence_logits = _clamp(
+            network, last_presence_logits, -10.0, 10.0,
+            dtype=work_np_dtype)
 
     decoder_queries = normalized_queries
-    pred_boxes = _cxcywh_to_xyxy(network, reference_boxes)
+    pred_boxes = _cxcywh_to_xyxy(
+        network, reference_boxes, dtype=work_np_dtype)
     pred_boxes_out = network.add_shuffle(pred_boxes)
     pred_boxes_out.reshape_dims = (1, num_queries, 4)
     pred_boxes_t = pred_boxes_out.get_output(0)
+    if pred_boxes_t.dtype != trt.float32:
+        pred_boxes_t = network.add_cast(pred_boxes_t, trt.float32).get_output(0)
     pred_boxes_t.name = "pred_boxes"
     network.mark_output(pred_boxes_t)
 
@@ -585,7 +636,8 @@ def build_sam3_core_engine(
         hidden_size, layer_norm_eps)
     pooled_text = _weighted_text_pool(
         network, text_features, text_mask_in,
-        text_seq_len=text_seq_len, hidden_size=hidden_size)
+        text_seq_len=text_seq_len, hidden_size=hidden_size,
+        dtype=work_np_dtype)
     proj_text = _linear(
         network, pooled_text, weights, "dot_product_scoring.text_proj",
         hidden_size, hidden_size)
@@ -595,12 +647,17 @@ def build_sam3_core_engine(
     scores = network.add_matrix_multiply(
         proj_queries, trt.MatrixOperation.NONE,
         proj_text, trt.MatrixOperation.TRANSPOSE).get_output(0)
-    scale = _scalar(network, 1.0 / math.sqrt(float(hidden_size)), 2)
+    scale = _scalar(
+        network, 1.0 / math.sqrt(float(hidden_size)), 2,
+        dtype=work_np_dtype)
     scores = network.add_elementwise(scores, scale, trt.ElementWiseOperation.PROD).get_output(0)
-    scores = _clamp(network, scores, -12.0, 12.0)
+    scores = _clamp(
+        network, scores, -12.0, 12.0, dtype=work_np_dtype)
     pred_logits = network.add_shuffle(scores)
     pred_logits.reshape_dims = (1, num_queries)
     pred_logits_t = pred_logits.get_output(0)
+    if pred_logits_t.dtype != trt.float32:
+        pred_logits_t = network.add_cast(pred_logits_t, trt.float32).get_output(0)
     pred_logits_t.name = "pred_logits"
     network.mark_output(pred_logits_t)
 
@@ -629,10 +686,12 @@ def build_sam3_core_engine(
             hidden_size,
             (3, 3),
             padding=(1, 1),
+            dtype=work_np_dtype,
         )
         pixel = _group_norm_4d(
             network, pixel, weights, f"mask_decoder.pixel_decoder.norms.{pixel_idx}",
-            channels=hidden_size, groups=8, eps=layer_norm_eps)
+            channels=hidden_size, groups=8, eps=layer_norm_eps,
+            dtype=work_np_dtype)
         pixel = network.add_activation(pixel, trt.ActivationType.RELU).get_output(0)
 
     instance = graph_ops.add_conv2d(
@@ -642,6 +701,7 @@ def build_sam3_core_engine(
         weights["mask_decoder.instance_projection.bias"],
         hidden_size,
         (1, 1),
+        dtype=work_np_dtype,
     )
     mask_embeddings = decoder_queries
     for idx in range(3):
@@ -661,6 +721,8 @@ def build_sam3_core_engine(
     masks_out = network.add_shuffle(masks)
     masks_out.reshape_dims = (1, num_queries, mask_h, mask_w)
     masks_t = masks_out.get_output(0)
+    if masks_t.dtype != trt.float32:
+        masks_t = network.add_cast(masks_t, trt.float32).get_output(0)
     masks_t.name = "pred_masks"
     network.mark_output(masks_t)
 
@@ -668,6 +730,9 @@ def build_sam3_core_engine(
         presence_out = network.add_shuffle(last_presence_logits)
         presence_out.reshape_dims = (1, 1)
         presence_t = presence_out.get_output(0)
+        if presence_t.dtype != trt.float32:
+            presence_t = network.add_cast(
+                presence_t, trt.float32).get_output(0)
         presence_t.name = "presence_logits"
         network.mark_output(presence_t)
 

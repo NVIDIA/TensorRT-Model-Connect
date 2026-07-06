@@ -1,38 +1,44 @@
 {
   "name": "flux-schnell-l0",
-  "trace_id": "IT-E2E-FLXS-L0-01",
   "hf_id": "black-forest-labs/FLUX.1-schnell",
   "bundle": "flux-schnell-l0.trtfb",
-  "model_type": "flux",
   "family": "flux",
   "runtime_strategy": "diffusion_flux",
   "task_strategy": "diffusion_media_generation",
-  "gated": true,
   "e2e_parallel_resource": "exclusive_gpu",
-  "ci_tier": "l0_only",
-  "reference_family": "diffusers_image_gen",
-  "user_contract": "diffusion_image",
-  "description": "FLUX.1-schnell L0 representative at 384px with full text shape and reduced image scale",
   "build_args": {
     "max_cache_length": 256
   },
-  "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
-  "test_type": "diffusion",
-  "image_height": 384,
-  "image_width": 384,
-  "video_num_frames": 1,
-  "num_inference_steps": 20,
-  "stages": [
+  "precision": "fp16",
+  "testcases": [
     {
-      "name": "end_to_end",
-      "required": true
+      "name": "flux-schnell-l0",
+      "trace_id": "IT-E2E-FLXS-L0-01",
+      "model_type": "flux",
+      "gated": true,
+      "ci_tier": "l0_only",
+      "reference_family": "diffusers_image_gen",
+      "user_contract": "diffusion_image",
+      "description": "FLUX.1-schnell L0 representative at 384px with full text shape and reduced image scale",
+      "test_prompt": "A photo of a cat sitting on a windowsill at sunset",
+      "test_type": "diffusion",
+      "image_height": 384,
+      "image_width": 384,
+      "video_num_frames": 1,
+      "num_inference_steps": 20,
+      "stages": [
+        {
+          "name": "end_to_end",
+          "required": true
+        }
+      ],
+      "skip_text_comparison": true,
+      "notes": "PR L0 repro for FLUX.1-schnell. Uses the same checkpoint, CLIP+T5 encoders, FluxDiT/VAE path, runner, comparator, and image artifact contract. L0 keeps the full 256-token text shape, uses a 384px image to reduce DiT/VAE scale, and uses twenty denoising steps.",
+      "metadata": {
+        "contract_config": {
+          "use_diffusers": true
+        }
+      }
     }
-  ],
-  "skip_text_comparison": true,
-  "notes": "PR L0 repro for FLUX.1-schnell. Uses the same checkpoint, CLIP+T5 encoders, FluxDiT/VAE path, runner, comparator, and image artifact contract. L0 keeps the full 256-token text shape, uses a 384px image to reduce DiT/VAE scale, and uses twenty denoising steps.",
-  "metadata": {
-    "contract_config": {
-      "use_diffusers": true
-    }
-  }
+  ]
 }

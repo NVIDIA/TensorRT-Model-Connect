@@ -4,6 +4,16 @@
 id = "lance"
 plugin = "lance"
 module = "plugin"
+model_dir_adapter = "prepare_model.py|resolve_model_dir"
+hf_allow_patterns = [
+  "Lance_3B/**",
+  "Qwen2.5-VL-ViT/**",
+]
+hf_required_files = [
+  "bytedance-research/Lance|Lance_3B/llm_config.json",
+  "bytedance-research/Lance|Lance_3B/model.safetensors",
+  "bytedance-research/Lance|Qwen2.5-VL-ViT/vit.safetensors",
+]
 aliases = [
   "lance",
 ]

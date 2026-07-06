@@ -38,15 +38,17 @@ from tensorrt_model_connect import trt_compat
 
 trt = trt_compat.get_trt() if trt_compat.is_available() else None
 
-
-def _add_layernorm_no_bias(network, inp, hidden_size, gamma, eps):
+def _add_layernorm_no_bias(
+    network, inp, hidden_size, gamma, eps, *, dtype=np.float32,
+):
     """LayerNorm without bias via TRT native normalization.
 
     ModernBERT uses nn.LayerNorm(bias=False) which still mean-centers,
     unlike RMSNorm which does not.
     """
-    beta = np.zeros(hidden_size, dtype=np.float32)
-    return graph_ops.add_layer_norm_native(network, inp, hidden_size, gamma, beta, eps)
+    beta = np.zeros(hidden_size, dtype=dtype)
+    return graph_ops.add_layer_norm_native(
+        network, inp, hidden_size, gamma, beta, eps, dtype=dtype)
 
 
 class ModernbertPlugin:
@@ -170,6 +172,12 @@ class ModernbertPlugin:
         intermediate = config.intermediate_size
         eps = config.raw.get("norm_eps", config.rms_norm_eps)
         max_seq = max_cache_length
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(f"Unsupported ModernBERT precision: {precision}")
 
         # Per-layer RoPE theta from layer_types
         layer_types = config.raw.get("layer_types", [])
@@ -195,9 +203,14 @@ class ModernbertPlugin:
         attention_mask_input = network.add_input("attention_mask", trt.int32, (max_seq,))
 
         # Attention mask: [seq] int -> [1, 1, 1, seq] additive float mask.
-        mask_float = network.add_cast(attention_mask_input, trt.float32)
-        ones_c = graph_ops.add_constant(network, (1,), np.array([1.0], dtype=np.float32))
-        neg_large = graph_ops.add_constant(network, (1,), np.array([-1e10], dtype=np.float32))
+        mask_float = network.add_cast(attention_mask_input, work_trt_dtype)
+        ones_c = graph_ops.add_constant(
+            network, (1,), np.array([1.0], dtype=work_np_dtype),
+            dtype=work_np_dtype)
+        mask_penalty = -1e4 if precision == "fp16" else -1e10
+        neg_large = graph_ops.add_constant(
+            network, (1,), np.array([mask_penalty], dtype=work_np_dtype),
+            dtype=work_np_dtype)
         inv_mask = network.add_elementwise(
             ones_c, mask_float.get_output(0), trt.ElementWiseOperation.SUB
         )
@@ -211,15 +224,15 @@ class ModernbertPlugin:
         rope_tables = {}
         for theta in set([full_theta, sliding_theta]):
             cos = graph_ops.add_constant(
-                network,
-                (max_seq, head_dim // 2),
-                graph_ops.make_rope_table_half_dim(max_seq, head_dim, theta, cosine=True),
-            )
+                network, (max_seq, head_dim // 2),
+                graph_ops.make_rope_table_half_dim(
+                    max_seq, head_dim, theta, cosine=True),
+                dtype=work_np_dtype)
             sin = graph_ops.add_constant(
-                network,
-                (max_seq, head_dim // 2),
-                graph_ops.make_rope_table_half_dim(max_seq, head_dim, theta, cosine=False),
-            )
+                network, (max_seq, head_dim // 2),
+                graph_ops.make_rope_table_half_dim(
+                    max_seq, head_dim, theta, cosine=False),
+                dtype=work_np_dtype)
             rope_tables[theta] = (cos, sin)
 
         pos_indices = graph_ops.add_constant(
@@ -227,11 +240,13 @@ class ModernbertPlugin:
         )
 
         # Embedding
-        embed_table = graph_ops.add_constant(network, (vocab, hidden), weights["embedding"])
+        embed_table = graph_ops.add_constant(
+            network, (vocab, hidden), weights["embedding"],
+            dtype=work_np_dtype)
         word_embed = network.add_gather(embed_table, input_ids, 0)
         hidden_state = _add_layernorm_no_bias(
-            network, word_embed.get_output(0), hidden, weights["embed_norm"], eps
-        )
+            network, word_embed.get_output(0), hidden,
+            weights["embed_norm"], eps, dtype=work_np_dtype)
 
         # Encoder layers
         for layer_idx in range(num_layers):
@@ -252,21 +267,22 @@ class ModernbertPlugin:
             has_attn_norm = f"{prefix}.attn_norm" in weights
             if has_attn_norm:
                 attn_input = _add_layernorm_no_bias(
-                    network, hidden_state, hidden, weights[f"{prefix}.attn_norm"], eps
-                )
+                    network, hidden_state, hidden,
+                    weights[f"{prefix}.attn_norm"], eps,
+                    dtype=work_np_dtype)
             else:
                 attn_input = hidden_state
 
             # QKV projections
             q = graph_ops.add_matmul_rhs_constant(
-                network, attn_input, hidden, hidden, weights[f"{prefix}.w_q"]
-            )
+                network, attn_input, hidden, hidden,
+                weights[f"{prefix}.w_q"], dtype=work_np_dtype)
             k = graph_ops.add_matmul_rhs_constant(
-                network, attn_input, hidden, hidden, weights[f"{prefix}.w_k"]
-            )
+                network, attn_input, hidden, hidden,
+                weights[f"{prefix}.w_k"], dtype=work_np_dtype)
             v = graph_ops.add_matmul_rhs_constant(
-                network, attn_input, hidden, hidden, weights[f"{prefix}.w_v"]
-            )
+                network, attn_input, hidden, hidden,
+                weights[f"{prefix}.w_v"], dtype=work_np_dtype)
 
             # RoPE
             q = graph_ops.add_apply_rope_native(
@@ -305,8 +321,8 @@ class ModernbertPlugin:
             )
 
             attn_out = graph_ops.add_matmul_rhs_constant(
-                network, context_flat, hidden, hidden, weights[f"{prefix}.w_o"]
-            )
+                network, context_flat, hidden, hidden,
+                weights[f"{prefix}.w_o"], dtype=work_np_dtype)
 
             # Residual
             res1 = network.add_elementwise(hidden_state, attn_out, trt.ElementWiseOperation.SUM)
@@ -314,40 +330,45 @@ class ModernbertPlugin:
 
             # Pre-norm GeGLU MLP
             mlp_input = _add_layernorm_no_bias(
-                network, hidden_state, hidden, weights[f"{prefix}.mlp_norm"], eps
-            )
+                network, hidden_state, hidden,
+                weights[f"{prefix}.mlp_norm"], eps,
+                dtype=work_np_dtype)
 
             # GeGLU: act(input) * gate
             inp_proj = graph_ops.add_matmul_rhs_constant(
-                network, mlp_input, hidden, intermediate, weights[f"{prefix}.w_mlp_input"]
-            )
+                network, mlp_input, hidden, intermediate,
+                weights[f"{prefix}.w_mlp_input"], dtype=work_np_dtype)
             gate_proj = graph_ops.add_matmul_rhs_constant(
-                network, mlp_input, hidden, intermediate, weights[f"{prefix}.w_mlp_gate"]
-            )
-            inp_act = graph_ops.add_gelu_erf(network, inp_proj)
+                network, mlp_input, hidden, intermediate,
+                weights[f"{prefix}.w_mlp_gate"], dtype=work_np_dtype)
+            inp_act = graph_ops.add_gelu_erf(
+                network, inp_proj, dtype=work_np_dtype)
             gated = network.add_elementwise(inp_act, gate_proj, trt.ElementWiseOperation.PROD)
 
             down = graph_ops.add_matmul_rhs_constant(
-                network, gated.get_output(0), intermediate, hidden, weights[f"{prefix}.w_down"]
-            )
+                network, gated.get_output(0), intermediate, hidden,
+                weights[f"{prefix}.w_down"], dtype=work_np_dtype)
 
             res2 = network.add_elementwise(hidden_state, down, trt.ElementWiseOperation.SUM)
             hidden_state = res2.get_output(0)
 
         # Final norm
         hidden_state = _add_layernorm_no_bias(
-            network, hidden_state, hidden, weights["final_norm"], eps
-        )
+            network, hidden_state, hidden, weights["final_norm"], eps,
+            dtype=work_np_dtype)
 
-        hidden_state.name = "hidden_states"
-        network.mark_output(hidden_state)
+        public_output = hidden_state
+        if public_output.dtype != trt.float32:
+            public_output = network.add_cast(
+                public_output, trt.float32).get_output(0)
+        public_output.name = "hidden_states"
+        network.mark_output(public_output)
 
         if verbose:
-            print(
-                f"[trtmc build] Building ModernBERT encoder TRT engine "
-                f"({num_layers} layers, hidden={hidden}, seq_len={max_seq}) ...",
-                file=sys.stderr,
-            )
+            print(f"[trtmc build] Building ModernBERT encoder TRT engine "
+                  f"({num_layers} layers, hidden={hidden}, seq_len={max_seq}, "
+                  f"precision={precision}) ...",
+                  file=sys.stderr)
 
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:

@@ -5,15 +5,22 @@
   "family": "bart",
   "runtime_strategy": "bart_seq2seq_encoder_decoder",
   "task_strategy": "text_generation_causal",
-  "reference_family": "seq2seq_base_weak",
-  "user_contract": "continuation_parity",
+  "precision": "fp16",
   "max_cache_length": 256,
-  "prompt": "The quick brown fox jumps over the lazy dog.",
-  "max_new_tokens": 20,
-  "metadata": {
-    "contract_config": {
-      "preserve_prompt_echo": true,
-      "seq2seq_reconstruction": true
+  "testcases": [
+    {
+      "name": "bart-base",
+      "reference_family": "seq2seq_base_weak",
+      "user_contract": "continuation_parity",
+      "reference_precision": "fp32",
+      "prompt": "The quick brown fox jumps over the lazy dog.",
+      "max_new_tokens": 20,
+      "metadata": {
+        "contract_config": {
+          "preserve_prompt_echo": true,
+          "seq2seq_reconstruction": true
+        }
+      }
     }
-  }
+  ]
 }

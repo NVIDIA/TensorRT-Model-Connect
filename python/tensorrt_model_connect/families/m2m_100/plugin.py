@@ -216,7 +216,8 @@ class M2M100Plugin:
 
     def build_engine(self, config: ModelConfig, weights: WeightDict,
                      max_cache_length: int, *, verbose: bool = False,
-                     debug_layer_outputs: bool = False) -> bytes:
+                     debug_layer_outputs: bool = False,
+                     precision: str = "fp32") -> bytes:
         """Build the DECODER TRT engine (with cross-attention to encoder output)."""
         dec_layers = weights["_dec_layers"]
         dec_heads = weights["_dec_heads"]
@@ -227,6 +228,14 @@ class M2M100Plugin:
         attention_window = max_cache_length + 1
         scale_embedding = weights["_scale_embedding"]
         embed_scale = math.sqrt(hidden) if scale_embedding else 1.0
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(
+                f"Unsupported M2M-100 precision {precision!r}; "
+                "expected fp32 or fp16")
 
         # Use a fixed max_source_length for cross-attention.
         # This determines the encoder output dimension the decoder cross-attends to.
@@ -243,6 +252,8 @@ class M2M100Plugin:
         token_id = network.add_input("token_id", trt.int32, (1,))
         position_id = network.add_input("position_id", trt.int32, (1,))
         attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
+        cross_attention_mask = network.add_input(
+            "cross_attention_mask", trt.float32, (max_source_length,))
 
         cache_k_inputs, cache_v_inputs = [], []
         for i in range(dec_layers):
@@ -261,21 +272,48 @@ class M2M100Plugin:
                 graph_ops.layer_tensor_name("cross_v", i), trt.float32,
                 (max_source_length, hidden)))
 
+        if work_trt_dtype != trt.float32:
+            attention_mask = network.add_cast(
+                attention_mask, work_trt_dtype).get_output(0)
+            cross_attention_mask = network.add_cast(
+                cross_attention_mask, work_trt_dtype).get_output(0)
+            cache_k_inputs = [
+                network.add_cast(t, work_trt_dtype).get_output(0)
+                for t in cache_k_inputs
+            ]
+            cache_v_inputs = [
+                network.add_cast(t, work_trt_dtype).get_output(0)
+                for t in cache_v_inputs
+            ]
+            cross_k_inputs = [
+                network.add_cast(t, work_trt_dtype).get_output(0)
+                for t in cross_k_inputs
+            ]
+            cross_v_inputs = [
+                network.add_cast(t, work_trt_dtype).get_output(0)
+                for t in cross_v_inputs
+            ]
+
         # Decoder embedding + positional encoding
-        embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["shared_embedding"])
+        embedding_table = graph_ops.add_constant(
+            network, (vocab, hidden), weights["shared_embedding"],
+            dtype=work_np_dtype)
 
         # Sinusoidal positional embeddings — shift table so 0-based position_id
         # from KvCache maps to the correct M2M-100 position (offset by padding_idx+1=2).
         padding_idx = weights["_padding_idx"]
         pos_embed_np = weights["sinusoidal_pos_embed"]
         dec_pos_table = pos_embed_np[padding_idx + 1:]
-        pos_embedding_table = graph_ops.add_constant(network, dec_pos_table.shape, dec_pos_table)
+        pos_embedding_table = graph_ops.add_constant(
+            network, dec_pos_table.shape, dec_pos_table,
+            dtype=work_np_dtype)
 
         # Embed token + scale + add positional encoding
         token_embed = network.add_gather(embedding_table, token_id, 0).get_output(0)
         if embed_scale != 1.0:
             scale_const = graph_ops.add_constant(network, (1, 1),
-                np.array([embed_scale], dtype=np.float32))
+                np.array([embed_scale], dtype=work_np_dtype),
+                dtype=work_np_dtype)
             token_embed = network.add_elementwise(
                 token_embed, scale_const, trt.ElementWiseOperation.PROD).get_output(0)
         pos_embed = network.add_gather(pos_embedding_table, position_id, 0).get_output(0)
@@ -289,11 +327,13 @@ class M2M100Plugin:
                 network=network, hidden=hidden_state,
                 cache_k=cache_k_inputs[layer_idx], cache_v=cache_v_inputs[layer_idx],
                 cross_k=cross_k_inputs[layer_idx], cross_v=cross_v_inputs[layer_idx],
-                attention_mask=attention_mask, eps=config.rms_norm_eps,
+                attention_mask=attention_mask,
+                cross_attention_mask=cross_attention_mask,
+                eps=config.rms_norm_eps,
                 weights=weights, prefix=prefix,
                 hidden_size=hidden, num_heads=dec_heads, head_dim=head_dim,
                 ffn_dim=dec_ffn, max_cache_length=max_cache_length,
-                max_source_length=max_source_length)
+                max_source_length=max_source_length, dtype=work_np_dtype)
             hidden_state = result["hidden"]
             present_k_outputs.append(result["present_k"])
             present_v_outputs.append(result["present_v"])
@@ -302,19 +342,30 @@ class M2M100Plugin:
         hidden_state = graph_ops.add_layer_norm_native(
             network, hidden_state, hidden,
             weights["final_norm"], weights["final_norm_beta"],
-            config.rms_norm_eps)
+            config.rms_norm_eps, dtype=work_np_dtype)
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_out"])
+            network, hidden_state, hidden, vocab, weights["w_out"],
+            dtype=work_np_dtype)
         logits = graph_ops.add_bias_sum(
-            network, logits, vocab, np.zeros(vocab, dtype=np.float32))
+            network, logits, vocab, np.zeros(vocab, dtype=work_np_dtype),
+            dtype=work_np_dtype)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
         logits.name = "logits"
         network.mark_output(logits)
 
         for i in range(dec_layers):
-            present_k_outputs[i].name = graph_ops.layer_tensor_name("present_k", i)
-            present_v_outputs[i].name = graph_ops.layer_tensor_name("present_v", i)
-            network.mark_output(present_k_outputs[i])
-            network.mark_output(present_v_outputs[i])
+            present_k = present_k_outputs[i]
+            present_v = present_v_outputs[i]
+            if present_k.dtype != trt.float32:
+                present_k = network.add_cast(
+                    present_k, trt.float32).get_output(0)
+                present_v = network.add_cast(
+                    present_v, trt.float32).get_output(0)
+            present_k.name = graph_ops.layer_tensor_name("present_k", i)
+            present_v.name = graph_ops.layer_tensor_name("present_v", i)
+            network.mark_output(present_k)
+            network.mark_output(present_v)
 
         if verbose:
             print(f"[trtmc build] Building M2M-100 decoder ({dec_layers}L, h={hidden}, "
@@ -326,9 +377,11 @@ class M2M100Plugin:
         return bytes(plan)
 
     def build_vision_engine(self, model_dir: str, config: ModelConfig,
-                            weights: WeightDict, *, verbose: bool = False) -> bytes | None:
+                            weights: WeightDict, *, precision: str = "fp32",
+                            verbose: bool = False) -> bytes | None:
         """Build the text ENCODER TRT engine (stored as vision_engine_plan in the bundle)."""
-        return _build_m2m100_encoder(config, weights, verbose=verbose)
+        return _build_m2m100_encoder(
+            config, weights, precision=precision, verbose=verbose)
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
         """Inject encoder-decoder config into bundle config.json."""
@@ -360,7 +413,9 @@ class M2M100Plugin:
             "num_key_value_heads": dec_heads,
         }
 
-def _build_m2m100_encoder(config, weights, *, verbose=False):
+def _build_m2m100_encoder(
+    config, weights, *, precision="fp32", verbose=False,
+):
     """Build M2M-100 text encoder TRT engine."""
     enc_layers = weights["_enc_layers"]
     enc_heads = weights["_enc_heads"]
@@ -370,6 +425,14 @@ def _build_m2m100_encoder(config, weights, *, verbose=False):
     max_source_length = 128
     scale_embedding = weights["_scale_embedding"]
     embed_scale = math.sqrt(hidden) if scale_embedding else 1.0
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported M2M-100 precision {precision!r}; "
+            "expected fp32 or fp16")
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -381,15 +444,20 @@ def _build_m2m100_encoder(config, weights, *, verbose=False):
 
     # Input: token IDs [max_source_length]
     input_ids = network.add_input("input_ids", trt.int32, (max_source_length,))
+    attention_mask = network.add_input(
+        "attention_mask", trt.float32, (max_source_length,))
 
     # Embedding lookup + scale
-    embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["shared_embedding"])
+    embedding_table = graph_ops.add_constant(
+        network, (vocab, hidden), weights["shared_embedding"],
+        dtype=work_np_dtype)
     hs = network.add_gather(embedding_table, input_ids, 0).get_output(0)
     # hs shape: [max_source_length, hidden]
 
     if embed_scale != 1.0:
         scale_const = graph_ops.add_constant(network, (1, 1),
-            np.array([embed_scale], dtype=np.float32))
+            np.array([embed_scale], dtype=work_np_dtype),
+            dtype=work_np_dtype)
         hs = network.add_elementwise(
             hs, scale_const, trt.ElementWiseOperation.PROD).get_output(0)
 
@@ -400,9 +468,18 @@ def _build_m2m100_encoder(config, weights, *, verbose=False):
     pos_embed_np = weights["sinusoidal_pos_embed"]
     # Extract positions [2..max_source_length+1] from the full table
     enc_pos = pos_embed_np[padding_idx + 1:padding_idx + 1 + max_source_length].copy()
-    enc_pos_const = graph_ops.add_constant(network, (max_source_length, hidden), enc_pos)
+    enc_pos_const = graph_ops.add_constant(
+        network, (max_source_length, hidden), enc_pos,
+        dtype=work_np_dtype)
     hs = network.add_elementwise(
         hs, enc_pos_const, trt.ElementWiseOperation.SUM).get_output(0)
+
+    enc_mask_4d = network.add_shuffle(attention_mask)
+    enc_mask_4d.reshape_dims = (1, 1, 1, max_source_length)
+    enc_mask = enc_mask_4d.get_output(0)
+    if enc_mask.dtype != work_trt_dtype:
+        enc_mask = network.add_cast(
+            enc_mask, work_trt_dtype).get_output(0)
 
     # Encoder layers
     for li in range(enc_layers):
@@ -410,7 +487,7 @@ def _build_m2m100_encoder(config, weights, *, verbose=False):
         normed = graph_ops.add_layer_norm_native(
             network, hs, hidden,
             weights[f"{pfx}.attn_norm"], weights[f"{pfx}.attn_norm_beta"],
-            config.rms_norm_eps)
+            config.rms_norm_eps, dtype=work_np_dtype)
         attn = graph_ops.add_self_attention_block(
             network, normed,
             w_q=weights[f"{pfx}.w_q"], w_k=weights[f"{pfx}.w_k"],
@@ -418,27 +495,35 @@ def _build_m2m100_encoder(config, weights, *, verbose=False):
             hidden_size=hidden, num_heads=enc_heads,
             seq_length=max_source_length,
             q_bias=weights[f"{pfx}.b_q"], k_bias=weights[f"{pfx}.b_k"],
-            v_bias=weights[f"{pfx}.b_v"], o_bias=weights[f"{pfx}.b_o"])
+            v_bias=weights[f"{pfx}.b_v"], o_bias=weights[f"{pfx}.b_o"],
+            mask=enc_mask, dtype=work_np_dtype)
         hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
         n2 = graph_ops.add_layer_norm_native(
             network, hs, hidden,
             weights[f"{pfx}.ffn_norm"], weights[f"{pfx}.ffn_norm_beta"],
-            config.rms_norm_eps)
+            config.rms_norm_eps, dtype=work_np_dtype)
         fc1 = graph_ops.add_bias_sum(
             network,
-            graph_ops.add_matmul_rhs_constant(network, n2, hidden, enc_ffn, weights[f"{pfx}.w_fc1"]),
-            enc_ffn, weights[f"{pfx}.b_fc1"])
-        act = graph_ops.add_activation(network, fc1, "relu")
+            graph_ops.add_matmul_rhs_constant(
+                network, n2, hidden, enc_ffn, weights[f"{pfx}.w_fc1"],
+                dtype=work_np_dtype),
+            enc_ffn, weights[f"{pfx}.b_fc1"], dtype=work_np_dtype)
+        act = graph_ops.add_activation(
+            network, fc1, "relu", dtype=work_np_dtype)
         fc2 = graph_ops.add_bias_sum(
             network,
-            graph_ops.add_matmul_rhs_constant(network, act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"]),
-            hidden, weights[f"{pfx}.b_fc2"])
+            graph_ops.add_matmul_rhs_constant(
+                network, act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"],
+                dtype=work_np_dtype),
+            hidden, weights[f"{pfx}.b_fc2"], dtype=work_np_dtype)
         hs = network.add_elementwise(hs, fc2, trt.ElementWiseOperation.SUM).get_output(0)
 
     hs = graph_ops.add_layer_norm_native(
         network, hs, hidden,
         weights["enc_final_norm"], weights["enc_final_norm_beta"],
-        config.rms_norm_eps)
+        config.rms_norm_eps, dtype=work_np_dtype)
+    if hs.dtype != trt.float32:
+        hs = network.add_cast(hs, trt.float32).get_output(0)
     hs.name = "encoder_output"
     network.mark_output(hs)
 
@@ -452,9 +537,9 @@ def _build_m2m100_encoder(config, weights, *, verbose=False):
 
 
 def _add_m2m100_decoder_layer(*, network, hidden, cache_k, cache_v,
-    cross_k, cross_v, attention_mask, eps,
+    cross_k, cross_v, attention_mask, cross_attention_mask, eps,
     weights, prefix, hidden_size, num_heads, head_dim, ffn_dim,
-    max_cache_length, max_source_length):
+    max_cache_length, max_source_length, dtype=np.float32):
     """Single M2M-100 decoder layer: self-attn + cross-attn + relu MLP."""
     attention_size = hidden_size
     attention_window = max_cache_length + 1
@@ -463,16 +548,16 @@ def _add_m2m100_decoder_layer(*, network, hidden, cache_k, cache_v,
     normed = graph_ops.add_layer_norm_native(
         network, hidden, hidden_size,
         weights[f"{prefix}.input_norm"], weights[f"{prefix}.input_norm_beta"],
-        eps)
+        eps, dtype=dtype)
     q = graph_ops.add_bias_sum(network,
-        graph_ops.add_matmul_rhs_constant(network, normed, hidden_size, attention_size, weights[f"{prefix}.w_q"]),
-        attention_size, weights[f"{prefix}.q_bias"])
+        graph_ops.add_matmul_rhs_constant(network, normed, hidden_size, attention_size, weights[f"{prefix}.w_q"], dtype=dtype),
+        attention_size, weights[f"{prefix}.q_bias"], dtype=dtype)
     k = graph_ops.add_bias_sum(network,
-        graph_ops.add_matmul_rhs_constant(network, normed, hidden_size, attention_size, weights[f"{prefix}.w_k"]),
-        attention_size, weights[f"{prefix}.k_bias"])
+        graph_ops.add_matmul_rhs_constant(network, normed, hidden_size, attention_size, weights[f"{prefix}.w_k"], dtype=dtype),
+        attention_size, weights[f"{prefix}.k_bias"], dtype=dtype)
     v = graph_ops.add_bias_sum(network,
-        graph_ops.add_matmul_rhs_constant(network, normed, hidden_size, attention_size, weights[f"{prefix}.w_v"]),
-        attention_size, weights[f"{prefix}.v_bias"])
+        graph_ops.add_matmul_rhs_constant(network, normed, hidden_size, attention_size, weights[f"{prefix}.w_v"], dtype=dtype),
+        attention_size, weights[f"{prefix}.v_bias"], dtype=dtype)
     present_k, present_v = k, v
 
     kr = network.add_shuffle(k)
@@ -492,42 +577,47 @@ def _add_m2m100_decoder_layer(*, network, hidden, cache_k, cache_v,
         q_seq=1, kv_seq=attention_window,
         mask=m4.get_output(0))
     sa = graph_ops.add_bias_sum(network,
-        graph_ops.add_matmul_rhs_constant(network, cf, attention_size, hidden_size, weights[f"{prefix}.w_o"]),
-        hidden_size, weights[f"{prefix}.o_bias"])
+        graph_ops.add_matmul_rhs_constant(network, cf, attention_size, hidden_size, weights[f"{prefix}.w_o"], dtype=dtype),
+        hidden_size, weights[f"{prefix}.o_bias"], dtype=dtype)
     psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
 
     # --- Cross-attention ---
     cn = graph_ops.add_layer_norm_native(
         network, psa, hidden_size,
         weights[f"{prefix}.cross_attn_norm"],
-        weights[f"{prefix}.cross_attn_norm_beta"], eps)
+        weights[f"{prefix}.cross_attn_norm_beta"], eps, dtype=dtype)
     cq = graph_ops.add_bias_sum(network,
-        graph_ops.add_matmul_rhs_constant(network, cn, hidden_size, attention_size, weights[f"{prefix}.cross_w_q"]),
-        attention_size, weights[f"{prefix}.cross_b_q"])
+        graph_ops.add_matmul_rhs_constant(network, cn, hidden_size, attention_size, weights[f"{prefix}.cross_w_q"], dtype=dtype),
+        attention_size, weights[f"{prefix}.cross_b_q"], dtype=dtype)
     ck_proj = graph_ops.add_bias_sum(network,
-        graph_ops.add_matmul_rhs_constant(network, cross_k, hidden_size, attention_size, weights[f"{prefix}.cross_w_k"]),
-        attention_size, weights[f"{prefix}.cross_b_k"])
+        graph_ops.add_matmul_rhs_constant(network, cross_k, hidden_size, attention_size, weights[f"{prefix}.cross_w_k"], dtype=dtype),
+        attention_size, weights[f"{prefix}.cross_b_k"], dtype=dtype)
     cv_proj = graph_ops.add_bias_sum(network,
-        graph_ops.add_matmul_rhs_constant(network, cross_v, hidden_size, attention_size, weights[f"{prefix}.cross_w_v"]),
-        attention_size, weights[f"{prefix}.cross_b_v"])
+        graph_ops.add_matmul_rhs_constant(network, cross_v, hidden_size, attention_size, weights[f"{prefix}.cross_w_v"], dtype=dtype),
+        attention_size, weights[f"{prefix}.cross_b_v"], dtype=dtype)
+
+    cross_mask_4d = network.add_shuffle(cross_attention_mask)
+    cross_mask_4d.reshape_dims = (1, 1, 1, max_source_length)
 
     ccf = graph_ops.add_attention_from_rows(
         network, cq, ck_proj, cv_proj,
         num_heads=num_heads, head_dim=head_dim,
-        q_seq=1, kv_seq=max_source_length)
+        q_seq=1, kv_seq=max_source_length,
+        mask=cross_mask_4d.get_output(0))
     ca = graph_ops.add_bias_sum(network,
-        graph_ops.add_matmul_rhs_constant(network, ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"]),
-        hidden_size, weights[f"{prefix}.cross_b_o"])
+        graph_ops.add_matmul_rhs_constant(network, ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"], dtype=dtype),
+        hidden_size, weights[f"{prefix}.cross_b_o"], dtype=dtype)
     pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
 
     # --- ReLU MLP ---
     fn = graph_ops.add_layer_norm_native(
         network, pca, hidden_size,
         weights[f"{prefix}.post_attn_norm"],
-        weights[f"{prefix}.post_attn_norm_beta"], eps)
+        weights[f"{prefix}.post_attn_norm_beta"], eps, dtype=dtype)
     mlp = graph_blocks.add_gelu_fc_mlp(
         network, fn, weights=weights, prefix=prefix,
-        hidden_size=hidden_size, mlp_size=ffn_dim, activation="relu")
+        hidden_size=hidden_size, mlp_size=ffn_dim, activation="relu",
+        dtype=dtype)
     out = network.add_elementwise(pca, mlp, trt.ElementWiseOperation.SUM).get_output(0)
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
 

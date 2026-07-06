@@ -1504,6 +1504,10 @@ FluxPipeline::generate_image_batch(const std::vector<std::string>& prompts,
     if (prompts.empty()) {
         return {};
     }
+    if (!cfg.initial_latents.empty() && prompts.size() != 1U) {
+        throw std::invalid_argument(
+            "FluxPipeline::generate_image_batch: caller initial latents require one prompt");
+    }
 
     const auto total = static_cast<int32_t>(prompts.size());
     const int32_t cap = std::max(1, config_.max_batch_size.dit);
@@ -1935,6 +1939,12 @@ ImageResult FluxPipeline::generate_one_for_batch(const std::string& prompt,
     // Override latent init with the per-sample seed; this is the single
     // behavior change vs. the legacy code (which hardcoded seed=42).
     initialize_flux_latents(latents, per_sample_seed);
+    std::string latent_error;
+    if (!diffusion::apply_flux_initial_latents(plan.latent_size, cfg.initial_latents, latents,
+                                               latent_error)) {
+        std::cerr << "[flux] " << latent_error << "\n";
+        return result;
+    }
     const auto t_prep = Clock::now();
 
     // Step 10: Denoising loop

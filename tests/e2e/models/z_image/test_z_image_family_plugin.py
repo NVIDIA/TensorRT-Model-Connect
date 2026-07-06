@@ -99,8 +99,19 @@ def test_load_weights_requires_diffusers_model_index(tmp_path) -> None:
         zimg_mod.plugin.load_weights(str(bad_dir), _cfg())
 
 
+@pytest.mark.parametrize(
+    ("fp32_layers", "dit_precision", "dit_fp32_layers", "vae_precision"),
+    [
+        ([1], "fp32", (), "fp16"),
+        ([2, 3, 7, 37], "fp16", (0, 4, 34), "fp32"),
+    ],
+)
 def test_build_components_calls_all_subbuilders(
     monkeypatch: pytest.MonkeyPatch,
+    fp32_layers: list[int],
+    dit_precision: str,
+    dit_fp32_layers: tuple[int, ...],
+    vae_precision: str,
 ) -> None:
     """Intent: verify builder orchestration and latent-size derived num_patches.
 
@@ -165,8 +176,9 @@ def test_build_components_calls_all_subbuilders(
 
     out = zimg_mod.plugin.build_components(
         "/model",
-        _cfg(image_height=1024, image_width=768),
+        _cfg(image_height=1024, image_width=768, _fp32_layers=fp32_layers),
         weights,
+        precision="fp16",
         verbose=True,
     )
 
@@ -177,6 +189,10 @@ def test_build_components_calls_all_subbuilders(
 
     # h_lat=128, w_lat=96, patch=2x2 -> 3072 patches.
     assert calls["build_z_image_dit_engine"][1]["num_patches"] == 3072
+    assert calls["build_qwen3_encoder_engine"][1]["precision"] == "fp16"
+    assert calls["build_z_image_dit_engine"][1]["precision"] == dit_precision
+    assert calls["build_z_image_dit_engine"][1]["fp32_layers"] == dit_fp32_layers
+    assert calls["build_vae_2d_decoder_engine"][1]["precision"] == vae_precision
     assert calls["build_vae_2d_decoder_engine"][1]["h_lat"] == 128
     assert calls["build_vae_2d_decoder_engine"][1]["w_lat"] == 96
 
@@ -327,3 +343,14 @@ def test_serialize_preprocessor_weights_maps_and_converts_values() -> None:
         nbytes = int(np.prod(info["shape"])) * 4
         max_end = max(max_end, info["offset"] + nbytes)
     assert len(payload) == max_end
+
+
+def test_fp16_vae_builder_reaches_checkpoint_validation(tmp_path) -> None:
+    """FP16 dtype selection must not shadow the TensorRT module binding."""
+    from tensorrt_model_connect.families.z_image.vae_2d_builder import (
+        build_vae_2d_decoder_engine,
+    )
+
+    with pytest.raises(FileNotFoundError, match="No safetensors found"):
+        build_vae_2d_decoder_engine(
+            str(tmp_path), h_lat=8, w_lat=8, precision="fp16")

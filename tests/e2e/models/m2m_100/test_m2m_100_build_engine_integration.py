@@ -52,7 +52,7 @@ def _write_safetensors(model_dir: Path, tensors: dict[str, np.ndarray],
 
 @requires_trt
 class TestM2M100BuildEngine:
-    VOCAB, HIDDEN, LAYERS, HEADS, FFN, MAX_POS = 32, 16, 1, 4, 32, 64
+    VOCAB, HIDDEN, LAYERS, HEADS, FFN, MAX_POS = 32, 16, 1, 4, 32, 128
 
     @staticmethod
     def _make(vocab, hidden, layers, heads, ffn):
@@ -105,7 +105,8 @@ class TestM2M100BuildEngine:
         t["model.decoder.layer_norm.bias"] = _rand(hidden)
         return t
 
-    def test_build_engine(self, tmp_path):
+    @pytest.mark.parametrize("precision", ["fp32", "fp16"])
+    def test_build_engine(self, tmp_path, precision):
         from tensorrt_model_connect.families.m2m_100 import plugin
         config = {
             "model_type": "m2m_100",
@@ -122,5 +123,11 @@ class TestM2M100BuildEngine:
             self.VOCAB, self.HIDDEN, self.LAYERS, self.HEADS, self.FFN))
         cfg = ModelConfig.from_dir(tmp_path)
         weights = plugin.load_weights(str(tmp_path), cfg)
-        engine = plugin.build_engine(cfg, weights, max_cache_length=32, verbose=False)
+        engine = plugin.build_engine(
+            cfg, weights, max_cache_length=32, verbose=False,
+            precision=precision)
         assert isinstance(engine, bytes) and len(engine) > 0
+
+        encoder = plugin.build_vision_engine(
+            str(tmp_path), cfg, weights, precision=precision, verbose=False)
+        assert isinstance(encoder, bytes) and len(encoder) > 0

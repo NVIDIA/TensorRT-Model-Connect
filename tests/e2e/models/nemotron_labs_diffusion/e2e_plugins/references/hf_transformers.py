@@ -73,12 +73,13 @@ _NEMOTRON_LABS_DIFFUSION_FALLBACK_CHAT_TEMPLATE = (
 
 
 def _torch_dtype_for_case(case: E2ECase) -> str:
-    """Return a torch dtype expression string matching the manifest precision.
+    """Return the explicit reference dtype, falling back to DUT precision.
 
-    The reference runner injects this into subprocess scripts so the HF model
-    loads at the same precision as the TRT engine, keeping comparisons fair.
+    FP16 acceptance manifests set reference_precision=fp32 so changing the
+    engine precision does not also change the oracle.
     """
-    precision = case.metadata.get("precision", "fp32")
+    precision = case.metadata.get(
+        "reference_precision", case.metadata.get("precision", "fp32"))
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
 
 

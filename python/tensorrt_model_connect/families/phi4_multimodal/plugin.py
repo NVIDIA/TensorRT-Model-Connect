@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Phi-4-multimodal family plugin — text decoder with fused QKV/gate_up and LoRA base_layer weights.
+"""Phi-4-multimodal family plugin — vision-adapted text decoder.
 
 Phi-4-multimodal stores base weights under `*.base_layer.weight` (LoRA adapters
-are in `*.lora_A.*` / `*.lora_B.*` which we ignore for TRT inference).
+are in `*.lora_A.*` / `*.lora_B.*`). Vision inference uses the merged vision
+adapter on every decoder projection.
 The text decoder is Phi-3 architecture with partial_rotary_factor=0.75.
 """
 
@@ -24,9 +25,36 @@ from .checkpoint_mapper import (
 )
 
 
+def _load_vision_adapted_weight(
+    readers, base_key: str, config: ModelConfig,
+) -> np.ndarray:
+    """Return a base projection with the checkpoint's vision LoRA merged."""
+    base = _load_tensor(readers, base_key).astype(np.float32)
+    if not base_key.endswith(".base_layer.weight"):
+        return base
+
+    projection_prefix = base_key.removesuffix(".base_layer.weight")
+    lora_a_key = f"{projection_prefix}.lora_A.vision.weight"
+    lora_b_key = f"{projection_prefix}.lora_B.vision.weight"
+    if not (_has_tensor(readers, lora_a_key) and _has_tensor(readers, lora_b_key)):
+        return base
+
+    lora_a = _load_tensor(readers, lora_a_key).astype(np.float32)
+    lora_b = _load_tensor(readers, lora_b_key).astype(np.float32)
+    vision_lora = config.raw.get("vision_lora", {})
+    rank = int(vision_lora.get("r", lora_a.shape[0]))
+    alpha = float(vision_lora.get("lora_alpha", rank))
+    if rank <= 0 or lora_a.shape[0] != rank or lora_b.shape[1] != rank:
+        raise ValueError(
+            f"Invalid Phi-4 vision LoRA shapes for {projection_prefix}: "
+            f"A={lora_a.shape}, B={lora_b.shape}, configured rank={rank}")
+    return base + (lora_b @ lora_a) * (alpha / rank)
+
+
 class Phi4MultimodalPlugin:
     name = "phi4_multimodal"
     runtime_strategy = "phi4_multimodal_vision_language"
+    embed_input = True
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
@@ -35,7 +63,7 @@ class Phi4MultimodalPlugin:
     def load_weights(
         self, model_dir: str, config: ModelConfig,
     ) -> WeightDict:
-        """Load Phi-4-multimodal base weights (ignoring LoRA adapters)."""
+        """Load Phi-4-multimodal weights with the vision LoRA merged."""
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
 
@@ -74,8 +102,10 @@ class Phi4MultimodalPlugin:
 
             # ---- Fused QKV projection (base_layer) ----
             # Shape: [q_dim + 2*kv_dim, hidden]
-            qkv_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.qkv_proj.base_layer.weight")
+            qkv_raw = _load_vision_adapted_weight(
+                readers,
+                f"{hf_prefix}.self_attn.qkv_proj.base_layer.weight",
+                config)
             total_qkv = qkv_raw.shape[0]
             expected_qkv = q_dim + 2 * kv_dim
             assert total_qkv == expected_qkv, (
@@ -101,15 +131,19 @@ class Phi4MultimodalPlugin:
             weights[f"{prefix}.w_v"] = v_t
 
             # Output projection (base_layer)
-            o_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.o_proj.base_layer.weight")
+            o_raw = _load_vision_adapted_weight(
+                readers,
+                f"{hf_prefix}.self_attn.o_proj.base_layer.weight",
+                config)
             weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj")
             del o_raw
 
             # ---- Fused gate_up projection (base_layer) ----
             # Shape: [2 * intermediate_size, hidden]
-            gate_up_raw = _load_tensor(
-                readers, f"{hf_prefix}.mlp.gate_up_proj.base_layer.weight")
+            gate_up_raw = _load_vision_adapted_weight(
+                readers,
+                f"{hf_prefix}.mlp.gate_up_proj.base_layer.weight",
+                config)
             intermediate = gate_up_raw.shape[0] // 2
             if mlp_size == 0:
                 mlp_size = intermediate
@@ -123,8 +157,10 @@ class Phi4MultimodalPlugin:
             del gate_raw, up_raw
 
             # Down projection (base_layer)
-            down_raw = _load_tensor(
-                readers, f"{hf_prefix}.mlp.down_proj.base_layer.weight")
+            down_raw = _load_vision_adapted_weight(
+                readers,
+                f"{hf_prefix}.mlp.down_proj.base_layer.weight",
+                config)
             weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
             del down_raw
 
@@ -146,6 +182,10 @@ class Phi4MultimodalPlugin:
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_mlp_size"] = mlp_size  # type: ignore[assignment]
+        # TensorRT 11's fused IAttention compiler rejects the 768+ cache shape
+        # required by the canonical Dynamic-HD prompt. Keep the same equation
+        # using explicit attention primitives with FP32 score accumulation.
+        weights["_explicit_attention"] = True
 
         return weights
 
@@ -160,9 +200,53 @@ class Phi4MultimodalPlugin:
         partial_rotary = config.raw.get("partial_rotary_factor", 1.0)
         return build_standard_decoder_engine(
             config, weights, max_cache_length,
+            precision=precision,
             quant_ctx=quant_ctx, partial_rotary_factor=partial_rotary,
+            embed_input=True,
             verbose=verbose,
             debug_layer_outputs=debug_layer_outputs)
+
+    def build_vision_engine(
+        self, model_dir: str, config: ModelConfig, weights: WeightDict,
+        *, precision: str = "fp32", verbose: bool = False,
+    ) -> bytes:
+        from .phi4mm_vision_builder import build_phi4mm_vision_engine
+
+        del config, weights
+        return build_phi4mm_vision_engine(
+            _load_vision_weights(model_dir), precision=precision,
+            verbose=verbose)
+
+    def get_vl_config(self, config: ModelConfig) -> dict:
+        return {
+            "image_token_id": 200010,
+            "fixed_image_size": 448,
+            "patch_size": 14,
+            "num_image_pad_tokens": 721,
+            "vision_output_dim": config.hidden_size,
+            "preprocessor_type": "phi4_hd_chw",
+            "image_mean": [0.5, 0.5, 0.5],
+            "image_std": [0.5, 0.5, 0.5],
+            "interpolation": "bilinear",
+            "vl_prompt_template": (
+                "<|user|>{image_pads}{prompt}<|end|><|assistant|>"),
+            "image_token_str": "<|endoftext10|>",
+        }
+
+
+def _load_vision_weights(model_dir: str) -> WeightDict:
+    """Load and canonicalize the checkpoint's image tower weights."""
+    readers = _open_safetensors(Path(model_dir))
+    checkpoint_prefix = "model.embed_tokens_extend.image_embed."
+    weights = WeightDict()
+    for reader in readers:
+        for key in reader.keys():
+            if key.startswith(checkpoint_prefix):
+                weights[key.removeprefix(checkpoint_prefix)] = _load_tensor(
+                    [reader], key)
+    if not weights:
+        raise RuntimeError("Phi-4 checkpoint contains no image tower weights")
+    return weights
 
 
 plugin = Phi4MultimodalPlugin()

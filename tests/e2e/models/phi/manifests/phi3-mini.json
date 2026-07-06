@@ -1,21 +1,28 @@
 {
   "name": "phi3-mini",
-  "trace_id": "IT-E2E-PHI3-01",
   "hf_id": "microsoft/Phi-3-mini-4k-instruct",
   "bundle": "phi3-mini.trtfb",
   "family": "phi",
   "runtime_strategy": "phi_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "chat_instruct_template",
-  "user_contract": "chat_response",
+  "precision": "fp16",
   "max_cache_length": 256,
-  "prompt": "What is the boiling point of water in Celsius? Answer with just the number.",
-  "max_new_tokens": 10,
   "trust_remote_code": false,
-  "metadata": {
-    "contract_config": {
-      "use_chat_template": true,
-      "enable_thinking": false
+  "testcases": [
+    {
+      "name": "phi3-mini",
+      "trace_id": "IT-E2E-PHI3-01",
+      "reference_family": "chat_instruct_template",
+      "user_contract": "chat_response",
+      "reference_precision": "fp32",
+      "prompt": "What is the boiling point of water in Celsius? Answer with just the number.",
+      "max_new_tokens": 10,
+      "metadata": {
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false
+        }
+      }
     }
-  }
+  ]
 }

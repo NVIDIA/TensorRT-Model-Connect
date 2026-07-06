@@ -11,6 +11,7 @@ test_manifests = [
   "manifests/flux-2-dev-l0.json",
   "manifests/flux-2-dev.json",
   "manifests/flux-schnell-l0-tp4.json",
+  "manifests/flux-schnell-l0-batch2.json",
   "manifests/flux-schnell-l0.json",
   "manifests/flux-schnell.json",
 ]
@@ -29,6 +30,7 @@ input_fields = [
   { input = "video_height", manifest = "video_height", default = 480, required_manifest = "video_num_frames" },
   { input = "video_width", manifest = "video_width", default = 832, required_manifest = "video_num_frames" },
   { input = "num_inference_steps", manifest = "num_inference_steps", default = 30, required_manifest = "video_num_frames" },
+  { input = "max_batch_size", manifest = "max_batch_size" },
 ]
 preflight_requirements = [
   { kind = "python_module_available", args = { module = "diffusers", phase = "build" }, gating = true },
@@ -41,4 +43,5 @@ build_cli_args = [
   { flag = "--video-width", input = "video_width" },
   { flag = "--video-num-frames", input = "video_num_frames" },
   { flag = "--num-inference-steps", input = "num_inference_steps" },
+  { flag = "--max-batch-size", input = "max_batch_size" },
 ]

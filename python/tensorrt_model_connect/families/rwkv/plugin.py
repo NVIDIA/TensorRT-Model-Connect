@@ -261,6 +261,13 @@ class RwkvPlugin:
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
         intermediate: int = weights["_intermediate_size"]
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(
+                f"RWKV supports precision='fp32' or 'fp16', got {precision!r}")
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
@@ -304,27 +311,33 @@ class RwkvPlugin:
         # Shared constants
         # -----------------------------------------------------------
         embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+            network, (vocab, hidden), weights["embedding"],
+            dtype=work_np_dtype)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
-            np.array([config.rms_norm_eps], dtype=np.float32))
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
 
         one_const = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=np.float32))
+            network, (1, 1), np.array([1.0], dtype=work_np_dtype),
+            dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # Embedding lookup
         # -----------------------------------------------------------
         gather = network.add_gather(embedding_table, token_id, 0)
         hidden_state = gather.get_output(0)  # [1, hidden]
+        if hidden_state.dtype != work_trt_dtype:
+            hidden_state = network.add_cast(
+                hidden_state, work_trt_dtype).get_output(0)
 
         # Optional pre-layer norm (some RWKV-4 variants)
         if "pre_ln_weight" in weights:
             hidden_state = graph_ops.add_layer_norm(
                 network, hidden_state, hidden,
                 weights["pre_ln_weight"], weights["pre_ln_bias"],
-                eps_tensor)
+                eps_tensor, dtype=work_np_dtype)
 
         if debug_layer_outputs:
             _mark_debug_output(network, hidden_state, "debug_embed")
@@ -340,12 +353,20 @@ class RwkvPlugin:
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
+            attn_state = attn_state_inputs[layer_idx]
+            ff_state = ff_state_inputs[layer_idx]
+            if attn_state.dtype != work_trt_dtype:
+                attn_state = network.add_cast(
+                    attn_state, work_trt_dtype).get_output(0)
+            if ff_state.dtype != work_trt_dtype:
+                ff_state = network.add_cast(
+                    ff_state, work_trt_dtype).get_output(0)
 
             result = _add_rwkv_layer(
                 network=network,
                 hidden=hidden_state,
-                attn_state_in=attn_state_inputs[layer_idx],
-                ff_state_in=ff_state_inputs[layer_idx],
+                attn_state_in=attn_state,
+                ff_state_in=ff_state,
                 num_state_in=num_state_inputs[layer_idx],
                 den_state_in=den_state_inputs[layer_idx],
                 max_state_in=max_state_inputs[layer_idx],
@@ -355,6 +376,7 @@ class RwkvPlugin:
                 prefix=prefix,
                 hidden_size=hidden,
                 intermediate_size=intermediate,
+                dtype=work_np_dtype,
             )
 
             hidden_state = result["hidden"]
@@ -373,13 +395,17 @@ class RwkvPlugin:
         # -----------------------------------------------------------
         hidden_state = graph_ops.add_layer_norm(
             network, hidden_state, hidden,
-            weights["final_norm"], weights["final_norm_beta"], eps_tensor)
+            weights["final_norm"], weights["final_norm_beta"], eps_tensor,
+            dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # LM head (logits)
         # -----------------------------------------------------------
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_lm_head"])
+            network, hidden_state, hidden, vocab, weights["w_lm_head"],
+            dtype=work_np_dtype)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
 
         logits.name = "logits"
         network.mark_output(logits)
@@ -393,6 +419,17 @@ class RwkvPlugin:
             pn = present_num_outputs[i]
             pd = present_den_outputs[i]
             pm = present_max_outputs[i]
+
+            if pa.dtype != trt.float32:
+                pa = network.add_cast(pa, trt.float32).get_output(0)
+            if pf.dtype != trt.float32:
+                pf = network.add_cast(pf, trt.float32).get_output(0)
+            if pn.dtype != trt.float32:
+                pn = network.add_cast(pn, trt.float32).get_output(0)
+            if pd.dtype != trt.float32:
+                pd = network.add_cast(pd, trt.float32).get_output(0)
+            if pm.dtype != trt.float32:
+                pm = network.add_cast(pm, trt.float32).get_output(0)
 
             pa.name = graph_ops.layer_tensor_name("present_attn", i)
             pf.name = graph_ops.layer_tensor_name("present_ff", i)
@@ -411,7 +448,8 @@ class RwkvPlugin:
         # -----------------------------------------------------------
         if verbose:
             print(f"[trtmc build] Building RWKV TRT engine ({num_layers} layers, "
-                  f"hidden={hidden}, intermediate={intermediate}) ...",
+                  f"hidden={hidden}, intermediate={intermediate}, "
+                  f"precision={precision}) ...",
                   file=sys.stderr)
 
         plan = builder.build_serialized_network(network, trt_config)
@@ -449,6 +487,7 @@ def _add_rwkv_layer(
     prefix: str,
     hidden_size: int,
     intermediate_size: int,
+    dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     """Add one RWKV layer (time-mixing + channel-mixing).
 
@@ -463,7 +502,7 @@ def _add_rwkv_layer(
         network, hidden, hidden_size,
         weights[f"{prefix}.attn_norm"],
         weights[f"{prefix}.attn_norm_beta"],
-        eps_tensor)
+        eps_tensor, dtype=dtype)
     # normed_attn: [1, hidden_size]
 
     # The normed output before time-shift becomes present_attn for next step
@@ -475,7 +514,7 @@ def _add_rwkv_layer(
     def _time_shift_blend(normed, prev_state, mix_weights_key):
         """Element-wise lerp: mix * normed + (1 - mix) * prev_state."""
         mix = graph_ops.add_constant(
-            network, (1, hidden_size), weights[mix_weights_key])
+            network, (1, hidden_size), weights[mix_weights_key], dtype=dtype)
         one_minus_mix = network.add_elementwise(
             one_const, mix, trt.ElementWiseOperation.SUB)
         cur_part = network.add_elementwise(
@@ -499,22 +538,30 @@ def _add_rwkv_layer(
     # R = sigmoid(xr @ w_attn_r)
     r_proj = graph_ops.add_matmul_rhs_constant(
         network, xr, hidden_size, hidden_size,
-        weights[f"{prefix}.w_attn_r"])
+        weights[f"{prefix}.w_attn_r"], dtype=dtype)
     r_gate = network.add_activation(r_proj, trt.ActivationType.SIGMOID)
 
     # K = xk @ w_attn_k
     k_proj = graph_ops.add_matmul_rhs_constant(
         network, xk, hidden_size, hidden_size,
-        weights[f"{prefix}.w_attn_k"])
+        weights[f"{prefix}.w_attn_k"], dtype=dtype)
     # K: [1, hidden_size]
 
     # V = xv @ w_attn_v
     v_proj = graph_ops.add_matmul_rhs_constant(
         network, xv, hidden_size, hidden_size,
-        weights[f"{prefix}.w_attn_v"])
+        weights[f"{prefix}.w_attn_v"], dtype=dtype)
     # V: [1, hidden_size]
 
     # ===== 4. WKV recurrence (numerically stable) =====
+    # The WKV max/exp accumulator remains FP32. It is recurrent across tokens,
+    # and reducing it to FP16 compounds error even when projections are FP16.
+    k_recur = k_proj
+    v_recur = v_proj
+    if k_recur.dtype != trt.float32:
+        k_recur = network.add_cast(k_recur, trt.float32).get_output(0)
+    if v_recur.dtype != trt.float32:
+        v_recur = network.add_cast(v_recur, trt.float32).get_output(0)
     time_decay = graph_ops.add_constant(
         network, (1, hidden_size), weights[f"{prefix}.time_decay"])
     time_first = graph_ops.add_constant(
@@ -526,7 +573,7 @@ def _add_rwkv_layer(
 
     # tf_plus_k = time_first + K
     tf_plus_k = network.add_elementwise(
-        time_first, k_proj, trt.ElementWiseOperation.SUM)
+        time_first, k_recur, trt.ElementWiseOperation.SUM)
 
     # ---- WKV output (uses time_first as bonus, NO decay) ----
     # HF: max_for_output = max(max_state, key + time_first)
@@ -551,7 +598,7 @@ def _add_rwkv_layer(
 
     # wkv_num = exp(tf+k-q) * V + exp(dpm-q) * num_state
     term1_num = network.add_elementwise(
-        exp_tf_k.get_output(0), v_proj,
+        exp_tf_k.get_output(0), v_recur,
         trt.ElementWiseOperation.PROD)
     term2_num = network.add_elementwise(
         exp_dpm.get_output(0), num_state_in,
@@ -576,12 +623,12 @@ def _add_rwkv_layer(
     # ---- State update (does NOT use time_first) ----
     # q2 = max(K, decay_plus_max)
     q2 = network.add_elementwise(
-        k_proj, decay_plus_max.get_output(0),
+        k_recur, decay_plus_max.get_output(0),
         trt.ElementWiseOperation.MAX)
 
     # exp(K - q2)
     k_minus_q2 = network.add_elementwise(
-        k_proj, q2.get_output(0),
+        k_recur, q2.get_output(0),
         trt.ElementWiseOperation.SUB)
     exp_k_q2 = network.add_unary(
         k_minus_q2.get_output(0), trt.UnaryOperation.EXP)
@@ -595,7 +642,7 @@ def _add_rwkv_layer(
 
     # present_num = exp(K-q2)*V + exp(dpm-q2)*num_state
     st_term1 = network.add_elementwise(
-        exp_k_q2.get_output(0), v_proj,
+        exp_k_q2.get_output(0), v_recur,
         trt.ElementWiseOperation.PROD)
     st_term2 = network.add_elementwise(
         exp_dpm_q2.get_output(0), num_state_in,
@@ -616,14 +663,18 @@ def _add_rwkv_layer(
     present_max = q2.get_output(0)
 
     # ===== 5. Gated output + residual =====
+    wkv_for_gate = wkv.get_output(0)
+    if wkv_for_gate.dtype != r_gate.get_output(0).dtype:
+        wkv_for_gate = network.add_cast(
+            wkv_for_gate, r_gate.get_output(0).dtype).get_output(0)
     gated = network.add_elementwise(
-        r_gate.get_output(0), wkv.get_output(0),
+        r_gate.get_output(0), wkv_for_gate,
         trt.ElementWiseOperation.PROD)
 
     # out_proj: [1, hidden_size] @ w_attn_o -> [1, hidden_size]
     attn_out = graph_ops.add_matmul_rhs_constant(
         network, gated.get_output(0), hidden_size, hidden_size,
-        weights[f"{prefix}.w_attn_o"])
+        weights[f"{prefix}.w_attn_o"], dtype=dtype)
 
     # Residual add
     residual_attn = network.add_elementwise(
@@ -639,7 +690,7 @@ def _add_rwkv_layer(
         network, hidden_after_attn, hidden_size,
         weights[f"{prefix}.ffn_norm"],
         weights[f"{prefix}.ffn_norm_beta"],
-        eps_tensor)
+        eps_tensor, dtype=dtype)
 
     # The normed output before time-shift becomes present_ff for next step
     present_ff = normed_ffn
@@ -653,19 +704,20 @@ def _add_rwkv_layer(
     # ===== 3. Key projection + squared ReLU =====
     k_ffn = graph_ops.add_matmul_rhs_constant(
         network, xk_ffn, hidden_size, intermediate_size,
-        weights[f"{prefix}.w_ffn_k"])
-    k_activated = graph_ops.add_activation(network, k_ffn, "squared_relu")
+        weights[f"{prefix}.w_ffn_k"], dtype=dtype)
+    k_activated = graph_ops.add_activation(
+        network, k_ffn, "squared_relu", dtype=dtype)
 
     # ===== 4. Receptance gate =====
     r_ffn = graph_ops.add_matmul_rhs_constant(
         network, xr_ffn, hidden_size, hidden_size,
-        weights[f"{prefix}.w_ffn_r"])
+        weights[f"{prefix}.w_ffn_r"], dtype=dtype)
     r_ffn_gate = network.add_activation(r_ffn, trt.ActivationType.SIGMOID)
 
     # ===== 5. Value projection + gating + residual =====
     kv_ffn = graph_ops.add_matmul_rhs_constant(
         network, k_activated, intermediate_size, hidden_size,
-        weights[f"{prefix}.w_ffn_v"])
+        weights[f"{prefix}.w_ffn_v"], dtype=dtype)
     gated_ffn = network.add_elementwise(
         r_ffn_gate.get_output(0), kv_ffn,
         trt.ElementWiseOperation.PROD)

@@ -77,10 +77,28 @@ void test_flux_generation_plan_derives_layout_and_scheduler() {
     check(scheduler.last_used_dynamic_shifting, "flux scheduler records dynamic shifting");
 }
 
+void test_flux_initial_latents_honor_caller_bytes_and_size() {
+    std::vector<float> latents(4, 0.0F);
+    std::string error;
+    const std::vector<float> supplied = {1.0F, 2.0F, 3.0F, 4.0F};
+
+    check(trtmc::diffusion::apply_flux_initial_latents(supplied.size(), supplied, latents, error),
+          "flux accepts caller initial latents");
+    check(latents == supplied, "flux preserves caller initial latent bytes");
+
+    error.clear();
+    check(!trtmc::diffusion::apply_flux_initial_latents(supplied.size() + 1, supplied, latents,
+                                                        error),
+          "flux rejects wrong caller initial latent size");
+    check(error.find("initial latents") != std::string::npos,
+          "flux reports caller initial latent size mismatch");
+}
+
 } // namespace
 
 int main() {
     test_flux_generation_plan_derives_layout_and_scheduler();
+    test_flux_initial_latents_honor_caller_bytes_and_size();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " flux generation plan test(s) failed\n";

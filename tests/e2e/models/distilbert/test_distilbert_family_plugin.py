@@ -169,10 +169,11 @@ def test_build_engine_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     calls: dict[str, object] = {}
 
-    def fake_builder(config, weights, *, max_seq_length, verbose):
+    def fake_builder(config, weights, *, max_seq_length, precision, verbose):
         calls["config"] = config
         calls["weights"] = weights
         calls["max_seq_length"] = max_seq_length
+        calls["precision"] = precision
         calls["verbose"] = verbose
         return b"distil-plan"
 
@@ -186,4 +187,5 @@ def test_build_engine_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls["config"] is cfg
     assert calls["weights"] is raw_weights
     assert calls["max_seq_length"] == 19
+    assert calls["precision"] == "fp32"
     assert calls["verbose"] is True

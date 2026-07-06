@@ -60,9 +60,11 @@ class EncoderPlugin final : public IPipelinePlugin {
         auto loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, engine_section), engine_section.c_str(), opts);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
+        const int32_t pad_token_id = extract_json_int(ctx.config_json, "pad_token_id", 0);
 
         return std::make_unique<EncoderPipeline>(std::move(loaded.module), "encoder_only",
-                                                 std::move(tokenizer), ctx.bundle.info.model_id);
+                                                 std::move(tokenizer), ctx.bundle.info.model_id,
+                                                 pad_token_id);
     }
 };
 

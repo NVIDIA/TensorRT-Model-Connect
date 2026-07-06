@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-from .references.invariant_only import InvariantOnlyReference
+from .references.upstream_replay import ElfUpstreamReplayReference
 
 
-class ElfFlowInvariantOnlyReference(InvariantOnlyReference):
-    """elf_flow local reference for invariant_only."""
+class ElfFlowReference(ElfUpstreamReplayReference):
+    """elf_flow local reference for official upstream JAX replay artifacts."""
 
-reference = ElfFlowInvariantOnlyReference()
+reference = ElfFlowReference()

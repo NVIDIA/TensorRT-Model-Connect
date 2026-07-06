@@ -484,7 +484,7 @@ class BarkPlugin:
             )
         return _build_bark_standard_engine(
             weights, "semantic", sem_cfg, max_cache_length,
-            embed_input=True, verbose=verbose)
+            embed_input=True, precision=precision, verbose=verbose)
 
     def build_extra_engines(
         self, config: ModelConfig, weights: WeightDict,
@@ -528,7 +528,7 @@ class BarkPlugin:
             with timed_trt_compile(build_timing, "extra_bark_coarse_decoder"):
                 coarse_plan = _build_bark_standard_engine(
                     weights, "coarse", coarse_cfg, max_cache_length,
-                    embed_input=True, verbose=verbose)
+                    embed_input=True, precision=precision, verbose=verbose)
             result["coarse_engine_plan"] = coarse_plan
 
         # Add embedding tables as raw bundle sections.
@@ -571,7 +571,8 @@ class BarkPlugin:
                   file=sys.stderr)
         with timed_trt_compile(build_timing, "extra_bark_fine_decoder"):
             fine_plan = _build_bark_fine_engine(
-                weights, fine_cfg, seq_length=fine_seq_length, verbose=verbose)
+                weights, fine_cfg, seq_length=fine_seq_length,
+                precision=precision, verbose=verbose)
         result["fine_engine_plan"] = fine_plan
 
         # Add fine embedding tables as a single concatenated section.
@@ -603,7 +604,8 @@ class BarkPlugin:
 
             with timed_trt_compile(build_timing, "extra_encodec_audio_decoder"):
                 codec_plan = build_encodec_decoder_engine(
-                    state_dict, seq_length=max_codec_frames, verbose=verbose)
+                    state_dict, seq_length=max_codec_frames,
+                    precision=precision, verbose=verbose)
             result["codec_engine_plan"] = codec_plan
 
         return result
@@ -674,6 +676,7 @@ def _build_bark_standard_engine(
     sub_cfg: dict,
     max_cache_length: int,
     embed_input: bool = True,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build a standard decoder engine for semantic or coarse using build_standard_decoder_engine."""
@@ -717,6 +720,7 @@ def _build_bark_standard_engine(
         position_type="learned",
         activation="gelu_new",
         embed_input=embed_input,
+        precision=precision,
         verbose=verbose,
     )
 
@@ -909,6 +913,7 @@ def _build_bark_fine_engine(
     weights: WeightDict,
     fine_cfg: dict,
     seq_length: int = 1024,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build a non-autoregressive TRT engine for the Bark fine model.
@@ -944,6 +949,13 @@ def _build_bark_fine_engine(
     n_lm_heads = fine_cfg.get("n_lm_heads", 7)
     codebook_size = fine_cfg.get("codebook_size", 1056)
     prefix = "fine."
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported Bark precision {precision!r}; expected fp32 or fp16")
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -956,20 +968,33 @@ def _build_bark_fine_engine(
     # passes the result directly.
     input_embeds = network.add_input(
         "input_embeds", trt.float32, (seq_length, hidden))
+    if work_trt_dtype != trt.float32:
+        input_embeds = network.add_cast(
+            input_embeds, work_trt_dtype).get_output(0)
 
     hidden_state = input_embeds
 
     eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([1e-5], dtype=np.float32))
+        network, (1, 1), np.array([1e-5], dtype=work_np_dtype),
+        dtype=work_np_dtype)
 
     for layer_idx in range(num_layers):
         lp = f"{prefix}layer.{layer_idx}"
+        layer_np_dtype = work_np_dtype
+        layer_trt_dtype = work_trt_dtype
+        if hidden_state.dtype != layer_trt_dtype:
+            hidden_state = network.add_cast(
+                hidden_state, layer_trt_dtype).get_output(0)
+        layer_eps_t = graph_ops.add_constant(
+            network, (1, 1), np.array([1e-5], dtype=layer_np_dtype),
+            dtype=layer_np_dtype)
 
         # Pre-attention LayerNorm
         normed = graph_ops.add_layer_norm(
             network, hidden_state, hidden,
             weights[f"{lp}.input_norm"],
-            weights[f"{lp}.input_norm_beta"], eps_t)
+            weights[f"{lp}.input_norm_beta"], layer_eps_t,
+            dtype=layer_np_dtype)
 
         # Bidirectional self-attention (no causal mask, no KV cache)
         # normed: [seq_length, hidden]
@@ -977,11 +1002,14 @@ def _build_bark_fine_engine(
         attn_scale = 1.0 / np.sqrt(head_dim)
 
         q = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, attention_size, weights[f"{lp}.w_q"])
+            network, normed, hidden, attention_size, weights[f"{lp}.w_q"],
+            dtype=layer_np_dtype)
         k = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, attention_size, weights[f"{lp}.w_k"])
+            network, normed, hidden, attention_size, weights[f"{lp}.w_k"],
+            dtype=layer_np_dtype)
         v = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, attention_size, weights[f"{lp}.w_v"])
+            network, normed, hidden, attention_size, weights[f"{lp}.w_v"],
+            dtype=layer_np_dtype)
 
         # Optional QKV biases
         for bias_name, tensor_ref in [
@@ -989,7 +1017,8 @@ def _build_bark_fine_engine(
             b = weights.get(bias_name)
             if b is not None:
                 ref = {"q": q, "k": k, "v": v}[tensor_ref]
-                ref_out = graph_ops.add_bias_sum(network, ref, attention_size, b)
+                ref_out = graph_ops.add_bias_sum(
+                    network, ref, attention_size, b, dtype=layer_np_dtype)
                 if tensor_ref == "q":
                     q = ref_out
                 elif tensor_ref == "k":
@@ -1001,15 +1030,17 @@ def _build_bark_fine_engine(
             network, q, k, v,
             num_heads=num_heads, head_dim=head_dim,
             q_seq=seq_length, kv_seq=seq_length,
-            scale=attn_scale)
+            scale=attn_scale,
+            fp32_accumulation=work_np_dtype != np.float32)
 
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
             network, ctx_flat, attention_size, hidden,
-            weights[f"{lp}.w_o"])
+            weights[f"{lp}.w_o"], dtype=layer_np_dtype)
         o_bias = weights.get(f"{lp}.o_bias")
         if o_bias is not None:
-            attn_out = graph_ops.add_bias_sum(network, attn_out, hidden, o_bias)
+            attn_out = graph_ops.add_bias_sum(
+                network, attn_out, hidden, o_bias, dtype=layer_np_dtype)
 
         # Residual
         hidden_state = network.add_elementwise(
@@ -1019,38 +1050,50 @@ def _build_bark_fine_engine(
         normed2 = graph_ops.add_layer_norm(
             network, hidden_state, hidden,
             weights[f"{lp}.post_attn_norm"],
-            weights[f"{lp}.post_attn_norm_beta"], eps_t)
+            weights[f"{lp}.post_attn_norm_beta"], layer_eps_t,
+            dtype=layer_np_dtype)
 
         # MLP: FC1 -> GELU -> FC2
         mlp_size = weights[f"{lp}.w_fc1"].shape[1]
         fc1 = graph_ops.add_matmul_rhs_constant(
-            network, normed2, hidden, mlp_size, weights[f"{lp}.w_fc1"])
+            network, normed2, hidden, mlp_size, weights[f"{lp}.w_fc1"],
+            dtype=layer_np_dtype)
         fc1_bias = weights.get(f"{lp}.fc1_bias")
         if fc1_bias is not None:
-            fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias)
+            fc1 = graph_ops.add_bias_sum(
+                network, fc1, mlp_size, fc1_bias, dtype=layer_np_dtype)
         # HF BarkMLP uses nn.GELU() with the exact erf formulation.
-        gelu = graph_ops.add_gelu_erf(network, fc1)
+        gelu = graph_ops.add_gelu_erf(network, fc1, dtype=layer_np_dtype)
         fc2 = graph_ops.add_matmul_rhs_constant(
-            network, gelu, mlp_size, hidden, weights[f"{lp}.w_fc2"])
+            network, gelu, mlp_size, hidden, weights[f"{lp}.w_fc2"],
+            dtype=layer_np_dtype)
         fc2_bias = weights.get(f"{lp}.fc2_bias")
         if fc2_bias is not None:
-            fc2 = graph_ops.add_bias_sum(network, fc2, hidden, fc2_bias)
+            fc2 = graph_ops.add_bias_sum(
+                network, fc2, hidden, fc2_bias, dtype=layer_np_dtype)
 
         # Residual
         hidden_state = network.add_elementwise(
             hidden_state, fc2, trt.ElementWiseOperation.SUM).get_output(0)
+        if layer_np_dtype != work_np_dtype:
+            hidden_state = network.add_cast(
+                hidden_state, work_trt_dtype).get_output(0)
 
     # Final LayerNorm
     hidden_state = graph_ops.add_layer_norm(
         network, hidden_state, hidden,
         weights[f"{prefix}final_norm"],
-        weights[f"{prefix}final_norm_beta"], eps_t)
+        weights[f"{prefix}final_norm_beta"], eps_t,
+        dtype=work_np_dtype)
 
     # 7 LM heads: each [seq_length, hidden] -> [seq_length, codebook_size]
     for j in range(n_lm_heads):
         logits_j = graph_ops.add_matmul_rhs_constant(
             network, hidden_state, hidden, codebook_size,
-            weights[f"{prefix}w_lm_head_{j}"])
+            weights[f"{prefix}w_lm_head_{j}"], dtype=work_np_dtype)
+        if logits_j.dtype != trt.float32:
+            logits_j = network.add_cast(
+                logits_j, trt.float32).get_output(0)
         logits_j.name = f"logits_cb{j + 1}"
         network.mark_output(logits_j)
 

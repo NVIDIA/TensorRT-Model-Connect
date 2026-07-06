@@ -101,9 +101,10 @@ class TorchReference:
             case.metadata.get("speech_reference_tokens", ""),
         )
         if not ref_tokens_path:
-            return StageOutput(
-                stage_name=stage.name,
-                data={"error": "No speech_reference_tokens path in manifest"},
+            ref_tokens_path = str(
+                Path(__file__).resolve().parents[2]
+                / "data"
+                / "personaplex_recording_official_tokens_greedy.npy"
             )
 
         if not os.path.isabs(ref_tokens_path):

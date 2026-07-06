@@ -169,6 +169,7 @@ def build_qwen_vl_vision_engine(
     fixed_image_size: int = 448,
     fixed_image_height: int | None = None,
     fixed_image_width: int | None = None,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build complete Qwen2.5-VL vision encoder TRT engine.
@@ -201,6 +202,11 @@ def build_qwen_vl_vision_engine(
     merge_size = vision_config.get("spatial_merge_size", 2)
     eps_val = vision_config.get("layer_norm_eps", 1e-6)
     rope_theta = float(vision_config.get("rope_theta", 10000.0))
+    if precision not in {"fp32", "fp16"}:
+        raise ValueError(
+            f"Qwen2.5-VL vision supports fp32 or fp16, got {precision!r}")
+    work_np_dtype = np.float16 if precision == "fp16" else np.float32
+    work_trt_dtype = trt.float16 if precision == "fp16" else trt.float32
 
     fixed_h = int(fixed_image_height if fixed_image_height is not None else fixed_image_size)
     fixed_w = int(fixed_image_width if fixed_image_width is not None else fixed_image_size)
@@ -239,7 +245,8 @@ def build_qwen_vl_vision_engine(
     trt_config = builder_context.config
 
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([eps_val], dtype=np.float32))
+        network, (1, 1), np.array([eps_val], dtype=work_np_dtype),
+        dtype=work_np_dtype)
 
     # ---------------------------------------------------------------
     # Input: pixel_values [T*C, H, W]
@@ -249,6 +256,9 @@ def build_qwen_vl_vision_engine(
     pixel_values = network.add_input(
         "pixel_values", trt.float32,
         (input_channels, fixed_h, fixed_w))
+    if work_trt_dtype != trt.float32:
+        pixel_values = network.add_cast(
+            pixel_values, work_trt_dtype).get_output(0)
 
     # ---------------------------------------------------------------
     # Stage 1: 3D Patch Embedding (conv)
@@ -262,12 +272,13 @@ def build_qwen_vl_vision_engine(
 
     hidden = graph_ops.add_patch_embed_3d(
         network, pixel_values,
-        patch_embed_w.astype(np.float32),
-        patch_embed_b.astype(np.float32) if patch_embed_b is not None else None,
+        patch_embed_w.astype(work_np_dtype),
+        patch_embed_b.astype(work_np_dtype) if patch_embed_b is not None else None,
         in_channels=in_channels,
         embed_dim=embed_dim,
         temporal_patch_size=temporal_patch_size,
-        patch_size=patch_size)
+        patch_size=patch_size,
+        dtype=work_np_dtype)
 
     # ---------------------------------------------------------------
     # Stage 2: Precompute RoPE tables + window index
@@ -337,8 +348,8 @@ def build_qwen_vl_vision_engine(
 
         normed = graph_ops.add_rms_norm(
             network, hidden, embed_dim,
-            ln1_gamma.astype(np.float32),
-            eps_tensor)
+            ln1_gamma.astype(work_np_dtype),
+            eps_tensor, dtype=work_np_dtype)
 
         # Self-attention with 3D RoPE
         # Handle fused QKV weights
@@ -350,7 +361,7 @@ def build_qwen_vl_vision_engine(
         if w_q is None:
             qkv_w = weights.get(f"{prefix}.attn.qkv.weight")
             if qkv_w is not None:
-                qkv_w = qkv_w.astype(np.float32)
+                qkv_w = qkv_w.astype(work_np_dtype)
                 w_q = qkv_w[:embed_dim, :].T.copy()
                 w_k = qkv_w[embed_dim:2*embed_dim, :].T.copy()
                 w_v = qkv_w[2*embed_dim:, :].T.copy()
@@ -366,28 +377,29 @@ def build_qwen_vl_vision_engine(
         if q_bias is None:
             qkv_b = weights.get(f"{prefix}.attn.qkv.bias")
             if qkv_b is not None:
-                qkv_b = qkv_b.astype(np.float32)
+                qkv_b = qkv_b.astype(work_np_dtype)
                 q_bias = qkv_b[:embed_dim].copy()
                 k_bias = qkv_b[embed_dim:2*embed_dim].copy()
                 v_bias = qkv_b[2*embed_dim:].copy()
 
         use_full_attn = (layer_idx in fullatt_block_indexes)
-        w_o_np = (w_o.astype(np.float32).T.copy() if w_o is not None
-                  else np.zeros((embed_dim, embed_dim), dtype=np.float32))
+        w_o_np = (w_o.astype(work_np_dtype).T.copy() if w_o is not None
+                  else np.zeros((embed_dim, embed_dim), dtype=work_np_dtype))
         attn_kwargs = dict(
-            w_q=w_q.astype(np.float32),
-            w_k=w_k.astype(np.float32),
-            w_v=w_v.astype(np.float32),
+            w_q=w_q.astype(work_np_dtype),
+            w_k=w_k.astype(work_np_dtype),
+            w_v=w_v.astype(work_np_dtype),
             w_o=w_o_np,
             hidden_size=embed_dim,
             num_heads=num_heads,
             seq_length=num_patches,
             cos_table=cos_table,
             sin_table=sin_table,
-            q_bias=q_bias.astype(np.float32) if q_bias is not None else None,
-            k_bias=k_bias.astype(np.float32) if k_bias is not None else None,
-            v_bias=v_bias.astype(np.float32) if v_bias is not None else None,
-            o_bias=o_bias.astype(np.float32) if o_bias is not None else None,
+            q_bias=q_bias.astype(work_np_dtype) if q_bias is not None else None,
+            k_bias=k_bias.astype(work_np_dtype) if k_bias is not None else None,
+            v_bias=v_bias.astype(work_np_dtype) if v_bias is not None else None,
+            o_bias=o_bias.astype(work_np_dtype) if o_bias is not None else None,
+            dtype=work_np_dtype,
         )
 
         if use_full_attn:
@@ -410,9 +422,9 @@ def build_qwen_vl_vision_engine(
         ln2_gamma = weights.get(f"{prefix}.norm2.weight")
         normed2 = graph_ops.add_rms_norm(
             network, res1.get_output(0), embed_dim,
-            ln2_gamma.astype(np.float32) if ln2_gamma is not None
-                else np.ones(embed_dim, dtype=np.float32),
-            eps_tensor)
+            ln2_gamma.astype(work_np_dtype) if ln2_gamma is not None
+                else np.ones(embed_dim, dtype=work_np_dtype),
+            eps_tensor, dtype=work_np_dtype)
 
         # SwiGLU MLP: gate_proj + up_proj + SiLU + down_proj (with biases)
         gate_w = weights.get(f"{prefix}.mlp.gate_proj.weight")
@@ -433,16 +445,18 @@ def build_qwen_vl_vision_engine(
             # SwiGLU: gate * sigmoid(gate) * up, then down
             gate = graph_ops.add_matmul_rhs_constant(
                 network, normed2, embed_dim, mlp_hidden,
-                gate_w.astype(np.float32).T.copy())
+                gate_w.astype(work_np_dtype).T.copy(), dtype=work_np_dtype)
             if gate_b is not None:
                 gate = graph_ops.add_bias_sum(network, gate, mlp_hidden,
-                                              gate_b.astype(np.float32))
+                                              gate_b.astype(work_np_dtype),
+                                              dtype=work_np_dtype)
             up = graph_ops.add_matmul_rhs_constant(
                 network, normed2, embed_dim, mlp_hidden,
-                up_w.astype(np.float32).T.copy())
+                up_w.astype(work_np_dtype).T.copy(), dtype=work_np_dtype)
             if up_b is not None:
                 up = graph_ops.add_bias_sum(network, up, mlp_hidden,
-                                            up_b.astype(np.float32))
+                                            up_b.astype(work_np_dtype),
+                                            dtype=work_np_dtype)
 
             # SiLU(gate) = gate * sigmoid(gate)
             sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
@@ -454,10 +468,11 @@ def build_qwen_vl_vision_engine(
 
             fc2 = graph_ops.add_matmul_rhs_constant(
                 network, gated.get_output(0), mlp_hidden, embed_dim,
-                down_w.astype(np.float32).T.copy())
+                down_w.astype(work_np_dtype).T.copy(), dtype=work_np_dtype)
             if down_b is not None:
                 fc2 = graph_ops.add_bias_sum(network, fc2, embed_dim,
-                                             down_b.astype(np.float32))
+                                             down_b.astype(work_np_dtype),
+                                             dtype=work_np_dtype)
         else:
             # GELU fc1/fc2 fallback
             fc1_b = weights.get(f"{prefix}.mlp.fc1.bias")
@@ -465,17 +480,20 @@ def build_qwen_vl_vision_engine(
             fc2_b = weights.get(f"{prefix}.mlp.fc2.bias")
             fc1 = graph_ops.add_matmul_rhs_constant(
                 network, normed2, embed_dim, mlp_hidden,
-                gate_w.astype(np.float32).T.copy())
+                gate_w.astype(work_np_dtype).T.copy(), dtype=work_np_dtype)
             if fc1_b is not None:
                 fc1 = graph_ops.add_bias_sum(network, fc1, mlp_hidden,
-                                             fc1_b.astype(np.float32))
-            activated = graph_ops.add_gelu_new(network, fc1)
+                                             fc1_b.astype(work_np_dtype),
+                                             dtype=work_np_dtype)
+            activated = graph_ops.add_gelu_new(
+                network, fc1, dtype=work_np_dtype)
             fc2 = graph_ops.add_matmul_rhs_constant(
                 network, activated, mlp_hidden, embed_dim,
-                fc2_w.astype(np.float32).T.copy())
+                fc2_w.astype(work_np_dtype).T.copy(), dtype=work_np_dtype)
             if fc2_b is not None:
                 fc2 = graph_ops.add_bias_sum(network, fc2, embed_dim,
-                                             fc2_b.astype(np.float32))
+                                             fc2_b.astype(work_np_dtype),
+                                             dtype=work_np_dtype)
 
         # Residual
         res2 = network.add_elementwise(
@@ -503,8 +521,8 @@ def build_qwen_vl_vision_engine(
     # 1. RMSNorm per-patch (NOT LayerNorm — HF uses Qwen2_5_VLRMSNorm)
     normed_patches = graph_ops.add_rms_norm(
         network, hidden, embed_dim,
-        merger_ln_w.astype(np.float32),
-        eps_tensor)
+        merger_ln_w.astype(work_np_dtype),
+        eps_tensor, dtype=work_np_dtype)
 
     # 2. Group every merge_unit consecutive patches (matches HF's view(-1, hidden_size))
     reshape_merge = network.add_shuffle(normed_patches)
@@ -515,21 +533,24 @@ def build_qwen_vl_vision_engine(
     merger_fc1_hidden = merger_fc1_w.shape[0]
     fc1_out = graph_ops.add_matmul_rhs_constant(
         network, merged_features, merged_dim, merger_fc1_hidden,
-        merger_fc1_w.astype(np.float32).T.copy())
+        merger_fc1_w.astype(work_np_dtype).T.copy(), dtype=work_np_dtype)
     if merger_fc1_b is not None:
         fc1_out = graph_ops.add_bias_sum(network, fc1_out, merger_fc1_hidden,
-                                          merger_fc1_b.astype(np.float32))
+                                          merger_fc1_b.astype(work_np_dtype),
+                                          dtype=work_np_dtype)
 
     # GELU activation
-    activated_merged = graph_ops.add_gelu_new(network, fc1_out)
+    activated_merged = graph_ops.add_gelu_new(
+        network, fc1_out, dtype=work_np_dtype)
 
     # MLP layer 2: [num_merged, fc1_hidden] -> [num_merged, text_hidden_size]
     fc2_out = graph_ops.add_matmul_rhs_constant(
         network, activated_merged, merger_fc1_hidden, text_hidden_size,
-        merger_fc2_w.astype(np.float32).T.copy())
+        merger_fc2_w.astype(work_np_dtype).T.copy(), dtype=work_np_dtype)
     if merger_fc2_b is not None:
         fc2_out = graph_ops.add_bias_sum(network, fc2_out, text_hidden_size,
-                                          merger_fc2_b.astype(np.float32))
+                                          merger_fc2_b.astype(work_np_dtype),
+                                          dtype=work_np_dtype)
 
     # 4. Reverse window reorder: restore original spatial order
     rev_idx_weights = trt.Weights(np.ascontiguousarray(reverse_indices))
@@ -542,8 +563,12 @@ def build_qwen_vl_vision_engine(
     # ---------------------------------------------------------------
     # Output: image_features [num_merged, text_hidden_size]
     # ---------------------------------------------------------------
-    reversed_out.get_output(0).name = "image_features"
-    network.mark_output(reversed_out.get_output(0))
+    image_features = reversed_out.get_output(0)
+    if work_trt_dtype != trt.float32:
+        image_features = network.add_cast(
+            image_features, trt.float32).get_output(0)
+    image_features.name = "image_features"
+    network.mark_output(image_features)
 
     # ---------------------------------------------------------------
     # Build
@@ -577,6 +602,7 @@ def _add_deepstack_merger(
     text_hidden_size: int,
     eps_tensor: trt.ITensor,
     reverse_indices: np.ndarray,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Apply a DeepStack PatchMerger: group → LayerNorm → fc1 → GELU → fc2 → reverse.
 
@@ -597,7 +623,8 @@ def _add_deepstack_merger(
     norm_w = weights[f"{merger_prefix}.norm.weight"].astype(np.float32)
     norm_b = weights[f"{merger_prefix}.norm.bias"].astype(np.float32)
     normed = graph_ops.add_layer_norm(
-        network, reshape_grp.get_output(0), merged_dim, norm_w, norm_b, eps_tensor)
+        network, reshape_grp.get_output(0), merged_dim, norm_w, norm_b,
+        eps_tensor, dtype=dtype)
 
     # Group: [num_patches, embed_dim] -> [num_merged, merged_dim]
     reshape_grp = network.add_shuffle(normed)
@@ -609,18 +636,21 @@ def _add_deepstack_merger(
     fc1_hidden = fc1_w.shape[0]
     fc1 = graph_ops.add_matmul_rhs_constant(
         network, normed, merged_dim, fc1_hidden,
-        fc1_w.T.copy())
-    fc1 = graph_ops.add_bias_sum(network, fc1, fc1_hidden, fc1_b)
+        fc1_w.T.copy(), dtype=dtype)
+    fc1 = graph_ops.add_bias_sum(
+        network, fc1, fc1_hidden, fc1_b, dtype=dtype)
 
     # GELU activation
-    activated = graph_ops.add_gelu_new(network, fc1)
+    activated = graph_ops.add_gelu_new(network, fc1, dtype=dtype)
 
     # fc2: [num_merged, fc1_hidden] -> [num_merged, text_hidden_size]
     fc2_w = weights[f"{merger_prefix}.linear_fc2.weight"].astype(np.float32)
     fc2_b = weights[f"{merger_prefix}.linear_fc2.bias"].astype(np.float32)
     fc2 = graph_ops.add_matmul_rhs_constant(
-        network, activated, fc1_hidden, text_hidden_size, fc2_w.T.copy())
-    fc2 = graph_ops.add_bias_sum(network, fc2, text_hidden_size, fc2_b)
+        network, activated, fc1_hidden, text_hidden_size, fc2_w.T.copy(),
+        dtype=dtype)
+    fc2 = graph_ops.add_bias_sum(
+        network, fc2, text_hidden_size, fc2_b, dtype=dtype)
 
     # Reverse window reorder
     rev_idx = trt.Weights(np.ascontiguousarray(reverse_indices))
@@ -636,6 +666,8 @@ def build_qwen3_vl_vision_engine(
     weights: WeightDict,
     *,
     fixed_image_size: int = 448,
+    precision: str = "fp32",
+    fp32_layers: set[int] | None = None,
     verbose: bool = False,
 ) -> bytes:
     """Build Qwen3-VL vision encoder TRT engine with DeepStack multi-level outputs.
@@ -662,6 +694,14 @@ def build_qwen3_vl_vision_engine(
     eps_val = vision_config.get("layer_norm_eps", 1e-6)
     deepstack_indexes = vision_config.get("deepstack_visual_indexes", [])
     text_hidden_size = vision_config.get("out_hidden_size", embed_dim)
+    requested_fp32_layers = {int(index) for index in (fp32_layers or set())}
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported Qwen3-VL precision {precision!r}; expected fp32 or fp16")
 
     grid_h = fixed_image_size // patch_size
     grid_w = fixed_image_size // patch_size
@@ -685,7 +725,8 @@ def build_qwen3_vl_vision_engine(
     trt_config = builder_context.config
 
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([eps_val], dtype=np.float32))
+        network, (1, 1), np.array([eps_val], dtype=work_np_dtype),
+        dtype=work_np_dtype)
 
     # ---------------------------------------------------------------
     # Input: pixel_values [T*C, H, W]
@@ -694,18 +735,22 @@ def build_qwen3_vl_vision_engine(
     pixel_values = network.add_input(
         "pixel_values", trt.float32,
         (input_channels, fixed_image_size, fixed_image_size))
+    if work_trt_dtype != trt.float32:
+        pixel_values = network.add_cast(
+            pixel_values, work_trt_dtype).get_output(0)
 
     # ---------------------------------------------------------------
     # Stage 1: 3D Patch Embedding
     # ---------------------------------------------------------------
-    patch_embed_w = weights["visual.patch_embed.proj.weight"].astype(np.float32)
+    patch_embed_w = weights["visual.patch_embed.proj.weight"].astype(work_np_dtype)
     patch_embed_b = weights.get("visual.patch_embed.proj.bias")
 
     hidden = graph_ops.add_patch_embed_3d(
         network, pixel_values, patch_embed_w,
-        patch_embed_b.astype(np.float32) if patch_embed_b is not None else None,
+        patch_embed_b.astype(work_np_dtype) if patch_embed_b is not None else None,
         in_channels=in_channels, embed_dim=embed_dim,
-        temporal_patch_size=temporal_patch_size, patch_size=patch_size)
+        temporal_patch_size=temporal_patch_size, patch_size=patch_size,
+        dtype=work_np_dtype)
 
     # ---------------------------------------------------------------
     # Stage 2: Learned position embedding (fast_pos_embed_interpolate)
@@ -754,7 +799,8 @@ def build_qwen3_vl_vision_engine(
                     idx += 1
 
     pos_const = graph_ops.add_constant(
-        network, (num_patches, embed_dim), pos_embed_interp)
+        network, (num_patches, embed_dim), pos_embed_interp,
+        dtype=work_np_dtype)
     pos_add = network.add_elementwise(
         hidden, pos_const, trt.ElementWiseOperation.SUM)
     hidden = pos_add.get_output(0)
@@ -823,12 +869,24 @@ def build_qwen3_vl_vision_engine(
 
     for layer_idx in range(num_layers):
         prefix = f"visual.blocks.{layer_idx}"
+        layer_np_dtype = (
+            np.float32
+            if work_np_dtype == np.float16 and layer_idx in requested_fp32_layers
+            else work_np_dtype)
+        layer_trt_dtype = (
+            trt.float32 if layer_np_dtype == np.float32 else work_trt_dtype)
+        if hidden.dtype != layer_trt_dtype:
+            hidden = network.add_cast(hidden, layer_trt_dtype).get_output(0)
+        layer_eps_tensor = graph_ops.add_constant(
+            network, (1, 1), np.array([eps_val], dtype=layer_np_dtype),
+            dtype=layer_np_dtype)
 
         # Pre-attention LayerNorm (with bias)
         ln1_gamma = weights[f"{prefix}.norm1.weight"].astype(np.float32)
         ln1_beta = weights[f"{prefix}.norm1.bias"].astype(np.float32)
         normed = graph_ops.add_layer_norm(
-            network, hidden, embed_dim, ln1_gamma, ln1_beta, eps_tensor)
+            network, hidden, embed_dim, ln1_gamma, ln1_beta, layer_eps_tensor,
+            dtype=layer_np_dtype)
 
         # Self-attention with 2D RoPE (Qwen3-VL uses both learned pos + RoPE)
         w_q, w_k, w_v, q_bias, k_bias, v_bias = None, None, None, None, None, None
@@ -858,7 +916,7 @@ def build_qwen3_vl_vision_engine(
             seq_length=num_patches,
             cos_table=cos_table, sin_table=sin_table,
             q_bias=q_bias, k_bias=k_bias, v_bias=v_bias,
-            o_bias=o_bias_np)
+            o_bias=o_bias_np, dtype=layer_np_dtype)
 
         # Residual
         res1 = network.add_elementwise(
@@ -869,7 +927,7 @@ def build_qwen3_vl_vision_engine(
         ln2_beta = weights[f"{prefix}.norm2.bias"].astype(np.float32)
         normed2 = graph_ops.add_layer_norm(
             network, res1.get_output(0), embed_dim,
-            ln2_gamma, ln2_beta, eps_tensor)
+            ln2_gamma, ln2_beta, layer_eps_tensor, dtype=layer_np_dtype)
 
         # GELU FC MLP: linear_fc1 → GELU → linear_fc2
         fc1_w = weights[f"{prefix}.mlp.linear_fc1.weight"].astype(np.float32)
@@ -878,12 +936,17 @@ def build_qwen3_vl_vision_engine(
         fc2_b = weights[f"{prefix}.mlp.linear_fc2.bias"].astype(np.float32)
 
         fc1 = graph_ops.add_matmul_rhs_constant(
-            network, normed2, embed_dim, mlp_hidden, fc1_w.T.copy())
-        fc1 = graph_ops.add_bias_sum(network, fc1, mlp_hidden, fc1_b)
-        activated = graph_ops.add_gelu_new(network, fc1)
+            network, normed2, embed_dim, mlp_hidden, fc1_w.T.copy(),
+            dtype=layer_np_dtype)
+        fc1 = graph_ops.add_bias_sum(
+            network, fc1, mlp_hidden, fc1_b, dtype=layer_np_dtype)
+        activated = graph_ops.add_gelu_new(
+            network, fc1, dtype=layer_np_dtype)
         fc2 = graph_ops.add_matmul_rhs_constant(
-            network, activated, mlp_hidden, embed_dim, fc2_w.T.copy())
-        fc2 = graph_ops.add_bias_sum(network, fc2, embed_dim, fc2_b)
+            network, activated, mlp_hidden, embed_dim, fc2_w.T.copy(),
+            dtype=layer_np_dtype)
+        fc2 = graph_ops.add_bias_sum(
+            network, fc2, embed_dim, fc2_b, dtype=layer_np_dtype)
 
         # Residual
         res2 = network.add_elementwise(
@@ -897,10 +960,13 @@ def build_qwen3_vl_vision_engine(
     # ---------------------------------------------------------------
     # Stage 4: Main spatial merge (same as Qwen2.5-VL but with LayerNorm naming)
     # ---------------------------------------------------------------
+    if hidden.dtype != work_trt_dtype:
+        hidden = network.add_cast(hidden, work_trt_dtype).get_output(0)
     merger_norm_w = weights["visual.merger.norm.weight"].astype(np.float32)
     merger_norm_b = weights["visual.merger.norm.bias"].astype(np.float32)
     normed_patches = graph_ops.add_layer_norm(
-        network, hidden, embed_dim, merger_norm_w, merger_norm_b, eps_tensor)
+        network, hidden, embed_dim, merger_norm_w, merger_norm_b, eps_tensor,
+        dtype=work_np_dtype)
 
     merged_dim = embed_dim * merge_unit
     reshape_merge = network.add_shuffle(normed_patches)
@@ -914,13 +980,17 @@ def build_qwen3_vl_vision_engine(
     fc1_hidden = merger_fc1_w.shape[0]
     fc1_out = graph_ops.add_matmul_rhs_constant(
         network, reshape_merge.get_output(0), merged_dim, fc1_hidden,
-        merger_fc1_w.T.copy())
-    fc1_out = graph_ops.add_bias_sum(network, fc1_out, fc1_hidden, merger_fc1_b)
-    activated = graph_ops.add_gelu_new(network, fc1_out)
+        merger_fc1_w.T.copy(), dtype=work_np_dtype)
+    fc1_out = graph_ops.add_bias_sum(
+        network, fc1_out, fc1_hidden, merger_fc1_b, dtype=work_np_dtype)
+    activated = graph_ops.add_gelu_new(
+        network, fc1_out, dtype=work_np_dtype)
     fc2_out = graph_ops.add_matmul_rhs_constant(
         network, activated, fc1_hidden, text_hidden_size,
-        merger_fc2_w.T.copy())
-    fc2_out = graph_ops.add_bias_sum(network, fc2_out, text_hidden_size, merger_fc2_b)
+        merger_fc2_w.T.copy(), dtype=work_np_dtype)
+    fc2_out = graph_ops.add_bias_sum(
+        network, fc2_out, text_hidden_size, merger_fc2_b,
+        dtype=work_np_dtype)
 
     # Reverse window reorder
     rev_idx = trt.Weights(np.ascontiguousarray(reverse_indices))
@@ -928,8 +998,11 @@ def build_qwen3_vl_vision_engine(
     rev_cast = network.add_cast(rev_layer.get_output(0), trt.int32)
     main_features = network.add_gather(fc2_out, rev_cast.get_output(0), 0)
 
-    main_features.get_output(0).name = "image_features"
-    network.mark_output(main_features.get_output(0))
+    main_output = main_features.get_output(0)
+    if main_output.dtype != trt.float32:
+        main_output = network.add_cast(main_output, trt.float32).get_output(0)
+    main_output.name = "image_features"
+    network.mark_output(main_output)
 
     # ---------------------------------------------------------------
     # Stage 5: DeepStack merger outputs
@@ -937,13 +1010,18 @@ def build_qwen3_vl_vision_engine(
     # ---------------------------------------------------------------
     for ds_idx, layer_idx in enumerate(sorted(deepstack_branches.keys())):
         ds_hidden = deepstack_branches[layer_idx]
+        if ds_hidden.dtype != work_trt_dtype:
+            ds_hidden = network.add_cast(ds_hidden, work_trt_dtype).get_output(0)
         merger_prefix = f"visual.deepstack_merger_list.{ds_idx}"
 
         ds_features = _add_deepstack_merger(
             network, ds_hidden, weights, merger_prefix,
             embed_dim, merge_unit, num_merged, text_hidden_size,
-            eps_tensor, reverse_indices)
+            eps_tensor, reverse_indices, dtype=work_np_dtype)
 
+        if ds_features.dtype != trt.float32:
+            ds_features = network.add_cast(
+                ds_features, trt.float32).get_output(0)
         ds_features.name = f"deepstack_features_{ds_idx}"
         network.mark_output(ds_features)
 

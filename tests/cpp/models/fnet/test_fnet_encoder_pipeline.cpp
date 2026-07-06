@@ -175,6 +175,29 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_encoder_engine_score_out
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
+// Mock: echo input IDs through a float lookup table so static-input padding is observable.
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_encoder_engine_echo_ids() {
+    auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
+    auto c = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(b->createBuilderConfig());
+    c->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
+
+    auto* ids = n->addInput("input_ids", nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {4}});
+    float values[10] = {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f};
+    auto* table = n->addConstant(nvinfer1::Dims{1, {10}},
+                                 nvinfer1::Weights{nvinfer1::DataType::kFLOAT, values, 10});
+    auto* gathered = n->addGather(*table->getOutput(0), *ids, 0);
+    gathered->getOutput(0)->setName("hidden_states");
+    n->markOutput(*gathered->getOutput(0));
+
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
+    if (!plan)
+        return nullptr;
+    auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
+        rt->deserializeCudaEngine(plan->data(), plan->size()));
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -329,6 +352,28 @@ static void test_encoder_score_output() {
     cudaStreamDestroy(stream);
 }
 
+static void test_encoder_pads_static_input_with_model_pad_id() {
+    auto engine = build_encoder_engine_echo_ids();
+    if (!engine) {
+        std::cerr << "SKIP encoder_pad_id\n";
+        return;
+    }
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
+                                                         engine->createExecutionContext(), stream);
+    trtmc::EncoderPipeline pipeline(std::move(module), "encode", nullptr, "", 9);
+    auto result = pipeline.encode_ids({1, 2});
+
+    check(result.data.size() == 4, "pad_id: static output size");
+    check(result.data == std::vector<float>({1.0f, 2.0f, 9.0f, 9.0f}),
+          "pad_id: short input padded with configured ID");
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_encoder_no_tokenizer_embed() {
     // embed() without tokenizer covers line 75 throw
     auto engine = build_encoder_engine();
@@ -415,6 +460,7 @@ int main() {
     test_encoder_int32_mask();
     test_encoder_validates();
     test_encoder_score_output();
+    test_encoder_pads_static_input_with_model_pad_id();
     test_encoder_no_tokenizer_embed();
     test_encoder_no_tokenizer_encode();
     test_encoder_no_tokenizer_rerank();

@@ -18,7 +18,11 @@ def _import_summary():
     return importlib.import_module("generate_ci_summary")
 
 
-def _result(name: str, status: str = "pass") -> dict:
+def _result(
+    name: str,
+    status: str = "pass",
+    model_name: str | None = None,
+) -> dict:
     return {
         "case_name": name,
         "status": status,
@@ -26,6 +30,7 @@ def _result(name: str, status: str = "pass") -> dict:
         "case_config": {
             "family": "example_decoder",
             "task_strategy": "text_generation_causal",
+            "metadata": {"model_name": model_name or name},
         },
         "stages": {
             "generate": {
@@ -43,11 +48,16 @@ def _result(name: str, status: str = "pass") -> dict:
     }
 
 
-def _write_result(artifacts_dir: Path, name: str, status: str = "pass") -> None:
+def _write_result(
+    artifacts_dir: Path,
+    name: str,
+    status: str = "pass",
+    model_name: str | None = None,
+) -> None:
     case_dir = artifacts_dir / name
     case_dir.mkdir(parents=True)
     (case_dir / "result.json").write_text(
-        json.dumps(_result(name, status)), encoding="utf-8"
+        json.dumps(_result(name, status, model_name)), encoding="utf-8"
     )
 
 
@@ -167,7 +177,10 @@ def test_summary_surfaces_xpass_from_console_logs(tmp_path: Path) -> None:
     )
 
     assert "### Pytest Waive Outcomes" in summary
-    assert "| image-diffusion-xpass | XPASS | pass | HF diffusion reference quality should be gated |" in summary
+    assert (
+        "| image-diffusion-xpass | XPASS | pass | HF diffusion reference quality should be gated |"
+        in summary
+    )
 
 
 def test_summary_treats_xfail_result_as_waived_not_active_failure(
@@ -240,28 +253,32 @@ def test_summary_treats_model_owned_xfail_as_waived_not_active_failure(
     assert "| skip | 1 |" in summary
     assert "### Failures" not in summary
     assert (
-        "| fnet-base | XFAIL | skip | "
-        "encoder representation parity below minimum contract floor |"
+        "| fnet-base | XFAIL | skip | encoder representation parity below minimum contract floor |"
     ) in summary
 
 
-def test_summary_expands_grouped_bundle_junit_members(tmp_path: Path) -> None:
+def test_summary_groups_structured_model_testcases(tmp_path: Path) -> None:
     mod = _import_summary()
     e2e_root = tmp_path / "e2e_artifacts"
     artifacts_dir = e2e_root / "artifacts"
     _write_result(artifacts_dir, "canary-1b-v2", "pass")
-    base_result = json.loads(
-        (artifacts_dir / "canary-1b-v2" / "result.json").read_text(encoding="utf-8")
+    _write_result(
+        artifacts_dir,
+        "canary-1b-v2-asr-probe01",
+        "pass",
+        "canary-1b-v2",
     )
-    base_result["case_config"]["bundle"] = "canary-1b-v2.trtfb"
-    (artifacts_dir / "canary-1b-v2" / "result.json").write_text(
-        json.dumps(base_result), encoding="utf-8"
+    _write_result(
+        artifacts_dir,
+        "canary-1b-v2-asr-probe02",
+        "pass",
+        "canary-1b-v2",
     )
     _write_junit(
         e2e_root,
         """
         <testcase classname="tests.e2e.models.canary.test_canary_e2e"
-                  name="test_model_e2e[bundle:canary-1b-v2+canary-1b-v2-asr-probe01+canary-1b-v2-asr-probe02]" />
+                  name="test_model_e2e[canary-1b-v2]" />
         """,
     )
 
@@ -280,10 +297,13 @@ def test_summary_expands_grouped_bundle_junit_members(tmp_path: Path) -> None:
     )
 
     assert "| pass | 3 |" in summary
-    assert "### Grouped Bundle Testcases" in summary
+    assert "### Multi-Testcase Models" in summary
     assert "canary-1b-v2-asr-probe01" in summary
     assert "canary-1b-v2-asr-probe02" in summary
-    assert "| canary-1b-v2-asr-probe01 |  |  | pass |  |  |" in summary
+    assert (
+        "| canary-1b-v2-asr-probe01 | example_decoder | "
+        "text_generation_causal | pass | token_agreement_rate=1 | 3.0s |"
+    ) in summary
 
 
 def test_summary_surfaces_model_owned_xpass_from_console_logs(tmp_path: Path) -> None:
@@ -313,7 +333,4 @@ def test_summary_surfaces_model_owned_xpass_from_console_logs(tmp_path: Path) ->
     )
 
     assert "### Pytest Waive Outcomes" in summary
-    assert (
-        "| fnet-base | XPASS | pass | "
-        "FNet parity gap unexpectedly closed |"
-    ) in summary
+    assert ("| fnet-base | XPASS | pass | FNet parity gap unexpectedly closed |") in summary

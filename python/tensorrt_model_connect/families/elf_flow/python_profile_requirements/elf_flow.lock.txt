@@ -1,0 +1,11 @@
+jax==0.4.38
+jaxlib==0.4.38
+ml_dtypes==0.5.1
+flax==0.10.2
+orbax-checkpoint==0.5.23
+opt_einsum==3.4.0
+nest_asyncio==1.6.0
+etils==1.13.0
+importlib_resources==6.5.2
+tensorstore==0.1.73
+PyYAML==6.0.2

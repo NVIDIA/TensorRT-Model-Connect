@@ -521,6 +521,52 @@ def test_impact_models_selects_owned_rules_and_l0_replacements(tmp_path: Path) -
     assert result.stdout.splitlines() == ["decoder-large-l0", "decoder-small"]
 
 
+def test_impact_models_excludes_non_runnable_ci_tiers(tmp_path: Path) -> None:
+    repo_root = _make_repo(tmp_path)
+    manifest_path = (
+        repo_root
+        / "tests"
+        / "e2e"
+        / "models"
+        / "decoder_family"
+        / "manifests"
+        / "decoder-small.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["testcases"] = [
+        {"name": "decoder-small", "ci_tier": "multi_device"}
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    impact_path = tmp_path / "impact.json"
+    impact_path.write_text(
+        json.dumps(
+            {
+                "e2e_models": ["decoder-small"],
+                "matched_rules": [
+                    {
+                        "file": "tests/e2e/models/decoder_family/runner.py",
+                        "rule": "e2e_model_owned_test",
+                        "models": ["decoder-small"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(
+        "impact-models",
+        "--repo-root",
+        str(repo_root),
+        "--impact-json",
+        str(impact_path),
+        "--exclude-ci-tier",
+        "multi_device",
+    )
+
+    assert result.stdout == ""
+
+
 def _passing_result(model_name: str) -> dict[str, object]:
     return {
         "case_name": model_name,
@@ -572,6 +618,69 @@ def test_verify_results_accepts_complete_passing_result(tmp_path: Path) -> None:
 
     assert "PASS decoder-small" in result.stdout
     assert json.loads(report_path.read_text(encoding="utf-8"))["passed"] is True
+
+
+def test_verify_results_accepts_advisory_metric_failure_in_passing_stage(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    result_data = _passing_result("decoder-small")
+    metric = result_data["stages"]["full_inference"]["metrics"]["cosine"]
+    metric["passed"] = False
+    _write_result(artifacts_dir, "decoder-small", result_data)
+
+    result = _run(
+        "verify-results",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        "decoder-small",
+        "--artifacts-dir",
+        str(artifacts_dir),
+    )
+
+    assert "PASS decoder-small" in result.stdout
+
+
+def test_verify_results_uses_first_testcase_when_model_has_no_same_named_case(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    manifest_path = (
+        repo_root
+        / "tests"
+        / "e2e"
+        / "models"
+        / "decoder_family"
+        / "manifests"
+        / "decoder-small.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["name"] = "decoder-bundle"
+    manifest["testcases"] = [
+        {"name": "decoder-bundle-probe01"},
+        {"name": "decoder-bundle-probe02"},
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    artifacts_dir = tmp_path / "artifacts"
+    _write_result(
+        artifacts_dir,
+        "decoder-bundle-probe01",
+        _passing_result("decoder-bundle-probe01"),
+    )
+
+    result = _run(
+        "verify-results",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        "decoder-bundle",
+        "--artifacts-dir",
+        str(artifacts_dir),
+    )
+
+    assert "PASS decoder-bundle" in result.stdout
 
 
 @pytest.mark.parametrize(

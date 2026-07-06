@@ -8,6 +8,7 @@ Intent: Validate E2E manifest schema enforcement for required fields, type check
 Preconditions: e2e_harness manifest_loader is importable
 Postconditions: Invalid manifests raise appropriate ValueError/TypeError; valid manifests pass validation
 """
+
 import json
 import os
 import pytest
@@ -22,6 +23,7 @@ try:
         iter_manifest_paths,
         load_all_manifests,
         load_manifest,
+        load_model_manifest,
     )
     from tests.e2e_harness.registry import (
         activate_model_plugins,
@@ -47,6 +49,32 @@ class TestManifestValidation:
         with open(path, "w") as f:
             json.dump(data, f)
         return path
+
+    def _write_unified_manifest(self, tmp_path, data):
+        model_fields = {
+            "hf_id",
+            "model_id",
+            "bundle",
+            "family",
+            "runtime_strategy",
+            "task_strategy",
+            "max_cache_length",
+            "precision",
+            "fp32_layers",
+            "quantization",
+            "fp8_scales",
+            "trust_remote_code",
+            "build_args",
+            "build_env",
+            "e2e_parallel_resource",
+            "e2e_size",
+            "distributed_runtime",
+        }
+        model = {"name": data.get("name", "")}
+        model.update({key: value for key, value in data.items() if key in model_fields})
+        testcase = {key: value for key, value in data.items() if key not in model_fields}
+        model["testcases"] = [testcase]
+        return self._write_manifest(tmp_path, model)
 
     def test_missing_name_raises(self, tmp_path):
         """Manifest without 'name' should raise ValueError."""
@@ -137,9 +165,7 @@ class TestManifestValidation:
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             _validate_manifest(data, "test.json")
-            strategy_warnings = [
-                x for x in w if "runtime_strategy" in str(x.message)
-            ]
+            strategy_warnings = [x for x in w if "runtime_strategy" in str(x.message)]
             assert len(strategy_warnings) == 0
 
     def test_valid_manifest_passes(self, tmp_path):
@@ -163,23 +189,42 @@ class TestManifestValidation:
         manifest_dir.mkdir(parents=True)
         manifest_path = manifest_dir / "example-test.json"
         manifest_path.write_text(
-            json.dumps({
-                "name": "example-test",
-                "hf_id": EXAMPLE_MODEL_ID,
-                "family": EXAMPLE_FAMILY,
-                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
-                "prompt": "Hello",
-                "max_new_tokens": 4,
-            }),
+            json.dumps(
+                {
+                    "name": "example-test",
+                    "hf_id": EXAMPLE_MODEL_ID,
+                    "family": EXAMPLE_FAMILY,
+                    "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                    "testcases": [
+                        {
+                            "name": "example-test",
+                            "prompt": "Hello",
+                            "max_new_tokens": 4,
+                        },
+                        {
+                            "name": "example-test-probe01",
+                            "prompt": "Probe",
+                            "max_new_tokens": 2,
+                        }
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
 
         assert iter_manifest_paths(models_dir) == [manifest_path]
         assert find_manifest_path("example-test", models_dir) == manifest_path
+        assert find_manifest_path("example-test-probe01", models_dir) == manifest_path
         cases = load_all_manifests(models_dir)
-        assert [case.name for case in cases] == ["example-test"]
+        assert [case.name for case in cases] == [
+            "example-test",
+            "example-test-probe01",
+        ]
         family_cases = load_all_manifests(models_dir / EXAMPLE_FAMILY)
-        assert [case.name for case in family_cases] == ["example-test"]
+        assert [case.name for case in family_cases] == [
+            "example-test",
+            "example-test-probe01",
+        ]
 
     def test_model_owned_threshold_sidecar_is_loaded(self, tmp_path):
         """Model-local thresholds/<case>.json sidecars feed E2E thresholds."""
@@ -190,24 +235,33 @@ class TestManifestValidation:
         threshold_dir.mkdir()
         manifest_path = manifest_dir / "example-test.json"
         manifest_path.write_text(
-            json.dumps({
-                "name": "example-test",
-                "hf_id": EXAMPLE_MODEL_ID,
-                "family": EXAMPLE_FAMILY,
-                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
-                "prompt": "Hello",
-                "max_new_tokens": 4,
-            }),
+            json.dumps(
+                {
+                    "name": "example-test",
+                    "hf_id": EXAMPLE_MODEL_ID,
+                    "family": EXAMPLE_FAMILY,
+                    "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                    "testcases": [
+                        {
+                            "name": "example-test",
+                            "prompt": "Hello",
+                            "max_new_tokens": 4,
+                        }
+                    ],
+                }
+            ),
             encoding="utf-8",
         )
         (threshold_dir / "example-test.json").write_text(
-            json.dumps({
-                "logit_atol": 10.0,
-                "threshold_overrides": {
-                    "logit_cosine_p5": 0.0,
-                    "token_agreement_rate": 0.0,
-                },
-            }),
+            json.dumps(
+                {
+                    "logit_atol": 10.0,
+                    "threshold_overrides": {
+                        "logit_cosine_p5": 0.0,
+                        "token_agreement_rate": 0.0,
+                    },
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -238,7 +292,8 @@ class TestManifestValidation:
         """Each model E2E folder owns its pytest runner entrypoint."""
         models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
         family_dirs = sorted(
-            path for path in models_dir.iterdir()
+            path
+            for path in models_dir.iterdir()
             if path.is_dir() and (path / "MODEL.toml").is_file()
         )
         assert family_dirs
@@ -257,8 +312,7 @@ class TestManifestValidation:
             for plugin_name in ("runner.py", "reference.py", "comparator.py"):
                 if not (family_dir / "e2e_plugins" / plugin_name).is_file():
                     missing_plugins.append(
-                        f"{family_dir.relative_to(models_dir).as_posix()}/"
-                        f"e2e_plugins/{plugin_name}"
+                        f"{family_dir.relative_to(models_dir).as_posix()}/e2e_plugins/{plugin_name}"
                     )
             for plugin_subdir in ("runners", "references", "comparators"):
                 if not (family_dir / "e2e_plugins" / plugin_subdir).is_dir():
@@ -311,20 +365,23 @@ class TestManifestValidation:
             raw = json.loads(manifest_path.read_text(encoding="utf-8"))
             keys = sorted(inline_fields & raw.keys())
             if keys:
-                inline_thresholds.append(
-                    (manifest_path.relative_to(models_dir).as_posix(), keys)
-                )
+                inline_thresholds.append((manifest_path.relative_to(models_dir).as_posix(), keys))
 
         sidecars = sorted(models_dir.glob("*/thresholds/*.json"))
+        testcase_paths = {}
+        for manifest_path in sorted(models_dir.glob("*/manifests/*.json")):
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for testcase in raw["testcases"]:
+                testcase_paths[(manifest_path.parent.parent, testcase["name"])] = manifest_path
         missing_sidecars = [
-            path.relative_to(models_dir).as_posix()
-            for path in sorted(models_dir.glob("*/manifests/*.json"))
-            if not (path.parent.parent / "thresholds" / path.name).is_file()
+            f"{manifest.relative_to(models_dir).as_posix()}: {name}"
+            for (family_dir, name), manifest in testcase_paths.items()
+            if not (family_dir / "thresholds" / f"{name}.json").is_file()
         ]
         missing_manifests = [
             path.relative_to(models_dir).as_posix()
             for path in sidecars
-            if not (path.parent.parent / "manifests" / path.name).is_file()
+            if (path.parent.parent, path.stem) not in testcase_paths
         ]
 
         assert sidecars
@@ -382,29 +439,32 @@ class TestManifestValidation:
         models_dir = Path(__file__).resolve().parents[1] / "e2e" / "models"
         failures = []
         for family_dir in sorted(
-            path for path in models_dir.iterdir()
+            path
+            for path in models_dir.iterdir()
             if path.is_dir() and (path / "MODEL.toml").is_file()
         ):
             family_prefix = f"tests.e2e.models.{family_dir.name}.e2e_plugins."
             try:
                 activate_model_plugins(family_dir)
                 for manifest_path in sorted((family_dir / "manifests").glob("*.json")):
-                    case = load_manifest(manifest_path)
-                    resolved = {
-                        "runner": get_runner(case.task_strategy),
-                        "reference": get_reference(case.reference_backend),
-                        "comparator": get_comparator(case.task_strategy),
-                    }
-                    for kind, plugin in resolved.items():
-                        module = type(plugin).__module__ if plugin is not None else ""
-                        if not module.startswith(family_prefix):
-                            failures.append(
-                                (
-                                    manifest_path.relative_to(models_dir).as_posix(),
-                                    kind,
-                                    module,
+                    model = load_model_manifest(manifest_path)
+                    for case in model.testcases:
+                        resolved = {
+                            "runner": get_runner(case.task_strategy),
+                            "reference": get_reference(case.reference_backend),
+                            "comparator": get_comparator(case.task_strategy),
+                        }
+                        for kind, plugin in resolved.items():
+                            module = type(plugin).__module__ if plugin is not None else ""
+                            if not module.startswith(family_prefix):
+                                failures.append(
+                                    (
+                                        manifest_path.relative_to(models_dir).as_posix(),
+                                        case.name,
+                                        kind,
+                                        module,
+                                    )
                                 )
-                            )
             finally:
                 reset_e2e_registry()
 
@@ -440,7 +500,7 @@ class TestManifestValidation:
                 for include_line in [
                     line.strip()
                     for line in text.splitlines()
-                    if line.strip().startswith("#include \"runtime/models/")
+                    if line.strip().startswith('#include "runtime/models/')
                 ]:
                     prefix = f'#include "runtime/models/{model_dir.name}/'
                     if not include_line.startswith(prefix):
@@ -480,34 +540,34 @@ class TestManifestValidation:
             load_manifest(path)
 
     def test_gated_manifest_requires_auth_preflight(self, tmp_path):
-        path = self._write_manifest(tmp_path, {
-            "name": "gated-test",
-            "hf_id": "org/gated-model",
-            "family": EXAMPLE_FAMILY,
-            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
-            "gated": True,
-        })
+        path = self._write_unified_manifest(
+            tmp_path,
+            {
+                "name": "gated-test",
+                "hf_id": "org/gated-model",
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                "gated": True,
+            },
+        )
         case = load_manifest(path)
-        matches = [
-            req for req in case.preflight
-            if req.kind == "hf_auth_token_present"
-        ]
+        matches = [req for req in case.preflight if req.kind == "hf_auth_token_present"]
         assert len(matches) == 1
         assert matches[0].gating is True
 
     def test_remote_code_manifest_auth_preflight_is_diagnostic(self, tmp_path):
-        path = self._write_manifest(tmp_path, {
-            "name": "remote-code-test",
-            "hf_id": "org/remote-code-model",
-            "family": EXAMPLE_FAMILY,
-            "runtime_strategy": "embedding",
-            "trust_remote_code": True,
-        })
+        path = self._write_unified_manifest(
+            tmp_path,
+            {
+                "name": "remote-code-test",
+                "hf_id": "org/remote-code-model",
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": "embedding",
+                "trust_remote_code": True,
+            },
+        )
         case = load_manifest(path)
-        matches = [
-            req for req in case.preflight
-            if req.kind == "hf_auth_token_present"
-        ]
+        matches = [req for req in case.preflight if req.kind == "hf_auth_token_present"]
         assert len(matches) == 1
         assert matches[0].gating is False
 
@@ -519,20 +579,30 @@ class TestManifestValidation:
         asset.parent.mkdir()
         asset.write_bytes(b"image")
         manifest_path = manifests_dir / "image-model.json"
-        manifest_path.write_text(json.dumps({
-            "name": "image-model",
-            "hf_id": EXAMPLE_MODEL_ID,
-            "family": EXAMPLE_FAMILY,
-            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
-            "test_image": "data/test_img.jpeg",
-            "preflight_requirements": [
+        manifest_path.write_text(
+            json.dumps(
                 {
-                    "kind": "asset_exists",
-                    "args": {"path": "data/test_img.jpeg"},
-                    "gating": True,
-                },
-            ],
-        }), encoding="utf-8")
+                    "name": "image-model",
+                    "hf_id": EXAMPLE_MODEL_ID,
+                    "family": EXAMPLE_FAMILY,
+                    "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                    "testcases": [
+                        {
+                            "name": "image-model",
+                            "test_image": "data/test_img.jpeg",
+                            "preflight_requirements": [
+                                {
+                                    "kind": "asset_exists",
+                                    "args": {"path": "data/test_img.jpeg"},
+                                    "gating": True,
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
 
         case = load_manifest(manifest_path)
 
@@ -561,6 +631,76 @@ class TestManifestValidation:
         with pytest.raises(TypeError, match="execution_profiles"):
             _validate_manifest(data, "test.json")
 
+    def test_reference_precision_is_validated_and_propagated(self, tmp_path):
+        path = self._write_unified_manifest(
+            tmp_path,
+            {
+                "name": "fp16-reference-test",
+                "hf_id": EXAMPLE_MODEL_ID,
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                "precision": "fp16",
+                "reference_precision": "fp32",
+            },
+        )
+
+        case = load_manifest(path)
+        assert case.metadata["precision"] == "fp16"
+        assert case.metadata["reference_precision"] == "fp32"
+
+        with pytest.raises(ValueError, match="reference_precision"):
+            _validate_manifest(
+                {
+                    "name": "bad-reference-precision",
+                    "hf_id": EXAMPLE_MODEL_ID,
+                    "family": EXAMPLE_FAMILY,
+                    "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                    "reference_precision": "tf32",
+                },
+                "test.json",
+            )
+
+    def test_fp32_layers_are_validated_and_propagated(self, tmp_path):
+        path = self._write_unified_manifest(
+            tmp_path,
+            {
+                "name": "mixed-precision-test",
+                "hf_id": EXAMPLE_MODEL_ID,
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                "precision": "fp16",
+                "reference_precision": "fp32",
+                "fp32_layers": [2],
+            },
+        )
+
+        case = load_manifest(path)
+        assert case.metadata["fp32_layers"] == [2]
+
+        with pytest.raises(TypeError, match="fp32_layers"):
+            _validate_manifest(
+                {
+                    "name": "bad-fp32-layer",
+                    "hf_id": EXAMPLE_MODEL_ID,
+                    "family": EXAMPLE_FAMILY,
+                    "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                    "fp32_layers": [-1],
+                },
+                "test.json",
+            )
+
+        with pytest.raises(ValueError, match="duplicates"):
+            _validate_manifest(
+                {
+                    "name": "duplicate-fp32-layer",
+                    "hf_id": EXAMPLE_MODEL_ID,
+                    "family": EXAMPLE_FAMILY,
+                    "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                    "fp32_layers": [2, 2],
+                },
+                "test.json",
+            )
+
     def test_execution_profiles_reject_unknown_phase(self, tmp_path):
         data = {
             "name": "test",
@@ -577,19 +717,22 @@ class TestManifestValidation:
 
     def test_quantization_block_propagates_to_metadata(self, tmp_path):
         """Quantization manifests should preserve the generic quant block."""
-        path = self._write_manifest(tmp_path, {
-            "name": "example-test-fp8",
-            "hf_id": EXAMPLE_MODEL_ID,
-            "family": EXAMPLE_FAMILY,
-            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
-            "precision": "bf16",
-            "quantization": {
-                "format": "fp8",
-                "scale_source": "precomputed",
-                "scale_artifact": "scales/example-fp8.json",
-                "calibration_samples": 16,
+        path = self._write_unified_manifest(
+            tmp_path,
+            {
+                "name": "example-test-fp8",
+                "hf_id": EXAMPLE_MODEL_ID,
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                "precision": "bf16",
+                "quantization": {
+                    "format": "fp8",
+                    "scale_source": "precomputed",
+                    "scale_artifact": "scales/example-fp8.json",
+                    "calibration_samples": 16,
+                },
             },
-        })
+        )
         case = load_manifest(path)
         assert case.metadata["precision"] == "bf16"
         assert case.metadata["quantization"]["format"] == "fp8"
@@ -597,13 +740,16 @@ class TestManifestValidation:
 
     def test_skip_comparison_populates_metadata(self, tmp_path):
         """skip_comparison should set skip_comparison_reason without setting skip_reason."""
-        path = self._write_manifest(tmp_path, {
-            "name": "rerank-test",
-            "hf_id": "org/rerank",
-            "family": EXAMPLE_FAMILY,
-            "runtime_strategy": "reranking",
-            "skip_comparison": "reference shape mismatch",
-        })
+        path = self._write_unified_manifest(
+            tmp_path,
+            {
+                "name": "rerank-test",
+                "hf_id": "org/rerank",
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": "reranking",
+                "skip_comparison": "reference shape mismatch",
+            },
+        )
         case = load_manifest(path)
         assert case.metadata["skip_comparison_reason"] == "reference shape mismatch"
         # Partial skip must NOT set skip_reason (that would trigger full pytest.skip)
@@ -611,31 +757,40 @@ class TestManifestValidation:
 
     def test_skip_comparison_does_not_exempt_required_fields(self, tmp_path):
         """skip_comparison still requires hf_id + family (unlike skip)."""
-        path = self._write_manifest(tmp_path, {
-            "name": "rerank-test",
-            "skip_comparison": "reference shape mismatch",
-        })
+        path = self._write_unified_manifest(
+            tmp_path,
+            {
+                "name": "rerank-test",
+                "skip_comparison": "reference shape mismatch",
+            },
+        )
         with pytest.raises(ValueError, match="hf_id"):
             _validate_manifest(json.load(open(path)), path)
 
     def test_skip_comparison_bool_defaults_reason(self, tmp_path):
         """skip_comparison: true should produce a default reason string."""
-        path = self._write_manifest(tmp_path, {
-            "name": "rerank-test",
-            "hf_id": "org/rerank",
-            "family": EXAMPLE_FAMILY,
-            "runtime_strategy": "reranking",
-            "skip_comparison": True,
-        })
+        path = self._write_unified_manifest(
+            tmp_path,
+            {
+                "name": "rerank-test",
+                "hf_id": "org/rerank",
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": "reranking",
+                "skip_comparison": True,
+            },
+        )
         case = load_manifest(path)
         assert case.metadata["skip_comparison_reason"]
 
     def test_skip_and_skip_comparison_are_independent(self, tmp_path):
         """`skip` still takes precedence (full skip); `skip_comparison` alone is partial."""
-        path_full = self._write_manifest(tmp_path, {
-            "name": "full-skip",
-            "skip": "broken",
-        })
+        path_full = self._write_unified_manifest(
+            tmp_path,
+            {
+                "name": "full-skip",
+                "skip": "broken",
+            },
+        )
         case_full = load_manifest(path_full)
         assert case_full.metadata["skip_reason"] == "broken"
         assert "skip_comparison_reason" not in case_full.metadata

@@ -108,10 +108,25 @@ def _find_joint_linear(sd: dict, prefix: str, label: str):
     raise KeyError(f"Missing tensor for {label}; tried {candidates}")
 
 
-def _add_lstm_cell(network, x, h_prev, c_prev, weights, pfx: str, hidden: int):
-    w_ih = graph_ops.add_constant(network, (hidden, 4 * hidden), weights[f"{pfx}.w_ih_t"])
-    w_hh = graph_ops.add_constant(network, (hidden, 4 * hidden), weights[f"{pfx}.w_hh_t"])
-    bias = graph_ops.add_constant(network, (1, 4 * hidden), weights[f"{pfx}.bias"])
+def _precision_dtypes(precision: str) -> tuple[type[np.generic], object]:
+    if precision == "fp16":
+        return np.float16, trt.float16
+    if precision == "fp32":
+        return np.float32, trt.float32
+    raise ValueError(
+        f"Unsupported Nemotron Speech Streaming precision {precision!r}; "
+        "expected fp32 or fp16")
+
+
+def _add_lstm_cell(
+        network, x, h_prev, c_prev, weights, pfx: str, hidden: int,
+        dtype=np.float32):
+    w_ih = graph_ops.add_constant(
+        network, (hidden, 4 * hidden), weights[f"{pfx}.w_ih_t"], dtype=dtype)
+    w_hh = graph_ops.add_constant(
+        network, (hidden, 4 * hidden), weights[f"{pfx}.w_hh_t"], dtype=dtype)
+    bias = graph_ops.add_constant(
+        network, (1, 4 * hidden), weights[f"{pfx}.bias"], dtype=dtype)
 
     xw = network.add_matrix_multiply(x, trt.MatrixOperation.NONE, w_ih, trt.MatrixOperation.NONE)
     hw = network.add_matrix_multiply(h_prev, trt.MatrixOperation.NONE, w_hh, trt.MatrixOperation.NONE)
@@ -156,10 +171,12 @@ def _streaming_encoder_frames(right_context: int) -> int:
     return right_context + 1
 
 
-def _rel_shift_streaming(network, x, heads: int, query_len: int, pos_len: int, key_len: int):
+def _rel_shift_streaming(
+        network, x, heads: int, query_len: int, pos_len: int, key_len: int,
+        dtype=np.float32):
     zeros = graph_ops.add_constant(
         network, (heads, query_len, 1),
-        np.zeros((heads, query_len, 1), dtype=np.float32))
+        np.zeros((heads, query_len, 1), dtype=dtype), dtype=dtype)
     padded = network.add_concatenation([zeros, x])
     padded.axis = 2
     rs1 = network.add_shuffle(padded.get_output(0))
@@ -193,11 +210,13 @@ def _slice_layer_time_cache(network, cache, layer: int, hidden: int, time_cache:
 
 def _add_streaming_rel_pos_attention(network, hs, channel_cache, weights, pfx,
                                      hidden, heads, head_dim, query_len,
-                                     cache_len, rpe, eps, enc_mask):
+                                     cache_len, rpe, eps, enc_mask,
+                                     dtype=np.float32):
     key_len = cache_len + query_len
     pos_len = 2 * key_len - 1
     normed = graph_ops.add_layer_norm(
-        network, hs, hidden, weights[f"{pfx}.norm_sa"], weights[f"{pfx}.norm_sa_b"], eps)
+        network, hs, hidden, weights[f"{pfx}.norm_sa"],
+        weights[f"{pfx}.norm_sa_b"], eps, dtype=dtype)
 
     cat_kv = network.add_concatenation([channel_cache, normed])
     cat_kv.axis = 0
@@ -205,21 +224,27 @@ def _add_streaming_rel_pos_attention(network, hs, channel_cache, weights, pfx,
 
     q = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(network, normed, hidden, hidden, weights[f"{pfx}.w_q"]),
+        graph_ops.add_matmul_rhs_constant(
+            network, normed, hidden, hidden, weights[f"{pfx}.w_q"], dtype=dtype),
         hidden,
         weights[f"{pfx}.b_q"],
+        dtype=dtype,
     )
     k = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(network, kv, hidden, hidden, weights[f"{pfx}.w_k"]),
+        graph_ops.add_matmul_rhs_constant(
+            network, kv, hidden, hidden, weights[f"{pfx}.w_k"], dtype=dtype),
         hidden,
         weights[f"{pfx}.b_k"],
+        dtype=dtype,
     )
     v = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(network, kv, hidden, hidden, weights[f"{pfx}.w_v"]),
+        graph_ops.add_matmul_rhs_constant(
+            network, kv, hidden, hidden, weights[f"{pfx}.w_v"], dtype=dtype),
         hidden,
         weights[f"{pfx}.b_v"],
+        dtype=dtype,
     )
 
     qr = network.add_shuffle(q)
@@ -229,8 +254,12 @@ def _add_streaming_rel_pos_attention(network, hs, channel_cache, weights, pfx,
     vr = network.add_shuffle(v)
     vr.reshape_dims = (key_len, heads, head_dim)
 
-    bu = graph_ops.add_constant(network, (1, heads, head_dim), weights[f"{pfx}.pos_bias_u"])
-    bv = graph_ops.add_constant(network, (1, heads, head_dim), weights[f"{pfx}.pos_bias_v"])
+    bu = graph_ops.add_constant(
+        network, (1, heads, head_dim), weights[f"{pfx}.pos_bias_u"],
+        dtype=dtype)
+    bv = graph_ops.add_constant(
+        network, (1, heads, head_dim), weights[f"{pfx}.pos_bias_v"],
+        dtype=dtype)
     qu = network.add_elementwise(qr.get_output(0), bu, trt.ElementWiseOperation.SUM).get_output(0)
     qv = network.add_elementwise(qr.get_output(0), bv, trt.ElementWiseOperation.SUM).get_output(0)
 
@@ -251,10 +280,12 @@ def _add_streaming_rel_pos_attention(network, hs, channel_cache, weights, pfx,
     ps_raw = network.add_matrix_multiply(
         qv_t.get_output(0), trt.MatrixOperation.NONE,
         rp_t.get_output(0), trt.MatrixOperation.TRANSPOSE).get_output(0)
-    ps = _rel_shift_streaming(network, ps_raw, heads, query_len, pos_len, key_len)
+    ps = _rel_shift_streaming(
+        network, ps_raw, heads, query_len, pos_len, key_len, dtype=dtype)
     total = network.add_elementwise(cs, ps, trt.ElementWiseOperation.SUM).get_output(0)
     scale = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([1.0 / math.sqrt(head_dim)], dtype=np.float32))
+        network, (1, 1, 1), np.array([1.0 / math.sqrt(head_dim)], dtype=dtype),
+        dtype=dtype)
     scaled = network.add_elementwise(total, scale, trt.ElementWiseOperation.PROD).get_output(0)
     if enc_mask is not None:
         scaled = network.add_elementwise(scaled, enc_mask, trt.ElementWiseOperation.SUM).get_output(0)
@@ -271,9 +302,10 @@ def _add_streaming_rel_pos_attention(network, hs, channel_cache, weights, pfx,
     out = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(network, af.get_output(0), hidden, hidden,
-                                          weights[f"{pfx}.w_o"]),
+                                          weights[f"{pfx}.w_o"], dtype=dtype),
         hidden,
         weights[f"{pfx}.b_o"],
+        dtype=dtype,
     )
 
     cache_tail = network.add_slice(
@@ -285,16 +317,18 @@ def _add_streaming_rel_pos_attention(network, hs, channel_cache, weights, pfx,
 
 
 def _add_streaming_conv_module(network, hs, time_cache, weights, pfx, hidden, kern,
-                               query_len, eps, conv_norm_type):
+                               query_len, eps, conv_norm_type, dtype=np.float32):
     normed = graph_ops.add_layer_norm(
-        network, hs, hidden, weights[f"{pfx}.norm_conv"], weights[f"{pfx}.norm_conv_b"], eps)
+        network, hs, hidden, weights[f"{pfx}.norm_conv"],
+        weights[f"{pfx}.norm_conv_b"], eps, dtype=dtype)
     r1 = network.add_shuffle(normed)
     r1.first_transpose = trt.Permutation([1, 0])
     r2 = network.add_shuffle(r1.get_output(0))
     r2.reshape_dims = (1, hidden, query_len)
     x = graph_ops.add_conv1d(
         network, r2.get_output(0), weight=weights[f"{pfx}.cpw1_w"],
-        bias=weights[f"{pfx}.cpw1_b"], out_channels=2 * hidden, kernel_size=1)
+        bias=weights[f"{pfx}.cpw1_b"], out_channels=2 * hidden, kernel_size=1,
+        dtype=dtype)
     xa = network.add_slice(x, start=(0, 0, 0), shape=(1, hidden, query_len),
                            stride=(1, 1, 1)).get_output(0)
     xb = network.add_slice(x, start=(0, hidden, 0), shape=(1, hidden, query_len),
@@ -312,12 +346,14 @@ def _add_streaming_conv_module(network, hs, time_cache, weights, pfx, hidden, ke
         stride=(1, 1, 1))
     x = graph_ops.add_conv1d(
         network, cached_tensor, weight=weights[f"{pfx}.cdw_w"], bias=weights[f"{pfx}.cdw_b"],
-        out_channels=hidden, kernel_size=kern, groups=hidden)
-    x = _add_conv_norm(network, x, weights, pfx, hidden, query_len, eps, conv_norm_type)
-    x = graph_ops.add_activation(network, x, "silu")
+        out_channels=hidden, kernel_size=kern, groups=hidden, dtype=dtype)
+    x = _add_conv_norm(
+        network, x, weights, pfx, hidden, query_len, eps, conv_norm_type,
+        dtype=dtype)
+    x = graph_ops.add_activation(network, x, "silu", dtype=dtype)
     x = graph_ops.add_conv1d(
         network, x, weight=weights[f"{pfx}.cpw2_w"], bias=weights[f"{pfx}.cpw2_b"],
-        out_channels=hidden, kernel_size=1)
+        out_channels=hidden, kernel_size=1, dtype=dtype)
     r3 = network.add_shuffle(x)
     r3.reshape_dims = (hidden, query_len)
     r4 = network.add_shuffle(r3.get_output(0))
@@ -330,21 +366,25 @@ def _add_streaming_conv_module(network, hs, time_cache, weights, pfx, hidden, ke
 
 def _add_streaming_conformer_block(network, hs, channel_cache, time_cache, weights, pfx,
                                    hidden, heads, head_dim, ffn, kern, query_len,
-                                   cache_len, rpe, eps, enc_mask, conv_norm_type):
-    ffn1 = _add_half_ffn(network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps)
+                                   cache_len, rpe, eps, enc_mask, conv_norm_type,
+                                   dtype=np.float32):
+    ffn1 = _add_half_ffn(
+        network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps, dtype=dtype)
     hs = network.add_elementwise(hs, ffn1, trt.ElementWiseOperation.SUM).get_output(0)
     attn, next_channel = _add_streaming_rel_pos_attention(
         network, hs, channel_cache, weights, pfx, hidden, heads, head_dim, query_len,
-        cache_len, rpe, eps, enc_mask)
+        cache_len, rpe, eps, enc_mask, dtype=dtype)
     hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
     conv, next_time = _add_streaming_conv_module(
         network, hs, time_cache, weights, pfx, hidden, kern, query_len, eps,
-        conv_norm_type=conv_norm_type)
+        conv_norm_type=conv_norm_type, dtype=dtype)
     hs = network.add_elementwise(hs, conv, trt.ElementWiseOperation.SUM).get_output(0)
-    ffn2 = _add_half_ffn(network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps)
+    ffn2 = _add_half_ffn(
+        network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps, dtype=dtype)
     hs = network.add_elementwise(hs, ffn2, trt.ElementWiseOperation.SUM).get_output(0)
     out = graph_ops.add_layer_norm(
-        network, hs, hidden, weights[f"{pfx}.norm_out"], weights[f"{pfx}.norm_out_b"], eps)
+        network, hs, hidden, weights[f"{pfx}.norm_out"],
+        weights[f"{pfx}.norm_out_b"], eps, dtype=dtype)
     return out, next_channel, next_time
 
 
@@ -357,12 +397,15 @@ def _mark_layer_cache_output(network, tensors, name: str, shape):
     cat = network.add_concatenation(reshaped)
     cat.axis = 0
     out = cat.get_output(0)
+    if out.dtype != trt.float32:
+        out = network.add_cast(out, trt.float32).get_output(0)
     out.name = name
     network.mark_output(out)
 
 
 def _build_streaming_encoder(weights: WeightDict, right_context: int, *,
-                             first_step: bool = False, verbose: bool = False) -> bytes:
+                             first_step: bool = False, precision: str = "fp32",
+                             verbose: bool = False) -> bytes:
     hidden = int(weights["_hidden"])
     enc_layers = int(weights["_enc_layers"])
     heads = int(weights["_enc_heads"])
@@ -372,6 +415,7 @@ def _build_streaming_encoder(weights: WeightDict, right_context: int, *,
     sub_ch = int(weights["_sub_ch"])
     head_dim = int(weights["_head_dim"])
     conv_norm_type = str(weights.get("_conv_norm_type", "batch_norm"))
+    work_np_dtype, work_trt_dtype = _precision_dtypes(precision)
     mel_len = _streaming_mel_length(right_context, first_step=first_step)
     pre_encoded = _compute_causal_enc_seq_len(mel_len)
     query_len = _streaming_encoder_frames(right_context)
@@ -390,17 +434,27 @@ def _build_streaming_encoder(weights: WeightDict, right_context: int, *,
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
 
-    eps = graph_ops.add_constant(network, (1, 1), np.array([1e-5], dtype=np.float32))
+    eps = graph_ops.add_constant(
+        network, (1, 1), np.array([1e-5], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     mel = network.add_input("mel_features", trt.float32, (mel_bins, mel_len))
     channel_cache = network.add_input(
         "cache_last_channel", trt.float32, (enc_layers, cache_len, hidden))
     time_cache = network.add_input(
         "cache_last_time", trt.float32, (enc_layers, hidden, _STREAMING_TIME_CACHE))
     enc_mask = network.add_input("encoder_mask", trt.float32, (1, query_len, key_len))
+    if work_trt_dtype != trt.float32:
+        mel = network.add_cast(mel, work_trt_dtype).get_output(0)
+        channel_cache = network.add_cast(
+            channel_cache, work_trt_dtype).get_output(0)
+        time_cache = network.add_cast(time_cache, work_trt_dtype).get_output(0)
+        enc_mask = network.add_cast(enc_mask, work_trt_dtype).get_output(0)
 
     sub_weights = dict(weights)
     sub_weights["_enc_seq"] = pre_encoded
-    hs = _build_subsampling(network, mel, sub_weights, sub_ch, hidden, mel_bins, mel_len)
+    hs = _build_subsampling(
+        network, mel, sub_weights, sub_ch, hidden, mel_bins, mel_len,
+        dtype=work_np_dtype)
     hs = network.add_slice(hs, start=(drop, 0), shape=(query_len, hidden),
                            stride=(1, 1)).get_output(0)
 
@@ -411,19 +465,24 @@ def _build_streaming_encoder(weights: WeightDict, right_context: int, *,
         pfx = f"el.{i}"
         rel_proj = rpe_np @ weights[f"{pfx}.w_pos"]
         rel_proj = rel_proj.reshape(2 * key_len - 1, heads, head_dim)
-        rpe = graph_ops.add_constant(network, (2 * key_len - 1, heads, head_dim), rel_proj)
+        rpe = graph_ops.add_constant(
+            network, (2 * key_len - 1, heads, head_dim), rel_proj,
+            dtype=work_np_dtype)
         layer_channel_cache = _slice_layer_channel_cache(network, channel_cache, i, cache_len, hidden)
         layer_time_cache = _slice_layer_time_cache(
             network, time_cache, i, hidden, _STREAMING_TIME_CACHE)
         hs, next_channel, next_time = _add_streaming_conformer_block(
             network, hs, layer_channel_cache, layer_time_cache, weights, pfx, hidden,
             heads, head_dim, ffn, kern, query_len, cache_len, rpe, eps, enc_mask,
-            conv_norm_type=conv_norm_type)
+            conv_norm_type=conv_norm_type, dtype=work_np_dtype)
         next_channels.append(next_channel)
         next_times.append(next_time)
 
-    hs.name = "encoder_output"
-    network.mark_output(hs)
+    output = hs
+    if output.dtype != trt.float32:
+        output = network.add_cast(output, trt.float32).get_output(0)
+    output.name = "encoder_output"
+    network.mark_output(output)
     _mark_layer_cache_output(
         network, next_channels, "cache_last_channel_next", (cache_len, hidden))
     _mark_layer_cache_output(
@@ -692,7 +751,7 @@ class NemotronSpeechStreamingPlugin:
     def build_engine(self, config: ModelConfig, weights: WeightDict, max_cache_length: int,
                      *, precision: str = "fp32", quant_ctx=None, verbose: bool = False,
                      debug_layer_outputs: bool = False, parallel_config=None) -> bytes:
-        del config, max_cache_length, precision
+        del config, max_cache_length
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
@@ -706,23 +765,26 @@ class NemotronSpeechStreamingPlugin:
                     "debug_layer_outputs")
             return build_nemotron_streaming_tp_predictor(
                 weights, verbose=verbose, parallel_config=parallel)
-        return _build_predictor(weights, verbose=verbose)
+        return _build_predictor(weights, precision=precision, verbose=verbose)
 
     def build_vision_engine(self, model_dir: str, config: ModelConfig, weights: WeightDict,
                             *, precision: str = "fp32", verbose: bool = False) -> bytes | None:
-        del model_dir, precision
-        return _build_encoder(config, weights, verbose=verbose)
+        del model_dir
+        return _build_encoder(
+            config, weights, precision=precision, verbose=verbose)
 
     def build_extra_engines(self, config: ModelConfig, weights: WeightDict, max_cache_length: int,
                             *, precision: str = "fp32", verbose: bool = False) -> dict | None:
-        del config, max_cache_length, precision
-        joint_plan = _build_joint(weights, verbose=verbose)
+        del config, max_cache_length
+        joint_plan = _build_joint(
+            weights, precision=precision, verbose=verbose)
         extras = {"joint_engine_plan": joint_plan}
         for right_context in _STREAMING_RIGHT_CONTEXTS:
             extras[f"streaming_encoder_plan_ctx{right_context}"] = _build_streaming_encoder(
-                weights, right_context, verbose=verbose)
+                weights, right_context, precision=precision, verbose=verbose)
             extras[f"streaming_encoder_first_plan_ctx{right_context}"] = _build_streaming_encoder(
-                weights, right_context, first_step=True, verbose=verbose)
+                weights, right_context, first_step=True, precision=precision,
+                verbose=verbose)
         mel = _build_mel_filterbank(weights, verbose=verbose)
         if mel is not None:
             extras["mel_filterbank"] = mel
@@ -769,10 +831,13 @@ class NemotronSpeechStreamingPlugin:
         }
 
 
-def _build_predictor(weights: WeightDict, *, verbose: bool = False) -> bytes:
+def _build_predictor(
+        weights: WeightDict, *, precision: str = "fp32",
+        verbose: bool = False) -> bytes:
     pred_hidden = int(weights["_pred_hidden"])
     pred_layers = int(weights["_pred_layers"])
     vocab_total = int(weights["_vocab_total"])
+    work_np_dtype, work_trt_dtype = _precision_dtypes(precision)
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -781,7 +846,9 @@ def _build_predictor(weights: WeightDict, *, verbose: bool = False) -> bytes:
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 256 << 20)
 
     token_id = network.add_input("token_id", trt.int32, (1,))
-    embedding = graph_ops.add_constant(network, (vocab_total, pred_hidden), weights["pred_embedding"])
+    embedding = graph_ops.add_constant(
+        network, (vocab_total, pred_hidden), weights["pred_embedding"],
+        dtype=work_np_dtype)
     hidden = network.add_gather(embedding, token_id, 0).get_output(0)
 
     next_h = []
@@ -789,19 +856,29 @@ def _build_predictor(weights: WeightDict, *, verbose: bool = False) -> bytes:
     for layer in range(pred_layers):
         h_in = network.add_input(f"state_h_{layer}", trt.float32, (1, pred_hidden))
         c_in = network.add_input(f"state_c_{layer}", trt.float32, (1, pred_hidden))
+        if work_trt_dtype != trt.float32:
+            h_in = network.add_cast(h_in, work_trt_dtype).get_output(0)
+            c_in = network.add_cast(c_in, work_trt_dtype).get_output(0)
         hidden, c_new = _add_lstm_cell(network, hidden, h_in, c_in, weights, f"pred.{layer}",
-                                       pred_hidden)
+                                       pred_hidden, dtype=work_np_dtype)
         next_h.append(hidden)
         next_c.append(c_new)
 
-    pred_output = network.add_identity(hidden).get_output(0)
+    pred_output = hidden
+    if pred_output.dtype != trt.float32:
+        pred_output = network.add_cast(pred_output, trt.float32).get_output(0)
     pred_output.name = "pred_output"
     network.mark_output(pred_output)
     for layer in range(pred_layers):
-        next_h[layer].name = f"next_h_{layer}"
-        next_c[layer].name = f"next_c_{layer}"
-        network.mark_output(next_h[layer])
-        network.mark_output(next_c[layer])
+        h_output = next_h[layer]
+        c_output = next_c[layer]
+        if h_output.dtype != trt.float32:
+            h_output = network.add_cast(h_output, trt.float32).get_output(0)
+            c_output = network.add_cast(c_output, trt.float32).get_output(0)
+        h_output.name = f"next_h_{layer}"
+        c_output.name = f"next_c_{layer}"
+        network.mark_output(h_output)
+        network.mark_output(c_output)
 
     if verbose:
         print(f"[trtmc build] Building RNNT predictor ({pred_layers}L, h={pred_hidden})",
@@ -812,12 +889,15 @@ def _build_predictor(weights: WeightDict, *, verbose: bool = False) -> bytes:
     return bytes(plan)
 
 
-def _build_joint(weights: WeightDict, *, verbose: bool = False) -> bytes:
+def _build_joint(
+        weights: WeightDict, *, precision: str = "fp32",
+        verbose: bool = False) -> bytes:
     enc_hidden = int(weights["_hidden"])
     pred_hidden = int(weights["_pred_hidden"])
     joint_hidden = int(weights["_joint_hidden"])
     vocab_total = int(weights["_vocab_total"])
     activation = str(weights["_joint_activation"]).lower()
+    work_np_dtype, work_trt_dtype = _precision_dtypes(precision)
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -827,19 +907,26 @@ def _build_joint(weights: WeightDict, *, verbose: bool = False) -> bytes:
 
     enc = network.add_input("encoder_frame", trt.float32, (1, enc_hidden))
     pred = network.add_input("pred_output", trt.float32, (1, pred_hidden))
+    if work_trt_dtype != trt.float32:
+        enc = network.add_cast(enc, work_trt_dtype).get_output(0)
+        pred = network.add_cast(pred, work_trt_dtype).get_output(0)
     enc_proj = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(network, enc, enc_hidden, joint_hidden,
-                                          weights["joint_enc_w"]),
+                                          weights["joint_enc_w"],
+                                          dtype=work_np_dtype),
         joint_hidden,
         weights["joint_enc_b"],
+        dtype=work_np_dtype,
     )
     pred_proj = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(network, pred, pred_hidden, joint_hidden,
-                                          weights["joint_pred_w"]),
+                                          weights["joint_pred_w"],
+                                          dtype=work_np_dtype),
         joint_hidden,
         weights["joint_pred_b"],
+        dtype=work_np_dtype,
     )
     joint = network.add_elementwise(enc_proj, pred_proj, trt.ElementWiseOperation.SUM).get_output(0)
     if activation == "relu":
@@ -854,10 +941,14 @@ def _build_joint(weights: WeightDict, *, verbose: bool = False) -> bytes:
     logits = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(network, joint, joint_hidden, vocab_total,
-                                          weights["joint_out_w"]),
+                                          weights["joint_out_w"],
+                                          dtype=work_np_dtype),
         vocab_total,
         weights["joint_out_b"],
+        dtype=work_np_dtype,
     )
+    if logits.dtype != trt.float32:
+        logits = network.add_cast(logits, trt.float32).get_output(0)
     logits.name = "logits"
     network.mark_output(logits)
 

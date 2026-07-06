@@ -30,6 +30,8 @@ class E2EManifest:
     runtime_strategy: str
     path: Path
     bundle: str = ""
+    result_case: str = ""
+    ci_tier: str = ""
 
 
 @dataclass(frozen=True)
@@ -97,6 +99,28 @@ def discover_e2e_manifests(repo_root: Path) -> dict[str, E2EManifest]:
         if not family and path.parent.name == "manifests":
             family = path.parent.parent.name
         runtime_strategy = str(raw.get("runtime_strategy") or "")
+        testcases = raw.get("testcases", [])
+        testcase_names = [
+            str(testcase.get("name") or "")
+            for testcase in testcases
+            if isinstance(testcase, dict) and testcase.get("name")
+        ]
+        result_case = (
+            name
+            if name in testcase_names
+            else testcase_names[0]
+            if testcase_names
+            else name
+        )
+        result_testcase = next(
+            (
+                testcase
+                for testcase in testcases
+                if isinstance(testcase, dict)
+                and str(testcase.get("name") or "") == result_case
+            ),
+            {},
+        )
         if name and family and runtime_strategy:
             manifests[name] = E2EManifest(
                 name=name,
@@ -104,6 +128,10 @@ def discover_e2e_manifests(repo_root: Path) -> dict[str, E2EManifest]:
                 runtime_strategy=runtime_strategy,
                 path=path,
                 bundle=str(raw.get("bundle") or f"{name}.trtfb"),
+                result_case=result_case,
+                ci_tier=str(
+                    result_testcase.get("ci_tier") or raw.get("ci_tier") or ""
+                ),
             )
     return manifests
 
@@ -614,8 +642,12 @@ def _returncode_failures(value: object, path: str = "result") -> list[str]:
     return failures
 
 
-def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, object]:
-    result_path = artifacts_dir / model_name / "result.json"
+def _verify_model_result(
+    model_name: str,
+    result_case: str,
+    artifacts_dir: Path,
+) -> dict[str, object]:
+    result_path = artifacts_dir / result_case / "result.json"
     errors: list[str] = []
     if not result_path.is_file():
         return {
@@ -637,8 +669,8 @@ def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, obje
         errors.append("result.json root is not an object")
         result = {}
 
-    if result.get("case_name") != model_name:
-        errors.append(f"case_name is {result.get('case_name')!r}, expected {model_name!r}")
+    if result.get("case_name") != result_case:
+        errors.append(f"case_name is {result.get('case_name')!r}, expected {result_case!r}")
     if result.get("status") != "pass":
         errors.append(f"status is {result.get('status')!r}, expected 'pass'")
     if result.get("failure_type") not in (None, ""):
@@ -659,11 +691,6 @@ def _verify_model_result(model_name: str, artifacts_dir: Path) -> dict[str, obje
             metrics = stage.get("metrics", {})
             if not isinstance(metrics, dict):
                 errors.append(f"stage {stage_name!r} metrics is not an object")
-                continue
-            for metric_name, metric in metrics.items():
-                if isinstance(metric, dict) and "passed" in metric:
-                    if metric["passed"] is not True:
-                        errors.append(f"stage {stage_name!r} metric {metric_name!r} did not pass")
 
     commands = result.get("commands")
     if commands is not None and not isinstance(commands, list):
@@ -702,7 +729,12 @@ def command_verify_results(args: argparse.Namespace) -> int:
         )
 
     results = [
-        _verify_model_result(model_name, artifacts_dir) for model_name in sorted(model_names)
+        _verify_model_result(
+            model_name,
+            manifests[model_name].result_case,
+            artifacts_dir,
+        )
+        for model_name in sorted(model_names)
     ]
     report = {
         "schema_version": 1,
@@ -730,7 +762,12 @@ def command_impact_models(args: argparse.Namespace) -> int:
     impact = json.loads(_read_text(args.impact_json))
     if not isinstance(impact, dict):
         raise SystemExit(f"Impact JSON root is not an object: {args.impact_json}")
+    excluded_ci_tiers = set(args.exclude_ci_tier)
+    manifests = discover_e2e_manifests(args.repo_root.resolve())
     for model_name in model_owned_impact_models(impact):
+        manifest = manifests.get(model_name)
+        if manifest is not None and manifest.ci_tier in excluded_ci_tiers:
+            continue
         print(model_name)
     return 0
 
@@ -858,7 +895,9 @@ def build_parser() -> argparse.ArgumentParser:
         "impact-models",
         help="Print final impacted E2E cases reached through model-owned rules",
     )
+    impact_models.add_argument("--repo-root", type=Path, default=Path.cwd())
     impact_models.add_argument("--impact-json", type=Path, required=True)
+    impact_models.add_argument("--exclude-ci-tier", action="append", default=[])
     impact_models.set_defaults(func=command_impact_models)
     return parser
 

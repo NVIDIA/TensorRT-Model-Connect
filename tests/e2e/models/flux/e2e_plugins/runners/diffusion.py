@@ -287,21 +287,47 @@ class DiffusionMediaRunner:
         bundle_path = _resolve_bundle_path(case, ctx)
         binary = ctx.binary_path
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
+        batch_prompts = case.inputs.get("batch_prompts")
+        if not isinstance(batch_prompts, list) or len(batch_prompts) < 2:
+            batch_prompts = None
+        batch_seeds = case.inputs.get("batch_seeds")
+        if batch_prompts and (
+            not isinstance(batch_seeds, list) or len(batch_seeds) != len(batch_prompts)
+        ):
+            return StageOutput(
+                stage_name=stage.name,
+                data={
+                    "returncode": -1,
+                    "error": "batch_seeds must match batch_prompts",
+                },
+                metadata={"status": "invalid_batch_contract"},
+            )
         num_steps = case.inputs.get("num_inference_steps", 30)
         ld_path = _build_ld_library_path(ctx)
 
         with tempfile.TemporaryDirectory(prefix="trtmc_frames_") as frame_dir:
-            cmd = [
-                binary, "generate-video", bundle_path,
-                "--prompt", prompt,
-                "--num-steps", str(num_steps),
-            ]
+            if batch_prompts:
+                prompts_path = Path(frame_dir) / "prompts.txt"
+                prompts_path.write_text("\n".join(batch_prompts) + "\n", encoding="utf-8")
+                cmd = [
+                    binary, "run", bundle_path,
+                    "--prompts-file", str(prompts_path),
+                    "--seed", ",".join(str(seed) for seed in batch_seeds),
+                    "--num-steps", str(num_steps),
+                ]
+                output_target = str(Path(frame_dir) / "frame.png")
+            else:
+                cmd = [
+                    binary, "generate-video", bundle_path,
+                    "--prompt", prompt,
+                    "--num-steps", str(num_steps),
+                ]
+                output_target = frame_dir
             guidance_scale = case.inputs.get("guidance_scale")
             if guidance_scale is not None:
                 cmd.extend(["--guidance-scale", str(guidance_scale)])
             if "seed" in case.inputs:
                 cmd.extend(["--seed", str(case.inputs["seed"])])
-            output_target = frame_dir
             runtime_cli_python = ctx.runtime_cli_hf_python()
             if runtime_cli_python:
                 cmd.extend(["--hf-python", runtime_cli_python])
@@ -346,6 +372,12 @@ class DiffusionMediaRunner:
                 _strip_mpi_stream_tags(result.stderr)
                 if distributed_runtime else result.stderr
             )
+            if result.returncode != 0:
+                logger.error(
+                    "Flux TRT runtime failed (rc=%d): %s",
+                    result.returncode,
+                    stderr_text[-2000:],
+                )
 
             # Count frames
             frame_files = sorted(Path(output_frame_dir).glob("frame_*.png"))
@@ -385,6 +417,7 @@ class DiffusionMediaRunner:
                 "stderr": stderr_truncated,
                 # Passed through to the comparator for CLIP semantic metrics.
                 "prompt": case.inputs.get("prompt") or case.inputs.get("test_prompt"),
+                "prompts": batch_prompts or [prompt],
             }
             if stderr_log:
                 e2e_data["stderr_log"] = stderr_log

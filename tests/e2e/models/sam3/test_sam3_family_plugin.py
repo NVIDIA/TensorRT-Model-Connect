@@ -387,12 +387,14 @@ def test_sam3_build_engine_delegates_to_text_encoder_builder(tmp_path: Path, mon
         fake_module,
     )
 
-    plan = plugin.build_engine(config, weights, max_cache_length=1)
+    plan = plugin.build_engine(
+        config, weights, max_cache_length=1, precision="fp16")
 
     assert plan == b"sam3-text-plan"
     assert calls[0]["hidden_size"] == 8
     assert calls[0]["projected_size"] == 4
     assert calls[0]["max_seq_len"] == 5
+    assert calls[0]["precision"] == "fp16"
 
 
 def test_sam3_build_vision_engine_delegates_to_vision_builder(tmp_path: Path, monkeypatch) -> None:
@@ -418,7 +420,8 @@ def test_sam3_build_vision_engine_delegates_to_vision_builder(tmp_path: Path, mo
         fake_module,
     )
 
-    plan = plugin.build_vision_engine(str(tmp_path), config, weights)
+    plan = plugin.build_vision_engine(
+        str(tmp_path), config, weights, precision="fp16")
 
     assert plan == b"sam3-vision-plan"
     assert calls[0]["kwargs"]["image_size"] == 28
@@ -426,6 +429,7 @@ def test_sam3_build_vision_engine_delegates_to_vision_builder(tmp_path: Path, mo
     assert calls[0]["kwargs"]["hidden_size"] == 8
     assert calls[0]["kwargs"]["intermediate_size"] == 16
     assert calls[0]["kwargs"]["num_layers"] == 2
+    assert calls[0]["kwargs"]["precision"] == "fp16"
     assert "vision.patch_embed.weight" in calls[0]["keys"]
     assert "vision.fpn.2.proj2.weight" in calls[0]["keys"]
 
@@ -456,7 +460,8 @@ def test_sam3_build_extra_engines_delegates_to_core_builder(
         fake_module,
     )
 
-    plans = plugin.build_extra_engines(config, weights, max_cache_length=1)
+    plans = plugin.build_extra_engines(
+        config, weights, max_cache_length=1, precision="fp16")
 
     assert plans == {"sam3_core_engine_plan": b"sam3-core-plan"}
     assert calls[0]["kwargs"]["text_seq_len"] == 5
@@ -465,6 +470,7 @@ def test_sam3_build_extra_engines_delegates_to_core_builder(
     assert calls[0]["kwargs"]["num_queries"] == 7
     assert calls[0]["kwargs"]["detr_encoder_heads"] == 2
     assert calls[0]["kwargs"]["detr_decoder_intermediate_size"] == 8
+    assert calls[0]["kwargs"]["precision"] == "fp16"
     assert "detr_encoder.layers.0.self_attn.q_proj.weight" in calls[0]["keys"]
     assert "detr_decoder.layers.2.vision_cross_attn.o_proj.bias" in calls[0]["keys"]
     assert "mask_decoder.instance_projection.weight" in calls[0]["keys"]

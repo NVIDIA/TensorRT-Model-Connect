@@ -301,6 +301,7 @@ def add_attention_block(
             causal=False,
             mask=mask_4d,
             scale=attention_scale,
+            explicit_attention=bool(weights.get("_explicit_attention", False)),
         )
     elif ffi_attention_kernel is not None:
         if num_kv_heads != num_heads:

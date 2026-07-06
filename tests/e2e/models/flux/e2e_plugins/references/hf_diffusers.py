@@ -91,10 +91,28 @@ class HfDiffusersReference:
     ) -> StageOutput:
         model_ref = _resolve_cached_model_ref(case.hf_id)
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
+        batch_prompts = case.inputs.get("batch_prompts")
+        if not isinstance(batch_prompts, list) or len(batch_prompts) < 2:
+            batch_prompts = [prompt]
+        batch_seeds = case.inputs.get("batch_seeds")
+        if not isinstance(batch_seeds, list) or len(batch_seeds) != len(batch_prompts):
+            seed = int(case.inputs.get("seed", case.determinism.get("seed", 42)))
+            batch_seeds = [seed] * len(batch_prompts)
         num_steps = case.inputs.get("num_inference_steps", 30)
         image_height = case.inputs.get("image_height", 1024)
         image_width = case.inputs.get("image_width", image_height)
         model_type = str(case.metadata.get("model_type", "")).lower()
+        default_reference_precision = (
+            "bf16" if model_type in {"flux.2", "flux2"} else "fp32"
+        )
+        reference_precision = str(
+            case.metadata.get("reference_precision", default_reference_precision)
+        ).lower()
+        reference_torch_dtype = {
+            "fp16": "torch.float16",
+            "bf16": "torch.bfloat16",
+            "fp32": "torch.float32",
+        }.get(reference_precision, "torch.float32")
         guidance_scale = case.inputs.get("guidance_scale")
         python = ctx.reference_python_path() or sys.executable
 
@@ -113,29 +131,33 @@ import transformers
 transformers.logging.set_verbosity_error()
 
 model_ref = {model_ref!r}
-prompt = {prompt!r}
+prompts = {batch_prompts!r}
+batch_seeds = {batch_seeds!r}
 num_steps = {num_steps}
 image_height = {image_height}
 image_width = {image_width}
 model_type = {model_type!r}
 guidance_scale = {guidance_scale!r}
 frames_dir = {frames_dir!r}
-seed = {int(case.inputs.get("seed", case.determinism.get("seed", 42)))}
+reference_torch_dtype = {reference_torch_dtype}
 
 if model_type in ("flux.2", "flux2"):
     from diffusers import Flux2Pipeline
     pipe = Flux2Pipeline.from_pretrained(
-        model_ref, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
+        model_ref, torch_dtype=reference_torch_dtype, low_cpu_mem_usage=True)
 else:
     from diffusers import FluxPipeline
-    pipe = FluxPipeline.from_pretrained(model_ref, torch_dtype=torch.float32)
+    pipe = FluxPipeline.from_pretrained(
+        model_ref, torch_dtype=reference_torch_dtype)
 pipe.to("cuda")
 kwargs = dict(
-    prompt=prompt,
+    prompt=prompts if len(prompts) > 1 else prompts[0],
     num_inference_steps=num_steps,
     height=image_height,
     width=image_width,
-    generator=torch.Generator("cuda").manual_seed(seed),
+    generator=[torch.Generator("cuda").manual_seed(seed) for seed in batch_seeds]
+        if len(batch_seeds) > 1
+        else torch.Generator("cuda").manual_seed(batch_seeds[0]),
 )
 if model_type in ("flux.2", "flux2"):
     kwargs["guidance_scale"] = 3.5 if guidance_scale is None else guidance_scale
@@ -171,6 +193,7 @@ print(f"Generated {{len(frames)}} frames")
                 "frames_dir": frames_dir,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
+                "prompts": batch_prompts,
             },
             text=result.stdout,
             timing_s=elapsed,

@@ -82,6 +82,28 @@ class _Network:
         raise AttributeError(attr)
 
 
+def test_static_fp16_attention_uses_fp32_accumulation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict] = []
+
+    def _attention(*_args, **kwargs):
+        calls.append(kwargs)
+        return _Tensor()
+
+    monkeypatch.setattr(
+        z_image_dit_builder.graph_ops, "add_attention_from_rows", _attention)
+
+    z_image_dit_builder._multi_head_attention(
+        None, _Tensor(), _Tensor(), _Tensor(),
+        num_heads=2, head_dim=4, q_seq=8, kv_seq=8, scale_t=0.5,
+        dtype=np.float16,
+    )
+
+    assert calls[0]["explicit_attention"] is True
+    assert calls[0]["scale"] == 0.5
+
+
 class _Config:
     def __init__(self):
         self.profiles: list = []
@@ -127,6 +149,7 @@ class _FakeTRT(types.SimpleNamespace):
 
     int32 = _Dtype("int32")
     float32 = _Dtype("float32")
+    float16 = _Dtype("float16")
     Builder = _Builder
 
     @staticmethod
@@ -250,7 +273,14 @@ def _tiny_dit_weights(
     return weights
 
 
-def _call_builder(monkeypatch, *, max_batch_size: int = 1, opt_batch_size=None):
+def _call_builder(
+    monkeypatch,
+    *,
+    max_batch_size: int = 1,
+    opt_batch_size=None,
+    precision: str = "fp32",
+    fp32_layers: tuple[int, ...] = (),
+):
     monkeypatch.setattr(z_image_dit_builder, "trt", _FakeTRT)
     _patch_graph_ops(monkeypatch)
 
@@ -290,6 +320,8 @@ def _call_builder(monkeypatch, *, max_batch_size: int = 1, opt_batch_size=None):
         head_dim=2,
         adaln_embed_dim=6,
         eps=1e-5,
+        precision=precision,
+        fp32_layers=fp32_layers,
         verbose=False,
         max_batch_size=max_batch_size,
         opt_batch_size=opt_batch_size,
@@ -337,3 +369,22 @@ def test_dynamic_batch_adds_leading_minus_one_to_all_inputs(
         "rotary_cos": (17, 2),
         "rotary_sin": (17, 2),
     }
+
+
+def test_static_fp16_accepts_selective_fp32_dit_layers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    network, profile_calls = _call_builder(
+        monkeypatch,
+        precision="fp16",
+        fp32_layers=(0, 2, 3),
+    )
+
+    assert profile_calls == []
+    assert [name for name, _dtype, _shape in network.inputs] == [
+        "hidden_states",
+        "encoder_hidden_states",
+        "timestep_embedding",
+        "rotary_cos",
+        "rotary_sin",
+    ]

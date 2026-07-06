@@ -3,6 +3,12 @@
 
 id = "magpie_tts"
 plugin = "magpie_tts"
+python_profile_specs = [
+  "magpie_tts_reference|families/magpie_tts/python_profile_requirements/magpie_tts_reference.lock.txt|families/magpie_tts/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|magpie_tts_reference",
+]
 module = "plugin"
 nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"
 nemo_model_type = "magpie_tts"

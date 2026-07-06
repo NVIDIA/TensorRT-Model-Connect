@@ -398,6 +398,22 @@ class Qwen35Plugin:
         attn_size: int = weights["_attn_size"]
         mlp_size: int = weights["_mlp_size"]
         partial_rotary_factor: float = weights["_partial_rotary_factor"]
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(
+                f"Unsupported Qwen3.5 precision {precision!r}; expected fp32 or fp16")
+        requested_fp32_layers = frozenset(
+            int(layer) for layer in config.raw.get("_fp32_layers", ()))
+        invalid_fp32_layers = sorted(
+            layer for layer in requested_fp32_layers
+            if layer < 0 or layer >= num_layers)
+        if invalid_fp32_layers:
+            raise ValueError(
+                "fp32_layers contains out-of-range indices: "
+                f"{invalid_fp32_layers}")
 
         num_heads = config.num_attention_heads
         num_kv_heads = config.num_key_value_heads
@@ -437,19 +453,41 @@ class Qwen35Plugin:
         for ai in range(num_attn):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", ai),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", ai),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
+        if work_trt_dtype != trt.float32:
+            attention_mask = network.add_cast(
+                attention_mask, work_trt_dtype).get_output(0)
+            conv_state_inputs = [
+                network.add_cast(x, work_trt_dtype).get_output(0)
+                for x in conv_state_inputs
+            ]
+            ssm_state_inputs = [
+                network.add_cast(x, work_trt_dtype).get_output(0)
+                for x in ssm_state_inputs
+            ]
+            cache_k_inputs = [
+                network.add_cast(x, work_trt_dtype).get_output(0)
+                for x in cache_k_inputs
+            ]
+            cache_v_inputs = [
+                network.add_cast(x, work_trt_dtype).get_output(0)
+                for x in cache_v_inputs
+            ]
+
         # --- Shared constants ---
         embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+            network, (vocab, hidden), weights["embedding"],
+            dtype=work_np_dtype)
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
-            np.array([config.rms_norm_eps], dtype=np.float32))
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
 
         rope_theta: float = weights["_rope_theta"]
         rotary_embedding_dim = int(head_dim * partial_rotary_factor)
@@ -463,9 +501,9 @@ class Qwen35Plugin:
             cosine=False, partial_rotary_factor=partial_rotary_factor)
 
         cos_half_tensor = graph_ops.add_constant(
-            network, cos_half.shape, cos_half)
+            network, cos_half.shape, cos_half, dtype=work_np_dtype)
         sin_half_tensor = graph_ops.add_constant(
-            network, sin_half.shape, sin_half)
+            network, sin_half.shape, sin_half, dtype=work_np_dtype)
 
         # --- Embedding ---
         gather = network.add_gather(embedding_table, token_id, 0)
@@ -485,14 +523,26 @@ class Qwen35Plugin:
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
             lt = layer_types[layer_idx]
+            layer_is_fp32 = (
+                precision == "fp16" and layer_idx in requested_fp32_layers)
+            layer_np_dtype = np.float32 if layer_is_fp32 else work_np_dtype
+            layer_trt_dtype = trt.float32 if layer_is_fp32 else work_trt_dtype
+
+            def layer_cast(tensor):
+                if tensor.dtype == layer_trt_dtype:
+                    return tensor
+                return network.add_cast(
+                    tensor, layer_trt_dtype).get_output(0)
 
             if lt == "deltanet":
                 result = _add_deltanet_layer(
                     network=network,
-                    hidden=hidden_state,
-                    conv_state_in=conv_state_inputs[mamba_counter],
-                    ssm_state_in=ssm_state_inputs[mamba_counter],
-                    eps_tensor=eps_tensor,
+                    hidden=layer_cast(hidden_state),
+                    conv_state_in=layer_cast(
+                        conv_state_inputs[mamba_counter]),
+                    ssm_state_in=layer_cast(
+                        ssm_state_inputs[mamba_counter]),
+                    eps_tensor=layer_cast(eps_tensor),
                     weights=weights,
                     prefix=prefix,
                     hidden_size=hidden,
@@ -503,6 +553,7 @@ class Qwen35Plugin:
                     num_kv_heads=deltanet_num_kv_heads,
                     head_dim=deltanet_head_dim,
                     mlp_size=mlp_size,
+                    dtype=layer_np_dtype,
                 )
                 hidden_state = result["hidden"]
                 present_conv_outputs.append(result["present_conv"])
@@ -512,14 +563,14 @@ class Qwen35Plugin:
             elif lt == "attention":
                 result = _add_full_attention_layer(
                     network=network,
-                    hidden=hidden_state,
-                    cache_k=cache_k_inputs[attn_counter],
-                    cache_v=cache_v_inputs[attn_counter],
-                    attention_mask=attention_mask,
+                    hidden=layer_cast(hidden_state),
+                    cache_k=layer_cast(cache_k_inputs[attn_counter]),
+                    cache_v=layer_cast(cache_v_inputs[attn_counter]),
+                    attention_mask=layer_cast(attention_mask),
                     position_id=position_id,
-                    cos_half_tensor=cos_half_tensor,
-                    sin_half_tensor=sin_half_tensor,
-                    eps_tensor=eps_tensor,
+                    cos_half_tensor=layer_cast(cos_half_tensor),
+                    sin_half_tensor=layer_cast(sin_half_tensor),
+                    eps_tensor=layer_cast(eps_tensor),
                     weights=weights,
                     prefix=prefix,
                     hidden_size=hidden,
@@ -531,6 +582,7 @@ class Qwen35Plugin:
                     rotary_embedding_dim=rotary_embedding_dim,
                     max_cache_length=max_cache_length,
                     mlp_size=mlp_size,
+                    dtype=layer_np_dtype,
                 )
                 hidden_state = result["hidden"]
                 present_k_outputs.append(result["present_k"])
@@ -542,16 +594,24 @@ class Qwen35Plugin:
                     network, hidden_state, f"debug_hidden_{layer_idx}")
 
         # --- Final norm ---
+        if hidden_state.dtype != work_trt_dtype:
+            hidden_state = network.add_cast(
+                hidden_state, work_trt_dtype).get_output(0)
         final_norm = weights.get("final_norm")
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = graph_ops.add_rms_norm(
-                network, hidden_state, hidden, final_norm, eps_tensor)
+                network, hidden_state, hidden, final_norm, eps_tensor,
+                dtype=work_np_dtype)
 
         # --- LM head ---
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_lm_head"])
-        b_out = np.zeros(vocab, dtype=np.float32)
-        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+            network, hidden_state, hidden, vocab, weights["w_lm_head"],
+            dtype=work_np_dtype)
+        b_out = np.zeros(vocab, dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(
+            network, logits, vocab, b_out, dtype=work_np_dtype)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
         logits.name = "logits"
         network.mark_output(logits)
 
@@ -559,6 +619,10 @@ class Qwen35Plugin:
         for mi in range(num_mamba):
             pc = present_conv_outputs[mi]
             ps = present_ssm_outputs[mi]
+            if pc.dtype != trt.float32:
+                pc = network.add_cast(pc, trt.float32).get_output(0)
+            if ps.dtype != trt.float32:
+                ps = network.add_cast(ps, trt.float32).get_output(0)
             pc.name = graph_ops.layer_tensor_name("present_conv", mi)
             ps.name = graph_ops.layer_tensor_name("present_ssm", mi)
             network.mark_output(pc)
@@ -567,6 +631,10 @@ class Qwen35Plugin:
         for ai in range(num_attn):
             pk = present_k_outputs[ai]
             pv = present_v_outputs[ai]
+            if pk.dtype != work_trt_dtype:
+                pk = network.add_cast(pk, work_trt_dtype).get_output(0)
+            if pv.dtype != work_trt_dtype:
+                pv = network.add_cast(pv, work_trt_dtype).get_output(0)
             pk.name = graph_ops.layer_tensor_name("present_k", ai)
             pv.name = graph_ops.layer_tensor_name("present_v", ai)
             network.mark_output(pk)
@@ -651,6 +719,7 @@ def _add_deltanet_layer(
     num_kv_heads: int,
     head_dim: int,
     mlp_size: int,
+    dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     """Add one Gated DeltaNet layer (single-step decode).
 
@@ -669,28 +738,28 @@ def _add_deltanet_layer(
     # ===== 1. RMSNorm =====
     normed = graph_ops.add_rms_norm(
         network, hidden, hidden_size,
-        weights[f"{prefix}.input_norm"], eps_tensor)
+        weights[f"{prefix}.input_norm"], eps_tensor, dtype=dtype)
 
     # ===== 2. Input projections =====
     # QKV combined: [1, hidden] -> [1, conv_dim]
     qkv = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, conv_dim,
-        weights[f"{prefix}.deltanet_in_proj_qkv"])
+        weights[f"{prefix}.deltanet_in_proj_qkv"], dtype=dtype)
 
     # Gate (z): [1, hidden] -> [1, d_inner]
     z = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, d_inner,
-        weights[f"{prefix}.deltanet_z_proj"])
+        weights[f"{prefix}.deltanet_z_proj"], dtype=dtype)
 
     # Decay projection (a): [1, hidden] -> [1, num_heads]
     a_raw = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, num_heads,
-        weights[f"{prefix}.deltanet_a_proj"])
+        weights[f"{prefix}.deltanet_a_proj"], dtype=dtype)
 
     # Beta projection (b): [1, hidden] -> [1, num_heads]
     b_raw = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, num_heads,
-        weights[f"{prefix}.deltanet_b_proj"])
+        weights[f"{prefix}.deltanet_b_proj"], dtype=dtype)
 
     # ===== 3. Conv1d step on QKV =====
     # conv_state_in: [conv_dim, d_conv]
@@ -712,7 +781,8 @@ def _add_deltanet_layer(
         present_conv = qkv_col.get_output(0)
 
     conv_w = graph_ops.add_constant(
-        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"])
+        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"],
+        dtype=dtype)
     conv_prod = network.add_elementwise(
         present_conv, conv_w, trt.ElementWiseOperation.PROD)
     conv_sum = network.add_reduce(
@@ -722,8 +792,9 @@ def _add_deltanet_layer(
     conv_flat.reshape_dims = (1, conv_dim)
     conv_out = graph_ops.add_bias_sum(
         network, conv_flat.get_output(0), conv_dim,
-        weights[f"{prefix}.conv1d_bias"])
-    qkv_activated = graph_ops.add_activation(network, conv_out, "silu")
+        weights[f"{prefix}.conv1d_bias"], dtype=dtype)
+    qkv_activated = graph_ops.add_activation(
+        network, conv_out, "silu", dtype=dtype)
 
     # ===== 4. Split Q, K, V from activated output =====
     offset = 0
@@ -745,11 +816,13 @@ def _add_deltanet_layer(
     # Reshape to [num_kv_heads, head_dim], normalize per-head, reshape back
     q_heads_in = network.add_shuffle(q_raw_t)
     q_heads_in.reshape_dims = (num_kv_heads, head_dim)
-    q_normed = graph_ops.add_l2_norm(network, q_heads_in.get_output(0), 1, eps=1e-6)
+    q_normed = graph_ops.add_l2_norm(
+        network, q_heads_in.get_output(0), 1, eps=1e-6, dtype=dtype)
 
     k_heads_in = network.add_shuffle(k_raw_t)
     k_heads_in.reshape_dims = (num_kv_heads, head_dim)
-    k_normed = graph_ops.add_l2_norm(network, k_heads_in.get_output(0), 1, eps=1e-6)
+    k_normed = graph_ops.add_l2_norm(
+        network, k_heads_in.get_output(0), 1, eps=1e-6, dtype=dtype)
 
     # ===== 6. keep compact Q,K from num_kv_heads -> num_heads =====
     heads_per_group = num_heads // num_kv_heads
@@ -762,7 +835,7 @@ def _add_deltanet_layer(
         q_3d.reshape_dims = (num_kv_heads, 1, head_dim)
         tile_ones = graph_ops.add_constant(
             network, (1, heads_per_group, 1),
-            np.ones((1, heads_per_group, 1), dtype=np.float32))
+            np.ones((1, heads_per_group, 1), dtype=dtype), dtype=dtype)
         q_tiled = network.add_elementwise(
             q_3d.get_output(0), tile_ones, trt.ElementWiseOperation.PROD)
         q_expanded_s = network.add_shuffle(q_tiled.get_output(0))
@@ -788,18 +861,18 @@ def _add_deltanet_layer(
     # ===== 7. Compute decay: -exp(A_log) * softplus(a + dt_bias) per head =====
     # A: [num_heads] (precomputed as -exp(A_log))
     A_const = graph_ops.add_constant(
-        network, (1, num_heads), weights[f"{prefix}.A"])
+        network, (1, num_heads), weights[f"{prefix}.A"], dtype=dtype)
 
     # dt_bias: [num_heads]
     dt_bias_const = graph_ops.add_constant(
-        network, (1, num_heads), weights[f"{prefix}.dt_bias"])
+        network, (1, num_heads), weights[f"{prefix}.dt_bias"], dtype=dtype)
     a_biased = network.add_elementwise(
         a_raw, dt_bias_const, trt.ElementWiseOperation.SUM)
 
     # softplus(a + dt_bias): log(1 + exp(x))
     a_exp = network.add_unary(a_biased.get_output(0), trt.UnaryOperation.EXP)
     one = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=np.float32))
+        network, (1, 1), np.array([1.0], dtype=dtype), dtype=dtype)
     a_exp_p1 = network.add_elementwise(
         a_exp.get_output(0), one, trt.ElementWiseOperation.SUM)
     a_softplus = network.add_unary(
@@ -867,7 +940,7 @@ def _add_deltanet_layer(
     # HF applies: query *= 1/sqrt(k_dim)
     q_scale = graph_ops.add_constant(
         network, (1, 1),
-        np.array([1.0 / np.sqrt(head_dim)], dtype=np.float32))
+        np.array([1.0 / np.sqrt(head_dim)], dtype=dtype), dtype=dtype)
     q_scaled = network.add_elementwise(
         q_expanded, q_scale, trt.ElementWiseOperation.PROD)
     # [H, V, K] @ [H, K, 1] = [H, V, 1]
@@ -885,15 +958,19 @@ def _add_deltanet_layer(
     # Use same eps as HF Qwen3_5RMSNormGated (config.rms_norm_eps = 1e-6)
     eps_small = graph_ops.add_constant(
         network, (1, 1),
-        np.array([1e-6], dtype=np.float32))
+        np.array([1e-6], dtype=np.float32), dtype=np.float32)
 
     # Reshape output and z to [num_heads, head_dim] for per-head norm
     output_heads = network.add_shuffle(output_flat.get_output(0))
     output_heads.reshape_dims = (num_heads, head_dim)
+    norm_input = output_heads.get_output(0)
+    norm_output_dtype = norm_input.dtype
+    if dtype != np.float32:
+        norm_input = network.add_cast(norm_input, trt.float32).get_output(0)
 
     # Per-head RMSNorm: norm each head independently
     sq = network.add_elementwise(
-        output_heads.get_output(0), output_heads.get_output(0),
+        norm_input, norm_input,
         trt.ElementWiseOperation.PROD)
     mean = network.add_reduce(
         sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
@@ -902,26 +979,31 @@ def _add_deltanet_layer(
     sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
     normalized = network.add_elementwise(
-        output_heads.get_output(0), recip.get_output(0),
+        norm_input, recip.get_output(0),
         trt.ElementWiseOperation.PROD)
 
     # Reshape back and apply weight
     norm_flat = network.add_shuffle(normalized.get_output(0))
     norm_flat.reshape_dims = (1, d_inner)
-    gamma_t = graph_ops.add_constant(network, (1, d_inner), deltanet_norm_w)
+    gamma_t = graph_ops.add_constant(
+        network, (1, d_inner), deltanet_norm_w, dtype=np.float32)
     normed_output = network.add_elementwise(
         norm_flat.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
+    normed_output_tensor = normed_output.get_output(0)
+    if normed_output_tensor.dtype != norm_output_dtype:
+        normed_output_tensor = network.add_cast(
+            normed_output_tensor, norm_output_dtype).get_output(0)
 
     # Gate: multiply by silu(z)
-    z_activated = graph_ops.add_activation(network, z, "silu")
+    z_activated = graph_ops.add_activation(network, z, "silu", dtype=dtype)
     gated = network.add_elementwise(
-        normed_output.get_output(0), z_activated,
+        normed_output_tensor, z_activated,
         trt.ElementWiseOperation.PROD)
 
     # ===== 11. Output projection + residual =====
     out = graph_ops.add_matmul_rhs_constant(
         network, gated.get_output(0), d_inner, hidden_size,
-        weights[f"{prefix}.deltanet_out_proj"])
+        weights[f"{prefix}.deltanet_out_proj"], dtype=dtype)
 
     residual = network.add_elementwise(
         hidden, out, trt.ElementWiseOperation.SUM)
@@ -930,7 +1012,7 @@ def _add_deltanet_layer(
     # ===== 12. Post-attention norm + SwiGLU MLP + residual =====
     post_normed = graph_ops.add_rms_norm(
         network, hidden_after_attn, hidden_size,
-        weights[f"{prefix}.post_attn_norm"], eps_tensor)
+        weights[f"{prefix}.post_attn_norm"], eps_tensor, dtype=dtype)
 
     mlp_out = graph_blocks.add_swiglu_mlp(
         network, post_normed,
@@ -938,6 +1020,7 @@ def _add_deltanet_layer(
         prefix=prefix,
         hidden_size=hidden_size,
         mlp_size=mlp_size,
+        dtype=dtype,
     )
 
     mlp_residual = network.add_elementwise(
@@ -973,6 +1056,7 @@ def _add_full_attention_layer(
     rotary_embedding_dim: int,
     max_cache_length: int,
     mlp_size: int,
+    dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     """Add one full self-attention layer with output gating.
 
@@ -991,28 +1075,29 @@ def _add_full_attention_layer(
         network, hidden, hidden_size,
         weights[f"{prefix}.input_norm"],
         weights.get(f"{prefix}.input_norm_beta"),
-        eps_tensor, "rmsnorm")
+        eps_tensor, "rmsnorm", dtype=dtype)
 
     # QKV projections
     q = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, attn_size,
-        weights[f"{prefix}.w_q"])
+        weights[f"{prefix}.w_q"], dtype=dtype)
     k = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_k"])
+        weights[f"{prefix}.w_k"], dtype=dtype)
     v = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_v"])
+        weights[f"{prefix}.w_v"], dtype=dtype)
 
     # Per-head QK norm
     q_norm = weights.get(f"{prefix}.q_norm")
     if q_norm is not None:
         q = graph_ops.add_rms_norm_per_head(
-            network, q, num_heads, head_dim, q_norm, eps_tensor)
+            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype)
     k_norm = weights.get(f"{prefix}.k_norm")
     if k_norm is not None:
         k = graph_ops.add_rms_norm_per_head(
-            network, k, num_kv_heads, head_dim, k_norm, eps_tensor)
+            network, k, num_kv_heads, head_dim, k_norm, eps_tensor,
+            dtype=dtype)
 
     # Native RoPE
     q = graph_ops.add_apply_rope_native(
@@ -1052,7 +1137,8 @@ def _add_full_attention_layer(
     attn_out = context_flat
     if gate_attn_w is not None:
         gate = graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden_size, attn_size, gate_attn_w)
+            network, normed, hidden_size, attn_size, gate_attn_w,
+            dtype=dtype)
         gate_sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
         gated = network.add_elementwise(
             attn_out, gate_sigmoid.get_output(0),
@@ -1062,7 +1148,7 @@ def _add_full_attention_layer(
     # Output projection (AFTER gate)
     attn_out = graph_ops.add_matmul_rhs_constant(
         network, attn_out, attn_size, hidden_size,
-        weights[f"{prefix}.w_o"])
+        weights[f"{prefix}.w_o"], dtype=dtype)
 
     # Residual after attention
     residual = network.add_elementwise(
@@ -1072,7 +1158,7 @@ def _add_full_attention_layer(
     # Post-attention norm + SwiGLU MLP + residual
     post_normed = graph_ops.add_rms_norm(
         network, hidden_after_attn, hidden_size,
-        weights[f"{prefix}.post_attn_norm"], eps_tensor)
+        weights[f"{prefix}.post_attn_norm"], eps_tensor, dtype=dtype)
 
     mlp_out = graph_blocks.add_swiglu_mlp(
         network, post_normed,
@@ -1080,6 +1166,7 @@ def _add_full_attention_layer(
         prefix=prefix,
         hidden_size=hidden_size,
         mlp_size=mlp_size,
+        dtype=dtype,
     )
 
     mlp_residual = network.add_elementwise(

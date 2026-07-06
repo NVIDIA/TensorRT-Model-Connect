@@ -18,11 +18,19 @@ class LlamaPlugin:
     def matches(self, model_type: str) -> bool:
         return model_type.lower().startswith("llama")
 
+    def supports_split_decoder_roles(self, config: ModelConfig) -> bool:
+        return not bool(config.raw.get("_fp32_layers"))
+
     def load_weights(
         self, model_dir: str, config: ModelConfig,
         *, precision: str = "fp32",
     ) -> WeightDict:
-        return load_standard_weights(model_dir, config, precision=precision)
+        return load_standard_weights(
+            model_dir,
+            config,
+            precision=precision,
+            fp32_layers=tuple(config.raw.get("_fp32_layers", ())),
+        )
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,

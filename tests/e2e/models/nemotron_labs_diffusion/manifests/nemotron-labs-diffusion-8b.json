@@ -1,41 +1,139 @@
 {
-  "name": "nemotron-labs-diffusion-8b-linear-spec-lora",
-  "trace_id": "IT-E2E-NLD8-01",
+  "name": "nemotron-labs-diffusion-8b",
   "hf_id": "nvidia/Nemotron-Labs-Diffusion-8B",
   "bundle": "nemotron-labs-diffusion-8b.trtfb",
   "family": "nemotron_labs_diffusion",
   "runtime_strategy": "nemotron_labs_diffusion",
   "task_strategy": "text_generation_causal",
-  "reference_family": "nemotron_labs_diffusion_model_card",
-  "user_contract": "model_card_generation_parity",
-  "ci_tier": "nightly_only",
   "e2e_parallel_resource": "exclusive_gpu",
   "precision": "bf16",
   "max_cache_length": 640,
-  "prompt": "What is the capital of France? Answer in one word.",
-  "max_new_tokens": 32,
   "trust_remote_code": true,
-  "inputs": {
-    "generation_mode": "linear_spec_lora",
-    "block_length": 32,
-    "threshold": 0.9,
-    "temperature": 0.0
-  },
-  "metadata": {
-    "group_by_bundle": true,
-    "contract_config": {
-      "use_chat_template": true,
-      "enable_thinking": false,
-      "token_parity_eos_token_ids": [
-        11
-      ],
-      "token_parity_ignore_terminal_token_ids": [
-        1010
-      ],
-      "forbidden_token_ids": [
-        0
-      ]
+  "testcases": [
+    {
+      "name": "nemotron-labs-diffusion-8b-ar",
+      "trace_id": "IT-E2E-NLD8-AR-01",
+      "reference_family": "nemotron_labs_diffusion_model_card",
+      "user_contract": "model_card_generation_parity",
+      "ci_tier": "nightly_only",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 32,
+      "inputs": {
+        "generation_mode": "ar",
+        "temperature": 0.0
+      },
+      "metadata": {
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false,
+          "token_parity_eos_token_ids": [
+            11
+          ],
+          "token_parity_ignore_terminal_token_ids": [
+            1010
+          ],
+          "forbidden_token_ids": [
+            0
+          ]
+        }
+      },
+      "notes": "Nightly coverage for the upstream model-card ar_generate path."
+    },
+    {
+      "name": "nemotron-labs-diffusion-8b-diffusion",
+      "trace_id": "IT-E2E-NLD8-DIFF-01",
+      "reference_family": "nemotron_labs_diffusion_model_card",
+      "user_contract": "model_card_generation_parity",
+      "ci_tier": "nightly_only",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 32,
+      "inputs": {
+        "generation_mode": "diffusion",
+        "block_length": 32,
+        "threshold": 0.9,
+        "temperature": 0.0
+      },
+      "metadata": {
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false,
+          "token_parity_eos_token_ids": [
+            11
+          ],
+          "token_parity_ignore_terminal_token_ids": [
+            1010
+          ],
+          "forbidden_token_ids": [
+            0
+          ]
+        }
+      },
+      "notes": "Nightly coverage for the upstream model-card diffusion generate path."
+    },
+    {
+      "name": "nemotron-labs-diffusion-8b-linear-spec",
+      "trace_id": "IT-E2E-NLD8-LSPEC-01",
+      "reference_family": "nemotron_labs_diffusion_model_card",
+      "user_contract": "model_card_generation_parity",
+      "ci_tier": "nightly_only",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 32,
+      "inputs": {
+        "generation_mode": "linear_spec",
+        "threshold": 0.9,
+        "temperature": 0.0
+      },
+      "metadata": {
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false,
+          "token_parity_eos_token_ids": [
+            11
+          ],
+          "token_parity_ignore_terminal_token_ids": [
+            1010
+          ],
+          "forbidden_token_ids": [
+            0
+          ]
+        }
+      },
+      "notes": "Nightly coverage for the upstream model-card linear_spec_generate path."
+    },
+    {
+      "name": "nemotron-labs-diffusion-8b-linear-spec-lora",
+      "trace_id": "IT-E2E-NLD8-01",
+      "reference_family": "nemotron_labs_diffusion_model_card",
+      "user_contract": "model_card_generation_parity",
+      "ci_tier": "nightly_only",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 32,
+      "inputs": {
+        "generation_mode": "linear_spec_lora",
+        "block_length": 32,
+        "threshold": 0.9,
+        "temperature": 0.0
+      },
+      "metadata": {
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false,
+          "token_parity_eos_token_ids": [
+            11
+          ],
+          "token_parity_ignore_terminal_token_ids": [
+            1010
+          ],
+          "forbidden_token_ids": [
+            0
+          ]
+        }
+      },
+      "notes": "Nightly coverage for the upstream LoRA-backed linear speculative model-card path."
     }
-  },
-  "notes": "Nightly coverage for the upstream LoRA-backed linear speculative model-card path."
+  ]
 }

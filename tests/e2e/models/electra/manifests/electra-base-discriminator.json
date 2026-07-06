@@ -5,14 +5,21 @@
   "family": "electra",
   "runtime_strategy": "electra_encoder_only",
   "task_strategy": "encoder_only_nlp",
-  "reference_family": "encoder_base_features",
-  "user_contract": "representation_parity",
+  "precision": "fp16",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
-  "max_new_tokens": 1,
-  "metadata": {
-    "contract_config": {
-      "auto_class": "AutoModel"
+  "testcases": [
+    {
+      "name": "electra-base-discriminator",
+      "reference_precision": "fp32",
+      "reference_family": "encoder_base_features",
+      "user_contract": "representation_parity",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 1,
+      "metadata": {
+        "contract_config": {
+          "auto_class": "AutoModel"
+        }
+      }
     }
-  }
+  ]
 }

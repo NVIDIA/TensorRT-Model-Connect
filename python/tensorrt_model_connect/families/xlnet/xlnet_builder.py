@@ -84,10 +84,11 @@ def _add_seq_layer_norm(
     gamma: np.ndarray,
     beta: np.ndarray,
     eps: float,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """LayerNorm over [seq_len, hidden] using TRT native normalization."""
     return graph_ops.add_layer_norm_native(
-        network, inp, hidden_size, gamma, beta, eps)
+        network, inp, hidden_size, gamma, beta, eps, dtype=dtype)
 
 
 def _add_rel_shift(network, bd, num_heads, qlen, klen):
@@ -125,6 +126,7 @@ def build_xlnet_engine(
     weights: WeightDict,
     max_seq_length: int,
     *,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build a TRT engine plan for XLNet encoder.
@@ -147,6 +149,12 @@ def build_xlnet_engine(
     intermediate = config.intermediate_size
     eps = config.rms_norm_eps
     ff_activation = config.raw.get("ff_activation", "gelu")
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(f"Unsupported XLNet precision: {precision}")
 
     qlen = max_seq_length
     scale = 1.0 / (d_head ** 0.5)
@@ -175,19 +183,26 @@ def build_xlnet_engine(
     # Constants
     # -------------------------------------------------------------------
     embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), weights["embedding"])
+        network, (vocab, hidden), weights["embedding"],
+        dtype=work_np_dtype)
     scale_t = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([scale], dtype=np.float32))
+        network, (1, 1, 1), np.array([scale], dtype=work_np_dtype),
+        dtype=work_np_dtype)
 
     # Precompute sinusoidal relative positional embeddings: [2*qlen, hidden]
     pos_emb_np = _compute_sinusoidal_pos_emb(qlen, hidden)
     pos_emb_const = graph_ops.add_constant(
-        network, pos_emb_np.shape, pos_emb_np)
+        network, pos_emb_np.shape, pos_emb_np, dtype=work_np_dtype)
 
     # Build additive attention mask from attention_mask input
-    mask_float = network.add_cast(attention_mask_input, trt.float32)
-    ones_mask = graph_ops.add_constant(network, (1,), np.array([1.0], dtype=np.float32))
-    neg_large = graph_ops.add_constant(network, (1,), np.array([-1e30], dtype=np.float32))
+    mask_float = network.add_cast(attention_mask_input, work_trt_dtype)
+    ones_mask = graph_ops.add_constant(
+        network, (1,), np.array([1.0], dtype=work_np_dtype),
+        dtype=work_np_dtype)
+    mask_penalty = -1e4 if precision == "fp16" else -1e30
+    neg_large = graph_ops.add_constant(
+        network, (1,), np.array([mask_penalty], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     inv_mask = network.add_elementwise(
         ones_mask, mask_float.get_output(0), trt.ElementWiseOperation.SUB)
     pad_penalty = network.add_elementwise(
@@ -205,7 +220,7 @@ def build_xlnet_engine(
     # one dynamically from token_type_ids.
     # -------------------------------------------------------------------
     # Cast token_type_ids to float: [seq_len]
-    tt_float = network.add_cast(token_type_ids, trt.float32)
+    tt_float = network.add_cast(token_type_ids, work_trt_dtype)
 
     # Reshape for broadcasting: [seq_len, 1] and [1, seq_len]
     tt_col = network.add_shuffle(tt_float.get_output(0))
@@ -221,7 +236,9 @@ def build_xlnet_engine(
 
     # seg_diff: [seq_len, seq_len] with 0=same, 1=different
     # Clamp to [0,1] (in case of more than 2 segments)
-    one_t = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+    one_t = graph_ops.add_constant(
+        network, (1, 1), np.array([1.0], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     seg_diff_raw = network.add_elementwise(
         tt_abs.get_output(0), one_t, trt.ElementWiseOperation.MIN)
 
@@ -270,18 +287,24 @@ def build_xlnet_engine(
             scale_tensor=scale_t,
             ff_activation=ff_activation,
             eps=eps,
+            dtype=work_np_dtype,
         )
 
     # -------------------------------------------------------------------
     # Output
     # -------------------------------------------------------------------
-    hidden_state.name = "hidden_states"
-    network.mark_output(hidden_state)
+    public_output = hidden_state
+    if public_output.dtype != trt.float32:
+        public_output = network.add_cast(
+            public_output, trt.float32).get_output(0)
+    public_output.name = "hidden_states"
+    network.mark_output(public_output)
 
     if verbose:
         print(f"[trtmc build] Building XLNet encoder TRT engine "
               f"({num_layers} layers, hidden={hidden}, "
-              f"seq_len={max_seq_length}) ...", file=sys.stderr)
+              f"seq_len={max_seq_length}, precision={precision}) ...",
+              file=sys.stderr)
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:
@@ -308,6 +331,7 @@ def _add_xlnet_layer(
     scale_tensor: trt.ITensor,
     ff_activation: str,
     eps: float,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Add one XLNet encoder layer with relative positional attention.
 
@@ -327,18 +351,18 @@ def _add_xlnet_layer(
     # --- QKV projections: [seq_len, hidden] @ [hidden, attn_size] -> [seq_len, attn_size] ---
     q = graph_ops.add_matmul_rhs_constant(
         network, hidden, hidden_size, attn_size,
-        weights[f"{prefix}.w_q"])
+        weights[f"{prefix}.w_q"], dtype=dtype)
     k = graph_ops.add_matmul_rhs_constant(
         network, hidden, hidden_size, attn_size,
-        weights[f"{prefix}.w_k"])
+        weights[f"{prefix}.w_k"], dtype=dtype)
     v = graph_ops.add_matmul_rhs_constant(
         network, hidden, hidden_size, attn_size,
-        weights[f"{prefix}.w_v"])
+        weights[f"{prefix}.w_v"], dtype=dtype)
 
     # Position key: [2*qlen, hidden] @ [hidden, attn_size] -> [2*qlen, attn_size]
     k_r = graph_ops.add_matmul_rhs_constant(
         network, pos_emb, hidden_size, attn_size,
-        weights[f"{prefix}.w_r"])
+        weights[f"{prefix}.w_r"], dtype=dtype)
 
     # Reshape QKV to multi-head: [seq_len, attn_size] -> [num_heads, seq_len, d_head]
     q_heads = network.add_shuffle(q)
@@ -361,7 +385,9 @@ def _add_xlnet_layer(
     # --- Content attention: ac = (q + r_w_bias) @ k^T ---
     # r_w_bias: [num_heads, d_head] -> [num_heads, 1, d_head]
     r_w_bias = graph_ops.add_constant(
-        network, (num_heads, 1, d_head), weights[f"{prefix}.r_w_bias"].reshape(num_heads, 1, d_head))
+        network, (num_heads, 1, d_head),
+        weights[f"{prefix}.r_w_bias"].reshape(num_heads, 1, d_head),
+        dtype=dtype)
     q_plus_rw = network.add_elementwise(
         q_heads.get_output(0), r_w_bias,
         trt.ElementWiseOperation.SUM)
@@ -373,7 +399,9 @@ def _add_xlnet_layer(
 
     # --- Position attention: bd = (q + r_r_bias) @ k_r^T ---
     r_r_bias = graph_ops.add_constant(
-        network, (num_heads, 1, d_head), weights[f"{prefix}.r_r_bias"].reshape(num_heads, 1, d_head))
+        network, (num_heads, 1, d_head),
+        weights[f"{prefix}.r_r_bias"].reshape(num_heads, 1, d_head),
+        dtype=dtype)
     q_plus_rr = network.add_elementwise(
         q_heads.get_output(0), r_r_bias,
         trt.ElementWiseOperation.SUM)
@@ -395,7 +423,9 @@ def _add_xlnet_layer(
     # step 2: gather from seg_mat and sum -> [N, qlen, klen]
 
     r_s_bias = graph_ops.add_constant(
-        network, (num_heads, 1, d_head), weights[f"{prefix}.r_s_bias"].reshape(num_heads, 1, d_head))
+        network, (num_heads, 1, d_head),
+        weights[f"{prefix}.r_s_bias"].reshape(num_heads, 1, d_head),
+        dtype=dtype)
     q_plus_rs = network.add_elementwise(
         q_heads.get_output(0), r_s_bias,
         trt.ElementWiseOperation.SUM)
@@ -403,7 +433,8 @@ def _add_xlnet_layer(
 
     # seg_embed: [2, N, d_head]
     seg_embed = graph_ops.add_constant(
-        network, (2, num_heads, d_head), weights[f"{prefix}.seg_embed"])
+        network, (2, num_heads, d_head), weights[f"{prefix}.seg_embed"],
+        dtype=dtype)
 
     # Compute q_plus_rs @ seg_embed^T for each segment type
     # seg_embed[0]: [N, d_head] - same segment
@@ -534,7 +565,8 @@ def _add_xlnet_layer(
     # With our flattened version: context_flat @ W_o^T where W_o is [hidden, attn_size]
     # So we need to use TRANSPOSE on the rhs.
     w_o = graph_ops.add_constant(
-        network, (hidden_size, attn_size), weights[f"{prefix}.w_o"])
+        network, (hidden_size, attn_size), weights[f"{prefix}.w_o"],
+        dtype=dtype)
     attn_out = network.add_matrix_multiply(
         context_flat.get_output(0), trt.MatrixOperation.NONE,
         w_o, trt.MatrixOperation.TRANSPOSE)
@@ -546,20 +578,20 @@ def _add_xlnet_layer(
     normed1 = _add_seq_layer_norm(
         network, residual1.get_output(0), hidden_size,
         weights[f"{prefix}.attn_norm"],
-        weights[f"{prefix}.attn_norm_beta"], eps)
+        weights[f"{prefix}.attn_norm_beta"], eps, dtype=dtype)
 
     # --- FFN ---
     fc1 = graph_ops.add_matmul_rhs_constant(
         network, normed1, hidden_size, intermediate_size,
-        weights[f"{prefix}.w_fc1"])
+        weights[f"{prefix}.w_fc1"], dtype=dtype)
     fc1 = graph_ops.add_bias_sum(network, fc1, intermediate_size,
-                                  weights[f"{prefix}.fc1_bias"])
+                                  weights[f"{prefix}.fc1_bias"], dtype=dtype)
     activated = graph_ops.add_activation(network, fc1, ff_activation)
     fc2 = graph_ops.add_matmul_rhs_constant(
         network, activated, intermediate_size, hidden_size,
-        weights[f"{prefix}.w_fc2"])
+        weights[f"{prefix}.w_fc2"], dtype=dtype)
     fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size,
-                                  weights[f"{prefix}.fc2_bias"])
+                                  weights[f"{prefix}.fc2_bias"], dtype=dtype)
 
     # POST-norm: LayerNorm(normed1 + ffn_out)
     residual2 = network.add_elementwise(
@@ -567,6 +599,6 @@ def _add_xlnet_layer(
     normed2 = _add_seq_layer_norm(
         network, residual2.get_output(0), hidden_size,
         weights[f"{prefix}.ff_norm"],
-        weights[f"{prefix}.ff_norm_beta"], eps)
+        weights[f"{prefix}.ff_norm_beta"], eps, dtype=dtype)
 
     return normed2

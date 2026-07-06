@@ -1,20 +1,12 @@
 {
   "name": "bark-small-tp4",
-  "trace_id": "IT-E2E-BARKS-TP4-01",
   "hf_id": "suno/bark-small",
   "bundle": "bark-small-tp4.trtfb",
   "family": "bark",
   "runtime_strategy": "text_to_audio_bark",
   "task_strategy": "text_to_audio",
-  "reference_family": "tts_bark",
-  "user_contract": "tts_audio",
-  "test_type": "audio",
   "max_cache_length": 1024,
-  "prompt": "Hello, this is a test of the audio generation system.",
-  "max_new_tokens": 0,
   "trust_remote_code": false,
-  "core": true,
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
     "parallel": {
@@ -34,28 +26,41 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "bark-small-tp4",
+      "trace_id": "IT-E2E-BARKS-TP4-01",
+      "reference_family": "tts_bark",
+      "user_contract": "tts_audio",
+      "test_type": "audio",
+      "prompt": "Hello, this is a test of the audio generation system.",
+      "max_new_tokens": 0,
+      "core": true,
+      "ci_tier": "multi_device",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "determinism": {
+        "seed": 0
+      }
     }
-  ],
-  "determinism": {
-    "seed": 0
-  }
+  ]
 }

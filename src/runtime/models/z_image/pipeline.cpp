@@ -238,10 +238,13 @@ bool ZImagePipeline::run_text_encoder(const std::vector<int32_t>& input_ids,
     }
 
     // Build TensorMap for TrtModule::forward()
+    const bool encoder_is_batched = text_encoder_->input_rank("input_ids") == 2;
+    const std::vector<int64_t> encoder_shape =
+        encoder_is_batched ? std::vector<int64_t>{1, static_cast<int64_t>(seq_len)}
+                           : std::vector<int64_t>{static_cast<int64_t>(seq_len)};
     TensorMap inputs;
-    inputs["input_ids"] = Tensor{padded_ids.data(), {static_cast<int64_t>(seq_len)}, DType::kInt32};
-    inputs["attention_mask"] =
-        Tensor{mask.data(), {static_cast<int64_t>(seq_len)}, DType::kFloat32};
+    inputs["input_ids"] = Tensor{padded_ids.data(), encoder_shape, DType::kInt32};
+    inputs["attention_mask"] = Tensor{mask.data(), encoder_shape, DType::kFloat32};
 
     auto outputs = text_encoder_->forward(inputs);
 
@@ -250,6 +253,11 @@ bool ZImagePipeline::run_text_encoder(const std::vector<int32_t>& input_ids,
     const auto emb_size = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(te_dim);
     text_embeddings.resize(emb_size);
     std::memcpy(text_embeddings.data(), te_out.data, emb_size * sizeof(float));
+    if (!std::all_of(text_embeddings.begin(), text_embeddings.end(),
+                     [](float value) { return std::isfinite(value); })) {
+        std::cerr << "[z-image] Text encoder produced non-finite embeddings\n";
+        return false;
+    }
 
     // Zero out embeddings for padding positions
     for (int32_t i = 0; i < seq_len; ++i) {
@@ -720,6 +728,15 @@ ZImagePipeline::generate_image_batch(const std::vector<std::string>& prompts,
               << ", patches: " << layout.num_patches << " (" << layout.nh << "x" << layout.nw
               << "), batch=" << prompts.size() << "\n";
 
+    const auto expected_initial_latents = static_cast<std::size_t>(layout.z_dim) *
+                                          static_cast<std::size_t>(layout.h_lat) *
+                                          static_cast<std::size_t>(layout.w_lat);
+    std::string latent_error;
+    if (!validate_z_image_initial_latents(expected_initial_latents, prompts.size(),
+                                          cfg.initial_latents, latent_error)) {
+        throw std::invalid_argument(latent_error);
+    }
+
     if (!z_weights_.valid) {
         std::cerr << "[z-image] WARNING: Z-Image preprocessor weights not loaded.\n";
         return {};
@@ -746,9 +763,9 @@ ZImagePipeline::generate_image_batch(const std::vector<std::string>& prompts,
                   << prompt_offset << ".."
                   << (prompt_offset + static_cast<std::size_t>(chunk_size) - 1U) << "]\n";
 
-        auto chunk_results = generate_image_batch_chunk(prompts, resolved_seeds, prompt_offset,
-                                                        chunk_size, layout, num_inference_steps,
-                                                        config_.freq_dim, engine_is_batched, cap);
+        auto chunk_results = generate_image_batch_chunk(
+            prompts, resolved_seeds, prompt_offset, chunk_size, layout, num_inference_steps,
+            config_.freq_dim, engine_is_batched, cap, cfg.initial_latents);
         if (chunk_results.empty()) {
             // Fail-fast: any per-chunk failure (encoder / DiT) zeroes the
             // chunk result and we surface an empty batch result, matching
@@ -785,7 +802,8 @@ int32_t ZImagePipeline::resolve_batch_cap(bool engine_is_batched) const {
 std::vector<ImageResult> ZImagePipeline::generate_image_batch_chunk(
     const std::vector<std::string>& prompts, const std::vector<std::uint32_t>& resolved_seeds,
     std::size_t prompt_offset, int32_t batch, const ZImageLayout& layout,
-    int32_t num_inference_steps, int32_t freq_dim, bool engine_is_batched, int32_t /*cap*/) {
+    int32_t num_inference_steps, int32_t freq_dim, bool engine_is_batched, int32_t /*cap*/,
+    const std::vector<float>& supplied_initial_latents) {
     const auto latent_size = static_cast<std::size_t>(layout.z_dim) *
                              static_cast<std::size_t>(layout.h_lat) *
                              static_cast<std::size_t>(layout.w_lat);
@@ -801,7 +819,8 @@ std::vector<ImageResult> ZImagePipeline::generate_image_batch_chunk(
     std::vector<float> latents(static_cast<std::size_t>(batch) * latent_size);
 
     if (!run_qwen3_encoder_for_chunk(prompts, resolved_seeds, prompt_offset, batch, layout,
-                                     caption_projected_b, rope_cos_b, rope_sin_b, latents)) {
+                                     caption_projected_b, rope_cos_b, rope_sin_b, latents,
+                                     supplied_initial_latents)) {
         return {};
     }
 
@@ -821,7 +840,8 @@ bool ZImagePipeline::run_qwen3_encoder_for_chunk(
     const std::vector<std::string>& prompts, const std::vector<std::uint32_t>& resolved_seeds,
     std::size_t prompt_offset, int32_t batch, const ZImageLayout& layout,
     std::vector<float>& caption_projected_b, std::vector<float>& rope_cos_b,
-    std::vector<float>& rope_sin_b, std::vector<float>& latents) {
+    std::vector<float>& rope_sin_b, std::vector<float>& latents,
+    const std::vector<float>& supplied_initial_latents) {
     const auto latent_size = static_cast<std::size_t>(layout.z_dim) *
                              static_cast<std::size_t>(layout.h_lat) *
                              static_cast<std::size_t>(layout.w_lat);
@@ -861,8 +881,13 @@ bool ZImagePipeline::run_qwen3_encoder_for_chunk(
                   rope_sin_b.begin() +
                       static_cast<std::ptrdiff_t>(b) * static_cast<std::ptrdiff_t>(rope_size));
 
-        initialize_latents_data(latents.data() + static_cast<std::size_t>(b) * latent_size,
-                                latent_size, resolved_seeds[sample_idx]);
+        if (!supplied_initial_latents.empty()) {
+            std::copy(supplied_initial_latents.begin(), supplied_initial_latents.end(),
+                      latents.begin());
+        } else {
+            initialize_latents_data(latents.data() + static_cast<std::size_t>(b) * latent_size,
+                                    latent_size, resolved_seeds[sample_idx]);
+        }
     }
     return true;
 }

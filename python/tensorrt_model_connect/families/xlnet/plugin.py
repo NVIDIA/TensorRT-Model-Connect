@@ -142,6 +142,7 @@ class XlnetPlugin:
         return build_xlnet_engine(
             config, weights,
             max_seq_length=max_cache_length,
+            precision=precision,
             verbose=verbose)
 
 

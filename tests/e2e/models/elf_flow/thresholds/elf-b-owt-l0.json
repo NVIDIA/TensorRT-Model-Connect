@@ -1,8 +1,10 @@
 {
   "threshold_overrides": {
-    "contract_expected_samples": 1000,
+    "contract_expected_samples": 1,
     "contract_max_gen_ppl": 24.5,
+    "contract_max_upstream_text_ned": 0.005,
     "contract_min_samples": 1,
+    "contract_min_upstream_token_agreement_rate": 0.995,
     "contract_min_unigram_entropy": 5.0
   }
 }

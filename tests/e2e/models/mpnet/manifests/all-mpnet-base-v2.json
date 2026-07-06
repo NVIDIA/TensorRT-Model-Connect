@@ -1,20 +1,27 @@
 {
   "name": "all-mpnet-base-v2",
-  "trace_id": "IT-E2E-MPNET-01",
   "hf_id": "sentence-transformers/all-mpnet-base-v2",
   "bundle": "all-mpnet-base-v2.trtfb",
   "family": "mpnet",
   "runtime_strategy": "mpnet_encoder_only",
   "task_strategy": "encoder_only_nlp",
-  "reference_family": "sentence_transformer_embed",
-  "user_contract": "embedding_vector",
+  "precision": "fp16",
   "max_cache_length": 384,
-  "prompt": "This is an example sentence for embedding.",
-  "max_new_tokens": 0,
   "trust_remote_code": false,
-  "metadata": {
-    "contract_config": {
-      "use_sentence_transformers": true
+  "testcases": [
+    {
+      "name": "all-mpnet-base-v2",
+      "trace_id": "IT-E2E-MPNET-01",
+      "reference_precision": "fp32",
+      "reference_family": "sentence_transformer_embed",
+      "user_contract": "embedding_vector",
+      "prompt": "This is an example sentence for embedding.",
+      "max_new_tokens": 0,
+      "metadata": {
+        "contract_config": {
+          "use_sentence_transformers": true
+        }
+      }
     }
-  }
+  ]
 }

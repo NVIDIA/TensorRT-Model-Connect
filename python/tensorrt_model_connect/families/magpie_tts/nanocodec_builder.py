@@ -75,12 +75,13 @@ def _make_fsq_lookup_table(levels: list[int]) -> np.ndarray:
 # Masking helpers
 # ---------------------------------------------------------------------------
 
-def _build_length_mask(network, current_len, max_len):
+def _build_length_mask(network, current_len, max_len, dtype=np.float32):
     """[1,1,max_len] float mask: 1 where pos < current_len, else 0."""
     arange = graph_ops.add_constant(
         network, (1, 1, max_len),
-        np.arange(max_len, dtype=np.float32).reshape(1, 1, max_len))
-    len_f = network.add_cast(current_len, trt.float32)
+        np.arange(max_len, dtype=dtype).reshape(1, 1, max_len), dtype=dtype)
+    work_trt_dtype = trt.float16 if dtype == np.float16 else trt.float32
+    len_f = network.add_cast(current_len, work_trt_dtype)
     len_r = network.add_shuffle(len_f.get_output(0))
     len_r.reshape_dims = (1, 1, 1)
     diff = network.add_elementwise(
@@ -124,11 +125,11 @@ def _apply_snake_core(network, x, alpha):
         x, scaled, trt.ElementWiseOperation.SUM).get_output(0)
 
 
-def _add_snake(network, x, alpha_np, channels):
+def _add_snake(network, x, alpha_np, channels, dtype=np.float32):
     """Snake (direct alpha, no exp). HalfSnake if alpha_ch < channels."""
     c_groups = alpha_np.shape[1]
     alpha = graph_ops.add_constant(
-        network, tuple(alpha_np.shape), alpha_np.astype(np.float32))
+        network, tuple(alpha_np.shape), alpha_np.astype(dtype), dtype=dtype)
     if c_groups == channels:
         return _apply_snake_core(network, x, alpha)
     half = c_groups
@@ -152,7 +153,7 @@ def _add_snake(network, x, alpha_np, channels):
 # ---------------------------------------------------------------------------
 
 def _add_causal_conv1d_wn(network, x, sd, prefix, out_ch, kernel, mask,
-                           dilation=1):
+                           dilation=1, dtype=np.float32):
     """Causal Conv1d + length mask."""
     g = sd[f"{prefix}.parametrizations.weight.original0"].astype(np.float32)
     v = sd[f"{prefix}.parametrizations.weight.original1"].astype(np.float32)
@@ -169,9 +170,10 @@ def _add_causal_conv1d_wn(network, x, sd, prefix, out_ch, kernel, mask,
                                    post_padding=(0, 0))
         inp = p.get_output(0)
     w4 = np.ascontiguousarray(
-        weight.reshape(weight.shape[0], weight.shape[1], 1, kernel))
+        weight.reshape(weight.shape[0], weight.shape[1], 1, kernel),
+        dtype=dtype)
     cw = trt.Weights(w4)
-    cb = (trt.Weights(np.ascontiguousarray(bias))
+    cb = (trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
           if bias is not None else trt.Weights())
     conv = network.add_convolution_nd(
         inp, num_output_maps=out_ch,
@@ -185,7 +187,7 @@ def _add_causal_conv1d_wn(network, x, sd, prefix, out_ch, kernel, mask,
 
 
 def _add_causal_conv_t1d_wn(network, x, sd, prefix, out_ch, kernel, stride,
-                             groups, mask):
+                             groups, mask, dtype=np.float32):
     """Causal ConvTranspose1d + length mask."""
     g = sd[f"{prefix}.parametrizations.weight.original0"].astype(np.float32)
     v = sd[f"{prefix}.parametrizations.weight.original1"].astype(np.float32)
@@ -197,9 +199,9 @@ def _add_causal_conv_t1d_wn(network, x, sd, prefix, out_ch, kernel, stride,
     ri.reshape_dims = (1, c_in, 1, length)
     opg = out_ch // groups
     w4 = np.ascontiguousarray(
-        weight.reshape(c_in, opg, 1, kernel), dtype=np.float32)
+        weight.reshape(c_in, opg, 1, kernel), dtype=dtype)
     cw = trt.Weights(w4)
-    cb = (trt.Weights(np.ascontiguousarray(bias))
+    cb = (trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
           if bias is not None else trt.Weights())
     dc = network.add_deconvolution_nd(
         ri.get_output(0), num_output_maps=out_ch,
@@ -230,6 +232,7 @@ def build_nanocodec_decoder_engine(
     codec_state_dict: dict,
     max_frames: int = 512,
     *,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build TRT engine for NanoCodec HiFi-GAN decoder.
@@ -240,6 +243,14 @@ def build_nanocodec_decoder_engine(
     Output:
         waveform [1, max_frames*1024] float32
     """
+    if precision == "fp16":
+        work_np_dtype = np.float16
+    elif precision == "fp32":
+        work_np_dtype = np.float32
+    else:
+        raise ValueError(
+            f"Unsupported NanoCodec precision {precision!r}; "
+            "expected fp32 or fp16")
     sd = {}
     for k, v in codec_state_dict.items():
         arr = v.numpy() if hasattr(v, 'numpy') else np.asarray(v)
@@ -266,7 +277,7 @@ def build_nanocodec_decoder_engine(
     # === FSQ dequantize ===
     fsq_table = graph_ops.add_constant(
         network, (FSQ_TOTAL_CODES, FSQ_DIM_PER_GROUP),
-        _make_fsq_lookup_table(FSQ_LEVELS))
+        _make_fsq_lookup_table(FSQ_LEVELS), dtype=work_np_dtype)
     group_latents = []
     for g in range(NUM_FSQ_GROUPS):
         gs = network.add_slice(
@@ -286,7 +297,8 @@ def build_nanocodec_decoder_engine(
     # === Length tracking ===
     cur_len = input_len
     cur_max = max_frames
-    mask = _build_length_mask(network, cur_len, cur_max)
+    mask = _build_length_mask(
+        network, cur_len, cur_max, dtype=work_np_dtype)
 
     # Zero padded FSQ positions
     x = _apply_mask(network, x, mask)
@@ -295,7 +307,8 @@ def build_nanocodec_decoder_engine(
     pp = "audio_decoder.pre_conv.conv"
     pv = sd[f"{pp}.parametrizations.weight.original1"]
     x = _add_causal_conv1d_wn(
-        network, x, sd, pp, pv.shape[0], pv.shape[2], mask)
+        network, x, sd, pp, pv.shape[0], pv.shape[2], mask,
+        dtype=work_np_dtype)
     cur_ch = pv.shape[0]
 
     # === 5 upsample stages ===
@@ -304,7 +317,8 @@ def build_nanocodec_decoder_engine(
         # Scale length for this upsample
         cur_len = _scale_len(network, cur_len, rate)
         cur_max *= rate
-        mask = _build_length_mask(network, cur_len, cur_max)
+        mask = _build_length_mask(
+            network, cur_len, cur_max, dtype=work_np_dtype)
 
         up = f"audio_decoder.up_sample_conv_layers.{si}.conv"
         uv = sd[f"{up}.parametrizations.weight.original1"]
@@ -315,11 +329,13 @@ def build_nanocodec_decoder_engine(
         # Snake FIRST (on pre-upsample channels)
         sk = (f"audio_decoder.activations.{si}"
               f".activation.snake_act.alpha")
-        x = _add_snake(network, x, sd[sk], cur_ch)
+        x = _add_snake(
+            network, x, sd[sk], cur_ch, dtype=work_np_dtype)
 
         # Then ConvTranspose
         x = _add_causal_conv_t1d_wn(
-            network, x, sd, up, oc, uk, rate, groups=oc, mask=mask)
+            network, x, sd, up, oc, uk, rate, groups=oc, mask=mask,
+            dtype=work_np_dtype)
         cur_ch = oc
 
         # ResBlocks: parallel groups, averaged
@@ -334,20 +350,22 @@ def build_nanocodec_decoder_engine(
                 gx = _add_snake(
                     network, gx,
                     sd[f"{r}.input_activation.activation.snake_act.alpha"],
-                    cur_ch)
+                    cur_ch, dtype=work_np_dtype)
                 ic = f"{r}.input_conv.conv"
                 ick = sd[f"{ic}.parametrizations.weight.original1"].shape[2]
                 gx = _add_causal_conv1d_wn(
-                    network, gx, sd, ic, cur_ch, ick, mask, dilation=dil)
+                    network, gx, sd, ic, cur_ch, ick, mask, dilation=dil,
+                    dtype=work_np_dtype)
 
                 gx = _add_snake(
                     network, gx,
                     sd[f"{r}.skip_activation.activation.snake_act.alpha"],
-                    cur_ch)
+                    cur_ch, dtype=work_np_dtype)
                 sc = f"{r}.skip_conv.conv"
                 sck = sd[f"{sc}.parametrizations.weight.original1"].shape[2]
                 gx = _add_causal_conv1d_wn(
-                    network, gx, sd, sc, cur_ch, sck, mask)
+                    network, gx, sd, sc, cur_ch, sck, mask,
+                    dtype=work_np_dtype)
 
                 gx = network.add_elementwise(
                     res, gx,
@@ -361,18 +379,21 @@ def build_nanocodec_decoder_engine(
                 x, go, trt.ElementWiseOperation.SUM).get_output(0)
         nc = graph_ops.add_constant(
             network, (1, 1, 1),
-            np.array([1.0 / num_res_groups], dtype=np.float32))
+            np.array([1.0 / num_res_groups], dtype=work_np_dtype),
+            dtype=work_np_dtype)
         x = network.add_elementwise(
             x, nc, trt.ElementWiseOperation.PROD).get_output(0)
 
     # === Post ===
     psk = "audio_decoder.post_activation.activation.snake_act.alpha"
-    x = _add_snake(network, x, sd[psk], cur_ch)
+    x = _add_snake(
+        network, x, sd[psk], cur_ch, dtype=work_np_dtype)
 
     pp2 = "audio_decoder.post_conv.conv"
     pv2 = sd[f"{pp2}.parametrizations.weight.original1"]
     x = _add_causal_conv1d_wn(
-        network, x, sd, pp2, pv2.shape[0], pv2.shape[2], mask)
+        network, x, sd, pp2, pv2.shape[0], pv2.shape[2], mask,
+        dtype=work_np_dtype)
 
     clip = network.add_activation(x, trt.ActivationType.CLIP)
     clip.alpha = -1.0
@@ -382,6 +403,8 @@ def build_nanocodec_decoder_engine(
     sq = network.add_shuffle(x)
     sq.reshape_dims = (1, -1)
     wf = sq.get_output(0)
+    if wf.dtype != trt.float32:
+        wf = network.add_cast(wf, trt.float32).get_output(0)
     wf.name = "waveform"
     network.mark_output(wf)
 

@@ -1,21 +1,28 @@
 {
   "name": "sam-vit-base",
-  "trace_id": "IT-E2E-SAM-01",
   "hf_id": "facebook/sam-vit-base",
   "bundle": "sam-vit-base.trtfb",
   "family": "sam",
   "runtime_strategy": "sam_prompted_segmentation",
   "task_strategy": "prompted_segmentation",
-  "reference_family": "prompted_segmentation_sam",
-  "user_contract": "prompted_mask",
-  "test_type": "prompted_segmentation",
   "max_cache_length": 1,
-  "prompt": "",
-  "max_new_tokens": 0,
   "trust_remote_code": false,
-  "test_image": "data/test_img.jpeg",
-  "point_x": 0.5,
-  "point_y": 0.5,
-  "num_expected_masks": 3,
-  "core": true
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "sam-vit-base",
+      "trace_id": "IT-E2E-SAM-01",
+      "reference_family": "prompted_segmentation_sam",
+      "user_contract": "prompted_mask",
+      "test_type": "prompted_segmentation",
+      "prompt": "",
+      "max_new_tokens": 0,
+      "reference_precision": "fp32",
+      "test_image": "data/test_img.jpeg",
+      "point_x": 0.5,
+      "point_y": 0.5,
+      "num_expected_masks": 3,
+      "core": true
+    }
+  ]
 }

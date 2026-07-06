@@ -158,7 +158,7 @@ class VLPlugin final : public IPipelinePlugin {
         const std::string cache_k_name =
             kv_names.cache_k.empty() ? std::string("cache_k_0") : kv_names.cache_k.front();
         int32_t kv_dim = decoder_cache_row_width(*loaded.module, cache_k_name, ctx.config);
-        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
+        DType cache_dtype = loaded.module->tensor_dtype(cache_k_name);
         std::unique_ptr<DeepseekOcrInferenceState> state =
             std::make_unique<DeepseekOcrKvCache>(ctx.config.num_layers, ctx.config.max_cache_length,
                                                  kv_dim, stream, cache_dtype, std::move(kv_names));

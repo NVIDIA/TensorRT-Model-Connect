@@ -1,20 +1,13 @@
 {
   "name": "internvl3-2b-tp2",
-  "trace_id": "IT-E2E-IVL3-02-TP2",
   "hf_id": "OpenGVLab/InternVL3-2B-hf",
   "bundle": "internvl3-2b-tp2-vl.trtfb",
   "family": "internvl",
   "runtime_strategy": "internvl_vision_language",
   "task_strategy": "vision_language_generation",
-  "ci_tier": "multi_device",
-  "task_eval": {
-    "vlm_fallback_prompt_template": "<IMG_CONTEXT>\n{prompt}"
-  },
+  "user_contract": "image-text-to-text",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 384,
-  "prompt": "What color is the vehicle in this image? Answer in one word.",
-  "max_new_tokens": 10,
-  "test_image": "data/test_img.jpeg",
   "trust_remote_code": false,
   "build_args": {
     "parallel": {
@@ -34,32 +27,45 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
+      "name": "internvl3-2b-tp2",
+      "trace_id": "IT-E2E-IVL3-02-TP2",
+      "ci_tier": "multi_device",
+      "task_eval": {
+        "vlm_fallback_prompt_template": "<IMG_CONTEXT>\n{prompt}"
       },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 2
-      },
-      "gating": true
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 2
+          },
+          "gating": true
+        }
+      ],
+      "stages": [
+        {
+          "name": "full_generation",
+          "required": true
+        }
+      ],
+      "notes": "InternVL3 2B TP2 coverage. The checkpoint has 2 KV heads, so TP4 is not valid. Uses the same checkpoint, prompt, cache length, image, and thresholds as internvl3-2b while running the text decoder through rank-local TP engines."
     }
-  ],
-  "stages": [
-    {
-      "name": "full_generation",
-      "required": true
-    }
-  ],
-  "notes": "InternVL3 2B TP2 coverage. The checkpoint has 2 KV heads, so TP4 is not valid. Uses the same checkpoint, prompt, cache length, image, and thresholds as internvl3-2b while running the text decoder through rank-local TP engines."
+  ]
 }

@@ -5,13 +5,8 @@
   "family": "olmo2",
   "runtime_strategy": "olmo2_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "continuation_parity",
   "max_cache_length": 256,
-  "prompt": "The capital of France is",
-  "max_new_tokens": 20,
   "trust_remote_code": false,
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
     "parallel": {
@@ -32,26 +27,36 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "olmo2-1b-tp4",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 20,
+      "ci_tier": "multi_device",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "notes": "Tensor-parallel TP=4 OLMo2 decoder coverage on four GPUs using the same prompt, cache length, and thresholds as olmo2-1b."
     }
-  ],
-  "notes": "Tensor-parallel TP=4 OLMo2 decoder coverage on four GPUs using the same prompt, cache length, and thresholds as olmo2-1b."
+  ]
 }

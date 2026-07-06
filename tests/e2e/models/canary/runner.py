@@ -11,9 +11,9 @@ import sys
 from contextlib import contextmanager
 from pathlib import Path
 
-from tests.e2e_harness.bundle_group_runner import (
-    model_case_names_for_dir,
-    run_model_e2e_case_or_group,
+from tests.e2e_harness.model_runner import (
+    model_names_for_dir,
+    run_model_e2e as run_model_manifest_e2e,
 )
 
 _MODEL_DIR = Path(__file__).resolve().parent
@@ -160,7 +160,7 @@ def _case_matches_e2e_model(case, filters: set[str]) -> bool:
 
 
 def model_case_names(config=None) -> list[str]:
-    return model_case_names_for_dir(
+    return model_names_for_dir(
         config=config,
         model_dir=_MODEL_DIR,
         case_matches_model=_case_matches_e2e_model,
@@ -169,11 +169,13 @@ def model_case_names(config=None) -> list[str]:
 
 
 def run_model_e2e(case_name: str, request) -> None:
-    run_model_e2e_case_or_group(
-        case_name=case_name,
+    run_model_manifest_e2e(
+        model_name=case_name,
         request=request,
         model_dir=_MODEL_DIR,
         load_waives=_load_waives,
+        case_matches_model=_case_matches_e2e_model,
+        is_multi_device_case=_is_multi_device_case,
         resolve_hf_python=_resolve_hf_python,
         resolve_artifacts_dir=_resolve_artifacts_dir,
         resolve_binary=_resolve_binary,

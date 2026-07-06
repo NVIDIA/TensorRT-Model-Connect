@@ -147,7 +147,8 @@ class Olmo2Plugin:
 
     def build_engine(
         self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, verbose: bool = False,
+        max_cache_length: int, *, precision: str = "fp32",
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
@@ -167,6 +168,13 @@ class Olmo2Plugin:
         trt = trt_compat.get_trt()
         from . import graph_ops
         from . import graph_blocks
+
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(f"Unsupported OLMo2 precision: {precision}")
 
         attention_size: int = weights.get("_attention_size", config.attention_size)
         mlp_size: int = weights.get("_mlp_size", config.intermediate_size)
@@ -193,22 +201,27 @@ class Olmo2Plugin:
         position_id = network.add_input("position_id", trt.int32, (1,))
         attention_mask = network.add_input(
             "attention_mask", trt.float32, (1, attention_window))
+        attention_mask_work = attention_mask
+        if work_trt_dtype != trt.float32:
+            attention_mask_work = network.add_cast(
+                attention_mask, work_trt_dtype).get_output(0)
 
         cache_k_inputs = []
         cache_v_inputs = []
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
         # Constants
         embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+            network, (vocab, hidden), weights["embedding"],
+            dtype=work_np_dtype)
 
         cos_table_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, True)
@@ -216,9 +229,9 @@ class Olmo2Plugin:
             attention_window, head_dim, config.rope_theta, False)
 
         cos_tensor = graph_ops.add_constant(
-            network, cos_table_np.shape, cos_table_np)
+            network, cos_table_np.shape, cos_table_np, dtype=work_np_dtype)
         sin_tensor = graph_ops.add_constant(
-            network, sin_table_np.shape, sin_table_np)
+            network, sin_table_np.shape, sin_table_np, dtype=work_np_dtype)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
@@ -237,24 +250,26 @@ class Olmo2Plugin:
             # ---- Attention (no pre-norm, QK norm inside) ----
             q = graph_ops.add_matmul_rhs_constant(
                 network, hidden_state, hidden, attention_size,
-                weights[f"{prefix}.w_q"])
+                weights[f"{prefix}.w_q"], dtype=work_np_dtype)
             k = graph_ops.add_matmul_rhs_constant(
                 network, hidden_state, hidden, kv_attention_size,
-                weights[f"{prefix}.w_k"])
+                weights[f"{prefix}.w_k"], dtype=work_np_dtype)
             v = graph_ops.add_matmul_rhs_constant(
                 network, hidden_state, hidden, kv_attention_size,
-                weights[f"{prefix}.w_v"])
+                weights[f"{prefix}.w_v"], dtype=work_np_dtype)
 
             # QK RMSNorm (full-dim, NOT per-head -- OLMo-2 applies norm
             # over the entire num_heads*head_dim dimension before reshape)
             q_norm_w = weights.get(f"{prefix}.q_norm")
             if q_norm_w is not None:
                 q = graph_ops.add_rms_norm(
-                    network, q, attention_size, q_norm_w, eps_tensor)
+                    network, q, attention_size, q_norm_w, eps_tensor,
+                    dtype=work_np_dtype)
             k_norm_w = weights.get(f"{prefix}.k_norm")
             if k_norm_w is not None:
                 k = graph_ops.add_rms_norm(
-                    network, k, kv_attention_size, k_norm_w, eps_tensor)
+                    network, k, kv_attention_size, k_norm_w, eps_tensor,
+                    dtype=work_np_dtype)
 
             # RoPE
             q = graph_ops.add_apply_rope_native(
@@ -281,7 +296,7 @@ class Olmo2Plugin:
                 [cache_v_inputs[layer_idx], v_reshape.get_output(0)])
             all_v.axis = 0
 
-            mask_reshape = network.add_shuffle(attention_mask)
+            mask_reshape = network.add_shuffle(attention_mask_work)
             mask_reshape.reshape_dims = (1, 1, 1, attention_window)
 
             context_flat = graph_ops.add_attention_from_rows(
@@ -294,12 +309,14 @@ class Olmo2Plugin:
             # Output projection
             attn_out = graph_ops.add_matmul_rhs_constant(
                 network, context_flat,
-                attention_size, hidden, weights[f"{prefix}.w_o"])
+                attention_size, hidden, weights[f"{prefix}.w_o"],
+                dtype=work_np_dtype)
 
             # ---- Post-attention norm ----
             normed_attn = graph_ops.add_rms_norm(
                 network, attn_out, hidden,
-                weights[f"{prefix}.post_attn_norm"], eps_tensor)
+                weights[f"{prefix}.post_attn_norm"], eps_tensor,
+                dtype=work_np_dtype)
             residual1 = network.add_elementwise(
                 hidden_state, normed_attn,
                 trt.ElementWiseOperation.SUM)
@@ -308,12 +325,14 @@ class Olmo2Plugin:
             # ---- MLP (SwiGLU, no pre-norm) ----
             mlp_out = graph_blocks.add_swiglu_mlp(
                 network, post_attn_state, weights=weights, prefix=prefix,
-                hidden_size=hidden, mlp_size=mlp_size)
+                hidden_size=hidden, mlp_size=mlp_size,
+                dtype=work_np_dtype)
 
             # ---- Post-feedforward norm ----
             normed_mlp = graph_ops.add_rms_norm(
                 network, mlp_out, hidden,
-                weights[f"{prefix}.post_ff_norm"], eps_tensor)
+                weights[f"{prefix}.post_ff_norm"], eps_tensor,
+                dtype=work_np_dtype)
             residual2 = network.add_elementwise(
                 post_attn_state, normed_mlp,
                 trt.ElementWiseOperation.SUM)
@@ -325,14 +344,18 @@ class Olmo2Plugin:
         # Final norm
         hidden_state = graph_ops.add_rms_norm(
             network, hidden_state, hidden,
-            weights["final_norm"], eps_tensor)
+            weights["final_norm"], eps_tensor, dtype=work_np_dtype)
 
         # LM head
         out_vocab = weights["w_out"].shape[1] if isinstance(weights["w_out"], np.ndarray) else vocab
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, out_vocab, weights["w_out"])
-        b_out = np.zeros(out_vocab, dtype=np.float32)
-        logits = graph_ops.add_bias_sum(network, logits, out_vocab, b_out)
+            network, hidden_state, hidden, out_vocab, weights["w_out"],
+            dtype=work_np_dtype)
+        b_out = np.zeros(out_vocab, dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(
+            network, logits, out_vocab, b_out, dtype=work_np_dtype)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
 
         logits.name = "logits"
         network.mark_output(logits)
@@ -350,7 +373,8 @@ class Olmo2Plugin:
         if verbose:
             print(f"[trtmc build] Building TRT engine ({num_layers} layers, "
                   f"hidden={hidden}, attn={attention_size}, mlp={mlp_size}, "
-                  f"cache={max_cache_length}) ...", file=sys.stderr)
+                  f"cache={max_cache_length}, precision={precision}) ...",
+                  file=sys.stderr)
 
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:

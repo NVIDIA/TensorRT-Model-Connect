@@ -1332,6 +1332,14 @@ class BpeTokenizer final : public ITokenizer {
 
     static bool normalizer_replaces_space_with_sentence_piece(const nlohmann::json& norm,
                                                               const std::string& norm_type) {
+        if (norm_type == "Sequence" && norm.contains("normalizers")) {
+            for (const auto& sub : norm["normalizers"]) {
+                if (normalizer_replaces_space_with_sentence_piece(sub, sub.value("type", ""))) {
+                    return true;
+                }
+            }
+            return false;
+        }
         if (norm_type != "Replace")
             return false;
         if (!norm.contains("pattern") || !norm["pattern"].contains("String"))

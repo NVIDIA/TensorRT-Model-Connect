@@ -436,10 +436,16 @@ def runner_from_bundle(
     distributed_communicator: object | None = None,
 ) -> HybridTrtRunner:
     del runtime_strategy, bundle_path
+    pattern = str(config.get("hybrid_override_pattern", ""))
+    num_mamba_layers = int(config.get("num_mamba_layers", 0) or 0)
+    num_attention_layers = int(config.get("num_attention_layers", 0) or 0)
+    if pattern:
+        num_mamba_layers = sum(char == "M" for char in pattern)
+        num_attention_layers = sum(char == "*" for char in pattern)
     return HybridTrtRunner(
         engine_plan=engine_plan,
         max_cache_length=header["max_cache_length"],
-        num_mamba_layers=config.get("num_mamba_layers", 0),
-        num_attention_layers=config.get("num_attention_layers", 0),
+        num_mamba_layers=num_mamba_layers,
+        num_attention_layers=num_attention_layers,
         distributed_communicator=distributed_communicator,
     )

@@ -38,12 +38,13 @@ _PRECISION_TO_TORCH_DTYPE = {
 
 
 def _torch_dtype_for_case(case: E2ECase) -> str:
-    """Return a torch dtype expression string matching the manifest precision.
+    """Return the explicit reference dtype, falling back to DUT precision.
 
-    The reference runner injects this into subprocess scripts so the HF model
-    loads at the same precision as the TRT engine, keeping comparisons fair.
+    FP16 acceptance manifests set reference_precision=fp32 so changing the
+    engine precision does not also change the oracle.
     """
-    precision = case.metadata.get("precision", "fp32")
+    precision = case.metadata.get(
+        "reference_precision", case.metadata.get("precision", "fp32"))
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
 
 
@@ -52,6 +53,7 @@ def _vl_prompt_has_image_placeholder(text: str) -> bool:
     return any(marker in text for marker in (
         "<|image_pad|>",
         "<|vision_start|>",
+        "<|image_1|>",
         "<image>",
         "<IMG_CONTEXT>",
     ))
@@ -900,6 +902,10 @@ class HfTransformersReference:
 
             # Try VL-specific auto classes in preference order
             import transformers
+            model_config = transformers.AutoConfig.from_pretrained(
+                model_ref, trust_remote_code=trust_remote_code)
+            model_config._attn_implementation = "eager"
+            model_config._attn_implementation_internal = "eager"
             model = None
             for cls_name in ["AutoModelForImageTextToText",
                              "AutoModelForVision2Seq"]:
@@ -907,7 +913,9 @@ class HfTransformersReference:
                     cls = getattr(transformers, cls_name)
                     model = cls.from_pretrained(
                         model_ref, trust_remote_code=trust_remote_code,
-                        torch_dtype={torch_dtype_expr})
+                        torch_dtype={torch_dtype_expr},
+                        config=model_config,
+                        attn_implementation="eager")
                     break
                 except (AttributeError, ImportError, ValueError, KeyError):
                     continue
@@ -916,21 +924,20 @@ class HfTransformersReference:
             if model is None:
                 model = transformers.AutoModelForCausalLM.from_pretrained(
                     model_ref, trust_remote_code=True,
-                    torch_dtype={torch_dtype_expr})
+                    torch_dtype={torch_dtype_expr},
+                    config=model_config,
+                    attn_implementation="eager")
             model.eval()
 
             image = Image.open(image_path).convert("RGB")
 
             # Build conversation for chat-template models
             messages = [
-                {{"role": "user", "content": [
-                    {{"type": "image", "image": image_path}},
-                    {{"type": "text", "text": prompt}},
-                ]}}
+                {{"role": "user", "content": f"<|image_1|>{{prompt}}"}}
             ]
             text_input = ""
             try:
-                text_input = processor.apply_chat_template(
+                text_input = processor.tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True)
                 if not isinstance(text_input, str):
                     raise TypeError("processor.apply_chat_template did not return text")

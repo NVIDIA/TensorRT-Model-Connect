@@ -648,8 +648,7 @@ CliArgs parse_args(int argc, char** argv) {
         }
     }
 
-    if (args.command == "run" && !args.bundle_path.empty() && !args.prompt_provided &&
-        args.prompts_file.empty()) {
+    if (args.command == "run" && !args.bundle_path.empty() && !has_run_prompt_source(args)) {
         args.parse_error = true;
         args.error_message = "run requires bundle + --prompt or --prompts-file";
     }

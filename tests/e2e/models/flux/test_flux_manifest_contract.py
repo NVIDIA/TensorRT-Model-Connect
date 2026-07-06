@@ -20,3 +20,21 @@ def test_flux2_fp8_manifest_uses_end_to_end_image_contract() -> None:
     assert [stage.name for stage in case.stages] == ["end_to_end"]
     assert all(stage.required for stage in case.stages)
     assert "Wan-specific" in case.metadata["notes"]
+
+
+def test_flux_batch2_manifest_declares_real_batch_contract() -> None:
+    manifest_path = Path(__file__).with_name("manifests") / "flux-schnell-l0-batch2.json"
+    case = load_manifest(manifest_path)
+
+    assert case.inputs["max_batch_size"] == 2
+    assert case.inputs["expected_batch_size"] == 2
+    assert case.inputs["batch_prompts"] == [
+        "A red cube on a white table",
+        "A blue sphere on a white table",
+    ]
+    assert case.inputs["batch_seeds"] == [42, 42]
+    assert case.threshold_overrides["batch_min_pairwise_pixel_mae"] == 0.01
+    assert case.metadata["contract_config"]["use_diffusers"] is True
+    assert {spec["flag"] for spec in case.metadata["build_cli_args"]} >= {
+        "--max-batch-size",
+    }

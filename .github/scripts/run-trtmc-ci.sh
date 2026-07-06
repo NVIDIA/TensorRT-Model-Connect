@@ -37,6 +37,7 @@ generate_e2e_report() {
     python scripts/generate_e2e_report.py \
       --artifacts-dir e2e_artifacts/artifacts \
       -o e2e_artifacts/e2e_report.html \
+      --manifest-dir tests/e2e/models \
       --project-dir . \
       --title "GitHub Actions E2E Report - ${GITHUB_RUN_ID:-local}" \
       || true
@@ -824,7 +825,7 @@ PY
 
   local e2e_rc=0
   pushd "$source_dir" >/dev/null
-  if run_with_timeout "${SELECTIVE_E2E_GROUP_TIMEOUT:-1h}" env \
+  if run_with_timeout "${SELECTIVE_E2E_GROUP_TIMEOUT:-90m}" env \
       CUDA_VISIBLE_DEVICES="$gpu_id" \
       HF_HUB_OFFLINE=1 \
       PYTHONNOUSERSITE=1 \
@@ -839,8 +840,8 @@ PY
         --hf-python "${HF_PYTHON:-/opt/venv/bin/python}" \
         --e2e-artifacts-dir "$result_dir/artifacts" \
         --model-plugin-dir "$model_plugin_dir" \
-        --e2e-group-by-bundle \
         --e2e-models-file "$models_file" \
+        --e2e-exclude-ci-tier nightly_only \
         "${model_filter_args[@]}" \
         --rebuild-engines \
         --junitxml="$audit_dir/junit.xml"; then
@@ -1035,7 +1036,10 @@ if test_ids:
     print(f'Selective E2E node IDs: {len(test_ids)}')
 "
   python3 tools/model_plugin_isolation.py impact-models \
-    --impact-json impact.json > e2e_isolation_models.txt
+    --impact-json impact.json \
+    --exclude-ci-tier multi_device \
+    --exclude-ci-tier nightly_only \
+    > e2e_isolation_models.txt
   echo "Model-owned isolation E2E: $(wc -l < e2e_isolation_models.txt) models"
   sed 's/^/  isolated: /' e2e_isolation_models.txt
   local model_count
@@ -1049,7 +1053,10 @@ if test_ids:
   export TRTMC_BUILDER_OPTIMIZATION_LEVEL="${TRTMC_BUILDER_OPTIMIZATION_LEVEL:-1}"
   configure_e2e_timing_cache
   echo "=== Phase 1: warming HF cache (online, sequential) ==="
-  env -u HF_HUB_OFFLINE python scripts/warm_hf_cache.py --models-file e2e_models.txt
+  env -u HF_HUB_OFFLINE python scripts/warm_hf_cache.py \
+    --models-file e2e_models.txt \
+    --exclude-ci-tier multi_device \
+    --exclude-ci-tier nightly_only
 
   echo "=== Phase 2: standard selective E2E for the full conservative impact set ==="
   load_wheel_build_metadata
@@ -1064,6 +1071,7 @@ if test_ids:
     --trtmc-binary "$(command -v trtmc)"
     --workers-per-gpu 4
     --models-file e2e_models.txt
+    --exclude-ci-tier nightly_only
     --model-plugin-dir "$full_model_plugin_dir"
   )
   if [ -s e2e_test_ids.txt ]; then
@@ -1080,6 +1088,10 @@ if test_ids:
   else
     standard_rc=$?
     echo "ERROR: standard selective E2E failed with code $standard_rc" >&2
+  fi
+  if [ "$standard_rc" -ne 0 ]; then
+    echo "Skipping strict model-owned isolation because standard selective E2E failed" >&2
+    return "$standard_rc"
   fi
 
   local isolation_count

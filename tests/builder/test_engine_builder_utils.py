@@ -20,6 +20,7 @@ import types
 from pathlib import Path
 
 import pytest
+import tensorrt_model_connect.engine_builder as engine_builder
 
 try:
     from tensorrt_model_connect.engine_builder import (
@@ -193,6 +194,30 @@ class TestDetectTokenizerAddSpecialTokens:
 
         assert _diffusion_tokenizer_add_special_tokens_from_plugin(
             FakeDiffusionPlugin(), tmp_path) is False
+
+    def test_diffusion_detects_exact_tokenizer_special_frame(self, tmp_path):
+        tokenizer_dir = tmp_path / "tokenizer"
+        tokenizer_dir.mkdir()
+
+        class FakeDiffusionPlugin:
+            name = "fake_diffusion"
+
+            def diffusion_tokenizer_special_frame(
+                self, model_dir_path, *, detect_tokenizer_special_frame,
+            ):
+                assert Path(model_dir_path) == tmp_path
+                return detect_tokenizer_special_frame(tokenizer_dir)
+
+        detector_calls = []
+
+        def detector(path):
+            detector_calls.append(Path(path))
+            return [], [1]
+
+        assert engine_builder._diffusion_tokenizer_special_frame_from_plugin(
+            FakeDiffusionPlugin(), tmp_path, detect_tokenizer_special_frame=detector
+        ) == ([], [1])
+        assert detector_calls == [tokenizer_dir]
 
 
 class TestResolveModel:

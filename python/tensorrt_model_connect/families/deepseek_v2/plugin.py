@@ -359,6 +359,26 @@ class DeepSeekV2Plugin:
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
+        if precision == "fp16":
+            work_np_dtype = np.float16
+            work_trt_dtype = trt.float16
+        elif precision == "bf16":
+            work_np_dtype = np.float16
+            work_trt_dtype = trt.bfloat16
+        else:
+            work_np_dtype = np.float32
+            work_trt_dtype = trt.float32
+
+        requested_fp32_layers = frozenset(
+            int(layer) for layer in config.raw.get("_fp32_layers", ()))
+        invalid_fp32_layers = sorted(
+            layer for layer in requested_fp32_layers
+            if layer < 0 or layer >= num_layers)
+        if invalid_fp32_layers:
+            raise ValueError(
+                "fp32_layers contains out-of-range indices: "
+                f"{invalid_fp32_layers}")
+
         # -----------------------------------------------------------
         # Inputs
         # -----------------------------------------------------------
@@ -372,18 +392,23 @@ class DeepSeekV2Plugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, attention_size))
+                work_trt_dtype, (max_cache_length, attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, attention_size))
+                work_trt_dtype, (max_cache_length, attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
+
+        if work_trt_dtype != trt.float32:
+            attention_mask = network.add_cast(
+                attention_mask, work_trt_dtype).get_output(0)
 
         # -----------------------------------------------------------
         # Shared constants
         # -----------------------------------------------------------
         embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+            network, (vocab, hidden), weights["embedding"],
+            dtype=work_np_dtype)
 
         # DeepSeek-V2 uses complex (interleaved) RoPE: adjacent dims (d, d+1)
         # share a frequency, matching HF's apply_rotary_emb with torch.polar.
@@ -410,13 +435,14 @@ class DeepSeekV2Plugin:
                 config.rope_theta, False, interleaved=True)
 
         cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np)
+            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
         sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np)
+            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
-            np.array([config.rms_norm_eps], dtype=np.float32))
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # Embedding lookup
@@ -435,6 +461,15 @@ class DeepSeekV2Plugin:
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
+            layer_is_fp32 = (
+                precision == "fp16" and layer_idx in requested_fp32_layers)
+            layer_np_dtype = np.float32 if layer_is_fp32 else work_np_dtype
+            layer_trt_dtype = trt.float32 if layer_is_fp32 else work_trt_dtype
+
+            def layer_cast(tensor):
+                if tensor.dtype == layer_trt_dtype:
+                    return tensor
+                return network.add_cast(tensor, layer_trt_dtype).get_output(0)
 
             is_moe_layer = (
                 layer_idx >= first_k_dense_replace
@@ -443,15 +478,15 @@ class DeepSeekV2Plugin:
 
             result = _add_deepseek_v2_decoder_layer(
                 network=network,
-                hidden=hidden_state,
-                cache_k=cache_k_inputs[layer_idx],
-                cache_v=cache_v_inputs[layer_idx],
-                attention_mask=attention_mask,
+                hidden=layer_cast(hidden_state),
+                cache_k=layer_cast(cache_k_inputs[layer_idx]),
+                cache_v=layer_cast(cache_v_inputs[layer_idx]),
+                attention_mask=layer_cast(attention_mask),
                 position_id=position_id,
-                cos_half_tensor=cos_half_tensor,
-                sin_half_tensor=sin_half_tensor,
+                cos_half_tensor=layer_cast(cos_half_tensor),
+                sin_half_tensor=layer_cast(sin_half_tensor),
                 attn_scale=attn_scale,
-                eps_tensor=eps_tensor,
+                eps_tensor=layer_cast(eps_tensor),
                 weights=weights,
                 prefix=prefix,
                 hidden_size=hidden,
@@ -472,11 +507,21 @@ class DeepSeekV2Plugin:
                 dense_intermediate=dense_intermediate,
                 norm_topk_prob=norm_topk_prob,
                 routed_scaling_factor=routed_scaling_factor,
+                dtype=layer_np_dtype,
             )
 
             hidden_state = result["hidden"]
-            present_k_outputs.append(result["present_k"])
-            present_v_outputs.append(result["present_v"])
+            present_k = result["present_k"]
+            present_v = result["present_v"]
+            if layer_is_fp32:
+                hidden_state = network.add_cast(
+                    hidden_state, work_trt_dtype).get_output(0)
+                present_k = network.add_cast(
+                    present_k, work_trt_dtype).get_output(0)
+                present_v = network.add_cast(
+                    present_v, work_trt_dtype).get_output(0)
+            present_k_outputs.append(present_k)
+            present_v_outputs.append(present_v)
 
             if debug_layer_outputs:
                 _mark_debug_output(
@@ -493,15 +538,20 @@ class DeepSeekV2Plugin:
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = _apply_norm(
                 network, hidden_state, hidden, final_norm,
-                None, eps_tensor, "rmsnorm")
+                None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # LM head (logits)
         # -----------------------------------------------------------
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_out"])
-        b_out = np.zeros(vocab, dtype=np.float32)
-        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+            network, hidden_state, hidden, vocab, weights["w_out"],
+            dtype=work_np_dtype)
+        b_out = np.zeros(vocab, dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(
+            network, logits, vocab, b_out, dtype=work_np_dtype)
+
+        if work_trt_dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
 
         logits.name = "logits"
         network.mark_output(logits)
@@ -565,6 +615,7 @@ def _add_mla_attention_block(
     q_lora_rank,
     attention_size: int,
     max_cache_length: int,
+    dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     """Multi-head Latent Attention (MLA) block with naive KV cache.
 
@@ -590,18 +641,20 @@ def _add_mla_attention_block(
         # hidden -> q_a_proj -> q_a_layernorm -> q_b_proj
         q_compressed = graph_ops.add_matmul_rhs_constant(
             network, normed, hidden_size, q_lora_rank,
-            weights[f"{prefix}.w_q_a"])  # [1, q_lora_rank]
+            weights[f"{prefix}.w_q_a"], dtype=dtype)  # [1, q_lora_rank]
         q_compressed = graph_ops.add_rms_norm(
             network, q_compressed, q_lora_rank,
-            weights[f"{prefix}.q_a_norm"], eps_tensor)  # [1, q_lora_rank]
+            weights[f"{prefix}.q_a_norm"], eps_tensor,
+            dtype=dtype)  # [1, q_lora_rank]
         q = graph_ops.add_matmul_rhs_constant(
             network, q_compressed, q_lora_rank, q_total,
-            weights[f"{prefix}.w_q_b"])  # [1, q_total]
+            weights[f"{prefix}.w_q_b"], dtype=dtype)  # [1, q_total]
     else:
         # V2-Lite: direct Q projection
         q = graph_ops.add_matmul_rhs_constant(
             network, normed, hidden_size, q_total,
-            weights[f"{prefix}.w_q"])  # [1, num_heads * (nope + rope)]
+            weights[f"{prefix}.w_q"],
+            dtype=dtype)  # [1, num_heads * (nope + rope)]
 
     # Split Q into nope and rope parts per head:
     # q shape: [1, num_heads * (nope + rope)]
@@ -655,7 +708,7 @@ def _add_mla_attention_block(
     kv_a_dim = kv_lora_rank + qk_rope_head_dim
     c_kv = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, kv_a_dim,
-        weights[f"{prefix}.w_kv_a"])
+        weights[f"{prefix}.w_kv_a"], dtype=dtype)
 
     # Split into latent and k_rope_pass
     # c_kv_latent: [1, kv_lora_rank]
@@ -671,14 +724,14 @@ def _add_mla_attention_block(
     # Step 2: RMSNorm on latent
     c_kv_normed = graph_ops.add_rms_norm(
         network, c_kv_latent, kv_lora_rank,
-        weights[f"{prefix}.kv_a_norm"], eps_tensor)
+        weights[f"{prefix}.kv_a_norm"], eps_tensor, dtype=dtype)
 
     # Step 3: KV-B projection: decompress
     # [1, kv_lora_rank] -> [1, num_heads * (qk_nope_head_dim + v_head_dim)]
     kv_b_out_dim = num_heads * (qk_nope_head_dim + v_head_dim)
     kv_expanded = graph_ops.add_matmul_rhs_constant(
         network, c_kv_normed, kv_lora_rank, kv_b_out_dim,
-        weights[f"{prefix}.w_kv_b"])
+        weights[f"{prefix}.w_kv_b"], dtype=dtype)
 
     # Split into K_nope and V per head
     # Reshape to [num_heads, qk_nope_head_dim + v_head_dim]
@@ -727,7 +780,7 @@ def _add_mla_attention_block(
     if pad_size > 0:
         zero_pad = graph_ops.add_constant(
             network, (num_heads, pad_size),
-            np.zeros((num_heads, pad_size), dtype=np.float32))
+            np.zeros((num_heads, pad_size), dtype=dtype), dtype=dtype)
         v_padded_cat = network.add_concatenation([v_heads, zero_pad])
         v_padded_cat.axis = 1
         v_padded = v_padded_cat.get_output(0)  # [num_heads, k_head_dim]
@@ -786,7 +839,7 @@ def _add_mla_attention_block(
     attn_out = graph_ops.add_matmul_rhs_constant(
         network, attn_context,
         v_total, hidden_size,
-        weights[f"{prefix}.w_o"])
+        weights[f"{prefix}.w_o"], dtype=dtype)
 
     return {
         "attn_out": attn_out,
@@ -807,12 +860,13 @@ def _add_swiglu_expert(
     w_gate: np.ndarray,
     w_up: np.ndarray,
     w_down: np.ndarray,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
     gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate)
+        network, inp, hidden_size, intermediate_size, w_gate, dtype=dtype)
     up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up)
+        network, inp, hidden_size, intermediate_size, w_up, dtype=dtype)
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(
@@ -821,7 +875,8 @@ def _add_swiglu_expert(
         swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
     down = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), intermediate_size, hidden_size, w_down)
+        network, gated.get_output(0), intermediate_size, hidden_size, w_down,
+        dtype=dtype)
     return down
 
 
@@ -837,6 +892,7 @@ def _add_moe_with_shared_experts(
     shared_intermediate: int,
     norm_topk_prob: bool = False,
     routed_scaling_factor: float = 1.0,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """MoE block with shared experts (DeepSeek-V2 style).
 
@@ -850,7 +906,7 @@ def _add_moe_with_shared_experts(
     # 1. Router logits
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, n_routed_experts,
-        weights[f"{prefix}.router"])
+        weights[f"{prefix}.router"], dtype=dtype)
 
     # 2. Softmax over router logits
     sm = network.add_softmax(router_logits)
@@ -875,7 +931,7 @@ def _add_moe_with_shared_experts(
         # Multiply by routed_scaling_factor
         scale_c = graph_ops.add_constant(
             network, (1, 1),
-            np.array([[routed_scaling_factor]], dtype=np.float32))
+            np.array([[routed_scaling_factor]], dtype=dtype), dtype=dtype)
         scaled_weights = network.add_elementwise(
             top_values, scale_c,
             trt.ElementWiseOperation.PROD).get_output(0)
@@ -891,6 +947,7 @@ def _add_moe_with_shared_experts(
             weights[f"{prefix}.expert.{e}.w_gate"],
             weights[f"{prefix}.expert.{e}.w_up"],
             weights[f"{prefix}.expert.{e}.w_down"],
+            dtype=dtype,
         )
         expert_outputs.append(exp_out)
 
@@ -935,6 +992,7 @@ def _add_moe_with_shared_experts(
         weights[f"{prefix}.shared.w_gate"],
         weights[f"{prefix}.shared.w_up"],
         weights[f"{prefix}.shared.w_down"],
+        dtype=dtype,
     )
 
     # 8. Combine: routed_output + shared_output
@@ -980,6 +1038,7 @@ def _add_deepseek_v2_decoder_layer(
     dense_intermediate: int,
     norm_topk_prob: bool = False,
     routed_scaling_factor: float = 1.0,
+    dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     """Add one DeepSeek-V2 decoder layer: MLA attention + (dense MLP or MoE)."""
 
@@ -987,7 +1046,7 @@ def _add_deepseek_v2_decoder_layer(
     norm1 = _apply_norm(
         network, hidden, hidden_size,
         weights[f"{prefix}.input_norm"],
-        None, eps_tensor, "rmsnorm")
+        None, eps_tensor, "rmsnorm", dtype=dtype)
 
     # MLA attention block
     attn = _add_mla_attention_block(
@@ -1012,6 +1071,7 @@ def _add_deepseek_v2_decoder_layer(
         q_lora_rank=q_lora_rank,
         attention_size=attention_size,
         max_cache_length=max_cache_length,
+        dtype=dtype,
     )
     attn_out = attn["attn_out"]
 
@@ -1023,7 +1083,7 @@ def _add_deepseek_v2_decoder_layer(
     norm2 = _apply_norm(
         network, residual1.get_output(0), hidden_size,
         weights[f"{prefix}.post_attn_norm"],
-        None, eps_tensor, "rmsnorm")
+        None, eps_tensor, "rmsnorm", dtype=dtype)
 
     # MLP: either dense or MoE with shared experts
     if is_moe_layer:
@@ -1032,14 +1092,16 @@ def _add_deepseek_v2_decoder_layer(
             hidden_size, n_routed_experts, moe_intermediate,
             num_experts_per_tok, shared_intermediate,
             norm_topk_prob=norm_topk_prob,
-            routed_scaling_factor=routed_scaling_factor)
+            routed_scaling_factor=routed_scaling_factor,
+            dtype=dtype)
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2,
             weights=weights,
             prefix=prefix,
             hidden_size=hidden_size,
-            mlp_size=dense_intermediate)
+            mlp_size=dense_intermediate,
+            dtype=dtype)
 
     # Residual connection after MLP
     residual2 = network.add_elementwise(

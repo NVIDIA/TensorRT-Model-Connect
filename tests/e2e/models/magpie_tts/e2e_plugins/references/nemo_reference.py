@@ -97,7 +97,12 @@ class NemoReference:
                 torch.cuda.manual_seed_all({seed})
 
             # Load MagpieTTS from HuggingFace
-            from nemo.collections.tts.models import MagpieTTSModel
+            try:
+                from nemo.collections.tts.models import MagpieTTSModel
+            except ImportError:
+                from nemo.collections.tts.models import (
+                    MagpieTTS_Model as MagpieTTSModel,
+                )
             model = MagpieTTSModel.from_pretrained({model_id!r})
             model.eval()
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -136,9 +141,6 @@ class NemoReference:
                 wf.setsampwidth(2)
                 wf.setframerate(sample_rate)
                 wf.writeframes(pcm.tobytes())
-
-            # Save audio array for detailed comparison
-            np.save({wav_path!r}.replace(".wav", ".npy"), audio)
 
             result = {{
                 "num_samples": len(audio),
@@ -190,13 +192,6 @@ class NemoReference:
                 data["parse_error"] = str(e)
                 data["stdout"] = result.stdout
 
-            # Load audio array for detailed comparison
-            npy_path = wav_path.replace(".wav", ".npy")
-            if os.path.exists(npy_path):
-                try:
-                    data["audio_samples"] = np.load(npy_path)
-                except Exception:
-                    pass
         else:
             data["stdout"] = result.stdout
             data["stderr"] = result.stderr

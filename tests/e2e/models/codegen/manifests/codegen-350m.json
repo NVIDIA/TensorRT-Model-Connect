@@ -1,15 +1,22 @@
 {
   "name": "codegen-350m",
-  "trace_id": "IT-E2E-CDGEN-01",
   "hf_id": "Salesforce/codegen-350M-mono",
   "bundle": "codegen-350m.trtfb",
   "family": "codegen",
   "runtime_strategy": "codegen_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "code_base_completion",
-  "user_contract": "code_completion",
+  "precision": "fp16",
   "max_cache_length": 256,
-  "prompt": "def fibonacci(n):",
-  "max_new_tokens": 20,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "codegen-350m",
+      "trace_id": "IT-E2E-CDGEN-01",
+      "reference_family": "code_base_completion",
+      "user_contract": "code_completion",
+      "reference_precision": "fp32",
+      "prompt": "def fibonacci(n):",
+      "max_new_tokens": 20
+    }
+  ]
 }

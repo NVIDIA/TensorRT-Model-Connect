@@ -1,19 +1,27 @@
 {
   "name": "internvl3-2b",
-  "trace_id": "IT-E2E-IVL3-02",
   "hf_id": "OpenGVLab/InternVL3-2B-hf",
   "bundle": "internvl3-2b-vl.trtfb",
   "family": "internvl",
   "runtime_strategy": "internvl_vision_language",
   "task_strategy": "vision_language_generation",
-  "ci_tier": "l0_only",
-  "task_eval": {
-    "vlm_fallback_prompt_template": "<IMG_CONTEXT>\n{prompt}"
-  },
+  "precision": "fp16",
+  "user_contract": "image-text-to-text",
   "max_cache_length": 384,
-  "prompt": "What color is the vehicle in this image? Answer in one word.",
-  "max_new_tokens": 10,
-  "test_image": "data/test_img.jpeg",
   "trust_remote_code": false,
-  "notes": "Smaller InternVL3 representative for PR L0. Preserves the InternVL model_type, Qwen2 text decoder, InternViT vision tower shape, internvl_vision_language runner, comparator, and image/text artifact contract while internvl3-8b remains covered in nightly."
+  "testcases": [
+    {
+      "name": "internvl3-2b",
+      "trace_id": "IT-E2E-IVL3-02",
+      "reference_precision": "fp32",
+      "ci_tier": "l0_only",
+      "task_eval": {
+        "vlm_fallback_prompt_template": "<IMG_CONTEXT>\n{prompt}"
+      },
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg",
+      "notes": "Smaller InternVL3 representative for PR L0. Preserves the InternVL model_type, Qwen2 text decoder, InternViT vision tower shape, internvl_vision_language runner, comparator, and image/text artifact contract while internvl3-8b remains covered in nightly."
+    }
+  ]
 }

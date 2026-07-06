@@ -183,6 +183,36 @@ def _token_ids_from_sample(sample: Any) -> list[int]:
     except (TypeError, ValueError):
         return []
 
+
+def _strip_trailing_tokens(
+    token_ids: list[int], terminal_token_ids: set[int]
+) -> list[int]:
+    if not terminal_token_ids:
+        return token_ids
+    end = len(token_ids)
+    while end and token_ids[end - 1] in terminal_token_ids:
+        end -= 1
+    return token_ids[:end]
+
+
+def _token_agreement_rate(
+    generated: list[list[int]], expected: list[list[int]]
+) -> float:
+    matches = 0
+    positions = 0
+    for index, expected_tokens in enumerate(expected):
+        if not expected_tokens:
+            continue
+        generated_tokens = generated[index] if index < len(generated) else []
+        matches += sum(
+            generated_token == expected_token
+            for generated_token, expected_token in zip(
+                generated_tokens, expected_tokens
+            )
+        )
+        positions += max(len(generated_tokens), len(expected_tokens))
+    return matches / positions if positions else 0.0
+
 def _samples_from_jsonl(payload: str) -> list[Any]:
     samples: list[Any] = []
     for line in payload.splitlines():
@@ -291,7 +321,6 @@ class ElfDiffusionTextPlugin:
         case: E2ECase,
         threshold: ThresholdProfile,
     ):
-        del ref_output
         stage = trt_output.stage_name
         if stage not in ("full_generation", "decoded_text", "end_to_end"):
             metrics = {
@@ -307,13 +336,21 @@ class ElfDiffusionTextPlugin:
 
         samples = _generated_samples(trt_output)
         texts = [normalize_text(_text_from_sample(sample)) for sample in samples]
-        expected_samples = _expected_samples(trt_output)
+        expected_samples = _expected_samples(ref_output) or _expected_samples(trt_output)
         expected_texts = [
             normalize_text(_text_from_sample(sample)) for sample in expected_samples
         ]
-        generated_token_ids = [_token_ids_from_sample(sample) for sample in samples]
+        terminal_token_ids = {
+            int(token)
+            for token in (ref_output.data or {}).get("terminal_token_ids", [])
+        }
+        generated_token_ids = [
+            _strip_trailing_tokens(_token_ids_from_sample(sample), terminal_token_ids)
+            for sample in samples
+        ]
         expected_token_ids = [
-            _token_ids_from_sample(sample) for sample in expected_samples
+            _strip_trailing_tokens(_token_ids_from_sample(sample), terminal_token_ids)
+            for sample in expected_samples
         ]
         non_empty = sum(1 for text in texts if text)
         min_samples = int(threshold.metrics.get("contract_min_samples", 1))
@@ -389,55 +426,104 @@ class ElfDiffusionTextPlugin:
             operator=">=",
         )
         if expected_texts:
-            compare_count = min(len(texts), len(expected_texts))
-            matches = sum(
-                1
-                for idx in range(compare_count)
-                if texts[idx] and texts[idx] == expected_texts[idx]
-            )
             expected_count = len(expected_texts)
-            match_rate = matches / expected_count if expected_count else 0.0
-            threshold_value = threshold.metrics.get(
-                "contract_min_upstream_text_match_rate", 1.0
-            )
-            passed = (
-                len(texts) >= expected_count
-                and match_rate >= threshold_value
-            )
-            metrics["upstream_text_match_rate"] = MetricResult(
-                value=match_rate,
-                threshold=threshold_value,
-                operator=">=",
-                passed=passed,
-                note="exact normalized text match against upstream replay artifact",
-            )
+            max_text_ned = threshold.metrics.get("contract_max_upstream_text_ned")
+            if max_text_ned is not None:
+                text_neds = [
+                    levenshtein_ned(
+                        texts[idx] if idx < len(texts) else "", expected_text
+                    )
+                    for idx, expected_text in enumerate(expected_texts)
+                ]
+                worst_text_ned = max(text_neds, default=1.0)
+                passed = (
+                    len(texts) >= expected_count
+                    and worst_text_ned <= max_text_ned
+                )
+                metrics["upstream_text_ned"] = MetricResult(
+                    value=worst_text_ned,
+                    threshold=max_text_ned,
+                    operator="<=",
+                    passed=passed,
+                    note="worst normalized text edit distance against upstream replay",
+                )
+            else:
+                compare_count = min(len(texts), expected_count)
+                matches = sum(
+                    1
+                    for idx in range(compare_count)
+                    if texts[idx] and texts[idx] == expected_texts[idx]
+                )
+                match_rate = matches / expected_count if expected_count else 0.0
+                threshold_value = threshold.metrics.get(
+                    "contract_min_upstream_text_match_rate", 1.0
+                )
+                passed = (
+                    len(texts) >= expected_count
+                    and match_rate >= threshold_value
+                )
+                metrics["upstream_text_match_rate"] = MetricResult(
+                    value=match_rate,
+                    threshold=threshold_value,
+                    operator=">=",
+                    passed=passed,
+                    note="exact normalized text match against upstream replay artifact",
+                )
             metric_ok &= passed
         expected_token_samples = [
             token_ids for token_ids in expected_token_ids if token_ids
         ]
         if expected_token_samples:
-            compare_count = min(len(generated_token_ids), len(expected_token_ids))
-            matches = sum(
-                1
-                for idx in range(compare_count)
-                if expected_token_ids[idx] and generated_token_ids[idx] == expected_token_ids[idx]
+            min_token_agreement = threshold.metrics.get(
+                "contract_min_upstream_token_agreement_rate"
             )
-            expected_count = len(expected_token_samples)
-            match_rate = matches / expected_count if expected_count else 0.0
-            threshold_value = threshold.metrics.get(
-                "contract_min_upstream_token_match_rate", 1.0
-            )
-            passed = (
-                len(generated_token_ids) >= len(expected_token_ids)
-                and match_rate >= threshold_value
-            )
-            metrics["upstream_token_id_match_rate"] = MetricResult(
-                value=match_rate,
-                threshold=threshold_value,
-                operator=">=",
-                passed=passed,
-                note="exact token-id sequence match against upstream replay artifact",
-            )
+            if min_token_agreement is not None:
+                agreement_rate = _token_agreement_rate(
+                    generated_token_ids, expected_token_ids
+                )
+                passed = (
+                    len(generated_token_ids) >= len(expected_token_ids)
+                    and agreement_rate >= min_token_agreement
+                )
+                metrics["upstream_token_id_agreement_rate"] = MetricResult(
+                    value=agreement_rate,
+                    threshold=min_token_agreement,
+                    operator=">=",
+                    passed=passed,
+                    note=(
+                        "positional token agreement against upstream replay after "
+                        "removing repeated terminal tokens"
+                    ),
+                )
+            else:
+                compare_count = min(
+                    len(generated_token_ids), len(expected_token_ids)
+                )
+                matches = sum(
+                    1
+                    for idx in range(compare_count)
+                    if expected_token_ids[idx]
+                    and generated_token_ids[idx] == expected_token_ids[idx]
+                )
+                expected_count = len(expected_token_samples)
+                match_rate = matches / expected_count if expected_count else 0.0
+                threshold_value = threshold.metrics.get(
+                    "contract_min_upstream_token_match_rate", 1.0
+                )
+                passed = (
+                    len(generated_token_ids) >= len(expected_token_ids)
+                    and match_rate >= threshold_value
+                )
+                metrics["upstream_token_id_match_rate"] = MetricResult(
+                    value=match_rate,
+                    threshold=threshold_value,
+                    operator=">=",
+                    passed=passed,
+                    note=(
+                        "exact token-id sequence match against upstream replay artifact "
+                        "after removing repeated terminal tokens"
+                    ),
+                )
             metric_ok &= passed
 
         rule = (

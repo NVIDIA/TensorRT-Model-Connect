@@ -146,9 +146,12 @@ class MarianPlugin:
     def build_engine(self, config: ModelConfig, weights: WeightDict,
                      max_cache_length: int, *, verbose: bool = False,
                      debug_layer_outputs: bool = False,
-                     parallel_config=None) -> bytes:
+                     parallel_config=None, precision: str = "fp32") -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
+            if precision != "fp32":
+                raise NotImplementedError(
+                    "Marian tensor-parallel decoder builds currently require fp32")
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="Marian tensor-parallel decoder builds")
             from .decoder_tp_builder import build_marian_tp_decoder_engine
@@ -168,6 +171,12 @@ class MarianPlugin:
         head_dim = hidden // dec_heads
         attention_window = max_cache_length + 1
         max_enc_seq_len = max_pos
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(f"Unsupported Marian precision: {precision}")
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
@@ -193,13 +202,18 @@ class MarianPlugin:
 
         encoder_mask = network.add_input("encoder_mask", trt.float32, (max_enc_seq_len,))
 
-        embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["dec_embedding"])
+        embedding_table = graph_ops.add_constant(
+            network, (vocab, hidden), weights["dec_embedding"],
+            dtype=work_np_dtype)
         pos_embed_np = weights["dec_pos_embedding"]
-        pos_embedding_table = graph_ops.add_constant(network, pos_embed_np.shape, pos_embed_np)
+        pos_embedding_table = graph_ops.add_constant(
+            network, pos_embed_np.shape, pos_embed_np, dtype=work_np_dtype)
 
         token_embed = network.add_gather(embedding_table, token_id, 0).get_output(0)
         scale_val = np.sqrt(float(hidden))
-        scale_const = graph_ops.add_constant(network, (1, 1), np.array([scale_val], dtype=np.float32))
+        scale_const = graph_ops.add_constant(
+            network, (1, 1), np.array([scale_val], dtype=work_np_dtype),
+            dtype=work_np_dtype)
         token_embed = network.add_elementwise(token_embed, scale_const, trt.ElementWiseOperation.PROD).get_output(0)
         pos_embed = network.add_gather(pos_embedding_table, position_id, 0).get_output(0)
         hidden_state = network.add_elementwise(token_embed, pos_embed, trt.ElementWiseOperation.SUM).get_output(0)
@@ -207,45 +221,94 @@ class MarianPlugin:
         if debug_layer_outputs:
             _mark_debug_output(network, hidden_state, "debug_embed")
 
+        cache_k_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype else value
+            for value in cache_k_inputs
+        ]
+        cache_v_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype else value
+            for value in cache_v_inputs
+        ]
+        cross_k_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype else value
+            for value in cross_k_inputs
+        ]
+        cross_v_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype else value
+            for value in cross_v_inputs
+        ]
+        attention_mask_work = (
+            network.add_cast(attention_mask, work_trt_dtype).get_output(0)
+            if attention_mask.dtype != work_trt_dtype else attention_mask
+        )
+        encoder_mask_work = (
+            network.add_cast(encoder_mask, work_trt_dtype).get_output(0)
+            if encoder_mask.dtype != work_trt_dtype else encoder_mask
+        )
+
         present_k_outputs, present_v_outputs = [], []
         for layer_idx in range(dec_layers):
             prefix = f"layer.{layer_idx}"
             result = _add_marian_decoder_layer(
                 network=network, hidden=hidden_state,
-                cache_k=cache_k_inputs[layer_idx], cache_v=cache_v_inputs[layer_idx],
-                cross_k=cross_k_inputs[layer_idx], cross_v=cross_v_inputs[layer_idx],
-                attention_mask=attention_mask, encoder_mask=encoder_mask,
+                cache_k=cache_k_work[layer_idx], cache_v=cache_v_work[layer_idx],
+                cross_k=cross_k_work[layer_idx], cross_v=cross_v_work[layer_idx],
+                attention_mask=attention_mask_work,
+                encoder_mask=encoder_mask_work,
                 eps=config.rms_norm_eps, weights=weights, prefix=prefix,
                 hidden_size=hidden,
                 num_heads=dec_heads, head_dim=head_dim, ffn_dim=dec_ffn,
-                max_cache_length=max_cache_length, max_enc_seq_len=max_enc_seq_len)
+                max_cache_length=max_cache_length,
+                max_enc_seq_len=max_enc_seq_len, dtype=work_np_dtype)
             hidden_state = result["hidden"]
             present_k_outputs.append(result["present_k"])
             present_v_outputs.append(result["present_v"])
             if debug_layer_outputs:
                 _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
 
-        logits = graph_ops.add_matmul_rhs_constant(network, hidden_state, hidden, vocab, weights["w_out"])
-        logits = graph_ops.add_bias_sum(network, logits, vocab, weights["final_logits_bias"])
+        logits = graph_ops.add_matmul_rhs_constant(
+            network, hidden_state, hidden, vocab, weights["w_out"],
+            dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(
+            network, logits, vocab, weights["final_logits_bias"],
+            dtype=work_np_dtype)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
         logits.name = "logits"
         network.mark_output(logits)
 
         for i in range(dec_layers):
-            present_k_outputs[i].name = graph_ops.layer_tensor_name("present_k", i)
-            present_v_outputs[i].name = graph_ops.layer_tensor_name("present_v", i)
-            network.mark_output(present_k_outputs[i])
-            network.mark_output(present_v_outputs[i])
+            present_k = present_k_outputs[i]
+            present_v = present_v_outputs[i]
+            if present_k.dtype != trt.float32:
+                present_k = network.add_cast(
+                    present_k, trt.float32).get_output(0)
+                present_v = network.add_cast(
+                    present_v, trt.float32).get_output(0)
+            present_k.name = graph_ops.layer_tensor_name("present_k", i)
+            present_v.name = graph_ops.layer_tensor_name("present_v", i)
+            network.mark_output(present_k)
+            network.mark_output(present_v)
 
         if verbose:
-            print(f"[trtmc build] Building Marian decoder ({dec_layers}L, h={hidden}, heads={dec_heads}, ffn={dec_ffn}, cache={max_cache_length})", file=sys.stderr)
+            print(f"[trtmc build] Building Marian decoder ({dec_layers}L, "
+                  f"h={hidden}, heads={dec_heads}, ffn={dec_ffn}, "
+                  f"cache={max_cache_length}, precision={precision})",
+                  file=sys.stderr)
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT decoder engine build failed")
         return bytes(plan)
 
     def build_vision_engine(self, model_dir: str, config: ModelConfig,
-                            weights: WeightDict, *, verbose: bool = False) -> bytes | None:
-        return _build_marian_encoder(config, weights, verbose=verbose)
+                            weights: WeightDict, *, verbose: bool = False,
+                            precision: str = "fp32") -> bytes | None:
+        return _build_marian_encoder(
+            config, weights, verbose=verbose, precision=precision)
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
         raw = config.raw
@@ -268,13 +331,19 @@ class MarianPlugin:
         }
 
 
-def _build_marian_encoder(config, weights, *, verbose=False):
+def _build_marian_encoder(config, weights, *, verbose=False, precision="fp32"):
     enc_layers = weights["_enc_layers"]
     enc_heads = weights["_enc_heads"]
     enc_ffn = weights["_enc_ffn"]
     max_pos = weights["_max_position_embeddings"]
     hidden = config.hidden_size
     vocab = config.vocab_size
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(f"Unsupported Marian precision: {precision}")
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -287,17 +356,21 @@ def _build_marian_encoder(config, weights, *, verbose=False):
     input_ids = network.add_input("input_ids", trt.int32, (max_pos,))
     attention_mask = network.add_input("attention_mask", trt.float32, (max_pos,))
 
-    embed_table = graph_ops.add_constant(network, (vocab, hidden), weights["enc_embedding"])
+    embed_table = graph_ops.add_constant(
+        network, (vocab, hidden), weights["enc_embedding"],
+        dtype=work_np_dtype)
     pos_embed_np = weights["enc_pos_embedding"]
-    graph_ops.add_constant(network, pos_embed_np.shape, pos_embed_np)
 
     token_embed = network.add_gather(embed_table, input_ids, 0).get_output(0)
     scale_val = np.sqrt(float(hidden))
-    scale_const = graph_ops.add_constant(network, (1, 1), np.array([scale_val], dtype=np.float32))
+    scale_const = graph_ops.add_constant(
+        network, (1, 1), np.array([scale_val], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     token_embed = network.add_elementwise(token_embed, scale_const, trt.ElementWiseOperation.PROD).get_output(0)
 
     # Position embeddings cover full sequence; add as constant (no Gather needed)
-    pos_embed = graph_ops.add_constant(network, (max_pos, hidden), pos_embed_np)
+    pos_embed = graph_ops.add_constant(
+        network, (max_pos, hidden), pos_embed_np, dtype=work_np_dtype)
 
     hs = network.add_elementwise(token_embed, pos_embed, trt.ElementWiseOperation.SUM).get_output(0)
 
@@ -305,44 +378,52 @@ def _build_marian_encoder(config, weights, *, verbose=False):
     # for native IAttention broadcast across heads and query positions.
     enc_mask_4d = network.add_shuffle(attention_mask)
     enc_mask_4d.reshape_dims = (1, 1, 1, max_pos)
+    enc_mask = enc_mask_4d.get_output(0)
+    if enc_mask.dtype != work_trt_dtype:
+        enc_mask = network.add_cast(enc_mask, work_trt_dtype).get_output(0)
 
     for li in range(enc_layers):
         pfx = f"enc_layer.{li}"
         head_dim = hidden // enc_heads
 
-        q = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, hidden, weights[f"{pfx}.w_q"]), hidden, weights[f"{pfx}.b_q"])
-        k = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, hidden, weights[f"{pfx}.w_k"]), hidden, weights[f"{pfx}.b_k"])
-        v = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, hidden, weights[f"{pfx}.w_v"]), hidden, weights[f"{pfx}.b_v"])
+        q = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, hidden, weights[f"{pfx}.w_q"], dtype=work_np_dtype), hidden, weights[f"{pfx}.b_q"], dtype=work_np_dtype)
+        k = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, hidden, weights[f"{pfx}.w_k"], dtype=work_np_dtype), hidden, weights[f"{pfx}.b_k"], dtype=work_np_dtype)
+        v = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, hidden, weights[f"{pfx}.w_v"], dtype=work_np_dtype), hidden, weights[f"{pfx}.b_v"], dtype=work_np_dtype)
 
         ctx_flat = graph_ops.add_attention_from_rows(
             network, q, k, v,
             num_heads=enc_heads, head_dim=head_dim,
             q_seq=max_pos, kv_seq=max_pos,
-            mask=enc_mask_4d.get_output(0))
+            mask=enc_mask)
 
-        out_proj = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ctx_flat, hidden, hidden, weights[f"{pfx}.w_o"]), hidden, weights[f"{pfx}.b_o"])
+        out_proj = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ctx_flat, hidden, hidden, weights[f"{pfx}.w_o"], dtype=work_np_dtype), hidden, weights[f"{pfx}.b_o"], dtype=work_np_dtype)
 
         hs = network.add_elementwise(hs, out_proj, trt.ElementWiseOperation.SUM).get_output(0)
         hs = graph_ops.add_layer_norm_native(
             network, hs, hidden,
             weights[f"{pfx}.attn_norm"], weights[f"{pfx}.attn_norm_beta"],
-            config.rms_norm_eps)
+            config.rms_norm_eps, dtype=work_np_dtype)
 
-        fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, enc_ffn, weights[f"{pfx}.w_fc1"]), enc_ffn, weights[f"{pfx}.b_fc1"])
-        act = graph_ops.add_activation(network, fc1, "silu")
-        fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"]), hidden, weights[f"{pfx}.b_fc2"])
+        fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, enc_ffn, weights[f"{pfx}.w_fc1"], dtype=work_np_dtype), enc_ffn, weights[f"{pfx}.b_fc1"], dtype=work_np_dtype)
+        act = graph_ops.add_activation(
+            network, fc1, "silu", dtype=work_np_dtype)
+        fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"], dtype=work_np_dtype), hidden, weights[f"{pfx}.b_fc2"], dtype=work_np_dtype)
 
         hs = network.add_elementwise(hs, fc2, trt.ElementWiseOperation.SUM).get_output(0)
         hs = graph_ops.add_layer_norm_native(
             network, hs, hidden,
             weights[f"{pfx}.ffn_norm"], weights[f"{pfx}.ffn_norm_beta"],
-            config.rms_norm_eps)
+            config.rms_norm_eps, dtype=work_np_dtype)
 
+    if hs.dtype != trt.float32:
+        hs = network.add_cast(hs, trt.float32).get_output(0)
     hs.name = "encoder_output"
     network.mark_output(hs)
 
     if verbose:
-        print(f"[trtmc build] Building Marian encoder ({enc_layers}L, h={hidden}, heads={enc_heads})", file=sys.stderr)
+        print(f"[trtmc build] Building Marian encoder ({enc_layers}L, "
+              f"h={hidden}, heads={enc_heads}, precision={precision})",
+              file=sys.stderr)
     plan = builder.build_serialized_network(network, tc)
     if plan is None:
         raise RuntimeError("TensorRT encoder engine build failed")
@@ -351,13 +432,14 @@ def _build_marian_encoder(config, weights, *, verbose=False):
 
 def _add_marian_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v,
     attention_mask, encoder_mask, eps, weights, prefix,
-    hidden_size, num_heads, head_dim, ffn_dim, max_cache_length, max_enc_seq_len):
+    hidden_size, num_heads, head_dim, ffn_dim, max_cache_length,
+    max_enc_seq_len, dtype=np.float32):
     attention_size = hidden_size
     attention_window = max_cache_length + 1
 
-    q = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_q"]), attention_size, weights[f"{prefix}.q_bias"])
-    k = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_k"]), attention_size, weights[f"{prefix}.k_bias"])
-    v = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_v"]), attention_size, weights[f"{prefix}.v_bias"])
+    q = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_q"], dtype=dtype), attention_size, weights[f"{prefix}.q_bias"], dtype=dtype)
+    k = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_k"], dtype=dtype), attention_size, weights[f"{prefix}.k_bias"], dtype=dtype)
+    v = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_v"], dtype=dtype), attention_size, weights[f"{prefix}.v_bias"], dtype=dtype)
     present_k, present_v = k, v
 
     kr = network.add_shuffle(k)
@@ -376,17 +458,17 @@ def _add_marian_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cro
         num_heads=num_heads, head_dim=head_dim,
         q_seq=1, kv_seq=attention_window,
         mask=m4.get_output(0))
-    sa = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cf, attention_size, hidden_size, weights[f"{prefix}.w_o"]), hidden_size, weights[f"{prefix}.o_bias"])
+    sa = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cf, attention_size, hidden_size, weights[f"{prefix}.w_o"], dtype=dtype), hidden_size, weights[f"{prefix}.o_bias"], dtype=dtype)
 
     psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
     psa = graph_ops.add_layer_norm_native(
         network, psa, hidden_size,
         weights[f"{prefix}.input_norm"], weights[f"{prefix}.input_norm_beta"],
-        eps)
+        eps, dtype=dtype)
 
-    cq = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, psa, hidden_size, attention_size, weights[f"{prefix}.cross_w_q"]), attention_size, weights[f"{prefix}.cross_b_q"])
-    ck_proj = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cross_k, hidden_size, attention_size, weights[f"{prefix}.cross_w_k"]), attention_size, weights[f"{prefix}.cross_b_k"])
-    cv_proj = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cross_v, hidden_size, attention_size, weights[f"{prefix}.cross_w_v"]), attention_size, weights[f"{prefix}.cross_b_v"])
+    cq = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, psa, hidden_size, attention_size, weights[f"{prefix}.cross_w_q"], dtype=dtype), attention_size, weights[f"{prefix}.cross_b_q"], dtype=dtype)
+    ck_proj = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cross_k, hidden_size, attention_size, weights[f"{prefix}.cross_w_k"], dtype=dtype), attention_size, weights[f"{prefix}.cross_b_k"], dtype=dtype)
+    cv_proj = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, cross_v, hidden_size, attention_size, weights[f"{prefix}.cross_w_v"], dtype=dtype), attention_size, weights[f"{prefix}.cross_b_v"], dtype=dtype)
 
     enc_mask_4d = network.add_shuffle(encoder_mask)
     enc_mask_4d.reshape_dims = (1, 1, 1, max_enc_seq_len)
@@ -395,23 +477,23 @@ def _add_marian_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cro
         num_heads=num_heads, head_dim=head_dim,
         q_seq=1, kv_seq=max_enc_seq_len,
         mask=enc_mask_4d.get_output(0))
-    ca = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"]), hidden_size, weights[f"{prefix}.cross_b_o"])
+    ca = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"], dtype=dtype), hidden_size, weights[f"{prefix}.cross_b_o"], dtype=dtype)
 
     pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
     pca = graph_ops.add_layer_norm_native(
         network, pca, hidden_size,
         weights[f"{prefix}.cross_attn_norm"],
-        weights[f"{prefix}.cross_attn_norm_beta"], eps)
+        weights[f"{prefix}.cross_attn_norm_beta"], eps, dtype=dtype)
 
-    fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, pca, hidden_size, ffn_dim, weights[f"{prefix}.w_fc1"]), ffn_dim, weights[f"{prefix}.fc1_bias"])
-    act = graph_ops.add_activation(network, fc1, "silu")
-    fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"]), hidden_size, weights[f"{prefix}.fc2_bias"])
+    fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, pca, hidden_size, ffn_dim, weights[f"{prefix}.w_fc1"], dtype=dtype), ffn_dim, weights[f"{prefix}.fc1_bias"], dtype=dtype)
+    act = graph_ops.add_activation(network, fc1, "silu", dtype=dtype)
+    fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"], dtype=dtype), hidden_size, weights[f"{prefix}.fc2_bias"], dtype=dtype)
 
     out = network.add_elementwise(pca, fc2, trt.ElementWiseOperation.SUM).get_output(0)
     out = graph_ops.add_layer_norm_native(
         network, out, hidden_size,
         weights[f"{prefix}.post_attn_norm"],
-        weights[f"{prefix}.post_attn_norm_beta"], eps)
+        weights[f"{prefix}.post_attn_norm_beta"], eps, dtype=dtype)
 
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
 

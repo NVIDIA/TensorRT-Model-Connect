@@ -98,3 +98,57 @@ def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) ->
     assert kwargs["precision"] == "bf16"
     assert kwargs["embed_input"] is True
     assert kwargs["verbose"] is True
+
+
+def test_qwen3_vl_vision_component_can_stay_fp32(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen_vl.plugin")
+    vision_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen_vl.qwen_vl_vision_builder")
+    calls: dict[str, object] = {}
+
+    def fake_load(_model_dir, _config):
+        return {"vision": "weights"}
+
+    def fake_build(vision_config, weights, **kwargs):
+        calls["build"] = (vision_config, weights, kwargs)
+        return b"qwen3-vl-vision-plan"
+
+    monkeypatch.setattr(module, "_load_vision_weights", fake_load)
+    monkeypatch.setattr(vision_module, "build_qwen3_vl_vision_engine", fake_build)
+
+    config = _config(qwen3=True)
+    config.raw["_fp32_layers"] = [
+        module._VISION_COMPONENT,
+        module._VISION_LAYER_OFFSET + 5,
+    ]
+    result = module.QwenVLPlugin().build_vision_engine(
+        "/tmp/model", config, {}, precision="fp16")
+
+    assert result == b"qwen3-vl-vision-plan"
+    assert calls["build"][2]["precision"] == "fp32"
+    assert calls["build"][2]["fp32_layers"] == {5}
+
+
+def test_qwen3_vl_text_decoder_component_can_stay_fp32(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen_vl.plugin")
+    calls: dict[str, object] = {}
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls["build"] = (config, weights, max_cache_length, kwargs)
+        return b"qwen3-vl-text-plan"
+
+    monkeypatch.setattr(module, "_build_qwen3_vl_decoder", fake_build)
+    config = _config(qwen3=True)
+    config.raw["_fp32_layers"] = [module._TEXT_DECODER_COMPONENT]
+
+    result = module.QwenVLPlugin().build_engine(
+        config,
+        {"_attention_size": 16, "_kv_attention_size": 16, "_mlp_size": 32},
+        31,
+        precision="fp16",
+    )
+
+    assert result == b"qwen3-vl-text-plan"
+    assert calls["build"][3]["precision"] == "fp32"

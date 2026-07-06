@@ -331,6 +331,7 @@ def _materialize_venv_profile(
                         "--disable-pip-version-check",
                         "--quiet",
                         "--no-deps",
+                        "--no-build-isolation",
                         "-r",
                         str(requirements_file),
                     ],

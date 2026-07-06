@@ -11,6 +11,7 @@
 #include "runtime/models/pixart/pipeline.h"
 
 #include "runtime/models/pixart/pixart_denoising_step_seam.h"
+#include "runtime/models/pixart/pixart_dpmsolver.h"
 #include "runtime/models/pixart/pixart_generation_conditioning.h"
 #include "runtime/models/pixart/pixart_generation_plan.h"
 
@@ -25,77 +26,9 @@ namespace trtmc {
 
 namespace {
 
+using diffusion::DPMSolverMultistepState;
 using diffusion::PixArtLayout;
 using diffusion::pixart_scheduler::FlowMatchEulerState;
-
-// ---------------------------------------------------------------------------
-// DDIM Scheduler (epsilon-prediction models like PixArt)
-// ---------------------------------------------------------------------------
-
-struct DDIMState {
-    std::vector<double> sigmas; // [num_steps + 1]
-    std::vector<float> timesteps;
-    int32_t num_train_timesteps{1000};
-    std::vector<double> prev_x0;
-    double prev_lambda_src{0.0};
-    bool has_prev{false};
-
-    void set_timesteps(int32_t num_steps, double beta_start = 0.0001, double beta_end = 0.02) {
-        const int32_t T = num_train_timesteps;
-        std::vector<double> alpha_cumprod(static_cast<std::size_t>(T));
-        double cum = 1.0;
-        for (int32_t i = 0; i < T; ++i) {
-            double beta = beta_start + static_cast<double>(i) / static_cast<double>(T - 1) *
-                                           (beta_end - beta_start);
-            cum *= (1.0 - beta);
-            alpha_cumprod[static_cast<std::size_t>(i)] = cum;
-        }
-        timesteps.resize(static_cast<std::size_t>(num_steps));
-        for (int32_t i = 0; i < num_steps; ++i) {
-            double frac = static_cast<double>(i) / static_cast<double>(num_steps);
-            timesteps[static_cast<std::size_t>(i)] =
-                static_cast<float>(std::round((1.0 - frac) * (T - 1)));
-        }
-        sigmas.resize(static_cast<std::size_t>(num_steps) + 1);
-        for (int32_t i = 0; i < num_steps; ++i) {
-            const int32_t t =
-                static_cast<int32_t>(std::round(timesteps[static_cast<std::size_t>(i)]));
-            const double acp =
-                alpha_cumprod[static_cast<std::size_t>(std::max(0, std::min(t, T - 1)))];
-            sigmas[static_cast<std::size_t>(i)] = std::sqrt((1.0 - acp) / acp);
-        }
-        sigmas[static_cast<std::size_t>(num_steps)] = 0.0;
-    }
-
-    void step(const float* eps_pred, const float* x_t, float* x_out, std::size_t count,
-              int32_t step_index) {
-        const auto si = static_cast<std::size_t>(step_index);
-
-        const double raw_src = sigmas[si];
-        const double raw_tgt = sigmas[si + 1];
-        const double alp_src = 1.0 / std::sqrt(1.0 + raw_src * raw_src);
-        const double sig_src = raw_src / std::sqrt(1.0 + raw_src * raw_src);
-        const double alp_tgt = 1.0 / std::sqrt(1.0 + raw_tgt * raw_tgt);
-        const double sig_tgt = raw_tgt / std::sqrt(1.0 + raw_tgt * raw_tgt);
-
-        double lam_src = std::log(alp_src / sig_src);
-        double lam_tgt = std::log(alp_tgt / sig_tgt);
-        double h = lam_tgt - lam_src;
-
-        double ratio = sig_tgt / sig_src;
-        double coeff = -alp_tgt * std::expm1(-h);
-
-        std::vector<double> x0(count);
-        for (std::size_t i = 0; i < count; ++i) {
-            x0[i] = (static_cast<double>(x_t[i]) - sig_src * static_cast<double>(eps_pred[i])) /
-                    alp_src;
-        }
-
-        for (std::size_t i = 0; i < count; ++i) {
-            x_out[i] = static_cast<float>(ratio * static_cast<double>(x_t[i]) + coeff * x0[i]);
-        }
-    }
-};
 
 // ---------------------------------------------------------------------------
 // CPU math helpers (standalone — replaces DiffusionBackendBase methods)
@@ -249,11 +182,14 @@ void compose_pixart_vae_video_frames(const std::vector<float>& all_raw_frames, i
 // Positional embedding
 // ---------------------------------------------------------------------------
 
-void compute_pixart_pos_embed_2d(int32_t nh_p, int32_t nw_p, int32_t dim,
-                                 std::vector<float>& pos_embed_2d) {
+void compute_pixart_pos_embed_2d(int32_t nh_p, int32_t nw_p, int32_t dim, int32_t base_grid_size,
+                                 float interpolation_scale, std::vector<float>& pos_embed_2d) {
     const int32_t half_dim = dim / 2;
     const int32_t quarter_dim = half_dim / 2;
-    const float interp_scale = 2.0F;
+    const float height_scale =
+        diffusion::pixart_position_scale(nh_p, base_grid_size, interpolation_scale);
+    const float width_scale =
+        diffusion::pixart_position_scale(nw_p, base_grid_size, interpolation_scale);
     pos_embed_2d.assign(static_cast<std::size_t>(nh_p * nw_p) * static_cast<std::size_t>(dim),
                         0.0F);
 
@@ -268,8 +204,8 @@ void compute_pixart_pos_embed_2d(int32_t nh_p, int32_t nw_p, int32_t dim,
             const int32_t patch_idx = hi * nw_p + wi;
             float* row = pos_embed_2d.data() +
                          static_cast<std::size_t>(patch_idx) * static_cast<std::size_t>(dim);
-            const double h_pos = static_cast<double>(hi) / static_cast<double>(interp_scale);
-            const double w_pos = static_cast<double>(wi) / static_cast<double>(interp_scale);
+            const double h_pos = static_cast<double>(hi) * static_cast<double>(height_scale);
+            const double w_pos = static_cast<double>(wi) * static_cast<double>(width_scale);
             for (int32_t d = 0; d < quarter_dim; ++d) {
                 const double angle_w = w_pos * omega[static_cast<std::size_t>(d)];
                 row[d] = static_cast<float>(std::sin(angle_w));
@@ -311,7 +247,7 @@ bool predict_pixart_noise(const std::vector<float>& hidden, const std::vector<fl
         std::vector<float> uncond_pred;
         std::vector<float> null_mask;
         if (!encoder_attn_mask.empty()) {
-            null_mask.assign(encoder_attn_mask.size(), 0.0F);
+            null_mask = diffusion::make_pixart_null_attention_mask(encoder_attn_mask.size());
         }
 
         if (!run_denoiser(hidden, temb_6d, time_embed, text_projected, encoder_attn_mask, cond_pred,
@@ -373,7 +309,7 @@ void maybe_truncate_pixart_output(std::vector<float>& denoiser_output, int32_t n
 // Scheduler step dispatch
 // ---------------------------------------------------------------------------
 
-void apply_pixart_scheduler_step(bool use_ddim, DDIMState& ddim_scheduler,
+void apply_pixart_scheduler_step(bool use_ddim, DPMSolverMultistepState& ddim_scheduler,
                                  FlowMatchEulerState& fm_scheduler,
                                  const std::vector<float>& noise_pred_spatial,
                                  std::vector<float>& latents, std::size_t latent_count,
@@ -424,7 +360,7 @@ bool run_pixart_denoising_loop(
     int32_t num_inference_steps, bool use_ddim, float guidance_scale, const PixArtLayout& layout,
     const std::vector<float>& step_timesteps, const std::vector<float>& pos_embed_2d,
     const std::vector<float>& text_projected, const std::vector<float>& null_text,
-    const std::vector<float>& encoder_attn_mask, DDIMState& ddim_scheduler,
+    const std::vector<float>& encoder_attn_mask, DPMSolverMultistepState& ddim_scheduler,
     FlowMatchEulerState& fm_scheduler, std::vector<float>& latents, std::string& error,
     ComputeTembFn&& compute_temb, PatchifyFn&& patchify, EmbedHiddenFn&& embed_hidden,
     UnpatchifyFn&& unpatchify, RunDenoiserFn&& run_denoiser) {
@@ -1186,18 +1122,24 @@ ImageResult PixArtPipeline::generate_image(const std::string& prompt, const Gene
     if (config_.use_rope) {
         compute_3d_rope(layout.nt, layout.nh_p, layout.nw_p, rope_cos, rope_sin);
     } else {
-        compute_pixart_pos_embed_2d(layout.nh_p, layout.nw_p, layout.dim, pos_embed_2d);
+        compute_pixart_pos_embed_2d(layout.nh_p, layout.nw_p, layout.dim,
+                                    config_.pos_embed_base_size,
+                                    config_.pos_embed_interpolation_scale, pos_embed_2d);
     }
 
-    // Initialize random latents
-    std::vector<float> latents = diffusion::make_pixart_initial_latents(plan.latent_count);
+    // Use caller-provided latents for cross-runtime parity; otherwise honor the requested seed.
+    std::vector<float> latents;
+    if (!diffusion::resolve_pixart_initial_latents(plan.latent_count, cfg.initial_latents, cfg.seed,
+                                                   latents, error)) {
+        std::cerr << "[diffusion] " << error << "\n";
+        return video_to_image(result, config_.video_height, config_.video_width);
+    }
 
     // Set up scheduler
     FlowMatchEulerState fm_scheduler;
-    DDIMState ddim_scheduler;
+    DPMSolverMultistepState ddim_scheduler;
     std::vector<float> step_timesteps;
     if (plan.use_ddim) {
-        ddim_scheduler.num_train_timesteps = 1000;
         ddim_scheduler.set_timesteps(plan.num_inference_steps);
         step_timesteps = ddim_scheduler.timesteps;
     } else {

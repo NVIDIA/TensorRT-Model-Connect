@@ -1,33 +1,40 @@
 {
   "name": "wan21-t2v-1.3b",
-  "trace_id": "IT-E2E-WAN21-01",
   "hf_id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
   "bundle": "wan21-t2v-1.3b.trtfb",
-  "model_type": "wan_t2v",
   "family": "wan_t2v",
   "runtime_strategy": "diffusion_wan",
   "task_strategy": "diffusion_media_generation",
-  "reference_family": "diffusers_video_gen",
-  "user_contract": "diffusion_video",
-  "ci_tier": "nightly_only",
-  "l0_replacement": "wan21-t2v-1.3b-l0",
-  "l0_replacement_reason": "Wan2.1 scale stays nightly; wan21-t2v-1.3b-l0 keeps the Wan video path at 384x672, 5 frames, and 15 steps for PR L0.",
-  "description": "Wan2.1 Text-to-Video 1.3B (diffusers format)",
+  "precision": "fp16",
   "build_args": {
     "max_cache_length": 256
   },
-  "test_prompt": "A cat sitting on a beach watching the sunset",
-  "test_type": "diffusion",
-  "video_num_frames": 17,
-  "video_height": 480,
-  "video_width": 832,
-  "num_inference_steps": 30,
-  "skip_text_comparison": true,
-  "notes": "First diffusion model. Uses flow matching Euler scheduler with shift=3.0.",
-  "metadata": {
-    "contract_config": {
-      "use_diffusers": true,
-      "video_mode": true
+  "testcases": [
+    {
+      "name": "wan21-t2v-1.3b",
+      "trace_id": "IT-E2E-WAN21-01",
+      "model_type": "wan_t2v",
+      "reference_family": "diffusers_video_gen",
+      "user_contract": "diffusion_video",
+      "reference_precision": "fp32",
+      "ci_tier": "nightly_only",
+      "l0_replacement": "wan21-t2v-1.3b-l0",
+      "l0_replacement_reason": "Wan2.1 scale stays nightly; wan21-t2v-1.3b-l0 keeps the Wan video path at 384x672, 5 frames, and 15 steps for PR L0.",
+      "description": "Wan2.1 Text-to-Video 1.3B (diffusers format)",
+      "test_prompt": "A cat sitting on a beach watching the sunset",
+      "test_type": "diffusion",
+      "video_num_frames": 17,
+      "video_height": 480,
+      "video_width": 832,
+      "num_inference_steps": 30,
+      "skip_text_comparison": true,
+      "notes": "Runs the T5 encoder, Wan DiT, and VAE decoder in FP16 and preserves the original FP32 Diffusers video contract. Uses flow matching Euler scheduler with shift=3.0.",
+      "metadata": {
+        "contract_config": {
+          "use_diffusers": true,
+          "video_mode": true
+        }
+      }
     }
-  }
+  ]
 }

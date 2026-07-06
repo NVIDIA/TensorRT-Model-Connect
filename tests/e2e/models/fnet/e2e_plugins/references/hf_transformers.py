@@ -38,12 +38,13 @@ _PRECISION_TO_TORCH_DTYPE = {
 
 
 def _torch_dtype_for_case(case: E2ECase) -> str:
-    """Return a torch dtype expression string matching the manifest precision.
+    """Return the explicit reference dtype, falling back to DUT precision.
 
-    The reference runner injects this into subprocess scripts so the HF model
-    loads at the same precision as the TRT engine, keeping comparisons fair.
+    FP16 acceptance manifests set reference_precision=fp32 so changing the
+    engine precision does not also change the oracle.
     """
-    precision = case.metadata.get("precision", "fp32")
+    precision = case.metadata.get(
+        "reference_precision", case.metadata.get("precision", "fp32"))
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
 
 
@@ -482,6 +483,7 @@ class HfTransformersReference:
         output_path = str(Path(model_dir) / "hf_encoder.json")
 
         prompt = case.inputs.get("prompt", "Hello world")
+        max_length = case.inputs.get("max_cache_length", 256)
         trust_remote_code = case.metadata.get("trust_remote_code", False)
         hf_id = case.hf_id
         model_ref = _resolve_cached_model_ref(hf_id)
@@ -494,6 +496,7 @@ class HfTransformersReference:
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
             prompt = {prompt!r}
+            max_length = {max_length}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
 
@@ -504,7 +507,16 @@ class HfTransformersReference:
                 torch_dtype={torch_dtype_expr})
             model.eval()
 
-            inputs = tokenizer(prompt, return_tensors="pt")
+            # FNet mixes the sequence axis with a DFT and does not consume an
+            # attention mask. Match the fixed TensorRT sequence dimension so
+            # both sides transform the same padded input.
+            inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                padding="max_length",
+                truncation=True,
+                max_length=max_length,
+            )
             with torch.no_grad():
                 outputs = model(**inputs)
 

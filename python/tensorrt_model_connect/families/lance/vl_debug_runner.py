@@ -805,8 +805,24 @@ class VisionTrtRunner:
         # Set input values
         for name, value in inputs.items():
             if name in self._host_buffers:
-                self._host_buffers[name][:] = value.astype(
-                    self._host_buffers[name].dtype)
+                host = self._host_buffers[name]
+                converted = value.astype(host.dtype)
+                if converted.shape != host.shape:
+                    if (
+                        converted.ndim == 3
+                        and host.ndim == 3
+                        and converted.shape[1:] == host.shape[1:]
+                        and host.shape[0] % converted.shape[0] == 0
+                    ):
+                        converted = np.tile(
+                            converted,
+                            (host.shape[0] // converted.shape[0], 1, 1),
+                        )
+                    else:
+                        raise ValueError(
+                            f"vision input {name!r} has shape {converted.shape}; "
+                            f"engine expects {host.shape}")
+                host[:] = converted
 
         # Copy inputs to device
         for i in range(self.engine.num_io_tensors):

@@ -1,18 +1,12 @@
 {
   "name": "distilbert-base-uncased-tp4",
-  "trace_id": "IT-E2E-DBERT-TP4-01",
   "hf_id": "distilbert/distilbert-base-uncased",
   "bundle": "distilbert-base-uncased-tp4.trtfb",
   "family": "distilbert",
   "runtime_strategy": "distilbert_encoder_only",
   "task_strategy": "encoder_only_nlp",
-  "reference_family": "encoder_base_features",
-  "user_contract": "representation_parity",
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 512,
-  "prompt": "The capital of France is Paris.",
-  "max_new_tokens": 0,
   "trust_remote_code": false,
   "build_args": {
     "parallel": {
@@ -32,31 +26,42 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "distilbert-base-uncased-tp4",
+      "trace_id": "IT-E2E-DBERT-TP4-01",
+      "reference_family": "encoder_base_features",
+      "user_contract": "representation_parity",
+      "ci_tier": "multi_device",
+      "prompt": "The capital of France is Paris.",
+      "max_new_tokens": 0,
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "notes": "DistilBERT TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as distilbert-base-uncased.",
+      "metadata": {
+        "contract_config": {
+          "auto_class": "AutoModel"
+        }
+      }
     }
-  ],
-  "notes": "DistilBERT TP4 coverage. Uses the same checkpoint, prompt, cache length, and thresholds as distilbert-base-uncased.",
-  "metadata": {
-    "contract_config": {
-      "auto_class": "AutoModel"
-    }
-  }
+  ]
 }

@@ -1,20 +1,12 @@
 {
   "name": "nemotron-speech-streaming-en-0.6b-tp4",
-  "trace_id": "IT-E2E-NEMO-RNNT-TP4-01",
   "hf_id": "nvidia/nemotron-speech-streaming-en-0.6b",
   "bundle": "nemotron-speech-streaming-en-0.6b-tp4.trtfb",
   "family": "nemotron_speech_streaming",
   "runtime_strategy": "nemotron_speech_streaming_speech_to_text_rnnt",
   "task_strategy": "speech_to_text",
-  "reference_family": "asr_canary",
-  "user_contract": "exact_transcript",
-  "test_type": "transcription",
   "max_cache_length": 128,
-  "prompt": "test",
-  "max_new_tokens": 80,
   "trust_remote_code": false,
-  "test_input_audio": "data/Recording.wav",
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
     "parallel": {
@@ -34,25 +26,38 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "nemotron-speech-streaming-en-0.6b-tp4",
+      "trace_id": "IT-E2E-NEMO-RNNT-TP4-01",
+      "reference_family": "asr_canary",
+      "user_contract": "exact_transcript",
+      "test_type": "transcription",
+      "prompt": "test",
+      "max_new_tokens": 80,
+      "test_input_audio": "data/Recording.wav",
+      "ci_tier": "multi_device",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ]
     }
   ]
 }

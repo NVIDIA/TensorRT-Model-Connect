@@ -90,10 +90,10 @@ class PersonaPlexPlugin final : public IPipelinePlugin {
         int32_t temporal_kv_dim =
             decoder_cache_row_width(*temporal_loaded.module, temporal_kv_fallback);
 
-        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
+        DType temporal_cache_dtype = temporal_loaded.module->tensor_dtype("cache_k_0");
         std::unique_ptr<PersonaplexInferenceState> temporal_state =
             std::make_unique<PersonaplexKvCache>(ctx.config.num_layers, ctx.config.max_cache_length,
-                                                 temporal_kv_dim, stream, cache_dtype);
+                                                 temporal_kv_dim, stream, temporal_cache_dtype);
         if (!temporal_state->ok())
             throw std::runtime_error(
                 "SpeechPipeline: failed to create temporal PersonaplexKvCache");
@@ -102,10 +102,13 @@ class PersonaPlexPlugin final : public IPipelinePlugin {
 
         const auto depth_cfg = make_depth_engine_config(ctx.config_json, ctx.config);
         int32_t depth_kv_dim = compute_kv_dim_kv_heads(depth_cfg, depth_cfg.hidden_size);
+        DType depth_cache_dtype = depth_engines.empty()
+                                      ? cache_dtype_from_precision(ctx.config.precision)
+                                      : depth_engines.front()->tensor_dtype("cache_k_0");
 
         std::unique_ptr<PersonaplexInferenceState> depth_state =
             std::make_unique<PersonaplexKvCache>(depth_cfg.num_layers, depth_cfg.max_cache_length,
-                                                 depth_kv_dim, stream, cache_dtype);
+                                                 depth_kv_dim, stream, depth_cache_dtype);
         if (!depth_state->ok())
             throw std::runtime_error("SpeechPipeline: failed to create depth PersonaplexKvCache");
 

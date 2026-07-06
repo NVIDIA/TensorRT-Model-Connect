@@ -1,15 +1,22 @@
 {
   "name": "bge-small-en-v1.5",
-  "trace_id": "IT-E2E-BGE-01",
   "hf_id": "BAAI/bge-small-en-v1.5",
   "bundle": "bge-small-en-v1.5.trtfb",
   "family": "bert",
   "runtime_strategy": "bert_encoder_only",
   "task_strategy": "encoder_only_nlp",
-  "reference_family": "bge_retrieval_embed",
-  "user_contract": "embedding_vector",
+  "precision": "fp16",
   "max_cache_length": 512,
-  "prompt": "The capital of France is Paris.",
-  "max_new_tokens": 0,
-  "trust_remote_code": false
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "bge-small-en-v1.5",
+      "trace_id": "IT-E2E-BGE-01",
+      "reference_precision": "fp32",
+      "reference_family": "bge_retrieval_embed",
+      "user_contract": "embedding_vector",
+      "prompt": "The capital of France is Paris.",
+      "max_new_tokens": 0
+    }
+  ]
 }

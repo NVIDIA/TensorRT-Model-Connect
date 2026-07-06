@@ -26,7 +26,9 @@ CMAKE_ROOT = REPO_ROOT / "CMakeLists.txt"
 CONFIG_SCHEMA_CMAKE = REPO_ROOT / "cmake" / "trtmc_config_schemas.cmake"
 SHARED_CONFIG_SCHEMAS = REPO_ROOT / "src" / "runtime" / "config" / "schemas"
 SHARED_CONFIG_SCHEMA_INCLUDES = REPO_ROOT / "include" / "trtmc" / "config" / "schemas"
-PY_RUNTIME_CONFIG_SCHEMAS = REPO_ROOT / "python" / "tensorrt_model_connect" / "runtime_config" / "schemas"
+PY_RUNTIME_CONFIG_SCHEMAS = (
+    REPO_ROOT / "python" / "tensorrt_model_connect" / "runtime_config" / "schemas"
+)
 BUNDLE_WRITER = REPO_ROOT / "python" / "tensorrt_model_connect" / "bundle_writer.py"
 CONFIG_PY = REPO_ROOT / "python" / "tensorrt_model_connect" / "config.py"
 CHECKPOINT_MAPPER = REPO_ROOT / "python" / "tensorrt_model_connect" / "checkpoint_mapper.py"
@@ -40,9 +42,7 @@ REMOVED_ROOT_GRAPH_HELPERS = (
 )
 QUANTIZATION = REPO_ROOT / "python" / "tensorrt_model_connect" / "quantization"
 DEBUG_RUNNER_TEST = REPO_ROOT / "tests" / "builder" / "test_debug_runner.py"
-DEBUG_RUNNER_EXTENDED_TEST = (
-    REPO_ROOT / "tests" / "builder" / "test_debug_runner_extended.py"
-)
+DEBUG_RUNNER_EXTENDED_TEST = REPO_ROOT / "tests" / "builder" / "test_debug_runner_extended.py"
 SHARED_MANIFEST_VALIDATION_TEST = REPO_ROOT / "tests" / "builder" / "test_manifest_validation.py"
 FP8_CALIBRATE = REPO_ROOT / "python" / "tensorrt_model_connect" / "fp8_calibrate.py"
 SHARED_GENERIC_HELPER_FILES = (
@@ -54,8 +54,16 @@ SHARED_GENERIC_HELPER_FILES = (
 REMOVED_SHARED_BUILDER_FILES = (
     REPO_ROOT / "python" / "tensorrt_model_connect" / "builders" / "__init__.py",
     REPO_ROOT / "python" / "tensorrt_model_connect" / "builders" / "default_decoder.py",
-    REPO_ROOT / "python" / "tensorrt_model_connect" / "builders" / "default_dual_profile_decoder.py",
-    REPO_ROOT / "python" / "tensorrt_model_connect" / "builders" / "default_dual_profile_decoder_tp.py",
+    REPO_ROOT
+    / "python"
+    / "tensorrt_model_connect"
+    / "builders"
+    / "default_dual_profile_decoder.py",
+    REPO_ROOT
+    / "python"
+    / "tensorrt_model_connect"
+    / "builders"
+    / "default_dual_profile_decoder_tp.py",
     REPO_ROOT / "python" / "tensorrt_model_connect" / "builders" / "utils.py",
 )
 CHAT_TEMPLATE_CORE_FILES = (
@@ -109,9 +117,7 @@ SPEECH_TO_TEXT_RUNTIME_STRATEGIES = {
     "whisper": "whisper_speech_to_text",
     "canary": "canary_speech_to_text",
 }
-NEMOTRON_SPEECH_STREAMING_RUNTIME_STRATEGY = (
-    "nemotron_speech_streaming_speech_to_text_rnnt"
-)
+NEMOTRON_SPEECH_STREAMING_RUNTIME_STRATEGY = "nemotron_speech_streaming_speech_to_text_rnnt"
 PERSONAPLEX_RUNTIME_STRATEGY = "personaplex_speech_to_speech"
 QWEN3_OMNI_RUNTIME_STRATEGY = "qwen3_omni_multimodal"
 PIPELINE_FACTORY = REPO_ROOT / "src" / "runtime" / "registry" / "pipeline_factory.cpp"
@@ -153,8 +159,12 @@ E2E_SHARED_AUDIO_FILES = (
     REPO_ROOT / "tests" / "e2e_harness" / "references" / "torch_reference.py",
     REPO_ROOT / "tests" / "e2e_harness" / "references" / "nemo_reference.py",
 )
-E2E_SHARED_HF_TRANSFORMERS = REPO_ROOT / "tests" / "e2e_harness" / "references" / "hf_transformers.py"
-E2E_SHARED_TORCH_REFERENCE = REPO_ROOT / "tests" / "e2e_harness" / "references" / "torch_reference.py"
+E2E_SHARED_HF_TRANSFORMERS = (
+    REPO_ROOT / "tests" / "e2e_harness" / "references" / "hf_transformers.py"
+)
+E2E_SHARED_TORCH_REFERENCE = (
+    REPO_ROOT / "tests" / "e2e_harness" / "references" / "torch_reference.py"
+)
 E2E_SHARED_CONTRACT_PLUGINS = REPO_ROOT / "tests" / "e2e_harness" / "plugins"
 PERSONAPLEX_E2E_MANIFESTS = (
     E2E_MODELS / "personaplex" / "manifests" / "personaplex-7b.json",
@@ -165,9 +175,7 @@ E2E_SHARED_SEGMENTATION_CONTRACT_FILES = (
     E2E_CONTRACTS,
     E2E_SHARED_CONTRACT_PLUGINS / "segmentation.py",
 )
-E2E_SHARED_PROMPTED_SEGMENTATION_REFERENCE_FILES = (
-    E2E_SHARED_HF_TRANSFORMERS,
-)
+E2E_SHARED_PROMPTED_SEGMENTATION_REFERENCE_FILES = (E2E_SHARED_HF_TRANSFORMERS,)
 E2E_SHARED_PROMPTED_SEGMENTATION_RUNTIME_FILES = (
     E2E_ORCHESTRATOR,
     REPO_ROOT / "tests" / "e2e_harness" / "runners" / "segmentation.py",
@@ -242,27 +250,17 @@ ROOT_MODEL_SCRIPT_WRAPPERS = {
     REPO_ROOT / "scripts" / "magpie_tokenizer.py": (
         FAMILIES / "magpie_tts" / "magpie_tokenizer.py"
     ),
-    REPO_ROOT / "scripts" / "magpie_codec_bridge.py": (
-        FAMILIES / "magpie_tts" / "codec_bridge.py"
-    ),
-    REPO_ROOT / "scripts" / "profile_magpie_tts.py": (
-        FAMILIES / "magpie_tts" / "profile.py"
-    ),
-    REPO_ROOT / "scripts" / "prepare_lance_model.py": (
-        FAMILIES / "lance" / "prepare_model.py"
-    ),
+    REPO_ROOT / "scripts" / "magpie_codec_bridge.py": (FAMILIES / "magpie_tts" / "codec_bridge.py"),
+    REPO_ROOT / "scripts" / "profile_magpie_tts.py": (FAMILIES / "magpie_tts" / "profile.py"),
+    REPO_ROOT / "scripts" / "prepare_lance_model.py": (FAMILIES / "lance" / "prepare_model.py"),
     REPO_ROOT / "scripts" / "_build_fp8_onnx_monolithic.py": (
         FAMILIES / "flux" / "build_fp8_onnx_monolithic.py"
     ),
     REPO_ROOT / "scripts" / "_inject_fp8_qdq_proto.py": (
         FAMILIES / "flux" / "inject_fp8_qdq_proto.py"
     ),
-    REPO_ROOT / "scripts" / "_mk_fp8_bf16_bundle.py": (
-        FAMILIES / "flux" / "mk_fp8_bf16_bundle.py"
-    ),
-    REPO_ROOT / "tools" / "diff_personaplex.py": (
-        FAMILIES / "personaplex" / "diff_personaplex.py"
-    ),
+    REPO_ROOT / "scripts" / "_mk_fp8_bf16_bundle.py": (FAMILIES / "flux" / "mk_fp8_bf16_bundle.py"),
+    REPO_ROOT / "tools" / "diff_personaplex.py": (FAMILIES / "personaplex" / "diff_personaplex.py"),
 }
 MODEL_OWNED_BUILDER_TESTS = {
     REPO_ROOT / "tests" / "builder" / "test_engine_qwen.py": (
@@ -293,14 +291,10 @@ MODEL_OWNED_BUILDER_TESTS = {
         E2E_MODELS / "magpie_tts" / "test_magpie_tts_builder_tp.py"
     ),
     REPO_ROOT / "tests" / "builder" / "test_engine_nemotron_speech_streaming.py": (
-        E2E_MODELS
-        / "nemotron_speech_streaming"
-        / "test_nemotron_speech_streaming_builder.py"
+        E2E_MODELS / "nemotron_speech_streaming" / "test_nemotron_speech_streaming_builder.py"
     ),
     REPO_ROOT / "tests" / "builder" / "test_engine_nemotron_speech_streaming_tp.py": (
-        E2E_MODELS
-        / "nemotron_speech_streaming"
-        / "test_nemotron_speech_streaming_builder_tp.py"
+        E2E_MODELS / "nemotron_speech_streaming" / "test_nemotron_speech_streaming_builder_tp.py"
     ),
     REPO_ROOT / "tests" / "builder" / "test_family_qwen_moe.py": (
         E2E_MODELS / "qwen_moe" / "test_qwen_moe_family_plugin.py"
@@ -331,126 +325,284 @@ MODEL_OWNED_BUILDER_TESTS = {
         E2E_MODELS / "z_image" / "test_z_image_family_plugin.py"
     ),
 }
-MODEL_OWNED_BUILDER_TESTS.update({
-    REPO_ROOT / "tests" / "builder" / "test_engine_internvl_tp.py": E2E_MODELS / "internvl" / "test_internvl_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_xlnet_tp.py": E2E_MODELS / "xlnet" / "test_xlnet_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_t5_tp.py": E2E_MODELS / "t5" / "test_t5_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_segformer_tp.py": E2E_MODELS / "segformer" / "test_segformer_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_sam_tp.py": E2E_MODELS / "sam" / "test_sam_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_rwkv_tp.py": E2E_MODELS / "rwkv" / "test_rwkv_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_roberta_tp.py": E2E_MODELS / "roberta" / "test_roberta_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_phi_moe_tp.py": E2E_MODELS / "phi_moe" / "test_phi_moe_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_personaplex_tp.py": E2E_MODELS / "personaplex" / "test_personaplex_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_opt_tp.py": E2E_MODELS / "opt" / "test_opt_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_olmo_tp.py": E2E_MODELS / "olmo" / "test_olmo_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_olmo2_tp.py": E2E_MODELS / "olmo2" / "test_olmo2_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_mpnet_tp.py": E2E_MODELS / "mpnet" / "test_mpnet_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_modernbert_tp.py": E2E_MODELS / "modernbert" / "test_modernbert_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_mixtral_tp.py": E2E_MODELS / "mixtral" / "test_mixtral_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_marian_tp.py": E2E_MODELS / "marian" / "test_marian_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_mamba_tp.py": E2E_MODELS / "mamba" / "test_mamba_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_granite_tp.py": E2E_MODELS / "granite" / "test_granite_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_gpt_oss_tp.py": E2E_MODELS / "gpt_oss" / "test_gpt_oss_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_gemma_tp.py": E2E_MODELS / "gemma" / "test_gemma_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_fnet_tp.py": E2E_MODELS / "fnet" / "test_fnet_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_falcon_tp.py": E2E_MODELS / "falcon" / "test_falcon_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_electra_tp.py": E2E_MODELS / "electra" / "test_electra_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_eagle_vlm_tp.py": E2E_MODELS / "eagle_vlm" / "test_eagle_vlm_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_dpr_tp.py": E2E_MODELS / "dpr" / "test_dpr_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_distilbert_tp.py": E2E_MODELS / "distilbert" / "test_distilbert_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_deepseek_v2_tp.py": E2E_MODELS / "deepseek_v2" / "test_deepseek_v2_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_deepseek_ocr_tp.py": E2E_MODELS / "deepseek_ocr" / "test_deepseek_ocr_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_deberta_tp.py": E2E_MODELS / "deberta" / "test_deberta_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_convbert_tp.py": E2E_MODELS / "convbert" / "test_convbert_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_bloom_tp.py": E2E_MODELS / "bloom" / "test_bloom_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_bert_tp.py": E2E_MODELS / "bert" / "test_bert_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_bart_tp.py": E2E_MODELS / "bart" / "test_bart_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_albert_tp.py": E2E_MODELS / "albert" / "test_albert_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_xglm.py": E2E_MODELS / "xglm" / "test_xglm_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_whisper.py": E2E_MODELS / "whisper" / "test_whisper_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_starcoder2.py": E2E_MODELS / "starcoder2" / "test_starcoder2_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_stablelm.py": E2E_MODELS / "stablelm" / "test_stablelm_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_segformer.py": E2E_MODELS / "segformer" / "test_segformer_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_rwkv.py": E2E_MODELS / "rwkv" / "test_rwkv_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_phi_moe.py": E2E_MODELS / "phi_moe" / "test_phi_moe_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_phi.py": E2E_MODELS / "phi" / "test_phi_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_opt.py": E2E_MODELS / "opt" / "test_opt_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_olmo.py": E2E_MODELS / "olmo" / "test_olmo_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_nemotron.py": E2E_MODELS / "nemotron" / "test_nemotron_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_mixtral.py": E2E_MODELS / "mixtral" / "test_mixtral_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_mistral.py": E2E_MODELS / "mistral" / "test_mistral_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_mamba.py": E2E_MODELS / "mamba" / "test_mamba_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_llama.py": E2E_MODELS / "llama" / "test_llama_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_internlm.py": E2E_MODELS / "internlm" / "test_internlm_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_granite.py": E2E_MODELS / "granite" / "test_granite_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_gpt_neox.py": E2E_MODELS / "gpt_neox" / "test_gpt_neox_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_gpt_neo.py": E2E_MODELS / "gpt_neo" / "test_gpt_neo_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_gpt2.py": E2E_MODELS / "gpt2" / "test_gpt2_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_gemma.py": E2E_MODELS / "gemma" / "test_gemma_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_falcon.py": E2E_MODELS / "falcon" / "test_falcon_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_codegen.py": E2E_MODELS / "codegen" / "test_codegen_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_bloom.py": E2E_MODELS / "bloom" / "test_bloom_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_engine_bark.py": E2E_MODELS / "bark" / "test_bark_builder_engine.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_marian_debug_runner.py": E2E_MODELS / "marian" / "test_marian_debug_runner.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_sam3.py": E2E_MODELS / "sam3" / "test_sam3_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_timm_vit.py": E2E_MODELS / "timm_vit" / "test_timm_vit_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_nemotron_h_tp.py": E2E_MODELS / "nemotron_h" / "test_nemotron_h_builder_tp.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_yolox.py": E2E_MODELS / "yolox" / "test_yolox_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_wan_t2v.py": E2E_MODELS / "wan_t2v" / "test_wan_t2v_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_sam.py": E2E_MODELS / "sam" / "test_sam_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_roberta.py": E2E_MODELS / "roberta" / "test_roberta_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_pixart.py": E2E_MODELS / "pixart" / "test_pixart_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_phi4mm.py": E2E_MODELS / "phi4_multimodal" / "test_phi4_multimodal_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_nemotron_h.py": E2E_MODELS / "nemotron_h" / "test_nemotron_h_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_mpnet.py": E2E_MODELS / "mpnet" / "test_mpnet_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_ltx_video.py": E2E_MODELS / "ltx_video" / "test_ltx_video_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_gpt_oss.py": E2E_MODELS / "gpt_oss" / "test_gpt_oss_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_glm.py": E2E_MODELS / "glm" / "test_glm_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_distilbert.py": E2E_MODELS / "distilbert" / "test_distilbert_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_deepseek_v2.py": E2E_MODELS / "deepseek_v2" / "test_deepseek_v2_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_bert.py": E2E_MODELS / "bert" / "test_bert_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_family_elf.py": E2E_MODELS / "elf_flow" / "test_elf_flow_family_plugin.py",
-    REPO_ROOT / "tests" / "builder" / "test_build_engine_std_decoders.py": (
-        E2E_MODELS / "gpt2" / "test_gpt2_build_engine_integration.py",
-        E2E_MODELS / "gpt_neo" / "test_gpt_neo_build_engine_integration.py",
-        E2E_MODELS / "gpt_neox" / "test_gpt_neox_build_engine_integration.py",
-        E2E_MODELS / "internlm" / "test_internlm_build_engine_integration.py",
-        E2E_MODELS / "codegen" / "test_codegen_build_engine_integration.py",
-    ),
-    REPO_ROOT / "tests" / "builder" / "test_build_engine_decoders.py": (
-        E2E_MODELS / "t5" / "test_t5_build_engine_integration.py",
-        E2E_MODELS / "convbert" / "test_convbert_build_engine_integration.py",
-        E2E_MODELS / "dpr" / "test_dpr_build_engine_integration.py",
-        E2E_MODELS / "distilbert" / "test_distilbert_build_engine_integration.py",
-    ),
-    REPO_ROOT / "tests" / "builder" / "test_build_engine_enc_dec.py": (
-        E2E_MODELS / "bart" / "test_bart_build_engine_integration.py",
-        E2E_MODELS / "m2m_100" / "test_m2m_100_build_engine_integration.py",
-    ),
-    REPO_ROOT / "tests" / "builder" / "test_build_engine_integration.py": (
-        E2E_MODELS / "olmo2" / "test_olmo2_build_engine_integration.py",
-        E2E_MODELS / "modernbert" / "test_modernbert_build_engine_integration.py",
-        E2E_MODELS / "deberta" / "test_deberta_build_engine_integration.py",
-        E2E_MODELS / "electra" / "test_electra_build_engine_integration.py",
-        E2E_MODELS / "fnet" / "test_fnet_build_engine_integration.py",
-        E2E_MODELS / "albert" / "test_albert_build_engine_integration.py",
-        E2E_MODELS / "xlnet" / "test_xlnet_build_engine_integration.py",
-    ),
-    REPO_ROOT / "tests" / "builder" / "test_engine_gpt_tp.py": (
-        E2E_MODELS / "gpt2" / "test_gpt2_builder_tp_dispatch.py",
-        E2E_MODELS / "gpt_neo" / "test_gpt_neo_builder_tp_dispatch.py",
-        E2E_MODELS / "gpt_neox" / "test_gpt_neox_builder_tp_dispatch.py",
-    ),
-    REPO_ROOT / "tests" / "builder" / "test_engine_decoder_family_tp.py": (
-        E2E_MODELS / "codegen" / "test_codegen_builder_tp.py",
-        E2E_MODELS / "glm" / "test_glm_builder_tp.py",
-        E2E_MODELS / "internlm" / "test_internlm_builder_tp.py",
-        E2E_MODELS / "phi" / "test_phi_builder_tp.py",
-        E2E_MODELS / "stablelm" / "test_stablelm_builder_tp.py",
-        E2E_MODELS / "starcoder2" / "test_starcoder2_builder_tp.py",
-        E2E_MODELS / "xglm" / "test_xglm_builder_tp.py",
-    ),
-})
+MODEL_OWNED_BUILDER_TESTS.update(
+    {
+        REPO_ROOT / "tests" / "builder" / "test_engine_internvl_tp.py": E2E_MODELS
+        / "internvl"
+        / "test_internvl_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_xlnet_tp.py": E2E_MODELS
+        / "xlnet"
+        / "test_xlnet_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_t5_tp.py": E2E_MODELS
+        / "t5"
+        / "test_t5_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_segformer_tp.py": E2E_MODELS
+        / "segformer"
+        / "test_segformer_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_sam_tp.py": E2E_MODELS
+        / "sam"
+        / "test_sam_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_rwkv_tp.py": E2E_MODELS
+        / "rwkv"
+        / "test_rwkv_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_roberta_tp.py": E2E_MODELS
+        / "roberta"
+        / "test_roberta_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_phi_moe_tp.py": E2E_MODELS
+        / "phi_moe"
+        / "test_phi_moe_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_personaplex_tp.py": E2E_MODELS
+        / "personaplex"
+        / "test_personaplex_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_opt_tp.py": E2E_MODELS
+        / "opt"
+        / "test_opt_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_olmo_tp.py": E2E_MODELS
+        / "olmo"
+        / "test_olmo_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_olmo2_tp.py": E2E_MODELS
+        / "olmo2"
+        / "test_olmo2_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_mpnet_tp.py": E2E_MODELS
+        / "mpnet"
+        / "test_mpnet_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_modernbert_tp.py": E2E_MODELS
+        / "modernbert"
+        / "test_modernbert_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_mixtral_tp.py": E2E_MODELS
+        / "mixtral"
+        / "test_mixtral_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_marian_tp.py": E2E_MODELS
+        / "marian"
+        / "test_marian_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_mamba_tp.py": E2E_MODELS
+        / "mamba"
+        / "test_mamba_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_granite_tp.py": E2E_MODELS
+        / "granite"
+        / "test_granite_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_gpt_oss_tp.py": E2E_MODELS
+        / "gpt_oss"
+        / "test_gpt_oss_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_gemma_tp.py": E2E_MODELS
+        / "gemma"
+        / "test_gemma_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_fnet_tp.py": E2E_MODELS
+        / "fnet"
+        / "test_fnet_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_falcon_tp.py": E2E_MODELS
+        / "falcon"
+        / "test_falcon_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_electra_tp.py": E2E_MODELS
+        / "electra"
+        / "test_electra_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_eagle_vlm_tp.py": E2E_MODELS
+        / "eagle_vlm"
+        / "test_eagle_vlm_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_dpr_tp.py": E2E_MODELS
+        / "dpr"
+        / "test_dpr_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_distilbert_tp.py": E2E_MODELS
+        / "distilbert"
+        / "test_distilbert_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_deepseek_v2_tp.py": E2E_MODELS
+        / "deepseek_v2"
+        / "test_deepseek_v2_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_deepseek_ocr_tp.py": E2E_MODELS
+        / "deepseek_ocr"
+        / "test_deepseek_ocr_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_deberta_tp.py": E2E_MODELS
+        / "deberta"
+        / "test_deberta_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_convbert_tp.py": E2E_MODELS
+        / "convbert"
+        / "test_convbert_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_bloom_tp.py": E2E_MODELS
+        / "bloom"
+        / "test_bloom_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_bert_tp.py": E2E_MODELS
+        / "bert"
+        / "test_bert_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_bart_tp.py": E2E_MODELS
+        / "bart"
+        / "test_bart_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_albert_tp.py": E2E_MODELS
+        / "albert"
+        / "test_albert_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_xglm.py": E2E_MODELS
+        / "xglm"
+        / "test_xglm_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_whisper.py": E2E_MODELS
+        / "whisper"
+        / "test_whisper_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_starcoder2.py": E2E_MODELS
+        / "starcoder2"
+        / "test_starcoder2_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_stablelm.py": E2E_MODELS
+        / "stablelm"
+        / "test_stablelm_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_segformer.py": E2E_MODELS
+        / "segformer"
+        / "test_segformer_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_rwkv.py": E2E_MODELS
+        / "rwkv"
+        / "test_rwkv_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_phi_moe.py": E2E_MODELS
+        / "phi_moe"
+        / "test_phi_moe_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_phi.py": E2E_MODELS
+        / "phi"
+        / "test_phi_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_opt.py": E2E_MODELS
+        / "opt"
+        / "test_opt_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_olmo.py": E2E_MODELS
+        / "olmo"
+        / "test_olmo_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_nemotron.py": E2E_MODELS
+        / "nemotron"
+        / "test_nemotron_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_mixtral.py": E2E_MODELS
+        / "mixtral"
+        / "test_mixtral_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_mistral.py": E2E_MODELS
+        / "mistral"
+        / "test_mistral_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_mamba.py": E2E_MODELS
+        / "mamba"
+        / "test_mamba_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_llama.py": E2E_MODELS
+        / "llama"
+        / "test_llama_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_internlm.py": E2E_MODELS
+        / "internlm"
+        / "test_internlm_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_granite.py": E2E_MODELS
+        / "granite"
+        / "test_granite_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_gpt_neox.py": E2E_MODELS
+        / "gpt_neox"
+        / "test_gpt_neox_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_gpt_neo.py": E2E_MODELS
+        / "gpt_neo"
+        / "test_gpt_neo_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_gpt2.py": E2E_MODELS
+        / "gpt2"
+        / "test_gpt2_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_gemma.py": E2E_MODELS
+        / "gemma"
+        / "test_gemma_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_falcon.py": E2E_MODELS
+        / "falcon"
+        / "test_falcon_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_codegen.py": E2E_MODELS
+        / "codegen"
+        / "test_codegen_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_bloom.py": E2E_MODELS
+        / "bloom"
+        / "test_bloom_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_engine_bark.py": E2E_MODELS
+        / "bark"
+        / "test_bark_builder_engine.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_marian_debug_runner.py": E2E_MODELS
+        / "marian"
+        / "test_marian_debug_runner.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_sam3.py": E2E_MODELS
+        / "sam3"
+        / "test_sam3_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_timm_vit.py": E2E_MODELS
+        / "timm_vit"
+        / "test_timm_vit_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_nemotron_h_tp.py": E2E_MODELS
+        / "nemotron_h"
+        / "test_nemotron_h_builder_tp.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_yolox.py": E2E_MODELS
+        / "yolox"
+        / "test_yolox_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_wan_t2v.py": E2E_MODELS
+        / "wan_t2v"
+        / "test_wan_t2v_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_sam.py": E2E_MODELS
+        / "sam"
+        / "test_sam_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_roberta.py": E2E_MODELS
+        / "roberta"
+        / "test_roberta_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_pixart.py": E2E_MODELS
+        / "pixart"
+        / "test_pixart_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_phi4mm.py": E2E_MODELS
+        / "phi4_multimodal"
+        / "test_phi4_multimodal_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_nemotron_h.py": E2E_MODELS
+        / "nemotron_h"
+        / "test_nemotron_h_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_mpnet.py": E2E_MODELS
+        / "mpnet"
+        / "test_mpnet_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_ltx_video.py": E2E_MODELS
+        / "ltx_video"
+        / "test_ltx_video_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_gpt_oss.py": E2E_MODELS
+        / "gpt_oss"
+        / "test_gpt_oss_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_glm.py": E2E_MODELS
+        / "glm"
+        / "test_glm_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_distilbert.py": E2E_MODELS
+        / "distilbert"
+        / "test_distilbert_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_deepseek_v2.py": E2E_MODELS
+        / "deepseek_v2"
+        / "test_deepseek_v2_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_bert.py": E2E_MODELS
+        / "bert"
+        / "test_bert_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_family_elf.py": E2E_MODELS
+        / "elf_flow"
+        / "test_elf_flow_family_plugin.py",
+        REPO_ROOT / "tests" / "builder" / "test_build_engine_std_decoders.py": (
+            E2E_MODELS / "gpt2" / "test_gpt2_build_engine_integration.py",
+            E2E_MODELS / "gpt_neo" / "test_gpt_neo_build_engine_integration.py",
+            E2E_MODELS / "gpt_neox" / "test_gpt_neox_build_engine_integration.py",
+            E2E_MODELS / "internlm" / "test_internlm_build_engine_integration.py",
+            E2E_MODELS / "codegen" / "test_codegen_build_engine_integration.py",
+        ),
+        REPO_ROOT / "tests" / "builder" / "test_build_engine_decoders.py": (
+            E2E_MODELS / "t5" / "test_t5_build_engine_integration.py",
+            E2E_MODELS / "convbert" / "test_convbert_build_engine_integration.py",
+            E2E_MODELS / "dpr" / "test_dpr_build_engine_integration.py",
+            E2E_MODELS / "distilbert" / "test_distilbert_build_engine_integration.py",
+        ),
+        REPO_ROOT / "tests" / "builder" / "test_build_engine_enc_dec.py": (
+            E2E_MODELS / "bart" / "test_bart_build_engine_integration.py",
+            E2E_MODELS / "m2m_100" / "test_m2m_100_build_engine_integration.py",
+        ),
+        REPO_ROOT / "tests" / "builder" / "test_build_engine_integration.py": (
+            E2E_MODELS / "olmo2" / "test_olmo2_build_engine_integration.py",
+            E2E_MODELS / "modernbert" / "test_modernbert_build_engine_integration.py",
+            E2E_MODELS / "deberta" / "test_deberta_build_engine_integration.py",
+            E2E_MODELS / "electra" / "test_electra_build_engine_integration.py",
+            E2E_MODELS / "fnet" / "test_fnet_build_engine_integration.py",
+            E2E_MODELS / "albert" / "test_albert_build_engine_integration.py",
+            E2E_MODELS / "xlnet" / "test_xlnet_build_engine_integration.py",
+        ),
+        REPO_ROOT / "tests" / "builder" / "test_engine_gpt_tp.py": (
+            E2E_MODELS / "gpt2" / "test_gpt2_builder_tp_dispatch.py",
+            E2E_MODELS / "gpt_neo" / "test_gpt_neo_builder_tp_dispatch.py",
+            E2E_MODELS / "gpt_neox" / "test_gpt_neox_builder_tp_dispatch.py",
+        ),
+        REPO_ROOT / "tests" / "builder" / "test_engine_decoder_family_tp.py": (
+            E2E_MODELS / "codegen" / "test_codegen_builder_tp.py",
+            E2E_MODELS / "glm" / "test_glm_builder_tp.py",
+            E2E_MODELS / "internlm" / "test_internlm_builder_tp.py",
+            E2E_MODELS / "phi" / "test_phi_builder_tp.py",
+            E2E_MODELS / "stablelm" / "test_stablelm_builder_tp.py",
+            E2E_MODELS / "starcoder2" / "test_starcoder2_builder_tp.py",
+            E2E_MODELS / "xglm" / "test_xglm_builder_tp.py",
+        ),
+    }
+)
 SHARED_PLUGIN_WEIGHT_TEST_FILES = (
     REPO_ROOT / "tests" / "builder" / "test_family_plugins.py",
     REPO_ROOT / "tests" / "builder" / "test_family_plugins_extended.py",
@@ -500,9 +652,7 @@ MODEL_OWNED_PLUGIN_WEIGHT_TESTS = {
     "TestM2M100Plugin": E2E_MODELS / "m2m_100" / "test_m2m_100_family_plugin_weights.py",
     "TestMarianPlugin": E2E_MODELS / "marian" / "test_marian_family_plugin_weights.py",
     "TestOlmoPlugin": E2E_MODELS / "olmo" / "test_olmo_family_plugin_weights.py",
-    "TestStablelmPlugin": (
-        E2E_MODELS / "stablelm" / "test_stablelm_family_plugin_weights.py"
-    ),
+    "TestStablelmPlugin": (E2E_MODELS / "stablelm" / "test_stablelm_family_plugin_weights.py"),
     "TestStarcoder2Plugin": (
         E2E_MODELS / "starcoder2" / "test_starcoder2_family_plugin_weights.py"
     ),
@@ -515,9 +665,7 @@ MODEL_OWNED_REGISTRY_CONTRACT_TESTS = {
     "gpt_oss": E2E_MODELS / "gpt_oss" / "test_gpt_oss_registry_contract.py",
     "qwen_vl": E2E_MODELS / "qwen_vl" / "test_qwen_vl_registry_contract.py",
     "internvl": E2E_MODELS / "internvl" / "test_internvl_registry_contract.py",
-    "locateanything": (
-        E2E_MODELS / "locateanything" / "test_locateanything_registry_contract.py"
-    ),
+    "locateanything": (E2E_MODELS / "locateanything" / "test_locateanything_registry_contract.py"),
     "qwen3_omni": E2E_MODELS / "qwen3_omni" / "test_qwen3_omni_registry_contract.py",
     "personaplex": E2E_MODELS / "personaplex" / "test_personaplex_registry_contract.py",
     "nemotron_h": E2E_MODELS / "nemotron_h" / "test_nemotron_h_registry_contract.py",
@@ -540,7 +688,9 @@ MODEL_OWNED_REGISTRY_CONTRACT_TESTS = {
     "opt": E2E_MODELS / "opt" / "test_opt_registry_contract.py",
     "phi_moe": E2E_MODELS / "phi_moe" / "test_phi_moe_registry_contract.py",
 }
-SHARED_TIMM_VIT_TRT_PATH_TOOL = REPO_ROOT / "tools" / "validation" / "timm_vit" / "benchmark_trt_paths.py"
+SHARED_TIMM_VIT_TRT_PATH_TOOL = (
+    REPO_ROOT / "tools" / "validation" / "timm_vit" / "benchmark_trt_paths.py"
+)
 SHARED_RUNNER_PARITY_TOOL = REPO_ROOT / "tools" / "test_runner_parity.py"
 SHARED_PERF_COMPARE_TOOL = REPO_ROOT / "tools" / "perf_compare.py"
 SHARED_CPU_PROFILE_TOOL = REPO_ROOT / "tools" / "cpu_profile.py"
@@ -595,15 +745,9 @@ MODEL_OWNED_DIFF_VL_HANDLERS = (
     FAMILIES / "qwen_vl" / "diff_vl.py",
     FAMILIES / "locateanything" / "diff_vl.py",
 )
-MODEL_OWNED_DIFF_LOGITS_HANDLERS = (
-    FAMILIES / "whisper" / "diff_logits.py",
-)
-MODEL_OWNED_DIFF_AUDIO_HANDLERS = (
-    FAMILIES / "bark" / "diff_audio.py",
-)
-MODEL_OWNED_DIFF_T5_HANDLERS = (
-    FAMILIES / "wan_t2v" / "diff_t5.py",
-)
+MODEL_OWNED_DIFF_LOGITS_HANDLERS = (FAMILIES / "whisper" / "diff_logits.py",)
+MODEL_OWNED_DIFF_AUDIO_HANDLERS = (FAMILIES / "bark" / "diff_audio.py",)
+MODEL_OWNED_DIFF_T5_HANDLERS = (FAMILIES / "wan_t2v" / "diff_t5.py",)
 MODEL_OWNED_DEBUG_DIFFUSION_PIPELINE_HANDLERS = (
     FAMILIES / "wan_t2v" / "debug_diffusion_pipeline.py",
 )
@@ -628,9 +772,7 @@ CPP_TESTS = REPO_ROOT / "tests" / "cpp"
 _RUNTIME_INCLUDE_RE = re.compile(
     r'#\s*include\s+[<"](?P<path>[^">]*runtime/models/(?P<model>[^/]+)/[^">]+)[">]'
 )
-_FORBIDDEN_E2E_IMPORT_RE = re.compile(
-    r"tests\.e2e_harness\.(?:runners|comparators|references)"
-)
+_FORBIDDEN_E2E_IMPORT_RE = re.compile(r"tests\.e2e_harness\.(?:runners|comparators|references)")
 _FORBIDDEN_SHARED_BUILDER_MODULES = {
     "checkpoint_mapper",
     "config",
@@ -646,16 +788,13 @@ def _runtime_model_ids() -> set[str]:
 
 def _family_model_ids() -> set[str]:
     return {
-        path.name
-        for path in FAMILIES.iterdir()
-        if path.is_dir() and not path.name.startswith("__")
+        path.name for path in FAMILIES.iterdir() if path.is_dir() and not path.name.startswith("__")
     }
 
 
 def _format_violations(violations: list[tuple[Path, int, str]]) -> str:
     return "\n".join(
-        f"{path.relative_to(REPO_ROOT)}:{line}: {detail}"
-        for path, line, detail in violations
+        f"{path.relative_to(REPO_ROOT)}:{line}: {detail}" for path, line, detail in violations
     )
 
 
@@ -732,11 +871,13 @@ def test_shared_runtime_build_files_do_not_name_model_owned_sources() -> None:
         for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             match = literal_model_source_re.search(line)
             if match:
-                violations.append((
-                    path,
-                    line_no,
-                    f"shared CMake names model source folder {match.group(1)}",
-                ))
+                violations.append(
+                    (
+                        path,
+                        line_no,
+                        f"shared CMake names model source folder {match.group(1)}",
+                    )
+                )
 
     assert not violations, _format_violations(violations)
 
@@ -752,11 +893,13 @@ def test_model_config_schemas_are_model_owned() -> None:
     shared_schema_text = CONFIG_SCHEMA_CMAKE.read_text(encoding="utf-8")
     for needle in ("audio_bark", "audio_magpie", "bark", "magpie"):
         if needle in shared_schema_text:
-            violations.append((
-                CONFIG_SCHEMA_CMAKE,
-                0,
-                f"shared config schema manifest contains model-owned schema {needle}",
-            ))
+            violations.append(
+                (
+                    CONFIG_SCHEMA_CMAKE,
+                    0,
+                    f"shared config schema manifest contains model-owned schema {needle}",
+                )
+            )
 
     forbidden_paths = (
         SHARED_CONFIG_SCHEMAS / "audio_bark.cpp",
@@ -773,8 +916,8 @@ def test_model_config_schemas_are_model_owned() -> None:
     )
 
     expected_schema_owners = {
-        "bark": "runtime_config_schemas = [\"config_schema.cpp|register_audio_bark_schema\"]",
-        "magpie": "runtime_config_schemas = [\"config_schema.cpp|register_audio_magpie_schema\"]",
+        "bark": 'runtime_config_schemas = ["config_schema.cpp|register_audio_bark_schema"]',
+        "magpie": 'runtime_config_schemas = ["config_schema.cpp|register_audio_magpie_schema"]',
     }
     for model, manifest_line in expected_schema_owners.items():
         manifest = RUNTIME_MODELS / model / "MODEL.toml"
@@ -906,9 +1049,7 @@ def test_shared_cpp_tests_do_not_regress_known_model_owned_cases() -> None:
             "FLUX",
             "Z-Image",
         ),
-        "test_ipa_tokenizer.cpp": (
-            "MagpieTTS",
-        ),
+        "test_ipa_tokenizer.cpp": ("MagpieTTS",),
         "test_perception_preprocess_seams.cpp": (
             "SAM",
             "Sam",
@@ -1001,13 +1142,19 @@ def test_shared_chat_template_core_is_model_owned() -> None:
     cmake_text = CMAKE_ROOT.read_text(encoding="utf-8")
     for needle in ("src/runtime/core/chat_template.cpp", "trtmc_add_test(test_chat_template)"):
         if needle in cmake_text:
-            violations.append((CMAKE_ROOT, 0, f"shared chat template build reference remains: {needle}"))
+            violations.append(
+                (CMAKE_ROOT, 0, f"shared chat template build reference remains: {needle}")
+            )
 
     legacy_patterns = {
         "runtime/core/chat_template.h": re.compile(r"runtime/core/chat_template\.h"),
         "register_chat_template_format": re.compile(r"\bregister_chat_template_format\s*\("),
-        "detect_chat_template_format": re.compile(r"(?<![A-Za-z0-9_])detect_chat_template_format\s*\("),
-        "apply_chat_template": re.compile(r"(?<![A-Za-z0-9_])apply_chat_template\s*\([^,\n]+,[^,\n]+,"),
+        "detect_chat_template_format": re.compile(
+            r"(?<![A-Za-z0-9_])detect_chat_template_format\s*\("
+        ),
+        "apply_chat_template": re.compile(
+            r"(?<![A-Za-z0-9_])apply_chat_template\s*\([^,\n]+,[^,\n]+,"
+        ),
         "ChatTemplateFormat": re.compile(r"\bChatTemplateFormat\b"),
         "ChatTemplateApplyFn": re.compile(r"\bChatTemplateApplyFn\b"),
     }
@@ -1084,7 +1231,9 @@ def test_production_models_do_not_include_runtime_core_headers() -> None:
             continue
         text = path.read_text(encoding="utf-8")
         if include_pattern.search(text):
-            violations.append((path, 0, "production model source includes shared runtime/core header"))
+            violations.append(
+                (path, 0, "production model source includes shared runtime/core header")
+            )
 
     assert not violations, _format_violations(violations)
 
@@ -1445,7 +1594,9 @@ def test_inference_and_kv_cache_shared_artifacts_are_retired() -> None:
             stripped = _strip_cpp_comments(text)
             for pattern in forbidden_shared_symbols:
                 if pattern.search(stripped):
-                    violations.append((path, 0, f"uses shared cache/state symbol {pattern.pattern}"))
+                    violations.append(
+                        (path, 0, f"uses shared cache/state symbol {pattern.pattern}")
+                    )
 
     assert not violations, _format_violations(violations)
 
@@ -1487,7 +1638,9 @@ def test_model_cache_state_is_model_owned() -> None:
             stripped = _strip_cpp_comments(text)
             for pattern in forbidden_unowned_symbols:
                 if pattern.search(stripped):
-                    violations.append((path, 0, f"uses unowned cache/state symbol {pattern.pattern}"))
+                    violations.append(
+                        (path, 0, f"uses unowned cache/state symbol {pattern.pattern}")
+                    )
 
         if state_header.is_file():
             text = state_header.read_text(encoding="utf-8", errors="ignore")
@@ -1496,7 +1649,7 @@ def test_model_cache_state_is_model_owned() -> None:
 
         if cache_header.is_file():
             text = cache_header.read_text(encoding="utf-8", errors="ignore")
-            expected_include = f'runtime/models/{family}/inference_state.h'
+            expected_include = f"runtime/models/{family}/inference_state.h"
             for needle in (
                 f"struct {prefix}KvCacheNames",
                 f"class {prefix}KvCache : public {prefix}InferenceState",
@@ -1508,7 +1661,7 @@ def test_model_cache_state_is_model_owned() -> None:
         if cache_source.is_file():
             text = cache_source.read_text(encoding="utf-8", errors="ignore")
             for needle in (
-                f'runtime/models/{family}/kv_cache.h',
+                f"runtime/models/{family}/kv_cache.h",
                 f"{prefix}KvCache::",
                 f"{prefix}KvCacheNames",
             ):
@@ -1593,8 +1746,8 @@ def test_text_decoder_triattention_cache_is_model_owned() -> None:
         kernel_header = model_dir / "triattention_kernels.h"
         kernel_source = model_dir / "triattention_kernels.cu"
         plugin = model_dir / "plugin.cpp"
-        expected_include = f'runtime/models/{family}/triattention_kv_cache.h'
-        expected_kernel_include = f'runtime/models/{family}/triattention_kernels.h'
+        expected_include = f"runtime/models/{family}/triattention_kv_cache.h"
+        expected_kernel_include = f"runtime/models/{family}/triattention_kernels.h"
         score_kernel = f"{family}_triattention_score_candidates_gpu"
         compact_kernel = f"{family}_triattention_compact_rows_gpu"
 
@@ -1625,7 +1778,9 @@ def test_text_decoder_triattention_cache_is_model_owned() -> None:
             stripped = _strip_cpp_comments(text)
             for pattern in forbidden_unowned_symbols:
                 if pattern.search(stripped):
-                    violations.append((path, 0, f"uses unowned TriAttention symbol {pattern.pattern}"))
+                    violations.append(
+                        (path, 0, f"uses unowned TriAttention symbol {pattern.pattern}")
+                    )
 
         for path in (kernel_header, kernel_source):
             if not path.is_file():
@@ -1640,7 +1795,9 @@ def test_text_decoder_triattention_cache_is_model_owned() -> None:
             stripped = _strip_cpp_comments(text)
             for pattern in forbidden_unowned_symbols:
                 if pattern.search(stripped):
-                    violations.append((path, 0, f"uses unowned TriAttention kernel symbol {pattern.pattern}"))
+                    violations.append(
+                        (path, 0, f"uses unowned TriAttention kernel symbol {pattern.pattern}")
+                    )
 
         plugin_text = plugin.read_text(encoding="utf-8", errors="ignore")
         for needle in (
@@ -1732,14 +1889,14 @@ def test_shared_sampler_is_retired() -> None:
         REPO_ROOT / "tests" / "cpp" / "test_sampler.cpp",
     )
     forbidden_patterns = (
-        re.compile(r'\bISampler\b'),
-        re.compile(r'\bSamplingParams\b'),
-        re.compile(r'\bSamplerFactoryOptions\b'),
-        re.compile(r'\bSampleResult\b'),
-        re.compile(r'\bLogitsLocation\b'),
-        re.compile(r'\bcreate_sampler\s*\('),
-        re.compile(r'\bcreate_gpu_greedy_sampler\s*\('),
-        re.compile(r'\bsampling_params_from_config\s*\('),
+        re.compile(r"\bISampler\b"),
+        re.compile(r"\bSamplingParams\b"),
+        re.compile(r"\bSamplerFactoryOptions\b"),
+        re.compile(r"\bSampleResult\b"),
+        re.compile(r"\bLogitsLocation\b"),
+        re.compile(r"\bcreate_sampler\s*\("),
+        re.compile(r"\bcreate_gpu_greedy_sampler\s*\("),
+        re.compile(r"\bsampling_params_from_config\s*\("),
     )
     violations = []
 
@@ -1820,13 +1977,15 @@ def test_shared_decode_runtime_is_model_owned() -> None:
                 continue
             for pattern in forbidden_unowned_symbols:
                 if pattern.search(text):
-                    violations.append((path, 0, f"uses shared decode runtime symbol {pattern.pattern}"))
+                    violations.append(
+                        (path, 0, f"uses shared decode runtime symbol {pattern.pattern}")
+                    )
 
     for family, masked_score in required_families.items():
         model_dir = RUNTIME_MODELS / family
         header = model_dir / "decode_runtime.h"
         source = model_dir / "decode_runtime.cpp"
-        expected_include = f'runtime/models/{family}/decode_runtime.h'
+        expected_include = f"runtime/models/{family}/decode_runtime.h"
         if not header.is_file():
             violations.append((header, 0, "missing model-owned decode runtime header"))
             continue
@@ -1854,24 +2013,32 @@ def test_shared_decode_runtime_is_model_owned() -> None:
         encoding="utf-8", errors="ignore"
     )
     expected_test_entry = (
-        "test_personaplex_decode_runtime|test_personaplex_decode_runtime.cpp|_|"
-        "decode_runtime.cpp|_"
+        "test_personaplex_decode_runtime|test_personaplex_decode_runtime.cpp|_|decode_runtime.cpp|_"
     )
     if expected_test_entry not in personaplex_manifest:
-        violations.append((
-            RUNTIME_MODELS / "personaplex" / "MODEL.toml",
-            0,
-            "missing model-owned decode runtime unit test entry",
-        ))
+        violations.append(
+            (
+                RUNTIME_MODELS / "personaplex" / "MODEL.toml",
+                0,
+                "missing model-owned decode runtime unit test entry",
+            )
+        )
 
-    personaplex_test = REPO_ROOT / "tests" / "cpp" / "models" / "personaplex" / (
-        "test_personaplex_decode_runtime.cpp"
+    personaplex_test = (
+        REPO_ROOT
+        / "tests"
+        / "cpp"
+        / "models"
+        / "personaplex"
+        / ("test_personaplex_decode_runtime.cpp")
     )
     test_text = personaplex_test.read_text(encoding="utf-8", errors="ignore")
-    if 'runtime/models/personaplex/decode_runtime.h' not in test_text:
+    if "runtime/models/personaplex/decode_runtime.h" not in test_text:
         violations.append((personaplex_test, 0, "test does not include personaplex decode runtime"))
     if "trtmc::personaplex_select_argmax_token" not in test_text:
-        violations.append((personaplex_test, 0, "test does not exercise personaplex decode symbols"))
+        violations.append(
+            (personaplex_test, 0, "test does not exercise personaplex decode symbols")
+        )
 
     assert not violations, _format_violations(violations)
 
@@ -2097,7 +2264,9 @@ def test_shared_sampler_cuda_kernels_are_model_owned() -> None:
             stripped = _strip_cpp_comments(text)
             for pattern in forbidden_unowned_symbols:
                 if pattern.search(stripped):
-                    violations.append((path, 0, f"uses unowned sampler kernel symbol {pattern.pattern}"))
+                    violations.append(
+                        (path, 0, f"uses unowned sampler kernel symbol {pattern.pattern}")
+                    )
 
         sampler_text = sampler.read_text(encoding="utf-8", errors="ignore")
         for include in retired_includes:
@@ -2115,7 +2284,9 @@ def test_shared_sampler_cuda_kernels_are_model_owned() -> None:
         stripped = _strip_cpp_comments(sampler_text)
         for pattern in forbidden_unowned_symbols:
             if pattern.search(stripped):
-                violations.append((sampler, 0, f"uses unowned sampler kernel symbol {pattern.pattern}"))
+                violations.append(
+                    (sampler, 0, f"uses unowned sampler kernel symbol {pattern.pattern}")
+                )
 
     for root in (REPO_ROOT / "src", REPO_ROOT / "include", CPP_TESTS):
         for path in _cpp_files_under(root):
@@ -2190,13 +2361,13 @@ def test_text_decoder_sampler_is_model_owned() -> None:
         "xglm": ("XglmISampler", "XglmSamplingParams", "create_xglm_sampler"),
     }
     forbidden_patterns = (
-        re.compile(r'\bISampler\b'),
-        re.compile(r'\bSamplingParams\b'),
-        re.compile(r'\bSampleResult\b'),
-        re.compile(r'\bLogitsLocation\b'),
-        re.compile(r'\bcreate_sampler\s*\('),
-        re.compile(r'\bcreate_gpu_greedy_sampler\s*\('),
-        re.compile(r'\bsampling_params_from_config\s*\('),
+        re.compile(r"\bISampler\b"),
+        re.compile(r"\bSamplingParams\b"),
+        re.compile(r"\bSampleResult\b"),
+        re.compile(r"\bLogitsLocation\b"),
+        re.compile(r"\bcreate_sampler\s*\("),
+        re.compile(r"\bcreate_gpu_greedy_sampler\s*\("),
+        re.compile(r"\bsampling_params_from_config\s*\("),
     )
     violations = []
 
@@ -2206,7 +2377,7 @@ def test_text_decoder_sampler_is_model_owned() -> None:
         sampler_source = model_dir / "sampler.cpp"
         pipeline_header = model_dir / "pipeline.h"
         pipeline_source = model_dir / "pipeline.cpp"
-        local_include = f'runtime/models/{family}/sampler.h'
+        local_include = f"runtime/models/{family}/sampler.h"
         gpu_factory = factory_name.replace("_sampler", "_gpu_greedy_sampler")
 
         for path in (sampler_header, sampler_source):
@@ -2366,13 +2537,13 @@ def test_vision_language_sampler_is_model_owned() -> None:
         "qwen_vl": ("QwenVlISampler", "QwenVlSamplingParams", "create_qwen_vl_sampler"),
     }
     forbidden_patterns = (
-        re.compile(r'\bISampler\b'),
-        re.compile(r'\bSamplingParams\b'),
-        re.compile(r'\bSampleResult\b'),
-        re.compile(r'\bLogitsLocation\b'),
-        re.compile(r'\bcreate_sampler\s*\('),
-        re.compile(r'\bcreate_gpu_greedy_sampler\s*\('),
-        re.compile(r'\bsampling_params_from_config\s*\('),
+        re.compile(r"\bISampler\b"),
+        re.compile(r"\bSamplingParams\b"),
+        re.compile(r"\bSampleResult\b"),
+        re.compile(r"\bLogitsLocation\b"),
+        re.compile(r"\bcreate_sampler\s*\("),
+        re.compile(r"\bcreate_gpu_greedy_sampler\s*\("),
+        re.compile(r"\bsampling_params_from_config\s*\("),
     )
     violations = []
 
@@ -2382,7 +2553,7 @@ def test_vision_language_sampler_is_model_owned() -> None:
         sampler_source = model_dir / "sampler.cpp"
         pipeline_header = model_dir / "pipeline.h"
         pipeline_source = model_dir / "pipeline.cpp"
-        local_include = f'runtime/models/{family}/sampler.h'
+        local_include = f"runtime/models/{family}/sampler.h"
         gpu_factory = factory_name.replace("_sampler", "_gpu_greedy_sampler")
 
         for path in (sampler_header, sampler_source):
@@ -2487,9 +2658,7 @@ def test_vision_language_pipeline_types_are_model_owned() -> None:
             if needle not in plugin_text:
                 violations.append((plugin_source, 0, f"missing {needle}"))
 
-        preprocessor_header_text = preprocessor_header.read_text(
-            encoding="utf-8", errors="ignore"
-        )
+        preprocessor_header_text = preprocessor_header.read_text(encoding="utf-8", errors="ignore")
         for needle in (
             preprocess_config,
             preprocessed_image,
@@ -2502,9 +2671,7 @@ def test_vision_language_pipeline_types_are_model_owned() -> None:
             if needle not in preprocessor_header_text:
                 violations.append((preprocessor_header, 0, f"missing {needle}"))
 
-        preprocessor_source_text = preprocessor_source.read_text(
-            encoding="utf-8", errors="ignore"
-        )
+        preprocessor_source_text = preprocessor_source.read_text(encoding="utf-8", errors="ignore")
         for needle in (
             preprocess_config,
             preprocessed_image,
@@ -2517,7 +2684,9 @@ def test_vision_language_pipeline_types_are_model_owned() -> None:
             if needle not in preprocessor_source_text:
                 violations.append((preprocessor_source, 0, f"missing {needle}"))
 
-        test_path = REPO_ROOT / "tests" / "cpp" / "models" / family / f"test_{family}_vl_pipeline.cpp"
+        test_path = (
+            REPO_ROOT / "tests" / "cpp" / "models" / family / f"test_{family}_vl_pipeline.cpp"
+        )
         if test_path.exists():
             test_text = test_path.read_text(encoding="utf-8", errors="ignore")
             for needle in (pipeline_class, config_class, preprocess_config):
@@ -2598,8 +2767,8 @@ def test_shared_device_kv_cache_runtime_is_retired() -> None:
             violations.append((CMAKE_ROOT, 0, f"CMake references retired {term}"))
 
     forbidden_terms = (
-        'runtime/core/device_kv_cache.h',
-        'runtime/core/device_kv_cache_update_plan.h',
+        "runtime/core/device_kv_cache.h",
+        "runtime/core/device_kv_cache_update_plan.h",
         '"DeviceKvCache"',
         "run_decoder_step_device",
         "DeviceResources",
@@ -2674,7 +2843,9 @@ def test_recurrent_step_contracts_are_model_owned() -> None:
     if retired_shared.exists():
         violations.append((retired_shared, 0, "shared recurrent step contract must be retired"))
     if retired_tensor_bindings.exists():
-        violations.append((retired_tensor_bindings, 0, "shared recurrent tensor bindings must be retired"))
+        violations.append(
+            (retired_tensor_bindings, 0, "shared recurrent tensor bindings must be retired")
+        )
     if retired_test.exists():
         violations.append((retired_test, 0, "root recurrent contract test must be model-owned"))
 
@@ -2778,7 +2949,11 @@ def test_diffusion_config_and_weight_types_are_model_owned() -> None:
         for type_name in required_types:
             if f"struct {type_name}" not in text:
                 violations.append((path, 0, f"missing family-owned type {type_name}"))
-        for retired_type in ("struct DiffusionConfig", "struct PreprocessorWeights", "struct VideoResult"):
+        for retired_type in (
+            "struct DiffusionConfig",
+            "struct PreprocessorWeights",
+            "struct VideoResult",
+        ):
             if retired_type in text:
                 violations.append((path, 0, f"keeps generic retired type {retired_type}"))
 
@@ -2810,7 +2985,11 @@ def test_qwen_image_scheduler_is_model_owned() -> None:
     required_owned_paths = (
         RUNTIME_MODELS / "qwen_image" / "qwen_image_scheduler.h",
         RUNTIME_MODELS / "qwen_image" / "qwen_image_scheduler.cpp",
-        REPO_ROOT / "tests" / "cpp" / "models" / "qwen_image"
+        REPO_ROOT
+        / "tests"
+        / "cpp"
+        / "models"
+        / "qwen_image"
         / "test_qwen_image_flow_match_scheduler.cpp",
     )
     violations = []
@@ -2831,7 +3010,10 @@ def test_qwen_image_scheduler_is_model_owned() -> None:
 
     manifest = RUNTIME_MODELS / "qwen_image" / "MODEL.toml"
     manifest_text = manifest.read_text(encoding="utf-8", errors="ignore")
-    if "test_qwen_image_flow_match_scheduler|test_qwen_image_flow_match_scheduler.cpp" not in manifest_text:
+    if (
+        "test_qwen_image_flow_match_scheduler|test_qwen_image_flow_match_scheduler.cpp"
+        not in manifest_text
+    ):
         violations.append((manifest, 0, "missing Qwen Image scheduler runtime test entry"))
     if "qwen_image_scheduler.cpp" not in manifest_text:
         violations.append((manifest, 0, "missing Qwen Image scheduler test source entry"))
@@ -2878,7 +3060,8 @@ def test_runtime_strategy_default_is_model_owned() -> None:
             )
 
     manifests_with_defaults = [
-        path for path in RUNTIME_MODELS.glob("*/MODEL.toml")
+        path
+        for path in RUNTIME_MODELS.glob("*/MODEL.toml")
         if "default_runtime_strategy" in path.read_text(encoding="utf-8")
     ]
     if manifests_with_defaults:
@@ -2947,8 +3130,7 @@ def test_shared_diff_vl_tool_uses_family_owned_debug_runners() -> None:
         "load_section_from_bundle",
     )
     violations = [
-        (SHARED_DIFF_VL_TOOL, 0,
-         "shared VL diff tool imports the shared debug runner surface")
+        (SHARED_DIFF_VL_TOOL, 0, "shared VL diff tool imports the shared debug runner surface")
         for needle in ("from tensorrt_model_connect.debug_runner import",)
         if needle in text
     ]
@@ -2960,18 +3142,21 @@ def test_shared_diff_vl_tool_uses_family_owned_debug_runners() -> None:
             and node.func.id in forbidden_calls
         ):
             violations.append(
-                (SHARED_DIFF_VL_TOOL, node.lineno,
-                 f"shared VL diff tool directly calls {node.func.id}")
+                (
+                    SHARED_DIFF_VL_TOOL,
+                    node.lineno,
+                    f"shared VL diff tool directly calls {node.func.id}",
+                )
             )
     if "_load_family_vl_debug_runner" not in text:
-        violations.append(
-            (SHARED_DIFF_VL_TOOL, 0, "missing family-owned VL debug runner loader")
-        )
+        violations.append((SHARED_DIFF_VL_TOOL, 0, "missing family-owned VL debug runner loader"))
 
     vl_families: set[str] = set()
     for plugin_path in sorted(FAMILIES.glob("*/plugin.py")):
         plugin_text = plugin_path.read_text(encoding="utf-8")
-        if re.search(r"runtime_strategy\s*=\s*['\"][A-Za-z0-9_]+_vision_language['\"]", plugin_text):
+        if re.search(
+            r"runtime_strategy\s*=\s*['\"][A-Za-z0-9_]+_vision_language['\"]", plugin_text
+        ):
             vl_families.add(plugin_path.parent.name)
     for manifest_path in sorted(E2E_MODELS.glob("*/manifests/*.json")):
         try:
@@ -2982,8 +3167,11 @@ def test_shared_diff_vl_tool_uses_family_owned_debug_runners() -> None:
             vl_families.add(manifest_path.parents[1].name)
 
     violations.extend(
-        (FAMILIES / family / "vl_debug_runner.py", 0,
-         "vision-language family missing model-owned VL debug runner")
+        (
+            FAMILIES / family / "vl_debug_runner.py",
+            0,
+            "vision-language family missing model-owned VL debug runner",
+        )
         for family in sorted(vl_families)
         if not (FAMILIES / family / "vl_debug_runner.py").is_file()
     )
@@ -3009,14 +3197,14 @@ def test_shared_diff_logits_tool_has_no_family_reference_implementations() -> No
         "RwkvTrtRunner",
     )
     violations = [
-        (SHARED_DIFF_LOGITS_TOOL, 0,
-         f"shared logit diff tool contains family term {needle}")
+        (SHARED_DIFF_LOGITS_TOOL, 0, f"shared logit diff tool contains family term {needle}")
         for needle in forbidden
         if needle in text
     ]
     violations.extend(
         (path, 0, "missing model-owned logit diff handler")
-        for path in MODEL_OWNED_DIFF_LOGITS_HANDLERS + (
+        for path in MODEL_OWNED_DIFF_LOGITS_HANDLERS
+        + (
             FAMILIES / "mamba" / "diff_logits.py",
             FAMILIES / "rwkv" / "diff_logits.py",
         )
@@ -3049,18 +3237,19 @@ def test_shared_diff_tools_do_not_branch_on_model_type_for_hf_loading() -> None:
             if needle in text
         )
 
-    diff_logits_text = SHARED_DIFF_LOGITS_TOOL.read_text(
-        encoding="utf-8", errors="ignore")
+    diff_logits_text = SHARED_DIFF_LOGITS_TOOL.read_text(encoding="utf-8", errors="ignore")
     for snippet in (
         "_find_family_diff_logits_handler(model_type)",
-        "load_hf_model = getattr(handler, \"load_hf_model\", None)",
+        'load_hf_model = getattr(handler, "load_hf_model", None)',
     ):
         if snippet not in diff_logits_text:
-            violations.append((
-                SHARED_DIFF_LOGITS_TOOL,
-                0,
-                f"missing family-owned diff-logits loading dispatch: {snippet}",
-            ))
+            violations.append(
+                (
+                    SHARED_DIFF_LOGITS_TOOL,
+                    0,
+                    f"missing family-owned diff-logits loading dispatch: {snippet}",
+                )
+            )
 
     assert not violations, _format_violations(violations)
 
@@ -3084,17 +3273,22 @@ def test_shared_runner_parity_tool_uses_family_registry_dispatch() -> None:
         'runtime_strategy == "nemotron_h_hybrid_mamba_attention"',
     )
     violations = [
-        (SHARED_RUNNER_PARITY_TOOL, 0,
-         f"shared runner parity tool contains model-owned dispatch {needle}")
+        (
+            SHARED_RUNNER_PARITY_TOOL,
+            0,
+            f"shared runner parity tool contains model-owned dispatch {needle}",
+        )
         for needle in forbidden
         if needle in text
     ]
     if "resolve_debug_runner" not in text:
-        violations.append((
-            SHARED_RUNNER_PARITY_TOOL,
-            0,
-            "shared runner parity tool should dispatch through family metadata",
-        ))
+        violations.append(
+            (
+                SHARED_RUNNER_PARITY_TOOL,
+                0,
+                "shared runner parity tool should dispatch through family metadata",
+            )
+        )
 
     assert not violations, _format_violations(violations)
 
@@ -3118,18 +3312,23 @@ def test_shared_diff_layers_tool_uses_family_capability_dispatch() -> None:
         "llama",
     )
     violations = [
-        (SHARED_DIFF_LAYERS_TOOL, 0,
-         f"shared layer diff tool contains family-owned builder term {needle}")
+        (
+            SHARED_DIFF_LAYERS_TOOL,
+            0,
+            f"shared layer diff tool contains family-owned builder term {needle}",
+        )
         for needle in forbidden
         if needle in text
     ]
     for needle in ("family_has_capability", "debug_layer_outputs", "plugin.build_engine"):
         if needle not in text:
-            violations.append((
-                SHARED_DIFF_LAYERS_TOOL,
-                0,
-                f"shared layer diff tool missing dispatch marker {needle}",
-            ))
+            violations.append(
+                (
+                    SHARED_DIFF_LAYERS_TOOL,
+                    0,
+                    f"shared layer diff tool missing dispatch marker {needle}",
+                )
+            )
 
     assert not violations, _format_violations(violations)
 
@@ -3143,17 +3342,21 @@ def test_runtime_cli_python_requirement_is_model_owned() -> None:
     contracts_text = E2E_CONTRACTS.read_text(encoding="utf-8")
     violations = []
     if 'runtime_strategy or "") not in {"speech_to_speech"}' in contracts_text:
-        violations.append((
-            E2E_CONTRACTS,
-            0,
-            "RunContext hardcodes speech_to_speech for --hf-python",
-        ))
+        violations.append(
+            (
+                E2E_CONTRACTS,
+                0,
+                "RunContext hardcodes speech_to_speech for --hf-python",
+            )
+        )
     if "runtime_cli_requires_hf_python" not in contracts_text:
-        violations.append((
-            E2E_CONTRACTS,
-            0,
-            "RunContext should read runtime_cli_requires_hf_python metadata",
-        ))
+        violations.append(
+            (
+                E2E_CONTRACTS,
+                0,
+                "RunContext should read runtime_cli_requires_hf_python metadata",
+            )
+        )
 
     for manifest in PERSONAPLEX_E2E_MANIFESTS:
         text = manifest.read_text(encoding="utf-8")
@@ -3195,9 +3398,7 @@ def test_shared_perf_tools_use_family_perf_hooks() -> None:
             if needle in text
         )
 
-    expected_hooks = (
-        FAMILIES / "mamba" / "perf_hooks.py",
-    )
+    expected_hooks = (FAMILIES / "mamba" / "perf_hooks.py",)
     violations.extend(
         (path, 0, "missing model-owned performance hook")
         for path in expected_hooks
@@ -3226,9 +3427,7 @@ def test_shared_text_debug_tools_use_family_debug_runner_dispatch() -> None:
     for path in paths:
         text = path.read_text(encoding="utf-8")
         if "from tensorrt_model_connect.debug_runner import TrtRunner" in text:
-            violations.append(
-                (path, 0, "shared text debug tool imports shared TrtRunner")
-            )
+            violations.append((path, 0, "shared text debug tool imports shared TrtRunner"))
 
     assert not violations, _format_violations(violations)
 
@@ -3255,9 +3454,7 @@ def test_family_tools_do_not_import_shared_runner_classes() -> None:
                 continue
             for alias in node.names:
                 if alias.name in forbidden:
-                    violations.append(
-                        (path, node.lineno, f"imports shared {alias.name}")
-                    )
+                    violations.append((path, node.lineno, f"imports shared {alias.name}"))
 
     assert not violations, _format_violations(violations)
 
@@ -3281,8 +3478,7 @@ def test_model_e2e_vl_runners_use_model_local_debug_runner() -> None:
 
         helper = path.parent / "vl_debug_runner.py"
         expected = (
-            f"from tests.e2e.models.{family}.e2e_plugins.runners."
-            "vl_debug_runner import VLTrtRunner"
+            f"from tests.e2e.models.{family}.e2e_plugins.runners.vl_debug_runner import VLTrtRunner"
         )
         if "from tensorrt_model_connect.debug_runner import VLTrtRunner" in text:
             violations.append((path, 0, "imports shared VLTrtRunner"))
@@ -3363,7 +3559,9 @@ def test_qwen_perf_parity_test_is_model_owned() -> None:
     owned_path = E2E_MODELS / "qwen" / "test_perf_parity.py"
     violations = []
     if shared_path.exists():
-        violations.append((shared_path, 0, "Qwen parity test should not live in shared tools tests"))
+        violations.append(
+            (shared_path, 0, "Qwen parity test should not live in shared tools tests")
+        )
     if not owned_path.is_file():
         violations.append((owned_path, 0, "missing Qwen-owned parity test"))
     else:
@@ -3452,12 +3650,16 @@ def test_shared_perf_analysis_tools_use_runtime_metadata_and_model_owned_batches
         for index, entry in enumerate(entries, 1):
             benchmark = entry.get("benchmark") if isinstance(entry, dict) else None
             command = benchmark.get("command") if isinstance(benchmark, dict) else None
-            if not isinstance(command, list) or not all(isinstance(token, str) for token in command):
-                violations.append((
-                    path,
-                    0,
-                    f"entry {index} missing model-owned benchmark.command template",
-                ))
+            if not isinstance(command, list) or not all(
+                isinstance(token, str) for token in command
+            ):
+                violations.append(
+                    (
+                        path,
+                        0,
+                        f"entry {index} missing model-owned benchmark.command template",
+                    )
+                )
 
     assert not violations, _format_violations(violations)
 
@@ -3479,8 +3681,7 @@ def test_shared_diff_audio_tool_has_no_family_reference_implementations() -> Non
         "stage4_greedy_parity",
     )
     violations = [
-        (SHARED_DIFF_AUDIO_TOOL, 0,
-         f"shared audio diff tool contains family term {needle}")
+        (SHARED_DIFF_AUDIO_TOOL, 0, f"shared audio diff tool contains family term {needle}")
         for needle in forbidden
         if needle in text
     ]
@@ -3505,11 +3706,13 @@ def test_personaplex_diff_tool_is_family_owned() -> None:
         violations.append((owned_tool, 0, "missing PersonaPlex-owned diff tool"))
     root_tool = REPO_ROOT / "tools" / "diff_personaplex.py"
     if root_tool.exists():
-        violations.append((
-            root_tool,
-            0,
-            "root PersonaPlex diff wrapper must not exist",
-        ))
+        violations.append(
+            (
+                root_tool,
+                0,
+                "root PersonaPlex diff wrapper must not exist",
+            )
+        )
 
     assert not violations, _format_violations(violations)
 
@@ -3525,11 +3728,13 @@ def test_qwen_aime_benchmark_tool_is_family_owned() -> None:
     if not owned_tool.is_file():
         violations.append((owned_tool, 0, "missing Qwen-owned AIME benchmark"))
     if SHARED_QWEN_AIME_BENCHMARK_TOOL.exists():
-        violations.append((
-            SHARED_QWEN_AIME_BENCHMARK_TOOL,
-            0,
-            "root Qwen benchmark wrapper must not exist",
-        ))
+        violations.append(
+            (
+                SHARED_QWEN_AIME_BENCHMARK_TOOL,
+                0,
+                "root Qwen benchmark wrapper must not exist",
+            )
+        )
 
     assert not violations, _format_violations(violations)
 
@@ -3545,11 +3750,13 @@ def test_timm_vit_trt_path_benchmark_is_family_owned() -> None:
     if not owned_tool.is_file():
         violations.append((owned_tool, 0, "missing timm_vit-owned TRT path benchmark"))
     if SHARED_TIMM_VIT_TRT_PATH_TOOL.exists():
-        violations.append((
-            SHARED_TIMM_VIT_TRT_PATH_TOOL,
-            0,
-            "root timm_vit benchmark wrapper must not exist",
-        ))
+        violations.append(
+            (
+                SHARED_TIMM_VIT_TRT_PATH_TOOL,
+                0,
+                "root timm_vit benchmark wrapper must not exist",
+            )
+        )
 
     assert not violations, _format_violations(violations)
 
@@ -3565,11 +3772,13 @@ def test_qwen_flashinfer_benchmark_tool_is_family_owned() -> None:
     if not owned_tool.is_file():
         violations.append((owned_tool, 0, "missing Qwen-owned FlashInfer benchmark"))
     if SHARED_QWEN_FLASHINFER_BENCHMARK_TOOL.exists():
-        violations.append((
-            SHARED_QWEN_FLASHINFER_BENCHMARK_TOOL,
-            0,
-            "root Qwen FlashInfer benchmark wrapper must not exist",
-        ))
+        violations.append(
+            (
+                SHARED_QWEN_FLASHINFER_BENCHMARK_TOOL,
+                0,
+                "root Qwen FlashInfer benchmark wrapper must not exist",
+            )
+        )
 
     assert not violations, _format_violations(violations)
 
@@ -3670,8 +3879,11 @@ def test_shared_debug_diffusion_pipeline_has_no_family_implementation() -> None:
         "text_encoder_dim",
     )
     violations = [
-        (SHARED_DEBUG_DIFFUSION_PIPELINE_TOOL, 0,
-         f"shared diffusion debug tool contains family term {needle}")
+        (
+            SHARED_DEBUG_DIFFUSION_PIPELINE_TOOL,
+            0,
+            f"shared diffusion debug tool contains family term {needle}",
+        )
         for needle in forbidden
         if needle in text
     ]
@@ -3720,22 +3932,25 @@ def test_root_checkpoint_mapper_is_type_only() -> None:
     Preconditions: family checkpoint_mapper.py copies own concrete loaders.
     Postconditions: root checkpoint_mapper.py exposes only the stable WeightDict type.
     """
-    tree = ast.parse(CHECKPOINT_MAPPER.read_text(encoding="utf-8"),
-                     filename=str(CHECKPOINT_MAPPER))
+    tree = ast.parse(CHECKPOINT_MAPPER.read_text(encoding="utf-8"), filename=str(CHECKPOINT_MAPPER))
     violations = []
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            violations.append((
-                CHECKPOINT_MAPPER,
-                node.lineno,
-                f"root checkpoint mapper defines helper function {node.name}",
-            ))
+            violations.append(
+                (
+                    CHECKPOINT_MAPPER,
+                    node.lineno,
+                    f"root checkpoint mapper defines helper function {node.name}",
+                )
+            )
         if isinstance(node, ast.ClassDef) and node.name != "WeightDict":
-            violations.append((
-                CHECKPOINT_MAPPER,
-                node.lineno,
-                f"root checkpoint mapper defines non-protocol class {node.name}",
-            ))
+            violations.append(
+                (
+                    CHECKPOINT_MAPPER,
+                    node.lineno,
+                    f"root checkpoint mapper defines non-protocol class {node.name}",
+                )
+            )
 
     text = CHECKPOINT_MAPPER.read_text(encoding="utf-8")
     forbidden = (
@@ -3773,18 +3988,17 @@ def test_quantization_uses_family_graph_ops_plumbing() -> None:
         text = path.read_text(encoding="utf-8", errors="ignore")
         for needle in forbidden_imports:
             if needle in text:
-                violations.append((
-                    path,
-                    0,
-                    f"quantization imports root graph helper via {needle}",
-                ))
+                violations.append(
+                    (
+                        path,
+                        0,
+                        f"quantization imports root graph helper via {needle}",
+                    )
+                )
 
-    context_text = (QUANTIZATION / "context.py").read_text(
-        encoding="utf-8", errors="ignore")
-    formats_text = (QUANTIZATION / "formats.py").read_text(
-        encoding="utf-8", errors="ignore")
-    init_text = (QUANTIZATION / "__init__.py").read_text(
-        encoding="utf-8", errors="ignore")
+    context_text = (QUANTIZATION / "context.py").read_text(encoding="utf-8", errors="ignore")
+    formats_text = (QUANTIZATION / "formats.py").read_text(encoding="utf-8", errors="ignore")
+    init_text = (QUANTIZATION / "__init__.py").read_text(encoding="utf-8", errors="ignore")
     engine_text = ENGINE_BUILDER.read_text(encoding="utf-8", errors="ignore")
 
     required_snippets = (
@@ -3969,11 +4183,13 @@ def test_shared_runtime_domains_do_not_carry_single_owner_model_helpers() -> Non
             "compute_segmentation_class_map_from_logits",
         ):
             if needle in text:
-                violations.append((
-                    path,
-                    0,
-                    f"shared perception domain contains single-family term {needle}",
-                ))
+                violations.append(
+                    (
+                        path,
+                        0,
+                        f"shared perception domain contains single-family term {needle}",
+                    )
+                )
 
     expected_segformer_owned = (
         RUNTIME_MODELS / "segformer" / "segformer_preprocess_seam.h",
@@ -3992,11 +4208,13 @@ def test_shared_runtime_domains_do_not_carry_single_owner_model_helpers() -> Non
         text = audio_configs.read_text(encoding="utf-8")
         for needle in ("MagpieTTSConfig", "SpeechConfig", "OmniConfig"):
             if needle in text:
-                violations.append((
-                    audio_configs,
-                    0,
-                    f"{needle} should live under src/runtime/models",
-                ))
+                violations.append(
+                    (
+                        audio_configs,
+                        0,
+                        f"{needle} should live under src/runtime/models",
+                    )
+                )
 
     assert not violations, _format_violations(violations)
 
@@ -4129,9 +4347,7 @@ def test_shared_diffusion_vlm_assessment_default_is_model_owned() -> None:
     Preconditions: shared CI/tooling may discover one model-owned VLM config.
     Postconditions: shared CI/tooling does not hardcode a concrete VLM model.
     """
-    forbidden = (
-        "Qwen/" + "Qwen2.5-VL-3B-Instruct",
-    )
+    forbidden = ("Qwen/" + "Qwen2.5-VL-3B-Instruct",)
     shared_paths = (*SHARED_GITHUB_CI_FILES, DIFFUSION_VLM_SIMILARITY_TOOL)
     violations = []
     for path in shared_paths:
@@ -4327,19 +4543,19 @@ def test_engine_builder_uses_declared_family_capabilities() -> None:
             continue
         names = [node.left, *node.comparators]
         compares_runtime_strategy = any(
-            isinstance(expr, ast.Name) and expr.id == "runtime_strategy"
-            for expr in names
+            isinstance(expr, ast.Name) and expr.id == "runtime_strategy" for expr in names
         )
         compares_literal_strategy = any(
-            isinstance(expr, ast.Constant) and isinstance(expr.value, str)
-            for expr in names
+            isinstance(expr, ast.Constant) and isinstance(expr.value, str) for expr in names
         )
         if compares_runtime_strategy and compares_literal_strategy:
-            violations.append((
-                ENGINE_BUILDER,
-                getattr(node, "lineno", 0),
-                "engine_builder branches on a concrete runtime_strategy",
-            ))
+            violations.append(
+                (
+                    ENGINE_BUILDER,
+                    getattr(node, "lineno", 0),
+                    "engine_builder branches on a concrete runtime_strategy",
+                )
+            )
 
     expected_tokenizer_adapters = (
         FAMILIES / "marian" / "tokenizer_json.py",
@@ -4377,11 +4593,13 @@ def test_discovery_and_cache_warm_use_family_metadata() -> None:
     violations = []
 
     if "family_probe_model_types" not in discover_text:
-        violations.append((
-            AUTOPILOT_DISCOVER,
-            0,
-            "autopilot discovery does not use family_probe_model_types",
-        ))
+        violations.append(
+            (
+                AUTOPILOT_DISCOVER,
+                0,
+                "autopilot discovery does not use family_probe_model_types",
+            )
+        )
     for needle in (
         '"qwen"',
         '"qwen2"',
@@ -4391,11 +4609,13 @@ def test_discovery_and_cache_warm_use_family_metadata() -> None:
         '"lance"',
     ):
         if needle in discover_text:
-            violations.append((
-                AUTOPILOT_DISCOVER,
-                0,
-                f"autopilot discovery hardcodes model type {needle}",
-            ))
+            violations.append(
+                (
+                    AUTOPILOT_DISCOVER,
+                    0,
+                    f"autopilot discovery hardcodes model type {needle}",
+                )
+            )
 
     for helper in (
         "family_hf_required_files_by_id",
@@ -4415,11 +4635,13 @@ def test_discovery_and_cache_warm_use_family_metadata() -> None:
         "adapter_model.safetensors",
     ):
         if needle in warm_text:
-            violations.append((
-                WARM_HF_CACHE,
-                0,
-                f"warm cache hardcodes family-owned asset {needle}",
-            ))
+            violations.append(
+                (
+                    WARM_HF_CACHE,
+                    0,
+                    f"warm cache hardcodes family-owned asset {needle}",
+                )
+            )
 
     assert not violations, _format_violations(violations)
 
@@ -4469,11 +4691,13 @@ def test_model_specific_builder_tests_are_family_owned() -> None:
     violations = []
     for shared_path, owned_paths in MODEL_OWNED_BUILDER_TESTS.items():
         if shared_path.exists():
-            violations.append((
-                shared_path,
-                0,
-                "model-specific builder test should not live in shared tests/builder",
-            ))
+            violations.append(
+                (
+                    shared_path,
+                    0,
+                    "model-specific builder test should not live in shared tests/builder",
+                )
+            )
         if isinstance(owned_paths, Path):
             owned_paths = (owned_paths,)
         for owned_path in owned_paths:
@@ -4490,8 +4714,7 @@ def test_model_specific_plugin_weight_tests_are_family_owned() -> None:
     Postconditions: shared tests/builder only carries generic test support/dispatch.
     """
     shared_texts = {
-        path: path.read_text(encoding="utf-8")
-        for path in SHARED_PLUGIN_WEIGHT_TEST_FILES
+        path: path.read_text(encoding="utf-8") for path in SHARED_PLUGIN_WEIGHT_TEST_FILES
     }
     support_path = REPO_ROOT / "tests" / "builder" / "family_plugin_test_support.py"
     support_text = support_path.read_text(encoding="utf-8")
@@ -4500,17 +4723,21 @@ def test_model_specific_plugin_weight_tests_are_family_owned() -> None:
     for class_name, owned_path in MODEL_OWNED_PLUGIN_WEIGHT_TESTS.items():
         for shared_path, shared_text in shared_texts.items():
             if class_name in shared_text:
-                violations.append((
-                    shared_path,
-                    0,
-                    f"model-specific plugin weight test {class_name} is shared",
-                ))
+                violations.append(
+                    (
+                        shared_path,
+                        0,
+                        f"model-specific plugin weight test {class_name} is shared",
+                    )
+                )
         if class_name in support_text:
-            violations.append((
-                support_path,
-                0,
-                f"generic support imports model-specific test {class_name}",
-            ))
+            violations.append(
+                (
+                    support_path,
+                    0,
+                    f"generic support imports model-specific test {class_name}",
+                )
+            )
         if not owned_path.is_file():
             violations.append((owned_path, 0, "missing family-owned weight test"))
 
@@ -4525,17 +4752,21 @@ def test_model_specific_plugin_weight_tests_are_family_owned() -> None:
     ):
         for shared_path, shared_text in shared_texts.items():
             if needle in shared_text:
-                violations.append((
-                    shared_path,
-                    0,
-                    f"shared plugin tests contain checkpoint-specific key {needle}",
-                ))
+                violations.append(
+                    (
+                        shared_path,
+                        0,
+                        f"shared plugin tests contain checkpoint-specific key {needle}",
+                    )
+                )
         if needle in support_text:
-            violations.append((
-                support_path,
-                0,
-                f"shared plugin support contains checkpoint-specific key {needle}",
-            ))
+            violations.append(
+                (
+                    support_path,
+                    0,
+                    f"shared plugin support contains checkpoint-specific key {needle}",
+                )
+            )
 
     assert not violations, _format_violations(violations)
 
@@ -4893,23 +5124,33 @@ def test_shared_multimodal_preprocessor_uses_generic_strategy_names() -> None:
         "test_vl_decode_policy",
     ):
         if needle in cmake_text:
-            violations.append((CMAKE_ROOT, 0, f"CMake still references retired shared VL helper {needle}"))
+            violations.append(
+                (CMAKE_ROOT, 0, f"CMake still references retired shared VL helper {needle}")
+            )
     if (CPP_TESTS / "test_vision_execution_plan.cpp").exists():
-        violations.append((
-            CPP_TESTS / "test_vision_execution_plan.cpp",
-            0,
-            "shared vision execution plan test must be retired",
-        ))
+        violations.append(
+            (
+                CPP_TESTS / "test_vision_execution_plan.cpp",
+                0,
+                "shared vision execution plan test must be retired",
+            )
+        )
     if (CPP_TESTS / "test_vl_decode_policy.cpp").exists():
-        violations.append((
-            CPP_TESTS / "test_vl_decode_policy.cpp",
-            0,
-            "shared VL decode policy test must be retired",
-        ))
+        violations.append(
+            (
+                CPP_TESTS / "test_vl_decode_policy.cpp",
+                0,
+                "shared VL decode policy test must be retired",
+            )
+        )
 
     for family in VL_RUNTIME_FAMILIES:
         runtime_dir = RUNTIME_MODELS / family
-        for filename in ("image_preprocessor.h", "image_preprocessor.cpp", "image_transform_helper.h"):
+        for filename in (
+            "image_preprocessor.h",
+            "image_preprocessor.cpp",
+            "image_transform_helper.h",
+        ):
             path = runtime_dir / filename
             if not path.is_file():
                 violations.append((path, 0, "missing family-owned VL image preprocessor"))
@@ -4917,9 +5158,21 @@ def test_shared_multimodal_preprocessor_uses_generic_strategy_names() -> None:
         if image_preprocessor.is_file():
             text = image_preprocessor.read_text(encoding="utf-8", errors="ignore")
             if "trtmc/runtime/domains/multimodal/image_transform_helper.h" in text:
-                violations.append((image_preprocessor, 0, "VL image preprocessor includes shared transform helper"))
+                violations.append(
+                    (
+                        image_preprocessor,
+                        0,
+                        "VL image preprocessor includes shared transform helper",
+                    )
+                )
             if '"image_transform_helper.h"' not in text:
-                violations.append((image_preprocessor, 0, "VL image preprocessor does not include family-owned transform helper"))
+                violations.append(
+                    (
+                        image_preprocessor,
+                        0,
+                        "VL image preprocessor does not include family-owned transform helper",
+                    )
+                )
         image_helper = runtime_dir / "image_transform_helper.h"
         if image_helper.is_file():
             text = image_helper.read_text(encoding="utf-8", errors="ignore")
@@ -4930,8 +5183,14 @@ def test_shared_multimodal_preprocessor_uses_generic_strategy_names() -> None:
                 "transform_chw_layout",
             ):
                 if needle not in text:
-                    violations.append((image_helper, 0, f"family-owned transform helper missing {needle}"))
-        for path in (runtime_dir / "plugin.cpp", runtime_dir / "pipeline.h", runtime_dir / "pipeline.cpp"):
+                    violations.append(
+                        (image_helper, 0, f"family-owned transform helper missing {needle}")
+                    )
+        for path in (
+            runtime_dir / "plugin.cpp",
+            runtime_dir / "pipeline.h",
+            runtime_dir / "pipeline.cpp",
+        ):
             if not path.is_file():
                 violations.append((path, 0, "missing family-owned VL runtime file"))
                 continue
@@ -5083,20 +5342,24 @@ def test_encoder_runtime_is_family_owned() -> None:
         family_plugin = FAMILIES / family / "plugin.py"
         cpp_test_dir = REPO_ROOT / "tests" / "cpp" / "models" / family
         if not runtime_manifest.is_file():
-            violations.append((runtime_manifest, 0, "missing family-owned encoder runtime manifest"))
+            violations.append(
+                (runtime_manifest, 0, "missing family-owned encoder runtime manifest")
+            )
             continue
 
         manifest_text = runtime_manifest.read_text(encoding="utf-8", errors="ignore")
         for needle in (
             f'id = "{family}"',
             f'runtime_library = "libtrtmc_model_{family}.so"',
-            f'trtmc_model_{family}',
+            f"trtmc_model_{family}",
         ):
             if needle not in manifest_text:
                 violations.append((runtime_manifest, 0, f"missing {needle}"))
         for strategy in expected:
             if strategy not in matrix_strategies:
-                violations.append((RUNTIME_STRATEGY_MATRIX, 0, f"missing matrix strategy {strategy}"))
+                violations.append(
+                    (RUNTIME_STRATEGY_MATRIX, 0, f"missing matrix strategy {strategy}")
+                )
             if strategy not in manifest_text:
                 violations.append((runtime_manifest, 0, f"missing runtime strategy {strategy}"))
 
@@ -5166,7 +5429,7 @@ def test_recurrent_runtime_is_family_owned() -> None:
             f'id = "{family}"',
             f'runtime_library = "libtrtmc_model_{family}.so"',
             f'runtime_strategies = ["{strategy}"]',
-            f'trtmc_model_{family}',
+            f"trtmc_model_{family}",
         ):
             if needle not in manifest_text:
                 violations.append((runtime_manifest, 0, f"missing {needle}"))
@@ -5268,7 +5531,7 @@ def test_speech_to_text_runtime_is_family_owned() -> None:
             f'id = "{family}"',
             f'runtime_library = "libtrtmc_model_{family}.so"',
             f'runtime_strategies = ["{strategy}"]',
-            f'trtmc_model_{family}',
+            f"trtmc_model_{family}",
         ):
             if needle not in manifest_text:
                 violations.append((runtime_manifest, 0, f"missing {needle}"))
@@ -5343,7 +5606,7 @@ def test_nemotron_speech_streaming_runtime_is_family_owned() -> None:
         f'id = "{family}"',
         f'runtime_library = "libtrtmc_model_{family}.so"',
         f'runtime_strategies = ["{strategy}"]',
-        f'trtmc_model_{family}',
+        f"trtmc_model_{family}",
         "test_nemotron_speech_streaming_audio_helpers|test_nemotron_speech_streaming_audio_helpers.cpp",
         "test_nemotron_speech_streaming_decode_policy|test_nemotron_speech_streaming_decode_policy.cpp",
         "test_nemotron_speech_streaming_streaming_contract|test_nemotron_speech_streaming_streaming_contract.cpp",
@@ -5358,9 +5621,7 @@ def test_nemotron_speech_streaming_runtime_is_family_owned() -> None:
     for manifest_path in sorted((E2E_MODELS / family / "manifests").glob("*.json")):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("runtime_strategy") != strategy:
-            violations.append(
-                (manifest_path, 0, f"{family} manifest uses non-owned runtime key")
-            )
+            violations.append((manifest_path, 0, f"{family} manifest uses non-owned runtime key"))
         if manifest.get("task_strategy") != "speech_to_text":
             violations.append((manifest_path, 0, f"{family} manifest changed ASR task key"))
 
@@ -5406,7 +5667,7 @@ def test_personaplex_runtime_is_family_owned() -> None:
         f'id = "{family}"',
         f'runtime_library = "libtrtmc_model_{family}.so"',
         f'runtime_strategies = ["{strategy}"]',
-        f'trtmc_model_{family}',
+        f"trtmc_model_{family}",
         "test_personaplex_speech_subprocess_seam|test_personaplex_speech_subprocess_seam.cpp",
         "test_personaplex_speech_decode_stop_policy|test_personaplex_speech_decode_stop_policy.cpp",
         "test_personaplex_speech_generation_helpers|test_personaplex_speech_generation_helpers.cpp",
@@ -5426,9 +5687,7 @@ def test_personaplex_runtime_is_family_owned() -> None:
     for manifest_path in sorted((E2E_MODELS / family / "manifests").glob("*.json")):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("runtime_strategy") != strategy:
-            violations.append(
-                (manifest_path, 0, f"{family} manifest uses non-owned runtime key")
-            )
+            violations.append((manifest_path, 0, f"{family} manifest uses non-owned runtime key"))
         if manifest.get("task_strategy") != retired_strategy:
             violations.append((manifest_path, 0, f"{family} manifest changed speech task key"))
 
@@ -5474,7 +5733,7 @@ def test_qwen3_omni_runtime_is_family_owned() -> None:
         f'id = "{family}"',
         f'runtime_library = "libtrtmc_model_{family}.so"',
         f'runtime_strategies = ["{strategy}"]',
-        f'trtmc_model_{family}',
+        f"trtmc_model_{family}",
         "test_qwen3_omni_audio_plan|test_qwen3_omni_audio_plan.cpp",
         "test_qwen3_omni_pipeline|test_qwen3_omni_pipeline.cpp",
     ):
@@ -5488,9 +5747,7 @@ def test_qwen3_omni_runtime_is_family_owned() -> None:
     for manifest_path in sorted((E2E_MODELS / family / "manifests").glob("*.json")):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if manifest.get("runtime_strategy") != strategy:
-            violations.append(
-                (manifest_path, 0, f"{family} manifest uses non-owned runtime key")
-            )
+            violations.append((manifest_path, 0, f"{family} manifest uses non-owned runtime key"))
         if manifest.get("task_strategy") != retired_strategy:
             violations.append((manifest_path, 0, f"{family} manifest changed omni task key"))
 
@@ -5555,10 +5812,7 @@ def test_shared_recurrent_contracts_are_model_neutral() -> None:
         owned_header = RUNTIME_MODELS / family / "recurrent_output_initializers.h"
         owned_contract = RUNTIME_MODELS / family / f"{family}_recurrent_step_contracts.h"
         owned_test = (
-            CPP_TESTS
-            / "models"
-            / family
-            / f"test_{family}_recurrent_output_initializers.cpp"
+            CPP_TESTS / "models" / family / f"test_{family}_recurrent_output_initializers.cpp"
         )
         manifest = RUNTIME_MODELS / family / "MODEL.toml"
         expected_manifest_entry = (
@@ -5619,8 +5873,13 @@ def test_shared_audio_domain_has_no_model_owned_feature_extractors() -> None:
     if "src/runtime/domains/audio/mel_spectrogram.cpp" in cmake_text:
         violations.append((CMAKE_ROOT, 0, "trtmc_core links shared mel_spectrogram.cpp"))
     if (CPP_TESTS / "test_mel_spectrogram.cpp").exists():
-        violations.append((CPP_TESTS / "test_mel_spectrogram.cpp", 0,
-                           "shared mel spectrogram test must be model-owned"))
+        violations.append(
+            (
+                CPP_TESTS / "test_mel_spectrogram.cpp",
+                0,
+                "shared mel spectrogram test must be model-owned",
+            )
+        )
 
     forbidden_includes = (
         "runtime/domains/audio/audio_types.h",
@@ -5663,13 +5922,16 @@ def test_shared_audio_domain_has_no_model_owned_feature_extractors() -> None:
         if not path.is_file()
     )
     manifest_expectations = {
-        RUNTIME_MODELS / "whisper" / "MODEL.toml":
-            "test_whisper_mel_spectrogram|test_whisper_mel_spectrogram.cpp",
-        RUNTIME_MODELS / "canary" / "MODEL.toml":
-            "test_canary_mel_spectrogram|test_canary_mel_spectrogram.cpp",
-        RUNTIME_MODELS / "nemotron_speech_streaming" / "MODEL.toml":
-            "test_nemotron_speech_streaming_audio_helpers|"
-            "test_nemotron_speech_streaming_audio_helpers.cpp",
+        RUNTIME_MODELS
+        / "whisper"
+        / "MODEL.toml": "test_whisper_mel_spectrogram|test_whisper_mel_spectrogram.cpp",
+        RUNTIME_MODELS
+        / "canary"
+        / "MODEL.toml": "test_canary_mel_spectrogram|test_canary_mel_spectrogram.cpp",
+        RUNTIME_MODELS
+        / "nemotron_speech_streaming"
+        / "MODEL.toml": "test_nemotron_speech_streaming_audio_helpers|"
+        "test_nemotron_speech_streaming_audio_helpers.cpp",
     }
     for manifest, expected in manifest_expectations.items():
         if expected not in manifest.read_text(encoding="utf-8"):
@@ -5756,10 +6018,7 @@ def test_shared_debug_runner_has_no_model_owned_runners() -> None:
         if match is None:
             continue
         strategy = match.group(1)
-        if not (
-            strategy.endswith("_decoder_kv_cache")
-            or strategy.endswith("_decoder_moe")
-        ):
+        if not (strategy.endswith("_decoder_kv_cache") or strategy.endswith("_decoder_moe")):
             continue
         family_dir = plugin_path.parent
         manifest = family_dir / "MODEL.toml"
@@ -5770,13 +6029,9 @@ def test_shared_debug_runner_has_no_model_owned_runners() -> None:
                 (manifest, 0, "decoder family missing model-owned debug_runner metadata")
             )
         if strategy not in manifest_text:
-            violations.append(
-                (manifest, 0, f"decoder family missing debug strategy {strategy}")
-            )
+            violations.append((manifest, 0, f"decoder family missing debug strategy {strategy}"))
         if not debug_runner.is_file():
-            violations.append(
-                (debug_runner, 0, "decoder family missing model-owned debug runner")
-            )
+            violations.append((debug_runner, 0, "decoder family missing model-owned debug runner"))
     root_test_text = DEBUG_RUNNER_TEST.read_text(encoding="utf-8")
     root_extended_test_text = DEBUG_RUNNER_EXTENDED_TEST.read_text(encoding="utf-8")
     shared_test_forbidden = (
@@ -5952,11 +6207,13 @@ def test_shared_e2e_preflight_and_repro_do_not_name_single_model_details() -> No
         "--condition-mask-raw",
     ):
         if needle in orchestrator_text:
-            violations.append((
-                E2E_ORCHESTRATOR,
-                0,
-                f"shared repro command contains model-owned detail {needle}",
-            ))
+            violations.append(
+                (
+                    E2E_ORCHESTRATOR,
+                    0,
+                    f"shared repro command contains model-owned detail {needle}",
+                )
+            )
 
     assert not violations, _format_violations(violations)
 
@@ -6110,11 +6367,13 @@ def test_prompted_segmentation_e2e_behavior_lives_only_in_sam_families() -> None
             violations.append((path, 0, "non-segmentation sidecar is not inert"))
         for needle in prompted_terms + semantic_terms:
             if needle in text:
-                violations.append((
-                    path,
-                    0,
-                    f"non-segmentation sidecar contains segmentation behavior {needle}",
-                ))
+                violations.append(
+                    (
+                        path,
+                        0,
+                        f"non-segmentation sidecar contains segmentation behavior {needle}",
+                    )
+                )
 
     assert not violations, _format_violations(violations)
 
@@ -6205,13 +6464,7 @@ def test_diffusion_runner_and_scheduler_are_family_owned() -> None:
             if not path.is_file():
                 violations.append((path, 0, "missing family-owned diffusion runner/scheduler"))
 
-        runner_path = (
-            E2E_MODELS
-            / owner
-            / "e2e_plugins"
-            / "runners"
-            / "diffusion.py"
-        )
+        runner_path = E2E_MODELS / owner / "e2e_plugins" / "runners" / "diffusion.py"
         if runner_path.is_file():
             text = runner_path.read_text(encoding="utf-8", errors="ignore")
             shared_imports = (
@@ -6474,10 +6727,7 @@ def test_diffusion_model_plugins_do_not_name_sibling_families() -> None:
     for owner, owner_terms in family_terms.items():
         owner_dir = E2E_MODELS / owner
         sibling_terms = tuple(
-            term
-            for family, terms in family_terms.items()
-            if family != owner
-            for term in terms
+            term for family, terms in family_terms.items() if family != owner for term in terms
         )
         for rel in relative_files:
             path = owner_dir / rel
@@ -6486,11 +6736,13 @@ def test_diffusion_model_plugins_do_not_name_sibling_families() -> None:
             text = path.read_text(encoding="utf-8", errors="ignore")
             for needle in sibling_terms:
                 if needle in text:
-                    violations.append((
-                        path,
-                        0,
-                        f"{owner} diffusion E2E plugin contains sibling behavior {needle}",
-                    ))
+                    violations.append(
+                        (
+                            path,
+                            0,
+                            f"{owner} diffusion E2E plugin contains sibling behavior {needle}",
+                        )
+                    )
 
     assert not violations, _format_violations(violations)
 
@@ -6588,7 +6840,7 @@ def test_shared_hf_transformers_reference_has_no_named_family_branches() -> None
         "_run_text_to_audio_ref",
         "DPRContextEncoder",
         "dpr_context_embed",
-        "model_type == \"dpr\"",
+        'model_type == "dpr"',
         "model_type == 'dpr'",
         "import timm",
         "timm.create_model",
@@ -6641,21 +6893,22 @@ def test_shared_e2e_placeholder_sidecars_have_no_runtime_behavior() -> None:
         tree = ast.parse(text, filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, forbidden_nodes):
-                violations.append((
-                    path,
-                    getattr(node, "lineno", 0),
-                    f"shared placeholder contains {type(node).__name__}",
-                ))
-            elif isinstance(node, (ast.Import, ast.ImportFrom)):
-                if not (
-                    isinstance(node, ast.ImportFrom)
-                    and node.module == "__future__"
-                ):
-                    violations.append((
+                violations.append(
+                    (
                         path,
                         getattr(node, "lineno", 0),
-                        "shared placeholder imports runtime code",
-                    ))
+                        f"shared placeholder contains {type(node).__name__}",
+                    )
+                )
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                if not (isinstance(node, ast.ImportFrom) and node.module == "__future__"):
+                    violations.append(
+                        (
+                            path,
+                            getattr(node, "lineno", 0),
+                            "shared placeholder imports runtime code",
+                        )
+                    )
 
     assert not violations, _format_violations(violations)
 
@@ -6682,11 +6935,13 @@ def test_diffusion_build_cli_args_are_family_owned() -> None:
         if flag in shared_text
     ]
     if "diffusion_build_args" in shared_text:
-        violations.append((
-            E2E_ORCHESTRATOR,
-            0,
-            "shared orchestrator contains diffusion-specific build arg mapping",
-        ))
+        violations.append(
+            (
+                E2E_ORCHESTRATOR,
+                0,
+                "shared orchestrator contains diffusion-specific build arg mapping",
+            )
+        )
 
     for family in ("flux", "ltx_video", "pixart", "qwen_image", "wan_t2v", "z_image"):
         manifest = E2E_MODELS / family / "MODEL.toml"
@@ -6739,63 +6994,81 @@ def test_diffusion_bundle_sections_config_and_tokenizers_are_family_owned() -> N
         '"vae_encoder" in components',
     ):
         if snippet in diffusion_body:
-            violations.append((
+            violations.append(
+                (
+                    ENGINE_BUILDER,
+                    0,
+                    f"shared diffusion builder owns bundle section policy {snippet}",
+                )
+            )
+    if "_diffusion_bundle_sections_from_plugin(plugin, components, parallel)" not in diffusion_body:
+        violations.append(
+            (
                 ENGINE_BUILDER,
                 0,
-                f"shared diffusion builder owns bundle section policy {snippet}",
-            ))
-    if "_diffusion_bundle_sections_from_plugin(plugin, components, parallel)" not in diffusion_body:
-        violations.append((
-            ENGINE_BUILDER,
-            0,
-            "shared diffusion builder does not delegate section assembly to plugin",
-        ))
+                "shared diffusion builder does not delegate section assembly to plugin",
+            )
+        )
     if 'getattr(plugin, "diffusion_bundle_config", None)' not in diffusion_body:
-        violations.append((
-            ENGINE_BUILDER,
-            0,
-            "shared diffusion builder does not delegate component-derived config to plugin",
-        ))
+        violations.append(
+            (
+                ENGINE_BUILDER,
+                0,
+                "shared diffusion builder does not delegate component-derived config to plugin",
+            )
+        )
     if "_diffusion_tokenizer_add_special_tokens_from_plugin(" not in diffusion_body:
-        violations.append((
-            ENGINE_BUILDER,
-            0,
-            "shared diffusion builder does not delegate tokenizer add-special policy to plugin",
-        ))
+        violations.append(
+            (
+                ENGINE_BUILDER,
+                0,
+                "shared diffusion builder does not delegate tokenizer add-special policy to plugin",
+            )
+        )
     if "_diffusion_tokenizer_bundle_sections_from_plugin(" not in diffusion_body:
-        violations.append((
-            ENGINE_BUILDER,
-            0,
-            "shared diffusion builder does not delegate tokenizer sections to plugin",
-        ))
+        violations.append(
+            (
+                ENGINE_BUILDER,
+                0,
+                "shared diffusion builder does not delegate tokenizer sections to plugin",
+            )
+        )
 
     for family in ("flux", "ltx_video", "pixart", "qwen_image", "wan_t2v", "z_image"):
         plugin_path = FAMILIES / family / "plugin.py"
         plugin_text = plugin_path.read_text(encoding="utf-8", errors="ignore")
         if "def diffusion_bundle_sections(" not in plugin_text:
-            violations.append((
-                plugin_path,
-                0,
-                "missing family-owned diffusion_bundle_sections()",
-            ))
+            violations.append(
+                (
+                    plugin_path,
+                    0,
+                    "missing family-owned diffusion_bundle_sections()",
+                )
+            )
         if "def diffusion_bundle_config(" not in plugin_text:
-            violations.append((
-                plugin_path,
-                0,
-                "missing family-owned diffusion_bundle_config()",
-            ))
+            violations.append(
+                (
+                    plugin_path,
+                    0,
+                    "missing family-owned diffusion_bundle_config()",
+                )
+            )
         if "def diffusion_tokenizer_add_special_tokens(" not in plugin_text:
-            violations.append((
-                plugin_path,
-                0,
-                "missing family-owned diffusion_tokenizer_add_special_tokens()",
-            ))
+            violations.append(
+                (
+                    plugin_path,
+                    0,
+                    "missing family-owned diffusion_tokenizer_add_special_tokens()",
+                )
+            )
         if "def diffusion_tokenizer_bundle_sections(" not in plugin_text:
-            violations.append((
-                plugin_path,
-                0,
-                "missing family-owned diffusion_tokenizer_bundle_sections()",
-            ))
+            violations.append(
+                (
+                    plugin_path,
+                    0,
+                    "missing family-owned diffusion_tokenizer_bundle_sections()",
+                )
+            )
 
     assert not violations, _format_violations(violations)
 
@@ -6818,11 +7091,13 @@ def test_image_repro_cli_args_are_family_owned() -> None:
         "Vision/segmentation need test image",
     ):
         if snippet in loader_text:
-            violations.append((
-                E2E_MANIFEST_LOADER,
-                0,
-                f"shared manifest loader owns image-specific mapping {snippet}",
-            ))
+            violations.append(
+                (
+                    E2E_MANIFEST_LOADER,
+                    0,
+                    f"shared manifest loader owns image-specific mapping {snippet}",
+                )
+            )
 
     image_families: set[str] = set()
     for manifest in sorted(E2E_MODELS.glob("*/manifests/*.json")):
@@ -6849,16 +7124,18 @@ def test_image_repro_cli_args_are_family_owned() -> None:
         family_manifest = E2E_MODELS / family / "MODEL.toml"
         manifest_text = family_manifest.read_text(encoding="utf-8", errors="ignore")
         for snippet in (
-            'input_fields = [',
+            "input_fields = [",
             '{ input = "image", manifest = "test_image" }',
             'preflight_asset_fields = ["test_image"]',
         ):
             if snippet not in manifest_text:
-                violations.append((
-                    family_manifest,
-                    0,
-                    f"missing image-owned loader mapping {snippet}",
-                ))
+                violations.append(
+                    (
+                        family_manifest,
+                        0,
+                        f"missing image-owned loader mapping {snippet}",
+                    )
+                )
 
     assert not violations, _format_violations(violations)
 
@@ -6881,11 +7158,13 @@ def test_audio_input_loader_mappings_are_family_owned() -> None:
         "Speech reference tokens",
     ):
         if snippet in loader_text:
-            violations.append((
-                E2E_MANIFEST_LOADER,
-                0,
-                f"shared manifest loader owns audio-specific mapping {snippet}",
-            ))
+            violations.append(
+                (
+                    E2E_MANIFEST_LOADER,
+                    0,
+                    f"shared manifest loader owns audio-specific mapping {snippet}",
+                )
+            )
 
     audio_families: set[str] = set()
     token_families: set[str] = set()
@@ -6904,26 +7183,30 @@ def test_audio_input_loader_mappings_are_family_owned() -> None:
         family_manifest = E2E_MODELS / family / "MODEL.toml"
         text = family_manifest.read_text(encoding="utf-8", errors="ignore")
         for snippet in (
-            'input_fields = [',
+            "input_fields = [",
             '{ input = "audio", manifest = "test_input_audio" }',
             "test_input_audio",
         ):
             if snippet not in text:
-                violations.append((
-                    family_manifest,
-                    0,
-                    f"missing audio-owned loader mapping {snippet}",
-                ))
+                violations.append(
+                    (
+                        family_manifest,
+                        0,
+                        f"missing audio-owned loader mapping {snippet}",
+                    )
+                )
 
     for family in sorted(token_families):
         family_manifest = E2E_MODELS / family / "MODEL.toml"
         text = family_manifest.read_text(encoding="utf-8", errors="ignore")
         if "speech_reference_tokens" not in text:
-            violations.append((
-                family_manifest,
-                0,
-                "missing speech-reference-token asset mapping",
-            ))
+            violations.append(
+                (
+                    family_manifest,
+                    0,
+                    "missing speech-reference-token asset mapping",
+                )
+            )
 
     assert not violations, _format_violations(violations)
 
@@ -6949,11 +7232,13 @@ def test_model_specific_manifest_inputs_are_family_owned() -> None:
         'for key in ("field_input", "branch_input", "trunk_input", "output_field")',
     ):
         if snippet in loader_text:
-            violations.append((
-                E2E_MANIFEST_LOADER,
-                0,
-                f"shared manifest loader owns model-specific input mapping {snippet}",
-            ))
+            violations.append(
+                (
+                    E2E_MANIFEST_LOADER,
+                    0,
+                    f"shared manifest loader owns model-specific input mapping {snippet}",
+                )
+            )
 
     model_input_fields = (
         "point_x",
@@ -6995,11 +7280,13 @@ def test_model_specific_manifest_inputs_are_family_owned() -> None:
         for field in sorted(fields):
             snippet = f'manifest = "{field}"'
             if snippet not in text:
-                violations.append((
-                    family_manifest,
-                    0,
-                    f"missing family-owned input mapping for {field}",
-                ))
+                violations.append(
+                    (
+                        family_manifest,
+                        0,
+                        f"missing family-owned input mapping for {field}",
+                    )
+                )
 
     assert not violations, _format_violations(violations)
 
@@ -7061,11 +7348,13 @@ def test_text_generation_runtime_and_e2e_behavior_is_model_owned() -> None:
             violations.append((path, 0, "shared text E2E sidecar must be inert"))
         for node in ast.walk(tree):
             if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                violations.append((
-                    path,
-                    getattr(node, "lineno", 0),
-                    "shared text E2E sidecar defines concrete behavior",
-                ))
+                violations.append(
+                    (
+                        path,
+                        getattr(node, "lineno", 0),
+                        "shared text E2E sidecar defines concrete behavior",
+                    )
+                )
 
     assert not violations, _format_violations(violations)
 
@@ -7092,11 +7381,7 @@ def test_nemotron_labs_diffusion_generation_cli_is_model_owned() -> None:
     ]
 
     owned_runner = (
-        E2E_MODELS
-        / "nemotron_labs_diffusion"
-        / "e2e_plugins"
-        / "runners"
-        / "text_generation.py"
+        E2E_MODELS / "nemotron_labs_diffusion" / "e2e_plugins" / "runners" / "text_generation.py"
     )
     owned_text = owned_runner.read_text(encoding="utf-8") if owned_runner.is_file() else ""
     if not owned_runner.is_file():
@@ -7105,11 +7390,7 @@ def test_nemotron_labs_diffusion_generation_cli_is_model_owned() -> None:
         if needle not in owned_text:
             violations.append((owned_runner, 0, f"missing Nemotron-owned CLI term {needle}"))
 
-    model_test = (
-        E2E_MODELS
-        / "nemotron_labs_diffusion"
-        / "test_nemotron_labs_diffusion_runner.py"
-    )
+    model_test = E2E_MODELS / "nemotron_labs_diffusion" / "test_nemotron_labs_diffusion_runner.py"
     if not model_test.is_file():
         violations.append((model_test, 0, "missing Nemotron-owned runner unit test"))
 
@@ -7161,8 +7442,11 @@ def test_model_e2e_text_runners_use_family_owned_debug_runners() -> None:
                 and any(alias.name == "runner_from_bundle" for alias in node.names)
             ):
                 violations.append(
-                    (runner_path, node.lineno,
-                     "model text runner imports shared runner_from_bundle")
+                    (
+                        runner_path,
+                        node.lineno,
+                        "model text runner imports shared runner_from_bundle",
+                    )
                 )
         for match in re.finditer(
             r"from tensorrt_model_connect\.debug_runner import \((.*?)\)",
@@ -7171,7 +7455,8 @@ def test_model_e2e_text_runners_use_family_owned_debug_runners() -> None:
         ):
             imported_block = match.group(1)
             leaked = sorted(
-                name for name in (
+                name
+                for name in (
                     "runner_from_bundle",
                     "load_config_from_bundle",
                     "load_engine_from_bundle",
@@ -7182,9 +7467,12 @@ def test_model_e2e_text_runners_use_family_owned_debug_runners() -> None:
             if leaked:
                 line = text.count("\n", 0, match.start()) + 1
                 violations.append(
-                    (runner_path, line,
-                     "embedded text runner script imports shared helper(s): "
-                     + ", ".join(leaked))
+                    (
+                        runner_path,
+                        line,
+                        "embedded text runner script imports shared helper(s): "
+                        + ", ".join(leaked),
+                    )
                 )
         if family not in active_families:
             if "plugin = None" not in text:
@@ -7236,31 +7524,19 @@ def test_model_e2e_text_runners_use_family_owned_debug_runners() -> None:
         family = comparator_root.parents[1].name
         text = comparator_root.read_text(encoding="utf-8")
         if "from .comparators.text import" in text and family not in active_families:
-            violations.append(
-                (comparator_root, 0, "non-text family imports text comparator")
-            )
+            violations.append((comparator_root, 0, "non-text family imports text comparator"))
 
     for family in sorted(active_families):
-        runner_path = (
-            E2E_MODELS
-            / family
-            / "e2e_plugins"
-            / "runners"
-            / "text_generation.py"
-        )
+        runner_path = E2E_MODELS / family / "e2e_plugins" / "runners" / "text_generation.py"
         family_debug_runner = FAMILIES / family / "debug_runner.py"
         if not runner_path.is_file():
             violations.append((runner_path, 0, "missing model-owned text runner"))
             continue
         if not family_debug_runner.is_file():
-            violations.append(
-                (family_debug_runner, 0, "missing family-owned debug runner")
-            )
+            violations.append((family_debug_runner, 0, "missing family-owned debug runner"))
             continue
         text = runner_path.read_text(encoding="utf-8")
-        expected_import = (
-            f"from tensorrt_model_connect.families.{family}.debug_runner import"
-        )
+        expected_import = f"from tensorrt_model_connect.families.{family}.debug_runner import"
         if expected_import not in text:
             violations.append(
                 (runner_path, 0, "active text runner missing family debug_runner import")
@@ -7298,9 +7574,12 @@ def test_model_debug_runner_tests_use_family_owned_factories() -> None:
                 leaked = sorted(alias.name for alias in node.names if alias.name in forbidden)
                 if leaked:
                     violations.append(
-                        (path, node.lineno,
-                         "model debug-runner test imports shared helper(s): "
-                         + ", ".join(leaked))
+                        (
+                            path,
+                            node.lineno,
+                            "model debug-runner test imports shared helper(s): "
+                            + ", ".join(leaked),
+                        )
                     )
 
     assert not violations, _format_violations(violations)
@@ -7338,9 +7617,12 @@ def test_model_owned_code_imports_only_debug_runner_infrastructure() -> None:
                 if leaked:
                     line = text.count("\n", 0, match.start()) + 1
                     violations.append(
-                        (path, line,
-                         "model-owned code imports shared debug_runner symbol(s): "
-                         + ", ".join(leaked))
+                        (
+                            path,
+                            line,
+                            "model-owned code imports shared debug_runner symbol(s): "
+                            + ", ".join(leaked),
+                        )
                     )
 
     assert not violations, _format_violations(violations)
@@ -7364,15 +7646,21 @@ def test_family_debug_runners_do_not_import_shared_debug_runner_module() -> None
             ):
                 imported = ", ".join(alias.name for alias in node.names)
                 violations.append(
-                    (path, node.lineno,
-                     "family debug_runner imports shared debug_runner: " + imported)
+                    (
+                        path,
+                        node.lineno,
+                        "family debug_runner imports shared debug_runner: " + imported,
+                    )
                 )
             elif isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name == "tensorrt_model_connect.debug_runner":
                         violations.append(
-                            (path, node.lineno,
-                             "family debug_runner imports shared debug_runner module")
+                            (
+                                path,
+                                node.lineno,
+                                "family debug_runner imports shared debug_runner module",
+                            )
                         )
 
     assert not violations, _format_violations(violations)
@@ -7412,9 +7700,12 @@ def test_qwen_debug_runner_path_does_not_import_shared_text_runner_helpers() -> 
             shared_behavior = sorted(imported & forbidden_helpers)
             if shared_behavior:
                 violations.append(
-                    (path, node.lineno,
-                     "Qwen E2E code imports shared text runner helper(s): "
-                     + ", ".join(shared_behavior))
+                    (
+                        path,
+                        node.lineno,
+                        "Qwen E2E code imports shared text runner helper(s): "
+                        + ", ".join(shared_behavior),
+                    )
                 )
 
     assert not violations, _format_violations(violations)
@@ -7427,60 +7718,90 @@ def test_hf_transformers_model_plugins_do_not_name_sibling_families() -> None:
     Postconditions: no HF reference sidecar carries another family's special branch.
     """
     family_term_groups = (
-        ({"bark"}, (
-            "BarkModel",
-            "_run_text_to_audio_ref",
-            "hf_text_to_audio",
-        )),
-        ({"canary"}, (
-            "Canary",
-            "canary",
-            "_run_canary_ref",
-            "nemo_canary_stt",
-        )),
-        ({"nemotron_speech_streaming"}, (
-            "Nemotron speech",
-            "_run_nemo_speech_ref",
-            "nemo_speech_stt",
-        )),
-        ({"nemotron_labs_diffusion"}, (
-            "nemotron_labs_diffusion",
-            "Nemotron Labs",
-            "linear_spec",
-            "_run_nemotron_labs_diffusion_generation",
-        )),
-        ({"locateanything"}, (
-            "LocateAnything",
-            "locateanything",
-            "_run_locateanything",
-            "patchify_chw",
-        )),
-        ({"qwen_vl"}, (
-            "qwen",
-            "Qwen",
-        )),
-        ({"internvl"}, (
-            "internvl",
-            "InternVL",
-        )),
-        ({"dpr"}, (
-            "DPRContextEncoder",
-            "DPRContextEncoderTokenizerFast",
-            "dpr_context_embed",
-            "model_type == \"dpr\"",
-            "model_type == 'dpr'",
-        )),
-        ({"timm_vit"}, (
-            "import timm",
-            "timm.create_model",
-            "_run_image_classification_ref",
-        )),
-        ({"sam", "sam3"}, (
-            "SamModel",
-            "SamProcessor",
-            "_run_prompted_segmentation_ref",
-            "hf_prompted_segmentation",
-        )),
+        (
+            {"bark"},
+            (
+                "BarkModel",
+                "_run_text_to_audio_ref",
+                "hf_text_to_audio",
+            ),
+        ),
+        (
+            {"canary"},
+            (
+                "Canary",
+                "canary",
+                "_run_canary_ref",
+                "nemo_canary_stt",
+            ),
+        ),
+        (
+            {"nemotron_speech_streaming"},
+            (
+                "Nemotron speech",
+                "_run_nemo_speech_ref",
+                "nemo_speech_stt",
+            ),
+        ),
+        (
+            {"nemotron_labs_diffusion"},
+            (
+                "nemotron_labs_diffusion",
+                "Nemotron Labs",
+                "linear_spec",
+                "_run_nemotron_labs_diffusion_generation",
+            ),
+        ),
+        (
+            {"locateanything"},
+            (
+                "LocateAnything",
+                "locateanything",
+                "_run_locateanything",
+                "patchify_chw",
+            ),
+        ),
+        (
+            {"qwen_vl"},
+            (
+                "qwen",
+                "Qwen",
+            ),
+        ),
+        (
+            {"internvl"},
+            (
+                "internvl",
+                "InternVL",
+            ),
+        ),
+        (
+            {"dpr"},
+            (
+                "DPRContextEncoder",
+                "DPRContextEncoderTokenizerFast",
+                "dpr_context_embed",
+                'model_type == "dpr"',
+                "model_type == 'dpr'",
+            ),
+        ),
+        (
+            {"timm_vit"},
+            (
+                "import timm",
+                "timm.create_model",
+                "_run_image_classification_ref",
+            ),
+        ),
+        (
+            {"sam", "sam3"},
+            (
+                "SamModel",
+                "SamProcessor",
+                "_run_prompted_segmentation_ref",
+                "hf_prompted_segmentation",
+            ),
+        ),
     )
     stale_terms = ("_vl_fallback_prompt",)
     violations = []
@@ -7491,10 +7812,7 @@ def test_hf_transformers_model_plugins_do_not_name_sibling_families() -> None:
             if needle in text:
                 violations.append((path, 0, f"{owner} HF reference contains stale {needle}"))
         sibling_terms = tuple(
-            term
-            for owners, terms in family_term_groups
-            if owner not in owners
-            for term in terms
+            term for owners, terms in family_term_groups if owner not in owners for term in terms
         )
         violations.extend(
             (path, 0, f"{owner} HF reference contains sibling behavior {needle}")
@@ -7592,7 +7910,7 @@ def test_single_family_e2e_task_sidecars_are_model_owned() -> None:
             "behavior_terms": (
                 "class ImageClassificationRunner",
                 "class ImageClassificationComparator",
-                "return \"image_classification\"",
+                'return "image_classification"',
                 "ctx.binary_path",
                 "top1_match",
             ),
@@ -7605,12 +7923,16 @@ def test_single_family_e2e_task_sidecars_are_model_owned() -> None:
             ),
             "shared_paths": (
                 REPO_ROOT / "tests" / "e2e_harness" / "runners" / "diffusion_text_generation.py",
-                REPO_ROOT / "tests" / "e2e_harness" / "comparators" / "diffusion_text_generation.py",
+                REPO_ROOT
+                / "tests"
+                / "e2e_harness"
+                / "comparators"
+                / "diffusion_text_generation.py",
             ),
             "behavior_terms": (
                 "class DiffusionTextGenerationRunner",
                 "class DiffusionTextGenerationComparator",
-                "return \"diffusion_text_generation\"",
+                'return "diffusion_text_generation"',
                 "elf_conditional_text",
                 "ELF replay",
                 "generated_samples",
@@ -7733,12 +8055,10 @@ def test_sampling_contract_is_qwen_owned() -> None:
     Preconditions: Qwen top-p manifests declare sampling_top_p.
     Postconditions: shared sampling plugin is inert and Qwen owns the contract.
     """
-    shared_text = (E2E_SHARED_CONTRACT_PLUGINS / "sampling.py").read_text(
+    shared_text = (E2E_SHARED_CONTRACT_PLUGINS / "sampling.py").read_text(encoding="utf-8")
+    qwen_contract = (E2E_MODELS / "qwen" / "e2e_plugins" / "contract.py").read_text(
         encoding="utf-8"
     )
-    qwen_contract = (
-        E2E_MODELS / "qwen" / "e2e_plugins" / "contract.py"
-    ).read_text(encoding="utf-8")
 
     violations = []
     if "plugin = None" not in shared_text:
@@ -8032,12 +8352,10 @@ def test_reference_contract_config_is_model_owned() -> None:
         metadata = manifest.get("metadata", {})
         config = metadata.get("contract_config", {}) if isinstance(metadata, dict) else {}
         missing = [
-            key for key in expected_keys
-            if not isinstance(config, dict) or key not in config
+            key for key in expected_keys if not isinstance(config, dict) or key not in config
         ]
         violations.extend(
-            (path, 0, f"manifest missing metadata.contract_config.{key}")
-            for key in missing
+            (path, 0, f"manifest missing metadata.contract_config.{key}") for key in missing
         )
 
     assert not violations, _format_violations(violations)
@@ -8058,9 +8376,7 @@ def test_every_reference_family_manifest_has_model_owned_contract() -> None:
 
         contract = path.parents[1] / "e2e_plugins" / "contract.py"
         if not contract.exists():
-            violations.append(
-                (contract, 0, f"missing model-owned contract for {reference_family}")
-            )
+            violations.append((contract, 0, f"missing model-owned contract for {reference_family}"))
             continue
 
         contract_text = contract.read_text(encoding="utf-8")
@@ -8106,7 +8422,7 @@ def test_model_owned_python_does_not_import_sibling_models() -> None:
                 for module in modules:
                     if not module.startswith(prefix):
                         continue
-                    imported_owner = module[len(prefix):].split(".", 1)[0]
+                    imported_owner = module[len(prefix) :].split(".", 1)[0]
                     if imported_owner and imported_owner != owner:
                         violations.append(
                             (
@@ -8173,9 +8489,7 @@ def test_model_owned_unit_tests_do_not_live_under_tests_tools() -> None:
         if not model_test.is_file():
             violations.append((model_test, 0, "missing model-owned unit test"))
 
-    sam3_prompted_harness = (
-        E2E_MODELS / "sam3" / "test_sam3_prompted_segmentation_harness.py"
-    )
+    sam3_prompted_harness = E2E_MODELS / "sam3" / "test_sam3_prompted_segmentation_harness.py"
     if not sam3_prompted_harness.is_file():
         violations.append((sam3_prompted_harness, 0, "missing model-owned unit test"))
     deepseek_ocr_contract = E2E_MODELS / "deepseek_ocr" / "test_ocr_contract.py"
@@ -8393,10 +8707,7 @@ def test_torch_reference_model_plugins_do_not_name_sibling_families() -> None:
         path = E2E_MODELS / owner / "e2e_plugins" / "references" / "torch_reference.py"
         text = path.read_text(encoding="utf-8", errors="ignore")
         sibling_terms = tuple(
-            term
-            for family, terms in family_terms.items()
-            if family != owner
-            for term in terms
+            term for family, terms in family_terms.items() if family != owner for term in terms
         )
         violations.extend(
             (path, 0, f"{owner} torch reference contains sibling behavior {needle}")
@@ -8559,7 +8870,7 @@ def test_text_to_audio_comparator_sidecars_are_owned_by_audio_models() -> None:
     owners = {"bark", "magpie_tts"}
     behavior_terms = (
         "class TextToAudioComparator",
-        "return \"text_to_audio\"",
+        'return "text_to_audio"',
         "audio_duration",
         "waveform",
         "sample_rate",
@@ -8729,40 +9040,97 @@ def test_generated_e2e_task_sidecars_are_task_owned() -> None:
     }
     diffusion_owners = {"flux", "ltx_video", "pixart", "qwen_image", "wan_t2v", "z_image"}
     simple_sidecars = [
-        ("runners", "vision_language.py", set(VL_RUNTIME_FAMILIES),
-         "VisionLanguageRunner", "vision_language_generation"),
-        ("comparators", "vision_language.py", set(VL_RUNTIME_FAMILIES),
-         "VisionLanguageComparator", "vision_language_generation"),
+        (
+            "runners",
+            "vision_language.py",
+            set(VL_RUNTIME_FAMILIES),
+            "VisionLanguageRunner",
+            "vision_language_generation",
+        ),
+        (
+            "comparators",
+            "vision_language.py",
+            set(VL_RUNTIME_FAMILIES),
+            "VisionLanguageComparator",
+            "vision_language_generation",
+        ),
         ("runners", "embedding.py", {"eagle_vlm"}, "EmbeddingRunner", "embedding"),
         ("comparators", "embedding.py", {"eagle_vlm"}, "EmbeddingComparator", "embedding"),
         ("runners", "encoder_only.py", encoder_owners, "EncoderOnlyRunner", "encoder_only_nlp"),
-        ("comparators", "encoder_only.py", encoder_owners, "EncoderOnlyComparator", "encoder_only_nlp"),
+        (
+            "comparators",
+            "encoder_only.py",
+            encoder_owners,
+            "EncoderOnlyComparator",
+            "encoder_only_nlp",
+        ),
         ("runners", "reranking.py", {"eagle_vlm"}, "RerankingRunner", "reranking"),
         ("comparators", "reranking.py", {"eagle_vlm"}, "RerankingComparator", "reranking"),
-        ("runners", "neural_operator.py",
-         {"chronos_bolt", "patchtsmixer", "patchtst", "timesfm"},
-         "NeuralOperatorRunner", "neural_operator"),
-        ("comparators", "neural_operator.py",
-         {"chronos_bolt", "patchtsmixer", "patchtst", "timesfm"},
-         "NeuralOperatorComparator", "neural_operator"),
-        ("runners", "object_detection.py", {"locateanything"},
-         "ObjectDetectionRunner", "object_detection"),
-        ("runners", "image_classification.py", {"timm_vit"},
-         "ImageClassificationRunner", "image_classification"),
-        ("comparators", "image_classification.py", {"timm_vit"},
-         "ImageClassificationComparator", "image_classification"),
-        ("runners", "diffusion.py", diffusion_owners,
-         "DiffusionMediaRunner", "diffusion_media_generation"),
-        ("comparators", "diffusion.py", diffusion_owners,
-         "DiffusionComparator", "diffusion_media_generation"),
-        ("runners", "diffusion_text_generation.py", {"elf_flow"},
-         "DiffusionTextGenerationRunner", "diffusion_text_generation"),
-        ("comparators", "diffusion_text_generation.py", {"elf_flow"},
-         "DiffusionTextGenerationComparator", "diffusion_text_generation"),
-        ("runners", "omni.py", {"qwen3_omni"},
-         "OmniMultimodalRunner", QWEN3_OMNI_RUNTIME_STRATEGY),
-        ("comparators", "omni.py", {"qwen3_omni"},
-         "OmniComparator", "omni_multimodal"),
+        (
+            "runners",
+            "neural_operator.py",
+            {"chronos_bolt", "patchtsmixer", "patchtst", "timesfm"},
+            "NeuralOperatorRunner",
+            "neural_operator",
+        ),
+        (
+            "comparators",
+            "neural_operator.py",
+            {"chronos_bolt", "patchtsmixer", "patchtst", "timesfm"},
+            "NeuralOperatorComparator",
+            "neural_operator",
+        ),
+        (
+            "runners",
+            "object_detection.py",
+            {"locateanything"},
+            "ObjectDetectionRunner",
+            "object_detection",
+        ),
+        (
+            "runners",
+            "image_classification.py",
+            {"timm_vit"},
+            "ImageClassificationRunner",
+            "image_classification",
+        ),
+        (
+            "comparators",
+            "image_classification.py",
+            {"timm_vit"},
+            "ImageClassificationComparator",
+            "image_classification",
+        ),
+        (
+            "runners",
+            "diffusion.py",
+            diffusion_owners,
+            "DiffusionMediaRunner",
+            "diffusion_media_generation",
+        ),
+        (
+            "comparators",
+            "diffusion.py",
+            diffusion_owners,
+            "DiffusionComparator",
+            "diffusion_media_generation",
+        ),
+        (
+            "runners",
+            "diffusion_text_generation.py",
+            {"elf_flow"},
+            "DiffusionTextGenerationRunner",
+            "diffusion_text_generation",
+        ),
+        (
+            "comparators",
+            "diffusion_text_generation.py",
+            {"elf_flow"},
+            "DiffusionTextGenerationComparator",
+            "diffusion_text_generation",
+        ),
+        ("runners", "omni.py", {"qwen3_omni"}, "OmniMultimodalRunner", QWEN3_OMNI_RUNTIME_STRATEGY),
+        ("comparators", "omni.py", {"qwen3_omni"}, "OmniComparator", "omni_multimodal"),
     ]
 
     violations = []
@@ -8892,11 +9260,13 @@ def test_family_builders_do_not_import_sibling_or_forbidden_shared_helpers() -> 
                         if module == "tensorrt_model_connect":
                             for alias in node.names:
                                 if alias.name in _FORBIDDEN_SHARED_BUILDER_MODULES:
-                                    violations.append((
-                                        path,
-                                        node.lineno,
-                                        f"imports shared {module}.{alias.name}",
-                                    ))
+                                    violations.append(
+                                        (
+                                            path,
+                                            node.lineno,
+                                            f"imports shared {module}.{alias.name}",
+                                        )
+                                    )
                         _check_absolute_import(
                             module, owner, family_ids, path, node.lineno, violations
                         )
@@ -8904,11 +9274,13 @@ def test_family_builders_do_not_import_sibling_or_forbidden_shared_helpers() -> 
                         if node.level >= 2 and not module:
                             for alias in node.names:
                                 if alias.name in _FORBIDDEN_SHARED_BUILDER_MODULES:
-                                    violations.append((
-                                        path,
-                                        node.lineno,
-                                        f"imports shared helper {'.' * node.level}{alias.name}",
-                                    ))
+                                    violations.append(
+                                        (
+                                            path,
+                                            node.lineno,
+                                            f"imports shared helper {'.' * node.level}{alias.name}",
+                                        )
+                                    )
                         _check_relative_import(
                             module,
                             node.level,
@@ -8981,23 +9353,29 @@ def test_model_owned_e2e_assets_are_local_and_complete() -> None:
                 violations.append((model_dir, 0, f"missing {required.name}"))
 
         for manifest in sorted((model_dir / "manifests").glob("*.json")):
-            threshold = model_dir / "thresholds" / manifest.name
-            if not threshold.is_file():
-                violations.append((
-                    manifest,
-                    0,
-                    f"missing threshold sidecar {threshold.relative_to(REPO_ROOT)}",
-                ))
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+            for testcase in raw.get("testcases", []):
+                threshold = model_dir / "thresholds" / f"{testcase['name']}.json"
+                if not threshold.is_file():
+                    violations.append(
+                        (
+                            manifest,
+                            0,
+                            f"missing threshold sidecar {threshold.relative_to(REPO_ROOT)}",
+                        )
+                    )
 
         for path in model_dir.rglob("*.py"):
             for line_no, line in enumerate(
                 path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1
             ):
                 if _FORBIDDEN_E2E_IMPORT_RE.search(line):
-                    violations.append((
-                        path,
-                        line_no,
-                        "imports shared E2E runner/reference/comparator",
-                    ))
+                    violations.append(
+                        (
+                            path,
+                            line_no,
+                            "imports shared E2E runner/reference/comparator",
+                        )
+                    )
 
     assert not violations, _format_violations(violations)

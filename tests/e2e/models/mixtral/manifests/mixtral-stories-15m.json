@@ -1,16 +1,26 @@
 {
   "name": "mixtral-stories-15m",
-  "trace_id": "IT-E2E-MXTRL-01",
   "hf_id": "ggml-org/stories15M_MOE",
   "bundle": "mixtral-stories-15m.trtfb",
   "family": "mixtral",
   "runtime_strategy": "mixtral_decoder_moe",
   "task_strategy": "text_generation_causal",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "continuation_parity",
+  "precision": "fp16",
+  "fp32_layers": [
+    5
+  ],
   "max_cache_length": 256,
-  "prompt": "Once upon a time there was a little",
-  "max_new_tokens": 20,
   "trust_remote_code": false,
-  "core": true
+  "testcases": [
+    {
+      "name": "mixtral-stories-15m",
+      "trace_id": "IT-E2E-MXTRL-01",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "reference_precision": "fp32",
+      "prompt": "Once upon a time there was a little",
+      "max_new_tokens": 20,
+      "core": true
+    }
+  ]
 }

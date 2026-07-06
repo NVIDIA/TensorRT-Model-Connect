@@ -32,10 +32,22 @@ void test_zimage_construction() {
     check(std::string(pipeline.model_id()) == "test-zimage", "ZImagePipeline model_id");
 }
 
+void test_zimage_initial_latent_contract() {
+    std::string error;
+    const std::vector<float> supplied(16, 1.0F);
+    check(trtmc::validate_z_image_initial_latents(supplied.size(), 1, supplied, error),
+          "Z-Image accepts exact caller latent size");
+    check(!trtmc::validate_z_image_initial_latents(supplied.size() + 1, 1, supplied, error),
+          "Z-Image rejects wrong caller latent size");
+    check(!trtmc::validate_z_image_initial_latents(supplied.size(), 2, supplied, error),
+          "Z-Image rejects one latent for multiple prompts");
+}
+
 } // namespace
 
 int main() {
     test_zimage_construction();
+    test_zimage_initial_latent_contract();
     if (failures > 0) {
         std::cerr << failures << " z-image pipeline test(s) FAILED\n";
     }

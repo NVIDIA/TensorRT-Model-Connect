@@ -5,12 +5,7 @@
   "family": "bart",
   "runtime_strategy": "bart_seq2seq_encoder_decoder",
   "task_strategy": "text_generation_causal",
-  "reference_family": "seq2seq_base_weak",
-  "user_contract": "continuation_parity",
   "max_cache_length": 256,
-  "prompt": "The quick brown fox jumps over the lazy dog.",
-  "max_new_tokens": 20,
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
     "parallel": {
@@ -30,32 +25,42 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "bart-base-tp4",
+      "reference_family": "seq2seq_base_weak",
+      "user_contract": "continuation_parity",
+      "prompt": "The quick brown fox jumps over the lazy dog.",
+      "max_new_tokens": 20,
+      "ci_tier": "multi_device",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "notes": "BART-base TP4 repro using the same checkpoint, prompt, generation length, and thresholds as bart-base.",
+      "metadata": {
+        "contract_config": {
+          "preserve_prompt_echo": true,
+          "seq2seq_reconstruction": true
+        }
+      }
     }
-  ],
-  "notes": "BART-base TP4 repro using the same checkpoint, prompt, generation length, and thresholds as bart-base.",
-  "metadata": {
-    "contract_config": {
-      "preserve_prompt_echo": true,
-      "seq2seq_reconstruction": true
-    }
-  }
+  ]
 }

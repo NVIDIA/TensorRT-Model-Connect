@@ -89,6 +89,10 @@ struct CliArgs {
     std::vector<std::uint64_t> seed_list;
 };
 
+inline bool has_run_prompt_source(const CliArgs& args) {
+    return args.prompt_provided || !args.prompts_file.empty();
+}
+
 std::optional<std::uint64_t> parse_byte_size(const std::string& text);
 // Parse a CSV of unsigned-64 integers (e.g. "0,1,2"). Returns nullopt when
 // any token fails to parse. Empty string returns an empty vector wrapped

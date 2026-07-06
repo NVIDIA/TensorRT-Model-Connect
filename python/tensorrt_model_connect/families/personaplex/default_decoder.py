@@ -69,6 +69,7 @@ def build_standard_decoder_engine(
     verbose: bool = False,
     debug_layer_outputs: bool = False,
     hidden_state_output: bool = False,
+    fp32_layers: tuple[int, ...] = (),
 ) -> bytes:
     """Build a TRT engine plan (serialized bytes) for a standard decoder.
 
@@ -127,6 +128,7 @@ def build_standard_decoder_engine(
         embed_input
         or debug_layer_outputs
         or hidden_state_output
+        or bool(fp32_layers)
         or bool(config.raw.get("dynamic_kv_cache", False))
         or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
     )
@@ -158,6 +160,17 @@ def build_standard_decoder_engine(
     num_layers = config.num_hidden_layers
     num_heads = config.num_attention_heads
     num_kv_heads = config.num_key_value_heads
+    selected_fp32_layers = frozenset(int(layer) for layer in fp32_layers)
+    invalid_fp32_layers = sorted(
+        layer for layer in selected_fp32_layers
+        if layer < 0 or layer >= num_layers)
+    if invalid_fp32_layers:
+        raise ValueError(
+            "PersonaPlex temporal fp32_layers contains out-of-range indices: "
+            f"{invalid_fp32_layers}; expected 0-{num_layers - 1}")
+    if selected_fp32_layers and precision != "fp16":
+        raise ValueError(
+            "PersonaPlex temporal fp32_layers requires FP16 base precision")
     head_dim = attention_size // num_heads
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
@@ -407,19 +420,56 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     present_k_outputs = []
     present_v_outputs = []
+    fp32_attention_mask = None
+    fp32_eps_tensor = None
+    fp32_cos_half_tensor = None
+    fp32_sin_half_tensor = None
+    if selected_fp32_layers:
+        fp32_attention_mask = network.add_cast(
+            attention_mask, trt.float32).get_output(0)
+        fp32_eps_tensor = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([config.rms_norm_eps], dtype=np.float32),
+            dtype=np.float32)
+        if cos_half_tensor is not None:
+            fp32_cos_half_tensor = network.add_cast(
+                cos_half_tensor, trt.float32).get_output(0)
+            fp32_sin_half_tensor = network.add_cast(
+                sin_half_tensor, trt.float32).get_output(0)
 
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
+        layer_is_fp32 = layer_idx in selected_fp32_layers
+        layer_hidden = hidden_state
+        layer_cache_k = cache_k_inputs[layer_idx]
+        layer_cache_v = cache_v_inputs[layer_idx]
+        layer_attention_mask = attention_mask
+        layer_eps_tensor = eps_tensor
+        layer_cos_half_tensor = cos_half_tensor
+        layer_sin_half_tensor = sin_half_tensor
+        layer_dtype = work_np_dtype
+        if layer_is_fp32:
+            layer_hidden = network.add_cast(
+                layer_hidden, trt.float32).get_output(0)
+            layer_cache_k = network.add_cast(
+                layer_cache_k, trt.float32).get_output(0)
+            layer_cache_v = network.add_cast(
+                layer_cache_v, trt.float32).get_output(0)
+            layer_attention_mask = fp32_attention_mask
+            layer_eps_tensor = fp32_eps_tensor
+            layer_cos_half_tensor = fp32_cos_half_tensor
+            layer_sin_half_tensor = fp32_sin_half_tensor
+            layer_dtype = np.float32
 
         result = _add_decoder_layer(
             network=network,
-            hidden=hidden_state,
-            cache_k=cache_k_inputs[layer_idx],
-            cache_v=cache_v_inputs[layer_idx],
-            attention_mask=attention_mask,
+            hidden=layer_hidden,
+            cache_k=layer_cache_k,
+            cache_v=layer_cache_v,
+            attention_mask=layer_attention_mask,
             position_id=position_id,
             attention_scale=attn_scale,
-            eps_tensor=eps_tensor,
+            eps_tensor=layer_eps_tensor,
             eps=config.rms_norm_eps,
             weights=weights,
             prefix=prefix,
@@ -438,15 +488,27 @@ def build_standard_decoder_engine(
             parallel_residual=parallel_residual,
             alibi_slopes_tensor=alibi_slopes_tensor,
             alibi_indices_tensor=alibi_indices_tensor,
-            dtype=work_np_dtype,
+            dtype=layer_dtype,
             quant_ctx=quant_ctx,
-            cos_half_tensor=cos_half_tensor,
-            sin_half_tensor=sin_half_tensor,
+            cos_half_tensor=layer_cos_half_tensor,
+            sin_half_tensor=layer_sin_half_tensor,
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
             ffi_attention_kernel=ffi_attention_kernel,
             dynamic_kv_cache=dynamic_kv_cache,
         )
+
+        if layer_is_fp32:
+            # Preserve one FP32 residual stream across adjacent selected
+            # blocks; an FP16 round trip between them recreates the overflow.
+            next_layer_is_fp32 = layer_idx + 1 in selected_fp32_layers
+            if not next_layer_is_fp32 and layer_idx + 1 < num_layers:
+                result["hidden"] = network.add_cast(
+                    result["hidden"], work_trt_dtype).get_output(0)
+            result["present_k"] = network.add_cast(
+                result["present_k"], work_trt_dtype).get_output(0)
+            result["present_v"] = network.add_cast(
+                result["present_v"], work_trt_dtype).get_output(0)
 
         hidden_state = result["hidden"]
         present_k_outputs.append(result["present_k"])
@@ -459,12 +521,15 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     # Final norm
     # ---------------------------------------------------------------
+    tail_is_fp32 = num_layers - 1 in selected_fp32_layers
+    tail_dtype = np.float32 if tail_is_fp32 else work_np_dtype
+    tail_eps_tensor = fp32_eps_tensor if tail_is_fp32 else eps_tensor
     final_norm = weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
         hidden_state = _apply_norm(
             network, hidden_state, hidden, final_norm,
-            weights.get("final_norm_beta"), eps_tensor, norm_type,
-            dtype=work_np_dtype, eps=config.rms_norm_eps)
+            weights.get("final_norm_beta"), tail_eps_tensor, norm_type,
+            dtype=tail_dtype, eps=config.rms_norm_eps)
 
     # Optional: mark hidden state as extra output for speech pipelines
     if hidden_state_output:
@@ -480,19 +545,19 @@ def build_standard_decoder_engine(
     out_vocab = weights["w_out"].shape[1] if isinstance(weights["w_out"], np.ndarray) else vocab
     logits = graph_ops.add_matmul_rhs_constant(
         network, hidden_state, hidden, out_vocab, weights["w_out"],
-        dtype=work_np_dtype)
+        dtype=tail_dtype)
     # LM head bias (if present, e.g. CodeGen) or zero bias for C++ parity
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
         logits = graph_ops.add_bias_sum(network, logits, out_vocab, lm_bias,
-                                        dtype=work_np_dtype)
+                                        dtype=tail_dtype)
     else:
-        b_out = np.zeros(out_vocab, dtype=work_np_dtype)
+        b_out = np.zeros(out_vocab, dtype=tail_dtype)
         logits = graph_ops.add_bias_sum(network, logits, out_vocab, b_out,
-                                        dtype=work_np_dtype)
+                                        dtype=tail_dtype)
 
     # Logits output: always FP32 for accurate argmax/sampling
-    if work_trt_dtype != trt.float32:
+    if not tail_is_fp32 and work_trt_dtype != trt.float32:
         logits_cast = network.add_cast(logits, trt.float32)
         logits = logits_cast.get_output(0)
     logits.name = "logits"

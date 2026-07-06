@@ -189,3 +189,34 @@ def test_deepseek_ocr_parallel_build_rejects_debug_outputs(monkeypatch) -> None:
             parallel_config=ParallelConfig(mode="tensor_parallel", tp_size=2, rank=0),
             debug_layer_outputs=True,
         )
+
+
+def test_deepseek_ocr_forwards_fp16_to_vision_engine(monkeypatch) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_build(model_dir, config, *, precision, verbose):
+        calls.update(
+            model_dir=model_dir,
+            config=config,
+            precision=precision,
+            verbose=verbose,
+        )
+        return b"vision-plan"
+
+    monkeypatch.setattr(
+        deepseek_ocr_module,
+        "_build_deepseek_ocr_vision_engine",
+        fake_build,
+    )
+    config = _config()
+
+    plan = deepseek_ocr_module.DeepSeekOCRPlugin().build_vision_engine(
+        "/model", config, _weights(), precision="fp16", verbose=True)
+
+    assert plan == b"vision-plan"
+    assert calls == {
+        "model_dir": "/model",
+        "config": config,
+        "precision": "fp16",
+        "verbose": True,
+    }

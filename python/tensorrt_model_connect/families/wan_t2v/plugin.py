@@ -146,6 +146,7 @@ class WanT2VPlugin:
                 num_layers=self._T5_NUM_LAYERS,
                 vocab_size=self._T5_VOCAB_SIZE,
                 max_seq_len=self._T5_MAX_SEQ_LEN,
+                precision=precision,
                 verbose=verbose,
             )
 
@@ -201,6 +202,7 @@ class WanT2VPlugin:
                     qk_norm=True,
                     cross_attn_norm=True,
                     ffn_activation="gelu_new",
+                    precision=precision,
                     verbose=verbose,
                 )
 
@@ -226,6 +228,7 @@ class WanT2VPlugin:
                 h_lat=h_lat,
                 w_lat=w_lat,
                 norm_type="l2_channel_norm",
+                precision=precision,
                 verbose=verbose,
             )
 

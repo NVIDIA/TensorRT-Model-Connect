@@ -22,8 +22,7 @@
 
 static int failures = 0;
 
-void check(bool condition, const std::string& name)
-{
+void check(bool condition, const std::string& name) {
     if (!condition) {
         std::cerr << "FAIL: " << name << std::endl;
         failures++;
@@ -32,10 +31,8 @@ void check(bool condition, const std::string& name)
     }
 }
 
-void check_ids(const std::vector<int32_t>& actual,
-               const std::vector<int32_t>& expected,
-               const std::string& label)
-{
+void check_ids(const std::vector<int32_t>& actual, const std::vector<int32_t>& expected,
+               const std::string& label) {
     if (actual == expected) {
         std::cerr << "PASS: " << label << " (" << actual.size() << " tokens)\n";
         return;
@@ -122,8 +119,30 @@ static const char* kUnigramNoSpecialJson = R"({
   }
 })";
 
-int main()
-{
+static const char* kUnigramSuffixOnlyJson = R"({
+  "model": {
+    "type": "Unigram",
+    "unk_id": 0,
+    "vocab": [["<unk>", 0.0], ["\u2581hello", -1.0]]
+  },
+  "pre_tokenizer": {
+    "type": "Metaspace",
+    "replacement": "\u2581",
+    "add_prefix_space": true
+  },
+  "post_processor": {
+    "type": "TemplateProcessing",
+    "single": [
+      {"Sequence": {"id": "A", "type_id": 0}},
+      {"SpecialToken": {"id": "</s>", "type_id": 0}}
+    ]
+  },
+  "added_tokens": [
+    {"id": 2, "content": "</s>", "special": true}
+  ]
+})";
+
+int main() {
     std::cerr << "Unigram Tokenizer Unit Tests\n\n";
 
     // ════════════════════════════════════════════════════════════
@@ -138,22 +157,32 @@ int main()
 
         // Invalid JSON
         bool threw = false;
-        try { trtmc::CreateUnigramTokenizer("bad", 3, false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer("bad", 3, false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_invalid_json");
 
         // BPE type rejected
         const char* bpe = R"({"model":{"type":"BPE","vocab":{},"merges":[]}})";
         threw = false;
-        try { trtmc::CreateUnigramTokenizer(bpe, std::strlen(bpe), false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer(bpe, std::strlen(bpe), false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_bpe_type");
 
         // WordPiece type rejected
-        const char* wp = R"({"model":{"type":"WordPiece","vocab":{},"continuing_subword_prefix":"##"}})";
+        const char* wp =
+            R"({"model":{"type":"WordPiece","vocab":{},"continuing_subword_prefix":"##"}})";
         threw = false;
-        try { trtmc::CreateUnigramTokenizer(wp, std::strlen(wp), false); }
-        catch (...) { threw = true; }
+        try {
+            trtmc::CreateUnigramTokenizer(wp, std::strlen(wp), false);
+        } catch (...) {
+            threw = true;
+        }
         check(threw, "reject_wordpiece_type");
     }
 
@@ -207,6 +236,11 @@ int main()
         // With special: <s> + tokens + </s>
         check_ids(tok->encode("hello"), {19, 2, 20}, "encode_hello_special");
         check_ids(tok->encode(""), {19, 20}, "encode_empty_special");
+
+        std::string suffix_json(kUnigramSuffixOnlyJson);
+        auto suffix_tok =
+            trtmc::CreateUnigramTokenizer(suffix_json.data(), suffix_json.size(), true);
+        check_ids(suffix_tok->encode("hello"), {1, 2}, "encode_suffix_only_template");
     }
 
     // ════════════════════════════════════════════════════════════
@@ -242,8 +276,7 @@ int main()
 
         auto rt = [&](const std::string& input) {
             auto decoded = tok->decode(tok->encode(input));
-            check(decoded == input,
-                  "roundtrip '" + input + "' -> '" + decoded + "'");
+            check(decoded == input, "roundtrip '" + input + "' -> '" + decoded + "'");
         };
 
         rt("hello");

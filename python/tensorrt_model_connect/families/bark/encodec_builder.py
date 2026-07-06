@@ -51,6 +51,7 @@ def build_encodec_decoder_engine(
     codebook_dim: int = 128,
     seq_length: int = 512,
     *,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build TRT engine for EnCodec decoder.
@@ -67,6 +68,14 @@ def build_encodec_decoder_engine(
     Returns:
         Serialized TRT engine plan bytes.
     """
+    if precision == "fp16":
+        work_np_dtype = np.float16
+    elif precision == "fp32":
+        work_np_dtype = np.float32
+    else:
+        raise ValueError(
+            f"Unsupported EnCodec precision {precision!r}; expected fp32 or fp16")
+
     def _to_np(key):
         t = state_dict[key]
         if hasattr(t, 'numpy'):
@@ -105,7 +114,8 @@ def build_encodec_decoder_engine(
         if not _has_key(cb_key):
             cb_key = f"{quantizer_prefix}{cb}.codebook.embed"
         embed_table = graph_ops.add_constant(
-            network, (codebook_size, codebook_dim), _to_np(cb_key))
+            network, (codebook_size, codebook_dim), _to_np(cb_key),
+            dtype=work_np_dtype)
 
         # Extract codes for this codebook: [1, seq_length]
         slice_layer = network.add_slice(
@@ -140,7 +150,9 @@ def build_encodec_decoder_engine(
     input_conv_b = _to_np(f"{prefix}layers.0.conv.bias") if _has_key(
         f"{prefix}layers.0.conv.bias") else None
     x = graph_ops.add_reflect_pad_1d(network, x, 6, 0)  # HF pad_mode="reflect"
-    x = graph_ops.add_conv1d(network, x, input_conv_w, input_conv_b, 512, 7)
+    x = graph_ops.add_conv1d(
+        network, x, input_conv_w, input_conv_b, 512, 7,
+        dtype=work_np_dtype)
 
     # === LSTM (model.1): 2 layers, hidden_size=512, with residual ===
     # Permute [1, 512, T] -> [1, T, 512] for LSTM
@@ -155,7 +167,8 @@ def build_encodec_decoder_engine(
         b_ih = _to_np(f"{prefix}layers.1.lstm.bias_ih_l{layer_i}")
         b_hh = _to_np(f"{prefix}layers.1.lstm.bias_hh_l{layer_i}")
         lstm_x = graph_ops.add_lstm_unrolled(
-            network, lstm_x, w_ih, w_hh, b_ih, b_hh, 512, seq_length)
+            network, lstm_x, w_ih, w_hh, b_ih, b_hh, 512, seq_length,
+            dtype=work_np_dtype)
 
     # Residual: lstm_output + lstm_input
     lstm_sum = network.add_elementwise(
@@ -187,7 +200,8 @@ def build_encodec_decoder_engine(
         deconv_b = _to_np(f"{prefix}layers.{deconv_idx}.conv.bias") if _has_key(
             f"{prefix}layers.{deconv_idx}.conv.bias") else None
         x = graph_ops.add_conv1d_transpose(
-            network, x, deconv_w, deconv_b, out_ch, kernel, stride)
+            network, x, deconv_w, deconv_b, out_ch, kernel, stride,
+            dtype=work_np_dtype)
 
         # Causal trim: trim padding_total from right
         padding_total = kernel - stride
@@ -207,7 +221,9 @@ def build_encodec_decoder_engine(
         conv1_b = _to_np(f"{prefix}layers.{res_idx}.block.1.conv.bias") if _has_key(
             f"{prefix}layers.{res_idx}.block.1.conv.bias") else None
         x = graph_ops.add_reflect_pad_1d(network, x, 2, 0)
-        x = graph_ops.add_conv1d(network, x, conv1_w, conv1_b, hidden_ch, 3)
+        x = graph_ops.add_conv1d(
+            network, x, conv1_w, conv1_b, hidden_ch, 3,
+            dtype=work_np_dtype)
 
         # block.2: ELU, block.3: SConv1d(hidden_ch -> out_ch, k=1)
         x = graph_ops.add_elu(network, x)
@@ -216,7 +232,9 @@ def build_encodec_decoder_engine(
             f"{prefix}layers.{res_idx}.block.3.conv.weight_v")
         conv2_b = _to_np(f"{prefix}layers.{res_idx}.block.3.conv.bias") if _has_key(
             f"{prefix}layers.{res_idx}.block.3.conv.bias") else None
-        x = graph_ops.add_conv1d(network, x, conv2_w, conv2_b, out_ch, 1)
+        x = graph_ops.add_conv1d(
+            network, x, conv2_w, conv2_b, out_ch, 1,
+            dtype=work_np_dtype)
 
         # Shortcut: SConv1d(out_ch -> out_ch, k=1)
         short_w = _get_fused_conv_weight(
@@ -224,7 +242,9 @@ def build_encodec_decoder_engine(
             f"{prefix}layers.{res_idx}.shortcut.conv.weight_v")
         short_b = _to_np(f"{prefix}layers.{res_idx}.shortcut.conv.bias") if _has_key(
             f"{prefix}layers.{res_idx}.shortcut.conv.bias") else None
-        shortcut = graph_ops.add_conv1d(network, res_in, short_w, short_b, out_ch, 1)
+        shortcut = graph_ops.add_conv1d(
+            network, res_in, short_w, short_b, out_ch, 1,
+            dtype=work_np_dtype)
 
         # Residual add
         x = network.add_elementwise(
@@ -237,10 +257,15 @@ def build_encodec_decoder_engine(
     out_conv_b = _to_np(f"{prefix}layers.15.conv.bias") if _has_key(
         f"{prefix}layers.15.conv.bias") else None
     x = graph_ops.add_reflect_pad_1d(network, x, 6, 0)
-    x = graph_ops.add_conv1d(network, x, out_conv_w, out_conv_b, 1, 7)
+    x = graph_ops.add_conv1d(
+        network, x, out_conv_w, out_conv_b, 1, 7,
+        dtype=work_np_dtype)
 
-    x.name = "waveform"
-    network.mark_output(x)
+    output = x
+    if output.dtype != trt.float32:
+        output = network.add_cast(output, trt.float32).get_output(0)
+    output.name = "waveform"
+    network.mark_output(output)
 
     if verbose:
         print(f"[trtmc build] Building EnCodec decoder engine "

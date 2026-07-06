@@ -38,12 +38,13 @@ _PRECISION_TO_TORCH_DTYPE = {
 
 
 def _torch_dtype_for_case(case: E2ECase) -> str:
-    """Return a torch dtype expression string matching the manifest precision.
+    """Return the explicit reference dtype, falling back to DUT precision.
 
-    The reference runner injects this into subprocess scripts so the HF model
-    loads at the same precision as the TRT engine, keeping comparisons fair.
+    FP16 acceptance manifests set reference_precision=fp32 so changing the
+    engine precision does not also change the oracle.
     """
-    precision = case.metadata.get("precision", "fp32")
+    precision = case.metadata.get(
+        "reference_precision", case.metadata.get("precision", "fp32"))
     return _PRECISION_TO_TORCH_DTYPE.get(precision, "torch.float32")
 
 
@@ -335,7 +336,19 @@ class HfTransformersReference:
 
         script = textwrap.dedent(f"""\
             import sys, numpy as np, torch
-            from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoTokenizer
+            from transformers import (
+                AutoModelForCausalLM,
+                AutoModelForSeq2SeqLM,
+                AutoTokenizer,
+                DynamicCache,
+            )
+
+            if not hasattr(DynamicCache, "from_legacy_cache"):
+                @classmethod
+                def _from_legacy_cache(cls, past_key_values=None):
+                    return cls(past_key_values) if past_key_values else cls()
+
+                DynamicCache.from_legacy_cache = _from_legacy_cache
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
@@ -358,8 +371,13 @@ class HfTransformersReference:
                     chat_kwargs = {{"add_generation_prompt": True}}
                     if not enable_thinking:
                         chat_kwargs["enable_thinking"] = False
-                    text_input = tokenizer.apply_chat_template(
-                        messages, tokenize=False, **chat_kwargs)
+                    try:
+                        text_input = tokenizer.apply_chat_template(
+                            messages, tokenize=False, **chat_kwargs)
+                    except TypeError:
+                        chat_kwargs.pop("enable_thinking", None)
+                        text_input = tokenizer.apply_chat_template(
+                            messages, tokenize=False, **chat_kwargs)
                     input_ids = tokenizer.encode(text_input, add_special_tokens=False)
                 except Exception:
                     # Fallback: model doesn't support chat template

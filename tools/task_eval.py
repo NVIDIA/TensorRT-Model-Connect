@@ -90,6 +90,19 @@ def infer_user_contract(raw: dict[str, Any], reference_family: str) -> str:
 
 def manifest_record(path: Path) -> dict[str, Any]:
     raw = json.loads(path.read_text(encoding="utf-8"))
+    model_name = str(raw.get("name", path.stem))
+    testcases = raw.pop("testcases", [])
+    if isinstance(testcases, list) and testcases:
+        canonical = next(
+            (
+                testcase
+                for testcase in testcases
+                if isinstance(testcase, dict) and testcase.get("name") == model_name
+            ),
+            testcases[0],
+        )
+        if isinstance(canonical, dict):
+            raw = {**raw, **canonical, "name": model_name}
     build_args = raw.get("build_args", {})
     task_eval_config = raw.get("task_eval", {})
     runtime_strategy = str(raw.get("runtime_strategy") or "")
@@ -101,7 +114,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         str(raw.get("ci_tier", "")) == "multi_device"
     )
     return {
-        "name": raw.get("name", path.stem),
+        "name": model_name,
         "manifest": str(path.relative_to(REPO_ROOT) if path.is_relative_to(REPO_ROOT) else path),
         "hf_id": raw.get("hf_id") or raw.get("model_id", ""),
         "bundle": raw.get("bundle", f"{path.stem}.trtfb"),
@@ -127,7 +140,9 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "build_args": build_args if isinstance(build_args, dict) else {},
         "fp8_scales": raw.get("fp8_scales", ""),
         "task_eval": task_eval_config if isinstance(task_eval_config, dict) else {},
-        "runtime_config": raw.get("runtime_config", {}) if isinstance(raw.get("runtime_config", {}), dict) else {},
+        "runtime_config": raw.get("runtime_config", {})
+        if isinstance(raw.get("runtime_config", {}), dict)
+        else {},
         "max_new_tokens": raw.get("max_new_tokens"),
     }
 
@@ -230,22 +245,24 @@ def build_plan(
                 matched = False
                 reason = f"waived {action}: {waive_reason}".strip()
             if matched or include_non_matching:
-                rows.append({
-                    "suite": suite["id"],
-                    "dataset_kind": suite.get("dataset", {}).get("kind", ""),
-                    "model": model["name"],
-                    "hf_id": model["hf_id"],
-                    "bundle": model["bundle"],
-                    "runtime_strategy": model["runtime_strategy"],
-                    "task_strategy": model["task_strategy"],
-                    "reference_family": model["reference_family"],
-                    "user_contract": model["user_contract"],
-                    "ci_tier": model["ci_tier"],
-                    "requires_multi_device": model["requires_multi_device"],
-                    "selected": matched,
-                    "reason": reason,
-                    "manifest": model["manifest"],
-                })
+                rows.append(
+                    {
+                        "suite": suite["id"],
+                        "dataset_kind": suite.get("dataset", {}).get("kind", ""),
+                        "model": model["name"],
+                        "hf_id": model["hf_id"],
+                        "bundle": model["bundle"],
+                        "runtime_strategy": model["runtime_strategy"],
+                        "task_strategy": model["task_strategy"],
+                        "reference_family": model["reference_family"],
+                        "user_contract": model["user_contract"],
+                        "ci_tier": model["ci_tier"],
+                        "requires_multi_device": model["requires_multi_device"],
+                        "selected": matched,
+                        "reason": reason,
+                        "manifest": model["manifest"],
+                    }
+                )
     return rows
 
 
@@ -399,7 +416,9 @@ def prepare_seedtts_dataset(
     task_eval_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     if subject:
-        raise ValueError("SeedTTS task eval does not support --subject; select a language suite instead")
+        raise ValueError(
+            "SeedTTS task eval does not support --subject; select a language suite instead"
+        )
     data, indexed = load_seedtts_requests(
         dataset_path,
         limit=limit,
@@ -425,16 +444,18 @@ def prepare_seedtts_dataset(
         prepared["reference_wav"] = str(reference_wav)
         prepared["subject"] = language
         prepared_requests.append(prepared)
-        prompt_rows.append({
-            "sample_id": sample_id,
-            "dataset_index": dataset_index,
-            "eval_index": out_idx,
-            "subject": language,
-            "answer": reference,
-            "prompt": reference,
-            "reference_wav": str(reference_wav),
-            "language": language,
-        })
+        prompt_rows.append(
+            {
+                "sample_id": sample_id,
+                "dataset_index": dataset_index,
+                "eval_index": out_idx,
+                "subject": language,
+                "answer": reference,
+                "prompt": reference,
+                "reference_wav": str(reference_wav),
+                "language": language,
+            }
+        )
 
     work_dir.mkdir(parents=True, exist_ok=True)
     answers_path = work_dir / "answers.json"
@@ -573,20 +594,22 @@ def unified_sample_to_vlm_request(sample: dict[str, Any]) -> dict[str, Any]:
     eval_method = _unified_answer_eval(sample)
     metadata = sample.get("metadata") if isinstance(sample.get("metadata"), dict) else {}
     messages = sample.get("messages")
-    normalized_messages = [
-        _normalize_unified_message(message)
-        for message in messages
-        if isinstance(message, dict)
-    ] if isinstance(messages, list) else []
+    normalized_messages = (
+        [_normalize_unified_message(message) for message in messages if isinstance(message, dict)]
+        if isinstance(messages, list)
+        else []
+    )
     media_refs = _unified_sample_media_refs(sample)
     if not normalized_messages and media_refs:
-        normalized_messages = [{
-            "role": "user",
-            "content": [
-                {"type": "image", "image": media_refs[0]},
-                {"type": "text", "text": str(sample.get("question", ""))},
-            ],
-        }]
+        normalized_messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": media_refs[0]},
+                    {"type": "text", "text": str(sample.get("question", ""))},
+                ],
+            }
+        ]
 
     request: dict[str, Any] = {
         "id": str(sample.get("id") or f"ocrbench_{sample.get('source_index', 0):06d}"),
@@ -594,10 +617,7 @@ def unified_sample_to_vlm_request(sample: dict[str, Any]) -> dict[str, Any]:
         "answer": primary_answer,
         "question": str(sample.get("question", "")),
         "subject": str(
-            sample.get("category")
-            or sample.get("type")
-            or sample.get("dataset_name")
-            or ""
+            sample.get("category") or sample.get("type") or sample.get("dataset_name") or ""
         ),
     }
     if aliases:
@@ -607,7 +627,9 @@ def unified_sample_to_vlm_request(sample: dict[str, Any]) -> dict[str, Any]:
     for key in ("dataset_name", "type", "source_index", "metadata"):
         if key in sample:
             request[key] = sample[key]
-    if str(sample.get("dataset", "") or sample.get("source", "") or "").lower() == "ocrbench_v2" or str(sample.get("id", "")).startswith("ocrbench_v2_"):
+    if str(
+        sample.get("dataset", "") or sample.get("source", "") or ""
+    ).lower() == "ocrbench_v2" or str(sample.get("id", "")).startswith("ocrbench_v2_"):
         request["ocrbench_type"] = sample.get("type")
         request["ocrbench_eval"] = eval_method
         request["ocrbench_answers"] = aliases
@@ -659,7 +681,9 @@ def resolve_dataset_asset_path(dataset_path: Path, asset_ref: str) -> Path:
     for candidate in _candidate_dataset_asset_paths(dataset_path, asset_ref):
         if candidate.is_file():
             return candidate.resolve()
-    candidates = ", ".join(str(path) for path in _candidate_dataset_asset_paths(dataset_path, asset_ref))
+    candidates = ", ".join(
+        str(path) for path in _candidate_dataset_asset_paths(dataset_path, asset_ref)
+    )
     raise FileNotFoundError(f"Could not resolve dataset asset {asset_ref!r}; tried: {candidates}")
 
 
@@ -695,7 +719,9 @@ def asr_request_audio_refs(request: dict[str, Any]) -> list[str]:
 def asr_request_audio(dataset_path: Path, request: dict[str, Any]) -> Path:
     refs = asr_request_audio_refs(request)
     if len(refs) != 1:
-        raise ValueError(f"ASR task eval expects exactly one audio asset per sample; found {len(refs)}")
+        raise ValueError(
+            f"ASR task eval expects exactly one audio asset per sample; found {len(refs)}"
+        )
     return resolve_dataset_asset_path(dataset_path, refs[0])
 
 
@@ -722,7 +748,10 @@ def validate_asr_dataset_assets(
     for dataset_index, request in indexed:
         sample_id = str(request.get("id") or f"asr_{dataset_index:06d}")
         for ref in asr_request_audio_refs(request):
-            if not any(candidate.is_file() for candidate in _candidate_dataset_asset_paths(dataset_path, ref)):
+            if not any(
+                candidate.is_file()
+                for candidate in _candidate_dataset_asset_paths(dataset_path, ref)
+            ):
                 missing.append((dataset_index, sample_id, ref))
     if missing:
         examples = "; ".join(
@@ -743,7 +772,10 @@ def validate_vlm_dataset_assets(
     for dataset_index, request in indexed:
         sample_id = str(request.get("id") or f"vlm_{dataset_index:06d}")
         for ref in vlm_request_image_refs(request):
-            if not any(candidate.is_file() for candidate in _candidate_dataset_asset_paths(dataset_path, ref)):
+            if not any(
+                candidate.is_file()
+                for candidate in _candidate_dataset_asset_paths(dataset_path, ref)
+            ):
                 missing.append((dataset_index, sample_id, ref))
     if missing:
         examples = "; ".join(
@@ -818,13 +850,15 @@ def _normalized_single_user_vlm_request(
     image_path: Path,
 ) -> dict[str, Any]:
     normalized = {key: value for key, value in request.items() if key != "messages"}
-    normalized["messages"] = [{
-        "role": "user",
-        "content": [
-            {"type": "image", "image": str(image_path)},
-            {"type": "text", "text": prompt},
-        ],
-    }]
+    normalized["messages"] = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": str(image_path)},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
     return normalized
 
 
@@ -1295,10 +1329,16 @@ def predictions_file_valid(
         return False
     responses = predictions.get("responses")
     requests = answers.get("requests")
-    if not isinstance(responses, list) or not isinstance(requests, list) or len(responses) != len(requests):
+    if (
+        not isinstance(responses, list)
+        or not isinstance(requests, list)
+        or len(responses) != len(requests)
+    ):
         return False
     if require_token_ids:
-        return all(isinstance(row, dict) and _generated_token_ids(row) is not None for row in responses)
+        return all(
+            isinstance(row, dict) and _generated_token_ids(row) is not None for row in responses
+        )
     return True
 
 
@@ -1324,14 +1364,16 @@ def _parse_transcribe_stdout(text: str) -> str:
 def convert_trtfb_jsonl_to_predictions(raw_path: Path, predictions_path: Path) -> None:
     rows = []
     for row in load_jsonl(raw_path):
-        rows.append({
-            "sample_id": row.get("sample_id", ""),
-            "output_text": row.get("text", ""),
-            "generated_tokens": row.get("generated_tokens"),
-            "generated_token_ids": _generated_token_ids(row),
-            "wall_ms": row.get("wall_ms"),
-            "source": "trtfb",
-        })
+        rows.append(
+            {
+                "sample_id": row.get("sample_id", ""),
+                "output_text": row.get("text", ""),
+                "generated_tokens": row.get("generated_tokens"),
+                "generated_token_ids": _generated_token_ids(row),
+                "wall_ms": row.get("wall_ms"),
+                "source": "trtfb",
+            }
+        )
     write_predictions(predictions_path, rows)
 
 
@@ -1345,11 +1387,15 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
     raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
     predictions = work_dir / (args.predictions or "trtfb_predictions.json")
     log_path = work_dir / (args.log or "trtfb_run.log")
-    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else int(
-        defaults.get("max_new_tokens", 8)
+    max_new_tokens = (
+        args.max_new_tokens
+        if args.max_new_tokens is not None
+        else int(defaults.get("max_new_tokens", 8))
     )
-    temperature = args.temperature if args.temperature is not None else float(
-        defaults.get("temperature", 1.0)
+    temperature = (
+        args.temperature
+        if args.temperature is not None
+        else float(defaults.get("temperature", 1.0))
     )
     top_k = args.top_k if args.top_k is not None else int(defaults.get("top_k", 1))
     top_p = args.top_p if args.top_p is not None else float(defaults.get("top_p", 1.0))
@@ -1363,7 +1409,10 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
 
     rows: list[dict[str, Any]] = []
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
-    with raw_output.open("w", encoding="utf-8") as raw_f, log_path.open("w", encoding="utf-8") as log_f:
+    with (
+        raw_output.open("w", encoding="utf-8") as raw_f,
+        log_path.open("w", encoding="utf-8") as log_f,
+    ):
         for idx, prompt_row in enumerate(prompt_rows):
             images = prompt_row.get("images", [])
             if not isinstance(images, list) or len(images) != 1:
@@ -1451,8 +1500,10 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
     raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
     predictions = work_dir / (args.predictions or "trtfb_predictions.json")
     log_path = work_dir / (args.log or "trtfb_run.log")
-    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else int(
-        defaults.get("max_new_tokens", 100)
+    max_new_tokens = (
+        args.max_new_tokens
+        if args.max_new_tokens is not None
+        else int(defaults.get("max_new_tokens", 100))
     )
 
     env = os.environ.copy()
@@ -1461,7 +1512,10 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
 
     rows: list[dict[str, Any]] = []
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
-    with raw_output.open("w", encoding="utf-8") as raw_f, log_path.open("w", encoding="utf-8") as log_f:
+    with (
+        raw_output.open("w", encoding="utf-8") as raw_f,
+        log_path.open("w", encoding="utf-8") as log_f,
+    ):
         for idx, prompt_row in enumerate(prompt_rows):
             audio_path = str(prompt_row.get("audio", ""))
             if not audio_path:
@@ -1504,7 +1558,9 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
             row = {
                 "sample_id": prompt_row.get("sample_id", f"asr_{idx:06d}"),
                 "output_text": _parse_transcribe_stdout(proc.stdout),
-                "generated_tokens": len(generated_token_ids) if generated_token_ids is not None else None,
+                "generated_tokens": len(generated_token_ids)
+                if generated_token_ids is not None
+                else None,
                 "generated_token_ids": generated_token_ids,
                 "wall_ms": wall_ms,
                 "source": "trtfb",
@@ -1678,18 +1734,20 @@ def score_asr_transcript_predictions(
         normalized_answer = normalize_asr_transcript(answer)
         if output_text == ERROR_OUTPUT_TEXT:
             skipped += 1
-            samples.append({
-                "index": idx,
-                "sample_id": response.get("sample_id", f"sample_{idx}"),
-                "subject": subject,
-                "answer": answer,
-                "normalized_answer": normalized_answer,
-                "prediction": output_text,
-                "normalized_prediction": "",
-                "skipped": True,
-                "correct": False,
-                "score": 0.0,
-            })
+            samples.append(
+                {
+                    "index": idx,
+                    "sample_id": response.get("sample_id", f"sample_{idx}"),
+                    "subject": subject,
+                    "answer": answer,
+                    "normalized_answer": normalized_answer,
+                    "prediction": output_text,
+                    "normalized_prediction": "",
+                    "skipped": True,
+                    "correct": False,
+                    "score": 0.0,
+                }
+            )
             continue
 
         normalized_prediction = normalize_asr_transcript(output_text)
@@ -1707,24 +1765,26 @@ def score_asr_transcript_predictions(
         sample_neds.append(ned)
         subject_stats[subject]["total"] += 1
         subject_stats[subject]["correct"] += int(ok)
-        samples.append({
-            "index": idx,
-            "sample_id": response.get("sample_id", f"sample_{idx}"),
-            "subject": subject,
-            "answer": answer,
-            "normalized_answer": normalized_answer,
-            "prediction": output_text,
-            "normalized_prediction": normalized_prediction,
-            "word_error_rate": wer,
-            "character_error_rate": cer,
-            "normalized_edit_distance": ned,
-            "wer_breakdown": wer_breakdown,
-            "cer_breakdown": cer_breakdown,
-            "exact_match": exact_match,
-            "skipped": False,
-            "correct": ok,
-            "score": 1.0 if ok else 0.0,
-        })
+        samples.append(
+            {
+                "index": idx,
+                "sample_id": response.get("sample_id", f"sample_{idx}"),
+                "subject": subject,
+                "answer": answer,
+                "normalized_answer": normalized_answer,
+                "prediction": output_text,
+                "normalized_prediction": normalized_prediction,
+                "word_error_rate": wer,
+                "character_error_rate": cer,
+                "normalized_edit_distance": ned,
+                "wer_breakdown": wer_breakdown,
+                "cer_breakdown": cer_breakdown,
+                "exact_match": exact_match,
+                "skipped": False,
+                "correct": ok,
+                "score": 1.0 if ok else 0.0,
+            }
+        )
 
     valid = len(requests) - skipped
     subject_accuracy = {}
@@ -1820,9 +1880,7 @@ def _levenshtein_distance(s1: Any, s2: Any) -> int:
         current = [i2 + 1]
         for i1, c1 in enumerate(s1):
             current.append(
-                previous[i1]
-                if c1 == c2
-                else 1 + min(previous[i1], previous[i1 + 1], current[-1])
+                previous[i1] if c1 == c2 else 1 + min(previous[i1], previous[i1 + 1], current[-1])
             )
         previous = current
     return int(previous[-1])
@@ -1970,8 +2028,8 @@ def _bleu_score(reference: list[str], hypothesis: list[str]) -> float:
         return 0.0
     precisions: list[float] = []
     for n in range(1, 5):
-        hyp_ngrams = Counter(tuple(hypothesis[i:i + n]) for i in range(len(hypothesis) - n + 1))
-        ref_ngrams = Counter(tuple(reference[i:i + n]) for i in range(len(reference) - n + 1))
+        hyp_ngrams = Counter(tuple(hypothesis[i : i + n]) for i in range(len(hypothesis) - n + 1))
+        ref_ngrams = Counter(tuple(reference[i : i + n]) for i in range(len(reference) - n + 1))
         total = sum(hyp_ngrams.values())
         if total == 0:
             precisions.append(0.0)
@@ -1980,7 +2038,9 @@ def _bleu_score(reference: list[str], hypothesis: list[str]) -> float:
         precisions.append(matched / total)
     if any(precision == 0.0 for precision in precisions):
         return 0.0
-    brevity = 1.0 if len(hypothesis) > len(reference) else math.exp(1 - len(reference) / len(hypothesis))
+    brevity = (
+        1.0 if len(hypothesis) > len(reference) else math.exp(1 - len(reference) / len(hypothesis))
+    )
     return _clip_score(brevity * math.exp(sum(math.log(precision) for precision in precisions) / 4))
 
 
@@ -2243,20 +2303,24 @@ def _dict_to_html(data: Any) -> str:
     rows = []
     if isinstance(data, dict):
         for key, value in data.items():
-            rows.append(f"<tr><td>{html.escape(str(key))}</td><td>{html.escape(str(value))}</td></tr>")
+            rows.append(
+                f"<tr><td>{html.escape(str(key))}</td><td>{html.escape(str(value))}</td></tr>"
+            )
     return "<html><body><table>" + "".join(rows) + "</table></body></html>"
 
 
-def _ocrbench_table_score(predict: str, answers: list[str], question: str, task_type: str) -> tuple[float, str]:
+def _ocrbench_table_score(
+    predict: str, answers: list[str], question: str, task_type: str
+) -> tuple[float, str]:
     if not answers or not isinstance(predict, str) or not predict:
         return 0.0, ""
     prediction = predict.replace("\n", "")
     answer = str(answers[0])
     if task_type == "table parsing cn" or "html" in question.lower():
         if "<body" in prediction:
-            prediction = prediction[prediction.find("<body"):]
+            prediction = prediction[prediction.find("<body") :]
         elif "<table" in prediction:
-            prediction = prediction[prediction.find("<table"):]
+            prediction = prediction[prediction.find("<table") :]
         else:
             return 0.0, ""
         return _structured_similarity(_wrap_html_table(prediction), _wrap_html_table(answer))
@@ -2312,32 +2376,63 @@ def _ocrbench_score_sample(predict: str, request: dict[str, Any]) -> tuple[float
 
     if task_type in basic_vqa_en:
         if eval_method == "multiple choice":
-            return _ocrbench_multiple_choice_score(predict, answers), "multiple_choice_exact", warning
+            return (
+                _ocrbench_multiple_choice_score(predict, answers),
+                "multiple_choice_exact",
+                warning,
+            )
         if eval_method == "case sensitive":
-            return _ocrbench_vqa_score(predict, answers, case_sensitive=True), "vqa_case_sensitive", warning
+            return (
+                _ocrbench_vqa_score(predict, answers, case_sensitive=True),
+                "vqa_case_sensitive",
+                warning,
+            )
         return _ocrbench_vqa_score(predict, answers), "vqa", warning
 
     if task_type in {"cognition VQA cn", "reasoning VQA cn"}:
         if eval_method == "multiple choice":
-            return _ocrbench_multiple_choice_score(predict, answers), "multiple_choice_exact", warning
+            return (
+                _ocrbench_multiple_choice_score(predict, answers),
+                "multiple_choice_exact",
+                warning,
+            )
         if eval_method == "case sensitive":
-            return _ocrbench_vqa_score(predict, answers, case_sensitive=True), "vqa_case_sensitive", warning
+            return (
+                _ocrbench_vqa_score(predict, answers, case_sensitive=True),
+                "vqa_case_sensitive",
+                warning,
+            )
         return _ocrbench_vqa_score(predict, answers, chinese=True), "cn_vqa", warning
 
     if task_type == "handwritten answer extraction cn":
         if "简答" in question:
-            return _ocrbench_long_reading_score(predict, answers[0] if answers else ""), "long_reading", warning
+            return (
+                _ocrbench_long_reading_score(predict, answers[0] if answers else ""),
+                "long_reading",
+                warning,
+            )
         if not answers:
             return 0.0, "contains", warning
         answer = answers[0]
         if len(answer) > 1:
             chars = list(answer)
             candidates = [
-                "".join(chars), ".".join(chars), ". ".join(chars), ",".join(chars),
-                ", ".join(chars), "、".join(chars), ";".join(chars), "; ".join(chars),
-                " ".join(chars), "和".join(chars),
+                "".join(chars),
+                ".".join(chars),
+                ". ".join(chars),
+                ",".join(chars),
+                ", ".join(chars),
+                "、".join(chars),
+                ";".join(chars),
+                "; ".join(chars),
+                " ".join(chars),
+                "和".join(chars),
             ]
-            return (1.0 if any(candidate in predict for candidate in candidates) else 0.0), "contains", warning
+            return (
+                (1.0 if any(candidate in predict for candidate in candidates) else 0.0),
+                "contains",
+                warning,
+            )
         return (1.0 if answer in predict else 0.0), "contains", warning
 
     if task_type == "formula recognition cn":
@@ -2347,8 +2442,17 @@ def _ocrbench_score_sample(predict: str, request: dict[str, Any]) -> tuple[float
     if task_type == "text counting en":
         return _ocrbench_counting_score(predict, answers, eval_method), "counting", warning
 
-    if task_type in {"fine-grained text recognition en", "full-page OCR en", "full-page OCR cn", "text translation cn"}:
-        return _ocrbench_long_reading_score(predict, answers[0] if answers else ""), "long_reading", warning
+    if task_type in {
+        "fine-grained text recognition en",
+        "full-page OCR en",
+        "full-page OCR cn",
+        "text translation cn",
+    }:
+        return (
+            _ocrbench_long_reading_score(predict, answers[0] if answers else ""),
+            "long_reading",
+            warning,
+        )
 
     if task_type in {"table parsing en", "table parsing cn"}:
         score, warning = _ocrbench_table_score(predict, answers, question, task_type)
@@ -2360,7 +2464,11 @@ def _ocrbench_score_sample(predict: str, request: dict[str, Any]) -> tuple[float
         score, warning = _ocrbench_document_score(predict, answers)
         return score, "document_similarity", warning
 
-    if task_type in {"key information extraction en", "key information mapping en", "key information extraction cn"}:
+    if task_type in {
+        "key information extraction en",
+        "key information mapping en",
+        "key information extraction cn",
+    }:
         return _ocrbench_kie_score(predict, answers), "key_value_f1", warning
 
     if task_type == "VQA with position en":
@@ -2378,7 +2486,11 @@ def _ocrbench_score_sample(predict: str, request: dict[str, Any]) -> tuple[float
         score, warning = _ocrbench_spotting_score(predict, request)
         return score, "text_spotting_hmean", warning
 
-    return 1.0 if is_correct_for_request(predict, request) else 0.0, "exact_or_alias", "unknown_ocrbench_type"
+    return (
+        1.0 if is_correct_for_request(predict, request) else 0.0,
+        "exact_or_alias",
+        "unknown_ocrbench_type",
+    )
 
 
 def score_ocrbench_v2_predictions(
@@ -2472,9 +2584,9 @@ def score_ocrbench_v2_predictions(
 
     valid_count = len(requests)
     return {
-        "overall_accuracy": _mean(all_capability_averages) if all_capability_averages else (
-            score_sum / valid_count if valid_count else 0.0
-        ),
+        "overall_accuracy": _mean(all_capability_averages)
+        if all_capability_averages
+        else (score_sum / valid_count if valid_count else 0.0),
         "sample_average_accuracy": score_sum / valid_count if valid_count else 0.0,
         "correct": perfect,
         "score_sum": score_sum,
@@ -2526,12 +2638,16 @@ def _read_wav_metrics(path: Path) -> dict[str, Any]:
         rms = 0.0
     elif audio_format == 3 and bits_per_sample == 32:
         count = len(data) // 4
-        samples = struct.unpack(f"<{count}f", data[:count * 4])
+        samples = struct.unpack(f"<{count}f", data[: count * 4])
         rms = math.sqrt(sum(float(value) ** 2 for value in samples) / count) if count else 0.0
     elif audio_format == 1 and bits_per_sample == 16:
         count = len(data) // 2
-        samples = struct.unpack(f"<{count}h", data[:count * 2])
-        rms = math.sqrt(sum((float(value) / 32768.0) ** 2 for value in samples) / count) if count else 0.0
+        samples = struct.unpack(f"<{count}h", data[: count * 2])
+        rms = (
+            math.sqrt(sum((float(value) / 32768.0) ** 2 for value in samples) / count)
+            if count
+            else 0.0
+        )
     else:
         rms = 0.0
     return {
@@ -2614,25 +2730,27 @@ def score_tts_intelligibility_predictions(
             and ned <= max_ned
         )
         correct += int(ok)
-        samples.append({
-            "index": idx,
-            "sample_id": response.get("sample_id", f"sample_{idx}"),
-            "subject": request.get("subject", ""),
-            "answer": reference,
-            "prediction": transcript,
-            "wav_path": str(wav_path) if str(wav_path) else "",
-            "wav_exists": wav_exists,
-            "rms": rms,
-            "duration_s": duration_s,
-            "reference_duration_s": reference_duration_s,
-            "duration_ratio": duration_ratio,
-            "wer": wer,
-            "ned": ned,
-            "score": 1.0 if ok else 0.0,
-            "correct": ok,
-            "skipped": False,
-            "error": error,
-        })
+        samples.append(
+            {
+                "index": idx,
+                "sample_id": response.get("sample_id", f"sample_{idx}"),
+                "subject": request.get("subject", ""),
+                "answer": reference,
+                "prediction": transcript,
+                "wav_path": str(wav_path) if str(wav_path) else "",
+                "wav_exists": wav_exists,
+                "rms": rms,
+                "duration_s": duration_s,
+                "reference_duration_s": reference_duration_s,
+                "duration_ratio": duration_ratio,
+                "wer": wer,
+                "ned": ned,
+                "score": 1.0 if ok else 0.0,
+                "correct": ok,
+                "skipped": False,
+                "error": error,
+            }
+        )
     total = len(requests)
     return {
         "overall_accuracy": correct / total if total else 0.0,
@@ -2685,32 +2803,36 @@ def score_predictions(
         answer_values = request_answer_values(request)
         if output_text == ERROR_OUTPUT_TEXT:
             skipped += 1
-            samples.append({
+            samples.append(
+                {
+                    "index": idx,
+                    "sample_id": response.get("sample_id", f"sample_{idx}"),
+                    "subject": subject,
+                    "answer": answer,
+                    "answer_aliases": answer_values[1:],
+                    "prediction": output_text,
+                    "skipped": True,
+                    "correct": False,
+                }
+            )
+            continue
+        ok = is_correct_for_request(output_text, request)
+        correct += int(ok)
+        subject_stats[subject]["total"] += 1
+        subject_stats[subject]["correct"] += int(ok)
+        samples.append(
+            {
                 "index": idx,
                 "sample_id": response.get("sample_id", f"sample_{idx}"),
                 "subject": subject,
                 "answer": answer,
                 "answer_aliases": answer_values[1:],
                 "prediction": output_text,
-                "skipped": True,
-                "correct": False,
-            })
-            continue
-        ok = is_correct_for_request(output_text, request)
-        correct += int(ok)
-        subject_stats[subject]["total"] += 1
-        subject_stats[subject]["correct"] += int(ok)
-        samples.append({
-            "index": idx,
-            "sample_id": response.get("sample_id", f"sample_{idx}"),
-            "subject": subject,
-            "answer": answer,
-            "answer_aliases": answer_values[1:],
-            "prediction": output_text,
-            "parsed_prediction": parse_multi_choice_response(clean_text(output_text)),
-            "skipped": False,
-            "correct": ok,
-        })
+                "parsed_prediction": parse_multi_choice_response(clean_text(output_text)),
+                "skipped": False,
+                "correct": ok,
+            }
+        )
 
     valid = len(requests) - skipped
     subject_accuracy = {}
@@ -2750,7 +2872,9 @@ def compare_prediction_sets(
     agreement = 0
     buckets = Counter()
     disagreements: list[dict[str, Any]] = []
-    for idx, (hf_row, trt_row, req) in enumerate(zip(hf_responses, trt_responses, requests, strict=True)):
+    for idx, (hf_row, trt_row, req) in enumerate(
+        zip(hf_responses, trt_responses, requests, strict=True)
+    ):
         answer = str(req["answer"])
         if scorer == "asr_transcript":
             hf_pred = normalize_asr_transcript(str(hf_row.get("output_text", "")))
@@ -2780,18 +2904,20 @@ def compare_prediction_sets(
         else:
             buckets["both_wrong"] += 1
         if not agreement_match:
-            disagreements.append({
-                "index": idx,
-                "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
-                "subject": req.get("subject", ""),
-                "answer": answer,
-                "hf_prediction": hf_pred,
-                "trtfb_prediction": trt_pred,
-                "hf_correct": hf_ok,
-                "trtfb_correct": trt_ok,
-                "hf_score": hf_sample.get("score", int(hf_ok)),
-                "trtfb_score": trtfb_sample.get("score", int(trt_ok)),
-            })
+            disagreements.append(
+                {
+                    "index": idx,
+                    "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
+                    "subject": req.get("subject", ""),
+                    "answer": answer,
+                    "hf_prediction": hf_pred,
+                    "trtfb_prediction": trt_pred,
+                    "hf_correct": hf_ok,
+                    "trtfb_correct": trt_ok,
+                    "hf_score": hf_sample.get("score", int(hf_ok)),
+                    "trtfb_score": trtfb_sample.get("score", int(trt_ok)),
+                }
+            )
 
     total = len(requests)
     return {
@@ -2962,7 +3088,9 @@ print(json.dumps([str(item.get("text", "")).strip() for item in outputs]))
     raise RuntimeError("TTS ASR transcription produced no parseable transcript list")
 
 
-def _tts_response_row(sample_id: str, wav_path: Path, wall_ms: float, source: str) -> dict[str, Any]:
+def _tts_response_row(
+    sample_id: str, wav_path: Path, wall_ms: float, source: str
+) -> dict[str, Any]:
     metrics = _read_wav_metrics(wav_path)
     return {
         "sample_id": sample_id,
@@ -3100,7 +3228,9 @@ def _vlm_model_classes(transformers_mod: Any) -> list[Any]:
         if cls is not None:
             classes.append(cls)
     if not classes:
-        raise RuntimeError("Transformers installation does not expose a VLM-capable AutoModel class")
+        raise RuntimeError(
+            "Transformers installation does not expose a VLM-capable AutoModel class"
+        )
     return classes
 
 
@@ -3118,12 +3248,15 @@ def _load_vlm_model(transformers_mod: Any, model_id: str, model_kwargs: dict[str
 
 
 def _vlm_prompt_has_image_placeholder(text: str) -> bool:
-    return any(marker in text for marker in (
-        "<|image_pad|>",
-        "<|vision_start|>",
-        "<image>",
-        "<IMG_CONTEXT>",
-    ))
+    return any(
+        marker in text
+        for marker in (
+            "<|image_pad|>",
+            "<|vision_start|>",
+            "<image>",
+            "<IMG_CONTEXT>",
+        )
+    )
 
 
 def _vlm_fallback_prompt(prompt: str, template: str = "") -> str:
@@ -3136,11 +3269,13 @@ def _apply_vlm_chat_template(obj: Any, messages: list[Any]) -> str:
     if not hasattr(obj, "apply_chat_template"):
         return ""
     try:
-        return str(obj.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        ))
+        return str(
+            obj.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        )
     except ValueError as exc:
         if "chat_template" in str(exc):
             return ""
@@ -3185,14 +3320,16 @@ def _strip_generated_text_prefix(text: str, prompt: str) -> str:
             generated = generated.split(marker, 1)[-1].strip()
             break
     if prompt and generated.startswith(prompt):
-        generated = generated[len(prompt):].strip()
+        generated = generated[len(prompt) :].strip()
     return generated
 
 
 def _to_device(batch: Any, device: Any) -> Any:
     if hasattr(batch, "to"):
         return batch.to(device)
-    return {key: value.to(device) if hasattr(value, "to") else value for key, value in batch.items()}
+    return {
+        key: value.to(device) if hasattr(value, "to") else value for key, value in batch.items()
+    }
 
 
 def _is_deepseek_ocr_hf_model(model_id: str, model: Any) -> bool:
@@ -3222,7 +3359,9 @@ def _run_deepseek_ocr_hf_reference(
             prompt_row = prompt_rows[idx]
             image_paths = [str(path) for path in prompt_row.get("images", [])]
             if len(image_paths) != 1:
-                raise ValueError(f"DeepSeek-OCR HF reference expects exactly one image for sample {idx}")
+                raise ValueError(
+                    f"DeepSeek-OCR HF reference expects exactly one image for sample {idx}"
+                )
             sample_id = str(prompt_row.get("sample_id", f"vlm_{idx:06d}"))
             output_path = output_root / sample_id
             start = time.perf_counter()
@@ -3255,7 +3394,9 @@ def _run_deepseek_ocr_hf_reference(
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.vlm_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr)
+            print(
+                f"[task_eval.vlm_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr
+            )
     write_predictions(pred_path, responses)
 
 
@@ -3276,12 +3417,18 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
     task_eval_config = work_manifest(work_dir).get("task_eval", {})
     if not isinstance(task_eval_config, dict):
         task_eval_config = {}
-    vlm_fallback_prompt_template = str(task_eval_config.get("vlm_fallback_prompt_template", "") or "")
-    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else int(
-        defaults.get("max_new_tokens", 8)
+    vlm_fallback_prompt_template = str(
+        task_eval_config.get("vlm_fallback_prompt_template", "") or ""
     )
-    temperature = args.temperature if args.temperature is not None else float(
-        defaults.get("temperature", 1.0)
+    max_new_tokens = (
+        args.max_new_tokens
+        if args.max_new_tokens is not None
+        else int(defaults.get("max_new_tokens", 8))
+    )
+    temperature = (
+        args.temperature
+        if args.temperature is not None
+        else float(defaults.get("temperature", 1.0))
     )
     top_k = args.top_k if args.top_k is not None else int(defaults.get("top_k", 1))
     top_p = args.top_p if args.top_p is not None else float(defaults.get("top_p", 1.0))
@@ -3396,7 +3543,9 @@ def run_vlm_hf_reference(args: argparse.Namespace) -> None:
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.vlm_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr)
+            print(
+                f"[task_eval.vlm_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr
+            )
     write_predictions(pred_path, responses)
     del model
     gc.collect()
@@ -3421,8 +3570,10 @@ def run_asr_hf_reference(args: argparse.Namespace) -> None:
     if len(prompt_rows) != len(answers["requests"]):
         raise ValueError("answers.json and prompts.jsonl must contain the same number of samples")
     defaults = generation_defaults(work_dir)
-    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else int(
-        defaults.get("max_new_tokens", 100)
+    max_new_tokens = (
+        args.max_new_tokens
+        if args.max_new_tokens is not None
+        else int(defaults.get("max_new_tokens", 100))
     )
     seed = args.seed if args.seed is not None else int(defaults.get("seed", -1))
 
@@ -3493,7 +3644,9 @@ def run_asr_hf_reference(args: argparse.Namespace) -> None:
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.asr_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr)
+            print(
+                f"[task_eval.asr_hf] sample={idx + 1}/{len(answers['requests'])}", file=sys.stderr
+            )
     write_predictions(pred_path, responses)
     del model
     gc.collect()
@@ -3582,7 +3735,11 @@ def _run_nemo_asr_hf_pipeline_reference(
     except Exception as exc:  # pragma: no cover - runtime dependency
         raise RuntimeError("NeMo ASR reference requires NeMo or transformers pipeline") from exc
 
-    device = 0 if str(getattr(args, "device", "")).startswith("cuda") and torch.cuda.is_available() else -1
+    device = (
+        0
+        if str(getattr(args, "device", "")).startswith("cuda") and torch.cuda.is_available()
+        else -1
+    )
     pipe = pipeline(
         "automatic-speech-recognition",
         model=args.model,
@@ -3599,7 +3756,9 @@ def _run_nemo_asr_hf_pipeline_reference(
             sample_id = str(prompt_row.get("sample_id", f"asr_{idx:06d}"))
             audio_path = str(prompt_row.get("audio", ""))
             if not audio_path:
-                raise ValueError(f"NeMo ASR HF pipeline reference expects an audio path for sample {idx}")
+                raise ValueError(
+                    f"NeMo ASR HF pipeline reference expects an audio path for sample {idx}"
+                )
             audio, sample_rate = _read_wav_float32(audio_path)
             audio = _resample_audio(audio, sample_rate, target_sr)
             mono_path = canary_audio_dir / _safe_sample_filename(sample_id, ".wav")
@@ -3618,7 +3777,10 @@ def _run_nemo_asr_hf_pipeline_reference(
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
             raw_f.flush()
-            print(f"[task_eval.nemo_asr_hf_pipeline] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
+            print(
+                f"[task_eval.nemo_asr_hf_pipeline] sample={idx + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
     write_predictions(pred_path, responses)
 
 
@@ -3660,12 +3822,16 @@ def run_tts_hf_reference(args: argparse.Namespace) -> None:
             local_files_only=args.local_files_only,
         )
         dtype = _model_dtype(torch, args.dtype)
-        model = BarkModel.from_pretrained(
-            args.model,
-            trust_remote_code=args.trust_remote_code,
-            local_files_only=args.local_files_only,
-            torch_dtype=dtype,
-        ).eval().to(device)
+        model = (
+            BarkModel.from_pretrained(
+                args.model,
+                trust_remote_code=args.trust_remote_code,
+                local_files_only=args.local_files_only,
+                torch_dtype=dtype,
+            )
+            .eval()
+            .to(device)
+        )
 
     raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
     pred_path = work_dir / (args.predictions or "hf_predictions.json")
@@ -3750,11 +3916,15 @@ def run_hf_reference(args: argparse.Namespace) -> None:
     if len(prompt_rows) != len(answers["requests"]):
         raise ValueError("answers.json and prompts.jsonl must contain the same number of samples")
     defaults = generation_defaults(work_dir)
-    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else int(
-        defaults.get("max_new_tokens", 1)
+    max_new_tokens = (
+        args.max_new_tokens
+        if args.max_new_tokens is not None
+        else int(defaults.get("max_new_tokens", 1))
     )
-    temperature = args.temperature if args.temperature is not None else float(
-        defaults.get("temperature", 1.0)
+    temperature = (
+        args.temperature
+        if args.temperature is not None
+        else float(defaults.get("temperature", 1.0))
     )
     top_k = args.top_k if args.top_k is not None else int(defaults.get("top_k", 1))
     top_p = args.top_p if args.top_p is not None else float(defaults.get("top_p", 1.0))
@@ -3827,7 +3997,7 @@ def run_hf_reference(args: argparse.Namespace) -> None:
                     eos_token_id=tokenizer.eos_token_id,
                 )
             wall_ms = (time.perf_counter() - start) * 1000.0
-            generated = output_ids[0, encoded["input_ids"].shape[1]:]
+            generated = output_ids[0, encoded["input_ids"].shape[1] :]
             output_text = tokenizer.decode(generated, skip_special_tokens=False)
             generated_token_ids = [int(token_id) for token_id in generated.tolist()]
             row = {
@@ -3879,7 +4049,11 @@ def run_tts_trtfb(args: argparse.Namespace) -> None:
     max_new_tokens = (
         args.max_new_tokens
         if args.max_new_tokens is not None
-        else int(model_max_new_tokens if model_max_new_tokens is not None else defaults.get("max_new_tokens", 0))
+        else int(
+            model_max_new_tokens
+            if model_max_new_tokens is not None
+            else defaults.get("max_new_tokens", 0)
+        )
     )
     runtime_config = task_config.get("runtime_config", {})
     runtime_config = runtime_config if isinstance(runtime_config, dict) else {}
@@ -3894,7 +4068,10 @@ def run_tts_trtfb(args: argparse.Namespace) -> None:
     if args.cuda_visible_devices:
         env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
     responses: list[dict[str, Any]] = []
-    with raw_output.open("w", encoding="utf-8") as raw_f, log_path.open("w", encoding="utf-8") as log_f:
+    with (
+        raw_output.open("w", encoding="utf-8") as raw_f,
+        log_path.open("w", encoding="utf-8") as log_f,
+    ):
         for idx, prompt_row in enumerate(prompt_rows):
             sample_id = str(prompt_row.get("sample_id", f"seedtts_{idx:06d}"))
             wav_path = output_dir / _safe_sample_filename(sample_id, ".wav")
@@ -3937,7 +4114,9 @@ def run_tts_trtfb(args: argparse.Namespace) -> None:
                     f"TRTFB TTS task eval failed for sample {idx} rc={proc.returncode}; see {log_path}"
                 )
             if not wav_path.is_file():
-                raise RuntimeError(f"TRTFB TTS task eval produced no WAV for sample {idx}: {wav_path}")
+                raise RuntimeError(
+                    f"TRTFB TTS task eval produced no WAV for sample {idx}: {wav_path}"
+                )
             row = _tts_response_row(sample_id, wav_path, wall_ms, "trtfb")
             responses.append(row)
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -3973,11 +4152,15 @@ def run_trtfb(args: argparse.Namespace) -> None:
     defaults = generation_defaults(work_dir)
     raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
     predictions = work_dir / (args.predictions or "trtfb_predictions.json")
-    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else int(
-        defaults.get("max_new_tokens", 1)
+    max_new_tokens = (
+        args.max_new_tokens
+        if args.max_new_tokens is not None
+        else int(defaults.get("max_new_tokens", 1))
     )
-    temperature = args.temperature if args.temperature is not None else float(
-        defaults.get("temperature", 1.0)
+    temperature = (
+        args.temperature
+        if args.temperature is not None
+        else float(defaults.get("temperature", 1.0))
     )
     top_k = args.top_k if args.top_k is not None else int(defaults.get("top_k", 1))
     top_p = args.top_p if args.top_p is not None else float(defaults.get("top_p", 1.0))
@@ -4022,7 +4205,9 @@ def run_trtfb(args: argparse.Namespace) -> None:
         env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
     log_path = work_dir / (args.log or "trtfb_run.log")
     with log_path.open("w", encoding="utf-8") as log_f:
-        proc = subprocess.run(cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env)
+        proc = subprocess.run(
+            cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env
+        )
     if proc.returncode != 0:
         raise RuntimeError(f"TRTFB task eval failed with rc={proc.returncode}; see {log_path}")
     convert_trtfb_jsonl_to_predictions(raw_output, predictions)
@@ -4169,7 +4354,9 @@ def ensure_bundle(
     with log_path.open("w", encoding="utf-8") as log_f:
         proc = subprocess.run(cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT)
     if proc.returncode != 0:
-        raise RuntimeError(f"Bundle build failed for {model['name']} rc={proc.returncode}; see {log_path}")
+        raise RuntimeError(
+            f"Bundle build failed for {model['name']} rc={proc.returncode}; see {log_path}"
+        )
     return bundle_path, True
 
 
@@ -4210,14 +4397,18 @@ def selected_models_for_suite(
                 missing.append(selector)
             filtered.extend(matches)
         if missing:
-            raise ValueError(f"Model selector(s) not found in suite {suite['id']}: {', '.join(missing)}")
+            raise ValueError(
+                f"Model selector(s) not found in suite {suite['id']}: {', '.join(missing)}"
+            )
         # Preserve manifest order and drop duplicates from overlapping selectors.
         wanted = {model["name"] for model in filtered}
         selected = [model for model in selected if model["name"] in wanted]
     return selected
 
 
-def _namespace_for_run_hf(args: argparse.Namespace, model: dict[str, Any], work_dir: Path) -> argparse.Namespace:
+def _namespace_for_run_hf(
+    args: argparse.Namespace, model: dict[str, Any], work_dir: Path
+) -> argparse.Namespace:
     return argparse.Namespace(
         model=model["hf_id"],
         family=model.get("family", ""),
@@ -4242,7 +4433,9 @@ def _namespace_for_run_hf(args: argparse.Namespace, model: dict[str, Any], work_
     )
 
 
-def _namespace_for_run_trtfb(args: argparse.Namespace, bundle_path: Path, work_dir: Path) -> argparse.Namespace:
+def _namespace_for_run_trtfb(
+    args: argparse.Namespace, bundle_path: Path, work_dir: Path
+) -> argparse.Namespace:
     return argparse.Namespace(
         bundle=str(bundle_path),
         work_dir=str(work_dir),
@@ -4283,14 +4476,22 @@ def run_hf_reference_subprocess(
         hf_python,
         str(Path(__file__).resolve()),
         "run-hf",
-        "--model", str(hf_args.model),
-        "--family", str(hf_args.family),
-        "--reference-family", str(hf_args.reference_family),
-        "--work-dir", str(hf_args.work_dir),
-        "--predictions", str(hf_args.predictions),
-        "--raw-output", str(hf_args.raw_output),
-        "--dtype", str(hf_args.dtype),
-        "--device", str(hf_args.device),
+        "--model",
+        str(hf_args.model),
+        "--family",
+        str(hf_args.family),
+        "--reference-family",
+        str(hf_args.reference_family),
+        "--work-dir",
+        str(hf_args.work_dir),
+        "--predictions",
+        str(hf_args.predictions),
+        "--raw-output",
+        str(hf_args.raw_output),
+        "--dtype",
+        str(hf_args.dtype),
+        "--device",
+        str(hf_args.device),
     ]
     if hf_args.device_map:
         cmd.extend(["--device-map", str(hf_args.device_map)])
@@ -4515,8 +4716,7 @@ def compare_continuation_sets(
         raise ValueError("HF and TRTFB predictions must contain response lists")
     if len(hf_rows) != len(trt_rows):
         raise ValueError(
-            f"HF and TRTFB predictions must have the same length: "
-            f"{len(hf_rows)} != {len(trt_rows)}"
+            f"HF and TRTFB predictions must have the same length: {len(hf_rows)} != {len(trt_rows)}"
         )
     if not all(isinstance(row, dict) for row in hf_rows + trt_rows):
         raise ValueError("HF and TRTFB predictions must contain object rows")
@@ -4568,17 +4768,19 @@ def compare_continuation_sets(
         div_positions.append(divergence)
         hf_token_at_divergence = hf_tokens[divergence] if divergence < len(hf_tokens) else None
         trt_token_at_divergence = trt_tokens[divergence] if divergence < len(trt_tokens) else None
-        samples.append({
-            "index": idx,
-            "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
-            "exact": is_exact,
-            "text_exact": text_is_exact,
-            "first_divergence": divergence,
-            "hf_len": len(hf_tokens),
-            "trtfb_len": len(trt_tokens),
-            "hf_token_at_divergence": hf_token_at_divergence,
-            "trtfb_token_at_divergence": trt_token_at_divergence,
-        })
+        samples.append(
+            {
+                "index": idx,
+                "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
+                "exact": is_exact,
+                "text_exact": text_is_exact,
+                "first_divergence": divergence,
+                "hf_len": len(hf_tokens),
+                "trtfb_len": len(trt_tokens),
+                "hf_token_at_divergence": hf_token_at_divergence,
+                "trtfb_token_at_divergence": trt_token_at_divergence,
+            }
+        )
 
     count = len(hf_rows)
     exact_rate = (exact / count) if count else 0.0
@@ -4604,7 +4806,9 @@ def cmd_compare_continuation(args: argparse.Namespace) -> int:
     work_dir = Path(args.work_dir)
     hf_path = Path(args.hf_predictions) if args.hf_predictions else work_dir / "hf_predictions.json"
     trtfb_path = (
-        Path(args.trtfb_predictions) if args.trtfb_predictions else work_dir / "trtfb_predictions.json"
+        Path(args.trtfb_predictions)
+        if args.trtfb_predictions
+        else work_dir / "trtfb_predictions.json"
     )
     tokenize = None
     if args.model:
@@ -4710,9 +4914,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--suites", default=str(DEFAULT_SUITES))
     p.add_argument("--suite")
     p.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
-    p.add_argument("--waives", default=str(DEFAULT_WAIVES), help="E2E waives file used to skip known-bad models.")
-    p.add_argument("--waive-platform", default="", help="Platform prefix to honor in the waives file.")
-    p.add_argument("--include-waived", action="store_true", help="Include models listed in the waives file.")
+    p.add_argument(
+        "--waives",
+        default=str(DEFAULT_WAIVES),
+        help="E2E waives file used to skip known-bad models.",
+    )
+    p.add_argument(
+        "--waive-platform", default="", help="Platform prefix to honor in the waives file."
+    )
+    p.add_argument(
+        "--include-waived", action="store_true", help="Include models listed in the waives file."
+    )
     p.add_argument(
         "--single-device-only",
         dest="single_device_only",
@@ -4810,12 +5022,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Manifest name, HF id, or bundle filename to evaluate. Repeatable.",
     )
     p.add_argument("--models-dir", default=str(DEFAULT_MODELS_DIR))
-    p.add_argument("--waives", default=str(DEFAULT_WAIVES), help="E2E waives file used to skip known-bad models.")
-    p.add_argument("--waive-platform", default="", help="Platform prefix to honor in the waives file.")
-    p.add_argument("--include-waived", action="store_true", help="Include models listed in the waives file.")
+    p.add_argument(
+        "--waives",
+        default=str(DEFAULT_WAIVES),
+        help="E2E waives file used to skip known-bad models.",
+    )
+    p.add_argument(
+        "--waive-platform", default="", help="Platform prefix to honor in the waives file."
+    )
+    p.add_argument(
+        "--include-waived", action="store_true", help="Include models listed in the waives file."
+    )
     p.add_argument("--work-root", default="/tmp/trtmc-task-eval")
     p.add_argument("--engine-dir", default="")
-    p.add_argument("--bundle", default="", help="Prebuilt bundle path; only valid with one --model.")
+    p.add_argument(
+        "--bundle", default="", help="Prebuilt bundle path; only valid with one --model."
+    )
     p.add_argument(
         "--single-device-only",
         dest="single_device_only",
@@ -4870,7 +5092,9 @@ def cmd_list_suites(args: argparse.Namespace) -> int:
         print(json.dumps({"suites": suites}, indent=2))
     else:
         for suite in suites:
-            print(f"{suite['id']}\t{suite.get('dataset', {}).get('kind', '')}\t{suite.get('description', '')}")
+            print(
+                f"{suite['id']}\t{suite.get('dataset', {}).get('kind', '')}\t{suite.get('description', '')}"
+            )
     return 0
 
 
@@ -4938,7 +5162,9 @@ def cmd_score(args: argparse.Namespace) -> int:
             raise ValueError("score requires --answers and --predictions without --work-dir")
         answers_path = Path(args.answers)
         predictions_path = Path(args.predictions)
-        output_path = Path(args.output) if args.output else predictions_path.with_suffix(".score.json")
+        output_path = (
+            Path(args.output) if args.output else predictions_path.with_suffix(".score.json")
+        )
     score = score_predictions(
         json.loads(predictions_path.read_text(encoding="utf-8")),
         json.loads(answers_path.read_text(encoding="utf-8")),
@@ -4958,7 +5184,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
     answers_path = Path(args.answers) if args.answers else work_dir / "answers.json"
     hf_path = Path(args.hf_predictions) if args.hf_predictions else work_dir / "hf_predictions.json"
     trtfb_path = (
-        Path(args.trtfb_predictions) if args.trtfb_predictions else work_dir / "trtfb_predictions.json"
+        Path(args.trtfb_predictions)
+        if args.trtfb_predictions
+        else work_dir / "trtfb_predictions.json"
     )
     summary = compare_prediction_sets(
         json.loads(hf_path.read_text(encoding="utf-8")),
@@ -5074,7 +5302,9 @@ def gpu_memory_back_to_baseline(
         current = gpu_memory_used_mib()
         if not current or len(current) != len(before_mib):
             return None, current
-        if all(after <= before + margin_mib for before, after in zip(before_mib, current, strict=True)):
+        if all(
+            after <= before + margin_mib for before, after in zip(before_mib, current, strict=True)
+        ):
             return True, current
         time.sleep(poll_s)
     return False, current
@@ -5082,8 +5312,7 @@ def gpu_memory_back_to_baseline(
 
 def is_oom_failure(result: dict[str, Any], returncode: int = 0) -> bool:
     text = " ".join(
-        str(result.get(key, ""))
-        for key in ("error", "error_type", "worker_log_tail")
+        str(result.get(key, "")) for key in ("error", "error_type", "worker_log_tail")
     ).lower()
     return (
         "out of memory" in text
@@ -5133,12 +5362,20 @@ def run_eval_model_worker(
         "result_path": str(result_path),
     }
     request_path.write_text(json.dumps(request, indent=2, ensure_ascii=False), encoding="utf-8")
-    cmd = [sys.executable, str(Path(__file__).resolve()), "eval-worker", "--request", str(request_path)]
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "eval-worker",
+        "--request",
+        str(request_path),
+    ]
     env = os.environ.copy()
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
     env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     with log_path.open("w", encoding="utf-8") as log_f:
-        proc = subprocess.run(cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env)
+        proc = subprocess.run(
+            cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env
+        )
 
     if result_path.is_file():
         result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -5268,9 +5505,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         results.append(result)
         print(f"[task_eval] {_format_result_line(model, result)}")
         if result.get("gpu_cleanup_confirmed") is False:
-            reason = (
-                f"Skipped because GPU cleanup after {model['name']} was not confirmed"
-            )
+            reason = f"Skipped because GPU cleanup after {model['name']} was not confirmed"
             print(f"[task_eval] {reason}")
             for skipped_model in selected[idx:]:
                 results.append(

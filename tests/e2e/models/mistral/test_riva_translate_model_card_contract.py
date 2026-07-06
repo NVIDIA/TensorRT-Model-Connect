@@ -33,19 +33,17 @@ MODEL_CARD_EN_FR_PROMPT = (
 def test_riva_manifest_uses_model_card_translation_contract() -> None:
     raw = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
     case = load_manifest(MANIFEST_PATH)
+    testcase = raw["testcases"][0]
 
     assert raw["hf_id"] == "nvidia/Riva-Translate-4B-Instruct-v1.1"
-    assert raw["gated"] is True
-    assert "skip_logit_parity" not in raw
+    assert testcase["gated"] is True
+    assert "skip_logit_parity" not in testcase
     assert case.reference_family == "translation_chat_template"
     assert case.user_contract == "translation"
     assert case.inputs["prompt"] == MODEL_CARD_EN_FR_PROMPT
     assert case.inputs["max_new_tokens"] == 20
     assert "skip_logit_parity" not in case.metadata
-    assert any(
-        req.kind == "hf_auth_token_present" and req.gating
-        for req in case.preflight
-    )
+    assert any(req.kind == "hf_auth_token_present" and req.gating for req in case.preflight)
 
 
 def test_riva_translation_plugin_uses_preformatted_model_card_prompt() -> None:

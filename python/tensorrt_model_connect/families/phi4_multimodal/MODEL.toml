@@ -3,6 +3,12 @@
 
 id = "phi4_multimodal"
 plugin = "phi4_multimodal"
+python_profile_specs = [
+  "phi4_multimodal|families/phi4_multimodal/python_profile_requirements/phi4_multimodal.lock.txt|families/phi4_multimodal/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|phi4_multimodal",
+]
 module = "plugin"
 capabilities = ["split_decoder_roles"]
 aliases = [

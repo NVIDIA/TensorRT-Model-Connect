@@ -1,20 +1,27 @@
 {
   "name": "all-minilm-l6-v2",
-  "trace_id": "IT-E2E-MNLM6-01",
   "hf_id": "sentence-transformers/all-MiniLM-L6-v2",
   "bundle": "all-minilm-l6-v2.trtfb",
   "family": "bert",
   "runtime_strategy": "bert_encoder_only",
   "task_strategy": "encoder_only_nlp",
-  "reference_family": "sentence_transformer_embed",
-  "user_contract": "embedding_vector",
+  "precision": "fp16",
   "max_cache_length": 512,
-  "prompt": "The capital of France is Paris.",
-  "max_new_tokens": 0,
   "trust_remote_code": false,
-  "metadata": {
-    "contract_config": {
-      "use_sentence_transformers": true
+  "testcases": [
+    {
+      "name": "all-minilm-l6-v2",
+      "trace_id": "IT-E2E-MNLM6-01",
+      "reference_precision": "fp32",
+      "reference_family": "sentence_transformer_embed",
+      "user_contract": "embedding_vector",
+      "prompt": "The capital of France is Paris.",
+      "max_new_tokens": 0,
+      "metadata": {
+        "contract_config": {
+          "use_sentence_transformers": true
+        }
+      }
     }
-  }
+  ]
 }

@@ -11,6 +11,11 @@ import pytest
 from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.families.elf_flow.prepare_model_dir import (
     prepare_model_dir,
+    resolve_model_dir,
+)
+from tensorrt_model_connect.families import (
+    family_hf_warm_dependencies,
+    family_hf_warm_files,
 )
 
 
@@ -90,3 +95,42 @@ def test_prepare_elf_model_dir_rejects_non_empty_output_without_force(tmp_path: 
 
     with pytest.raises(FileExistsError, match="not empty"):
         prepare_model_dir(_args(tmp_path, tokenizer=""))
+
+
+def test_resolve_elf_hf_snapshot_stages_external_encoder_and_tokenizer(
+    tmp_path: Path, monkeypatch
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    _write_config(snapshot / "ELF-B-owt.yml")
+    (snapshot / "checkpoint_0").mkdir()
+    (snapshot / "checkpoint_0" / "manifest.ocdbt").write_bytes(b"checkpoint")
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    (tokenizer / "tokenizer.json").write_text("{}", encoding="utf-8")
+    encoder = tmp_path / "t5_small_encoder_jax.pkl"
+    encoder.write_bytes(b"encoder")
+    monkeypatch.setenv("TRTMC_FAMILY_MODEL_ROOT", str(tmp_path / "staged"))
+    monkeypatch.setenv("TRTMC_ELF_TOKENIZER_DIR", str(tokenizer))
+    monkeypatch.setenv("TRTMC_ELF_ENCODER_CHECKPOINT", str(encoder))
+
+    resolved = resolve_model_dir(snapshot)
+
+    assert resolved is not None
+    assert (resolved / "ELF-B-owt.yml").exists()
+    assert (resolved / "checkpoint_0" / "manifest.ocdbt").read_bytes() == b"checkpoint"
+    assert (resolved / "tokenizer.json").exists()
+    assert (resolved / "t5_small_encoder_jax.pkl").read_bytes() == b"encoder"
+
+
+def test_elf_offline_build_dependencies_are_warmed() -> None:
+    assert family_hf_warm_dependencies("elf") == [
+        ("elf-tokenizer", "google-t5/t5-small")
+    ]
+    assert family_hf_warm_files("elf") == [
+        (
+            "elf-t5-encoder",
+            "embedded-language-flows/t5_small_encoder_jax",
+            "t5_small_encoder_jax.pkl",
+        )
+    ]

@@ -200,6 +200,7 @@ def build_causal_vae_3d_engine(
     norm_type: str = "l2_channel_norm",
     num_groups: int = 32,
     eps: float = 1e-6,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build causal 3D VAE decoder TRT engine plan.
@@ -213,6 +214,13 @@ def build_causal_vae_3d_engine(
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
     from . import graph_ops, graph_blocks
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported 3D VAE precision {precision!r}; expected fp32 or fp16")
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -234,6 +242,8 @@ def build_causal_vae_3d_engine(
     # --- Input ---
     latent = network.add_input(
         "latent_frame", trt.float32, (1, z_dim, 1, h_lat, w_lat))
+    if work_trt_dtype != trt.float32:
+        latent = network.add_cast(latent, work_trt_dtype).get_output(0)
 
     # --- Cache inputs ---
     cache_idx = 0
@@ -245,6 +255,8 @@ def build_causal_vae_3d_engine(
         name = f"cache_{cache_idx}"
         shape = (1, channels, t_cache, h_c, w_c)
         t = network.add_input(name, trt.float32, shape)
+        if work_trt_dtype != trt.float32:
+            t = network.add_cast(t, work_trt_dtype).get_output(0)
         cache_inputs[cache_idx] = t
         cache_idx += 1
         return t
@@ -259,6 +271,7 @@ def build_causal_vae_3d_engine(
         bias=weights["post_quant_conv.bias"],
         out_channels=z_dim,
         kernel_size=(1, 1, 1),
+        dtype=work_np_dtype,
     )
 
     # --- conv_in: CausalConv3D [z_dim -> mid_ch, (3,3,3)] ---
@@ -270,6 +283,7 @@ def build_causal_vae_3d_engine(
         out_channels=mid_ch,
         kernel_size=(3, 3, 3),
         padding_hw=(1, 1),
+        dtype=work_np_dtype,
     )
     _set_cache_output(cache_idx - 1, ci_cache_out)
     print(f"[vae-3d] conv_in: [{z_dim}]->[{mid_ch}], "
@@ -284,7 +298,8 @@ def build_causal_vae_3d_engine(
             network, x, c1, c2,
             weights=weights, prefix=prefix,
             in_channels=mid_ch, out_channels=mid_ch,
-            norm_type=norm_type, num_groups=num_groups, eps=eps)
+            norm_type=norm_type, num_groups=num_groups, eps=eps,
+            dtype=work_np_dtype)
         _set_cache_output(cache_idx - 2, co1)
         _set_cache_output(cache_idx - 1, co2)
 
@@ -295,7 +310,8 @@ def build_causal_vae_3d_engine(
                 weights=weights,
                 prefix="decoder.mid_block.attentions.0",
                 channels=mid_ch,
-                norm_type=norm_type, num_groups=num_groups, eps=eps)
+                norm_type=norm_type, num_groups=num_groups, eps=eps,
+                dtype=work_np_dtype)
 
     print(f"[vae-3d] mid_block done, T={cur_t}, {cur_h}x{cur_w}",
           file=sys.stderr)
@@ -325,7 +341,8 @@ def build_causal_vae_3d_engine(
                 network, x, c1, c2,
                 weights=weights, prefix=prefix,
                 in_channels=in_ch, out_channels=out_ch,
-                norm_type=norm_type, num_groups=num_groups, eps=eps)
+                norm_type=norm_type, num_groups=num_groups, eps=eps,
+                dtype=work_np_dtype)
             _set_cache_output(cache_idx - 2, co1)
             _set_cache_output(cache_idx - 1, co2)
 
@@ -348,6 +365,7 @@ def build_causal_vae_3d_engine(
                 out_channels=tc_out_ch,
                 kernel_size=(3, 1, 1),
                 padding_hw=(0, 0),
+                dtype=work_np_dtype,
             )
             _set_cache_output(cache_idx - 1, tc_cache_out)
 
@@ -368,7 +386,7 @@ def build_causal_vae_3d_engine(
                 network, x,
                 weight=sp_w,
                 bias=weights[f"{sp_prefix}.bias"],
-                scale=2)
+                scale=2, dtype=work_np_dtype)
             cur_h *= 2
             cur_w *= 2
             prev_ch = sp_out_ch  # Track channel change from spatial conv
@@ -379,12 +397,12 @@ def build_causal_vae_3d_engine(
     if norm_type == "l2_channel_norm":
         x = graph_ops.add_l2_channel_norm(
             network, x, prev_ch,
-            weights["decoder.norm_out.gamma"], eps)
+            weights["decoder.norm_out.gamma"], eps, dtype=work_np_dtype)
     else:
         x = graph_ops.add_group_norm(
             network, x, prev_ch, num_groups,
             weights["decoder.norm_out.weight"],
-            weights["decoder.norm_out.bias"], eps)
+            weights["decoder.norm_out.bias"], eps, dtype=work_np_dtype)
     x = graph_ops.add_silu(network, x)
 
     # --- conv_out: CausalConv3D [96 -> 3, (3,3,3)] ---
@@ -396,6 +414,7 @@ def build_causal_vae_3d_engine(
         out_channels=out_channels,
         kernel_size=(3, 3, 3),
         padding_hw=(1, 1),
+        dtype=work_np_dtype,
     )
     _set_cache_output(cache_idx - 1, co_cache_out)
 

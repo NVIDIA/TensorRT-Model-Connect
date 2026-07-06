@@ -38,6 +38,7 @@ def build_sam3_text_encoder_engine(
     vocab_size: int,
     max_seq_len: int,
     eps: float,
+    precision: str = "fp32",
     hidden_act: str = "gelu",
     verbose: bool = False,
 ) -> bytes:
@@ -45,6 +46,8 @@ def build_sam3_text_encoder_engine(
     del vocab_size
     trt = _trt()
     head_dim = hidden_size // num_heads
+    work_np_dtype = np.float16 if precision == "fp16" else np.float32
+    work_trt_dtype = trt.float16 if precision == "fp16" else trt.float32
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -59,32 +62,39 @@ def build_sam3_text_encoder_engine(
     tok_embed_w = weights["text_model.embeddings.token_embedding.weight"]
     pos_embed_w = weights["text_model.embeddings.position_embedding.weight"]
 
-    tok_const = graph_ops.add_constant(network, tok_embed_w.shape, tok_embed_w)
+    tok_const = graph_ops.add_constant(
+        network, tok_embed_w.shape, tok_embed_w, dtype=work_np_dtype)
     tok_gather = network.add_gather(tok_const, input_ids, axis=0)
     hidden = tok_gather.get_output(0)
 
     pos_ids_np = np.arange(max_seq_len, dtype=np.int32)
     pos_ids = network.add_constant(
         (max_seq_len,), trt.Weights(np.ascontiguousarray(pos_ids_np))).get_output(0)
-    pos_const = graph_ops.add_constant(network, pos_embed_w.shape, pos_embed_w)
+    pos_const = graph_ops.add_constant(
+        network, pos_embed_w.shape, pos_embed_w, dtype=work_np_dtype)
     pos_gather = network.add_gather(pos_const, pos_ids, axis=0)
     hidden = network.add_elementwise(
         hidden, pos_gather.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
 
-    causal_np = np.full((max_seq_len, max_seq_len), -1e9, dtype=np.float32)
+    mask_min = -1e4 if precision == "fp16" else -1e9
+    causal_np = np.full(
+        (max_seq_len, max_seq_len), mask_min, dtype=work_np_dtype)
     for i in range(max_seq_len):
         causal_np[i, : i + 1] = 0.0
     causal_const = graph_ops.add_constant(
-        network, (1, 1, max_seq_len, max_seq_len), causal_np[None, None])
-    mask_float = network.add_cast(attention_mask, trt.float32).get_output(0)
+        network, (1, 1, max_seq_len, max_seq_len), causal_np[None, None],
+        dtype=work_np_dtype)
+    mask_float = network.add_cast(attention_mask, work_trt_dtype).get_output(0)
     valid_ones = graph_ops.add_constant(
-        network, (max_seq_len,), np.ones((max_seq_len,), dtype=np.float32))
+        network, (max_seq_len,), np.ones((max_seq_len,), dtype=work_np_dtype),
+        dtype=work_np_dtype)
     invalid_mask = network.add_elementwise(
         valid_ones, mask_float, trt.ElementWiseOperation.SUB).get_output(0)
     invalid_mask_4d = network.add_shuffle(invalid_mask)
     invalid_mask_4d.reshape_dims = (1, 1, 1, max_seq_len)
     mask_penalty = graph_ops.add_constant(
-        network, (1, 1, 1, 1), np.array([-1e9], dtype=np.float32))
+        network, (1, 1, 1, 1), np.array([mask_min], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     padding_bias = network.add_elementwise(
         invalid_mask_4d.get_output(0), mask_penalty, trt.ElementWiseOperation.PROD)
     attention_bias = network.add_elementwise(
@@ -154,7 +164,8 @@ def build_sam3_text_encoder_engine(
             network, fc1, intermediate_size, weights[f"{prefix}.mlp.fc1.bias"])
         if hidden_act == "quick_gelu":
             coeff = graph_ops.add_constant(
-                network, (1, 1), np.array([1.702], dtype=np.float32))
+                network, (1, 1), np.array([1.702], dtype=work_np_dtype),
+                dtype=work_np_dtype)
             scaled = network.add_elementwise(fc1, coeff, trt.ElementWiseOperation.PROD)
             sigmoid = network.add_activation(scaled.get_output(0), trt.ActivationType.SIGMOID)
             activated = network.add_elementwise(

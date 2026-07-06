@@ -1,17 +1,24 @@
 {
   "name": "glm-4-9b-l0",
-  "trace_id": "IT-E2E-GLM4-L0-01",
   "hf_id": "THUDM/glm-4-9b-hf",
   "bundle": "glm-4-9b-l0.trtfb",
   "family": "glm",
   "runtime_strategy": "glm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "ci_tier": "l0_only",
-  "reference_family": "causal_base_continuation",
-  "user_contract": "continuation_parity",
+  "precision": "fp16",
   "max_cache_length": 256,
-  "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
-  "max_new_tokens": 8,
   "trust_remote_code": false,
-  "notes": "PR L0 repro for GLM-4-9B. Uses the same checkpoint, glm_decoder_kv_cache runtime, runner, comparator, continuation artifact contract, and full cache budget with shorter decode budget."
+  "testcases": [
+    {
+      "name": "glm-4-9b-l0",
+      "trace_id": "IT-E2E-GLM4-L0-01",
+      "ci_tier": "l0_only",
+      "reference_family": "causal_base_continuation",
+      "user_contract": "continuation_parity",
+      "reference_precision": "fp32",
+      "prompt": "The quick brown fox jumps over the lazy dog. Once upon a time",
+      "max_new_tokens": 8,
+      "notes": "PR L0 repro for GLM-4-9B. Uses the same checkpoint, glm_decoder_kv_cache runtime, runner, comparator, continuation artifact contract, and full cache budget with shorter decode budget."
+    }
+  ]
 }

@@ -1,21 +1,28 @@
 {
   "name": "nemotron-mini-4b",
-  "trace_id": "IT-E2E-NMMN-01",
   "hf_id": "nvidia/Nemotron-Mini-4B-Instruct",
   "bundle": "nemotron-mini-4b.trtfb",
   "family": "nemotron",
   "runtime_strategy": "nemotron_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "chat_instruct_template",
-  "user_contract": "chat_response",
+  "precision": "fp16",
   "max_cache_length": 256,
-  "prompt": "What is the capital of France? Answer in one word.",
-  "max_new_tokens": 10,
   "trust_remote_code": false,
-  "metadata": {
-    "contract_config": {
-      "use_chat_template": true,
-      "enable_thinking": false
+  "testcases": [
+    {
+      "name": "nemotron-mini-4b",
+      "trace_id": "IT-E2E-NMMN-01",
+      "reference_family": "chat_instruct_template",
+      "user_contract": "chat_response",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "metadata": {
+        "contract_config": {
+          "use_chat_template": true,
+          "enable_thinking": false
+        }
+      }
     }
-  }
+  ]
 }

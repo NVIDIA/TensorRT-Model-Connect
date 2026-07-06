@@ -31,7 +31,6 @@ _CONSOLE_OUTCOME_RE = re.compile(
     r"tests/e2e/models/[^\s:]+::test_model_e2e)\[([^\]]+)\]\s+"
     r"(PASSED|FAILED|SKIPPED|ERROR|XFAIL|XPASS)\b(.*)"
 )
-_BUNDLE_GROUP_PREFIX = "bundle:"
 _METRIC_PRIORITY = (
     "logit_cosine_p5",
     "token_agreement_rate",
@@ -78,30 +77,18 @@ def _extract_case_name(text: str) -> str:
     return match.group(1) if match else ""
 
 
-def _case_names_from_param(case_name: str) -> list[str]:
-    if case_name.startswith(_BUNDLE_GROUP_PREFIX):
-        payload = case_name[len(_BUNDLE_GROUP_PREFIX):]
-        return [part for part in payload.split("+") if part]
-    return [case_name] if case_name else []
-
-
 def _record_pytest_outcome(
     outcomes: dict[str, dict[str, str]],
     case_name: str,
     outcome: dict[str, str],
 ) -> None:
-    member_names = _case_names_from_param(case_name)
-    if len(member_names) <= 1:
         outcomes[case_name] = outcome
-        return
 
-    grouped = {
-        **outcome,
-        "pytest_group": case_name,
-        "pytest_group_members": ",".join(member_names),
-    }
-    for member_name in member_names:
-        outcomes[member_name] = grouped
+
+def _result_model_name(result: dict[str, Any]) -> str:
+    case_config = result.get("case_config", {}) or {}
+    metadata = case_config.get("metadata", {}) or {}
+    return str(metadata.get("model_name") or result.get("case_name") or "")
 
 
 def _clean_pytest_reason(reason: str) -> str:
@@ -130,10 +117,7 @@ def _load_pytest_outcomes(e2e_root: Path) -> dict[str, dict[str, str]]:
             continue
         for testcase in root.iter("testcase"):
             case_name = _extract_case_name(
-                " ".join(
-                    str(testcase.attrib.get(key, ""))
-                    for key in ("classname", "name")
-                )
+                " ".join(str(testcase.attrib.get(key, "")) for key in ("classname", "name"))
             )
             if not case_name:
                 continue
@@ -153,11 +137,15 @@ def _load_pytest_outcomes(e2e_root: Path) -> dict[str, dict[str, str]]:
                 skip_type = skipped.attrib.get("type", "")
                 status = "XFAIL" if skip_type == "pytest.xfail" else "SKIPPED"
                 reason = skipped.attrib.get("message", "") or (skipped.text or "")
-            _record_pytest_outcome(outcomes, case_name, {
+            _record_pytest_outcome(
+                outcomes,
+                case_name,
+                {
                 "pytest_status": status,
                 "reason": _clean_pytest_reason(reason),
                 "source": source,
-            })
+                },
+            )
 
     for log_path in sorted(e2e_root.glob("console-*.log")):
         try:
@@ -172,11 +160,15 @@ def _load_pytest_outcomes(e2e_root: Path) -> dict[str, dict[str, str]]:
             case_name, status, rest = match.groups()
             reason = _clean_pytest_reason(rest.split("[", 1)[0])
             if status in {"XPASS", "XFAIL"} or case_name not in outcomes:
-                _record_pytest_outcome(outcomes, case_name, {
+                _record_pytest_outcome(
+                    outcomes,
+                    case_name,
+                    {
                     "pytest_status": status,
                     "reason": reason,
                     "source": log_path.name,
-                })
+                    },
+                )
 
     return outcomes
 
@@ -189,24 +181,22 @@ def _merge_pytest_outcomes(
     seen: set[str] = set()
     for result in results:
         item = dict(result)
-        case_name = str(item.get("case_name") or "")
-        if case_name:
-            seen.add(case_name)
-        if case_name in outcomes:
-            item["_pytest_outcome"] = outcomes[case_name]
+        model_name = _result_model_name(item)
+        if model_name:
+            seen.add(model_name)
+        if model_name in outcomes:
+            item["_pytest_outcome"] = outcomes[model_name]
         merged.append(item)
 
     for case_name, outcome in sorted(outcomes.items()):
         if case_name in seen:
             continue
-        status = _PYTEST_TO_RESULT_STATUS.get(
-            outcome.get("pytest_status", ""), "error")
+        status = _PYTEST_TO_RESULT_STATUS.get(outcome.get("pytest_status", ""), "error")
         merged.append(
             {
                 "case_name": case_name,
                 "status": status,
-                "failure_type": "pytest_failed"
-                if status in {"fail", "error"} else None,
+                "failure_type": "pytest_failed" if status in {"fail", "error"} else None,
                 "case_config": {},
                 "stages": {
                     "pytest": {
@@ -340,54 +330,36 @@ def _sort_key(result: dict[str, Any]) -> tuple[int, float, str]:
     return (status_rank, -(total or 0.0), str(result.get("case_name", "")))
 
 
-def _bundle_group_key(result: dict[str, Any]) -> str:
-    outcome = result.get("_pytest_outcome")
-    if isinstance(outcome, dict):
-        group_name = str(outcome.get("pytest_group") or "")
-        if group_name:
-            return group_name
-    case_config = result.get("case_config", {}) or {}
-    bundle = str(case_config.get("bundle", "") or "").strip()
-    if bundle:
-        return bundle
-    return ""
+def _model_group_key(result: dict[str, Any]) -> str:
+    return _result_model_name(result)
 
 
-def _bundle_group_label(group_key: str) -> str:
-    if group_key.startswith(_BUNDLE_GROUP_PREFIX):
-        return "pytest group: " + ", ".join(_case_names_from_param(group_key))
+def _model_group_label(group_key: str) -> str:
     return group_key
 
 
-def _bundle_group_sort_key(group_key: str, result: dict[str, Any]) -> tuple[int, str]:
+def _model_group_sort_key(group_key: str, result: dict[str, Any]) -> tuple[int, str]:
     name = str(result.get("case_name", ""))
-    if group_key.startswith(_BUNDLE_GROUP_PREFIX):
-        member_names = _case_names_from_param(group_key)
-        try:
-            return (member_names.index(name), name)
-        except ValueError:
-            return (len(member_names), name)
-    bundle_stem = Path(group_key).stem if group_key else ""
-    return (0 if name == bundle_stem else 1, name)
+    return (0 if name == group_key else 1, name)
 
 
-def _grouped_bundle_results(
+def _grouped_model_results(
     results: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
     groups: dict[str, list[dict[str, Any]]] = {}
     for result in results:
-        group_key = _bundle_group_key(result)
+        group_key = _model_group_key(result)
         if not group_key:
             continue
         groups.setdefault(group_key, []).append(result)
     return {
-        key: sorted(items, key=lambda item: _bundle_group_sort_key(key, item))
+        key: sorted(items, key=lambda item: _model_group_sort_key(key, item))
         for key, items in sorted(groups.items())
         if len(items) > 1
     }
 
 
-def _bundle_group_row(group_key: str, items: list[dict[str, Any]]) -> str:
+def _model_group_row(group_key: str, items: list[dict[str, Any]]) -> str:
     status_counts: dict[str, int] = {}
     for item in items:
         status = _status(item)
@@ -408,7 +380,7 @@ def _bundle_group_row(group_key: str, items: list[dict[str, Any]]) -> str:
         detail += ")"
         testcase_lines.append(detail)
     cols = [
-        _md(_bundle_group_label(group_key)),
+        _md(_model_group_label(group_key)),
         str(len(items)),
         _md(status_summary),
         "<br>".join(testcase_lines),
@@ -452,30 +424,28 @@ def render_summary(
     lines.append("### E2E Result Counts")
     count_rows = [
         f"| {_md(status)} | {counts[status]} |"
-        for status in sorted(counts, key=lambda s: (_STATUS_ORDER.index(s) if s in _STATUS_ORDER else 1, s))
+        for status in sorted(
+            counts, key=lambda s: (_STATUS_ORDER.index(s) if s in _STATUS_ORDER else 1, s)
+        )
     ]
     lines.extend(_render_table(["Status", "Count"], count_rows))
     lines.append("")
 
-    grouped_bundles = _grouped_bundle_results(results)
-    if grouped_bundles:
-        lines.append("### Grouped Bundle Testcases")
-        rows = [
-            _bundle_group_row(group_key, items)
-            for group_key, items in grouped_bundles.items()
-        ]
-        lines.extend(
-            _render_table(["Bundle", "Testcases", "Statuses", "Members"], rows)
-        )
+    grouped_models = _grouped_model_results(results)
+    if grouped_models:
+        lines.append("### Multi-Testcase Models")
+        rows = [_model_group_row(group_key, items) for group_key, items in grouped_models.items()]
+        lines.extend(_render_table(["Bundle", "Testcases", "Statuses", "Members"], rows))
         lines.append("")
 
     failures = [
-        r for r in results
-        if _status(r) not in _PASS_STATUSES and _pytest_status(r) != "XFAIL"
+        r for r in results if _status(r) not in _PASS_STATUSES and _pytest_status(r) != "XFAIL"
     ]
     if failures:
         lines.append("### Failures")
-        rows = [_case_row(r, include_failure=True) for r in sorted(failures, key=_sort_key)[:max_rows]]
+        rows = [
+            _case_row(r, include_failure=True) for r in sorted(failures, key=_sort_key)[:max_rows]
+        ]
         lines.extend(
             _render_table(
                 ["Model", "Family", "Task", "Status", "Failure", "Key Metric", "Time"],
@@ -499,8 +469,7 @@ def render_summary(
                 ),
             )
         ]
-        lines.extend(_render_table(
-            ["Model", "Pytest Status", "Result Status", "Reason"], rows))
+        lines.extend(_render_table(["Model", "Pytest Status", "Result Status", "Reason"], rows))
         lines.append("")
 
     timed = [r for r in results if _total_time_seconds(r) is not None]
@@ -508,9 +477,13 @@ def render_summary(
         lines.append("### Slowest E2E Cases")
         rows = [
             _case_row(r)
-            for r in sorted(timed, key=lambda item: _total_time_seconds(item) or 0.0, reverse=True)[:10]
+            for r in sorted(timed, key=lambda item: _total_time_seconds(item) or 0.0, reverse=True)[
+                :10
         ]
-        lines.extend(_render_table(["Model", "Family", "Task", "Status", "Key Metric", "Time"], rows))
+        ]
+        lines.extend(
+            _render_table(["Model", "Family", "Task", "Status", "Key Metric", "Time"], rows)
+        )
         lines.append("")
 
     lines.append("### All E2E Model Status")

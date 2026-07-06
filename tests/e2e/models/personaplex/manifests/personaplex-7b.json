@@ -1,26 +1,37 @@
 {
   "name": "personaplex-7b",
-  "trace_id": "IT-E2E-PPLX-01",
   "hf_id": "nvidia/personaplex-7b-v1",
   "bundle": "personaplex-7b.trtfb",
   "family": "personaplex",
   "runtime_strategy": "personaplex_speech_to_speech",
   "task_strategy": "speech_to_speech",
-  "reference_family": "s2s_personaplex",
-  "user_contract": "speech_response",
-  "gated": true,
-  "ci_tier": "nightly_only",
-  "l0_replacement": "personaplex-7b-l0",
-  "l0_replacement_reason": "PersonaPlex scale stays nightly; personaplex-7b-l0 keeps the speech path with shorter generation for PR L0.",
-  "test_type": "audio",
+  "precision": "fp16",
+  "fp32_layers": [
+    35
+  ],
   "max_cache_length": 512,
-  "test_input_audio": "data/Recording.wav",
-  "speech_reference_tokens": "data/personaplex_recording_official_tokens_greedy.npy",
-  "speech_test_max_frames": 300,
-  "prompt": "",
-  "max_new_tokens": 1000,
   "trust_remote_code": true,
-  "metadata": {
-    "runtime_cli_requires_hf_python": true
-  }
+  "testcases": [
+    {
+      "name": "personaplex-7b",
+      "trace_id": "IT-E2E-PPLX-01",
+      "reference_precision": "bf16",
+      "reference_family": "s2s_personaplex",
+      "user_contract": "speech_response",
+      "gated": true,
+      "ci_tier": "nightly_only",
+      "l0_replacement": "personaplex-7b-l0",
+      "l0_replacement_reason": "PersonaPlex scale stays nightly; personaplex-7b-l0 keeps the speech path with shorter generation for PR L0.",
+      "test_type": "audio",
+      "test_input_audio": "data/Recording.wav",
+      "speech_reference_tokens": "data/personaplex_recording_official_tokens_greedy.npy",
+      "speech_test_max_frames": 300,
+      "prompt": "",
+      "max_new_tokens": 1000,
+      "notes": "The temporal decoder, depth decoders, and Mimi codec run in FP16. Global selector 35 keeps only temporal block 31 and the following final norm/heads in FP32; pure FP16 makes the temporal hidden state non-finite, while this boundary passes the unchanged checkpoint-owned token contract.",
+      "metadata": {
+        "runtime_cli_requires_hf_python": true
+      }
+    }
+  ]
 }

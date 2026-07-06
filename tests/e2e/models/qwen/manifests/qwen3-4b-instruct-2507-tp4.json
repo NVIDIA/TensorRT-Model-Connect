@@ -1,19 +1,13 @@
 {
   "name": "qwen3-4b-instruct-2507-tp4",
-  "trace_id": "IT-E2E-QWN3I-TP4-01",
   "hf_id": "Qwen/Qwen3-4B-Instruct-2507",
   "bundle": "qwen3-4b-instruct-2507-tp4.trtfb",
   "family": "qwen",
   "runtime_strategy": "qwen_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
-  "reference_family": "chat_qwen3_posttrained",
-  "user_contract": "chat_response",
   "precision": "fp16",
   "max_cache_length": 256,
-  "prompt": "What is the capital of Japan? Answer in one word.",
-  "max_new_tokens": 10,
   "trust_remote_code": false,
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
     "parallel": {
@@ -34,25 +28,37 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "qwen3-4b-instruct-2507-tp4",
+      "trace_id": "IT-E2E-QWN3I-TP4-01",
+      "reference_family": "chat_qwen3_posttrained",
+      "user_contract": "chat_response",
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of Japan? Answer in one word.",
+      "max_new_tokens": 10,
+      "ci_tier": "multi_device",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ]
     }
   ]
 }

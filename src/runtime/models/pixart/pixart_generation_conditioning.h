@@ -27,6 +27,14 @@ struct PixArtTextConditioning {
     std::vector<float> null_text;
 };
 
+inline std::vector<float> make_pixart_null_attention_mask(std::size_t sequence_length) {
+    std::vector<float> mask(sequence_length, -10000.0F);
+    if (!mask.empty()) {
+        mask[0] = 0.0F;
+    }
+    return mask;
+}
+
 inline PixArtConditioningInputs
 make_pixart_conditioning_inputs(const PixArtDiffusionConfig& config, const PixArtLayout& layout,
                                 const std::vector<int32_t>& input_ids) {
@@ -86,6 +94,25 @@ inline std::vector<float> make_pixart_initial_latents(std::size_t latent_count,
             latents[index + 1] = static_cast<float>(radius * std::sin(theta));
     }
     return latents;
+}
+
+inline bool resolve_pixart_initial_latents(std::size_t latent_count,
+                                           const std::vector<float>& supplied_latents,
+                                           int32_t requested_seed, std::vector<float>& latents,
+                                           std::string& error) {
+    if (!supplied_latents.empty()) {
+        if (supplied_latents.size() != latent_count) {
+            error = "PixArt initial latents contain " + std::to_string(supplied_latents.size()) +
+                    " floats; expected " + std::to_string(latent_count);
+            return false;
+        }
+        latents = supplied_latents;
+        return true;
+    }
+
+    const auto seed = requested_seed >= 0 ? static_cast<uint32_t>(requested_seed) : 42U;
+    latents = make_pixart_initial_latents(latent_count, seed);
+    return true;
 }
 
 } // namespace diffusion

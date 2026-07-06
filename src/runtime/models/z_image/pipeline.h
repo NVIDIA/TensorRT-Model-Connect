@@ -125,7 +125,8 @@ class ZImagePipeline final : public IPipeline {
     std::vector<ImageResult> generate_image_batch_chunk(
         const std::vector<std::string>& prompts, const std::vector<std::uint32_t>& resolved_seeds,
         std::size_t prompt_offset, int32_t batch, const ZImageLayout& layout,
-        int32_t num_inference_steps, int32_t freq_dim, bool engine_is_batched, int32_t cap);
+        int32_t num_inference_steps, int32_t freq_dim, bool engine_is_batched, int32_t cap,
+        const std::vector<float>& supplied_initial_latents);
 
     /// Run the Qwen3 text encoder + caption projection + RoPE + latent
     /// initialization for every sample in a chunk. Fills the four batched
@@ -136,7 +137,8 @@ class ZImagePipeline final : public IPipeline {
                                      const ZImageLayout& layout,
                                      std::vector<float>& caption_projected_b,
                                      std::vector<float>& rope_cos_b, std::vector<float>& rope_sin_b,
-                                     std::vector<float>& latents);
+                                     std::vector<float>& latents,
+                                     const std::vector<float>& supplied_initial_latents);
 
     /// Run the FlowMatchEuler denoise loop for one chunk. ``latents`` is
     /// updated in-place. Returns false if any DiT invocation fails.

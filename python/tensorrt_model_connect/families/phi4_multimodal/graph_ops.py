@@ -2286,6 +2286,8 @@ def make_rope_table_half_dim(
     cosine: bool,
     partial_rotary_factor: float = 1.0,
     interleaved: bool = False,
+    frequency_factors: np.ndarray | list[float] | None = None,
+    attention_factor: float = 1.0,
 ) -> np.ndarray:
     """Build a RoPE cos/sin table of shape [max_cache_length, rotary_ndims // 2].
 
@@ -2313,6 +2315,14 @@ def make_rope_table_half_dim(
     if max_cache_length <= 0 or rope_theta <= 0.0:
         return np.full((max(max_cache_length, 1), max(half, 1)),
                        default, dtype=np.float32)
+    if frequency_factors is None:
+        factors = np.ones(half, dtype=np.float64)
+    else:
+        factors = np.asarray(frequency_factors, dtype=np.float64)
+        if factors.shape != (half,):
+            raise ValueError(
+                "RoPE frequency_factors must contain one value per rotary "
+                f"pair: expected {half}, got {factors.shape}")
     table = np.full((max_cache_length, half), default, dtype=np.float32)
     for pos in range(max_cache_length):
         for d in range(half):
@@ -2320,9 +2330,10 @@ def make_rope_table_half_dim(
             # (the distinction only affects which input pair is rotated; the
             # freq assignment per half-dim is the same).
             exponent = (2.0 * d) / rotary_ndims
-            inv_freq = rope_theta ** (-exponent)
+            inv_freq = rope_theta ** (-exponent) / factors[d]
             angle = pos * inv_freq
-            table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
+            trig = np.cos(angle) if cosine else np.sin(angle)
+            table[pos, d] = trig * attention_factor
     return table
 
 
@@ -2783,7 +2794,7 @@ def _repeat_kv_heads_4d(
     return concat.get_output(0)
 
 
-def _add_attention_core_with_logit_softcap(
+def _add_attention_core_explicit(
     network: trt.INetworkDefinition,
     q_4d: trt.ITensor,
     k_4d: trt.ITensor,
@@ -2794,7 +2805,7 @@ def _add_attention_core_with_logit_softcap(
     head_dim: int,
     mask: trt.ITensor | None,
     scale: float,
-    logit_softcap: float,
+    logit_softcap: float | None = None,
 ) -> trt.ITensor:
     output_dtype = q_4d.dtype
     k_4d = _repeat_kv_heads_4d(
@@ -2821,8 +2832,9 @@ def _add_attention_core_with_logit_softcap(
     scores = network.add_elementwise(
         scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
 
-    scores = add_tanh_softcap(
-        network, scores, logit_softcap, scalar_shape=(1, 1, 1, 1))
+    if logit_softcap is not None and float(logit_softcap) > 0.0:
+        scores = add_tanh_softcap(
+            network, scores, logit_softcap, scalar_shape=(1, 1, 1, 1))
 
     if score_mask is not None:
         scores = network.add_elementwise(
@@ -2856,6 +2868,7 @@ def add_attention_from_rows(
     scale: float | None = None,
     logit_softcap: float | None = None,
     fp32_accumulation: bool = False,
+    explicit_attention: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
@@ -2877,11 +2890,19 @@ def add_attention_from_rows(
         tag=None if tag is None else tag + ".v")
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-    if logit_softcap is not None and float(logit_softcap) > 0.0:
+    if explicit_attention:
+        if causal:
+            raise NotImplementedError(
+                "Explicit attention requires an additive causal mask")
+        ctx_4d = _add_attention_core_explicit(
+            network, q_4d, k_4d, v_4d,
+            num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
+            mask=mask, scale=scale)
+    elif logit_softcap is not None and float(logit_softcap) > 0.0:
         if causal:
             raise NotImplementedError(
                 "logit_softcap attention requires an explicit additive mask")
-        ctx_4d = _add_attention_core_with_logit_softcap(
+        ctx_4d = _add_attention_core_explicit(
             network, q_4d, k_4d, v_4d,
             num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
             mask=mask, scale=scale, logit_softcap=float(logit_softcap))

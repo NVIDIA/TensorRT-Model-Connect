@@ -106,10 +106,13 @@ class T5Plugin:
 
     def build_engine(
         self, config, weights, max_cache_length, *, verbose=False,
-        debug_layer_outputs=False, parallel_config=None,
+        debug_layer_outputs=False, parallel_config=None, precision="fp32",
     ):
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
+            if precision != "fp32":
+                raise NotImplementedError(
+                    "T5 tensor-parallel decoder builds currently require fp32")
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="T5 tensor-parallel decoder builds")
             from .decoder_tp_builder import build_t5_tp_decoder_engine
@@ -130,6 +133,12 @@ class T5Plugin:
         nb = weights["_num_buckets"]
         md = weights["_max_distance"]
         eps = weights["_layer_norm_eps"]
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(f"Unsupported T5 precision: {precision}")
         hd = dkv
         asz = nh * hd
         aw = max_cache_length + 1
@@ -157,9 +166,39 @@ class T5Plugin:
         enc_mask_reshape = network.add_shuffle(enc_mask_input)
         enc_mask_reshape.reshape_dims = (1, 1, msp)
         enc_mask_3d = enc_mask_reshape.get_output(0)
-        et = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
-        emb = graph_ops.add_constant(network, (vs, h), weights["shared_embedding"])
+        if enc_mask_3d.dtype != work_trt_dtype:
+            enc_mask_3d = network.add_cast(
+                enc_mask_3d, work_trt_dtype).get_output(0)
+        et = graph_ops.add_constant(
+            network, (1, 1), np.array([eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
+        emb = graph_ops.add_constant(
+            network, (vs, h), weights["shared_embedding"], dtype=work_np_dtype)
         hs = network.add_gather(emb, token_id, 0).get_output(0)
+        ck_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype else value
+            for value in ck_in
+        ]
+        cv_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype else value
+            for value in cv_in
+        ]
+        xk_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype else value
+            for value in xk_in
+        ]
+        xv_work = [
+            network.add_cast(value, work_trt_dtype).get_output(0)
+            if value.dtype != work_trt_dtype else value
+            for value in xv_in
+        ]
+        attn_mask_work = (
+            network.add_cast(attn_mask, work_trt_dtype).get_output(0)
+            if attn_mask.dtype != work_trt_dtype else attn_mask
+        )
         dsrb = weights.get("dec_self_rel_attn_bias")
         dxrb = weights.get("dec_cross_rel_attn_bias")
         if debug_layer_outputs:
@@ -167,30 +206,46 @@ class T5Plugin:
         pk_out, pv_out = [], []
         for li in range(dl):
             pfx = f"layer.{li}"
-            r = _add_t5_decoder_layer(network=network, hidden=hs, cache_k=ck_in[li], cache_v=cv_in[li], cross_k=xk_in[li], cross_v=xv_in[li], attention_mask=attn_mask, position_id=position_id, eps_tensor=et, weights=weights, prefix=pfx, hidden_size=h, num_heads=nh, head_dim=hd, attention_size=asz, ffn_dim=dff, max_cache_length=max_cache_length, max_source_positions=msp, dec_self_rel_bias=dsrb, dec_cross_rel_bias=dxrb, num_buckets=nb, max_distance=md, enc_mask=enc_mask_3d)
+            r = _add_t5_decoder_layer(network=network, hidden=hs, cache_k=ck_work[li], cache_v=cv_work[li], cross_k=xk_work[li], cross_v=xv_work[li], attention_mask=attn_mask_work, position_id=position_id, eps_tensor=et, weights=weights, prefix=pfx, hidden_size=h, num_heads=nh, head_dim=hd, attention_size=asz, ffn_dim=dff, max_cache_length=max_cache_length, max_source_positions=msp, dec_self_rel_bias=dsrb, dec_cross_rel_bias=dxrb, num_buckets=nb, max_distance=md, enc_mask=enc_mask_3d, dtype=work_np_dtype)
             hs = r["hidden"]
             pk_out.append(r["present_k"])
             pv_out.append(r["present_v"])
             if debug_layer_outputs:
                 _mark_debug_output(network, hs, f"debug_hidden_{li}")
-        hs = graph_ops.add_rms_norm(network, hs, h, weights["final_norm"], et)
-        logits = graph_ops.add_matmul_rhs_constant(network, hs, h, vs, weights["w_out"])
+        hs = graph_ops.add_rms_norm(
+            network, hs, h, weights["final_norm"], et, dtype=work_np_dtype)
+        logits = graph_ops.add_matmul_rhs_constant(
+            network, hs, h, vs, weights["w_out"], dtype=work_np_dtype)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
         logits.name = "logits"
         network.mark_output(logits)
         for i in range(dl):
-            pk_out[i].name = graph_ops.layer_tensor_name("present_k", i)
-            pv_out[i].name = graph_ops.layer_tensor_name("present_v", i)
-            network.mark_output(pk_out[i])
-            network.mark_output(pv_out[i])
+            present_k = pk_out[i]
+            present_v = pv_out[i]
+            if present_k.dtype != trt.float32:
+                present_k = network.add_cast(
+                    present_k, trt.float32).get_output(0)
+                present_v = network.add_cast(
+                    present_v, trt.float32).get_output(0)
+            present_k.name = graph_ops.layer_tensor_name("present_k", i)
+            present_v.name = graph_ops.layer_tensor_name("present_v", i)
+            network.mark_output(present_k)
+            network.mark_output(present_v)
         if verbose:
-            print(f"[trtmc build] T5 decoder ({dl}L, h={h}, heads={nh}, d_kv={dkv}, ffn={dff}, cache={max_cache_length})", file=sys.stderr)
+            print(f"[trtmc build] T5 decoder ({dl}L, h={h}, heads={nh}, "
+                  f"d_kv={dkv}, ffn={dff}, cache={max_cache_length}, "
+                  f"precision={precision})", file=sys.stderr)
         plan = builder.build_serialized_network(network, tc)
         if plan is None:
             raise RuntimeError("TRT T5 decoder build failed")
         return bytes(plan)
 
-    def build_vision_engine(self, model_dir, config, weights, *, verbose=False):
-        return _build_t5_encoder(config, weights, verbose=verbose)
+    def build_vision_engine(
+        self, model_dir, config, weights, *, verbose=False, precision="fp32",
+    ):
+        return _build_t5_encoder(
+            config, weights, verbose=verbose, precision=precision)
 
     def get_vl_config(self, config):
         raw = config.raw
@@ -198,7 +253,7 @@ class T5Plugin:
         return {"encoder_layers": raw.get("num_encoder_layers", nl), "decoder_layers": raw.get("num_decoder_layers", nl), "max_source_positions": raw.get("n_positions", 512), "max_target_positions": raw.get("n_positions", 512), "has_vision_engine": True, "is_encoder_decoder": True, "d_kv": raw.get("d_kv", 64), "d_ff": raw.get("d_ff", config.intermediate_size), "relative_attention_num_buckets": raw.get("relative_attention_num_buckets", 32)}
 
 
-def _build_t5_encoder(config, weights, *, verbose=False):
+def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32"):
     el = weights["_enc_layers"]
     nh = weights["_num_heads"]
     dkv = weights["_d_kv"]
@@ -208,6 +263,12 @@ def _build_t5_encoder(config, weights, *, verbose=False):
     nb = weights["_num_buckets"]
     md = weights["_max_distance"]
     eps = weights["_layer_norm_eps"]
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(f"Unsupported T5 precision: {precision}")
     msl = weights.get("_max_cache_length", config.raw.get("n_positions", 512))
     hd = dkv
     asz = nh * hd
@@ -218,7 +279,9 @@ def _build_t5_encoder(config, weights, *, verbose=False):
     tc = builder.create_builder_config()
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     tc.clear_flag(trt.BuilderFlag.TF32)
-    et = graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32))
+    et = graph_ops.add_constant(
+        network, (1, 1), np.array([eps], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     ids = network.add_input("input_ids", trt.int32, (msl,))
     # Attention mask: [msl] float32, 0.0 for valid, -1e9 for padding
     enc_attn_mask_input = network.add_input("attention_mask", trt.float32, (msl,))
@@ -226,39 +289,62 @@ def _build_t5_encoder(config, weights, *, verbose=False):
     enc_mask_3d = network.add_shuffle(enc_attn_mask_input)
     enc_mask_3d.reshape_dims = (1, 1, msl)
     enc_mask_broadcast = enc_mask_3d.get_output(0)
-    emb = graph_ops.add_constant(network, (vs, h), weights["shared_embedding"])
+    if enc_mask_broadcast.dtype != work_trt_dtype:
+        enc_mask_broadcast = network.add_cast(
+            enc_mask_broadcast, work_trt_dtype).get_output(0)
+    emb = graph_ops.add_constant(
+        network, (vs, h), weights["shared_embedding"], dtype=work_np_dtype)
     hs = network.add_gather(emb, ids, 0).get_output(0)
     rpb = None
     if "enc_rel_attn_bias" in weights:
         bt = weights["enc_rel_attn_bias"]
         bi = graph_ops.make_t5_relative_position_bias(num_heads=nh, max_seq_len=msl, num_buckets=nb, max_distance=md)
         bv = bt[bi.flatten()].reshape(msl, msl, nh).transpose(2, 0, 1)
-        rpb = graph_ops.add_constant(network, bv.shape, bv.astype(np.float32))
+        rpb = graph_ops.add_constant(
+            network, bv.shape, bv.astype(work_np_dtype), dtype=work_np_dtype)
     for li in range(el):
         pfx = f"enc_layer.{li}"
-        normed = graph_ops.add_rms_norm(network, hs, h, weights[f"{pfx}.attn_norm"], et)
-        attn = _add_t5_enc_sa(network, normed, weights[f"{pfx}.w_q"], weights[f"{pfx}.w_k"], weights[f"{pfx}.w_v"], weights[f"{pfx}.w_o"], h, nh, hd, asz, msl, rpb, enc_mask_broadcast)
+        normed = graph_ops.add_rms_norm(
+            network, hs, h, weights[f"{pfx}.attn_norm"], et,
+            dtype=work_np_dtype)
+        attn = _add_t5_enc_sa(network, normed, weights[f"{pfx}.w_q"], weights[f"{pfx}.w_k"], weights[f"{pfx}.w_v"], weights[f"{pfx}.w_o"], h, nh, hd, asz, msl, rpb, enc_mask_broadcast, dtype=work_np_dtype)
         hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
-        fn = graph_ops.add_rms_norm(network, hs, h, weights[f"{pfx}.ffn_norm"], et)
-        f1 = graph_ops.add_matmul_rhs_constant(network, fn, h, dff, weights[f"{pfx}.w_fc1"])
+        fn = graph_ops.add_rms_norm(
+            network, hs, h, weights[f"{pfx}.ffn_norm"], et,
+            dtype=work_np_dtype)
+        f1 = graph_ops.add_matmul_rhs_constant(
+            network, fn, h, dff, weights[f"{pfx}.w_fc1"],
+            dtype=work_np_dtype)
         a = network.add_activation(f1, trt.ActivationType.RELU)
-        f2 = graph_ops.add_matmul_rhs_constant(network, a.get_output(0), dff, h, weights[f"{pfx}.w_fc2"])
+        f2 = graph_ops.add_matmul_rhs_constant(
+            network, a.get_output(0), dff, h, weights[f"{pfx}.w_fc2"],
+            dtype=work_np_dtype)
         hs = network.add_elementwise(hs, f2, trt.ElementWiseOperation.SUM).get_output(0)
-    hs = graph_ops.add_rms_norm(network, hs, h, weights["enc_final_norm"], et)
+    hs = graph_ops.add_rms_norm(
+        network, hs, h, weights["enc_final_norm"], et, dtype=work_np_dtype)
+    if hs.dtype != trt.float32:
+        hs = network.add_cast(hs, trt.float32).get_output(0)
     hs.name = "encoder_output"
     network.mark_output(hs)
     if verbose:
-        print(f"[trtmc build] T5 encoder ({el}L, h={h}, heads={nh}, seq={msl})", file=sys.stderr)
+        print(f"[trtmc build] T5 encoder ({el}L, h={h}, heads={nh}, "
+              f"seq={msl}, precision={precision})", file=sys.stderr)
     plan = builder.build_serialized_network(network, tc)
     if plan is None:
         raise RuntimeError("TRT T5 encoder build failed")
     return bytes(plan)
 
 
-def _add_t5_enc_sa(network, hidden, wq, wk, wv, wo, h, nh, hd, asz, sl, rpb=None, attn_mask=None):
-    q = graph_ops.add_matmul_rhs_constant(network, hidden, h, asz, wq)
-    k = graph_ops.add_matmul_rhs_constant(network, hidden, h, asz, wk)
-    v = graph_ops.add_matmul_rhs_constant(network, hidden, h, asz, wv)
+def _add_t5_enc_sa(
+    network, hidden, wq, wk, wv, wo, h, nh, hd, asz, sl,
+    rpb=None, attn_mask=None, dtype=np.float32,
+):
+    q = graph_ops.add_matmul_rhs_constant(
+        network, hidden, h, asz, wq, dtype=dtype)
+    k = graph_ops.add_matmul_rhs_constant(
+        network, hidden, h, asz, wk, dtype=dtype)
+    v = graph_ops.add_matmul_rhs_constant(
+        network, hidden, h, asz, wv, dtype=dtype)
     mask = None
     if rpb is not None:
         mask = rpb
@@ -277,17 +363,23 @@ def _add_t5_enc_sa(network, hidden, wq, wk, wv, wo, h, nh, hd, asz, sl, rpb=None
         q_seq=sl, kv_seq=sl,
         mask=mask,
         scale=1.0)
-    return graph_ops.add_matmul_rhs_constant(network, cf, asz, h, wo)
+    return graph_ops.add_matmul_rhs_constant(
+        network, cf, asz, h, wo, dtype=dtype)
 
 
-def _add_t5_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v, attention_mask, position_id, eps_tensor, weights, prefix, hidden_size, num_heads, head_dim, attention_size, ffn_dim, max_cache_length, max_source_positions, dec_self_rel_bias, dec_cross_rel_bias, num_buckets, max_distance, enc_mask=None):
+def _add_t5_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v, attention_mask, position_id, eps_tensor, weights, prefix, hidden_size, num_heads, head_dim, attention_size, ffn_dim, max_cache_length, max_source_positions, dec_self_rel_bias, dec_cross_rel_bias, num_buckets, max_distance, enc_mask=None, dtype=np.float32):
     h, nh, hd, asz = hidden_size, num_heads, head_dim, attention_size
     aw = max_cache_length + 1
     msp = max_source_positions
-    normed = graph_ops.add_rms_norm(network, hidden, h, weights[f"{prefix}.input_norm"], eps_tensor)
-    q = graph_ops.add_matmul_rhs_constant(network, normed, h, asz, weights[f"{prefix}.w_q"])
-    k = graph_ops.add_matmul_rhs_constant(network, normed, h, asz, weights[f"{prefix}.w_k"])
-    v = graph_ops.add_matmul_rhs_constant(network, normed, h, asz, weights[f"{prefix}.w_v"])
+    normed = graph_ops.add_rms_norm(
+        network, hidden, h, weights[f"{prefix}.input_norm"], eps_tensor,
+        dtype=dtype)
+    q = graph_ops.add_matmul_rhs_constant(
+        network, normed, h, asz, weights[f"{prefix}.w_q"], dtype=dtype)
+    k = graph_ops.add_matmul_rhs_constant(
+        network, normed, h, asz, weights[f"{prefix}.w_k"], dtype=dtype)
+    v = graph_ops.add_matmul_rhs_constant(
+        network, normed, h, asz, weights[f"{prefix}.w_v"], dtype=dtype)
     present_k, present_v = k, v
     kr = network.add_shuffle(k)
     kr.reshape_dims = (1, asz)
@@ -300,7 +392,8 @@ def _add_t5_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v
     if dec_self_rel_bias is not None:
         bi = _make_t5_causal_buckets(aw, num_buckets, max_distance)
         bv = dec_self_rel_bias[bi.flatten()].reshape(aw, aw, nh).transpose(2, 0, 1)
-        bc = graph_ops.add_constant(network, bv.shape, bv.astype(np.float32))
+        bc = graph_ops.add_constant(
+            network, bv.shape, bv.astype(dtype), dtype=dtype)
         br = network.add_gather(bc, position_id, 1)
         m3 = network.add_shuffle(attention_mask)
         m3.reshape_dims = (1, 1, aw)
@@ -317,16 +410,25 @@ def _add_t5_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v
         q_seq=1, kv_seq=aw,
         mask=self_mask,
         scale=1.0)
-    sa = graph_ops.add_matmul_rhs_constant(network, cf, asz, h, weights[f"{prefix}.w_o"])
+    sa = graph_ops.add_matmul_rhs_constant(
+        network, cf, asz, h, weights[f"{prefix}.w_o"], dtype=dtype)
     psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
-    cn = graph_ops.add_rms_norm(network, psa, h, weights[f"{prefix}.cross_attn_norm"], eps_tensor)
-    cq = graph_ops.add_matmul_rhs_constant(network, cn, h, asz, weights[f"{prefix}.cross_w_q"])
-    ckp = graph_ops.add_matmul_rhs_constant(network, cross_k, h, asz, weights[f"{prefix}.cross_w_k"])
-    cvp = graph_ops.add_matmul_rhs_constant(network, cross_v, h, asz, weights[f"{prefix}.cross_w_v"])
+    cn = graph_ops.add_rms_norm(
+        network, psa, h, weights[f"{prefix}.cross_attn_norm"], eps_tensor,
+        dtype=dtype)
+    cq = graph_ops.add_matmul_rhs_constant(
+        network, cn, h, asz, weights[f"{prefix}.cross_w_q"], dtype=dtype)
+    ckp = graph_ops.add_matmul_rhs_constant(
+        network, cross_k, h, asz, weights[f"{prefix}.cross_w_k"],
+        dtype=dtype)
+    cvp = graph_ops.add_matmul_rhs_constant(
+        network, cross_v, h, asz, weights[f"{prefix}.cross_w_v"],
+        dtype=dtype)
     if dec_cross_rel_bias is not None:
         xbi = _make_t5_cross_buckets(aw, msp, num_buckets, max_distance)
         xbv = dec_cross_rel_bias[xbi.flatten()].reshape(aw, msp, nh).transpose(2, 0, 1)
-        xbc = graph_ops.add_constant(network, xbv.shape, xbv.astype(np.float32))
+        xbc = graph_ops.add_constant(
+            network, xbv.shape, xbv.astype(dtype), dtype=dtype)
         xbr = network.add_gather(xbc, position_id, 1)
         cross_mask = xbr.get_output(0)
         if enc_mask is not None:
@@ -346,12 +448,18 @@ def _add_t5_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross_v
         q_seq=1, kv_seq=msp,
         mask=cross_mask,
         scale=1.0)
-    ca = graph_ops.add_matmul_rhs_constant(network, ccf, asz, h, weights[f"{prefix}.cross_w_o"])
+    ca = graph_ops.add_matmul_rhs_constant(
+        network, ccf, asz, h, weights[f"{prefix}.cross_w_o"], dtype=dtype)
     pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
-    fn = graph_ops.add_rms_norm(network, pca, h, weights[f"{prefix}.post_attn_norm"], eps_tensor)
-    f1 = graph_ops.add_matmul_rhs_constant(network, fn, h, ffn_dim, weights[f"{prefix}.w_fc1"])
+    fn = graph_ops.add_rms_norm(
+        network, pca, h, weights[f"{prefix}.post_attn_norm"], eps_tensor,
+        dtype=dtype)
+    f1 = graph_ops.add_matmul_rhs_constant(
+        network, fn, h, ffn_dim, weights[f"{prefix}.w_fc1"], dtype=dtype)
     act = network.add_activation(f1, trt.ActivationType.RELU)
-    f2 = graph_ops.add_matmul_rhs_constant(network, act.get_output(0), ffn_dim, h, weights[f"{prefix}.w_fc2"])
+    f2 = graph_ops.add_matmul_rhs_constant(
+        network, act.get_output(0), ffn_dim, h, weights[f"{prefix}.w_fc2"],
+        dtype=dtype)
     out = network.add_elementwise(pca, f2, trt.ElementWiseOperation.SUM).get_output(0)
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
 

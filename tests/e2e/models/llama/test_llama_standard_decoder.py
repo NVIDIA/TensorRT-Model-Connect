@@ -216,6 +216,7 @@ class TestTensorNamingContract:
         assert "debug_post_attn_1" in outputs
         assert "logits" in outputs
 
+
     def test_interleaved_rope(self):
         plan = self._build_engine(interleaved_rope=True)
         inputs, outputs = _get_io_names(plan)

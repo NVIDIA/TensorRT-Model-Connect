@@ -205,6 +205,26 @@ class MixtralPlugin:
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
+        if precision == "fp16":
+            work_np_dtype = np.float16
+            work_trt_dtype = trt.float16
+        elif precision == "bf16":
+            work_np_dtype = np.float16
+            work_trt_dtype = trt.bfloat16
+        else:
+            work_np_dtype = np.float32
+            work_trt_dtype = trt.float32
+
+        requested_fp32_layers = frozenset(
+            int(layer) for layer in config.raw.get("_fp32_layers", ()))
+        invalid_fp32_layers = sorted(
+            layer for layer in requested_fp32_layers
+            if layer < 0 or layer >= num_layers)
+        if invalid_fp32_layers:
+            raise ValueError(
+                "fp32_layers contains out-of-range indices: "
+                f"{invalid_fp32_layers}")
+
         # -----------------------------------------------------------
         # Inputs
         # -----------------------------------------------------------
@@ -218,18 +238,23 @@ class MixtralPlugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
+
+        if work_trt_dtype != trt.float32:
+            attention_mask = network.add_cast(
+                attention_mask, work_trt_dtype).get_output(0)
 
         # -----------------------------------------------------------
         # Shared constants
         # -----------------------------------------------------------
         embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+            network, (vocab, hidden), weights["embedding"],
+            dtype=work_np_dtype)
 
         graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
         cos_half_np = graph_ops.make_rope_table_half_dim(
@@ -237,13 +262,14 @@ class MixtralPlugin:
         sin_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, False)
         cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np)
+            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
         sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np)
+            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
-            np.array([config.rms_norm_eps], dtype=np.float32))
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
         # -----------------------------------------------------------
         # Embedding lookup
         # -----------------------------------------------------------
@@ -261,17 +287,26 @@ class MixtralPlugin:
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
+            layer_is_fp32 = (
+                precision == "fp16" and layer_idx in requested_fp32_layers)
+            layer_np_dtype = np.float32 if layer_is_fp32 else work_np_dtype
+            layer_trt_dtype = trt.float32 if layer_is_fp32 else work_trt_dtype
+
+            def layer_cast(tensor):
+                if tensor.dtype == layer_trt_dtype:
+                    return tensor
+                return network.add_cast(tensor, layer_trt_dtype).get_output(0)
 
             result = _add_mixtral_decoder_layer(
                 network=network,
-                hidden=hidden_state,
-                cache_k=cache_k_inputs[layer_idx],
-                cache_v=cache_v_inputs[layer_idx],
-                attention_mask=attention_mask,
+                hidden=layer_cast(hidden_state),
+                cache_k=layer_cast(cache_k_inputs[layer_idx]),
+                cache_v=layer_cast(cache_v_inputs[layer_idx]),
+                attention_mask=layer_cast(attention_mask),
                 position_id=position_id,
-                cos_half_tensor=cos_half_tensor,
-                sin_half_tensor=sin_half_tensor,
-                eps_tensor=eps_tensor,
+                cos_half_tensor=layer_cast(cos_half_tensor),
+                sin_half_tensor=layer_cast(sin_half_tensor),
+                eps_tensor=layer_cast(eps_tensor),
                 weights=weights,
                 prefix=prefix,
                 hidden_size=hidden,
@@ -284,11 +319,21 @@ class MixtralPlugin:
                 num_experts=num_experts,
                 moe_intermediate=moe_intermediate,
                 top_k=top_k,
+                dtype=layer_np_dtype,
             )
 
             hidden_state = result["hidden"]
-            present_k_outputs.append(result["present_k"])
-            present_v_outputs.append(result["present_v"])
+            present_k = result["present_k"]
+            present_v = result["present_v"]
+            if layer_is_fp32:
+                hidden_state = network.add_cast(
+                    hidden_state, work_trt_dtype).get_output(0)
+                present_k = network.add_cast(
+                    present_k, work_trt_dtype).get_output(0)
+                present_v = network.add_cast(
+                    present_v, work_trt_dtype).get_output(0)
+            present_k_outputs.append(present_k)
+            present_v_outputs.append(present_v)
 
             if debug_layer_outputs:
                 _mark_debug_output(
@@ -305,15 +350,20 @@ class MixtralPlugin:
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = _apply_norm(
                 network, hidden_state, hidden, final_norm,
-                None, eps_tensor, "rmsnorm")
+                None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # LM head (logits)
         # -----------------------------------------------------------
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_out"])
-        b_out = np.zeros(vocab, dtype=np.float32)
-        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+            network, hidden_state, hidden, vocab, weights["w_out"],
+            dtype=work_np_dtype)
+        b_out = np.zeros(vocab, dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(
+            network, logits, vocab, b_out, dtype=work_np_dtype)
+
+        if work_trt_dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
 
         logits.name = "logits"
         network.mark_output(logits)
@@ -354,12 +404,13 @@ def _add_swiglu_expert(
     w_gate: np.ndarray,
     w_up: np.ndarray,
     w_down: np.ndarray,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
     gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate)
+        network, inp, hidden_size, intermediate_size, w_gate, dtype=dtype)
     up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up)
+        network, inp, hidden_size, intermediate_size, w_up, dtype=dtype)
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(
@@ -368,7 +419,8 @@ def _add_swiglu_expert(
         swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
     down = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), intermediate_size, hidden_size, w_down)
+        network, gated.get_output(0), intermediate_size, hidden_size, w_down,
+        dtype=dtype)
     return down
 
 
@@ -381,6 +433,7 @@ def _add_mixtral_moe_block(
     num_experts: int,
     moe_intermediate: int,
     top_k: int = 2,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Add Mixture of Experts block with standard top-k softmax routing.
 
@@ -395,7 +448,7 @@ def _add_mixtral_moe_block(
     # 1. Router logits
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, num_experts,
-        weights[f"{prefix}.router"])
+        weights[f"{prefix}.router"], dtype=dtype)
 
     # 2. Softmax over router logits
     sm = network.add_softmax(router_logits)
@@ -422,6 +475,7 @@ def _add_mixtral_moe_block(
             weights[f"{prefix}.expert.{e}.w_gate"],
             weights[f"{prefix}.expert.{e}.w_up"],
             weights[f"{prefix}.expert.{e}.w_down"],
+            dtype=dtype,
         )
         expert_outputs.append(exp_out)
 
@@ -487,6 +541,7 @@ def _add_mixtral_decoder_layer(
     num_experts: int,
     moe_intermediate: int,
     top_k: int = 2,
+    dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     """Add one decoder layer with Mixtral MoE MLP. Attention is standard."""
     attention_window = max_cache_length + 1
@@ -495,18 +550,18 @@ def _add_mixtral_decoder_layer(
     norm1 = _apply_norm(
         network, hidden, hidden_size,
         weights[f"{prefix}.input_norm"],
-        None, eps_tensor, "rmsnorm")
+        None, eps_tensor, "rmsnorm", dtype=dtype)
 
     # QKV projections (no biases)
     q = graph_ops.add_matmul_rhs_constant(
         network, norm1, hidden_size, attention_size,
-        weights[f"{prefix}.w_q"])
+        weights[f"{prefix}.w_q"], dtype=dtype)
     k = graph_ops.add_matmul_rhs_constant(
         network, norm1, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_k"])
+        weights[f"{prefix}.w_k"], dtype=dtype)
     v = graph_ops.add_matmul_rhs_constant(
         network, norm1, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_v"])
+        weights[f"{prefix}.w_v"], dtype=dtype)
 
     q = graph_ops.add_apply_rope_native(
         network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
@@ -544,7 +599,7 @@ def _add_mixtral_decoder_layer(
     attn_out = graph_ops.add_matmul_rhs_constant(
         network, context_flat,
         attention_size, hidden_size,
-        weights[f"{prefix}.w_o"])
+        weights[f"{prefix}.w_o"], dtype=dtype)
 
     # Residual connection
     residual1 = network.add_elementwise(
@@ -554,12 +609,12 @@ def _add_mixtral_decoder_layer(
     norm2 = _apply_norm(
         network, residual1.get_output(0), hidden_size,
         weights[f"{prefix}.post_attn_norm"],
-        None, eps_tensor, "rmsnorm")
+        None, eps_tensor, "rmsnorm", dtype=dtype)
 
     # MoE block
     moe_out = _add_mixtral_moe_block(
         network, norm2, weights, prefix,
-        hidden_size, num_experts, moe_intermediate, top_k)
+        hidden_size, num_experts, moe_intermediate, top_k, dtype=dtype)
 
     # Residual connection
     residual2 = network.add_elementwise(

@@ -71,6 +71,10 @@ class PixArtPlugin:
     _IMAGE_HEIGHT = 1024
     _IMAGE_WIDTH = 1024
 
+    _T5_COMPONENT = 0
+    _DIT_COMPONENT = 1
+    _VAE_COMPONENT = 2
+
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
         return mt in ("pixart", "pixart_sigma", "pixart_alpha",
@@ -134,6 +138,27 @@ class PixArtPlugin:
         require_tensorrt_11_for_tensor_parallel(
             parallel, feature="PixArt tensor-parallel builds")
 
+        selected_fp32 = {
+            int(index) for index in config.raw.get("_fp32_layers", ())
+        }
+        valid_components = {
+            self._T5_COMPONENT, self._DIT_COMPONENT, self._VAE_COMPONENT,
+        }
+        invalid_components = sorted(selected_fp32 - valid_components)
+        if invalid_components:
+            raise ValueError(
+                "PixArt fp32_layers contains invalid component indices: "
+                f"{invalid_components}; expected 0=T5, 1=DiT, or 2=VAE")
+
+        def component_precision(component: int) -> str:
+            if precision == "fp16" and component in selected_fp32:
+                return "fp32"
+            return precision
+
+        t5_precision = component_precision(self._T5_COMPONENT)
+        dit_precision = component_precision(self._DIT_COMPONENT)
+        vae_precision = component_precision(self._VAE_COMPONENT)
+
         text_encoder_dir = weights["_text_encoder_dir"]
         transformer_dir = weights["_transformer_dir"]
         vae_dir = weights["_vae_dir"]
@@ -144,8 +169,8 @@ class PixArtPlugin:
         head_dim = tc.get("attention_head_dim", self._DIT_HEAD_DIM)
         dit_dim = num_heads * head_dim
         num_layers = tc.get("num_layers", self._DIT_NUM_LAYERS)
-        tc.get("in_channels", self._DIT_IN_CHANNELS)
         patch_size = tc.get("patch_size", self._DIT_PATCH_SIZE)
+        tc.get("in_channels", self._DIT_IN_CHANNELS)
         cross_attn_dim = tc.get("cross_attention_dim", dit_dim)
         ffn_dim = dit_dim * 4  # PixArt uses 4x multiplier
 
@@ -185,7 +210,7 @@ class PixArtPlugin:
                 d_ff=t5_d_ff,
                 num_layers=t5_num_layers,
                 vocab_size=t5_vocab_size,
-                precision=precision,
+                precision=t5_precision,
             )
         with timed_trt_compile(build_timing, "t5_encoder"):
             t5_plan = build_t5_encoder_engine(
@@ -197,6 +222,7 @@ class PixArtPlugin:
                 num_layers=t5_num_layers,
                 vocab_size=t5_vocab_size,
                 max_seq_len=self._T5_MAX_SEQ_LEN,
+                precision=t5_precision,
                 verbose=verbose,
             )
 
@@ -252,6 +278,7 @@ class PixArtPlugin:
                     cross_attn_norm=False,
                     ffn_activation="gelu_approximate",
                     use_rope=False,
+                    precision=dit_precision,
                     verbose=verbose,
                 )
 
@@ -264,6 +291,7 @@ class PixArtPlugin:
             w_lat=w_lat,
             scaling_factor=self._VAE_SCALING_FACTOR,
             shift_factor=0.0,
+            precision=vae_precision,
             verbose=verbose,
             build_timing=build_timing,
             timing_component="vae_decoder",
@@ -323,6 +351,18 @@ class PixArtPlugin:
                 return bool(detect_tokenizer_add_special_tokens(tok_dir))
         return bool(detect_tokenizer_add_special_tokens(model_dir))
 
+    def diffusion_tokenizer_special_frame(
+        self, model_dir_path, *, detect_tokenizer_special_frame,
+    ):
+        from pathlib import Path
+
+        model_dir = Path(model_dir_path)
+        for tok_subdir in ("tokenizer_2", "tokenizer"):
+            tok_dir = model_dir / tok_subdir
+            if tok_dir.is_dir():
+                return detect_tokenizer_special_frame(tok_dir)
+        return detect_tokenizer_special_frame(model_dir)
+
     def diffusion_tokenizer_bundle_sections(
         self, model_dir_path, *, ensure_tokenizer_json,
     ) -> list[tuple[str, bytes]]:
@@ -376,6 +416,11 @@ class PixArtPlugin:
         head_dim = tc.get("attention_head_dim", self._DIT_HEAD_DIM)
         dit_dim = num_heads * head_dim
         num_layers = tc.get("num_layers", self._DIT_NUM_LAYERS)
+        patch_size = tc.get("patch_size", self._DIT_PATCH_SIZE)
+        sample_size = tc.get("sample_size", self._IMAGE_HEIGHT // self._VAE_SCALE_FACTOR)
+        interpolation_scale = tc.get("interpolation_scale")
+        if interpolation_scale is None:
+            interpolation_scale = max(sample_size // 64, 1)
 
         return {
             "diffusion_backend_type": "wan_3d",
@@ -390,7 +435,7 @@ class PixArtPlugin:
             "dit_dim": dit_dim,
             "dit_num_heads": num_heads,
             "dit_num_layers": num_layers,
-            "patch_size": [1, self._DIT_PATCH_SIZE, self._DIT_PATCH_SIZE],
+            "patch_size": [1, patch_size, patch_size],
             "z_dim": self._VAE_LATENT_CHANNELS,
             "scale_factor_temporal": 1,
             "scale_factor_spatial": self._VAE_SCALE_FACTOR,
@@ -405,6 +450,8 @@ class PixArtPlugin:
             "text_encoder_dim": self._T5_D_MODEL,
             "vae_scaling_factor": self._VAE_SCALING_FACTOR,
             "use_rope": 0,  # PixArt uses fixed sinusoidal pos embed
+            "pos_embed_base_size": sample_size // patch_size,
+            "pos_embed_interpolation_scale": interpolation_scale,
         }
 
 

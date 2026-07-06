@@ -292,6 +292,23 @@ class DeepSeekOCRPlugin:
         kv_attention_size = graph_blocks.infer_kv_attention_size(
             weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
         attention_window = max_cache_length + 1
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(
+                f"Unsupported DeepSeek-OCR precision {precision!r}; "
+                "expected fp32 or fp16")
+        requested_fp32_layers = frozenset(
+            int(layer) for layer in config.raw.get("_fp32_layers", ()))
+        invalid_fp32_layers = sorted(
+            layer for layer in requested_fp32_layers
+            if layer < 0 or layer >= num_layers)
+        if invalid_fp32_layers:
+            raise ValueError(
+                "fp32_layers contains out-of-range indices: "
+                f"{invalid_fp32_layers}")
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
@@ -324,12 +341,26 @@ class DeepSeekOCRPlugin:
                 trt.float32, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
+        if work_trt_dtype != trt.float32:
+            attention_mask = network.add_cast(
+                attention_mask, work_trt_dtype).get_output(0)
+            input_embed_tensor = network.add_cast(
+                input_embed_tensor, work_trt_dtype).get_output(0)
+            use_input_embed_tensor = network.add_cast(
+                use_input_embed_tensor, work_trt_dtype).get_output(0)
+            cache_k_inputs = [
+                network.add_cast(x, work_trt_dtype).get_output(0)
+                for x in cache_k_inputs]
+            cache_v_inputs = [
+                network.add_cast(x, work_trt_dtype).get_output(0)
+                for x in cache_v_inputs]
 
         # -----------------------------------------------------------
         # Shared constants
         # -----------------------------------------------------------
         embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+            network, (vocab, hidden), weights["embedding"],
+            dtype=work_np_dtype)
 
         graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
         cos_half_np = graph_ops.make_rope_table_half_dim(
@@ -337,13 +368,14 @@ class DeepSeekOCRPlugin:
         sin_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, False)
         cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np)
+            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
         sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np)
+            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
-            np.array([config.rms_norm_eps], dtype=np.float32))
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # Embedding with input_embed override for VL
@@ -355,7 +387,8 @@ class DeepSeekOCRPlugin:
         flag_broadcast = network.add_shuffle(use_input_embed_tensor)
         flag_broadcast.reshape_dims = (1, 1)
         one_const = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=np.float32))
+            network, (1, 1), np.array([1.0], dtype=work_np_dtype),
+            dtype=work_np_dtype)
         inv_flag = network.add_elementwise(
             one_const, flag_broadcast.get_output(0),
             trt.ElementWiseOperation.SUB)
@@ -382,17 +415,27 @@ class DeepSeekOCRPlugin:
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
             is_moe_layer = layer_idx >= first_k_dense_replace
+            layer_is_fp32 = (
+                precision == "fp16" and layer_idx in requested_fp32_layers)
+            layer_np_dtype = np.float32 if layer_is_fp32 else work_np_dtype
+            layer_trt_dtype = trt.float32 if layer_is_fp32 else work_trt_dtype
+
+            def layer_cast(tensor):
+                if tensor.dtype == layer_trt_dtype:
+                    return tensor
+                return network.add_cast(
+                    tensor, layer_trt_dtype).get_output(0)
 
             result = _add_decoder_layer(
                 network=network,
-                hidden=hidden_state,
-                cache_k=cache_k_inputs[layer_idx],
-                cache_v=cache_v_inputs[layer_idx],
-                attention_mask=attention_mask,
+                hidden=layer_cast(hidden_state),
+                cache_k=layer_cast(cache_k_inputs[layer_idx]),
+                cache_v=layer_cast(cache_v_inputs[layer_idx]),
+                attention_mask=layer_cast(attention_mask),
                 position_id=position_id,
-                cos_half_tensor=cos_half_tensor,
-                sin_half_tensor=sin_half_tensor,
-                eps_tensor=eps_tensor,
+                cos_half_tensor=layer_cast(cos_half_tensor),
+                sin_half_tensor=layer_cast(sin_half_tensor),
+                eps_tensor=layer_cast(eps_tensor),
                 weights=weights,
                 prefix=prefix,
                 hidden_size=hidden,
@@ -410,6 +453,7 @@ class DeepSeekOCRPlugin:
                 dense_intermediate=dense_intermediate,
                 norm_topk_prob=norm_topk_prob,
                 routed_scaling_factor=routed_scaling_factor,
+                dtype=layer_np_dtype,
             )
 
             hidden_state = result["hidden"]
@@ -427,19 +471,26 @@ class DeepSeekOCRPlugin:
         # -----------------------------------------------------------
         # Final norm
         # -----------------------------------------------------------
+        if hidden_state.dtype != work_trt_dtype:
+            hidden_state = network.add_cast(
+                hidden_state, work_trt_dtype).get_output(0)
         final_norm = weights.get("final_norm")
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = _apply_norm(
                 network, hidden_state, hidden, final_norm,
-                None, eps_tensor, "rmsnorm")
+                None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # LM head (logits)
         # -----------------------------------------------------------
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_out"])
+            network, hidden_state, hidden, vocab, weights["w_out"],
+            dtype=work_np_dtype)
         b_out = np.zeros(vocab, dtype=np.float32)
-        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+        logits = graph_ops.add_bias_sum(
+            network, logits, vocab, b_out, dtype=work_np_dtype)
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
 
         logits.name = "logits"
         network.mark_output(logits)
@@ -450,6 +501,9 @@ class DeepSeekOCRPlugin:
         for i in range(num_layers):
             pk = present_k_outputs[i]
             pv = present_v_outputs[i]
+            if pk.dtype != trt.float32:
+                pk = network.add_cast(pk, trt.float32).get_output(0)
+                pv = network.add_cast(pv, trt.float32).get_output(0)
             pk.name = graph_ops.layer_tensor_name("present_k", i)
             pv.name = graph_ops.layer_tensor_name("present_v", i)
             network.mark_output(pk)
@@ -486,7 +540,8 @@ class DeepSeekOCRPlugin:
         Input:  pixel_values  [1, 3, 1024, 1024] float32
         Output: image_features [257, 1280] float32  (256 projected + 1 view_sep)
         """
-        return _build_deepseek_ocr_vision_engine(model_dir, config, verbose=verbose)
+        return _build_deepseek_ocr_vision_engine(
+            model_dir, config, precision=precision, verbose=verbose)
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
         """Promote language_config fields to top level for C++ fast_path_config."""
@@ -539,12 +594,13 @@ def _add_swiglu_expert(
     w_gate: np.ndarray,
     w_up: np.ndarray,
     w_down: np.ndarray,
+    dtype=np.float32,
 ) -> trt.ITensor:
     """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
     gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate)
+        network, inp, hidden_size, intermediate_size, w_gate, dtype=dtype)
     up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up)
+        network, inp, hidden_size, intermediate_size, w_up, dtype=dtype)
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(
@@ -553,7 +609,8 @@ def _add_swiglu_expert(
         swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
     down = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), intermediate_size, hidden_size, w_down)
+        network, gated.get_output(0), intermediate_size, hidden_size, w_down,
+        dtype=dtype)
     return down
 
 
@@ -573,6 +630,7 @@ def _add_moe_with_shared_experts(
     shared_intermediate: int,
     norm_topk_prob: bool = False,
     routed_scaling_factor: float = 1.0,
+    dtype=np.float32,
 ) -> trt.ITensor:
     """MoE block with shared experts (DeepSeek-V2 style).
 
@@ -587,7 +645,7 @@ def _add_moe_with_shared_experts(
     # 1. Router logits
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, n_routed_experts,
-        weights[f"{prefix}.router"])
+        weights[f"{prefix}.router"], dtype=dtype)
 
     # 2. Softmax
     sm = network.add_softmax(router_logits)
@@ -612,7 +670,7 @@ def _add_moe_with_shared_experts(
     elif routed_scaling_factor != 1.0:
         scale_c = graph_ops.add_constant(
             network, (1, 1),
-            np.array([routed_scaling_factor], dtype=np.float32))
+            np.array([routed_scaling_factor], dtype=dtype), dtype=dtype)
         final_weights = network.add_elementwise(
             top_values, scale_c,
             trt.ElementWiseOperation.PROD).get_output(0)
@@ -627,6 +685,7 @@ def _add_moe_with_shared_experts(
             weights[f"{prefix}.expert.{e}.w_gate"],
             weights[f"{prefix}.expert.{e}.w_up"],
             weights[f"{prefix}.expert.{e}.w_down"],
+            dtype=dtype,
         )
         expert_outputs.append(exp_out)
 
@@ -667,6 +726,7 @@ def _add_moe_with_shared_experts(
         weights[f"{prefix}.shared.w_gate"],
         weights[f"{prefix}.shared.w_up"],
         weights[f"{prefix}.shared.w_down"],
+        dtype=dtype,
     )
 
     # 8. Combine: routed_output + shared_output
@@ -708,6 +768,7 @@ def _add_decoder_layer(
     dense_intermediate: int,
     norm_topk_prob: bool = False,
     routed_scaling_factor: float = 1.0,
+    dtype=np.float32,
 ) -> dict[str, trt.ITensor]:
     """One decoder layer: standard MHA + (dense MLP or MoE with shared experts)."""
     attention_window = max_cache_length + 1
@@ -716,18 +777,18 @@ def _add_decoder_layer(
     norm1 = _apply_norm(
         network, hidden, hidden_size,
         weights[f"{prefix}.input_norm"],
-        None, eps_tensor, "rmsnorm")
+        None, eps_tensor, "rmsnorm", dtype=dtype)
 
     # QKV projections (no biases)
     q = graph_ops.add_matmul_rhs_constant(
         network, norm1, hidden_size, attention_size,
-        weights[f"{prefix}.w_q"])
+        weights[f"{prefix}.w_q"], dtype=dtype)
     k = graph_ops.add_matmul_rhs_constant(
         network, norm1, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_k"])
+        weights[f"{prefix}.w_k"], dtype=dtype)
     v = graph_ops.add_matmul_rhs_constant(
         network, norm1, hidden_size, kv_attention_size,
-        weights[f"{prefix}.w_v"])
+        weights[f"{prefix}.w_v"], dtype=dtype)
 
     q = graph_ops.add_apply_rope_native(
         network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
@@ -759,13 +820,14 @@ def _add_decoder_layer(
         network, q, all_k.get_output(0), all_v.get_output(0),
         num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
         q_seq=1, kv_seq=attention_window,
-        mask=mask_4d)
+        mask=mask_4d,
+        fp32_accumulation=dtype != np.float32)
 
     # Output projection
     attn_out = graph_ops.add_matmul_rhs_constant(
         network, context_flat,
         attention_size, hidden_size,
-        weights[f"{prefix}.w_o"])
+        weights[f"{prefix}.w_o"], dtype=dtype)
 
     # Residual
     residual1 = network.add_elementwise(
@@ -775,7 +837,7 @@ def _add_decoder_layer(
     norm2 = _apply_norm(
         network, residual1.get_output(0), hidden_size,
         weights[f"{prefix}.post_attn_norm"],
-        None, eps_tensor, "rmsnorm")
+        None, eps_tensor, "rmsnorm", dtype=dtype)
 
     # MLP: dense or MoE with shared experts
     if is_moe_layer:
@@ -784,14 +846,14 @@ def _add_decoder_layer(
             hidden_size, n_routed_experts, moe_intermediate,
             num_experts_per_tok, shared_intermediate,
             norm_topk_prob=norm_topk_prob,
-            routed_scaling_factor=routed_scaling_factor)
+            routed_scaling_factor=routed_scaling_factor, dtype=dtype)
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2,
             weights=weights,
             prefix=prefix,
             hidden_size=hidden_size,
-            mlp_size=dense_intermediate)
+            mlp_size=dense_intermediate, dtype=dtype)
 
     # Residual
     residual2 = network.add_elementwise(
@@ -839,6 +901,7 @@ def _build_sam_attention(
     head_dim: int,
     eps_t: trt.ITensor,
     window_size: int = 0,
+    dtype=np.float32,
 ) -> trt.ITensor:
     """Build SAM ViT attention block with decomposed relative position biases.
 
@@ -899,19 +962,19 @@ def _build_sam_attention(
 
     q = graph_ops.add_matmul_rhs_constant(
         network, flat.get_output(0), hidden, hidden,
-        weights[f"{w_prefix}.attn.q.weight"])
+        weights[f"{w_prefix}.attn.q.weight"], dtype=dtype)
     q = graph_ops.add_bias_sum(
-        network, q, hidden, weights[f"{w_prefix}.attn.q.bias"])
+        network, q, hidden, weights[f"{w_prefix}.attn.q.bias"], dtype=dtype)
     k = graph_ops.add_matmul_rhs_constant(
         network, flat.get_output(0), hidden, hidden,
-        weights[f"{w_prefix}.attn.k.weight"])
+        weights[f"{w_prefix}.attn.k.weight"], dtype=dtype)
     k = graph_ops.add_bias_sum(
-        network, k, hidden, weights[f"{w_prefix}.attn.k.bias"])
+        network, k, hidden, weights[f"{w_prefix}.attn.k.bias"], dtype=dtype)
     v = graph_ops.add_matmul_rhs_constant(
         network, flat.get_output(0), hidden, hidden,
-        weights[f"{w_prefix}.attn.v.weight"])
+        weights[f"{w_prefix}.attn.v.weight"], dtype=dtype)
     v = graph_ops.add_bias_sum(
-        network, v, hidden, weights[f"{w_prefix}.attn.v.bias"])
+        network, v, hidden, weights[f"{w_prefix}.attn.v.bias"], dtype=dtype)
 
     # Reshape to [B*num_heads, seq, head_dim] for batched matmul
     q_h = network.add_shuffle(q)
@@ -932,11 +995,21 @@ def _build_sam_attention(
     v_r = network.add_shuffle(v_h.get_output(0))
     v_r.reshape_dims = (attn_batch * num_heads, attn_seq, head_dim)
 
+    score_q = q_r.get_output(0)
+    score_k = k_r.get_output(0)
+    score_v = v_r.get_output(0)
+    score_dtype = dtype
+    if dtype != np.float32:
+        score_q = network.add_cast(score_q, trt.float32).get_output(0)
+        score_k = network.add_cast(score_k, trt.float32).get_output(0)
+        score_v = network.add_cast(score_v, trt.float32).get_output(0)
+        score_dtype = np.float32
     score = network.add_matrix_multiply(
-        q_r.get_output(0), trt.MatrixOperation.NONE,
-        k_r.get_output(0), trt.MatrixOperation.TRANSPOSE)
+        score_q, trt.MatrixOperation.NONE,
+        score_k, trt.MatrixOperation.TRANSPOSE)
     scale_c = graph_ops.add_constant(
-        network, (1, 1, 1), np.array([attn_scale], dtype=np.float32))
+        network, (1, 1, 1), np.array([attn_scale], dtype=score_dtype),
+        dtype=score_dtype)
     scaled = network.add_elementwise(
         score.get_output(0), scale_c, trt.ElementWiseOperation.PROD)
 
@@ -948,15 +1021,16 @@ def _build_sam_attention(
                              weights[f"{w_prefix}.attn.rel_pos_w"])
 
         # q for rel_pos: [B*N, seq, D] -> [B*N, H, W, D]
-        q_4d = network.add_shuffle(q_r.get_output(0))
+        q_4d = network.add_shuffle(score_q)
         q_4d.reshape_dims = (attn_batch * num_heads, attn_spatial, attn_spatial, head_dim)
 
         # H-axis: [H, B*N*W, D] @ [H, D, K] -> [H, B*N*W, K]
         q_perm_h = network.add_shuffle(q_4d.get_output(0))
         q_perm_h.first_transpose = trt.Permutation([1, 0, 2, 3])
         q_perm_h.reshape_dims = (attn_spatial, attn_batch * num_heads * attn_spatial, head_dim)
-        rp_h_t = rp_h.transpose(0, 2, 1).astype(np.float32)
-        rp_h_c = graph_ops.add_constant(network, rp_h_t.shape, rp_h_t)
+        rp_h_t = rp_h.transpose(0, 2, 1).astype(score_dtype)
+        rp_h_c = graph_ops.add_constant(
+            network, rp_h_t.shape, rp_h_t, dtype=score_dtype)
         rel_h_mm = network.add_matrix_multiply(
             q_perm_h.get_output(0), trt.MatrixOperation.NONE,
             rp_h_c, trt.MatrixOperation.NONE)
@@ -968,8 +1042,9 @@ def _build_sam_attention(
         q_perm_w = network.add_shuffle(q_4d.get_output(0))
         q_perm_w.first_transpose = trt.Permutation([2, 0, 1, 3])
         q_perm_w.reshape_dims = (attn_spatial, attn_batch * num_heads * attn_spatial, head_dim)
-        rp_w_t = rp_w.transpose(0, 2, 1).astype(np.float32)
-        rp_w_c = graph_ops.add_constant(network, rp_w_t.shape, rp_w_t)
+        rp_w_t = rp_w.transpose(0, 2, 1).astype(score_dtype)
+        rp_w_c = graph_ops.add_constant(
+            network, rp_w_t.shape, rp_w_t, dtype=score_dtype)
         rel_w_mm = network.add_matrix_multiply(
             q_perm_w.get_output(0), trt.MatrixOperation.NONE,
             rp_w_c, trt.MatrixOperation.NONE)
@@ -997,10 +1072,13 @@ def _build_sam_attention(
     softmax.axes = 1 << 2
     ctx = network.add_matrix_multiply(
         softmax.get_output(0), trt.MatrixOperation.NONE,
-        v_r.get_output(0), trt.MatrixOperation.NONE)
+        score_v, trt.MatrixOperation.NONE)
+    ctx_tensor = ctx.get_output(0)
+    if dtype != np.float32:
+        ctx_tensor = network.add_cast(ctx_tensor, trt.float16).get_output(0)
 
     # Reshape back: [B*N, seq, D] -> [B, N, H, W, D] -> [B, H, W, N*D]
-    ctx_r = network.add_shuffle(ctx.get_output(0))
+    ctx_r = network.add_shuffle(ctx_tensor)
     ctx_r.reshape_dims = (attn_batch, num_heads, attn_spatial, attn_spatial, head_dim)
     ctx_r.second_transpose = trt.Permutation([0, 2, 3, 1, 4])
     ctx_flat = network.add_shuffle(ctx_r.get_output(0))
@@ -1008,9 +1086,9 @@ def _build_sam_attention(
 
     out = graph_ops.add_matmul_rhs_constant(
         network, ctx_flat.get_output(0), hidden, hidden,
-        weights[f"{w_prefix}.attn.o.weight"])
+        weights[f"{w_prefix}.attn.o.weight"], dtype=dtype)
     out = graph_ops.add_bias_sum(
-        network, out, hidden, weights[f"{w_prefix}.attn.o.bias"])
+        network, out, hidden, weights[f"{w_prefix}.attn.o.bias"], dtype=dtype)
 
     if window_size > 0:
         # Window unpartition: [nH*nW, ws, ws, C] -> [1, H, W, C]
@@ -1162,7 +1240,8 @@ def _load_vision_weights(
 
 
 def _build_deepseek_ocr_vision_engine(
-    model_dir: str, config: ModelConfig, *, verbose: bool = False,
+    model_dir: str, config: ModelConfig, *, precision: str = "fp32",
+    verbose: bool = False,
 ) -> bytes:
     """Build DeepSeek-OCR-2 vision engine using native TRT API.
 
@@ -1175,6 +1254,14 @@ def _build_deepseek_ocr_vision_engine(
           file=sys.stderr)
 
     vw = _load_vision_weights(model_dir)
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(
+            f"Unsupported DeepSeek-OCR vision precision {precision!r}; "
+            "expected fp32 or fp16")
 
     # SAM config
     sam_hidden = 768
@@ -1219,15 +1306,20 @@ def _build_deepseek_ocr_vision_engine(
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
 
     eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([1e-6], dtype=np.float32))
+        network, (1, 1), np.array([1e-6], dtype=work_np_dtype),
+        dtype=work_np_dtype)
     rms_eps_t = graph_ops.add_constant(
-        network, (1, 1), np.array([1e-6], dtype=np.float32))
+        network, (1, 1), np.array([1e-6], dtype=work_np_dtype),
+        dtype=work_np_dtype)
 
     # ===================================================================
     # Stage 1: SAM ViT-B
     # ===================================================================
     pixel_values = network.add_input(
         "pixel_values", trt.float32, (1, 3, image_size, image_size))
+    if work_trt_dtype != trt.float32:
+        pixel_values = network.add_cast(
+            pixel_values, work_trt_dtype).get_output(0)
 
     # Patch embedding: Conv2d [1, 3, 1024, 1024] -> [1, 768, 64, 64]
     pe_w = vw["sam.patch_embed.weight"]
@@ -1235,8 +1327,8 @@ def _build_deepseek_ocr_vision_engine(
     patch_conv = network.add_convolution_nd(
         pixel_values, num_output_maps=sam_hidden,
         kernel_shape=(patch_size, patch_size),
-        kernel=trt.Weights(np.ascontiguousarray(pe_w)),
-        bias=trt.Weights(np.ascontiguousarray(pe_b)))
+        kernel=trt.Weights(np.ascontiguousarray(pe_w, dtype=work_np_dtype)),
+        bias=trt.Weights(np.ascontiguousarray(pe_b, dtype=work_np_dtype)))
     patch_conv.stride_nd = (patch_size, patch_size)
 
     # NCHW -> NHWC: [1, 768, 64, 64] -> [1, 64, 64, 768]
@@ -1245,7 +1337,8 @@ def _build_deepseek_ocr_vision_engine(
 
     # Add position embedding
     pos_c = graph_ops.add_constant(
-        network, (1, grid_size, grid_size, sam_hidden), vw["sam.pos_embed"])
+        network, (1, grid_size, grid_size, sam_hidden), vw["sam.pos_embed"],
+        dtype=work_np_dtype)
     pos_sum = network.add_elementwise(
         to_nhwc.get_output(0), pos_c, trt.ElementWiseOperation.SUM)
     hidden_state = pos_sum.get_output(0)
@@ -1261,7 +1354,8 @@ def _build_deepseek_ocr_vision_engine(
         reshape_2d.reshape_dims = (seq_len, sam_hidden)
         normed = graph_ops.add_layer_norm(
             network, reshape_2d.get_output(0), sam_hidden,
-            vw[f"{wp}.norm1.weight"], vw[f"{wp}.norm1.bias"], eps_t)
+            vw[f"{wp}.norm1.weight"], vw[f"{wp}.norm1.bias"], eps_t,
+            dtype=work_np_dtype)
         normed_4d = network.add_shuffle(normed)
         normed_4d.reshape_dims = (1, grid_size, grid_size, sam_hidden)
 
@@ -1269,7 +1363,8 @@ def _build_deepseek_ocr_vision_engine(
         attn_out_4d = _build_sam_attention(
             network, normed_4d.get_output(0), vw, wp,
             grid_size, sam_hidden, sam_heads, sam_head_dim, eps_t,
-            window_size=0 if is_global else window_size)
+            window_size=0 if is_global else window_size,
+            dtype=work_np_dtype)
 
         # Residual
         res1 = network.add_elementwise(
@@ -1280,18 +1375,21 @@ def _build_deepseek_ocr_vision_engine(
         res1_2d.reshape_dims = (seq_len, sam_hidden)
         normed2 = graph_ops.add_layer_norm(
             network, res1_2d.get_output(0), sam_hidden,
-            vw[f"{wp}.norm2.weight"], vw[f"{wp}.norm2.bias"], eps_t)
+            vw[f"{wp}.norm2.weight"], vw[f"{wp}.norm2.bias"], eps_t,
+            dtype=work_np_dtype)
         fc1 = graph_ops.add_matmul_rhs_constant(
             network, normed2, sam_hidden, sam_mlp_dim,
-            vw[f"{wp}.mlp.fc1.weight"])
+            vw[f"{wp}.mlp.fc1.weight"], dtype=work_np_dtype)
         fc1 = graph_ops.add_bias_sum(
-            network, fc1, sam_mlp_dim, vw[f"{wp}.mlp.fc1.bias"])
-        gelu = graph_ops.add_gelu_erf(network, fc1)
+            network, fc1, sam_mlp_dim, vw[f"{wp}.mlp.fc1.bias"],
+            dtype=work_np_dtype)
+        gelu = graph_ops.add_gelu_erf(network, fc1, dtype=work_np_dtype)
         fc2 = graph_ops.add_matmul_rhs_constant(
             network, gelu, sam_mlp_dim, sam_hidden,
-            vw[f"{wp}.mlp.fc2.weight"])
+            vw[f"{wp}.mlp.fc2.weight"], dtype=work_np_dtype)
         fc2 = graph_ops.add_bias_sum(
-            network, fc2, sam_hidden, vw[f"{wp}.mlp.fc2.bias"])
+            network, fc2, sam_hidden, vw[f"{wp}.mlp.fc2.bias"],
+            dtype=work_np_dtype)
         fc2_4d = network.add_shuffle(fc2)
         fc2_4d.reshape_dims = (1, grid_size, grid_size, sam_hidden)
         res2 = network.add_elementwise(
@@ -1305,8 +1403,9 @@ def _build_deepseek_ocr_vision_engine(
     neck_c1 = network.add_convolution_nd(
         to_nchw.get_output(0), num_output_maps=256,
         kernel_shape=(1, 1),
-        kernel=trt.Weights(np.ascontiguousarray(vw["sam.neck.conv1.weight"])),
-        bias=trt.Weights(np.zeros(256, dtype=np.float32)))
+        kernel=trt.Weights(np.ascontiguousarray(
+            vw["sam.neck.conv1.weight"], dtype=work_np_dtype)),
+        bias=trt.Weights(np.zeros(256, dtype=work_np_dtype)))
 
     # LN1: NCHW -> NHWC -> LN -> NCHW
     n1_nhwc = network.add_shuffle(neck_c1.get_output(0))
@@ -1315,7 +1414,8 @@ def _build_deepseek_ocr_vision_engine(
     n1_flat.reshape_dims = (seq_len, 256)
     ln1 = graph_ops.add_layer_norm(
         network, n1_flat.get_output(0), 256,
-        vw["sam.neck.ln1.weight"], vw["sam.neck.ln1.bias"], eps_t)
+        vw["sam.neck.ln1.weight"], vw["sam.neck.ln1.bias"], eps_t,
+        dtype=work_np_dtype)
     ln1_4d = network.add_shuffle(ln1)
     ln1_4d.reshape_dims = (1, grid_size, grid_size, 256)
     ln1_nchw = network.add_shuffle(ln1_4d.get_output(0))
@@ -1324,8 +1424,9 @@ def _build_deepseek_ocr_vision_engine(
     neck_c2 = network.add_convolution_nd(
         ln1_nchw.get_output(0), num_output_maps=256,
         kernel_shape=(3, 3),
-        kernel=trt.Weights(np.ascontiguousarray(vw["sam.neck.conv2.weight"])),
-        bias=trt.Weights(np.zeros(256, dtype=np.float32)))
+        kernel=trt.Weights(np.ascontiguousarray(
+            vw["sam.neck.conv2.weight"], dtype=work_np_dtype)),
+        bias=trt.Weights(np.zeros(256, dtype=work_np_dtype)))
     neck_c2.padding_nd = (1, 1)
 
     # LN2
@@ -1335,7 +1436,8 @@ def _build_deepseek_ocr_vision_engine(
     n2_flat.reshape_dims = (seq_len, 256)
     ln2 = graph_ops.add_layer_norm(
         network, n2_flat.get_output(0), 256,
-        vw["sam.neck.ln2.weight"], vw["sam.neck.ln2.bias"], eps_t)
+        vw["sam.neck.ln2.weight"], vw["sam.neck.ln2.bias"], eps_t,
+        dtype=work_np_dtype)
     ln2_4d = network.add_shuffle(ln2)
     ln2_4d.reshape_dims = (1, grid_size, grid_size, 256)
     ln2_nchw = network.add_shuffle(ln2_4d.get_output(0))
@@ -1346,8 +1448,9 @@ def _build_deepseek_ocr_vision_engine(
     net2 = network.add_convolution_nd(
         ln2_nchw.get_output(0), num_output_maps=512,
         kernel_shape=(3, 3),
-        kernel=trt.Weights(np.ascontiguousarray(vw["sam.net_2.weight"])),
-        bias=trt.Weights(np.zeros(512, dtype=np.float32)))
+        kernel=trt.Weights(np.ascontiguousarray(
+            vw["sam.net_2.weight"], dtype=work_np_dtype)),
+        bias=trt.Weights(np.zeros(512, dtype=work_np_dtype)))
     net2.stride_nd = (2, 2)
     net2.padding_nd = (1, 1)
     # [1, 512, 32, 32]
@@ -1356,8 +1459,9 @@ def _build_deepseek_ocr_vision_engine(
     net3 = network.add_convolution_nd(
         net2.get_output(0), num_output_maps=896,
         kernel_shape=(3, 3),
-        kernel=trt.Weights(np.ascontiguousarray(vw["sam.net_3.weight"])),
-        bias=trt.Weights(np.zeros(896, dtype=np.float32)))
+        kernel=trt.Weights(np.ascontiguousarray(
+            vw["sam.net_3.weight"], dtype=work_np_dtype)),
+        bias=trt.Weights(np.zeros(896, dtype=work_np_dtype)))
     net3.stride_nd = (2, 2)
     net3.padding_nd = (1, 1)
     # SAM final output: [1, 896, 16, 16]
@@ -1373,7 +1477,8 @@ def _build_deepseek_ocr_vision_engine(
 
     # Learned queries: [256, 896] -> [1, 256, 896]
     queries_c = graph_ops.add_constant(
-        network, (1, qwen2_num_queries, qwen2_hidden), vw["qwen2.queries"])
+        network, (1, qwen2_num_queries, qwen2_hidden), vw["qwen2.queries"],
+        dtype=work_np_dtype)
 
     # Concatenate: [1, 256, 896] + [1, 256, 896] -> [1, 512, 896]
     enc_concat = network.add_concatenation(
@@ -1391,9 +1496,9 @@ def _build_deepseek_ocr_vision_engine(
     sin_half_np = graph_ops.make_rope_table_half_dim(
         qwen2_total_seq, qwen2_head_dim, rope_theta, False)
     cos_half_c = graph_ops.add_constant(
-        network, cos_half_np.shape, cos_half_np)
+        network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
     sin_half_c = graph_ops.add_constant(
-        network, sin_half_np.shape, sin_half_np)
+        network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
     position_ids_c = graph_ops.add_constant(
         network,
         (qwen2_total_seq,),
@@ -1407,13 +1512,15 @@ def _build_deepseek_ocr_vision_engine(
     # Standard causal mask (lower-triangular). HF Qwen2 SDPA uses is_causal=True
     # which creates this mask internally. All tokens attend only to preceding tokens.
     qwen2_mask_np = np.full(
-        (qwen2_total_seq, qwen2_total_seq), -1e9, dtype=np.float32)
+        (qwen2_total_seq, qwen2_total_seq), -10000.0,
+        dtype=work_np_dtype)
     for i in range(qwen2_total_seq):
         for j in range(i + 1):
             qwen2_mask_np[i, j] = 0.0
     qwen2_mask_c = graph_ops.add_constant(
         network, (1, qwen2_total_seq, qwen2_total_seq),
-        qwen2_mask_np.reshape(1, qwen2_total_seq, qwen2_total_seq))
+        qwen2_mask_np.reshape(1, qwen2_total_seq, qwen2_total_seq),
+        dtype=work_np_dtype)
 
 
     for layer_idx in range(qwen2_layers):
@@ -1422,22 +1529,32 @@ def _build_deepseek_ocr_vision_engine(
         # Pre-attention RMSNorm
         norm1 = _apply_norm(
             network, enc_state, qwen2_hidden,
-            vw[f"{wp}.input_norm"], None, rms_eps_t, "rmsnorm")
+            vw[f"{wp}.input_norm"], None, rms_eps_t, "rmsnorm",
+            dtype=work_np_dtype)
 
         # Q projection: [512, 896] @ [896, 896] -> [512, 896]
         q = graph_ops.add_matmul_rhs_constant(
-            network, norm1, qwen2_hidden, qwen2_q_dim, vw[f"{wp}.w_q"])
-        q = graph_ops.add_bias_sum(network, q, qwen2_q_dim, vw[f"{wp}.q_bias"])
+            network, norm1, qwen2_hidden, qwen2_q_dim, vw[f"{wp}.w_q"],
+            dtype=work_np_dtype)
+        q = graph_ops.add_bias_sum(
+            network, q, qwen2_q_dim, vw[f"{wp}.q_bias"],
+            dtype=work_np_dtype)
 
         # K projection: [512, 896] @ [896, 128] -> [512, 128]
         k = graph_ops.add_matmul_rhs_constant(
-            network, norm1, qwen2_hidden, qwen2_kv_dim, vw[f"{wp}.w_k"])
-        k = graph_ops.add_bias_sum(network, k, qwen2_kv_dim, vw[f"{wp}.k_bias"])
+            network, norm1, qwen2_hidden, qwen2_kv_dim, vw[f"{wp}.w_k"],
+            dtype=work_np_dtype)
+        k = graph_ops.add_bias_sum(
+            network, k, qwen2_kv_dim, vw[f"{wp}.k_bias"],
+            dtype=work_np_dtype)
 
         # V projection: [512, 896] @ [896, 128] -> [512, 128]
         v = graph_ops.add_matmul_rhs_constant(
-            network, norm1, qwen2_hidden, qwen2_kv_dim, vw[f"{wp}.w_v"])
-        v = graph_ops.add_bias_sum(network, v, qwen2_kv_dim, vw[f"{wp}.v_bias"])
+            network, norm1, qwen2_hidden, qwen2_kv_dim, vw[f"{wp}.w_v"],
+            dtype=work_np_dtype)
+        v = graph_ops.add_bias_sum(
+            network, v, qwen2_kv_dim, vw[f"{wp}.v_bias"],
+            dtype=work_np_dtype)
 
         q_rope = graph_ops.add_apply_rope_native(
             network, q, qwen2_heads, qwen2_head_dim,
@@ -1462,7 +1579,8 @@ def _build_deepseek_ocr_vision_engine(
         # Output projection: [512, 896] @ [896, 896] -> [512, 896]
         attn_out = graph_ops.add_matmul_rhs_constant(
             network, ctx_flat,
-            qwen2_q_dim, qwen2_hidden, vw[f"{wp}.w_o"])
+            qwen2_q_dim, qwen2_hidden, vw[f"{wp}.w_o"],
+            dtype=work_np_dtype)
 
         # Residual
         res1 = network.add_elementwise(
@@ -1471,12 +1589,15 @@ def _build_deepseek_ocr_vision_engine(
         # Post-attention RMSNorm + SwiGLU MLP
         norm2 = _apply_norm(
             network, res1.get_output(0), qwen2_hidden,
-            vw[f"{wp}.post_attn_norm"], None, rms_eps_t, "rmsnorm")
+            vw[f"{wp}.post_attn_norm"], None, rms_eps_t, "rmsnorm",
+            dtype=work_np_dtype)
 
         gate = graph_ops.add_matmul_rhs_constant(
-            network, norm2, qwen2_hidden, qwen2_mlp_dim, vw[f"{wp}.w_gate"])
+            network, norm2, qwen2_hidden, qwen2_mlp_dim, vw[f"{wp}.w_gate"],
+            dtype=work_np_dtype)
         up = graph_ops.add_matmul_rhs_constant(
-            network, norm2, qwen2_hidden, qwen2_mlp_dim, vw[f"{wp}.w_up"])
+            network, norm2, qwen2_hidden, qwen2_mlp_dim, vw[f"{wp}.w_up"],
+            dtype=work_np_dtype)
         sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
         swish = network.add_elementwise(
             gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
@@ -1484,7 +1605,7 @@ def _build_deepseek_ocr_vision_engine(
             swish.get_output(0), up, trt.ElementWiseOperation.PROD)
         down = graph_ops.add_matmul_rhs_constant(
             network, gated.get_output(0), qwen2_mlp_dim, qwen2_hidden,
-            vw[f"{wp}.w_down"])
+            vw[f"{wp}.w_down"], dtype=work_np_dtype)
 
         # Residual
         res2 = network.add_elementwise(
@@ -1494,7 +1615,8 @@ def _build_deepseek_ocr_vision_engine(
     # Final RMSNorm
     enc_state = _apply_norm(
         network, enc_state, qwen2_hidden,
-        vw["qwen2.final_norm"], None, rms_eps_t, "rmsnorm")
+        vw["qwen2.final_norm"], None, rms_eps_t, "rmsnorm",
+        dtype=work_np_dtype)
 
     # Extract query outputs: last 256 tokens from [512, 896]
     query_out = network.add_slice(
@@ -1509,22 +1631,25 @@ def _build_deepseek_ocr_vision_engine(
     # ===================================================================
     projected = graph_ops.add_matmul_rhs_constant(
         network, query_out.get_output(0),
-        proj_in, proj_out, vw["proj.weight"])
+        proj_in, proj_out, vw["proj.weight"], dtype=work_np_dtype)
     projected = graph_ops.add_bias_sum(
-        network, projected, proj_out, vw["proj.bias"])
+        network, projected, proj_out, vw["proj.bias"], dtype=work_np_dtype)
     # [256, 1280]
 
     # ===================================================================
     # Stage 4: View Separator
     # ===================================================================
     view_sep_c = graph_ops.add_constant(
-        network, (1, proj_out), vw["view_sep"].reshape(1, -1))
+        network, (1, proj_out), vw["view_sep"].reshape(1, -1),
+        dtype=work_np_dtype)
     final_concat = network.add_concatenation(
         [projected, view_sep_c])
     final_concat.axis = 0
     # [257, 1280]
 
     output = final_concat.get_output(0)
+    if output.dtype != trt.float32:
+        output = network.add_cast(output, trt.float32).get_output(0)
     output.name = "image_features"
     network.mark_output(output)
 

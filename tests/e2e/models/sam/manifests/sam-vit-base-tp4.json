@@ -1,23 +1,12 @@
 {
   "name": "sam-vit-base-tp4",
-  "trace_id": "IT-E2E-SAM-TP4-01",
   "hf_id": "facebook/sam-vit-base",
   "bundle": "sam-vit-base-tp4.trtfb",
   "family": "sam",
   "runtime_strategy": "sam_prompted_segmentation",
   "task_strategy": "prompted_segmentation",
-  "reference_family": "prompted_segmentation_sam",
-  "user_contract": "prompted_mask",
-  "test_type": "prompted_segmentation",
   "max_cache_length": 1,
-  "prompt": "",
-  "max_new_tokens": 0,
   "trust_remote_code": false,
-  "test_image": "data/test_img.jpeg",
-  "point_x": 0.5,
-  "point_y": 0.5,
-  "num_expected_masks": 3,
-  "ci_tier": "multi_device",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
     "parallel": {
@@ -37,26 +26,42 @@
       "TRTMC_NCCL_RENDEZVOUS"
     ]
   },
-  "preflight_requirements": [
+  "testcases": [
     {
-      "kind": "binary_exists",
-      "args": {},
-      "gating": true
-    },
-    {
-      "kind": "command_available",
-      "args": {
-        "command": "mpirun"
-      },
-      "gating": true
-    },
-    {
-      "kind": "gpu_count_min",
-      "args": {
-        "count": 4
-      },
-      "gating": true
+      "name": "sam-vit-base-tp4",
+      "trace_id": "IT-E2E-SAM-TP4-01",
+      "reference_family": "prompted_segmentation_sam",
+      "user_contract": "prompted_mask",
+      "test_type": "prompted_segmentation",
+      "prompt": "",
+      "max_new_tokens": 0,
+      "test_image": "data/test_img.jpeg",
+      "point_x": 0.5,
+      "point_y": 0.5,
+      "num_expected_masks": 3,
+      "ci_tier": "multi_device",
+      "preflight_requirements": [
+        {
+          "kind": "binary_exists",
+          "args": {},
+          "gating": true
+        },
+        {
+          "kind": "command_available",
+          "args": {
+            "command": "mpirun"
+          },
+          "gating": true
+        },
+        {
+          "kind": "gpu_count_min",
+          "args": {
+            "count": 4
+          },
+          "gating": true
+        }
+      ],
+      "notes": "SAM ViT-base TP4 repro. Uses the same checkpoint, image, prompted segmentation comparator, logit tolerance, and mask-count threshold as sam-vit-base."
     }
-  ],
-  "notes": "SAM ViT-base TP4 repro. Uses the same checkpoint, image, prompted segmentation comparator, logit tolerance, and mask-count threshold as sam-vit-base."
+  ]
 }

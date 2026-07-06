@@ -122,7 +122,8 @@ class VisionLanguageRunner:
         t0 = time.monotonic()
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=600, env=env)
+                cmd, capture_output=True, text=True, errors="replace",
+                timeout=600, env=env)
         except subprocess.TimeoutExpired:
             return StageOutput(
                 stage_name="vision_encode",

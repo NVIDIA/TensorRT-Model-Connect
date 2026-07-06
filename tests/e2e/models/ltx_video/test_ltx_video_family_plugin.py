@@ -141,7 +141,12 @@ def test_build_components_calls_native_subbuilders(
 
     out = ltx_mod.plugin.build_components(
         "/model",
-        _cfg(video_height=256, video_width=384, video_num_frames=17),
+        _cfg(
+            video_height=256,
+            video_width=384,
+            video_num_frames=17,
+            _fp32_layers=[24],
+        ),
         weights,
         precision="fp16",
         verbose=True,
@@ -151,12 +156,17 @@ def test_build_components_calls_native_subbuilders(
     assert out["denoiser"] == b"denoiser-plan"
     assert out["vae_decoder"] == b"vae-plan"
     assert "runtime_only" not in out
+    assert calls["load_t5_weights"]["precision"] == "fp32"
+    assert calls["load_t5_weights"]["fp32_layers"] == ()
     assert calls["build_t5_encoder_engine"]["max_seq_len"] == 128
+    assert calls["build_t5_encoder_engine"]["precision"] == "fp32"
+    assert calls["build_t5_encoder_engine"]["fp32_layers"] == ()
     assert calls["compile_denoiser"]["latent_frames"] == 3
     assert calls["compile_denoiser"]["latent_height"] == 8
     assert calls["compile_denoiser"]["latent_width"] == 12
     assert calls["compile_denoiser"]["precision"] == "fp16"
     assert calls["compile_vae"]["latent_channels"] == 128
+    assert calls["compile_vae"]["precision"] == "fp16"
 
 
 def test_get_diffusion_config_uses_ltx_scheduler_fields() -> None:

@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -90,5 +91,23 @@ struct ZImageCommonPreprocessorWeights {
 
     bool valid{false};
 };
+
+inline bool validate_z_image_initial_latents(std::size_t expected_size, std::size_t prompt_count,
+                                             const std::vector<float>& supplied,
+                                             std::string& error) {
+    if (supplied.empty()) {
+        return true;
+    }
+    if (prompt_count != 1U) {
+        error = "Z-Image caller initial latents require exactly one prompt";
+        return false;
+    }
+    if (supplied.size() != expected_size) {
+        error = "Z-Image initial latents contain " + std::to_string(supplied.size()) +
+                " floats; expected " + std::to_string(expected_size);
+        return false;
+    }
+    return true;
+}
 
 } // namespace trtmc

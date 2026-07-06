@@ -264,9 +264,11 @@ def test_build_components_uses_transformer_and_t5_configs(
         },
     }
 
+    config = _cfg(image_height=256, image_width=384)
+    config.raw["_fp32_layers"] = [2]
     out = pixart_mod.plugin.build_components(
         str(model_dir),
-        _cfg(image_height=256, image_width=384),
+        config,
         weights,
         precision="fp16",
         verbose=False,
@@ -279,6 +281,9 @@ def test_build_components_uses_transformer_and_t5_configs(
 
     # h_lat=32, w_lat=48, patch_size=4 -> 96 patches.
     assert calls["load_t5_weights"][1]["precision"] == "fp16"
+    assert calls["build_t5_encoder_engine"][1]["precision"] == "fp16"
+    assert calls["build_standard_dit_engine"][1]["precision"] == "fp16"
+    assert calls["build_vae_2d_decoder_engine"][1]["precision"] == "fp32"
     assert calls["build_standard_dit_engine"][1]["num_patches"] == 96
     assert calls["build_standard_dit_engine"][1]["context_dim"] == 64
     assert calls["_serialize_preprocessor_weights"][0][1] == 1024
@@ -398,6 +403,9 @@ def test_get_diffusion_config_uses_transformer_overrides() -> None:
             "num_attention_heads": 5,
             "attention_head_dim": 6,
             "num_layers": 3,
+            "sample_size": 128,
+            "patch_size": 2,
+            "interpolation_scale": 2,
         },
         image_height=640,
         image_width=832,
@@ -410,6 +418,8 @@ def test_get_diffusion_config_uses_transformer_overrides() -> None:
     assert dc["image_height"] == 640
     assert dc["image_width"] == 832
     assert dc["use_rope"] == 0
+    assert dc["pos_embed_base_size"] == 64
+    assert dc["pos_embed_interpolation_scale"] == 2
 
 
 def test_load_pixart_dit_weights_maps_optional_biases(

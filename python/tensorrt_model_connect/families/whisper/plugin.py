@@ -45,6 +45,17 @@ from .decoder_tp_builder import build_whisper_tp_decoder_engine
 
 trt = trt_compat.get_trt()
 
+
+def _encoder_precision(raw: dict, precision: str) -> str:
+    fp32_layers = {int(layer) for layer in raw.get("_fp32_layers", ())}
+    invalid = sorted(fp32_layers - {0})
+    if invalid:
+        raise ValueError(
+            "Whisper fp32_layers supports only selector 0 (the encoder); "
+            f"got {invalid}"
+        )
+    return "fp32" if precision == "fp16" and 0 in fp32_layers else precision
+
 def _load_bias_or_zeros(readers, hf_key: str, size: int, dtype=np.float32) -> np.ndarray:
     """Load bias if it exists, otherwise return zeros."""
     if _has_tensor(readers, hf_key):
@@ -74,9 +85,14 @@ class WhisperPlugin:
         max_source_positions = raw.get("max_source_positions", 1500)
         max_target_positions = raw.get("max_target_positions", 448)
 
+        encoder_precision = _encoder_precision(raw, precision)
+
         # Projection weights use work dtype; norm weights stay FP32
         # (add_layer_norm handles FP32 precision boundaries internally).
         w_dtype = np.float16 if precision == "fp16" else np.float32
+        encoder_dtype = (
+            np.float16 if encoder_precision == "fp16" else np.float32
+        )
 
         weights = WeightDict()
         weights["_enc_layers"] = enc_layers
@@ -90,14 +106,14 @@ class WhisperPlugin:
         weights["_max_target_positions"] = max_target_positions
 
         # Encoder conv stem
-        weights["enc_conv1_weight"] = _load_tensor(readers, "model.encoder.conv1.weight").astype(w_dtype)
-        weights["enc_conv1_bias"] = _load_tensor(readers, "model.encoder.conv1.bias").astype(w_dtype)
-        weights["enc_conv2_weight"] = _load_tensor(readers, "model.encoder.conv2.weight").astype(w_dtype)
-        weights["enc_conv2_bias"] = _load_tensor(readers, "model.encoder.conv2.bias").astype(w_dtype)
+        weights["enc_conv1_weight"] = _load_tensor(readers, "model.encoder.conv1.weight").astype(encoder_dtype)
+        weights["enc_conv1_bias"] = _load_tensor(readers, "model.encoder.conv1.bias").astype(encoder_dtype)
+        weights["enc_conv2_weight"] = _load_tensor(readers, "model.encoder.conv2.weight").astype(encoder_dtype)
+        weights["enc_conv2_bias"] = _load_tensor(readers, "model.encoder.conv2.bias").astype(encoder_dtype)
 
         # [C2] Encoder learned positional embeddings
         weights["enc_pos_embedding"] = _load_tensor(
-            readers, "model.encoder.embed_positions.weight").astype(w_dtype)
+            readers, "model.encoder.embed_positions.weight").astype(encoder_dtype)
 
         # Encoder layers
         for i in range(enc_layers):
@@ -106,18 +122,18 @@ class WhisperPlugin:
             # [C1] Whisper k_proj has no bias -- load conditionally
             for proj in ("q", "k", "v"):
                 weights[f"{pfx}.w_{proj}"] = _transpose_2d(
-                    _load_tensor(readers, f"{hf}.self_attn.{proj}_proj.weight"), f"enc_{proj}")
+                    _load_tensor(readers, f"{hf}.self_attn.{proj}_proj.weight"), f"enc_{proj}").astype(encoder_dtype)
                 weights[f"{pfx}.b_{proj}"] = _load_bias_or_zeros(
-                    readers, f"{hf}.self_attn.{proj}_proj.bias", hidden, dtype=w_dtype)
-            weights[f"{pfx}.w_o"] = _transpose_2d(_load_tensor(readers, f"{hf}.self_attn.out_proj.weight"), "enc_o")
-            weights[f"{pfx}.b_o"] = _load_tensor(readers, f"{hf}.self_attn.out_proj.bias").astype(w_dtype)
+                    readers, f"{hf}.self_attn.{proj}_proj.bias", hidden, dtype=encoder_dtype)
+            weights[f"{pfx}.w_o"] = _transpose_2d(_load_tensor(readers, f"{hf}.self_attn.out_proj.weight"), "enc_o").astype(encoder_dtype)
+            weights[f"{pfx}.b_o"] = _load_tensor(readers, f"{hf}.self_attn.out_proj.bias").astype(encoder_dtype)
             # Norm weights stay FP32 (add_layer_norm casts internally)
             weights[f"{pfx}.attn_norm"] = _load_tensor(readers, f"{hf}.self_attn_layer_norm.weight").astype(np.float32)
             weights[f"{pfx}.attn_norm_beta"] = _load_tensor(readers, f"{hf}.self_attn_layer_norm.bias").astype(np.float32)
-            weights[f"{pfx}.w_fc1"] = _transpose_2d(_load_tensor(readers, f"{hf}.fc1.weight"), "enc_fc1")
-            weights[f"{pfx}.b_fc1"] = _load_tensor(readers, f"{hf}.fc1.bias").astype(w_dtype)
-            weights[f"{pfx}.w_fc2"] = _transpose_2d(_load_tensor(readers, f"{hf}.fc2.weight"), "enc_fc2")
-            weights[f"{pfx}.b_fc2"] = _load_tensor(readers, f"{hf}.fc2.bias").astype(w_dtype)
+            weights[f"{pfx}.w_fc1"] = _transpose_2d(_load_tensor(readers, f"{hf}.fc1.weight"), "enc_fc1").astype(encoder_dtype)
+            weights[f"{pfx}.b_fc1"] = _load_tensor(readers, f"{hf}.fc1.bias").astype(encoder_dtype)
+            weights[f"{pfx}.w_fc2"] = _transpose_2d(_load_tensor(readers, f"{hf}.fc2.weight"), "enc_fc2").astype(encoder_dtype)
+            weights[f"{pfx}.b_fc2"] = _load_tensor(readers, f"{hf}.fc2.bias").astype(encoder_dtype)
             # Norm weights stay FP32
             weights[f"{pfx}.ffn_norm"] = _load_tensor(readers, f"{hf}.final_layer_norm.weight").astype(np.float32)
             weights[f"{pfx}.ffn_norm_beta"] = _load_tensor(readers, f"{hf}.final_layer_norm.bias").astype(np.float32)
@@ -304,7 +320,9 @@ class WhisperPlugin:
         return bytes(plan)
 
     def build_vision_engine(self, model_dir: str, config: ModelConfig, weights: WeightDict, *, precision: str = "fp32", verbose: bool = False) -> bytes | None:
-        return _build_whisper_encoder(config, weights, precision=precision, verbose=verbose)
+        encoder_precision = _encoder_precision(config.raw, precision)
+        return _build_whisper_encoder(
+            config, weights, precision=encoder_precision, verbose=verbose)
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
         raw = config.raw
