@@ -71,15 +71,13 @@ no_impact scripts/check_family_coverage.py # developer utility script; no CI tes
 no_impact scripts/docker_build_gb300.sh # developer utility script; no CI test impact is intentional
 no_impact scripts/docker_run_gb300.sh # developer utility script; no CI test impact is intentional
 no_impact scripts/eval_mmlu.py # developer utility script; no CI test impact is intentional
-no_impact scripts/fetch_tensorrt_sdk.sh # maintainer-only SDK mirroring helper; runtime behavior is pinned by the main Dockerfile digest
 no_impact scripts/generate_ci_summary.py # developer utility script; no CI test impact is intentional
 no_impact scripts/generate_perf_report.py # developer utility script; no CI test impact is intentional
 no_impact scripts/hf_generate.py # developer utility script; no CI test impact is intentional
 no_impact scripts/hf_tokenizer.py # developer utility script; no CI test impact is intentional
-no_impact scripts/load_artifactory_credentials.sh # maintainer-only SDK mirroring helper; never runs in package or test stages
 no_impact scripts/new_family.py # developer utility script; no CI test impact is intentional
 no_impact scripts/perf_evolve_prompt.py # developer utility script; no CI test impact is intentional
-no_impact scripts/publish_tensorrt_sdk.sh # maintainer-only SDK publisher; CI consumes the separately pinned GHCR digest
+no_impact scripts/publish_tensorrt_sdk.sh # temporary maintainer-only SDK publisher; CI consumes the separately pinned GHCR digest
 no_impact scripts/reporting/__init__.py # developer utility script; no CI test impact is intentional
 no_impact scripts/reporting/vlm_assessment.py # developer utility script; no CI test impact is intentional
 no_impact scripts/repro_trt_fp8_mha.py # standalone TensorRT FP8 MHA repro helper; no CI test impact is intentional

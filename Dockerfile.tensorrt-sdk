@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Maintainer-owned source metadata for the pinned TensorRT SDK. The publishing
-# script reads these defaults as well as passing TENSORRT_VERSION to the build.
+# TEMPORARY: This packages the private nightly SDK for GHCR consumption. Remove
+# it with scripts/publish_tensorrt_sdk.sh when TensorRT 11.2 is publicly
+# released and CI can install the official packages directly.
+#
+# The publishing script reads this pinned source metadata and passes
+# TENSORRT_VERSION to the build.
 ARG TENSORRT_VERSION=11.2.0.113
 ARG TENSORRT_SDK_IMAGE=ghcr.io/nvidia/tensorrt-model-connect/tensorrt-sdk:11.2.0.113
 ARG TENSORRT_SDK_URL=https://artifactory.nvidia.com/artifactory/sw-tensorrt-generic-local/cicd/rel-11.2/L1_Nightly/1/trt_build_aarch64_ubuntu22.04_cuda13.3_full_optimized_cmake.tar

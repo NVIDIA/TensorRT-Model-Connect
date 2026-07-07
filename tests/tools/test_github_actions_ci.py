@@ -70,6 +70,19 @@ def test_workflows_pull_tensorrt_sdk_from_ghcr_without_artifactory_secrets() -> 
         assert "TRTMC_ARTIFACTORY_PASSWORD" not in text
 
 
+def test_tensorrt_sdk_publisher_is_temporary_and_self_contained() -> None:
+    scripts = REPO_ROOT / "scripts"
+    assert not (scripts / "load_artifactory_credentials.sh").exists()
+    assert not (scripts / "fetch_tensorrt_sdk.sh").exists()
+
+    publisher = (scripts / "publish_tensorrt_sdk.sh").read_text()
+    assert "TEMPORARY:" in publisher
+    assert "when TensorRT 11.2" in publisher
+    assert "is publicly released" in publisher
+    assert "load_artifactory_credentials()" in publisher
+    assert "stage_tensorrt_sdk()" in publisher
+
+
 def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
     stage_text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     start_text = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
