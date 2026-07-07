@@ -356,9 +356,7 @@ TextResult Gpt2TextGenerationPipeline::generate(const std::string& prompt,
     auto timed = generate_from_ids(input_ids, max_new, sp, cfg);
 
     // Decode only the NEW tokens (skip input)
-    std::vector<int32_t> new_tokens(timed.token_ids.begin() +
-                                        static_cast<std::ptrdiff_t>(input_ids.size()),
-                                    timed.token_ids.end());
+    std::vector<int32_t> new_tokens(timed.token_ids.begin(), timed.token_ids.end());
     std::string text = tokenizer_->decode(new_tokens);
 
     return TextResult{std::move(text), std::move(new_tokens), timed.prefill_ms, timed.decode_ms};
