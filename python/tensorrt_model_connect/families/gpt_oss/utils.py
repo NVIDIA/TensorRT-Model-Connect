@@ -16,6 +16,59 @@ from . import graph_ops
 trt = trt_compat.get_trt()
 
 
+def resolve_rope_parameters(config) -> dict:
+    """Return the RoPE scaling dict from the raw HF config.json.
+
+    Configs serialized by transformers < 5.x store the scaling dict under
+    ``rope_scaling``; transformers 5.x standardizes on ``rope_parameters``.
+    GPT-OSS checkpoints on the Hub still ship ``rope_scaling``, so accept
+    both (``rope_parameters`` wins when both are present).
+    """
+    raw = getattr(config, "raw", None) or {}
+    for key in ("rope_parameters", "rope_scaling"):
+        params = raw.get(key)
+        if isinstance(params, dict):
+            return params
+    return {}
+
+
+def make_rope_half_tables(
+    config,
+    attention_window: int,
+    head_dim: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build (cos, sin) half-dim RoPE tables honoring YaRN when configured."""
+    rope_params = resolve_rope_parameters(config)
+    rope_type = rope_params.get(
+        "rope_type", rope_params.get("type", "default"))
+    if rope_type == "yarn":
+        attention_factor = rope_params.get("attention_factor")
+        yarn_kwargs = dict(
+            scaling_factor=float(rope_params.get("factor", 1.0)),
+            original_max_position_embeddings=int(rope_params.get(
+                "original_max_position_embeddings", 4096)),
+            beta_fast=float(rope_params.get("beta_fast", 32.0)),
+            beta_slow=float(rope_params.get("beta_slow", 1.0)),
+            truncate=bool(rope_params.get("truncate", True)),
+            attention_factor=(
+                None if attention_factor is None else float(attention_factor)),
+        )
+        return (
+            graph_ops.make_yarn_rope_table_half_dim(
+                attention_window, head_dim, config.rope_theta, True,
+                **yarn_kwargs),
+            graph_ops.make_yarn_rope_table_half_dim(
+                attention_window, head_dim, config.rope_theta, False,
+                **yarn_kwargs),
+        )
+    return (
+        graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, True),
+        graph_ops.make_rope_table_half_dim(
+            attention_window, head_dim, config.rope_theta, False),
+    )
+
+
 @dataclass(frozen=True)
 class BuilderContext:
     """TensorRT objects shared by engine builders."""

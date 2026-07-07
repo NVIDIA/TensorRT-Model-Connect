@@ -47,6 +47,7 @@ from ...parallel_config import (
     require_tensorrt_11_for_tensor_parallel,
 )
 from .standard_decoder_builder import _apply_norm, _mark_debug_output
+from .utils import make_rope_half_tables
 
 
 trt = trt_compat.get_trt()
@@ -309,6 +310,18 @@ class GptOssPlugin:
             attention_mask = network.add_cast(
                 attention_mask, work_trt_dtype).get_output(0)
 
+        # GPT-OSS alternates sliding_attention (windowed) and full_attention
+        # layers. The runtime mask only encodes causal validity, so build a
+        # second mask that additionally hides cache columns older than the
+        # sliding window and feed it to the sliding layers.
+        layer_types = list(config.raw.get("layer_types") or [])
+        sliding_window = int(config.raw.get("sliding_window") or 0)
+        sliding_attention_mask = None
+        if sliding_window > 0 and "sliding_attention" in layer_types:
+            sliding_attention_mask = graph_ops.add_sliding_window_mask(
+                network, attention_mask, position_id,
+                attention_window, sliding_window)
+
         # -----------------------------------------------------------
         # Shared constants
         # -----------------------------------------------------------
@@ -316,38 +329,11 @@ class GptOssPlugin:
             network, (vocab, hidden), weights["embedding"],
             dtype=work_np_dtype)
 
-        # GPT-OSS uses YaRN RoPE scaling (rope_parameters in config.json)
-        rope_params = config.raw.get("rope_parameters", {})
-        rope_type = rope_params.get("rope_type", "default")
-
-        if rope_type == "yarn":
-            yarn_factor = float(rope_params.get("factor", 1.0))
-            yarn_orig_max = int(rope_params.get(
-                "original_max_position_embeddings", 4096))
-            yarn_beta_fast = float(rope_params.get("beta_fast", 32.0))
-            yarn_beta_slow = float(rope_params.get("beta_slow", 1.0))
-
-            cos_half_np = graph_ops.make_yarn_rope_table_half_dim(
-                attention_window, head_dim,
-                config.rope_theta, True,
-                scaling_factor=yarn_factor,
-                original_max_position_embeddings=yarn_orig_max,
-                beta_fast=yarn_beta_fast,
-                beta_slow=yarn_beta_slow)
-            sin_half_np = graph_ops.make_yarn_rope_table_half_dim(
-                attention_window, head_dim,
-                config.rope_theta, False,
-                scaling_factor=yarn_factor,
-                original_max_position_embeddings=yarn_orig_max,
-                beta_fast=yarn_beta_fast,
-                beta_slow=yarn_beta_slow)
-        else:
-            cos_half_np = graph_ops.make_rope_table_half_dim(
-                attention_window, head_dim,
-                config.rope_theta, True)
-            sin_half_np = graph_ops.make_rope_table_half_dim(
-                attention_window, head_dim,
-                config.rope_theta, False)
+        # GPT-OSS uses YaRN RoPE scaling. Hub checkpoints serialize it under
+        # rope_scaling; transformers 5.x configs use rope_parameters. The
+        # shared helper accepts both and applies HF-exact YaRN semantics.
+        cos_half_np, sin_half_np = make_rope_half_tables(
+            config, attention_window, head_dim)
 
         cos_half_tensor = graph_ops.add_constant(
             network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
@@ -391,12 +377,21 @@ class GptOssPlugin:
                     return tensor
                 return network.add_cast(tensor, layer_trt_dtype).get_output(0)
 
+            layer_type = (
+                layer_types[layer_idx] if layer_idx < len(layer_types)
+                else "full_attention")
+            layer_mask = (
+                sliding_attention_mask
+                if (sliding_attention_mask is not None
+                    and layer_type == "sliding_attention")
+                else attention_mask)
+
             result = _add_gpt_oss_decoder_layer(
                 network=network,
                 hidden=layer_cast(hidden_state),
                 cache_k=layer_cast(cache_k_inputs[layer_idx]),
                 cache_v=layer_cast(cache_v_inputs[layer_idx]),
-                attention_mask=layer_cast(attention_mask),
+                attention_mask=layer_cast(layer_mask),
                 position_id=position_id,
                 cos_half_tensor=layer_cast(cos_half_tensor),
                 sin_half_tensor=layer_cast(sin_half_tensor),

@@ -471,8 +471,15 @@ def make_yarn_rope_table_half_dim(
     beta_fast: float,
     beta_slow: float,
     interleaved: bool = False,
+    truncate: bool = True,
+    attention_factor: float | None = None,
 ) -> np.ndarray:
     """Build a YaRN RoPE table for TRT native IRotaryEmbeddingLayer.
+
+    Matches transformers ``_compute_yarn_parameters``: ``truncate=False``
+    keeps float correction-range bounds, and cos/sin values are scaled by
+    ``attention_factor`` (defaulting to the paper's ``0.1 * ln(factor) + 1``
+    mscale when unset).
 
     Returns [max_cache_length, head_dim // 2], matching the half-dimension
     cache layout required by IRotaryEmbeddingLayer.
@@ -488,19 +495,75 @@ def make_yarn_rope_table_half_dim(
         rope_theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim))
     freq_inter = freq_extra / scaling_factor
 
-    low = max(int(np.floor(_yarn_correction_dim(
-        beta_fast, head_dim, rope_theta, original_max_position_embeddings))), 0)
-    high = min(int(np.ceil(_yarn_correction_dim(
-        beta_slow, head_dim, rope_theta, original_max_position_embeddings))), half - 1)
-    ramp = np.clip((np.arange(half, dtype=np.float64) - low) / max(high - low, 1), 0.0, 1.0)
+    low = _yarn_correction_dim(
+        beta_fast, head_dim, rope_theta, original_max_position_embeddings)
+    high = _yarn_correction_dim(
+        beta_slow, head_dim, rope_theta, original_max_position_embeddings)
+    if truncate:
+        low = np.floor(low)
+        high = np.ceil(high)
+    low = max(float(low), 0.0)
+    high = min(float(high), float(head_dim - 1))
+    if low == high:
+        high += 0.001  # prevent singularity (HF parity)
+    ramp = np.clip(
+        (np.arange(half, dtype=np.float64) - low) / (high - low), 0.0, 1.0)
     inv_freq = freq_inter * ramp + freq_extra * (1 - ramp)
 
-    table = np.full((max_cache_length, half), default, dtype=np.float32)
-    for pos in range(max_cache_length):
-        for d in range(half):
-            angle = pos * inv_freq[d]
-            table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
-    return table
+    if attention_factor is None:
+        attention_factor = (
+            0.1 * float(np.log(scaling_factor)) + 1.0
+            if scaling_factor > 1.0 else 1.0)
+
+    positions = np.arange(max_cache_length, dtype=np.float64)[:, None]
+    angles = positions * inv_freq[None, :]
+    table = (np.cos(angles) if cosine else np.sin(angles)) * attention_factor
+    return table.astype(np.float32)
+
+
+def add_sliding_window_mask(
+    network: trt.INetworkDefinition,
+    attention_mask: trt.ITensor,
+    position_id: trt.ITensor,
+    attention_window: int,
+    sliding_window: int,
+) -> trt.ITensor:
+    """Combine the runtime causal mask with a sliding-window restriction.
+
+    Cache column ``c`` of the attention window holds the K/V row written at
+    position ``c`` and the final column holds the current token, so a
+    sliding-attention layer at position ``p`` may only attend to columns
+    ``c >= p - (sliding_window - 1)``. Columns below that bound receive a
+    large negative penalty on top of the runtime-provided causal mask.
+
+    Returns a ``[1, attention_window]`` mask tensor in the dtype of
+    ``attention_mask``.
+    """
+    iota = add_constant(
+        network, (1, attention_window),
+        np.arange(attention_window, dtype=np.float32).reshape(1, -1))
+    pos_float = network.add_cast(position_id, trt.float32).get_output(0)
+    pos_2d = network.add_shuffle(pos_float)
+    pos_2d.reshape_dims = (1, 1)
+    window_span = add_constant(
+        network, (1, 1),
+        np.array([[float(sliding_window - 1)]], dtype=np.float32))
+    threshold = network.add_elementwise(
+        pos_2d.get_output(0), window_span,
+        trt.ElementWiseOperation.SUB).get_output(0)
+    out_of_window = network.add_elementwise(
+        iota, threshold, trt.ElementWiseOperation.LESS).get_output(0)
+    penalty_value = add_constant(
+        network, (1, 1), np.array([[-1e9]], dtype=np.float32))
+    zero = add_constant(
+        network, (1, 1), np.array([[0.0]], dtype=np.float32))
+    penalty = network.add_select(
+        out_of_window, penalty_value, zero).get_output(0)
+    if penalty.dtype != attention_mask.dtype:
+        penalty = network.add_cast(
+            penalty, attention_mask.dtype).get_output(0)
+    return network.add_elementwise(
+        attention_mask, penalty, trt.ElementWiseOperation.SUM).get_output(0)
 
 
 def make_llama4_attention_scale_table(
