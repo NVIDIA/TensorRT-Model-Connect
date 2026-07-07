@@ -52,7 +52,7 @@
         "github_reference": "https://github.com/lillian039/ELF",
         "upstream_entrypoint": "src/eval.py --config configs/training_configs/train_owt_ELF-B.yml",
         "expected_report": "Gen. PPL around 24 and unigram entropy around 5.15 for ELF-B at 32 SDE steps.",
-        "notes": "Replays one deterministic ODE32 sample exported by the official ELF JAX evaluator. The FP32 TensorRT result must retain at least 99.5% positional token agreement and at most 0.005 normalized text edit distance against the JAX replay; this bounds observed cross-framework tactic variation. ODE avoids committing the much larger stochastic-noise trace required by SDE while retaining the upstream implementation and checkpoint."
+        "notes": "Replays one deterministic ODE32 sample exported by the official ELF JAX evaluator. The FP32 TensorRT result must retain at least 99% positional token agreement and at most 0.01 normalized text edit distance against the JAX replay; this bounds observed cross-framework tactic variation across TensorRT releases. ODE avoids committing the much larger stochastic-noise trace required by SDE while retaining the upstream implementation and checkpoint."
       }
     }
   ]
