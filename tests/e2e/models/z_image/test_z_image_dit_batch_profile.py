@@ -417,3 +417,48 @@ def test_static_fp16_accepts_selective_fp32_dit_layers(
         "rotary_sin",
         "attention_mask",
     ]
+
+
+def test_sandwich_prescale_params_fp16_scales_and_swaps_eps() -> None:
+    """FP16 blocks pre-scale to_out/ff_w3 and use the compensated post-norm eps."""
+    weights = {
+        "b.to_out": np.ones((4, 4), dtype=np.float32),
+        "b.ff_w3": np.full((4, 4), 2.0, dtype=np.float32),
+    }
+    eps_t, sandwich_eps_t = object(), object()
+
+    w_out, w_ff3, norm_eps = z_image_dit_builder._sandwich_prescale_params(
+        weights, "b", eps_t, sandwich_eps_t, np.float16)
+    alpha = z_image_dit_builder._SANDWICH_PRESCALE
+    np.testing.assert_allclose(w_out, np.full((4, 4), alpha))
+    np.testing.assert_allclose(w_ff3, np.full((4, 4), 2.0 * alpha))
+    assert norm_eps is sandwich_eps_t
+
+    # FP32 blocks (pinned selectors) keep the original weights and epsilon.
+    w_out, w_ff3, norm_eps = z_image_dit_builder._sandwich_prescale_params(
+        weights, "b", eps_t, sandwich_eps_t, np.float32)
+    assert w_out is weights["b.to_out"]
+    assert w_ff3 is weights["b.ff_w3"]
+    assert norm_eps is eps_t
+
+    # FP32 base precision never creates a sandwich constant.
+    w_out, _w_ff3, norm_eps = z_image_dit_builder._sandwich_prescale_params(
+        weights, "b", eps_t, None, np.float16)
+    assert w_out is weights["b.to_out"]
+    assert norm_eps is eps_t
+
+
+def test_sandwich_prescale_epsilon_identity() -> None:
+    """The prescale and epsilon compensation preserve RMSNorm in real arithmetic."""
+    rng = np.random.default_rng(3)
+    x = rng.standard_normal((5, 64)).astype(np.float64) * 37.0
+    gamma = rng.standard_normal(64)
+    eps = 1e-5
+    alpha = z_image_dit_builder._SANDWICH_PRESCALE
+
+    def rms_norm(v, e):
+        return v / np.sqrt((v ** 2).mean(axis=-1, keepdims=True) + e) * gamma
+
+    np.testing.assert_allclose(
+        rms_norm(x, eps), rms_norm(alpha * x, eps * alpha * alpha),
+        rtol=1e-12)

@@ -15,6 +15,7 @@ import json
 import struct
 import sys
 import types
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -27,6 +28,19 @@ try:
     import tensorrt_model_connect.families.z_image as zimg_mod
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
+
+
+@pytest.mark.parametrize(
+    "manifest_name",
+    ["z-image-turbo.json", "z-image-turbo-l0.json"],
+)
+def test_caption_mask_manifests_preserve_audited_precision(manifest_name: str) -> None:
+    """Caption parity must preserve the reduced-precision contract from #371."""
+    manifest_path = Path(__file__).parent / "manifests" / manifest_name
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["precision"] == "fp16"
+    assert manifest["fp32_layers"] == [2, 3, 4, 7, 8]
 
 
 def _cfg(**raw_overrides: object) -> ModelConfig:
