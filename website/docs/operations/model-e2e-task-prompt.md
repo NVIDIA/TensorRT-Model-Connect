@@ -31,9 +31,8 @@ You are working in tensorrt-model-connect. Add one model end-to-end so it is
   - python3 -c "import tensorrt, torch, transformers; print('ok')"
   - pip install --no-deps -e . -C py-only=true
   - cmake -S . -B build -G Ninja \
-    -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
-    -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/
-  tensorrt_libs}/libnvinfer.so" \
+    -DTRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/opt/tensorrt/include}" \
+    -DTRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/tensorrt/lib}/libnvinfer.so" \
     -DTRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
     -DTRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so
   - cmake --build build -j

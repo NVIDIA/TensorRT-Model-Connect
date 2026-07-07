@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Maintainer-owned source metadata for the pinned TensorRT SDK. The publishing
+# script reads these defaults as well as passing TENSORRT_VERSION to the build.
+ARG TENSORRT_VERSION=11.2.0.113
+ARG TENSORRT_SDK_IMAGE=ghcr.io/nvidia/tensorrt-model-connect/tensorrt-sdk:11.2.0.113
+ARG TENSORRT_SDK_URL=https://artifactory.nvidia.com/artifactory/sw-tensorrt-generic-local/cicd/rel-11.2/L1_Nightly/1/trt_build_aarch64_ubuntu22.04_cuda13.3_full_optimized_cmake.tar
+ARG TENSORRT_SDK_RANGE=1536-2540981352
+ARG TENSORRT_SDK_SHA256=3d09048311c7bf8f6d32b3e3cfe2c615de9397e9289f4d436277dd35cb58c3dd
+
+FROM ubuntu:24.04 AS unpack
+
+ARG TENSORRT_VERSION
+ARG TENSORRT_SDK_SHA256
+
+RUN apt-get update && apt-get install -y --no-install-recommends zstd && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY tensorrt-sdk.tar.zst /tmp/tensorrt-sdk.tar.zst
+RUN echo "${TENSORRT_SDK_SHA256}  /tmp/tensorrt-sdk.tar.zst" | sha256sum --check - && \
+    mkdir -p /opt/tensorrt && \
+    tar --zstd -xf /tmp/tensorrt-sdk.tar.zst \
+      --strip-components=1 -C /opt/tensorrt && \
+    test -f "/opt/tensorrt/python/tensorrt-${TENSORRT_VERSION}-cp312-none-linux_aarch64.whl" && \
+    grep -q "#define TRT_BUILD_ENTERPRISE 113" /opt/tensorrt/include/NvInferVersion.h
+
+FROM scratch
+
+ARG TENSORRT_VERSION
+
+LABEL org.opencontainers.image.source="https://github.com/NVIDIA/TensorRT-Model-Connect"
+LABEL org.opencontainers.image.description="Pinned TensorRT SDK for TensorRT-Model-Connect"
+LABEL org.opencontainers.image.version="${TENSORRT_VERSION}"
+
+COPY --from=unpack /opt/tensorrt /opt/tensorrt

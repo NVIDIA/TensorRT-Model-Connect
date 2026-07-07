@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-FROM nvidia/cuda:13.0.0-devel-ubuntu24.04 AS ci-base
+ARG TENSORRT_SDK_IMAGE=ghcr.io/nvidia/tensorrt-model-connect/tensorrt-sdk:11.2.0.113@sha256:18c12935c4e7f507d8719d44509cb5623b17f298ee951d844bd9e558a8309929
+FROM ${TENSORRT_SDK_IMAGE} AS tensorrt_sdk
 
-ARG TENSORRT_VERSION=11.0.0.114
-ARG TENSORRT_DEB_VERSION=11.0.0.114-1+cuda13.2
+FROM nvidia/cuda:13.3.0-devel-ubuntu24.04 AS ci-base
+
+ARG TENSORRT_VERSION=11.2.0.113
 ARG PYTORCH_CUDA_INDEX=https://download.pytorch.org/whl/cu130
 ARG TORCH_VERSION=2.12.0+cu130
 ARG TORCHVISION_VERSION=0.27.0+cu130
@@ -29,22 +31,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12-venv \
     python3-pip \
     lcov \
-    "libnvinfer-headers-dev=${TENSORRT_DEB_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
+
+# TensorRT 11.2 nightlies are mirrored to an access-controlled,
+# repository-linked GHCR image by a maintainer. CI pulls this stage with its
+# scoped GITHUB_TOKEN, so NVIDIA Artifactory credentials never enter GitHub
+# Actions. Install the SDK assets into the same locations used by the previous
+# TensorRT packages.
+COPY --from=tensorrt_sdk /opt/tensorrt/include/ /usr/include/aarch64-linux-gnu/
+COPY --from=tensorrt_sdk /opt/tensorrt/python/tensorrt-${TENSORRT_VERSION}-cp312-none-linux_aarch64.whl /opt/tensorrt/python/
+RUN \
+    test -f "/opt/tensorrt/python/tensorrt-${TENSORRT_VERSION}-cp312-none-linux_aarch64.whl" && \
+    grep -q "#define TRT_BUILD_ENTERPRISE 113" /usr/include/aarch64-linux-gnu/NvInferVersion.h
 
 # ── Python venv with all deps ───────────────────────────────────────────────
 ENV VIRTUAL_ENV=/opt/venv
 RUN python3.12 -m venv $VIRTUAL_ENV
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-# TensorRT Python/runtime libraries. Keep this in sync with the headers above:
-# CMake derives the backend ABI alias from NvInferVersion.h.
+# Install the runtime libraries and Python bindings from the same SDK as the
+# headers. CMake derives the backend ABI alias from NvInferVersion.h.
+COPY --from=tensorrt_sdk /opt/tensorrt/lib/ /opt/venv/lib/python3.12/site-packages/tensorrt_libs/
 RUN pip install -U pip && \
-    pip install --no-cache-dir "tensorrt_cu13==${TENSORRT_VERSION}" && \
-    pip install --no-cache-dir "tensorrt==${TENSORRT_VERSION}" --no-deps
+    pip install --no-cache-dir \
+      "/opt/tensorrt/python/tensorrt-${TENSORRT_VERSION}-cp312-none-linux_aarch64.whl"
 
-# CUDA Python bindings (needed by debug_runner.py / diff tools). Match the CUDA
-# 13.0 Python stack pulled by PyTorch.
+# CUDA Python bindings (needed by debug_runner.py / diff tools). Match the
+# CUDA 13.0 Python stack pulled by PyTorch.
 RUN pip install "cuda-python==13.0.3"
 
 # Apache TVM-FFI: the kernel-bridge ABI that lets compiled CUDA modules
@@ -122,11 +135,12 @@ RUN pip install --force-reinstall \
       "torchaudio==${TORCHAUDIO_VERSION}" \
       --index-url "${PYTORCH_CUDA_INDEX}" && \
     pip install "setuptools>=80,<82" && \
-    python3 -c "import tensorrt; assert tensorrt.__version__ == '${TENSORRT_VERSION}', tensorrt.__version__" && \
+    LD_LIBRARY_PATH="/opt/venv/lib/python3.12/site-packages/tensorrt_libs:/usr/local/cuda/lib64" \
+      python3 -c "import tensorrt; assert tensorrt.__version__ == '${TENSORRT_VERSION}', tensorrt.__version__" && \
     python3 -c "import torch; assert torch.__version__ == '${TORCH_VERSION}', torch.__version__" && \
     python3 -c "import importlib.metadata as m; assert m.version('nvidia-modelopt') == '${MODELOPT_VERSION}', m.version('nvidia-modelopt')"
 
-# Create libnvinfer.so symlink (pip ships the versioned libnvinfer.so.11 only)
+# Create libnvinfer.so symlink when the SDK only ships the versioned library.
 RUN TRT_LIB=$(python3 -c \
       "import importlib.util; s=importlib.util.find_spec('tensorrt_libs'); print(s.submodule_search_locations[0])") && \
     [ ! -f "$TRT_LIB/libnvinfer.so" ] && ln -sf libnvinfer.so.11 "$TRT_LIB/libnvinfer.so" || true && \

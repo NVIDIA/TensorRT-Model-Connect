@@ -1517,12 +1517,11 @@ for wheel in sys.argv[1:]:
         raise SystemExit(f"{wheel}: native trtmc must be installed directly, not via console_scripts")
     if not backend_entries:
         raise SystemExit(f"{wheel}: packaged native TensorRT backend DSO is missing")
-    trt_dep_variants = (
-        "Requires-Dist: tensorrt<11.1,>=11.0.0.114",
-        "Requires-Dist: tensorrt>=11.0.0.114,<11.1",
-    )
-    if not any(dep in metadata for dep in trt_dep_variants):
-        raise SystemExit(f"{wheel}: TensorRT 11 dependency metadata is missing")
+    trt_dependency = "Requires-Dist: tensorrt==11.2.0.113"
+    if trt_dependency not in metadata:
+        raise SystemExit(
+            f"{wheel}: pinned TensorRT 11.2.0.113 dependency metadata is missing"
+        )
     if f"-{EXPECTED_PLATFORM}" not in wheel_metadata:
         raise SystemExit(f"{wheel}: WHEEL metadata is missing {EXPECTED_PLATFORM}")
     audit = subprocess.run(

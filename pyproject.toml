@@ -21,7 +21,7 @@ dependencies = [
     "transformers>=4.40",
     "huggingface_hub>=0.23",
     "sentencepiece>=0.1.99",
-    "tensorrt>=11.0.0.114,<11.1",
+    "tensorrt==11.2.0.113",
     "cuda-python>=13.0.3,<14",
     "PyYAML>=6.0",
     "tomli>=2.0; python_version < '3.11'",

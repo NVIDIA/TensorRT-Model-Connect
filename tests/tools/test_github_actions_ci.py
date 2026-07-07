@@ -49,6 +49,19 @@ def test_workflows_define_shared_hf_cache_env() -> None:
     assert "-e HF_MODULES_CACHE=/work/hf-modules" in runner
 
 
+def test_workflows_pull_tensorrt_sdk_from_ghcr_without_artifactory_secrets() -> None:
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text()
+    assert "ghcr.io/nvidia/tensorrt-model-connect/tensorrt-sdk:11.2.0.113@sha256:" in dockerfile
+
+    for workflow in ("nightly.yml", "trtmc-ci.yml"):
+        text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
+        assert "packages: read" in text
+        assert "GHCR_TOKEN: ${{ github.token }}" in text
+        assert "DOCKER_CONFIG=$docker_config" in text
+        assert "TRTMC_ARTIFACTORY_USERNAME" not in text
+        assert "TRTMC_ARTIFACTORY_PASSWORD" not in text
+
+
 def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
     stage_text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     start_text = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()

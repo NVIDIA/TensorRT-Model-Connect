@@ -215,6 +215,7 @@ jobs:
       matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}
     permissions:
       contents: read
+      packages: read
     uses: ./.github/workflows/model-proof.yml
     with:
       model: ${{ matrix.model }}

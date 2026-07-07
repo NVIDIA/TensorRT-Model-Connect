@@ -217,7 +217,14 @@ rebuild_reasons=()
 mapfile -t changed_paths < <(collect_docker_input_changes)
 
 version_file="$(mktemp)"
-trap 'rm -f "$version_file"' EXIT
+empty_context=""
+cleanup() {
+  rm -f "$version_file"
+  if [ -n "$empty_context" ]; then
+    rm -rf "$empty_context"
+  fi
+}
+trap cleanup EXIT
 
 if ! docker image inspect "$image" >/dev/null 2>&1; then
   rebuild_reasons+=("CI Docker image '$image' is missing")
