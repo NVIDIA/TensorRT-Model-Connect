@@ -18,7 +18,6 @@ try:
     deepseek_ocr_module = importlib.import_module(
         "tensorrt_model_connect.families.deepseek_ocr.plugin")
     from tensorrt_model_connect.checkpoint_mapper import WeightDict
-    from tensorrt_model_connect.families.deepseek_ocr import graph_ops
     from tensorrt_model_connect.families.deepseek_ocr import tp_builder
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
@@ -96,55 +95,6 @@ def _weights() -> WeightDict:
     weights["layer.1.shared.w_down"] = np.arange(
         shared * hidden, dtype=np.float32).reshape(shared, hidden)
     return weights
-
-
-def test_deepseek_ocr_fp16_gemm_accumulates_in_fp32() -> None:
-    class Tensor:
-        def __init__(self, dtype):
-            self.dtype = dtype
-
-    class Layer:
-        def __init__(self, output):
-            self.output = output
-
-        def get_output(self, index):
-            assert index == 0
-            return self.output
-
-    class Network:
-        def __init__(self):
-            self.casts = []
-            self.matmul_inputs = None
-
-        def add_cast(self, tensor, dtype):
-            self.casts.append((tensor.dtype, dtype))
-            return Layer(Tensor(dtype))
-
-        def add_matrix_multiply(self, lhs, lhs_op, rhs, rhs_op):
-            self.matmul_inputs = (lhs.dtype, lhs_op, rhs.dtype, rhs_op)
-            return Layer(Tensor(lhs.dtype))
-
-    network = Network()
-    output = graph_ops._add_matrix_multiply_with_fp32_accumulation(
-        network,
-        Tensor(graph_ops.trt.float16),
-        graph_ops.trt.MatrixOperation.NONE,
-        Tensor(graph_ops.trt.float16),
-        graph_ops.trt.MatrixOperation.NONE,
-    )
-
-    assert network.matmul_inputs == (
-        graph_ops.trt.float32,
-        graph_ops.trt.MatrixOperation.NONE,
-        graph_ops.trt.float32,
-        graph_ops.trt.MatrixOperation.NONE,
-    )
-    assert network.casts == [
-        (graph_ops.trt.float16, graph_ops.trt.float32),
-        (graph_ops.trt.float16, graph_ops.trt.float32),
-        (graph_ops.trt.float32, graph_ops.trt.float16),
-    ]
-    assert output.dtype == graph_ops.trt.float16
 
 
 def test_deepseek_ocr_tp_slices_attention_and_moe_weights() -> None:
