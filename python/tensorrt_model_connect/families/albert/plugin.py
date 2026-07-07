@@ -42,7 +42,7 @@ def _load_ln(readers, prefix):
 
 class AlbertPlugin:
     name = "albert"
-    runtime_strategy = "albert_encoder_only"
+    runtime_strategy = "bert_encoder_only"
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() == "albert"
