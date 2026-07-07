@@ -172,6 +172,22 @@ for backend in backends:
 PY
 }
 
+install_tensorrt_sdk_wheel() {
+  local target_python="$1"
+  local trt_version
+  local python_tag
+  local trt_wheel
+
+  trt_version="$(python -c 'import tensorrt; print(tensorrt.__version__)')"
+  python_tag="$("$target_python" -c 'import sys; print(f"cp{sys.version_info.major}{sys.version_info.minor}")')"
+  trt_wheel="/opt/tensorrt/python/tensorrt-${trt_version}-${python_tag}-none-linux_aarch64.whl"
+  if [ ! -f "$trt_wheel" ]; then
+    echo "ERROR: TensorRT SDK wheel not found: $trt_wheel" >&2
+    return 1
+  fi
+  "$target_python" -m pip install --disable-pip-version-check "$trt_wheel"
+}
+
 install_built_wheel_once() {
   ensure_ci_state_dir
   local sentinel
@@ -1566,6 +1582,7 @@ PY
   rm -rf "$smoke_venv"
   python -m venv "$smoke_venv"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
+  install_tensorrt_sdk_wheel "$smoke_venv/bin/python"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$install_wheel"
   "$smoke_venv/bin/python" - "$smoke_venv/bin/trtmc" <<'PY'
 from pathlib import Path
@@ -1735,6 +1752,7 @@ PY
   mkdir -p "$smoke_root"
   python -m venv "$smoke_venv"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check --upgrade pip
+  install_tensorrt_sdk_wheel "$smoke_venv/bin/python"
   "$smoke_venv/bin/python" -m pip install --disable-pip-version-check "$wheel"
   "$smoke_venv/bin/python" -m pip check
   "$smoke_venv/bin/python" - "$smoke_venv/bin/trtmc" <<'PY'

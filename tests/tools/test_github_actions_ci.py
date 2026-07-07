@@ -52,6 +52,14 @@ def test_workflows_define_shared_hf_cache_env() -> None:
 def test_workflows_pull_tensorrt_sdk_from_ghcr_without_artifactory_secrets() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text()
     assert "ghcr.io/nvidia/tensorrt-model-connect/tensorrt-sdk:11.2.0.113@sha256:" in dockerfile
+    assert "ENV TRT_ROOT=" not in dockerfile
+    assert "ENV PIP_FIND_LINKS=" not in dockerfile
+    assert "ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs" in dockerfile
+    assert "ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu" in dockerfile
+
+    ci_script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    install_call = 'install_tensorrt_sdk_wheel "$smoke_venv/bin/python"'
+    assert ci_script.count(install_call) == 2
 
     for workflow in ("nightly.yml", "trtmc-ci.yml"):
         text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()

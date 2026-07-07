@@ -56,9 +56,9 @@ if(DEFINED ENV{CUDA_HOME})
   list(APPEND _trtmc_default_search_paths "$ENV{CUDA_HOME}/lib64")
 endif()
 
-# Public TensorRT pip packages ship libnvinfer.so under a Python site-packages
-# tensorrt_libs/ tree. Keep that discovery fallback for compatible developer
-# environments; the pinned nightly SDK is found through TRT_ROOT above.
+# The TensorRT pip wheel (tensorrt_cu13) ships libnvinfer.so under a Python
+# site-packages tensorrt_libs/ tree. Ask Python where so CMake can find it
+# without manual hints. Mirrors the apache-tvm-ffi discovery below.
 find_program(_trtmc_python NAMES python3.12 python3 python)
 if(_trtmc_python)
   execute_process(
