@@ -151,7 +151,7 @@ DiffusionParts load_diffusion_parts(IBackend* backend, const BundleFile& bundle,
     parts.denoiser =
         load_trt_module_from_plan(backend, find_section(bundle, denoiser_section_name),
                                   denoiser_section_name.c_str(), effective_denoiser_options);
-    parts.vae = load_trt_module_from_plan(backend, find_section(bundle, "vae_decoder_plan"),
+    parts.vae = load_trt_module_from_plan(backend, find_section(bundle, "vae_decoder"),
                                           "vae_decoder_plan", options);
     parts.vision = try_load_trt_module_from_plan(
         backend, find_section(bundle, "vision_engine_plan"), "vision_engine_plan", options);
