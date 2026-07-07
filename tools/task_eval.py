@@ -152,6 +152,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
             build_args.get("max_cache_length", 256) if isinstance(build_args, dict) else 256,
         ),
         "precision": raw.get("precision", "fp32"),
+        "fp32_layers": raw.get("fp32_layers", []),
         "quantization": raw.get("quantization", {}),
         "build_args": build_args if isinstance(build_args, dict) else {},
         "fp8_scales": raw.get("fp8_scales", ""),
@@ -5052,6 +5053,10 @@ def build_bundle_command(
     precision = str(model.get("precision", "fp32") or "fp32")
     if precision != "fp32":
         cmd.extend(["--precision", precision])
+    fp32_layers = model.get("fp32_layers") or []
+    if fp32_layers:
+        cmd.extend(
+            ["--fp32-layers", ",".join(str(layer) for layer in fp32_layers)])
     quantization = model.get("quantization", {})
     if isinstance(quantization, dict):
         quant_format = quantization.get("format")

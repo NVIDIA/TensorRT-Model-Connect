@@ -1777,6 +1777,43 @@ def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> No
     assert "--verbose" in cmd
 
 
+def test_build_bundle_command_passes_manifest_fp32_layers(tmp_path: Path) -> None:
+    """Reduced-precision selectors must reach the build, matching the E2E harness."""
+    model = {
+        "name": "case",
+        "hf_id": "org/model",
+        "max_cache_length": 256,
+        "precision": "fp16",
+        "fp32_layers": [2, 3, 4, 7, 8],
+    }
+
+    cmd = task_eval.build_bundle_command(
+        model,
+        trtmc_binary="build/trtmc",
+        bundle_path=tmp_path / "case.trtfb",
+    )
+
+    idx = cmd.index("--fp32-layers")
+    assert cmd[idx : idx + 2] == ["--fp32-layers", "2,3,4,7,8"]
+
+
+def test_build_bundle_command_omits_fp32_layers_when_absent(tmp_path: Path) -> None:
+    model = {
+        "name": "case",
+        "hf_id": "org/model",
+        "max_cache_length": 256,
+        "precision": "fp16",
+    }
+
+    cmd = task_eval.build_bundle_command(
+        model,
+        trtmc_binary="build/trtmc",
+        bundle_path=tmp_path / "case.trtfb",
+    )
+
+    assert "--fp32-layers" not in cmd
+
+
 def test_suite_build_cache_minimum_overrides_manifest_cache() -> None:
     suite = {"build": {"min_max_cache_length": 1024}}
     model = {"max_cache_length": 256}
