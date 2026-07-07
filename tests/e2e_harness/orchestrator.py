@@ -1536,6 +1536,19 @@ class E2EOrchestrator:
             state.sink.write_stage_output(stage.name, trt_output, prefix="trt")
             _log_stage_subprocess(state.sink, stage.name, trt_output, "trt")
             _auto_register_artifacts(state.sink, trt_output, "trt")
+            returncode = trt_output.data.get("returncode")
+            if isinstance(returncode, int) and returncode != 0:
+                stderr = trt_output.data.get("stderr")
+                detail = f"returncode={returncode}"
+                if stderr:
+                    detail = f"{detail}: {stderr}"
+                state.stage_results[stage.name] = CompareResult(
+                    stage_name=stage.name,
+                    status=StageStatus.ERROR.value,
+                    message=f"TRT run failed ({detail})",
+                )
+                self._mark_required_stage_failed(state, stage)
+                return None
             runtime_path_error = _validate_trt_runtime_path(state.case, state.ctx, trt_output)
             if runtime_path_error is not None:
                 state.stage_results[stage.name] = CompareResult(
