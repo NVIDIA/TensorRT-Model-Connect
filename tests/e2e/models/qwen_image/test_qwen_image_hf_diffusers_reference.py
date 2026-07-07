@@ -86,6 +86,19 @@ def test_qwen_image_reference_uses_qwen_image_pipeline(monkeypatch, tmp_path):
     assert "prompt = 'A red apple on a wooden table'" in script
 
 
+def test_qwen_image_reference_uses_cpu_offload_for_48gb_gpus(monkeypatch, tmp_path):
+    case = _make_qwen_image_case(inputs={"prompt": "scene"})
+    ctx = _make_ctx(case, tmp_path)
+    captured = _capture_subprocess(monkeypatch)
+
+    qwen_image_hf_diffusers.HfDiffusersReference().run_stage(
+        case, StageSpec(name="end_to_end"), ctx)
+
+    script = _extract_script(captured["cmd"])
+    assert "pipe.enable_model_cpu_offload()" in script
+    assert 'pipe.to("cuda")' not in script
+
+
 def test_qwen_image_reference_falls_back_to_guidance_scale(monkeypatch, tmp_path):
     case = _make_qwen_image_case(
         inputs={

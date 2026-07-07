@@ -1,0 +1,31 @@
+{
+  "name": "nemotron-3.5-asr-streaming-0.6b",
+  "hf_id": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+  "bundle": "nemotron-3.5-asr-streaming-0.6b.trtfb",
+  "family": "nemotron_speech_streaming",
+  "runtime_strategy": "nemotron_speech_streaming_speech_to_text_rnnt",
+  "task_strategy": "speech_to_text",
+  "precision": "fp16",
+  "max_cache_length": 128,
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "nemotron-3.5-asr-streaming-0.6b",
+      "trace_id": "IT-E2E-NEMO-RNNT-MULTILINGUAL-01",
+      "reference_backend": "hf_transformers",
+      "test_type": "transcription",
+      "prompt": "test",
+      "max_new_tokens": 80,
+      "test_input_audio": "data/Recording.wav",
+      "language": "en-US",
+      "streaming": {
+        "enabled": true,
+        "chunk_ms": 1120,
+        "att_context_size": [56, 13]
+      },
+      "metadata": {
+        "notes": "Reference runs NeMo's EncDecRNNTBPEModelWithPrompt via a JSONL manifest with `lang: en-US` (the field NeMo's Lhotse loader maps to supervisions[0].language); audio is converted to mono 16 kHz first. Comparator gates on WER/CER thresholds set in the sidecar."
+      }
+    }
+  ]
+}

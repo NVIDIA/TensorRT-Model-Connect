@@ -5,8 +5,12 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace trtmc {
 
@@ -35,6 +39,15 @@ struct RnntConfig {
     int32_t streaming_pre_encode_cache{9};
     int32_t streaming_drop_pre_encoded{2};
     bool causal_downsampling{false};
+
+    // Multilingual / prompt-kernel variant fields.
+    bool has_prompt_kernel{false};
+    int32_t num_prompts{0};
+    std::unordered_map<std::string, int32_t> prompt_dictionary;
+
+    // Per-checkpoint list of supported att_context_right values (e.g.,
+    // {13,6,1,0} for en-0.6b, {13,6,3,0} for the 3.5 multilingual).
+    std::vector<int32_t> supported_right_contexts;
 };
 
 struct RnntStreamingSchedule {
@@ -54,8 +67,12 @@ struct RnntStreamingSchedule {
     int32_t drop_extra_pre_encoded{2};
 };
 
-inline bool is_supported_nemotron_att_context(int32_t left, int32_t right) {
-    return left == 70 && (right == 0 || right == 1 || right == 6 || right == 13);
+inline bool is_supported_nemotron_att_context(int32_t left, int32_t right, int32_t supported_left,
+                                              const std::vector<int32_t>& supported_right) {
+    if (left != supported_left)
+        return false;
+    return std::find(supported_right.begin(), supported_right.end(), right) !=
+           supported_right.end();
 }
 
 inline RnntStreamingSchedule make_nemotron_streaming_schedule(int32_t att_context_left,
@@ -63,9 +80,11 @@ inline RnntStreamingSchedule make_nemotron_streaming_schedule(int32_t att_contex
                                                               int32_t sample_rate = 16000,
                                                               int32_t mel_hop_length = 160,
                                                               int32_t subsampling_factor = 8) {
-    if (!is_supported_nemotron_att_context(att_context_left, att_context_right))
-        throw std::invalid_argument("RNN-T streaming supports att_context_size "
-                                    "[70,0], [70,1], [70,6], or [70,13]");
+    if (att_context_left <= 0)
+        throw std::invalid_argument("Nemotron RNNT streaming requires positive att_context_left");
+    if (att_context_right < 0)
+        throw std::invalid_argument(
+            "Nemotron RNNT streaming requires non-negative att_context_right");
     if (sample_rate <= 0 || mel_hop_length <= 0 || subsampling_factor <= 0)
         throw std::invalid_argument("RNN-T streaming schedule requires positive "
                                     "sample_rate, mel_hop_length, and subsampling_factor");

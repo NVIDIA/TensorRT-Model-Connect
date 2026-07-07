@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "sana_wm"
+runtime_library = "libtrtmc_model_sana_wm.so"
+runtime_plugins = ["plugin.cpp|register_sana_wm_plugin"]
+runtime_config_schemas = ["config_schema.cpp|register_sana_wm_schema"]
+runtime_strategies = ["diffusion_sana_wm"]
+runtime_tests = [
+  "test_sana_wm_pipeline|test_sana_wm_pipeline.cpp|trtmc_model_sana_wm|_|_",
+]

@@ -14,6 +14,7 @@ from tensorrt_model_connect import trt_compat
 from . import graph_blocks, graph_ops
 from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
 from .standard_decoder_builder import _apply_norm, _mark_debug_output
+from .utils import make_rope_half_tables
 
 trt = trt_compat.get_trt()
 
@@ -492,34 +493,7 @@ def _make_rope_tables(
     attention_window: int,
     head_dim: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    rope_params = config.raw.get("rope_parameters", {})
-    rope_type = rope_params.get("rope_type", "default")
-    if rope_type == "yarn":
-        yarn_factor = float(rope_params.get("factor", 1.0))
-        yarn_orig_max = int(rope_params.get(
-            "original_max_position_embeddings", 4096))
-        yarn_beta_fast = float(rope_params.get("beta_fast", 32.0))
-        yarn_beta_slow = float(rope_params.get("beta_slow", 1.0))
-        return (
-            graph_ops.make_yarn_rope_table_half_dim(
-                attention_window, head_dim, config.rope_theta, True,
-                scaling_factor=yarn_factor,
-                original_max_position_embeddings=yarn_orig_max,
-                beta_fast=yarn_beta_fast,
-                beta_slow=yarn_beta_slow),
-            graph_ops.make_yarn_rope_table_half_dim(
-                attention_window, head_dim, config.rope_theta, False,
-                scaling_factor=yarn_factor,
-                original_max_position_embeddings=yarn_orig_max,
-                beta_fast=yarn_beta_fast,
-                beta_slow=yarn_beta_slow),
-        )
-    return (
-        graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, True),
-        graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, False),
-    )
+    return make_rope_half_tables(config, attention_window, head_dim)
 
 
 def build_gpt_oss_tp_engine(
@@ -591,16 +565,34 @@ def build_gpt_oss_tp_engine(
     if debug_layer_outputs:
         _mark_debug_output(network, hidden_state, "debug_embed")
 
+    # Sliding-attention layers attend only within the configured window;
+    # feed them a mask that additionally hides out-of-window cache columns.
+    layer_types = list(config.raw.get("layer_types") or [])
+    sliding_window = int(config.raw.get("sliding_window") or 0)
+    sliding_attention_mask = None
+    if sliding_window > 0 and "sliding_attention" in layer_types:
+        sliding_attention_mask = graph_ops.add_sliding_window_mask(
+            network, attention_mask, position_id,
+            attention_window, sliding_window)
+
     present_k_outputs = []
     present_v_outputs = []
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
+        layer_type = (
+            layer_types[layer_idx] if layer_idx < len(layer_types)
+            else "full_attention")
+        layer_mask = (
+            sliding_attention_mask
+            if (sliding_attention_mask is not None
+                and layer_type == "sliding_attention")
+            else attention_mask)
         result = _add_gpt_oss_tp_decoder_layer(
             network=network,
             hidden=hidden_state,
             cache_k=cache_k_inputs[layer_idx],
             cache_v=cache_v_inputs[layer_idx],
-            attention_mask=attention_mask,
+            attention_mask=layer_mask,
             position_id=position_id,
             cos_half_tensor=cos_half_tensor,
             sin_half_tensor=sin_half_tensor,

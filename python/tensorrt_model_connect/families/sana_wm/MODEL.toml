@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "sana_wm"
+plugin = "sana_wm"
+module = "plugin"
+config_adapter = "model_config.py|config_from_dir"
+aliases = [
+  "sana-wm",
+  "sana_wm",
+  "sanamsvideocamctrl_1600m_p1_d20",
+]
+prefixes = [
+  "sana_wm",
+]
+hf_warm_dependencies = [
+  "stage-1-text-encoder|Efficient-Large-Model/gemma-2-2b-it",
+]
+hf_allow_patterns = [
+  "README.md",
+  "config.yaml",
+  "model_index.json",
+  "pipeline*.py",
+  "asset/sana_wm/**",
+  "inference_video_scripts/**",
+  "scheduler/**",
+  "dit/**",
+  "vae/**",
+  "text_encoder/**",
+  "refiner/**",
+]

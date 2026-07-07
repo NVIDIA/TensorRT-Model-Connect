@@ -26,6 +26,7 @@ from pathlib import Path
 
 from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..parity import ensure_initial_latents, uses_shared_initial_latents
 from ._runtime_common import (
     _distributed_runtime_config,
     _ensure_distributed_runtime_env,
@@ -289,6 +290,18 @@ class DiffusionMediaRunner:
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 30)
         ld_path = _build_ld_library_path(ctx)
+        initial_latents = None
+        if uses_shared_initial_latents(case):
+            try:
+                initial_latents = ensure_initial_latents(case, ctx)
+            except Exception as exc:
+                return StageOutput(
+                    stage_name=stage.name,
+                    data={"returncode": 1, "stderr": str(exc), "num_frames": 0},
+                    text="",
+                    timing_s=0.0,
+                    metadata={"command": "create_pixart_initial_latents"},
+                )
 
         with tempfile.TemporaryDirectory(prefix="trtmc_frames_") as frame_dir:
             cmd = [
@@ -296,6 +309,10 @@ class DiffusionMediaRunner:
                 "--prompt", prompt,
                 "--num-steps", str(num_steps),
             ]
+            if initial_latents is not None:
+                cmd.extend(["--initial-latents-raw", str(initial_latents.path)])
+            if ctx.model_plugin_dir:
+                cmd.extend(["--model-plugin-dir", ctx.model_plugin_dir])
             guidance_scale = case.inputs.get("guidance_scale")
             if guidance_scale is not None:
                 cmd.extend(["--guidance-scale", str(guidance_scale)])
@@ -386,6 +403,13 @@ class DiffusionMediaRunner:
                 # Passed through to the comparator for CLIP semantic metrics.
                 "prompt": case.inputs.get("prompt") or case.inputs.get("test_prompt"),
             }
+            if initial_latents is not None:
+                e2e_data.update(
+                    {
+                        "initial_latents_path": str(initial_latents.path),
+                        "initial_latents_sha256": initial_latents.sha256,
+                    }
+                )
             if stderr_log:
                 e2e_data["stderr_log"] = stderr_log
             if distributed_runtime:

@@ -14,7 +14,9 @@
 
 #include <cstdint>
 #include <map>
+#include <nlohmann/json.hpp>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -37,6 +39,30 @@ TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::stri
 
 std::string tp_engine_section_name(int32_t rank) {
     return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+// Parse the small `prompt_dictionary` object emitted by the Python builder.
+// Defers the actual parsing to nlohmann/json after extracting the object's
+// text via the shared helper, so the schema-tolerant behaviour matches the
+// rest of the bundle-config readers.
+std::unordered_map<std::string, int32_t> extract_string_int_map(const std::string& json,
+                                                                const std::string& key) {
+    const auto obj_text = extract_json_object_text(json, key);
+    if (obj_text.empty())
+        return {};
+    try {
+        const auto parsed = nlohmann::json::parse(obj_text);
+        if (!parsed.is_object())
+            return {};
+        std::unordered_map<std::string, int32_t> out;
+        for (auto it = parsed.begin(); it != parsed.end(); ++it) {
+            if (it.value().is_number_integer())
+                out.emplace(it.key(), it.value().get<int32_t>());
+        }
+        return out;
+    } catch (const nlohmann::json::exception&) {
+        return {};
+    }
 }
 
 } // namespace
@@ -67,9 +93,25 @@ class NemotronSpeechStreamingPlugin final : public IPipelinePlugin {
             ctx.backend, find_section(ctx.bundle, pred_section), "rnnt predictor", pred_opts);
         auto joint_loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, "joint_engine_plan"), "rnnt joint", opts);
+        std::unique_ptr<TrtModule> prompt_kernel_module;
+        const bool has_prompt_kernel =
+            extract_json_bool(ctx.config_json, "rnnt_has_prompt_kernel", false);
+        if (has_prompt_kernel) {
+            const auto* pk_plan = find_section(ctx.bundle, "prompt_kernel_plan");
+            if (!pk_plan)
+                throw std::runtime_error(
+                    "rnnt_has_prompt_kernel=true but bundle missing prompt_kernel_plan section");
+            auto pk_loaded =
+                load_trt_module_from_plan(ctx.backend, pk_plan, "rnnt prompt_kernel", opts);
+            prompt_kernel_module = std::move(pk_loaded.module);
+        }
         std::map<int32_t, std::string> streaming_encoder_sections;
         std::map<int32_t, std::string> streaming_first_encoder_sections;
-        for (int32_t right_context : {13, 6, 1, 0}) {
+        auto right_contexts =
+            extract_json_int_array(ctx.config_json, "rnnt_streaming_right_contexts");
+        if (right_contexts.empty())
+            right_contexts = {13, 6, 1, 0};
+        for (int32_t right_context : right_contexts) {
             const std::string section_name =
                 "streaming_encoder_plan_ctx" + std::to_string(right_context);
             const auto* plan = find_section(ctx.bundle, section_name);
@@ -112,6 +154,10 @@ class NemotronSpeechStreamingPlugin final : public IPipelinePlugin {
             extract_json_int(json, "rnnt_streaming_drop_pre_encoded", 2);
         cfg.causal_downsampling =
             json.find("\"rnnt_causal_downsampling\": true") != std::string::npos;
+        cfg.has_prompt_kernel = has_prompt_kernel;
+        cfg.num_prompts = extract_json_int(json, "rnnt_num_prompts", 0);
+        cfg.prompt_dictionary = extract_string_int_map(json, "rnnt_prompt_dictionary");
+        cfg.supported_right_contexts = right_contexts;
 
         auto mel_fb = load_mel_filterbank(ctx.bundle);
         auto tok = create_tokenizer_from_bundle(ctx.bundle);
@@ -119,8 +165,9 @@ class NemotronSpeechStreamingPlugin final : public IPipelinePlugin {
 
         return std::make_unique<RnntPipeline>(
             std::move(enc_loaded.module), std::move(pred_loaded.module),
-            std::move(joint_loaded.module), std::move(streaming_encoder_sections), ctx.backend,
-            opts, std::move(streaming_first_encoder_sections), ctx.bundle_path, std::move(cfg),
+            std::move(joint_loaded.module), std::move(prompt_kernel_module),
+            std::move(streaming_encoder_sections), ctx.backend, opts,
+            std::move(streaming_first_encoder_sections), ctx.bundle_path, std::move(cfg),
             std::move(mel_fb), stream, std::move(tok), ctx.bundle.info.model_id);
     }
 };

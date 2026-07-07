@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import ast
 import copy
+import csv
 import gc
 import html
 import json
@@ -20,6 +21,7 @@ import traceback
 import subprocess
 import sys
 import time
+import warnings
 from collections import Counter, defaultdict
 from itertools import product
 from pathlib import Path
@@ -30,7 +32,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from tests.e2e_harness.manifest_loader import iter_manifest_paths  # noqa: E402
+from tests.e2e_harness.manifest_loader import iter_manifest_paths, load_manifest  # noqa: E402
+from tests.e2e_harness.registry import (  # noqa: E402
+    activate_model_plugins,
+    get_comparator,
+    get_reference,
+    get_runner,
+)
 
 
 DEFAULT_SUITES = REPO_ROOT / "tests" / "task_eval" / "validation_suites.yaml"
@@ -38,6 +46,9 @@ DEFAULT_MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
 CHOICE_LETTERS = set("ABCDEFGHIJ")
+GPT_OSS_MMLU_SYSTEM_PROMPT = (
+    "You are a helpful assistant. Answer with only the option letter."
+)
 
 
 def load_structured_file(path: Path) -> dict[str, Any]:
@@ -80,6 +91,40 @@ def suite_by_id(suites: list[dict[str, Any]], suite_id: str) -> dict[str, Any]:
     raise ValueError(f"Unknown suite {suite_id!r}. Known suites: {known}")
 
 
+def _deep_merge_mappings(*values: Any) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        for key, item in value.items():
+            if isinstance(item, dict) and isinstance(merged.get(key), dict):
+                merged[key] = _deep_merge_mappings(merged[key], item)
+            else:
+                merged[key] = copy.deepcopy(item)
+    return merged
+
+
+def effective_task_eval_config(
+    suite: dict[str, Any], model: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve suite family/model overrides, then manifest-specific settings."""
+    overrides = suite.get("model_overrides", {})
+    if not isinstance(overrides, dict):
+        raise ValueError(f"Suite {suite.get('id', '<unknown>')} model_overrides must be a mapping")
+    by_family = overrides.get("by_family", {})
+    by_model = overrides.get("by_model", {})
+    if not isinstance(by_family, dict) or not isinstance(by_model, dict):
+        raise ValueError(
+            f"Suite {suite.get('id', '<unknown>')} model_overrides.by_family/by_model "
+            "must be mappings"
+        )
+    return _deep_merge_mappings(
+        by_family.get(str(model.get("family", "")), {}),
+        by_model.get(str(model.get("name", "")), {}),
+        model.get("task_eval", {}),
+    )
+
+
 def infer_reference_family(raw: dict[str, Any]) -> str:
     return str(raw.get("reference_family", "") or "")
 
@@ -108,6 +153,14 @@ def manifest_record(path: Path) -> dict[str, Any]:
     runtime_strategy = str(raw.get("runtime_strategy") or "")
     task_strategy = str(raw.get("task_strategy") or runtime_strategy)
     reference_family = infer_reference_family(raw)
+    reference_backend = str(raw.get("reference_backend", "") or "")
+    if not reference_backend:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                reference_backend = load_manifest(path).reference_backend
+        except Exception:
+            reference_backend = "hf_transformers"
     user_contract = infer_user_contract(raw, reference_family)
     distributed = raw.get("distributed_runtime", {})
     requires_multi_device = bool(distributed.get("enabled")) or (
@@ -122,7 +175,7 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "runtime_strategy": runtime_strategy,
         "task_strategy": task_strategy,
         "reference_family": reference_family,
-        "reference_backend": raw.get("reference_backend", "hf_transformers"),
+        "reference_backend": reference_backend,
         "user_contract": user_contract,
         "ci_tier": raw.get("ci_tier", "default"),
         "core": bool(raw.get("core", False)),
@@ -136,9 +189,16 @@ def manifest_record(path: Path) -> dict[str, Any]:
             build_args.get("max_cache_length", 256) if isinstance(build_args, dict) else 256,
         ),
         "precision": raw.get("precision", "fp32"),
+        "fp32_layers": raw.get("fp32_layers", []),
         "quantization": raw.get("quantization", {}),
         "build_args": build_args if isinstance(build_args, dict) else {},
         "fp8_scales": raw.get("fp8_scales", ""),
+        "image_height": raw.get("image_height"),
+        "image_width": raw.get("image_width"),
+        "video_num_frames": raw.get("video_num_frames"),
+        "video_height": raw.get("video_height"),
+        "video_width": raw.get("video_width"),
+        "num_inference_steps": raw.get("num_inference_steps"),
         "task_eval": task_eval_config if isinstance(task_eval_config, dict) else {},
         "runtime_config": raw.get("runtime_config", {})
         if isinstance(raw.get("runtime_config", {}), dict)
@@ -189,6 +249,8 @@ def _selector_values(selectors: dict[str, Any], key: str) -> set[str]:
 
 def suite_match_reason(suite: dict[str, Any], model: dict[str, Any]) -> tuple[bool, str]:
     selectors = suite.get("selectors", {})
+    model_names = _selector_values(selectors, "model_names")
+    exclude_model_names = _selector_values(selectors, "exclude_model_names")
     task_strategies = _selector_values(selectors, "task_strategies")
     runtime_strategies = _selector_values(selectors, "runtime_strategies")
     user_contracts = _selector_values(selectors, "user_contracts")
@@ -196,6 +258,10 @@ def suite_match_reason(suite: dict[str, Any], model: dict[str, Any]) -> tuple[bo
     families = _selector_values(selectors, "families")
     exclude_families = _selector_values(selectors, "exclude_families")
 
+    if model_names and model["name"] not in model_names:
+        return False, f"model={model['name']} not selected"
+    if exclude_model_names and model["name"] in exclude_model_names:
+        return False, f"model={model['name']} excluded"
     if task_strategies and model["task_strategy"] not in task_strategies:
         return False, f"task_strategy={model['task_strategy']} not selected"
     if runtime_strategies and model["runtime_strategy"] not in runtime_strategies:
@@ -211,6 +277,63 @@ def suite_match_reason(suite: dict[str, Any], model: dict[str, Any]) -> tuple[bo
     if model.get("skip"):
         return False, f"manifest skip: {model['skip']}"
     return True, "selected"
+
+
+def resolve_suite_for_model(
+    suite: dict[str, Any], model: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve manifest generation settings and per-model gates for one suite run."""
+    resolved = copy.deepcopy(suite)
+    generation = dict(resolved.get("generation", {}))
+    for key in (
+        "image_height",
+        "image_width",
+        "video_num_frames",
+        "video_height",
+        "video_width",
+        "num_inference_steps",
+    ):
+        value = model.get(key)
+        if value is not None:
+            generation[key] = value
+
+    family_profiles = resolved.get("family_profiles", {})
+    if not isinstance(family_profiles, dict):
+        raise ValueError(f"Suite {suite['id']} family_profiles must be a mapping")
+    family_profile = family_profiles.get(str(model.get("family", "")), {})
+    if not isinstance(family_profile, dict):
+        raise ValueError(
+            f"Suite {suite['id']} family profile for {model.get('family')} "
+            "must be a mapping"
+        )
+
+    profiles = resolved.get("model_profiles", {})
+    if not isinstance(profiles, dict):
+        raise ValueError(f"Suite {suite['id']} model_profiles must be a mapping")
+    profile = profiles.get(str(model.get("name", "")), {})
+    if not isinstance(profile, dict):
+        raise ValueError(
+            f"Suite {suite['id']} profile for {model.get('name')} must be a mapping"
+        )
+    for owner, source in ((model.get("family"), family_profile), (model.get("name"), profile)):
+        profile_generation = source.get("generation", {})
+        if not isinstance(profile_generation, dict):
+            raise ValueError(
+                f"Suite {suite['id']} generation profile for {owner} must be a mapping"
+            )
+        generation.update(profile_generation)
+    resolved["generation"] = generation
+
+    gates = dict(resolved.get("gates", {}))
+    for owner, source in ((model.get("family"), family_profile), (model.get("name"), profile)):
+        profile_gates = source.get("gates", {})
+        if not isinstance(profile_gates, dict):
+            raise ValueError(
+                f"Suite {suite['id']} gate profile for {owner} must be a mapping"
+            )
+        gates.update(profile_gates)
+    resolved["gates"] = gates
+    return resolved
 
 
 def build_plan(
@@ -231,6 +354,10 @@ def build_plan(
         default_model_names = (
             _selector_values(suite, "default_model_names") if use_default_models else set()
         )
+        if use_default_models and not default_model_names:
+            default_model_names = _selector_values(
+                suite.get("selectors", {}), "default_model_names"
+            )
         for model in models:
             matched, reason = suite_match_reason(suite, model)
             if matched and default_model_names and model["name"] not in default_model_names:
@@ -300,6 +427,24 @@ def _request_prompt(request: dict[str, Any]) -> str:
     raise ValueError("MMLU request has neither messages content nor prompt")
 
 
+def render_mmlu_prompt(prompt: str, task_eval_config: dict[str, Any] | None) -> str:
+    config = task_eval_config if isinstance(task_eval_config, dict) else {}
+    renderer = str(config.get("prompt_renderer", "") or "")
+    if not renderer:
+        return prompt
+    if renderer != "gpt_oss_harmony_mcq":
+        raise ValueError(f"Unsupported MMLU prompt renderer {renderer!r}")
+    system_prompt = str(
+        config.get("system_prompt", GPT_OSS_MMLU_SYSTEM_PROMPT)
+        or GPT_OSS_MMLU_SYSTEM_PROMPT
+    )
+    return (
+        f"<|start|>system<|message|>{system_prompt}<|end|>"
+        f"<|start|>user<|message|>{prompt}<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>"
+    )
+
+
 def _copy_dataset_header(data: dict[str, Any], requests: list[dict[str, Any]]) -> dict[str, Any]:
     out = {k: v for k, v in data.items() if k not in {"requests", "samples"}}
     out["requests"] = requests
@@ -356,15 +501,105 @@ def prepare_mmlu_dataset(
     answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
     with prompts_path.open("w", encoding="utf-8") as f:
         for out_idx, (dataset_index, request) in enumerate(indexed):
+            prompt = render_mmlu_prompt(_request_prompt(request), task_eval_config)
             sample = {
                 "sample_id": f"mmlu_{dataset_index:06d}",
                 "dataset_index": dataset_index,
                 "eval_index": out_idx,
                 "subject": request.get("subject", ""),
                 "answer": request["answer"],
-                "prompt": _request_prompt(request),
+                "prompt": prompt,
             }
             f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+
+    generation = _deep_merge_mappings(
+        suite.get("generation", {}),
+        (task_eval_config or {}).get("generation", {}),
+    )
+
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_kind": suite.get("dataset", {}).get("kind", ""),
+        "request_count": len(indexed),
+        "subject": subject or "all",
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "generation": generation,
+        "files": {
+            "answers": str(answers_path),
+            "prompts": str(prompts_path),
+        },
+    }
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
+def prepare_diffusion_prompt_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    with dataset_path.open("r", encoding="utf-8-sig", newline="") as dataset_file:
+        reader = csv.DictReader(dataset_file, delimiter="\t")
+        required = {"Prompt", "Category", "Challenge", "Note"}
+        missing = required.difference(reader.fieldnames or [])
+        if missing:
+            raise ValueError(
+                f"{dataset_path}: missing PartiPrompts columns {sorted(missing)}"
+            )
+        indexed = []
+        for dataset_index, row in enumerate(reader):
+            prompt = str(row.get("Prompt", "")).strip()
+            if not prompt:
+                raise ValueError(f"{dataset_path}: empty prompt at row {dataset_index + 2}")
+            category = str(row.get("Category", "")).strip()
+            if subject and category != subject:
+                continue
+            indexed.append((dataset_index, {
+                "sample_id": f"partiprompts_{dataset_index:06d}",
+                "dataset_index": dataset_index,
+                "prompt": prompt,
+                "category": category,
+                "challenge": str(row.get("Challenge", "")).strip(),
+                "note": str(row.get("Note", "")).strip(),
+            }))
+
+    if sample_seed is not None:
+        rng = random.Random(sample_seed)
+        rng.shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+    answers = {
+        "dataset": "PartiPrompts",
+        "requests": [request for _dataset_index, request in indexed],
+    }
+    answers_path.write_text(
+        json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    with prompts_path.open("w", encoding="utf-8") as prompts_file:
+        for eval_index, (dataset_index, request) in enumerate(indexed):
+            prompt_row = {
+                "sample_id": request["sample_id"],
+                "dataset_index": dataset_index,
+                "eval_index": eval_index,
+                "prompt": request["prompt"],
+                "category": request["category"],
+                "challenge": request["challenge"],
+            }
+            prompts_file.write(json.dumps(prompt_row, ensure_ascii=False) + "\n")
 
     manifest = {
         "suite": suite["id"],
@@ -379,6 +614,76 @@ def prepare_mmlu_dataset(
             "answers": str(answers_path),
             "prompts": str(prompts_path),
         },
+    }
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
+def prepare_diffusion_prompt_json_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    requests = data.get("requests")
+    if not isinstance(requests, list):
+        raise ValueError(f"{dataset_path}: expected top-level 'requests' list")
+    indexed: list[tuple[int, dict[str, Any]]] = []
+    for source_position, request in enumerate(requests):
+        if not isinstance(request, dict):
+            raise ValueError(f"{dataset_path}: request {source_position} must be an object")
+        prompt = str(request.get("prompt", "")).strip()
+        if not prompt:
+            raise ValueError(f"{dataset_path}: request {source_position} has no prompt")
+        category = str(request.get("category", "")).strip()
+        if subject and subject not in {value.strip() for value in category.split(",")}:
+            continue
+        prepared = dict(request)
+        prepared["prompt"] = prompt
+        prepared.setdefault("sample_id", f"diffusion_prompt_{source_position:06d}")
+        prepared.setdefault("dataset_index", source_position)
+        prepared.setdefault("category", category)
+        prepared.setdefault("challenge", "")
+        indexed.append((source_position, prepared))
+    if sample_seed is not None:
+        rng = random.Random(sample_seed)
+        rng.shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+    selected = [request for _source_position, request in indexed]
+    answers = _copy_dataset_header(data, selected)
+    answers_path.write_text(
+        json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    with prompts_path.open("w", encoding="utf-8") as prompts_file:
+        for eval_index, (_source_position, request) in enumerate(indexed):
+            prompt_row = dict(request)
+            prompt_row["eval_index"] = eval_index
+            prompts_file.write(json.dumps(prompt_row, ensure_ascii=False) + "\n")
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_name": data.get("dataset", ""),
+        "dataset_version": data.get("version", ""),
+        "dataset_kind": suite.get("dataset", {}).get("kind", ""),
+        "request_count": len(indexed),
+        "subject": subject or "all",
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "generation": suite.get("generation", {}),
+        "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
     }
     if task_eval_config:
         manifest["task_eval"] = task_eval_config
@@ -1231,6 +1536,26 @@ def prepare_task_dataset(
             sample_seed=sample_seed,
             task_eval_config=task_eval_config,
         )
+    if dataset_kind == "diffusion_prompt_tsv":
+        return prepare_diffusion_prompt_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
+    if dataset_kind == "diffusion_prompt_json":
+        return prepare_diffusion_prompt_json_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
     raise ValueError(f"Unsupported task-eval dataset kind {dataset_kind!r}")
 
 
@@ -1595,10 +1920,25 @@ def parse_multi_choice_response(text: str) -> str:
     return text
 
 
-def is_correct(prediction: str, reference: str) -> bool:
-    pred_clean = clean_text(prediction)
+def parse_model_prediction(text: str, *, answer_parser: str = "") -> str:
+    if not answer_parser:
+        return parse_multi_choice_response(clean_text(text))
+    if answer_parser != "gpt_oss_harmony_final_mcq":
+        raise ValueError(f"Unsupported task-eval answer parser {answer_parser!r}")
+
+    final_marker = "<|channel|>final<|message|>"
+    if final_marker in text:
+        text = text.rsplit(final_marker, 1)[1]
+    elif "<|channel|>" in text or "<|message|>" in text:
+        return ""
+    parsed = parse_multi_choice_response(clean_text(text))
+    return parsed if parsed in CHOICE_LETTERS else ""
+
+
+def is_correct(prediction: str, reference: str, *, answer_parser: str = "") -> bool:
+    pred_clean = parse_model_prediction(prediction, answer_parser=answer_parser)
     ref_clean = clean_text(reference)
-    if ref_clean in CHOICE_LETTERS:
+    if ref_clean in CHOICE_LETTERS and not answer_parser:
         pred_clean = parse_multi_choice_response(pred_clean)
     return pred_clean == ref_clean
 
@@ -1614,8 +1954,13 @@ def request_answer_values(request: dict[str, Any]) -> list[str]:
     return values
 
 
-def is_correct_for_request(prediction: str, request: dict[str, Any]) -> bool:
-    return any(is_correct(prediction, answer) for answer in request_answer_values(request))
+def is_correct_for_request(
+    prediction: str, request: dict[str, Any], *, answer_parser: str = ""
+) -> bool:
+    return any(
+        is_correct(prediction, answer, answer_parser=answer_parser)
+        for answer in request_answer_values(request)
+    )
 
 
 def normalize_asr_transcript(text: str) -> str:
@@ -2776,6 +3121,8 @@ def score_predictions(
     answers_data: dict[str, Any],
     *,
     scorer: str = "exact_or_alias",
+    answer_parser: str = "",
+    require_valid_prediction: bool = False,
 ) -> dict[str, Any]:
     if scorer == "ocrbench_v2":
         return score_ocrbench_v2_predictions(predictions_data, answers_data)
@@ -2794,6 +3141,7 @@ def score_predictions(
 
     correct = 0
     skipped = 0
+    valid_predictions = 0
     subject_stats: dict[str, Counter[str]] = defaultdict(Counter)
     samples: list[dict[str, Any]] = []
     for idx, (response, request) in enumerate(zip(responses, requests, strict=True)):
@@ -2816,7 +3164,12 @@ def score_predictions(
                 }
             )
             continue
-        ok = is_correct_for_request(output_text, request)
+        parsed_prediction = parse_model_prediction(output_text, answer_parser=answer_parser)
+        prediction_valid = bool(parsed_prediction)
+        if require_valid_prediction and clean_text(answer) in CHOICE_LETTERS:
+            prediction_valid = parsed_prediction in CHOICE_LETTERS
+        valid_predictions += int(prediction_valid)
+        ok = is_correct_for_request(output_text, request, answer_parser=answer_parser)
         correct += int(ok)
         subject_stats[subject]["total"] += 1
         subject_stats[subject]["correct"] += int(ok)
@@ -2828,7 +3181,8 @@ def score_predictions(
                 "answer": answer,
                 "answer_aliases": answer_values[1:],
                 "prediction": output_text,
-                "parsed_prediction": parse_multi_choice_response(clean_text(output_text)),
+                "parsed_prediction": parsed_prediction,
+                "valid_prediction": prediction_valid,
                 "skipped": False,
                 "correct": ok,
             }
@@ -2847,6 +3201,9 @@ def score_predictions(
         "overall_accuracy": (correct / valid) if valid else 0.0,
         "correct": correct,
         "valid_count": valid,
+        "valid_prediction_count": valid_predictions,
+        "invalid_prediction_count": valid - valid_predictions,
+        "valid_prediction_rate": (valid_predictions / valid) if valid else 0.0,
         "skipped_count": skipped,
         "total_count": len(requests),
         "subject_accuracy": subject_accuracy,
@@ -2860,9 +3217,23 @@ def compare_prediction_sets(
     answers: dict[str, Any],
     *,
     scorer: str = "exact_or_alias",
+    answer_parser: str = "",
+    require_valid_prediction: bool = False,
 ) -> dict[str, Any]:
-    hf_score = score_predictions(hf_predictions, answers, scorer=scorer)
-    trtfb_score = score_predictions(trtfb_predictions, answers, scorer=scorer)
+    hf_score = score_predictions(
+        hf_predictions,
+        answers,
+        scorer=scorer,
+        answer_parser=answer_parser,
+        require_valid_prediction=require_valid_prediction,
+    )
+    trtfb_score = score_predictions(
+        trtfb_predictions,
+        answers,
+        scorer=scorer,
+        answer_parser=answer_parser,
+        require_valid_prediction=require_valid_prediction,
+    )
     hf_responses = hf_predictions["responses"]
     trt_responses = trtfb_predictions["responses"]
     requests = answers["requests"]
@@ -2883,8 +3254,12 @@ def compare_prediction_sets(
             hf_pred = _tts_normalize_text(str(hf_row.get("output_text", "")))
             trt_pred = _tts_normalize_text(str(trt_row.get("output_text", "")))
         else:
-            hf_pred = parse_multi_choice_response(clean_text(str(hf_row.get("output_text", ""))))
-            trt_pred = parse_multi_choice_response(clean_text(str(trt_row.get("output_text", ""))))
+            hf_pred = parse_model_prediction(
+                str(hf_row.get("output_text", "")), answer_parser=answer_parser
+            )
+            trt_pred = parse_model_prediction(
+                str(trt_row.get("output_text", "")), answer_parser=answer_parser
+            )
         hf_sample = hf_score["samples"][idx]
         trtfb_sample = trtfb_score["samples"][idx]
         hf_ok = bool(hf_sample.get("correct", False))
@@ -2894,6 +3269,11 @@ def compare_prediction_sets(
             if scorer in {"ocrbench_v2", "asr_transcript", "tts_intelligibility"}
             else hf_pred == trt_pred
         )
+        if require_valid_prediction and (
+            not bool(hf_sample.get("valid_prediction", False))
+            or not bool(trtfb_sample.get("valid_prediction", False))
+        ):
+            agreement_match = False
         agreement += int(agreement_match)
         if hf_ok and trt_ok:
             buckets["both_correct"] += 1
@@ -2931,6 +3311,357 @@ def compare_prediction_sets(
         "total_count": total,
         "buckets": dict(buckets),
         "disagreements": disagreements,
+    }
+
+
+def _load_diffusion_task_eval_comparator(work_dir: Path) -> Any:
+    case, _reference, _runner = _load_diffusion_task_eval_plugins(work_dir)
+    comparator = get_comparator(case.task_strategy)
+    if comparator is None:
+        raise RuntimeError(
+            f"No comparator plugin {case.task_strategy!r} for {case.family}"
+        )
+    return comparator
+
+
+def _compute_task_eval_clip_metrics(
+    trt_frames_dir: str, hf_frames_dir: str, prompt: str
+) -> Any:
+    from tests.e2e.models.flux.e2e_plugins.comparators.clip_metrics import (
+        compute_clip_metrics,
+    )
+
+    return compute_clip_metrics(trt_frames_dir, hf_frames_dir, prompt)
+
+
+def _first_generated_image(frames_dir: str) -> Path | None:
+    root = Path(frames_dir)
+    if not root.is_dir():
+        return None
+    for suffix in ("*.png", "*.jpg", "*.jpeg", "*.webp"):
+        images = sorted(root.rglob(suffix))
+        if images:
+            return images[0]
+    return None
+
+
+def write_diffusion_visual_review(
+    work_dir: Path,
+    samples: list[dict[str, Any]],
+) -> Path:
+    report_path = work_dir / "visual_review.html"
+
+    def image_tag(path_value: str, label: str) -> str:
+        path = Path(path_value) if path_value else None
+        if path is None or not path.is_file():
+            return f"<div class='missing'>{html.escape(label)} image missing</div>"
+        relative = os.path.relpath(path, report_path.parent)
+        return (
+            f"<figure><figcaption>{html.escape(label)}</figcaption>"
+            f"<a href='{html.escape(relative)}'><img loading='lazy' "
+            f"src='{html.escape(relative)}' alt='{html.escape(label)}'></a></figure>"
+        )
+
+    cards = []
+    for sample in samples:
+        questions = sample.get("questions", [])
+        question_items = "".join(
+            f"<li>{html.escape(str(question.get('question', question)))}</li>"
+            for question in questions
+        ) or "<li>No proposition questions provided.</li>"
+        metrics = sample.get("metrics", {})
+        metric_rows = "".join(
+            "<tr>"
+            f"<td>{html.escape(name)}</td>"
+            f"<td>{float(metric.get('value', 0.0)):.6f}</td>"
+            f"<td>{html.escape(str(metric.get('operator', 'info')))}</td>"
+            f"<td>{html.escape(str(metric.get('threshold', 'diagnostic')))}</td>"
+            f"<td>{'yes' if metric.get('passed', False) else 'no'}</td>"
+            "</tr>"
+            for name, metric in sorted(metrics.items())
+        )
+        cards.append(
+            f"<section class='case {html.escape(str(sample.get('status', '')))}'>"
+            f"<h2>{sample.get('index', 0) + 1}. "
+            f"{html.escape(str(sample.get('sample_id', '')))} — "
+            f"{html.escape(str(sample.get('status', '')))}</h2>"
+            f"<p class='prompt'>{html.escape(str(sample.get('prompt', '')))}</p>"
+            "<div class='images'>"
+            f"{image_tag(str(sample.get('hf_image', '')), 'HF')}"
+            f"{image_tag(str(sample.get('trtfb_image', '')), 'TRTMC')}"
+            "</div>"
+            "<details open><summary>DPG proposition checklist</summary>"
+            f"<ol>{question_items}</ol></details>"
+            "<details><summary>Parity metrics</summary>"
+            "<table><thead><tr><th>Metric</th><th>Value</th><th>Gate</th>"
+            f"<th>Threshold</th><th>Passed</th></tr></thead><tbody>{metric_rows}</tbody></table>"
+            "</details></section>"
+        )
+    report_path.write_text(
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<title>Diffusion HF/TRTMC visual review</title><style>"
+        "body{font-family:system-ui,sans-serif;max-width:1500px;margin:auto;padding:24px;"
+        "background:#f4f5f7;color:#171717}.case{background:white;padding:18px;margin:20px 0;"
+        "border-radius:10px;border-left:8px solid #888}.case.passed{border-color:#258a45}"
+        ".case.failed,.case.error{border-color:#c43b32}.prompt{font-size:1.05rem;line-height:1.5}"
+        ".images{display:grid;grid-template-columns:1fr 1fr;gap:18px}figure{margin:0}"
+        "figcaption{font-weight:700;margin-bottom:6px}img{width:100%;height:auto;border:1px solid #bbb}"
+        "table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccc;padding:6px;text-align:left}"
+        "li{margin:4px 0}.missing{padding:40px;background:#fee;color:#900}"
+        "</style></head><body><h1>Diffusion HF/TRTMC visual review</h1>"
+        "<p>Parity metrics answer whether both implementations agree. The DPG checklist is for "
+        "manual prompt-adherence review and must not be inferred from CLIPScore alone.</p>"
+        + "".join(cards) + "</body></html>\n",
+        encoding="utf-8",
+    )
+    return report_path
+
+
+def compare_diffusion_image_predictions(
+    hf_predictions: dict[str, Any],
+    trtfb_predictions: dict[str, Any],
+    answers_data: dict[str, Any],
+    *,
+    work_dir: Path,
+    gates: dict[str, Any],
+) -> dict[str, Any]:
+    from tests.e2e_harness.contracts import (
+        StageOutput,
+        StageSpec,
+        StageStatus,
+        ThresholdProfile,
+    )
+
+    hf_rows = hf_predictions.get("responses", [])
+    trt_rows = trtfb_predictions.get("responses", [])
+    requests = answers_data.get("requests", [])
+    if len(hf_rows) != len(trt_rows) or len(hf_rows) != len(requests):
+        raise ValueError(
+            "HF predictions, TRT predictions, and diffusion requests must have "
+            f"the same length: {len(hf_rows)}, {len(trt_rows)}, {len(requests)}"
+        )
+    comparator = _load_diffusion_task_eval_comparator(work_dir)
+    threshold = ThresholdProfile(
+        task_strategy="diffusion_media_generation",
+        profile_name="task_eval",
+        metrics={str(key): float(value) for key, value in gates.items()},
+    )
+    stage = StageSpec(name="end_to_end", required=True)
+    metric_values: dict[str, list[float]] = defaultdict(list)
+    metric_passed: Counter[str] = Counter()
+    metric_gated: Counter[str] = Counter()
+    samples: list[dict[str, Any]] = []
+    passed_count = 0
+    skipped_count = 0
+
+    for index, (hf_row, trt_row, request) in enumerate(
+        zip(hf_rows, trt_rows, requests, strict=True)
+    ):
+        expected_id = str(request.get("sample_id", f"partiprompts_{index:06d}"))
+        hf_id = str(hf_row.get("sample_id", ""))
+        trt_id = str(trt_row.get("sample_id", ""))
+        if hf_id != expected_id or trt_id != expected_id:
+            raise ValueError(
+                f"Diffusion sample id mismatch at index {index}: "
+                f"expected={expected_id!r} hf={hf_id!r} trtfb={trt_id!r}"
+            )
+        hf_latent_hash = str(hf_row.get("initial_latents_sha256", ""))
+        trt_latent_hash = str(trt_row.get("initial_latents_sha256", ""))
+        require_matching_latents = float(gates.get("require_matching_initial_latents", 0)) > 0
+        if require_matching_latents and (not hf_latent_hash or not trt_latent_hash):
+            raise ValueError(
+                f"Diffusion parity requires matching initial latents at index {index}: "
+                f"hf={hf_latent_hash!r} trtfb={trt_latent_hash!r}"
+            )
+        if hf_latent_hash or trt_latent_hash:
+            if not hf_latent_hash or not trt_latent_hash or hf_latent_hash != trt_latent_hash:
+                raise ValueError(
+                    f"Diffusion initial latent mismatch at index {index}: "
+                    f"hf={hf_latent_hash!r} trtfb={trt_latent_hash!r}"
+                )
+        invalid = (
+            int(hf_row.get("returncode", 1)) != 0
+            or int(trt_row.get("returncode", 1)) != 0
+            or int(hf_row.get("num_frames", 0)) < 1
+            or int(trt_row.get("num_frames", 0)) < 1
+        )
+        if invalid:
+            skipped_count += 1
+            samples.append({
+                "index": index,
+                "sample_id": expected_id,
+                "category": request.get("category", ""),
+                "challenge": request.get("challenge", ""),
+                "prompt": request.get("prompt", ""),
+                "questions": request.get("questions", []),
+                "hf_image": str(_first_generated_image(str(hf_row.get("frames_dir", ""))) or ""),
+                "trtfb_image": str(_first_generated_image(str(trt_row.get("frames_dir", ""))) or ""),
+                "status": StageStatus.ERROR.value,
+                "metrics": {},
+            })
+            continue
+
+        trt_output = StageOutput(
+            stage_name="end_to_end",
+            data={
+                "returncode": trt_row.get("returncode", 0),
+                "num_frames": trt_row.get("num_frames", 0),
+                "frames_dir": trt_row.get("frames_dir", ""),
+                "frame_stats": trt_row.get("frame_stats", {}),
+                "prompt": trt_row.get("prompt", request.get("prompt", "")),
+            },
+        )
+        hf_output = StageOutput(
+            stage_name="end_to_end",
+            data={
+                "returncode": hf_row.get("returncode", 0),
+                "num_frames": hf_row.get("num_frames", 0),
+                "frames_dir": hf_row.get("frames_dir", ""),
+                "frame_stats": hf_row.get("frame_stats", {}),
+                "prompt": hf_row.get("prompt", request.get("prompt", "")),
+            },
+        )
+        result = comparator.compare(trt_output, hf_output, threshold, stage)
+        required_clip_metrics = {
+            "prompt_clipscore_delta",
+            "hf_prompt_clipscore",
+            "trt_prompt_clipscore",
+            "trt_hf_image_clip_cosine",
+        }
+        missing_clip_metrics = required_clip_metrics.difference(result.metrics)
+        if missing_clip_metrics:
+            from tests.e2e_harness.contracts import MetricResult
+
+            clip = _compute_task_eval_clip_metrics(
+                str(trt_output.data["frames_dir"]),
+                str(hf_output.data["frames_dir"]),
+                str(trt_output.data["prompt"]),
+            )
+            if clip is not None:
+                max_drop = (
+                    float(gates["max_prompt_clipscore_drop"])
+                    if "max_prompt_clipscore_drop" in gates
+                    else None
+                )
+                hf_floor = (
+                    float(gates["min_hf_prompt_clipscore"])
+                    if "min_hf_prompt_clipscore" in gates
+                    else None
+                )
+                image_floor = float(gates.get("min_trt_hf_image_clip_cosine", 0.0))
+                clip_metrics = {
+                    "prompt_clipscore_delta": MetricResult(
+                        value=float(clip.prompt_clipscore_delta),
+                        threshold=-max_drop if max_drop is not None else None,
+                        operator=">=" if max_drop is not None else "info",
+                        passed=(
+                            max_drop is None
+                            or float(clip.prompt_clipscore_delta) >= -max_drop
+                        ),
+                        note=(
+                            f"trt={clip.trt_prompt_clipscore:.2f}, "
+                            f"hf={clip.hf_prompt_clipscore:.2f}"
+                            + (" [prompt truncated]" if clip.prompt_truncated else "")
+                        ),
+                    ),
+                    "hf_prompt_clipscore": MetricResult(
+                        value=float(clip.hf_prompt_clipscore),
+                        threshold=hf_floor,
+                        operator=">=" if hf_floor is not None else "info",
+                        passed=(
+                            hf_floor is None
+                            or float(clip.hf_prompt_clipscore) >= hf_floor
+                        ),
+                    ),
+                    "trt_prompt_clipscore": MetricResult(
+                        value=float(clip.trt_prompt_clipscore),
+                        threshold=None,
+                        operator="info",
+                        passed=True,
+                    ),
+                    "trt_hf_image_clip_cosine": MetricResult(
+                        value=float(clip.trt_hf_image_clip_cosine),
+                        threshold=image_floor if image_floor > 0.0 else None,
+                        operator=">=",
+                        passed=(
+                            image_floor <= 0.0
+                            or float(clip.trt_hf_image_clip_cosine) >= image_floor
+                        ),
+                    ),
+                }
+                result.metrics.update(clip_metrics)
+                if any(
+                    metric.threshold is not None and not metric.passed
+                    for metric in clip_metrics.values()
+                ):
+                    result.status = StageStatus.FAILED.value
+                missing_clip_metrics = required_clip_metrics.difference(result.metrics)
+        if missing_clip_metrics:
+            raise RuntimeError(
+                "Diffusion scorecard did not produce required CLIP metrics "
+                f"for {expected_id}: {sorted(missing_clip_metrics)}. "
+                "Install open_clip and verify both HF and TRT image artifacts."
+            )
+        passed_count += int(result.status == StageStatus.PASSED.value)
+        sample_metrics: dict[str, Any] = {}
+        for metric_name, metric in result.metrics.items():
+            value = float(metric.value)
+            metric_values[metric_name].append(value)
+            if metric.threshold is not None:
+                metric_gated[metric_name] += 1
+                metric_passed[metric_name] += int(metric.passed)
+            sample_metrics[metric_name] = {
+                "value": value,
+                "threshold": metric.threshold,
+                "operator": metric.operator,
+                "passed": metric.passed,
+                "note": metric.note,
+            }
+        gated_metrics = [
+            metric for metric in result.metrics.values() if metric.threshold is not None
+        ]
+        gated_passed = sum(int(metric.passed) for metric in gated_metrics)
+        result.message = (
+            f"{'PASS' if result.status == StageStatus.PASSED.value else 'FAIL'}: "
+            f"{gated_passed}/{len(gated_metrics)} gated metrics passed"
+        )
+        samples.append({
+            "index": index,
+            "sample_id": expected_id,
+            "category": request.get("category", ""),
+            "challenge": request.get("challenge", ""),
+            "prompt": request.get("prompt", ""),
+            "questions": request.get("questions", []),
+            "hf_image": str(_first_generated_image(str(hf_output.data["frames_dir"])) or ""),
+            "trtfb_image": str(_first_generated_image(str(trt_output.data["frames_dir"])) or ""),
+            "initial_latents_sha256": hf_latent_hash,
+            "status": result.status,
+            "metrics": sample_metrics,
+            "message": result.message,
+        })
+
+    metrics = {}
+    for metric_name, values in sorted(metric_values.items()):
+        metrics[metric_name] = {
+            "mean": _mean(values),
+            "min": min(values),
+            "max": max(values),
+            "count": len(values),
+            "gated_count": metric_gated[metric_name],
+            "passed_count": metric_passed[metric_name],
+        }
+    valid_count = len(requests) - skipped_count
+    visual_review = write_diffusion_visual_review(work_dir, samples)
+    return {
+        "mode": "diffusion_image_clip_parity",
+        "overall_pass_rate": passed_count / valid_count if valid_count else 0.0,
+        "passed_count": passed_count,
+        "valid_count": valid_count,
+        "skipped_count": skipped_count,
+        "total_count": len(requests),
+        "metrics": metrics,
+        "samples": samples,
+        "visual_review": str(visual_review),
     }
 
 
@@ -2984,6 +3715,10 @@ def _is_vlm_dataset_kind(kind: str) -> bool:
 
 def _is_asr_dataset_kind(kind: str) -> bool:
     return kind in {"asr_chat_json"}
+
+
+def _is_diffusion_media_dataset_kind(kind: str) -> bool:
+    return kind in {"diffusion_prompt_tsv", "diffusion_prompt_json"}
 
 
 def _is_tts_dataset_kind(kind: str) -> bool:
@@ -3784,6 +4519,117 @@ def _run_nemo_asr_hf_pipeline_reference(
     write_predictions(pred_path, responses)
 
 
+def _load_diffusion_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
+    task_eval_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        task_eval_config = {}
+    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+    if not manifest_ref:
+        raise ValueError(
+            "diffusion task eval requires task_eval.model_manifest in the work manifest"
+        )
+    manifest_path = Path(manifest_ref)
+    if not manifest_path.is_absolute():
+        manifest_path = REPO_ROOT / manifest_path
+    case = load_manifest(manifest_path)
+    model_test_dir = str(case.metadata.get("model_test_dir", "") or "")
+    activate_model_plugins(model_test_dir)
+    reference = get_reference(case.reference_backend)
+    runner = get_runner(case.task_strategy)
+    comparator = get_comparator(case.task_strategy)
+    if reference is None:
+        raise RuntimeError(
+            f"No reference plugin {case.reference_backend!r} for {case.family}"
+        )
+    if runner is None:
+        raise RuntimeError(f"No runner plugin {case.task_strategy!r} for {case.family}")
+    if comparator is None:
+        raise RuntimeError(
+            f"No comparator plugin {case.task_strategy!r} for {case.family}"
+        )
+    return case, reference, runner
+
+
+def _diffusion_case_for_prompt(
+    template: Any,
+    prompt_row: dict[str, Any],
+    generation: dict[str, Any],
+    index: int,
+) -> Any:
+    case = copy.deepcopy(template)
+    case.name = str(prompt_row.get("sample_id", f"diffusion_{index:06d}"))
+    case.inputs.update(generation)
+    case.inputs["prompt"] = str(prompt_row["prompt"])
+    seed = int(generation.get("seed", case.determinism.get("seed", 42)))
+    case.inputs["seed"] = seed + index
+    return case
+
+
+def _diffusion_end_to_end_stage(case: Any) -> Any:
+    from tests.e2e_harness.contracts import StageSpec
+
+    for stage in case.stages:
+        if stage.name == "end_to_end":
+            return stage
+    return StageSpec(name="end_to_end", required=True)
+
+
+def _diffusion_response(sample_id: str, source: str, output: Any) -> dict[str, Any]:
+    data = output.data if isinstance(output.data, dict) else {}
+    return {
+        "sample_id": sample_id,
+        "source": source,
+        "returncode": int(data.get("returncode", 1)),
+        "num_frames": int(data.get("num_frames", 0)),
+        "frames_dir": str(data.get("frames_dir", "")),
+        "frame_stats": data.get("frame_stats", {}),
+        "prompt": str(data.get("prompt", "")),
+        "initial_latents_sha256": str(data.get("initial_latents_sha256", "")),
+        "wall_ms": float(output.timing_s) * 1000.0,
+    }
+
+
+def run_diffusion_hf_reference(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, reference, _runner = _load_diffusion_task_eval_plugins(work_dir)
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    generation = generation_defaults(work_dir)
+    artifacts_dir = work_dir / "hf_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "hf_predictions.json")
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_file:
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _diffusion_case_for_prompt(template, prompt_row, generation, index)
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                hf_python=sys.executable,
+                reference_python=sys.executable,
+            )
+            output = reference.run_stage(
+                case, _diffusion_end_to_end_stage(case), context
+            )
+            response = _diffusion_response(case.name, "hf", output)
+            response["prompt"] = str(prompt_row["prompt"])
+            if response["returncode"] != 0 or response["num_frames"] < 1:
+                raise RuntimeError(
+                    f"HF diffusion reference failed for {case.name}: "
+                    f"returncode={response['returncode']} frames={response['num_frames']}"
+                )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            print(
+                f"[task_eval.diffusion_hf] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
 def run_tts_hf_reference(args: argparse.Namespace) -> None:
     try:
         import numpy as np
@@ -3904,6 +4750,9 @@ def run_hf_reference(args: argparse.Namespace) -> None:
     if _is_asr_dataset_kind(dataset_kind):
         run_asr_hf_reference(args)
         return
+    if _is_diffusion_media_dataset_kind(dataset_kind):
+        run_diffusion_hf_reference(args)
+        return
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer, logging
@@ -4019,6 +4868,52 @@ def run_hf_reference(args: argparse.Namespace) -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def run_diffusion_trtfb(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, _reference, runner = _load_diffusion_task_eval_plugins(work_dir)
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    generation = generation_defaults(work_dir)
+    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    bundle_path = Path(args.bundle).resolve()
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_file:
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _diffusion_case_for_prompt(template, prompt_row, generation, index)
+            case.bundle = bundle_path.name
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                binary_path=str(args.trtmc_binary),
+                hf_python=str(getattr(args, "hf_python", "") or ""),
+                runtime_python=str(getattr(args, "hf_python", "") or ""),
+                engine_dir=str(bundle_path.parent),
+                model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
+            )
+            output = runner.run_stage(
+                case, _diffusion_end_to_end_stage(case), context
+            )
+            response = _diffusion_response(case.name, "trtfb", output)
+            response["prompt"] = str(prompt_row["prompt"])
+            if response["returncode"] != 0 or response["num_frames"] < 1:
+                raise RuntimeError(
+                    f"TRT diffusion run failed for {case.name}: "
+                    f"returncode={response['returncode']} frames={response['num_frames']}"
+                )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            print(
+                f"[task_eval.diffusion_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
 
 
 def _runtime_config_tokens(config: dict[str, Any], prefix: str = "") -> list[str]:
@@ -4149,6 +5044,9 @@ def run_trtfb(args: argparse.Namespace) -> None:
     if _is_asr_dataset_kind(dataset_kind):
         run_asr_trtfb(args)
         return
+    if _is_diffusion_media_dataset_kind(dataset_kind):
+        run_diffusion_trtfb(args)
+        return
     defaults = generation_defaults(work_dir)
     raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
     predictions = work_dir / (args.predictions or "trtfb_predictions.json")
@@ -4189,6 +5087,8 @@ def run_trtfb(args: argparse.Namespace) -> None:
         cmd.extend(["--hf-python", args.hf_python])
     if args.backend_dir:
         cmd.extend(["--backend-dir", args.backend_dir])
+    if getattr(args, "model_plugin_dir", ""):
+        cmd.extend(["--model-plugin-dir", args.model_plugin_dir])
     if args.kv_cache_size:
         cmd.extend(["--kv-cache-size", args.kv_cache_size])
     if args.config:
@@ -4269,6 +5169,10 @@ def build_bundle_command(
     precision = str(model.get("precision", "fp32") or "fp32")
     if precision != "fp32":
         cmd.extend(["--precision", precision])
+    fp32_layers = model.get("fp32_layers") or []
+    if fp32_layers:
+        cmd.extend(
+            ["--fp32-layers", ",".join(str(layer) for layer in fp32_layers)])
     quantization = model.get("quantization", {})
     if isinstance(quantization, dict):
         quant_format = quantization.get("format")
@@ -4282,6 +5186,17 @@ def build_bundle_command(
                 cmd.extend(["--quant-calibration-samples", str(calibration_samples)])
     if model.get("trust_remote_code"):
         cmd.append("--trust-remote-code")
+    for key, flag in (
+        ("image_height", "--image-height"),
+        ("image_width", "--image-width"),
+        ("video_num_frames", "--video-num-frames"),
+        ("video_height", "--video-height"),
+        ("video_width", "--video-width"),
+        ("num_inference_steps", "--num-inference-steps"),
+    ):
+        value = model.get(key)
+        if value is not None:
+            cmd.extend([flag, str(value)])
     fp8_scales = model.get("fp8_scales")
     if fp8_scales:
         scales_path = REPO_ROOT / "tests" / "e2e" / "data" / str(fp8_scales)
@@ -4443,6 +5358,7 @@ def _namespace_for_run_trtfb(
         benchmark_binary=args.benchmark_binary,
         hf_python=args.hf_python,
         backend_dir=args.backend_dir,
+        model_plugin_dir=getattr(args, "model_plugin_dir", ""),
         kv_cache_size=args.kv_cache_size,
         config=args.config,
         set=args.set or [],
@@ -4535,6 +5451,7 @@ def eval_one_model(
     model: dict[str, Any],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
+    suite = resolve_suite_for_model(suite, model)
     work_root = Path(args.work_root)
     work_dir = work_root / suite["id"] / str(model["name"])
     dataset_path = Path(args.dataset or suite.get("dataset", {}).get("default_path", ""))
@@ -4543,11 +5460,11 @@ def eval_one_model(
     scorer = str(suite.get("scoring", {}).get("scorer", "mcq"))
     dataset_kind = str(suite.get("dataset", {}).get("kind", ""))
     reference_backend = str(model.get("reference_backend", "hf_transformers") or "hf_transformers")
-    task_eval_config = model.get("task_eval", {})
-    task_eval_config = dict(task_eval_config) if isinstance(task_eval_config, dict) else {}
-    model_family = str(model.get("family", "") or "")
-    if model_family:
-        task_eval_config["family"] = model_family
+    task_eval_config = effective_task_eval_config(suite, model)
+    if model.get("manifest"):
+        task_eval_config["model_manifest"] = str(model["manifest"])
+    if model.get("family"):
+        task_eval_config["family"] = str(model["family"])
     runtime_config = model.get("runtime_config", {})
     if isinstance(runtime_config, dict) and runtime_config:
         task_eval_config["runtime_config"] = runtime_config
@@ -4583,6 +5500,7 @@ def eval_one_model(
     if (
         not args.skip_prompt_length_check
         and not _is_asr_dataset_kind(dataset_kind)
+        and not _is_diffusion_media_dataset_kind(dataset_kind)
         and not _is_tts_dataset_kind(dataset_kind)
     ):
         prompt_rows_path = work_dir / "prompts.jsonl"
@@ -4592,11 +5510,22 @@ def eval_one_model(
             local_files_only=args.local_files_only,
             trust_remote_code=args.trust_remote_code or bool(model.get("trust_remote_code", False)),
         )
+    generation = generation_defaults(work_dir)
+    generation_headroom = 0
+    if bool(task_eval_config.get("build_generation_headroom", False)):
+        generation_headroom = int(
+            args.max_new_tokens
+            if args.max_new_tokens is not None
+            else generation.get("max_new_tokens", 0)
+        )
+    required_prompt_cache = (
+        int(max_prompt_len or 0) + generation_headroom if max_prompt_len is not None else None
+    )
     max_cache_length = requested_build_max_cache_length(
         suite,
         model,
         args.build_max_cache_length,
-        prompt_max_tokens=max_prompt_len,
+        prompt_max_tokens=required_prompt_cache,
     )
     if max_prompt_len is not None and max_prompt_len > max_cache_length:
         raise RuntimeError(
@@ -4631,6 +5560,7 @@ def eval_one_model(
         "hf_reference_status": "reused" if hf_reused else "ran",
         "hf_reused": hf_reused,
         "bundle_built": built,
+        "model_plugin_dir": str(getattr(args, "model_plugin_dir", "") or ""),
     }
 
     if scorer == "continuation":
@@ -4654,6 +5584,36 @@ def eval_one_model(
             "mean_first_divergence": summary["mean_first_divergence"],
             "prediction_agreement_rate": summary["token_prefix_agreement"],
         }
+    elif scorer == "diffusion_image_clip_parity":
+        hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        summary = compare_diffusion_image_predictions(
+            hf_data,
+            trtfb_data,
+            json.loads(answers_path.read_text(encoding="utf-8")),
+            work_dir=work_dir,
+            gates=suite.get("gates", {}),
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        write_diffusion_summary_markdown(summary, work_dir / "summary.md")
+        result = {
+            **base_result,
+            "mode": scorer,
+            "overall_pass_rate": summary["overall_pass_rate"],
+            "passed_count": summary["passed_count"],
+            "valid_count": summary["valid_count"],
+            "skipped_count": summary["skipped_count"],
+            "metrics": summary["metrics"],
+            "status": (
+                "passed"
+                if summary["valid_count"] > 0
+                and summary["passed_count"] == summary["valid_count"]
+                and summary["skipped_count"] == 0
+                else "failed"
+            ),
+        }
     else:
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
@@ -4662,6 +5622,10 @@ def eval_one_model(
             trtfb_data,
             json.loads(answers_path.read_text(encoding="utf-8")),
             scorer=scorer,
+            answer_parser=str(task_eval_config.get("answer_parser", "") or ""),
+            require_valid_prediction=bool(
+                task_eval_config.get("require_valid_prediction", False)
+            ),
         )
         (work_dir / "summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -4674,6 +5638,8 @@ def eval_one_model(
             "trtfb_accuracy": summary["trtfb"]["overall_accuracy"],
             "accuracy_delta_trtfb_minus_hf": summary["accuracy_delta_trtfb_minus_hf"],
             "prediction_agreement_rate": summary["prediction_agreement_rate"],
+            "hf_valid_prediction_rate": summary["hf"].get("valid_prediction_rate"),
+            "trtfb_valid_prediction_rate": summary["trtfb"].get("valid_prediction_rate"),
         }
     (work_dir / "eval_result.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False),
@@ -4877,6 +5843,25 @@ def write_continuation_summary_markdown(summary: dict[str, Any], path: Path) -> 
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_diffusion_summary_markdown(summary: dict[str, Any], path: Path) -> None:
+    lines = [
+        "# Diffusion Image CLIP Parity Summary",
+        "",
+        f"- overall_pass_rate: {summary['overall_pass_rate']:.4f}",
+        f"- passed: {summary['passed_count']}/{summary['valid_count']}",
+        f"- skipped: {summary['skipped_count']}",
+        "",
+        "| Metric | Mean | Min | Max | Gated passed |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for metric_name, metric in sorted(summary.get("metrics", {}).items()):
+        lines.append(
+            f"| {metric_name} | {metric['mean']:.4f} | {metric['min']:.4f} | "
+            f"{metric['max']:.4f} | {metric['passed_count']}/{metric['gated_count']} |"
+        )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
     common = f"hf_reused={result['hf_reused']} bundle_built={result['bundle_built']}"
     if result.get("mode") == "continuation":
@@ -4885,6 +5870,11 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
             f"token_agreement={result['token_prefix_agreement']:.4f} "
             f"mean_first_divergence={result['mean_first_divergence']:.2f} "
             f"granularity={result.get('comparison_granularity', '')} {common}"
+        )
+    if result.get("mode") == "diffusion_image_clip_parity":
+        return (
+            f"model={model['name']} pass_rate={result['overall_pass_rate']:.4f} "
+            f"passed={result['passed_count']}/{result['valid_count']} {common}"
         )
     return (
         f"model={model['name']} hf={result['hf_accuracy']:.4f} "
@@ -4968,6 +5958,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--benchmark-binary", default="build/trtmc_dataset_benchmark")
     p.add_argument("--hf-python", default="")
     p.add_argument("--backend-dir", default="")
+    p.add_argument("--model-plugin-dir", default="")
     p.add_argument("--kv-cache-size", default="")
     p.add_argument("--config", default="")
     p.add_argument("--set", action="append", default=[])
@@ -5068,6 +6059,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--benchmark-binary", default="build/trtmc_dataset_benchmark")
     p.add_argument("--hf-python", default="")
     p.add_argument("--backend-dir", default="")
+    p.add_argument("--model-plugin-dir", default="")
     p.add_argument("--kv-cache-size", default="")
     p.add_argument("--config", default="")
     p.add_argument("--set", action="append", default=[])
@@ -5418,7 +6410,7 @@ def cmd_eval_worker(args: argparse.Namespace) -> int:
     result_path = Path(request["result_path"])
     try:
         result = eval_one_model(suite=suite, model=model, args=worker_args)
-        result["status"] = "passed"
+        result.setdefault("status", "passed")
         result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         return 0
     except Exception as exc:
@@ -5437,6 +6429,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
         "vlm_chat_json",
         "vlm_unified_json",
         "asr_chat_json",
+        "diffusion_prompt_tsv",
+        "diffusion_prompt_json",
         "seedtts_json",
     }:
         raise ValueError(f"eval does not support dataset kind {dataset_kind!r}")
@@ -5501,7 +6495,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
                     f"error_type={type(exc).__name__} error={exc}"
                 )
                 continue
-        result["status"] = "passed"
+        result.setdefault("status", "passed")
         results.append(result)
         print(f"[task_eval] {_format_result_line(model, result)}")
         if result.get("gpu_cleanup_confirmed") is False:

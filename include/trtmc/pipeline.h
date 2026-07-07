@@ -59,6 +59,11 @@ struct TranscriptionStreamConfig {
     bool emit_partial_results{true};
     bool online_normalization{false};
     bool pad_and_drop_preencoded{false};
+
+    // Multilingual ASR: a language tag from the bundle's prompt_dictionary
+    // (e.g. "en-US", "es-ES", "auto"). Empty selects prompt index 0.
+    // Ignored when the bundle's has_prompt_kernel is false.
+    std::string language;
 };
 
 struct TranscriptionStreamResult {

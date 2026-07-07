@@ -162,6 +162,14 @@ def _load_dit_block(
         weights[f"{tp}.adaln.bias"] = _f(f"{p}.adaLN_modulation.0.bias")
 
 
+# FP16 blocks: pre-scale applied to one linear stage per sandwich-normed
+# branch, compensated exactly in the post-norm epsilon (see
+# build_z_image_dit_engine). 1/64 leaves substantial headroom below the
+# observed 63k transient peaks; TRT fp16 GEMMs can overflow internal partial
+# accumulations even when their stored inputs and outputs remain finite.
+_SANDWICH_PRESCALE = 1.0 / 64.0
+
+
 def build_z_image_dit_engine(
     weights: WeightDict,
     *,
@@ -265,6 +273,8 @@ def build_z_image_dit_engine(
         temb_inp = network.add_cast(temb_inp, work_trt_dtype).get_output(0)
         rope_cos = network.add_cast(rope_cos, work_trt_dtype).get_output(0)
         rope_sin = network.add_cast(rope_sin, work_trt_dtype).get_output(0)
+    attention_mask = network.add_input(
+        "attention_mask", trt.float32, (total_seq,))
 
     # Constants
     eps_t = graph_ops.add_constant(
@@ -287,6 +297,28 @@ def build_z_image_dit_engine(
             network, (1, 1), np.array([1.0], dtype=np.float32),
             dtype=np.float32)
 
+    # HF-correct caption embeddings drive fp16-block transients close to the
+    # 65504 storage limit: the attention out-projection output peaks at 63k+
+    # at 512px and the SwiGLU gated product feeding ff_w2 peaks at 63k+ at
+    # 1024px (the previous caption semantics already sat near 56k). On P2021,
+    # TensorRT GEMMs become non-finite at these magnitudes because internal
+    # fp16 partial accumulations can overflow before the result is stored.
+    # Both branches are sandwich-normed — an RMSNorm sits directly after the
+    # projection — so pre-scaling one linear stage per branch (to_out for
+    # attention; ff_w3 for the FFN, whose scale rides linearly through the
+    # gated product and ff_w2) shrinks the hot transients and the branch
+    # output by _SANDWICH_PRESCALE, which the compensated post-norm epsilon
+    # cancels in real arithmetic: RMSNorm_eps(x) ==
+    # RMSNorm_{eps*a^2}(a*x).
+    # The epsilon constant must live in fp32: the compensated value
+    # underflows fp16.
+    sandwich_eps_t = None
+    if precision == "fp16":
+        sandwich_eps_t = graph_ops.add_constant(
+            network, (1, 1),
+            np.array([eps * _SANDWICH_PRESCALE ** 2], dtype=np.float32),
+            dtype=np.float32)
+
     def _layer_inputs(selector: int, *tensors):
         if selector not in selected_fp32_layers:
             return work_np_dtype, eps_t, ones_t, tensors
@@ -303,6 +335,14 @@ def build_z_image_dit_engine(
 
     noise = noise_inp
     caption = caption_inp
+    full_mask_r = network.add_shuffle(attention_mask)
+    full_mask_r.reshape_dims = (1, 1, 1, total_seq)
+    full_attention_mask = full_mask_r.get_output(0)
+    cap_mask_slice = network.add_slice(
+        attention_mask, start=(num_patches,), shape=(text_seq_len,), stride=(1,))
+    cap_mask_r = network.add_shuffle(cap_mask_slice.get_output(0))
+    cap_mask_r.reshape_dims = (1, 1, 1, text_seq_len)
+    cap_attention_mask = cap_mask_r.get_output(0)
 
     # --- Noise refiner (on noise only, with AdaLN) ---
     noise_cos = _slice_rope(network, rope_cos, 0, num_patches, head_dim)
@@ -319,6 +359,7 @@ def build_z_image_dit_engine(
             num_patches, layer_eps, scale_t,
             layer_cos, layer_sin, layer_ones,
             dtype=layer_dtype,
+            sandwich_eps_t=sandwich_eps_t,
         )
         noise = _cast_back_from_fp32(selector, noise)
 
@@ -335,7 +376,9 @@ def build_z_image_dit_engine(
             network, layer_caption, weights, tp,
             dim, num_heads, head_dim, ffn_dim, text_seq_len,
             layer_eps, scale_t, layer_cos, layer_sin,
+            attention_mask=cap_attention_mask,
             dtype=layer_dtype,
+            sandwich_eps_t=sandwich_eps_t,
         )
         caption = _cast_back_from_fp32(selector, caption)
 
@@ -353,7 +396,9 @@ def build_z_image_dit_engine(
             network, layer_unified, weights, tp, layer_temb,
             dim, num_heads, head_dim, ffn_dim, adaln_embed_dim,
             total_seq, layer_eps, scale_t, layer_cos, layer_sin, layer_ones,
+            attention_mask=full_attention_mask,
             dtype=layer_dtype,
+            sandwich_eps_t=sandwich_eps_t,
         )
         unified_t = _cast_back_from_fp32(selector, unified_t)
 
@@ -467,20 +512,47 @@ def _per_head_rms_norm(
 
 def _multi_head_attention(
         network, q, k, v, num_heads, head_dim, q_seq, kv_seq, scale_t,
-        dtype=np.float32):
+        mask=None, dtype=np.float32):
     """Standard multi-head attention."""
     return graph_ops.add_attention_from_rows(
         network, q, k, v,
         num_heads=num_heads, head_dim=head_dim,
         q_seq=q_seq, kv_seq=kv_seq,
+        mask=mask,
         scale=scale_t,
         explicit_attention=(dtype != np.float32))
+
+
+def _sandwich_prescale_params(
+    weights, prefix, eps_t, sandwich_eps_t, dtype,
+):
+    """Linear weights and post-norm eps for one block's transient chains.
+
+    In FP16 blocks every tensor between the pre-norm and the post-norm is
+    transient (an RMSNorm follows immediately), yet two of them sit at the
+    fp16 cliff: the attention out-projection output (observed 63k+ at 512px)
+    and the SwiGLU gated product feeding ff_w2 (observed 63k+ at 1024px).
+    Scale one linear stage per branch — to_out
+    for attention, ff_w3 for the FFN (silu applies to the un-scaled w1
+    branch, so the ff_w3 scale rides linearly through the gated product and
+    ff_w2) — and hand back the epsilon-compensated post-norm constant that
+    preserves the unscaled formulation in real arithmetic.
+    """
+    w_to_out = weights[f"{prefix}.to_out"]
+    w_ff3 = weights[f"{prefix}.ff_w3"]
+    norm2_eps_t = eps_t
+    if sandwich_eps_t is not None and dtype != np.float32:
+        w_to_out = w_to_out * _SANDWICH_PRESCALE
+        w_ff3 = w_ff3 * _SANDWICH_PRESCALE
+        norm2_eps_t = sandwich_eps_t
+    return w_to_out, w_ff3, norm2_eps_t
 
 
 def _add_plain_dit_block(
     network, x, weights, prefix,
     dim, num_heads, head_dim, ffn_dim, seq_len,
-    eps_t, scale_t, cos_t, sin_t, dtype=np.float32,
+    eps_t, scale_t, cos_t, sin_t, attention_mask=None, dtype=np.float32,
+    sandwich_eps_t=None,
 ):
     """Plain DiT block (no AdaLN): pre-norm attention + post-norm + SwiGLU FFN.
 
@@ -489,6 +561,8 @@ def _add_plain_dit_block(
         x = x + attention_norm2(attn_out)          # norm2 = post-norm
         x = x + ffn_norm2(feed_forward(ffn_norm1(x)))  # norm2 = post-norm
     """
+    w_to_out, w_ff3, norm2_eps_t = _sandwich_prescale_params(
+        weights, prefix, eps_t, sandwich_eps_t, dtype)
     # Pre-attention norm
     normed = graph_ops.add_rms_norm(
         network, x, dim, weights[f"{prefix}.attn_norm1"], eps_t,
@@ -519,13 +593,13 @@ def _add_plain_dit_block(
     # Attention
     attn_out = _multi_head_attention(
         network, q, k, v, num_heads, head_dim, seq_len, seq_len, scale_t,
-        dtype=dtype)
+        mask=attention_mask, dtype=dtype)
     attn_out = graph_ops.add_matmul_rhs_constant(
-        network, attn_out, dim, dim, weights[f"{prefix}.to_out"], dtype=dtype)
+        network, attn_out, dim, dim, w_to_out, dtype=dtype)
 
-    # Post-norm on attn output
+    # Post-norm on attn output (eps compensated when to_out is pre-scaled)
     attn_out_normed = graph_ops.add_rms_norm(
-        network, attn_out, dim, weights[f"{prefix}.attn_norm2"], eps_t,
+        network, attn_out, dim, weights[f"{prefix}.attn_norm2"], norm2_eps_t,
         dtype=dtype)
 
     # Residual
@@ -540,7 +614,7 @@ def _add_plain_dit_block(
         network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w1"],
         dtype=dtype)
     up_proj = graph_ops.add_matmul_rhs_constant(
-        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w3"],
+        network, ffn_normed, dim, ffn_dim, w_ff3,
         dtype=dtype)
     gate_sigmoid = network.add_activation(gate_proj, trt.ActivationType.SIGMOID)
     gate_silu = network.add_elementwise(gate_proj, gate_sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
@@ -549,9 +623,9 @@ def _add_plain_dit_block(
         network, gated.get_output(0), ffn_dim, dim, weights[f"{prefix}.ff_w2"],
         dtype=dtype)
 
-    # Post-norm on FFN output
+    # Post-norm on FFN output (eps compensated when ff_w2 is pre-scaled)
     ffn_out_normed = graph_ops.add_rms_norm(
-        network, down_proj, dim, weights[f"{prefix}.ffn_norm2"], eps_t,
+        network, down_proj, dim, weights[f"{prefix}.ffn_norm2"], norm2_eps_t,
         dtype=dtype)
 
     x = network.add_elementwise(x, ffn_out_normed, trt.ElementWiseOperation.SUM).get_output(0)
@@ -561,7 +635,9 @@ def _add_plain_dit_block(
 def _add_adaln_dit_block(
     network, x, weights, prefix, temb,
     dim, num_heads, head_dim, ffn_dim, adaln_embed_dim,
-    seq_len, eps_t, scale_t, cos_t, sin_t, ones_t, dtype=np.float32,
+    seq_len, eps_t, scale_t, cos_t, sin_t, ones_t,
+    attention_mask=None, dtype=np.float32,
+    sandwich_eps_t=None,
 ):
     """AdaLN DiT block (noise_refiner): 4-chunk modulation + tanh gating + attention + SwiGLU.
 
@@ -577,6 +653,8 @@ def _add_adaln_dit_block(
         ffn_out = feed_forward(ffn_norm1(x) * scale_mlp)
         x = x + gate_mlp * ffn_norm2(ffn_out)
     """
+    w_to_out, w_ff3, norm2_eps_t = _sandwich_prescale_params(
+        weights, prefix, eps_t, sandwich_eps_t, dtype)
     # AdaLN modulation: just Linear, no SiLU
     adaln_w = weights[f"{prefix}.adaln.weight"]
     adaln_b = weights[f"{prefix}.adaln.bias"]
@@ -627,13 +705,13 @@ def _add_adaln_dit_block(
 
     attn_out = _multi_head_attention(
         network, q, k, v, num_heads, head_dim, seq_len, seq_len, scale_t,
-        dtype=dtype)
+        mask=attention_mask, dtype=dtype)
     attn_out = graph_ops.add_matmul_rhs_constant(
-        network, attn_out, dim, dim, weights[f"{prefix}.to_out"], dtype=dtype)
+        network, attn_out, dim, dim, w_to_out, dtype=dtype)
 
-    # Post-norm on attn output
+    # Post-norm on attn output (eps compensated when to_out is pre-scaled)
     attn_out_normed = graph_ops.add_rms_norm(
-        network, attn_out, dim, weights[f"{prefix}.attn_norm2"], eps_t,
+        network, attn_out, dim, weights[f"{prefix}.attn_norm2"], norm2_eps_t,
         dtype=dtype)
 
     gated_attn = network.add_elementwise(attn_out_normed, gate_msa, trt.ElementWiseOperation.PROD)
@@ -649,7 +727,7 @@ def _add_adaln_dit_block(
         network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w1"],
         dtype=dtype)
     up_proj = graph_ops.add_matmul_rhs_constant(
-        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w3"],
+        network, ffn_normed, dim, ffn_dim, w_ff3,
         dtype=dtype)
     gate_sigmoid = network.add_activation(gate_proj, trt.ActivationType.SIGMOID)
     gate_silu = network.add_elementwise(gate_proj, gate_sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
@@ -658,9 +736,9 @@ def _add_adaln_dit_block(
         network, gated.get_output(0), ffn_dim, dim, weights[f"{prefix}.ff_w2"],
         dtype=dtype)
 
-    # Post-norm on FFN output
+    # Post-norm on FFN output (eps compensated when ff_w2 is pre-scaled)
     ffn_out_normed = graph_ops.add_rms_norm(
-        network, down_proj, dim, weights[f"{prefix}.ffn_norm2"], eps_t,
+        network, down_proj, dim, weights[f"{prefix}.ffn_norm2"], norm2_eps_t,
         dtype=dtype)
 
     gated_ffn = network.add_elementwise(ffn_out_normed, gate_mlp, trt.ElementWiseOperation.PROD)
@@ -749,13 +827,15 @@ def _reshape_heads_4d_to_batched_rows(network, x, num_heads: int, head_dim: int,
     return r.get_output(0)
 
 
-def _mha_batched(network, q, k, v, num_heads: int, head_dim: int, seq_len: int):
+def _mha_batched(
+    network, q, k, v, num_heads: int, head_dim: int, seq_len: int, mask=None,
+):
     """Multi-head attention for ``[B, S, H*D]`` Q/K/V tensors."""
     q_4d = _reshape_batched_rows_to_heads_4d(network, q, num_heads, head_dim, seq_len)
     k_4d = _reshape_batched_rows_to_heads_4d(network, k, num_heads, head_dim, seq_len)
     v_4d = _reshape_batched_rows_to_heads_4d(network, v, num_heads, head_dim, seq_len)
     ctx_4d = graph_ops.add_attention_core(
-        network, q_4d, k_4d, v_4d, causal=False, mask=None,
+        network, q_4d, k_4d, v_4d, causal=False, mask=mask,
         scale=float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0)
     return _reshape_heads_4d_to_batched_rows(network, ctx_4d, num_heads, head_dim, seq_len)
 
@@ -868,12 +948,14 @@ def _build_z_image_dit_engine_batched(
         "rotary_cos", trt.float32, (-1, total_seq, head_dim))
     rope_sin = network.add_input(
         "rotary_sin", trt.float32, (-1, total_seq, head_dim))
+    attention_mask = network.add_input(
+        "attention_mask", trt.float32, (-1, total_seq))
 
     add_dynamic_batch_profile(
         builder, config, network,
         input_names=[
             "hidden_states", "encoder_hidden_states", "timestep_embedding",
-            "rotary_cos", "rotary_sin",
+            "rotary_cos", "rotary_sin", "attention_mask",
         ],
         max_batch=max_batch_size,
         opt_batch=opt_batch_size,
@@ -883,6 +965,7 @@ def _build_z_image_dit_engine_batched(
             "timestep_embedding": (adaln_embed_dim,),
             "rotary_cos": (total_seq, head_dim),
             "rotary_sin": (total_seq, head_dim),
+            "attention_mask": (total_seq,),
         },
     )
 
@@ -902,6 +985,16 @@ def _build_z_image_dit_engine_batched(
 
     noise = noise_inp
     caption = caption_inp
+    full_mask_r = network.add_shuffle(attention_mask)
+    full_mask_r.reshape_dims = (-1, 1, 1, total_seq)
+    full_attention_mask = full_mask_r.get_output(0)
+    cap_mask_slice = network.add_slice(
+        attention_mask, start=(0, num_patches), shape=(0, 0), stride=(1, 1))
+    cap_mask_slice.set_input(
+        2, _dynamic_batch_shape(network, attention_mask, (text_seq_len,)))
+    cap_mask_r = network.add_shuffle(cap_mask_slice.get_output(0))
+    cap_mask_r.reshape_dims = (-1, 1, 1, text_seq_len)
+    cap_attention_mask = cap_mask_r.get_output(0)
 
     noise_cos = _slice_batched_sequence(network, rope_cos, 0, num_patches, head_dim)
     noise_sin = _slice_batched_sequence(network, rope_sin, 0, num_patches, head_dim)
@@ -922,7 +1015,7 @@ def _build_z_image_dit_engine_batched(
         caption = _add_plain_dit_block_batched(
             network, caption, weights, tp,
             dim, num_heads, head_dim, ffn_dim, text_seq_len,
-            eps_t, cap_cos, cap_sin,
+            eps_t, cap_cos, cap_sin, cap_attention_mask,
         )
 
     for i in range(num_layers):
@@ -984,7 +1077,8 @@ def _build_z_image_dit_engine_batched(
             network, k, rope_cos, rope_sin, num_heads, head_dim, total_seq)
 
         attn_out = _mha_batched(
-            network, q, k, v, num_heads, head_dim, total_seq)
+            network, q, k, v, num_heads, head_dim, total_seq,
+            full_attention_mask)
         attn_out = graph_ops.add_matmul_rhs_constant(
             network, attn_out, dim, dim, weights[f"{tp}.to_out"])
         attn_out_normed = graph_ops.add_rms_norm_last_dim(
@@ -1069,7 +1163,7 @@ def _build_z_image_dit_engine_batched(
 def _add_plain_dit_block_batched(
     network, x, weights, prefix,
     dim, num_heads, head_dim, ffn_dim, seq_len,
-    eps_t, cos_t, sin_t,
+    eps_t, cos_t, sin_t, attention_mask=None,
 ):
     """Plain DiT block (no AdaLN) for ``[B, S, D]`` tensors."""
     normed = graph_ops.add_rms_norm_last_dim(
@@ -1094,7 +1188,8 @@ def _add_plain_dit_block_batched(
     k = _apply_rope_batched_from_full_cache(
         network, k, cos_t, sin_t, num_heads, head_dim, seq_len)
 
-    attn_out = _mha_batched(network, q, k, v, num_heads, head_dim, seq_len)
+    attn_out = _mha_batched(
+        network, q, k, v, num_heads, head_dim, seq_len, attention_mask)
     attn_out = graph_ops.add_matmul_rhs_constant(
         network, attn_out, dim, dim, weights[f"{prefix}.to_out"])
     attn_out_normed = graph_ops.add_rms_norm_last_dim(

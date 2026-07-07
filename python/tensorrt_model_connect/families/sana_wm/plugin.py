@@ -1,0 +1,2034 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""SANA-WM family plugin.
+
+The public SANA-WM release is not a standard diffusers directory: it ships a
+Sana-specific config.yaml plus DiT, LTX-2 VAE, and refiner weights. Local
+directories may package prebuilt native TRT component plans under
+``trtmc_engines/`` for the C++ runtime to load.
+"""
+
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import struct
+from contextlib import contextmanager
+from pathlib import Path
+
+import numpy as np
+
+from ...build_timing import timed_build_phase
+from .checkpoint_mapper import WeightDict
+from .config import ModelConfig
+
+
+_HF_ID = "Efficient-Large-Model/SANA-WM_bidirectional"
+_DEFAULT_ACTION = "w-80,jw-40,w-40,lw-60,w-100"
+_DEFAULT_TRANSLATION_SPEED = 0.055
+_DEFAULT_ROTATION_SPEED_DEG = 1.2
+_DEFAULT_NUM_FRAMES = 321
+_DEFAULT_HEIGHT = 704
+_DEFAULT_WIDTH = 1280
+_DEFAULT_FPS = 16
+_DEFAULT_NUM_STEPS = 60
+_DEFAULT_GUIDANCE_SCALE = 5.0
+_DEFAULT_DEMO_INTRINSICS = (797.87866, 830.0503, 844.2675, 463.7225)
+_DEFAULT_VAE_STRIDE = (8, 32, 32)
+_DEFAULT_REFINER_TEXT_MAX_LENGTH = 1024
+_STAGE1_DIT_REL = Path("dit") / "sana_wm_1600m_720p.safetensors"
+_STAGE1_TEXT_ENCODER_REL = Path("text_encoder")
+_STAGE1_TEXT_ENCODER_HF_IDS = {
+    "gemma-2-2b-it": "Efficient-Large-Model/gemma-2-2b-it",
+}
+_STAGE1_TEXT_ENCODER_ALLOW_PATTERNS = (
+    "config.json",
+    "generation_config.json",
+    "model*.safetensors",
+    "model.safetensors.index.json",
+    "tokenizer*",
+    "tokenizer.model",
+    "special_tokens_map.json",
+)
+_LEGACY_REFINER_REL = Path("refiner") / "refiner.safetensors"
+_REFINER_DIR_REL = Path("refiner")
+_REFINER_TRANSFORMER_REL = Path("refiner") / "transformer" / "diffusion_pytorch_model.safetensors"
+_REFINER_CONNECTORS_REL = Path("refiner") / "connectors" / "diffusion_pytorch_model.safetensors"
+_REFINER_GEMMA_REL = Path("refiner") / "text_encoder"
+_FULL_SNAPSHOT_REQUIRED_PATH_GROUPS = (
+    ("dit/sana_wm_1600m_720p.safetensors", (_STAGE1_DIT_REL,)),
+    ("vae/", (Path("vae"),)),
+    (
+        "refiner transformer",
+        (_LEGACY_REFINER_REL, _REFINER_TRANSFORMER_REL),
+    ),
+    (
+        "refiner connectors",
+        (_LEGACY_REFINER_REL, _REFINER_CONNECTORS_REL),
+    ),
+    ("refiner/text_encoder/", (_REFINER_GEMMA_REL,)),
+)
+_NATIVE_BUILDER_COMPONENTS = (
+    "stage-1 Gemma text encoder",
+    "SanaMSVideoCamCtrl DiT with BidirectionalGDN camera-control blocks",
+    "LTX-2 VAE encoder",
+    "LTX-2/SANA VAE decoder",
+    "Gemma3 refiner text encoder plus LTX-2 text connector stack",
+    "LTX-2 refiner transformer/connectors denoiser",
+    "LTX-2 refiner VAE decoder",
+)
+_NATIVE_PLAN_DIR = Path("trtmc_engines")
+_PLAN_CACHE_DIR_ENV = "TRTMC_SANA_WM_PLAN_CACHE_DIR"
+_STAGE1_SEGMENTED_DENOISER_ENV = "TRTMC_SANA_WM_STAGE1_SEGMENTED_DENOISER"
+_STAGE1_SEGMENTED_DENOISER_SECTIONS = (
+    "sana_wm_stage1_denoiser_block0_3_plan",
+    "sana_wm_stage1_denoiser_block4_7_plan",
+    "sana_wm_stage1_denoiser_block8_11_plan",
+    "sana_wm_stage1_denoiser_block12_15_plan",
+    "sana_wm_stage1_denoiser_block16_final_plan",
+)
+_NATIVE_PLAN_SECTIONS = (
+    "text_encoder_0_plan",
+    "denoiser_plan",
+    *_STAGE1_SEGMENTED_DENOISER_SECTIONS,
+    "sana_wm_vae_encoder_plan",
+    "vae_decoder_plan",
+    "sana_wm_refiner_text_encoder_plan",
+    "sana_wm_refiner_text_connector_plan",
+    "sana_wm_refiner_denoiser_plan",
+    "sana_wm_refiner_vae_decoder_plan",
+)
+_STAGE1_CORE_PLAN_SECTIONS = (
+    "text_encoder_0_plan",
+    "sana_wm_vae_encoder_plan",
+)
+_REFINER_CORE_PLAN_SECTIONS = (
+    "sana_wm_refiner_text_encoder_plan",
+    "sana_wm_refiner_denoiser_plan",
+    "sana_wm_refiner_vae_decoder_plan",
+)
+_REFINER_PLAN_SECTIONS = (
+    *_REFINER_CORE_PLAN_SECTIONS,
+    "sana_wm_refiner_text_connector_plan",
+)
+_LTX2_VAE_PLAN_PRECISION = "bf16"
+_LTX2_VAE_ENCODER_PLAN_PRECISION = "bf16"
+_TOKENIZER_FILES = (
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+    "special_tokens_map.json",
+    "tokenizer.model",
+)
+_TOKENIZER_SECTION_SUFFIXES = {
+    "tokenizer.json": "tokenizer.json",
+    "tokenizer_config.json": "tokenizer_config.json",
+    "vocab.json": "vocab.json",
+    "merges.txt": "merges.txt",
+    "special_tokens_map.json": "special_tokens_map.json",
+    "tokenizer.model": "tokenizer.model",
+}
+_MAX_SAFETENSORS_HEADER_BYTES = 64 * 1024 * 1024
+_NATIVE_ENGINE_MARKER = b"TRTMC_SANA_WM_NATIVE_COMPONENTS\n"
+_STAGE1_DENOISER_BUILD_ENV_DEFAULTS = (
+    ("TRTMC_SANA_WM_PATCH_EMBED_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_PATCH_EMBED_TORCH_CONV", "1"),
+    ("TRTMC_SANA_WM_TIMESTEP_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_LAYER_NORM_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_T2I_MODULATE_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_FRAME_MEAN_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_GATE_PROJ_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_SHORT_CONV_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_BETA_PROJ_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_DECAY_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_RAW_GDN_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_GDN_CUBLAS", "1"),
+    ("TRTMC_SANA_WM_MLP_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_CAMERA_PREP_PLUGIN", "hybrid"),
+    ("TRTMC_SANA_WM_CAMERA_BETA_DISCOUNT_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_CAMERA_OUT_PROJ_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_OUTPUT_GATE_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_ATTN_PROJ_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_FRAME_GATE_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_CAPTION_EMBED_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_PLUCKER_PROJ_PLUGIN", "1"),
+    ("TRTMC_SANA_WM_CROSS_ATTN_PLUGIN", "1"),
+)
+
+
+def _plan_cache_dir() -> Path | None:
+    value = os.environ.get(_PLAN_CACHE_DIR_ENV)
+    if value is None or not value.strip():
+        return None
+    return Path(value).expanduser()
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+@contextmanager
+def _stage1_denoiser_build_env_defaults():
+    previous: dict[str, str | None] = {}
+    try:
+        for name, value in _STAGE1_DENOISER_BUILD_ENV_DEFAULTS:
+            previous[name] = os.environ.get(name)
+            if name not in os.environ:
+                os.environ[name] = value
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def _cached_plan(cache_name: str, build) -> bytes:
+    cache_dir = _plan_cache_dir()
+    if cache_dir is None:
+        return build()
+    path = cache_dir / f"{cache_name}.plan"
+    if path.is_file():
+        return path.read_bytes()
+    plan = build()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_bytes(plan)
+    tmp_path.replace(path)
+    return plan
+
+
+def _vae_stride(raw_vae: dict, raw_config: dict) -> tuple[int, int, int]:
+    stride = raw_vae.get("vae_stride", raw_config.get("vae_stride", _DEFAULT_VAE_STRIDE))
+    if not isinstance(stride, (list, tuple)) or len(stride) == 0:
+        return _DEFAULT_VAE_STRIDE
+    values = [int(v) for v in stride]
+    if len(values) == 1:
+        values = [values[0], values[0], values[0]]
+    if len(values) == 2:
+        values = [values[0], values[1], values[1]]
+    return values[0], values[1], values[2]
+
+
+def _float_list(value, fallback: tuple[float, ...]) -> list[float]:
+    if isinstance(value, (list, tuple)):
+        return [float(v) for v in value]
+    return list(fallback)
+
+
+def _read_safetensors_header(path: Path) -> dict:
+    with path.open("rb") as f:
+        prefix = f.read(8)
+        if len(prefix) != 8:
+            raise ValueError(f"{path} is too small to be a safetensors file")
+        header_len = struct.unpack("<Q", prefix)[0]
+        if header_len <= 0 or header_len > _MAX_SAFETENSORS_HEADER_BYTES:
+            raise ValueError(f"{path} has an invalid safetensors header size: {header_len}")
+        header = f.read(header_len)
+        if len(header) != header_len:
+            raise ValueError(f"{path} ended before its safetensors header was complete")
+    return json.loads(header)
+
+
+def _tensor_shape(header: dict, name: str) -> list[int]:
+    entry = header.get(name)
+    if not isinstance(entry, dict) or "shape" not in entry:
+        raise ValueError(f"SANA-WM DiT safetensors missing tensor {name!r}")
+    return [int(v) for v in entry["shape"]]
+
+
+def _block_count(header: dict) -> int:
+    block_ids = set()
+    for name in header:
+        parts = name.split(".", 2)
+        if len(parts) >= 3 and parts[0] == "blocks" and parts[1].isdigit():
+            block_ids.add(int(parts[1]))
+    return max(block_ids) + 1 if block_ids else 0
+
+
+def _summarize_stage1_dit(path: Path) -> dict:
+    header = _read_safetensors_header(path)
+    tensor_count = sum(1 for name in header if name != "__metadata__")
+    hidden_size, latent_channels, _, _, _ = _tensor_shape(header, "x_embedder.proj.weight")
+    text_hidden, text_dim = _tensor_shape(header, "y_embedder.y_proj.fc1.weight")
+    text_length, y_dim = _tensor_shape(header, "y_embedder.y_embedding")
+    out_channels, out_hidden = _tensor_shape(header, "final_layer.linear.weight")
+    plucker_hidden, chunk_plucker_channels, _, _, _ = _tensor_shape(
+        header, "plucker_embedder.proj.weight"
+    )
+    raymap_hidden, raymap_channels, _, _, _ = _tensor_shape(header, "raymap_embedder.proj.weight")
+    qkv_rows, qkv_cols = _tensor_shape(header, "blocks.0.attn.qkv.weight")
+
+    if not (
+        hidden_size == text_hidden == out_hidden == plucker_hidden == raymap_hidden == qkv_cols
+    ):
+        raise ValueError("SANA-WM DiT metadata has inconsistent hidden-size dimensions")
+    if text_dim != y_dim:
+        raise ValueError("SANA-WM DiT metadata has inconsistent text embedding dimensions")
+    if out_channels != latent_channels:
+        raise ValueError("SANA-WM DiT metadata has inconsistent latent channel dimensions")
+    if qkv_rows != hidden_size * 3:
+        raise ValueError("SANA-WM DiT qkv tensor does not match 3x hidden size")
+
+    return {
+        "tensor_count": tensor_count,
+        "num_layers": _block_count(header),
+        "hidden_size": hidden_size,
+        "latent_channels": latent_channels,
+        "text_max_length": text_length,
+        "text_embed_dim": text_dim,
+        "chunk_plucker_channels": chunk_plucker_channels,
+        "raymap_channels": raymap_channels,
+    }
+
+
+def _resolve_native_plan_path(model_path: Path, value: str) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = model_path / path
+    return path
+
+
+def _append_native_plan_dir(candidates: list[Path], model_path: Path, value: object) -> None:
+    if not value:
+        return
+    path = _resolve_native_plan_path(model_path, str(value))
+    if path not in candidates:
+        candidates.append(path)
+
+
+def _append_model_native_plan_dir(candidates: list[Path], model_path: Path, value: object) -> None:
+    if not value:
+        return
+    path = _resolve_native_plan_path(model_path, str(value)) / _NATIVE_PLAN_DIR
+    if path not in candidates:
+        candidates.append(path)
+
+
+def _resolve_stage1_text_encoder_dir(model_path: Path, raw_config: dict) -> Path | None:
+    text_encoder = raw_config.get("text_encoder", {})
+    if not isinstance(text_encoder, dict):
+        text_encoder = {}
+    candidates: list[Path] = []
+    for value in (
+        raw_config.get("sana_wm_text_encoder_dir"),
+        text_encoder.get("text_encoder_dir"),
+        os.environ.get("SANA_WM_TEXT_ENCODER_DIR"),
+    ):
+        if value:
+            candidates.append(_resolve_native_plan_path(model_path, str(value)))
+    candidates.append(model_path / _STAGE1_TEXT_ENCODER_REL)
+
+    for candidate in candidates:
+        if (candidate / "config.json").is_file():
+            return candidate
+    cached = _cached_stage1_text_encoder_dir(raw_config)
+    if cached is not None:
+        return cached
+    downloaded = _download_stage1_text_encoder_dir(raw_config)
+    if downloaded is not None and (downloaded / "config.json").is_file():
+        return downloaded
+    return None
+
+
+def _resolve_refiner_text_encoder_dir(model_path: Path, raw_config: dict) -> Path | None:
+    candidates: list[Path] = []
+    for value in (
+        raw_config.get("sana_wm_refiner_text_encoder_dir"),
+        os.environ.get("SANA_WM_REFINER_TEXT_ENCODER_DIR"),
+    ):
+        if value:
+            candidates.append(_resolve_native_plan_path(model_path, str(value)))
+    candidates.append(model_path / _REFINER_GEMMA_REL)
+
+    for candidate in candidates:
+        if (candidate / "config.json").is_file():
+            return candidate
+    return None
+
+
+def _resolve_refiner_root(model_path: Path, raw_config: dict) -> Path:
+    for value in (
+        raw_config.get("sana_wm_refiner_dir"),
+        os.environ.get("SANA_WM_REFINER_DIR"),
+    ):
+        if value:
+            return _resolve_native_plan_path(model_path, str(value))
+    return model_path / _REFINER_DIR_REL
+
+
+def _resolve_refiner_checkpoint_path(model_path: Path, raw_config: dict) -> Path:
+    configured = raw_config.get("sana_wm_refiner_checkpoint")
+    if configured:
+        return _resolve_native_plan_path(model_path, str(configured))
+    legacy_path = model_path / _LEGACY_REFINER_REL
+    if legacy_path.is_file():
+        return legacy_path
+    refiner_root = _resolve_refiner_root(model_path, raw_config)
+    transformer_path = refiner_root / "transformer" / "diffusion_pytorch_model.safetensors"
+    if transformer_path.is_file():
+        return refiner_root
+    return model_path / _REFINER_DIR_REL
+
+
+def _resolve_refiner_transformer_dir(model_path: Path, raw_config: dict) -> Path | None:
+    refiner_root = _resolve_refiner_root(model_path, raw_config)
+    transformer_dir = refiner_root / "transformer"
+    if _has_safetensors_weight_file(transformer_dir):
+        return transformer_dir
+    legacy_path = model_path / _LEGACY_REFINER_REL
+    if legacy_path.is_file():
+        return legacy_path.parent
+    return None
+
+
+def _resolve_refiner_connectors_dir(model_path: Path, raw_config: dict) -> Path | None:
+    refiner_root = _resolve_refiner_root(model_path, raw_config)
+    connectors_dir = refiner_root / "connectors"
+    if _has_safetensors_weight_file(connectors_dir):
+        return connectors_dir
+    legacy_path = model_path / _LEGACY_REFINER_REL
+    if legacy_path.is_file():
+        return legacy_path.parent
+    return None
+
+
+def _has_safetensors_weight_file(path: Path) -> bool:
+    return (
+        (path / "model.safetensors").is_file()
+        or (path / "model.safetensors.index.json").is_file()
+        or (path / "diffusion_pytorch_model.safetensors").is_file()
+        or (path / "diffusion_pytorch_model.safetensors.index.json").is_file()
+        or any(path.glob("*.safetensors"))
+    )
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _stage1_text_encoder_hf_id(raw_config: dict) -> str:
+    text_encoder = raw_config.get("text_encoder", {})
+    if not isinstance(text_encoder, dict):
+        text_encoder = {}
+    configured = (
+        raw_config.get("sana_wm_text_encoder_hf_id")
+        or text_encoder.get("text_encoder_hf_id")
+        or text_encoder.get("text_encoder_name")
+        or text_encoder.get("model")
+        or "gemma-2-2b-it"
+    )
+    name = str(configured)
+    return _STAGE1_TEXT_ENCODER_HF_IDS.get(name, name)
+
+
+def _cached_stage1_text_encoder_dir(raw_config: dict) -> Path | None:
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        return None
+    try:
+        cached = Path(
+            snapshot_download(
+                repo_id=_stage1_text_encoder_hf_id(raw_config),
+                allow_patterns=list(_STAGE1_TEXT_ENCODER_ALLOW_PATTERNS),
+                local_files_only=True,
+            )
+        )
+    except Exception:  # noqa: BLE001 - a missing/partial optional cache is not fatal
+        return None
+    if (cached / "config.json").is_file() and _has_safetensors_weight_file(cached):
+        return cached
+    return None
+
+
+def _download_stage1_text_encoder_dir(raw_config: dict) -> Path | None:
+    if not _truthy_env("TRTMC_SANA_WM_DOWNLOAD_WEIGHTS"):
+        return None
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:
+        raise ImportError(
+            "huggingface_hub is required to download the SANA-WM stage-1 "
+            "Gemma text encoder. Install it or set SANA_WM_TEXT_ENCODER_DIR."
+        ) from exc
+    return Path(
+        snapshot_download(
+            repo_id=_stage1_text_encoder_hf_id(raw_config),
+            allow_patterns=list(_STAGE1_TEXT_ENCODER_ALLOW_PATTERNS),
+        )
+    )
+
+
+def _resolve_vae_dir(model_path: Path, raw_config: dict) -> Path | None:
+    vae = raw_config.get("vae", {})
+    if not isinstance(vae, dict):
+        vae = {}
+    candidates: list[Path] = []
+    for value in (
+        raw_config.get("sana_wm_vae_dir"),
+        vae.get("vae_dir"),
+        os.environ.get("SANA_WM_VAE_DIR"),
+    ):
+        if value:
+            candidates.append(_resolve_native_plan_path(model_path, str(value)))
+    candidates.append(model_path / "vae")
+
+    for candidate in candidates:
+        if candidate.is_dir() and _has_safetensors_weight_file(candidate):
+            return candidate
+    return None
+
+
+def _resolve_vae_encoder_dir(model_path: Path, raw_config: dict) -> Path | None:
+    return _resolve_vae_dir(model_path, raw_config)
+
+
+def _resolve_vae_decoder_dir(model_path: Path, raw_config: dict) -> Path | None:
+    return _resolve_vae_dir(model_path, raw_config)
+
+
+def _load_vae_config(vae_dir: Path) -> dict:
+    config_path = vae_dir / "config.json"
+    if not config_path.is_file():
+        return {}
+    parsed = json.loads(config_path.read_text(encoding="utf-8"))
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _load_refiner_transformer_config(transformer_dir: Path | None) -> dict:
+    if transformer_dir is None:
+        return {}
+    return _load_json_config(transformer_dir / "config.json")
+
+
+def _load_json_config(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    parsed = json.loads(path.read_text(encoding="utf-8"))
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _text_encoder_model_type(text_encoder_dir: Path) -> str:
+    parsed = _load_json_config(text_encoder_dir / "config.json")
+    model_type = parsed.get("model_type")
+    if model_type:
+        return str(model_type)
+    text_config = parsed.get("text_config")
+    if isinstance(text_config, dict) and text_config.get("model_type"):
+        return str(text_config["model_type"])
+    return ""
+
+
+def _can_build_legacy_refiner_text_encoder(
+    text_encoder_dir: Path | None,
+    connectors_dir: Path | None,
+) -> bool:
+    if text_encoder_dir is None or connectors_dir is not None:
+        return False
+    model_type = _text_encoder_model_type(text_encoder_dir).lower()
+    return (
+        bool(model_type) and model_type.startswith("gemma") and not model_type.startswith("gemma3")
+    )
+
+
+def _can_build_split_refiner_text_encoder(
+    text_encoder_dir: Path | None,
+    native_plan_paths: dict[str, Path],
+    *,
+    can_build_refiner_text_connector: bool = False,
+) -> bool:
+    if text_encoder_dir is None or (
+        "sana_wm_refiner_text_connector_plan" not in native_plan_paths
+        and not can_build_refiner_text_connector
+    ):
+        return False
+    model_type = _text_encoder_model_type(text_encoder_dir).lower()
+    return bool(model_type) and model_type.startswith("gemma")
+
+
+def _int_tuple(value, fallback: tuple[int, ...]) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)):
+        return fallback
+    return tuple(int(v) for v in value)
+
+
+def _bool_tuple(value, fallback: tuple[bool, ...]) -> tuple[bool, ...]:
+    if not isinstance(value, (list, tuple)):
+        return fallback
+    return tuple(bool(v) for v in value)
+
+
+def _str_tuple(value, fallback: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return fallback
+    return tuple(str(v) for v in value)
+
+
+def _discover_native_plan_dirs(model_path: Path, raw_config: dict) -> list[Path]:
+    candidates: list[Path] = []
+    _append_native_plan_dir(candidates, model_path, raw_config.get("sana_wm_native_plan_dir"))
+    _append_native_plan_dir(candidates, model_path, os.environ.get("SANA_WM_NATIVE_PLAN_DIR"))
+    _append_model_native_plan_dir(candidates, model_path, raw_config.get("sana_wm_model_dir"))
+    _append_model_native_plan_dir(candidates, model_path, os.environ.get("SANA_WM_MODEL_DIR"))
+    _append_native_plan_dir(candidates, model_path, _NATIVE_PLAN_DIR)
+    return candidates
+
+
+def _discover_native_plan_paths(model_path: Path, raw_config: dict) -> dict[str, Path]:
+    paths: dict[str, Path] = {}
+    configured = raw_config.get("sana_wm_native_plan_paths")
+    if isinstance(configured, dict):
+        for section in _NATIVE_PLAN_SECTIONS:
+            value = configured.get(section)
+            if value:
+                path = _resolve_native_plan_path(model_path, str(value))
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"SANA-WM native plan {section!r} does not exist: {path}"
+                    )
+                paths[section] = path
+
+    for plan_dir in _discover_native_plan_dirs(model_path, raw_config):
+        for section in _NATIVE_PLAN_SECTIONS:
+            if section in paths:
+                continue
+            path = plan_dir / f"{section}.plan"
+            if path.is_file():
+                paths[section] = path
+    return paths
+
+
+def _effective_native_sections(
+    paths: dict[str, Path],
+    *,
+    can_build_stage1_text_encoder: bool,
+    can_build_stage1_denoiser: bool = False,
+    can_build_refiner_text_encoder: bool = False,
+    can_build_refiner_text_connector: bool = False,
+    can_build_refiner_denoiser: bool = False,
+    can_build_vae_encoder: bool = False,
+    can_build_vae_decoder: bool = False,
+    can_build_refiner_vae_decoder: bool = False,
+) -> list[str]:
+    present = set(paths)
+    refiner_requested = bool(present.intersection(_REFINER_PLAN_SECTIONS)) or bool(
+        can_build_refiner_denoiser
+    )
+    if can_build_stage1_text_encoder:
+        present.add("text_encoder_0_plan")
+    if can_build_stage1_denoiser:
+        present.add("denoiser_plan")
+    if refiner_requested and can_build_refiner_text_encoder:
+        present.add("sana_wm_refiner_text_encoder_plan")
+    if refiner_requested and can_build_refiner_text_connector:
+        present.add("sana_wm_refiner_text_connector_plan")
+    if can_build_refiner_denoiser:
+        present.add("sana_wm_refiner_denoiser_plan")
+    if can_build_vae_encoder:
+        present.add("sana_wm_vae_encoder_plan")
+    if can_build_vae_decoder:
+        present.add("vae_decoder_plan")
+    if refiner_requested and can_build_refiner_vae_decoder:
+        present.add("sana_wm_refiner_vae_decoder_plan")
+    return [section for section in _NATIVE_PLAN_SECTIONS if section in present]
+
+
+def _has_stage1_denoiser_sections(present: set[str]) -> bool:
+    return "denoiser_plan" in present or all(
+        section in present for section in _STAGE1_SEGMENTED_DENOISER_SECTIONS
+    )
+
+
+def _missing_stage1_core_sections(present: set[str]) -> list[str]:
+    missing = [section for section in _STAGE1_CORE_PLAN_SECTIONS if section not in present]
+    if not _has_stage1_denoiser_sections(present):
+        missing.append("denoiser_plan or " + ",".join(_STAGE1_SEGMENTED_DENOISER_SECTIONS))
+    return missing
+
+
+def _native_sections_are_complete(sections: list[str]) -> bool:
+    present = set(sections)
+    if _missing_stage1_core_sections(present):
+        return False
+    present_refiner = [section for section in _REFINER_PLAN_SECTIONS if section in present]
+    if present_refiner:
+        return all(section in present for section in _REFINER_CORE_PLAN_SECTIONS)
+    return "vae_decoder_plan" in present
+
+
+def _validate_native_plan_paths(
+    paths: dict[str, Path],
+    *,
+    can_build_stage1_text_encoder: bool = False,
+    can_build_stage1_denoiser: bool = False,
+    can_build_refiner_text_encoder: bool = False,
+    can_build_refiner_text_connector: bool = False,
+    can_build_refiner_denoiser: bool = False,
+    can_build_vae_encoder: bool = False,
+    can_build_vae_decoder: bool = False,
+    can_build_refiner_vae_decoder: bool = False,
+) -> None:
+    if not paths:
+        return
+    effective_sections = _effective_native_sections(
+        paths,
+        can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+        can_build_stage1_denoiser=can_build_stage1_denoiser,
+        can_build_refiner_text_encoder=can_build_refiner_text_encoder,
+        can_build_refiner_text_connector=can_build_refiner_text_connector,
+        can_build_refiner_denoiser=can_build_refiner_denoiser,
+        can_build_vae_encoder=can_build_vae_encoder,
+        can_build_vae_decoder=can_build_vae_decoder,
+        can_build_refiner_vae_decoder=can_build_refiner_vae_decoder,
+    )
+    missing_core = _missing_stage1_core_sections(set(effective_sections))
+    if missing_core:
+        raise ValueError(
+            "SANA-WM native TensorRT bundle requires a complete prebuilt plan set; "
+            f"missing {missing_core!r} with only {effective_sections!r} present"
+        )
+
+    present_refiner = [
+        section for section in _REFINER_PLAN_SECTIONS if section in effective_sections
+    ]
+    if present_refiner:
+        missing_refiner = [
+            section for section in _REFINER_CORE_PLAN_SECTIONS if section not in effective_sections
+        ]
+        if missing_refiner:
+            raise ValueError(
+                "SANA-WM native TensorRT bundle requires a complete prebuilt plan set; "
+                f"missing {missing_refiner!r} with only {effective_sections!r} present"
+            )
+        return
+
+    if "vae_decoder_plan" not in effective_sections:
+        raise ValueError(
+            "SANA-WM native TensorRT bundle requires a complete prebuilt plan set; "
+            f"missing ['vae_decoder_plan'] with only {effective_sections!r} present"
+        )
+
+
+def _join_chi_prompt(text_encoder: dict) -> str:
+    chi_prompt = text_encoder.get("chi_prompt", [])
+    if isinstance(chi_prompt, str):
+        return chi_prompt
+    if isinstance(chi_prompt, (list, tuple)):
+        return "\n".join(str(line) for line in chi_prompt)
+    return ""
+
+
+def _stage1_chi_prompt_token_count(text_encoder_dir: Path, chi_prompt: str) -> int:
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(text_encoder_dir, local_files_only=True)
+    return len(tokenizer.encode(chi_prompt))
+
+
+def _tokenizer_adds_special_tokens(tokenizer_dir: Path) -> bool:
+    try:
+        from transformers import AutoTokenizer
+
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, local_files_only=True)
+        return tokenizer.encode("hello") != tokenizer.encode(
+            "hello", add_special_tokens=False
+        )
+    except Exception:  # noqa: BLE001 - lightweight builds use the JSON fallback
+        config_path = tokenizer_dir / "tokenizer_config.json"
+        if not config_path.is_file():
+            return False
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return bool(config.get("add_bos_token") or config.get("add_eos_token"))
+
+
+def _stage1_text_encoder_conditioning_length(
+    text_encoder_dir: Path,
+    raw_config: dict,
+) -> int:
+    text_encoder = raw_config.get("text_encoder", {})
+    if not isinstance(text_encoder, dict):
+        text_encoder = {}
+
+    model_max_length = int(
+        text_encoder.get(
+            "model_max_length",
+            raw_config.get("text_encoder_max_length", 300),
+        )
+    )
+    chi_prompt = raw_config.get("sana_wm_chi_prompt", _join_chi_prompt(text_encoder))
+    if not chi_prompt:
+        return model_max_length
+
+    chi_tokens = _stage1_chi_prompt_token_count(text_encoder_dir, str(chi_prompt))
+    return max(model_max_length, model_max_length + max(0, chi_tokens - 2))
+
+
+def _append_unique_path(candidates: list[Path], path: Path | None) -> None:
+    if path is not None and path not in candidates:
+        candidates.append(path)
+
+
+def _discover_tokenizer_sections(
+    model_path: Path,
+    raw_config: dict,
+    *,
+    stage1_text_encoder_dir: Path | None = None,
+    refiner_text_encoder_dir: Path | None = None,
+) -> dict[str, Path]:
+    def collect(candidate: Path | None) -> dict[str, Path]:
+        if candidate is None or not candidate.is_dir() or candidate == model_path:
+            return {}
+        sections = {
+            name: candidate / name for name in _TOKENIZER_FILES if (candidate / name).is_file()
+        }
+        return sections if "tokenizer.json" in sections else {}
+
+    def first_existing(candidates: list[Path | None]) -> dict[str, Path]:
+        for candidate in candidates:
+            sections = collect(candidate)
+            if sections:
+                return sections
+        return {}
+
+    def prefixed(sections: dict[str, Path], prefix: str) -> dict[str, Path]:
+        return {
+            f"{prefix}_{_TOKENIZER_SECTION_SUFFIXES[name]}": path
+            for name, path in sections.items()
+            if name in _TOKENIZER_SECTION_SUFFIXES
+        }
+
+    stage1_candidates: list[Path | None] = []
+    for value in (
+        raw_config.get("sana_wm_stage1_tokenizer_dir"),
+        raw_config.get("sana_wm_tokenizer_dir"),
+        os.environ.get("SANA_WM_STAGE1_TOKENIZER_DIR"),
+        os.environ.get("SANA_WM_TOKENIZER_DIR"),
+    ):
+        if value:
+            stage1_candidates.append(_resolve_native_plan_path(model_path, str(value)))
+    stage1_candidates.extend([stage1_text_encoder_dir, model_path / _STAGE1_TEXT_ENCODER_REL])
+
+    refiner_candidates: list[Path | None] = []
+    for value in (
+        raw_config.get("sana_wm_refiner_tokenizer_dir"),
+        os.environ.get("SANA_WM_REFINER_TOKENIZER_DIR"),
+    ):
+        if value:
+            refiner_candidates.append(_resolve_native_plan_path(model_path, str(value)))
+    refiner_candidates.extend([refiner_text_encoder_dir, model_path / _REFINER_GEMMA_REL])
+
+    stage1_sections = first_existing(stage1_candidates)
+    refiner_sections = first_existing(refiner_candidates)
+    sections: dict[str, Path] = {}
+    if stage1_sections:
+        # Keep the legacy section names bound to Stage-1 so older runtimes do
+        # not accidentally drive the Sana DiT with the refiner tokenizer.
+        sections.update(stage1_sections)
+        sections.update(prefixed(stage1_sections, "sana_wm_stage1"))
+    if refiner_sections:
+        sections.update(prefixed(refiner_sections, "sana_wm_refiner"))
+    if sections:
+        return sections
+    return {}
+
+
+def _validate_native_tokenizer_sections(
+    tokenizer_sections: dict[str, Path], *, require_refiner: bool
+) -> None:
+    if "sana_wm_stage1_tokenizer.json" not in tokenizer_sections:
+        raise ValueError(
+            "SANA-WM native TensorRT bundles require tokenizer assets for the C++ "
+            "Stage-1 text-encoder path. Place tokenizer.json under text_encoder/, "
+            "set sana_wm_stage1_tokenizer_dir, or set SANA_WM_STAGE1_TOKENIZER_DIR."
+        )
+    if require_refiner and "sana_wm_refiner_tokenizer.json" not in tokenizer_sections:
+        raise ValueError(
+            "SANA-WM native TensorRT bundles with refiner plans require tokenizer "
+            "assets for the refiner text encoder. Place tokenizer.json under "
+            "refiner/text_encoder/, set sana_wm_refiner_tokenizer_dir, or set "
+            "SANA_WM_REFINER_TOKENIZER_DIR."
+        )
+
+
+def _missing_full_snapshot_paths(model_path: Path) -> list[str]:
+    missing: list[str] = []
+    for label, alternatives in _FULL_SNAPSHOT_REQUIRED_PATH_GROUPS:
+        if not any((model_path / rel).exists() for rel in alternatives):
+            missing.append(label)
+    return missing
+
+
+def _missing_native_builder_components(weights: WeightDict) -> tuple[str, ...]:
+    missing = list(_NATIVE_BUILDER_COMPONENTS)
+    if weights.get("_stage1_text_encoder_dir"):
+        missing = [component for component in missing if component != "stage-1 Gemma text encoder"]
+    if weights.get("_stage1_dit_path") and Path(str(weights["_stage1_dit_path"])).is_file():
+        missing = [
+            component
+            for component in missing
+            if component != "SanaMSVideoCamCtrl DiT with BidirectionalGDN camera-control blocks"
+        ]
+    if weights.get("_can_build_refiner_text_encoder_plan") and weights.get(
+        "_can_build_refiner_text_connector_plan"
+    ):
+        missing = [
+            component
+            for component in missing
+            if component != "Gemma3 refiner text encoder plus LTX-2 text connector stack"
+        ]
+    if weights.get("_can_build_refiner_denoiser_plan"):
+        missing = [
+            component
+            for component in missing
+            if component != "LTX-2 refiner transformer/connectors denoiser"
+        ]
+    if weights.get("_sana_wm_vae_encoder_dir"):
+        missing = [component for component in missing if component != "LTX-2 VAE encoder"]
+    if weights.get("_sana_wm_vae_decoder_dir"):
+        missing = [
+            component
+            for component in missing
+            if component
+            not in {
+                "LTX-2/SANA VAE decoder",
+                "LTX-2 refiner VAE decoder",
+            }
+        ]
+    return tuple(missing)
+
+
+def _native_build_error(weights: WeightDict) -> str:
+    model_path = Path(str(weights.get("_model_dir", "")))
+    components = "; ".join(_missing_native_builder_components(weights))
+    message = (
+        "SANA-WM pure C++ builds require a complete native TensorRT component "
+        "set: either prebuilt plans under trtmc_engines/ or "
+        "sana_wm_native_plan_paths, or raw component weights that the direct "
+        f"TensorRT builders can consume. Missing native inputs/builders: {components}. "
+        "No ONNX fallback is used."
+    )
+    missing = _missing_full_snapshot_paths(model_path)
+    if missing:
+        message += (
+            " The resolved model snapshot is also missing raw SANA-WM weight "
+            f"paths: {', '.join(missing)}. Set TRTMC_SANA_WM_DOWNLOAD_WEIGHTS=1 "
+            "when resolving Efficient-Large-Model/SANA-WM_bidirectional, or "
+            "point SANA_WM_MODEL_DIR at a full local snapshot."
+        )
+    return message
+
+
+def _pre_scale_gemma_embedding_bf16(weights: WeightDict, hidden_size: int) -> None:
+    import ml_dtypes
+
+    embedding = np.asarray(weights["embedding"])
+    embedding_bf16 = embedding.astype(ml_dtypes.bfloat16)
+    scale_bf16 = np.asarray(np.sqrt(hidden_size), dtype=ml_dtypes.bfloat16)
+    scaled_bf16 = (embedding_bf16 * scale_bf16).astype(ml_dtypes.bfloat16)
+    weights["embedding"] = scaled_bf16.astype(np.float32).astype(embedding.dtype)
+    weights.pop("_embedding_scale", None)
+
+
+def _make_exact_gemma_rope_tables(
+    text_config: ModelConfig,
+    table_length: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("SANA-WM exact Gemma RoPE table generation requires CUDA")
+    head_dim = int(text_config.raw.get("head_dim", text_config.attention_size //
+                                       text_config.num_attention_heads))
+    rope_theta = float(text_config.rope_theta)
+    inv_freq = 1.0 / (
+        rope_theta
+        ** (torch.arange(0, head_dim, 2, dtype=torch.int64).float() / head_dim)
+    )
+    position_ids = torch.arange(table_length, device="cuda", dtype=torch.long).unsqueeze(0)
+    inv_freq_expanded = inv_freq.cuda()[None, :, None].float()
+    position_ids_expanded = position_ids[:, None, :].float()
+    with torch.autocast(device_type="cuda", enabled=False):
+        freqs = (inv_freq_expanded @ position_ids_expanded).transpose(1, 2)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos().to(torch.bfloat16).float().cpu().numpy()[0]
+        sin = emb.sin().to(torch.bfloat16).float().cpu().numpy()[0]
+    # Every BF16 value is exactly representable in fp16 in [-1, 1], which is
+    # the storage dtype used by the generic BF16 TensorRT builder.
+    return cos.astype(np.float16), sin.astype(np.float16)
+
+
+def _make_exact_gemma3_rope_tables(
+    text_encoder_dir: Path,
+    table_length: int,
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    import torch
+    from transformers import AutoConfig
+    from transformers.models.gemma3.modeling_gemma3 import Gemma3RotaryEmbedding
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("SANA-WM exact Gemma3 RoPE table generation requires CUDA")
+    config = AutoConfig.from_pretrained(
+        text_encoder_dir,
+        local_files_only=True,
+    ).text_config
+    rotary = Gemma3RotaryEmbedding(config)
+    positions = torch.arange(table_length, device="cuda", dtype=torch.long).unsqueeze(0)
+    probe = torch.empty((1, 1, config.head_dim), device="cuda", dtype=torch.bfloat16)
+    tables: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for layer_type in set(config.layer_types):
+        cos, sin = rotary(probe, positions, layer_type)
+        tables[layer_type] = (
+            cos.float().cpu().numpy()[0].astype(np.float16),
+            sin.float().cpu().numpy()[0].astype(np.float16),
+        )
+    return tables
+
+
+def _prepare_exact_gemma_text_weights(
+    text_config: ModelConfig,
+    text_weights: WeightDict,
+    max_cache_length: int,
+    text_encoder_dir: Path | None = None,
+) -> None:
+    _pre_scale_gemma_embedding_bf16(text_weights, text_config.hidden_size)
+    text_weights["_sana_wm_exact_gemma"] = True
+    nested_text_config = text_config.raw.get("text_config", {})
+    layer_types = nested_text_config.get("layer_types", [])
+    if text_config.model_type.startswith("gemma3") and layer_types:
+        if text_encoder_dir is None:
+            raise ValueError("Gemma3 exact RoPE generation requires the text encoder directory")
+        tables = _make_exact_gemma3_rope_tables(
+            text_encoder_dir,
+            2 * max_cache_length,
+        )
+        text_weights["_sana_wm_rope_tables"] = tables
+        text_weights["_sana_wm_layer_types"] = list(layer_types[: text_config.num_hidden_layers])
+    else:
+        cos, sin = _make_exact_gemma_rope_tables(text_config, 2 * max_cache_length)
+        text_weights["_sana_wm_rope_cos"] = cos
+        text_weights["_sana_wm_rope_sin"] = sin
+
+
+def _build_gemma_text_encoder_plan(
+    text_encoder_dir: Path,
+    max_cache_length: int,
+    *,
+    precision: str = "fp32",
+    verbose: bool = False,
+    label: str,
+    debug_layer_outputs: bool = False,
+    manual_decode_attention: bool = False,
+) -> bytes:
+    from .components.gemma.plugin import plugin as gemma_plugin
+    from .components.gemma.standard_decoder_builder import build_standard_decoder_engine
+
+    text_config = ModelConfig.from_dir(text_encoder_dir)
+    if not gemma_plugin.matches(text_config.model_type):
+        raise ValueError(
+            f"SANA-WM {label} text encoder builder currently supports Gemma only; "
+            f"found model_type={text_config.model_type!r} in {text_encoder_dir}"
+        )
+    load_precision = "fp32" if precision == "bf16" else precision
+    text_weights = gemma_plugin.load_weights(
+        str(text_encoder_dir),
+        text_config,
+        precision=load_precision,
+    )
+    if precision == "bf16":
+        from ... import trt_compat
+        from .stage1_dit_builder import _get_sana_wm_plugin_creator_with_get_creator
+
+        trt_module = trt_compat.get_trt()
+        for plugin_name in (
+            "SanaWmGemmaRmsNorm",
+            "SanaWmGemmaGatedGelu",
+            "SanaWmGemmaRope",
+            "SanaWmGemmaAttention",
+        ):
+            if _get_sana_wm_plugin_creator_with_get_creator(trt_module, plugin_name) is None:
+                raise RuntimeError(
+                    f"{plugin_name} is required for exact SANA-WM Gemma text encoding"
+                )
+        _prepare_exact_gemma_text_weights(
+            text_config,
+            text_weights,
+            max_cache_length,
+            text_encoder_dir,
+        )
+    previous_manual_attention = os.environ.get("TRTMC_MANUAL_DECODE_ATTENTION")
+    if manual_decode_attention:
+        os.environ["TRTMC_MANUAL_DECODE_ATTENTION"] = "1"
+    try:
+        return build_standard_decoder_engine(
+            text_config,
+            text_weights,
+            max_cache_length,
+            precision=precision,
+            verbose=verbose,
+            debug_layer_outputs=debug_layer_outputs,
+            hidden_state_output=True,
+        )
+    finally:
+        if manual_decode_attention:
+            if previous_manual_attention is None:
+                os.environ.pop("TRTMC_MANUAL_DECODE_ATTENTION", None)
+            else:
+                os.environ["TRTMC_MANUAL_DECODE_ATTENTION"] = previous_manual_attention
+
+
+def _build_stage1_text_encoder_plan(
+    text_encoder_dir: Path,
+    max_cache_length: int,
+    *,
+    precision: str = "fp32",
+    verbose: bool = False,
+) -> bytes:
+    return _build_gemma_text_encoder_plan(
+        text_encoder_dir,
+        max_cache_length,
+        precision=precision,
+        verbose=verbose,
+        label="stage-1",
+    )
+
+
+def _build_refiner_text_encoder_plan(
+    text_encoder_dir: Path,
+    max_cache_length: int,
+    *,
+    precision: str = "fp32",
+    verbose: bool = False,
+) -> bytes:
+    return _build_gemma_text_encoder_plan(
+        text_encoder_dir,
+        max_cache_length,
+        precision=precision,
+        verbose=verbose,
+        label="refiner",
+        debug_layer_outputs=True,
+        manual_decode_attention=True,
+    )
+
+
+def _build_sana_wm_stage1_denoiser_plan(
+    dit_path: Path,
+    raw_config: dict,
+    *,
+    precision: str = "fp16",
+    verbose: bool = False,
+) -> bytes:
+    from .stage1_dit_builder import (
+        build_sana_wm_stage1_dit_engine,
+        load_sana_wm_stage1_dit_weights,
+    )
+
+    with _stage1_denoiser_build_env_defaults():
+        weights = load_sana_wm_stage1_dit_weights(dit_path, precision=precision)
+        return build_sana_wm_stage1_dit_engine(
+            weights,
+            raw_config,
+            precision=precision,
+            verbose=verbose,
+        )
+
+
+def _build_sana_wm_stage1_denoiser_segment_plan(
+    dit_path: Path,
+    raw_config: dict,
+    *,
+    input_block: int | None,
+    stop_after_block: int | None,
+    precision: str = "fp16",
+    verbose: bool = False,
+) -> bytes:
+    from .stage1_dit_builder import (
+        build_sana_wm_stage1_dit_engine,
+        load_sana_wm_stage1_dit_weights,
+    )
+
+    stop_env = "TRTMC_SANA_WM_STAGE1_DEBUG_STOP_AFTER_BLOCK"
+    input_env = "TRTMC_SANA_WM_STAGE1_DEBUG_BLOCK_INPUT_INDEX"
+    old_stop = os.environ.get(stop_env)
+    old_input = os.environ.get(input_env)
+    try:
+        if stop_after_block is None:
+            os.environ.pop(stop_env, None)
+        else:
+            os.environ[stop_env] = str(stop_after_block)
+        if input_block is None:
+            os.environ.pop(input_env, None)
+        else:
+            os.environ[input_env] = str(input_block)
+
+        with _stage1_denoiser_build_env_defaults():
+            weights = load_sana_wm_stage1_dit_weights(dit_path, precision=precision)
+            return build_sana_wm_stage1_dit_engine(
+                weights,
+                raw_config,
+                precision=precision,
+                verbose=verbose,
+            )
+    finally:
+        if old_stop is None:
+            os.environ.pop(stop_env, None)
+        else:
+            os.environ[stop_env] = old_stop
+        if old_input is None:
+            os.environ.pop(input_env, None)
+        else:
+            os.environ[input_env] = old_input
+
+
+def _build_sana_wm_stage1_segmented_denoiser_plans(
+    dit_path: Path,
+    raw_config: dict,
+    *,
+    precision: str = "fp16",
+    verbose: bool = False,
+) -> dict[str, bytes]:
+    specs = (
+        ("sana_wm_stage1_denoiser_block0_3_plan", None, 3),
+        ("sana_wm_stage1_denoiser_block4_7_plan", 4, 7),
+        ("sana_wm_stage1_denoiser_block8_11_plan", 8, 11),
+        ("sana_wm_stage1_denoiser_block12_15_plan", 12, 15),
+        ("sana_wm_stage1_denoiser_block16_final_plan", 16, None),
+    )
+    result: dict[str, bytes] = {}
+    for section, input_block, stop_after_block in specs:
+        result[section] = _cached_plan(
+            section,
+            lambda input_block=input_block, stop_after_block=stop_after_block: (
+                _build_sana_wm_stage1_denoiser_segment_plan(
+                    dit_path,
+                    raw_config,
+                    input_block=input_block,
+                    stop_after_block=stop_after_block,
+                    precision=precision,
+                    verbose=verbose,
+                )
+            ),
+        )
+    return result
+
+
+def _build_sana_wm_refiner_denoiser_plan(
+    transformer_dir: Path,
+    raw_config: dict,
+    transformer_config: dict | None = None,
+    *,
+    precision: str = "fp16",
+    verbose: bool = False,
+) -> bytes:
+    from .refiner_dit_builder import (
+        build_sana_wm_refiner_dit_engine,
+        load_sana_wm_refiner_dit_weights,
+    )
+
+    cfg = transformer_config or _load_refiner_transformer_config(transformer_dir)
+    weights = load_sana_wm_refiner_dit_weights(
+        transformer_dir,
+        num_layers=int(cfg.get("num_layers", 48)),
+        precision=precision,
+    )
+    return build_sana_wm_refiner_dit_engine(
+        weights,
+        raw_config,
+        cfg,
+        precision=precision,
+        verbose=verbose,
+    )
+
+
+def _build_sana_wm_refiner_text_connector_plan(
+    connectors_dir: Path,
+    raw_config: dict,
+    connector_config: dict | None = None,
+    *,
+    precision: str = "fp32",
+    verbose: bool = False,
+) -> bytes:
+    from .refiner_text_connector_builder import (
+        build_sana_wm_refiner_text_connector_engine,
+        load_sana_wm_refiner_text_connector_weights,
+        refiner_text_connector_shape_from_config,
+    )
+
+    cfg = connector_config or _load_json_config(connectors_dir / "config.json")
+    shape = refiner_text_connector_shape_from_config(raw_config, cfg)
+    weights = load_sana_wm_refiner_text_connector_weights(
+        connectors_dir,
+        num_layers=shape.num_layers,
+        precision=precision,
+    )
+    return build_sana_wm_refiner_text_connector_engine(
+        weights,
+        raw_config,
+        cfg,
+        precision=precision,
+        verbose=verbose,
+    )
+
+
+def _build_sana_wm_vae_encoder_plan(
+    vae_dir: Path,
+    raw_config: dict,
+    *,
+    precision: str = "fp16",
+    verbose: bool = False,
+) -> bytes:
+    from .components.ltx_video.ltx_vae_builder import (
+        build_ltx_vae_encoder_engine,
+        load_ltx_vae_encoder_weights,
+    )
+
+    vae = raw_config.get("vae", {})
+    if not isinstance(vae, dict):
+        vae = {}
+    vae_config = _load_vae_config(vae_dir)
+    video_height = int(raw_config.get("video_height", _DEFAULT_HEIGHT))
+    video_width = int(raw_config.get("video_width", _DEFAULT_WIDTH))
+    spatial_tiling = video_height > 512 or video_width > 512
+    weights = load_ltx_vae_encoder_weights(vae_dir, precision=precision)
+    return build_ltx_vae_encoder_engine(
+        weights,
+        sample_frames=1,
+        sample_height=video_height,
+        sample_width=video_width,
+        in_channels=int(vae_config.get("in_channels", 3)),
+        latent_channels=int(vae_config.get("latent_channels", vae.get("vae_latent_dim", 128))),
+        block_out_channels=_int_tuple(vae_config.get("block_out_channels"), (128, 256, 512, 512)),
+        layers_per_block=_int_tuple(vae_config.get("layers_per_block"), (4, 3, 3, 3, 4)),
+        spatio_temporal_scaling=_bool_tuple(
+            vae_config.get("spatio_temporal_scaling"), (True, True, True, False)
+        ),
+        downsample_type=_str_tuple(
+            vae_config.get("downsample_type"), ("conv", "conv", "conv", "conv")
+        ),
+        patch_size=int(vae_config.get("patch_size", 4)),
+        patch_size_t=int(vae_config.get("patch_size_t", 1)),
+        precision=precision,
+        normalize_output=True,
+        scaling_factor=float(vae_config.get("scaling_factor", 1.0)),
+        spatial_tiling=spatial_tiling,
+        tile_sample_min_height=int(vae.get("tile_sample_min_height", 512)),
+        tile_sample_min_width=int(vae.get("tile_sample_min_width", 512)),
+        tile_sample_stride_height=int(vae.get("tile_sample_stride_height", 448)),
+        tile_sample_stride_width=int(vae.get("tile_sample_stride_width", 448)),
+        use_torch_conv3d=precision == "bf16",
+        verbose=verbose,
+    )
+
+
+def _sana_wm_vae_tile_section_name(
+    prefix: str,
+    frames: int,
+    height: int,
+    width: int,
+) -> str:
+    return f"{prefix}_tile_t{frames}_h{height}_w{width}_plan"
+
+
+def _sana_wm_vae_tile_shapes(raw_config: dict) -> list[tuple[int, int, int]]:
+    vae = raw_config.get("vae", {})
+    if not isinstance(vae, dict):
+        vae = {}
+    if not (
+        vae.get("use_framewise_decoding") is True
+        or "tile_sample_min_num_frames" in vae
+        or "tile_sample_stride_num_frames" in vae
+    ):
+        return []
+
+    video_height = int(raw_config.get("video_height", _DEFAULT_HEIGHT))
+    video_width = int(raw_config.get("video_width", _DEFAULT_WIDTH))
+    video_num_frames = int(raw_config.get("video_num_frames", _DEFAULT_NUM_FRAMES))
+    vae_stride = _vae_stride(vae, raw_config)
+    latent_frames = (video_num_frames - 1) // vae_stride[0] + 1
+    latent_height = video_height // vae_stride[-1]
+    latent_width = video_width // vae_stride[-1]
+
+    tile_latent_min_frames = max(1, int(vae.get("tile_sample_min_num_frames", 96)) // vae_stride[0])
+    tile_latent_stride_frames = max(
+        1, int(vae.get("tile_sample_stride_num_frames", 64)) // vae_stride[0]
+    )
+    tile_latent_min_height = max(1, int(vae.get("tile_sample_min_height", 512)) // vae_stride[-1])
+    tile_latent_min_width = max(1, int(vae.get("tile_sample_min_width", 512)) // vae_stride[-1])
+    tile_latent_stride_height = max(
+        1, int(vae.get("tile_sample_stride_height", 448)) // vae_stride[-1]
+    )
+    tile_latent_stride_width = max(
+        1, int(vae.get("tile_sample_stride_width", 448)) // vae_stride[-1]
+    )
+
+    temporal_tiles: list[int] = []
+    if bool(vae.get("use_framewise_decoding", True)) and latent_frames > tile_latent_min_frames:
+        for start in range(0, latent_frames, tile_latent_stride_frames):
+            frames = min(tile_latent_min_frames + 1, latent_frames - start)
+            if start > 0 and frames <= 1:
+                continue
+            temporal_tiles.append(frames)
+    else:
+        temporal_tiles.append(latent_frames)
+
+    height_tiles: list[int] = []
+    width_tiles: list[int] = []
+    if bool(vae.get("use_tiling", True)) and (
+        latent_height > tile_latent_min_height or latent_width > tile_latent_min_width
+    ):
+        for start in range(0, latent_height, tile_latent_stride_height):
+            height_tiles.append(min(tile_latent_min_height, latent_height - start))
+        for start in range(0, latent_width, tile_latent_stride_width):
+            width_tiles.append(min(tile_latent_min_width, latent_width - start))
+    else:
+        height_tiles.append(latent_height)
+        width_tiles.append(latent_width)
+
+    return sorted(
+        {
+            (frames, height, width)
+            for frames in temporal_tiles
+            for height in height_tiles
+            for width in width_tiles
+        }
+    )
+
+
+def _build_sana_wm_vae_decoder_plan(
+    vae_dir: Path,
+    raw_config: dict,
+    *,
+    precision: str = "fp16",
+    verbose: bool = False,
+) -> bytes:
+    from .components.ltx_video.ltx_vae_builder import (
+        build_ltx_vae_decoder_engine,
+        load_ltx_vae_weights,
+    )
+
+    vae = raw_config.get("vae", {})
+    if not isinstance(vae, dict):
+        vae = {}
+    video_height = int(raw_config.get("video_height", _DEFAULT_HEIGHT))
+    video_width = int(raw_config.get("video_width", _DEFAULT_WIDTH))
+    video_num_frames = int(raw_config.get("video_num_frames", _DEFAULT_NUM_FRAMES))
+    vae_config = _load_vae_config(vae_dir)
+    vae_stride = _vae_stride(vae, raw_config)
+    latent_frames = (video_num_frames - 1) // vae_stride[0] + 1
+    latent_height = video_height // vae_stride[-1]
+    latent_width = video_width // vae_stride[-1]
+    weights = load_ltx_vae_weights(vae_dir, precision=precision)
+    return build_ltx_vae_decoder_engine(
+        weights,
+        latent_frames=latent_frames,
+        latent_height=latent_height,
+        latent_width=latent_width,
+        latent_channels=int(
+            vae_config.get(
+                "latent_channels",
+                vae.get("vae_latent_dim", raw_config.get("vae_latent_dim", 128)),
+            )
+        ),
+        block_out_channels=_int_tuple(
+            vae_config.get("decoder_block_out_channels") or vae_config.get("block_out_channels"),
+            (128, 256, 512, 512),
+        ),
+        layers_per_block=_int_tuple(
+            vae_config.get("decoder_layers_per_block") or vae_config.get("layers_per_block"),
+            (4, 3, 3, 3, 4),
+        ),
+        spatio_temporal_scaling=_bool_tuple(
+            vae_config.get("decoder_spatio_temporal_scaling")
+            or vae_config.get("spatio_temporal_scaling"),
+            (True, True, True, False),
+        ),
+        upsample_type=_str_tuple(
+            vae_config.get("upsample_type"),
+            ("spatiotemporal", "spatiotemporal", "spatiotemporal"),
+        ),
+        upsample_factor=_int_tuple(vae_config.get("upsample_factor"), (1, 1, 1)),
+        upsample_residual=_bool_tuple(vae_config.get("upsample_residual"), (False, False, False)),
+        patch_size=int(vae_config.get("patch_size", 4)),
+        patch_size_t=int(vae_config.get("patch_size_t", 1)),
+        out_channels=int(vae_config.get("out_channels", 3)),
+        precision=precision,
+        denormalize_input=True,
+        scaling_factor=float(vae_config.get("scaling_factor", 1.0)),
+        spatial_padding_mode=str(vae_config.get("decoder_spatial_padding_mode", "zeros")),
+        verbose=verbose,
+    )
+
+
+def _build_sana_wm_vae_decoder_tile_plans(
+    vae_dir: Path,
+    raw_config: dict,
+    *,
+    section_prefix: str,
+    precision: str = "fp16",
+    verbose: bool = False,
+) -> dict[str, bytes]:
+    shapes = _sana_wm_vae_tile_shapes(raw_config)
+    if not shapes:
+        return {}
+    from .components.ltx_video.ltx_vae_builder import (
+        build_ltx_vae_decoder_engine,
+        load_ltx_vae_weights,
+    )
+
+    vae = raw_config.get("vae", {})
+    if not isinstance(vae, dict):
+        vae = {}
+    vae_config = _load_vae_config(vae_dir)
+    weights = load_ltx_vae_weights(vae_dir, precision=precision)
+    result: dict[str, bytes] = {}
+    for latent_frames, latent_height, latent_width in shapes:
+        result[
+            _sana_wm_vae_tile_section_name(
+                section_prefix, latent_frames, latent_height, latent_width
+            )
+        ] = build_ltx_vae_decoder_engine(
+            weights,
+            latent_frames=latent_frames,
+            latent_height=latent_height,
+            latent_width=latent_width,
+            latent_channels=int(
+                vae_config.get(
+                    "latent_channels",
+                    vae.get("vae_latent_dim", raw_config.get("vae_latent_dim", 128)),
+                )
+            ),
+            block_out_channels=_int_tuple(
+                vae_config.get("decoder_block_out_channels")
+                or vae_config.get("block_out_channels"),
+                (128, 256, 512, 512),
+            ),
+            layers_per_block=_int_tuple(
+                vae_config.get("decoder_layers_per_block") or vae_config.get("layers_per_block"),
+                (4, 3, 3, 3, 4),
+            ),
+            spatio_temporal_scaling=_bool_tuple(
+                vae_config.get("decoder_spatio_temporal_scaling")
+                or vae_config.get("spatio_temporal_scaling"),
+                (True, True, True, False),
+            ),
+            upsample_type=_str_tuple(
+                vae_config.get("upsample_type"),
+                ("spatiotemporal", "spatiotemporal", "spatiotemporal"),
+            ),
+            upsample_factor=_int_tuple(vae_config.get("upsample_factor"), (1, 1, 1)),
+            upsample_residual=_bool_tuple(
+                vae_config.get("upsample_residual"), (False, False, False)
+            ),
+            patch_size=int(vae_config.get("patch_size", 4)),
+            patch_size_t=int(vae_config.get("patch_size_t", 1)),
+            out_channels=int(vae_config.get("out_channels", 3)),
+            precision=precision,
+            denormalize_input=True,
+            scaling_factor=float(vae_config.get("scaling_factor", 1.0)),
+            spatial_padding_mode=str(vae_config.get("decoder_spatial_padding_mode", "zeros")),
+            verbose=verbose,
+        )
+    return result
+
+
+def _build_sana_wm_refiner_vae_decoder_plan(
+    vae_dir: Path,
+    raw_config: dict,
+    *,
+    precision: str = "fp16",
+    verbose: bool = False,
+) -> bytes:
+    return _build_sana_wm_vae_decoder_plan(
+        vae_dir,
+        raw_config,
+        precision=precision,
+        verbose=verbose,
+    )
+
+
+class SanaWmPlugin:
+    name = "sana_wm"
+    runtime_strategy = "diffusion_sana_wm"
+    requires_tokenizer = False
+
+    def matches(self, model_type: str) -> bool:
+        mt = model_type.lower()
+        return mt in (
+            "sana_wm",
+            "sana-wm",
+            "sanamsvideocamctrl_1600m_p1_d20",
+        )
+
+    def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
+        model_path = Path(model_dir)
+        weights = WeightDict()
+        weights["_model_format"] = "sana_wm_yaml"
+        weights["_model_dir"] = str(model_path)
+        weights["_stage1_dit_path"] = str(model_path / _STAGE1_DIT_REL)
+        weights["_vae_dir"] = str(model_path / "vae")
+        weights["_refiner_checkpoint"] = str(
+            _resolve_refiner_checkpoint_path(model_path, config.raw)
+        )
+        weights["_refiner_gemma_root"] = str(model_path / _REFINER_GEMMA_REL)
+
+        stage1_path = model_path / _STAGE1_DIT_REL
+        if stage1_path.is_file():
+            summary = _summarize_stage1_dit(stage1_path)
+            weights["_stage1_dit_summary"] = summary
+            config.raw["_sana_wm_stage1_dit_summary"] = summary
+        native_plan_paths = _discover_native_plan_paths(model_path, config.raw)
+        stage1_text_encoder_dir = _resolve_stage1_text_encoder_dir(model_path, config.raw)
+        can_build_stage1_text_encoder = stage1_text_encoder_dir is not None
+        can_build_stage1_denoiser = stage1_path.is_file()
+        refiner_text_encoder_dir = _resolve_refiner_text_encoder_dir(model_path, config.raw)
+        refiner_transformer_dir = _resolve_refiner_transformer_dir(model_path, config.raw)
+        refiner_connectors_dir = _resolve_refiner_connectors_dir(model_path, config.raw)
+        can_build_refiner_text_connector = (
+            refiner_connectors_dir is not None
+            and "sana_wm_refiner_text_encoder_plan" not in native_plan_paths
+        )
+        can_build_refiner_text_encoder = _can_build_legacy_refiner_text_encoder(
+            refiner_text_encoder_dir, refiner_connectors_dir
+        ) or _can_build_split_refiner_text_encoder(
+            refiner_text_encoder_dir,
+            native_plan_paths,
+            can_build_refiner_text_connector=can_build_refiner_text_connector,
+        )
+        can_build_refiner_denoiser = refiner_transformer_dir is not None
+        vae_encoder_dir = _resolve_vae_encoder_dir(model_path, config.raw)
+        can_build_vae_encoder = vae_encoder_dir is not None
+        vae_decoder_dir = _resolve_vae_decoder_dir(model_path, config.raw)
+        can_build_vae_decoder = vae_decoder_dir is not None
+        can_build_refiner_vae_decoder = vae_decoder_dir is not None
+        _validate_native_plan_paths(
+            native_plan_paths,
+            can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+            can_build_stage1_denoiser=can_build_stage1_denoiser,
+            can_build_refiner_text_encoder=can_build_refiner_text_encoder,
+            can_build_refiner_text_connector=can_build_refiner_text_connector,
+            can_build_refiner_denoiser=can_build_refiner_denoiser,
+            can_build_vae_encoder=can_build_vae_encoder,
+            can_build_vae_decoder=can_build_vae_decoder,
+            can_build_refiner_vae_decoder=can_build_refiner_vae_decoder,
+        )
+        tokenizer_sections = _discover_tokenizer_sections(
+            model_path,
+            config.raw,
+            stage1_text_encoder_dir=stage1_text_encoder_dir,
+            refiner_text_encoder_dir=refiner_text_encoder_dir,
+        )
+        stage1_tokenizer = tokenizer_sections.get("sana_wm_stage1_tokenizer.json")
+        if stage1_tokenizer is not None:
+            config.raw["tokenizer_add_special_tokens"] = int(
+                _tokenizer_adds_special_tokens(stage1_tokenizer.parent)
+            )
+        require_refiner_tokenizer = (
+            bool(set(native_plan_paths).intersection(_REFINER_PLAN_SECTIONS))
+            or can_build_refiner_text_encoder
+            or can_build_refiner_denoiser
+            or can_build_refiner_vae_decoder
+        )
+        if native_plan_paths:
+            _validate_native_tokenizer_sections(
+                tokenizer_sections,
+                require_refiner=require_refiner_tokenizer,
+            )
+        effective_sections = _effective_native_sections(
+            native_plan_paths,
+            can_build_stage1_text_encoder=can_build_stage1_text_encoder,
+            can_build_stage1_denoiser=can_build_stage1_denoiser,
+            can_build_refiner_text_encoder=can_build_refiner_text_encoder,
+            can_build_refiner_text_connector=can_build_refiner_text_connector,
+            can_build_refiner_denoiser=can_build_refiner_denoiser,
+            can_build_vae_encoder=can_build_vae_encoder,
+            can_build_vae_decoder=can_build_vae_decoder,
+            can_build_refiner_vae_decoder=can_build_refiner_vae_decoder,
+        )
+        if _native_sections_are_complete(effective_sections):
+            config.raw["_sana_wm_native_plan_sections"] = effective_sections
+        if native_plan_paths:
+            weights["_native_plan_paths"] = {
+                section: str(path) for section, path in native_plan_paths.items()
+            }
+        if stage1_text_encoder_dir is not None:
+            weights["_stage1_text_encoder_dir"] = str(stage1_text_encoder_dir)
+        if refiner_text_encoder_dir is not None:
+            weights["_refiner_text_encoder_dir"] = str(refiner_text_encoder_dir)
+            model_type = _text_encoder_model_type(refiner_text_encoder_dir)
+            if model_type:
+                weights["_refiner_text_encoder_model_type"] = model_type
+        if can_build_refiner_text_encoder:
+            weights["_can_build_refiner_text_encoder_plan"] = True
+        if refiner_transformer_dir is not None:
+            weights["_refiner_transformer_dir"] = str(refiner_transformer_dir)
+            weights["_can_build_refiner_denoiser_plan"] = True
+            transformer_config = _load_refiner_transformer_config(refiner_transformer_dir)
+            if transformer_config:
+                weights["_refiner_transformer_config"] = transformer_config
+                config.raw["_sana_wm_refiner_transformer_config"] = transformer_config
+        if refiner_connectors_dir is not None:
+            weights["_refiner_connectors_dir"] = str(refiner_connectors_dir)
+            connector_config = _load_json_config(refiner_connectors_dir / "config.json")
+            if connector_config:
+                weights["_refiner_connectors_config"] = connector_config
+                config.raw["_sana_wm_refiner_connectors_config"] = connector_config
+        if can_build_refiner_text_connector:
+            weights["_can_build_refiner_text_connector_plan"] = True
+        if vae_encoder_dir is not None:
+            weights["_sana_wm_vae_encoder_dir"] = str(vae_encoder_dir)
+        if vae_decoder_dir is not None:
+            weights["_sana_wm_vae_decoder_dir"] = str(vae_decoder_dir)
+            weights["_sana_wm_refiner_vae_decoder_dir"] = str(vae_decoder_dir)
+        if tokenizer_sections:
+            weights["_tokenizer_sections"] = {
+                section: str(path) for section, path in tokenizer_sections.items()
+            }
+        return weights
+
+    def build_engine(
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
+    ) -> bytes:
+        del max_cache_length, precision, quant_ctx, verbose
+        native_plan_paths = weights.get("_native_plan_paths")
+        effective_sections = _effective_native_sections(
+            native_plan_paths if isinstance(native_plan_paths, dict) else {},
+            can_build_stage1_text_encoder=bool(weights.get("_stage1_text_encoder_dir")),
+            can_build_stage1_denoiser=Path(str(weights.get("_stage1_dit_path", ""))).is_file(),
+            can_build_refiner_text_encoder=bool(
+                weights.get("_can_build_refiner_text_encoder_plan")
+            ),
+            can_build_refiner_text_connector=bool(
+                weights.get("_can_build_refiner_text_connector_plan")
+            ),
+            can_build_refiner_denoiser=bool(weights.get("_can_build_refiner_denoiser_plan")),
+            can_build_vae_encoder=bool(weights.get("_sana_wm_vae_encoder_dir")),
+            can_build_vae_decoder=bool(weights.get("_sana_wm_vae_decoder_dir")),
+            can_build_refiner_vae_decoder=bool(weights.get("_sana_wm_refiner_vae_decoder_dir")),
+        )
+        if not _native_sections_are_complete(effective_sections):
+            raise NotImplementedError(_native_build_error(weights))
+        # The runtime plugin ignores engine_plan. A small marker section keeps
+        # the bundle shape compatible with the generic builder/writer path.
+        return _NATIVE_ENGINE_MARKER
+
+    def build_extra_engines(
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
+        build_timing: dict | None = None,
+    ) -> dict:
+        from .native_plugin_builder import ensure_native_plugin
+
+        native_plugin = ensure_native_plugin(verbose=verbose)
+        ctypes.CDLL(str(native_plugin), mode=ctypes.RTLD_GLOBAL)
+        result = {"sana_wm_native_plugin_so": native_plugin.read_bytes()}
+        plan_paths = weights.get("_native_plan_paths", {})
+        if isinstance(plan_paths, dict):
+            result.update(
+                {
+                    section: Path(path).read_bytes()
+                    for section, path in plan_paths.items()
+                    if section in _NATIVE_PLAN_SECTIONS
+                }
+            )
+        text_encoder_dir = weights.get("_stage1_text_encoder_dir")
+        if "text_encoder_0_plan" not in result and text_encoder_dir:
+            stage1_text_length = _stage1_text_encoder_conditioning_length(
+                Path(str(text_encoder_dir)),
+                config.raw,
+            )
+            with timed_build_phase(build_timing, "build_extra_sana_wm_stage1_text_encoder_s"):
+                result["text_encoder_0_plan"] = _cached_plan(
+                    "text_encoder_0_plan",
+                    lambda: _build_stage1_text_encoder_plan(
+                        Path(str(text_encoder_dir)),
+                        stage1_text_length,
+                        precision=precision,
+                        verbose=verbose,
+                    ),
+                )
+        stage1_dit_path = weights.get("_stage1_dit_path")
+        if (
+            not _has_stage1_denoiser_sections(set(result))
+            and stage1_dit_path
+            and Path(str(stage1_dit_path)).is_file()
+        ):
+            with timed_build_phase(build_timing, "build_extra_sana_wm_stage1_denoiser_s"):
+                if _env_flag(_STAGE1_SEGMENTED_DENOISER_ENV):
+                    result.update(
+                        _build_sana_wm_stage1_segmented_denoiser_plans(
+                            Path(str(stage1_dit_path)),
+                            config.raw,
+                            precision=precision,
+                            verbose=verbose,
+                        )
+                    )
+                else:
+                    result["denoiser_plan"] = _cached_plan(
+                        "denoiser_plan",
+                        lambda: _build_sana_wm_stage1_denoiser_plan(
+                            Path(str(stage1_dit_path)),
+                            config.raw,
+                            precision=precision,
+                            verbose=verbose,
+                        ),
+                    )
+        refiner_text_encoder_dir = weights.get("_refiner_text_encoder_dir")
+        refiner_requested = bool(set(result).intersection(_REFINER_PLAN_SECTIONS)) or bool(
+            weights.get("_can_build_refiner_denoiser_plan")
+        )
+        refiner_connectors_dir = weights.get("_refiner_connectors_dir")
+        if (
+            refiner_requested
+            and "sana_wm_refiner_text_connector_plan" not in result
+            and refiner_connectors_dir
+            and weights.get("_can_build_refiner_text_connector_plan")
+        ):
+            with timed_build_phase(build_timing, "build_extra_sana_wm_refiner_text_connector_s"):
+                result["sana_wm_refiner_text_connector_plan"] = _cached_plan(
+                    "sana_wm_refiner_text_connector_plan",
+                    lambda: _build_sana_wm_refiner_text_connector_plan(
+                        Path(str(refiner_connectors_dir)),
+                        config.raw,
+                        weights.get("_refiner_connectors_config")
+                        if isinstance(weights.get("_refiner_connectors_config"), dict)
+                        else None,
+                        precision="bf16",
+                        verbose=verbose,
+                    ),
+                )
+        if (
+            refiner_requested
+            and "sana_wm_refiner_text_encoder_plan" not in result
+            and refiner_text_encoder_dir
+            and weights.get("_can_build_refiner_text_encoder_plan")
+        ):
+            with timed_build_phase(build_timing, "build_extra_sana_wm_refiner_text_encoder_s"):
+                result["sana_wm_refiner_text_encoder_plan"] = _cached_plan(
+                    "sana_wm_refiner_text_encoder_plan",
+                    lambda: _build_refiner_text_encoder_plan(
+                        Path(str(refiner_text_encoder_dir)),
+                        max(
+                            max_cache_length,
+                            int(
+                                config.raw.get(
+                                    "sana_wm_refiner_text_max_length",
+                                    _DEFAULT_REFINER_TEXT_MAX_LENGTH,
+                                )
+                            ),
+                        ),
+                        precision=precision,
+                        verbose=verbose,
+                    ),
+                )
+        refiner_transformer_dir = weights.get("_refiner_transformer_dir")
+        refiner_requested = bool(set(result).intersection(_REFINER_PLAN_SECTIONS)) or bool(
+            weights.get("_can_build_refiner_denoiser_plan")
+        )
+        if (
+            refiner_requested
+            and "sana_wm_refiner_denoiser_plan" not in result
+            and refiner_transformer_dir
+            and weights.get("_can_build_refiner_denoiser_plan")
+        ):
+            with timed_build_phase(build_timing, "build_extra_sana_wm_refiner_denoiser_s"):
+                result["sana_wm_refiner_denoiser_plan"] = _cached_plan(
+                    "sana_wm_refiner_denoiser_plan",
+                    lambda: _build_sana_wm_refiner_denoiser_plan(
+                        Path(str(refiner_transformer_dir)),
+                        config.raw,
+                        weights.get("_refiner_transformer_config")
+                        if isinstance(weights.get("_refiner_transformer_config"), dict)
+                        else None,
+                        precision=precision,
+                        verbose=verbose,
+                    ),
+                )
+        vae_encoder_dir = weights.get("_sana_wm_vae_encoder_dir")
+        if "sana_wm_vae_encoder_plan" not in result and vae_encoder_dir:
+            with timed_build_phase(build_timing, "build_extra_sana_wm_vae_encoder_s"):
+                result["sana_wm_vae_encoder_plan"] = _cached_plan(
+                    "sana_wm_vae_encoder_plan",
+                    lambda: _build_sana_wm_vae_encoder_plan(
+                        Path(str(vae_encoder_dir)),
+                        config.raw,
+                        precision=_LTX2_VAE_ENCODER_PLAN_PRECISION,
+                        verbose=verbose,
+                    ),
+                )
+        vae_decoder_dir = weights.get("_sana_wm_vae_decoder_dir")
+        generated_vae_decoder = False
+        if "vae_decoder_plan" not in result and vae_decoder_dir:
+            with timed_build_phase(build_timing, "build_extra_sana_wm_vae_decoder_s"):
+                result["vae_decoder_plan"] = _cached_plan(
+                    "vae_decoder_plan",
+                    lambda: _build_sana_wm_vae_decoder_plan(
+                        Path(str(vae_decoder_dir)),
+                        config.raw,
+                        precision=_LTX2_VAE_PLAN_PRECISION,
+                        verbose=verbose,
+                    ),
+                )
+            generated_vae_decoder = True
+        if vae_decoder_dir:
+            with timed_build_phase(build_timing, "build_extra_sana_wm_vae_decoder_tiles_s"):
+                result.update(
+                    _build_sana_wm_vae_decoder_tile_plans(
+                        Path(str(vae_decoder_dir)),
+                        config.raw,
+                        section_prefix="sana_wm_vae_decoder",
+                        precision=_LTX2_VAE_PLAN_PRECISION,
+                        verbose=verbose,
+                    )
+                )
+        refiner_vae_decoder_dir = weights.get("_sana_wm_refiner_vae_decoder_dir")
+        refiner_requested = bool(set(result).intersection(_REFINER_PLAN_SECTIONS))
+        if (
+            refiner_requested
+            and "sana_wm_refiner_vae_decoder_plan" not in result
+            and refiner_vae_decoder_dir
+        ):
+            if (
+                generated_vae_decoder
+                and vae_decoder_dir
+                and Path(str(refiner_vae_decoder_dir)) == Path(str(vae_decoder_dir))
+            ):
+                result["sana_wm_refiner_vae_decoder_plan"] = result["vae_decoder_plan"]
+            else:
+                with timed_build_phase(build_timing, "build_extra_sana_wm_refiner_vae_decoder_s"):
+                    result["sana_wm_refiner_vae_decoder_plan"] = _cached_plan(
+                        "sana_wm_refiner_vae_decoder_plan",
+                        lambda: _build_sana_wm_refiner_vae_decoder_plan(
+                            Path(str(refiner_vae_decoder_dir)),
+                            config.raw,
+                            precision=_LTX2_VAE_PLAN_PRECISION,
+                            verbose=verbose,
+                        ),
+                    )
+        tokenizer_sections = weights.get("_tokenizer_sections", {})
+        if isinstance(tokenizer_sections, dict):
+            result.update(
+                {section: Path(path).read_bytes() for section, path in tokenizer_sections.items()}
+            )
+        return result
+
+    def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
+        raw = config.raw
+        text_encoder = raw.get("text_encoder", {})
+        scheduler = raw.get("scheduler", {})
+        vae = raw.get("vae", {})
+        if not isinstance(text_encoder, dict):
+            text_encoder = {}
+        if not isinstance(scheduler, dict):
+            scheduler = {}
+        if not isinstance(vae, dict):
+            vae = {}
+
+        video_height = int(raw.get("video_height", _DEFAULT_HEIGHT))
+        video_width = int(raw.get("video_width", _DEFAULT_WIDTH))
+        video_num_frames = int(raw.get("video_num_frames", _DEFAULT_NUM_FRAMES))
+        vae_stride = _vae_stride(vae, raw)
+
+        native_sections = raw.get("_sana_wm_native_plan_sections")
+        has_native_sections = isinstance(native_sections, list) and len(native_sections) > 0
+
+        overrides = {
+            "model_type": "sana_wm",
+            "runtime_strategy": self.runtime_strategy,
+            "tokenizer_add_special_tokens": int(
+                bool(raw.get("tokenizer_add_special_tokens", False))
+            ),
+            "sana_wm_hf_id": _HF_ID,
+            "sana_wm_config_path": f"hf://{_HF_ID}/config.yaml",
+            "sana_wm_model_path": f"hf://{_HF_ID}/dit/sana_wm_1600m_720p.safetensors",
+            "sana_wm_refiner_checkpoint": f"hf://{_HF_ID}/refiner",
+            "sana_wm_refiner_transformer": (
+                f"hf://{_HF_ID}/refiner/transformer/diffusion_pytorch_model.safetensors"
+            ),
+            "sana_wm_refiner_connectors": (
+                f"hf://{_HF_ID}/refiner/connectors/diffusion_pytorch_model.safetensors"
+            ),
+            "sana_wm_refiner_gemma_root": f"hf://{_HF_ID}/refiner/text_encoder",
+            "sana_wm_action": str(raw.get("sana_wm_action", _DEFAULT_ACTION)),
+            "sana_wm_translation_speed": float(
+                raw.get("sana_wm_translation_speed", _DEFAULT_TRANSLATION_SPEED)
+            ),
+            "sana_wm_rotation_speed_deg": float(
+                raw.get("sana_wm_rotation_speed_deg", _DEFAULT_ROTATION_SPEED_DEG)
+            ),
+            "sana_wm_default_intrinsics": _float_list(
+                raw.get("sana_wm_default_intrinsics"), _DEFAULT_DEMO_INTRINSICS
+            ),
+            "video_height": video_height,
+            "video_width": video_width,
+            "video_num_frames": video_num_frames,
+            "fps": int(raw.get("fps", _DEFAULT_FPS)),
+            "num_inference_steps": int(raw.get("num_inference_steps", _DEFAULT_NUM_STEPS)),
+            "guidance_scale": float(raw.get("guidance_scale", _DEFAULT_GUIDANCE_SCALE)),
+            "vae_latent_dim": int(vae.get("vae_latent_dim", raw.get("vae_latent_dim", 128))),
+            "vae_downsample_rate": int(
+                vae.get("vae_downsample_rate", raw.get("vae_downsample_rate", 32))
+            ),
+            "vae_time_stride": int(vae_stride[0]),
+            "vae_spatial_stride": int(vae_stride[-1]),
+            "vae_use_framewise_decoding": bool(vae.get("use_framewise_decoding", True)),
+            "vae_use_spatial_tiling": bool(vae.get("use_tiling", True)),
+            "vae_tile_sample_min_height": int(vae.get("tile_sample_min_height", 512)),
+            "vae_tile_sample_min_width": int(vae.get("tile_sample_min_width", 512)),
+            "vae_tile_sample_stride_height": int(vae.get("tile_sample_stride_height", 448)),
+            "vae_tile_sample_stride_width": int(vae.get("tile_sample_stride_width", 448)),
+            "vae_tile_sample_min_num_frames": int(vae.get("tile_sample_min_num_frames", 96)),
+            "vae_tile_sample_stride_num_frames": int(vae.get("tile_sample_stride_num_frames", 64)),
+            "text_encoder_name": str(
+                text_encoder.get("text_encoder_name")
+                or text_encoder.get("model")
+                or "gemma-2-2b-it"
+            ),
+            "text_encoder_max_length": int(text_encoder.get("model_max_length", 300)),
+            "sana_wm_refiner_text_max_length": int(
+                raw.get("sana_wm_refiner_text_max_length", _DEFAULT_REFINER_TEXT_MAX_LENGTH)
+            ),
+            "sana_wm_chi_prompt": str(
+                raw.get("sana_wm_chi_prompt", _join_chi_prompt(text_encoder))
+            ),
+            "flow_shift": float(scheduler.get("inference_flow_shift", 9.8)),
+        }
+        if not has_native_sections:
+            overrides["engine_backend"] = "none"
+        if has_native_sections:
+            overrides["sana_wm_native_plan_sections"] = [str(v) for v in native_sections]
+        stage1_summary = raw.get("_sana_wm_stage1_dit_summary")
+        if isinstance(stage1_summary, dict):
+            overrides.update(
+                {
+                    "sana_wm_dit_num_layers": int(stage1_summary.get("num_layers", 0)),
+                    "sana_wm_dit_hidden_size": int(stage1_summary.get("hidden_size", 0)),
+                    "sana_wm_dit_text_embed_dim": int(stage1_summary.get("text_embed_dim", 0)),
+                    "sana_wm_dit_tensor_count": int(stage1_summary.get("tensor_count", 0)),
+                }
+            )
+        return overrides
+
+
+plugin = SanaWmPlugin()

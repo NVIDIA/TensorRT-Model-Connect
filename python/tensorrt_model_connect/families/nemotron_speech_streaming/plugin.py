@@ -67,6 +67,20 @@ def _cfg_dict(root: dict, *path: str) -> dict:
     return cur if isinstance(cur, dict) else {}
 
 
+def _extract_prompt_dictionary(ncfg: dict) -> dict[str, int]:
+    """Returns the language-tag -> prompt-index mapping from NeMo train_ds.
+
+    Returns ``{}`` for monolingual checkpoints (no prompt support).
+    """
+    train_ds = ncfg.get("train_ds") if isinstance(ncfg, dict) else None
+    if not isinstance(train_ds, dict):
+        return {}
+    pd = train_ds.get("prompt_dictionary")
+    if not isinstance(pd, dict):
+        return {}
+    return {str(k): int(v) for k, v in pd.items()}
+
+
 def _find_tensor(sd: dict, candidates: list[str], label: str):
     for key in candidates:
         if key in sd:
@@ -153,8 +167,6 @@ def _add_lstm_cell(
     return h_new, c_new
 
 
-_STREAMING_RIGHT_CONTEXTS = (13, 6, 1, 0)
-_STREAMING_LEFT_CONTEXT = 70
 _STREAMING_TIME_CACHE = 8
 _STREAMING_PRE_ENCODE_CACHE = 9
 _STREAMING_DROP_PRE_ENCODED = 2
@@ -426,7 +438,7 @@ def _build_streaming_encoder(weights: WeightDict, right_context: int, *,
             f"Unexpected streaming pre-encode drop for right={right_context}, "
             f"first_step={first_step}: {drop}")
 
-    cache_len = _STREAMING_LEFT_CONTEXT
+    cache_len = int(weights["_streaming_cache_left"])
     key_len = cache_len + query_len
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -511,13 +523,16 @@ class NemotronSpeechStreamingPlugin:
         self._vl_config: dict = {}
 
     def matches(self, model_type: str) -> bool:
-        mt = model_type.lower().replace("-", "_")
+        mt = model_type.lower().replace("-", "_").replace(".", "_")
         return mt in {
             "nemotron_speech_streaming",
             "nemotron_asr_streaming",
             "nemotron_speech_streaming_rnnt",
+            "nemotron_3_5_asr_streaming",
+            "nemotron3_5_asr",
             "fastconformer_cacheaware_rnnt",
             "enc_dec_rnnt_bpe",
+            "enc_dec_rnnt_bpe_with_prompt",
             "rnnt_bpe",
         }
 
@@ -528,6 +543,7 @@ class NemotronSpeechStreamingPlugin:
         if isinstance(sd, dict) and isinstance(sd.get("state_dict"), dict):
             sd = sd["state_dict"]
         _extract_tokenizer_from_nemo(model_dir, Path(model_dir))
+        prompt_dictionary = _extract_prompt_dictionary(ncfg)
 
         ec = ncfg.get("encoder", {})
         defaults = ncfg.get("model_defaults", {})
@@ -556,6 +572,25 @@ class NemotronSpeechStreamingPlugin:
         att_context = att_contexts[0] if isinstance(att_contexts, list) and att_contexts else [70, 13]
         att_left = _cfg_int(att_context[0] if len(att_context) > 0 else None, default=70)
         att_right = _cfg_int(att_context[1] if len(att_context) > 1 else None, default=13)
+
+        # Streaming knobs are checkpoint-defined. The NeMo config exposes the full
+        # list of supported att_context_size pairs; drive the per-right-context
+        # engine set from that list.
+        _pairs = att_contexts  # always a list at this point
+        streaming_right_contexts = sorted(
+            {int(p[1]) for p in _pairs if isinstance(p, (list, tuple)) and len(p) >= 2},
+            reverse=True,
+        )
+        if not streaming_right_contexts:
+            streaming_right_contexts = [att_right]
+        streaming_cache_left = att_left
+        if any(int(p[0]) != streaming_cache_left for p in _pairs
+               if isinstance(p, (list, tuple)) and len(p) >= 2):
+            raise ValueError(
+                "att_context_size pairs must share a single left value; "
+                f"got {att_contexts}")
+        w["_streaming_right_contexts"] = streaming_right_contexts
+        w["_streaming_cache_left"] = streaming_cache_left
 
         pred_hidden = _cfg_int(prednet.get("pred_hidden"), defaults.get("pred_hidden"), default=640)
         pred_layers = _cfg_int(prednet.get("pred_rnn_layers"), default=1)
@@ -706,6 +741,50 @@ class NemotronSpeechStreamingPlugin:
         w["_joint_hidden"] = joint_hidden
         w["_joint_activation"] = joint_activation
 
+        # Multilingual variant: prompt_kernel MLP (Linear 1152 -> 2048 -> 1024).
+        has_prompt_kernel = "prompt_kernel.0.weight" in sd
+        if has_prompt_kernel:
+            pk_w0 = _to_np(sd["prompt_kernel.0.weight"])    # (2048, 1152)
+            pk_b0 = _to_np(sd["prompt_kernel.0.bias"])      # (2048,)
+            pk_w2 = _to_np(sd["prompt_kernel.2.weight"])    # (1024, 2048)
+            pk_b2 = _to_np(sd["prompt_kernel.2.bias"])      # (1024,)
+            if pk_w0.ndim != 2 or pk_w2.ndim != 2:
+                raise ValueError(f"Unexpected prompt_kernel weight ranks: "
+                                 f"{pk_w0.shape}, {pk_w2.shape}")
+            pk_hidden = int(pk_w0.shape[0])                  # 2048
+            pk_input_dim = int(pk_w0.shape[1])               # 1152
+            pk_output_dim = int(pk_w2.shape[0])              # 1024
+            if pk_w2.shape[1] != pk_hidden:
+                raise ValueError(f"prompt_kernel hidden mismatch: "
+                                 f"{pk_w0.shape} vs {pk_w2.shape}")
+            num_prompts = pk_input_dim - hidden              # 1152 - 1024 = 128
+            if num_prompts <= 0:
+                raise ValueError(f"prompt_kernel input dim {pk_input_dim} <= "
+                                 f"encoder_hidden {hidden}; cannot derive num_prompts.")
+            if pk_output_dim != hidden:
+                raise ValueError(f"prompt_kernel output dim {pk_output_dim} must equal "
+                                 f"encoder_hidden {hidden}.")
+            w["pk_w0"] = _transpose_2d(pk_w0, "pk_w0")    # (1152, 2048)
+            w["pk_b0"] = pk_b0.astype(np.float32)
+            w["pk_w2"] = _transpose_2d(pk_w2, "pk_w2")    # (2048, 1024)
+            w["pk_b2"] = pk_b2.astype(np.float32)
+            w["_pk_hidden"] = pk_hidden
+            w["_pk_input_dim"] = pk_input_dim
+            w["_pk_output_dim"] = pk_output_dim
+            w["_num_prompts"] = num_prompts
+            w["_prompt_dictionary"] = prompt_dictionary
+            if not prompt_dictionary:
+                raise ValueError(
+                    "prompt_kernel present but no prompt_dictionary in NeMo YAML "
+                    "(train_ds.prompt_dictionary).")
+        else:
+            w["_pk_hidden"] = 0
+            w["_pk_input_dim"] = 0
+            w["_pk_output_dim"] = 0
+            w["_num_prompts"] = 0
+            w["_prompt_dictionary"] = {}
+        w["_has_prompt_kernel"] = has_prompt_kernel
+
         config.hidden_size = pred_hidden
         config.vocab_size = vocab_total
         config.num_hidden_layers = pred_layers
@@ -740,11 +819,14 @@ class NemotronSpeechStreamingPlugin:
             "rnnt_causal_downsampling": causal_downsampling,
             "rnnt_att_context_left": att_left,
             "rnnt_att_context_right": att_right,
-            "rnnt_streaming_cache_left": _STREAMING_LEFT_CONTEXT,
+            "rnnt_streaming_cache_left": streaming_cache_left,
             "rnnt_streaming_time_cache": _STREAMING_TIME_CACHE,
             "rnnt_streaming_pre_encode_cache": _STREAMING_PRE_ENCODE_CACHE,
             "rnnt_streaming_drop_pre_encoded": _STREAMING_DROP_PRE_ENCODED,
-            "rnnt_streaming_right_contexts": list(_STREAMING_RIGHT_CONTEXTS),
+            "rnnt_streaming_right_contexts": list(streaming_right_contexts),
+            "rnnt_has_prompt_kernel": bool(w["_has_prompt_kernel"]),
+            "rnnt_num_prompts": int(w["_num_prompts"]),
+            "rnnt_prompt_dictionary": dict(w["_prompt_dictionary"]),
         }
         return w
 
@@ -779,12 +861,14 @@ class NemotronSpeechStreamingPlugin:
         joint_plan = _build_joint(
             weights, precision=precision, verbose=verbose)
         extras = {"joint_engine_plan": joint_plan}
-        for right_context in _STREAMING_RIGHT_CONTEXTS:
+        for right_context in weights["_streaming_right_contexts"]:
             extras[f"streaming_encoder_plan_ctx{right_context}"] = _build_streaming_encoder(
                 weights, right_context, precision=precision, verbose=verbose)
             extras[f"streaming_encoder_first_plan_ctx{right_context}"] = _build_streaming_encoder(
                 weights, right_context, first_step=True, precision=precision,
                 verbose=verbose)
+        if weights.get("_has_prompt_kernel"):
+            extras["prompt_kernel_plan"] = _build_prompt_kernel(weights, verbose=verbose)
         mel = _build_mel_filterbank(weights, verbose=verbose)
         if mel is not None:
             extras["mel_filterbank"] = mel
@@ -823,11 +907,11 @@ class NemotronSpeechStreamingPlugin:
             "rnnt_encoder_hidden_size": 1024,
             "rnnt_max_symbols_per_step": 10,
             "rnnt_encoder_layers": 24,
-            "rnnt_streaming_cache_left": _STREAMING_LEFT_CONTEXT,
+            "rnnt_streaming_cache_left": 70,
             "rnnt_streaming_time_cache": _STREAMING_TIME_CACHE,
             "rnnt_streaming_pre_encode_cache": _STREAMING_PRE_ENCODE_CACHE,
             "rnnt_streaming_drop_pre_encoded": _STREAMING_DROP_PRE_ENCODED,
-            "rnnt_streaming_right_contexts": list(_STREAMING_RIGHT_CONTEXTS),
+            "rnnt_streaming_right_contexts": [13, 6, 1, 0],
         }
 
 
@@ -958,6 +1042,60 @@ def _build_joint(
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("RNNT joint build failed")
+    return bytes(plan)
+
+
+def _build_prompt_kernel(weights: WeightDict, *, verbose: bool = False) -> bytes:
+    pk_input_dim = int(weights["_pk_input_dim"])     # 1152
+    pk_hidden = int(weights["_pk_hidden"])            # 2048
+    pk_output_dim = int(weights["_pk_output_dim"])    # 1024
+    encoder_hidden = int(weights["_hidden"])          # 1024
+    num_prompts = int(weights["_num_prompts"])        # 128
+    assert pk_input_dim == encoder_hidden + num_prompts, (
+        f"prompt_kernel input dim {pk_input_dim} != enc_hidden {encoder_hidden} "
+        f"+ num_prompts {num_prompts}")
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(
+        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    config = builder.create_builder_config()
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 256 << 20)
+
+    # Inputs: encoder_frame (1, encoder_hidden) and prompt_onehot (1, num_prompts).
+    enc = network.add_input("encoder_frame", trt.float32, (1, encoder_hidden))
+    prompt = network.add_input("prompt_onehot", trt.float32, (1, num_prompts))
+    cat = network.add_concatenation([enc, prompt])
+    cat.axis = 1
+    fused = cat.get_output(0)                        # (1, 1152)
+
+    # Linear 0: 1152 -> 2048 with bias.
+    h = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(network, fused, pk_input_dim, pk_hidden,
+                                          weights["pk_w0"]),
+        pk_hidden,
+        weights["pk_b0"],
+    )
+    h = network.add_activation(h, trt.ActivationType.RELU).get_output(0)
+
+    # Linear 2: 2048 -> 1024 with bias.
+    out = graph_ops.add_bias_sum(
+        network,
+        graph_ops.add_matmul_rhs_constant(network, h, pk_hidden, pk_output_dim,
+                                          weights["pk_w2"]),
+        pk_output_dim,
+        weights["pk_b2"],
+    )
+
+    out.name = "prompt_kernel_output"
+    network.mark_output(out)
+    if verbose:
+        print(f"[trtmc-build] Building prompt_kernel ({pk_input_dim}->{pk_hidden}->"
+              f"{pk_output_dim})", file=sys.stderr)
+    plan = builder.build_serialized_network(network, config)
+    if plan is None:
+        raise RuntimeError("prompt_kernel engine build failed")
     return bytes(plan)
 
 

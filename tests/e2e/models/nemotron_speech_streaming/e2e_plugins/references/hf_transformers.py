@@ -817,6 +817,11 @@ class HfTransformersReference:
         audio_path = self._resolve_image_path(case.inputs.get("audio", ""))
         hf_id = case.hf_id
         torch_dtype_expr = _torch_dtype_for_case(case)
+        # Prompt-conditioned NeMo ASR (nemotron-3.5) requires a language tag;
+        # for monolingual checkpoints the model ignores this kwarg.
+        language_tag = (case.inputs.get("language")
+                        or case.metadata.get("language", "")
+                        or "auto")
 
         script = textwrap.dedent(f"""\
             import json, numpy as np
@@ -825,6 +830,7 @@ class HfTransformersReference:
             hf_id = {hf_id!r}
             audio_path = {audio_path!r}
             output_path = {output_path!r}
+            language_tag = {language_tag!r}
 
             # Try NeMo ASR model
             try:
@@ -851,7 +857,22 @@ class HfTransformersReference:
                 model = nemo_asr.models.ASRModel.from_pretrained(hf_id, map_location="cpu")
                 model = model.cpu()
                 model.eval()
-                transcriptions = model.transcribe([mono_path], batch_size=1)
+                # Prompt-conditioned models (nemotron-3.5) read language from the
+                # Lhotse cut's supervision; NeMo's JSONL manifest loader copies the
+                # `lang` field into supervisions[0].language. Monolingual models
+                # (en-0.6b) accept the same manifest and ignore the field.
+                duration = float(len(audio_f)) / target_sr
+                manifest_path = mono_path + ".manifest.jsonl"
+                _record = {{
+                    "audio_filepath": mono_path,
+                    "duration": duration,
+                    "text": "",
+                }}
+                if language_tag and language_tag != "auto":
+                    _record["lang"] = language_tag
+                with open(manifest_path, "w") as _mf:
+                    _mf.write(json.dumps(_record) + "\\n")
+                transcriptions = model.transcribe(manifest_path, batch_size=1)
                 if isinstance(transcriptions, list):
                     if hasattr(transcriptions[0], 'text'):
                         text = transcriptions[0].text

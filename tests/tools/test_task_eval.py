@@ -9,6 +9,8 @@ import struct
 import wave
 from pathlib import Path
 
+import pytest
+
 from tools import task_eval
 
 
@@ -218,6 +220,129 @@ def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
     assert suite["selectors"]["families"] == ["nemotron_speech_streaming"]
     non_streaming = task_eval.suite_by_id(suites, "librispeech_clean_asr")
     assert "nemotron_speech_streaming" in non_streaming["selectors"]["exclude_families"]
+
+
+def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
+    suites = task_eval.load_suites()
+    suite = task_eval.suite_by_id(suites, "dpg_bench_diffusion_image")
+
+    assert suite["dataset"]["kind"] == "diffusion_prompt_json"
+    assert suite["selectors"]["task_strategies"] == ["diffusion_media_generation"]
+    assert len(suite["selectors"]["families"]) == 4
+    assert {"flux", "pixart", "z_image"} < set(suite["selectors"]["families"])
+    assert len(suite["selectors"]["runtime_strategies"]) == 4
+    assert {
+        "diffusion_flux", "diffusion_pixart", "diffusion_zimage"
+    } < set(suite["selectors"]["runtime_strategies"])
+    expected_non_neutral_models = {
+        "flux-schnell-l0",
+        "flux-2-dev-l0",
+        "flux-2-dev-fp8-l0",
+        "pixart-sigma-1024",
+        "z-image-turbo",
+    }
+    assert len(suite["default_model_names"]) == 7
+    assert expected_non_neutral_models < set(suite["default_model_names"])
+    assert len(suite["selectors"]["exclude_model_names"]) == 1
+    assert suite["selectors"]["exclude_model_names"][0].endswith("image-edit-2511")
+    assert suite["scoring"]["scorer"] == "diffusion_image_clip_parity"
+    assert suite["gates"]["min_trt_hf_image_clip_cosine"] == 0.85
+    assert suite["ci"] == {
+        "eligible": False,
+        "lane": "local_only",
+        "notes": "P2021-only until the DPG-Bench scorecard is visually calibrated.\n",
+    }
+
+
+def test_partiprompts_defaults_to_canonical_models_across_image_families() -> None:
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    )
+
+    selected = task_eval.selected_models_for_suite(
+        suite, task_eval.load_manifest_records(), single_device_only=True
+    )
+
+    selected_names = [model["name"] for model in selected]
+    expected_non_neutral_models = {
+        "flux-2-dev-fp8-l0",
+        "flux-2-dev-l0",
+        "flux-schnell-l0",
+        "pixart-sigma-1024",
+        "z-image-turbo",
+    }
+    assert len(selected_names) == 7
+    assert expected_non_neutral_models < set(selected_names)
+
+
+def test_explicit_partiprompts_model_can_select_compatible_non_default() -> None:
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    )
+
+    selected = task_eval.selected_models_for_suite(
+        suite,
+        task_eval.load_manifest_records(),
+        selectors=["flux-2-dev-l0"],
+        single_device_only=True,
+    )
+
+    assert [model["name"] for model in selected] == ["flux-2-dev-l0"]
+
+
+def test_partiprompts_uses_model_manifest_generation_and_profile_gates() -> None:
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    )
+    models = {model["name"]: model for model in task_eval.load_manifest_records()}
+
+    pixart_suite = task_eval.resolve_suite_for_model(
+        suite, models["pixart-sigma-1024"]
+    )
+    assert pixart_suite["generation"] == {
+        "seed": 42,
+        "use_shared_initial_latents": True,
+        "image_height": 1024,
+        "image_width": 1024,
+        "video_num_frames": 1,
+        "num_inference_steps": 20,
+    }
+    assert pixart_suite["gates"]["min_trt_hf_image_clip_cosine"] == 0.85
+    assert pixart_suite["gates"]["ssim"] == 0.75
+    assert pixart_suite["gates"]["psnr"] == 10.0
+    assert pixart_suite["gates"]["require_matching_initial_latents"] == 1
+    assert "max_prompt_clipscore_drop" not in pixart_suite["gates"]
+    assert "min_hf_prompt_clipscore" not in pixart_suite["gates"]
+
+    flux_suite = task_eval.resolve_suite_for_model(
+        suite, models["flux-schnell-l0"]
+    )
+    assert flux_suite["generation"]["image_height"] == 384
+    assert flux_suite["generation"]["image_width"] == 384
+    assert flux_suite["generation"]["num_inference_steps"] == 20
+    assert flux_suite["gates"]["psnr"] == 5.0
+    assert flux_suite["gates"]["ssim"] == 0.1
+
+    non_default_flux_suite = task_eval.resolve_suite_for_model(
+        suite, models["flux-2-dev"]
+    )
+    assert non_default_flux_suite["generation"]["image_height"] == 1024
+    assert non_default_flux_suite["generation"]["num_inference_steps"] == 28
+    assert non_default_flux_suite["gates"]["psnr"] == 5.0
+
+    z_image_suite = task_eval.resolve_suite_for_model(
+        suite, models["z-image-turbo"]
+    )
+    assert z_image_suite["generation"]["image_height"] == 1024
+    assert z_image_suite["generation"]["num_inference_steps"] == 9
+
+
+def test_partiprompts_has_no_family_specific_suite_ids() -> None:
+    suite_ids = {suite["id"] for suite in task_eval.load_suites()}
+
+    assert "dpg_bench_diffusion_image" in suite_ids
+    assert "partiprompts_pixart_diffusion_image" not in suite_ids
+    assert "partiprompts_flux_diffusion_image" not in suite_ids
 
 
 def test_custom_suite_file_does_not_add_builtin_suites(tmp_path: Path) -> None:
@@ -496,6 +621,119 @@ def test_prepare_mmlu_writes_answers_and_trtfb_jsonl(tmp_path: Path) -> None:
     ]
     assert manifest["suite"] == "mmlu_five_shot_mcq"
     assert manifest["request_count"] == 1
+
+
+def test_prepare_diffusion_prompts_writes_stable_prompt_rows(tmp_path: Path) -> None:
+    dataset = tmp_path / "PartiPrompts.tsv"
+    dataset.write_text(
+        "Prompt\tCategory\tChallenge\tNote\n"
+        "a red cube\tSimple Detail\tBasic\tcolor binding\n"
+        "a horse riding an astronaut\tImagination\tComplex\trole reversal\n",
+        encoding="utf-8",
+    )
+    suite = {
+        "id": "dpg_bench_diffusion_image",
+        "dataset": {"kind": "diffusion_prompt_tsv"},
+        "generation": {"seed": 42, "image_height": 384, "image_width": 384},
+    }
+
+    outputs = task_eval.prepare_diffusion_prompt_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+    )
+
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+
+    assert answers["requests"] == [{
+        "sample_id": "partiprompts_000000",
+        "dataset_index": 0,
+        "prompt": "a red cube",
+        "category": "Simple Detail",
+        "challenge": "Basic",
+        "note": "color binding",
+    }]
+    assert prompts == [{
+        "sample_id": "partiprompts_000000",
+        "dataset_index": 0,
+        "eval_index": 0,
+        "prompt": "a red cube",
+        "category": "Simple Detail",
+        "challenge": "Basic",
+    }]
+    assert manifest["dataset_kind"] == "diffusion_prompt_tsv"
+    assert manifest["request_count"] == 1
+    assert manifest["generation"]["seed"] == 42
+
+
+def test_prepare_task_dataset_dispatches_diffusion_prompt_json(tmp_path: Path) -> None:
+    dataset = tmp_path / "dpg_bench.json"
+    dataset.write_text(json.dumps({
+        "dataset": "DPG-Bench",
+        "version": "test",
+        "requests": [{
+            "sample_id": "dpg_bench_000001",
+            "dataset_index": 1,
+            "prompt": "a red cube above a blue sphere",
+            "category": "entity,relation",
+            "challenge": "dense_prompt_following",
+            "questions": [{"question": "Is the red cube above the blue sphere?"}],
+        }],
+    }), encoding="utf-8")
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    )
+
+    outputs = task_eval.prepare_task_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+    )
+
+    prompt = task_eval.load_jsonl(outputs["prompts"])[0]
+    assert prompt["prompt"] == "a red cube above a blue sphere"
+    assert prompt["questions"] == [{"question": "Is the red cube above the blue sphere?"}]
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+    assert manifest["dataset_kind"] == "diffusion_prompt_json"
+    assert manifest["dataset_name"] == "DPG-Bench"
+
+
+def test_prepare_mmlu_applies_gpt_oss_family_override(tmp_path: Path) -> None:
+    dataset = tmp_path / "mmlu.json"
+    _write_mmlu(dataset)
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
+    model = {"name": "gpt-oss-20b", "family": "gpt_oss", "task_eval": {}}
+    config = task_eval.effective_task_eval_config(suite, model)
+
+    outputs = task_eval.prepare_mmlu_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+        task_eval_config=config,
+    )
+
+    prompt = task_eval.load_jsonl(outputs["prompts"])[0]["prompt"]
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+    assert prompt == (
+        "<|start|>system<|message|>You are a helpful assistant. "
+        "Answer with only the option letter.<|end|>"
+        "<|start|>user<|message|>Question one\nA. a\nB. b\nAnswer:<|end|>"
+        "<|start|>assistant<|channel|>final<|message|>"
+    )
+    assert manifest["generation"]["max_new_tokens"] == 8
+    assert manifest["generation"]["apply_chat_template"] is False
+    assert manifest["task_eval"]["answer_parser"] == "gpt_oss_harmony_final_mcq"
+
+
+def test_non_gpt_oss_mmlu_model_keeps_suite_defaults() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
+    model = {"name": "tinyllama-1.1b", "family": "llama", "task_eval": {}}
+
+    assert task_eval.effective_task_eval_config(suite, model) == {}
 
 
 def test_prepare_seedtts_writes_resolved_audio_and_scoring_contract(tmp_path: Path) -> None:
@@ -1001,6 +1239,36 @@ def test_score_and_compare_mmlu_predictions(tmp_path: Path) -> None:
     assert summary["accuracy_delta_trtfb_minus_hf"] == -0.5
     assert summary["prediction_agreement_rate"] == 0.5
     assert summary["buckets"]["hf_correct_trtfb_wrong"] == 1
+
+
+def test_gpt_oss_harmony_parser_rejects_control_only_predictions() -> None:
+    parser = "gpt_oss_harmony_final_mcq"
+
+    assert task_eval.parse_model_prediction(
+        "<|channel|>final<|message|> B", answer_parser=parser
+    ) == "B"
+    assert task_eval.parse_model_prediction(" B", answer_parser=parser) == "B"
+    assert task_eval.parse_model_prediction("<|channel|>", answer_parser=parser) == ""
+
+
+def test_required_valid_prediction_does_not_agree_on_empty_outputs() -> None:
+    answers = {"requests": [{"answer": "A", "subject": "test"}]}
+    hf = {"responses": [{"sample_id": "one", "output_text": "<|channel|>"}]}
+    trtfb = {"responses": [{"sample_id": "one", "output_text": "\n\n"}]}
+
+    summary = task_eval.compare_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        answer_parser="gpt_oss_harmony_final_mcq",
+        require_valid_prediction=True,
+    )
+
+    assert summary["prediction_agreement_rate"] == 0.0
+    assert summary["hf"]["valid_prediction_count"] == 0
+    assert summary["trtfb"]["valid_prediction_count"] == 0
+    assert summary["disagreements"][0]["hf_prediction"] == ""
+    assert summary["disagreements"][0]["trtfb_prediction"] == ""
 
 
 def test_score_predictions_parses_vlm_a_to_j_choices() -> None:
@@ -1574,6 +1842,43 @@ def test_build_bundle_command_uses_manifest_build_settings(tmp_path: Path) -> No
     assert "--verbose" in cmd
 
 
+def test_build_bundle_command_passes_manifest_fp32_layers(tmp_path: Path) -> None:
+    """Reduced-precision selectors must reach the build, matching the E2E harness."""
+    model = {
+        "name": "case",
+        "hf_id": "org/model",
+        "max_cache_length": 256,
+        "precision": "fp16",
+        "fp32_layers": [2, 3, 4, 7, 8],
+    }
+
+    cmd = task_eval.build_bundle_command(
+        model,
+        trtmc_binary="build/trtmc",
+        bundle_path=tmp_path / "case.trtfb",
+    )
+
+    idx = cmd.index("--fp32-layers")
+    assert cmd[idx : idx + 2] == ["--fp32-layers", "2,3,4,7,8"]
+
+
+def test_build_bundle_command_omits_fp32_layers_when_absent(tmp_path: Path) -> None:
+    model = {
+        "name": "case",
+        "hf_id": "org/model",
+        "max_cache_length": 256,
+        "precision": "fp16",
+    }
+
+    cmd = task_eval.build_bundle_command(
+        model,
+        trtmc_binary="build/trtmc",
+        bundle_path=tmp_path / "case.trtfb",
+    )
+
+    assert "--fp32-layers" not in cmd
+
+
 def test_suite_build_cache_minimum_overrides_manifest_cache() -> None:
     suite = {"build": {"min_max_cache_length": 1024}}
     model = {"max_cache_length": 256}
@@ -1753,6 +2058,697 @@ def test_run_hf_reference_dispatches_asr_workdir(tmp_path: Path, monkeypatch) ->
     task_eval.run_hf_reference(argparse.Namespace(work_dir=str(work_dir)))
 
     assert calls == ["asr"]
+
+
+def test_run_hf_reference_dispatches_diffusion_prompt_workdir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": "diffusion_prompt_tsv"}),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def fake_diffusion(_args):
+        calls.append("diffusion")
+
+    monkeypatch.setattr(task_eval, "run_diffusion_hf_reference", fake_diffusion)
+
+    task_eval.run_hf_reference(argparse.Namespace(work_dir=str(work_dir)))
+
+    assert calls == ["diffusion"]
+
+
+def test_run_diffusion_hf_reference_writes_image_artifact_predictions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tests.e2e_harness.contracts import E2ECase, StageOutput
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(json.dumps({
+        "dataset_kind": "diffusion_prompt_tsv",
+        "generation": {
+            "seed": 42,
+            "image_height": 384,
+            "image_width": 384,
+            "num_inference_steps": 20,
+        },
+        "task_eval": {"model_manifest": "tests/e2e/models/flux/manifests/flux-schnell-l0.json"},
+    }), encoding="utf-8")
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps({"sample_id": "partiprompts_000000", "prompt": "a red cube"}) + "\n"
+        + json.dumps({"sample_id": "partiprompts_000001", "prompt": "a blue sphere"}) + "\n",
+        encoding="utf-8",
+    )
+    seen: list[tuple[str, int, int]] = []
+
+    class FakeReference:
+        def run_stage(self, case, _stage, _ctx):
+            seen.append((case.inputs["prompt"], case.inputs["seed"], case.inputs["image_height"]))
+            frames_dir = work_dir / "fake_frames" / case.name
+            frames_dir.mkdir(parents=True)
+            (frames_dir / "frame_0000.png").write_bytes(b"png")
+            return StageOutput(
+                stage_name="end_to_end",
+                data={
+                    "returncode": 0,
+                    "num_frames": 1,
+                    "frames_dir": str(frames_dir),
+                    "frame_stats": {"mean": 0.5, "std": 0.2},
+                },
+                timing_s=1.25,
+            )
+
+    template = E2ECase(
+        name="flux-schnell-l0",
+        hf_id="black-forest-labs/FLUX.1-schnell",
+        family="flux",
+        runtime_strategy="diffusion_flux",
+        task_strategy="diffusion_media_generation",
+        reference_backend="hf_diffusers",
+        bundle="flux-schnell-l0.trtfb",
+        inputs={},
+    )
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_plugins",
+        lambda _work_dir: (template, FakeReference(), object()),
+        raising=False,
+    )
+
+    task_eval.run_diffusion_hf_reference(argparse.Namespace(
+        work_dir=str(work_dir),
+        predictions="hf_predictions.json",
+        raw_output="hf_raw.jsonl",
+    ))
+
+    predictions = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+    assert seen == [("a red cube", 42, 384), ("a blue sphere", 43, 384)]
+    assert predictions["responses"][0]["sample_id"] == "partiprompts_000000"
+    assert predictions["responses"][0]["num_frames"] == 1
+    assert predictions["responses"][0]["source"] == "hf"
+
+
+def test_run_trtfb_dispatches_diffusion_prompt_workdir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": "diffusion_prompt_tsv"}),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def fake_diffusion(_args):
+        calls.append("diffusion")
+
+    monkeypatch.setattr(
+        task_eval, "run_diffusion_trtfb", fake_diffusion, raising=False
+    )
+
+    task_eval.run_trtfb(argparse.Namespace(work_dir=str(work_dir)))
+
+    assert calls == ["diffusion"]
+
+
+def test_run_diffusion_trtfb_writes_image_artifact_predictions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tests.e2e_harness.contracts import E2ECase, StageOutput
+
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(json.dumps({
+        "dataset_kind": "diffusion_prompt_tsv",
+        "generation": {"seed": 7, "num_inference_steps": 20},
+        "task_eval": {"model_manifest": "tests/e2e/models/flux/manifests/flux-schnell-l0.json"},
+    }), encoding="utf-8")
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps({"sample_id": "partiprompts_000000", "prompt": "a red cube"}) + "\n",
+        encoding="utf-8",
+    )
+    seen: list[tuple[str, str, str]] = []
+
+    class FakeRunner:
+        def run_stage(self, case, _stage, ctx):
+            seen.append((case.inputs["prompt"], ctx.binary_path, case.bundle))
+            frames_dir = work_dir / "fake_trt_frames" / case.name
+            frames_dir.mkdir(parents=True)
+            (frames_dir / "frame_0000.png").write_bytes(b"png")
+            return StageOutput(
+                stage_name="end_to_end",
+                data={
+                    "returncode": 0,
+                    "num_frames": 1,
+                    "frames_dir": str(frames_dir),
+                    "frame_stats": {"mean": 0.5, "std": 0.2},
+                    "prompt": case.inputs["prompt"],
+                },
+                timing_s=0.5,
+            )
+
+    template = E2ECase(
+        name="flux-schnell-l0",
+        hf_id="black-forest-labs/FLUX.1-schnell",
+        family="flux",
+        runtime_strategy="diffusion_flux",
+        task_strategy="diffusion_media_generation",
+        reference_backend="hf_diffusers",
+        bundle="flux-schnell-l0.trtfb",
+        inputs={},
+    )
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_plugins",
+        lambda _work_dir: (template, object(), FakeRunner()),
+    )
+
+    task_eval.run_diffusion_trtfb(argparse.Namespace(
+        work_dir=str(work_dir),
+        bundle=str(tmp_path / "bundles" / "flux-schnell-l0.trtfb"),
+        trtmc_binary="build/trtmc",
+        hf_python="/opt/venv/bin/python",
+        predictions="trtfb_predictions.json",
+        raw_output="trtfb_raw.jsonl",
+    ))
+
+    predictions = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+    assert seen == [("a red cube", "build/trtmc", "flux-schnell-l0.trtfb")]
+    assert predictions["responses"][0]["source"] == "trtfb"
+    assert predictions["responses"][0]["num_frames"] == 1
+
+
+def test_compare_diffusion_image_predictions_aggregates_model_comparator_metrics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tests.e2e_harness.contracts import (
+        CompareResult,
+        MetricResult,
+        StageStatus,
+    )
+
+    class FakeComparator:
+        def compare(self, trt, ref, threshold, stage):
+            assert trt.data["prompt"] == "a red cube"
+            assert ref.data["frames_dir"] == "/hf/frames"
+            assert threshold.metrics["max_prompt_clipscore_drop"] == 3.0
+            assert stage.name == "end_to_end"
+            return CompareResult(
+                stage_name="end_to_end",
+                status=StageStatus.PASSED.value,
+                metrics={
+                    "prompt_clipscore_delta": MetricResult(
+                        value=-0.5, threshold=-3.0, operator=">=", passed=True
+                    ),
+                    "trt_prompt_clipscore": MetricResult(
+                        value=24.0, threshold=None, operator="info", passed=True
+                    ),
+                    "hf_prompt_clipscore": MetricResult(
+                        value=24.5, threshold=20.0, operator=">=", passed=True
+                    ),
+                    "trt_hf_image_clip_cosine": MetricResult(
+                        value=0.9, threshold=None, operator=">=", passed=True
+                    ),
+                },
+            )
+
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_comparator",
+        lambda _work_dir: FakeComparator(),
+        raising=False,
+    )
+    hf = {"responses": [{
+        "sample_id": "partiprompts_000000",
+        "returncode": 0,
+        "num_frames": 1,
+        "frames_dir": "/hf/frames",
+        "frame_stats": {"mean": 0.5, "std": 0.2},
+        "prompt": "a red cube",
+    }]}
+    trt = {"responses": [{
+        "sample_id": "partiprompts_000000",
+        "returncode": 0,
+        "num_frames": 1,
+        "frames_dir": "/trt/frames",
+        "frame_stats": {"mean": 0.5, "std": 0.2},
+        "prompt": "a red cube",
+    }]}
+    answers = {"requests": [{
+        "sample_id": "partiprompts_000000",
+        "category": "Simple Detail",
+        "challenge": "Basic",
+        "prompt": "a red cube",
+        "questions": [{"question": "Is there a red cube?"}],
+    }]}
+
+    summary = task_eval.compare_diffusion_image_predictions(
+        hf,
+        trt,
+        answers,
+        work_dir=tmp_path,
+        gates={"max_prompt_clipscore_drop": 3.0},
+    )
+
+    assert summary["overall_pass_rate"] == 1.0
+    assert summary["passed_count"] == 1
+    assert summary["metrics"]["prompt_clipscore_delta"]["mean"] == -0.5
+    assert summary["samples"][0]["category"] == "Simple Detail"
+    assert summary["samples"][0]["prompt"] == "a red cube"
+    review = Path(summary["visual_review"])
+    assert review.is_file()
+    review_html = review.read_text(encoding="utf-8")
+    assert "Is there a red cube?" in review_html
+    assert "HF image missing" in review_html
+    assert "TRTMC image missing" in review_html
+
+
+def test_diffusion_response_preserves_initial_latent_identity() -> None:
+    from tests.e2e_harness.contracts import StageOutput
+
+    response = task_eval._diffusion_response(
+        "sample-1",
+        "hf",
+        StageOutput(
+            stage_name="end_to_end",
+            data={
+                "returncode": 0,
+                "num_frames": 1,
+                "frames_dir": "/frames",
+                "initial_latents_sha256": "abc123",
+            },
+        ),
+    )
+
+    assert response["initial_latents_sha256"] == "abc123"
+
+
+def test_diffusion_parity_rejects_mismatched_initial_latents(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tests.e2e_harness.contracts import CompareResult, MetricResult, StageStatus
+
+    class Comparator:
+        def compare(self, *_args):
+            return CompareResult(
+                stage_name="end_to_end",
+                status=StageStatus.PASSED.value,
+                metrics={
+                    "prompt_clipscore_delta": MetricResult(
+                        value=0.0, threshold=None, operator="info", passed=True
+                    ),
+                    "trt_prompt_clipscore": MetricResult(
+                        value=30.0, threshold=None, operator="info", passed=True
+                    ),
+                    "hf_prompt_clipscore": MetricResult(
+                        value=30.0, threshold=None, operator="info", passed=True
+                    ),
+                    "trt_hf_image_clip_cosine": MetricResult(
+                        value=1.0, threshold=0.9, operator=">=", passed=True
+                    ),
+                },
+            )
+
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_comparator",
+        lambda _work_dir: Comparator(),
+    )
+    base = {
+        "sample_id": "partiprompts_000000",
+        "returncode": 0,
+        "num_frames": 1,
+        "frames_dir": "/frames",
+        "frame_stats": {"mean": 0.5, "std": 0.2},
+        "prompt": "a red cube",
+    }
+
+    with pytest.raises(ValueError, match="initial latent"):
+        task_eval.compare_diffusion_image_predictions(
+            {"responses": [{**base, "initial_latents_sha256": "hf-hash"}]},
+            {"responses": [{**base, "initial_latents_sha256": "trt-hash"}]},
+            {"requests": [{"sample_id": "partiprompts_000000"}]},
+            work_dir=tmp_path,
+            gates={"min_trt_hf_image_clip_cosine": 0.9},
+        )
+
+
+def test_diffusion_parity_requires_declared_initial_latent_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_comparator",
+        lambda _work_dir: object(),
+    )
+    row = {
+        "sample_id": "partiprompts_000000",
+        "returncode": 0,
+        "num_frames": 1,
+        "frames_dir": "/frames",
+        "frame_stats": {"mean": 0.5, "std": 0.2},
+        "prompt": "a red cube",
+    }
+
+    with pytest.raises(ValueError, match="requires matching initial latents"):
+        task_eval.compare_diffusion_image_predictions(
+            {"responses": [row]},
+            {"responses": [row]},
+            {"requests": [{"sample_id": "partiprompts_000000"}]},
+            work_dir=tmp_path,
+            gates={"require_matching_initial_latents": 1},
+        )
+
+
+def test_compare_diffusion_image_predictions_requires_clip_metrics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from tests.e2e_harness.contracts import CompareResult, StageStatus
+
+    class ComparatorWithoutClip:
+        def compare(self, *_args):
+            return CompareResult(
+                stage_name="end_to_end",
+                status=StageStatus.PASSED.value,
+                metrics={},
+            )
+
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_comparator",
+        lambda _work_dir: ComparatorWithoutClip(),
+    )
+    monkeypatch.setattr(
+        task_eval,
+        "_compute_task_eval_clip_metrics",
+        lambda *_args: None,
+        raising=False,
+    )
+    row = {
+        "sample_id": "partiprompts_000000",
+        "returncode": 0,
+        "num_frames": 1,
+        "frames_dir": "/frames",
+        "frame_stats": {"mean": 0.5, "std": 0.2},
+        "prompt": "a red cube",
+    }
+
+    try:
+        task_eval.compare_diffusion_image_predictions(
+            {"responses": [row]},
+            {"responses": [row]},
+            {"requests": [{"sample_id": "partiprompts_000000"}]},
+            work_dir=tmp_path,
+            gates={"max_prompt_clipscore_drop": 3.0},
+        )
+    except RuntimeError as exc:
+        assert "required CLIP metrics" in str(exc)
+    else:
+        raise AssertionError("expected missing CLIP metric failure")
+
+
+def test_compare_diffusion_image_predictions_adds_generic_clip_metrics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+    from tests.e2e_harness.contracts import CompareResult, StageStatus
+
+    class PixArtComparator:
+        def compare(self, *_args):
+            return CompareResult(
+                stage_name="end_to_end",
+                status=StageStatus.PASSED.value,
+                metrics={},
+            )
+
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_comparator",
+        lambda _work_dir: PixArtComparator(),
+    )
+    monkeypatch.setattr(
+        task_eval,
+        "_compute_task_eval_clip_metrics",
+        lambda trt_dir, ref_dir, prompt: SimpleNamespace(
+            trt_prompt_clipscore=24.0,
+            hf_prompt_clipscore=25.0,
+            prompt_clipscore_delta=-1.0,
+            trt_hf_image_clip_cosine=0.8,
+            prompt_truncated=False,
+        ),
+        raising=False,
+    )
+    row = {
+        "sample_id": "partiprompts_000000",
+        "returncode": 0,
+        "num_frames": 1,
+        "frames_dir": "/frames",
+        "frame_stats": {"mean": 0.5, "std": 0.2},
+        "prompt": "a red cube",
+    }
+
+    summary = task_eval.compare_diffusion_image_predictions(
+        {"responses": [{**row, "frames_dir": "/hf"}]},
+        {"responses": [{**row, "frames_dir": "/trt"}]},
+        {"requests": [{"sample_id": "partiprompts_000000"}]},
+        work_dir=tmp_path,
+        gates={
+            "max_prompt_clipscore_drop": 3.0,
+            "min_hf_prompt_clipscore": 20.0,
+            "min_trt_hf_image_clip_cosine": 0.0,
+        },
+    )
+
+    assert summary["metrics"]["prompt_clipscore_delta"]["mean"] == -1.0
+    assert summary["overall_pass_rate"] == 1.0
+
+
+def test_diffusion_parity_gates_image_to_image_not_prompt_alignment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+    from tests.e2e_harness.contracts import CompareResult, StageStatus
+
+    class PixArtComparator:
+        def compare(self, *_args):
+            return CompareResult(
+                stage_name="end_to_end",
+                status=StageStatus.PASSED.value,
+                metrics={},
+            )
+
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_comparator",
+        lambda _work_dir: PixArtComparator(),
+    )
+    monkeypatch.setattr(
+        task_eval,
+        "_compute_task_eval_clip_metrics",
+        lambda *_args: SimpleNamespace(
+            trt_prompt_clipscore=31.0,
+            hf_prompt_clipscore=32.0,
+            prompt_clipscore_delta=-1.0,
+            trt_hf_image_clip_cosine=0.70,
+            prompt_truncated=False,
+        ),
+    )
+    row = {
+        "sample_id": "partiprompts_000000",
+        "returncode": 0,
+        "num_frames": 1,
+        "frames_dir": "/frames",
+        "frame_stats": {"mean": 0.5, "std": 0.2},
+        "prompt": "a red cube",
+    }
+
+    summary = task_eval.compare_diffusion_image_predictions(
+        {"responses": [{**row, "frames_dir": "/hf"}]},
+        {"responses": [{**row, "frames_dir": "/trt"}]},
+        {"requests": [{"sample_id": "partiprompts_000000"}]},
+        work_dir=tmp_path,
+        gates={"min_trt_hf_image_clip_cosine": 0.90},
+    )
+
+    metrics = summary["samples"][0]["metrics"]
+    assert summary["overall_pass_rate"] == 0.0
+    assert summary["samples"][0]["message"].startswith("FAIL:")
+    assert metrics["trt_hf_image_clip_cosine"]["passed"] is False
+    assert metrics["prompt_clipscore_delta"]["threshold"] is None
+    assert metrics["hf_prompt_clipscore"]["threshold"] is None
+
+
+def test_eval_one_model_passes_model_manifest_to_diffusion_prepare(
+    tmp_path: Path, monkeypatch
+) -> None:
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    )
+    model = {
+        "name": "flux-schnell-l0",
+        "manifest": "tests/e2e/models/flux/manifests/flux-schnell-l0.json",
+        "hf_id": "black-forest-labs/FLUX.1-schnell",
+        "bundle": "flux-schnell-l0.trtfb",
+        "family": "flux",
+        "task_eval": {},
+    }
+    captured: dict = {}
+
+    class Prepared(Exception):
+        pass
+
+    def fake_prepare(**kwargs):
+        captured.update(kwargs["task_eval_config"])
+        raise Prepared
+
+    monkeypatch.setattr(task_eval, "prepare_task_dataset", fake_prepare)
+
+    try:
+        task_eval.eval_one_model(
+            suite=suite,
+            model=model,
+            args=argparse.Namespace(
+                work_root=str(tmp_path / "work"),
+                dataset=str(tmp_path / "PartiPrompts.tsv"),
+                limit=1,
+                subject="",
+                sample_seed=None,
+            ),
+        )
+    except Prepared:
+        pass
+    else:
+        raise AssertionError("expected prepare sentinel")
+
+    assert captured["model_manifest"] == model["manifest"]
+    assert captured["family"] == "flux"
+
+
+def test_flux_task_eval_build_command_preserves_diffusion_shape(tmp_path: Path) -> None:
+    model = next(
+        model
+        for model in task_eval.load_manifest_records()
+        if model["name"] == "flux-schnell-l0"
+    )
+
+    command = task_eval.build_bundle_command(
+        model,
+        trtmc_binary="build/trtmc",
+        bundle_path=tmp_path / "flux-schnell-l0.trtfb",
+    )
+
+    assert command[command.index("--image-height") + 1] == "384"
+    assert command[command.index("--image-width") + 1] == "384"
+    assert command[command.index("--video-num-frames") + 1] == "1"
+    assert command[command.index("--num-inference-steps") + 1] == "20"
+
+
+def test_eval_one_model_diffusion_uses_clip_parity_summary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dataset = tmp_path / "dpg_bench.json"
+    dataset.write_text(json.dumps({"dataset": "DPG-Bench", "requests": [{
+        "sample_id": "dpg_bench_000000",
+        "prompt": "a red cube above a blue sphere",
+        "category": "entity,relation",
+        "questions": [{"question": "Is the red cube above the blue sphere?"}],
+    }]}), encoding="utf-8")
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "dpg_bench_diffusion_image"
+    )
+    model = next(
+        model
+        for model in task_eval.load_manifest_records()
+        if model["name"] == "flux-schnell-l0"
+    )
+
+    def fake_hf(_args, _model, work_dir):
+        task_eval.write_predictions(work_dir / "hf_predictions.json", [{
+            "sample_id": "dpg_bench_000000", "returncode": 0, "num_frames": 1
+        }])
+
+    def fake_bundle(*_args, **kwargs):
+        return kwargs["bundle_path"], True
+
+    def fake_trt(args):
+        task_eval.write_predictions(Path(args.work_dir) / "trtfb_predictions.json", [{
+            "sample_id": "dpg_bench_000000", "returncode": 0, "num_frames": 1
+        }])
+
+    def fake_compare(_hf, _trt, _answers, *, work_dir, gates):
+        assert work_dir.name == "flux-schnell-l0"
+        assert "max_prompt_clipscore_drop" not in gates
+        assert "min_hf_prompt_clipscore" not in gates
+        assert gates["psnr"] == 5.0
+        assert gates["ssim"] == 0.1
+        return {
+            "mode": "diffusion_image_clip_parity",
+            "overall_pass_rate": 1.0,
+            "passed_count": 1,
+            "valid_count": 1,
+            "skipped_count": 0,
+            "total_count": 1,
+            "metrics": {},
+            "samples": [],
+        }
+
+    monkeypatch.setattr(task_eval, "run_hf_reference_subprocess", fake_hf)
+    monkeypatch.setattr(task_eval, "ensure_bundle", fake_bundle)
+    monkeypatch.setattr(task_eval, "run_trtfb", fake_trt)
+    monkeypatch.setattr(task_eval, "compare_diffusion_image_predictions", fake_compare)
+    monkeypatch.setattr(
+        task_eval,
+        "max_prompt_token_length",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("not for diffusion")),
+    )
+    args = argparse.Namespace(
+        work_root=str(tmp_path / "work"),
+        dataset=str(dataset),
+        limit=1,
+        subject="",
+        sample_seed=None,
+        force_hf=False,
+        force_build=False,
+        build_max_cache_length=None,
+        skip_prompt_length_check=False,
+        bundle="",
+        model=["flux-schnell-l0"],
+        engine_dir="",
+        trtmc_binary="build/trtmc",
+        extra_build_arg=[],
+        hf_dtype="auto",
+        hf_device="cuda",
+        hf_device_map="",
+        hf_attn_impl="",
+        trust_remote_code=False,
+        local_files_only=True,
+        do_sample=False,
+        apply_chat_template=False,
+        max_new_tokens=None,
+        temperature=None,
+        top_k=None,
+        top_p=None,
+        min_p=None,
+        seed=None,
+        benchmark_binary="build/trtmc_dataset_benchmark",
+        hf_python="",
+        backend_dir="",
+        kv_cache_size="",
+        config="",
+        set=[],
+        cuda_visible_devices="",
+        chat_template=False,
+    )
+
+    result = task_eval.eval_one_model(suite=suite, model=model, args=args)
+
+    assert result["mode"] == "diffusion_image_clip_parity"
+    assert result["overall_pass_rate"] == 1.0
+    assert result["bundle_built"] is True
 
 
 def test_run_asr_trtfb_invokes_transcribe_per_audio(tmp_path: Path, monkeypatch) -> None:
@@ -2385,6 +3381,75 @@ def test_eval_records_model_failure_and_continues(tmp_path: Path, monkeypatch) -
     assert summary["results"][0]["error"] == "gated repo"
     assert summary["results"][1]["status"] == "passed"
     assert summary["results"][1]["model"] == "ok"
+
+
+def test_eval_preserves_failed_diffusion_gate_status(tmp_path: Path, monkeypatch) -> None:
+    suite = {
+        "id": "dpg_bench_diffusion_image",
+        "dataset": {"kind": "diffusion_prompt_tsv"},
+    }
+    model = {"name": "pixart", "hf_id": "org/pixart", "bundle": "pixart.trtfb"}
+    monkeypatch.setattr(task_eval, "load_suites", lambda *_args, **_kwargs: [suite])
+    monkeypatch.setattr(task_eval, "load_manifest_records", lambda *_args, **_kwargs: [model])
+    monkeypatch.setattr(
+        task_eval,
+        "selected_models_for_suite",
+        lambda *_args, **_kwargs: [model],
+    )
+    monkeypatch.setattr(
+        task_eval,
+        "eval_one_model",
+        lambda **_kwargs: {
+            "suite": suite["id"],
+            "model": model["name"],
+            "mode": "diffusion_image_clip_parity",
+            "overall_pass_rate": 0.0,
+            "passed_count": 0,
+            "valid_count": 10,
+            "skipped_count": 0,
+            "hf_reused": False,
+            "bundle_built": False,
+            "status": "failed",
+        },
+    )
+    args = argparse.Namespace(
+        suites="",
+        suite=suite["id"],
+        models_dir="",
+        waives="",
+        waive_platform="",
+        include_waived=False,
+        model=[],
+        single_device_only=True,
+        bundle="",
+        work_root=str(tmp_path / "work"),
+        engine_dir=str(tmp_path / "bundles"),
+        fail_fast=False,
+        disable_model_process_isolation=True,
+    )
+
+    assert task_eval.cmd_eval(args) == 0
+
+    summary = json.loads(
+        (tmp_path / "work" / suite["id"] / "eval_summary.json").read_text()
+    )
+    assert summary["passed_count"] == 0
+    assert summary["failed_count"] == 1
+    assert summary["results"][0]["status"] == "failed"
+
+
+def test_eval_parser_accepts_explicit_model_plugin_dir() -> None:
+    args = task_eval.build_arg_parser().parse_args([
+        "eval",
+        "--suite",
+        "dpg_bench_diffusion_image",
+        "--work-root",
+        "/work",
+        "--model-plugin-dir",
+        "/runtime/models/pixart",
+    ])
+
+    assert args.model_plugin_dir == "/runtime/models/pixart"
 
 
 def test_eval_stops_after_oom_when_gpu_cleanup_is_not_confirmed(

@@ -83,7 +83,8 @@ class ZImagePipeline final : public IPipeline {
                           std::vector<float>& text_embeddings);
     bool run_denoiser(const std::vector<float>& hidden, const std::vector<float>& encoder_hidden,
                       const std::vector<float>& temb, const std::vector<float>& cos_vals,
-                      const std::vector<float>& sin_vals, std::vector<float>& output);
+                      const std::vector<float>& sin_vals, const std::vector<float>& attention_mask,
+                      std::vector<float>& output);
 
     /// Batched DiT forward. Every input carries a leading batch dim of size
     /// ``batch_size`` and the output is contiguous ``[B, num_patches,
@@ -91,7 +92,8 @@ class ZImagePipeline final : public IPipeline {
     bool run_denoiser_batched(const std::vector<float>& hidden,
                               const std::vector<float>& encoder_hidden,
                               const std::vector<float>& temb, const std::vector<float>& cos_vals,
-                              const std::vector<float>& sin_vals, int32_t batch_size,
+                              const std::vector<float>& sin_vals,
+                              const std::vector<float>& attention_mask, int32_t batch_size,
                               int32_t num_patches, int32_t dit_dim, int32_t text_seq,
                               int32_t freq_dim, int32_t total_seq, int32_t head_dim,
                               int32_t patch_dim, std::vector<float>& output);
@@ -131,14 +133,12 @@ class ZImagePipeline final : public IPipeline {
     /// Run the Qwen3 text encoder + caption projection + RoPE + latent
     /// initialization for every sample in a chunk. Fills the four batched
     /// buffers in-place. Returns false on encoder failure.
-    bool run_qwen3_encoder_for_chunk(const std::vector<std::string>& prompts,
-                                     const std::vector<std::uint32_t>& resolved_seeds,
-                                     std::size_t prompt_offset, int32_t batch,
-                                     const ZImageLayout& layout,
-                                     std::vector<float>& caption_projected_b,
-                                     std::vector<float>& rope_cos_b, std::vector<float>& rope_sin_b,
-                                     std::vector<float>& latents,
-                                     const std::vector<float>& supplied_initial_latents);
+    bool run_qwen3_encoder_for_chunk(
+        const std::vector<std::string>& prompts, const std::vector<std::uint32_t>& resolved_seeds,
+        std::size_t prompt_offset, int32_t batch, const ZImageLayout& layout,
+        std::vector<float>& caption_projected_b, std::vector<float>& rope_cos_b,
+        std::vector<float>& rope_sin_b, std::vector<float>& attention_mask_b,
+        std::vector<float>& latents, const std::vector<float>& supplied_initial_latents);
 
     /// Run the FlowMatchEuler denoise loop for one chunk. ``latents`` is
     /// updated in-place. Returns false if any DiT invocation fails.
@@ -148,6 +148,7 @@ class ZImagePipeline final : public IPipeline {
                                     const std::vector<float>& caption_projected_b,
                                     const std::vector<float>& rope_cos_b,
                                     const std::vector<float>& rope_sin_b,
+                                    const std::vector<float>& attention_mask_b,
                                     std::vector<float>& latents);
 
     /// Per-step fallback when the DiT engine is the legacy static (rank-2)
@@ -156,10 +157,11 @@ class ZImagePipeline final : public IPipeline {
     /// itself stays under the CCN gate.
     bool run_denoiser_unbatched_step(
         int32_t batch, int32_t step, std::size_t prompt_offset, std::size_t hidden_size,
-        std::size_t caption_size, std::size_t rope_size, std::size_t patch_size,
-        const std::vector<float>& hidden_b, const std::vector<float>& caption_projected_b,
-        const std::vector<float>& temb_one, const std::vector<float>& rope_cos_b,
-        const std::vector<float>& rope_sin_b, std::vector<float>& denoiser_output);
+        std::size_t caption_size, std::size_t rope_size, std::size_t attention_mask_size,
+        std::size_t patch_size, const std::vector<float>& hidden_b,
+        const std::vector<float>& caption_projected_b, const std::vector<float>& temb_one,
+        const std::vector<float>& rope_cos_b, const std::vector<float>& rope_sin_b,
+        const std::vector<float>& attention_mask_b, std::vector<float>& denoiser_output);
 
     /// VAE-decode each sample in the chunk at B=1, routing through
     /// ``decode_z_image_result`` so non-rank-0 TP ranks return empty

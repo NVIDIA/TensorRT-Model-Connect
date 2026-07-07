@@ -67,6 +67,7 @@ struct CliArgs {
     int chunk_ms{160};
     int att_context_left{70};
     int att_context_right{13};
+    std::string language;
     std::string runtime_cache;
     std::vector<std::string> backend_search_paths;
     std::vector<std::string> model_plugin_search_paths;

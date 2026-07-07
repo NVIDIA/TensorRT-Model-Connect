@@ -35,6 +35,13 @@ def strip_prompt_echo(text: str, prompt: str) -> str:
     return text
 
 
+def starts_with_prompt_echo(text: str, prompt: str) -> bool:
+    """Return whether generated text starts with the input prompt."""
+    norm_text = normalize_text(text)
+    norm_prompt = normalize_text(prompt)
+    return bool(norm_prompt and norm_text.startswith(norm_prompt))
+
+
 _CHAT_ROLE_PREFIXES = (
     "### response:", "### assistant:", "assistant:",
     "<|assistant|>", "<|im_start|>assistant\n",
@@ -176,6 +183,8 @@ class Gpt2CausalContinuationPlugin:
         config = contract_config(case)
         preserve_prompt_echo = bool(config.get("preserve_prompt_echo"))
         reconstruction_check = bool(config.get("seq2seq_reconstruction"))
+        prompt_echoed = starts_with_prompt_echo(trt_output.text or "", prompt)
+        prompt_excluded = preserve_prompt_echo or not prompt_echoed
         if preserve_prompt_echo:
             trt_text = normalize_text(trt_output.text or "")
             ref_text = normalize_text(ref_output.text or "")
@@ -206,6 +215,17 @@ class Gpt2CausalContinuationPlugin:
         prefix_match = (trt_text[:prefix_len] == ref_text[:prefix_len]) if prefix_len > 0 else True
 
         metrics = {
+            "prompt_excluded": MetricResult(
+                value=1.0 if prompt_excluded else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=prompt_excluded,
+                note=(
+                    "prompt echo explicitly allowed"
+                    if preserve_prompt_echo
+                    else "TRT output must not start with the input prompt"
+                ),
+            ),
             "ned": MetricResult(
                 value=ned,
                 threshold=ned_threshold,
@@ -236,19 +256,27 @@ class Gpt2CausalContinuationPlugin:
                 note="visible HF reconstruction text",
             )
 
-        passed = ned <= ned_threshold
+        passed = prompt_excluded and ned <= ned_threshold
         rule = (
             "seq2seq reconstruction parity against HF reference"
             if reconstruction_check
-            else "ned <= threshold (continuation parity)"
+            else (
+                "ned <= threshold (prompt echo explicitly allowed)"
+                if preserve_prompt_echo
+                else "prompt excluded AND ned <= threshold (continuation parity)"
+            )
         )
         if passed:
             return make_pass("full_generation", metrics, rule)
+        if not prompt_excluded:
+            message = "TRT continuation includes the input prompt"
+        else:
+            message = f"Continuation diverged: NED={ned:.3f}"
         return make_fail(
             "full_generation",
             metrics,
             rule,
-            f"Continuation diverged: NED={ned:.3f}",
+            message,
         )
 
 plugin = Gpt2CausalContinuationPlugin()

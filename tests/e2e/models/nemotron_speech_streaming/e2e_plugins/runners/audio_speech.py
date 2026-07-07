@@ -188,6 +188,29 @@ class SpeechToTextRunner:
             "--audio", audio_input,
             "--max-new-tokens", str(max_new_tokens),
         ]
+        # Forward the manifest's language tag so multilingual ASR (e.g.
+        # nemotron-3.5) routes through the right prompt-kernel one-hot.
+        # Monolingual checkpoints ignore the field.
+        language = case.inputs.get("language") or case.metadata.get("language", "")
+        if language:
+            cmd.extend(["--language", str(language)])
+
+        # Cache-aware streaming-only checkpoints (e.g. nemotron-3.5 with
+        # causal_downsampling=True) require chunked decode for correct output;
+        # the default non-streaming path returns garbage. Manifest opt-in:
+        #   "streaming": {"enabled": true, "chunk_ms": 1120,
+        #                 "att_context_size": [56, 13]}
+        streaming_cfg = (case.inputs.get("streaming") or
+                         case.metadata.get("streaming") or {})
+        if isinstance(streaming_cfg, dict) and streaming_cfg.get("enabled"):
+            cmd.append("--stream")
+            chunk_ms = streaming_cfg.get("chunk_ms")
+            if chunk_ms is not None:
+                cmd.extend(["--chunk-ms", str(int(chunk_ms))])
+            att = streaming_cfg.get("att_context_size")
+            if isinstance(att, (list, tuple)) and len(att) == 2:
+                cmd.extend(["--att-context-size", f"{int(att[0])},{int(att[1])}"])
+
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python:
             cmd.extend(["--hf-python", runtime_cli_python])

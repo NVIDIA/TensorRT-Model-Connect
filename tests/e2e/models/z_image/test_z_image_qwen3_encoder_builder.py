@@ -326,7 +326,67 @@ def test_build_qwen3_encoder_engine_success_with_gqa_and_negative_output_layer(m
     assert [t.dtype for t in builder.network.outputs] == ["float32"]
     assert attention_calls
     assert all(call["num_kv_heads"] == 1 for call in attention_calls)
+    assert all(call["causal"] is True for call in attention_calls)
+    assert all(call["mask"] is None for call in attention_calls)
     assert not any(op == "add_concatenation" for op, _args, _kwargs in builder.network.calls)
+
+
+@pytest.mark.unit
+def test_qwen3_encoder_negative_output_layer_is_captured_after_selected_layer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HF ``hidden_states[-2]`` is the output after the penultimate decoder layer."""
+    fake_trt = _make_fake_trt()
+    mod = _import_qwen3_with_fake_trt(fake_trt)
+
+    monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
+    monkeypatch.setattr(mod.graph_ops, "add_rms_norm", _fake_tensor_fn("rms"))
+    monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", _fake_tensor_fn("mm"))
+    monkeypatch.setattr(mod.graph_ops, "add_attention_from_rows", _fake_tensor_fn("attention"))
+    residual_outputs: list[_FakeTensor] = []
+    original_add_elementwise = _FakeNetwork.add_elementwise
+
+    def recording_add_elementwise(self, *args, **kwargs):
+        layer = original_add_elementwise(self, *args, **kwargs)
+        if (
+            args[-1] == fake_trt.ElementWiseOperation.SUM
+            and any(getattr(arg, "name", "").startswith("mm_") for arg in args[:-1])
+        ):
+            residual_outputs.append(layer.get_output(0))
+        return layer
+
+    monkeypatch.setattr(_FakeNetwork, "add_elementwise", recording_add_elementwise)
+
+    plan = mod.build_qwen3_encoder_engine(
+        _make_qwen3_weights(
+            hidden_size=4,
+            num_layers=3,
+            num_heads=2,
+            num_kv_heads=1,
+            head_dim=2,
+            intermediate_size=6,
+            vocab_size=10,
+        ),
+        hidden_size=4,
+        num_layers=3,
+        num_heads=2,
+        num_kv_heads=1,
+        head_dim=2,
+        intermediate_size=6,
+        vocab_size=10,
+        max_seq_len=3,
+        output_layer=-2,
+    )
+
+    assert plan == b"engine-plan"
+    builder = fake_trt.Builder.last_instance
+    # The recorder selects the two decoder residual SUMs per layer.
+    # For three layers, HF hidden_states[-2] is the hidden state after layer 1,
+    # i.e. the fourth residual SUM.
+    cast_inputs = [args[0] for op, args, _kwargs in builder.network.calls if op == "add_cast"]
+    assert len(residual_outputs) == 6
+    assert cast_inputs
+    assert cast_inputs[-1] is residual_outputs[3]
 
 
 @pytest.mark.unit
