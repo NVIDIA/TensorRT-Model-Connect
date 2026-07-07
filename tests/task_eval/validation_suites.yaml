@@ -63,6 +63,10 @@ suites:
             max_new_tokens: 8
             apply_chat_template: false
             enable_thinking: false
+        internlm:
+          # InternLM2 remote code is incompatible with the Transformers 5.x
+          # generation cache API (attention length N+1 vs mask length N).
+          hf_use_cache: false
     build:
       min_max_cache_length: 0
     gates:
@@ -129,6 +133,25 @@ suites:
       do_sample: false
     scoring:
       scorer: continuation
+    model_overrides:
+      by_model:
+        bart-base:
+          # Reserve two special tokens plus 64 generated decoder tokens inside
+          # the causal BART path's 1024-position table.
+          prompt_token_limit: 958
+          prompt_truncation_side: left
+        gpt2-125m:
+          # Reserve the suite's 64 generated tokens inside GPT-2's 1024 limit.
+          prompt_token_limit: 960
+          prompt_truncation_side: left
+        gpt-neo-125m:
+          # Reserve the suite's 64 generated tokens inside its 2048 limit.
+          prompt_token_limit: 1984
+          prompt_truncation_side: left
+        opt-125m:
+          # Reserve the suite's 64 generated tokens inside OPT's 2048 limit.
+          prompt_token_limit: 1984
+          prompt_truncation_side: left
     build:
       min_max_cache_length: 0
     gates:

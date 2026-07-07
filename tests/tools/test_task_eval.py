@@ -736,6 +736,134 @@ def test_non_gpt_oss_mmlu_model_keeps_suite_defaults() -> None:
     assert task_eval.effective_task_eval_config(suite, model) == {}
 
 
+@pytest.mark.parametrize(
+    ("model_name", "prompt_token_limit"),
+    [
+        ("bart-base", 958),
+        ("gpt2-125m", 960),
+        ("gpt-neo-125m", 1984),
+        ("opt-125m", 1984),
+    ],
+)
+def test_continuation_suite_limits_prompts_to_model_context(
+    model_name: str, prompt_token_limit: int
+) -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_continuation_parity")
+    config = task_eval.effective_task_eval_config(
+        suite,
+        {"name": model_name, "family": "", "task_eval": {}},
+    )
+    assert config["prompt_token_limit"] == prompt_token_limit
+    assert config["prompt_truncation_side"] == "left"
+
+
+def test_mmlu_suite_disables_hf_cache_for_internlm() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "mmlu_five_shot_mcq")
+    config = task_eval.effective_task_eval_config(
+        suite,
+        {"name": "internlm2-1.8b", "family": "internlm", "task_eval": {}},
+    )
+    assert config["hf_use_cache"] is False
+
+
+def test_truncate_prompt_rows_preserves_suffix_and_records_provenance() -> None:
+    class Tokenizer:
+        def __call__(self, text, *, add_special_tokens=False):
+            assert add_special_tokens is False
+            return argparse.Namespace(input_ids=text.split())
+
+        def decode(self, token_ids, **kwargs):
+            assert kwargs == {
+                "skip_special_tokens": False,
+                "clean_up_tokenization_spaces": False,
+            }
+            return " ".join(token_ids)
+
+    rows = [
+        {"sample_id": "long", "prompt": "one two three four five"},
+        {"sample_id": "short", "prompt": "six seven"},
+    ]
+    summary = task_eval.truncate_prompt_rows(
+        rows,
+        tokenizer=Tokenizer(),
+        token_limit=3,
+        truncation_side="left",
+    )
+    assert rows == [
+        {
+            "sample_id": "long",
+            "prompt": "three four five",
+            "prompt_tokens_before": 5,
+            "prompt_tokens_after": 3,
+            "prompt_truncated": True,
+        },
+        {
+            "sample_id": "short",
+            "prompt": "six seven",
+            "prompt_tokens_before": 2,
+            "prompt_tokens_after": 2,
+            "prompt_truncated": False,
+        },
+    ]
+    assert summary == {
+        "token_limit": 3,
+        "truncation_side": "left",
+        "prompt_count": 2,
+        "truncated_count": 1,
+        "max_tokens_before": 5,
+        "max_tokens_after": 3,
+    }
+
+
+def test_hf_generation_overrides_reads_explicit_cache_setting(tmp_path: Path) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"task_eval": {"hf_use_cache": False}}),
+        encoding="utf-8",
+    )
+    assert task_eval.hf_generation_overrides(work_dir) == {"use_cache": False}
+
+
+def test_model_reference_python_resolves_family_profile(monkeypatch) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    def fake_normalize(raw, **kwargs):
+        calls.append(("normalize", raw, kwargs))
+        return {"build": "base", "runtime": "base", "reference": "deepseek_ocr"}
+
+    def fake_resolve(profile, base_python):
+        calls.append(("resolve", profile, base_python))
+        return "/profiles/deepseek-ocr/bin/python"
+
+    monkeypatch.setattr(task_eval, "normalize_execution_profiles", fake_normalize)
+    monkeypatch.setattr(task_eval, "resolve_profile_python", fake_resolve)
+
+    resolved = task_eval.model_reference_python(
+        {
+            "family": "deepseek_ocr",
+            "runtime_strategy": "deepseek_ocr_vision_language",
+            "reference_backend": "hf_transformers",
+            "execution_profiles": {"reference": "deepseek_ocr"},
+        },
+        "/opt/venv/bin/python3",
+    )
+
+    assert resolved == "/profiles/deepseek-ocr/bin/python"
+    assert calls == [
+        (
+            "normalize",
+            {"reference": "deepseek_ocr"},
+            {
+                "family": "deepseek_ocr",
+                "runtime_strategy": "deepseek_ocr_vision_language",
+                "reference_backend": "hf_transformers",
+            },
+        ),
+        ("resolve", "deepseek_ocr", "/opt/venv/bin/python3"),
+    ]
+
+
 def test_prepare_seedtts_writes_resolved_audio_and_scoring_contract(tmp_path: Path) -> None:
     dataset = tmp_path / "SeedTTS_en_meta" / "seedtts_en_meta.json"
     dataset.parent.mkdir()

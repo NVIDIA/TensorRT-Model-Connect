@@ -33,6 +33,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tests.e2e_harness.manifest_loader import iter_manifest_paths, load_manifest  # noqa: E402
+from tests.e2e_harness.python_profiles import (  # noqa: E402
+    normalize_execution_profiles,
+    resolve_profile_python,
+)
 from tests.e2e_harness.registry import (  # noqa: E402
     activate_model_plugins,
     get_comparator,
@@ -176,6 +180,9 @@ def manifest_record(path: Path) -> dict[str, Any]:
         "task_strategy": task_strategy,
         "reference_family": reference_family,
         "reference_backend": reference_backend,
+        "execution_profiles": raw.get("execution_profiles", {})
+        if isinstance(raw.get("execution_profiles", {}), dict)
+        else {},
         "user_contract": user_contract,
         "ci_tier": raw.get("ci_tier", "default"),
         "core": bool(raw.get("core", False)),
@@ -1567,6 +1574,99 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
             if line:
                 rows.append(json.loads(line))
     return rows
+
+
+def truncate_prompt_rows(
+    rows: list[dict[str, Any]],
+    *,
+    tokenizer: Any,
+    token_limit: int,
+    truncation_side: str = "left",
+) -> dict[str, Any]:
+    """Truncate shared text prompts before either HF or TRTFB consumes them."""
+    if token_limit <= 0:
+        raise ValueError(f"prompt token limit must be positive, got {token_limit}")
+    if truncation_side not in {"left", "right"}:
+        raise ValueError(
+            f"prompt truncation side must be 'left' or 'right', got {truncation_side!r}"
+        )
+
+    truncated_count = 0
+    max_before = 0
+    max_after = 0
+    for row in rows:
+        prompt = str(row.get("prompt", ""))
+        token_ids = list(tokenizer(prompt, add_special_tokens=False).input_ids)
+        before = len(token_ids)
+        max_before = max(max_before, before)
+        truncated = before > token_limit
+        if truncated:
+            token_ids = (
+                token_ids[-token_limit:]
+                if truncation_side == "left"
+                else token_ids[:token_limit]
+            )
+            row["prompt"] = tokenizer.decode(
+                token_ids,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+            truncated_count += 1
+        after = len(token_ids)
+        max_after = max(max_after, after)
+        row["prompt_tokens_before"] = before
+        row["prompt_tokens_after"] = after
+        row["prompt_truncated"] = truncated
+
+    return {
+        "token_limit": token_limit,
+        "truncation_side": truncation_side,
+        "prompt_count": len(rows),
+        "truncated_count": truncated_count,
+        "max_tokens_before": max_before,
+        "max_tokens_after": max_after,
+    }
+
+
+def apply_work_prompt_token_limit(
+    *,
+    work_dir: Path,
+    model_id: str,
+    token_limit: int,
+    truncation_side: str = "left",
+    local_files_only: bool = False,
+    trust_remote_code: bool = False,
+) -> dict[str, Any]:
+    try:
+        from transformers import AutoTokenizer
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("Prompt truncation requires transformers") from exc
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id,
+        local_files_only=local_files_only,
+        trust_remote_code=trust_remote_code,
+    )
+    prompts_path = work_dir / "prompts.jsonl"
+    rows = load_jsonl(prompts_path)
+    summary = truncate_prompt_rows(
+        rows,
+        tokenizer=tokenizer,
+        token_limit=token_limit,
+        truncation_side=truncation_side,
+    )
+    with prompts_path.open("w", encoding="utf-8") as prompt_file:
+        for row in rows:
+            prompt_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    manifest_path = work_dir / "manifest.json"
+    manifest = work_manifest(work_dir)
+    manifest["prompt_normalization"] = summary
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return summary
 
 
 def max_prompt_token_length(
@@ -3705,6 +3805,16 @@ def work_manifest(work_dir: Path) -> dict[str, Any]:
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
+def hf_generation_overrides(work_dir: Path) -> dict[str, Any]:
+    task_eval_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        return {}
+    overrides: dict[str, Any] = {}
+    if "hf_use_cache" in task_eval_config:
+        overrides["use_cache"] = bool(task_eval_config["hf_use_cache"])
+    return overrides
+
+
 def _work_dataset_kind(work_dir: Path) -> str:
     return str(work_manifest(work_dir).get("dataset_kind", ""))
 
@@ -4782,6 +4892,7 @@ def run_hf_reference(args: argparse.Namespace) -> None:
     apply_chat_template = args.apply_chat_template or bool(
         defaults.get("apply_chat_template", answers.get("apply_chat_template", False))
     )
+    generation_overrides = hf_generation_overrides(work_dir)
 
     logging.set_verbosity_error()
     tokenizer = AutoTokenizer.from_pretrained(
@@ -4844,6 +4955,7 @@ def run_hf_reference(args: argparse.Namespace) -> None:
                     num_beams=1,
                     pad_token_id=tokenizer.pad_token_id,
                     eos_token_id=tokenizer.eos_token_id,
+                    **generation_overrides,
                 )
             wall_ms = (time.perf_counter() - start) * 1000.0
             generated = output_ids[0, encoded["input_ids"].shape[1] :]
@@ -5376,6 +5488,16 @@ def _namespace_for_run_trtfb(
     )
 
 
+def model_reference_python(model: dict[str, Any], base_python: str) -> str:
+    profiles = normalize_execution_profiles(
+        model.get("execution_profiles"),
+        family=str(model.get("family", "") or ""),
+        runtime_strategy=str(model.get("runtime_strategy", "") or ""),
+        reference_backend=str(model.get("reference_backend", "") or ""),
+    )
+    return resolve_profile_python(profiles["reference"], base_python)
+
+
 def run_hf_reference_subprocess(
     args: argparse.Namespace, model: dict[str, Any], work_dir: Path
 ) -> None:
@@ -5387,7 +5509,8 @@ def run_hf_reference_subprocess(
     resident reference model from contending with the TRT engine + KV cache.
     """
     hf_args = _namespace_for_run_hf(args, model, work_dir)
-    hf_python = str(getattr(args, "hf_python", "") or sys.executable)
+    base_python = str(getattr(args, "hf_python", "") or sys.executable)
+    hf_python = model_reference_python(model, base_python)
     cmd = [
         hf_python,
         str(Path(__file__).resolve()),
@@ -5480,9 +5603,35 @@ def eval_one_model(
         task_eval_config=task_eval_config,
     )
 
+    prompt_token_limit = int(task_eval_config.get("prompt_token_limit", 0) or 0)
+    prompt_normalization: dict[str, Any] | None = None
+    if prompt_token_limit:
+        if bool(suite.get("generation", {}).get("apply_chat_template", False)):
+            raise ValueError(
+                "prompt_token_limit requires apply_chat_template=false so HF and TRTFB "
+                "consume the same normalized prompt"
+            )
+        prompt_normalization = apply_work_prompt_token_limit(
+            work_dir=work_dir,
+            model_id=str(model["hf_id"]),
+            token_limit=prompt_token_limit,
+            truncation_side=str(task_eval_config.get("prompt_truncation_side", "left")),
+            local_files_only=args.local_files_only,
+            trust_remote_code=(
+                args.trust_remote_code or bool(model.get("trust_remote_code", False))
+            ),
+        )
+
     answers_path = work_dir / "answers.json"
     hf_predictions = work_dir / "hf_predictions.json"
-    hf_reused = predictions_file_valid(hf_predictions, answers_path) and not args.force_hf
+    prompts_changed = bool(
+        prompt_normalization and prompt_normalization.get("truncated_count", 0)
+    )
+    hf_reused = (
+        predictions_file_valid(hf_predictions, answers_path)
+        and not args.force_hf
+        and not prompts_changed
+    )
     if not hf_reused:
         # Run HF in its own process so its GPU memory is fully reclaimed before
         # the TRT bundle build and TRTFB inference for this model.
@@ -5562,6 +5711,8 @@ def eval_one_model(
         "bundle_built": built,
         "model_plugin_dir": str(getattr(args, "model_plugin_dir", "") or ""),
     }
+    if prompt_normalization is not None:
+        base_result["prompt_normalization"] = prompt_normalization
 
     if scorer == "continuation":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
