@@ -304,11 +304,15 @@ class DeepSeekOCRPlugin:
             int(layer) for layer in config.raw.get("_fp32_layers", ()))
         invalid_fp32_layers = sorted(
             layer for layer in requested_fp32_layers
-            if layer < 0 or layer >= num_layers)
+            if layer < 0 or layer > num_layers)
         if invalid_fp32_layers:
             raise ValueError(
                 "fp32_layers contains out-of-range indices: "
                 f"{invalid_fp32_layers}")
+        use_fp32_io = (
+            precision == "fp16" and num_layers in requested_fp32_layers)
+        io_np_dtype = np.float32 if use_fp32_io else work_np_dtype
+        io_trt_dtype = trt.float32 if use_fp32_io else work_trt_dtype
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
@@ -344,23 +348,24 @@ class DeepSeekOCRPlugin:
         if work_trt_dtype != trt.float32:
             attention_mask = network.add_cast(
                 attention_mask, work_trt_dtype).get_output(0)
-            input_embed_tensor = network.add_cast(
-                input_embed_tensor, work_trt_dtype).get_output(0)
-            use_input_embed_tensor = network.add_cast(
-                use_input_embed_tensor, work_trt_dtype).get_output(0)
             cache_k_inputs = [
                 network.add_cast(x, work_trt_dtype).get_output(0)
                 for x in cache_k_inputs]
             cache_v_inputs = [
                 network.add_cast(x, work_trt_dtype).get_output(0)
                 for x in cache_v_inputs]
+        if io_trt_dtype != trt.float32:
+            input_embed_tensor = network.add_cast(
+                input_embed_tensor, io_trt_dtype).get_output(0)
+            use_input_embed_tensor = network.add_cast(
+                use_input_embed_tensor, io_trt_dtype).get_output(0)
 
         # -----------------------------------------------------------
         # Shared constants
         # -----------------------------------------------------------
         embedding_table = graph_ops.add_constant(
             network, (vocab, hidden), weights["embedding"],
-            dtype=work_np_dtype)
+            dtype=io_np_dtype)
 
         graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
         cos_half_np = graph_ops.make_rope_table_half_dim(
@@ -376,6 +381,12 @@ class DeepSeekOCRPlugin:
             network, (1, 1),
             np.array([config.rms_norm_eps], dtype=work_np_dtype),
             dtype=work_np_dtype)
+        io_eps_tensor = (
+            graph_ops.add_constant(
+                network, (1, 1),
+                np.array([config.rms_norm_eps], dtype=np.float32),
+                dtype=np.float32)
+            if use_fp32_io else eps_tensor)
 
         # -----------------------------------------------------------
         # Embedding with input_embed override for VL
@@ -387,8 +398,8 @@ class DeepSeekOCRPlugin:
         flag_broadcast = network.add_shuffle(use_input_embed_tensor)
         flag_broadcast.reshape_dims = (1, 1)
         one_const = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=work_np_dtype),
-            dtype=work_np_dtype)
+            network, (1, 1), np.array([1.0], dtype=io_np_dtype),
+            dtype=io_np_dtype)
         inv_flag = network.add_elementwise(
             one_const, flag_broadcast.get_output(0),
             trt.ElementWiseOperation.SUB)
@@ -471,24 +482,24 @@ class DeepSeekOCRPlugin:
         # -----------------------------------------------------------
         # Final norm
         # -----------------------------------------------------------
-        if hidden_state.dtype != work_trt_dtype:
+        if hidden_state.dtype != io_trt_dtype:
             hidden_state = network.add_cast(
-                hidden_state, work_trt_dtype).get_output(0)
+                hidden_state, io_trt_dtype).get_output(0)
         final_norm = weights.get("final_norm")
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = _apply_norm(
                 network, hidden_state, hidden, final_norm,
-                None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
+                None, io_eps_tensor, "rmsnorm", dtype=io_np_dtype)
 
         # -----------------------------------------------------------
         # LM head (logits)
         # -----------------------------------------------------------
         logits = graph_ops.add_matmul_rhs_constant(
             network, hidden_state, hidden, vocab, weights["w_out"],
-            dtype=work_np_dtype)
+            dtype=io_np_dtype)
         b_out = np.zeros(vocab, dtype=np.float32)
         logits = graph_ops.add_bias_sum(
-            network, logits, vocab, b_out, dtype=work_np_dtype)
+            network, logits, vocab, b_out, dtype=io_np_dtype)
         if logits.dtype != trt.float32:
             logits = network.add_cast(logits, trt.float32).get_output(0)
 

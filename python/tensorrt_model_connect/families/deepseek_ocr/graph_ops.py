@@ -35,6 +35,23 @@ def _cast_back_to_trt_dtype(
         return tensor
     return network.add_cast(tensor, target_dtype).get_output(0)
 
+
+def _add_matrix_multiply_with_fp32_accumulation(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    lhs_op: trt.MatrixOperation,
+    rhs: trt.ITensor,
+    rhs_op: trt.MatrixOperation,
+) -> trt.ITensor:
+    """Request a fused FP16 GEMM with FP32 accumulation."""
+    output_dtype = lhs.dtype
+    if lhs.dtype == trt.float16 and rhs.dtype == trt.float16:
+        lhs = network.add_cast(lhs, trt.float32).get_output(0)
+        rhs = network.add_cast(rhs, trt.float32).get_output(0)
+    output = network.add_matrix_multiply(lhs, lhs_op, rhs, rhs_op).get_output(0)
+    return _cast_back_to_trt_dtype(network, output, output_dtype)
+
+
 def layer_tensor_name(stem: str, layer: int) -> str:
     return f"{stem}_{layer}"
 
@@ -58,6 +75,7 @@ def add_matmul_rhs_constant(
     rhs_width: int,
     rhs_weights: np.ndarray,
     dtype: np.dtype = np.float32,
+    fp32_accumulation: bool = True,
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
     rank = len(tuple(lhs.shape))
@@ -73,6 +91,12 @@ def add_matmul_rhs_constant(
         dtype=dtype,
     )
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
+    if fp32_accumulation:
+        return _add_matrix_multiply_with_fp32_accumulation(
+            network,
+            lhs, trt.MatrixOperation.NONE,
+            rhs, trt.MatrixOperation.NONE,
+        )
     mm = network.add_matrix_multiply(
         lhs, trt.MatrixOperation.NONE,
         rhs, trt.MatrixOperation.NONE,

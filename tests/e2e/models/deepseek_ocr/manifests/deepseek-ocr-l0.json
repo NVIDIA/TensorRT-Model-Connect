@@ -8,6 +8,15 @@
   "max_cache_length": 4096,
   "trust_remote_code": true,
   "precision": "fp16",
+  "fp32_layers": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+  ],
   "testcases": [
     {
       "name": "deepseek-ocr-l0",
@@ -27,7 +36,7 @@
           "ocr_mode": true
         }
       },
-      "notes": "PR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, deepseek_ocr_vision_language runtime, and full cache budget. The shorter decode validates the visible Architecture section emitted by the OCR fixture while nightly keeps the full OCR transcript contract."
+      "notes": "PR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, deepseek_ocr_vision_language runtime, and full cache budget. Decoder layers 6-11 and selector 12's embedding/final-logit boundary use FP32 to preserve the OCR text contract with TensorRT 11.2 while the remaining decoder path stays FP16. The shorter decode validates the visible Architecture section emitted by the OCR fixture while nightly keeps the full OCR transcript contract."
     }
   ]
 }

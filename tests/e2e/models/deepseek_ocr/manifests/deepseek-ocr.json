@@ -6,6 +6,15 @@
   "runtime_strategy": "deepseek_ocr_vision_language",
   "task_strategy": "vision_language_generation",
   "precision": "fp16",
+  "fp32_layers": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+  ],
   "max_cache_length": 4096,
   "trust_remote_code": true,
   "testcases": [
@@ -29,7 +38,7 @@
           "ocr_mode": true
         }
       },
-      "notes": "The reference runs the official BF16 model.infer path in the family-owned Transformers 4.46.3 profile and preserves the original OCR prompt and required-substring contract."
+      "notes": "The reference runs the official BF16 model.infer path in the family-owned Transformers 4.46.3 profile and preserves the original OCR prompt and required-substring contract. Decoder layers 6-11 and selector 12's embedding/final-logit boundary use FP32 to preserve that contract with TensorRT 11.2 while the remaining decoder path stays FP16."
     }
   ]
 }
