@@ -62,16 +62,15 @@ void check_fft_matches_direct(const std::vector<float>& input, const char* test_
 }
 
 void test_canary_fft_matches_direct_dft() {
-    check_fft_matches_direct(
-        {0.25F, -0.5F, 0.75F, 1.0F, -0.25F, 0.125F, 0.5F, -0.75F},
-        "canary radix-2 FFT power matches direct DFT");
+    check_fft_matches_direct({0.25F, -0.5F, 0.75F, 1.0F, -0.25F, 0.125F, 0.5F, -0.75F},
+                             "canary radix-2 FFT power matches direct DFT");
     check_fft_matches_direct({0.1F, 0.2F, -0.3F, 0.4F, 0.5F, -0.6F, 0.7F, 0.8F, -0.9F, 1.0F},
                              "canary non-radix-2 fallback matches direct DFT");
 
     std::vector<float> canary_input(512);
     for (std::size_t i = 0; i < canary_input.size(); ++i) {
-        canary_input[i] = static_cast<float>(
-            std::sin(static_cast<double>(i) * 0.17) + 0.25 * std::cos(static_cast<double>(i) * 0.07));
+        canary_input[i] = static_cast<float>(std::sin(static_cast<double>(i) * 0.17) +
+                                             0.25 * std::cos(static_cast<double>(i) * 0.07));
     }
     check_fft_matches_direct(canary_input, "canary 512-point FFT power matches direct DFT");
 }
@@ -93,8 +92,7 @@ void test_canary_shape_and_empty_audio() {
     check(mel.n_frames == 3000, "canary mel frame count matches 30s HF window");
     check(static_cast<int32_t>(mel.data.size()) == n_mel_bins * mel.n_frames,
           "canary mel data size matches shape");
-    check(std::all_of(mel.data.begin(), mel.data.end(),
-                      [](float value) { return value == -1.5F; }),
+    check(std::all_of(mel.data.begin(), mel.data.end(), [](float value) { return value == -1.5F; }),
           "canary empty audio keeps the normalized zero-power value");
 }
 
@@ -107,8 +105,8 @@ void test_canary_short_audio_matches_full_zero_padded_reference() {
     const int32_t n_mel_bins = n_freq_bins;
     auto fb = make_identity_filterbank(n_freq_bins, n_mel_bins);
 
-    std::vector<float> short_audio = {0.25F, -0.5F, 0.75F, 1.0F, -0.25F, 0.125F,
-                                      0.5F,  -0.75F, 0.2F, 0.4F,  -0.1F};
+    std::vector<float> short_audio = {0.25F, -0.5F,  0.75F, 1.0F, -0.25F, 0.125F,
+                                      0.5F,  -0.75F, 0.2F,  0.4F, -0.1F};
     std::vector<float> full_audio(static_cast<std::size_t>(sample_rate * chunk_length_s), 0.0F);
     std::copy(short_audio.begin(), short_audio.end(), full_audio.begin());
 

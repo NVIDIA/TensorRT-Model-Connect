@@ -66,6 +66,12 @@ CanaryPipeline::CanaryPipeline(std::unique_ptr<TrtModule> encoder,
     if (!state_ || !state_->ok())
         throw std::runtime_error("CanaryPipeline: invalid inference state");
 
+    // Decoder shapes are stable within each dynamic cache-row bucket. Capture
+    // the TensorRT enqueue on the first step and replay it until a shape change
+    // invalidates the graph and triggers a recapture.
+    if (!canary_config_.disable_cuda_graph)
+        decoder_->enable_cuda_graph();
+
     // Allocate cross-attention K/V device buffers
     cross_kv_bytes_ = static_cast<std::size_t>(canary_config_.max_source_positions) *
                       static_cast<std::size_t>(hidden_size_) * sizeof(float);
@@ -162,13 +168,13 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
     if (report_stage_timing) {
         std::ostringstream timing;
         timing << "[trtmc.canary_timing.json] {\"resample_ms\":"
-               << elapsed_ms(transcribe_start, resample_end) << ",\"mel_ms\":"
-               << elapsed_ms(resample_end, mel_end) << ",\"encoder_ms\":"
-               << elapsed_ms(mel_end, encoder_end) << ",\"cross_kv_ms\":"
-               << elapsed_ms(encoder_end, cross_kv_end) << ",\"decoder_ms\":"
-               << elapsed_ms(cross_kv_end, decoder_end) << ",\"tokenizer_ms\":"
-               << elapsed_ms(decoder_end, tokenize_end) << ",\"total_ms\":"
-               << elapsed_ms(transcribe_start, tokenize_end) << '}';
+               << elapsed_ms(transcribe_start, resample_end)
+               << ",\"mel_ms\":" << elapsed_ms(resample_end, mel_end)
+               << ",\"encoder_ms\":" << elapsed_ms(mel_end, encoder_end)
+               << ",\"cross_kv_ms\":" << elapsed_ms(encoder_end, cross_kv_end)
+               << ",\"decoder_ms\":" << elapsed_ms(cross_kv_end, decoder_end)
+               << ",\"tokenizer_ms\":" << elapsed_ms(decoder_end, tokenize_end)
+               << ",\"total_ms\":" << elapsed_ms(transcribe_start, tokenize_end) << '}';
         std::cerr << timing.str() << std::endl;
     }
     return out;

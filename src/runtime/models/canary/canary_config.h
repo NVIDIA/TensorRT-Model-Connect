@@ -25,6 +25,7 @@ struct CanaryConfig {
     int32_t notimestamps_token_id{50363};
     int32_t eot_token_id{50257}; // <|endoftext|>
     std::string language{"en"};
+    bool disable_cuda_graph{false};
 
     int32_t mel_length{0}; // expected mel input length; 0 = auto (max_source_positions * 2)
 

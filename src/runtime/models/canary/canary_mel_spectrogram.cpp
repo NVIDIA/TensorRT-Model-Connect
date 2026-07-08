@@ -144,8 +144,7 @@ std::vector<float> compute_mel_spectrogram(const std::vector<float>& padded,
             if (p == 0.0F) {
                 continue;
             }
-            const float* filter_row =
-                mel_filters + static_cast<std::size_t>(f) * n_mel_bins;
+            const float* filter_row = mel_filters + static_cast<std::size_t>(f) * n_mel_bins;
             for (int32_t m = 0; m < n_mel_bins; ++m) {
                 frame_mel[static_cast<std::size_t>(m)] +=
                     p * filter_row[static_cast<std::size_t>(m)];
@@ -228,9 +227,9 @@ MelResult extract_mel_spectrogram(const float* samples, int32_t n_samples, const
         build_center_padded_audio(samples, n_samples, chunk_length_s, sample_rate, n_fft);
 
     int32_t n_frames_raw = 0;
-    std::vector<float> mel_spec = compute_mel_spectrogram(
-        padded, make_hann_window(n_fft), mel_filters, n_fft, hop_length, freq_bins, n_mel_bins,
-        frames_to_compute, n_frames_raw);
+    std::vector<float> mel_spec =
+        compute_mel_spectrogram(padded, make_hann_window(n_fft), mel_filters, n_fft, hop_length,
+                                freq_bins, n_mel_bins, frames_to_compute, n_frames_raw);
     normalize_log_mel_inplace(mel_spec);
 
     int32_t n_frames_out = 0;

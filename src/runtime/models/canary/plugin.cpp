@@ -8,6 +8,7 @@
 
 #include "plugin_helpers.h"
 #include "runtime/models/canary/pipeline.h"
+#include "trtmc/config/config_bundle.h"
 #include "trtmc/runtime/distributed_runtime.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
@@ -99,6 +100,14 @@ class CanaryPlugin final : public IPipelinePlugin {
         wc.eot_token_id = (eot_token_id >= 0) ? eot_token_id : ctx.config.id_eos;
         wc.mel_length = extract_json_int(json, "mel_length", 0);
         wc.decoder_start_token_ids = extract_json_int_array(json, "decoder_start_token_ids");
+        if (ctx.runtime_config != nullptr) {
+            try {
+                wc.disable_cuda_graph =
+                    ctx.runtime_config->get<bool>("runtime", "disable_cuda_graph");
+            } catch (const std::exception&) {
+                // Schema not registered — retain the default graph policy.
+            }
+        }
 
         // Create CanaryKvCache for decoder self-attention
         cudaStream_t stream = dec_loaded.module->stream();
