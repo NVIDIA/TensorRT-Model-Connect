@@ -63,6 +63,10 @@ suites:
             max_new_tokens: 8
             apply_chat_template: false
             enable_thinking: false
+        internlm:
+          # InternLM2 remote code is incompatible with the Transformers 5.x
+          # generation cache API (attention length N+1 vs mask length N).
+          hf_use_cache: false
     build:
       min_max_cache_length: 0
     gates:
@@ -129,6 +133,25 @@ suites:
       do_sample: false
     scoring:
       scorer: continuation
+    model_overrides:
+      by_model:
+        bart-base:
+          # Reserve two special tokens plus 64 generated decoder tokens inside
+          # the causal BART path's 1024-position table.
+          prompt_token_limit: 958
+          prompt_truncation_side: left
+        gpt2-125m:
+          # Reserve the suite's 64 generated tokens inside GPT-2's 1024 limit.
+          prompt_token_limit: 960
+          prompt_truncation_side: left
+        gpt-neo-125m:
+          # Reserve the suite's 64 generated tokens inside its 2048 limit.
+          prompt_token_limit: 1984
+          prompt_truncation_side: left
+        opt-125m:
+          # Reserve the suite's 64 generated tokens inside OPT's 2048 limit.
+          prompt_token_limit: 1984
+          prompt_truncation_side: left
     build:
       min_max_cache_length: 0
     gates:
@@ -551,3 +574,86 @@ suites:
       lane: local_only
       notes: >
         P2021-only until the DPG-Bench scorecard is visually calibrated.
+
+  - id: stsbenchmark_encoder_embedding_parity
+    description: >
+      HF-versus-TRTMC vector parity for encoder-only NLP and text embedding
+      models on the MTEB STSBenchmark test split. Base encoders compare their
+      first-token representation; native embedding runtimes compare their
+      pooled normalized embedding. Gold STS correlation is diagnostic only.
+    user_contract: encoder_embedding_parity
+    default_model_names:
+      - albert-base
+      - all-minilm-l6-v2
+      - all-mpnet-base-v2
+      - bert-base-uncased
+      - bge-small-en-v1.5
+      - camembert-base
+      - convbert-base
+      - deberta-base
+      - distilbert-base-uncased
+      - dpr-ctx-encoder
+      - electra-base-discriminator
+      - fnet-base
+      - modernbert-base
+      - nemotron-embed-vl-1b-v2
+      - paraphrase-multilingual-minilm-l12-v2
+      - roberta-base
+      - roberta-large
+      - xlm-roberta-base
+      - xlnet-base
+    dataset:
+      kind: sts_pair_jsonl
+      name: MTEB STSBenchmark test
+      default_path: /mnt/data/STSBenchmark/stsbenchmark_test.jsonl
+      subject_field: genre
+    selectors:
+      task_strategies:
+        - encoder_only_nlp
+        - embedding
+      user_contracts:
+        - representation_parity
+        - embedding_vector
+    reference:
+      mode: hf_encoder_vector
+    scoring:
+      scorer: encoder_embedding_parity
+      task_metric: sts_spearman
+    gates:
+      min_vector_cosine: 0.999
+      min_vector_pass_rate: 1.0
+      max_pair_cosine_abs_delta: 0.02
+    model_profiles:
+      # Match the model-owned, reviewed encoder E2E numerical contracts. These
+      # models have architecture-specific FP16 sensitivity; task-eval does not
+      # invent looser thresholds for them.
+      albert-base:
+        gates:
+          min_vector_cosine: 0.99
+      convbert-base:
+        gates:
+          min_vector_cosine: 0.95
+      dpr-ctx-encoder:
+        gates:
+          min_vector_cosine: 0.99
+      fnet-base:
+        gates:
+          min_vector_cosine: 0.6
+          # FNet's reviewed 0.6 vector-cosine contract permits larger drift in
+          # the second-order cosine between two independently drifted vectors.
+          max_pair_cosine_abs_delta: 0.1
+      modernbert-base:
+        gates:
+          min_vector_cosine: 0.995
+      nemotron-embed-vl-1b-v2:
+        gates:
+          min_vector_cosine: 0.99
+      xlnet-base:
+        gates:
+          min_vector_cosine: 0.95
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GPU bundle builds and the complete 19-model matrix are validated
+        outside premerge CI; small --limit slices are smoke tests only.
