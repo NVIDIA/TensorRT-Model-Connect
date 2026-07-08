@@ -11,6 +11,14 @@
 namespace trtmc {
 namespace canary {
 
+namespace detail {
+
+// Internal seam used by the focused frontend tests. Production callers should
+// use extract_mel_spectrogram().
+std::vector<float> rfft_power(const std::vector<float>& input);
+
+} // namespace detail
+
 struct MelResult {
     std::vector<float> data; // [n_mels, n_frames] row-major
     int32_t n_mels{0};

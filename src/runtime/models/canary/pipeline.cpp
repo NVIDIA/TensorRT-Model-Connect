@@ -15,12 +15,30 @@
 #include "trtmc/tokenizer.h"
 #include "utils/wav_reader.h"
 
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
 namespace trtmc {
+
+namespace {
+
+using CanaryClock = std::chrono::steady_clock;
+
+bool canary_stage_timing_enabled() {
+    const char* value = std::getenv("TRTMC_CANARY_STAGE_TIMING");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+double elapsed_ms(CanaryClock::time_point start, CanaryClock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+} // namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CanaryPipeline
@@ -73,6 +91,9 @@ CanaryPipeline::~CanaryPipeline() {
 
 TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_samples,
                                       int32_t max_new_tokens, int32_t input_sample_rate) {
+    const bool report_stage_timing = canary_stage_timing_enabled();
+    const auto transcribe_start = CanaryClock::now();
+
     // Step 0: Resample if needed
     const float* samples_ptr = audio_data;
     int32_t samples_count = num_samples;
@@ -86,6 +107,7 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
         samples_ptr = resampled_buf.data();
         samples_count = static_cast<int32_t>(resampled_buf.size());
     }
+    const auto resample_end = CanaryClock::now();
 
     // Step 1: Extract mel spectrogram
     canary::MelResult mel;
@@ -95,6 +117,7 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
                                             mel_fb_->n_freq_bins, mel_fb_->n_mel_bins, mel_n_fft_,
                                             mel_hop_length_, mel_chunk_length_, mel_sampling_rate_);
     }
+    const auto mel_end = CanaryClock::now();
 
     if (mel.data.empty()) {
         return TextResult{"[mel extraction failed]", {}};
@@ -106,6 +129,7 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
     const int32_t valid_mel_frames = mel.valid_frames > 0 ? mel.valid_frames : mel.n_frames;
     std::cerr << "[canary] Running encoder ..." << std::endl;
     run_encoder(mel.data.data(), mel.n_mels, mel.n_frames, valid_mel_frames);
+    const auto encoder_end = CanaryClock::now();
 
     // Compute actual encoder sequence length for masking
     const int32_t mel_full = resolve_canary_expected_mel_length(canary_config_);
@@ -119,17 +143,33 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
     // Step 3: Set up cross-attention K/V
     std::cerr << "[canary] Computing cross-attention K/V ..." << std::endl;
     setup_cross_attention(actual_enc_seq_len);
+    const auto cross_kv_end = CanaryClock::now();
 
     // Step 4: Run decoder
     std::vector<int32_t> initial_tokens = make_canary_initial_decoder_tokens(canary_config_);
     std::cerr << "[canary] Running decoder ..." << std::endl;
     auto output_ids = run_decoder(initial_tokens, max_new_tokens);
+    const auto decoder_end = CanaryClock::now();
 
     // Step 5: Decode token IDs
     TextResult out;
     out.token_ids = std::move(output_ids);
     if (tokenizer_ && !out.token_ids.empty()) {
         out.text = tokenizer_->decode(out.token_ids);
+    }
+    const auto tokenize_end = CanaryClock::now();
+
+    if (report_stage_timing) {
+        std::ostringstream timing;
+        timing << "[trtmc.canary_timing.json] {\"resample_ms\":"
+               << elapsed_ms(transcribe_start, resample_end) << ",\"mel_ms\":"
+               << elapsed_ms(resample_end, mel_end) << ",\"encoder_ms\":"
+               << elapsed_ms(mel_end, encoder_end) << ",\"cross_kv_ms\":"
+               << elapsed_ms(encoder_end, cross_kv_end) << ",\"decoder_ms\":"
+               << elapsed_ms(cross_kv_end, decoder_end) << ",\"tokenizer_ms\":"
+               << elapsed_ms(decoder_end, tokenize_end) << ",\"total_ms\":"
+               << elapsed_ms(transcribe_start, tokenize_end) << '}';
+        std::cerr << timing.str() << std::endl;
     }
     return out;
 }

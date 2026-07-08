@@ -10,6 +10,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -249,6 +250,72 @@ float resample_at_position(const float* samples, int32_t n_samples, double src_p
     return 0.0F;
 }
 
+struct PolyphaseSincWeights
+{
+    int32_t rate_gcd{1};
+    int32_t phase_count{1};
+    int32_t half_taps{16};
+    std::vector<double> weights;
+};
+
+PolyphaseSincWeights build_polyphase_sinc_weights(
+    int32_t source_rate, int32_t target_rate, double cutoff, int32_t half_taps)
+{
+    PolyphaseSincWeights table;
+    table.rate_gcd = std::gcd(source_rate, target_rate);
+    table.phase_count = target_rate / table.rate_gcd;
+    table.half_taps = half_taps;
+    const int32_t tap_count = 2 * half_taps;
+    table.weights.resize(static_cast<std::size_t>(table.phase_count) * tap_count);
+
+    for (int32_t phase = 0; phase < table.phase_count; ++phase)
+    {
+        const double fraction = static_cast<double>(phase * table.rate_gcd) /
+            static_cast<double>(target_rate);
+        for (int32_t tap = 0; tap < tap_count; ++tap)
+        {
+            const int32_t offset = tap - half_taps + 1;
+            const double distance = static_cast<double>(offset) - fraction;
+            table.weights[static_cast<std::size_t>(phase) * tap_count + tap] =
+                scaled_sinc(distance, cutoff) * hann_window(distance, half_taps);
+        }
+    }
+    return table;
+}
+
+std::vector<float> resample_polyphase(
+    const float* samples, int32_t n_samples, int32_t source_rate, int32_t target_rate,
+    int32_t out_len, double cutoff, int32_t half_taps)
+{
+    const PolyphaseSincWeights table =
+        build_polyphase_sinc_weights(source_rate, target_rate, cutoff, half_taps);
+    const int32_t tap_count = 2 * half_taps;
+    std::vector<float> resampled(out_len);
+
+    for (int32_t i = 0; i < out_len; ++i)
+    {
+        const int64_t position_numerator = static_cast<int64_t>(i) * source_rate;
+        const int32_t center = static_cast<int32_t>(position_numerator / target_rate);
+        const int32_t remainder = static_cast<int32_t>(position_numerator % target_rate);
+        const int32_t phase = remainder / table.rate_gcd;
+        const double* phase_weights =
+            table.weights.data() + static_cast<std::size_t>(phase) * tap_count;
+
+        const int32_t first_offset = std::max(-half_taps + 1, -center);
+        const int32_t last_offset = std::min(half_taps, n_samples - 1 - center);
+        double acc = 0.0;
+        double weight_sum = 0.0;
+        for (int32_t offset = first_offset; offset <= last_offset; ++offset)
+        {
+            const double weight = phase_weights[offset + half_taps - 1];
+            acc += static_cast<double>(samples[center + offset]) * weight;
+            weight_sum += weight;
+        }
+        resampled[i] = weight_sum > 1e-12 ? static_cast<float>(acc / weight_sum) : 0.0F;
+    }
+    return resampled;
+}
+
 } // namespace
 
 WavData read_wav(const std::string& path)
@@ -282,6 +349,18 @@ std::vector<float> resample_linear(
     const int32_t half_taps = 16;
     const double cutoff = std::min(1.0, static_cast<double>(target_rate) /
                                         static_cast<double>(source_rate));
+
+    // Source positions repeat across target_rate / gcd(source_rate,
+    // target_rate) fractional phases. Precompute the windowed-sinc weights for
+    // those phases instead of evaluating sin/cos for every output sample and
+    // tap. Fall back for unusual rate pairs that would require a large table.
+    constexpr int32_t kMaxPrecomputedPhases = 2048;
+    const int32_t phase_count = target_rate / std::gcd(source_rate, target_rate);
+    if (phase_count <= kMaxPrecomputedPhases)
+    {
+        return resample_polyphase(
+            samples, n_samples, source_rate, target_rate, out_len, cutoff, half_taps);
+    }
 
     for (int32_t i = 0; i < out_len; ++i)
     {
