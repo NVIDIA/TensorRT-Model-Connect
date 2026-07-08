@@ -349,12 +349,19 @@ def test_runner_warms_the_exact_shared_selection_before_the_proof() -> None:
     assert 'die "offline HF cache readiness check failed' in warm
 
 
-def test_runner_defaults_to_the_standard_user_hf_cache() -> None:
+def test_runner_keeps_local_fallback_and_workflow_uses_runner_cache_paths() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
 
     assert '${HF_HOME:-$HOME/.cache/huggingface}' in runner
-    assert "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME }}" in workflow
+    assert (
+        "TRTMC_HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || "
+        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache/hub' }}"
+    ) in workflow
+    assert (
+        "TRTMC_HF_MODULES_CACHE: ${{ vars.TRTMC_HF_MODULES_CACHE || "
+        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache/modules' }}"
+    ) in workflow
 
 
 def test_hf_token_is_not_exposed_to_pull_request_model_proof_code() -> None:
@@ -686,18 +693,68 @@ def test_host_cache_existence_is_delegated_to_read_only_docker_mounts() -> None:
         "set +e", maxsplit=1
     )[0]
 
-    assert '[ -d "$hf_cache/hub" ]' not in host
-    assert '[ -d "$hf_cache/modules" ]' not in host
+    assert '[ -d "$hf_hub_cache" ]' not in host
+    assert '[ -d "$hf_modules_cache" ]' not in host
     assert "HF Hub cache directory does not exist" not in host
     assert "HF modules cache directory does not exist" not in host
+    assert '[ "$hf_hub_cache" != "/" ]' in host
+    assert '[ "$hf_modules_cache" != "/" ]' in host
     for docker_args in (cache_check, proof):
         assert (
-            '--mount "type=bind,src=$hf_cache/hub,dst=/hf-cache/hub,readonly"'
+            '--mount "type=bind,src=$hf_hub_cache,dst=/hf-cache/hub,readonly"'
             in docker_args
         )
         assert (
-            '--mount "type=bind,src=$hf_cache/modules,dst=/hf-cache/modules,readonly"'
+            '--mount "type=bind,src=$hf_modules_cache,dst=/hf-cache/modules,readonly"'
             in docker_args
+        )
+
+
+def test_distinct_explicit_hf_cache_paths_reach_both_containers(
+    tmp_path: Path,
+) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    hub_cache = tmp_path / "explicit-hub-cache"
+    modules_cache = tmp_path / "explicit-modules-cache"
+    hub_cache.mkdir()
+    modules_cache.mkdir()
+    env.update(
+        {
+            "TRTMC_HF_HUB_CACHE": str(hub_cache),
+            "TRTMC_HF_MODULES_CACHE": str(modules_cache),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash", str(RUNNER),
+            "--model", "convbert",
+            "--revision", "HEAD",
+            "--output-dir", str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    docker_runs = [
+        line for line in docker_log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("run ")
+    ]
+    assert len(docker_runs) == 2
+    for docker_run in docker_runs:
+        assert (
+            f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub,readonly"
+            in docker_run
+        )
+        assert (
+            f"--mount type=bind,src={modules_cache},dst=/hf-cache/modules,readonly"
+            in docker_run
         )
 
 
@@ -717,15 +774,18 @@ def test_docker_bind_mount_fails_closed_when_host_cache_source_is_absent(
         encoding="utf-8",
     )
     docker.chmod(0o755)
-    cache = tmp_path / "docker-daemon-only-cache"
-    assert not cache.exists()
+    hub_cache = tmp_path / "missing-hub-cache"
+    modules_cache = tmp_path / "missing-modules-cache"
+    assert not hub_cache.exists()
+    assert not modules_cache.exists()
     output = tmp_path / "proof"
     env = os.environ.copy()
     env.update(
         {
             "PATH": f"{fake_bin}:{env['PATH']}",
             "DOCKER_LOG": str(docker_log),
-            "TRTMC_HF_CACHE": str(cache),
+            "TRTMC_HF_HUB_CACHE": str(hub_cache),
+            "TRTMC_HF_MODULES_CACHE": str(modules_cache),
         }
     )
 
@@ -751,11 +811,11 @@ def test_docker_bind_mount_fails_closed_when_host_cache_source_is_absent(
     ]
     assert len(docker_runs) == 1
     assert (
-        f"--mount type=bind,src={cache}/hub,dst=/hf-cache/hub,readonly"
+        f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub,readonly"
         in docker_runs[0]
     )
     assert (
-        f"--mount type=bind,src={cache}/modules,dst=/hf-cache/modules,readonly"
+        f"--mount type=bind,src={modules_cache},dst=/hf-cache/modules,readonly"
         in docker_runs[0]
     )
     assert "--network none" in docker_runs[0]

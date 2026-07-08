@@ -814,15 +814,28 @@ PY
   [[ "$build_jobs" =~ ^[1-9][0-9]*$ ]] || \
     die "TRTMC_MODEL_PROOF_BUILD_JOBS must be a positive integer"
 
-  local hf_cache="${TRTMC_HF_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}}"
-  hf_cache="$(python3 - "$hf_cache" <<'PY'
+  local hf_cache_root="${TRTMC_HF_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}}"
+  local hf_hub_cache="${TRTMC_HF_HUB_CACHE:-$hf_cache_root/hub}"
+  local hf_modules_cache="${TRTMC_HF_MODULES_CACHE:-$hf_cache_root/modules}"
+  hf_hub_cache="$(python3 - "$hf_hub_cache" <<'PY'
 import sys
 from pathlib import Path
 print(Path(sys.argv[1]).resolve())
 PY
   )"
-  [ "$hf_cache" != "/" ] || die "refusing to use / as the HF cache"
-  [ "$hf_cache" != "$repo_root" ] || die "HF cache cannot be the checkout"
+  hf_modules_cache="$(python3 - "$hf_modules_cache" <<'PY'
+import sys
+from pathlib import Path
+print(Path(sys.argv[1]).resolve())
+PY
+  )"
+  [ "$hf_hub_cache" != "/" ] || die "refusing to use / as the HF Hub cache"
+  [ "$hf_hub_cache" != "$repo_root" ] || \
+    die "HF Hub cache cannot be the checkout"
+  [ "$hf_modules_cache" != "/" ] || \
+    die "refusing to use / as the HF modules cache"
+  [ "$hf_modules_cache" != "$repo_root" ] || \
+    die "HF modules cache cannot be the checkout"
 
   # Do not preflight these paths as the unprivileged Actions runner. The
   # persistent cache parent can intentionally be non-traversable while the
@@ -846,8 +859,8 @@ PY
     --user "$(id -u):$(id -g)"
     --mount "type=bind,src=$projection_dir,dst=/src,readonly"
     --mount "type=bind,src=$artifacts_dir,dst=/artifacts,readonly"
-    --mount "type=bind,src=$hf_cache/hub,dst=/hf-cache/hub,readonly"
-    --mount "type=bind,src=$hf_cache/modules,dst=/hf-cache/modules,readonly"
+    --mount "type=bind,src=$hf_hub_cache,dst=/hf-cache/hub,readonly"
+    --mount "type=bind,src=$hf_modules_cache,dst=/hf-cache/modules,readonly"
     --tmpfs /tmp:rw,exec,nosuid,nodev,size=1g
     --workdir /src
     -e HOME=/tmp
@@ -902,8 +915,8 @@ PY
     -e "TRTMC_MODEL_PROOF_BUILD_JOBS=$build_jobs"
   )
   docker_args+=(
-    --mount "type=bind,src=$hf_cache/hub,dst=/hf-cache/hub,readonly"
-    --mount "type=bind,src=$hf_cache/modules,dst=/hf-cache/modules,readonly"
+    --mount "type=bind,src=$hf_hub_cache,dst=/hf-cache/hub,readonly"
+    --mount "type=bind,src=$hf_modules_cache,dst=/hf-cache/modules,readonly"
     -e HF_HOME=/hf-cache
     -e HF_HUB_CACHE=/hf-cache/hub
     -e HUGGINGFACE_HUB_CACHE=/hf-cache/hub

@@ -35,8 +35,18 @@ def test_workflows_define_shared_hf_cache_env() -> None:
         assert f"{name}:" in nightly
 
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
-    assert "TRTMC_HF_CACHE:" in proof
-    assert "vars.TRTMC_HF_HOME" in proof
+    assert (
+        "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || "
+        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}"
+    ) in proof
+    assert (
+        "TRTMC_HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || "
+        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache/hub' }}"
+    ) in proof
+    assert (
+        "TRTMC_HF_MODULES_CACHE: ${{ vars.TRTMC_HF_MODULES_CACHE || "
+        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache/modules' }}"
+    ) in proof
     runner = (REPO_ROOT / ".github/scripts/run-model-proof.sh").read_text()
     assert '$HOME/.cache/huggingface' in runner
 
@@ -491,6 +501,8 @@ def test_model_proof_batch_uses_one_setup_read_only_hf_cache_and_evidence() -> N
     assert proof.count("actions/checkout@v4") == 1
     assert proof.count("bash .github/scripts/ensure-ci-docker-image.sh") == 1
     assert "TRTMC_HF_CACHE:" in proof
+    assert "TRTMC_HF_HUB_CACHE:" in proof
+    assert "TRTMC_HF_MODULES_CACHE:" in proof
     assert "bash .github/scripts/run-model-proof-batch.sh" in proof
     assert '--models-json "$MODELS_JSON"' in proof
     assert '--expected-count "$EXPECTED_COUNT"' in proof
