@@ -510,6 +510,37 @@ def test_elf_rope_cache_matches_github_empty_token_semantics() -> None:
     np.testing.assert_allclose(sin[0, 3], np.sin(freqs), rtol=1e-6, atol=1e-6)
 
 
+def test_elf_model_timing_cache_is_attached_read_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tensorrt_model_connect.families.elf_flow import builder
+
+    cache_path = tmp_path / "elf.cache"
+    cache_path.write_bytes(b"model-owned-cache")
+    monkeypatch.setenv("TRTMC_ELF_TIMING_CACHE_PATH", str(cache_path))
+
+    calls: list[tuple] = []
+
+    class Config:
+        def create_timing_cache(self, payload):
+            calls.append(("create", bytes(payload)))
+            return "cache"
+
+        def set_timing_cache(self, cache, ignore_mismatch):
+            calls.append(("set", cache, ignore_mismatch))
+            return True
+
+        def set_flag(self, flag):
+            calls.append(("flag", flag))
+
+    builder._attach_model_timing_cache(Config())
+
+    assert calls[0] == ("create", b"model-owned-cache")
+    assert calls[1] == ("set", "cache", False)
+    assert calls[2] == ("flag", builder.trt.BuilderFlag.ERROR_ON_TIMING_CACHE_MISS)
+    assert cache_path.read_bytes() == b"model-owned-cache"
+
+
 @pytest.mark.trt
 def test_elf_trt_forward_matches_github_numpy_reference(tmp_path: Path) -> None:
     pytest.importorskip("tensorrt")

@@ -6,6 +6,18 @@
   "runtime_strategy": "elf_flow",
   "task_strategy": "diffusion_text_generation",
   "precision": "fp32",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_env": {
+    "TRTMC_BUILDER_OPTIMIZATION_LEVEL": "2",
+    "TRTMC_MAX_NUM_TACTICS": "",
+    "TRTMC_AVG_TIMING_ITERATIONS": "",
+    "TRTMC_TRT_TIMING_CACHE_PATH": "",
+    "TRTMC_TRT_TIMING_CACHE_DIR": "",
+    "TRTMC_ELF_TIMING_CACHE_PATH": {
+      "path": "data/elf-b-owt-replay/tensorrt-11.0.0.114-gb300-opt2.cache",
+      "relative_to": "model"
+    }
+  },
   "max_cache_length": 1024,
   "testcases": [
     {

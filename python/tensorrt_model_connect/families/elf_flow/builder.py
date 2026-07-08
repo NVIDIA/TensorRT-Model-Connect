@@ -10,7 +10,9 @@ factored decoder head from ``src/modules/model.py`` and ``src/modules/layers.py`
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -32,6 +34,23 @@ def _storage_dtype(precision: str) -> np.dtype:
 
 def _trt_dtype(precision: str):
     return trt.float16 if precision == "fp16" else trt.float32
+
+
+def _attach_model_timing_cache(builder_config) -> None:
+    """Attach a read-only, model-owned cache for reproducible ELF tactics."""
+    cache_path = os.environ.get("TRTMC_ELF_TIMING_CACHE_PATH", "").strip()
+    if not cache_path:
+        return
+
+    path = Path(cache_path)
+    payload = path.read_bytes()
+    if not payload:
+        raise RuntimeError(f"ELF timing cache is empty: {path}")
+    cache = builder_config.create_timing_cache(payload)
+    if not builder_config.set_timing_cache(cache, False):
+        raise RuntimeError(f"ELF timing cache is incompatible: {path}")
+    if hasattr(trt.BuilderFlag, "ERROR_ON_TIMING_CACHE_MISS"):
+        builder_config.set_flag(trt.BuilderFlag.ERROR_ON_TIMING_CACHE_MISS)
 
 
 def _cast(network: trt.INetworkDefinition, tensor: trt.ITensor, dtype):
@@ -257,6 +276,7 @@ def build_elf_flow_engine(
     # Keep the fp32 build in full fp32 rather than TensorRT's default TF32 path
     # so replay parity against the GitHub JAX implementation stays tight.
     builder_config.clear_flag(trt.BuilderFlag.TF32)
+    _attach_model_timing_cache(builder_config)
 
     boundary_selector = cfg["depth"]
     use_fp32_boundary = (
