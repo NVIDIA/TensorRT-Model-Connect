@@ -73,6 +73,14 @@ class TensorRTModelConnectConan(ConanFile):
         )
         copy(self, "trtmc", src=self.build_folder, dst=str(package_bin), keep_path=False)
         copy(self, "trtmc", src=self.build_folder, dst=str(wheel_data_scripts), keep_path=False)
+        for destination in (package_bin, wheel_data_scripts):
+            copy(
+                self,
+                "libtrtmc_core.so*",
+                src=self.build_folder,
+                dst=str(destination),
+                keep_path=False,
+            )
         copy(
             self,
             "libtrtmc_backend_trt*.so*",
@@ -93,12 +101,18 @@ class TensorRTModelConnectConan(ConanFile):
 
         native = package_bin / "trtmc"
         installed_script = wheel_data_scripts / "trtmc"
+        package_cores = sorted(package_bin.glob("libtrtmc_core.so*"))
+        script_cores = sorted(wheel_data_scripts.glob("libtrtmc_core.so*"))
         backends = sorted(package_bin.glob("libtrtmc_backend_trt*.so*"))
         model_plugins = sorted(package_bin.glob("libtrtmc_model_*.so*"))
         if not native.is_file():
             raise ConanException("TRTMC native executable was not staged into the wheel package")
         if not installed_script.is_file():
             raise ConanException("TRTMC native executable was not staged as the wheel script")
+        if not package_cores:
+            raise ConanException("TRTMC core DSO was not staged into the wheel package")
+        if not script_cores:
+            raise ConanException("TRTMC core DSO was not staged beside the wheel script")
         if not backends:
             raise ConanException("TRTMC TensorRT backend DSO was not staged into the wheel package")
         if not model_plugins:

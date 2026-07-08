@@ -954,6 +954,22 @@ def test_model_plugins_are_staged_for_installed_trtmc() -> None:
     assert '"trtmc" / "models"' in loader
 
 
+def test_release_wheel_stages_core_runtime_and_uses_origin_rpath() -> None:
+    cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
+    conanfile = (REPO_ROOT / "conanfile.py").read_text()
+    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text()
+
+    assert 'set_target_properties(trtmc PROPERTIES' in cmake
+    assert 'INSTALL_RPATH "\\$ORIGIN"' in cmake
+    assert '"libtrtmc_core.so*"' in conanfile
+    assert "for destination in (package_bin, wheel_data_scripts):" in conanfile
+    assert "TRTMC core DSO was not staged beside the wheel script" in conanfile
+    assert 'apache-tvm-ffi==0.1.12' in pyproject
+    assert "script_core_entries" in script
+    assert "installed trtmc RUNPATH leaks the CI build directory" in script
+
+
 def test_ci_source_build_defaults_to_packaged_libtorch_mode() -> None:
     conanfile = (REPO_ROOT / "conanfile.py").read_text()
     wrapper = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()

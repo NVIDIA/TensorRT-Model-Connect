@@ -607,6 +607,10 @@ add_executable(trtmc
 target_link_libraries(trtmc PRIVATE trtmc_core)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_include_directories(trtmc SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
+set_target_properties(trtmc PROPERTIES
+  BUILD_RPATH "\$ORIGIN"
+  INSTALL_RPATH "\$ORIGIN"
+)
 
 if(TRTMC_BUILD_BENCHMARKS)
   add_executable(trtmc_dataset_benchmark examples/trtmc_dataset_benchmark.cpp)

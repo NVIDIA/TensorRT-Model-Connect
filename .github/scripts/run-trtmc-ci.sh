@@ -1617,6 +1617,12 @@ for wheel in sys.argv[1:]:
             raise SystemExit(f"{wheel}: native wheel must not install package files via purelib")
         bin_entries = [name for name in names if name.endswith("/bin/trtmc")]
         script_entries = [name for name in names if name.endswith(".data/scripts/trtmc")]
+        package_core_entries = [
+            name for name in names if "/bin/libtrtmc_core.so" in name
+        ]
+        script_core_entries = [
+            name for name in names if ".data/scripts/libtrtmc_core.so" in name
+        ]
         backend_entries = [
             name for name in names if "/bin/libtrtmc_backend" in name and name.endswith(".so")
         ]
@@ -1630,6 +1636,10 @@ for wheel in sys.argv[1:]:
         raise SystemExit(f"{wheel}: expected one packaged trtmc executable")
     if len(script_entries) != 1:
         raise SystemExit(f"{wheel}: expected one native trtmc script executable")
+    if not package_core_entries:
+        raise SystemExit(f"{wheel}: packaged core DSO is missing")
+    if not script_core_entries:
+        raise SystemExit(f"{wheel}: core DSO beside native trtmc script is missing")
     if any(name.endswith(".dist-info/entry_points.txt") for name in names):
         raise SystemExit(f"{wheel}: native trtmc must be installed directly, not via console_scripts")
     if not backend_entries:
@@ -1639,6 +1649,8 @@ for wheel in sys.argv[1:]:
         raise SystemExit(
             f"{wheel}: pinned TensorRT 11.2.0.113 dependency metadata is missing"
         )
+    if "Requires-Dist: apache-tvm-ffi==0.1.12" not in metadata:
+        raise SystemExit(f"{wheel}: Apache TVM-FFI dependency metadata is missing")
     if f"-{EXPECTED_PLATFORM}" not in wheel_metadata:
         raise SystemExit(f"{wheel}: WHEEL metadata is missing {EXPECTED_PLATFORM}")
     audit = subprocess.run(
@@ -1661,7 +1673,15 @@ for wheel in sys.argv[1:]:
             f"manylinux_2_{MAX_GLIBC_MINOR}_aarch64 or older"
         )
     print(f"validated wheel={wheel}")
-    for entry in sorted([*bin_entries, *script_entries, *backend_entries]):
+    for entry in sorted(
+        [
+            *bin_entries,
+            *script_entries,
+            *package_core_entries,
+            *script_core_entries,
+            *backend_entries,
+        ]
+    ):
         print(f"  {entry}")
 PY
 
@@ -1693,6 +1713,15 @@ trtmc = Path(sys.argv[1])
 if trtmc.read_bytes()[:4] != b"\x7fELF":
     raise SystemExit(f"{trtmc} is not the native ELF trtmc executable")
 PY
+  trtmc_dynamic_section="$(readelf -d "$smoke_venv/bin/trtmc")"
+  if ! grep -Fq '\$ORIGIN' <<<"$trtmc_dynamic_section"; then
+    echo "ERROR: installed trtmc does not search for DSOs beside itself" >&2
+    exit 1
+  fi
+  if grep -Fq '/workspace/' <<<"$trtmc_dynamic_section"; then
+    echo "ERROR: installed trtmc RUNPATH leaks the CI build directory" >&2
+    exit 1
+  fi
   "$smoke_venv/bin/trtmc" version
   "$smoke_venv/bin/trtmc" --help >/tmp/trtmc-help.txt
   "$smoke_venv/bin/trtmc" build --help >/tmp/trtmc-build-help.txt
@@ -1705,12 +1734,15 @@ dist = metadata.distribution("tensorrt-model-connect")
 native_dir = Path(resources.files("tensorrt_model_connect").joinpath("bin"))
 native = native_dir / "trtmc"
 backends = sorted(native_dir.glob("libtrtmc_backend*.so*"))
+cores = sorted(native_dir.glob("libtrtmc_core.so*"))
 print(f"wheel={dist.metadata['Name']} {dist.version}")
 print(f"native_trtmc={native}")
 if not native.is_file():
     raise SystemExit("packaged native trtmc executable is missing")
 if not backends:
     raise SystemExit("packaged native TensorRT backend DSO is missing")
+if not cores:
+    raise SystemExit("packaged core DSO is missing")
 for backend in backends:
     print(f"native_backend={backend}")
 PY
