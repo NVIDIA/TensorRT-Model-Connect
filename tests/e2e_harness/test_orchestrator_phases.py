@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -280,6 +281,29 @@ def test_hf_auth_preflight_rejects_a_missing_offline_snapshot(
 
     assert passed is False
     assert "snapshot is unavailable offline" in message
+
+
+def test_bundle_build_honors_manifest_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("custom-build-timeout")
+    case.metadata["build_timeout_s"] = 5400
+    ctx = _make_ctx(tmp_path, case)
+    captured: dict[str, Any] = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+
+    bundle, _elapsed, error, _build_info = orchestrator._resolve_bundle(case, ctx)
+
+    assert bundle == str(Path(ctx.engine_dir) / case.bundle)
+    assert error == ""
+    assert captured["kwargs"]["timeout"] == 5400
 
 
 def _patch_bundle_success(

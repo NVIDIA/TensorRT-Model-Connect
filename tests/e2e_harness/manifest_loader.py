@@ -848,6 +848,16 @@ def _validate_manifest(raw: dict, path: str) -> None:
         if len(fp32_layers) != len(set(fp32_layers)):
             raise ValueError(f"Manifest {path!r}: fp32_layers must not contain duplicates")
 
+    build_timeout_s = raw.get("build_timeout_s")
+    if build_timeout_s is not None and (
+        not isinstance(build_timeout_s, int)
+        or isinstance(build_timeout_s, bool)
+        or build_timeout_s <= 0
+    ):
+        raise TypeError(
+            f"Manifest {path!r}: build_timeout_s must be a positive integer"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -869,6 +879,7 @@ _MODEL_ONLY_FIELDS = frozenset(
         "trust_remote_code",
         "build_args",
         "build_env",
+        "build_timeout_s",
         "e2e_parallel_resource",
         "e2e_size",
         "distributed_runtime",

@@ -412,8 +412,17 @@ def _resolve_bundle(
             )
         env["TRTMC_ENGINE_BUILD_IDENTITY"] = build_identity
         env["TRTMC_ENGINE_BUILD_COMMAND_JSON"] = json.dumps(cmd)
+    build_timeout_s = int(case.metadata.get("build_timeout_s", 3600))
+    if build_timeout_s <= 0:
+        raise ValueError("build_timeout_s must be positive")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=build_timeout_s,
+            env=env,
+        )
         elapsed = time.monotonic() - t0
     except subprocess.TimeoutExpired:
         build_timing = _load_build_timing(build_timing_path)
@@ -429,7 +438,7 @@ def _resolve_bundle(
         return (
             None,
             None,
-            f"Bundle build timed out for {hf_id}",
+            f"Bundle build timed out after {build_timeout_s}s for {hf_id}",
             {
                 **build_info,
             },

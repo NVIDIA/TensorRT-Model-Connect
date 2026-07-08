@@ -9,6 +9,7 @@
   "max_cache_length": 256,
   "trust_remote_code": true,
   "e2e_parallel_resource": "exclusive_gpu",
+  "build_timeout_s": 5400,
   "testcases": [
     {
       "name": "qwen3-omni-30b-a3b-instruct",
