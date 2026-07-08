@@ -4016,7 +4016,7 @@ def test_diffusion_text_scores_gold_and_unconditional_quality(monkeypatch) -> No
     assert quality["distinct_1"] == 0.5
 
 
-def test_diffusion_text_hf_parity_uses_normalized_text_and_token_agreement() -> None:
+def test_diffusion_text_hf_parity_uses_token_agreement_only() -> None:
     result = task_eval.compare_diffusion_text_prediction_sets(
         {
             "responses": [
@@ -4040,10 +4040,35 @@ def test_diffusion_text_hf_parity_uses_normalized_text_and_token_agreement() -> 
         },
     )
 
-    assert result["normalized_text_exact_match_rate"] == 1.0
     assert result["token_agreement_rate"] == 0.5
-    assert result["mean_text_ned"] == 0.0
     assert result["shared_sampling_inputs_match_rate"] == 1.0
+    assert "normalized_text_exact_match_rate" not in result
+    assert "text_ned" not in result["samples"][0]
+
+
+def test_diffusion_text_hf_parity_requires_token_ids() -> None:
+    with pytest.raises(ValueError, match="must contain token_ids or generated_token_ids"):
+        task_eval.compare_diffusion_text_prediction_sets(
+            {
+                "responses": [
+                    {
+                        "sample_id": "sample",
+                        "output_text": "HF output",
+                        "shared_sampling_inputs": {"initial_latents": "/tmp/shared.f32"},
+                    }
+                ]
+            },
+            {
+                "responses": [
+                    {
+                        "sample_id": "sample",
+                        "output_text": "TRT output",
+                        "generated_token_ids": [1, 2],
+                        "shared_sampling_inputs": {"initial_latents": "/tmp/shared.f32"},
+                    }
+                ]
+            },
+        )
 
 
 @pytest.mark.parametrize(

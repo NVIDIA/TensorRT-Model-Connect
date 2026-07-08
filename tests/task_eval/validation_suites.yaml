@@ -693,7 +693,7 @@ suites:
       task_metric: sacrebleu
     gates:
       # The official PyTorch port allows <0.5 BLEU point sampling/numeric drift.
-      # Exact text/token agreement remains diagnostic for divergence triage.
+      # Token agreement remains diagnostic for divergence triage.
       max_corpus_bleu_abs_delta: 0.5
       min_shared_sampling_inputs_match_rate: 1.0
     ci:

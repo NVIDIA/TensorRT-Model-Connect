@@ -3760,10 +3760,8 @@ def compare_diffusion_text_prediction_sets(
         raise ValueError(
             f"ELF HF/TRTMC prediction count mismatch: hf={len(hf_rows)} trtfb={len(trtfb_rows)}"
         )
-    text_matches = 0
     token_matches = 0
     token_positions = 0
-    text_neds: list[float] = []
     shared_input_matches = 0
     samples: list[dict[str, Any]] = []
     for index, (hf_row, trtfb_row) in enumerate(zip(hf_rows, trtfb_rows, strict=True)):
@@ -3773,29 +3771,25 @@ def compare_diffusion_text_prediction_sets(
             raise ValueError(
                 f"ELF HF/TRTMC sample id mismatch at index {index}: hf={hf_id!r} trtfb={trtfb_id!r}"
             )
-        hf_text = " ".join(str(hf_row.get("output_text", "")).split()).lower()
-        trtfb_text = " ".join(str(trtfb_row.get("output_text", "")).split()).lower()
+        for backend, row in (("HF", hf_row), ("TRTMC", trtfb_row)):
+            if not isinstance(row.get("token_ids", row.get("generated_token_ids")), list):
+                raise ValueError(
+                    f"ELF {backend} prediction {hf_id!r} must contain token_ids or "
+                    "generated_token_ids for token agreement"
+                )
         hf_tokens = _diffusion_text_sample_token_ids(hf_row)
         trtfb_tokens = _diffusion_text_sample_token_ids(trtfb_row)
         positions = max(len(hf_tokens), len(trtfb_tokens))
         matches = sum(left == right for left, right in zip(hf_tokens, trtfb_tokens, strict=False))
-        exact = bool(hf_text) and hf_text == trtfb_text
-        ned = _normalized_edit_distance(trtfb_text, hf_text)
         hf_shared_inputs = _diffusion_text_shared_sampling_inputs(hf_row)
         trtfb_shared_inputs = _diffusion_text_shared_sampling_inputs(trtfb_row)
         shared_inputs_match = bool(hf_shared_inputs) and hf_shared_inputs == trtfb_shared_inputs
-        text_matches += int(exact)
         token_matches += matches
         token_positions += positions
-        text_neds.append(ned)
         shared_input_matches += int(shared_inputs_match)
         samples.append(
             {
                 "sample_id": hf_id,
-                "hf_text": hf_text,
-                "trtfb_text": trtfb_text,
-                "normalized_text_exact_match": exact,
-                "text_ned": ned,
                 "token_agreement_rate": matches / positions if positions else 0.0,
                 "first_token_divergence": _first_token_divergence(hf_tokens, trtfb_tokens),
                 "shared_sampling_inputs_match": shared_inputs_match,
@@ -3804,10 +3798,7 @@ def compare_diffusion_text_prediction_sets(
     count = len(hf_rows)
     return {
         "valid_count": count,
-        "normalized_text_exact_match_rate": text_matches / count if count else 0.0,
         "token_agreement_rate": token_matches / token_positions if token_positions else 0.0,
-        "mean_text_ned": _mean(text_neds),
-        "max_text_ned": max(text_neds, default=0.0),
         "shared_sampling_inputs_match_rate": shared_input_matches / count if count else 0.0,
         "samples": samples,
     }
@@ -7168,10 +7159,7 @@ def eval_one_model(
             **base_result,
             "mode": scorer,
             "valid_count": summary["valid_count"],
-            "normalized_text_exact_match_rate": summary["normalized_text_exact_match_rate"],
             "token_agreement_rate": summary["token_agreement_rate"],
-            "mean_text_ned": summary["mean_text_ned"],
-            "max_text_ned": summary["max_text_ned"],
             "shared_sampling_inputs_match_rate": summary["shared_sampling_inputs_match_rate"],
             **diagnostics,
         }
@@ -7591,10 +7579,8 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
             "task_metric_delta=unavailable",
         )
         return (
-            f"model={model['name']} {delta} text_agreement="
-            f"{result['normalized_text_exact_match_rate']:.4f} "
+            f"model={model['name']} {delta} "
             f"token_agreement={result['token_agreement_rate']:.4f} "
-            f"max_text_ned={result['max_text_ned']:.4f} "
             f"status={result.get('status', '')} {common}"
         )
     if result.get("mode") == "sacrebleu":
