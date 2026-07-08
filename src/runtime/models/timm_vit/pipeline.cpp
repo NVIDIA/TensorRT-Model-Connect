@@ -15,7 +15,7 @@ namespace {
 
 const Tensor* find_logits_output(const TensorMap& outputs) {
     for (const auto& [name, tensor] : outputs) {
-        if (name.find("logits") != std::string::npos || outputs.size() == 1)
+        if (name == "classification_logits")
             return &tensor;
     }
     return nullptr;
