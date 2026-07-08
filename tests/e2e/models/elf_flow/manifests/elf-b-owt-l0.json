@@ -14,7 +14,7 @@
     "TRTMC_TRT_TIMING_CACHE_PATH": "",
     "TRTMC_TRT_TIMING_CACHE_DIR": "",
     "TRTMC_ELF_TIMING_CACHE_PATH": {
-      "path": "data/elf-b-owt-replay/tensorrt-11.0.0.114-gb300-opt2.cache",
+      "path": "data/elf-b-owt-replay/tensorrt-11.0.0.114-gb300-opt2.bin",
       "relative_to": "model"
     }
   },
