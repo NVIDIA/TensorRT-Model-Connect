@@ -5,10 +5,7 @@
   "family": "mixtral",
   "runtime_strategy": "mixtral_decoder_moe",
   "task_strategy": "text_generation_causal",
-  "precision": "fp16",
-  "fp32_layers": [
-    5
-  ],
+  "precision": "fp32",
   "max_cache_length": 256,
   "trust_remote_code": false,
   "testcases": [
