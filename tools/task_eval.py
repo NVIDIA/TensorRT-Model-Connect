@@ -1482,6 +1482,97 @@ def prepare_vlm_unified_dataset(
     )
 
 
+def prepare_sts_pair_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    """Prepare STS sentence pairs as byte-shared HF/TRTMC text inputs."""
+    indexed: list[tuple[int, dict[str, Any]]] = []
+    for dataset_index, row in enumerate(load_jsonl(dataset_path)):
+        genre = str(row.get("genre", ""))
+        if subject and genre != subject:
+            continue
+        sentence1 = str(row.get("sentence1", "")).strip()
+        sentence2 = str(row.get("sentence2", "")).strip()
+        if not sentence1 or not sentence2:
+            raise ValueError(
+                f"{dataset_path}: STS row {dataset_index} must contain sentence1 and sentence2"
+            )
+        try:
+            score = float(row["score"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{dataset_path}: STS row {dataset_index} has invalid score"
+            ) from exc
+        indexed.append((dataset_index, {**row, "score": score}))
+    if sample_seed is not None:
+        random.Random(sample_seed).shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+    requests: list[dict[str, Any]] = []
+    with prompts_path.open("w", encoding="utf-8") as prompts_file:
+        for eval_index, (dataset_index, row) in enumerate(indexed):
+            pair_id = f"stsbenchmark_{dataset_index:06d}"
+            for pair_side in ("sentence1", "sentence2"):
+                sample_id = f"{pair_id}_{'a' if pair_side == 'sentence1' else 'b'}"
+                request = {
+                    "sample_id": sample_id,
+                    "pair_id": pair_id,
+                    "pair_side": pair_side,
+                    "score": row["score"],
+                    "subject": str(row.get("genre", "")),
+                    "dataset": str(row.get("dataset", "")),
+                    "prompt": str(row[pair_side]),
+                }
+                requests.append(request)
+                prompts_file.write(
+                    json.dumps(
+                        {
+                            **request,
+                            "dataset_index": dataset_index,
+                            "eval_index": eval_index,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+    answers = {
+        "dataset": "MTEB STSBenchmark test",
+        "scoring": suite.get("scoring", {}),
+        "requests": requests,
+    }
+    answers_path.write_text(
+        json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_kind": suite.get("dataset", {}).get("kind", ""),
+        "pair_count": len(indexed),
+        "request_count": len(requests),
+        "subject": subject or "all",
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "scoring": suite.get("scoring", {}),
+        "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
+    }
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
 def prepare_task_dataset(
     *,
     dataset_path: Path,
@@ -1555,6 +1646,16 @@ def prepare_task_dataset(
         )
     if dataset_kind == "diffusion_prompt_json":
         return prepare_diffusion_prompt_json_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
+    if dataset_kind == "sts_pair_jsonl":
+        return prepare_sts_pair_dataset(
             dataset_path=dataset_path,
             work_dir=work_dir,
             suite=suite,
@@ -3835,6 +3936,10 @@ def _is_tts_dataset_kind(kind: str) -> bool:
     return kind == "seedtts_json"
 
 
+def _is_encoder_embedding_dataset_kind(kind: str) -> bool:
+    return kind == "sts_pair_jsonl"
+
+
 def work_scoring(work_dir: Path) -> dict[str, Any]:
     scoring = work_manifest(work_dir).get("scoring", {})
     return scoring if isinstance(scoring, dict) else {}
@@ -4849,8 +4954,120 @@ def run_tts_hf_reference(args: argparse.Namespace) -> None:
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def encoder_reference_class_names(reference_family: str) -> tuple[str, str]:
+    if reference_family == "dpr_context_embed":
+        return "DPRContextEncoder", "DPRContextEncoderTokenizerFast"
+    return "AutoModel", "AutoTokenizer"
+
+
+def run_encoder_embedding_hf_reference(args: argparse.Namespace) -> None:
+    try:
+        import torch
+        import transformers
+        from transformers import logging
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("encoder/embedding HF reference requires torch and transformers") from exc
+
+    work_dir = Path(args.work_dir)
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    task_config = work_manifest(work_dir).get("task_eval", {})
+    task_config = task_config if isinstance(task_config, dict) else {}
+    vector_mode = "embedding" if task_config.get("task_strategy") == "embedding" else "cls"
+    model_class_name, tokenizer_class_name = encoder_reference_class_names(
+        str(args.reference_family or "")
+    )
+    model_class = getattr(transformers, model_class_name)
+    tokenizer_class = getattr(transformers, tokenizer_class_name)
+
+    logging.set_verbosity_error()
+    tokenizer = tokenizer_class.from_pretrained(
+        args.model,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
+    dtype: str | Any = "auto"
+    if args.dtype == "float16":
+        dtype = torch.float16
+    elif args.dtype == "bfloat16":
+        dtype = torch.bfloat16
+    model_kwargs = {
+        "torch_dtype": dtype,
+        "trust_remote_code": args.trust_remote_code,
+        "local_files_only": args.local_files_only,
+    }
+    if args.device_map:
+        model_kwargs["device_map"] = args.device_map
+    model = model_class.from_pretrained(args.model, **model_kwargs).eval()
+    if not args.device_map:
+        device = torch.device(args.device)
+        model.to(device)
+    else:
+        device = model.device
+
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "hf_predictions.json")
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_file:
+        for index, prompt_row in enumerate(prompt_rows):
+            encoded = tokenizer(
+                str(prompt_row["prompt"]),
+                return_tensors="pt",
+                truncation=True,
+            )
+            encoded = {key: value.to(device) for key, value in encoded.items()}
+            start = time.perf_counter()
+            with torch.inference_mode():
+                outputs = model(**encoded, output_hidden_states=True)
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            hidden = getattr(outputs, "last_hidden_state", None)
+            if hidden is None:
+                hidden_states = getattr(outputs, "hidden_states", None)
+                if hidden_states:
+                    hidden = hidden_states[-1]
+                elif isinstance(outputs, (tuple, list)) and outputs:
+                    hidden = outputs[0]
+            if hidden is None or hidden.ndim != 3:
+                raise RuntimeError(
+                    f"HF encoder output for {prompt_row['sample_id']} has no rank-3 hidden state"
+                )
+            if vector_mode == "embedding":
+                attention_mask = encoded.get("attention_mask")
+                if attention_mask is None:
+                    attention_mask = torch.ones(hidden.shape[:2], device=hidden.device)
+                mask = attention_mask.unsqueeze(-1).to(hidden.dtype)
+                vector_tensor = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+                vector_tensor = torch.nn.functional.normalize(vector_tensor, p=2, dim=-1)[0]
+            else:
+                vector_tensor = hidden[0, 0]
+            row = {
+                "sample_id": str(prompt_row["sample_id"]),
+                "pair_id": str(prompt_row["pair_id"]),
+                "pair_side": str(prompt_row["pair_side"]),
+                "score": float(prompt_row["score"]),
+                "vector_mode": vector_mode,
+                "vector": vector_tensor.float().cpu().numpy().tolist(),
+                "wall_ms": wall_ms,
+                "source": "hf",
+            }
+            responses.append(row)
+            raw_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            print(
+                f"[task_eval.encoder_hf] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def run_hf_reference(args: argparse.Namespace) -> None:
     dataset_kind = _work_dataset_kind(Path(args.work_dir))
+    if _is_encoder_embedding_dataset_kind(dataset_kind):
+        run_encoder_embedding_hf_reference(args)
+        return
     if _is_tts_dataset_kind(dataset_kind):
         run_tts_hf_reference(args)
         return
@@ -5144,9 +5361,90 @@ def run_tts_trtfb(args: argparse.Namespace) -> None:
             raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _parse_encoder_vector_stdout(stdout: str, key: str) -> list[float]:
+    try:
+        data = json.loads(stdout.strip())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"TRTMC encoder output is not JSON: {stdout[:500]}") from exc
+    vector = data.get(key) if isinstance(data, dict) else None
+    if not isinstance(vector, list) or not vector:
+        raise ValueError(f"TRTMC encoder output does not contain non-empty {key!r}")
+    return [float(value) for value in vector]
+
+
+def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
+    work_dir = Path(args.work_dir)
+    task_config = work_manifest(work_dir).get("task_eval", {})
+    task_config = task_config if isinstance(task_config, dict) else {}
+    vector_mode = "embedding" if task_config.get("task_strategy") == "embedding" else "cls"
+    command_name = "embed" if vector_mode == "embedding" else "encode"
+    output_key = "embedding" if vector_mode == "embedding" else "cls_embedding"
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    log_path = work_dir / (args.log or "trtfb_run.log")
+    responses: list[dict[str, Any]] = []
+    env = os.environ.copy()
+    if args.cuda_visible_devices:
+        env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
+    with (
+        raw_path.open("w", encoding="utf-8") as raw_file,
+        log_path.open("w", encoding="utf-8") as log_file,
+    ):
+        for index, prompt_row in enumerate(prompt_rows):
+            cmd = [
+                _trtmc_binary_from_args(args),
+                command_name,
+                args.bundle,
+                "--prompt",
+                str(prompt_row["prompt"]),
+            ]
+            if args.hf_python:
+                cmd.extend(["--hf-python", args.hf_python])
+            if args.backend_dir:
+                cmd.extend(["--backend-dir", args.backend_dir])
+            if args.model_plugin_dir:
+                cmd.extend(["--model-plugin-dir", args.model_plugin_dir])
+            if args.config:
+                cmd.extend(["--config", args.config])
+            for token in args.set or []:
+                cmd.extend(["--set", token])
+            start = time.perf_counter()
+            proc = subprocess.run(cmd, check=False, text=True, capture_output=True, env=env)
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            log_file.write(f"$ {' '.join(cmd)}\n{proc.stdout}{proc.stderr}")
+            log_file.flush()
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"TRTMC {command_name} failed for {prompt_row['sample_id']} "
+                    f"rc={proc.returncode}; see {log_path}"
+                )
+            row = {
+                "sample_id": str(prompt_row["sample_id"]),
+                "pair_id": str(prompt_row["pair_id"]),
+                "pair_side": str(prompt_row["pair_side"]),
+                "score": float(prompt_row["score"]),
+                "vector_mode": vector_mode,
+                "vector": _parse_encoder_vector_stdout(proc.stdout, output_key),
+                "wall_ms": wall_ms,
+                "source": "trtfb",
+            }
+            responses.append(row)
+            raw_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            print(
+                f"[task_eval.encoder_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
 def run_trtfb(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     dataset_kind = _work_dataset_kind(work_dir)
+    if _is_encoder_embedding_dataset_kind(dataset_kind):
+        run_encoder_embedding_trtfb(args)
+        return
     if _is_tts_dataset_kind(dataset_kind):
         run_tts_trtfb(args)
         return
@@ -5568,6 +5866,197 @@ def run_hf_reference_subprocess(
         )
 
 
+def _vector_cosine(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right) or not left:
+        raise ValueError(f"Vector dimension mismatch: {len(left)} != {len(right)}")
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm <= 0.0 or right_norm <= 0.0:
+        raise ValueError("Cannot compare a zero-norm encoder vector")
+    return max(-1.0, min(1.0, dot / (left_norm * right_norm)))
+
+
+def _rank_values(values: list[float]) -> list[float]:
+    indexed = sorted(enumerate(values), key=lambda item: item[1])
+    ranks = [0.0] * len(values)
+    start = 0
+    while start < len(indexed):
+        end = start + 1
+        while end < len(indexed) and indexed[end][1] == indexed[start][1]:
+            end += 1
+        average_rank = (start + end - 1) / 2.0
+        for position in range(start, end):
+            ranks[indexed[position][0]] = average_rank
+        start = end
+    return ranks
+
+
+def _pearson_correlation(left: list[float], right: list[float]) -> float | None:
+    if len(left) != len(right) or len(left) < 2:
+        return None
+    left_mean = sum(left) / len(left)
+    right_mean = sum(right) / len(right)
+    left_centered = [value - left_mean for value in left]
+    right_centered = [value - right_mean for value in right]
+    denominator = math.sqrt(
+        sum(value * value for value in left_centered)
+        * sum(value * value for value in right_centered)
+    )
+    if denominator <= 0.0:
+        return None
+    return sum(
+        a * b for a, b in zip(left_centered, right_centered, strict=True)
+    ) / denominator
+
+
+def _spearman_correlation(left: list[float], right: list[float]) -> float | None:
+    return _pearson_correlation(_rank_values(left), _rank_values(right))
+
+
+def compare_encoder_embedding_prediction_sets(
+    hf_data: dict[str, Any],
+    trtfb_data: dict[str, Any],
+    *,
+    gates: dict[str, Any],
+) -> dict[str, Any]:
+    hf_rows = hf_data.get("responses", [])
+    trtfb_rows = trtfb_data.get("responses", [])
+    if not isinstance(hf_rows, list) or not isinstance(trtfb_rows, list):
+        raise ValueError("Encoder predictions must contain response lists")
+    if len(hf_rows) != len(trtfb_rows):
+        raise ValueError(
+            f"Encoder HF/TRTMC prediction count mismatch: {len(hf_rows)} != {len(trtfb_rows)}"
+        )
+    min_vector_cosine_gate = float(gates.get("min_vector_cosine", 0.99))
+    min_vector_pass_rate_gate = float(gates.get("min_vector_pass_rate", 1.0))
+    max_pair_delta_gate = float(gates.get("max_pair_cosine_abs_delta", 0.02))
+    vector_cosines: list[float] = []
+    samples: list[dict[str, Any]] = []
+    hf_pairs: dict[str, dict[str, Any]] = defaultdict(dict)
+    trtfb_pairs: dict[str, dict[str, Any]] = defaultdict(dict)
+    for index, (hf_row, trtfb_row) in enumerate(zip(hf_rows, trtfb_rows, strict=True)):
+        hf_id = str(hf_row.get("sample_id", index))
+        trtfb_id = str(trtfb_row.get("sample_id", index))
+        if hf_id != trtfb_id:
+            raise ValueError(
+                f"Encoder HF/TRTMC sample id mismatch at {index}: {hf_id!r} != {trtfb_id!r}"
+            )
+        hf_vector = hf_row.get("vector")
+        trtfb_vector = trtfb_row.get("vector")
+        if not isinstance(hf_vector, list) or not isinstance(trtfb_vector, list):
+            raise ValueError(f"Encoder prediction {hf_id!r} is missing vector data")
+        cosine = _vector_cosine(
+            [float(value) for value in hf_vector],
+            [float(value) for value in trtfb_vector],
+        )
+        vector_cosines.append(cosine)
+        pair_id = str(hf_row.get("pair_id", ""))
+        pair_side = str(hf_row.get("pair_side", ""))
+        if not pair_id or pair_side not in {"sentence1", "sentence2"}:
+            raise ValueError(f"Encoder prediction {hf_id!r} has invalid pair metadata")
+        hf_pairs[pair_id][pair_side] = hf_row
+        trtfb_pairs[pair_id][pair_side] = trtfb_row
+        samples.append(
+            {
+                "sample_id": hf_id,
+                "pair_id": pair_id,
+                "pair_side": pair_side,
+                "vector_dim": len(hf_vector),
+                "vector_cosine": cosine,
+                "passed": cosine >= min_vector_cosine_gate,
+            }
+        )
+
+    pair_rows: list[dict[str, Any]] = []
+    pair_deltas: list[float] = []
+    gold_scores: list[float] = []
+    hf_similarities: list[float] = []
+    trtfb_similarities: list[float] = []
+    for pair_id, hf_pair in hf_pairs.items():
+        trtfb_pair = trtfb_pairs.get(pair_id, {})
+        if set(hf_pair) != {"sentence1", "sentence2"} or set(trtfb_pair) != {
+            "sentence1",
+            "sentence2",
+        }:
+            raise ValueError(f"Encoder pair {pair_id!r} is incomplete")
+        hf_similarity = _vector_cosine(
+            [float(value) for value in hf_pair["sentence1"]["vector"]],
+            [float(value) for value in hf_pair["sentence2"]["vector"]],
+        )
+        trtfb_similarity = _vector_cosine(
+            [float(value) for value in trtfb_pair["sentence1"]["vector"]],
+            [float(value) for value in trtfb_pair["sentence2"]["vector"]],
+        )
+        delta = abs(trtfb_similarity - hf_similarity)
+        score = float(hf_pair["sentence1"].get("score", 0.0))
+        pair_deltas.append(delta)
+        gold_scores.append(score)
+        hf_similarities.append(hf_similarity)
+        trtfb_similarities.append(trtfb_similarity)
+        pair_rows.append(
+            {
+                "pair_id": pair_id,
+                "score": score,
+                "hf_cosine": hf_similarity,
+                "trtfb_cosine": trtfb_similarity,
+                "cosine_abs_delta": delta,
+                "passed": delta <= max_pair_delta_gate,
+            }
+        )
+
+    vector_passed = sum(value >= min_vector_cosine_gate for value in vector_cosines)
+    vector_pass_rate = vector_passed / len(vector_cosines) if vector_cosines else 0.0
+    max_pair_delta = max(pair_deltas, default=float("inf"))
+    status = (
+        "passed"
+        if vector_cosines
+        and pair_deltas
+        and vector_pass_rate >= min_vector_pass_rate_gate
+        and max_pair_delta <= max_pair_delta_gate
+        else "failed"
+    )
+    return {
+        "status": status,
+        "valid_count": len(vector_cosines),
+        "pair_count": len(pair_rows),
+        "vector_passed_count": vector_passed,
+        "vector_pass_rate": vector_pass_rate,
+        "mean_vector_cosine": sum(vector_cosines) / len(vector_cosines)
+        if vector_cosines
+        else 0.0,
+        "min_vector_cosine": min(vector_cosines, default=0.0),
+        "mean_pair_cosine_abs_delta": sum(pair_deltas) / len(pair_deltas)
+        if pair_deltas
+        else float("inf"),
+        "max_pair_cosine_abs_delta": max_pair_delta,
+        "hf_sts_spearman": _spearman_correlation(gold_scores, hf_similarities),
+        "trtfb_sts_spearman": _spearman_correlation(gold_scores, trtfb_similarities),
+        "gates": {
+            "min_vector_cosine": min_vector_cosine_gate,
+            "min_vector_pass_rate": min_vector_pass_rate_gate,
+            "max_pair_cosine_abs_delta": max_pair_delta_gate,
+        },
+        "samples": samples,
+        "pairs": pair_rows,
+    }
+
+
+def write_encoder_embedding_summary_markdown(summary: dict[str, Any], path: Path) -> None:
+    lines = [
+        "# Encoder / Embedding Parity Summary",
+        "",
+        f"- status: {summary['status']}",
+        f"- vector_pass_rate: {summary['vector_pass_rate']:.4f}",
+        f"- mean_vector_cosine: {summary['mean_vector_cosine']:.6f}",
+        f"- min_vector_cosine: {summary['min_vector_cosine']:.6f}",
+        f"- max_pair_cosine_abs_delta: {summary['max_pair_cosine_abs_delta']:.6f}",
+        f"- hf_sts_spearman: {_format_optional_float(summary.get('hf_sts_spearman'))}",
+        f"- trtfb_sts_spearman: {_format_optional_float(summary.get('trtfb_sts_spearman'))}",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def eval_one_model(
     *,
     suite: dict[str, Any],
@@ -5588,6 +6077,8 @@ def eval_one_model(
         task_eval_config["model_manifest"] = str(model["manifest"])
     if model.get("family"):
         task_eval_config["family"] = str(model["family"])
+    if model.get("task_strategy"):
+        task_eval_config["task_strategy"] = str(model["task_strategy"])
     runtime_config = model.get("runtime_config", {})
     if isinstance(runtime_config, dict) and runtime_config:
         task_eval_config["runtime_config"] = runtime_config
@@ -5714,7 +6205,35 @@ def eval_one_model(
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 
-    if scorer == "continuation":
+    if scorer == "encoder_embedding_parity":
+        hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+        trtfb_data = json.loads(
+            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        )
+        summary = compare_encoder_embedding_prediction_sets(
+            hf_data,
+            trtfb_data,
+            gates=suite.get("gates", {}),
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        write_encoder_embedding_summary_markdown(summary, work_dir / "summary.md")
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "valid_count": summary["valid_count"],
+            "pair_count": summary["pair_count"],
+            "vector_pass_rate": summary["vector_pass_rate"],
+            "mean_vector_cosine": summary["mean_vector_cosine"],
+            "min_vector_cosine": summary["min_vector_cosine"],
+            "mean_pair_cosine_abs_delta": summary["mean_pair_cosine_abs_delta"],
+            "max_pair_cosine_abs_delta": summary["max_pair_cosine_abs_delta"],
+            "hf_sts_spearman": summary["hf_sts_spearman"],
+            "trtfb_sts_spearman": summary["trtfb_sts_spearman"],
+        }
+    elif scorer == "continuation":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
         summary = compare_continuation_sets(
@@ -6015,6 +6534,13 @@ def write_diffusion_summary_markdown(summary: dict[str, Any], path: Path) -> Non
 
 def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
     common = f"hf_reused={result['hf_reused']} bundle_built={result['bundle_built']}"
+    if result.get("mode") == "encoder_embedding_parity":
+        return (
+            f"model={model['name']} vector_pass_rate={result['vector_pass_rate']:.4f} "
+            f"min_vector_cosine={result['min_vector_cosine']:.6f} "
+            f"max_pair_delta={result['max_pair_cosine_abs_delta']:.6f} "
+            f"status={result.get('status', '')} {common}"
+        )
     if result.get("mode") == "continuation":
         return (
             f"model={model['name']} exact={result['exact_match_rate']:.4f} "
@@ -6583,6 +7109,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         "diffusion_prompt_tsv",
         "diffusion_prompt_json",
         "seedtts_json",
+        "sts_pair_jsonl",
     }:
         raise ValueError(f"eval does not support dataset kind {dataset_kind!r}")
     models = load_manifest_records(Path(args.models_dir))
@@ -6608,11 +7135,14 @@ def cmd_eval(args: argparse.Namespace) -> int:
             result = run_eval_model_worker(suite=suite, model=model, args=args)
             if result.get("status") == "failed":
                 results.append(result)
-                print(
-                    f"[task_eval] model={model['name']} status=failed "
-                    f"error_type={result.get('error_type', '')} error={result.get('error', '')} "
-                    f"log={result.get('worker_log', '')}"
-                )
+                if result.get("mode"):
+                    print(f"[task_eval] {_format_result_line(model, result)}")
+                else:
+                    print(
+                        f"[task_eval] model={model['name']} status=failed "
+                        f"error_type={result.get('error_type', '')} "
+                        f"error={result.get('error', '')} log={result.get('worker_log', '')}"
+                    )
                 if args.fail_fast:
                     raise RuntimeError(
                         f"Model {model['name']} failed in worker; see {result.get('worker_log', '')}"

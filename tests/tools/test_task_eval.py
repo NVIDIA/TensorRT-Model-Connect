@@ -164,6 +164,32 @@ def _write_asr_librispeech(path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _write_stsbenchmark(path: Path) -> None:
+    rows = [
+        {
+            "split": "test",
+            "genre": "main-captions",
+            "dataset": "MSRvid",
+            "sid": "0001",
+            "score": 5.0,
+            "sentence1": "A plane is taking off.",
+            "sentence2": "An airplane is taking off.",
+        },
+        {
+            "split": "test",
+            "genre": "main-news",
+            "dataset": "headlines",
+            "sid": "0002",
+            "score": 0.0,
+            "sentence1": "Stocks rose on Monday.",
+            "sentence2": "A dog sleeps by the fire.",
+        },
+    ]
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+
 def test_default_suites_include_ocrbench_v2_unified() -> None:
     suites = task_eval.load_suites()
     suite = task_eval.suite_by_id(suites, "ocrbench_v2_unified")
@@ -252,6 +278,116 @@ def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
         "lane": "local_only",
         "notes": "P2021-only until the DPG-Bench scorecard is visually calibrated.\n",
     }
+
+
+def test_default_suites_include_encoder_embedding_parity() -> None:
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "stsbenchmark_encoder_embedding_parity"
+    )
+    models = task_eval.load_manifest_records()
+
+    selected = task_eval.selected_models_for_suite(
+        suite, models, single_device_only=True
+    )
+
+    assert suite["dataset"]["kind"] == "sts_pair_jsonl"
+    assert suite["scoring"]["scorer"] == "encoder_embedding_parity"
+    assert suite["selectors"]["task_strategies"] == [
+        "encoder_only_nlp",
+        "embedding",
+    ]
+    assert suite["selectors"]["user_contracts"] == [
+        "representation_parity",
+        "embedding_vector",
+    ]
+    assert len(suite["default_model_names"]) == 19
+    assert len(selected) == 19
+    assert {model["name"] for model in selected} == set(suite["default_model_names"])
+    models_by_name = {model["name"]: model for model in models}
+    assert task_eval.resolve_suite_for_model(
+        suite, models_by_name["bert-base-uncased"]
+    )["gates"]["min_vector_cosine"] == 0.999
+    assert task_eval.resolve_suite_for_model(
+        suite, models_by_name["convbert-base"]
+    )["gates"]["min_vector_cosine"] == 0.95
+    assert task_eval.resolve_suite_for_model(
+        suite, models_by_name["fnet-base"]
+    )["gates"]["min_vector_cosine"] == 0.6
+    assert task_eval.resolve_suite_for_model(
+        suite, models_by_name["fnet-base"]
+    )["gates"]["max_pair_cosine_abs_delta"] == 0.1
+
+
+def test_prepare_stsbenchmark_expands_each_pair_to_shared_sentence_inputs(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "stsbenchmark_test.jsonl"
+    _write_stsbenchmark(dataset)
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "stsbenchmark_encoder_embedding_parity"
+    )
+
+    outputs = task_eval.prepare_sts_pair_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+        subject="main-captions",
+        sample_seed=None,
+    )
+
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+    assert [row["prompt"] for row in prompts] == [
+        "A plane is taking off.",
+        "An airplane is taking off.",
+    ]
+    assert [row["pair_side"] for row in prompts] == ["sentence1", "sentence2"]
+    assert len(answers["requests"]) == 2
+    assert manifest["pair_count"] == 1
+    assert manifest["request_count"] == 2
+
+
+def test_compare_encoder_embedding_predictions_gates_vector_and_pair_parity() -> None:
+    hf = {
+        "responses": [
+            {"sample_id": "pair-a", "pair_id": "pair", "pair_side": "sentence1", "score": 2.5, "vector": [1.0, 0.0]},
+            {"sample_id": "pair-b", "pair_id": "pair", "pair_side": "sentence2", "score": 2.5, "vector": [0.0, 1.0]},
+        ]
+    }
+    trt = {
+        "responses": [
+            {"sample_id": "pair-a", "pair_id": "pair", "pair_side": "sentence1", "score": 2.5, "vector": [0.999, 0.001]},
+            {"sample_id": "pair-b", "pair_id": "pair", "pair_side": "sentence2", "score": 2.5, "vector": [0.001, 0.999]},
+        ]
+    }
+
+    summary = task_eval.compare_encoder_embedding_prediction_sets(
+        hf,
+        trt,
+        gates={
+            "min_vector_cosine": 0.99,
+            "min_vector_pass_rate": 1.0,
+            "max_pair_cosine_abs_delta": 0.01,
+        },
+    )
+
+    assert summary["status"] == "passed"
+    assert summary["vector_pass_rate"] == 1.0
+    assert summary["min_vector_cosine"] > 0.99
+    assert summary["max_pair_cosine_abs_delta"] < 0.01
+
+
+def test_encoder_reference_uses_dpr_context_classes() -> None:
+    assert task_eval.encoder_reference_class_names("dpr_context_embed") == (
+        "DPRContextEncoder",
+        "DPRContextEncoderTokenizerFast",
+    )
+    assert task_eval.encoder_reference_class_names("encoder_base_features") == (
+        "AutoModel",
+        "AutoTokenizer",
+    )
 
 
 def test_partiprompts_defaults_to_canonical_models_across_image_families() -> None:
