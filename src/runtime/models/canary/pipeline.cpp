@@ -38,6 +38,32 @@ double elapsed_ms(CanaryClock::time_point start, CanaryClock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
+struct CanaryStageTimestamps {
+    CanaryClock::time_point transcribe_start;
+    CanaryClock::time_point resample_end;
+    CanaryClock::time_point mel_end;
+    CanaryClock::time_point encoder_end;
+    CanaryClock::time_point cross_kv_end;
+    CanaryClock::time_point decoder_end;
+    CanaryClock::time_point tokenize_end;
+};
+
+void report_canary_stage_timing(bool enabled, const CanaryStageTimestamps& timestamps) {
+    if (!enabled)
+        return;
+    std::ostringstream timing;
+    timing << "[trtmc.canary_timing.json] {\"resample_ms\":"
+           << elapsed_ms(timestamps.transcribe_start, timestamps.resample_end)
+           << ",\"mel_ms\":" << elapsed_ms(timestamps.resample_end, timestamps.mel_end)
+           << ",\"encoder_ms\":" << elapsed_ms(timestamps.mel_end, timestamps.encoder_end)
+           << ",\"cross_kv_ms\":" << elapsed_ms(timestamps.encoder_end, timestamps.cross_kv_end)
+           << ",\"decoder_ms\":" << elapsed_ms(timestamps.cross_kv_end, timestamps.decoder_end)
+           << ",\"tokenizer_ms\":" << elapsed_ms(timestamps.decoder_end, timestamps.tokenize_end)
+           << ",\"total_ms\":" << elapsed_ms(timestamps.transcribe_start, timestamps.tokenize_end)
+           << '}';
+    std::cerr << timing.str() << std::endl;
+}
+
 } // namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -165,18 +191,9 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
     }
     const auto tokenize_end = CanaryClock::now();
 
-    if (report_stage_timing) {
-        std::ostringstream timing;
-        timing << "[trtmc.canary_timing.json] {\"resample_ms\":"
-               << elapsed_ms(transcribe_start, resample_end)
-               << ",\"mel_ms\":" << elapsed_ms(resample_end, mel_end)
-               << ",\"encoder_ms\":" << elapsed_ms(mel_end, encoder_end)
-               << ",\"cross_kv_ms\":" << elapsed_ms(encoder_end, cross_kv_end)
-               << ",\"decoder_ms\":" << elapsed_ms(cross_kv_end, decoder_end)
-               << ",\"tokenizer_ms\":" << elapsed_ms(decoder_end, tokenize_end)
-               << ",\"total_ms\":" << elapsed_ms(transcribe_start, tokenize_end) << '}';
-        std::cerr << timing.str() << std::endl;
-    }
+    report_canary_stage_timing(report_stage_timing,
+                               {transcribe_start, resample_end, mel_end, encoder_end, cross_kv_end,
+                                decoder_end, tokenize_end});
     return out;
 }
 
