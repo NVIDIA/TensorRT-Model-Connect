@@ -50,9 +50,7 @@ DEFAULT_MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
 CHOICE_LETTERS = set("ABCDEFGHIJ")
-GPT_OSS_MMLU_SYSTEM_PROMPT = (
-    "You are a helpful assistant. Answer with only the option letter."
-)
+GPT_OSS_MMLU_SYSTEM_PROMPT = "You are a helpful assistant. Answer with only the option letter."
 
 
 def load_structured_file(path: Path) -> dict[str, Any]:
@@ -310,8 +308,7 @@ def resolve_suite_for_model(
     family_profile = family_profiles.get(str(model.get("family", "")), {})
     if not isinstance(family_profile, dict):
         raise ValueError(
-            f"Suite {suite['id']} family profile for {model.get('family')} "
-            "must be a mapping"
+            f"Suite {suite['id']} family profile for {model.get('family')} must be a mapping"
         )
 
     profiles = resolved.get("model_profiles", {})
@@ -544,6 +541,199 @@ def prepare_mmlu_dataset(
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
 
+def prepare_conditional_text_jsonl_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    dataset_config = suite.get("dataset", {})
+    source_field = str(dataset_config.get("source_field", "input"))
+    answer_field = str(dataset_config.get("answer_field", "output"))
+    subject_field = str(dataset_config.get("subject_field", "subset"))
+    sample_prefix = str(dataset_config.get("sample_prefix", "conditional_text"))
+    indexed: list[tuple[int, dict[str, Any]]] = []
+    with dataset_path.open("r", encoding="utf-8") as dataset_file:
+        for dataset_index, raw_line in enumerate(dataset_file):
+            if not raw_line.strip():
+                continue
+            row = json.loads(raw_line)
+            if not isinstance(row, dict):
+                raise ValueError(f"{dataset_path}: row {dataset_index + 1} must be an object")
+            source_text = str(row.get(source_field, "")).strip()
+            answer = str(row.get(answer_field, "")).strip()
+            row_subject = str(row.get(subject_field, "")).strip()
+            if not source_text or not answer:
+                raise ValueError(
+                    f"{dataset_path}: row {dataset_index + 1} needs non-empty "
+                    f"{source_field!r} and {answer_field!r}"
+                )
+            if subject and row_subject != subject:
+                continue
+            indexed.append(
+                (
+                    dataset_index,
+                    {
+                        "sample_id": str(row.get("id") or f"{sample_prefix}_{dataset_index:06d}"),
+                        "dataset_index": dataset_index,
+                        "source_text": source_text,
+                        "answer": answer,
+                        "subject": row_subject,
+                    },
+                )
+            )
+    if sample_seed is not None:
+        random.Random(sample_seed).shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+    answers_path.write_text(
+        json.dumps(
+            {
+                "dataset": str(dataset_config.get("name", dataset_path.stem)),
+                "requests": [row for _idx, row in indexed],
+            },
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with prompts_path.open("w", encoding="utf-8") as prompts_file:
+        for eval_index, (dataset_index, row) in enumerate(indexed):
+            prompts_file.write(
+                json.dumps(
+                    {
+                        "sample_id": row["sample_id"],
+                        "dataset_index": dataset_index,
+                        "eval_index": eval_index,
+                        "prompt": row["source_text"],
+                        "source_text": row["source_text"],
+                        "subject": row["subject"],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    generation = _deep_merge_mappings(
+        suite.get("generation", {}),
+        (task_eval_config or {}).get("generation", {}),
+    )
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_kind": dataset_config.get("kind", ""),
+        "reference_mode": suite.get("reference", {}).get("mode", ""),
+        "request_count": len(indexed),
+        "subject": subject or "all",
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "generation": generation,
+        "scoring": suite.get("scoring", {}),
+        "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
+    }
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
+def prepare_unconditional_text_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    requests = data.get("requests")
+    if not isinstance(requests, list):
+        raise ValueError(f"{dataset_path}: expected top-level 'requests' list")
+    indexed: list[tuple[int, dict[str, Any]]] = []
+    for dataset_index, raw_request in enumerate(requests):
+        if not isinstance(raw_request, dict):
+            raise ValueError(f"{dataset_path}: request {dataset_index} must be an object")
+        row_subject = str(raw_request.get("subject", "unconditional")).strip()
+        if subject and row_subject != subject:
+            continue
+        indexed.append(
+            (
+                dataset_index,
+                {
+                    "sample_id": str(raw_request.get("id") or f"unconditional_{dataset_index:06d}"),
+                    "dataset_index": dataset_index,
+                    "subject": row_subject,
+                    "seed": int(raw_request.get("seed", dataset_index)),
+                },
+            )
+        )
+    if sample_seed is not None:
+        random.Random(sample_seed).shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+    selected = [row for _idx, row in indexed]
+    answers_path.write_text(
+        json.dumps(
+            {"dataset": data.get("dataset", dataset_path.stem), "requests": selected},
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with prompts_path.open("w", encoding="utf-8") as prompts_file:
+        for eval_index, (dataset_index, row) in enumerate(indexed):
+            prompts_file.write(
+                json.dumps(
+                    {
+                        **row,
+                        "dataset_index": dataset_index,
+                        "eval_index": eval_index,
+                        "prompt": "",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    generation = _deep_merge_mappings(
+        suite.get("generation", {}),
+        (task_eval_config or {}).get("generation", {}),
+    )
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_kind": suite.get("dataset", {}).get("kind", ""),
+        "reference_mode": suite.get("reference", {}).get("mode", ""),
+        "request_count": len(indexed),
+        "subject": subject or "all",
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "generation": generation,
+        "scoring": suite.get("scoring", {}),
+        "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
+    }
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
 def prepare_diffusion_prompt_dataset(
     *,
     dataset_path: Path,
@@ -570,14 +760,19 @@ def prepare_diffusion_prompt_dataset(
             category = str(row.get("Category", "")).strip()
             if subject and category != subject:
                 continue
-            indexed.append((dataset_index, {
-                "sample_id": f"partiprompts_{dataset_index:06d}",
-                "dataset_index": dataset_index,
-                "prompt": prompt,
-                "category": category,
-                "challenge": str(row.get("Challenge", "")).strip(),
-                "note": str(row.get("Note", "")).strip(),
-            }))
+            indexed.append(
+                (
+                    dataset_index,
+                    {
+                        "sample_id": f"partiprompts_{dataset_index:06d}",
+                        "dataset_index": dataset_index,
+                        "prompt": prompt,
+                        "category": category,
+                        "challenge": str(row.get("Challenge", "")).strip(),
+                        "note": str(row.get("Note", "")).strip(),
+                    },
+                )
+            )
 
     if sample_seed is not None:
         rng = random.Random(sample_seed)
@@ -1656,6 +1851,26 @@ def prepare_task_dataset(
         )
     if dataset_kind == "sts_pair_jsonl":
         return prepare_sts_pair_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
+    if dataset_kind == "conditional_text_jsonl":
+        return prepare_conditional_text_jsonl_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
+    if dataset_kind == "unconditional_text_json":
+        return prepare_unconditional_text_dataset(
             dataset_path=dataset_path,
             work_dir=work_dir,
             suite=suite,
@@ -3317,6 +3532,426 @@ def score_tts_intelligibility_predictions(
     }
 
 
+def _aligned_generated_texts(
+    predictions_data: dict[str, Any],
+    answers_data: dict[str, Any],
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
+    responses = predictions_data.get("responses", [])
+    requests = answers_data.get("requests", [])
+    if len(responses) != len(requests):
+        raise ValueError(
+            "Predictions and answers must have the same length: "
+            f"{len(responses)} != {len(requests)}"
+        )
+    predictions: list[str] = []
+    references: list[str] = []
+    samples: list[dict[str, Any]] = []
+    for index, (response, request) in enumerate(zip(responses, requests, strict=True)):
+        expected_id = str(request.get("sample_id", f"conditional_text_{index:06d}"))
+        actual_id = str(response.get("sample_id", expected_id))
+        if actual_id != expected_id:
+            raise ValueError(
+                f"Prediction sample id mismatch at index {index}: {actual_id!r} != {expected_id!r}"
+            )
+        prediction = str(response.get("output_text", "")).strip()
+        reference = str(request.get("answer", "")).strip()
+        predictions.append(prediction)
+        references.append(reference)
+        samples.append(
+            {
+                "index": index,
+                "sample_id": expected_id,
+                "subject": str(request.get("subject", "")),
+                "source_text": str(request.get("source_text", "")),
+                "prediction": prediction,
+                "reference": reference,
+                "non_empty": bool(prediction),
+            }
+        )
+    return predictions, references, samples
+
+
+def score_sacrebleu_predictions(
+    predictions_data: dict[str, Any],
+    answers_data: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        import sacrebleu
+    except Exception as exc:  # pragma: no cover - optional runtime dependency
+        raise RuntimeError(
+            "sacreBLEU scoring requires the task-eval optional dependency: "
+            "pip install 'sacrebleu>=2.4'"
+        ) from exc
+    predictions, references, samples = _aligned_generated_texts(predictions_data, answers_data)
+    non_empty = sum(bool(text) for text in predictions)
+    bleu = sacrebleu.corpus_bleu(predictions, [references]) if predictions else None
+    corpus_bleu = float(bleu.score) if bleu is not None else 0.0
+    return {
+        "mode": "sacrebleu",
+        "corpus_bleu": corpus_bleu,
+        "non_empty_rate": non_empty / len(predictions) if predictions else 0.0,
+        "valid_count": len(predictions),
+        "skipped_count": 0,
+        "bleu": {
+            "brevity_penalty": float(bleu.bp) if bleu is not None else 0.0,
+            "system_length": int(bleu.sys_len) if bleu is not None else 0,
+            "reference_length": int(bleu.ref_len) if bleu is not None else 0,
+            "precisions": [float(value) for value in bleu.precisions] if bleu is not None else [],
+        },
+        "samples": samples,
+    }
+
+
+def _rouge_tokens(text: str) -> list[str]:
+    return re.findall(r"\w+|[^\w\s]", text.lower(), flags=re.UNICODE)
+
+
+def score_rouge_predictions(
+    predictions_data: dict[str, Any],
+    answers_data: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        from rouge_score import rouge_scorer
+    except Exception as exc:  # pragma: no cover - optional runtime dependency
+        raise RuntimeError(
+            "ROUGE scoring requires the task-eval optional dependency: "
+            "pip install 'rouge-score>=0.1.2'"
+        ) from exc
+    predictions, references, samples = _aligned_generated_texts(predictions_data, answers_data)
+    scorer = rouge_scorer.RougeScorer(["rouge1", "rouge2", "rougeL"], use_stemmer=True)
+    rouge1_values: list[float] = []
+    rouge2_values: list[float] = []
+    rouge_l_values: list[float] = []
+    for prediction, reference, sample in zip(predictions, references, samples, strict=True):
+        scores = scorer.score(reference, prediction)
+        sample_scores = {
+            "rouge1": float(scores["rouge1"].fmeasure),
+            "rouge2": float(scores["rouge2"].fmeasure),
+            "rouge_l": float(scores["rougeL"].fmeasure),
+        }
+        rouge1_values.append(sample_scores["rouge1"])
+        rouge2_values.append(sample_scores["rouge2"])
+        rouge_l_values.append(sample_scores["rouge_l"])
+        sample.update(sample_scores)
+    non_empty = sum(bool(text) for text in predictions)
+    return {
+        "mode": "rouge",
+        "rouge1": _mean(rouge1_values),
+        "rouge2": _mean(rouge2_values),
+        "rouge_l": _mean(rouge_l_values),
+        "non_empty_rate": non_empty / len(predictions) if predictions else 0.0,
+        "valid_count": len(predictions),
+        "skipped_count": 0,
+        "samples": samples,
+    }
+
+
+def _generated_token_sequence(response: dict[str, Any], text: str) -> list[Any]:
+    token_ids = response.get("generated_token_ids")
+    if isinstance(token_ids, list) and token_ids:
+        return [int(token_id) for token_id in token_ids]
+    return _rouge_tokens(text)
+
+
+def score_unconditional_text_predictions(
+    predictions_data: dict[str, Any],
+    answers_data: dict[str, Any],
+    *,
+    generation_ppl: float | None = None,
+    unigram_entropy: float | None = None,
+) -> dict[str, Any]:
+    responses = predictions_data.get("responses", [])
+    requests = answers_data.get("requests", [])
+    if len(responses) != len(requests):
+        raise ValueError(
+            "Predictions and requests must have the same length: "
+            f"{len(responses)} != {len(requests)}"
+        )
+    corpus_tokens: list[Any] = []
+    bigrams: list[tuple[Any, Any]] = []
+    samples: list[dict[str, Any]] = []
+    non_empty = 0
+    repeated_tokens = 0
+    total_tokens = 0
+    for index, (response, request) in enumerate(zip(responses, requests, strict=True)):
+        expected_id = str(request.get("sample_id", f"unconditional_{index:06d}"))
+        actual_id = str(response.get("sample_id", expected_id))
+        if actual_id != expected_id:
+            raise ValueError(
+                f"Prediction sample id mismatch at index {index}: {actual_id!r} != {expected_id!r}"
+            )
+        text = str(response.get("output_text", "")).strip()
+        tokens = _generated_token_sequence(response, text)
+        non_empty += int(bool(text))
+        total_tokens += len(tokens)
+        repeated_tokens += len(tokens) - len(set(tokens))
+        corpus_tokens.extend(tokens)
+        bigrams.extend(zip(tokens, tokens[1:]))
+        samples.append(
+            {
+                "index": index,
+                "sample_id": expected_id,
+                "prediction": text,
+                "token_count": len(tokens),
+                "non_empty": bool(text),
+            }
+        )
+    counts = Counter(corpus_tokens)
+    fallback_entropy = 0.0
+    if corpus_tokens:
+        for count in counts.values():
+            probability = count / len(corpus_tokens)
+            fallback_entropy -= probability * math.log(probability)
+    result = {
+        "mode": "unconditional_text_quality",
+        "generation_ppl": generation_ppl,
+        "unigram_entropy": fallback_entropy if unigram_entropy is None else unigram_entropy,
+        "distinct_1": len(counts) / len(corpus_tokens) if corpus_tokens else 0.0,
+        "distinct_2": len(set(bigrams)) / len(bigrams) if bigrams else 0.0,
+        "token_repetition_rate": repeated_tokens / total_tokens if total_tokens else 1.0,
+        "mean_token_count": total_tokens / len(responses) if responses else 0.0,
+        "non_empty_rate": non_empty / len(responses) if responses else 0.0,
+        "valid_count": len(responses),
+        "skipped_count": 0,
+        "samples": samples,
+    }
+    return result
+
+
+def _diffusion_text_sample_token_ids(sample: Any) -> list[int]:
+    if not isinstance(sample, dict):
+        return []
+    value = sample.get("token_ids", sample.get("generated_token_ids", []))
+    if not isinstance(value, list):
+        return []
+    return [int(token_id) for token_id in value]
+
+
+def _first_token_divergence(reference: list[int], actual: list[int]) -> int:
+    for index, (reference_id, actual_id) in enumerate(zip(reference, actual, strict=False)):
+        if reference_id != actual_id:
+            return index
+    return min(len(reference), len(actual))
+
+
+def _diffusion_text_shared_sampling_inputs(row: dict[str, Any]) -> dict[str, str]:
+    explicit = row.get("shared_sampling_inputs", {})
+    if isinstance(explicit, dict) and explicit:
+        return {str(key): str(value) for key, value in explicit.items()}
+    shared_dir = str(row.get("shared_inputs_dir", "") or "")
+    if not shared_dir:
+        return {}
+    root = Path(shared_dir)
+    candidates = {
+        "initial_latents": root / "initial_latents.f32",
+        "sampling_steps": root / "sampling_steps.f32",
+        "sde_noises": root / "sde_noises.f32",
+    }
+    return {key: str(path) for key, path in candidates.items() if path.is_file()}
+
+
+def compare_diffusion_text_prediction_sets(
+    hf_data: dict[str, Any],
+    trtfb_data: dict[str, Any],
+) -> dict[str, Any]:
+    hf_rows = hf_data.get("responses", [])
+    trtfb_rows = trtfb_data.get("responses", [])
+    if len(hf_rows) != len(trtfb_rows):
+        raise ValueError(
+            f"ELF HF/TRTMC prediction count mismatch: hf={len(hf_rows)} trtfb={len(trtfb_rows)}"
+        )
+    text_matches = 0
+    token_matches = 0
+    token_positions = 0
+    text_neds: list[float] = []
+    shared_input_matches = 0
+    samples: list[dict[str, Any]] = []
+    for index, (hf_row, trtfb_row) in enumerate(zip(hf_rows, trtfb_rows, strict=True)):
+        hf_id = str(hf_row.get("sample_id", hf_row.get("id", index)))
+        trtfb_id = str(trtfb_row.get("sample_id", trtfb_row.get("id", index)))
+        if hf_id != trtfb_id:
+            raise ValueError(
+                f"ELF HF/TRTMC sample id mismatch at index {index}: hf={hf_id!r} trtfb={trtfb_id!r}"
+            )
+        hf_text = " ".join(str(hf_row.get("output_text", "")).split()).lower()
+        trtfb_text = " ".join(str(trtfb_row.get("output_text", "")).split()).lower()
+        hf_tokens = _diffusion_text_sample_token_ids(hf_row)
+        trtfb_tokens = _diffusion_text_sample_token_ids(trtfb_row)
+        positions = max(len(hf_tokens), len(trtfb_tokens))
+        matches = sum(left == right for left, right in zip(hf_tokens, trtfb_tokens, strict=False))
+        exact = bool(hf_text) and hf_text == trtfb_text
+        ned = _normalized_edit_distance(trtfb_text, hf_text)
+        hf_shared_inputs = _diffusion_text_shared_sampling_inputs(hf_row)
+        trtfb_shared_inputs = _diffusion_text_shared_sampling_inputs(trtfb_row)
+        shared_inputs_match = bool(hf_shared_inputs) and hf_shared_inputs == trtfb_shared_inputs
+        text_matches += int(exact)
+        token_matches += matches
+        token_positions += positions
+        text_neds.append(ned)
+        shared_input_matches += int(shared_inputs_match)
+        samples.append(
+            {
+                "sample_id": hf_id,
+                "hf_text": hf_text,
+                "trtfb_text": trtfb_text,
+                "normalized_text_exact_match": exact,
+                "text_ned": ned,
+                "token_agreement_rate": matches / positions if positions else 0.0,
+                "first_token_divergence": _first_token_divergence(hf_tokens, trtfb_tokens),
+                "shared_sampling_inputs_match": shared_inputs_match,
+            }
+        )
+    count = len(hf_rows)
+    return {
+        "valid_count": count,
+        "normalized_text_exact_match_rate": text_matches / count if count else 0.0,
+        "token_agreement_rate": token_matches / token_positions if token_positions else 0.0,
+        "mean_text_ned": _mean(text_neds),
+        "max_text_ned": max(text_neds, default=0.0),
+        "shared_sampling_inputs_match_rate": shared_input_matches / count if count else 0.0,
+        "samples": samples,
+    }
+
+
+def diffusion_text_task_metric_deltas(
+    task_metric: str,
+    diagnostics: dict[str, float],
+) -> dict[str, float]:
+    """Return absolute HF/TRTMC deltas for the task-level ELF metrics."""
+    metric_pairs: dict[str, tuple[tuple[str, str, str], ...]] = {
+        "sacrebleu": (("hf_corpus_bleu", "trtfb_corpus_bleu", "corpus_bleu_abs_delta"),),
+        "rouge": (
+            ("hf_rouge1", "trtfb_rouge1", "rouge1_abs_delta"),
+            ("hf_rouge2", "trtfb_rouge2", "rouge2_abs_delta"),
+            ("hf_rouge_l", "trtfb_rouge_l", "rouge_l_abs_delta"),
+        ),
+        "unconditional_text_quality": (
+            ("hf_generation_ppl", "trtfb_generation_ppl", "generation_ppl_abs_delta"),
+            ("hf_unigram_entropy", "trtfb_unigram_entropy", "unigram_entropy_abs_delta"),
+        ),
+    }
+    pairs = metric_pairs.get(task_metric)
+    if pairs is None:
+        raise ValueError(f"Unsupported diffusion-text task metric {task_metric!r}")
+    return {
+        output_key: abs(float(diagnostics[hf_key]) - float(diagnostics[trtfb_key]))
+        for hf_key, trtfb_key, output_key in pairs
+    }
+
+
+def compute_gpt2_generation_metrics(
+    texts: list[str],
+    *,
+    model_id: str,
+    device: str = "cuda",
+    local_files_only: bool = False,
+) -> dict[str, float]:
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError("GPT-2 generation perplexity requires torch and transformers") from exc
+    resolved_device = device if device != "cuda" or torch.cuda.is_available() else "cpu"
+    dtype = torch.float16 if resolved_device.startswith("cuda") else torch.float32
+    tokenizer = AutoTokenizer.from_pretrained(model_id, local_files_only=local_files_only)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id,
+        torch_dtype=dtype,
+        local_files_only=local_files_only,
+    ).to(resolved_device)
+    model.eval()
+    max_length = int(
+        getattr(model.config, "n_positions", 0)
+        or getattr(model.config, "max_position_embeddings", 1024)
+        or 1024
+    )
+    total_nll = 0.0
+    total_tokens = 0
+    sample_entropies: list[float] = []
+    with torch.no_grad():
+        for text in texts:
+            if not text.strip():
+                continue
+            encoded = tokenizer(
+                text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_length,
+            )["input_ids"].to(resolved_device)
+            token_counts = Counter(int(token_id) for token_id in encoded[0].tolist())
+            token_total = sum(token_counts.values())
+            if token_total:
+                sample_entropies.append(
+                    -sum(
+                        (count / token_total) * math.log(count / token_total + 1e-10)
+                        for count in token_counts.values()
+                    )
+                )
+            predicted_tokens = max(0, int(encoded.shape[1]) - 1)
+            if predicted_tokens == 0:
+                continue
+            output = model(input_ids=encoded, labels=encoded)
+            total_nll += float(output.loss.detach().float().cpu()) * predicted_tokens
+            total_tokens += predicted_tokens
+    del model
+    if resolved_device.startswith("cuda"):
+        torch.cuda.empty_cache()
+    if total_tokens == 0:
+        generation_ppl = math.inf
+    else:
+        generation_ppl = math.exp(total_nll / total_tokens)
+    return {
+        "generation_ppl": generation_ppl,
+        "unigram_entropy": _mean(sample_entropies),
+    }
+
+
+def apply_metric_gates(result: dict[str, Any], gates: dict[str, Any]) -> dict[str, Any]:
+    failures: list[dict[str, Any]] = []
+    for gate, required_raw in gates.items():
+        if gate.startswith("min_"):
+            metric = gate[len("min_") :]
+            operator = ">="
+        elif gate.startswith("max_"):
+            metric = gate[len("max_") :]
+            operator = "<="
+        else:
+            continue
+        actual_raw = result.get(metric)
+        required = float(required_raw)
+        if actual_raw is None:
+            failures.append(
+                {
+                    "gate": gate,
+                    "metric": metric,
+                    "actual": None,
+                    "required": required,
+                    "reason": "metric unavailable",
+                }
+            )
+            continue
+        actual = float(actual_raw)
+        passed = actual >= required if operator == ">=" else actual <= required
+        if not passed:
+            failures.append(
+                {
+                    "gate": gate,
+                    "metric": metric,
+                    "actual": actual,
+                    "required": required,
+                }
+            )
+    result["gate_failures"] = failures
+    result["status"] = "failed" if failures else "passed"
+    if failures:
+        result["error_type"] = "BenchmarkGateError"
+        result["error"] = "; ".join(
+            f"{failure['gate']} actual={failure['actual']} required={failure['required']}"
+            for failure in failures
+        )
+    return result
+
+
 def score_predictions(
     predictions_data: dict[str, Any],
     answers_data: dict[str, Any],
@@ -3331,6 +3966,12 @@ def score_predictions(
         return score_asr_transcript_predictions(predictions_data, answers_data)
     if scorer == "tts_intelligibility":
         return score_tts_intelligibility_predictions(predictions_data, answers_data)
+    if scorer == "sacrebleu":
+        return score_sacrebleu_predictions(predictions_data, answers_data)
+    if scorer == "rouge":
+        return score_rouge_predictions(predictions_data, answers_data)
+    if scorer == "unconditional_text_quality":
+        return score_unconditional_text_predictions(predictions_data, answers_data)
 
     responses = predictions_data.get("responses", [])
     requests = answers_data.get("requests", [])
@@ -3566,10 +4207,13 @@ def write_diffusion_visual_review(
     cards = []
     for sample in samples:
         questions = sample.get("questions", [])
-        question_items = "".join(
-            f"<li>{html.escape(str(question.get('question', question)))}</li>"
-            for question in questions
-        ) or "<li>No proposition questions provided.</li>"
+        question_items = (
+            "".join(
+                f"<li>{html.escape(str(question.get('question', question)))}</li>"
+                for question in questions
+            )
+            or "<li>No proposition questions provided.</li>"
+        )
         metrics = sample.get("metrics", {})
         metric_rows = "".join(
             "<tr>"
@@ -3930,6 +4574,10 @@ def _is_asr_dataset_kind(kind: str) -> bool:
 
 def _is_diffusion_media_dataset_kind(kind: str) -> bool:
     return kind in {"diffusion_prompt_tsv", "diffusion_prompt_json"}
+
+
+def _is_diffusion_text_dataset_kind(kind: str) -> bool:
+    return kind in {"conditional_text_jsonl", "unconditional_text_json"}
 
 
 def _is_tts_dataset_kind(kind: str) -> bool:
@@ -5068,6 +5716,9 @@ def run_hf_reference(args: argparse.Namespace) -> None:
     if _is_encoder_embedding_dataset_kind(dataset_kind):
         run_encoder_embedding_hf_reference(args)
         return
+    if _is_diffusion_text_dataset_kind(dataset_kind):
+        run_diffusion_text_hf_reference(args)
+        return
     if _is_tts_dataset_kind(dataset_kind):
         run_tts_hf_reference(args)
         return
@@ -5243,6 +5894,232 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
                 file=sys.stderr,
             )
     write_predictions(pred_path, responses)
+
+
+_ELF_REPLAY_INPUT_KEYS = {
+    "elf_replay_artifact",
+    "upstream_replay_artifact",
+    "initial_latents_raw",
+    "initial_latents_path",
+    "condition_latents_raw",
+    "condition_latents_path",
+    "condition_mask_raw",
+    "condition_mask_path",
+    "sampling_steps_raw",
+    "sampling_steps_path",
+    "sde_noise_raw",
+    "sde_noise_path",
+    "expected_generated_jsonl_path",
+    "expected_jsonl_path",
+    "expected_generated_samples",
+    "replay_samples",
+}
+
+
+def _load_diffusion_text_task_eval_runner(work_dir: Path) -> tuple[Any, Any]:
+    task_eval_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        task_eval_config = {}
+    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+    if not manifest_ref:
+        raise ValueError("diffusion text task eval requires task_eval.model_manifest")
+    manifest_path = Path(manifest_ref)
+    if not manifest_path.is_absolute():
+        manifest_path = REPO_ROOT / manifest_path
+    case = load_manifest(manifest_path)
+    activate_model_plugins(str(case.metadata.get("model_test_dir", "") or ""))
+    runner = get_runner(case.task_strategy)
+    if runner is None:
+        raise RuntimeError(f"No runner plugin {case.task_strategy!r} for {case.family}")
+    return case, runner
+
+
+def run_diffusion_text_trtfb(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext, StageSpec
+
+    work_dir = Path(args.work_dir)
+    template, runner = _load_diffusion_text_task_eval_runner(work_dir)
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    generation = generation_defaults(work_dir)
+    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    bundle_path = Path(args.bundle).resolve()
+    base_seed = int(generation.get("seed", 42))
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_file:
+        for index, prompt_row in enumerate(prompt_rows):
+            case = copy.deepcopy(template)
+            for key in _ELF_REPLAY_INPUT_KEYS:
+                case.inputs.pop(key, None)
+            sample_id = str(prompt_row.get("sample_id", f"diffusion_text_{index:06d}"))
+            source_text = str(prompt_row.get("source_text", prompt_row.get("prompt", "")))
+            dataset_index = int(prompt_row.get("dataset_index", index))
+            case.name = sample_id
+            case.bundle = bundle_path.name
+            case.inputs.update(generation)
+            case.inputs.update(
+                {
+                    "prompt": source_text,
+                    "source_text": source_text,
+                    "num_samples": 1,
+                    "seed": int(prompt_row.get("seed", base_seed + dataset_index)),
+                }
+            )
+            shared_dir = work_dir / "hf_shared_inputs" / sample_id
+            initial_latents = shared_dir / "initial_latents.f32"
+            sampling_steps = shared_dir / "sampling_steps.f32"
+            sde_noises = shared_dir / "sde_noises.f32"
+            missing = [
+                str(path) for path in (initial_latents, sampling_steps) if not path.is_file()
+            ]
+            if str(generation.get("sampling_method", "ode")) == "sde" and not sde_noises.is_file():
+                missing.append(str(sde_noises))
+            if missing:
+                raise RuntimeError(
+                    "ELF TRTMC parity requires HF-exported shared sampling inputs; missing "
+                    + ", ".join(missing)
+                )
+            case.inputs["initial_latents_raw"] = str(initial_latents)
+            case.inputs["sampling_steps_raw"] = str(sampling_steps)
+            shared_sampling_inputs = {
+                "initial_latents": str(initial_latents),
+                "sampling_steps": str(sampling_steps),
+            }
+            if sde_noises.is_file():
+                case.inputs["sde_noise_raw"] = str(sde_noises)
+                shared_sampling_inputs["sde_noises"] = str(sde_noises)
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                binary_path=str(args.trtmc_binary),
+                hf_python=str(getattr(args, "hf_python", "") or ""),
+                runtime_python=str(getattr(args, "hf_python", "") or ""),
+                engine_dir=str(bundle_path.parent),
+                model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
+            )
+            output = runner.run_stage(case, StageSpec(name="decoded_text", required=True), context)
+            generated_samples = output.data.get("generated_samples", [])
+            generated = generated_samples[0] if generated_samples else {}
+            output_text = str(
+                generated.get("generated", "") if isinstance(generated, dict) else output.text or ""
+            ).strip()
+            token_ids = (
+                generated.get("token_ids")
+                if isinstance(generated, dict) and isinstance(generated.get("token_ids"), list)
+                else []
+            )
+            response = {
+                "sample_id": sample_id,
+                "output_text": output_text,
+                "generated_token_ids": [int(token_id) for token_id in token_ids],
+                "wall_ms": float(output.timing_s) * 1000.0,
+                "source": "trtfb",
+                "seed": case.inputs["seed"],
+                "shared_sampling_inputs": shared_sampling_inputs,
+            }
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            print(
+                f"[task_eval.diffusion_text_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
+def run_diffusion_text_hf_reference(args: argparse.Namespace) -> None:
+    work_dir = Path(args.work_dir)
+    manifest = work_manifest(work_dir)
+    task_config = manifest.get("task_eval", {})
+    task_config = task_config if isinstance(task_config, dict) else {}
+    reference = task_config.get("reference", {})
+    reference = reference if isinstance(reference, dict) else {}
+    reference_repo = str(getattr(args, "elf_reference_repo", "") or "")
+    if not reference_repo:
+        raise ValueError("ELF HF reference requires --elf-reference-repo")
+    config_value = str(reference.get("config", "") or "")
+    checkpoint = str(reference.get("checkpoint", args.model) or args.model)
+    if not config_value:
+        raise ValueError("ELF HF reference requires reference.config in the suite")
+    config_path = Path(config_value)
+    if not config_path.is_absolute():
+        config_path = Path(reference_repo) / config_path
+
+    prompts = load_jsonl(work_dir / "prompts.jsonl")
+    answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
+    requests = answers.get("requests", [])
+    if len(prompts) != len(requests):
+        raise ValueError("ELF HF reference prompt/answer count mismatch")
+    reference_dataset = work_dir / "hf_reference_dataset.jsonl"
+    with reference_dataset.open("w", encoding="utf-8") as output:
+        for prompt, request in zip(prompts, requests, strict=True):
+            output.write(
+                json.dumps(
+                    {
+                        "id": str(prompt.get("sample_id", "")),
+                        "input": str(prompt.get("source_text", prompt.get("prompt", ""))),
+                        "output": str(request.get("answer", "")),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    generation = generation_defaults(work_dir)
+    output_path = work_dir / (args.predictions or "hf_predictions.json")
+    cmd = [
+        sys.executable,
+        str(REPO_ROOT / "tools" / "elf_hf_reference.py"),
+        "--reference-repo",
+        reference_repo,
+        "--config",
+        str(config_path),
+        "--checkpoint",
+        checkpoint,
+        "--dataset",
+        str(reference_dataset),
+        "--output",
+        str(output_path),
+        "--shared-inputs-dir",
+        str(work_dir / "hf_shared_inputs"),
+        "--generation-mode",
+        str(generation.get("generation_mode", "conditional")),
+        "--sampling-method",
+        str(generation.get("sampling_method", "ode")),
+        "--num-steps",
+        str(generation.get("num_sampling_steps", 64)),
+        "--cfg-scale",
+        str(generation.get("cfg_scale", 1.0)),
+        "--self-cond-cfg-scale",
+        str(generation.get("self_cond_cfg_scale", 1.0)),
+        "--sde-gamma",
+        str(generation.get("sde_gamma", 0.0)),
+        "--seed",
+        str(generation.get("seed", 42)),
+    ]
+    if args.local_files_only:
+        cmd.append("--local-files-only")
+    result = subprocess.run(
+        cmd,
+        check=False,
+        text=True,
+        capture_output=True,
+        cwd=reference_repo,
+    )
+    (work_dir / "hf_reference_stdout.log").write_text(result.stdout, encoding="utf-8")
+    (work_dir / "hf_reference_stderr.log").write_text(result.stderr, encoding="utf-8")
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ELF HF reference failed rc={result.returncode}; "
+            f"see {work_dir / 'hf_reference_stderr.log'}"
+        )
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    with raw_path.open("w", encoding="utf-8") as raw_file:
+        for row in payload.get("responses", []):
+            raw_file.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def _runtime_config_tokens(config: dict[str, Any], prefix: str = "") -> list[str]:
@@ -5456,6 +6333,9 @@ def run_trtfb(args: argparse.Namespace) -> None:
         return
     if _is_diffusion_media_dataset_kind(dataset_kind):
         run_diffusion_trtfb(args)
+        return
+    if _is_diffusion_text_dataset_kind(dataset_kind):
+        run_diffusion_text_trtfb(args)
         return
     defaults = generation_defaults(work_dir)
     raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
@@ -5755,6 +6635,7 @@ def _namespace_for_run_hf(
         top_p=args.top_p,
         min_p=args.min_p,
         seed=args.seed,
+        elf_reference_repo=getattr(args, "elf_reference_repo", ""),
     )
 
 
@@ -5842,6 +6723,8 @@ def run_hf_reference_subprocess(
         cmd.append("--do-sample")
     if hf_args.apply_chat_template:
         cmd.append("--apply-chat-template")
+    if hf_args.elf_reference_repo:
+        cmd.extend(["--elf-reference-repo", str(hf_args.elf_reference_repo)])
     for flag, value in (
         ("--max-new-tokens", hf_args.max_new_tokens),
         ("--temperature", hf_args.temperature),
@@ -6071,8 +6954,15 @@ def eval_one_model(
         raise ValueError(f"Suite {suite['id']} has no dataset path; pass --dataset")
     scorer = str(suite.get("scoring", {}).get("scorer", "mcq"))
     dataset_kind = str(suite.get("dataset", {}).get("kind", ""))
-    reference_backend = str(model.get("reference_backend", "hf_transformers") or "hf_transformers")
+    reference_mode = str(suite.get("reference", {}).get("mode", "") or "")
+    no_hf_reference = reference_mode in {"gold_only", "metric_only"}
+    reference_backend = reference_mode or str(
+        model.get("reference_backend", "hf_transformers") or "hf_transformers"
+    )
     task_eval_config = effective_task_eval_config(suite, model)
+    suite_reference = suite.get("reference", {})
+    if isinstance(suite_reference, dict) and suite_reference:
+        task_eval_config["reference"] = suite_reference
     if model.get("manifest"):
         task_eval_config["model_manifest"] = str(model["manifest"])
     if model.get("family"):
@@ -6119,11 +7009,12 @@ def eval_one_model(
         prompt_normalization and prompt_normalization.get("truncated_count", 0)
     )
     hf_reused = (
-        predictions_file_valid(hf_predictions, answers_path)
+        not no_hf_reference
+        and predictions_file_valid(hf_predictions, answers_path)
         and not args.force_hf
         and not prompts_changed
     )
-    if not hf_reused:
+    if not no_hf_reference and not hf_reused:
         # Run HF in its own process so its GPU memory is fully reclaimed before
         # the TRT bundle build and TRTFB inference for this model.
         run_hf_reference_subprocess(args, model, work_dir)
@@ -6141,6 +7032,7 @@ def eval_one_model(
         not args.skip_prompt_length_check
         and not _is_asr_dataset_kind(dataset_kind)
         and not _is_diffusion_media_dataset_kind(dataset_kind)
+        and not _is_diffusion_text_dataset_kind(dataset_kind)
         and not _is_tts_dataset_kind(dataset_kind)
     ):
         prompt_rows_path = work_dir / "prompts.jsonl"
@@ -6197,7 +7089,11 @@ def eval_one_model(
         "build_max_cache_length": max_cache_length,
         "max_prompt_tokens": max_prompt_len,
         "reference_backend": reference_backend,
-        "hf_reference_status": "reused" if hf_reused else "ran",
+        "hf_reference_status": reference_mode
+        if no_hf_reference
+        else "reused"
+        if hf_reused
+        else "ran",
         "hf_reused": hf_reused,
         "bundle_built": built,
         "model_plugin_dir": str(getattr(args, "model_plugin_dir", "") or ""),
@@ -6233,6 +7129,107 @@ def eval_one_model(
             "hf_sts_spearman": summary["hf_sts_spearman"],
             "trtfb_sts_spearman": summary["trtfb_sts_spearman"],
         }
+    elif scorer == "diffusion_text_parity":
+        hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        summary = compare_diffusion_text_prediction_sets(hf_data, trtfb_data)
+        task_metric = str(suite.get("scoring", {}).get("task_metric", "") or "")
+        answers_data = json.loads(answers_path.read_text(encoding="utf-8"))
+        diagnostics: dict[str, Any] = {}
+        if task_metric == "sacrebleu":
+            for label, data in (("hf", hf_data), ("trtfb", trtfb_data)):
+                score = score_sacrebleu_predictions(data, answers_data)
+                diagnostics[f"{label}_corpus_bleu"] = score["corpus_bleu"]
+        elif task_metric == "rouge":
+            for label, data in (("hf", hf_data), ("trtfb", trtfb_data)):
+                score = score_rouge_predictions(data, answers_data)
+                diagnostics[f"{label}_rouge1"] = score["rouge1"]
+                diagnostics[f"{label}_rouge2"] = score["rouge2"]
+                diagnostics[f"{label}_rouge_l"] = score["rouge_l"]
+        elif task_metric == "unconditional_text_quality":
+            scoring = suite.get("scoring", {})
+            perplexity_model = str(scoring.get("perplexity_model", "") or "")
+            for label, data in (("hf", hf_data), ("trtfb", trtfb_data)):
+                texts = [str(row.get("output_text", "")) for row in data.get("responses", [])]
+                metrics = compute_gpt2_generation_metrics(
+                    texts,
+                    model_id=perplexity_model,
+                    device=str(scoring.get("perplexity_device", "cuda") or "cuda"),
+                    local_files_only=args.local_files_only,
+                )
+                diagnostics[f"{label}_generation_ppl"] = metrics["generation_ppl"]
+                diagnostics[f"{label}_unigram_entropy"] = metrics["unigram_entropy"]
+        diagnostics.update(diffusion_text_task_metric_deltas(task_metric, diagnostics))
+        summary["task_quality_diagnostics"] = diagnostics
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        result = {
+            **base_result,
+            "mode": scorer,
+            "valid_count": summary["valid_count"],
+            "normalized_text_exact_match_rate": summary["normalized_text_exact_match_rate"],
+            "token_agreement_rate": summary["token_agreement_rate"],
+            "mean_text_ned": summary["mean_text_ned"],
+            "max_text_ned": summary["max_text_ned"],
+            "shared_sampling_inputs_match_rate": summary["shared_sampling_inputs_match_rate"],
+            **diagnostics,
+        }
+        apply_metric_gates(result, suite.get("gates", {}))
+    elif scorer in {"sacrebleu", "rouge", "unconditional_text_quality"} and no_hf_reference:
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        answers_data = json.loads(answers_path.read_text(encoding="utf-8"))
+        if scorer == "sacrebleu":
+            summary = score_sacrebleu_predictions(trtfb_data, answers_data)
+            metric_names = ("corpus_bleu", "non_empty_rate", "valid_count", "skipped_count")
+        elif scorer == "rouge":
+            summary = score_rouge_predictions(trtfb_data, answers_data)
+            metric_names = (
+                "rouge1",
+                "rouge2",
+                "rouge_l",
+                "non_empty_rate",
+                "valid_count",
+                "skipped_count",
+            )
+        else:
+            scoring = suite.get("scoring", {})
+            perplexity_model = str(scoring.get("perplexity_model", "") or "")
+            generation_metrics: dict[str, float] = {}
+            if perplexity_model:
+                generation_metrics = compute_gpt2_generation_metrics(
+                    [str(row.get("output_text", "")) for row in trtfb_data.get("responses", [])],
+                    model_id=perplexity_model,
+                    device=str(scoring.get("perplexity_device", "cuda") or "cuda"),
+                    local_files_only=args.local_files_only,
+                )
+            summary = score_unconditional_text_predictions(
+                trtfb_data,
+                answers_data,
+                generation_ppl=generation_metrics.get("generation_ppl"),
+                unigram_entropy=generation_metrics.get("unigram_entropy"),
+            )
+            metric_names = (
+                "generation_ppl",
+                "unigram_entropy",
+                "distinct_1",
+                "distinct_2",
+                "token_repetition_rate",
+                "mean_token_count",
+                "non_empty_rate",
+                "valid_count",
+                "skipped_count",
+            )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        write_diffusion_text_summary_markdown(summary, work_dir / "summary.md")
+        result = {
+            **base_result,
+            "mode": scorer,
+            **{name: summary.get(name) for name in metric_names},
+        }
+        apply_metric_gates(result, suite.get("gates", {}))
     elif scorer == "continuation":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
@@ -6532,6 +7529,36 @@ def write_diffusion_summary_markdown(summary: dict[str, Any], path: Path) -> Non
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_diffusion_text_summary_markdown(summary: dict[str, Any], path: Path) -> None:
+    lines = [
+        "# Diffusion Text Task Evaluation Summary",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+    ]
+    for metric in (
+        "corpus_bleu",
+        "rouge1",
+        "rouge2",
+        "rouge_l",
+        "generation_ppl",
+        "unigram_entropy",
+        "distinct_1",
+        "distinct_2",
+        "token_repetition_rate",
+        "mean_token_count",
+        "non_empty_rate",
+        "valid_count",
+        "skipped_count",
+    ):
+        if metric not in summary or summary[metric] is None:
+            continue
+        value = summary[metric]
+        rendered = str(value) if isinstance(value, int) else f"{float(value):.4f}"
+        lines.append(f"| {metric} | {rendered} |")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
     common = f"hf_reused={result['hf_reused']} bundle_built={result['bundle_built']}"
     if result.get("mode") == "encoder_embedding_parity":
@@ -6552,6 +7579,41 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
         return (
             f"model={model['name']} pass_rate={result['overall_pass_rate']:.4f} "
             f"passed={result['passed_count']}/{result['valid_count']} {common}"
+        )
+    if result.get("mode") == "diffusion_text_parity":
+        delta_fields = (
+            "corpus_bleu_abs_delta",
+            "rouge1_abs_delta",
+            "generation_ppl_abs_delta",
+        )
+        delta = next(
+            (f"{name}={float(result[name]):.4f}" for name in delta_fields if name in result),
+            "task_metric_delta=unavailable",
+        )
+        return (
+            f"model={model['name']} {delta} text_agreement="
+            f"{result['normalized_text_exact_match_rate']:.4f} "
+            f"token_agreement={result['token_agreement_rate']:.4f} "
+            f"max_text_ned={result['max_text_ned']:.4f} "
+            f"status={result.get('status', '')} {common}"
+        )
+    if result.get("mode") == "sacrebleu":
+        return (
+            f"model={model['name']} bleu={result['corpus_bleu']:.4f} "
+            f"non_empty={result['non_empty_rate']:.4f} status={result.get('status', '')} {common}"
+        )
+    if result.get("mode") == "rouge":
+        return (
+            f"model={model['name']} rouge1={result['rouge1']:.4f} "
+            f"rouge2={result['rouge2']:.4f} rougeL={result['rouge_l']:.4f} "
+            f"status={result.get('status', '')} {common}"
+        )
+    if result.get("mode") == "unconditional_text_quality":
+        ppl = _format_optional_float(result.get("generation_ppl"), precision=2)
+        return (
+            f"model={model['name']} gen_ppl={ppl} "
+            f"entropy={result['unigram_entropy']:.4f} "
+            f"status={result.get('status', '')} {common}"
         )
     return (
         f"model={model['name']} hf={result['hf_accuracy']:.4f} "
@@ -6626,6 +7688,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--local-files-only", action="store_true")
     p.add_argument("--do-sample", action="store_true")
     p.add_argument("--apply-chat-template", action="store_true")
+    p.add_argument("--elf-reference-repo", default="")
     add_generation_args(p)
 
     p = sub.add_parser("run-trtfb")
@@ -6735,6 +7798,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--trtmc-binary", default="build/trtmc")
     p.add_argument("--benchmark-binary", default="build/trtmc_dataset_benchmark")
     p.add_argument("--hf-python", default="")
+    p.add_argument("--elf-reference-repo", default="")
     p.add_argument("--backend-dir", default="")
     p.add_argument("--model-plugin-dir", default="")
     p.add_argument("--kv-cache-size", default="")
@@ -7108,6 +8172,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
         "asr_chat_json",
         "diffusion_prompt_tsv",
         "diffusion_prompt_json",
+        "conditional_text_jsonl",
+        "unconditional_text_json",
         "seedtts_json",
         "sts_pair_jsonl",
     }:

@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import struct
+import sys
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -3778,3 +3780,329 @@ def test_eval_stops_after_oom_when_gpu_cleanup_is_not_confirmed(
     assert summary["model_process_isolation"] is True
     assert summary["results"][1]["status"] == "skipped"
     assert "GPU cleanup" in summary["results"][1]["reason"]
+
+
+def _write_conditional_text_jsonl(path: Path) -> None:
+    rows = [
+        {"id": "sample-1", "input": "Quelle eins", "output": "Reference one", "subset": "test"},
+        {"id": "sample-2", "input": "Quelle zwei", "output": "Reference two", "subset": "test"},
+    ]
+    path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def _write_unconditional_text_requests(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "dataset": "ELF OpenWebText generation",
+                "requests": [
+                    {"id": "owt-0", "seed": 42},
+                    {"id": "owt-1", "seed": 43},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize(
+    ("suite_id", "dataset_kind", "model_name", "task_metric"),
+    [
+        ("wmt14_de_en_elf_diffusion_text", "conditional_text_jsonl", "elf-b-de-en-l0", "sacrebleu"),
+        ("xsum_elf_diffusion_text", "conditional_text_jsonl", "elf-b-xsum-l0", "rouge"),
+        (
+            "openwebtext_elf_diffusion_text",
+            "unconditional_text_json",
+            "elf-b-owt-l0",
+            "unconditional_text_quality",
+        ),
+    ],
+)
+def test_default_suites_include_elf_diffusion_text_tasks(
+    suite_id: str, dataset_kind: str, model_name: str, task_metric: str
+) -> None:
+    suites = task_eval.load_suites()
+    suite = task_eval.suite_by_id(suites, suite_id)
+    models = task_eval.load_manifest_records()
+    selected = task_eval.selected_models_for_suite(suite, models)
+
+    assert suite["dataset"]["kind"] == dataset_kind
+    assert suite["selectors"]["model_names"] == [model_name]
+    assert suite["selectors"]["task_strategies"] == ["diffusion_text_generation"]
+    assert [model["name"] for model in selected] == [model_name]
+    assert suite["reference"]["mode"] == "hf_elf_torch"
+    assert suite["reference"]["checkpoint"].endswith("-torch")
+    assert suite["scoring"]["scorer"] == "diffusion_text_parity"
+    assert suite["scoring"]["task_metric"] == task_metric
+    assert "parity" not in suite
+
+
+def test_prepare_conditional_text_dataset_preserves_sources_and_gold(tmp_path: Path) -> None:
+    dataset = tmp_path / "conditional.jsonl"
+    _write_conditional_text_jsonl(dataset)
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "wmt14_de_en_elf_diffusion_text")
+
+    outputs = task_eval.prepare_conditional_text_jsonl_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+    )
+
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+    assert answers["requests"][0]["answer"] == "Reference one"
+    assert prompts[0]["source_text"] == "Quelle eins"
+    assert prompts[0]["sample_id"] == "sample-1"
+    assert manifest["reference_mode"] == "hf_elf_torch"
+    assert manifest["generation"]["num_sampling_steps"] == 64
+
+
+def test_prepare_unconditional_text_dataset_preserves_request_seeds(tmp_path: Path) -> None:
+    dataset = tmp_path / "owt.json"
+    _write_unconditional_text_requests(dataset)
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "openwebtext_elf_diffusion_text")
+
+    outputs = task_eval.prepare_unconditional_text_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+    )
+
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    assert [(row["sample_id"], row["seed"], row["prompt"]) for row in prompts] == [
+        ("owt-0", 42, ""),
+        ("owt-1", 43, ""),
+    ]
+
+
+def test_diffusion_text_runner_replaces_e2e_replay_with_hf_shared_inputs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_kind": "conditional_text_jsonl",
+                "generation": {"num_sampling_steps": 64, "seed": 42},
+                "task_eval": {"model_manifest": "unused.json"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps(
+            {
+                "sample_id": "sample-1",
+                "dataset_index": 7,
+                "source_text": "Der echte Eingabetext.",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    shared_dir = work_dir / "hf_shared_inputs" / "sample-1"
+    shared_dir.mkdir(parents=True)
+    (shared_dir / "initial_latents.f32").write_bytes(b"latents")
+    (shared_dir / "sampling_steps.f32").write_bytes(b"steps")
+    template = SimpleNamespace(
+        name="template",
+        bundle="template.trtfb",
+        inputs={
+            "elf_replay_artifact": "fixed-replay.json",
+            "condition_latents_raw": "fixed-condition.f32",
+            "initial_latents_raw": "fixed-initial.f32",
+            "expected_generated_samples": [{"generated": "fixed"}],
+        },
+    )
+    captured_inputs: list[dict] = []
+
+    class FakeRunner:
+        def run_stage(self, case, stage, context):
+            captured_inputs.append(dict(case.inputs))
+            return SimpleNamespace(
+                data={"generated_samples": [{"generated": "Real output", "token_ids": [1, 2]}]},
+                text="Real output",
+                timing_s=0.01,
+            )
+
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_text_task_eval_runner",
+        lambda _work_dir: (template, FakeRunner()),
+    )
+
+    task_eval.run_diffusion_text_trtfb(
+        SimpleNamespace(
+            work_dir=str(work_dir),
+            raw_output="",
+            predictions="",
+            bundle=str(tmp_path / "elf.trtfb"),
+            trtmc_binary="trtmc",
+            hf_python="python",
+            model_plugin_dir="",
+        )
+    )
+
+    assert captured_inputs[0]["source_text"] == "Der echte Eingabetext."
+    assert captured_inputs[0]["seed"] == 49
+    assert "elf_replay_artifact" not in captured_inputs[0]
+    assert "condition_latents_raw" not in captured_inputs[0]
+    assert "expected_generated_samples" not in captured_inputs[0]
+    assert captured_inputs[0]["initial_latents_raw"] == str(shared_dir / "initial_latents.f32")
+    assert captured_inputs[0]["sampling_steps_raw"] == str(shared_dir / "sampling_steps.f32")
+
+
+def test_diffusion_text_scores_gold_and_unconditional_quality(monkeypatch) -> None:
+    predictions = {
+        "responses": [
+            {"sample_id": "a", "output_text": "the cat sat", "generated_token_ids": [1, 2, 3]},
+            {"sample_id": "b", "output_text": "a cat sat", "generated_token_ids": [1, 2, 2]},
+        ]
+    }
+    answers = {
+        "requests": [
+            {"sample_id": "a", "answer": "the cat sat"},
+            {"sample_id": "b", "answer": "the cat slept"},
+        ]
+    }
+    fake_bleu = SimpleNamespace(
+        score=31.5, bp=0.9, sys_len=6, ref_len=6, precisions=[50.0, 25.0, 0.0, 0.0]
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sacrebleu",
+        SimpleNamespace(corpus_bleu=lambda hypotheses, references: fake_bleu),
+    )
+
+    class FakeRougeScorer:
+        def __init__(self, metrics, use_stemmer):
+            assert metrics == ["rouge1", "rouge2", "rougeL"]
+            assert use_stemmer is True
+
+        def score(self, reference, prediction):
+            return {
+                "rouge1": SimpleNamespace(fmeasure=0.75),
+                "rouge2": SimpleNamespace(fmeasure=0.50),
+                "rougeL": SimpleNamespace(fmeasure=0.625),
+            }
+
+    monkeypatch.setitem(
+        sys.modules,
+        "rouge_score",
+        SimpleNamespace(rouge_scorer=SimpleNamespace(RougeScorer=FakeRougeScorer)),
+    )
+
+    bleu = task_eval.score_sacrebleu_predictions(predictions, answers)
+    rouge = task_eval.score_rouge_predictions(predictions, answers)
+    quality = task_eval.score_unconditional_text_predictions(
+        predictions,
+        {"requests": [{"sample_id": "a"}, {"sample_id": "b"}]},
+        generation_ppl=24.1,
+        unigram_entropy=5.15,
+    )
+
+    assert bleu["corpus_bleu"] == 31.5
+    assert bleu["non_empty_rate"] == 1.0
+    assert rouge["rouge1"] > rouge["rouge2"]
+    assert rouge["rouge_l"] == 0.625
+    assert quality["generation_ppl"] == 24.1
+    assert quality["unigram_entropy"] == 5.15
+    assert quality["distinct_1"] == 0.5
+
+
+def test_diffusion_text_hf_parity_uses_normalized_text_and_token_agreement() -> None:
+    result = task_eval.compare_diffusion_text_prediction_sets(
+        {
+            "responses": [
+                {
+                    "sample_id": "sample",
+                    "output_text": "Change Good",
+                    "generated_token_ids": [483, 1804],
+                    "shared_sampling_inputs": {"initial_latents": "/tmp/shared.f32"},
+                }
+            ]
+        },
+        {
+            "responses": [
+                {
+                    "sample_id": "sample",
+                    "output_text": "change  good",
+                    "generated_token_ids": [5968, 1804],
+                    "shared_sampling_inputs": {"initial_latents": "/tmp/shared.f32"},
+                }
+            ]
+        },
+    )
+
+    assert result["normalized_text_exact_match_rate"] == 1.0
+    assert result["token_agreement_rate"] == 0.5
+    assert result["mean_text_ned"] == 0.0
+    assert result["shared_sampling_inputs_match_rate"] == 1.0
+
+
+@pytest.mark.parametrize(
+    ("task_metric", "diagnostics", "expected"),
+    [
+        (
+            "sacrebleu",
+            {"hf_corpus_bleu": 26.4, "trtfb_corpus_bleu": 26.1},
+            {"corpus_bleu_abs_delta": pytest.approx(0.3)},
+        ),
+        (
+            "rouge",
+            {
+                "hf_rouge1": 0.36,
+                "trtfb_rouge1": 0.355,
+                "hf_rouge2": 0.122,
+                "trtfb_rouge2": 0.120,
+                "hf_rouge_l": 0.278,
+                "trtfb_rouge_l": 0.281,
+            },
+            {
+                "rouge1_abs_delta": pytest.approx(0.005),
+                "rouge2_abs_delta": pytest.approx(0.002),
+                "rouge_l_abs_delta": pytest.approx(0.003),
+            },
+        ),
+        (
+            "unconditional_text_quality",
+            {
+                "hf_generation_ppl": 24.2,
+                "trtfb_generation_ppl": 23.9,
+                "hf_unigram_entropy": 5.12,
+                "trtfb_unigram_entropy": 5.10,
+            },
+            {
+                "generation_ppl_abs_delta": pytest.approx(0.3),
+                "unigram_entropy_abs_delta": pytest.approx(0.02),
+            },
+        ),
+    ],
+)
+def test_diffusion_text_task_metric_deltas(
+    task_metric: str,
+    diagnostics: dict[str, float],
+    expected: dict[str, float],
+) -> None:
+    assert task_eval.diffusion_text_task_metric_deltas(task_metric, diagnostics) == expected
+
+
+def test_metric_gates_fail_on_missing_or_out_of_range_metrics() -> None:
+    result = {"corpus_bleu": 19.0, "non_empty_rate": 1.0}
+
+    task_eval.apply_metric_gates(
+        result,
+        {"min_corpus_bleu": 20.0, "min_non_empty_rate": 0.99, "max_generation_ppl": 40.0},
+    )
+
+    assert result["status"] == "failed"
+    assert [failure["gate"] for failure in result["gate_failures"]] == [
+        "min_corpus_bleu",
+        "max_generation_ppl",
+    ]

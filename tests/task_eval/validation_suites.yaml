@@ -651,9 +651,158 @@ suites:
       xlnet-base:
         gates:
           min_vector_cosine: 0.95
+  - id: wmt14_de_en_elf_diffusion_text
+    description: >
+      HF-versus-TRTMC parity evaluation for ELF-B translation on WMT14
+      German-to-English. Both backends consume shared diffusion sampling
+      inputs, and agreement is gated on their corpus sacreBLEU delta.
+    user_contract: diffusion_text_generation
+    default_model_names:
+      - elf-b-de-en-l0
+    dataset:
+      kind: conditional_text_jsonl
+      name: WMT14 De-En test
+      default_path: /mnt/data/WMT14_de_en/wmt14_de_en_test.jsonl
+      source_field: input
+      answer_field: output
+      subject_field: subset
+      sample_prefix: wmt14_de_en
+    selectors:
+      model_names:
+        - elf-b-de-en-l0
+      task_strategies:
+        - diffusion_text_generation
+      runtime_strategies:
+        - elf_flow
+      families:
+        - elf_flow
+    reference:
+      mode: hf_elf_torch
+      checkpoint: embedded-language-flows/ELF-B-de-en-torch
+      config: src/configs/training_configs/train_de-en_ELF-B.yml
+    generation:
+      generation_mode: conditional
+      sampling_method: ode
+      num_sampling_steps: 64
+      cfg_scale: 2.0
+      self_cond_cfg_scale: 1.0
+      sde_gamma: 0.0
+      seed: 42
+    scoring:
+      scorer: diffusion_text_parity
+      task_metric: sacrebleu
+    gates:
+      # The official PyTorch port allows <0.5 BLEU point sampling/numeric drift.
+      # Exact text/token agreement remains diagnostic for divergence triage.
+      max_corpus_bleu_abs_delta: 0.5
+      min_shared_sampling_inputs_match_rate: 1.0
     ci:
       eligible: false
       lane: local_only
       notes: >
         GPU bundle builds and the complete 19-model matrix are validated
         outside premerge CI; small --limit slices are smoke tests only.
+        P2021-only until the full WMT14 test baseline is reproduced and
+        calibrated against the official ELF evaluator.
+
+  - id: xsum_elf_diffusion_text
+    description: >
+      HF-versus-TRTMC parity evaluation for ELF-B summarization on XSum. Both
+      backends consume shared diffusion sampling inputs, and agreement is
+      gated on their mean ROUGE-1, ROUGE-2, and ROUGE-L F1 deltas.
+    user_contract: diffusion_text_generation
+    default_model_names:
+      - elf-b-xsum-l0
+    dataset:
+      kind: conditional_text_jsonl
+      name: XSum test
+      default_path: /mnt/data/XSum/xsum_test.jsonl
+      source_field: input
+      answer_field: output
+      subject_field: subset
+      sample_prefix: xsum
+    selectors:
+      model_names:
+        - elf-b-xsum-l0
+      task_strategies:
+        - diffusion_text_generation
+      runtime_strategies:
+        - elf_flow
+      families:
+        - elf_flow
+    reference:
+      mode: hf_elf_torch
+      checkpoint: embedded-language-flows/ELF-B-xsum-torch
+      config: src/configs/training_configs/train_xsum_ELF-B.yml
+    generation:
+      generation_mode: conditional
+      sampling_method: ode
+      num_sampling_steps: 64
+      cfg_scale: 2.0
+      self_cond_cfg_scale: 1.0
+      sde_gamma: 0.0
+      seed: 42
+    scoring:
+      scorer: diffusion_text_parity
+      task_metric: rouge
+    gates:
+      # ROUGE is represented as a [0, 1] fraction here; 0.005 is 0.5 point.
+      max_rouge1_abs_delta: 0.005
+      max_rouge2_abs_delta: 0.005
+      max_rouge_l_abs_delta: 0.005
+      min_shared_sampling_inputs_match_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        P2021-only until the full XSum test baseline is reproduced and
+        calibrated against the official ELF evaluator.
+
+  - id: openwebtext_elf_diffusion_text
+    description: >
+      HF-versus-TRTMC parity evaluation for unconditional ELF-B generation
+      using shared 32-step SDE inputs. Both output sets are retokenized with
+      GPT-2 Large, and agreement is gated on their generative-perplexity delta.
+    user_contract: diffusion_text_generation
+    default_model_names:
+      - elf-b-owt-l0
+    dataset:
+      kind: unconditional_text_json
+      name: ELF OpenWebText unconditional generation requests
+      default_path: /mnt/data/OpenWebText/elf_owt_generation.json
+    selectors:
+      model_names:
+        - elf-b-owt-l0
+      task_strategies:
+        - diffusion_text_generation
+      runtime_strategies:
+        - elf_flow
+      families:
+        - elf_flow
+    reference:
+      mode: hf_elf_torch
+      checkpoint: embedded-language-flows/ELF-B-owt-torch
+      config: src/configs/training_configs/train_owt_ELF-B.yml
+    generation:
+      generation_mode: unconditional
+      sampling_method: sde
+      num_sampling_steps: 32
+      cfg_scale: 1.0
+      self_cond_cfg_scale: 3.0
+      sde_gamma: 1.5
+      seed: 42
+    scoring:
+      scorer: diffusion_text_parity
+      task_metric: unconditional_text_quality
+      perplexity_model: gpt2-large
+      perplexity_device: cuda
+    gates:
+      # The official PyTorch port allows <1 PPL sampling/numeric drift.
+      max_generation_ppl_abs_delta: 1.0
+      min_shared_sampling_inputs_match_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        P2021-only; use the full 1,000-request dataset for paper-comparable
+        perplexity and entropy. Small --limit slices are smoke tests only.

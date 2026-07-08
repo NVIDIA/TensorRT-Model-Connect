@@ -1637,9 +1637,17 @@ class TestUnitTiers:
         assert match.rule == "family_package"
         assert match.models == ["elf-flow-case"]
 
-    def test_task_eval_tool_triggers_tools_tier(self, imap):
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "tools/task_eval.py",
+            "tools/elf_hf_reference.py",
+            "tools/prepare_elf_task_eval_datasets.py",
+        ],
+    )
+    def test_task_eval_tool_triggers_tools_tier(self, imap, path):
         """task_eval tool edits run tools-tier tests without E2E."""
-        match = test_impact.classify_file("tools/task_eval.py", imap)
+        match = test_impact.classify_file(path, imap)
 
         assert match.rule == "task_eval_tool"
         assert match.models == []

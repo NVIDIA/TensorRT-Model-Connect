@@ -1842,7 +1842,11 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=486,
             name="task_eval_tool",
-            matcher=_path_equals("tools/task_eval.py"),
+            matcher=_path_in({
+                "tools/task_eval.py",
+                "tools/elf_hf_reference.py",
+                "tools/prepare_elf_task_eval_datasets.py",
+            }),
             resolver=_match_result("task_eval_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_task_eval_tool_triggers_tools_tier",),
         ),
