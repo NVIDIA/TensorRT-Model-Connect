@@ -25,3 +25,18 @@ def test_nemotron_labs_diffusion_manifests_cover_model_card_modes() -> None:
     assert all(case.metadata["ci_tier"] == "nightly_only" for case in cases)
     assert all(case.metadata["contract_config"]["enable_thinking"] is False for case in cases)
     assert all(case.threshold_overrides["canonical_token_agreement_rate"] == 1.0 for case in cases)
+
+
+def test_nemotron_labs_diffusion_has_a_strict_premerge_l0_case() -> None:
+    manifest_dir = Path(__file__).with_name("manifests")
+    model = load_model_manifest(
+        manifest_dir / "nemotron-labs-diffusion-8b-l0.json"
+    )
+
+    assert len(model.testcases) == 1
+    case = model.testcases[0]
+    assert case.metadata["ci_tier"] == "l0_only"
+    assert case.inputs["generation_mode"] == "ar"
+    assert case.inputs["max_new_tokens"] == 8
+    assert case.threshold_overrides["canonical_token_agreement_rate"] == 1.0
+    assert case.reference_backend == "hf_transformers"

@@ -19,7 +19,7 @@ try:
     from safetensors.numpy import save_file
     from tensorrt_model_connect.config import ModelConfig
     from tensorrt_model_connect.families.timm_vit import plugin
-    from tensorrt_model_connect.families.timm_vit import timm_vit_tp_builder as tp_builder
+    from tensorrt_model_connect.families.timm_vit.model import parallel as tp_builder
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires TensorRT", allow_module_level=True)

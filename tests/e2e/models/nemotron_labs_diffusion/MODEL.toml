@@ -4,6 +4,7 @@
 id = "nemotron_labs_diffusion"
 plugin = "nemotron_labs_diffusion"
 test_manifests = [
+  "manifests/nemotron-labs-diffusion-8b-l0.json",
   "manifests/nemotron-labs-diffusion-8b.json",
 ]
 

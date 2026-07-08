@@ -25,6 +25,12 @@ class TestQwenPlugin:
 
     VOCAB, HIDDEN, LAYERS, HEADS, KV_HEADS, MLP = 32, 16, 2, 4, 4, 32
 
+    def test_dense_qwen_matcher_excludes_moe_model_types(self):
+        """The dense Qwen owner must not claim Qwen-MoE configurations."""
+        from tensorrt_model_connect.families.qwen import plugin
+
+        assert not plugin.matches("qwen3_moe")
+
     @staticmethod
     def _make_tensors(vocab, hidden, layers, heads, kv_heads, mlp):
         head_dim = hidden // heads

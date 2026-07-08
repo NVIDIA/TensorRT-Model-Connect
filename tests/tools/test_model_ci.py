@@ -106,8 +106,16 @@ def _make_repo(tmp_path: Path) -> tuple[Path, str]:
     _write(repo, "README.md", "# Documentation\n")
     _write(repo, "tests/__init__.py", "")
     _write(repo, "tests/builder/__init__.py", "")
-    _write(repo, "tests/builder/family_plugin_test_support.py", "# shared test support\n")
+    for support_path in (
+        "tests/builder/conftest.py",
+        "tests/builder/debug_runner_test_support.py",
+        "tests/builder/family_plugin_test_mixin.py",
+        "tests/builder/family_plugin_test_support.py",
+        "tests/builder/family_plugin_tester.py",
+    ):
+        _write(repo, support_path, "# shared test support\n")
     _write(repo, "tests/builder/test_checkpoint_mapper.py", "# unrelated test suite\n")
+    _write(repo, "tests/builder/test_debug_runner.py", "# unrelated test suite\n")
     _write(repo, "tests/runtime_strategy_matrix.yaml", "strategies: []\n")
     _write(repo, ".github/scripts/run-model-proof.sh", "#!/usr/bin/env bash\n")
     os.chmod(repo / ".github/scripts/run-model-proof.sh", 0o755)
@@ -327,8 +335,19 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     assert (output / "python/tensorrt_model_connect/families/__init__.py").is_file()
     assert (output / "tests/__init__.py").is_file()
     assert (output / "tests/builder/__init__.py").is_file()
-    assert (output / "tests/builder/family_plugin_test_support.py").is_file()
-    assert not (output / "tests/builder/test_checkpoint_mapper.py").exists()
+    for support_path in (
+        "tests/builder/conftest.py",
+        "tests/builder/debug_runner_test_support.py",
+        "tests/builder/family_plugin_test_mixin.py",
+        "tests/builder/family_plugin_test_support.py",
+        "tests/builder/family_plugin_tester.py",
+    ):
+        assert (output / support_path).is_file()
+    for unrelated_path in (
+        "tests/builder/test_checkpoint_mapper.py",
+        "tests/builder/test_debug_runner.py",
+    ):
+        assert not (output / unrelated_path).exists()
     assert (output / "tests/runtime_strategy_matrix.yaml").is_file()
     assert (output / ".github/scripts/run-model-proof.sh").is_file()
     assert os.access(output / ".github/scripts/run-model-proof.sh", os.X_OK)

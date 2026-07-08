@@ -28,8 +28,8 @@ Usage:
     # PR CI — only download models missing from cache:
     python scripts/warm_hf_cache.py --models-file e2e_models.txt
 
-Exit code 0 even on partial failures — missing cache entries produce a warning
-but do not block CI.
+By default, partial failures remain warnings for existing nightly behavior.
+Pass --strict to fail when a selected snapshot or file cannot be cached.
 """
 
 import argparse
@@ -97,8 +97,21 @@ _HF_ALLOW_PATTERNS = [
 ]
 
 _HF_EXTRA_ALLOW_PATTERNS = ["*.nemo"]
-_ENTRYPOINT_PATTERNS = ["config.json", "model_index.json", "*/config.json"]
-_WEIGHT_PATTERNS = ["*.safetensors", "*.bin", "*.nemo"]
+_ENTRYPOINT_PATTERNS = [
+    "config.json",
+    "model_index.json",
+    "*.yml",
+    "*.yaml",
+    "*/config.json",
+]
+_WEIGHT_PATTERNS = [
+    "*.safetensors",
+    "*.bin",
+    "*.nemo",
+    "model.npz",
+    "elf_params.npz",
+    "checkpoint_*/manifest.ocdbt",
+]
 _DIFFUSERS_WEIGHT_COMPONENTS = {
     "controlnet",
     "image_encoder",
@@ -139,6 +152,17 @@ _HF_FAMILY_ALLOW_PATTERNS = _load_family_hf_allow_patterns()
 _HF_DOWNLOAD_PATTERNS = (
     _HF_ALLOW_PATTERNS + _HF_FAMILY_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS
 )
+_TOKENIZER_DOWNLOAD_PATTERNS = [
+    "config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "vocab.json",
+    "merges.txt",
+    "*.model",
+    "*.spm",
+]
 
 
 def _is_hf_file_cached(hf_id: str, filename: str) -> bool:
@@ -185,6 +209,16 @@ parser.add_argument(
     help="Exclude manifests with this ci_tier value. Intended for nightly mode "
          "to skip PR-only representative manifests.",
 )
+parser.add_argument(
+    "--strict",
+    action="store_true",
+    help="Exit nonzero if any selected snapshot or file cannot be cached.",
+)
+parser.add_argument(
+    "--local-only",
+    action="store_true",
+    help="Check cache readiness without making network requests or changing the cache.",
+)
 args = parser.parse_args()
 
 models_dir = ROOT / "tests" / "e2e" / "models"
@@ -202,8 +236,20 @@ if args.models_file:
         sys.exit(1)
     filter_names = {line.strip() for line in p.read_text().splitlines() if line.strip()}
 excluded_ci_tiers = set(args.exclude_ci_tier or [])
+if args.strict and filter_names is not None:
+    manifest_names = {
+        str(json.loads(manifest.read_text()).get("name") or manifest.stem)
+        for manifest in manifests
+    }
+    missing_names = sorted(filter_names - manifest_names)
+    if missing_names:
+        print(
+            "ERROR: selected model manifest(s) not found: " + ", ".join(missing_names),
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
-entries: list[tuple[str, str, bool]] = []
+entries: list[tuple[str, str, bool, bool]] = []
 file_assets: list[tuple[str, str, str]] = []
 for m in manifests:
     d = json.loads(m.read_text())
@@ -216,21 +262,34 @@ for m in manifests:
         continue
     if filter_names is not None and name not in filter_names:
         continue
-    entries.append((name, d["hf_id"], bool(d.get("gated"))))
+    entries.append((name, d["hf_id"], bool(d.get("gated")), True))
     entries.extend(
-        (dependency_name, dependency_hf_id, False)
+        (
+            dependency_name,
+            dependency_hf_id,
+            False,
+            not dependency_name.endswith("-tokenizer"),
+        )
         for dependency_name, dependency_hf_id in _family_hf_warm_dependencies(
             d.get("family", "")
         )
     )
     file_assets.extend(_family_hf_warm_files(d.get("family", "")))
-deduped_entries: list[tuple[str, str, bool]] = []
-seen_hf_ids: set[str] = set()
-for name, hf_id, gated in entries:
-    if hf_id in seen_hf_ids:
+deduped_entries: list[tuple[str, str, bool, bool]] = []
+entry_indexes: dict[str, int] = {}
+for name, hf_id, gated, require_weights in entries:
+    existing_index = entry_indexes.get(hf_id)
+    if existing_index is None:
+        entry_indexes[hf_id] = len(deduped_entries)
+        deduped_entries.append((name, hf_id, gated, require_weights))
         continue
-    seen_hf_ids.add(hf_id)
-    deduped_entries.append((name, hf_id, gated))
+    old_name, _, old_gated, old_require_weights = deduped_entries[existing_index]
+    deduped_entries[existing_index] = (
+        old_name,
+        hf_id,
+        old_gated or gated,
+        old_require_weights or require_weights,
+    )
 entries = deduped_entries
 deduped_file_assets: list[tuple[str, str, str]] = []
 seen_file_assets: set[tuple[str, str]] = set()
@@ -243,7 +302,7 @@ for asset_name, asset_hf_id, filename in file_assets:
 file_assets = deduped_file_assets
 
 
-def _is_cached(hf_id: str) -> bool:
+def _is_cached(hf_id: str, require_weights: bool = True) -> bool:
     """Return True if the model has a usable local snapshot.
 
     A snapshot directory alone is not enough: partial cache entries can contain
@@ -256,7 +315,11 @@ def _is_cached(hf_id: str) -> bool:
     try:
         local_dir = snapshot_download(
             hf_id,
-            allow_patterns=_HF_DOWNLOAD_PATTERNS,
+            allow_patterns=(
+                _HF_DOWNLOAD_PATTERNS
+                if require_weights
+                else _TOKENIZER_DOWNLOAD_PATTERNS
+            ),
             local_files_only=True,
         )
     except Exception:
@@ -265,10 +328,18 @@ def _is_cached(hf_id: str) -> bool:
     snapshot_dir = pathlib.Path(local_dir)
     if snapshot_dir.parent.name != "snapshots":
         return False
-    return _snapshot_has_required_files(snapshot_dir, hf_id=hf_id)
+    return _snapshot_has_required_files(
+        snapshot_dir,
+        hf_id=hf_id,
+        require_weights=require_weights,
+    )
 
 
-def _snapshot_has_required_files(snapshot_dir: pathlib.Path, hf_id: str = "") -> bool:
+def _snapshot_has_required_files(
+    snapshot_dir: pathlib.Path,
+    hf_id: str = "",
+    require_weights: bool = True,
+) -> bool:
     files = [
         str(path.relative_to(snapshot_dir))
         for path in snapshot_dir.rglob("*")
@@ -288,6 +359,8 @@ def _snapshot_has_required_files(snapshot_dir: pathlib.Path, hf_id: str = "") ->
     )
     required_files = _REQUIRED_FILES_BY_HF_ID.get(hf_id, [])
     has_required_files = all((snapshot_dir / name).is_file() for name in required_files)
+    if not require_weights:
+        return has_entrypoint and has_required_files
     if (snapshot_dir / "model_index.json").is_file():
         return has_entrypoint and has_weights and has_required_files and not _diffusers_missing_weight_components(
             snapshot_dir
@@ -334,6 +407,54 @@ def _component_has_weight(snapshot_dir: pathlib.Path, component: str) -> bool:
     )
 
 
+def _warm_snapshot(
+    hf_id: str,
+    *,
+    gated: bool,
+    token_available: bool,
+    selective: bool,
+    local_only: bool = False,
+    require_weights: bool = True,
+) -> tuple[str, str]:
+    """Resolve locally first, downloading only when the cache is incomplete."""
+    if (selective or local_only) and _is_cached(
+        hf_id,
+        require_weights=require_weights,
+    ):
+        return "cached", ""
+    if local_only:
+        return "failed", "required snapshot is not available in the local cache"
+    if gated and not token_available:
+        return "failed", "gated model is not cached and no HF token is available"
+    try:
+        local_dir = snapshot_download(
+            hf_id,
+            allow_patterns=(
+                _HF_DOWNLOAD_PATTERNS
+                if require_weights
+                else _TOKENIZER_DOWNLOAD_PATTERNS
+            ),
+        )
+        if not _snapshot_has_required_files(
+            pathlib.Path(local_dir),
+            hf_id=hf_id,
+            require_weights=require_weights,
+        ):
+            raise RuntimeError(
+                "downloaded snapshot is still missing a config/model_index "
+                "entrypoint or required local weight artifact"
+            )
+    except HfHubHTTPError as exc:
+        return "failed", f"HTTP {exc.response.status_code}: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return "failed", str(exc)
+    return "downloaded", ""
+
+
+def _warm_exit_code(strict: bool, failures: list[str]) -> int:
+    return 1 if strict and failures else 0
+
+
 selective = filter_names is not None
 asset_scope = f", {len(file_assets)} file asset(s)" if file_assets else ""
 scope = (
@@ -341,7 +462,8 @@ scope = (
     if selective
     else f"all {len(entries)} models{asset_scope}"
 )
-print(f"Warming HF cache — {scope}...")
+action = "Checking HF cache readiness" if args.local_only else "Warming HF cache"
+print(f"{action} — {scope}...")
 print(f"HF Hub cache: {hf_constants.HF_HUB_CACHE}")
 
 warned: list[str] = []
@@ -350,42 +472,45 @@ hf_token_available = bool(
     os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 )
 
-for i, (name, hf_id, gated) in enumerate(entries, 1):
-    if gated and not hf_token_available:
-        print(f"  [{i:3d}/{len(entries)}] {name}  SKIP (gated, no HF token)")
-        skipped.append(name)
-        continue
-    if selective and _is_cached(hf_id):
+for i, (name, hf_id, gated, require_weights) in enumerate(entries, 1):
+    status, detail = _warm_snapshot(
+        hf_id,
+        gated=gated,
+        token_available=hf_token_available,
+        selective=selective,
+        local_only=args.local_only,
+        require_weights=require_weights,
+    )
+    if status == "cached":
         print(f"  [{i:3d}/{len(entries)}] {name}  CACHED (skip)")
         skipped.append(name)
         continue
-
-    try:
-        local_dir = snapshot_download(
-            hf_id,
-            allow_patterns=_HF_DOWNLOAD_PATTERNS,
-        )
-        if not _snapshot_has_required_files(pathlib.Path(local_dir), hf_id=hf_id):
-            raise RuntimeError(
-                "downloaded snapshot is still missing a config/model_index "
-                "entrypoint or required local weight artifact")
+    if status == "downloaded":
         print(f"  [{i:3d}/{len(entries)}] {name}  OK")
-    except HfHubHTTPError as e:
-        print(f"  [{i:3d}/{len(entries)}] {name}  WARN (HTTP {e.response.status_code}): {e}")
+        # Small inter-request delay to stay well below the API rate limit.
+        time.sleep(0.3)
+        continue
+    if gated and not hf_token_available:
+        print(f"  [{i:3d}/{len(entries)}] {name}  SKIP ({detail})")
+        if not args.strict:
+            skipped.append(name)
+            continue
+    else:
+        print(f"  [{i:3d}/{len(entries)}] {name}  WARN: {detail}")
+    if status == "failed":
         warned.append(name)
-    except Exception as e:  # noqa: BLE001
-        print(f"  [{i:3d}/{len(entries)}] {name}  WARN: {e}")
-        warned.append(name)
-    # Small inter-request delay to stay well below the API rate limit.
-    time.sleep(0.3)
 
 if file_assets:
     print()
     print("Warming family file assets...")
 for i, (name, hf_id, filename) in enumerate(file_assets, 1):
-    if selective and _is_hf_file_cached(hf_id, filename):
+    if (selective or args.local_only) and _is_hf_file_cached(hf_id, filename):
         print(f"  [{i:3d}/{len(file_assets)}] {name}  CACHED (skip)")
         skipped.append(name)
+        continue
+    if args.local_only:
+        print(f"  [{i:3d}/{len(file_assets)}] {name}  WARN: required file is not cached")
+        warned.append(name)
         continue
 
     try:
@@ -404,14 +529,20 @@ if selective and skipped:
     print(f"Skipped {len(skipped)} already-cached item(s) (no network calls).")
 if warned:
     total_items = len(entries) + len(file_assets)
+    failure_action = "are missing from the cache" if args.local_only else "could not be warmed"
     print(
-        f"Warning: {len(warned)}/{total_items} item(s) could not be warmed: {warned}",
+        f"Warning: {len(warned)}/{total_items} item(s) {failure_action}: {warned}",
         file=sys.stderr,
     )
-    print("Parallel E2E phase may re-issue HF cache requests for these item(s).")
+    if not args.local_only:
+        print("Parallel E2E phase may re-issue HF cache requests for these item(s).")
 else:
     downloaded = len(entries) + len(file_assets) - len(skipped)
     if downloaded == 0:
         print("All items already cached — zero network calls.")
     else:
         print(f"Downloaded {downloaded} item(s) successfully.")
+
+strict_exit_code = _warm_exit_code(args.strict, warned)
+if strict_exit_code:
+    sys.exit(strict_exit_code)

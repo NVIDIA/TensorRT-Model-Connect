@@ -8,6 +8,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 import tensorrt_model_connect.python_profiles as shared_profiles
 from tests.e2e_harness.contracts import E2ECase, RunContext
 from tests.e2e_harness.orchestrator import _build_repro_commands
@@ -104,6 +105,65 @@ def test_resolve_profile_python_materializes_declared_venv(monkeypatch, tmp_path
     assert Path(python).is_file()
     assert ready.is_file()
     assert shared_profiles.resolve_profile_python("custom", sys.executable) == python
+
+
+def test_family_profile_registry_is_fully_exact_pinned():
+    expected = {
+        "chronos",
+        "deepseek_ocr",
+        "elf_flow",
+        "internlm",
+        "magpie_tts_reference",
+        "nemotron_h_reference",
+        "phi4_multimodal",
+    }
+    profiles = shared_profiles.load_python_profile_registry()["profiles"]
+
+    assert set(profiles) - {shared_profiles.DEFAULT_PROFILE} == expected
+    for name in expected:
+        requirements = shared_profiles._read_requirements_text(
+            profiles[name]["requirements"]
+        )
+        pins = shared_profiles._exact_pinned_requirements(requirements)
+        assert pins, name
+
+
+def test_profile_lock_rejects_non_exact_or_duplicate_requirements():
+    with pytest.raises(ValueError, match="exact name==version pins"):
+        shared_profiles._exact_pinned_requirements("transformers>=4.48\n")
+
+    with pytest.raises(ValueError, match="more than once"):
+        shared_profiles._exact_pinned_requirements(
+            "huggingface-hub==0.28.1\nhuggingface_hub==0.28.1\n"
+        )
+
+
+def test_prebuilt_only_profile_fails_before_creating_a_runtime_cache(
+    monkeypatch, tmp_path
+):
+    requirements = tmp_path / "empty.lock.txt"
+    requirements.write_text("", encoding="utf-8")
+    profile_root = tmp_path / "profiles"
+    monkeypatch.setenv(shared_profiles.PROFILE_ROOT_ENV, str(profile_root))
+    monkeypatch.setenv(shared_profiles.PREBUILT_ONLY_ENV, "1")
+    monkeypatch.setattr(
+        shared_profiles,
+        "load_python_profile_registry",
+        lambda: {
+            "profiles": {
+                "custom": {
+                    "kind": "venv",
+                    "requirements": str(requirements),
+                    "system_site_packages": False,
+                }
+            }
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="CI image is stale or incomplete"):
+        shared_profiles.resolve_profile_python("custom", sys.executable)
+
+    assert not profile_root.exists()
 
 
 def test_runtime_cli_hf_python_is_manifest_metadata_controlled(tmp_path):

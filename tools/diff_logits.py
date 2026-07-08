@@ -30,7 +30,10 @@ from types import ModuleType
 
 import numpy as np
 
-from tool_helpers import make_family_debug_runner, runtime_strategy_from_config
+try:
+    from tools.tool_helpers import make_family_debug_runner, runtime_strategy_from_config
+except ModuleNotFoundError:
+    from tool_helpers import make_family_debug_runner, runtime_strategy_from_config
 
 STANDARD_PROMPTS = [
     ("factual", "The capital of France is"),

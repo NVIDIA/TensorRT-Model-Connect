@@ -16,6 +16,8 @@
       "reference_family": "nemotron_labs_diffusion_model_card",
       "user_contract": "model_card_generation_parity",
       "ci_tier": "nightly_only",
+      "l0_replacement": "nemotron-labs-diffusion-8b-l0",
+      "l0_replacement_reason": "The nightly matrix covers every generation mode; PR L0 keeps the same checkpoint, plugin, runtime, HF oracle, and exact canonical-token contract through the AR path.",
       "reference_precision": "fp32",
       "prompt": "What is the capital of France? Answer in one word.",
       "max_new_tokens": 32,

@@ -12,6 +12,9 @@ set -euo pipefail
 proof_container_name=""
 proof_artifacts_dir=""
 proof_repo_root=""
+proof_gpu_id=""
+proof_gpu_lease_fd=""
+proof_gpu_lease_file=""
 
 die() {
   if [ -n "$proof_artifacts_dir" ]; then
@@ -29,6 +32,9 @@ cleanup_proof_container() {
     docker rm -f "$proof_container_name" >/dev/null 2>&1 || true
   fi
   generate_host_fallback_report "$rc" || true
+  if [ -n "$proof_gpu_lease_fd" ]; then
+    flock -u "$proof_gpu_lease_fd" || true
+  fi
   exit "$rc"
 }
 
@@ -90,6 +96,62 @@ python_bin() {
   else
     command -v python3
   fi
+}
+
+select_proof_gpu() {
+  if [[ -v TRTMC_GPU_ID ]]; then
+    [[ "$TRTMC_GPU_ID" =~ ^[0-9]+$ ]] || \
+      die "TRTMC_GPU_ID must be a non-negative integer"
+    proof_gpu_id="$TRTMC_GPU_ID"
+    echo "Using explicit model-proof GPU $proof_gpu_id"
+    return 0
+  fi
+
+  command -v flock >/dev/null || \
+    die "flock is required for automatic model-proof GPU leasing"
+  local configured_ids="${TRTMC_MODEL_PROOF_GPU_IDS:-0,1,2,3}"
+  [[ "$configured_ids" =~ ^(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*$ ]] || \
+    die "TRTMC_MODEL_PROOF_GPU_IDS must be a comma-separated list of unique non-negative integers"
+  local timeout="${TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS:-60}"
+  [[ "$timeout" =~ ^[1-9][0-9]{0,3}$ ]] && [ "$timeout" -le 3600 ] || \
+    die "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS must be an integer from 1 to 3600"
+
+  local lock_dir="${TRTMC_MODEL_PROOF_GPU_LOCK_DIR:-/tmp/trtmc-model-proof-gpu-locks}"
+  [ -n "$lock_dir" ] || die "TRTMC_MODEL_PROOF_GPU_LOCK_DIR must not be empty"
+  mkdir -p -- "$lock_dir" || die "could not create GPU lease directory: $lock_dir"
+
+  local -a gpu_ids=()
+  IFS=, read -r -a gpu_ids <<< "$configured_ids"
+  local -A seen_ids=()
+  local candidate
+  for candidate in "${gpu_ids[@]}"; do
+    [[ -z "${seen_ids[$candidate]+x}" ]] || \
+      die "TRTMC_MODEL_PROOF_GPU_IDS contains duplicate GPU ID: $candidate"
+    seen_ids[$candidate]=1
+  done
+
+  local deadline=$((SECONDS + timeout))
+  local attempted=0
+  while true; do
+    if [ "$attempted" -eq 1 ] && [ "$SECONDS" -ge "$deadline" ]; then
+      die "timed out after ${timeout}s waiting for a model-proof GPU lease from: $configured_ids"
+    fi
+    attempted=1
+    for candidate in "${gpu_ids[@]}"; do
+      local candidate_fd
+      local lock_file="$lock_dir/gpu-$candidate.lock"
+      exec {candidate_fd}>"$lock_file" || die "could not open GPU lease file: $lock_file"
+      if flock -n "$candidate_fd"; then
+        proof_gpu_id="$candidate"
+        proof_gpu_lease_fd="$candidate_fd"
+        proof_gpu_lease_file="$lock_file"
+        echo "Leased model-proof GPU $proof_gpu_id via $proof_gpu_lease_file"
+        return 0
+      fi
+      exec {candidate_fd}>&-
+    done
+    sleep 1
+  done
 }
 
 generate_host_fallback_report() {
@@ -250,20 +312,11 @@ PY
   exit "$validation_rc"
 }
 
-run_inner() {
-  [ "$output_dir" = "/artifacts" ] || die "inner output directory must be /artifacts"
-  [ -f /src/.trtmc-model-projection.json ] || \
-    die "projection manifest is missing from /src"
-  [ ! -e /src/.git ] || die "projected source must not contain Git metadata"
-  [ -d /work ] || die "isolated writable work directory is missing"
-
-  mkdir -p /artifacts /artifacts/e2e /work/build /work/engines /work/model-plugins /work/tmp
-  trap 'finalize_model_report "$?"' EXIT
-  initialize_proof_status
-  cp /src/.trtmc-model-projection.json /artifacts/source-projection.json
-
-  local config_file=/work/model-proof-config.txt
-  "$(python_bin)" - "$model" "$suite" "$revision" /src /artifacts/selection.json \
+write_model_proof_selection() {
+  local source_root="$1"
+  local selection_path="$2"
+  local config_file="$3"
+  "$(python_bin)" - "$model" "$suite" "$revision" "$source_root" "$selection_path" \
     > "$config_file" <<'PY'
 import json
 import os
@@ -343,26 +396,74 @@ for entry in runtime_data.get("runtime_tests", []):
     runtime_tests.append(fields[0])
 
 e2e_dir = roots["e2e"] / owners["e2e"]
+timing_estimates = {}
+timing_path = root / "tests/e2e/timing_estimates.json"
+if timing_path.is_file():
+    timing_payload = json.loads(timing_path.read_text(encoding="utf-8"))
+    raw_estimates = timing_payload.get("estimates_s", {})
+    if isinstance(raw_estimates, dict):
+        timing_estimates = raw_estimates
 cases = []
 for case_path in sorted((e2e_dir / "manifests").glob("*.json")):
     data = json.loads(case_path.read_text(encoding="utf-8"))
     if data.get("skip_reason") or data.get("skip"):
         continue
-    name = str(data.get("name") or case_path.stem)
-    tier = str(data.get("ci_tier") or "")
-    if tier == "multi_device":
-        continue
-    priority = {
-        "l0_only": 0,
-        "contract_only": 1,
-        "": 2,
-        "nightly_only": 3,
-    }.get(tier, 2)
-    cases.append((priority, name, case_path.name, tier))
+    manifest_name = str(data.get("name") or case_path.stem)
+    testcases = data.get("testcases")
+    if not isinstance(testcases, list) or not testcases:
+        raise SystemExit(f"E2E manifest has no testcases: {case_path}")
+    for testcase in testcases:
+        if not isinstance(testcase, dict):
+            raise SystemExit(f"E2E manifest has an invalid testcase: {case_path}")
+        if testcase.get("skip_reason") or testcase.get("skip"):
+            continue
+        name = str(testcase.get("name") or "")
+        if not name:
+            raise SystemExit(f"E2E manifest has an unnamed testcase: {case_path}")
+        tier = str(testcase.get("ci_tier") or data.get("ci_tier") or "")
+        if tier == "multi_device":
+            continue
+        cases.append({
+            "name": name,
+            "model": manifest_name,
+            "manifest": case_path.name,
+            "ci_tier": tier,
+            "l0_replacement": str(testcase.get("l0_replacement") or ""),
+            "estimated_seconds": timing_estimates.get(name),
+        })
 if not cases:
     raise SystemExit(f"no single-GPU E2E case is available for {owners['e2e']}")
-cases.sort()
-selected_cases = cases[:1] if suite == "premerge" else cases
+cases.sort(key=lambda case: (case["name"], case["model"], case["manifest"]))
+if suite == "premerge":
+    eligible = [
+        case for case in cases
+        if case["ci_tier"] not in {"nightly_only", "multi_device"}
+    ]
+    if not eligible:
+        raise SystemExit(
+            f"no premerge E2E case is available for {owners['e2e']}"
+        )
+    l0_replacements = {
+        case["l0_replacement"]
+        for case in cases
+        if case["ci_tier"] == "nightly_only" and case["l0_replacement"]
+    }
+    replacements = [case for case in eligible if case["name"] in l0_replacements]
+    candidates = replacements or eligible
+    priority = {"l0_only": 0, "contract_only": 1, "": 2}
+    candidates.sort(
+        key=lambda case: (
+            priority.get(case["ci_tier"], 2),
+            case["estimated_seconds"]
+            if isinstance(case["estimated_seconds"], (int, float))
+            else float("inf"),
+            case["name"],
+            case["model"],
+        )
+    )
+    selected_cases = candidates[:1]
+else:
+    selected_cases = cases
 
 e2e_tests = sorted(e2e_dir.glob("test_*_e2e.py"))
 if len(e2e_tests) != 1:
@@ -383,8 +484,15 @@ selection = {
     "python_tests": [str(path.relative_to(root)) for path in python_tests],
     "suite": suite,
     "e2e_cases": [
-        {"name": name, "manifest": case_manifest, "ci_tier": ci_tier}
-        for _, name, case_manifest, ci_tier in selected_cases
+        {
+            "name": case["name"],
+            "model": case["model"],
+            "manifest": case["manifest"],
+            "ci_tier": case["ci_tier"],
+            "l0_replacement": case["l0_replacement"],
+            "estimated_seconds": case["estimated_seconds"],
+        }
+        for case in selected_cases
     ],
     "e2e_test": str(e2e_tests[0].relative_to(root)),
 }
@@ -394,11 +502,32 @@ print(f"runtime_model={owners['runtime']}")
 print(f"runtime_library={runtime_library}")
 print(f"e2e_family={owners['e2e']}")
 print(f"e2e_test={e2e_tests[0]}")
-for _, name, _, _ in selected_cases:
-    print(f"e2e_case={name}")
+for model_name in dict.fromkeys(case["model"] for case in selected_cases):
+    print(f"e2e_model={model_name}")
+for case in selected_cases:
+    print(f"e2e_case={case['name']}")
 for test in runtime_tests:
     print(f"cpp_test={test}")
 PY
+}
+
+run_inner() {
+  [ "$output_dir" = "/artifacts" ] || die "inner output directory must be /artifacts"
+  [ -f /src/.trtmc-model-projection.json ] || \
+    die "projection manifest is missing from /src"
+  [ ! -e /src/.git ] || die "projected source must not contain Git metadata"
+  [ -d /work ] || die "isolated writable work directory is missing"
+
+  mkdir -p /artifacts /artifacts/e2e /work/build /work/engines /work/model-plugins /work/tmp
+  trap 'finalize_model_report "$?"' EXIT
+  initialize_proof_status
+  [[ "${TRTMC_MODEL_PROOF_GPU_ID:-}" =~ ^[0-9]+$ ]] || \
+    die "TRTMC_MODEL_PROOF_GPU_ID must be passed as a non-negative integer"
+  update_proof_fact gpu_id "$TRTMC_MODEL_PROOF_GPU_ID"
+  cp /src/.trtmc-model-projection.json /artifacts/source-projection.json
+
+  local config_file=/work/model-proof-config.txt
+  write_model_proof_selection /src /artifacts/selection.json "$config_file"
 
   update_proof_step projection_validation passed \
     "source-projection.json, selection.json"
@@ -409,6 +538,9 @@ PY
   e2e_family="$(sed -n 's/^e2e_family=//p' "$config_file")"
   e2e_test="$(sed -n 's/^e2e_test=//p' "$config_file")"
   [ -n "$runtime_model" ] || die "could not resolve the runtime model from projection"
+  local -a e2e_models=()
+  mapfile -t e2e_models < <(sed -n 's/^e2e_model=//p' "$config_file")
+  [ "${#e2e_models[@]}" -gt 0 ] || die "could not resolve an E2E model from projection"
   local -a e2e_cases=()
   mapfile -t e2e_cases < <(sed -n 's/^e2e_case=//p' "$config_file")
   [ "${#e2e_cases[@]}" -gt 0 ] || die "could not resolve an E2E case from projection"
@@ -532,11 +664,15 @@ PY
 
   local ld_library_path="/work/build:${LD_LIBRARY_PATH:-}"
   local models_file=/work/e2e-models.txt
-  printf '%s\n' "${e2e_cases[@]}" > "$models_file"
+  printf '%s\n' "${e2e_models[@]}" > "$models_file"
   local -a e2e_filter_args=()
+  local e2e_model
+  for e2e_model in "${e2e_models[@]}"; do
+    e2e_filter_args+=(--e2e-model "$e2e_model")
+  done
   local e2e_case
   for e2e_case in "${e2e_cases[@]}"; do
-    e2e_filter_args+=(--e2e-model "$e2e_case")
+    e2e_filter_args+=(--e2e-testcase "$e2e_case")
   done
   update_proof_step e2e_reference running "e2e/junit.xml, e2e/*/result.json"
   PYTHONPATH=/src/python:/src \
@@ -567,13 +703,23 @@ PY
   update_proof_step result_verification passed "e2e-verification.json"
 
   "$py" - "$model" "$revision" "$runtime_model" "$runtime_library" \
+    "$TRTMC_MODEL_PROOF_GPU_ID" \
     "${built_dsos[0]}" /artifacts/selection.json /artifacts/proof.json <<'PY'
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-model, revision, runtime_model, runtime_library, dso_path, selection_path, output = sys.argv[1:]
+(
+    model,
+    revision,
+    runtime_model,
+    runtime_library,
+    gpu_id,
+    dso_path,
+    selection_path,
+    output,
+) = sys.argv[1:]
 digest = hashlib.sha256(Path(dso_path).read_bytes()).hexdigest()
 selection = json.loads(Path(selection_path).read_text(encoding="utf-8"))
 proof = {
@@ -584,6 +730,7 @@ proof = {
     "runtime_model": runtime_model,
     "runtime_library": runtime_library,
     "runtime_library_sha256": digest,
+    "gpu_id": gpu_id,
     "suite": selection["suite"],
     "e2e_cases": [case["name"] for case in selection["e2e_cases"]],
     "sibling_model_count": 0,
@@ -652,16 +799,75 @@ print(
 )
 PY
 
+  local host_config_file="$work_dir/model-proof-config-host.txt"
+  write_model_proof_selection \
+    "$projection_dir" "$artifacts_dir/selection.json" "$host_config_file"
+  local -a cache_check_models=()
+  mapfile -t cache_check_models < <(sed -n 's/^e2e_model=//p' "$host_config_file")
+  [ "${#cache_check_models[@]}" -gt 0 ] || \
+    die "could not resolve an E2E model for cache validation"
+  printf '%s\n' "${cache_check_models[@]}" > "$artifacts_dir/cache-check-models.txt"
+
   local image="${TRTMC_CI_IMAGE:-trtmc-dev-gb300:manylinux_2_39}"
   docker image inspect "$image" >/dev/null 2>&1 || die "CI image is not present: $image"
-  local gpu_id="${TRTMC_GPU_ID:-0}"
-  [[ "$gpu_id" =~ ^[0-9]+$ ]] || die "TRTMC_GPU_ID must be a non-negative integer"
   local build_jobs="${TRTMC_MODEL_PROOF_BUILD_JOBS:-8}"
   [[ "$build_jobs" =~ ^[1-9][0-9]*$ ]] || \
     die "TRTMC_MODEL_PROOF_BUILD_JOBS must be a positive integer"
 
+  local hf_cache="${TRTMC_HF_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}}"
+  hf_cache="$(python3 - "$hf_cache" <<'PY'
+import sys
+from pathlib import Path
+print(Path(sys.argv[1]).resolve())
+PY
+)"
+  [ "$hf_cache" != "/" ] || die "refusing to use / as the HF cache"
+  [ "$hf_cache" != "$repo_root" ] || die "HF cache cannot be the checkout"
+  [ -d "$hf_cache/hub" ] || die "HF Hub cache directory does not exist: $hf_cache/hub"
+  [ -d "$hf_cache/modules" ] || \
+    die "HF modules cache directory does not exist: $hf_cache/modules"
+
   local container_name="trtmc-model-proof-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$model"
   container_name="${container_name//_/-}"
+  local cache_check_container_name="${container_name}-cache-check"
+  proof_container_name="$cache_check_container_name"
+  docker rm -f "$cache_check_container_name" >/dev/null 2>&1 || true
+
+  local -a cache_check_docker_args=(
+    run --rm
+    --name "$cache_check_container_name"
+    --read-only
+    --network none
+    --cap-drop ALL
+    --security-opt no-new-privileges
+    --user "$(id -u):$(id -g)"
+    --mount "type=bind,src=$projection_dir,dst=/src,readonly"
+    --mount "type=bind,src=$artifacts_dir,dst=/artifacts,readonly"
+    --mount "type=bind,src=$hf_cache/hub,dst=/hf-cache/hub,readonly"
+    --mount "type=bind,src=$hf_cache/modules,dst=/hf-cache/modules,readonly"
+    --tmpfs /tmp:rw,exec,nosuid,nodev,size=1g
+    --workdir /src
+    -e HOME=/tmp
+    -e HF_HOME=/hf-cache
+    -e HF_HUB_CACHE=/hf-cache/hub
+    -e HUGGINGFACE_HUB_CACHE=/hf-cache/hub
+    -e HF_MODULES_CACHE=/hf-cache/modules
+    -e PYTHONDONTWRITEBYTECODE=1
+  )
+  set +e
+  docker "${cache_check_docker_args[@]}" "$image" \
+    /opt/venv/bin/python /src/scripts/warm_hf_cache.py \
+      --models-file /artifacts/cache-check-models.txt --local-only --strict \
+    2>&1 | tee "$artifacts_dir/cache-check.log"
+  local cache_check_rc="${PIPESTATUS[0]}"
+  set -e
+  [ "$cache_check_rc" -eq 0 ] || \
+    die "offline HF cache readiness check failed for $model (exit $cache_check_rc)"
+
+  select_proof_gpu
+  local gpu_id="$proof_gpu_id"
+  printf '%s\n' "$gpu_id" > "$artifacts_dir/gpu-id.txt"
+
   proof_container_name="$container_name"
   docker rm -f "$container_name" >/dev/null 2>&1 || true
 
@@ -689,25 +895,17 @@ PY
     -e TRANSFORMERS_OFFLINE=1
     -e PYTHONHASHSEED=0
     -e TRTMC_MODEL_PLUGIN_STRICT=1
+    -e "TRTMC_MODEL_PROOF_GPU_ID=$gpu_id"
     -e "TRTMC_MODEL_PROOF_BUILD_JOBS=$build_jobs"
   )
-  local hf_cache="${TRTMC_HF_CACHE:-${HF_HOME:-}}"
-  if [ -n "$hf_cache" ]; then
-    hf_cache="$(python3 - "$hf_cache" <<'PY'
-import sys
-from pathlib import Path
-print(Path(sys.argv[1]).resolve())
-PY
-)"
-    [ -d "$hf_cache" ] || die "HF cache directory does not exist: $hf_cache"
-    docker_args+=(
-      --mount "type=bind,src=$hf_cache,dst=/hf-cache,readonly"
-      -e HF_HOME=/hf-cache
-      -e HF_HUB_CACHE=/hf-cache/hub
-      -e HUGGINGFACE_HUB_CACHE=/hf-cache/hub
-      -e HF_MODULES_CACHE=/hf-cache/modules
-    )
-  fi
+  docker_args+=(
+    --mount "type=bind,src=$hf_cache/hub,dst=/hf-cache/hub,readonly"
+    --mount "type=bind,src=$hf_cache/modules,dst=/hf-cache/modules,readonly"
+    -e HF_HOME=/hf-cache
+    -e HF_HUB_CACHE=/hf-cache/hub
+    -e HUGGINGFACE_HUB_CACHE=/hf-cache/hub
+    -e HF_MODULES_CACHE=/hf-cache/modules
+  )
 
   set +e
   docker "${docker_args[@]}" "$image" \

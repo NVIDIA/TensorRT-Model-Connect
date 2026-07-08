@@ -26,9 +26,13 @@ PROFILE_PHASES = ("build", "runtime", "reference")
 DEFAULT_PROFILE = "base"
 PROFILE_ROOT_ENV = "TRTMC_PYTHON_PROFILE_ROOT"
 LEGACY_PROFILE_ROOT_ENV = "TRTMC_E2E_PROFILE_ROOT"
+PREBUILT_ONLY_ENV = "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY"
 DEFAULT_PROFILE_ROOT = "/tmp/trtmc-python-profiles"
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_PROFILE_LAYOUT_VERSION = "overlay-v2"
+_PROFILE_LAYOUT_VERSION = "overlay-v3-exact-pins"
+_EXACT_REQUIREMENT_RE = re.compile(
+    r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9,._-]+\])?==([^\s;]+)$"
+)
 
 
 def _absolute_python(path: str) -> str:
@@ -104,6 +108,60 @@ def _read_package_text(path_spec: str) -> str:
 
 def _read_requirements_text(path_spec: str) -> str:
     return _read_package_text(path_spec)
+
+
+def _exact_pinned_requirements(requirements_text: str) -> dict[str, str]:
+    """Parse the profile lock contract and reject non-hermetic requirements."""
+    pinned: dict[str, str] = {}
+    for line_number, raw_line in enumerate(requirements_text.splitlines(), start=1):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        match = _EXACT_REQUIREMENT_RE.fullmatch(line)
+        if match is None:
+            raise ValueError(
+                "Python profile requirements must be exact name==version pins; "
+                f"line {line_number} is {raw_line!r}"
+            )
+        name, version = match.groups()
+        normalized_name = re.sub(r"[-_.]+", "-", name).lower()
+        if normalized_name in pinned:
+            raise ValueError(
+                f"Python profile requirements declare {name!r} more than once"
+            )
+        pinned[normalized_name] = version
+    return pinned
+
+
+def _verify_exact_requirements(
+    profile_name: str,
+    profile_python: str,
+    pinned: Mapping[str, str],
+) -> None:
+    if not pinned:
+        return
+    script = (
+        "import importlib.metadata as m, json, sys; "
+        "expected=json.loads(sys.argv[1]); "
+        "actual={name:m.version(name) for name in expected}; "
+        "bad={name:(expected[name], actual[name]) for name in expected "
+        "if actual[name] != expected[name]}; "
+        "assert not bad, f'exact profile pins do not match: {bad}'"
+    )
+    _run_profile_command(
+        [profile_python, "-c", script, json.dumps(dict(pinned), sort_keys=True)],
+        description=f"verify exact package pins for Python profile {profile_name!r}",
+        timeout=300,
+    )
+
+
+def _prebuilt_only() -> bool:
+    return os.environ.get(PREBUILT_ONLY_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _profile_spec(profile_name: str) -> dict[str, Any]:
@@ -268,6 +326,7 @@ def _materialize_venv_profile(
             f"Execution profile {profile_name!r} must declare a requirements file"
         )
     requirements_text = _read_requirements_text(requirements_spec)
+    pinned_requirements = _exact_pinned_requirements(requirements_text)
     verification_script = str(spec.get("verification_script", "") or "").strip()
     verification_script_file = str(
         spec.get("verification_script_file", "") or ""
@@ -294,11 +353,23 @@ def _materialize_venv_profile(
     profile_hash = hashlib.sha256(hash_input).hexdigest()[:12]
 
     root = profile_root()
-    root.mkdir(parents=True, exist_ok=True)
     env_dir = root / f"{profile_name}-{profile_hash}"
     python_path = env_dir / "bin" / "python"
     ready_path = env_dir / ".ready"
     lock_path = root / f"{profile_name}-{profile_hash}.lock"
+
+    # Model-proof containers mount the source read-only and disable networking.
+    # A matching image-baked profile therefore needs no writable lock or cache.
+    if ready_path.is_file() and python_path.is_file():
+        return str(python_path.absolute())
+    if _prebuilt_only():
+        raise RuntimeError(
+            f"Execution profile {profile_name!r} is not prebuilt for this source "
+            f"at {env_dir}. The CI image is stale or incomplete; rebuild it from "
+            "the current Dockerfile and family-owned profile locks."
+        )
+
+    root.mkdir(parents=True, exist_ok=True)
 
     with open(lock_path, "w", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
@@ -337,6 +408,12 @@ def _materialize_venv_profile(
                     ],
                     description=f"install Python profile {profile_name!r}",
                 )
+
+            _verify_exact_requirements(
+                profile_name,
+                str(tmp_python),
+                pinned_requirements,
+            )
 
             if verification_script:
                 _run_profile_command(

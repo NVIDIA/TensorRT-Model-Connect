@@ -124,14 +124,27 @@ def _check_gpu_memory(ctx: RunContext, req: PreflightRequirement) -> tuple[bool,
 
 
 def _check_hf_auth(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, str]:
-    """Check that HF auth token is present."""
+    """Check for HF auth, or resolve a warmed snapshot without networking."""
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if token:
         return True, "HF auth token found"
     hf_token_path = Path.home() / ".huggingface" / "token"
     if hf_token_path.is_file():
         return True, "HF auth token found in ~/.huggingface/token"
-    return False, "HF auth token not found (set HF_TOKEN or login with huggingface-cli)"
+    hf_id = str(req.args.get("hf_id") or ctx.case.hf_id or "").strip()
+    if hf_id:
+        try:
+            from huggingface_hub import snapshot_download
+
+            snapshot = Path(snapshot_download(hf_id, local_files_only=True))
+            if snapshot.is_dir():
+                return True, f"HF snapshot available offline: {hf_id}"
+        except Exception:
+            pass
+    return False, (
+        "HF auth token not found and model snapshot is unavailable offline "
+        f"for {hf_id or 'unspecified model'}"
+    )
 
 
 def _check_asset_exists(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, str]:

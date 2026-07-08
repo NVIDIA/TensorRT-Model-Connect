@@ -18,6 +18,8 @@
       "trace_id": "IT-E2E-QIMG-01",
       "model_type": "qwen_image",
       "ci_tier": "nightly_only",
+      "l0_replacement": "qwen-image-l0",
+      "l0_replacement_reason": "Qwen-Image 1024px scale stays nightly; qwen-image-l0 keeps the same checkpoint, text encoder, DiT, VAE, HF reference, and quality gates at 512px.",
       "description": "Qwen-Image base text-to-image (Qwen2.5-VL text encoder + Qwen-Image DiT + VAE)",
       "prompt": "A cat holding a sign that says hello world",
       "negative_prompt": " ",

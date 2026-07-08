@@ -1,24 +1,25 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-.git
-.venv
-engines
-test-result
-test-result-*
-trtmc_frames
-trtmc_frames_old
-*.trtfb
-*.wav
-*.mp4
-*.npy
-*.npz
-*.pt
-*.pth
-*.safetensors
-build
-build-*
-*.o
-*.a
-*.so
-*.so.*
+# The repository Dockerfile copies only the declarative Python profile source
+# and its image-build helper. Keep the daemon context stable and small even on
+# long-lived self-hosted runners with large build/test artifacts.
+*
+!python/
+!python/tensorrt_model_connect/
+!python/tensorrt_model_connect/__init__.py
+!python/tensorrt_model_connect/python_profiles.py
+!python/tensorrt_model_connect/python_profiles.toml
+!python/tensorrt_model_connect/families/
+!python/tensorrt_model_connect/families/__init__.py
+!python/tensorrt_model_connect/families/*/
+!python/tensorrt_model_connect/families/*/MODEL.toml
+!python/tensorrt_model_connect/families/*/python_profile_requirements/
+!python/tensorrt_model_connect/families/*/python_profile_requirements/*.lock.txt
+!python/tensorrt_model_connect/families/*/python_profile_verify.py
+!.github/
+!.github/scripts/
+!.github/scripts/build-python-profiles.py
+
+**/__pycache__/
+**/*.py[cod]

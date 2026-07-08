@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +179,68 @@ def _make_ctx(tmp_path: Path, case: E2ECase) -> RunContext:
         hf_python=sys.executable,
         engine_dir=str(engine_dir),
     )
+
+
+def test_hf_auth_preflight_accepts_a_warmed_offline_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("gated-offline")
+    ctx = _make_ctx(tmp_path, case)
+    snapshot = tmp_path / "hf-cache" / "snapshots" / "revision"
+    snapshot.mkdir(parents=True)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    def resolve_offline(hf_id: str, *, local_files_only: bool) -> str:
+        assert hf_id == case.hf_id
+        assert local_files_only is True
+        return str(snapshot)
+
+    huggingface_hub = types.ModuleType("huggingface_hub")
+    huggingface_hub.snapshot_download = resolve_offline
+    monkeypatch.setitem(sys.modules, "huggingface_hub", huggingface_hub)
+
+    passed, message = orchestrator._check_hf_auth(
+        ctx,
+        PreflightRequirement(
+            kind="hf_auth_token_present",
+            args={"hf_id": case.hf_id},
+        ),
+    )
+
+    assert passed is True
+    assert message == f"HF snapshot available offline: {case.hf_id}"
+
+
+def test_hf_auth_preflight_rejects_a_missing_offline_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("gated-missing")
+    ctx = _make_ctx(tmp_path, case)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+
+    def missing(*_args, **_kwargs):
+        raise RuntimeError("not cached")
+
+    huggingface_hub = types.ModuleType("huggingface_hub")
+    huggingface_hub.snapshot_download = missing
+    monkeypatch.setitem(sys.modules, "huggingface_hub", huggingface_hub)
+
+    passed, message = orchestrator._check_hf_auth(
+        ctx,
+        PreflightRequirement(
+            kind="hf_auth_token_present",
+            args={"hf_id": case.hf_id},
+        ),
+    )
+
+    assert passed is False
+    assert "snapshot is unavailable offline" in message
 
 
 def _patch_bundle_success(

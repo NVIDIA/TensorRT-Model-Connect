@@ -393,14 +393,15 @@ def _build_preflight(manifest: dict, defaults: dict[str, Any]) -> list[Preflight
                     )
                 )
 
-    # HF auth for gated models.  trust_remote_code still gets a non-gating
-    # diagnostic because many public repos use remote code, but gated repos
-    # should skip cleanly when a CI runner has no HF token.
+    # Gated models require either authentication or a complete-enough local
+    # snapshot that Hugging Face can resolve in offline mode.  Isolated model
+    # proofs deliberately do not receive secrets or networking, so a warmed
+    # cache is the authorization-independent path used there.
     if manifest.get("gated"):
         reqs.append(
             PreflightRequirement(
                 kind="hf_auth_token_present",
-                args={},
+                args={"hf_id": str(manifest.get("hf_id") or "")},
                 gating=True,
             )
         )
@@ -408,7 +409,7 @@ def _build_preflight(manifest: dict, defaults: dict[str, Any]) -> list[Preflight
         reqs.append(
             PreflightRequirement(
                 kind="hf_auth_token_present",
-                args={},
+                args={"hf_id": str(manifest.get("hf_id") or "")},
                 gating=False,
             )
         )

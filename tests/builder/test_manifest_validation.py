@@ -554,6 +554,7 @@ class TestManifestValidation:
         matches = [req for req in case.preflight if req.kind == "hf_auth_token_present"]
         assert len(matches) == 1
         assert matches[0].gating is True
+        assert matches[0].args == {"hf_id": "org/gated-model"}
 
     def test_remote_code_manifest_auth_preflight_is_diagnostic(self, tmp_path):
         path = self._write_unified_manifest(
@@ -570,6 +571,7 @@ class TestManifestValidation:
         matches = [req for req in case.preflight if req.kind == "hf_auth_token_present"]
         assert len(matches) == 1
         assert matches[0].gating is False
+        assert matches[0].args == {"hf_id": "org/remote-code-model"}
 
     def test_explicit_asset_preflight_path_is_model_local(self, tmp_path):
         model_dir = tmp_path / "image_family"

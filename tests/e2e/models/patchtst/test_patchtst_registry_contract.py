@@ -17,6 +17,11 @@ def _plugin(model_type: str):
     assert plugin is not None
     return plugin
 
+
 def test_runtime_strategy() -> None:
     plugin = _plugin("patchtst")
     assert getattr(plugin, "runtime_strategy", None) == "patchtst_trt"
+
+
+def test_registry_routes_supported_prefix() -> None:
+    assert _plugin("patchtstforprediction").name == "patchtst"

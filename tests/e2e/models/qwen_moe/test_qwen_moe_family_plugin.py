@@ -139,11 +139,6 @@ class TestQwen3MoePlugin:
         from tensorrt_model_connect.families.qwen_moe import plugin
         assert plugin.runtime_strategy == "qwen_moe_decoder_moe"
 
-    def test_qwen_plugin_excludes_moe(self):
-        """The standard Qwen plugin should NOT match qwen3_moe."""
-        from tensorrt_model_connect.families.qwen import plugin
-        assert not plugin.matches("qwen3_moe")
-
     def test_load_weights_dense_layer_keys(self, tmp_path):
         """Dense MLP layer (layer 0) should have w_gate/w_up/w_down."""
         from tensorrt_model_connect.families.qwen_moe import plugin

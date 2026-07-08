@@ -27,7 +27,7 @@ jobs:
   prove:
     name: ${{ inputs.model }} / Build + test
     runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
-    timeout-minutes: 90
+    timeout-minutes: 180
 
     defaults:
       run:
@@ -35,11 +35,13 @@ jobs:
 
     env:
       TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
-      TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}
+      TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME }}
       TRTMC_MODEL_PROOF_BUILD_JOBS: ${{ vars.TRTMC_MODEL_PROOF_BUILD_JOBS || '8' }}
+      TRTMC_MODEL_PROOF_GPU_IDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_IDS || '0,1,2,3' }}
+      TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || '60' }}
+      TRTMC_MODEL_PROOF_MIN_FREE_GIB: ${{ vars.TRTMC_MODEL_PROOF_MIN_FREE_GIB || '40' }}
+      TRTMC_MODEL_PROOF_STALE_MINUTES: ${{ vars.TRTMC_MODEL_PROOF_STALE_MINUTES || '120' }}
       PYTHONHASHSEED: "0"
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
       - name: Bootstrap model proof HTML before checkout
@@ -100,6 +102,38 @@ jobs:
           (root / "model-proof-report.html").write_text(report, encoding="utf-8")
           PY
 
+      - name: Check model proof disk headroom
+        run: |
+          set -euo pipefail
+          if ! [[ "$TRTMC_MODEL_PROOF_MIN_FREE_GIB" =~ ^[1-9][0-9]*$ ]]; then
+            echo "TRTMC_MODEL_PROOF_MIN_FREE_GIB must be a positive integer." >&2
+            exit 1
+          fi
+          if ! [[ "$TRTMC_MODEL_PROOF_STALE_MINUTES" =~ ^[1-9][0-9]*$ ]]; then
+            echo "TRTMC_MODEL_PROOF_STALE_MINUTES must be a positive integer." >&2
+            exit 1
+          fi
+          while IFS= read -r -d '' stale_dir; do
+            case "$stale_dir" in
+              "$RUNNER_TEMP"/model-proof-*) ;;
+              *) echo "Refusing to clean unsafe stale path: $stale_dir" >&2; exit 1 ;;
+            esac
+            echo "Removing stale model-proof scratch data from $stale_dir"
+            rm -rf -- "$stale_dir/work" "$stale_dir/projection"
+          done < <(
+            find "$RUNNER_TEMP" -mindepth 1 -maxdepth 1 -type d \
+              -name 'model-proof-*' -mmin "+$TRTMC_MODEL_PROOF_STALE_MINUTES" \
+              -print0
+          )
+          df -h "$RUNNER_TEMP"
+          available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {print $4}')"
+          required_kib="$((TRTMC_MODEL_PROOF_MIN_FREE_GIB * 1024 * 1024))"
+          if [ "$available_kib" -lt "$required_kib" ]; then
+            available_gib="$((available_kib / 1024 / 1024))"
+            echo "Insufficient model-proof disk headroom: ${available_gib} GiB available; ${TRTMC_MODEL_PROOF_MIN_FREE_GIB} GiB required." >&2
+            exit 1
+          fi
+
       - name: Check out exact source revision
         id: checkout
         uses: actions/checkout@v4
@@ -125,7 +159,7 @@ jobs:
 
       - name: Ensure CI Docker image
         id: ci_image
-        timeout-minutes: 30
+        timeout-minutes: 90
         working-directory: ${{ github.workspace }}/model-proof-source
         run: |
           set -euo pipefail
@@ -235,6 +269,7 @@ jobs:
           PY
 
       - name: Upload proof evidence
+        id: proof_upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -246,6 +281,7 @@ jobs:
             !${{ runner.temp }}/model-proof-${{ inputs.model }}-${{ github.run_id }}-${{ github.run_attempt }}/artifacts/model-proof-report.html
 
       - name: Upload model proof HTML report
+        id: html_upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -253,3 +289,26 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           path: ${{ runner.temp }}/model-proof-${{ inputs.model }}-${{ github.run_id }}-${{ github.run_attempt }}/artifacts/model-proof-report.html
+
+      - name: Clean model proof scratch space
+        if: always()
+        env:
+          PROOF_UPLOAD_OUTCOME: ${{ steps.proof_upload.outcome }}
+          HTML_UPLOAD_OUTCOME: ${{ steps.html_upload.outcome }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MODEL_PROOF_OUTPUT_DIR:-}" ]; then
+            echo "No model-proof output directory was initialized; nothing to clean."
+            exit 0
+          fi
+          case "$MODEL_PROOF_OUTPUT_DIR" in
+            "$RUNNER_TEMP"/model-proof-*) ;;
+            *) echo "Refusing to clean unsafe model-proof path: $MODEL_PROOF_OUTPUT_DIR" >&2; exit 1 ;;
+          esac
+          rm -rf -- "$MODEL_PROOF_OUTPUT_DIR/work" "$MODEL_PROOF_OUTPUT_DIR/projection"
+          if [ "$PROOF_UPLOAD_OUTCOME" = "success" ] && [ "$HTML_UPLOAD_OUTCOME" = "success" ]; then
+            rm -rf -- "$MODEL_PROOF_OUTPUT_DIR"
+          else
+            echo "Keeping local proof artifacts because an artifact upload did not succeed."
+          fi
+          df -h "$RUNNER_TEMP"

@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for owned Qwen3/T5 helper and weight-loader logic.
+"""Unit tests for Z-Image-owned Qwen3 helper and weight-loader logic.
 
 These tests avoid TensorRT runtime by importing modules with a fake trt stub.
 
-Trace: ARCH-FAM-001, UD-FAM-QWEN3-T5
-Intent: Validate Qwen3 and T5 helper functions and weight-loader logic with fake TRT stub
+Trace: ARCH-FAM-001, UD-FAM-QWEN3
+Intent: Validate Qwen3 helper functions and weight-loader logic with fake TRT stub
 Preconditions: Fake tensorrt module is injected; no real TRT runtime
 Postconditions: Helper functions produce correct weight transformations and config derivations
 """
@@ -173,87 +173,3 @@ def test_load_qwen3_encoder_weights_transposes_and_optional_norm() -> None:
             vocab_size=5,
         )
     assert "final_norm" not in weights_no_final
-
-
-@pytest.mark.unit
-def test_load_t5_weights_transposes_and_bias_fallback() -> None:
-    """Intent: verify T5 loader transposes linear weights and handles per-layer bias fallback.
-
-    Preconditions: checkpoint_mapper helpers are replaced by a fake deterministic module.
-    Postconditions: Returned weights are float32 and include expected optional keys.
-    """
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.t5_encoder_builder")
-
-    tensors: dict[str, np.ndarray] = {
-        "shared.weight": np.arange(28, dtype=np.float32).reshape(7, 4),
-        "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight": np.arange(
-            64, dtype=np.float32
-        ).reshape(32, 2),
-        "encoder.final_layer_norm.weight": np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32),
-    }
-
-    for layer in range(2):
-        prefix = f"encoder.block.{layer}"
-        tensors[f"{prefix}.layer.0.SelfAttention.q.weight"] = np.arange(16, dtype=np.float32).reshape(4, 4) + layer
-        tensors[f"{prefix}.layer.0.SelfAttention.k.weight"] = np.arange(16, dtype=np.float32).reshape(4, 4) + layer + 1
-        tensors[f"{prefix}.layer.0.SelfAttention.v.weight"] = np.arange(16, dtype=np.float32).reshape(4, 4) + layer + 2
-        tensors[f"{prefix}.layer.0.SelfAttention.o.weight"] = np.arange(16, dtype=np.float32).reshape(4, 4) + layer + 3
-        tensors[f"{prefix}.layer.0.layer_norm.weight"] = np.arange(4, dtype=np.float32) + layer
-        tensors[f"{prefix}.layer.1.DenseReluDense.wi_0.weight"] = np.arange(24, dtype=np.float32).reshape(6, 4) + layer
-        tensors[f"{prefix}.layer.1.DenseReluDense.wi_1.weight"] = np.arange(24, dtype=np.float32).reshape(6, 4) + layer + 1
-        tensors[f"{prefix}.layer.1.DenseReluDense.wo.weight"] = np.arange(24, dtype=np.float32).reshape(4, 6) + layer + 2
-        tensors[f"{prefix}.layer.1.layer_norm.weight"] = np.arange(4, dtype=np.float32) + layer + 10
-
-    cm = importlib.import_module("tensorrt_model_connect.families.flux.checkpoint_mapper")
-
-    with patch.object(cm, "_open_safetensors", lambda _path: tensors), patch.object(
-        cm, "_load_tensor", lambda readers, name: readers[name]
-    ), patch.object(cm, "_has_tensor", lambda readers, name: name in readers), patch.object(
-        cm, "_target_np_dtype",
-        lambda precision: np.float16 if precision == "fp16" else np.float32,
-    ):
-        weights = mod.load_t5_weights(
-            model_dir="unused",
-            d_model=4,
-            num_heads=2,
-            d_kv=2,
-            d_ff=6,
-            num_layers=2,
-            vocab_size=7,
-        )
-
-    np.testing.assert_allclose(
-        weights["encoder.block.0.layer.0.SelfAttention.q.weight"],
-        tensors["encoder.block.0.layer.0.SelfAttention.q.weight"].T.astype(np.float32),
-    )
-    np.testing.assert_allclose(
-        weights["encoder.block.1.layer.1.DenseReluDense.wi_0.weight"],
-        tensors["encoder.block.1.layer.1.DenseReluDense.wi_0.weight"].T.astype(np.float32),
-    )
-    assert "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight" in weights
-    assert "encoder.block.1.layer.0.SelfAttention.relative_attention_bias.weight" not in weights
-    assert weights["encoder.final_layer_norm.weight"].dtype == np.float32
-
-    with patch.object(cm, "_open_safetensors", lambda _path: tensors), patch.object(
-        cm, "_load_tensor", lambda readers, name: readers[name]
-    ), patch.object(cm, "_has_tensor", lambda readers, name: name in readers), patch.object(
-        cm, "_target_np_dtype",
-        lambda precision: np.float16 if precision == "fp16" else np.float32,
-    ):
-        fp16_weights = mod.load_t5_weights(
-            model_dir="unused",
-            d_model=4,
-            num_heads=2,
-            d_kv=2,
-            d_ff=6,
-            num_layers=2,
-            vocab_size=7,
-            precision="fp16",
-        )
-
-    assert fp16_weights["shared.weight"].dtype == np.float16
-    assert (
-        fp16_weights["encoder.block.0.layer.0.SelfAttention.q.weight"].dtype
-        == np.float16
-    )
-    assert fp16_weights["encoder.block.0.layer.0.layer_norm.weight"].dtype == np.float32

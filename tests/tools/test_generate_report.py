@@ -439,6 +439,40 @@ class TestLoadAllResults:
         assert "canary-1b-v2-asr-probe02" in html
         assert "3 testcases" in html
 
+    def test_parent_pytest_node_does_not_create_schema_less_result(self, tmp_path):
+        mod = _import_report()
+        e2e_root = tmp_path / "e2e_artifacts"
+        artifacts_dir = e2e_root / "artifacts"
+        parent_name = "multi-case-model"
+        for suffix in ("ar", "diffusion", "linear-spec"):
+            case_name = f"{parent_name}-{suffix}"
+            _write_result(
+                artifacts_dir,
+                case_name,
+                _make_result(name=case_name, model_name=parent_name),
+            )
+        _write_junit(
+            e2e_root,
+            f"""
+            <testcase classname="tests.e2e.models.multi.test_multi_e2e"
+                      name="test_model_e2e[{parent_name}]" />
+            """,
+        )
+
+        results = mod.load_all_results(artifacts_dir)
+
+        assert {result["case_name"] for result in results} == {
+            f"{parent_name}-ar",
+            f"{parent_name}-diffusion",
+            f"{parent_name}-linear-spec",
+        }
+        assert all(result["case_config"] for result in results)
+        assert all(
+            result["_pytest_model_outcome"]["pytest_status"] == "PASSED"
+            for result in results
+        )
+        assert mod.validate_evidence(results, project_dir=None) == []
+
 
 class TestLoadModelManifests:
     """Tests for the model and testcase inventory shown in the summary."""
@@ -2001,6 +2035,7 @@ class TestEvidenceCompleteness:
             "runtime_library_sha256": "b" * 64,
             "sibling_model_count": 0,
             "model_dso_count": 1,
+            "gpu_id": "2",
             "network": "disabled",
             "plugin_search": "strict",
             "steps": {"scratch_build": {"status": "passed", "evidence": "build.log"}},
@@ -2017,6 +2052,8 @@ class TestEvidenceCompleteness:
         assert "Isolation Proof" in rendered
         assert "a" * 40 in rendered
         assert "libtrtmc_model_alpha.so" in rendered
+        assert "Host GPU ID" in rendered
+        assert ">2<" in rendered
         assert "test_alpha" in rendered
         assert "test_alpha_unit.py" in rendered
         assert "alpha-small" in rendered
@@ -2038,6 +2075,7 @@ class TestEvidenceCompleteness:
             "model": "alpha",
             "source_revision": "a" * 40,
             "suite": "premerge",
+            "gpu_id": "2",
             "validation_exit_code": 0,
             "steps": steps,
         }
@@ -2050,6 +2088,7 @@ class TestEvidenceCompleteness:
             "runtime_library_sha256": "b" * 64,
             "sibling_model_count": 0,
             "model_dso_count": 1,
+            "gpu_id": "2",
             "network": "disabled",
             "plugin_search": "strict",
         }

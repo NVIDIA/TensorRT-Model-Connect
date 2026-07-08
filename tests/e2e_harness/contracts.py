@@ -254,7 +254,8 @@ class PreflightRequirement:
         kind: Requirement type identifier. Supported kinds:
             - "binary_exists": args must contain "path".
             - "gpu_memory_min_gb": args must contain "min_gb".
-            - "hf_auth_token_present": no args needed.
+            - "hf_auth_token_present": optional ``hf_id``; succeeds with an
+              auth token or a locally resolvable offline snapshot.
             - "asset_exists": args must contain "path".
             - "python_module_available": args must contain "module" and may
               optionally contain "phase" ("build", "runtime", "reference")

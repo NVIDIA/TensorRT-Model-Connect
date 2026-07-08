@@ -9,13 +9,13 @@ import json
 from importlib import import_module
 from unittest.mock import patch
 
-from tests.builder.test_debug_runner import _make_bundle_bytes
+from tests.builder.debug_runner_test_support import make_bundle_bytes
 
 
 def test_qwen_debug_runner_forwards_engine_section_and_communicator(tmp_path) -> None:
     from tensorrt_model_connect.families.qwen.debug_runner import runner_from_bundle
 
-    bundle = _make_bundle_bytes(
+    bundle = make_bundle_bytes(
         {"num_layers": 2, "max_cache_length": 128},
         engine_plan=b"SINGLE_ENGINE",
         extra_sections={
@@ -52,7 +52,7 @@ def test_qwen_loads_triattention_stats_from_bundle(tmp_path) -> None:
         "sampled_heads": [[0, 0]],
         "stats": {},
     }).encode("utf-8")
-    bundle = _make_bundle_bytes(
+    bundle = make_bundle_bytes(
         {"num_layers": 1, "max_cache_length": 32},
         engine_plan=b"X",
         extra_sections={"triattention_stats.json": stats_data},
@@ -91,7 +91,7 @@ def test_qwen_triattention_bundle_uses_qwen_runner(tmp_path) -> None:
             }
         },
     }).encode("utf-8")
-    bundle = _make_bundle_bytes(
+    bundle = make_bundle_bytes(
         {"num_layers": 2, "max_cache_length": 128},
         engine_plan=b"ENGINE",
         extra_sections={

@@ -35,21 +35,29 @@ if [ "${1:-}" = "image" ] && [ "${2:-}" = "inspect" ]; then
   record="$(awk -F'|' -v image="$image" '$1 == image { print; exit }' "$FAKE_DOCKER_STATE")"
   [ -n "$record" ] || exit 1
   if [[ " $* " == *" --format "* ]]; then
-    printf '%s\n' "${record#*|}"
+    if [[ " $* " == *"{{.Id}}"* ]]; then
+      printf 'sha256:%s\n' "${record#*|}"
+    else
+      printf '%s\n' "${record#*|}"
+    fi
   fi
   exit 0
 fi
 
 if [ "${1:-}" = "run" ]; then
   capability="${FAKE_DOCKER_CAPABILITY:-available}"
+  profiles="${FAKE_DOCKER_PROFILES-chronos,deepseek_ocr,elf_flow,internlm,magpie_tts_reference,nemotron_h_reference,phi4_multimodal}"
   if [ -f "$FAKE_DOCKER_REBUILT" ]; then
     capability="available"
+    profiles="chronos,deepseek_ocr,elf_flow,internlm,magpie_tts_reference,nemotron_h_reference,phi4_multimodal"
   fi
   cat <<'EOF'
 TENSORRT_VERSION=11.0.0.114
 MODELOPT_VERSION=0.44.0
+NLOHMANN_JSON_HEADER=present
 EOF
   printf 'NEMO_PROMPT_RNNT=%s\n' "$capability"
+  printf 'PYTHON_PROFILES=%s\n' "$profiles"
   exit 0
 fi
 
@@ -92,6 +100,10 @@ def _run_ensure_script(
     *,
     existing_images: dict[str, str],
     capability: str = "available",
+    profiles: str = (
+        "chronos,deepseek_ocr,elf_flow,internlm,magpie_tts_reference,"
+        "nemotron_h_reference,phi4_multimodal"
+    ),
     changed_paths: tuple[str, ...] = (),
 ) -> tuple[subprocess.CompletedProcess[str], str, str]:
     bin_dir, log_path = _write_fake_docker(tmp_path, existing_images)
@@ -120,6 +132,7 @@ exit 2
             "FAKE_DOCKER_LOG": str(log_path),
             "FAKE_DOCKER_STATE": str(tmp_path / "images"),
             "FAKE_DOCKER_CAPABILITY": capability,
+            "FAKE_DOCKER_PROFILES": profiles,
             "FAKE_DOCKER_REBUILT": str(tmp_path / "rebuilt"),
             "GITHUB_ENV": str(github_env),
             "RUNNER_TEMP": str(tmp_path / "runner-temp"),
@@ -207,3 +220,39 @@ def test_matching_fingerprint_image_is_reused_for_pr_rerun(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr
     assert "build " not in docker_log
     assert f"CI Docker image '{resolved_image}' already matches" in result.stdout
+
+
+def test_missing_prebuilt_profiles_rebuilds_the_image(tmp_path: Path) -> None:
+    bootstrap_result, bootstrap_env, bootstrap_log = _run_ensure_script(
+        tmp_path / "bootstrap",
+        existing_images={},
+    )
+    assert bootstrap_result.returncode == 0, bootstrap_result.stderr
+    resolved_image = re.search(
+        r"^TRTMC_CI_IMAGE=(.+)$", bootstrap_env, re.MULTILINE
+    ).group(1)
+    fingerprint = re.search(
+        r"--label org\.nvidia\.trtmc\.ci-input-fingerprint=([0-9a-f]{64})",
+        bootstrap_log,
+    ).group(1)
+
+    result, _, docker_log = _run_ensure_script(
+        tmp_path / "profiles-missing",
+        existing_images={resolved_image: fingerprint},
+        profiles="",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"-t {resolved_image}" in docker_log
+    assert "prebuilt Python profiles differ" in result.stdout
+
+
+def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> None:
+    script = SCRIPT.read_text(encoding="utf-8")
+
+    assert "family_model_manifests" in script
+    assert "declared_profile_assets" in script
+    assert 'python/tensorrt_model_connect/python_profiles.py' in script
+    assert '-f "$dockerfile" \\\n    .' in script
+    assert "trtmc-empty-docker-context" not in script
+    assert "profile builder source leaked into the runtime image" in script

@@ -37,7 +37,8 @@ def test_workflows_define_shared_hf_cache_env() -> None:
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
     assert "TRTMC_HF_CACHE:" in proof
     assert "vars.TRTMC_HF_HOME" in proof
-    assert "/workspace/users/yifeif/tensorrt-model-connect/hf-cache" in proof
+    runner = (REPO_ROOT / ".github/scripts/run-model-proof.sh").read_text()
+    assert '$HOME/.cache/huggingface' in runner
 
 
 def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
@@ -493,7 +494,8 @@ def test_model_proof_uses_pinned_image_read_only_hf_cache_and_evidence() -> None
     assert "/artifacts/" in proof
 
     assert "dst=/src,readonly" in runner
-    assert "dst=/hf-cache,readonly" in runner
+    assert "dst=/hf-cache/hub,readonly" in runner
+    assert "dst=/hf-cache/modules,readonly" in runner
     assert "--network none" in runner
     assert "--read-only" in runner
     assert "proof.json" in runner

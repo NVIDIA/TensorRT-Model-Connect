@@ -504,3 +504,90 @@ def test_build_t5_encoder_engine_raises_when_builder_returns_none(monkeypatch: p
             max_seq_len=2,
             relative_attention_num_buckets=4,
         )
+
+
+@pytest.mark.unit
+def test_load_t5_weights_transposes_and_bias_fallback() -> None:
+    """Verify Flux's T5 loader owns its transforms and layer-0 bias fallback."""
+    fake_trt = _make_fake_trt()
+    mod = _import_with_fake_trt(
+        "tensorrt_model_connect.families.flux.t5_encoder_builder", fake_trt
+    )
+
+    tensors: dict[str, np.ndarray] = {
+        "shared.weight": np.arange(28, dtype=np.float32).reshape(7, 4),
+        "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight": np.arange(
+            64, dtype=np.float32
+        ).reshape(32, 2),
+        "encoder.final_layer_norm.weight": np.array(
+            [0.1, 0.2, 0.3, 0.4], dtype=np.float32
+        ),
+    }
+
+    for layer in range(2):
+        prefix = f"encoder.block.{layer}"
+        for offset, projection in enumerate(("q", "k", "v", "o")):
+            tensors[f"{prefix}.layer.0.SelfAttention.{projection}.weight"] = (
+                np.arange(16, dtype=np.float32).reshape(4, 4) + layer + offset
+            )
+        tensors[f"{prefix}.layer.0.layer_norm.weight"] = (
+            np.arange(4, dtype=np.float32) + layer
+        )
+        for offset, projection in enumerate(("wi_0", "wi_1")):
+            tensors[f"{prefix}.layer.1.DenseReluDense.{projection}.weight"] = (
+                np.arange(24, dtype=np.float32).reshape(6, 4) + layer + offset
+            )
+        tensors[f"{prefix}.layer.1.DenseReluDense.wo.weight"] = (
+            np.arange(24, dtype=np.float32).reshape(4, 6) + layer + 2
+        )
+        tensors[f"{prefix}.layer.1.layer_norm.weight"] = (
+            np.arange(4, dtype=np.float32) + layer + 10
+        )
+
+    checkpoint_mapper = importlib.import_module(
+        "tensorrt_model_connect.families.flux.checkpoint_mapper"
+    )
+
+    def load(precision: str = "fp32"):
+        with patch.object(
+            checkpoint_mapper, "_open_safetensors", lambda _path: tensors
+        ), patch.object(
+            checkpoint_mapper, "_load_tensor", lambda readers, name: readers[name]
+        ), patch.object(
+            checkpoint_mapper, "_has_tensor", lambda readers, name: name in readers
+        ), patch.object(
+            checkpoint_mapper,
+            "_target_np_dtype",
+            lambda value: np.float16 if value == "fp16" else np.float32,
+        ):
+            return mod.load_t5_weights(
+                model_dir="unused",
+                d_model=4,
+                num_heads=2,
+                d_kv=2,
+                d_ff=6,
+                num_layers=2,
+                vocab_size=7,
+                precision=precision,
+            )
+
+    weights = load()
+    np.testing.assert_allclose(
+        weights["encoder.block.0.layer.0.SelfAttention.q.weight"],
+        tensors["encoder.block.0.layer.0.SelfAttention.q.weight"].T,
+    )
+    np.testing.assert_allclose(
+        weights["encoder.block.1.layer.1.DenseReluDense.wi_0.weight"],
+        tensors["encoder.block.1.layer.1.DenseReluDense.wi_0.weight"].T,
+    )
+    assert "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight" in weights
+    assert "encoder.block.1.layer.0.SelfAttention.relative_attention_bias.weight" not in weights
+    assert weights["encoder.final_layer_norm.weight"].dtype == np.float32
+
+    fp16_weights = load("fp16")
+    assert fp16_weights["shared.weight"].dtype == np.float16
+    assert (
+        fp16_weights["encoder.block.0.layer.0.SelfAttention.q.weight"].dtype
+        == np.float16
+    )
+    assert fp16_weights["encoder.block.0.layer.0.layer_norm.weight"].dtype == np.float32

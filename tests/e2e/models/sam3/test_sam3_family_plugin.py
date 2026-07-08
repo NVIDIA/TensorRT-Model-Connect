@@ -299,6 +299,7 @@ def _sam3_core_tensors(prefix: str = "detector_model.") -> dict[str, np.ndarray]
 
 
 def test_sam3_matches_sam3_video_not_legacy_sam() -> None:
+    from tensorrt_model_connect.families import find_plugin
     from tensorrt_model_connect.families.sam3 import plugin
 
     assert plugin.matches("sam3")
@@ -307,6 +308,8 @@ def test_sam3_matches_sam3_video_not_legacy_sam() -> None:
     assert not plugin.matches("qwen3")
     assert plugin.runtime_strategy == "sam3_prompted_segmentation"
     assert plugin.requires_tokenizer is True
+    assert find_plugin("sam3").name == "sam3"
+    assert find_plugin("sam3_video").name == "sam3"
 
 
 def test_sam3_load_weights_maps_text_encoder_prefix(tmp_path: Path) -> None:

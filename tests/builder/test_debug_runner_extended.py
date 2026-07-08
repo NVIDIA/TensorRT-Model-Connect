@@ -10,57 +10,15 @@ file covers an owned E2E bundle-reader implementation and pure cache arithmetic.
 from __future__ import annotations
 
 import json
-import struct
 import pytest
+
+from tests.builder.debug_runner_test_support import make_bundle_bytes
 
 # Module-level skip: tensorrt_model_connect submodules need tensorrt installed
 try:
     import tensorrt_model_connect.debug_runner  # noqa: F401
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect.debug_runner requires tensorrt", allow_module_level=True)
-
-
-# ---------------------------------------------------------------------------
-# Helpers: build a minimal .trtfb bundle in memory
-# ---------------------------------------------------------------------------
-
-def _make_bundle_bytes(
-    header: dict,
-    engine_plan: bytes = b"FAKE_ENGINE_PLAN",
-    vision_plan: bytes | None = None,
-    extra_sections: dict[str, bytes] | None = None,
-) -> bytes:
-    """Build a minimal .trtfb bundle in memory.
-
-    ``extra_sections`` maps section name -> raw bytes; these are appended
-    after engine_plan (and vision_plan if given).
-    """
-    magic = b"TRTFB\x00\x01\x00"
-    sections: dict[str, dict] = {}
-    body = b""
-
-    # engine_plan section
-    sections["engine_plan"] = {"offset": len(body), "size": len(engine_plan)}
-    body += engine_plan
-
-    # optional vision section
-    if vision_plan is not None:
-        sections["vision_engine_plan"] = {
-            "offset": len(body), "size": len(vision_plan),
-        }
-        body += vision_plan
-
-    # extra sections (config.json, tokenizer.json, etc.)
-    if extra_sections:
-        for name, data in extra_sections.items():
-            sections[name] = {"offset": len(body), "size": len(data)}
-            body += data
-
-    header["sections"] = sections
-    header_json = json.dumps(header).encode("utf-8")
-    header_len = struct.pack("<Q", len(header_json))
-
-    return magic + header_len + header_json + body
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +33,7 @@ class TestLoadConfigFromBundleExtended:
         from tests.e2e.models.qwen.e2e_plugins.runners.vl_debug_runner import load_config_from_bundle
 
         header = {"num_layers": 2, "max_cache_length": 64}
-        bundle = _make_bundle_bytes(header, engine_plan=b"FAKE")
+        bundle = make_bundle_bytes(header, engine_plan=b"FAKE")
 
         path = tmp_path / "no_config.trtfb"
         path.write_bytes(bundle)
@@ -95,7 +53,7 @@ class TestLoadConfigFromBundleExtended:
         }).encode("utf-8")
 
         header = {"num_layers": 1, "max_cache_length": 32}
-        bundle = _make_bundle_bytes(
+        bundle = make_bundle_bytes(
             header,
             engine_plan=b"EP",
             extra_sections={"config.json": config_data},
@@ -132,7 +90,7 @@ class TestLoadPreprocessorConfigFromBundle:
         }).encode("utf-8")
 
         header = {"num_layers": 1, "max_cache_length": 32}
-        bundle = _make_bundle_bytes(
+        bundle = make_bundle_bytes(
             header,
             engine_plan=b"EP",
             extra_sections={"preprocessor_config.json": preproc_data},
@@ -151,7 +109,7 @@ class TestLoadPreprocessorConfigFromBundle:
         from tests.e2e.models.qwen.e2e_plugins.runners.vl_debug_runner import load_preprocessor_config_from_bundle
 
         header = {"num_layers": 1, "max_cache_length": 32}
-        bundle = _make_bundle_bytes(header, engine_plan=b"EP")
+        bundle = make_bundle_bytes(header, engine_plan=b"EP")
 
         path = tmp_path / "no_preproc.trtfb"
         path.write_bytes(bundle)
@@ -177,7 +135,7 @@ class TestMultiSectionBundle:
 
         header = {"num_layers": 4, "max_cache_length": 128}
         engine_plan = b"REAL_ENGINE_PLAN_DATA"
-        bundle = _make_bundle_bytes(
+        bundle = make_bundle_bytes(
             header,
             engine_plan=engine_plan,
             extra_sections={

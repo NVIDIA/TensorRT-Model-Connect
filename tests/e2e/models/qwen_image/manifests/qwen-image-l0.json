@@ -1,0 +1,43 @@
+{
+  "name": "qwen-image-l0",
+  "hf_id": "Qwen/Qwen-Image",
+  "bundle": "qwen-image-l0.trtfb",
+  "family": "qwen_image",
+  "runtime_strategy": "diffusion_qwen_image",
+  "task_strategy": "diffusion_media_generation",
+  "precision": "bf16",
+  "user_contract": "text-to-image",
+  "build_args": {
+    "max_cache_length": 256
+  },
+  "testcases": [
+    {
+      "name": "qwen-image-l0",
+      "trace_id": "IT-E2E-QIMG-L0-01",
+      "model_type": "qwen_image",
+      "ci_tier": "l0_only",
+      "reference_family": "diffusers_image_gen",
+      "user_contract": "diffusion_image",
+      "description": "Qwen-Image L0 representative at 512px with the full denoising contract",
+      "prompt": "A cat holding a sign that says hello world",
+      "negative_prompt": " ",
+      "test_type": "diffusion",
+      "image_height": 512,
+      "image_width": 512,
+      "height": 512,
+      "width": 512,
+      "video_num_frames": 1,
+      "num_inference_steps": 20,
+      "cfg_scale": 4.0,
+      "seed": 42,
+      "stages": [
+        {
+          "name": "end_to_end",
+          "required": true
+        }
+      ],
+      "skip_text_comparison": true,
+      "notes": "PR L0 uses the same checkpoint, Qwen2.5-VL text encoder, Qwen-Image DiT, VAE, C++ runtime, HF diffusers reference, twenty-step denoising recipe, and acceptance thresholds as nightly; only spatial scale is reduced."
+    }
+  ]
+}

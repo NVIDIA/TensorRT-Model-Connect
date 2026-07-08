@@ -819,7 +819,7 @@ class HfTransformersReference:
         torch_dtype_expr = _torch_dtype_for_case(case)
 
         script = textwrap.dedent(f"""\
-            import json, numpy as np
+            import json, os, numpy as np
             import scipy.io.wavfile as wav
 
             hf_id = {hf_id!r}
@@ -845,7 +845,11 @@ class HfTransformersReference:
                 if sr_raw != target_sr:
                     from scipy.signal import resample
                     audio_f = resample(audio_f, int(len(audio_f)*target_sr/sr_raw)).astype(np.float32)
-                mono_path = audio_path + ".mono.wav"
+                # The source projection and HF cache are mounted read-only in
+                # isolated CI.  Keep derived audio beside this case's writable
+                # report artifacts instead of mutating the model-owned input.
+                mono_path = os.path.join(
+                    os.path.dirname(output_path), "reference-input.mono.wav")
                 audio_i16 = np.clip(audio_f * 32768, -32768, 32767).astype(np.int16)
                 wav.write(mono_path, target_sr, audio_i16)
                 model = nemo_asr.models.ASRModel.from_pretrained(hf_id, map_location="cpu")

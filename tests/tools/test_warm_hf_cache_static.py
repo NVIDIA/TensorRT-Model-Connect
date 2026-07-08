@@ -28,6 +28,8 @@ HELPER_FUNCTIONS = {
     "_is_cached",
     "_manifest_has_eligible_testcase",
     "_snapshot_has_required_files",
+    "_warm_exit_code",
+    "_warm_snapshot",
 }
 
 
@@ -64,8 +66,21 @@ def _load_cache_helpers() -> dict:
                 "linear_spec_lora/adapter_model.safetensors",
             ],
         },
-        "_ENTRYPOINT_PATTERNS": ["config.json", "model_index.json", "*/config.json"],
-        "_WEIGHT_PATTERNS": ["*.safetensors", "*.bin", "*.nemo"],
+        "_ENTRYPOINT_PATTERNS": [
+            "config.json",
+            "model_index.json",
+            "*.yml",
+            "*.yaml",
+            "*/config.json",
+        ],
+        "_WEIGHT_PATTERNS": [
+            "*.safetensors",
+            "*.bin",
+            "*.nemo",
+            "model.npz",
+            "elf_params.npz",
+            "checkpoint_*/manifest.ocdbt",
+        ],
         "_HF_ALLOW_PATTERNS": ["config.json", "model.safetensors"],
         "_HF_FAMILY_ALLOW_PATTERNS": ["nested/**"],
         "_HF_EXTRA_ALLOW_PATTERNS": ["*.nemo"],
@@ -75,6 +90,12 @@ def _load_cache_helpers() -> dict:
             "nested/**",
             "*.nemo",
         ],
+        "_TOKENIZER_DOWNLOAD_PATTERNS": [
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ],
+        "HfHubHTTPError": RuntimeError,
     }
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in HELPER_FUNCTIONS:
@@ -122,6 +143,34 @@ def test_nemo_archives_count_as_complete_snapshots() -> None:
         'if any(fnmatch.fnmatch(name, "*.nemo") for name in files):\n'
         "        return True"
     ) in text
+
+
+def test_orbax_checkpoint_counts_as_complete_snapshot(tmp_path: Path) -> None:
+    helpers = _load_cache_helpers()
+    snapshot = tmp_path / "snapshots" / "abc"
+    checkpoint = snapshot / "checkpoint_0"
+    checkpoint.mkdir(parents=True)
+    (snapshot / "ELF-B-de-en.yml").write_text("model: elf\n")
+    (checkpoint / "manifest.ocdbt").write_bytes(b"checkpoint")
+
+    assert helpers["_snapshot_has_required_files"](snapshot)
+
+
+def test_tokenizer_dependency_does_not_require_model_weights(tmp_path: Path) -> None:
+    helpers = _load_cache_helpers()
+    snapshot = tmp_path / "snapshots" / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "tokenizer_config.json").write_text("{}")
+
+    assert helpers["_snapshot_has_required_files"](
+        snapshot,
+        require_weights=False,
+    )
+    assert not helpers["_snapshot_has_required_files"](
+        snapshot,
+        require_weights=True,
+    )
 
 
 def test_diffusers_snapshot_requires_component_weights(tmp_path: Path) -> None:
@@ -243,6 +292,73 @@ def test_cache_skip_rejects_unresolved_snapshots_parent(tmp_path: Path) -> None:
     helpers["snapshot_download"] = lambda *args, **kwargs: str(snapshots)
 
     assert not helpers["_is_cached"]("org/model")
+
+
+def test_selective_warm_of_cached_snapshot_makes_no_network_download() -> None:
+    helpers = _load_cache_helpers()
+    downloads: list[str] = []
+    helpers["_is_cached"] = lambda _hf_id, **_kwargs: True
+    helpers["snapshot_download"] = lambda hf_id, **_kwargs: downloads.append(hf_id)
+
+    status, detail = helpers["_warm_snapshot"](
+        "org/model",
+        gated=True,
+        token_available=False,
+        selective=True,
+        local_only=False,
+    )
+
+    assert (status, detail) == ("cached", "")
+    assert downloads == []
+
+
+def test_uncached_gated_snapshot_without_token_fails_before_download() -> None:
+    helpers = _load_cache_helpers()
+    downloads: list[str] = []
+    helpers["_is_cached"] = lambda _hf_id, **_kwargs: False
+    helpers["snapshot_download"] = lambda hf_id, **_kwargs: downloads.append(hf_id)
+
+    status, detail = helpers["_warm_snapshot"](
+        "org/gated-model",
+        gated=True,
+        token_available=False,
+        selective=True,
+        local_only=False,
+    )
+
+    assert status == "failed"
+    assert "no HF token" in detail
+    assert downloads == []
+
+
+def test_local_only_uncached_snapshot_never_downloads() -> None:
+    helpers = _load_cache_helpers()
+    downloads: list[str] = []
+    helpers["_is_cached"] = lambda _hf_id, **_kwargs: False
+    helpers["snapshot_download"] = lambda hf_id, **_kwargs: downloads.append(hf_id)
+
+    status, detail = helpers["_warm_snapshot"](
+        "org/model",
+        gated=False,
+        token_available=False,
+        selective=True,
+        local_only=True,
+    )
+
+    assert status == "failed"
+    assert "not available in the local cache" in detail
+    assert downloads == []
+
+
+def test_strict_warm_failure_returns_nonzero() -> None:
+    exit_code = _load_cache_helpers()["_warm_exit_code"]
+    text = WARM_HF_CACHE.read_text(encoding="utf-8")
+
+    assert exit_code(True, ["org/missing"]) == 1
+    assert exit_code(True, []) == 0
+    assert exit_code(False, ["org/missing"]) == 0
+    assert "strict_exit_code = _warm_exit_code(args.strict, warned)" in text
+    assert "if strict_exit_code:\n    sys.exit(strict_exit_code)" in text
 
 
 def test_hf_file_cache_skip_uses_hf_local_resolution() -> None:

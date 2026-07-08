@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-FROM nvidia/cuda:13.0.0-devel-ubuntu24.04
+FROM nvidia/cuda:13.0.0-devel-ubuntu24.04 AS ci-base
 
 ARG TENSORRT_VERSION=11.0.0.114
 ARG TENSORRT_DEB_VERSION=11.0.0.114-1+cuda13.2
@@ -154,6 +154,31 @@ ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 RUN apt-get update && \
     apt-get install -y --no-install-recommends nlohmann-json3-dev && \
     rm -rf /var/lib/apt/lists/*
+
+# Build every family-declared Python execution profile while network access is
+# available. The family-owned lock and verification files are the only package
+# source of truth; python_profiles.py additionally rejects non-exact pins and
+# verifies every installed distribution before marking a profile ready.
+FROM ci-base AS python-profile-builder
+
+ENV PYTHONPATH=/opt/trtmc-profile-source
+ENV TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles
+# This image targets the GB300/Blackwell runners. Avoid compiling profile-local
+# CUDA extensions for every architecture known to a GPU-less Docker build.
+ENV TORCH_CUDA_ARCH_LIST=10.0
+COPY python/tensorrt_model_connect /opt/trtmc-profile-source/tensorrt_model_connect
+COPY .github/scripts/build-python-profiles.py /opt/trtmc-build-python-profiles.py
+RUN python3 /opt/trtmc-build-python-profiles.py
+
+# Do not retain the full builder source tree in the proof image. Only the
+# verified virtual environments cross the stage boundary, so sibling model
+# implementations cannot satisfy imports in an isolated source projection.
+FROM ci-base AS ci-runtime
+
+COPY --from=python-profile-builder \
+    /opt/trtmc-python-profiles /opt/trtmc-python-profiles
+ENV TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles
+ENV TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1
 
 WORKDIR /workspace/tensorrt-model-connect
 

@@ -5,12 +5,11 @@
 
 from __future__ import annotations
 
-import importlib
-
 
 def test_locateanything_handler_is_model_owned():
-    mod = importlib.import_module("diff_vl")
-    handler = mod._find_family_diff_vl_handler("locateanything")
+    from tools import diff_vl
+
+    handler = diff_vl._find_family_diff_vl_handler("locateanything")
 
     assert handler is not None
     assert handler.__file__.replace("\\", "/").endswith(

@@ -9379,3 +9379,26 @@ def test_model_owned_e2e_assets_are_local_and_complete() -> None:
                     )
 
     assert not violations, _format_violations(violations)
+
+
+def test_lazy_family_packages_preserve_plugin_instance_api() -> None:
+    """Lazy package imports must not replace ``family.plugin`` with a module.
+
+    Importlib publishes a directly imported ``family.plugin`` submodule on the
+    parent package.  Every lazy family initializer must intercept that write so
+    package consumers and registry discovery continue to receive the
+    model-owned ``FamilyPlugin`` instance, independent of test import order.
+    """
+    violations: list[tuple[Path, int, str]] = []
+    guard = 'if name == "plugin" and isinstance(value, types.ModuleType):'
+
+    for init_path in sorted(FAMILIES.glob("*/__init__.py")):
+        source = init_path.read_text(encoding="utf-8")
+        if "_plugin = None" not in source:
+            continue
+        if guard not in source:
+            violations.append(
+                (init_path, 0, "lazy package does not preserve plugin instance")
+            )
+
+    assert not violations, _format_violations(violations)

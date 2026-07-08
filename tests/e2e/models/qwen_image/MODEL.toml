@@ -4,6 +4,7 @@
 id = "qwen_image"
 plugin = "qwen_image"
 test_manifests = [
+  "manifests/qwen-image-l0.json",
   "manifests/qwen-image-2512.json",
   "manifests/qwen-image-edit-2511.json",
   "manifests/qwen-image.json",

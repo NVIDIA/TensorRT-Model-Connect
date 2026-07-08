@@ -7,7 +7,7 @@ set -euo pipefail
 base_image="${TRTMC_CI_IMAGE:-trtmc-dev-gb300:manylinux_2_39}"
 dockerfile="${TRTMC_CI_DOCKERFILE:-Dockerfile}"
 lock_file="${TRTMC_CI_IMAGE_LOCK_FILE:-/tmp/trtmc-ci-docker-image.lock}"
-lock_timeout="${TRTMC_CI_IMAGE_LOCK_TIMEOUT:-1800}"
+lock_timeout="${TRTMC_CI_IMAGE_LOCK_TIMEOUT:-5400}"
 fingerprint_label="org.nvidia.trtmc.ci-input-fingerprint"
 
 if ! [[ "$lock_timeout" =~ ^[1-9][0-9]*$ ]]; then
@@ -26,12 +26,65 @@ fi
 
 docker_input_paths=(
   "$dockerfile"
+  .dockerignore
   scripts/docker_build_gb300.sh
   .github/scripts/start-gha-container.sh
+  .github/scripts/build-python-profiles.py
   .github/scripts/ensure-ci-docker-image.sh
   .github/workflows/trtmc-ci.yml
   .github/workflows/nightly.yml
+  python/tensorrt_model_connect/__init__.py
+  python/tensorrt_model_connect/python_profiles.py
+  python/tensorrt_model_connect/python_profiles.toml
+  python/tensorrt_model_connect/families/__init__.py
 )
+
+# Family manifests declare profile assets. Include both the declarations and
+# the referenced lock/verification files in the image tag fingerprint so a
+# source revision can never silently reuse profiles baked for older pins.
+mapfile -t family_model_manifests < <(
+  find python/tensorrt_model_connect/families \
+    -mindepth 2 -maxdepth 2 -type f -name MODEL.toml -print | sort
+)
+docker_input_paths+=("${family_model_manifests[@]}")
+mapfile -t declared_profile_assets < <(
+  PYTHONPATH=python python3 - <<'PY'
+from pathlib import Path
+
+from tensorrt_model_connect.python_profiles import load_python_profile_registry
+
+package_root = Path("python/tensorrt_model_connect")
+assets = set()
+for spec in load_python_profile_registry()["profiles"].values():
+    if not isinstance(spec, dict):
+        continue
+    for field in ("requirements", "verification_script_file"):
+        value = str(spec.get(field, "") or "").strip()
+        if value:
+            assets.add(str(package_root / value))
+print("\n".join(sorted(assets)))
+PY
+)
+docker_input_paths+=("${declared_profile_assets[@]}")
+mapfile -t docker_input_paths < <(
+  printf '%s\n' "${docker_input_paths[@]}" | sort -u
+)
+
+expected_python_profiles="$({
+  PYTHONPATH=python python3 - <<'PY'
+from tensorrt_model_connect.python_profiles import (
+    DEFAULT_PROFILE,
+    load_python_profile_registry,
+)
+
+profiles = load_python_profile_registry()["profiles"]
+print(",".join(sorted(name for name in profiles if name != DEFAULT_PROFILE)))
+PY
+} | tail -n 1)"
+if [ -z "$expected_python_profiles" ]; then
+  echo "ERROR: No family-owned Python execution profiles were declared" >&2
+  exit 1
+fi
 
 compute_docker_input_fingerprint() {
   local path
@@ -101,6 +154,22 @@ print(
     + ("present" if Path("/usr/include/nlohmann/json.hpp").is_file() else "missing")
 )
 print("NEMO_PROMPT_RNNT=available")
+
+manifest_path = Path("/opt/trtmc-python-profiles/.image-ready.json")
+manifest = __import__("json").loads(manifest_path.read_text(encoding="utf-8"))
+if Path("/opt/trtmc-profile-source").exists():
+    raise SystemExit("profile builder source leaked into the runtime image")
+profiles = manifest.get("profiles")
+if not isinstance(profiles, dict) or not profiles:
+    raise SystemExit("prebuilt Python profile manifest is empty or invalid")
+for name, record in profiles.items():
+    if not isinstance(record, dict):
+        raise SystemExit(f"invalid prebuilt Python profile record: {name}")
+    python = Path(str(record.get("python", "")))
+    ready = Path(str(record.get("ready", "")))
+    if not python.is_file() or not ready.is_file():
+        raise SystemExit(f"prebuilt Python profile is incomplete: {name}")
+print("PYTHON_PROFILES=" + ",".join(sorted(profiles)))
 PY
 '
 }
@@ -140,6 +209,7 @@ else
     current_modelopt="$(awk -F= '$1 == "MODELOPT_VERSION" { print $2 }' "$version_file")"
     current_nlohmann="$(awk -F= '$1 == "NLOHMANN_JSON_HEADER" { print $2 }' "$version_file")"
     current_nemo_prompt_rnnt="$(awk -F= '$1 == "NEMO_PROMPT_RNNT" { print $2 }' "$version_file")"
+    current_python_profiles="$(awk -F= '$1 == "PYTHON_PROFILES" { print $2 }' "$version_file")"
 
     if [ "$current_trt" != "$expected_trt" ]; then
       rebuild_reasons+=("TensorRT version mismatch: image has '${current_trt:-unknown}', Dockerfile expects '$expected_trt'")
@@ -155,6 +225,10 @@ else
 
     if [ "$current_nemo_prompt_rnnt" != "available" ]; then
       rebuild_reasons+=("required NeMo prompt RNN-T capability is missing")
+    fi
+
+    if [ "$current_python_profiles" != "$expected_python_profiles" ]; then
+      rebuild_reasons+=("prebuilt Python profiles differ: image has '${current_python_profiles:-missing}', source expects '$expected_python_profiles'")
     fi
   fi
 fi
@@ -174,13 +248,11 @@ if [ "${#rebuild_reasons[@]}" -gt 0 ]; then
     done
   fi
 
-  empty_context="${RUNNER_TEMP:-/tmp}/trtmc-empty-docker-context"
-  mkdir -p "$empty_context"
   docker build \
     --label "$fingerprint_label=$expected_fingerprint" \
     -t "$image" \
     -f "$dockerfile" \
-    "$empty_context"
+    .
 else
   echo "CI Docker image '$image' already matches $dockerfile"
 fi
@@ -196,6 +268,7 @@ current_trt="$(awk -F= '$1 == "TENSORRT_VERSION" { print $2 }' "$version_file")"
 current_modelopt="$(awk -F= '$1 == "MODELOPT_VERSION" { print $2 }' "$version_file")"
 current_nlohmann="$(awk -F= '$1 == "NLOHMANN_JSON_HEADER" { print $2 }' "$version_file")"
 current_nemo_prompt_rnnt="$(awk -F= '$1 == "NEMO_PROMPT_RNNT" { print $2 }' "$version_file")"
+current_python_profiles="$(awk -F= '$1 == "PYTHON_PROFILES" { print $2 }' "$version_file")"
 
 if [ "$current_trt" != "$expected_trt" ]; then
   echo "ERROR: CI Docker image '$image' has TensorRT '$current_trt'; expected '$expected_trt' from $dockerfile" >&2
@@ -217,6 +290,11 @@ if [ "$current_nemo_prompt_rnnt" != "available" ]; then
   exit 1
 fi
 
+if [ "$current_python_profiles" != "$expected_python_profiles" ]; then
+  echo "ERROR: CI Docker image '$image' has prebuilt Python profiles '${current_python_profiles:-missing}'; expected '$expected_python_profiles' from family metadata" >&2
+  exit 1
+fi
+
 image_ref="$(docker image inspect --format '{{.Id}}' "$image")"
 if ! [[ "$image_ref" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   echo "ERROR: CI Docker image '$image' returned an invalid immutable ID: $image_ref" >&2
@@ -226,4 +304,4 @@ if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
 fi
 
-echo "CI Docker image '$image' verified: TensorRT $current_trt, modelopt $current_modelopt, nlohmann/json headers and NeMo prompt RNN-T present, image $image_ref"
+echo "CI Docker image '$image' verified: TensorRT $current_trt, modelopt $current_modelopt, nlohmann/json headers, NeMo prompt RNN-T and prebuilt Python profiles ($current_python_profiles) present, image $image_ref"

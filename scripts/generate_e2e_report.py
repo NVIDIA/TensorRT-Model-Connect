@@ -344,8 +344,19 @@ def _merge_pytest_outcomes(
             item["status"] = _PYTEST_TO_RESULT_STATUS[status]
         merged.append(item)
 
+    # Some model-owned pytest entrypoints execute a manifest whose individual
+    # testcases each emit result.json.  The JUnit node is named after the
+    # parent model, not a fifth testcase.  Attach that model-level outcome to
+    # its children instead of synthesizing a schema-less passing result that
+    # would fail strict evidence validation as an "unknown strategy".
+    grouped_model_names = {_result_model_name(item) for item in merged}
     for case_name, outcome in sorted(outcomes.items()):
         if case_name in seen:
+            continue
+        if case_name in grouped_model_names:
+            for item in merged:
+                if _result_model_name(item) == case_name:
+                    item["_pytest_model_outcome"] = outcome
             continue
         status = _PYTEST_TO_RESULT_STATUS.get(outcome.get("pytest_status", ""), "error")
         merged.append(
@@ -2748,7 +2759,7 @@ def _proof_context(
     for key in (
         "model", "source_revision", "suite", "runtime_model",
         "runtime_library", "runtime_library_sha256", "sibling_model_count",
-        "model_dso_count", "network", "plugin_search", "passed",
+        "model_dso_count", "gpu_id", "network", "plugin_search", "passed",
     ):
         if key in proof:
             context[key] = proof[key]
@@ -2800,6 +2811,11 @@ def validate_proof_context(
         issues.append("Final proof JSON does not prove zero sibling models")
     if proof.get("model_dso_count") != 1:
         issues.append("Final proof JSON does not prove exactly one model DSO")
+    gpu_id = str(proof.get("gpu_id") or "")
+    if not re.fullmatch(r"[0-9]+", gpu_id):
+        issues.append("Final proof JSON has no valid host GPU ID")
+    if gpu_id != str(status.get("gpu_id") or ""):
+        issues.append("Proof GPU ID does not match model-proof status")
     if proof.get("network") != "disabled" or proof.get("plugin_search") != "strict":
         issues.append("Final proof JSON is missing hermetic network/plugin guarantees")
     if proof.get("model") != status.get("model"):
@@ -2877,6 +2893,7 @@ def render_proof_section(context: Dict[str, Any]) -> str:
         ("Runtime library SHA-256", context.get("runtime_library_sha256")),
         ("Sibling models in projection", context.get("sibling_model_count")),
         ("Model DSOs produced", context.get("model_dso_count")),
+        ("Host GPU ID", context.get("gpu_id")),
         ("Container network", context.get("network")),
         ("Plugin search", context.get("plugin_search")),
     )

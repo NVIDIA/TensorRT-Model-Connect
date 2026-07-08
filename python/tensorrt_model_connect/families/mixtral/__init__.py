@@ -44,6 +44,12 @@ def __dir__() -> list[str]:
 
 class _FamilyModule(types.ModuleType):
     def __setattr__(self, name, value):
+        # Importlib publishes a directly imported plugin submodule on its parent.
+        # Keep the public package attribute bound to the FamilyPlugin instance.
+        if name == "plugin" and isinstance(value, types.ModuleType):
+            super().__setattr__("_plugin", value)
+            super().__setattr__("plugin", value.plugin)
+            return
         super().__setattr__(name, value)
         if (
             not name.startswith("__")

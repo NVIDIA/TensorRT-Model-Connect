@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-from tests.builder.test_debug_runner import _make_bundle_bytes
+from tests.builder.debug_runner_test_support import make_bundle_bytes
 
 
 def test_bart_seq2seq_engine_section_and_communicator_forwarded(tmp_path) -> None:
@@ -23,7 +23,7 @@ def test_bart_seq2seq_engine_section_and_communicator_forwarded(tmp_path) -> Non
         "decoder_layers": 2,
         "decoder_start_token_id": 0,
     }).encode("utf-8")
-    bundle = _make_bundle_bytes(
+    bundle = make_bundle_bytes(
         {"num_layers": 2, "max_cache_length": 128},
         engine_plan=b"SINGLE_DECODER",
         vision_plan=b"ENCODER_PLAN",

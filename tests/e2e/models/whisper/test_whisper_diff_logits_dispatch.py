@@ -5,12 +5,10 @@
 
 from __future__ import annotations
 
-import importlib
-
-
 def test_whisper_handler_is_model_owned():
-    mod = importlib.import_module("diff_logits")
-    handler = mod._find_family_diff_logits_handler("whisper")
+    from tools import diff_logits
+
+    handler = diff_logits._find_family_diff_logits_handler("whisper")
 
     assert handler is not None
     assert handler.__file__.replace("\\", "/").endswith(
@@ -19,10 +17,11 @@ def test_whisper_handler_is_model_owned():
 
 
 def test_whisper_handler_prompt_cases_override_tokenization():
-    mod = importlib.import_module("diff_logits")
-    handler = mod._find_family_diff_logits_handler("whisper")
+    from tools import diff_logits
 
-    cases = mod._prompt_cases_for_handler([("default", "ignored")], handler)
+    handler = diff_logits._find_family_diff_logits_handler("whisper")
+
+    cases = diff_logits._prompt_cases_for_handler([("default", "ignored")], handler)
 
     assert len(cases) == 1
     label, display_text, input_ids = cases[0]
