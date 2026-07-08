@@ -159,6 +159,22 @@ def test_family_allow_patterns_are_used_for_cache_warming() -> None:
     assert "_HF_DOWNLOAD_PATTERNS" in text
 
 
+def test_shared_cache_patterns_cover_builder_and_offline_snapshot_metadata() -> None:
+    tree = ast.parse(WARM_HF_CACHE.read_text())
+    allow_patterns = next(
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "_HF_ALLOW_PATTERNS"
+            for target in node.targets
+        )
+    )
+
+    assert "processor_config.json" in allow_patterns
+    assert ".gitattributes" in allow_patterns
+
+
 def test_family_file_assets_are_metadata_driven() -> None:
     text = WARM_HF_CACHE.read_text()
     assert "_family_hf_warm_files" in text

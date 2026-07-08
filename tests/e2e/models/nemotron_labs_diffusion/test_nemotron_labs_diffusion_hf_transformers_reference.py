@@ -21,6 +21,36 @@ def test_mode_aliases() -> None:
     assert normalize("linear-speculation-lora") == "linear_spec_lora"
 
 
+def test_cached_snapshot_resolution_uses_config_anchor(
+    monkeypatch, tmp_path
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    calls: list[dict] = []
+
+    def fake_snapshot_download(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return str(snapshot)
+
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download",
+        fake_snapshot_download,
+    )
+
+    resolved = nemotron_hf_transformers._resolve_cached_model_ref(
+        "nvidia/Nemotron-Labs-Diffusion-8B"
+    )
+
+    assert resolved == str(snapshot)
+    assert calls == [{
+        "args": ("nvidia/Nemotron-Labs-Diffusion-8B",),
+        "kwargs": {
+            "allow_patterns": ["config.json"],
+            "local_files_only": True,
+        },
+    }]
+
+
 def test_reference_uses_custom_auto_model_path(monkeypatch, tmp_path) -> None:
     captured: dict[str, object] = {}
 

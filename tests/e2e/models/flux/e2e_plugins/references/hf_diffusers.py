@@ -44,7 +44,11 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     try:
         from huggingface_hub import snapshot_download
 
-        snapshot = Path(snapshot_download(hf_id, local_files_only=True))
+        snapshot = Path(snapshot_download(
+            hf_id,
+            allow_patterns=["model_index.json"],
+            local_files_only=True,
+        ))
     except Exception:
         return hf_id
     tok_cfg = snapshot / "tokenizer" / "tokenizer_config.json"

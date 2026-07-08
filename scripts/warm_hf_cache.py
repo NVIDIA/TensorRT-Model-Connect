@@ -62,6 +62,8 @@ _HF_ALLOW_PATTERNS = [
     "config.json",
     "generation_config.json",
     "preprocessor_config.json",
+    "processor_config.json",
+    ".gitattributes",
     "model.safetensors",
     "model-*.safetensors",
     "model.safetensors-*.safetensors",

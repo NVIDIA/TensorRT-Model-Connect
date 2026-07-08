@@ -162,7 +162,11 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
     try:
         from huggingface_hub import snapshot_download
 
-        return snapshot_download(hf_id, local_files_only=True)
+        return snapshot_download(
+            hf_id,
+            allow_patterns=["config.json"],
+            local_files_only=True,
+        )
     except Exception:
         return hf_id
 
