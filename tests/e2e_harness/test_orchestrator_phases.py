@@ -421,6 +421,40 @@ def test_run_classifies_trt_stage_error(
     assert data["stages"]["generate"]["status"] == StageStatus.ERROR.value
 
 
+def test_run_stops_after_trt_process_returns_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("trt-nonzero-returncode")
+    ctx = _make_ctx(tmp_path, case)
+    _patch_bundle_success(monkeypatch, tmp_path)
+    reference = _FakeReference()
+    _patch_plugins(
+        monkeypatch,
+        runner=_FakeRunner(
+            outputs=[
+                StageOutput(
+                    stage_name="generate",
+                    data={"returncode": 1, "stderr": "runtime boom"},
+                    metadata={"command": ["trtmc", "run"]},
+                )
+            ]
+        ),
+        reference=reference,
+        comparator=_FakeComparator(),
+    )
+
+    result = E2EOrchestrator().run(case, ctx)
+
+    assert result.status == E2EStatus.FAIL.value
+    assert result.failure_type == FailureType.TRT_RUN_FAIL.value
+    assert result.stages["generate"].status == StageStatus.ERROR.value
+    assert "TRT run failed" in result.stages["generate"].message
+    assert "returncode=1" in result.stages["generate"].message
+    assert "runtime boom" in result.stages["generate"].message
+    assert reference.calls == 0
+
+
 def test_run_classifies_reference_stage_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

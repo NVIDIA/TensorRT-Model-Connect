@@ -43,6 +43,14 @@ from .parallel_config import (
     require_tensorrt_11_for_tensor_parallel,
 )
 
+try:
+    from cuda.bindings import runtime as cudart
+except ImportError:
+    try:
+        from cuda import cudart  # type: ignore[no-redef]
+    except ImportError:  # pragma: no cover - depends on build environment
+        cudart = None  # type: ignore[assignment]
+
 
 def _setup_trt_import(rtx: bool) -> None:
     """Select the TensorRT Python backend before any TRT API is touched."""
@@ -582,13 +590,24 @@ def _trt_abi_from_version(version: str) -> str:
 
 
 def _get_gpu_name() -> str:
+    if cudart is None:
+        return ""
     try:
-        import subprocess
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            return result.stdout.strip().split("\n")[0]
+        success = (
+            cudart.cudaError_t.cudaSuccess
+            if hasattr(cudart, "cudaError_t")
+            else 0
+        )
+        status, device = cudart.cudaGetDevice()
+        if status != success:
+            return ""
+        status, properties = cudart.cudaGetDeviceProperties(device)
+        if status != success:
+            return ""
+        name = properties.name
+        if isinstance(name, bytes):
+            return name.decode("utf-8", errors="replace").rstrip("\x00")
+        return str(name).rstrip("\x00")
     except Exception:
         pass
     return ""

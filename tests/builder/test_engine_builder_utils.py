@@ -18,6 +18,8 @@ import json
 import sys
 import types
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import tensorrt_model_connect.engine_builder as engine_builder
@@ -253,6 +255,62 @@ class TestTrtAbiFromVersion:
 
 class TestGetGpuName:
     """Test _get_gpu_name helper."""
+
+    def test_returns_active_cuda_device_not_first_physical_gpu(self, monkeypatch):
+        """Records the CUDA build device on a heterogeneous GPU host."""
+        props = SimpleNamespace(name=b"NVIDIA GB300")
+        mock_cudart = SimpleNamespace(
+            cudaGetDevice=Mock(return_value=(0, 0)),
+            cudaGetDeviceProperties=Mock(return_value=(0, props)),
+        )
+        mock_smi = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition\n"
+                "NVIDIA GB300\n"
+            ),
+        )
+        monkeypatch.setattr(engine_builder, "cudart", mock_cudart, raising=False)
+        mock_smi_run = Mock(return_value=mock_smi)
+        monkeypatch.setattr("subprocess.run", mock_smi_run)
+
+        assert _get_gpu_name() == "NVIDIA GB300"
+        mock_cudart.cudaGetDeviceProperties.assert_called_once_with(0)
+        mock_smi_run.assert_not_called()
+
+    def test_uses_programmatically_selected_cuda_device(self, monkeypatch):
+        props = SimpleNamespace(name="NVIDIA B200\x00")
+        mock_cudart = SimpleNamespace(
+            cudaGetDevice=Mock(return_value=(0, 2)),
+            cudaGetDeviceProperties=Mock(return_value=(0, props)),
+        )
+        monkeypatch.setattr(engine_builder, "cudart", mock_cudart)
+
+        assert _get_gpu_name() == "NVIDIA B200"
+        mock_cudart.cudaGetDeviceProperties.assert_called_once_with(2)
+
+    def test_returns_empty_when_cuda_runtime_is_unavailable(self, monkeypatch):
+        monkeypatch.setattr(engine_builder, "cudart", None)
+        assert _get_gpu_name() == ""
+
+    def test_returns_empty_when_current_device_query_fails(self, monkeypatch):
+        mock_cudart = SimpleNamespace(
+            cudaGetDevice=Mock(return_value=(1, 0)),
+            cudaGetDeviceProperties=Mock(),
+        )
+        monkeypatch.setattr(engine_builder, "cudart", mock_cudart)
+
+        assert _get_gpu_name() == ""
+        mock_cudart.cudaGetDeviceProperties.assert_not_called()
+
+    def test_returns_empty_when_device_properties_query_fails(self, monkeypatch):
+        mock_cudart = SimpleNamespace(
+            cudaGetDevice=Mock(return_value=(0, 0)),
+            cudaGetDeviceProperties=Mock(return_value=(1, None)),
+        )
+        monkeypatch.setattr(engine_builder, "cudart", mock_cudart)
+
+        assert _get_gpu_name() == ""
 
     def test_returns_string(self):
         result = _get_gpu_name()
