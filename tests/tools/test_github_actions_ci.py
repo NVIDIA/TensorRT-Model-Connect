@@ -189,9 +189,9 @@ def test_qwen_flashinfer_scripts_skip_pytest_collection() -> None:
 def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> None:
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
     nightly = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    assert "name: model-proof-${{ inputs.model }}-${{ inputs.revision }}" in proof
+    assert "name: model-proof-batch-${{ inputs.revision }}" in proof
     assert "retention-days: 7" in proof
-    assert "/artifacts/" in proof
+    assert "/*/artifacts/" in proof
     assert "name: trtmc-nightly-${{ github.run_id }}" in nightly
     assert "retention-days: 14" in nightly
 
@@ -206,9 +206,11 @@ def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> 
     assert "!e2e_artifacts/e2e_report.html" not in nightly
 
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
-    assert "Upload model proof HTML report" in proof
-    assert "model-proof-html-${{ inputs.model }}-${{ inputs.revision }}" in proof
-    assert "/artifacts/model-proof-report.html" in proof
+    assert "Upload batch model proof HTML reports" in proof
+    assert "model-proof-html-batch-${{ inputs.revision }}" in proof
+    assert "/*/artifacts/model-proof-report.html" in proof
+    assert "/model-proof-index.html" in proof
+    assert "/*/batch.log" in proof
     assert "!${{ runner.temp }}" in proof
     assert "if-no-files-found: error" in proof
     assert "retention-days: 7" in proof
@@ -332,9 +334,10 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "needs.legal.outputs.authorized == 'true'" in model_proof
     assert "needs.impact.outputs.has_models == 'true'" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
-    assert "matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}" in model_proof
-    assert "fail-fast: false" in model_proof
-    assert "max-parallel: 4" in model_proof
+    assert "models: ${{ needs.impact.outputs.affected_models }}" in model_proof
+    assert "expected_count: ${{ fromJSON(needs.impact.outputs.expected_count) }}" in model_proof
+    assert "matrix:" not in model_proof
+    assert "strategy:" not in model_proof
 
     assert "- legal" in no_model
     assert "- impact" in no_model
@@ -476,22 +479,29 @@ def test_premerge_delegates_only_model_owned_work_to_the_proof() -> None:
     assert "uses: ./.github/workflows/model-proof.yml" in premerge
 
 
-def test_model_proof_uses_pinned_image_read_only_hf_cache_and_evidence() -> None:
+def test_model_proof_batch_uses_one_setup_read_only_hf_cache_and_evidence() -> None:
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
     runner = (REPO_ROOT / ".github/scripts/run-model-proof.sh").read_text()
 
     assert "TRTMC_CI_IMAGE:" in proof
     assert "vars.TRTMC_MANYLINUX_CI_IMAGE" in proof
     assert "trtmc-dev-gb300:manylinux_2_39" in proof
-    assert "Ensure CI Docker image" in proof
+    assert "Ensure CI Docker image once" in proof
     assert "bash .github/scripts/ensure-ci-docker-image.sh" in proof
+    assert proof.count("actions/checkout@v4") == 1
+    assert proof.count("bash .github/scripts/ensure-ci-docker-image.sh") == 1
     assert "TRTMC_HF_CACHE:" in proof
-    assert "bash .github/scripts/run-model-proof.sh" in proof
+    assert "bash .github/scripts/run-model-proof-batch.sh" in proof
+    assert '--models-json "$MODELS_JSON"' in proof
+    assert '--expected-count "$EXPECTED_COUNT"' in proof
     assert '--suite "$SUITE"' in proof
-    assert "Upload proof evidence" in proof
+    assert "Upload batch proof evidence" in proof
+    assert "Upload batch model proof HTML reports" in proof
+    assert "model-proof-index.html" in proof
+    assert "/*/artifacts/model-proof-report.html" in proof
     assert "if-no-files-found: error" in proof
     assert "retention-days: 7" in proof
-    assert "/artifacts/" in proof
+    assert "/*/artifacts/" in proof
 
     assert "dst=/src,readonly" in runner
     assert "dst=/hf-cache/hub,readonly" in runner

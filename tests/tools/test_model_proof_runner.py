@@ -360,8 +360,8 @@ def test_runner_defaults_to_the_standard_user_hf_cache() -> None:
 def test_hf_token_is_not_exposed_to_pull_request_model_proof_code() -> None:
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
     job_environment = workflow.split("\n    steps:", maxsplit=1)[0]
-    proof_step = workflow.split("- name: Run hermetic model proof", maxsplit=1)[1].split(
-        "- name: Finalize model proof HTML fallback", maxsplit=1
+    proof_step = workflow.split("- name: Run affected model proofs", maxsplit=1)[1].split(
+        "- name: Finalize batch proof fallbacks", maxsplit=1
     )[0]
 
     assert "HF_TOKEN:" not in job_environment
@@ -402,32 +402,37 @@ def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> 
 
 def test_model_proof_uses_a_dedicated_self_hosted_checkout() -> None:
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    checkout = workflow.split("- name: Check out exact source revision", maxsplit=1)[1].split(
-        "- name: Ensure CI Docker image", maxsplit=1
+    checkout = workflow.split("- name: Check out exact source revision once", maxsplit=1)[
+        1
+    ].split(
+        "- name: Ensure CI Docker image once", maxsplit=1
     )[0]
 
     assert "path: model-proof-source" in checkout
     assert "clean: true" in checkout
-    assert workflow.count("working-directory: ${{ github.workspace }}/model-proof-source") == 4
+    assert "persist-credentials: false" in checkout
+    assert workflow.count("working-directory: ${{ github.workspace }}/model-proof-source") == 2
 
 
 def test_model_proof_bootstraps_html_without_a_checkout_dependency() -> None:
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
     bootstrap = workflow.split(
-        "- name: Bootstrap model proof HTML before checkout", maxsplit=1
-    )[1].split("- name: Check out exact source revision", maxsplit=1)[0]
+        "- name: Bootstrap batch HTML before checkout", maxsplit=1
+    )[1].split("- name: Check out exact source revision once", maxsplit=1)[0]
     checkout_failure = workflow.split(
-        "- name: Finalize HTML when checkout fails", maxsplit=1
-    )[1].split("- name: Upload proof evidence", maxsplit=1)[0]
+        "- name: Finalize batch proof fallbacks", maxsplit=1
+    )[1].split("- name: Upload batch proof evidence", maxsplit=1)[0]
 
-    assert workflow.index("Bootstrap model proof HTML before checkout") < workflow.index(
-        "Check out exact source revision"
+    assert workflow.index("Bootstrap batch HTML before checkout") < workflow.index(
+        "Check out exact source revision once"
     )
     assert "model-proof-report.html" in bootstrap
     assert "model-proof-status.json" in bootstrap
+    assert "model-proof-index.html" in bootstrap
     assert "working-directory:" not in bootstrap
     assert ".github/scripts/" not in bootstrap
-    assert "steps.checkout.outcome != 'success'" in checkout_failure
+    assert "if: always()" in checkout_failure
+    assert "CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}" in checkout_failure
     assert "model-proof-report.html" in checkout_failure
     assert "working-directory:" not in checkout_failure
     assert ".github/scripts/" not in checkout_failure
@@ -437,32 +442,39 @@ def test_model_proof_resolves_runner_temp_only_after_runner_assignment() -> None
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
     job_configuration = workflow.split("\n    steps:", maxsplit=1)[0]
     bootstrap = workflow.split(
-        "- name: Bootstrap model proof HTML before checkout", maxsplit=1
-    )[1].split("- name: Check out exact source revision", maxsplit=1)[0]
+        "- name: Bootstrap batch HTML before checkout", maxsplit=1
+    )[1].split("- name: Check out exact source revision once", maxsplit=1)[0]
     proof = workflow.split(
-        "- name: Run hermetic model proof", maxsplit=1
-    )[1].split("- name: Finalize model proof HTML fallback", maxsplit=1)[0]
+        "- name: Run affected model proofs", maxsplit=1
+    )[1].split("- name: Finalize batch proof fallbacks", maxsplit=1)[0]
 
-    assert "MODEL_PROOF_OUTPUT_DIR:" not in job_configuration
-    assert "MODEL_PROOF_OUTPUT_DIR: ${{ runner.temp }}" in bootstrap
-    assert 'echo "MODEL_PROOF_OUTPUT_DIR=$MODEL_PROOF_OUTPUT_DIR" >> "$GITHUB_ENV"' in bootstrap
-    assert "${{ env.MODEL_PROOF_OUTPUT_DIR }}" not in proof
-    assert '--output-dir "$MODEL_PROOF_OUTPUT_DIR"' in proof
+    assert "MODEL_PROOF_BATCH_OUTPUT_DIR:" not in job_configuration
+    assert "MODEL_PROOF_BATCH_OUTPUT_DIR: ${{ runner.temp }}" in bootstrap
+    assert (
+        'echo "MODEL_PROOF_BATCH_OUTPUT_DIR=$MODEL_PROOF_BATCH_OUTPUT_DIR" >> "$GITHUB_ENV"'
+        in bootstrap
+    )
+    assert "${{ env.MODEL_PROOF_BATCH_OUTPUT_DIR }}" not in proof
+    assert '--output-dir "$MODEL_PROOF_BATCH_OUTPUT_DIR"' in proof
 
 
 def test_model_proof_checks_disk_headroom_before_checkout() -> None:
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
     disk_check = workflow.split(
         "- name: Check model proof disk headroom", maxsplit=1
-    )[1].split("- name: Check out exact source revision", maxsplit=1)[0]
+    )[1].split("- name: Check out exact source revision once", maxsplit=1)[0]
 
     assert workflow.index("Check model proof disk headroom") < workflow.index(
-        "Check out exact source revision"
+        "Check out exact source revision once"
     )
     assert "TRTMC_MODEL_PROOF_MIN_FREE_GIB:" in workflow
     assert "TRTMC_MODEL_PROOF_STALE_MINUTES:" in workflow
     assert "-mmin \"+$TRTMC_MODEL_PROOF_STALE_MINUTES\"" in disk_check
-    assert 'rm -rf -- "$stale_dir/work" "$stale_dir/projection"' in disk_check
+    assert "-name work -o -name projection" in disk_check
+    assert "-exec rm -rf -- {} +" in disk_check
+    assert "active_workers=" in disk_check
+    assert "min(len(models), len(gpu_ids))" in disk_check
+    assert "required_gib=\"$((TRTMC_MODEL_PROOF_MIN_FREE_GIB * active_workers))\"" in disk_check
     assert 'df -Pk "$RUNNER_TEMP"' in disk_check
     assert "Insufficient model-proof disk headroom" in disk_check
 
@@ -470,22 +482,22 @@ def test_model_proof_checks_disk_headroom_before_checkout() -> None:
 def test_model_proof_cleans_scratch_only_after_both_artifact_uploads() -> None:
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
     cleanup = workflow.split(
-        "- name: Clean model proof scratch space", maxsplit=1
+        "- name: Clean batch proof scratch space", maxsplit=1
     )[1]
 
-    assert workflow.index("Upload proof evidence") < workflow.index(
-        "Clean model proof scratch space"
+    assert workflow.index("Upload batch proof evidence") < workflow.index(
+        "Clean batch proof scratch space"
     )
-    assert workflow.index("Upload model proof HTML report") < workflow.index(
-        "Clean model proof scratch space"
+    assert workflow.index("Upload batch model proof HTML reports") < workflow.index(
+        "Clean batch proof scratch space"
     )
     assert "id: proof_upload" in workflow
     assert "id: html_upload" in workflow
-    assert '"$RUNNER_TEMP"/model-proof-*' in cleanup
-    assert 'rm -rf -- "$MODEL_PROOF_OUTPUT_DIR/work" "$MODEL_PROOF_OUTPUT_DIR/projection"' in cleanup
+    assert '"$RUNNER_TEMP"/model-proof-batch-*' in cleanup
+    assert "-name work -o -name projection" in cleanup
     assert 'PROOF_UPLOAD_OUTCOME" = "success"' in cleanup
     assert 'HTML_UPLOAD_OUTCOME" = "success"' in cleanup
-    assert 'rm -rf -- "$MODEL_PROOF_OUTPUT_DIR"' in cleanup
+    assert 'rm -rf -- "$MODEL_PROOF_BATCH_OUTPUT_DIR"' in cleanup
 
 
 def test_model_proof_always_generates_a_strict_self_contained_html_report() -> None:
@@ -514,13 +526,12 @@ def test_model_proof_always_generates_a_strict_self_contained_html_report() -> N
     assert 'exit "$validation_rc"' in runner
     assert 'payload["validation_exit_code"] = rc' in runner
     assert 'payload["report_exit_code"] = report_rc' in runner
-    assert "Upload model proof HTML report" in workflow
-    assert "Bootstrap model proof HTML before checkout" in workflow
-    assert "Initialize model proof HTML fallback" in workflow
-    assert "Finalize model proof HTML fallback" in workflow
-    assert "Finalize HTML when checkout fails" in workflow
+    assert "Upload batch model proof HTML reports" in workflow
+    assert "Bootstrap batch HTML before checkout" in workflow
+    assert "Finalize batch proof fallbacks" in workflow
     assert "ci-image.log" in workflow
-    assert "/artifacts/model-proof-report.html" in workflow
+    assert "/*/artifacts/model-proof-report.html" in workflow
+    assert "/model-proof-index.html" in workflow
     assert "if-no-files-found: error" in workflow
 
 

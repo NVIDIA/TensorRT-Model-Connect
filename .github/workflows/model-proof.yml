@@ -1,15 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Isolated model proof
+name: Isolated model proofs
 
 on:
   workflow_call:
     inputs:
-      model:
-        description: "Model ownership identifier to build in isolation"
+      models:
+        description: "JSON array of affected model ownership identifiers"
         required: true
         type: string
+      expected_count:
+        description: "Expected number of unique affected models"
+        required: true
+        type: number
       revision:
         description: "Exact Git commit to certify"
         required: true
@@ -25,7 +29,7 @@ permissions:
 
 jobs:
   prove:
-    name: ${{ inputs.model }} / Build + test
+    name: Affected ${{ inputs.models }} / Build + test
     runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 180
 
@@ -44,65 +48,150 @@ jobs:
       PYTHONHASHSEED: "0"
 
     steps:
-      - name: Bootstrap model proof HTML before checkout
+      - name: Bootstrap batch HTML before checkout
         env:
-          MODEL: ${{ inputs.model }}
+          MODELS_JSON: ${{ inputs.models }}
+          EXPECTED_COUNT: ${{ inputs.expected_count }}
           REVISION: ${{ inputs.revision }}
           SUITE: ${{ inputs.suite }}
-          MODEL_PROOF_OUTPUT_DIR: ${{ runner.temp }}/model-proof-${{ inputs.model }}-${{ github.run_id }}-${{ github.run_attempt }}
+          MODEL_PROOF_BATCH_OUTPUT_DIR: ${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          echo "MODEL_PROOF_OUTPUT_DIR=$MODEL_PROOF_OUTPUT_DIR" >> "$GITHUB_ENV"
-          artifacts_dir="$MODEL_PROOF_OUTPUT_DIR/artifacts"
-          mkdir -p "$artifacts_dir"
-          python3 - "$artifacts_dir" "$MODEL" "$REVISION" "$SUITE" <<'PY'
+          echo "MODEL_PROOF_BATCH_OUTPUT_DIR=$MODEL_PROOF_BATCH_OUTPUT_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$MODEL_PROOF_BATCH_OUTPUT_DIR"
+          python3 - "$MODEL_PROOF_BATCH_OUTPUT_DIR" "$MODELS_JSON" "$EXPECTED_COUNT" "$REVISION" "$SUITE" <<'PY'
           import html
           import json
+          import re
           import sys
           from pathlib import Path
 
-          artifacts, model, revision, suite = sys.argv[1:]
-          root = Path(artifacts)
-          status = {
+          output, raw_models, raw_expected_count, revision, suite = sys.argv[1:]
+          root = Path(output)
+          root.mkdir(parents=True, exist_ok=True)
+          try:
+              models = json.loads(raw_models)
+              if not isinstance(models, list) or not models:
+                  raise ValueError("models must be a non-empty JSON array")
+              expected_count = int(raw_expected_count)
+              if expected_count < 1:
+                  raise ValueError("expected_count must be a positive integer")
+              if any(not isinstance(model, str) for model in models):
+                  raise ValueError("every model identifier must be a string")
+              if len(models) != len(set(models)):
+                  raise ValueError("model identifiers must be unique")
+              if len(models) != expected_count:
+                  raise ValueError(
+                      f"affected model count mismatch: expected {expected_count}, "
+                      f"received {len(models)}"
+                  )
+              invalid = [
+                  model
+                  for model in models
+                  if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", model)
+              ]
+              if invalid:
+                  raise ValueError(f"unsafe model identifiers: {invalid}")
+          except (json.JSONDecodeError, ValueError) as error:
+              payload = {
+                  "schema_version": 1,
+                  "report_kind": "workflow_fallback",
+                  "outcome": "failed",
+                  "phase": "workflow-bootstrap",
+                  "details": [str(error)],
+                  "source_revision": revision,
+                  "suite": suite,
+              }
+              (root / "batch-status.json").write_text(
+                  json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+              )
+              (root / "model-proof-index.html").write_text(
+                  "<!doctype html><html lang='en' "
+                  "data-report-kind='workflow-fallback'><head><meta charset='utf-8'>"
+                  "<title>Isolated model proofs failed</title></head><body>"
+                  f"<h1>Invalid affected-model selection</h1><p>{html.escape(str(error))}</p>"
+                  "</body></html>",
+                  encoding="utf-8",
+              )
+              raise SystemExit(str(error))
+
+          batch_status = {
               "schema_version": 1,
               "report_kind": "workflow_fallback",
-              "model": model,
+              "models": models,
+              "expected_count": expected_count,
               "source_revision": revision,
               "suite": suite,
               "outcome": "running",
               "phase": "workflow-bootstrap",
-              "steps": {
-                  "checkout": {
-                      "status": "running",
-                      "evidence": "GitHub Actions checkout outcome",
-                  }
-              },
           }
-          (root / "model-proof-status.json").write_text(
-              json.dumps(status, indent=2) + "\n", encoding="utf-8"
+          (root / "batch-status.json").write_text(
+              json.dumps(batch_status, indent=2) + "\n", encoding="utf-8"
           )
-          rows = "".join(
-              f"<tr><th>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>"
-              for label, value in (
-                  ("Model", model),
-                  ("Revision", revision),
-                  ("Suite", suite),
-                  ("Outcome", "Running"),
-                  ("Phase", "Workflow bootstrap"),
+
+          for model in models:
+              artifacts = root / model / "artifacts"
+              artifacts.mkdir(parents=True, exist_ok=True)
+              status = {
+                  "schema_version": 1,
+                  "report_kind": "workflow_fallback",
+                  "model": model,
+                  "source_revision": revision,
+                  "suite": suite,
+                  "outcome": "running",
+                  "phase": "workflow-bootstrap",
+                  "steps": {
+                      "checkout": {
+                          "status": "running",
+                          "evidence": "GitHub Actions checkout outcome",
+                      }
+                  },
+              }
+              (artifacts / "model-proof-status.json").write_text(
+                  json.dumps(status, indent=2) + "\n", encoding="utf-8"
               )
-          )
-          report = f"""<!doctype html>
-          <html lang="en"><head><meta charset="utf-8">
+              rows = "".join(
+                  f"<tr><th>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>"
+                  for label, value in (
+                      ("Model", model),
+                      ("Revision", revision),
+                      ("Suite", suite),
+                      ("Outcome", "Running"),
+                      ("Phase", "Workflow bootstrap"),
+                  )
+              )
+              report = f"""<!doctype html>
+          <html lang="en" data-report-kind="workflow-fallback"><head><meta charset="utf-8">
           <meta name="viewport" content="width=device-width,initial-scale=1">
           <title>Isolated model proof: {html.escape(model)}</title>
           <style>body{{font:16px system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#17202a}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccd1d1;padding:.6rem;text-align:left}}th{{width:12rem;background:#f4f6f7}}.pending{{border-left:.4rem solid #f1c40f;background:#fffbea;padding:1rem}}</style>
           </head><body><h1>Isolated model proof</h1>
-          <p class="pending">The workflow is preparing the exact source revision. This bootstrap report will be replaced with full model evidence after checkout.</p>
+          <p class="pending">The workflow is preparing the exact source revision. This report will be replaced with full model evidence after checkout.</p>
           <table>{rows}</table></body></html>"""
-          (root / "model-proof-report.html").write_text(report, encoding="utf-8")
+              (artifacts / "model-proof-report.html").write_text(
+                  report, encoding="utf-8"
+              )
+
+          links = "".join(
+              "<li><a href='"
+              f"{html.escape(model)}/artifacts/model-proof-report.html'>"
+              f"{html.escape(model)}</a> &mdash; preparing</li>"
+              for model in models
+          )
+          index = f"""<!doctype html>
+          <html lang="en" data-report-kind="workflow-fallback"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>Isolated model proof batch</title>
+          <style>body{{font:16px system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#17202a}}li{{margin:.6rem 0}}</style>
+          </head><body><h1>Isolated model proof batch</h1>
+          <p>Revision <code>{html.escape(revision)}</code>; suite <code>{html.escape(suite)}</code>.</p>
+          <ul>{links}</ul></body></html>"""
+          (root / "model-proof-index.html").write_text(index, encoding="utf-8")
           PY
 
       - name: Check model proof disk headroom
+        env:
+          MODELS_JSON: ${{ inputs.models }}
         run: |
           set -euo pipefail
           if ! [[ "$TRTMC_MODEL_PROOF_MIN_FREE_GIB" =~ ^[1-9][0-9]*$ ]]; then
@@ -115,199 +204,299 @@ jobs:
           fi
           while IFS= read -r -d '' stale_dir; do
             case "$stale_dir" in
-              "$RUNNER_TEMP"/model-proof-*) ;;
+              "$RUNNER_TEMP"/model-proof-batch-*) ;;
               *) echo "Refusing to clean unsafe stale path: $stale_dir" >&2; exit 1 ;;
             esac
-            echo "Removing stale model-proof scratch data from $stale_dir"
-            rm -rf -- "$stale_dir/work" "$stale_dir/projection"
+            echo "Removing stale batch scratch data from $stale_dir"
+            find "$stale_dir" -mindepth 2 -maxdepth 2 -type d \
+              \( -name work -o -name projection \) -exec rm -rf -- {} +
           done < <(
             find "$RUNNER_TEMP" -mindepth 1 -maxdepth 1 -type d \
-              -name 'model-proof-*' -mmin "+$TRTMC_MODEL_PROOF_STALE_MINUTES" \
+              -name 'model-proof-batch-*' -mmin "+$TRTMC_MODEL_PROOF_STALE_MINUTES" \
               -print0
           )
           df -h "$RUNNER_TEMP"
+          active_workers="$(python3 - "$MODELS_JSON" "$TRTMC_MODEL_PROOF_GPU_IDS" <<'PY'
+          import json
+          import re
+          import sys
+
+          models = json.loads(sys.argv[1])
+          configured = sys.argv[2]
+          if not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:,(?:0|[1-9][0-9]*))*", configured):
+              raise SystemExit(
+                  "TRTMC_MODEL_PROOF_GPU_IDS must be a comma-separated list "
+                  "of unique non-negative integers"
+              )
+          gpu_ids = configured.split(",")
+          if len(gpu_ids) != len(set(gpu_ids)):
+              raise SystemExit("TRTMC_MODEL_PROOF_GPU_IDS must contain unique IDs")
+          print(min(len(models), len(gpu_ids)))
+          PY
+          )"
           available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {print $4}')"
-          required_kib="$((TRTMC_MODEL_PROOF_MIN_FREE_GIB * 1024 * 1024))"
+          required_gib="$((TRTMC_MODEL_PROOF_MIN_FREE_GIB * active_workers))"
+          required_kib="$((required_gib * 1024 * 1024))"
           if [ "$available_kib" -lt "$required_kib" ]; then
             available_gib="$((available_kib / 1024 / 1024))"
-            echo "Insufficient model-proof disk headroom: ${available_gib} GiB available; ${TRTMC_MODEL_PROOF_MIN_FREE_GIB} GiB required." >&2
+            echo "Insufficient model-proof disk headroom: ${available_gib} GiB available; ${required_gib} GiB required for ${active_workers} active workers." >&2
             exit 1
           fi
 
-      - name: Check out exact source revision
+      - name: Check out exact source revision once
         id: checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.revision }}
           path: model-proof-source
           fetch-depth: 0
+          persist-credentials: false
           clean: true
           lfs: false
 
-      - name: Initialize model proof HTML fallback
-        if: ${{ always() && steps.checkout.outcome == 'success' }}
-        working-directory: ${{ github.workspace }}/model-proof-source
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/write-model-proof-fallback-report.py \
-            --artifacts-dir "$MODEL_PROOF_OUTPUT_DIR/artifacts" \
-            --model "${{ inputs.model }}" \
-            --revision "${{ inputs.revision }}" \
-            --suite "${{ inputs.suite }}" \
-            --outcome running \
-            --phase workflow-setup
-
-      - name: Ensure CI Docker image
+      - name: Ensure CI Docker image once
         id: ci_image
         timeout-minutes: 90
         working-directory: ${{ github.workspace }}/model-proof-source
         run: |
           set -euo pipefail
-          mkdir -p "$MODEL_PROOF_OUTPUT_DIR/artifacts"
           bash .github/scripts/ensure-ci-docker-image.sh \
-            2>&1 | tee "$MODEL_PROOF_OUTPUT_DIR/artifacts/ci-image.log"
+            2>&1 | tee "$MODEL_PROOF_BATCH_OUTPUT_DIR/ci-image.log"
 
-      - name: Run hermetic model proof
+      - name: Run affected model proofs
         id: proof
         env:
-          MODEL: ${{ inputs.model }}
+          MODELS_JSON: ${{ inputs.models }}
+          EXPECTED_COUNT: ${{ inputs.expected_count }}
           REVISION: ${{ inputs.revision }}
           SUITE: ${{ inputs.suite }}
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
         working-directory: ${{ github.workspace }}/model-proof-source
         run: |
           set -euo pipefail
-          bash .github/scripts/run-model-proof.sh \
-            --model "$MODEL" \
+          bash .github/scripts/run-model-proof-batch.sh \
+            --models-json "$MODELS_JSON" \
+            --expected-count "$EXPECTED_COUNT" \
             --revision "$REVISION" \
             --suite "$SUITE" \
-            --output-dir "$MODEL_PROOF_OUTPUT_DIR"
-          echo "output_dir=$MODEL_PROOF_OUTPUT_DIR" >> "$GITHUB_OUTPUT"
+            --output-dir "$MODEL_PROOF_BATCH_OUTPUT_DIR"
+          echo "output_dir=$MODEL_PROOF_BATCH_OUTPUT_DIR" >> "$GITHUB_OUTPUT"
 
-      - name: Finalize model proof HTML fallback
-        if: ${{ always() && steps.checkout.outcome == 'success' }}
+      - name: Finalize batch proof fallbacks
+        if: always()
         env:
-          CI_IMAGE_OUTCOME: ${{ steps.ci_image.outcome }}
-          PROOF_OUTCOME: ${{ steps.proof.outcome }}
-        working-directory: ${{ github.workspace }}/model-proof-source
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/write-model-proof-fallback-report.py \
-            --artifacts-dir "$MODEL_PROOF_OUTPUT_DIR/artifacts" \
-            --model "${{ inputs.model }}" \
-            --revision "${{ inputs.revision }}" \
-            --suite "${{ inputs.suite }}" \
-            --outcome failed \
-            --phase workflow-finalize \
-            --exit-code 1 \
-            --detail "CI image step: $CI_IMAGE_OUTCOME" \
-            --detail "Isolated proof step: $PROOF_OUTCOME" \
-            --preserve-rich-report
-
-      - name: Finalize HTML when checkout fails
-        if: ${{ always() && steps.checkout.outcome != 'success' }}
-        env:
-          MODEL: ${{ inputs.model }}
+          MODELS_JSON: ${{ inputs.models }}
           REVISION: ${{ inputs.revision }}
           SUITE: ${{ inputs.suite }}
           CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          CI_IMAGE_OUTCOME: ${{ steps.ci_image.outcome }}
+          PROOF_OUTCOME: ${{ steps.proof.outcome }}
         run: |
           set -euo pipefail
-          artifacts_dir="$MODEL_PROOF_OUTPUT_DIR/artifacts"
-          mkdir -p "$artifacts_dir"
-          python3 - "$artifacts_dir" "$MODEL" "$REVISION" "$SUITE" "$CHECKOUT_OUTCOME" <<'PY'
+          python3 - "$MODEL_PROOF_BATCH_OUTPUT_DIR" "$MODELS_JSON" "$REVISION" "$SUITE" \
+            "$CHECKOUT_OUTCOME" "$CI_IMAGE_OUTCOME" "$PROOF_OUTCOME" <<'PY'
           import html
           import json
+          import re
           import sys
           from pathlib import Path
 
-          artifacts, model, revision, suite, checkout_outcome = sys.argv[1:]
-          root = Path(artifacts)
-          status_path = root / "model-proof-status.json"
-          try:
-              status = json.loads(status_path.read_text(encoding="utf-8"))
-          except (OSError, json.JSONDecodeError):
-              status = {"schema_version": 1, "report_kind": "workflow_fallback"}
-          status.update({
-              "model": model,
-              "source_revision": revision,
-              "suite": suite,
-              "outcome": "failed",
-              "phase": "source-checkout",
-              "exit_code": 1,
-              "details": [f"Source checkout outcome: {checkout_outcome}"],
-          })
-          status["steps"] = {
-              "checkout": {
-                  "status": "failed",
-                  "evidence": f"GitHub Actions outcome: {checkout_outcome}",
-              }
-          }
-          status_path.write_text(
-              json.dumps(status, indent=2) + "\n", encoding="utf-8"
-          )
-          rows = "".join(
-              f"<tr><th>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>"
-              for label, value in (
-                  ("Model", model),
-                  ("Revision", revision),
-                  ("Suite", suite),
-                  ("Outcome", "Failed"),
-                  ("Phase", "Source checkout"),
-                  ("Checkout", checkout_outcome),
+          root_arg, raw_models, revision, suite, checkout, ci_image, proof = sys.argv[1:]
+          root = Path(root_arg)
+          root.mkdir(parents=True, exist_ok=True)
+          models = json.loads(raw_models)
+          if (
+              not isinstance(models, list)
+              or any(not isinstance(model, str) for model in models)
+              or len(models) != len(set(models))
+              or any(
+                  not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", model)
+                  for model in models
               )
-          )
-          report = f"""<!doctype html>
-          <html lang="en"><head><meta charset="utf-8">
+          ):
+              models = []
+          details = [
+              f"Source checkout outcome: {checkout}",
+              f"CI image outcome: {ci_image}",
+              f"Batch proof outcome: {proof}",
+          ]
+          if checkout != "success":
+              phase = "source-checkout"
+          elif ci_image != "success":
+              phase = "ci-image"
+          else:
+              phase = "batch-proof"
+
+          summaries = []
+          for model in models:
+              artifacts = root / model / "artifacts"
+              artifacts.mkdir(parents=True, exist_ok=True)
+              status_path = artifacts / "model-proof-status.json"
+              report_path = artifacts / "model-proof-report.html"
+              try:
+                  status = json.loads(status_path.read_text(encoding="utf-8"))
+              except (OSError, json.JSONDecodeError):
+                  status = {}
+              try:
+                  report_text = report_path.read_text(encoding="utf-8")
+              except OSError:
+                  report_text = ""
+              rich_report = (
+                  bool(report_text)
+                  and status.get("report_kind") != "workflow_fallback"
+                  and 'data-report-kind="workflow-fallback"' not in report_text
+              )
+              if not rich_report:
+                  status.update({
+                      "schema_version": 1,
+                      "report_kind": "workflow_fallback",
+                      "model": model,
+                      "source_revision": revision,
+                      "suite": suite,
+                      "outcome": "failed",
+                      "phase": phase,
+                      "exit_code": 1,
+                      "details": details,
+                      "steps": {
+                          "checkout": {
+                              "status": "passed" if checkout == "success" else "failed",
+                              "evidence": f"GitHub Actions outcome: {checkout}",
+                          },
+                          "ci_image": {
+                              "status": "passed" if ci_image == "success" else "failed",
+                              "evidence": f"GitHub Actions outcome: {ci_image}",
+                          },
+                          "batch_proof": {
+                              "status": "passed" if proof == "success" else "failed",
+                              "evidence": f"GitHub Actions outcome: {proof}",
+                          },
+                      },
+                  })
+                  status_path.write_text(
+                      json.dumps(status, indent=2) + "\n", encoding="utf-8"
+                  )
+                  rows = "".join(
+                      f"<tr><th>{html.escape(label)}</th><td>{html.escape(str(value))}</td></tr>"
+                      for label, value in (
+                          ("Model", model),
+                          ("Pinned revision", revision),
+                          ("Suite", suite),
+                          ("Outcome", "Failed"),
+                          ("Failure phase", phase),
+                          ("Checkout", checkout),
+                          ("CI image", ci_image),
+                          ("Batch proof", proof),
+                      )
+                  )
+                  report = f"""<!doctype html>
+          <html lang="en" data-report-kind="workflow-fallback"><head><meta charset="utf-8">
           <meta name="viewport" content="width=device-width,initial-scale=1">
           <title>Isolated model proof failed: {html.escape(model)}</title>
           <style>body{{font:16px system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#17202a}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccd1d1;padding:.6rem;text-align:left}}th{{width:12rem;background:#f4f6f7}}.failed{{border-left:.4rem solid #c0392b;background:#fdedec;padding:1rem}}</style>
           </head><body><h1>Isolated model proof</h1>
-          <p class="failed">Validation could not start because the exact source revision was not checked out. No build or model test was run.</p>
+          <p class="failed">Validation did not enter or complete the isolated report path. This fallback preserves the workflow outcomes for this model.</p>
           <table>{rows}</table></body></html>"""
-          (root / "model-proof-report.html").write_text(report, encoding="utf-8")
+                  report_path.write_text(report, encoding="utf-8")
+              summaries.append((model, str(status.get("outcome", "unknown"))))
+
+          batch_status_path = root / "batch-status.json"
+          try:
+              batch_status = json.loads(batch_status_path.read_text(encoding="utf-8"))
+          except (OSError, json.JSONDecodeError):
+              batch_status = {}
+          if batch_status.get("report_kind") in (None, "", "workflow_fallback"):
+              batch_status.update({
+                  "schema_version": 1,
+                  "report_kind": "workflow_fallback",
+                  "models": models,
+                  "source_revision": revision,
+                  "suite": suite,
+                  "outcome": "failed",
+                  "phase": phase,
+                  "details": details,
+              })
+              batch_status_path.write_text(
+                  json.dumps(batch_status, indent=2) + "\n", encoding="utf-8"
+              )
+
+          index_path = root / "model-proof-index.html"
+          try:
+              current_index = index_path.read_text(encoding="utf-8")
+          except OSError:
+              current_index = ""
+          expected_report_links = [
+              f"{model}/artifacts/model-proof-report.html" for model in models
+          ]
+          if (
+              not current_index
+              or 'data-report-kind="workflow-fallback"' in current_index
+              or any(link not in current_index for link in expected_report_links)
+          ):
+              rows = "".join(
+                  "<tr><td><a href='"
+                  f"{html.escape(model)}/artifacts/model-proof-report.html'>"
+                  f"{html.escape(model)}</a></td><td>{html.escape(outcome)}</td></tr>"
+                  for model, outcome in summaries
+              )
+              index = f"""<!doctype html>
+          <html lang="en" data-report-kind="workflow-fallback"><head><meta charset="utf-8">
+          <meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>Isolated model proof batch</title>
+          <style>body{{font:16px system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#17202a}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccd1d1;padding:.6rem;text-align:left}}</style>
+          </head><body><h1>Isolated model proof batch</h1>
+          <p>Revision <code>{html.escape(revision)}</code>; suite <code>{html.escape(suite)}</code>.</p>
+          <table><thead><tr><th>Model report</th><th>Outcome</th></tr></thead><tbody>{rows}</tbody></table>
+          </body></html>"""
+              index_path.write_text(index, encoding="utf-8")
           PY
 
-      - name: Upload proof evidence
+      - name: Upload batch proof evidence
         id: proof_upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: model-proof-${{ inputs.model }}-${{ inputs.revision }}-${{ github.run_attempt }}
+          name: model-proof-batch-${{ inputs.revision }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
           path: |
-            ${{ runner.temp }}/model-proof-${{ inputs.model }}-${{ github.run_id }}-${{ github.run_attempt }}/artifacts/
-            !${{ runner.temp }}/model-proof-${{ inputs.model }}-${{ github.run_id }}-${{ github.run_attempt }}/artifacts/model-proof-report.html
+            ${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}/batch-status.json
+            ${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}/ci-image.log
+            ${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}/*/batch.log
+            ${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}/*/artifacts/
+            !${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}/*/artifacts/model-proof-report.html
 
-      - name: Upload model proof HTML report
+      - name: Upload batch model proof HTML reports
         id: html_upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: model-proof-html-${{ inputs.model }}-${{ inputs.revision }}-${{ github.run_attempt }}
+          name: model-proof-html-batch-${{ inputs.revision }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
-          path: ${{ runner.temp }}/model-proof-${{ inputs.model }}-${{ github.run_id }}-${{ github.run_attempt }}/artifacts/model-proof-report.html
+          path: |
+            ${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}/model-proof-index.html
+            ${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}/*/batch.log
+            ${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}/*/artifacts/model-proof-report.html
 
-      - name: Clean model proof scratch space
+      - name: Clean batch proof scratch space
         if: always()
         env:
           PROOF_UPLOAD_OUTCOME: ${{ steps.proof_upload.outcome }}
           HTML_UPLOAD_OUTCOME: ${{ steps.html_upload.outcome }}
         run: |
           set -euo pipefail
-          if [ -z "${MODEL_PROOF_OUTPUT_DIR:-}" ]; then
-            echo "No model-proof output directory was initialized; nothing to clean."
+          if [ -z "${MODEL_PROOF_BATCH_OUTPUT_DIR:-}" ]; then
+            echo "No batch proof output directory was initialized; nothing to clean."
             exit 0
           fi
-          case "$MODEL_PROOF_OUTPUT_DIR" in
-            "$RUNNER_TEMP"/model-proof-*) ;;
-            *) echo "Refusing to clean unsafe model-proof path: $MODEL_PROOF_OUTPUT_DIR" >&2; exit 1 ;;
+          case "$MODEL_PROOF_BATCH_OUTPUT_DIR" in
+            "$RUNNER_TEMP"/model-proof-batch-*) ;;
+            *) echo "Refusing to clean unsafe batch proof path: $MODEL_PROOF_BATCH_OUTPUT_DIR" >&2; exit 1 ;;
           esac
-          rm -rf -- "$MODEL_PROOF_OUTPUT_DIR/work" "$MODEL_PROOF_OUTPUT_DIR/projection"
+          find "$MODEL_PROOF_BATCH_OUTPUT_DIR" -mindepth 2 -maxdepth 2 -type d \
+            \( -name work -o -name projection \) -exec rm -rf -- {} +
           if [ "$PROOF_UPLOAD_OUTCOME" = "success" ] && [ "$HTML_UPLOAD_OUTCOME" = "success" ]; then
-            rm -rf -- "$MODEL_PROOF_OUTPUT_DIR"
+            rm -rf -- "$MODEL_PROOF_BATCH_OUTPUT_DIR"
           else
             echo "Keeping local proof artifacts because an artifact upload did not succeed."
           fi
