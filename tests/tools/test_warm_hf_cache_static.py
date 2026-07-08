@@ -45,6 +45,31 @@ def _family_metadata_values(field: str) -> list[str]:
     return values
 
 
+def _family_metadata_specs(field: str) -> list[str]:
+    specs: list[str] = []
+    for model_toml in sorted(FAMILIES.glob("*/MODEL.toml")):
+        data = tomllib.loads(model_toml.read_text(encoding="utf-8"))
+        specs.extend(
+            spec for spec in data.get(field, []) if isinstance(spec, str)
+        )
+    return specs
+
+
+def _literal_string_list(name: str) -> set[str]:
+    tree = ast.parse(WARM_HF_CACHE.read_text())
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == name
+            for target in node.targets
+        ):
+            continue
+        value = ast.literal_eval(node.value)
+        return {item for item in value if isinstance(item, str)}
+    raise AssertionError(f"Missing literal string list {name}")
+
+
 def _load_cache_helpers() -> dict:
     tree = ast.parse(WARM_HF_CACHE.read_text())
     namespace = {
@@ -133,8 +158,25 @@ def test_family_file_assets_are_metadata_driven() -> None:
     assert "_family_hf_warm_files" in text
     assert "family_hf_warm_files" in text
     assert "Warming family file assets" in text
-    for value in _family_metadata_values("hf_warm_files"):
-        assert value not in text
+    global_allow_patterns = _literal_string_list("_HF_ALLOW_PATTERNS")
+    for spec in _family_metadata_specs("hf_warm_files"):
+        asset_name, hf_id, filename = spec.split("|", 2)
+        assert spec not in text
+        assert asset_name not in text
+        assert hf_id not in text
+        # Generic filenames may already be part of the global snapshot schema;
+        # only family-unique filenames prove model-specific hard-coding here.
+        if filename not in global_allow_patterns:
+            assert filename not in text
+
+
+def test_family_file_asset_guard_allows_global_filename_collisions() -> None:
+    """A generic weight name is not itself family-specific hard-coding."""
+    assert "pytorch_model.bin" in _literal_string_list("_HF_ALLOW_PATTERNS")
+    assert any(
+        spec.endswith("|pytorch_model.bin")
+        for spec in _family_metadata_specs("hf_warm_files")
+    )
 
 
 def test_nemo_archives_count_as_complete_snapshots() -> None:

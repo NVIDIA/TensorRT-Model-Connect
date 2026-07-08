@@ -30,3 +30,6 @@ hf_warm_dependencies = [
   "magpie-byt5-tokenizer|google/byt5-small",
   "magpie-wavlm-discriminator|microsoft/wavlm-base-plus",
 ]
+hf_warm_files = [
+  "magpie-speaker-encoder|Edresson/Speaker_Encoder_H_ASP|pytorch_model.bin",
+]

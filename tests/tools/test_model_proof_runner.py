@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,28 @@ def _selection_program() -> str:
     text = RUNNER.read_text(encoding="utf-8")
     marker = '> "$config_file" <<\'PY\'\n'
     return text.split(marker, maxsplit=1)[1].split("\nPY\n", maxsplit=1)[0]
+
+
+def _workflow_batch_finalizer_program() -> str:
+    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+    step = workflow.split(
+        "- name: Finalize batch proof fallbacks", maxsplit=1
+    )[1].split("- name: Upload batch proof evidence", maxsplit=1)[0]
+    program = step.split("<<'PY'\n", maxsplit=1)[1].split(
+        "\n          PY", maxsplit=1
+    )[0]
+    return textwrap.dedent(program)
+
+
+def _workflow_batch_gate_program() -> str:
+    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+    step = workflow.split(
+        "- name: Enforce certified batch outcome", maxsplit=1
+    )[1].split("- name: Clean batch proof scratch space", maxsplit=1)[0]
+    program = step.split("<<'PY'\n", maxsplit=1)[1].split(
+        "\n          PY", maxsplit=1
+    )[0]
+    return textwrap.dedent(program)
 
 
 def _run_test_selection(tmp_path: Path, family: str, suite: str) -> dict:
@@ -410,6 +433,23 @@ def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> 
     assert "TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}" in workflow
 
 
+def test_model_proof_job_budget_reserves_finalization_and_bounds_small_batches() -> None:
+    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+    job_configuration = workflow.split("jobs:\n  prove:", maxsplit=1)[1].split(
+        "\n    steps:", maxsplit=1
+    )[0]
+    proof = workflow.split("- name: Run affected model proofs", maxsplit=1)[1].split(
+        "- name: Finalize batch proof fallbacks", maxsplit=1
+    )[0]
+
+    assert "timeout-minutes: 360" in job_configuration
+    assert "timeout-minutes: 180" not in job_configuration
+    assert (
+        "timeout-minutes: ${{ inputs.expected_count <= 4 && 60 || "
+        "(inputs.expected_count <= 16 && 120 || 240) }}"
+    ) in proof
+
+
 def test_model_proof_uses_a_dedicated_self_hosted_checkout() -> None:
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
     checkout = workflow.split("- name: Check out exact source revision once", maxsplit=1)[
@@ -446,6 +486,357 @@ def test_model_proof_bootstraps_html_without_a_checkout_dependency() -> None:
     assert "model-proof-report.html" in checkout_failure
     assert "working-directory:" not in checkout_failure
     assert ".github/scripts/" not in checkout_failure
+
+
+@pytest.mark.parametrize("proof_outcome", ["cancelled", "failure"])
+def test_workflow_finalizer_rebuilds_truthful_batch_ledger_after_timeout(
+    tmp_path: Path,
+    proof_outcome: str,
+) -> None:
+    models = ["passed", "failed", "interrupted", "unstarted"]
+    revision = "a" * 40
+    root = tmp_path / "batch"
+    results = root / ".batch-state" / "results"
+    results.mkdir(parents=True)
+    for index, payload in enumerate((
+        {
+            "model": "passed",
+            "gpu_id": "0",
+            "exit_code": 0,
+            "duration_seconds": 12,
+        },
+        {
+            "model": "failed",
+            "gpu_id": "1",
+            "exit_code": 7,
+            "duration_seconds": 9,
+        },
+    )):
+        (results / f"{index:06d}.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    statuses = {
+        "passed": {"outcome": "passed", "gpu_id": "0", "exit_code": 0},
+        "failed": {"outcome": "failed", "gpu_id": "1", "exit_code": 7},
+        "interrupted": {"outcome": "running", "gpu_id": "2"},
+        "unstarted": {"outcome": "running", "report_kind": "workflow_fallback"},
+    }
+    for model, status in statuses.items():
+        artifacts = root / model / "artifacts"
+        artifacts.mkdir(parents=True)
+        payload = {
+            "schema_version": 1,
+            "model": model,
+            "source_revision": revision,
+            "suite": "premerge",
+            **status,
+        }
+        (artifacts / "model-proof-status.json").write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+        if model in {"passed", "failed"}:
+            (artifacts / "model-proof-report.html").write_text(
+                f"<!doctype html><title>{model}</title>", encoding="utf-8"
+            )
+            (root / model / "batch.log").write_text("complete\n", encoding="utf-8")
+
+    (root / "batch-status.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "report_kind": "model_proof_batch",
+            "outcome": "interrupted",
+            "passed_count": 0,
+            "failed_count": 0,
+            "interrupted_count": 1,
+            "queued_count": 1,
+            "gpu_ids": ["0", "1", "2", "3"],
+            "models": [
+                {
+                    "model": "interrupted",
+                    "gpu_id": "2",
+                    "status": "interrupted",
+                    "exit_code": 143,
+                },
+                {
+                    "model": "unstarted",
+                    "gpu_id": "",
+                    "status": "queued",
+                    "exit_code": None,
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+    (root / "model-proof-index.html").write_text(
+        "<!doctype html><p>Outcome: running; all queued</p>", encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _workflow_batch_finalizer_program(),
+            str(root),
+            json.dumps(models),
+            revision,
+            "premerge",
+            "success",
+            "success",
+            proof_outcome,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    ledger = json.loads((root / "batch-status.json").read_text(encoding="utf-8"))
+    assert ledger["outcome"] == "failed"
+    assert ledger["passed_count"] == 1
+    assert ledger["failed_count"] == 1
+    assert ledger["interrupted_count"] == 1
+    assert ledger["queued_count"] == 1
+    assert ledger["workflow_outcomes"]["batch_proof"] == proof_outcome
+    assert [item["status"] for item in ledger["models"]] == [
+        "passed",
+        "failed",
+        "interrupted",
+        "queued",
+    ]
+    assert [item["gpu_id"] for item in ledger["models"]] == ["0", "1", "2", ""]
+    interrupted_status = json.loads(
+        (root / "interrupted" / "artifacts" / "model-proof-status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    queued_status = json.loads(
+        (root / "unstarted" / "artifacts" / "model-proof-status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert interrupted_status["outcome"] == "interrupted"
+    assert interrupted_status["exit_code"] == 143
+    assert interrupted_status["steps"]["batch_proof"]["status"] == "interrupted"
+    assert queued_status["outcome"] == "queued"
+    assert queued_status["exit_code"] is None
+    assert queued_status["steps"]["batch_proof"]["status"] == "queued"
+    interrupted_report = (
+        root / "interrupted" / "artifacts" / "model-proof-report.html"
+    ).read_text(encoding="utf-8")
+    queued_report = (
+        root / "unstarted" / "artifacts" / "model-proof-report.html"
+    ).read_text(encoding="utf-8")
+    assert "<th>Outcome</th><td>Interrupted</td>" in interrupted_report
+    assert "<th>Outcome</th><td>Queued</td>" in queued_report
+    assert "<th>Outcome</th><td>Failed</td>" not in interrupted_report
+    assert "<th>Outcome</th><td>Failed</td>" not in queued_report
+    index = (root / "model-proof-index.html").read_text(encoding="utf-8")
+    assert 'data-report-kind="model-proof-batch"' in index
+    assert "Outcome: running" not in index
+    assert "passed/artifacts/model-proof-report.html" in index
+    assert "unstarted/artifacts/model-proof-report.html" in index
+    assert all(
+        (root / model / "artifacts" / "model-proof-report.html").is_file()
+        for model in models
+    )
+
+
+def test_workflow_finalizer_handles_prebatch_failure_without_prior_gpu_ledger(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "batch"
+    root.mkdir()
+    (root / "batch-status.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "report_kind": "workflow_fallback",
+            "outcome": "running",
+            "phase": "workflow-bootstrap",
+        }),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _workflow_batch_finalizer_program(),
+            str(root),
+            json.dumps(["alpha"]),
+            "a" * 40,
+            "premerge",
+            "failure",
+            "skipped",
+            "skipped",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    ledger = json.loads((root / "batch-status.json").read_text(encoding="utf-8"))
+    assert ledger["outcome"] == "failed"
+    assert ledger["gpu_ids"] == ["0", "1", "2", "3"]
+    assert ledger["models"][0]["status"] == "failed"
+    status = json.loads(
+        (root / "alpha" / "artifacts" / "model-proof-status.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert status["outcome"] == "failed"
+
+
+def test_workflow_finalizer_never_passes_a_failed_proof_step(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "batch"
+    artifacts = root / "alpha" / "artifacts"
+    artifacts.mkdir(parents=True)
+    rich_report = "<!doctype html><html><title>rich pass</title></html>"
+    (artifacts / "model-proof-status.json").write_text(
+        json.dumps({"outcome": "passed", "gpu_id": "0", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    (artifacts / "model-proof-report.html").write_text(
+        rich_report, encoding="utf-8"
+    )
+    (root / "batch-status.json").write_text(
+        json.dumps({"gpu_ids": ["0", "1", "2", "3"]}), encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _workflow_batch_finalizer_program(),
+            str(root),
+            json.dumps(["alpha"]),
+            "a" * 40,
+            "premerge",
+            "success",
+            "success",
+            "failure",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    ledger = json.loads((root / "batch-status.json").read_text(encoding="utf-8"))
+    assert ledger["models"][0]["status"] == "passed"
+    assert ledger["passed_count"] == 1
+    assert ledger["outcome"] == "failed"
+    assert ledger["workflow_outcomes"]["batch_proof"] == "failure"
+    assert (artifacts / "model-proof-report.html").read_text(
+        encoding="utf-8"
+    ) == rich_report
+
+
+def _certified_batch_payload(revision: str) -> dict:
+    models = [
+        {
+            "model": "alpha",
+            "status": "passed",
+            "exit_code": 0,
+            "report_exists": True,
+        },
+        {
+            "model": "beta",
+            "status": "passed",
+            "exit_code": 0,
+            "report_exists": True,
+        },
+    ]
+    return {
+        "schema_version": 1,
+        "report_kind": "model_proof_batch",
+        "source_revision": revision,
+        "suite": "premerge",
+        "outcome": "passed",
+        "expected_count": 2,
+        "model_count": 2,
+        "passed_count": 2,
+        "failed_count": 0,
+        "interrupted_count": 0,
+        "queued_count": 0,
+        "models": models,
+        "workflow_outcomes": {
+            "checkout": "success",
+            "ci_image": "success",
+            "batch_proof": "success",
+        },
+    }
+
+
+def _run_workflow_batch_gate(
+    tmp_path: Path,
+    payload: dict,
+    *,
+    proof_upload: str = "success",
+    html_upload: str = "success",
+) -> subprocess.CompletedProcess[str]:
+    status_path = tmp_path / "batch-status.json"
+    status_path.write_text(json.dumps(payload), encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _workflow_batch_gate_program(),
+            str(status_path),
+            "2",
+            "a" * 40,
+            "premerge",
+            proof_upload,
+            html_upload,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_workflow_batch_gate_accepts_only_complete_uploaded_certification(
+    tmp_path: Path,
+) -> None:
+    result = _run_workflow_batch_gate(
+        tmp_path, _certified_batch_payload("a" * 40)
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Certified 2 isolated model proof(s)" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("mutation", "proof_upload", "html_upload", "message"),
+    [
+        ({"outcome": "failed"}, "success", "success", "outcome"),
+        ({"failed_count": 1}, "success", "success", "failed_count"),
+        ({}, "failure", "success", "proof artifact upload"),
+        ({}, "success", "failure", "HTML artifact upload"),
+    ],
+)
+def test_workflow_batch_gate_rejects_failed_or_unpublished_evidence(
+    tmp_path: Path,
+    mutation: dict,
+    proof_upload: str,
+    html_upload: str,
+    message: str,
+) -> None:
+    payload = _certified_batch_payload("a" * 40)
+    payload.update(mutation)
+
+    result = _run_workflow_batch_gate(
+        tmp_path,
+        payload,
+        proof_upload=proof_upload,
+        html_upload=html_upload,
+    )
+
+    assert result.returncode == 1
+    assert message in result.stderr
 
 
 def test_model_proof_resolves_runner_temp_only_after_runner_assignment() -> None:
@@ -491,6 +882,9 @@ def test_model_proof_checks_disk_headroom_before_checkout() -> None:
 
 def test_model_proof_cleans_scratch_only_after_both_artifact_uploads() -> None:
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+    gate = workflow.split(
+        "- name: Enforce certified batch outcome", maxsplit=1
+    )[1].split("- name: Clean batch proof scratch space", maxsplit=1)[0]
     cleanup = workflow.split(
         "- name: Clean batch proof scratch space", maxsplit=1
     )[1]
@@ -499,8 +893,12 @@ def test_model_proof_cleans_scratch_only_after_both_artifact_uploads() -> None:
         "Clean batch proof scratch space"
     )
     assert workflow.index("Upload batch model proof HTML reports") < workflow.index(
+        "Enforce certified batch outcome"
+    )
+    assert workflow.index("Enforce certified batch outcome") < workflow.index(
         "Clean batch proof scratch space"
     )
+    assert "if: always()" in gate
     assert "id: proof_upload" in workflow
     assert "id: html_upload" in workflow
     assert '"$RUNNER_TEMP"/model-proof-batch-*' in cleanup

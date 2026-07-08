@@ -813,6 +813,8 @@ class HfTransformersReference:
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         output_path = str(Path(model_dir) / "hf_stt.json")
+        mono_path = str(Path(model_dir) / "nemo_reference_audio.wav")
+        manifest_path = str(Path(model_dir) / "nemo_reference_audio.manifest.jsonl")
 
         audio_path = self._resolve_image_path(case.inputs.get("audio", ""))
         hf_id = case.hf_id
@@ -830,6 +832,8 @@ class HfTransformersReference:
             hf_id = {hf_id!r}
             audio_path = {audio_path!r}
             output_path = {output_path!r}
+            mono_path = {mono_path!r}
+            manifest_path = {manifest_path!r}
             language_tag = {language_tag!r}
 
             # Try NeMo ASR model
@@ -851,7 +855,6 @@ class HfTransformersReference:
                 if sr_raw != target_sr:
                     from scipy.signal import resample
                     audio_f = resample(audio_f, int(len(audio_f)*target_sr/sr_raw)).astype(np.float32)
-                mono_path = audio_path + ".mono.wav"
                 audio_i16 = np.clip(audio_f * 32768, -32768, 32767).astype(np.int16)
                 wav.write(mono_path, target_sr, audio_i16)
                 model = nemo_asr.models.ASRModel.from_pretrained(hf_id, map_location="cpu")
@@ -862,7 +865,6 @@ class HfTransformersReference:
                 # `lang` field into supervisions[0].language. Monolingual models
                 # (en-0.6b) accept the same manifest and ignore the field.
                 duration = float(len(audio_f)) / target_sr
-                manifest_path = mono_path + ".manifest.jsonl"
                 _record = {{
                     "audio_filepath": mono_path,
                     "duration": duration,

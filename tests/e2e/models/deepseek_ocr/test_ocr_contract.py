@@ -201,6 +201,74 @@ def test_vl_qa_ocr_rejects_missing_contracted_architecture_output() -> None:
     assert "Vision: region encoder + example adapter" in result.message
 
 
+def test_vl_qa_ocr_accepts_literal_fixture_spacing_and_terminal_norm() -> None:
+    """Regression for the L0 output observed on GB300 in premerge CI."""
+    required = [
+        "Architecture:",
+        "Attention: Standard Q/K/V/O",
+        "RoPE: Standard rotary position embeddings",
+        "Layer 0: Dense SwiGLU MLP",
+        "Layers 1-11: MoE",
+        "Norm: RMS",
+    ]
+    reference = (
+        "Architecture:\n"
+        "Attention: Standard Q/K/V/O (no biases, no GQA -- heads == kv_heads)\n"
+        "RoPE: Standard rotary position embeddings\n"
+        "Layer 0: Dense SwiGLU MLP (intermediate_size=6848)\n"
+        "Layers 1-11: MoE (64 experts, top-6, intermediate=896)\n"
+        "Norm: RMSNorm"
+    )
+    generated = (
+        "Architecture:\n"
+        "Attention:Standard Q/K/V/O (no biases,no GQA-heads == kv heads)\n"
+        "RoPE:Standard rotary position embeddings\n"
+        "Layer 0: Dense SwiGLU MLP (intermediate_size=6848)\n"
+        "Layers 1-11:MoE 64 experts,top-6,intermediate=896)\n"
+        "Norm:RMSNorm"
+    )
+
+    result = DeepseekOcrVLQAPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            data={"generated_text": generated},
+            metadata={"returncode": 0},
+        ),
+        StageOutput(
+            stage_name="full_generation",
+            data={"text": reference, "required_substrings": required},
+        ),
+        _case(reference_backend="golden_snapshot"),
+        ThresholdProfile(task_strategy="vision_language_generation"),
+    )
+
+    assert result.status == StageStatus.PASSED.value
+    assert result.metrics["required_ocr_substrings"].value == len(required)
+
+
+def test_vl_qa_ocr_still_rejects_truncation_before_terminal_norm() -> None:
+    required = ["Architecture:", "Norm: RMS"]
+    result = DeepseekOcrVLQAPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            data={"generated_text": "Architecture:\nNorm:"},
+            metadata={"returncode": 0},
+        ),
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "text": "Architecture:\nNorm: RMSNorm",
+                "required_substrings": required,
+            },
+        ),
+        _case(reference_backend="golden_snapshot"),
+        ThresholdProfile(task_strategy="vision_language_generation"),
+    )
+
+    assert result.status == StageStatus.FAILED.value
+    assert "Norm: RMS" in result.message
+
+
 def test_vl_qa_preserves_ocr_punctuation() -> None:
     result = DeepseekOcrVLQAPlugin().verify(
         StageOutput(stage_name="full_generation", data={"generated_text": "Invoice"}),

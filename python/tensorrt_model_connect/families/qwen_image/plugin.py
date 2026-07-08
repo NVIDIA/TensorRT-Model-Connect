@@ -85,6 +85,79 @@ def _resolve_edit_condition_image_size(config: ModelConfig) -> tuple[int, int] |
     return int(height), int(width)
 
 
+def _apply_static_image_geometry(
+    config: ModelConfig,
+    bundle_config: dict,
+) -> tuple[int, int, int, int, int, int]:
+    """Apply the requested build size to every static Qwen-Image component.
+
+    Qwen-Image's DiT and VAE plans have static spatial shapes.  The build CLI
+    stores ``--image-height`` / ``--image-width`` in ``config.raw``; leaving
+    the bundle defaults at 1024 would compile those plans for a different
+    shape than the runtime request.  Return both the dense VAE latent grid and
+    the post-patchify DiT grid so all builders consume one resolved geometry.
+    """
+    image_config = bundle_config["image"]
+    image_height = int(
+        config.raw.get("image_height", image_config["default_height"])
+    )
+    image_width = int(
+        config.raw.get("image_width", image_config["default_width"])
+    )
+
+    min_height = int(image_config["min_height"])
+    min_width = int(image_config["min_width"])
+    max_height = int(image_config["max_height"])
+    max_width = int(image_config["max_width"])
+    height_alignment = int(image_config["height_alignment"])
+    width_alignment = int(image_config["width_alignment"])
+    if not min_height <= image_height <= max_height:
+        raise ValueError(
+            "Qwen-Image image_height must be in "
+            f"[{min_height}, {max_height}] (got {image_height})"
+        )
+    if not min_width <= image_width <= max_width:
+        raise ValueError(
+            "Qwen-Image image_width must be in "
+            f"[{min_width}, {max_width}] (got {image_width})"
+        )
+    if image_height % height_alignment != 0:
+        raise ValueError(
+            "Qwen-Image image_height must be divisible by "
+            f"{height_alignment} (got {image_height})"
+        )
+    if image_width % width_alignment != 0:
+        raise ValueError(
+            "Qwen-Image image_width must be divisible by "
+            f"{width_alignment} (got {image_width})"
+        )
+
+    vae_scale = int(bundle_config["vae"]["spatial_scale_factor"])
+    patch_size = int(bundle_config["denoiser"]["patch_size"])
+    latent_alignment = vae_scale * patch_size
+    if image_height % latent_alignment != 0 or image_width % latent_alignment != 0:
+        raise ValueError(
+            "Qwen-Image image dimensions must be divisible by VAE scale * "
+            f"DiT patch size ({latent_alignment}); got "
+            f"{image_height}x{image_width}"
+        )
+
+    image_config["default_height"] = image_height
+    image_config["default_width"] = image_width
+    latent_height = image_height // vae_scale
+    latent_width = image_width // vae_scale
+    dit_height = latent_height // patch_size
+    dit_width = latent_width // patch_size
+    return (
+        image_height,
+        image_width,
+        latent_height,
+        latent_width,
+        dit_height,
+        dit_width,
+    )
+
+
 class QwenImagePlugin:
     name = "qwen_image"
     runtime_strategy = "diffusion_qwen_image"
@@ -228,7 +301,22 @@ class QwenImagePlugin:
             repo,
             edit_condition_image_size=edit_condition_image_size,
         )
+        (
+            default_h,
+            default_w,
+            latent_h,
+            latent_w,
+            h_lat,
+            w_lat,
+        ) = _apply_static_image_geometry(config, bundle_cfg)
         is_edit = bundle_cfg.get("task_mode") == "edit"
+        print(
+            "[qwen-image] Static output geometry: "
+            f"image={default_h}x{default_w}, "
+            f"vae_latent={latent_h}x{latent_w}, "
+            f"dit_grid={h_lat}x{w_lat}",
+            file=sys.stderr,
+        )
         if is_edit and edit_condition_image_size is not None:
             print(
                 "[qwen-image] Static edit VAE condition size resolved from "
@@ -236,14 +324,10 @@ class QwenImagePlugin:
                 f"{bundle_cfg['image_conditioning']['vae_image_width']}",
                 file=sys.stderr,
             )
-        config_json_bytes = json.dumps(bundle_cfg, indent=2).encode("utf-8")
-
         # Derive engine build-time shape constants from the bundle config so
         # the static plans agree with the C++ runtime contract.
         vae_scale = int(bundle_cfg["vae"]["spatial_scale_factor"])
         patch_size = int(bundle_cfg["denoiser"]["patch_size"])
-        default_h = int(bundle_cfg["image"]["default_height"])
-        default_w = int(bundle_cfg["image"]["default_width"])
         n_text = int(bundle_cfg["text_encoder"]["max_seq_len"])
         text_encoder_hf_cfg = json.loads((repo / "text_encoder" / "config.json").read_text())
         vision_cfg = text_encoder_hf_cfg.get("vision_config", {})
@@ -261,10 +345,6 @@ class QwenImagePlugin:
         # Latent grid pre-patchify, then packed-token grid post-patchify.
         # h_lat / w_lat here describe the *post-patchify* token grid that
         # build_qwen_image_dit_engine expects (h_lat * w_lat == n_img).
-        latent_h = default_h // vae_scale
-        latent_w = default_w // vae_scale
-        h_lat = latent_h // patch_size
-        w_lat = latent_w // patch_size
         image_token_shapes = None
         if is_edit:
             cond_h = int(
@@ -282,6 +362,11 @@ class QwenImagePlugin:
             cond_h_lat = cond_latent_h // patch_size
             cond_w_lat = cond_latent_w // patch_size
             image_token_shapes = [(h_lat, w_lat), (cond_h_lat, cond_w_lat)]
+
+        # Serialize only after applying the build-time image geometry so a
+        # no-override runtime request also uses the shapes baked into the
+        # static DiT and VAE plans.
+        config_json_bytes = json.dumps(bundle_cfg, indent=2).encode("utf-8")
 
         # 2. Qwen2.5-VL LM text encoder.
         print(

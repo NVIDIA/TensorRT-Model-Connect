@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Run isolated model proofs concurrently without oversubscribing the configured
-# GPUs. Each long-lived worker owns one GPU and receives a deterministic,
-# round-robin subset of the requested models.
+# GPUs. Each long-lived worker owns one GPU and claims the next queued model
+# when it becomes free, so one unusually slow model cannot leave other GPUs
+# idle while later proofs remain unstarted.
 
 set -uo pipefail
 
@@ -18,6 +19,8 @@ suite=""
 output_dir=""
 state_dir=""
 models_file=""
+next_index_file=""
+queue_lock_file=""
 declare -a models=()
 declare -a gpu_ids=()
 declare -a worker_pids=()
@@ -82,6 +85,7 @@ esac
 [ -n "$output_dir" ] || die "--output-dir is required"
 [ -f "$proof_runner" ] || die "model proof runner is not a file: $proof_runner"
 command -v python3 >/dev/null || die "python3 is required"
+command -v flock >/dev/null || die "flock is required"
 
 configured_gpu_ids="${TRTMC_MODEL_PROOF_GPU_IDS-0,1,2,3}"
 [[ "$configured_gpu_ids" =~ ^(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*$ ]] || \
@@ -106,6 +110,8 @@ mkdir -p -- "$output_dir" || die "could not create output directory: $output_dir
 
 state_dir="$output_dir/.batch-state"
 models_file="$state_dir/models.txt"
+next_index_file="$state_dir/next-index.txt"
+queue_lock_file="$state_dir/queue.lock"
 rm -rf -- "$state_dir"
 mkdir -p -- "$state_dir/results" || die "could not initialize batch state"
 
@@ -140,12 +146,13 @@ PY
 parse_rc=$?
 [ "$parse_rc" -eq 0 ] || exit "$parse_rc"
 mapfile -t models < "$models_file"
+printf '0\n' > "$next_index_file" || die "could not initialize model queue"
 
 write_batch_outputs() {
   local mode="$1"
   local signal_exit_code="${2:-0}"
   python3 - \
-    "$models_file" "$state_dir/results" "$output_dir" "$revision" "$suite" \
+    "$models_file" "$state_dir/results" "$next_index_file" "$output_dir" "$revision" "$suite" \
     "$configured_gpu_ids" "$expected_count" "$mode" "$signal_exit_code" <<'PY'
 import html
 import json
@@ -155,6 +162,7 @@ from pathlib import Path
 (
     models_path,
     results_path,
+    next_index_path,
     output_path,
     revision,
     suite,
@@ -168,6 +176,11 @@ results_dir = Path(results_path)
 output_dir = Path(output_path)
 gpu_ids = gpu_text.split(",")
 entries = []
+try:
+    claimed_count = int(Path(next_index_path).read_text(encoding="utf-8").strip())
+except (OSError, ValueError):
+    claimed_count = 0
+claimed_count = max(0, min(claimed_count, len(models)))
 
 for index, model in enumerate(models):
     result_path = results_dir / f"{index:06d}.json"
@@ -179,20 +192,27 @@ for index, model in enumerate(models):
                 result = loaded
         except (json.JSONDecodeError, OSError):
             result = None
-    assigned_gpu = gpu_ids[index % len(gpu_ids)]
     if result is not None:
+        assigned_gpu = str(result.get("gpu_id", ""))
         status = "passed" if result.get("exit_code") == 0 else "failed"
         exit_code = result.get("exit_code")
         duration = result.get("duration_seconds")
     elif mode == "running":
+        assigned_gpu = ""
         status = "queued"
         exit_code = None
         duration = None
     elif mode == "interrupted":
-        status = "interrupted"
-        exit_code = int(signal_exit_text)
+        assigned_gpu = ""
+        if index < claimed_count:
+            status = "interrupted"
+            exit_code = int(signal_exit_text)
+        else:
+            status = "queued"
+            exit_code = None
         duration = None
     else:
+        assigned_gpu = ""
         status = "failed"
         exit_code = None
         duration = None
@@ -334,6 +354,21 @@ PY
   mv -- "$temporary_path" "$result_path"
 }
 
+claim_next_index() {
+  local index temporary_path
+  {
+    flock -x 9
+    read -r index < "$next_index_file" || index=0
+    if [ "$index" -ge "${#models[@]}" ]; then
+      return 1
+    fi
+    temporary_path="$next_index_file.tmp-$BASHPID"
+    printf '%s\n' "$((index + 1))" > "$temporary_path"
+    mv -- "$temporary_path" "$next_index_file"
+    printf '%s\n' "$index"
+  } 9> "$queue_lock_file"
+}
+
 run_worker() {
   local worker_index="$1"
   local gpu_id="$2"
@@ -352,7 +387,7 @@ run_worker() {
   trap stop_worker INT TERM HUP
 
   local index model model_dir log_path started finished proof_rc missing_evidence evidence
-  for ((index = worker_index; index < ${#models[@]}; index += ${#gpu_ids[@]})); do
+  while index="$(claim_next_index)"; do
     model="${models[$index]}"
     model_dir="$output_dir/$model"
     log_path="$model_dir/batch.log"

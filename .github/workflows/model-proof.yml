@@ -31,7 +31,11 @@ jobs:
   prove:
     name: Affected ${{ inputs.models }} / Build + test
     runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
-    timeout-minutes: 180
+    # Full platform/CI changes certify every registered model. The image build
+    # and 77 isolated E2E proofs exceeded the former three-hour job budget even
+    # though the runner remained healthy, so leave enough room for evidence
+    # finalization while small affected-model batches still finish in minutes.
+    timeout-minutes: 360
 
     defaults:
       run:
@@ -267,6 +271,11 @@ jobs:
 
       - name: Run affected model proofs
         id: proof
+        # Keep the common one-to-four-model path bounded to one hour, while a
+        # platform-wide proof gets four hours.  The proof ceiling remains well
+        # below the six-hour job ceiling so checkout, image verification,
+        # finalization, and both artifact uploads retain a bounded tail.
+        timeout-minutes: ${{ inputs.expected_count <= 4 && 60 || (inputs.expected_count <= 16 && 120 || 240) }}
         env:
           MODELS_JSON: ${{ inputs.models }}
           EXPECTED_COUNT: ${{ inputs.expected_count }}
@@ -299,6 +308,7 @@ jobs:
             "$CHECKOUT_OUTCOME" "$CI_IMAGE_OUTCOME" "$PROOF_OUTCOME" <<'PY'
           import html
           import json
+          import os
           import re
           import sys
           from pathlib import Path
@@ -306,7 +316,10 @@ jobs:
           root_arg, raw_models, revision, suite, checkout, ci_image, proof = sys.argv[1:]
           root = Path(root_arg)
           root.mkdir(parents=True, exist_ok=True)
-          models = json.loads(raw_models)
+          try:
+              models = json.loads(raw_models)
+          except json.JSONDecodeError:
+              models = []
           if (
               not isinstance(models, list)
               or any(not isinstance(model, str) for model in models)
@@ -329,8 +342,34 @@ jobs:
           else:
               phase = "batch-proof"
 
+          batch_status_path = root / "batch-status.json"
+          try:
+              previous_batch_status = json.loads(
+                  batch_status_path.read_text(encoding="utf-8")
+              )
+          except (OSError, json.JSONDecodeError):
+              previous_batch_status = {}
+          if not isinstance(previous_batch_status, dict):
+              previous_batch_status = {}
+          previous_model_items = previous_batch_status.get("models", [])
+          if not isinstance(previous_model_items, list):
+              previous_model_items = []
+          previous_models = {
+              item["model"]: item
+              for item in previous_model_items
+              if isinstance(item, dict) and isinstance(item.get("model"), str)
+          }
+          batch_was_interrupted = (
+              proof == "cancelled"
+              or previous_batch_status.get("outcome") == "interrupted"
+          )
+
+          def gpu_text(value):
+              return "" if value is None else str(value)
+
           summaries = []
-          for model in models:
+          results_dir = root / ".batch-state" / "results"
+          for index, model in enumerate(models):
               artifacts = root / model / "artifacts"
               artifacts.mkdir(parents=True, exist_ok=True)
               status_path = artifacts / "model-proof-status.json"
@@ -338,6 +377,8 @@ jobs:
               try:
                   status = json.loads(status_path.read_text(encoding="utf-8"))
               except (OSError, json.JSONDecodeError):
+                  status = {}
+              if not isinstance(status, dict):
                   status = {}
               try:
                   report_text = report_path.read_text(encoding="utf-8")
@@ -348,16 +389,93 @@ jobs:
                   and status.get("report_kind") != "workflow_fallback"
                   and 'data-report-kind="workflow-fallback"' not in report_text
               )
+              result_path = results_dir / f"{index:06d}.json"
+              try:
+                  result = json.loads(result_path.read_text(encoding="utf-8"))
+              except (OSError, json.JSONDecodeError):
+                  result = {}
+              if not isinstance(result, dict):
+                  result = {}
+              previous = previous_models.get(model, {})
+              status_gpu = gpu_text(status.get("gpu_id"))
+              previous_gpu = gpu_text(previous.get("gpu_id"))
+
+              result_exit = result.get("exit_code")
+              status_exit = status.get("exit_code")
+              if not isinstance(status_exit, int):
+                  status_exit = status.get("validation_exit_code")
+              if isinstance(result_exit, int):
+                  state = "passed" if result_exit == 0 else "failed"
+                  exit_code = result_exit
+                  duration = result.get("duration_seconds")
+                  gpu_id = gpu_text(result.get("gpu_id"))
+              elif rich_report and status.get("outcome") in {"passed", "failed"}:
+                  state = str(status["outcome"])
+                  exit_code = (
+                      0
+                      if state == "passed"
+                      else status_exit if isinstance(status_exit, int) else 1
+                  )
+                  duration = None
+                  gpu_id = status_gpu
+              elif batch_was_interrupted and phase == "batch-proof":
+                  was_claimed = (
+                      previous.get("status") == "interrupted"
+                      or bool(status_gpu)
+                  )
+                  if was_claimed:
+                      state = "interrupted"
+                      previous_exit = previous.get("exit_code")
+                      exit_code = (
+                          previous_exit
+                          if isinstance(previous_exit, int) and previous_exit != 0
+                          else 143
+                      )
+                      gpu_id = previous_gpu or status_gpu
+                  else:
+                      state = "queued"
+                      exit_code = None
+                      gpu_id = ""
+                  duration = None
+              else:
+                  state = "failed"
+                  exit_code = (
+                      status_exit
+                      if isinstance(status_exit, int) and status_exit != 0
+                      else 1
+                  )
+                  duration = None
+                  gpu_id = status_gpu
+
+              # A zero result without its rich report is incomplete evidence,
+              # so the workflow must fail closed and replace it with a
+              # truthful fallback rather than certify an uninspectable pass.
+              if state == "passed" and not rich_report:
+                  state = "failed"
+                  exit_code = 1
+
               if not rich_report:
-                  status.update({
+                  messages = {
+                      "failed": (
+                          "Validation did not complete the isolated report path."
+                      ),
+                      "interrupted": (
+                          "Validation started but was interrupted before completion."
+                      ),
+                      "queued": (
+                          "Validation was queued but did not start before cancellation."
+                      ),
+                  }
+                  status = {
                       "schema_version": 1,
                       "report_kind": "workflow_fallback",
                       "model": model,
                       "source_revision": revision,
                       "suite": suite,
-                      "outcome": "failed",
+                      "outcome": state,
                       "phase": phase,
-                      "exit_code": 1,
+                      "exit_code": exit_code,
+                      "gpu_id": gpu_id,
                       "details": details,
                       "steps": {
                           "checkout": {
@@ -369,11 +487,14 @@ jobs:
                               "evidence": f"GitHub Actions outcome: {ci_image}",
                           },
                           "batch_proof": {
-                              "status": "passed" if proof == "success" else "failed",
-                              "evidence": f"GitHub Actions outcome: {proof}",
+                              "status": state,
+                              "evidence": (
+                                  f"GitHub Actions outcome: {proof}; "
+                                  f"model state: {state}"
+                              ),
                           },
                       },
-                  })
+                  }
                   status_path.write_text(
                       json.dumps(status, indent=2) + "\n", encoding="utf-8"
                   )
@@ -383,8 +504,8 @@ jobs:
                           ("Model", model),
                           ("Pinned revision", revision),
                           ("Suite", suite),
-                          ("Outcome", "Failed"),
-                          ("Failure phase", phase),
+                          ("Outcome", state.title()),
+                          ("Workflow phase", phase),
                           ("Checkout", checkout),
                           ("CI image", ci_image),
                           ("Batch proof", proof),
@@ -393,63 +514,106 @@ jobs:
                   report = f"""<!doctype html>
           <html lang="en" data-report-kind="workflow-fallback"><head><meta charset="utf-8">
           <meta name="viewport" content="width=device-width,initial-scale=1">
-          <title>Isolated model proof failed: {html.escape(model)}</title>
-          <style>body{{font:16px system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#17202a}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccd1d1;padding:.6rem;text-align:left}}th{{width:12rem;background:#f4f6f7}}.failed{{border-left:.4rem solid #c0392b;background:#fdedec;padding:1rem}}</style>
+          <title>Isolated model proof {html.escape(state)}: {html.escape(model)}</title>
+          <style>body{{font:16px system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#17202a}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccd1d1;padding:.6rem;text-align:left}}th{{width:12rem;background:#f4f6f7}}.failed{{border-left:.4rem solid #c0392b;background:#fdedec;padding:1rem}}.interrupted{{border-left:.4rem solid #d35400;background:#fef5e7;padding:1rem}}.queued{{border-left:.4rem solid #607d8b;background:#eceff1;padding:1rem}}</style>
           </head><body><h1>Isolated model proof</h1>
-          <p class="failed">Validation did not enter or complete the isolated report path. This fallback preserves the workflow outcomes for this model.</p>
+          <p class="{html.escape(state)}">{html.escape(messages[state])} This fallback preserves the workflow outcomes for this model.</p>
           <table>{rows}</table></body></html>"""
                   report_path.write_text(report, encoding="utf-8")
-              summaries.append((model, str(status.get("outcome", "unknown"))))
-
-          batch_status_path = root / "batch-status.json"
-          try:
-              batch_status = json.loads(batch_status_path.read_text(encoding="utf-8"))
-          except (OSError, json.JSONDecodeError):
-              batch_status = {}
-          if batch_status.get("report_kind") in (None, "", "workflow_fallback"):
-              batch_status.update({
-                  "schema_version": 1,
-                  "report_kind": "workflow_fallback",
-                  "models": models,
-                  "source_revision": revision,
-                  "suite": suite,
-                  "outcome": "failed",
-                  "phase": phase,
-                  "details": details,
+              summaries.append({
+                  "model": model,
+                  "gpu_id": gpu_id,
+                  "status": state,
+                  "exit_code": exit_code,
+                  "duration_seconds": duration,
+                  "output_dir": model,
+                  "report": f"{model}/artifacts/model-proof-report.html",
+                  "report_exists": report_path.is_file(),
+                  "log": f"{model}/batch.log",
+                  "log_exists": (root / model / "batch.log").is_file(),
               })
-              batch_status_path.write_text(
-                  json.dumps(batch_status, indent=2) + "\n", encoding="utf-8"
+
+          counts = {
+              state: sum(item["status"] == state for item in summaries)
+              for state in ("passed", "failed", "interrupted", "queued")
+          }
+          batch_outcome = (
+              "passed"
+              if (
+                  summaries
+                  and counts["passed"] == len(summaries)
+                  and checkout == "success"
+                  and ci_image == "success"
+                  and proof == "success"
               )
+              else "failed"
+          )
+          gpu_ids = previous_batch_status.get("gpu_ids")
+          if not isinstance(gpu_ids, list):
+              gpu_ids = os.environ.get("TRTMC_MODEL_PROOF_GPU_IDS", "0,1,2,3").split(",")
+          batch_status = {
+              "schema_version": 1,
+              "report_kind": "model_proof_batch",
+              "source_revision": revision,
+              "suite": suite,
+              "outcome": batch_outcome,
+              "expected_count": len(models),
+              "model_count": len(models),
+              "passed_count": counts["passed"],
+              "failed_count": counts["failed"],
+              "interrupted_count": counts["interrupted"],
+              "queued_count": counts["queued"],
+              "gpu_ids": gpu_ids,
+              "models": summaries,
+              "workflow_outcomes": {
+                  "checkout": checkout,
+                  "ci_image": ci_image,
+                  "batch_proof": proof,
+              },
+          }
+          batch_status_path.write_text(
+              json.dumps(batch_status, indent=2) + "\n", encoding="utf-8"
+          )
 
           index_path = root / "model-proof-index.html"
-          try:
-              current_index = index_path.read_text(encoding="utf-8")
-          except OSError:
-              current_index = ""
-          expected_report_links = [
-              f"{model}/artifacts/model-proof-report.html" for model in models
-          ]
-          if (
-              not current_index
-              or 'data-report-kind="workflow-fallback"' in current_index
-              or any(link not in current_index for link in expected_report_links)
-          ):
-              rows = "".join(
-                  "<tr><td><a href='"
-                  f"{html.escape(model)}/artifacts/model-proof-report.html'>"
-                  f"{html.escape(model)}</a></td><td>{html.escape(outcome)}</td></tr>"
-                  for model, outcome in summaries
+          rows = []
+          for item in summaries:
+              report_cell = (
+                  f'<a href="{html.escape(item["report"], quote=True)}">HTML report</a>'
+                  if item["report_exists"]
+                  else "Unavailable"
               )
-              index = f"""<!doctype html>
-          <html lang="en" data-report-kind="workflow-fallback"><head><meta charset="utf-8">
+              log_cell = (
+                  f'<a href="{html.escape(item["log"], quote=True)}">Batch log</a>'
+                  if item["log_exists"]
+                  else "Unavailable"
+              )
+              exit_cell = "" if item["exit_code"] is None else str(item["exit_code"])
+              duration_cell = (
+                  ""
+                  if item["duration_seconds"] is None
+                  else f'{item["duration_seconds"]} s'
+              )
+              rows.append(
+                  "<tr>"
+                  f'<td><code>{html.escape(item["model"])}</code></td>'
+                  f'<td><code>{html.escape(item["gpu_id"])}</code></td>'
+                  f'<td>{html.escape(item["status"])}</td>'
+                  f"<td>{exit_cell}</td><td>{duration_cell}</td>"
+                  f"<td>{report_cell}</td><td>{log_cell}</td>"
+                  "</tr>"
+              )
+          index = f"""<!doctype html>
+          <html lang="en" data-report-kind="model-proof-batch"><head><meta charset="utf-8">
           <meta name="viewport" content="width=device-width,initial-scale=1">
           <title>Isolated model proof batch</title>
           <style>body{{font:16px system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;color:#17202a}}table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccd1d1;padding:.6rem;text-align:left}}</style>
           </head><body><h1>Isolated model proof batch</h1>
-          <p>Revision <code>{html.escape(revision)}</code>; suite <code>{html.escape(suite)}</code>.</p>
-          <table><thead><tr><th>Model report</th><th>Outcome</th></tr></thead><tbody>{rows}</tbody></table>
+          <p>Outcome: <strong>{html.escape(batch_outcome)}</strong></p>
+          <p>Revision <code>{html.escape(revision)}</code>; suite <code>{html.escape(suite)}</code>; models {len(models)}.</p>
+          <table><thead><tr><th>Model</th><th>GPU</th><th>Status</th><th>Exit</th><th>Duration</th><th>Evidence</th><th>Log</th></tr></thead><tbody>{''.join(rows)}</tbody></table>
           </body></html>"""
-              index_path.write_text(index, encoding="utf-8")
+          index_path.write_text(index, encoding="utf-8")
           PY
 
       - name: Upload batch proof evidence
@@ -479,6 +643,105 @@ jobs:
             ${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}/model-proof-index.html
             ${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}/*/batch.log
             ${{ runner.temp }}/model-proof-batch-${{ github.run_id }}-${{ github.run_attempt }}/*/artifacts/model-proof-report.html
+
+      - name: Enforce certified batch outcome
+        if: always()
+        env:
+          EXPECTED_COUNT: ${{ inputs.expected_count }}
+          REVISION: ${{ inputs.revision }}
+          SUITE: ${{ inputs.suite }}
+          PROOF_UPLOAD_OUTCOME: ${{ steps.proof_upload.outcome }}
+          HTML_UPLOAD_OUTCOME: ${{ steps.html_upload.outcome }}
+        run: |
+          set -euo pipefail
+          test -n "${MODEL_PROOF_BATCH_OUTPUT_DIR:-}" || {
+            echo "::error::Batch proof output directory was not initialized"
+            exit 1
+          }
+          python3 - \
+            "$MODEL_PROOF_BATCH_OUTPUT_DIR/batch-status.json" \
+            "$EXPECTED_COUNT" "$REVISION" "$SUITE" \
+            "$PROOF_UPLOAD_OUTCOME" "$HTML_UPLOAD_OUTCOME" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          status_path, expected_text, revision, suite, proof_upload, html_upload = (
+              sys.argv[1:]
+          )
+          errors = []
+          try:
+              payload = json.loads(Path(status_path).read_text(encoding="utf-8"))
+          except (OSError, json.JSONDecodeError) as exc:
+              raise SystemExit(f"batch proof ledger is unavailable: {exc}") from exc
+          if not isinstance(payload, dict):
+              raise SystemExit("batch proof ledger must be a JSON object")
+          expected = int(expected_text)
+          models = payload.get("models")
+          if not isinstance(models, list):
+              models = []
+              errors.append("models is not a list")
+
+          required = {
+              "report_kind": "model_proof_batch",
+              "source_revision": revision,
+              "suite": suite,
+              "outcome": "passed",
+              "expected_count": expected,
+              "model_count": expected,
+              "passed_count": expected,
+              "failed_count": 0,
+              "interrupted_count": 0,
+              "queued_count": 0,
+          }
+          for field, wanted in required.items():
+              if payload.get(field) != wanted:
+                  errors.append(
+                      f"{field}: expected {wanted!r}, found {payload.get(field)!r}"
+                  )
+          if len(models) != expected:
+              errors.append(f"models: expected {expected} entries, found {len(models)}")
+          for index, model in enumerate(models):
+              if not isinstance(model, dict):
+                  errors.append(f"models[{index}] is not an object")
+                  continue
+              if model.get("status") != "passed":
+                  errors.append(
+                      f"models[{index}] {model.get('model')!r}: "
+                      f"status is {model.get('status')!r}"
+                  )
+              if model.get("exit_code") != 0:
+                  errors.append(
+                      f"models[{index}] {model.get('model')!r}: "
+                      f"exit_code is {model.get('exit_code')!r}"
+                  )
+              if model.get("report_exists") is not True:
+                  errors.append(
+                      f"models[{index}] {model.get('model')!r}: HTML report is missing"
+                  )
+
+          outcomes = payload.get("workflow_outcomes")
+          if not isinstance(outcomes, dict):
+              errors.append("workflow_outcomes is not an object")
+          else:
+              for step in ("checkout", "ci_image", "batch_proof"):
+                  if outcomes.get(step) != "success":
+                      errors.append(
+                          f"workflow_outcomes.{step}: expected 'success', "
+                          f"found {outcomes.get(step)!r}"
+                      )
+          if proof_upload != "success":
+              errors.append(f"proof artifact upload outcome is {proof_upload!r}")
+          if html_upload != "success":
+              errors.append(f"HTML artifact upload outcome is {html_upload!r}")
+
+          if errors:
+              print("Batch proof certification failed:", file=sys.stderr)
+              for error in errors:
+                  print(f"- {error}", file=sys.stderr)
+              raise SystemExit(1)
+          print(f"Certified {expected} isolated model proof(s) for {revision}.")
+          PY
 
       - name: Clean batch proof scratch space
         if: always()

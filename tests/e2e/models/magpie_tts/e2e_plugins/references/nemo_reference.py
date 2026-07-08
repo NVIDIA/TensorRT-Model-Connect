@@ -34,6 +34,11 @@ from ..runtime_config import runtime_config_get
 logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).resolve().parents[6]
+MAGPIE_SPEAKER_ENCODER_REPO = "Edresson/Speaker_Encoder_H_ASP"
+MAGPIE_SPEAKER_ENCODER_FILENAME = "pytorch_model.bin"
+MAGPIE_SPEAKER_ENCODER_URL = (
+    "https://huggingface.co/Edresson/Speaker_Encoder_H_ASP/resolve/main/pytorch_model.bin"
+)
 
 
 def _write_wav(path: str, audio: np.ndarray, sample_rate: int) -> None:
@@ -89,8 +94,30 @@ class NemoReference:
             os.environ["NEMO_LOG_LEVEL"] = "ERROR"
             warnings.filterwarnings("ignore")
 
+            import fsspec
             import numpy as np
             import torch
+            from huggingface_hub import hf_hub_download
+
+            # Magpie's upstream NeMo config stores the speaker-encoder weight as
+            # a Hub HTTPS URL.  CI deliberately disables the network after its
+            # cache-warm phase, so map that URL to the family-declared,
+            # pre-warmed Hub file instead of allowing fsspec to make a request.
+            speaker_checkpoint = hf_hub_download(
+                repo_id={MAGPIE_SPEAKER_ENCODER_REPO!r},
+                filename={MAGPIE_SPEAKER_ENCODER_FILENAME!r},
+                local_files_only=True,
+            )
+            speaker_checkpoint_url = {MAGPIE_SPEAKER_ENCODER_URL!r}
+            original_fsspec_open = fsspec.open
+
+            def offline_fsspec_open(path, *args, **kwargs):
+                normalized = str(path).split("?", 1)[0]
+                if normalized == speaker_checkpoint_url:
+                    path = speaker_checkpoint
+                return original_fsspec_open(path, *args, **kwargs)
+
+            fsspec.open = offline_fsspec_open
 
             torch.manual_seed({seed})
             if torch.cuda.is_available():

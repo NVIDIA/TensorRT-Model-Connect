@@ -170,10 +170,18 @@ def _reference_is_invariant_only(case, ref_output: StageOutput) -> bool:
     )
 
 def _normalized_substring_hits(text: str, substrings: list[str]) -> tuple[int, list[str]]:
-    normalized = normalize_text(text)
+    # OCR content must preserve punctuation, while incidental whitespace
+    # around a visible delimiter is layout rather than text.  The fixture
+    # contains ``Layer 0: Dense``; model output may faithfully transcribe it
+    # as ``Layer 0:Dense``.  Canonicalize only colon-adjacent whitespace so a
+    # missing colon (or missing text after it) still fails the contract.
+    def normalize_contract_text(value: str) -> str:
+        return re.sub(r"\s*:\s*", ":", normalize_text(value))
+
+    normalized = normalize_contract_text(text)
     missing = [
         expected for expected in substrings
-        if normalize_text(expected) not in normalized
+        if normalize_contract_text(expected) not in normalized
     ]
     return len(substrings) - len(missing), missing
 

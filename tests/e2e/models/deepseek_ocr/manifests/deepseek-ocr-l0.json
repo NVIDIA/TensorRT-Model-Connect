@@ -16,7 +16,7 @@
       "reference_family": "ocr_markdown",
       "user_contract": "ocr_text",
       "prompt": "Extract the text from this image.",
-      "max_new_tokens": 80,
+      "max_new_tokens": 96,
       "test_image": "data/orc_test_img.jpeg",
       "reference_backend": "golden_snapshot",
       "metadata": {

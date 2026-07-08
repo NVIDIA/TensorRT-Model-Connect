@@ -46,7 +46,11 @@ def _write_fake_proof_runner(tmp_path: Path) -> tuple[Path, Path]:
         '  trap \'printf "%s\\n" "$model" >> "$FAKE_TERMINATED"; exit 143\' TERM INT HUP\n'
         "  while :; do sleep 0.1; done\n"
         "fi\n"
-        'sleep "${FAKE_DELAY_SECONDS:-0}"\n'
+        'delay="${FAKE_DELAY_SECONDS:-0}"\n'
+        'case ",${FAKE_SLOW_MODELS:-}," in\n'
+        '  *,"$model",*) delay="${FAKE_SLOW_DELAY_SECONDS:-0}" ;;\n'
+        "esac\n"
+        'sleep "$delay"\n'
         'case ",${FAKE_FAIL_MODELS:-}," in\n'
         '  *,"$model",*) exit 7 ;;\n'
         "esac\n"
@@ -104,14 +108,18 @@ def _calls(path: Path) -> dict[str, tuple[str, str, str]]:
     return {model: (gpu, revision, suite) for model, gpu, revision, suite in rows}
 
 
-def test_batch_runner_assigns_deterministic_gpu_workers_and_writes_index(
+def test_batch_runner_keeps_gpu_workers_busy_and_writes_index(
     tmp_path: Path,
 ) -> None:
     fake_runner, calls = _write_fake_proof_runner(tmp_path)
     models = ["alpha", "beta", "gamma", "delta", "epsilon"]
     output_dir = tmp_path / "batch"
     env = _environment(fake_runner, calls)
-    env["FAKE_DELAY_SECONDS"] = "0.05"
+    env.update({
+        "FAKE_DELAY_SECONDS": "0.02",
+        "FAKE_SLOW_MODELS": "alpha",
+        "FAKE_SLOW_DELAY_SECONDS": "0.5",
+    })
 
     result = subprocess.run(
         _command(models, output_dir),
@@ -124,13 +132,10 @@ def test_batch_runner_assigns_deterministic_gpu_workers_and_writes_index(
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = _calls(calls)
     assert set(recorded) == set(models)
-    assert {model: recorded[model][0] for model in models} == {
-        "alpha": "2",
-        "beta": "5",
-        "gamma": "2",
-        "delta": "5",
-        "epsilon": "2",
-    }
+    assert {gpu for gpu, _, _ in recorded.values()} == {"2", "5"}
+    fast_worker = recorded["beta"][0]
+    assert recorded["alpha"][0] != fast_worker
+    assert all(recorded[model][0] == fast_worker for model in models[1:])
     assert all(recorded[model][1:] == ("a" * 40, "premerge") for model in models)
     assert all((output_dir / model / "batch.log").is_file() for model in models)
     assert all(
@@ -151,11 +156,7 @@ def test_batch_runner_assigns_deterministic_gpu_workers_and_writes_index(
     assert [entry["model"] for entry in status["models"]] == models
     assert all(entry["status"] == "passed" for entry in status["models"])
     assert [entry["gpu_id"] for entry in status["models"]] == [
-        "2",
-        "5",
-        "2",
-        "5",
-        "2",
+        recorded[model][0] for model in models
     ]
 
     index = (output_dir / "model-proof-index.html").read_text(encoding="utf-8")
@@ -307,7 +308,7 @@ def test_batch_runner_terminates_children_and_finalizes_reports_on_term(
     env = _environment(fake_runner, calls)
     env.update({"FAKE_BLOCK": "1", "FAKE_TERMINATED": str(terminated)})
     process = subprocess.Popen(
-        _command(["alpha", "beta"], output_dir),
+        _command(["alpha", "beta", "gamma", "delta", "epsilon"], output_dir),
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -331,6 +332,22 @@ def test_batch_runner_terminates_children_and_finalizes_reports_on_term(
     status = json.loads((output_dir / "batch-status.json").read_text(encoding="utf-8"))
     assert status["outcome"] == "interrupted"
     assert status["interrupted_count"] == 2
-    assert all(entry["status"] == "interrupted" for entry in status["models"])
-    assert (output_dir / "model-proof-index.html").is_file()
+    assert status["queued_count"] == 3
+    assert [entry["status"] for entry in status["models"]] == [
+        "interrupted",
+        "interrupted",
+        "queued",
+        "queued",
+        "queued",
+    ]
+    assert [entry["exit_code"] for entry in status["models"]] == [
+        143,
+        143,
+        None,
+        None,
+        None,
+    ]
+    index = (output_dir / "model-proof-index.html").read_text(encoding="utf-8")
+    assert index.count('<td class="interrupted">interrupted</td>') == 2
+    assert index.count('<td class="queued">queued</td>') == 3
     assert set(terminated.read_text(encoding="utf-8").splitlines()) == {"alpha", "beta"}
