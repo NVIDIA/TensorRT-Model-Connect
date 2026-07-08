@@ -676,6 +676,91 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
     assert "--network none" in docker_runs[0]
 
 
+def test_host_cache_existence_is_delegated_to_read_only_docker_mounts() -> None:
+    text = RUNNER.read_text(encoding="utf-8")
+    host = text.split("run_host() {", maxsplit=1)[1]
+    cache_check = host.split(
+        "local -a cache_check_docker_args=(", maxsplit=1
+    )[1].split("set +e", maxsplit=1)[0]
+    proof = host.split("local -a docker_args=(", maxsplit=1)[1].split(
+        "set +e", maxsplit=1
+    )[0]
+
+    assert '[ -d "$hf_cache/hub" ]' not in host
+    assert '[ -d "$hf_cache/modules" ]' not in host
+    assert "HF Hub cache directory does not exist" not in host
+    assert "HF modules cache directory does not exist" not in host
+    for docker_args in (cache_check, proof):
+        assert (
+            '--mount "type=bind,src=$hf_cache/hub,dst=/hf-cache/hub,readonly"'
+            in docker_args
+        )
+        assert (
+            '--mount "type=bind,src=$hf_cache/modules,dst=/hf-cache/modules,readonly"'
+            in docker_args
+        )
+
+
+def test_docker_bind_mount_fails_closed_when_host_cache_source_is_absent(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\n' \"$*\" >> \"$DOCKER_LOG\"\n"
+        "if [ \"${1:-}\" = image ] || [ \"${1:-}\" = rm ]; then exit 0; fi\n"
+        "if [ \"${1:-}\" = run ]; then exit 23; fi\n"
+        "exit 99\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    cache = tmp_path / "docker-daemon-only-cache"
+    assert not cache.exists()
+    output = tmp_path / "proof"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "DOCKER_LOG": str(docker_log),
+            "TRTMC_HF_CACHE": str(cache),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash", str(RUNNER),
+            "--model", "convbert",
+            "--revision", "HEAD",
+            "--output-dir", str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "offline HF cache readiness check failed for convbert" in result.stderr
+    docker_runs = [
+        line for line in docker_log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("run ")
+    ]
+    assert len(docker_runs) == 1
+    assert (
+        f"--mount type=bind,src={cache}/hub,dst=/hf-cache/hub,readonly"
+        in docker_runs[0]
+    )
+    assert (
+        f"--mount type=bind,src={cache}/modules,dst=/hf-cache/modules,readonly"
+        in docker_runs[0]
+    )
+    assert "--network none" in docker_runs[0]
+
+
 def test_explicit_runner_gpu_id_bypasses_automatic_leasing(tmp_path: Path) -> None:
     fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
     output = tmp_path / "proof"

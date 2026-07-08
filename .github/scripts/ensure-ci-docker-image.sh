@@ -27,26 +27,15 @@ fi
 docker_input_paths=(
   "$dockerfile"
   .dockerignore
-  scripts/docker_build_gb300.sh
-  .github/scripts/start-gha-container.sh
   .github/scripts/build-python-profiles.py
-  .github/scripts/ensure-ci-docker-image.sh
-  .github/workflows/trtmc-ci.yml
-  .github/workflows/nightly.yml
   python/tensorrt_model_connect/__init__.py
   python/tensorrt_model_connect/python_profiles.py
-  python/tensorrt_model_connect/python_profiles.toml
   python/tensorrt_model_connect/families/__init__.py
 )
 
-# Family manifests declare profile assets. Include both the declarations and
-# the referenced lock/verification files in the image tag fingerprint so a
-# source revision can never silently reuse profiles baked for older pins.
-mapfile -t family_model_manifests < <(
-  find python/tensorrt_model_connect/families \
-    -mindepth 2 -maxdepth 2 -type f -name MODEL.toml -print | sort
-)
-docker_input_paths+=("${family_model_manifests[@]}")
+# Family manifests declare profile assets, but most MODEL.toml fields do not
+# affect the CI image. Fingerprint the normalized profile registry below so a
+# comment or ownership-only model edit cannot force a full image rebuild.
 mapfile -t declared_profile_assets < <(
   PYTHONPATH=python python3 - <<'PY'
 from pathlib import Path
@@ -70,6 +59,32 @@ mapfile -t docker_input_paths < <(
   printf '%s\n' "${docker_input_paths[@]}" | sort -u
 )
 
+python_profile_semantic_fingerprint="$({
+  PYTHONPATH=python python3 - <<'PY'
+import hashlib
+import json
+
+from tensorrt_model_connect.python_profiles import load_python_profile_registry
+
+registry = load_python_profile_registry()
+profile_image_contract = {
+    "version": registry.get("version"),
+    "profiles": registry["profiles"],
+}
+payload = json.dumps(
+    profile_image_contract,
+    ensure_ascii=True,
+    separators=(",", ":"),
+    sort_keys=True,
+).encode("utf-8")
+print(hashlib.sha256(payload).hexdigest())
+PY
+} | tail -n 1)"
+if ! [[ "$python_profile_semantic_fingerprint" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "ERROR: Could not fingerprint normalized Python profile declarations" >&2
+  exit 1
+fi
+
 expected_python_profiles="$({
   PYTHONPATH=python python3 - <<'PY'
 from tensorrt_model_connect.python_profiles import (
@@ -89,6 +104,8 @@ fi
 compute_docker_input_fingerprint() {
   local path
   {
+    printf 'python-profile-registry\0%s\n' \
+      "$python_profile_semantic_fingerprint"
     for path in "${docker_input_paths[@]}"; do
       printf '%s\0' "$path"
       if [ -f "$path" ]; then

@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPT = REPO_ROOT / ".github" / "scripts" / "ensure-ci-docker-image.sh"
+DEFAULT_PROFILES = (
+    "chronos,deepseek_ocr,elf_flow,internlm,magpie_tts_reference,"
+    "nemotron_h_reference,phi4_multimodal"
+)
 
 
 def _write_fake_docker(tmp_path: Path, existing_images: dict[str, str]) -> tuple[Path, Path]:
@@ -49,7 +54,7 @@ if [ "${1:-}" = "run" ]; then
   profiles="${FAKE_DOCKER_PROFILES-chronos,deepseek_ocr,elf_flow,internlm,magpie_tts_reference,nemotron_h_reference,phi4_multimodal}"
   if [ -f "$FAKE_DOCKER_REBUILT" ]; then
     capability="available"
-    profiles="chronos,deepseek_ocr,elf_flow,internlm,magpie_tts_reference,nemotron_h_reference,phi4_multimodal"
+    profiles="$FAKE_DOCKER_REBUILT_PROFILES"
   fi
   cat <<'EOF'
 TENSORRT_VERSION=11.0.0.114
@@ -100,11 +105,10 @@ def _run_ensure_script(
     *,
     existing_images: dict[str, str],
     capability: str = "available",
-    profiles: str = (
-        "chronos,deepseek_ocr,elf_flow,internlm,magpie_tts_reference,"
-        "nemotron_h_reference,phi4_multimodal"
-    ),
+    profiles: str = DEFAULT_PROFILES,
+    rebuilt_profiles: str = DEFAULT_PROFILES,
     changed_paths: tuple[str, ...] = (),
+    repo_root: Path = REPO_ROOT,
 ) -> tuple[subprocess.CompletedProcess[str], str, str]:
     bin_dir, log_path = _write_fake_docker(tmp_path, existing_images)
     if changed_paths:
@@ -133,17 +137,20 @@ exit 2
             "FAKE_DOCKER_STATE": str(tmp_path / "images"),
             "FAKE_DOCKER_CAPABILITY": capability,
             "FAKE_DOCKER_PROFILES": profiles,
+            "FAKE_DOCKER_REBUILT_PROFILES": rebuilt_profiles,
             "FAKE_DOCKER_REBUILT": str(tmp_path / "rebuilt"),
             "GITHUB_ENV": str(github_env),
             "RUNNER_TEMP": str(tmp_path / "runner-temp"),
+            "TRTMC_CI_IMAGE_LOCK_FILE": str(tmp_path / "ci-image.lock"),
             "TRTMC_CI_IMAGE": "trtmc-dev-gb300:manylinux_2_39",
             "CI_BASE_REF": "fake-base" if changed_paths else "",
             "FAKE_GIT_CHANGED_PATHS": "\n".join(changed_paths),
         }
     )
+    script = repo_root / SCRIPT.relative_to(REPO_ROOT)
     result = subprocess.run(
-        ["bash", str(SCRIPT)],
-        cwd=REPO_ROOT,
+        ["bash", str(script)],
+        cwd=repo_root,
         env=env,
         text=True,
         capture_output=True,
@@ -151,6 +158,74 @@ exit 2
     )
     github_env_text = github_env.read_text() if github_env.exists() else ""
     return result, github_env_text, log_path.read_text()
+
+
+def _write_profile_fingerprint_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Create the smallest source tree needed to exercise image fingerprinting."""
+    repo_root = tmp_path / "repo"
+    shutil.copytree(REPO_ROOT / ".github" / "scripts", repo_root / ".github" / "scripts")
+
+    package_root = repo_root / "python" / "tensorrt_model_connect"
+    families_root = package_root / "families"
+    demo_root = families_root / "demo"
+    demo_root.mkdir(parents=True)
+    for source in (
+        REPO_ROOT / "python" / "tensorrt_model_connect" / "__init__.py",
+        REPO_ROOT / "python" / "tensorrt_model_connect" / "python_profiles.py",
+        REPO_ROOT / "python" / "tensorrt_model_connect" / "python_profiles.toml",
+    ):
+        shutil.copy2(source, package_root / source.name)
+    shutil.copy2(
+        REPO_ROOT / "python" / "tensorrt_model_connect" / "families" / "__init__.py",
+        families_root / "__init__.py",
+    )
+
+    manifest = demo_root / "MODEL.toml"
+    manifest.write_text(
+        """# Synthetic family used only by the image-fingerprint tests.
+id = "demo"
+plugin = "demo"
+module = "plugin"
+aliases = ["demo"]
+prefixes = ["demo"]
+python_profile_specs = [
+  "demo|families/demo/requirements.lock.txt|families/demo/verify.py|true",
+]
+default_execution_profiles = ["reference|demo"]
+""",
+        encoding="utf-8",
+    )
+    requirements = demo_root / "requirements.lock.txt"
+    requirements.write_text("demo-package==1.0.0\n", encoding="utf-8")
+    (demo_root / "verify.py").write_text("import demo_package\n", encoding="utf-8")
+
+    (repo_root / "Dockerfile").write_text(
+        "ARG TENSORRT_VERSION=11.0.0.114\nARG MODELOPT_VERSION=0.44.0\n",
+        encoding="utf-8",
+    )
+    return repo_root, manifest, requirements
+
+
+def _resolved_image_for_repo(
+    tmp_path: Path,
+    repo_root: Path,
+) -> tuple[str, str]:
+    result, github_env, docker_log = _run_ensure_script(
+        tmp_path,
+        existing_images={},
+        profiles="demo",
+        rebuilt_profiles="demo",
+        repo_root=repo_root,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    match = re.search(r"^TRTMC_CI_IMAGE=(.+)$", github_env, re.MULTILINE)
+    assert match, github_env
+    fingerprint_match = re.search(
+        r"--label org\.nvidia\.trtmc\.ci-input-fingerprint=([0-9a-f]{64})",
+        docker_log,
+    )
+    assert fingerprint_match, docker_log
+    return match.group(1), fingerprint_match.group(1)
 
 
 def test_missing_fingerprint_image_builds_and_exports_resolved_tag(tmp_path: Path) -> None:
@@ -178,9 +253,7 @@ def test_missing_required_capability_rebuilds_matching_image(tmp_path: Path) -> 
         existing_images={},
     )
     assert bootstrap_result.returncode == 0, bootstrap_result.stderr
-    resolved_image = re.search(
-        r"^TRTMC_CI_IMAGE=(.+)$", bootstrap_env, re.MULTILINE
-    ).group(1)
+    resolved_image = re.search(r"^TRTMC_CI_IMAGE=(.+)$", bootstrap_env, re.MULTILINE).group(1)
     fingerprint = re.search(
         r"--label org\.nvidia\.trtmc\.ci-input-fingerprint=([0-9a-f]{64})",
         bootstrap_log,
@@ -203,9 +276,7 @@ def test_matching_fingerprint_image_is_reused_for_pr_rerun(tmp_path: Path) -> No
         existing_images={},
     )
     assert bootstrap_result.returncode == 0, bootstrap_result.stderr
-    resolved_image = re.search(
-        r"^TRTMC_CI_IMAGE=(.+)$", bootstrap_env, re.MULTILINE
-    ).group(1)
+    resolved_image = re.search(r"^TRTMC_CI_IMAGE=(.+)$", bootstrap_env, re.MULTILINE).group(1)
     fingerprint = re.search(
         r"--label org\.nvidia\.trtmc\.ci-input-fingerprint=([0-9a-f]{64})",
         bootstrap_log,
@@ -228,9 +299,7 @@ def test_missing_prebuilt_profiles_rebuilds_the_image(tmp_path: Path) -> None:
         existing_images={},
     )
     assert bootstrap_result.returncode == 0, bootstrap_result.stderr
-    resolved_image = re.search(
-        r"^TRTMC_CI_IMAGE=(.+)$", bootstrap_env, re.MULTILINE
-    ).group(1)
+    resolved_image = re.search(r"^TRTMC_CI_IMAGE=(.+)$", bootstrap_env, re.MULTILINE).group(1)
     fingerprint = re.search(
         r"--label org\.nvidia\.trtmc\.ci-input-fingerprint=([0-9a-f]{64})",
         bootstrap_log,
@@ -250,9 +319,68 @@ def test_missing_prebuilt_profiles_rebuilds_the_image(tmp_path: Path) -> None:
 def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
 
-    assert "family_model_manifests" in script
+    assert "family_model_manifests" not in script
+    assert "python_profile_semantic_fingerprint" in script
+    assert "python-profile-registry" in script
     assert "declared_profile_assets" in script
-    assert 'python/tensorrt_model_connect/python_profiles.py' in script
+    assert "python/tensorrt_model_connect/python_profiles.py" in script
     assert '-f "$dockerfile" \\\n    .' in script
     assert "trtmc-empty-docker-context" not in script
     assert "profile builder source leaked into the runtime image" in script
+
+
+def test_profile_fingerprint_ignores_manifest_comments_and_ownership_fields(
+    tmp_path: Path,
+) -> None:
+    repo_root, manifest, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "# Synthetic family used only by the image-fingerprint tests.",
+            "# An unrelated ownership comment changed.",
+        ),
+        encoding="utf-8",
+    )
+    comment_changed = _resolved_image_for_repo(tmp_path / "comment-change", repo_root)
+    assert comment_changed == baseline
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'aliases = ["demo"]',
+            'aliases = ["demo", "demo-alias"]',
+        ),
+        encoding="utf-8",
+    )
+    ownership_changed = _resolved_image_for_repo(tmp_path / "ownership-change", repo_root)
+    assert ownership_changed == baseline
+
+
+def test_profile_fingerprint_changes_for_semantic_profile_declaration(
+    tmp_path: Path,
+) -> None:
+    repo_root, manifest, _ = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "families/demo/verify.py|true",
+            "families/demo/verify.py|false",
+        ),
+        encoding="utf-8",
+    )
+
+    changed = _resolved_image_for_repo(tmp_path / "profile-change", repo_root)
+    assert changed != baseline
+
+
+def test_profile_fingerprint_changes_for_referenced_profile_asset_content(
+    tmp_path: Path,
+) -> None:
+    repo_root, _, requirements = _write_profile_fingerprint_repo(tmp_path)
+    baseline = _resolved_image_for_repo(tmp_path / "baseline", repo_root)
+
+    requirements.write_text("demo-package==1.0.1\n", encoding="utf-8")
+
+    changed = _resolved_image_for_repo(tmp_path / "asset-change", repo_root)
+    assert changed != baseline

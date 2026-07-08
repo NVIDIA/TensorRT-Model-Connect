@@ -820,12 +820,15 @@ import sys
 from pathlib import Path
 print(Path(sys.argv[1]).resolve())
 PY
-)"
+  )"
   [ "$hf_cache" != "/" ] || die "refusing to use / as the HF cache"
   [ "$hf_cache" != "$repo_root" ] || die "HF cache cannot be the checkout"
-  [ -d "$hf_cache/hub" ] || die "HF Hub cache directory does not exist: $hf_cache/hub"
-  [ -d "$hf_cache/modules" ] || \
-    die "HF modules cache directory does not exist: $hf_cache/modules"
+
+  # Do not preflight these paths as the unprivileged Actions runner. The
+  # persistent cache parent can intentionally be non-traversable while the
+  # Docker daemon is still authorized to bind its read-only hub/modules
+  # children. Docker --mount fails closed when either source is truly absent,
+  # and the network-disabled strict cache check below proves readability.
 
   local container_name="trtmc-model-proof-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$model"
   container_name="${container_name//_/-}"
