@@ -316,6 +316,7 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
         "--network none",
         "--cap-drop ALL",
         "dst=/src,readonly",
+        "TMPDIR=/work/tmp",
         "TORCHINDUCTOR_CACHE_DIR=/work/torch-cache",
         "TRTMC_MODEL_PLUGIN_STRICT=1",
         "scratch build produced ${#built_dsos[@]} model DSOs; expected exactly one",
@@ -327,6 +328,8 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
     assert "-e HF_TOKEN" not in warm
     assert "-e HUGGING_FACE_HUB_TOKEN" not in warm
     assert "--network none" in proof
+    assert "-e TMPDIR=/work/tmp" in proof
+    assert "-e TMPDIR=/work/tmp" not in warm
     assert "dst=/hf-cache/hub,readonly" in proof
     assert "dst=/hf-cache/modules,readonly" in proof
     assert "-e HF_TOKEN" not in proof

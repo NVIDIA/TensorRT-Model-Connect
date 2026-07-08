@@ -31,12 +31,19 @@ def _cfg_int(*values: object, default: int) -> int:
 def _read_model_config(nemo_path: Path) -> dict[str, Any]:
     import yaml
 
-    with tarfile.open(str(nemo_path), "r") as tar:
-        for member in tar.getmembers():
-            if Path(member.name).name == "model_config.yaml":
-                handle = tar.extractfile(member)
-                if handle is not None:
-                    return yaml.safe_load(handle.read()) or {}
+    try:
+        with tarfile.open(str(nemo_path), "r") as tar:
+            for member in tar.getmembers():
+                if Path(member.name).name == "model_config.yaml":
+                    handle = tar.extractfile(member)
+                    if handle is not None:
+                        loaded = yaml.safe_load(handle.read()) or {}
+                        return loaded if isinstance(loaded, dict) else {}
+    except (OSError, tarfile.TarError, yaml.YAMLError):
+        # A downloaded HF snapshot can contain an unrelated or incomplete
+        # archive.  This adapter participates in global family discovery, so
+        # an unrecognized archive must fall through to the normal HF resolver.
+        return {}
     return {}
 
 
@@ -93,3 +100,22 @@ def resolve_nemo_archive(nemo_path: Path) -> str | None:
         file=sys.stderr,
     )
     return tmp_dir
+
+
+def resolve_model_dir(model_dir: Path) -> str | None:
+    """Stage a matching NeMo snapshot without mutating the source cache.
+
+    Some Hugging Face NeMo repositories include a top-level ``config.json``.
+    The generic resolver would otherwise treat that snapshot as a writable HF
+    model directory, while this family extracts tokenizer files beside the
+    archive for bundle packaging.  Resolve the archive first so those generated
+    files land in the family-owned temporary directory instead of the read-only
+    shared cache.
+    """
+    if not model_dir.is_dir():
+        return None
+    for nemo_path in sorted(model_dir.glob("*.nemo")):
+        resolved = resolve_nemo_archive(nemo_path)
+        if resolved is not None:
+            return resolved
+    return None

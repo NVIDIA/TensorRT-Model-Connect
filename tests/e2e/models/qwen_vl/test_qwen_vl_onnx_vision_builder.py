@@ -9,7 +9,9 @@ import importlib
 import io
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 import numpy as np
 import pytest
@@ -55,15 +57,25 @@ def _drop_imported_module(module_name: str) -> None:
         delattr(package, attribute_name)
 
 
-def _import_with_fake_trt(module_name: str, fake_trt: types.SimpleNamespace | None = None):
+@contextmanager
+def _import_with_fake_trt(
+    module_name: str,
+    fake_trt: types.SimpleNamespace | None = None,
+) -> Iterator[object]:
     if fake_trt is None:
         fake_trt = _make_fake_trt_base()
     _drop_imported_module(module_name)
+    from tensorrt_model_connect import trt_compat
+
     previous_trt = sys.modules.get("tensorrt")
+    previous_module = trt_compat._module
     sys.modules["tensorrt"] = fake_trt
+    trt_compat._module = fake_trt
     try:
-        return importlib.import_module(module_name)
+        yield importlib.import_module(module_name)
     finally:
+        _drop_imported_module(module_name)
+        trt_compat._module = previous_module
         if previous_trt is None:
             sys.modules.pop("tensorrt", None)
         else:
@@ -122,13 +134,12 @@ def test_onnx_builder_raises_parser_error_with_details() -> None:
         NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
     )
-    mod = _import_with_fake_trt(
+    with _import_with_fake_trt(
         "tensorrt_model_connect.families.qwen_vl.onnx_vision_builder",
         fake_trt=fake_trt,
-    )
-
-    with pytest.raises(RuntimeError, match="ONNX parsing failed"):
-        mod.build_vision_engine_from_onnx(b"bad-onnx")
+    ) as mod:
+        with pytest.raises(RuntimeError, match="ONNX parsing failed"):
+            mod.build_vision_engine_from_onnx(b"bad-onnx")
 
 
 @pytest.mark.unit
@@ -194,26 +205,23 @@ def test_onnx_builder_success_and_plan_none_branches() -> None:
         NetworkDefinitionCreationFlag=types.SimpleNamespace(EXPLICIT_BATCH=0, STRONGLY_TYPED=1),
         MemoryPoolType=types.SimpleNamespace(WORKSPACE="workspace"),
     )
-    mod = _import_with_fake_trt(
+    with _import_with_fake_trt(
         "tensorrt_model_connect.families.qwen_vl.onnx_vision_builder",
         fake_trt=fake_trt,
-    )
+    ) as mod:
+        plan = mod.build_vision_engine_from_onnx(b"good-onnx", verbose=True)
+        assert plan == b"engine-plan"
+        assert _FakeBuilder.last_instance.flags == 3
+        assert _FakeBuilder.last_instance.config.calls == [("workspace", 1 << 30)]
 
-    plan = mod.build_vision_engine_from_onnx(b"good-onnx", verbose=True)
-    assert plan == b"engine-plan"
-    assert _FakeBuilder.last_instance.flags == 3
-    assert _FakeBuilder.last_instance.config.calls == [("workspace", 1 << 30)]
-
-    _FakeBuilder.plan_to_return = None
-    with pytest.raises(RuntimeError, match="TensorRT vision engine build failed"):
-        mod.build_vision_engine_from_onnx(b"good-onnx")
+        _FakeBuilder.plan_to_return = None
+        with pytest.raises(RuntimeError, match="TensorRT vision engine build failed"):
+            mod.build_vision_engine_from_onnx(b"good-onnx")
 
 
 @pytest.mark.unit
 def test_trace_hf_vision_encoder_import_and_missing_encoder_branches() -> None:
     """Qwen-VL trace helper reports missing dependencies and vision module."""
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.qwen_vl.onnx_vision_builder")
-
     class _NoGrad:
         def __enter__(self):
             return None
@@ -228,12 +236,6 @@ def test_trace_hf_vision_encoder_import_and_missing_encoder_branches() -> None:
 
     config = types.SimpleNamespace(raw={"vision_config": {"image_size": 8}})
 
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setitem(sys.modules, "torch", fake_torch)
-        mp.setitem(sys.modules, "transformers", None)
-        with pytest.raises(ImportError, match="transformers is required"):
-            mod.trace_hf_vision_encoder("unused", config)
-
     class _AutoModelMissingVision:
         @staticmethod
         def from_pretrained(_model_dir, trust_remote_code=False):
@@ -245,18 +247,25 @@ def test_trace_hf_vision_encoder_import_and_missing_encoder_branches() -> None:
     fake_transformers = types.ModuleType("transformers")
     fake_transformers.AutoModel = _AutoModelMissingVision
 
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setitem(sys.modules, "torch", fake_torch)
-        mp.setitem(sys.modules, "transformers", fake_transformers)
-        with pytest.raises(RuntimeError, match="Could not find vision encoder"):
-            mod.trace_hf_vision_encoder("unused", config)
+    with _import_with_fake_trt(
+        "tensorrt_model_connect.families.qwen_vl.onnx_vision_builder"
+    ) as mod:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setitem(sys.modules, "torch", fake_torch)
+            mp.setitem(sys.modules, "transformers", None)
+            with pytest.raises(ImportError, match="transformers is required"):
+                mod.trace_hf_vision_encoder("unused", config)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setitem(sys.modules, "torch", fake_torch)
+            mp.setitem(sys.modules, "transformers", fake_transformers)
+            with pytest.raises(RuntimeError, match="Could not find vision encoder"):
+                mod.trace_hf_vision_encoder("unused", config)
 
 
 @pytest.mark.unit
 def test_trace_hf_vision_encoder_success_path_with_mocked_export() -> None:
     """Qwen-VL trace helper delegates exported ONNX bytes to TRT builder."""
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.qwen_vl.onnx_vision_builder")
-
     class _NoGrad:
         def __enter__(self):
             return None
@@ -301,12 +310,15 @@ def test_trace_hf_vision_encoder_success_path_with_mocked_export() -> None:
         received.append(onnx_bytes)
         return b"engine-ok"
 
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setitem(sys.modules, "torch", fake_torch)
-        mp.setitem(sys.modules, "transformers", fake_transformers)
-        mp.setattr(mod, "build_vision_engine_from_onnx", _fake_build)
-        config = types.SimpleNamespace(raw={"vision_config": {"image_size": 16}})
-        out = mod.trace_hf_vision_encoder("model-dir", config, verbose=True)
+    with _import_with_fake_trt(
+        "tensorrt_model_connect.families.qwen_vl.onnx_vision_builder"
+    ) as mod:
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setitem(sys.modules, "torch", fake_torch)
+            mp.setitem(sys.modules, "transformers", fake_transformers)
+            mp.setattr(mod, "build_vision_engine_from_onnx", _fake_build)
+            config = types.SimpleNamespace(raw={"vision_config": {"image_size": 16}})
+            out = mod.trace_hf_vision_encoder("model-dir", config, verbose=True)
 
     assert out == b"engine-ok"
     assert received == [b"onnx-bytes"]

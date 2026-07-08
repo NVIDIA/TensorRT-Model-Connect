@@ -168,7 +168,8 @@ ENV TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles
 ENV TORCH_CUDA_ARCH_LIST=10.0
 COPY python/tensorrt_model_connect /opt/trtmc-profile-source/tensorrt_model_connect
 COPY .github/scripts/build-python-profiles.py /opt/trtmc-build-python-profiles.py
-RUN python3 /opt/trtmc-build-python-profiles.py
+RUN python3 /opt/trtmc-build-python-profiles.py \
+    && chmod -R a+rX /opt/trtmc-python-profiles
 
 # Do not retain the full builder source tree in the proof image. Only the
 # verified virtual environments cross the stage boundary, so sibling model

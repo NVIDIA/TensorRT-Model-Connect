@@ -327,6 +327,8 @@ def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> No
     assert '-f "$dockerfile" \\\n    .' in script
     assert "trtmc-empty-docker-context" not in script
     assert "profile builder source leaked into the runtime image" in script
+    assert "--user 65534:65534" in script
+    assert "--read-only" in script
 
 
 def test_profile_fingerprint_ignores_manifest_comments_and_ownership_fields(

@@ -154,7 +154,14 @@ summary() {
 }
 
 query_image_versions() {
-  docker run --rm --entrypoint /bin/bash "$image" -lc '
+  # Validate with an unprivileged identity matching the model-proof security
+  # boundary. This catches image-baked profiles that exist for root but cannot
+  # be traversed by the proof container.
+  docker run --rm --read-only \
+    --user 65534:65534 \
+    --tmpfs /tmp:rw,exec,nosuid,nodev,size=256m \
+    -e HOME=/tmp \
+    --entrypoint /bin/bash "$image" -lc '
 python3 - <<'"'"'PY'"'"'
 import importlib.metadata as metadata
 from pathlib import Path

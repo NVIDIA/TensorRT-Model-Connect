@@ -25,3 +25,13 @@ def test_qwen_owned_runtime_strategy() -> None:
 def test_no_embed_input() -> None:
     plugin = _plugin("qwen")
     assert not getattr(plugin, "embed_input", False)
+
+
+def test_qwen_does_not_match_qwen_vl() -> None:
+    plugin = _plugin("qwen")
+    assert not plugin.matches("qwen2_vl")
+
+
+def test_qwen3_alias_dispatches_to_qwen() -> None:
+    plugin = _plugin("qwen3")
+    assert plugin.name == "qwen"

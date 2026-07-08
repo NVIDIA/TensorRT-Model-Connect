@@ -905,6 +905,9 @@ PY
     -e HOME=/tmp
     -e USER=trtmc-ci
     -e LOGNAME=trtmc-ci
+    -e TMPDIR=/work/tmp
+    -e TEMP=/work/tmp
+    -e TMP=/work/tmp
     -e XDG_CACHE_HOME=/work/cache
     -e TORCHINDUCTOR_CACHE_DIR=/work/torch-cache
     -e HF_HUB_OFFLINE=1

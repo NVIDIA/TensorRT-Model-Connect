@@ -385,6 +385,16 @@ run_worker() {
         proof_rc=1
       fi
     fi
+    # A batch can cover every model on one runner.  Preserve the reports and
+    # logs, but release each completed scratch build and source projection
+    # before this worker starts its next model.  Retaining all of those trees
+    # until artifact upload can exhaust the runner disk and create false E2E
+    # failures in otherwise independent models.
+    if ! rm -rf -- "$model_dir/work" "$model_dir/projection"; then
+      printf 'ERROR: could not remove completed scratch state for %s\n' "$model" \
+        | tee -a "$log_path" >&2
+      proof_rc=1
+    fi
     finished="$(date +%s)"
     write_result "$index" "$model" "$gpu_id" "$proof_rc" "$((finished - started))"
     echo "Finished isolated proof for $model on GPU $gpu_id (exit $proof_rc)"

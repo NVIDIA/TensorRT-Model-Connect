@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from tests.e2e.models.sana_wm.e2e_plugins.commands import (
     build_sana_wm_reference_command,
     build_sana_wm_trt_command,
@@ -57,7 +59,8 @@ def _make_ctx(case: E2ECase) -> RunContext:
     )
 
 
-def test_sana_wm_trt_command_uses_model_card_inputs() -> None:
+def test_sana_wm_trt_command_uses_model_card_inputs(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
     case = _make_case()
     cmd = build_sana_wm_trt_command(
         case,
@@ -72,9 +75,9 @@ def test_sana_wm_trt_command_uses_model_card_inputs() -> None:
         "/tmp/engines/sana-wm-bidirectional.trtfb",
         "--prompt",
     ]
-    assert (
-        "sana_wm.image_path=tests/e2e/models/sana_wm/assets/demo_0.png" in cmd
-    )
+    expected_image = Path(__file__).resolve().parent / "assets/demo_0.png"
+    assert f"sana_wm.image_path={expected_image}" in cmd
+    assert expected_image.is_file()
     assert "sana_wm.action=w-80,jw-40,w-40,lw-60,w-100" in cmd
     assert "sana_wm.intrinsics=797.87866,830.0503,844.2675,463.7225" in cmd
     assert "sana_wm.num_frames=321" in cmd
@@ -110,7 +113,7 @@ def test_sana_wm_reference_command_uses_model_card_spellings() -> None:
 
 def test_sana_wm_model_plugins_register_runner_reference_and_repro() -> None:
     reset()
-    activate_model_plugins("tests/e2e/models/sana_wm")
+    activate_model_plugins(Path(__file__).resolve().parent)
 
     assert get_runner("diffusion_media_generation") is not None
     assert get_reference("hf_diffusers") is not None

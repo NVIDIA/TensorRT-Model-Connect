@@ -11,6 +11,7 @@ from typing import Any
 from .contracts import E2ECase, RunContext
 
 _MODEL_DIR = Path(__file__).resolve().parents[1]
+_PROJECT_DIR = _MODEL_DIR.parents[3]
 
 
 def _csv_arg(value: Any) -> str:
@@ -26,23 +27,34 @@ def _prompt_file(case: E2ECase) -> str:
     )
 
 
+def _resolve_owned_file(value: str) -> Path:
+    path = Path(value)
+    candidates = [path] if path.is_absolute() else [
+        _PROJECT_DIR / path,
+        _MODEL_DIR / path,
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    raise FileNotFoundError(f"SANA-WM input file does not exist: {value}")
+
+
 def _prompt_text(case: E2ECase) -> str:
     prompt = case.inputs.get("prompt")
     if prompt:
         return str(prompt)
-    path = Path(_prompt_file(case))
-    if not path.is_absolute() and not path.is_file():
-        path = _MODEL_DIR / path
+    path = _resolve_owned_file(_prompt_file(case))
     return path.read_text(encoding="utf-8").strip()
 
 
 def _image(case: E2ECase) -> str:
-    return str(
+    value = str(
         case.inputs.get("image")
         or case.inputs.get("test_image")
         or case.inputs.get("image_path")
         or "tests/e2e/models/sana_wm/assets/demo_0.png"
     )
+    return str(_resolve_owned_file(value))
 
 
 def build_sana_wm_trt_command(

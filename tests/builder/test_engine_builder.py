@@ -14,8 +14,12 @@ Postconditions: Local directories with config.json resolve correctly, HF repo ID
 from __future__ import annotations
 
 import importlib
+import io
+import shutil
 import sys
+import tarfile
 import types
+from pathlib import Path
 
 import pytest
 
@@ -94,6 +98,37 @@ class TestResolveModel:
 
         result = _resolve_model("example-org/nemo-only-model")
         assert result == f"resolved:{nemo_path}"
+
+    def test_download_stages_owned_nemo_before_hf_config(
+        self, tmp_path, monkeypatch
+    ):
+        """A recognized family archive gets writable staging before HF use."""
+        dl_dir = tmp_path / "dl"
+        dl_dir.mkdir()
+        (dl_dir / "config.json").write_text(
+            '{"model_type":"nemotron_speech_streaming"}'
+        )
+        nemo_path = dl_dir / "model.nemo"
+        config_bytes = (
+            b"_target_: nemo.collections.asr.models.rnnt_bpe_models."
+            b"EncDecRNNTBPEModel\nencoder:\n  d_model: 16\n"
+        )
+        with tarfile.open(nemo_path, "w") as archive:
+            member = tarfile.TarInfo("model_config.yaml")
+            member.size = len(config_bytes)
+            archive.addfile(member, io.BytesIO(config_bytes))
+
+        fake_hf = types.ModuleType("huggingface_hub")
+        fake_hf.snapshot_download = lambda **kwargs: str(dl_dir)
+        monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+        staged = Path(_resolve_model("example-org/nemotron-speech"))
+        try:
+            assert staged != dl_dir
+            assert (staged / "config.json").is_file()
+            assert (staged / nemo_path.name).resolve() == nemo_path.resolve()
+        finally:
+            shutil.rmtree(staged)
 
 
 class TestFindPlugin:

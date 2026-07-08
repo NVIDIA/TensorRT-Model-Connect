@@ -38,7 +38,9 @@ def _write_fake_proof_runner(tmp_path: Path) -> tuple[Path, Path]:
         "  esac\n"
         "done\n"
         'printf \'%s\\t%s\\t%s\\t%s\\n\' "$model" "${TRTMC_GPU_ID:-missing}" "$revision" "$suite" >> "$FAKE_CALLS"\n'
-        'mkdir -p "$output_dir/artifacts"\n'
+        'mkdir -p "$output_dir/artifacts" "$output_dir/work" "$output_dir/projection"\n'
+        'printf "scratch\n" > "$output_dir/work/generated.txt"\n'
+        'printf "projection\n" > "$output_dir/projection/generated.txt"\n'
         'printf \'<!doctype html><title>%s</title>\\n\' "$model" > "$output_dir/artifacts/model-proof-report.html"\n'
         'if [ "${FAKE_BLOCK:-0}" = 1 ]; then\n'
         '  trap \'printf "%s\\n" "$model" >> "$FAKE_TERMINATED"; exit 143\' TERM INT HUP\n'
@@ -134,6 +136,8 @@ def test_batch_runner_assigns_deterministic_gpu_workers_and_writes_index(
     assert all(
         (output_dir / model / "artifacts" / "model-proof-report.html").is_file() for model in models
     )
+    assert all(not (output_dir / model / "work").exists() for model in models)
+    assert all(not (output_dir / model / "projection").exists() for model in models)
 
     status = json.loads((output_dir / "batch-status.json").read_text(encoding="utf-8"))
     assert status["schema_version"] == 1
@@ -185,6 +189,8 @@ def test_batch_runner_attempts_every_model_before_returning_failure(tmp_path: Pa
     assert by_model["fails"]["status"] == "failed"
     assert by_model["fails"]["exit_code"] == 7
     assert by_model["passes-after-failure"]["status"] == "passed"
+    assert all(not (output_dir / model / "work").exists() for model in models)
+    assert all(not (output_dir / model / "projection").exists() for model in models)
 
 
 @pytest.mark.parametrize(

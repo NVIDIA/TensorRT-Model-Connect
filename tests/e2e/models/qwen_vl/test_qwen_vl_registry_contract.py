@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("tensorrt", reason="Qwen-VL registry tests require TensorRT")
 
-from tensorrt_model_connect.families import _ALL_PLUGINS, find_plugin
+from tensorrt_model_connect.families import find_plugin
 
 
 def test_qwen_vl_matches_vl_plugin() -> None:
@@ -28,16 +28,7 @@ def test_qwen_vl_runtime_contract() -> None:
 
 
 def test_plain_qwen_does_not_match_vl() -> None:
-    plugin = find_plugin("qwen3")
+    plugin = find_plugin("qwen2_vl")
     assert plugin is not None
-    assert plugin.name == "qwen"
-
-
-def test_qwen_vl_does_not_match_plain_qwen() -> None:
-    qwen_plugin = None
-    for plugin in _ALL_PLUGINS:
-        if plugin.name == "qwen":
-            qwen_plugin = plugin
-            break
-    assert qwen_plugin is not None
-    assert not qwen_plugin.matches("qwen2_vl")
+    assert plugin.name == "qwen_vl"
+    assert not plugin.matches("qwen3")
