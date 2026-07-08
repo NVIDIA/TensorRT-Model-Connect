@@ -85,6 +85,10 @@ class QwenPlugin:
         quant_ctx=None, verbose: bool = False, parallel_config=None,
         debug_layer_outputs: bool = False,
     ) -> bytes:
+        if quant_ctx is not None:
+            for scales in quant_ctx.profile.scale_map.scales.values():
+                scales.input_scale = 1.0e6
+                scales.weight_scale = 1.0e6
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             if debug_layer_outputs:
