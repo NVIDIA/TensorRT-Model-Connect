@@ -1809,8 +1809,11 @@ PY
   # Convert the cache evidence into a positive, proof-private view. Reflink
   # only the selected repositories into the job work directory so Transformers
   # can update cache metadata without writing to, or seeing, the persistent
-  # Hub. Requiring --reflink=always fails closed instead of silently turning
-  # the isolation step into a full byte-for-byte copy.
+  # Hub. The copy helper runs as root because cache files can legitimately be
+  # unreadable by the Actions account. It receives only the validated selected
+  # repository (read-only) and its empty private destination. Requiring
+  # --reflink=always fails closed instead of silently turning the isolation step
+  # into a full byte-for-byte copy.
   local hf_private_root="$work_dir/hf-private"
   local hf_private_hub="$hf_private_root/hub"
   local hf_cache_mounts="$work_dir/hf-cache-mounts.tsv"
@@ -1895,21 +1898,59 @@ PY
     die "selected Hugging Face cache evidence failed closed validation"
   fi
 
+  local runner_uid runner_gid
+  runner_uid="$(id -u)"
+  runner_gid="$(id -g)"
   local hf_repo_source hf_repo_folder
   local hf_cache_repository_count=0
   while IFS=$'\t' read -r hf_repo_source hf_repo_folder; do
     [ -n "$hf_repo_source" ] && [ -n "$hf_repo_folder" ] || \
       die "selected Hugging Face cache copy evidence is malformed"
-    [ ! -e "$hf_private_hub/$hf_repo_folder" ] || \
+    local hf_repo_destination="$hf_private_hub/$hf_repo_folder"
+    [ ! -e "$hf_repo_destination" ] || \
       die "selected Hugging Face cache copy destination already exists"
-    if ! cp -a --reflink=always -- \
-        "$hf_repo_source" "$hf_private_hub/$hf_repo_folder"; then
+    mkdir -m 0700 -- "$hf_repo_destination"
+
+    local cache_copy_container_name="${container_name}-hf-cache-copy-$hf_cache_repository_count"
+    proof_container_name="$cache_copy_container_name"
+    docker rm -f "$cache_copy_container_name" >/dev/null 2>&1 || true
+    local -a cache_copy_docker_args=(
+      run --rm
+      --name "$cache_copy_container_name"
+      --read-only
+      --network none
+      --cap-drop ALL
+      --cap-add DAC_OVERRIDE
+      --cap-add CHOWN
+      --security-opt no-new-privileges
+      --pids-limit 32
+      --user 0:0
+      --mount "type=bind,src=$hf_repo_source,dst=/selected-hf-repo,readonly"
+      --mount "type=bind,src=$hf_repo_destination,dst=/private-hf-repo"
+      --entrypoint /bin/bash
+    )
+    if ! docker "${cache_copy_docker_args[@]}" "$image" -ceu '
+runner_owner="$1:$2"
+return_destination() {
+  chmod -R u+rwX -- /private-hf-repo >/dev/null 2>&1 || true
+  chown -hR -- "$runner_owner" /private-hf-repo >/dev/null 2>&1 || true
+}
+trap return_destination EXIT
+chown 0:0 /private-hf-repo
+cp -a --reflink=always --no-preserve=ownership -- \
+  /selected-hf-repo/. /private-hf-repo/
+chmod -R u+rwX -- /private-hf-repo
+chown -hR -- "$runner_owner" /private-hf-repo
+trap - EXIT
+' -- "$runner_uid" "$runner_gid"; then
       die "selected Hugging Face cache repository could not be reflinked: $hf_repo_folder"
     fi
-    [ -d "$hf_private_hub/$hf_repo_folder" ] && \
-      [ ! -L "$hf_private_hub/$hf_repo_folder" ] || \
+    [ -d "$hf_repo_destination" ] && \
+      [ ! -L "$hf_repo_destination" ] || \
       die "selected Hugging Face cache reflink produced an invalid repository"
-    chmod -R u+rwX -- "$hf_private_hub/$hf_repo_folder" || \
+    [ "$(stat -c '%u:%g' "$hf_repo_destination")" = "$runner_uid:$runner_gid" ] || \
+      die "selected Hugging Face cache reflink did not return ownership to the runner"
+    chmod -R u+rwX -- "$hf_repo_destination" || \
       die "selected Hugging Face cache reflink could not be made writable"
     hf_cache_repository_count=$((hf_cache_repository_count + 1))
   done < "$hf_cache_mounts"

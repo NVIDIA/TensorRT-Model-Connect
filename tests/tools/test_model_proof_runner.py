@@ -52,6 +52,33 @@ def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
         "      fi\n"
         "      exit 0\n"
         "    fi\n"
+        '    if [[ " $* " == *"dst=/selected-hf-repo,readonly"* ]]; then\n'
+        '      if [ "${FAKE_REFLINK_EXIT_CODE:-0}" -ne 0 ]; then\n'
+        '        exit "$FAKE_REFLINK_EXIT_CODE"\n'
+        "      fi\n"
+        '      selected_repo=""\n'
+        '      private_repo=""\n'
+        '      for argument in "$@"; do\n'
+        '        case "$argument" in\n'
+        "          type=bind,src=*,dst=/selected-hf-repo,readonly)\n"
+        '            selected_repo="${argument#type=bind,src=}"\n'
+        '            selected_repo="${selected_repo%,dst=/selected-hf-repo,readonly}"\n'
+        "            ;;\n"
+        "          type=bind,src=*,dst=/private-hf-repo)\n"
+        '            private_repo="${argument#type=bind,src=}"\n'
+        '            private_repo="${private_repo%,dst=/private-hf-repo}"\n'
+        "            ;;\n"
+        "        esac\n"
+        "      done\n"
+        '      [ -n "$selected_repo" ] && [ -n "$private_repo" ] || exit 96\n'
+        '      if [ "${FAKE_UNREADABLE_REFLINK:-0}" = 1 ]; then\n'
+        "        printf '%s\\n' \"${FAKE_UNREADABLE_REFLINK_CONTENT:-private copy}\" > "
+        '"$private_repo/unreadable-cache-marker"\n'
+        "      else\n"
+        '        /bin/cp -a --reflink=always -- "$selected_repo/." "$private_repo/"\n'
+        "      fi\n"
+        "      exit 0\n"
+        "    fi\n"
         '    if [[ " $* " == *" --inner "* ]]; then\n'
         '      if [ -n "${FAKE_PROOF_RELEASE_FILE:-}" ]; then\n'
         "        deadline=$((SECONDS + 30))\n"
@@ -576,7 +603,7 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
     assert "-e HF_HOME=/work/hf-home" in proof
     assert "-e HF_MODULES_CACHE=/work/hf-modules" in proof
     assert "-e TRANSFORMERS_CACHE=/hf-cache/hub" in proof
-    assert "cp -a --reflink=always --" in text
+    assert "cp -a --reflink=always --no-preserve=ownership --" in text
     assert "chmod -R u+rwX --" in text
     assert "-e TRTMC_STORAGE_ROOT=/work/reference-private" in proof
     assert "TRTMC_MODEL_REFERENCE_CACHE_ROOT" not in proof
@@ -1105,7 +1132,42 @@ def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -
     assert "hf_repo_mount_args" not in host
     assert "src=$hf_hub_cache,dst=/hf-cache/hub" not in proof
     assert "dst=/hf-cache/modules" not in proof
-    assert "cp -a --reflink=always --" in host
+    assert "cp -a --reflink=always --no-preserve=ownership --" in host
+
+
+def test_selected_hf_cache_reflink_helper_has_a_minimal_mount_and_capability_boundary() -> None:
+    text = RUNNER.read_text(encoding="utf-8")
+    helper = text.split("local -a cache_copy_docker_args=(", maxsplit=1)[1].split(
+        "select_proof_gpu", maxsplit=1
+    )[0]
+
+    for contract in (
+        "--read-only",
+        "--network none",
+        "--cap-drop ALL",
+        "--cap-add DAC_OVERRIDE",
+        "--cap-add CHOWN",
+        "--security-opt no-new-privileges",
+        "--pids-limit 32",
+        "--user 0:0",
+        "type=bind,src=$hf_repo_source,dst=/selected-hf-repo,readonly",
+        "type=bind,src=$hf_repo_destination,dst=/private-hf-repo",
+        "--entrypoint /bin/bash",
+        "cp -a --reflink=always --no-preserve=ownership --",
+        'chown -hR -- "$runner_owner" /private-hf-repo',
+    ):
+        assert contract in helper
+    assert helper.count("--cap-add") == 2
+    assert "dst=/selected-hf-repo,readonly" in helper
+    assert "dst=/private-hf-repo,readonly" not in helper
+    assert "src=$hf_hub_cache" not in helper
+    assert "src=$hf_private_hub" not in helper
+    assert "src=$projection_dir" not in helper
+    assert "src=$artifacts_dir" not in helper
+    assert "--gpus" not in helper
+    assert "HF_TOKEN" not in helper
+    assert "/var/run/docker.sock" not in helper
+    assert "if ! cp -a" not in helper
 
 
 def test_sana_reference_cache_is_copied_to_selected_private_view(
@@ -1302,40 +1364,97 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
         for line in docker_log.read_text(encoding="utf-8").splitlines()
         if line.startswith("run ")
     ]
-    assert len(docker_runs) == 2
-    warm, proof = docker_runs
+    assert len(docker_runs) == 3
+    warm, cache_copy, proof = docker_runs
     assert f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub,readonly" in warm
     assert f"src={modules_cache}" not in warm
+    assert f"--mount type=bind,src={selected_repo},dst=/selected-hf-repo,readonly" in cache_copy
+    private_repo = output / "work" / "hf-private" / "hub" / "models--fixture--model"
+    assert f"--mount type=bind,src={private_repo},dst=/private-hf-repo" in cache_copy
+    assert "--user 0:0" in cache_copy
+    assert "--cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN" in cache_copy
+    assert "--network none" in cache_copy
+    assert f"src={hub_cache},dst=/hf-cache/hub" not in cache_copy
+    assert f"src={modules_cache}" not in cache_copy
     assert f"src={hub_cache},dst=/hf-cache/hub" not in proof
     assert f"src={selected_repo}" not in proof
     assert f"src={modules_cache}" not in proof
     private_hub = output / "work" / "hf-private" / "hub"
     assert f"--mount type=bind,src={private_hub},dst=/hf-cache/hub" in proof
     assert f"src={private_hub},dst=/hf-cache/hub,readonly" not in proof
-    private_repo = private_hub / "models--fixture--model"
     assert (private_repo / "selected-cache-marker").read_text(encoding="utf-8") == "selected\n"
     write_probe = private_repo / "test-write-probe"
     write_probe.write_text("writable\n", encoding="utf-8")
     assert write_probe.read_text(encoding="utf-8") == "writable\n"
 
 
+def test_selected_hf_cache_with_unreadable_file_is_delegated_to_root_helper(
+    tmp_path: Path,
+) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    selected_repo = tmp_path / "hf-cache" / "hub" / "models--fixture--model"
+    unreadable = selected_repo / "unreadable-cache-marker"
+    unreadable.write_text("persistent cache\n", encoding="utf-8")
+    unreadable.chmod(0)
+    assert not os.access(unreadable, os.R_OK)
+    env.update(
+        {
+            "FAKE_UNREADABLE_REFLINK": "1",
+            "FAKE_UNREADABLE_REFLINK_CONTENT": "private reflink",
+        }
+    )
+
+    try:
+        result = subprocess.run(
+            [
+                "bash",
+                str(RUNNER),
+                "--model",
+                "convbert",
+                "--revision",
+                "HEAD",
+                "--output-dir",
+                str(output),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        source_mode = unreadable.stat().st_mode & 0o777
+    finally:
+        unreadable.chmod(0o600)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert source_mode == 0
+    assert unreadable.read_text(encoding="utf-8") == "persistent cache\n"
+    private_repo = output / "work" / "hf-private" / "hub" / "models--fixture--model"
+    assert (private_repo / "unreadable-cache-marker").read_text(encoding="utf-8") == (
+        "private reflink\n"
+    )
+    docker_runs = [
+        line
+        for line in docker_log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("run ")
+    ]
+    assert len(docker_runs) == 3
+    _warm, cache_copy, proof = docker_runs
+    assert f"--mount type=bind,src={selected_repo},dst=/selected-hf-repo,readonly" in cache_copy
+    assert "--user 0:0" in cache_copy
+    assert "--cap-add DAC_OVERRIDE" in cache_copy
+    assert f"src={selected_repo}" not in proof
+
+
 def test_selected_hf_cache_fails_closed_when_reflink_is_unavailable(
     tmp_path: Path,
 ) -> None:
     fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
-    fake_cp = fake_bin / "cp"
-    fake_cp.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        'printf \'%s\\n\' "$*" > "$FAKE_CP_LOG"\n'
-        "exit 73\n",
-        encoding="utf-8",
-    )
-    fake_cp.chmod(0o755)
     output = tmp_path / "proof"
     env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-    cp_log = tmp_path / "cp.log"
-    env["FAKE_CP_LOG"] = str(cp_log)
+    env["FAKE_REFLINK_EXIT_CODE"] = "73"
 
     result = subprocess.run(
         [
@@ -1357,14 +1476,15 @@ def test_selected_hf_cache_fails_closed_when_reflink_is_unavailable(
 
     assert result.returncode != 0
     assert "selected Hugging Face cache repository could not be reflinked" in result.stderr
-    assert cp_log.read_text(encoding="utf-8").startswith("-a --reflink=always -- ")
-    docker_runs = [
-        line
-        for line in docker_log.read_text(encoding="utf-8").splitlines()
-        if line.startswith("run ")
-    ]
-    assert len(docker_runs) == 1
+    docker_text = docker_log.read_text(encoding="utf-8")
+    assert "cp -a --reflink=always --no-preserve=ownership --" in docker_text
+    docker_runs = [line for line in docker_text.splitlines() if line.startswith("run ")]
+    assert len(docker_runs) == 2
     assert "warm_hf_cache.py" in docker_runs[0]
+    assert "dst=/selected-hf-repo,readonly" in docker_runs[1]
+    assert "dst=/private-hf-repo" in docker_runs[1]
+    assert "--cap-drop ALL --cap-add DAC_OVERRIDE --cap-add CHOWN" in docker_runs[1]
+    assert " --inner " not in f" {docker_text} "
 
 
 def test_selected_hf_cache_evidence_rejects_path_escape_before_proof(

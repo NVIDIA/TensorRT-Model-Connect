@@ -210,7 +210,7 @@ jobs:
         needs.impact.outputs.has_models == 'true'
       }}
     strategy:
-      fail-fast: false
+      fail-fast: true
       max-parallel: 16
       matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}
     permissions:
