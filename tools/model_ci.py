@@ -125,6 +125,7 @@ PLATFORM_EXACT = frozenset(
         ".gitignore",
         "CMakeLists.txt",
         "Dockerfile",
+        "Dockerfile.tensorrt-sdk",
         "_pyproject_backend.py",
         "conanfile.py",
         "conftest.py",
