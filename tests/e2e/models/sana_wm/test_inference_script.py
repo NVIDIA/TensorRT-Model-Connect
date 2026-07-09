@@ -337,6 +337,63 @@ def test_inference_sana_wm_discovers_storage_root_official_script(
     assert module._resolve_external_script() == external
 
 
+def test_inference_sana_wm_prefers_pinned_private_storage_reference(
+    monkeypatch, tmp_path
+) -> None:
+    module = _load_module()
+    storage_root = tmp_path / "reference-private"
+    sana_repo = (
+        storage_root
+        / "sana_wm"
+        / "reference"
+        / f"Sana-{module._SANA_REFERENCE_COMMIT[:12]}"
+    )
+    external = sana_repo / "inference_video_scripts" / "wm" / "inference_sana_wm.py"
+    external.parent.mkdir(parents=True)
+    marker = tmp_path / "pinned_reference_ran.txt"
+    external.write_text(
+        "from pathlib import Path\n"
+        "def main():\n"
+        f"    Path({str(marker)!r}).write_text('pinned official reference', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    image_file = tmp_path / "demo.png"
+    image_file.write_bytes(b"test image")
+    prompt_file = tmp_path / "demo.txt"
+    prompt_file.write_text("drive forward", encoding="utf-8")
+    selected: dict[str, Path] = {}
+
+    def fail_diffusers_fallback():
+        raise AssertionError("private pinned reference must win over Diffusers fallback")
+
+    def record_external_script(script_path: Path) -> None:
+        selected["script"] = script_path
+        marker.write_text("pinned official reference", encoding="utf-8")
+
+    monkeypatch.setattr(module, "_load_pipeline", fail_diffusers_fallback)
+    monkeypatch.setattr(module, "_run_external_script", record_external_script)
+    monkeypatch.setenv("TRTMC_STORAGE_ROOT", str(storage_root))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "inference_sana_wm.py",
+            "--image",
+            str(image_file),
+            "--prompt",
+            str(prompt_file),
+            "--action",
+            "w-80",
+            "--output_dir",
+            str(tmp_path / "output"),
+        ],
+    )
+
+    assert module.main() == 0
+    assert selected["script"] == external
+    assert marker.read_text(encoding="utf-8") == "pinned official reference"
+
+
 def test_inference_sana_wm_bootstraps_pinned_storage_reference(
     monkeypatch, tmp_path
 ) -> None:

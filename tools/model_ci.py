@@ -66,6 +66,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "scripts/generate_e2e_report_assets/e2e_report.js",
         "scripts/reporting/__init__.py",
         "scripts/reporting/vlm_assessment.py",
+        "scripts/schedule_e2e.py",
         "scripts/warm_hf_cache.py",
         "tests/__init__.py",
         "tests/builder/__init__.py",
@@ -82,7 +83,9 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "tools/__init__.py",
         "tools/diff_logits.py",
         "tools/diff_vl.py",
+        "tools/diffusion_helpers.py",
         "tools/model_plugin_isolation.py",
+        "tools/test_impact.py",
         "tools/tool_helpers.py",
         *MODEL_ROOT_PLATFORM_FILES,
     }

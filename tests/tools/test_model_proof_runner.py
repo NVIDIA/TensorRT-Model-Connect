@@ -26,6 +26,9 @@ IMAGE_ENSURE = REPO_ROOT / ".github" / "scripts" / "ensure-ci-docker-image.sh"
 PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "model-proof.yml"
 FALLBACK_WRITER = REPO_ROOT / ".github" / "scripts" / "write-model-proof-fallback-report.py"
 PLUGIN_CMAKE = REPO_ROOT / "cmake" / "trtmc_pipeline_plugins.cmake"
+SANA_REFERENCE_REVISION = "59629fdf790850797cb657bad014fce432bd713d"
+SANA_REFERENCE_RELATIVE_PATH = "sana_wm/reference/Sana-59629fdf7908"
+SANA_REFERENCE_ENTRYPOINT = "inference_video_scripts/wm/inference_sana_wm.py"
 
 
 def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
@@ -94,6 +97,87 @@ def _fake_proof_environment(
         }
     )
     return env
+
+
+def _write_fake_pinned_model_reference(
+    tmp_path: Path,
+    fake_bin: Path,
+) -> tuple[Path, Path]:
+    cache_root = tmp_path / "model-reference-cache"
+    source = cache_root / SANA_REFERENCE_RELATIVE_PATH
+    entrypoint = source / SANA_REFERENCE_ENTRYPOINT
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text("# pinned SANA-WM reference\n", encoding="utf-8")
+    (source / "reference-marker.txt").write_text("selected only\n", encoding="utf-8")
+
+    real_git = shutil.which("git")
+    assert real_git is not None
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        textwrap.dedent(
+            f"""\
+            #!{sys.executable}
+            import os
+            from pathlib import Path
+            import subprocess
+            import sys
+
+            args = sys.argv[1:]
+            source = Path(os.environ["FAKE_REFERENCE_SOURCE"]).resolve()
+            if len(args) >= 3 and args[0] == "-C" and Path(args[1]).resolve() == source:
+                command = args[2]
+                if command == "rev-parse":
+                    value = args[3]
+                    if value == "HEAD^{{commit}}":
+                        print(os.environ["FAKE_REFERENCE_REVISION"])
+                        raise SystemExit(0)
+                    if value.endswith("^{{tree}}"):
+                        print("1" * 40)
+                        raise SystemExit(0)
+                if command == "config" and args[3:] == ["--get", "remote.origin.url"]:
+                    print("https://github.com/NVlabs/Sana.git")
+                    raise SystemExit(0)
+                if command == "cat-file":
+                    revision_and_path = args[-1]
+                    relative = revision_and_path.split(":", 1)[1]
+                    raise SystemExit(0 if (source / relative).is_file() else 1)
+                if command == "archive":
+                    raise SystemExit(subprocess.run(
+                        ["tar", "--exclude=.git", "-C", str(source), "-cf", "-", "."],
+                        check=False,
+                    ).returncode)
+            os.execv({real_git!r}, [{real_git!r}, *args])
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    return cache_root, source
+
+
+def _write_sana_reference_config(path: Path) -> None:
+    path.write_text(
+        "model_reference_repository=https://github.com/NVlabs/Sana.git\n"
+        f"model_reference_revision={SANA_REFERENCE_REVISION}\n"
+        f"model_reference_relative_path={SANA_REFERENCE_RELATIVE_PATH}\n"
+        f"model_reference_entrypoint={SANA_REFERENCE_ENTRYPOINT}\n",
+        encoding="utf-8",
+    )
+
+
+def _prepare_reference_program() -> str:
+    text = RUNNER.read_text(encoding="utf-8")
+    function = text.split("prepare_private_model_reference_cache() {", maxsplit=1)[1]
+    function = "prepare_private_model_reference_cache() {" + function.split(
+        "\n\nrun_host() {", maxsplit=1
+    )[0]
+    return (
+        "set -euo pipefail\n"
+        'model="sana_wm"\n'
+        'die() { echo "ERROR: $*" >&2; exit 1; }\n'
+        f"{function}\n"
+        'prepare_private_model_reference_cache "$1" "$2" "$3" "$4"\n'
+    )
 
 
 def _proof_gpu_ids(docker_log: Path) -> list[str]:
@@ -342,6 +426,19 @@ def test_selection_includes_every_owned_python_family_test(
     assert expected_family_tests <= set(selection["python_tests"])
 
 
+def test_sana_selection_declares_its_pinned_model_reference_cache(
+    tmp_path: Path,
+) -> None:
+    selection = _run_test_selection(tmp_path, "sana_wm", "premerge")
+
+    assert selection["model_reference_cache"] == {
+        "repository": "https://github.com/NVlabs/Sana.git",
+        "revision": SANA_REFERENCE_REVISION,
+        "relative_path": SANA_REFERENCE_RELATIVE_PATH,
+        "entrypoint": SANA_REFERENCE_ENTRYPOINT,
+    }
+
+
 def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
 
@@ -474,6 +571,10 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
     assert "-e TRANSFORMERS_CACHE=/hf-cache/hub" in proof
     assert "cp -a --reflink=always --" in text
     assert "chmod -R u+rwX --" in text
+    assert "-e TRTMC_STORAGE_ROOT=/work/reference-private" in proof
+    assert "TRTMC_MODEL_REFERENCE_CACHE_ROOT" not in proof
+    assert "src=$reference_cache_root" not in proof
+    assert "src=$reference_source" not in proof
     assert "-e HF_TOKEN" not in proof
     assert "-e HUGGING_FACE_HUB_TOKEN" not in proof
 
@@ -501,6 +602,7 @@ def test_runner_keeps_local_fallback_and_workflow_uses_runner_cache_paths() -> N
 
     assert "${HF_HOME:-$HOME/.cache/huggingface}" in runner
     assert "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || " in workflow
+    assert "TRTMC_MODEL_REFERENCE_CACHE_ROOT: ${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || " in workflow
     assert "TRTMC_HF_HUB_CACHE:" not in workflow
     assert "TRTMC_HF_MODULES_CACHE:" not in workflow
     assert "${TRTMC_HF_HUB_CACHE:-$hf_cache_root/hub}" in runner
@@ -997,6 +1099,157 @@ def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -
     assert "src=$hf_hub_cache,dst=/hf-cache/hub" not in proof
     assert "dst=/hf-cache/modules" not in proof
     assert "cp -a --reflink=always --" in host
+
+
+def test_sana_reference_cache_is_copied_to_selected_private_view(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    cache_root, source = _write_fake_pinned_model_reference(tmp_path, fake_bin)
+    config = tmp_path / "model-proof-config.txt"
+    _write_sana_reference_config(config)
+    work_dir = tmp_path / "work"
+    artifacts = tmp_path / "artifacts"
+    work_dir.mkdir()
+    artifacts.mkdir()
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "TRTMC_MODEL_REFERENCE_CACHE_ROOT": str(cache_root),
+            "FAKE_REFERENCE_SOURCE": str(source),
+            "FAKE_REFERENCE_REVISION": SANA_REFERENCE_REVISION,
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _prepare_reference_program(),
+            "--",
+            str(config),
+            str(work_dir),
+            str(artifacts),
+            str(REPO_ROOT),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    private_root = work_dir / "reference-private"
+    private_reference = private_root / SANA_REFERENCE_RELATIVE_PATH
+    assert (private_reference / SANA_REFERENCE_ENTRYPOINT).is_file()
+    assert (private_reference / "reference-marker.txt").read_text(encoding="utf-8") == (
+        "selected only\n"
+    )
+    assert not any(path.name == ".git" for path in private_root.rglob(".git"))
+    assert {path.name for path in private_root.iterdir()} == {"sana_wm"}
+
+    evidence = json.loads(
+        (artifacts / "model-reference-cache.json").read_text(encoding="utf-8")
+    )
+    assert evidence == {
+        "schema_version": 1,
+        "model": "sana_wm",
+        "isolation": "selected-pinned-private",
+        "repository": "https://github.com/NVlabs/Sana.git",
+        "reference_revision": SANA_REFERENCE_REVISION,
+        "reference_tree": "1" * 40,
+        "relative_path": SANA_REFERENCE_RELATIVE_PATH,
+        "entrypoint": SANA_REFERENCE_ENTRYPOINT,
+        "container_storage_root": "/work/reference-private",
+        "copy_method": "git-archive",
+    }
+
+
+def test_sana_reference_cache_missing_checkout_fails_before_docker(
+    tmp_path: Path,
+) -> None:
+    cache_root = tmp_path / "model-reference-cache"
+    cache_root.mkdir()
+    config = tmp_path / "model-proof-config.txt"
+    _write_sana_reference_config(config)
+    work_dir = tmp_path / "work"
+    artifacts = tmp_path / "artifacts"
+    work_dir.mkdir()
+    artifacts.mkdir()
+    env = os.environ.copy()
+    env["TRTMC_MODEL_REFERENCE_CACHE_ROOT"] = str(cache_root)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _prepare_reference_program(),
+            "--",
+            str(config),
+            str(work_dir),
+            str(artifacts),
+            str(REPO_ROOT),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "selected model reference cache is unavailable" in result.stderr
+
+
+def test_sana_reference_cache_wrong_revision_fails_before_docker(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    cache_root, source = _write_fake_pinned_model_reference(tmp_path, fake_bin)
+    config = tmp_path / "model-proof-config.txt"
+    _write_sana_reference_config(config)
+    work_dir = tmp_path / "work"
+    artifacts = tmp_path / "artifacts"
+    work_dir.mkdir()
+    artifacts.mkdir()
+    env = os.environ.copy()
+    wrong_revision = "0" * 40
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "TRTMC_MODEL_REFERENCE_CACHE_ROOT": str(cache_root),
+            "FAKE_REFERENCE_SOURCE": str(source),
+            "FAKE_REFERENCE_REVISION": wrong_revision,
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _prepare_reference_program(),
+            "--",
+            str(config),
+            str(work_dir),
+            str(artifacts),
+            str(REPO_ROOT),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert (
+        "selected model reference cache revision mismatch: "
+        f"expected {SANA_REFERENCE_REVISION}, found {wrong_revision}"
+    ) in result.stderr
 
 
 def test_distinct_explicit_hf_cache_paths_reach_both_containers(

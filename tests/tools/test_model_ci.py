@@ -92,14 +92,18 @@ def _add_model(
     )
 
 
-def _make_repo(tmp_path: Path) -> tuple[Path, str]:
+def _make_repo(
+    tmp_path: Path,
+    *,
+    model_ids: tuple[str, ...] = ("model_a", "model_b"),
+) -> tuple[Path, str]:
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
     _git(repo, "config", "user.name", "Model CI Test")
     _git(repo, "config", "user.email", "model-ci@example.com")
-    _add_model(repo, "model_a")
-    _add_model(repo, "model_b")
+    for model_id in model_ids:
+        _add_model(repo, model_id)
     _write(repo, "python/tensorrt_model_connect/families/__init__.py", "# registry\n")
     _write(repo, "CMakeLists.txt", "# platform build\n")
     _write(repo, "src/runtime/core/core.cpp", "// platform core\n")
@@ -129,11 +133,14 @@ def _make_repo(tmp_path: Path) -> tuple[Path, str]:
     _write(repo, "scripts/generate_e2e_report_assets/e2e_report.js", "// report\n")
     _write(repo, "scripts/reporting/__init__.py", "")
     _write(repo, "scripts/reporting/vlm_assessment.py", "# report component\n")
+    _write(repo, "scripts/schedule_e2e.py", "# shared E2E scheduler\n")
     _write(repo, "scripts/warm_hf_cache.py", "# cache check\n")
     _write(repo, "tools/__init__.py", "")
     _write(repo, "tools/diff_logits.py", "# shared logits diff\n")
     _write(repo, "tools/diff_vl.py", "# shared vision-language diff\n")
+    _write(repo, "tools/diffusion_helpers.py", "# shared diffusion helpers\n")
     _write(repo, "tools/model_plugin_isolation.py", "# proof verifier\n")
+    _write(repo, "tools/test_impact.py", "# shared impact analyzer\n")
     _write(repo, "tools/tool_helpers.py", "# shared tool helpers\n")
     _write(repo, "scripts/repro_trt_fp8_mha.py", "# unrelated model script\n")
     _write(repo, "tools/diff_t5.py", "# unrelated model diff\n")
@@ -415,11 +422,14 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         "scripts/generate_e2e_report_assets/e2e_report.js",
         "scripts/reporting/__init__.py",
         "scripts/reporting/vlm_assessment.py",
+        "scripts/schedule_e2e.py",
         "scripts/warm_hf_cache.py",
         "tools/__init__.py",
         "tools/diff_logits.py",
         "tools/diff_vl.py",
+        "tools/diffusion_helpers.py",
         "tools/model_plugin_isolation.py",
+        "tools/test_impact.py",
         "tools/tool_helpers.py",
     ):
         assert (output / report_path).is_file()
@@ -435,6 +445,44 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         item for item in manifest["files"] if item["path"] == copied.relative_to(output).as_posix()
     )
     assert entry["sha256"] == hashlib.sha256(expected).hexdigest()
+
+
+def test_affected_model_projections_include_only_shared_support_and_owned_roots(
+    tmp_path: Path,
+) -> None:
+    repo, revision = _make_repo(
+        tmp_path,
+        model_ids=("ltx_video", "qwen3_5", "dpr"),
+    )
+    cases = (
+        ("ltx_video", "tools/diffusion_helpers.py"),
+        ("qwen3_5", "scripts/schedule_e2e.py"),
+        ("dpr", "tools/test_impact.py"),
+    )
+
+    for selected, required_shared_file in cases:
+        output = tmp_path / f"projection-{selected}"
+        _run(
+            repo,
+            "project",
+            "--revision",
+            revision,
+            "--model",
+            selected,
+            "--output-dir",
+            str(output),
+        )
+
+        assert (output / required_shared_file).is_file()
+        for model_root in (
+            "python/tensorrt_model_connect/families",
+            "src/runtime/models",
+            "tests/e2e/models",
+            "tests/cpp/models",
+        ):
+            assert (output / model_root / selected).is_dir()
+            for sibling in {model_id for model_id, _ in cases} - {selected}:
+                assert not (output / model_root / sibling).exists()
 
 
 def test_projection_and_impact_normalize_logical_runtime_owner(tmp_path: Path) -> None:

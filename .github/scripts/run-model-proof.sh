@@ -432,6 +432,7 @@ payload = {
     "outcome": "running",
     "steps": {
         "hf_cache_isolation": {"status": "pending", "evidence": "hf-cache-repos.json"},
+        "model_reference_isolation": {"status": "pending", "evidence": "selection.json"},
         "projection_validation": {"status": "running", "evidence": "source-projection.json, selection.json"},
         "configure": {"status": "pending", "evidence": "configure.log"},
         "scratch_build": {"status": "pending", "evidence": "build.log"},
@@ -569,9 +570,10 @@ write_model_proof_selection() {
     > "$config_file" <<'PY'
 import json
 import os
+import re
 import sys
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 selected = sys.argv[1]
 suite = sys.argv[2]
@@ -645,6 +647,63 @@ for entry in runtime_data.get("runtime_tests", []):
     runtime_tests.append(fields[0])
 
 e2e_dir = roots["e2e"] / owners["e2e"]
+e2e_owner_manifest = e2e_dir / "MODEL.toml"
+e2e_owner_data = tomllib.loads(e2e_owner_manifest.read_text(encoding="utf-8"))
+raw_reference_cache = e2e_owner_data.get("model_reference_cache")
+model_reference_cache = None
+if raw_reference_cache is not None:
+    if not isinstance(raw_reference_cache, dict):
+        raise SystemExit(
+            f"model_reference_cache must be a table in {e2e_owner_manifest}"
+        )
+
+    def safe_relative_path(field: str) -> str:
+        value = raw_reference_cache.get(field)
+        if (
+            not isinstance(value, str)
+            or not value
+            or "\\" in value
+            or any(character in value for character in "\r\n\t")
+        ):
+            raise SystemExit(
+                f"model_reference_cache.{field} must be a non-empty POSIX path"
+            )
+        path = PurePosixPath(value)
+        if path.is_absolute() or path.as_posix() != value or any(
+            part in {"", ".", ".."} for part in path.parts
+        ):
+            raise SystemExit(
+                f"model_reference_cache.{field} must be a canonical relative path"
+            )
+        return value
+
+    reference_revision = raw_reference_cache.get("revision")
+    if not isinstance(reference_revision, str) or re.fullmatch(
+        r"[0-9a-f]{40}", reference_revision
+    ) is None:
+        raise SystemExit(
+            "model_reference_cache.revision must be a full lowercase Git commit"
+        )
+    reference_repository = raw_reference_cache.get("repository")
+    if (
+        not isinstance(reference_repository, str)
+        or not reference_repository
+        or any(character in reference_repository for character in "\r\n\t")
+    ):
+        raise SystemExit(
+            "model_reference_cache.repository must be a non-empty single-line string"
+        )
+    reference_relative_path = safe_relative_path("relative_path")
+    if PurePosixPath(reference_relative_path).parts[0] != owners["e2e"]:
+        raise SystemExit(
+            "model_reference_cache.relative_path must be owned by the selected E2E family"
+        )
+    model_reference_cache = {
+        "repository": reference_repository,
+        "revision": reference_revision,
+        "relative_path": reference_relative_path,
+        "entrypoint": safe_relative_path("entrypoint"),
+    }
 timing_estimates = {}
 timing_path = root / "tests/e2e/timing_estimates.json"
 if timing_path.is_file():
@@ -809,6 +868,8 @@ selection = {
     ],
     "e2e_test": str(e2e_tests[0].relative_to(root)),
 }
+if model_reference_cache is not None:
+    selection["model_reference_cache"] = model_reference_cache
 selection.update(lease_fields)
 selection_path.write_text(json.dumps(selection, indent=2) + "\n", encoding="utf-8")
 
@@ -817,6 +878,11 @@ print(f"runtime_library={runtime_library}")
 print(f"e2e_family={owners['e2e']}")
 print(f"e2e_test={e2e_tests[0]}")
 print(f"resource_class={resource_class}")
+if model_reference_cache is not None:
+    print(f"model_reference_repository={model_reference_cache['repository']}")
+    print(f"model_reference_revision={model_reference_cache['revision']}")
+    print(f"model_reference_relative_path={model_reference_cache['relative_path']}")
+    print(f"model_reference_entrypoint={model_reference_cache['entrypoint']}")
 if python_family:
     print(f"python_family={python_family}")
 for model_name in dict.fromkeys(case["model"] for case in selected_cases):
@@ -988,6 +1054,116 @@ print(len(repositories))
 PY
 }
 
+validate_inner_model_reference_cache() {
+  local config_file="$1"
+  local reference_repository reference_revision reference_relative_path
+  local reference_entrypoint
+  reference_repository="$(sed -n 's/^model_reference_repository=//p' "$config_file")"
+  reference_revision="$(sed -n 's/^model_reference_revision=//p' "$config_file")"
+  reference_relative_path="$(sed -n 's/^model_reference_relative_path=//p' "$config_file")"
+  reference_entrypoint="$(sed -n 's/^model_reference_entrypoint=//p' "$config_file")"
+
+  if [ -z "$reference_repository" ] && [ -z "$reference_revision" ] && \
+      [ -z "$reference_relative_path" ] && [ -z "$reference_entrypoint" ]; then
+    [ -z "${TRTMC_STORAGE_ROOT:-}" ] || \
+      die "TRTMC_STORAGE_ROOT must not be exposed when the model declares no reference cache"
+    [ ! -e /artifacts/model-reference-cache.json ] || \
+      die "model reference evidence exists for a model that declares no reference cache"
+    printf 'not-required\n'
+    return 0
+  fi
+
+  [ -n "$reference_repository" ] && [ -n "$reference_revision" ] && \
+    [ -n "$reference_relative_path" ] && [ -n "$reference_entrypoint" ] || \
+    die "model reference cache selection is incomplete"
+  [ "${TRTMC_STORAGE_ROOT:-}" = /work/reference-private ] || \
+    die "TRTMC_STORAGE_ROOT must use the proof-private model reference cache"
+  [ -f /artifacts/model-reference-cache.json ] || \
+    die "model reference cache evidence is missing"
+
+  "$(python_bin)" - \
+    /artifacts/model-reference-cache.json /artifacts/selection.json \
+    "$model" "$reference_repository" "$reference_revision" "$reference_relative_path" \
+    "$reference_entrypoint" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+(
+    evidence_path,
+    selection_path,
+    model,
+    repository,
+    revision,
+    relative_path,
+    entrypoint,
+) = sys.argv[1:]
+evidence = json.loads(Path(evidence_path).read_text(encoding="utf-8"))
+selection = json.loads(Path(selection_path).read_text(encoding="utf-8"))
+expected = {
+    "schema_version": 1,
+    "model": model,
+    "isolation": "selected-pinned-private",
+    "repository": repository,
+    "reference_revision": revision,
+    "relative_path": relative_path,
+    "entrypoint": entrypoint,
+    "container_storage_root": "/work/reference-private",
+    "copy_method": "git-archive",
+}
+for key, value in expected.items():
+    if evidence.get(key) != value:
+        raise SystemExit(
+            f"model reference evidence mismatch for {key}: "
+            f"{evidence.get(key)!r} != {value!r}"
+        )
+selection_reference = selection.get("model_reference_cache")
+if not isinstance(selection_reference, dict):
+    raise SystemExit("selection is missing its model reference cache contract")
+for key, value in {
+    "repository": repository,
+    "revision": revision,
+    "relative_path": relative_path,
+    "entrypoint": entrypoint,
+}.items():
+    if selection_reference.get(key) != value:
+        raise SystemExit(f"selection model reference mismatch for {key}")
+
+root = Path("/work/reference-private")
+try:
+    resolved_root = root.resolve(strict=True)
+except OSError as exc:
+    raise SystemExit(f"proof-private model reference root is unavailable: {exc}") from exc
+if resolved_root != root:
+    raise SystemExit("proof-private model reference root must not be a symlink")
+reference = root / relative_path
+try:
+    reference.resolve(strict=True).relative_to(resolved_root)
+except (OSError, ValueError) as exc:
+    raise SystemExit("selected model reference escapes its private root") from exc
+script = reference / entrypoint
+if script.is_symlink() or not script.is_file():
+    raise SystemExit("selected model reference entrypoint is not a regular file")
+for path in reference.rglob("*"):
+    if not path.is_symlink():
+        continue
+    try:
+        path.resolve(strict=True).relative_to(reference.resolve(strict=True))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"selected model reference has an escaping symlink: {path}") from exc
+if any(path.name == ".git" for path in root.rglob(".git")):
+    raise SystemExit("proof-private model reference must not contain Git metadata")
+expected_top_level = relative_path.split("/", 1)[0]
+actual_top_level = {path.name for path in root.iterdir()}
+if actual_top_level != {expected_top_level}:
+    raise SystemExit(
+        "proof-private model reference contains an unexpected model root: "
+        f"{sorted(actual_top_level)}"
+    )
+PY
+  printf '%s\n' "$reference_revision"
+}
+
 run_inner() {
   [ "$output_dir" = "/artifacts" ] || die "inner output directory must be /artifacts"
   [ -f /src/.trtmc-model-projection.json ] || \
@@ -1012,6 +1188,19 @@ run_inner() {
 
   local config_file=/work/model-proof-config.txt
   write_model_proof_selection /src /artifacts/selection.json "$config_file"
+
+  local model_reference_revision
+  model_reference_revision="$(validate_inner_model_reference_cache "$config_file")"
+  if [ "$model_reference_revision" = not-required ]; then
+    update_proof_step model_reference_isolation passed \
+      "selection.json (no external model reference required)"
+    update_proof_fact model_reference_isolation "not-required"
+  else
+    update_proof_step model_reference_isolation passed \
+      "model-reference-cache.json"
+    update_proof_fact model_reference_isolation "selected-pinned-private"
+    update_proof_fact model_reference_revision "$model_reference_revision"
+  fi
 
   update_proof_step projection_validation passed \
     "source-projection.json, selection.json"
@@ -1269,6 +1458,12 @@ build_verification = json.loads(
 cache_evidence = json.loads(
     Path("/artifacts/hf-cache-repos.json").read_text(encoding="utf-8")
 )
+reference_evidence_path = Path("/artifacts/model-reference-cache.json")
+reference_evidence = (
+    json.loads(reference_evidence_path.read_text(encoding="utf-8"))
+    if reference_evidence_path.is_file()
+    else None
+)
 if build_verification.get("passed") is not True:
     raise SystemExit("engine build verification did not pass")
 proof = {
@@ -1302,15 +1497,170 @@ proof = {
     "hf_cache_isolation": "selected-repositories-only",
     "hf_cache_repository_count": len(cache_evidence["repositories"]),
     "hf_cache_evidence": "hf-cache-repos.json",
+    "model_reference_isolation": (
+        "selected-pinned-private" if reference_evidence else "not-required"
+    ),
 }
+if reference_evidence:
+    proof["model_reference_revision"] = reference_evidence["reference_revision"]
+    proof["model_reference_evidence"] = "model-reference-cache.json"
 Path(output).write_text(json.dumps(proof, indent=2) + "\n", encoding="utf-8")
 PY
   echo "PASS: isolated model proof completed for $model"
 }
 
+prepare_private_model_reference_cache() {
+  local config_file="$1"
+  local work_dir="$2"
+  local artifacts_dir="$3"
+  local repo_root="$4"
+  local reference_repository reference_revision reference_relative_path
+  local reference_entrypoint
+  reference_repository="$(sed -n 's/^model_reference_repository=//p' "$config_file")"
+  reference_revision="$(sed -n 's/^model_reference_revision=//p' "$config_file")"
+  reference_relative_path="$(sed -n 's/^model_reference_relative_path=//p' "$config_file")"
+  reference_entrypoint="$(sed -n 's/^model_reference_entrypoint=//p' "$config_file")"
+
+  if [ -z "$reference_repository" ] && [ -z "$reference_revision" ] && \
+      [ -z "$reference_relative_path" ] && [ -z "$reference_entrypoint" ]; then
+    return 0
+  fi
+  [ -n "$reference_repository" ] && [ -n "$reference_revision" ] && \
+    [ -n "$reference_relative_path" ] && [ -n "$reference_entrypoint" ] || \
+    die "model reference cache selection is incomplete"
+
+  local configured_root="${TRTMC_MODEL_REFERENCE_CACHE_ROOT:-}"
+  [ -n "$configured_root" ] || \
+    die "TRTMC_MODEL_REFERENCE_CACHE_ROOT is required for $model"
+  local reference_cache_root
+  if ! reference_cache_root="$(python3 - "$configured_root" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    resolved = path.resolve(strict=True)
+except OSError as exc:
+    raise SystemExit(f"model reference cache root is unavailable: {exc}") from exc
+if not resolved.is_dir():
+    raise SystemExit("model reference cache root is not a directory")
+print(resolved)
+PY
+  )"; then
+    die "model reference cache root validation failed"
+  fi
+  [ "$reference_cache_root" != / ] || \
+    die "model reference cache root must not be /"
+  [ "$reference_cache_root" != "$repo_root" ] || \
+    die "model reference cache root must not be the project checkout"
+
+  local raw_reference_source="$reference_cache_root/$reference_relative_path"
+  [ ! -L "$raw_reference_source" ] || \
+    die "selected model reference cache must not be a symlink"
+  local reference_source
+  if ! reference_source="$(python3 - \
+      "$reference_cache_root" "$reference_relative_path" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve(strict=True)
+source = root / sys.argv[2]
+try:
+    resolved = source.resolve(strict=True)
+    resolved.relative_to(root)
+except (OSError, ValueError) as exc:
+    raise SystemExit(f"selected model reference cache is unavailable or escapes its root: {exc}") from exc
+if not resolved.is_dir():
+    raise SystemExit("selected model reference cache is not a directory")
+print(resolved)
+PY
+  )"; then
+    die "selected model reference cache is unavailable: $reference_relative_path"
+  fi
+
+  local cached_revision
+  if ! cached_revision="$(git -C "$reference_source" rev-parse 'HEAD^{commit}' 2>/dev/null)"; then
+    die "selected model reference cache is not a Git checkout"
+  fi
+  [ "$cached_revision" = "$reference_revision" ] || \
+    die "selected model reference cache revision mismatch: expected $reference_revision, found $cached_revision"
+  local cached_repository
+  if ! cached_repository="$(git -C "$reference_source" config --get remote.origin.url 2>/dev/null)"; then
+    die "selected model reference cache has no origin repository"
+  fi
+  [ "$cached_repository" = "$reference_repository" ] || \
+    die "selected model reference cache repository mismatch: expected $reference_repository, found $cached_repository"
+  git -C "$reference_source" cat-file -e \
+    "${reference_revision}:${reference_entrypoint}" 2>/dev/null || \
+    die "pinned model reference entrypoint is absent from commit $reference_revision"
+  local reference_tree
+  reference_tree="$(git -C "$reference_source" rev-parse "${reference_revision}^{tree}")"
+
+  local private_root="$work_dir/reference-private"
+  local private_reference="$private_root/$reference_relative_path"
+  [ ! -e "$private_root" ] || \
+    die "proof-private model reference destination already exists"
+  mkdir -p "$private_reference"
+  if ! git -C "$reference_source" archive --format=tar "$reference_revision" | \
+      tar --no-same-owner --no-same-permissions -xf - -C "$private_reference"; then
+    die "pinned model reference cache could not be copied privately"
+  fi
+  [ -f "$private_reference/$reference_entrypoint" ] && \
+    [ ! -L "$private_reference/$reference_entrypoint" ] || \
+    die "private model reference copy is missing its entrypoint"
+  [ ! -e "$private_reference/.git" ] || \
+    die "private model reference copy unexpectedly contains Git metadata"
+  python3 - "$private_reference" <<'PY'
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1]).resolve(strict=True)
+for path in root.rglob("*"):
+    if not path.is_symlink():
+        continue
+    try:
+        path.resolve(strict=True).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"private model reference has an escaping symlink: {path}") from exc
+PY
+
+  python3 - \
+    "$artifacts_dir/model-reference-cache.json" "$model" \
+    "$reference_repository" "$reference_revision" "$reference_tree" \
+    "$reference_relative_path" "$reference_entrypoint" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+(
+    output,
+    model,
+    repository,
+    revision,
+    tree,
+    relative_path,
+    entrypoint,
+) = sys.argv[1:]
+payload = {
+    "schema_version": 1,
+    "model": model,
+    "isolation": "selected-pinned-private",
+    "repository": repository,
+    "reference_revision": revision,
+    "reference_tree": tree,
+    "relative_path": relative_path,
+    "entrypoint": entrypoint,
+    "container_storage_root": "/work/reference-private",
+    "copy_method": "git-archive",
+}
+Path(output).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
 run_host() {
   command -v docker >/dev/null || die "docker is required"
   command -v git >/dev/null || die "git is required"
+  command -v tar >/dev/null || die "tar is required"
 
   local repo_root
   repo_root="$(git rev-parse --show-toplevel)"
@@ -1367,6 +1717,10 @@ PY
   local host_config_file="$work_dir/model-proof-config-host.txt"
   write_model_proof_selection \
     "$projection_dir" "$artifacts_dir/selection.json" "$host_config_file"
+  local model_reference_revision
+  model_reference_revision="$(sed -n 's/^model_reference_revision=//p' "$host_config_file")"
+  prepare_private_model_reference_cache \
+    "$host_config_file" "$work_dir" "$artifacts_dir" "$repo_root"
   local -a cache_check_models=()
   mapfile -t cache_check_models < <(sed -n 's/^e2e_model=//p' "$host_config_file")
   [ "${#cache_check_models[@]}" -gt 0 ] || \
@@ -1636,6 +1990,11 @@ PY
     -e HF_MODULES_CACHE=/work/hf-modules
     -e TRANSFORMERS_CACHE=/hf-cache/hub
   )
+  if [ -n "$model_reference_revision" ]; then
+    docker_args+=(
+      -e TRTMC_STORAGE_ROOT=/work/reference-private
+    )
+  fi
 
   set +e
   docker "${docker_args[@]}" "$image" \

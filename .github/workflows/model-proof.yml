@@ -39,6 +39,7 @@ jobs:
       TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
       TRTMC_CI_IMAGE_LOCK_FILE: ${{ vars.TRTMC_CI_IMAGE_LOCK_FILE || '/tmp/trtmc-ci-docker-image.lock' }}
       TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}
+      TRTMC_MODEL_REFERENCE_CACHE_ROOT: ${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || '/workspace/users/yifeif/tensorrt-model-connect' }}
       TRTMC_MODEL_PROOF_BUILD_JOBS: ${{ vars.TRTMC_MODEL_PROOF_BUILD_JOBS || '2' }}
       TRTMC_MODEL_PROOF_GPU_IDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_IDS || '0,1,2,3' }}
       TRTMC_MODEL_PROOF_SLOTS_PER_GPU: ${{ vars.TRTMC_MODEL_PROOF_SLOTS_PER_GPU || '4' }}
