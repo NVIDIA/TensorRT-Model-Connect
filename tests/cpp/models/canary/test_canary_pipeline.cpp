@@ -49,6 +49,7 @@ void test_canary_transcribe() {
         enc_engine.get(), enc_engine->createExecutionContext(), stream);
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
+    auto* decoder_ptr = decoder.get();
     auto cache = std::make_unique<trtmc::CanaryKvCache>(0, 8, 0, stream);
 
     check(encoder->ok(), "canary encoder ok");
@@ -69,6 +70,7 @@ void test_canary_transcribe() {
                                    4, 0, std::move(mel_fb), 400, 160, 1, 16000, stream);
 
     check(std::string(pipeline.pipeline_type()) == "CanaryPipeline", "canary pipeline_type");
+    check(decoder_ptr->cuda_graph_active(), "canary enables decoder CUDA graph by default");
 
     std::vector<float> audio(100, 0.0F);
     auto result = pipeline.transcribe(audio.data(), static_cast<int32_t>(audio.size()), 5);
@@ -131,12 +133,14 @@ void test_canary_with_cross_kv() {
         enc_engine.get(), enc_engine->createExecutionContext(), stream);
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
+    auto* decoder_ptr = decoder.get();
     auto cache = std::make_unique<trtmc::CanaryKvCache>(0, 8, 0, stream);
 
     trtmc::CanaryConfig wcfg;
     wcfg.mel_length = 4;
     wcfg.max_source_positions = 5;
     wcfg.eot_token_id = 2;
+    wcfg.disable_cuda_graph = true;
 
     trtmc::MelFilterbank mel_fb;
     mel_fb.n_freq_bins = 201;
@@ -148,6 +152,7 @@ void test_canary_with_cross_kv() {
 
     check(std::string(pipeline.pipeline_type()) == "CanaryPipeline",
           "canary cross-kv: pipeline_type");
+    check(!decoder_ptr->cuda_graph_active(), "canary honors CUDA graph opt-out");
 
     std::vector<float> audio(100, 0.0F);
     auto result = pipeline.transcribe(audio.data(), static_cast<int32_t>(audio.size()), 5);

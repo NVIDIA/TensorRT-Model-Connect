@@ -47,6 +47,65 @@ static void check(bool condition, const char* test_name) {
     }
 }
 
+static double reference_scaled_sinc(double distance, double cutoff) {
+    constexpr double kPi = 3.14159265358979323846;
+    if (std::abs(distance) < 1e-12)
+        return cutoff;
+    return cutoff * std::sin(kPi * distance * cutoff) / (kPi * distance * cutoff);
+}
+
+static double reference_hann_window(double distance, int32_t half_taps) {
+    constexpr double kPi = 3.14159265358979323846;
+    const double position =
+        (distance + static_cast<double>(half_taps)) / (2.0 * static_cast<double>(half_taps));
+    return 0.5 * (1.0 - std::cos(2.0 * kPi * position));
+}
+
+static std::vector<float> reference_resample(const std::vector<float>& samples, int32_t source_rate,
+                                             int32_t target_rate) {
+    const int32_t out_len =
+        static_cast<int32_t>(static_cast<int64_t>(samples.size()) * target_rate / source_rate);
+    const int32_t half_taps = 16;
+    const double cutoff =
+        std::min(1.0, static_cast<double>(target_rate) / static_cast<double>(source_rate));
+    std::vector<float> output(out_len);
+    for (int32_t i = 0; i < out_len; ++i) {
+        const double source_position = static_cast<double>(i) * source_rate / target_rate;
+        const int32_t center = static_cast<int32_t>(std::floor(source_position));
+        const int32_t first = std::max(0, center - half_taps + 1);
+        const int32_t last = std::min(static_cast<int32_t>(samples.size()) - 1, center + half_taps);
+        double value = 0.0;
+        double weight_sum = 0.0;
+        for (int32_t j = first; j <= last; ++j) {
+            const double distance = static_cast<double>(j) - source_position;
+            const double weight = reference_scaled_sinc(distance, cutoff) *
+                                  reference_hann_window(distance, half_taps);
+            value += static_cast<double>(samples[static_cast<std::size_t>(j)]) * weight;
+            weight_sum += weight;
+        }
+        output[static_cast<std::size_t>(i)] =
+            weight_sum > 1e-12 ? static_cast<float>(value / weight_sum) : 0.0F;
+    }
+    return output;
+}
+
+static void check_resample_matches_reference(int32_t source_rate, int32_t target_rate,
+                                             const char* test_name) {
+    std::vector<float> input(1003);
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        input[i] = static_cast<float>(0.7 * std::sin(static_cast<double>(i) * 0.11) +
+                                      0.2 * std::cos(static_cast<double>(i) * 0.037));
+    }
+    const auto actual = trtmc::resample_linear(input.data(), static_cast<int32_t>(input.size()),
+                                               source_rate, target_rate);
+    const auto reference = reference_resample(input, source_rate, target_rate);
+    bool matches = actual.size() == reference.size();
+    for (std::size_t i = 0; matches && i < actual.size(); ++i) {
+        matches = std::abs(actual[i] - reference[i]) <= 1e-6F;
+    }
+    check(matches, test_name);
+}
+
 static std::filesystem::path make_temp_dir() {
     char pattern[] = "/tmp/trtmc_wav_test_XXXXXX";
     char* dir = mkdtemp(pattern);
@@ -201,7 +260,12 @@ int main() {
         check(std::abs(resampled[1] - 0.2F) < 1e-6F, "resample_identity: values match");
     }
 
-    // Test 6: Invalid file throws
+    // Test 6: polyphase resampling preserves the original windowed-sinc result.
+    check_resample_matches_reference(48000, 16000, "resample_polyphase: 48k to 16k parity");
+    check_resample_matches_reference(44100, 16000, "resample_polyphase: 44.1k to 16k parity");
+    check_resample_matches_reference(16000, 48000, "resample_polyphase: 16k to 48k parity");
+
+    // Test 7: Invalid file throws
     {
         bool caught = false;
         try {
