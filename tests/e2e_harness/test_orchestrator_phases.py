@@ -181,6 +181,45 @@ def _make_ctx(tmp_path: Path, case: E2ECase) -> RunContext:
     )
 
 
+def test_ci_engine_build_guard_passes_manifest_identity_to_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("unit-build")
+    case.metadata.update(
+        {
+            "model_name": "unit-model-config",
+            "manifest_path": "/src/tests/e2e/models/unit/manifests/unit.json",
+        }
+    )
+    ctx = _make_ctx(tmp_path, case)
+    guard_dir = tmp_path / "engine-builds"
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_GUARD_DIR", str(guard_dir))
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_REVISION", "abc123")
+    build_environments: list[dict[str, str]] = []
+
+    def fake_run(cmd, **kwargs):
+        build_environments.append(kwargs["env"])
+        bundle_path = Path(cmd[cmd.index("-o") + 1])
+        bundle_path.write_bytes(b"bundle")
+        timing_path = Path(cmd[cmd.index("--build-timing-json") + 1])
+        timing_path.write_text('{"total_s": 1.0}\n', encoding="utf-8")
+        return types.SimpleNamespace(returncode=0, stdout="built", stderr="")
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+
+    result = orchestrator._resolve_bundle(case, ctx)
+
+    assert result[0] == str(Path(ctx.engine_dir) / case.bundle)
+    assert result[2] == ""
+    assert len(build_environments) == 1
+    build_env = build_environments[0]
+    assert build_env["TRTMC_ENGINE_BUILD_IDENTITY"] == "unit-model-config"
+    assert build_env["TRTMC_ENGINE_BUILD_REVISION"] == "abc123"
+    command = json.loads(build_env["TRTMC_ENGINE_BUILD_COMMAND_JSON"])
+    assert command[command.index("-o") + 1] == str(Path(ctx.engine_dir) / case.bundle)
+
+
 def test_hf_auth_preflight_accepts_a_warmed_offline_snapshot(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

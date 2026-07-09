@@ -185,6 +185,59 @@ def _make_tiny_wav(path: Path) -> None:
     path.write_bytes(wav)
 
 
+class TestInputMediaPathResolution:
+    """Input media from isolated /src results stays portable and confined."""
+
+    def test_rebases_isolated_image_audio_and_video_paths(self, tmp_path):
+        mod = _import_report()
+        project_dir = tmp_path / "checkout"
+        media_dir = project_dir / "tests/e2e/models/example/data"
+        media_dir.mkdir(parents=True)
+        media = {
+            "input.png": _make_tiny_png,
+            "input.wav": _make_tiny_wav,
+            "input.mp4": lambda path: path.write_bytes(
+                b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomiso2"
+            ),
+        }
+
+        for filename, writer in media.items():
+            target = media_dir / filename
+            writer(target)
+            isolated_path = f"/src/tests/e2e/models/example/data/{filename}"
+
+            assert mod._resolve_input_media(isolated_path, project_dir) == target.resolve()
+            assert mod._embeddable(target)
+
+    def test_rebase_rejects_other_absolute_traversal_and_symlink_paths(self, tmp_path):
+        mod = _import_report()
+        project_dir = tmp_path / "checkout"
+        source_dir = project_dir / "tests/e2e/models/example/data"
+        source_dir.mkdir(parents=True)
+        outside = tmp_path / "outside.wav"
+        _make_tiny_wav(outside)
+        (source_dir / "escape.wav").symlink_to(outside)
+
+        assert mod._resolve_input_media(str(outside), project_dir) is None
+        assert mod._resolve_input_media("/src/../outside.wav", project_dir) is None
+        assert (
+            mod._resolve_input_media(
+                "/src/tests/e2e/models/example/data/escape.wav", project_dir
+            )
+            is None
+        )
+        assert mod._resolve_input_media("/src-adjacent/input.wav", project_dir) is None
+
+    def test_single_model_existing_absolute_project_path_is_unchanged(self, tmp_path):
+        mod = _import_report()
+        project_dir = tmp_path / "standalone-source"
+        source = project_dir / "tests/e2e/models/example/data/input.wav"
+        source.parent.mkdir(parents=True)
+        _make_tiny_wav(source)
+
+        assert mod._resolve_input_media(source, project_dir) == source.resolve()
+
+
 # ---------------------------------------------------------------------------
 # Tests: classify_modality
 # ---------------------------------------------------------------------------
@@ -2033,9 +2086,18 @@ class TestEvidenceCompleteness:
             "outcome": "passed",
             "runtime_library": "libtrtmc_model_alpha.so",
             "runtime_library_sha256": "b" * 64,
+            "staged_runtime_library_sha256": "b" * 64,
             "sibling_model_count": 0,
             "model_dso_count": 1,
+            "staged_model_dso_count": 1,
+            "engine_builds_per_model": 1,
+            "engine_build_count": 1,
+            "engine_build_verification": "engine-build-verification.json",
             "gpu_id": "2",
+            "gpu_resource_class": "shared",
+            "gpu_slot_ids": [1],
+            "gpu_slots_per_device": 4,
+            "gpu_lease_evidence": "gpu-lease.json",
             "network": "disabled",
             "plugin_search": "strict",
             "steps": {"scratch_build": {"status": "passed", "evidence": "build.log"}},
@@ -2053,6 +2115,9 @@ class TestEvidenceCompleteness:
         assert "a" * 40 in rendered
         assert "libtrtmc_model_alpha.so" in rendered
         assert "Host GPU ID" in rendered
+        assert "Full bundle builds per model" in rendered
+        assert "Staged runtime library SHA-256" in rendered
+        assert "Model DSOs staged" in rendered
         assert ">2<" in rendered
         assert "test_alpha" in rendered
         assert "test_alpha_unit.py" in rendered
@@ -2066,7 +2131,7 @@ class TestEvidenceCompleteness:
             for name in (
                 "projection_validation", "configure", "scratch_build",
                 "dso_isolation", "cpp_tests", "e2e_reference",
-                "result_verification",
+                "engine_build_budget", "result_verification",
             )
         }
         steps["python_tests"] = {"status": "skipped"}
@@ -2076,6 +2141,10 @@ class TestEvidenceCompleteness:
             "source_revision": "a" * 40,
             "suite": "premerge",
             "gpu_id": "2",
+            "gpu_resource_class": "shared",
+            "gpu_slot_ids": [1],
+            "gpu_slots_per_device": 4,
+            "gpu_lease_evidence": "gpu-lease.json",
             "validation_exit_code": 0,
             "steps": steps,
         }
@@ -2086,21 +2155,43 @@ class TestEvidenceCompleteness:
             "runtime_model": "alpha",
             "runtime_library": "libtrtmc_model_alpha.so",
             "runtime_library_sha256": "b" * 64,
+            "staged_runtime_library_sha256": "b" * 64,
             "sibling_model_count": 0,
             "model_dso_count": 1,
+            "staged_model_dso_count": 1,
+            "engine_builds_per_model": 1,
+            "engine_build_count": 1,
+            "engine_build_verification": "engine-build-verification.json",
             "gpu_id": "2",
+            "gpu_resource_class": "shared",
+            "gpu_slot_ids": [1],
+            "gpu_slots_per_device": 4,
+            "gpu_lease_evidence": "gpu-lease.json",
             "network": "disabled",
             "plugin_search": "strict",
         }
         selection = {
             "requested_model": "alpha",
+            "gpu_id": "2",
             "e2e_test": "tests/e2e/models/alpha/test_alpha_e2e.py",
             "e2e_cases": [{"name": "alpha-small"}],
+            "gpu_resource_class": "shared",
+            "gpu_slot_ids": [1],
+            "gpu_slots_per_device": 4,
+            "gpu_lease_evidence": "gpu-lease.json",
         }
 
         assert mod.validate_proof_context(status, proof, selection) == []
         proof["runtime_library_sha256"] = "invalid"
         assert "SHA-256" in " ".join(
+            mod.validate_proof_context(status, proof, selection))
+        proof["runtime_library_sha256"] = "b" * 64
+        proof["staged_runtime_library_sha256"] = "c" * 64
+        assert "does not match" in " ".join(
+            mod.validate_proof_context(status, proof, selection))
+        proof["staged_runtime_library_sha256"] = "b" * 64
+        proof["staged_model_dso_count"] = 2
+        assert "staged model DSO" in " ".join(
             mod.validate_proof_context(status, proof, selection))
 
     def test_proof_diagnostics_embed_bounded_log_and_junit_failure(self, tmp_path):

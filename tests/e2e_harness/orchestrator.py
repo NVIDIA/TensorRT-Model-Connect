@@ -396,6 +396,22 @@ def _resolve_bundle(
         build_timing_path = Path(ctx.engine_dir) / f"{case.name}.build_timing.json"
     build_timing_path.parent.mkdir(parents=True, exist_ok=True)
     cmd.extend(["--build-timing-json", str(build_timing_path)])
+    if env.get("TRTMC_ENGINE_BUILD_GUARD_DIR"):
+        build_identity = str(case.metadata.get("model_name") or "").strip()
+        if not build_identity:
+            return (
+                None,
+                None,
+                "guarded full bundle build requires manifest model_name metadata",
+                {
+                    "command": cmd,
+                    "returncode": -1,
+                    "stdout": "",
+                    "stderr": "missing manifest model_name metadata",
+                },
+            )
+        env["TRTMC_ENGINE_BUILD_IDENTITY"] = build_identity
+        env["TRTMC_ENGINE_BUILD_COMMAND_JSON"] = json.dumps(cmd)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600, env=env)
         elapsed = time.monotonic() - t0

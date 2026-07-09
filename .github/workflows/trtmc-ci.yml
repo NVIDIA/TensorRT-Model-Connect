@@ -137,6 +137,7 @@ jobs:
       contents: read
     outputs:
       has_models: ${{ steps.impact.outputs.has_models }}
+      matrix: ${{ steps.impact.outputs.matrix }}
       affected_models: ${{ steps.impact.outputs.affected_models }}
       expected_count: ${{ steps.impact.outputs.expected_count }}
       mode: ${{ steps.impact.outputs.mode }}
@@ -199,7 +200,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   model-proof:
-    name: 3 / Isolated proofs / ${{ needs.impact.outputs.affected_models }}
+    name: 3 / Model / ${{ matrix.model }}
     needs:
       - legal
       - impact
@@ -208,12 +209,15 @@ jobs:
         needs.legal.outputs.authorized == 'true' &&
         needs.impact.outputs.has_models == 'true'
       }}
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}
     permissions:
       contents: read
     uses: ./.github/workflows/model-proof.yml
     with:
-      models: ${{ needs.impact.outputs.affected_models }}
-      expected_count: ${{ fromJSON(needs.impact.outputs.expected_count) }}
+      model: ${{ matrix.model }}
       revision: ${{ needs.legal.outputs.tested_sha }}
       suite: premerge
     secrets: inherit
@@ -240,6 +244,246 @@ jobs:
           test "$IMPACT_MODE" = "none"
           echo "No model-owned or platform inputs changed." >> "$GITHUB_STEP_SUMMARY"
 
+  report:
+    name: 4 / Combined HTML report
+    needs:
+      - legal
+      - impact
+      - model-proof
+      - no-model
+    if: >-
+      ${{
+        always() &&
+        github.event.label.name == 'run-ci'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Bootstrap combined HTML before checkout
+        env:
+          EXPECTED_MODELS: ${{ needs.impact.outputs.affected_models }}
+          REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
+          SUITE: premerge
+          HAS_MODELS: ${{ needs.impact.outputs.has_models }}
+          LEGAL_RESULT: ${{ needs.legal.result }}
+          IMPACT_RESULT: ${{ needs.impact.result }}
+          MODEL_RESULT: ${{ needs.model-proof.result }}
+          NO_MODEL_RESULT: ${{ needs.no-model.result }}
+          REPORT_OUTPUT_DIR: ${{ runner.temp }}/model-proof-report-${{ github.run_id }}-${{ github.run_attempt }}
+          PARTS_DIR: ${{ runner.temp }}/model-proof-parts-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          echo "REPORT_OUTPUT_DIR=$REPORT_OUTPUT_DIR" >> "$GITHUB_ENV"
+          echo "PARTS_DIR=$PARTS_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$REPORT_OUTPUT_DIR" "$PARTS_DIR"
+          python3 - \
+            "$REPORT_OUTPUT_DIR" "$EXPECTED_MODELS" "$REVISION" "$SUITE" \
+            "$HAS_MODELS" "$LEGAL_RESULT" "$IMPACT_RESULT" \
+            "$MODEL_RESULT" "$NO_MODEL_RESULT" <<'PY'
+          import html
+          import json
+          import sys
+          from pathlib import Path
+
+          (
+              output_dir,
+              raw_models,
+              revision,
+              suite,
+              has_models,
+              legal_result,
+              impact_result,
+              model_result,
+              no_model_result,
+          ) = sys.argv[1:]
+          root = Path(output_dir)
+          try:
+              models = json.loads(raw_models)
+          except json.JSONDecodeError:
+              models = []
+          if not isinstance(models, list):
+              models = []
+          models = [model for model in models if isinstance(model, str)]
+          upstream_results = {
+              "legal": legal_result,
+              "impact": impact_result,
+          }
+          if has_models == "true":
+              upstream_results["model-proof"] = model_result
+          elif has_models == "false":
+              upstream_results["no-model"] = no_model_result
+          else:
+              upstream_results["impact-selection"] = "invalid"
+          issues = ["Combined report generation has not completed."]
+          issues.extend(
+              f"Upstream job {name!r} finished with result {result!r}."
+              for name, result in upstream_results.items()
+              if result != "success"
+          )
+          status = {
+              "schema_version": 1,
+              "report_kind": "combined_model_proof",
+              "outcome": "failed",
+              "source_revision": revision,
+              "suite": suite,
+              "upstream_results": upstream_results,
+              "expected_models": models,
+              "discovered_models": [],
+              "expected_count": len(models),
+              "discovered_count": 0,
+              "result_count": 0,
+              "issue_count": len(issues),
+              "issues": issues,
+              "models": [],
+          }
+          (root / "model-proof-report-status.json").write_text(
+              json.dumps(status, indent=2) + "\n", encoding="utf-8"
+          )
+          model_text = ", ".join(models) if models else "No affected models"
+          issue_items = "".join(f"<li>{html.escape(issue)}</li>" for issue in issues)
+          document = f"""<!DOCTYPE html>
+          <html lang="en"><head><meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>TensorRT-Model-Connect Premerge Report</title>
+          <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem}}.pending{{padding:1rem;background:#fff7ed;border:1px solid #fdba74;border-radius:.5rem}}code{{overflow-wrap:anywhere}}</style>
+          </head><body><h1>TensorRT-Model-Connect Premerge Report</h1>
+          <div class="pending"><strong>The combined report did not complete.</strong></div>
+          <p>Revision: <code>{html.escape(revision)}</code></p>
+          <p>Suite: <code>{html.escape(suite)}</code></p>
+          <p>Expected models: {html.escape(model_text)}</p>
+          <h2>Available diagnostics</h2><ul>{issue_items}</ul></body></html>"""
+          (root / "model-proof-report.html").write_text(document, encoding="utf-8")
+          PY
+
+      - name: Check out pinned merge snapshot for report tooling
+        id: checkout
+        if: ${{ always() }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download isolated model proof artifacts
+        id: download
+        if: ${{ always() && needs.impact.outputs.has_models == 'true' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: model-proof-*-${{ needs.legal.outputs.tested_sha || github.sha }}-*
+          path: ${{ runner.temp }}/model-proof-parts-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: false
+
+      - name: Compose combined model proof report
+        id: compose
+        if: ${{ always() }}
+        env:
+          EXPECTED_MODELS: ${{ needs.impact.outputs.affected_models }}
+          REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
+          SUITE: premerge
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+          HAS_MODELS: ${{ needs.impact.outputs.has_models }}
+          LEGAL_RESULT: ${{ needs.legal.result }}
+          IMPACT_RESULT: ${{ needs.impact.result }}
+          MODEL_RESULT: ${{ needs.model-proof.result }}
+          NO_MODEL_RESULT: ${{ needs.no-model.result }}
+        run: |
+          set -uo pipefail
+          compose_rc=1
+          if [ "$CHECKOUT_OUTCOME" != "success" ]; then
+            echo "::error::Report tooling checkout did not succeed: $CHECKOUT_OUTCOME"
+          else
+            if [ "$HAS_MODELS" = "true" ] && [ "$DOWNLOAD_OUTCOME" != "success" ]; then
+              echo "::error::Model proof artifact download did not succeed: $DOWNLOAD_OUTCOME"
+            fi
+            upstream_args=(
+              --upstream-result "legal=$LEGAL_RESULT"
+              --upstream-result "impact=$IMPACT_RESULT"
+            )
+            case "$HAS_MODELS" in
+              true) upstream_args+=(--upstream-result "model-proof=$MODEL_RESULT") ;;
+              false) upstream_args+=(--upstream-result "no-model=$NO_MODEL_RESULT") ;;
+              *) upstream_args+=(--upstream-result "impact-selection=invalid") ;;
+            esac
+            python3 scripts/generate_model_proof_report.py \
+              --parts-dir "$PARTS_DIR" \
+              --expected-models "$EXPECTED_MODELS" \
+              --revision "$REVISION" \
+              --suite "$SUITE" \
+              --project-dir "$GITHUB_WORKSPACE" \
+              --output "$REPORT_OUTPUT_DIR/model-proof-report.html" \
+              --status-output "$REPORT_OUTPUT_DIR/model-proof-report-status.json" \
+              "${upstream_args[@]}"
+            compose_rc=$?
+          fi
+          echo "exit_code=$compose_rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload combined model proof HTML report
+        id: report_upload
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-proof-html-${{ needs.legal.outputs.tested_sha || github.sha }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/model-proof-report-${{ github.run_id }}-${{ github.run_attempt }}/model-proof-report.html
+            ${{ runner.temp }}/model-proof-report-${{ github.run_id }}-${{ github.run_attempt }}/model-proof-report-status.json
+
+      - name: Enforce combined report certification
+        if: ${{ always() }}
+        env:
+          COMPOSE_EXIT_CODE: ${{ steps.compose.outputs.exit_code }}
+          REPORT_UPLOAD_OUTCOME: ${{ steps.report_upload.outcome }}
+          EXPECTED_MODELS: ${{ needs.impact.outputs.affected_models }}
+          REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
+          SUITE: premerge
+        run: |
+          set -euo pipefail
+          test "$REPORT_UPLOAD_OUTCOME" = "success" || {
+            echo "::error::Combined HTML artifact upload result: $REPORT_UPLOAD_OUTCOME"
+            exit 1
+          }
+          test "${COMPOSE_EXIT_CODE:-1}" -eq 0 || {
+            echo "::error::Combined report certification exited ${COMPOSE_EXIT_CODE:-missing}"
+            exit 1
+          }
+          python3 - \
+            "$REPORT_OUTPUT_DIR/model-proof-report-status.json" \
+            "$EXPECTED_MODELS" "$REVISION" "$SUITE" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          status_path, raw_expected, revision, suite = sys.argv[1:]
+          status = json.loads(Path(status_path).read_text(encoding="utf-8"))
+          expected = json.loads(raw_expected)
+          errors = []
+          required = {
+              "schema_version": 1,
+              "report_kind": "combined_model_proof",
+              "outcome": "passed",
+              "source_revision": revision,
+              "suite": suite,
+              "expected_models": expected,
+              "discovered_models": expected,
+              "expected_count": len(expected),
+              "discovered_count": len(expected),
+              "issue_count": 0,
+          }
+          for key, wanted in required.items():
+              if status.get(key) != wanted:
+                  errors.append(f"{key}: expected {wanted!r}, found {status.get(key)!r}")
+          if errors:
+              raise SystemExit("Combined report status is not certified:\n- " + "\n- ".join(errors))
+          PY
+
   required:
     # Authorized runs preserve the exact context required by main's ruleset.
     # Other labels use a distinct successful context and leave it unsatisfied.
@@ -249,6 +493,7 @@ jobs:
       - impact
       - model-proof
       - no-model
+      - report
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -263,6 +508,7 @@ jobs:
           IMPACT_RESULT: ${{ needs.impact.result }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
           NO_MODEL_RESULT: ${{ needs.no-model.result }}
+          REPORT_RESULT: ${{ needs.report.result }}
           HAS_MODELS: ${{ needs.impact.outputs.has_models }}
           EXPECTED_COUNT: ${{ needs.impact.outputs.expected_count }}
         run: |
@@ -285,6 +531,10 @@ jobs:
           test -n "$TESTED_SHA"
           test "$IMPACT_RESULT" = "success" || {
             echo "::error::Ownership and impact result: $IMPACT_RESULT"
+            exit 1
+          }
+          test "$REPORT_RESULT" = "success" || {
+            echo "::error::Combined HTML report result: $REPORT_RESULT"
             exit 1
           }
 

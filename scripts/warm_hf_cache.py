@@ -49,6 +49,7 @@ try:
     from huggingface_hub import constants as hf_constants
     from huggingface_hub import hf_hub_download
     from huggingface_hub import snapshot_download
+    from huggingface_hub.file_download import repo_folder_name
     from huggingface_hub.utils import HfHubHTTPError
 except ImportError:
     print("ERROR: huggingface_hub not available", file=sys.stderr)
@@ -218,6 +219,13 @@ parser.add_argument(
     "--local-only",
     action="store_true",
     help="Check cache readiness without making network requests or changing the cache.",
+)
+parser.add_argument(
+    "--emit-cache-repos",
+    metavar="JSON",
+    help="After a successful cache check, write the unique selected Hugging Face "
+         "repository IDs and their canonical cache folders to this JSON file. "
+         "This is used to construct a positive per-model cache view.",
 )
 args = parser.parse_args()
 
@@ -455,6 +463,82 @@ def _warm_exit_code(strict: bool, failures: list[str]) -> int:
     return 1 if strict and failures else 0
 
 
+def _cache_repository_manifest(
+    repo_ids: list[str],
+    *,
+    hub_cache: pathlib.Path,
+) -> dict[str, object]:
+    """Return a fail-closed manifest for selected repositories in one HF cache."""
+    try:
+        canonical_hub = hub_cache.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"HF Hub cache is unavailable: {hub_cache}: {exc}") from exc
+    if not canonical_hub.is_dir():
+        raise RuntimeError(f"HF Hub cache is not a directory: {canonical_hub}")
+
+    repositories: list[dict[str, str]] = []
+    seen_repo_ids: set[str] = set()
+    seen_folders: set[str] = set()
+    for repo_id in repo_ids:
+        if repo_id in seen_repo_ids:
+            continue
+        seen_repo_ids.add(repo_id)
+        folder = repo_folder_name(repo_id=repo_id, repo_type="model")
+        if not folder or "/" in folder or "\\" in folder or folder in {".", ".."}:
+            raise RuntimeError(
+                f"Hugging Face repository has an unsafe canonical cache folder: "
+                f"{repo_id!r}: {folder!r}"
+            )
+        if folder in seen_folders:
+            raise RuntimeError(f"duplicate canonical cache folder: {folder}")
+        seen_folders.add(folder)
+
+        raw_repo_path = canonical_hub / folder
+        if raw_repo_path.is_symlink() or not raw_repo_path.is_dir():
+            raise RuntimeError(
+                f"selected Hugging Face repository cache is missing or not a directory: "
+                f"{repo_id}: {raw_repo_path}"
+            )
+        try:
+            canonical_repo_path = raw_repo_path.resolve(strict=True)
+            canonical_repo_path.relative_to(canonical_hub)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                f"selected Hugging Face repository cache escapes the configured hub: "
+                f"{repo_id}: {raw_repo_path}"
+            ) from exc
+        repositories.append(
+            {
+                "repo_id": repo_id,
+                "repo_type": "model",
+                "cache_folder": folder,
+                "cache_path": str(canonical_repo_path),
+            }
+        )
+
+    if not repositories:
+        raise RuntimeError("no selected Hugging Face repositories were resolved")
+    return {
+        "schema_version": 1,
+        "hub_cache": str(canonical_hub),
+        "repositories": repositories,
+    }
+
+
+def _write_cache_repository_manifest(
+    output: pathlib.Path,
+    repo_ids: list[str],
+) -> None:
+    payload = _cache_repository_manifest(
+        repo_ids,
+        hub_cache=pathlib.Path(hf_constants.HF_HUB_CACHE),
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f".{output.name}.tmp-{os.getpid()}")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, output)
+
+
 selective = filter_names is not None
 asset_scope = f", {len(file_assets)} file asset(s)" if file_assets else ""
 scope = (
@@ -543,6 +627,20 @@ else:
     else:
         print(f"Downloaded {downloaded} item(s) successfully.")
 
-strict_exit_code = _warm_exit_code(args.strict, warned)
+if args.emit_cache_repos and not warned:
+    selected_repo_ids = [hf_id for _, hf_id, _, _ in entries]
+    selected_repo_ids.extend(hf_id for _, hf_id, _ in file_assets)
+    try:
+        _write_cache_repository_manifest(
+            pathlib.Path(args.emit_cache_repos),
+            selected_repo_ids,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: could not emit selected cache repositories: {exc}", file=sys.stderr)
+        warned.append("cache-repository-evidence")
+    else:
+        print(f"Selected cache repository evidence: {args.emit_cache_repos}")
+
+strict_exit_code = _warm_exit_code(args.strict or bool(args.emit_cache_repos), warned)
 if strict_exit_code:
     sys.exit(strict_exit_code)

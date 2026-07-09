@@ -127,7 +127,17 @@ def _make_repo(tmp_path: Path) -> tuple[Path, str]:
     _write(repo, "scripts/generate_e2e_report.py", "# report generator\n")
     _write(repo, "scripts/generate_e2e_report_assets/e2e_report.css", "/* report */\n")
     _write(repo, "scripts/generate_e2e_report_assets/e2e_report.js", "// report\n")
+    _write(repo, "scripts/reporting/__init__.py", "")
     _write(repo, "scripts/reporting/vlm_assessment.py", "# report component\n")
+    _write(repo, "scripts/warm_hf_cache.py", "# cache check\n")
+    _write(repo, "tools/__init__.py", "")
+    _write(repo, "tools/diff_logits.py", "# shared logits diff\n")
+    _write(repo, "tools/diff_vl.py", "# shared vision-language diff\n")
+    _write(repo, "tools/model_plugin_isolation.py", "# proof verifier\n")
+    _write(repo, "tools/tool_helpers.py", "# shared tool helpers\n")
+    _write(repo, "scripts/repro_trt_fp8_mha.py", "# unrelated model script\n")
+    _write(repo, "tools/diff_t5.py", "# unrelated model diff\n")
+    _write(repo, "tools/validate_t5.py", "# unrelated model validator\n")
     return repo, _commit(repo, "initial")
 
 
@@ -176,6 +186,47 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
         "expected_count=2",
         "mode=all",
     ]
+
+
+def test_matrix_schedules_unknown_then_longest_known_premerge_models(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _make_repo(tmp_path)
+    for model, seconds in (("model_a", 25), ("model_b", 200)):
+        manifest_path = repo / f"tests/e2e/models/{model}/manifests/{model}.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["testcases"] = [{"name": f"{model}-case", "ci_tier": "l0_only"}]
+        manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+        if model == "model_b":
+            _add_model(repo, "model_c")
+    _write(
+        repo,
+        "tests/e2e/timing_estimates.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "estimates_s": {
+                    "model_a-case": 25,
+                    "model_b-case": 200,
+                },
+            }
+        )
+        + "\n",
+    )
+    revision = _commit(repo, "add timing estimates")
+
+    result = json.loads(_run(repo, "all", "--revision", revision).stdout)
+
+    # model_c has no estimate, so it runs first conservatively. The known
+    # models then follow longest-processing-time order.
+    assert result["affected_models"] == ["model_a", "model_b", "model_c"]
+    assert result["matrix"] == {
+        "include": [
+            {"model": "model_c"},
+            {"model": "model_b"},
+            {"model": "model_a"},
+        ]
+    }
 
 
 def test_impact_selects_only_model_a(tmp_path: Path) -> None:
@@ -331,6 +382,10 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     assert not (output / "python/tensorrt_model_connect/families/model_b").exists()
     assert not (output / "src/runtime/models/model_b").exists()
     assert not (output / "tests/e2e/models/model_b").exists()
+    assert not (output / "tests/cpp/models/model_b").exists()
+    assert (
+        output / "tests/cpp/models/model_a/test_model_a.cpp"
+    ).is_file()
     assert (output / "src/runtime/core/core.cpp").is_file()
     assert (output / "python/tensorrt_model_connect/families/__init__.py").is_file()
     assert (output / "tests/__init__.py").is_file()
@@ -358,9 +413,22 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         "scripts/generate_e2e_report.py",
         "scripts/generate_e2e_report_assets/e2e_report.css",
         "scripts/generate_e2e_report_assets/e2e_report.js",
+        "scripts/reporting/__init__.py",
         "scripts/reporting/vlm_assessment.py",
+        "scripts/warm_hf_cache.py",
+        "tools/__init__.py",
+        "tools/diff_logits.py",
+        "tools/diff_vl.py",
+        "tools/model_plugin_isolation.py",
+        "tools/tool_helpers.py",
     ):
         assert (output / report_path).is_file()
+    for unrelated_tool in (
+        "scripts/repro_trt_fp8_mha.py",
+        "tools/diff_t5.py",
+        "tools/validate_t5.py",
+    ):
+        assert not (output / unrelated_tool).exists()
     assert manifest["runtime_model"] == "model_a"
     assert manifest["build_target"] == "trtmc_model_model_a"
     entry = next(

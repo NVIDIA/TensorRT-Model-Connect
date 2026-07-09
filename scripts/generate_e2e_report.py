@@ -511,12 +511,30 @@ def _path_within(path: Path, root: Path) -> Optional[Path]:
 
 
 def _resolve_input_media(ref: Any, project_dir: Optional[Path]) -> Optional[Path]:
-    """Resolve a manifest-owned input file below the projected source tree."""
+    """Resolve a manifest-owned input file below the checked-out source tree.
+
+    Isolated model proofs run with their positive source projection mounted at
+    ``/src``. Their result JSON therefore records manifest inputs as absolute
+    ``/src/...`` paths. A later combined-report job checks out that revision at
+    another path. Rebase only that exact isolated-source prefix; all other
+    absolute paths remain invalid. ``_path_within`` rejects both traversal and
+    symlink escapes after rebasing.
+    """
     if not isinstance(ref, (str, Path)) or not str(ref) or project_dir is None:
         return None
     raw = Path(str(ref))
-    candidate = raw if raw.is_absolute() else project_dir / raw
-    return _path_within(candidate, project_dir)
+    if not raw.is_absolute():
+        return _path_within(project_dir / raw, project_dir)
+
+    direct = _path_within(raw, project_dir)
+    if direct is not None:
+        return direct
+
+    try:
+        isolated_relative = raw.relative_to(Path("/src"))
+    except ValueError:
+        return None
+    return _path_within(project_dir / isolated_relative, project_dir)
 
 
 def _resolve_artifact_media(ref: Any, art_dir: Path) -> Optional[Path]:
@@ -2759,7 +2777,11 @@ def _proof_context(
     for key in (
         "model", "source_revision", "suite", "runtime_model",
         "runtime_library", "runtime_library_sha256", "sibling_model_count",
-        "model_dso_count", "gpu_id", "network", "plugin_search", "passed",
+        "model_dso_count", "staged_runtime_library_sha256",
+        "staged_model_dso_count", "engine_builds_per_model", "engine_build_count",
+        "engine_build_verification", "gpu_id", "gpu_resource_class",
+        "gpu_slot_ids", "gpu_slots_per_device", "gpu_lease_evidence",
+        "network", "plugin_search", "passed",
     ):
         if key in proof:
             context[key] = proof[key]
@@ -2811,11 +2833,72 @@ def validate_proof_context(
         issues.append("Final proof JSON does not prove zero sibling models")
     if proof.get("model_dso_count") != 1:
         issues.append("Final proof JSON does not prove exactly one model DSO")
+    staged_digest = str(proof.get("staged_runtime_library_sha256") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", staged_digest):
+        issues.append("Final proof JSON has no valid staged runtime library SHA-256")
+    elif staged_digest != digest:
+        issues.append("Staged runtime library SHA-256 does not match the built library")
+    if proof.get("staged_model_dso_count") != 1:
+        issues.append("Final proof JSON does not prove exactly one staged model DSO")
+    if proof.get("engine_builds_per_model") != 1:
+        issues.append("Final proof JSON does not prove one full bundle build per model")
+    selected_build_models = {
+        str(case.get("model") or case.get("name") or "")
+        for case in selection.get("e2e_cases", [])
+        if isinstance(case, dict) and (case.get("model") or case.get("name"))
+    }
+    if proof.get("engine_build_count") != len(selected_build_models):
+        issues.append(
+            "Final proof JSON engine build count does not match selected configurations"
+        )
+    if proof.get("engine_build_verification") != "engine-build-verification.json":
+        issues.append("Final proof JSON does not identify engine build verification evidence")
     gpu_id = str(proof.get("gpu_id") or "")
     if not re.fullmatch(r"[0-9]+", gpu_id):
         issues.append("Final proof JSON has no valid host GPU ID")
     if gpu_id != str(status.get("gpu_id") or ""):
         issues.append("Proof GPU ID does not match model-proof status")
+    if gpu_id != str(selection.get("gpu_id") or ""):
+        issues.append("Proof GPU ID does not match test selection")
+    resource_class = proof.get("gpu_resource_class")
+    slot_ids = proof.get("gpu_slot_ids")
+    slots_per_device = proof.get("gpu_slots_per_device")
+    lease_evidence = proof.get("gpu_lease_evidence")
+    if resource_class not in {"shared", "exclusive_gpu"}:
+        issues.append("Final proof JSON has no valid GPU resource class")
+    if not isinstance(slots_per_device, int) or isinstance(slots_per_device, bool) \
+            or slots_per_device < 1:
+        issues.append("Final proof JSON has no valid GPU slots-per-device value")
+    valid_slot_ids = (
+        isinstance(slot_ids, list)
+        and bool(slot_ids)
+        and all(
+            isinstance(slot, int) and not isinstance(slot, bool)
+            for slot in slot_ids
+        )
+        and len(slot_ids) == len(set(slot_ids))
+        and isinstance(slots_per_device, int)
+        and not isinstance(slots_per_device, bool)
+        and all(0 <= slot < slots_per_device for slot in slot_ids)
+    )
+    if not valid_slot_ids:
+        issues.append("Final proof JSON has no valid unique GPU slot IDs")
+    elif resource_class == "shared" and len(slot_ids) != 1:
+        issues.append("Shared GPU proof must hold exactly one GPU slot")
+    elif resource_class == "exclusive_gpu" and sorted(slot_ids) != list(
+        range(slots_per_device)
+    ):
+        issues.append("Exclusive GPU proof must hold every slot on its GPU")
+    if lease_evidence != "gpu-lease.json":
+        issues.append("Final proof JSON does not identify GPU lease evidence")
+    for field in (
+        "gpu_resource_class", "gpu_slot_ids", "gpu_slots_per_device",
+        "gpu_lease_evidence",
+    ):
+        if proof.get(field) != status.get(field):
+            issues.append(f"Proof {field} does not match model-proof status")
+        if proof.get(field) != selection.get(field):
+            issues.append(f"Proof {field} does not match test selection")
     if proof.get("network") != "disabled" or proof.get("plugin_search") != "strict":
         issues.append("Final proof JSON is missing hermetic network/plugin guarantees")
     if proof.get("model") != status.get("model"):
@@ -2891,9 +2974,18 @@ def render_proof_section(context: Dict[str, Any]) -> str:
         ("Runtime model", context.get("runtime_model")),
         ("Runtime library", context.get("runtime_library")),
         ("Runtime library SHA-256", context.get("runtime_library_sha256")),
+        ("Staged runtime library SHA-256", context.get("staged_runtime_library_sha256")),
         ("Sibling models in projection", context.get("sibling_model_count")),
         ("Model DSOs produced", context.get("model_dso_count")),
+        ("Model DSOs staged", context.get("staged_model_dso_count")),
+        ("Full bundle builds per model", context.get("engine_builds_per_model")),
+        ("Full bundle builds recorded", context.get("engine_build_count")),
+        ("Engine build verification", context.get("engine_build_verification")),
         ("Host GPU ID", context.get("gpu_id")),
+        ("GPU resource class", context.get("gpu_resource_class")),
+        ("GPU slot IDs", context.get("gpu_slot_ids")),
+        ("GPU slots per device", context.get("gpu_slots_per_device")),
+        ("GPU lease evidence", context.get("gpu_lease_evidence")),
         ("Container network", context.get("network")),
         ("Plugin search", context.get("plugin_search")),
     )
@@ -2966,6 +3058,56 @@ def render_proof_section(context: Dict[str, Any]) -> str:
             )
     parts.append("</section>")
     return "\n".join(parts)
+
+
+def render_proof_batch_section(contexts: List[Dict[str, Any]]) -> str:
+    """Render a compact batch summary followed by each model's proof.
+
+    A premerge matrix produces one hermetic proof artifact per ownership
+    model.  Keeping those proof contexts separate preserves the per-model
+    isolation evidence while the rest of this module renders one familiar
+    E2E dashboard across all of their testcase results.
+    """
+    if not contexts:
+        return ""
+
+    summary_rows: List[str] = []
+    details: List[str] = []
+    for context in contexts:
+        model = str(context.get("model") or "unknown")
+        outcome = str(
+            context.get("outcome")
+            or ("passed" if context.get("passed") is True else "incomplete")
+        )
+        selection = context.get("selection") or {}
+        selected_cases = selection.get("e2e_cases") or []
+        case_count = len(selected_cases) if isinstance(selected_cases, list) else 0
+        summary_rows.append(
+            "<tr>"
+            f"<td><code>{_esc(model)}</code></td>"
+            f"<td>{_badge(outcome)}</td>"
+            f"<td><code>{_esc(context.get('gpu_id') or '')}</code></td>"
+            f"<td>{case_count}</td>"
+            f"<td>{_esc(context.get('runtime_library') or '')}</td>"
+            "</tr>"
+        )
+        details.append(
+            '<details class="proof-model-details" open>'
+            f"<summary><strong>{_esc(model)}</strong> &mdash; "
+            f"{_badge(outcome)}</summary>"
+            f"{render_proof_section(context)}"
+            "</details>"
+        )
+
+    return (
+        '<section class="proof-batch-section"><h2>Isolated Model Proofs</h2>'
+        '<table class="proof-table"><thead><tr>'
+        "<th>Model</th><th>Outcome</th><th>GPU</th><th>E2E cases</th>"
+        "<th>Runtime library</th></tr></thead><tbody>"
+        + "".join(summary_rows)
+        + "</tbody></table></section>"
+        + "\n".join(details)
+    )
 
 
 def _embeddable(path: Optional[Path]) -> bool:
@@ -3219,6 +3361,7 @@ def render_report(
     proof_context: Optional[Dict[str, Any]] = None,
     evidence_issues: Optional[List[str]] = None,
     model_manifests: Optional[List[Dict[str, Any]]] = None,
+    proof_contexts: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Assemble the full self-contained HTML report."""
     # Reset command counter for deterministic output.
@@ -3237,6 +3380,8 @@ def render_report(
 
     if proof_context:
         parts.append(render_proof_section(proof_context))
+    if proof_contexts:
+        parts.append(render_proof_batch_section(proof_contexts))
 
     # Timestamp
     if results:

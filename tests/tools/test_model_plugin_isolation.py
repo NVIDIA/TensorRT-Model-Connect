@@ -754,3 +754,104 @@ def test_verify_results_rejects_missing_result(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     assert "result.json is missing" in result.stderr
+
+
+def _write_build_ledger(
+    ledger_dir: Path,
+    model_name: str,
+    bundle_path: Path,
+    timing_path: Path,
+    **overrides,
+) -> None:
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "identity": model_name,
+        "status": "passed",
+        "invocation_count": 1,
+        "returncode": 0,
+        "source_revision": "abc123",
+        "bundle_path": str(bundle_path),
+        "build_timing_path": str(timing_path),
+    }
+    payload.update(overrides)
+    (ledger_dir / f"{model_name}.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def test_verify_builds_accepts_exactly_one_completed_build_per_model(
+    tmp_path: Path,
+) -> None:
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("decoder-small\nencoder-small\n", encoding="utf-8")
+    ledger_dir = tmp_path / "engine-builds"
+    for model_name in ("decoder-small", "encoder-small"):
+        bundle_path = tmp_path / f"{model_name}.trtfb"
+        bundle_path.write_bytes(b"bundle")
+        timing_path = tmp_path / f"{model_name}-timing.json"
+        timing_path.write_text("{}\n", encoding="utf-8")
+        _write_build_ledger(
+            ledger_dir,
+            model_name,
+            bundle_path,
+            timing_path,
+        )
+    report_path = tmp_path / "build-verification.json"
+
+    result = _run(
+        "verify-builds",
+        "--models-file",
+        str(models_file),
+        "--ledger-dir",
+        str(ledger_dir),
+        "--source-revision",
+        "abc123",
+        "--report",
+        str(report_path),
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert result.stdout.count("PASS") == 2
+    assert report["passed"] is True
+    assert report["builds_per_model"] == 1
+    assert report["expected_models"] == ["decoder-small", "encoder-small"]
+
+
+def test_verify_builds_rejects_a_missing_or_failed_build(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("decoder-small\nencoder-small\n", encoding="utf-8")
+    ledger_dir = tmp_path / "engine-builds"
+    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path.write_bytes(b"bundle")
+    timing_path = tmp_path / "decoder-small-timing.json"
+    timing_path.write_text("{}\n", encoding="utf-8")
+    _write_build_ledger(
+        ledger_dir,
+        "decoder-small",
+        bundle_path,
+        timing_path,
+        status="failed",
+        returncode=1,
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "verify-builds",
+            "--models-file",
+            str(models_file),
+            "--ledger-dir",
+            str(ledger_dir),
+            "--source-revision",
+            "abc123",
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "missing build ledgers: encoder-small" in result.stderr
+    assert "decoder-small: status is 'failed'" in result.stderr

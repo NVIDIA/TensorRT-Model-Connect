@@ -61,6 +61,12 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "conftest.py",
         "pyproject.toml",
         "ruff.toml",
+        "scripts/generate_e2e_report.py",
+        "scripts/generate_e2e_report_assets/e2e_report.css",
+        "scripts/generate_e2e_report_assets/e2e_report.js",
+        "scripts/reporting/__init__.py",
+        "scripts/reporting/vlm_assessment.py",
+        "scripts/warm_hf_cache.py",
         "tests/__init__.py",
         "tests/builder/__init__.py",
         "tests/builder/conftest.py",
@@ -73,6 +79,11 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "tests/test_e2e.py",
         "tests/test_e2e_selection.py",
         "tests/test_tvm_ffi_e2e.py",
+        "tools/__init__.py",
+        "tools/diff_logits.py",
+        "tools/diff_vl.py",
+        "tools/model_plugin_isolation.py",
+        "tools/tool_helpers.py",
         *MODEL_ROOT_PLATFORM_FILES,
     }
 )
@@ -80,7 +91,6 @@ PLATFORM_PROJECTION_PREFIXES = (
     "cmake/",
     "include/",
     "python/tensorrt_model_connect/",
-    "scripts/",
     "src/",
     "tensorrt_model_connect/",
     "tests/cpp/",
@@ -88,7 +98,6 @@ PLATFORM_PROJECTION_PREFIXES = (
     "tests/e2e/",
     "tests/e2e_harness/",
     "third_party/",
-    "tools/",
 )
 
 LEGAL_OR_DOC_EXACT = frozenset(
@@ -514,18 +523,124 @@ def _diff_entries(repo_root: Path, base: str, head: str) -> tuple[DiffEntry, ...
 
 
 def _result(
-    models: Iterable[str], *, mode: str, changes: list[dict[str, object]]
+    models: Iterable[str],
+    *,
+    mode: str,
+    changes: list[dict[str, object]],
+    matrix_models: Iterable[str] | None = None,
 ) -> dict[str, object]:
     selected = sorted(set(models))
+    scheduled = list(matrix_models) if matrix_models is not None else selected
+    if len(scheduled) != len(set(scheduled)) or set(scheduled) != set(selected):
+        raise ModelCIError("matrix model order must contain each affected model exactly once")
     return {
         "schema_version": 1,
         "mode": mode,
         "has_models": bool(selected),
         "expected_count": len(selected),
         "affected_models": selected,
-        "matrix": {"include": [{"model": model} for model in selected]},
+        "matrix": {"include": [{"model": model} for model in scheduled]},
         "changes": changes,
     }
+
+
+def _scheduled_models(
+    repo_root: Path,
+    catalog: OwnershipCatalog,
+    models: Iterable[str],
+) -> list[str]:
+    """Order model matrix entries longest-first using the pinned timing data.
+
+    GitHub starts matrix children in include order when runner capacity becomes
+    available.  Unknown timings are scheduled first because they are the least
+    bounded.  The selected premerge case mirrors the isolated proof runner's
+    L0/contract/fastest preference; allocation safety is still enforced later
+    from the projected manifest rather than trusting this scheduling hint.
+    """
+    entries_by_path = {entry.path: entry for entry in catalog.entries}
+    timing_estimates: dict[str, float] = {}
+    timing_entry = entries_by_path.get("tests/e2e/timing_estimates.json")
+    if timing_entry is not None:
+        try:
+            payload = json.loads(_read_blob(repo_root, timing_entry.object_id))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ModelCIError("invalid tests/e2e/timing_estimates.json") from exc
+        raw_estimates = payload.get("estimates_s", {})
+        if isinstance(raw_estimates, dict):
+            timing_estimates = {
+                str(name): float(value)
+                for name, value in raw_estimates.items()
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+            }
+
+    estimates: dict[str, float | None] = {}
+    for model in set(models):
+        cases: list[dict[str, object]] = []
+        for family in catalog.e2e_families.get(model, ()):
+            prefix = f"tests/e2e/models/{family}/manifests/"
+            for entry in catalog.entries:
+                if not entry.path.startswith(prefix) or not entry.path.endswith(".json"):
+                    continue
+                try:
+                    manifest = json.loads(_read_blob(repo_root, entry.object_id))
+                except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                    raise ModelCIError(f"invalid E2E manifest JSON: {entry.path}") from exc
+                if manifest.get("skip_reason") or manifest.get("skip"):
+                    continue
+                testcases = manifest.get("testcases", [])
+                if not isinstance(testcases, list):
+                    continue
+                for testcase in testcases:
+                    if not isinstance(testcase, dict):
+                        continue
+                    if testcase.get("skip_reason") or testcase.get("skip"):
+                        continue
+                    name = str(testcase.get("name") or "")
+                    if not name:
+                        continue
+                    tier = str(testcase.get("ci_tier") or manifest.get("ci_tier") or "")
+                    if tier == "multi_device":
+                        continue
+                    cases.append(
+                        {
+                            "name": name,
+                            "tier": tier,
+                            "l0_replacement": str(testcase.get("l0_replacement") or ""),
+                            "estimated_seconds": timing_estimates.get(name),
+                        }
+                    )
+        eligible = [case for case in cases if case["tier"] != "nightly_only"]
+        replacements = {
+            str(case["l0_replacement"])
+            for case in cases
+            if case["tier"] == "nightly_only" and case["l0_replacement"]
+        }
+        candidates = [case for case in eligible if case["name"] in replacements] or eligible
+        priority = {"l0_only": 0, "contract_only": 1, "": 2}
+        candidates.sort(
+            key=lambda case: (
+                priority.get(str(case["tier"]), 2),
+                case["estimated_seconds"]
+                if isinstance(case["estimated_seconds"], (int, float))
+                else float("inf"),
+                str(case["name"]),
+            )
+        )
+        selected_estimate = candidates[0]["estimated_seconds"] if candidates else None
+        estimates[model] = (
+            float(selected_estimate)
+            if isinstance(selected_estimate, (int, float))
+            else None
+        )
+
+    return sorted(
+        set(models),
+        key=lambda model: (
+            0 if estimates.get(model) is None else 1,
+            -(estimates.get(model) or 0.0),
+            model,
+        ),
+    )
 
 
 def calculate_impact(
@@ -592,7 +707,12 @@ def calculate_impact(
         mode = "models"
     else:
         mode = "none"
-    result = _result(affected, mode=mode, changes=serialized_changes)
+    result = _result(
+        affected,
+        mode=mode,
+        changes=serialized_changes,
+        matrix_models=_scheduled_models(repo_root, head_catalog, affected),
+    )
     result["base_revision"] = base_catalog.revision
     result["head_revision"] = head_catalog.revision
     return result
@@ -820,7 +940,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _write_github_output(args.github_output, result)
         elif args.command == "all":
             catalog = discover_catalog(args.repo_root, args.revision)
-            result = _result(catalog.models, mode="all", changes=[])
+            result = _result(
+                catalog.models,
+                mode="all",
+                changes=[],
+                matrix_models=_scheduled_models(args.repo_root, catalog, catalog.models),
+            )
             result["revision"] = catalog.revision
             if args.github_output is not None:
                 _write_github_output(args.github_output, result)

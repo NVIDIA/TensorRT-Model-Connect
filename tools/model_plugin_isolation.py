@@ -757,6 +757,115 @@ def command_verify_results(args: argparse.Namespace) -> int:
     return 0 if report["passed"] else 1
 
 
+def command_verify_builds(args: argparse.Namespace) -> int:
+    """Require exactly one completed full-bundle build per selected model."""
+    expected_models = selected_models(args, {})
+    if not expected_models and not args.allow_empty:
+        raise SystemExit("No E2E models selected")
+
+    ledger_dir = args.ledger_dir.resolve()
+    expected_revision = str(args.source_revision or "")
+    records: list[dict[str, object]] = []
+    errors: list[str] = []
+    identities: list[str] = []
+    record_paths = sorted(ledger_dir.glob("*.json")) if ledger_dir.is_dir() else []
+    for record_path in record_paths:
+        try:
+            record = json.loads(_read_text(record_path))
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"could not read build ledger {record_path}: {exc}")
+            continue
+        if not isinstance(record, dict):
+            errors.append(f"build ledger is not an object: {record_path}")
+            continue
+        identity = str(record.get("identity") or "")
+        identities.append(identity)
+        record_errors: list[str] = []
+        if not identity:
+            record_errors.append("identity is missing")
+        if record.get("invocation_count") != 1:
+            record_errors.append(
+                f"invocation_count is {record.get('invocation_count')!r}, expected 1"
+            )
+        if record.get("status") != "passed":
+            record_errors.append(
+                f"status is {record.get('status')!r}, expected 'passed'"
+            )
+        if record.get("returncode") != 0:
+            record_errors.append(
+                f"returncode is {record.get('returncode')!r}, expected 0"
+            )
+        if expected_revision and record.get("source_revision") != expected_revision:
+            record_errors.append(
+                "source_revision is "
+                f"{record.get('source_revision')!r}, expected {expected_revision!r}"
+            )
+        bundle_path = Path(str(record.get("bundle_path") or ""))
+        if not bundle_path.is_file():
+            record_errors.append(f"bundle is missing: {bundle_path}")
+        timing_path = Path(str(record.get("build_timing_path") or ""))
+        if not timing_path.is_file():
+            record_errors.append(f"build timing is missing: {timing_path}")
+        records.append(
+            {
+                "path": str(record_path),
+                "identity": identity,
+                "passed": not record_errors,
+                "errors": record_errors,
+                "record": record,
+            }
+        )
+
+    observed_models = {identity for identity in identities if identity}
+    duplicate_models = sorted(
+        identity for identity in observed_models if identities.count(identity) != 1
+    )
+    missing_models = sorted(expected_models - observed_models)
+    unexpected_models = sorted(observed_models - expected_models)
+    if duplicate_models:
+        errors.append("duplicate build ledgers: " + ", ".join(duplicate_models))
+    if missing_models:
+        errors.append("missing build ledgers: " + ", ".join(missing_models))
+    if unexpected_models:
+        errors.append("unexpected build ledgers: " + ", ".join(unexpected_models))
+    for record in records:
+        for error in record["errors"]:
+            errors.append(f"{record['identity'] or record['path']}: {error}")
+
+    report = {
+        "schema_version": 1,
+        "ledger_dir": str(ledger_dir),
+        "expected_models": sorted(expected_models),
+        "observed_models": sorted(observed_models),
+        "source_revision": expected_revision,
+        "builds_per_model": 1,
+        "passed": not errors,
+        "errors": errors,
+        "records": records,
+    }
+    if args.report is not None:
+        report_path = args.report.resolve()
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        print(report_path)
+
+    passing_records = {
+        str(record["identity"])
+        for record in records
+        if bool(record["passed"])
+    }
+    for model in sorted(expected_models | observed_models):
+        passed = (
+            model in expected_models
+            and model in passing_records
+            and model not in duplicate_models
+        )
+        print(f"{'PASS' if passed else 'FAIL'} {model}")
+    for error in errors:
+        print(f"  {error}", file=sys.stderr)
+    return 0 if report["passed"] else 1
+
+
 def command_impact_models(args: argparse.Namespace) -> int:
     """Print impacted cases that came from model-owned classification rules."""
     impact = json.loads(_read_text(args.impact_json))
@@ -890,6 +999,16 @@ def build_parser() -> argparse.ArgumentParser:
     verify_results.add_argument("--artifacts-dir", type=Path, required=True)
     verify_results.add_argument("--report", type=Path)
     verify_results.set_defaults(func=command_verify_results)
+
+    verify_builds = subparsers.add_parser(
+        "verify-builds",
+        help="Require one completed full-bundle build per selected model",
+    )
+    add_selection_options(verify_builds)
+    verify_builds.add_argument("--ledger-dir", type=Path, required=True)
+    verify_builds.add_argument("--source-revision", default="")
+    verify_builds.add_argument("--report", type=Path)
+    verify_builds.set_defaults(func=command_verify_builds)
 
     impact_models = subparsers.add_parser(
         "impact-models",

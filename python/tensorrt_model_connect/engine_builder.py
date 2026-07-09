@@ -20,6 +20,7 @@ from .build_timing import (
     write_build_timing as _write_build_timing,
 )
 from .config import ModelConfig
+from .engine_build_budget import enforce_single_full_bundle_build
 from .families import (
     available_plugin_ids,
     family_hf_allow_patterns,
@@ -711,6 +712,7 @@ def _ensure_tokenizer_json(model_dir: Path, *, plugin=None) -> None:
           "(C++ runtime may fail to create tokenizer)", file=sys.stderr)
 
 
+@enforce_single_full_bundle_build
 def build_bundle(
     model_dir: str,
     output_path: str,

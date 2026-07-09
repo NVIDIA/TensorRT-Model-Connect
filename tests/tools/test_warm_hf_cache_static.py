@@ -11,6 +11,8 @@ import json
 import pathlib
 from pathlib import Path
 
+import pytest
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
@@ -22,6 +24,7 @@ WARM_HF_CACHE = REPO_ROOT / "scripts" / "warm_hf_cache.py"
 FAMILIES = REPO_ROOT / "python" / "tensorrt_model_connect" / "families"
 HELPER_FUNCTIONS = {
     "_component_has_weight",
+    "_cache_repository_manifest",
     "_diffusers_missing_weight_components",
     "_is_hf_file_cached",
     "_is_diffusers_component_enabled",
@@ -121,6 +124,9 @@ def _load_cache_helpers() -> dict:
             "tokenizer_config.json",
         ],
         "HfHubHTTPError": RuntimeError,
+        "repo_folder_name": (
+            lambda *, repo_id, repo_type: f"{repo_type}s--{repo_id.replace('/', '--')}"
+        ),
     }
     for node in tree.body:
         if isinstance(node, ast.FunctionDef) and node.name in HELPER_FUNCTIONS:
@@ -399,8 +405,68 @@ def test_strict_warm_failure_returns_nonzero() -> None:
     assert exit_code(True, ["org/missing"]) == 1
     assert exit_code(True, []) == 0
     assert exit_code(False, ["org/missing"]) == 0
-    assert "strict_exit_code = _warm_exit_code(args.strict, warned)" in text
+    assert (
+        "strict_exit_code = _warm_exit_code(args.strict or bool(args.emit_cache_repos), warned)"
+        in text
+    )
     assert "if strict_exit_code:\n    sys.exit(strict_exit_code)" in text
+
+
+def test_selected_cache_repository_manifest_is_unique_and_canonical(
+    tmp_path: Path,
+) -> None:
+    manifest = _load_cache_helpers()["_cache_repository_manifest"]
+    hub = tmp_path / "hub"
+    for folder in ("models--org--one", "models--org--two"):
+        (hub / folder).mkdir(parents=True)
+
+    payload = manifest(
+        ["org/one", "org/one", "org/two"],
+        hub_cache=hub,
+    )
+
+    assert payload == {
+        "schema_version": 1,
+        "hub_cache": str(hub.resolve()),
+        "repositories": [
+            {
+                "repo_id": "org/one",
+                "repo_type": "model",
+                "cache_folder": "models--org--one",
+                "cache_path": str((hub / "models--org--one").resolve()),
+            },
+            {
+                "repo_id": "org/two",
+                "repo_type": "model",
+                "cache_folder": "models--org--two",
+                "cache_path": str((hub / "models--org--two").resolve()),
+            },
+        ],
+    }
+
+
+def test_selected_cache_repository_manifest_rejects_missing_or_linked_repo(
+    tmp_path: Path,
+) -> None:
+    manifest = _load_cache_helpers()["_cache_repository_manifest"]
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (hub / "models--org--linked").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="missing or not a directory"):
+        manifest(["org/missing"], hub_cache=hub)
+    with pytest.raises(RuntimeError, match="missing or not a directory"):
+        manifest(["org/linked"], hub_cache=hub)
+
+
+def test_cache_repository_evidence_cli_is_fail_closed() -> None:
+    text = WARM_HF_CACHE.read_text(encoding="utf-8")
+
+    assert '"--emit-cache-repos"' in text
+    assert "if args.emit_cache_repos and not warned:" in text
+    assert 'warned.append("cache-repository-evidence")' in text
 
 
 def test_hf_file_cache_skip_uses_hf_local_resolution() -> None:

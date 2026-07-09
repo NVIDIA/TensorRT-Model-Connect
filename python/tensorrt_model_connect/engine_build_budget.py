@@ -1,0 +1,156 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Fail-closed CI budget for full TensorRT bundle builds."""
+
+from __future__ import annotations
+
+import functools
+import hashlib
+import inspect
+import json
+import os
+import re
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, ParamSpec, TypeVar
+
+
+_GUARD_DIR_ENV = "TRTMC_ENGINE_BUILD_GUARD_DIR"
+_IDENTITY_ENV = "TRTMC_ENGINE_BUILD_IDENTITY"
+_REVISION_ENV = "TRTMC_ENGINE_BUILD_REVISION"
+_COMMAND_ENV = "TRTMC_ENGINE_BUILD_COMMAND_JSON"
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def _ledger_path(guard_dir: Path, identity: str) -> Path:
+    safe_identity = re.sub(r"[^A-Za-z0-9_.-]+", "-", identity).strip("-.") or "model"
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return guard_dir / f"{safe_identity}-{digest}.json"
+
+
+def _jsonable_arguments(arguments: dict[str, object]) -> dict[str, object]:
+    return json.loads(json.dumps(arguments, sort_keys=True, default=str))
+
+
+def _claim_build(
+    *,
+    arguments: dict[str, object],
+    output_path: Path,
+) -> tuple[Path | None, float]:
+    raw_guard_dir = os.environ.get(_GUARD_DIR_ENV, "").strip()
+    if not raw_guard_dir:
+        return None, time.monotonic()
+
+    identity = os.environ.get(_IDENTITY_ENV, "").strip()
+    if not identity:
+        raise RuntimeError(f"{_IDENTITY_ENV} is required when {_GUARD_DIR_ENV} is enabled")
+
+    guard_dir = Path(raw_guard_dir)
+    guard_dir.mkdir(parents=True, exist_ok=True)
+    claim_path = _ledger_path(guard_dir, identity)
+    normalized_arguments = _jsonable_arguments(arguments)
+    encoded_arguments = json.dumps(
+        normalized_arguments, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    raw_command = os.environ.get(_COMMAND_ENV, "")
+    try:
+        command = json.loads(raw_command) if raw_command else []
+    except json.JSONDecodeError:
+        command = [raw_command]
+    payload = {
+        "schema_version": 1,
+        "identity": identity,
+        "status": "started",
+        "invocation_count": 1,
+        "source_revision": os.environ.get(_REVISION_ENV, ""),
+        "bundle_path": str(output_path),
+        "build_timing_path": str(arguments.get("build_timing_path") or ""),
+        "arguments_sha256": hashlib.sha256(encoded_arguments).hexdigest(),
+        "command": command,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError(
+            f"full TensorRT bundle build budget already consumed for {identity!r}: {claim_path}"
+        ) from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as claim_file:
+            json.dump(payload, claim_file, indent=2)
+            claim_file.write("\n")
+    except BaseException:
+        claim_path.unlink(missing_ok=True)
+        raise
+    return claim_path, time.monotonic()
+
+
+def _finish_build(
+    claim_path: Path | None,
+    started: float,
+    *,
+    output_path: Path,
+    status: str,
+    error: str = "",
+) -> None:
+    if claim_path is None:
+        return
+    payload = json.loads(claim_path.read_text(encoding="utf-8"))
+    payload.update(
+        {
+            "status": status,
+            "returncode": 0 if status == "passed" else 1,
+            "elapsed_s": time.monotonic() - started,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "bundle_exists": output_path.is_file(),
+            "bundle_size_bytes": output_path.stat().st_size if output_path.is_file() else 0,
+        }
+    )
+    if error:
+        payload["error"] = error
+    temporary = claim_path.with_suffix(f".json.tmp-{os.getpid()}")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, claim_path)
+
+
+def enforce_single_full_bundle_build(func: Callable[P, R]) -> Callable[P, R]:
+    """Allow one guarded invocation per manifest model identity and CI attempt."""
+    signature = inspect.signature(func)
+
+    @functools.wraps(func)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> R:
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        output_path = Path(str(bound.arguments["output_path"]))
+        claim_path: Path | None = None
+        started = time.monotonic()
+        try:
+            claim_path, started = _claim_build(
+                arguments=dict(bound.arguments),
+                output_path=output_path,
+            )
+            result = func(*args, **kwargs)
+            if claim_path is not None and not output_path.is_file():
+                raise RuntimeError(f"guarded full bundle build did not produce {output_path}")
+        except BaseException as exc:
+            _finish_build(
+                claim_path,
+                started,
+                output_path=output_path,
+                status="failed",
+                error=str(exc),
+            )
+            raise
+        _finish_build(
+            claim_path,
+            started,
+            output_path=output_path,
+            status="passed",
+        )
+        return result
+
+    return wrapped

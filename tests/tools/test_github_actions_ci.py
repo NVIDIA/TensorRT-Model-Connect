@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 
@@ -39,16 +42,11 @@ def test_workflows_define_shared_hf_cache_env() -> None:
         "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || "
         "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}"
     ) in proof
-    assert (
-        "TRTMC_HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || "
-        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache/hub' }}"
-    ) in proof
-    assert (
-        "TRTMC_HF_MODULES_CACHE: ${{ vars.TRTMC_HF_MODULES_CACHE || "
-        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache/modules' }}"
-    ) in proof
+    assert "TRTMC_HF_HUB_CACHE:" not in proof and "TRTMC_HF_MODULES_CACHE:" not in proof
     runner = (REPO_ROOT / ".github/scripts/run-model-proof.sh").read_text()
-    assert '$HOME/.cache/huggingface' in runner
+    assert "$HOME/.cache/huggingface" in runner
+    assert "${TRTMC_HF_HUB_CACHE:-$hf_cache_root/hub}" in runner
+    assert "-e HF_MODULES_CACHE=/work/hf-modules" in runner
 
 
 def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
@@ -199,9 +197,11 @@ def test_qwen_flashinfer_scripts_skip_pytest_collection() -> None:
 def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> None:
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
     nightly = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    assert "name: model-proof-batch-${{ inputs.revision }}" in proof
+    assert (
+        "name: model-proof-${{ inputs.model }}-${{ inputs.revision }}-${{ github.run_attempt }}"
+    ) in proof
     assert "retention-days: 7" in proof
-    assert "/*/artifacts/" in proof
+    assert "${{ inputs.model }}/artifacts/" in proof
     assert "name: trtmc-nightly-${{ github.run_id }}" in nightly
     assert "retention-days: 14" in nightly
 
@@ -216,17 +216,25 @@ def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> 
     assert "!e2e_artifacts/e2e_report.html" not in nightly
 
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
-    assert "Upload batch model proof HTML reports" in proof
-    assert "model-proof-html-batch-${{ inputs.revision }}" in proof
-    assert "/*/artifacts/model-proof-report.html" in proof
-    assert "/model-proof-index.html" in proof
-    assert "/*/batch.log" in proof
-    assert "!${{ runner.temp }}" in proof
+    assert "Upload isolated model proof artifact" in proof
+    assert "model-proof-${{ inputs.model }}-${{ inputs.revision }}" in proof
+    assert "model-proof-report.html" in proof
     assert "if-no-files-found: error" in proof
     assert "retention-days: 7" in proof
 
     premerge = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
     assert "model-proof.yml" in premerge
+    assert "4 / Combined HTML report" in premerge
+    assert "Download isolated model proof artifacts" in premerge
+    assert "merge-multiple: false" in premerge
+    assert (
+        "pattern: model-proof-*-${{ needs.legal.outputs.tested_sha || github.sha }}-*" in premerge
+    )
+    assert "scripts/generate_model_proof_report.py" in premerge
+    assert '--upstream-result "legal=$LEGAL_RESULT"' in premerge
+    assert '--upstream-result "impact=$IMPACT_RESULT"' in premerge
+    assert "Upload combined model proof HTML report" in premerge
+    assert "model-proof-html-${{ needs.legal.outputs.tested_sha || github.sha }}" in premerge
 
 
 def test_premerge_ci_is_triggered_only_by_one_shot_label_events() -> None:
@@ -328,7 +336,8 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     model_proof = text.split("\n  model-proof:", maxsplit=1)[1].split("\n  no-model:", maxsplit=1)[
         0
     ]
-    no_model = text.split("\n  no-model:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
+    no_model = text.split("\n  no-model:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
+    report = text.split("\n  report:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
     required = text.split("\n  required:", maxsplit=1)[1]
 
     assert "'Legal compliance' || 'Ignored label / Legal compliance'" in legal
@@ -338,16 +347,20 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "python3 tools/model_ci.py validate" in impact
     assert "python3 tools/model_ci.py impact" in impact
     assert "--platform-change-policy all" in impact
+    assert "matrix: ${{ steps.impact.outputs.matrix }}" in impact
 
     assert "- legal" in model_proof
     assert "- impact" in model_proof
     assert "needs.legal.outputs.authorized == 'true'" in model_proof
     assert "needs.impact.outputs.has_models == 'true'" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
-    assert "models: ${{ needs.impact.outputs.affected_models }}" in model_proof
-    assert "expected_count: ${{ fromJSON(needs.impact.outputs.expected_count) }}" in model_proof
-    assert "matrix:" not in model_proof
-    assert "strategy:" not in model_proof
+    assert "name: 3 / Model / ${{ matrix.model }}" in model_proof
+    assert "fail-fast: false" in model_proof
+    assert "max-parallel: 16" in model_proof
+    assert "matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}" in model_proof
+    assert "model: ${{ matrix.model }}" in model_proof
+    assert "models: ${{ needs.impact.outputs.affected_models }}" not in model_proof
+    assert "expected_count:" not in model_proof
 
     assert "- legal" in no_model
     assert "- impact" in no_model
@@ -356,10 +369,72 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert 'test "$IMPACT_MODE" = "none"' in no_model
 
     for dependency in ("legal", "impact", "model-proof", "no-model"):
+        assert f"- {dependency}" in report
+    assert "4 / Combined HTML report" in report
+    assert "always()" in report
+    assert "github.event.label.name == 'run-ci'" in report
+    assert "needs.legal.outputs.authorized == 'true'" not in report
+    assert '"upstream_results": upstream_results' in report
+    assert "The combined report did not complete." in report
+    assert "actions/download-artifact@v4" in report
+    assert "merge-multiple: false" in report
+    assert "needs.legal.outputs.tested_sha || github.sha" in report
+    assert '--upstream-result "legal=$LEGAL_RESULT"' in report
+    assert '--upstream-result "impact=$IMPACT_RESULT"' in report
+    assert '--upstream-result "model-proof=$MODEL_RESULT"' in report
+    assert '--upstream-result "no-model=$NO_MODEL_RESULT"' in report
+    assert "scripts/generate_model_proof_report.py" in report
+    assert "Upload combined model proof HTML report" in report
+    assert "Enforce combined report certification" in report
+
+    for dependency in ("legal", "impact", "model-proof", "no-model", "report"):
         assert f"- {dependency}" in required
     assert "'Premerge CI' || 'Ignored label / Premerge CI'" in required
     assert "always()" in required
     assert 'test "$MODEL_RESULT" = "success"' in required
+    assert 'test "$REPORT_RESULT" = "success"' in required
+
+
+def test_premerge_report_bootstrap_names_upstream_failure_before_checkout(
+    tmp_path: Path,
+) -> None:
+    text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    block = text.split("- name: Bootstrap combined HTML before checkout", maxsplit=1)[1].split(
+        "- name: Check out pinned merge snapshot for report tooling", maxsplit=1
+    )[0]
+    program = textwrap.dedent(
+        block.split("<<'PY'\n", maxsplit=1)[1].split("\n          PY", maxsplit=1)[0]
+    )
+    output = tmp_path / "report"
+    output.mkdir()
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-",
+            str(output),
+            "",
+            "a" * 40,
+            "premerge",
+            "",
+            "failure",
+            "skipped",
+            "skipped",
+            "skipped",
+        ],
+        input=program,
+        text=True,
+        check=True,
+    )
+
+    status = json.loads((output / "model-proof-report-status.json").read_text(encoding="utf-8"))
+    assert status["outcome"] == "failed"
+    assert status["upstream_results"]["legal"] == "failure"
+    assert status["upstream_results"]["impact"] == "skipped"
+    assert any("legal" in issue and "failure" in issue for issue in status["issues"])
+    report = (output / "model-proof-report.html").read_text(encoding="utf-8")
+    assert "legal" in report
+    assert "failure" in report
 
 
 def test_premerge_ci_preserves_the_main_ruleset_context_names() -> None:
@@ -489,35 +564,47 @@ def test_premerge_delegates_only_model_owned_work_to_the_proof() -> None:
     assert "uses: ./.github/workflows/model-proof.yml" in premerge
 
 
-def test_model_proof_batch_uses_one_setup_read_only_hf_cache_and_evidence() -> None:
+def test_model_proof_runs_one_isolated_model_with_unique_complete_evidence() -> None:
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
     runner = (REPO_ROOT / ".github/scripts/run-model-proof.sh").read_text()
 
     assert "TRTMC_CI_IMAGE:" in proof
     assert "vars.TRTMC_MANYLINUX_CI_IMAGE" in proof
     assert "trtmc-dev-gb300:manylinux_2_39" in proof
-    assert "Ensure CI Docker image once" in proof
+    assert (
+        "TRTMC_CI_IMAGE_LOCK_FILE: ${{ vars.TRTMC_CI_IMAGE_LOCK_FILE || "
+        "'/tmp/trtmc-ci-docker-image.lock' }}"
+    ) in proof
+    assert "Ensure CI Docker image" in proof
     assert "bash .github/scripts/ensure-ci-docker-image.sh" in proof
     assert proof.count("actions/checkout@v4") == 1
     assert proof.count("bash .github/scripts/ensure-ci-docker-image.sh") == 1
     assert "TRTMC_HF_CACHE:" in proof
-    assert "TRTMC_HF_HUB_CACHE:" in proof
-    assert "TRTMC_HF_MODULES_CACHE:" in proof
-    assert "bash .github/scripts/run-model-proof-batch.sh" in proof
-    assert '--models-json "$MODELS_JSON"' in proof
-    assert '--expected-count "$EXPECTED_COUNT"' in proof
+    assert "TRTMC_HF_HUB_CACHE:" not in proof
+    assert "TRTMC_HF_MODULES_CACHE:" not in proof
+    assert "TRTMC_MODEL_PROOF_BUILD_JOBS: ${{ vars.TRTMC_MODEL_PROOF_BUILD_JOBS || '2' }}" in proof
+    assert "TRTMC_MODEL_PROOF_SLOTS_PER_GPU:" in proof
+    assert "vars.TRTMC_MODEL_PROOF_SLOTS_PER_GPU || '4'" in proof
+    assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR:" in proof
+    assert "/tmp/trtmc-model-proof-gpu-locks" in proof
+    assert "bash .github/scripts/run-model-proof.sh" in proof
+    assert "run-model-proof-batch.sh" not in proof
+    assert "env -u TRTMC_GPU_ID bash .github/scripts/run-model-proof.sh" in proof
+    assert '--model "$MODEL"' in proof
+    assert '--revision "$REVISION"' in proof
     assert '--suite "$SUITE"' in proof
-    assert "Upload batch proof evidence" in proof
-    assert "Upload batch model proof HTML reports" in proof
-    assert "model-proof-index.html" in proof
-    assert "/*/artifacts/model-proof-report.html" in proof
+    assert "Upload isolated model proof artifact" in proof
+    assert "model-proof-${{ inputs.model }}-${{ inputs.revision }}" in proof
+    assert "${{ github.run_attempt }}" in proof
+    assert "model-proof-report.html" in proof
     assert "if-no-files-found: error" in proof
     assert "retention-days: 7" in proof
-    assert "/*/artifacts/" in proof
+    assert "${{ inputs.model }}/artifacts/" in proof
 
     assert "dst=/src,readonly" in runner
     assert "dst=/hf-cache/hub,readonly" in runner
-    assert "dst=/hf-cache/modules,readonly" in runner
+    assert "dst=/hf-cache/modules" not in runner
+    assert "-e HF_MODULES_CACHE=/work/hf-modules" in runner
     assert "--network none" in runner
     assert "--read-only" in runner
     assert "proof.json" in runner
@@ -686,8 +773,8 @@ def test_selective_e2e_builds_and_runs_single_family_source_projections() -> Non
     assert "impact-models" in selective
     assert "e2e_isolation_models.txt" in selective
     assert './scripts/run_e2e_parallel.sh "${standard_args[@]}"' in selective
-    assert '--exclude-ci-tier nightly_only' in selective
-    assert '--exclude-ci-tier multi_device' in selective
+    assert "--exclude-ci-tier nightly_only" in selective
+    assert "--exclude-ci-tier multi_device" in selective
     assert 'if [ "$standard_rc" -ne 0 ]; then' in selective
     assert "Skipping strict model-owned isolation" in selective
     assert 'prepare_model_plugin_dir "$full_model_plugin_dir"' in selective
@@ -707,8 +794,8 @@ def test_selective_e2e_builds_and_runs_single_family_source_projections() -> Non
     assert 'CUDA_VISIBLE_DEVICES="$gpu_id"' in group_runner
     assert '--rootdir "$source_dir"' in group_runner
     assert '--e2e-models-file "$models_file"' in group_runner
-    assert '--e2e-exclude-ci-tier nightly_only' in group_runner
-    assert '${SELECTIVE_E2E_GROUP_TIMEOUT:-90m}' in group_runner
+    assert "--e2e-exclude-ci-tier nightly_only" in group_runner
+    assert "${SELECTIVE_E2E_GROUP_TIMEOUT:-90m}" in group_runner
     assert '"${model_filter_args[@]}"' in group_runner
     assert "scripts/run_e2e_parallel.sh" not in group_runner
     assert "verify-results" in group_runner
