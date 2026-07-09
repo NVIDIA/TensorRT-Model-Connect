@@ -5,6 +5,7 @@
   "family": "timesfm",
   "runtime_strategy": "timesfm_trt",
   "task_strategy": "neural_operator",
+  "e2e_parallel_resource": "exclusive_gpu",
   "precision": "fp16",
   "fp32_layers": [
     0,

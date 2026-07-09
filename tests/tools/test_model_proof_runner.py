@@ -456,6 +456,7 @@ def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
         ("flux", "exclusive_gpu"),
         ("gpt2", "exclusive_gpu"),
         ("mixtral", "exclusive_gpu"),
+        ("timesfm", "exclusive_gpu"),
     ),
 )
 def test_selection_derives_the_most_restrictive_gpu_resource_class(
