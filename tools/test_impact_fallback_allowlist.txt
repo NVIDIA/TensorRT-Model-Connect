@@ -72,6 +72,7 @@ no_impact scripts/docker_build_gb300.sh # developer utility script; no CI test i
 no_impact scripts/docker_run_gb300.sh # developer utility script; no CI test impact is intentional
 no_impact scripts/eval_mmlu.py # developer utility script; no CI test impact is intentional
 no_impact scripts/generate_ci_summary.py # developer utility script; no CI test impact is intentional
+no_impact scripts/generate_model_proof_report.py # offline model-proof report composer; no runtime, build, or test-selection impact is intentional
 no_impact scripts/generate_perf_report.py # developer utility script; no CI test impact is intentional
 no_impact scripts/hf_generate.py # developer utility script; no CI test impact is intentional
 no_impact scripts/hf_tokenizer.py # developer utility script; no CI test impact is intentional
@@ -152,6 +153,7 @@ shared_builder_module python/tensorrt_model_connect/bundle_writer.py # shared Py
 shared_builder_module python/tensorrt_model_connect/checkpoint_mapper.py # stable WeightDict protocol surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/config.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/debug_runner.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/engine_build_budget.py # shared build-budget policy surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_builder.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_defs/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_defs/base.py # shared Python builder surface; broad builder impact is intentional
