@@ -452,6 +452,7 @@ def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
 @pytest.mark.parametrize(
     ("family", "expected_resource"),
     (
+        ("bark", "exclusive_gpu"),
         ("convbert", "shared"),
         ("flux", "exclusive_gpu"),
         ("gpt2", "exclusive_gpu"),

@@ -6,6 +6,7 @@
   "runtime_strategy": "text_to_audio_bark",
   "task_strategy": "text_to_audio",
   "precision": "fp16",
+  "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 1024,
   "trust_remote_code": false,
   "testcases": [
