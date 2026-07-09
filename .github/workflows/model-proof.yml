@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   prove:
-    name: ${{ inputs.model }} / Build + reference test
+    name: ${{ inputs.model }}
     runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     # Reserve time after the bounded image/proof steps for fallback generation
     # and artifact publication even when a model reaches its proof timeout.
