@@ -609,6 +609,7 @@ target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_include_directories(trtmc SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
 set_target_properties(trtmc PROPERTIES
   BUILD_RPATH "\$ORIGIN"
+  BUILD_RPATH_USE_ORIGIN TRUE
   INSTALL_RPATH "\$ORIGIN"
 )
 

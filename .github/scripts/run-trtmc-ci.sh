@@ -1714,7 +1714,7 @@ if trtmc.read_bytes()[:4] != b"\x7fELF":
     raise SystemExit(f"{trtmc} is not the native ELF trtmc executable")
 PY
   trtmc_dynamic_section="$(readelf -d "$smoke_venv/bin/trtmc")"
-  if ! grep -Fq '\$ORIGIN' <<<"$trtmc_dynamic_section"; then
+  if ! grep -Fq '$ORIGIN' <<<"$trtmc_dynamic_section"; then
     echo "ERROR: installed trtmc does not search for DSOs beside itself" >&2
     exit 1
   fi
