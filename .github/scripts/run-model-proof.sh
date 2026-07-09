@@ -905,13 +905,22 @@ validate_inner_hf_cache_view() {
     die "HF_HUB_CACHE must use the selected-repository cache view"
   [ "${HUGGINGFACE_HUB_CACHE:-}" = /hf-cache/hub ] || \
     die "HUGGINGFACE_HUB_CACHE must use the selected-repository cache view"
+  [ "${TRANSFORMERS_CACHE:-}" = /hf-cache/hub ] || \
+    die "TRANSFORMERS_CACHE must use the selected-repository cache view"
   [ -d "$HF_HOME" ] && [ -w "$HF_HOME" ] || \
     die "proof-private HF_HOME is unavailable or not writable"
   [ -d "$HF_MODULES_CACHE" ] && [ -w "$HF_MODULES_CACHE" ] || \
     die "proof-private HF_MODULES_CACHE is unavailable or not writable"
   [ -d /hf-cache/hub ] || die "selected-repository HF Hub view is missing"
+  [ -w /hf-cache/hub ] || \
+    die "selected-repository HF Hub view is not writable"
   [ ! -e /hf-cache/modules ] || \
     die "global Hugging Face modules must not be visible in the proof container"
+
+  local hf_cache_write_probe=/hf-cache/hub/.trtmc-write-probe
+  (umask 077; : > "$hf_cache_write_probe") || \
+    die "selected-repository HF Hub view rejected a proof-private write"
+  rm -f -- "$hf_cache_write_probe"
 
   "$(python_bin)" - /artifacts/hf-cache-repos.json /hf-cache/hub <<'PY'
 import json
@@ -1443,9 +1452,11 @@ PY
   [ -f "$artifacts_dir/hf-cache-repos.json" ] || \
     die "offline HF cache readiness check did not emit repository evidence"
 
-  # Convert the cache evidence into a positive view. The proof container sees
-  # an otherwise-empty Hub directory plus one read-only child mount per
-  # selected repository. It never sees the full persistent Hub cache.
+  # Convert the cache evidence into a positive, proof-private view. Reflink
+  # only the selected repositories into the job work directory so Transformers
+  # can update cache metadata without writing to, or seeing, the persistent
+  # Hub. Requiring --reflink=always fails closed instead of silently turning
+  # the isolation step into a full byte-for-byte copy.
   local hf_private_root="$work_dir/hf-private"
   local hf_private_hub="$hf_private_root/hub"
   local hf_cache_mounts="$work_dir/hf-cache-mounts.tsv"
@@ -1530,18 +1541,26 @@ PY
     die "selected Hugging Face cache evidence failed closed validation"
   fi
 
-  local -a hf_repo_mount_args=()
   local hf_repo_source hf_repo_folder
+  local hf_cache_repository_count=0
   while IFS=$'\t' read -r hf_repo_source hf_repo_folder; do
     [ -n "$hf_repo_source" ] && [ -n "$hf_repo_folder" ] || \
-      die "selected Hugging Face cache mount evidence is malformed"
-    mkdir -p "$hf_private_hub/$hf_repo_folder"
-    hf_repo_mount_args+=(
-      --mount "type=bind,src=$hf_repo_source,dst=/hf-cache/hub/$hf_repo_folder,readonly"
-    )
+      die "selected Hugging Face cache copy evidence is malformed"
+    [ ! -e "$hf_private_hub/$hf_repo_folder" ] || \
+      die "selected Hugging Face cache copy destination already exists"
+    if ! cp -a --reflink=always -- \
+        "$hf_repo_source" "$hf_private_hub/$hf_repo_folder"; then
+      die "selected Hugging Face cache repository could not be reflinked: $hf_repo_folder"
+    fi
+    [ -d "$hf_private_hub/$hf_repo_folder" ] && \
+      [ ! -L "$hf_private_hub/$hf_repo_folder" ] || \
+      die "selected Hugging Face cache reflink produced an invalid repository"
+    chmod -R u+rwX -- "$hf_private_hub/$hf_repo_folder" || \
+      die "selected Hugging Face cache reflink could not be made writable"
+    hf_cache_repository_count=$((hf_cache_repository_count + 1))
   done < "$hf_cache_mounts"
-  [ "${#hf_repo_mount_args[@]}" -gt 0 ] || \
-    die "selected Hugging Face cache evidence produced no repository mounts"
+  [ "$hf_cache_repository_count" -gt 0 ] || \
+    die "selected Hugging Face cache evidence produced no repository copies"
 
   select_proof_gpu "$resource_class"
   local gpu_id="$proof_gpu_id"
@@ -1610,12 +1629,12 @@ PY
     -e "TRTMC_MODEL_PROOF_BUILD_JOBS=$build_jobs"
   )
   docker_args+=(
-    --mount "type=bind,src=$hf_private_hub,dst=/hf-cache/hub,readonly"
-    "${hf_repo_mount_args[@]}"
+    --mount "type=bind,src=$hf_private_hub,dst=/hf-cache/hub"
     -e HF_HOME=/work/hf-home
     -e HF_HUB_CACHE=/hf-cache/hub
     -e HUGGINGFACE_HUB_CACHE=/hf-cache/hub
     -e HF_MODULES_CACHE=/work/hf-modules
+    -e TRANSFORMERS_CACHE=/hf-cache/hub
   )
 
   set +e

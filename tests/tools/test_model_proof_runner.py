@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -348,7 +349,7 @@ def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
     assert 'print(f"python_test={test.relative_to(root)}")' in runner
     assert "sed -n 's/^python_test=//p'" in runner
     assert 'python_tests+=("/src/$python_test")' in runner
-    assert "find \"$python_test_dir\" -maxdepth 1" not in runner
+    assert 'find "$python_test_dir" -maxdepth 1' not in runner
 
 
 @pytest.mark.parametrize(
@@ -463,12 +464,16 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
     assert "--network none" in proof
     assert "-e TMPDIR=/work/tmp" in proof
     assert "-e TMPDIR=/work/tmp" not in warm
-    assert "src=$hf_private_hub,dst=/hf-cache/hub,readonly" in proof
-    assert "dst=/hf-cache/hub/$hf_repo_folder,readonly" in text
+    assert '--mount "type=bind,src=$hf_private_hub,dst=/hf-cache/hub"' in proof
+    assert "src=$hf_private_hub,dst=/hf-cache/hub,readonly" not in proof
+    assert "dst=/hf-cache/hub/$hf_repo_folder" not in text
     assert "src=$hf_hub_cache,dst=/hf-cache/hub" not in proof
     assert "dst=/hf-cache/modules" not in proof
     assert "-e HF_HOME=/work/hf-home" in proof
     assert "-e HF_MODULES_CACHE=/work/hf-modules" in proof
+    assert "-e TRANSFORMERS_CACHE=/hf-cache/hub" in proof
+    assert "cp -a --reflink=always --" in text
+    assert "chmod -R u+rwX --" in text
     assert "-e HF_TOKEN" not in proof
     assert "-e HUGGING_FACE_HUB_TOKEN" not in proof
 
@@ -784,6 +789,24 @@ def test_model_proof_always_generates_a_strict_self_contained_html_report() -> N
     assert "if-no-files-found: error" in workflow
 
 
+def test_model_proof_fallback_step_has_valid_shell_heredocs() -> None:
+    workflow = yaml.safe_load(PROOF_WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["prove"]["steps"]
+    script = next(
+        step["run"] for step in steps if step.get("name") == "Finalize model proof fallback"
+    )
+
+    result = subprocess.run(
+        ["bash", "-n"],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
 
@@ -968,10 +991,12 @@ def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -
     assert "hf_modules_cache" not in host
     assert '--mount "type=bind,src=$hf_hub_cache,dst=/hf-cache/hub,readonly"' in cache_check
     assert "dst=/hf-cache/modules" not in cache_check
-    assert '--mount "type=bind,src=$hf_private_hub,dst=/hf-cache/hub,readonly"' in proof
-    assert "${hf_repo_mount_args[@]}" in proof
+    assert '--mount "type=bind,src=$hf_private_hub,dst=/hf-cache/hub"' in proof
+    assert 'src=$hf_private_hub,dst=/hf-cache/hub,readonly' not in proof
+    assert "hf_repo_mount_args" not in host
     assert "src=$hf_hub_cache,dst=/hf-cache/hub" not in proof
     assert "dst=/hf-cache/modules" not in proof
+    assert "cp -a --reflink=always --" in host
 
 
 def test_distinct_explicit_hf_cache_paths_reach_both_containers(
@@ -982,7 +1007,9 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
     env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
     hub_cache = tmp_path / "explicit-hub-cache"
     modules_cache = tmp_path / "explicit-modules-cache"
-    (hub_cache / "models--fixture--model").mkdir(parents=True)
+    selected_repo = hub_cache / "models--fixture--model"
+    selected_repo.mkdir(parents=True)
+    (selected_repo / "selected-cache-marker").write_text("selected\n", encoding="utf-8")
     modules_cache.mkdir()
     env.update(
         {
@@ -1020,15 +1047,64 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
     assert f"--mount type=bind,src={hub_cache},dst=/hf-cache/hub,readonly" in warm
     assert f"src={modules_cache}" not in warm
     assert f"src={hub_cache},dst=/hf-cache/hub" not in proof
-    assert (
-        f"--mount type=bind,src={hub_cache / 'models--fixture--model'},"
-        "dst=/hf-cache/hub/models--fixture--model,readonly" in proof
-    )
+    assert f"src={selected_repo}" not in proof
     assert f"src={modules_cache}" not in proof
-    assert (
-        f"--mount type=bind,src={output / 'work' / 'hf-private' / 'hub'},"
-        "dst=/hf-cache/hub,readonly" in proof
+    private_hub = output / "work" / "hf-private" / "hub"
+    assert f"--mount type=bind,src={private_hub},dst=/hf-cache/hub" in proof
+    assert f"src={private_hub},dst=/hf-cache/hub,readonly" not in proof
+    private_repo = private_hub / "models--fixture--model"
+    assert (private_repo / "selected-cache-marker").read_text(encoding="utf-8") == "selected\n"
+    write_probe = private_repo / "test-write-probe"
+    write_probe.write_text("writable\n", encoding="utf-8")
+    assert write_probe.read_text(encoding="utf-8") == "writable\n"
+
+
+def test_selected_hf_cache_fails_closed_when_reflink_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    fake_cp = fake_bin / "cp"
+    fake_cp.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf \'%s\\n\' "$*" > "$FAKE_CP_LOG"\n'
+        "exit 73\n",
+        encoding="utf-8",
     )
+    fake_cp.chmod(0o755)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    cp_log = tmp_path / "cp.log"
+    env["FAKE_CP_LOG"] = str(cp_log)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--model",
+            "convbert",
+            "--revision",
+            "HEAD",
+            "--output-dir",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "selected Hugging Face cache repository could not be reflinked" in result.stderr
+    assert cp_log.read_text(encoding="utf-8").startswith("-a --reflink=always -- ")
+    docker_runs = [
+        line
+        for line in docker_log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("run ")
+    ]
+    assert len(docker_runs) == 1
+    assert "warm_hf_cache.py" in docker_runs[0]
 
 
 def test_selected_hf_cache_evidence_rejects_path_escape_before_proof(

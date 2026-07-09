@@ -235,35 +235,35 @@ jobs:
           else
             python3 - "$artifacts/model-proof-status.json" "$artifacts/model-proof-report.html" \
               "$MODEL" "$REVISION" "$SUITE" "$CHECKOUT_OUTCOME" <<'PY'
-            import html
-            import json
-            import sys
-            from pathlib import Path
+          import html
+          import json
+          import sys
+          from pathlib import Path
 
-            status_path, report_path, model, revision, suite, checkout = sys.argv[1:]
-            status = {
-                "schema_version": 1,
-                "report_kind": "workflow_fallback",
-                "model": model,
-                "source_revision": revision,
-                "suite": suite,
-                "outcome": "failed",
-                "phase": "workflow-source-checkout",
-                "exit_code": 1,
-                "details": [f"Source checkout outcome: {checkout}"],
-            }
-            Path(status_path).write_text(
-                json.dumps(status, indent=2) + "\n", encoding="utf-8"
-            )
-            Path(report_path).write_text(
-                "<!DOCTYPE html><html lang='en' data-report-kind='workflow-fallback'>"
-                "<head><meta charset='utf-8'><title>Isolated model proof failed</title></head>"
-                f"<body><h1>{html.escape(model)}</h1><p>Source checkout failed: "
-                f"{html.escape(checkout)}</p><p><code>{html.escape(revision)}</code></p>"
-                "</body></html>",
-                encoding="utf-8",
-            )
-            PY
+          status_path, report_path, model, revision, suite, checkout = sys.argv[1:]
+          status = {
+              "schema_version": 1,
+              "report_kind": "workflow_fallback",
+              "model": model,
+              "source_revision": revision,
+              "suite": suite,
+              "outcome": "failed",
+              "phase": "workflow-source-checkout",
+              "exit_code": 1,
+              "details": [f"Source checkout outcome: {checkout}"],
+          }
+          Path(status_path).write_text(
+              json.dumps(status, indent=2) + "\n", encoding="utf-8"
+          )
+          Path(report_path).write_text(
+              "<!DOCTYPE html><html lang='en' data-report-kind='workflow-fallback'>"
+              "<head><meta charset='utf-8'><title>Isolated model proof failed</title></head>"
+              f"<body><h1>{html.escape(model)}</h1><p>Source checkout failed: "
+              f"{html.escape(checkout)}</p><p><code>{html.escape(revision)}</code></p>"
+              "</body></html>",
+              encoding="utf-8",
+          )
+          PY
           fi
 
       - name: Upload isolated model proof artifact
