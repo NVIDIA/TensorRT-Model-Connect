@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from tests.e2e.models.gpt2.e2e_plugins.contract import Gpt2CausalContinuationPlugin
 from tests.e2e_harness.contracts import E2ECase, StageOutput, ThresholdProfile
 
@@ -57,3 +60,10 @@ def test_allows_prompt_echo_when_explicitly_configured() -> None:
 
     assert result.passed
     assert result.metrics["prompt_excluded"].passed
+
+
+def test_acceptance_build_reserves_gpu_for_stable_tactic_selection() -> None:
+    manifest_path = Path(__file__).parent / "manifests" / "gpt2-125m.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
