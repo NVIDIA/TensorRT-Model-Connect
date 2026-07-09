@@ -5,6 +5,7 @@
 
 // trt_common.cpp — TensorRT logger/runtime helpers plus CUDA graph support.
 // CudaStream/CudaBuffer moved to cuda_common.cpp.
+// CI coverage experiment: shared runtime changes must select the fixed five-model fallback.
 
 #include "runtime/core/trt_common.h"
 
