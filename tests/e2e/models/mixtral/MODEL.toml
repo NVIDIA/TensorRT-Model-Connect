@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# CI coverage experiment: this E2E ownership change must select mixtral.
 id = "mixtral"
 plugin = "mixtral"
 test_manifests = [
