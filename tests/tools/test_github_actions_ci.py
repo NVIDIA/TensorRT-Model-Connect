@@ -61,13 +61,19 @@ def test_workflows_pull_tensorrt_sdk_from_ghcr_without_artifactory_secrets() -> 
     install_call = 'install_tensorrt_sdk_wheel "$smoke_venv/bin/python"'
     assert ci_script.count(install_call) == 2
 
-    for workflow in ("nightly.yml", "trtmc-ci.yml"):
+    for workflow in ("nightly.yml", "model-proof.yml"):
         text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
         assert "packages: read" in text
         assert "GHCR_TOKEN: ${{ github.token }}" in text
         assert "DOCKER_CONFIG=$docker_config" in text
         assert "TRTMC_ARTIFACTORY_USERNAME" not in text
         assert "TRTMC_ARTIFACTORY_PASSWORD" not in text
+
+    premerge = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
+    assert "uses: ./.github/workflows/model-proof.yml" in premerge
+    assert "packages: read" in premerge
+    assert "TRTMC_ARTIFACTORY_USERNAME" not in premerge
+    assert "TRTMC_ARTIFACTORY_PASSWORD" not in premerge
 
 
 def test_tensorrt_sdk_publisher_is_temporary_and_self_contained() -> None:
