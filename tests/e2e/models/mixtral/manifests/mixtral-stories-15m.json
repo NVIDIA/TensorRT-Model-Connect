@@ -5,6 +5,7 @@
   "family": "mixtral",
   "runtime_strategy": "mixtral_decoder_moe",
   "task_strategy": "text_generation_causal",
+  "e2e_parallel_resource": "exclusive_gpu",
   "precision": "fp16",
   "fp32_layers": [
     5

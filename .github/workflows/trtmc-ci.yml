@@ -410,16 +410,19 @@ jobs:
               false) upstream_args+=(--upstream-result "no-model=$NO_MODEL_RESULT") ;;
               *) upstream_args+=(--upstream-result "impact-selection=invalid") ;;
             esac
-            python3 scripts/generate_model_proof_report.py \
-              --parts-dir "$PARTS_DIR" \
-              --expected-models "$EXPECTED_MODELS" \
-              --revision "$REVISION" \
-              --suite "$SUITE" \
-              --project-dir "$GITHUB_WORKSPACE" \
-              --output "$REPORT_OUTPUT_DIR/model-proof-report.html" \
-              --status-output "$REPORT_OUTPUT_DIR/model-proof-report-status.json" \
-              "${upstream_args[@]}"
-            compose_rc=$?
+            if python3 scripts/generate_model_proof_report.py \
+                --parts-dir "$PARTS_DIR" \
+                --expected-models "$EXPECTED_MODELS" \
+                --revision "$REVISION" \
+                --suite "$SUITE" \
+                --project-dir "$GITHUB_WORKSPACE" \
+                --output "$REPORT_OUTPUT_DIR/model-proof-report.html" \
+                --status-output "$REPORT_OUTPUT_DIR/model-proof-report-status.json" \
+                "${upstream_args[@]}"; then
+              compose_rc=0
+            else
+              compose_rc=$?
+            fi
           fi
           echo "exit_code=$compose_rc" >> "$GITHUB_OUTPUT"
           exit 0

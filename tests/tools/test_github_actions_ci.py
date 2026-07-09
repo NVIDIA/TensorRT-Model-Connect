@@ -384,6 +384,9 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert '--upstream-result "model-proof=$MODEL_RESULT"' in report
     assert '--upstream-result "no-model=$NO_MODEL_RESULT"' in report
     assert "scripts/generate_model_proof_report.py" in report
+    assert "if python3 scripts/generate_model_proof_report.py" in report
+    assert "compose_rc=$?" in report
+    assert 'echo "exit_code=$compose_rc" >> "$GITHUB_OUTPUT"' in report
     assert "Upload combined model proof HTML report" in report
     assert "Enforce combined report certification" in report
 
