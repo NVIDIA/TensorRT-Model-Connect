@@ -4,6 +4,7 @@ title: Architecture Overview
 
 import useBaseUrl from '@docusaurus/useBaseUrl';
 
+<!-- CI coverage experiment: documentation-only changes must not schedule GPU model proofs. -->
 
 TensorRT-Model-Connect has two large responsibilities:
 
