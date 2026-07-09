@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# CI coverage experiment: this Python ownership change must select only gpt2.
 id = "gpt2"
 plugin = "gpt2"
 module = "plugin"
