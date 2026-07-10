@@ -77,6 +77,35 @@ auto partial = stream->accept_audio(samples, num_samples, false);
 auto final = stream->finish();
 ```
 
+## Offline transcription
+
+`TranscriptionConfig` carries per-request offline ASR controls:
+
+```cpp
+trtmc::TranscriptionConfig cfg;
+cfg.input_sample_rate = 16000;
+cfg.max_output_tokens = 80;
+cfg.beam_size = 4;
+cfg.source_language = "en";
+cfg.target_language = "fr";
+cfg.task = trtmc::TranscriptionTask::kTranslate;
+cfg.punctuation = true;
+cfg.timestamps = true;
+cfg.max_input_duration_seconds = 300.0F;
+cfg.segment_duration_seconds = 20.0F;
+
+auto result = pipe->transcribe(samples, num_samples, cfg);
+for (const auto& segment : result.segments) {
+    std::cout << segment.start_seconds << "\t" << segment.end_seconds
+              << "\t" << segment.text << "\n";
+}
+```
+
+`transcribe_batch(const std::vector<TranscriptionRequest>&)` preserves each
+request's samples and config. The default implementation is sequential and
+returns results in request order. The legacy max-token/sample-rate overload is
+still supported.
+
 ## C ABI
 
 The C ABI is for FFI and backward-compatible integrations:

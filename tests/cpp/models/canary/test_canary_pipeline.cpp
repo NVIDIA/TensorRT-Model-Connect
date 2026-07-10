@@ -60,6 +60,13 @@ void test_canary_transcribe() {
     wcfg.mel_length = 4;
     wcfg.max_source_positions = 5;
     wcfg.eot_token_id = 2;
+    wcfg.decoder_start_token_ids = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    wcfg.supported_languages = {"en"};
+    wcfg.language_token_ids = {0};
+    wcfg.punctuation_token_id = 0;
+    wcfg.no_punctuation_token_id = 1;
+    wcfg.timestamp_token_id = 1;
+    wcfg.no_timestamp_token_id = 2;
 
     trtmc::MelFilterbank mel_fb;
     mel_fb.n_freq_bins = 201;
@@ -76,6 +83,15 @@ void test_canary_transcribe() {
     auto result = pipeline.transcribe(audio.data(), static_cast<int32_t>(audio.size()), 5);
     check(result.token_ids.size() == 1, "canary transcribe produces 1 token");
     check(result.token_ids[0] == 2, "canary transcribe token is eot=2");
+
+    trtmc::TranscriptionConfig request;
+    request.max_output_tokens = 5;
+    request.input_sample_rate = 16000;
+    request.timestamps = true;
+    const auto timed = pipeline.transcribe(audio.data(), static_cast<int32_t>(audio.size()), request);
+    check(timed.segments.size() == 1, "canary timestamp request returns one segment");
+    check(timed.segments[0].start_seconds == 0.0 && timed.segments[0].end_seconds > 0.0,
+          "canary timestamp segment reports input interval in seconds");
 
     cudaStreamDestroy(stream);
 }

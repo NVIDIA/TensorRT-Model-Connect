@@ -33,6 +33,20 @@ struct CanaryConfig {
     // When non-empty, transcribe() uses this instead of building from individual fields.
     // Set from bundle config.json "decoder_start_token_ids" for compatible ASR variants.
     std::vector<int32_t> decoder_start_token_ids;
+
+    // Canary prompt metadata is derived from the checkpoint tokenizer while
+    // building the bundle. The positions refer to decoder_start_token_ids.
+    std::vector<std::string> supported_languages;
+    std::vector<int32_t> language_token_ids;
+    int32_t source_language_position{4};
+    int32_t target_language_position{5};
+    int32_t punctuation_position{6};
+    int32_t timestamp_position{8};
+    int32_t punctuation_token_id{-1};
+    int32_t no_punctuation_token_id{-1};
+    int32_t timestamp_token_id{-1};
+    int32_t no_timestamp_token_id{-1};
+    bool translation_requires_english{true};
 };
 
 } // namespace trtmc

@@ -130,6 +130,30 @@ class TestResolveModel:
         finally:
             shutil.rmtree(staged)
 
+    def test_local_canary_directory_stages_archive_before_generic_config(self, tmp_path):
+        """A local Canary directory resolves without a remote model ID."""
+        (tmp_path / "config.json").write_text('{"model_type":"unrelated"}')
+        nemo_path = tmp_path / "local-canary.nemo"
+        config_bytes = (
+            b"target: nemo.collections.asr.models.aed_multitask_models."
+            b"EncDecMultiTaskModel\nencoder:\n  d_model: 16\n"
+            b"head:\n  num_classes: 321\n"
+        )
+        with tarfile.open(nemo_path, "w") as archive:
+            member = tarfile.TarInfo("model_config.yaml")
+            member.size = len(config_bytes)
+            archive.addfile(member, io.BytesIO(config_bytes))
+
+        staged = Path(_resolve_model(str(tmp_path)))
+        try:
+            assert staged != tmp_path
+            staged_config = (staged / "config.json").read_text()
+            assert '"model_type": "canary"' in staged_config
+            assert '"vocab_size": 321' in staged_config
+            assert (staged / nemo_path.name).resolve() == nemo_path.resolve()
+        finally:
+            shutil.rmtree(staged)
+
 
 class TestFindPlugin:
     def test_unsupported_model_type(self):

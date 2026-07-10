@@ -68,6 +68,9 @@ Key ideas:
 
 `speech_to_text` bundles use audio preprocessing, mel feature extraction, encoder/decoder execution, and text decoding.
 
+For local Canary checkpoints, multilingual prompts, beam search, batching, and
+segment controls, continue with [Configurable Canary Decoding](canary-decoding.md).
+
 ```mermaid
 flowchart LR
   Audio["PCM audio"] --> Resample["Resample if needed"]

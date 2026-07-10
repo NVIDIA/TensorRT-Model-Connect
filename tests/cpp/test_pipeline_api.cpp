@@ -53,6 +53,21 @@ class DummyPipeline final : public trtmc::IPipeline {
     const char* pipeline_type() const override { return "DummyPipeline"; }
 };
 
+class RecordingTranscriptionPipeline final : public trtmc::IPipeline {
+  public:
+    const char* model_id() const override { return "recording"; }
+    const char* pipeline_type() const override { return "RecordingTranscriptionPipeline"; }
+
+    trtmc::TextResult transcribe(const float* audio, int32_t count,
+                                 const trtmc::TranscriptionConfig& cfg) override {
+        observed.push_back(cfg);
+        return {std::to_string(count) + ":" + std::to_string(audio == nullptr ? -1 : audio[0]),
+                {cfg.beam_size}};
+    }
+
+    std::vector<trtmc::TranscriptionConfig> observed;
+};
+
 static void test_null_input_returns_null() {
     auto* p = trtmc_create_pipeline(nullptr, 0);
     check(p == nullptr, "null input returns nullptr");
@@ -233,6 +248,27 @@ static void test_ipipeline_default_virtuals() {
     check(threw, "default detect throws");
 }
 
+static void test_transcription_batch_preserves_per_request_config() {
+    RecordingTranscriptionPipeline pipeline;
+    trtmc::TranscriptionRequest first;
+    first.audio_samples = {1.0F, 2.0F};
+    first.config.beam_size = 1;
+    first.config.source_language = "en";
+    trtmc::TranscriptionRequest second;
+    second.audio_samples = {3.0F};
+    second.config.beam_size = 4;
+    second.config.source_language = "fr";
+
+    const auto results = pipeline.transcribe_batch({first, second});
+    check(results.size() == 2, "transcription batch result count");
+    check(results[0].token_ids == std::vector<int32_t>({1}) &&
+              results[1].token_ids == std::vector<int32_t>({4}),
+          "transcription batch preserves request order");
+    check(pipeline.observed.size() == 2 && pipeline.observed[0].source_language == "en" &&
+              pipeline.observed[1].source_language == "fr",
+          "transcription batch preserves per-request config");
+}
+
 int main() {
     test_null_input_returns_null();
     test_invalid_path_returns_null();
@@ -241,6 +277,7 @@ int main() {
     test_sizeof_ipipeline_is_vtable();
     test_delete_null_safe();
     test_ipipeline_default_virtuals();
+    test_transcription_batch_preserves_per_request_config();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

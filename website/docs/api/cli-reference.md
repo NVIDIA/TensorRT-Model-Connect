@@ -77,3 +77,23 @@ Common options include `--hf-python`, `--backend-dir`, `--runtime-cache`, `--cud
 Text-generation options include `--max-new-tokens`, `--greedy`, `--temperature`, `--top-k`, `--top-p`, `--min-p`, `--seed`, `--chat-template`, and `--no-thinking`.
 
 Object detection is available through `trtmc detect` for pipelines that implement `IPipeline::detect`.
+
+### Canary transcription options
+
+`trtmc transcribe` accepts repeated `--audio` inputs. These options apply to
+every input in that CLI batch:
+
+| Option | Purpose |
+| --- | --- |
+| `--beam-size N` | Greedy at `1`; Canary beam search at `2` through `16`. |
+| `--source-language TAG` | Language code for the input audio. |
+| `--target-language TAG` | Language code for the decoded text. |
+| `--task transcribe|translate` | Validate and select ASR versus translation prompting. |
+| `--punctuation`, `--no-punctuation` | Enable or remove punctuation in decoded text. |
+| `--timestamps` | Print segment start/end seconds with each transcript. |
+| `--max-new-tokens N` | Per-segment decoder output limit. |
+| `--max-input-seconds F` | Reject inputs longer than this duration. |
+| `--segment-length-seconds F` | Decode independent audio windows of this duration. |
+
+See [Configurable Canary Decoding](/tutorials/intermediate/canary-decoding)
+for bounds, batch output, and local checkpoint examples.

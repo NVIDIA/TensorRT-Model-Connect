@@ -18,17 +18,68 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace trtmc {
 
 // --- Result types (all value types, user owns the data) ---
 
+struct TranscriptionSegment {
+    double start_seconds{0.0};
+    double end_seconds{0.0};
+    std::string text;
+    std::vector<int32_t> token_ids;
+};
+
 struct TextResult {
+    TextResult() = default;
+    TextResult(std::string result_text, std::vector<int32_t> result_token_ids,
+               double result_prefill_ms = 0.0, double result_decode_ms = 0.0,
+               std::vector<TranscriptionSegment> result_segments = {})
+        : text(std::move(result_text)), token_ids(std::move(result_token_ids)),
+          prefill_ms(result_prefill_ms), decode_ms(result_decode_ms),
+          segments(std::move(result_segments)) {}
+
     std::string text;
     std::vector<int32_t> token_ids;
     double prefill_ms{0.0};
     double decode_ms{0.0};
+    // Populated by transcription pipelines when timestamp intervals are
+    // requested and supported.
+    std::vector<TranscriptionSegment> segments;
+};
+
+enum class TranscriptionTask {
+    kTranscribe,
+    kTranslate,
+};
+
+struct TranscriptionConfig {
+    // Maximum number of decoder output tokens. The valid upper bound is
+    // model-specific and excludes the decoder prompt tokens.
+    int32_t max_output_tokens{224};
+    // Source sample rate in Hz. 0 means the samples are already at the model
+    // rate. A positive value is resampled when necessary.
+    int32_t input_sample_rate{0};
+    // 1 preserves greedy decoding. Values greater than 1 select beam search.
+    int32_t beam_size{1};
+    std::string source_language{"en"};
+    std::string target_language{"en"};
+    TranscriptionTask task{TranscriptionTask::kTranscribe};
+    bool punctuation{true};
+    bool timestamps{false};
+    // 0 disables the caller-specified duration limit. A positive value is a
+    // hard input limit in seconds; longer inputs are rejected.
+    float max_input_duration_seconds{0.0F};
+    // 0 processes one model-sized segment. A positive value splits the input
+    // into independent segments of this many seconds and joins their text.
+    float segment_duration_seconds{0.0F};
+};
+
+struct TranscriptionRequest {
+    std::vector<float> audio_samples;
+    TranscriptionConfig config;
 };
 
 struct ImageResult {
@@ -279,6 +330,29 @@ class IPipeline {
         (void)max_tokens;
         (void)input_sample_rate;
         throw std::runtime_error(std::string(pipeline_type()) + " does not support transcribe()");
+    }
+
+    // Typed transcription configuration. The default forwards to the legacy
+    // overload so existing speech pipelines remain compatible.
+    virtual TextResult transcribe(const float* audio_samples, int32_t num_samples,
+                                  const TranscriptionConfig& cfg) {
+        return transcribe(audio_samples, num_samples, cfg.max_output_tokens,
+                          cfg.input_sample_rate);
+    }
+
+    // Each request owns its samples and its complete per-input configuration.
+    // Pipelines may override this for true batching; the default preserves the
+    // request order and executes sequentially.
+    virtual std::vector<TextResult>
+    transcribe_batch(const std::vector<TranscriptionRequest>& requests) {
+        std::vector<TextResult> results;
+        results.reserve(requests.size());
+        for (const auto& request : requests) {
+            results.push_back(transcribe(request.audio_samples.data(),
+                                         static_cast<int32_t>(request.audio_samples.size()),
+                                         request.config));
+        }
+        return results;
     }
 
     // -- Streaming transcription (cache-aware ASR) --

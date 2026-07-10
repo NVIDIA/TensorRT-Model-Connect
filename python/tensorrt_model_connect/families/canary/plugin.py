@@ -47,6 +47,11 @@ from .decoder_tp_builder import build_canary_tp_decoder_engine
 
 trt = trt_compat.get_trt()
 
+_CANARY_V2_LANGUAGES = [
+    "bg", "hr", "cs", "da", "nl", "en", "et", "fi", "fr", "de", "el", "hu", "it",
+    "lv", "lt", "mt", "pl", "pt", "ro", "sk", "sl", "es", "sv", "ru", "uk",
+]
+
 
 def _cfg_int(*values, default: int) -> int:
     for value in values:
@@ -95,20 +100,31 @@ def _load_nemo_archive(path: str):
     return state_dict, config_dict
 
 
-def _extract_tokenizer_from_nemo(nemo_path: str, dest_dir: Path) -> None:
+def _extract_tokenizer_from_nemo(
+    nemo_path: str, dest_dir: Path, nemo_cfg: dict | None = None,
+) -> Path:
     nemo = Path(nemo_path)
     if nemo.is_dir():
         nemo_files = sorted(nemo.glob("*.nemo"))
         if nemo_files:
             nemo = nemo_files[0]
+    tokenizer_cfg = (nemo_cfg or {}).get("tokenizer", {})
+    configured_name = str(tokenizer_cfg.get("model_path", "")).removeprefix("nemo:")
     with tarfile.open(str(nemo), "r") as tar:
-        for member in tar.getmembers():
-            bn = Path(member.name).name
-            if bn.endswith(".model") and "tokenizer" in bn.lower():
-                f = tar.extractfile(member)
-                if f:
-                    (dest_dir / "tokenizer.model").write_bytes(f.read())
-                    break
+        candidates = [
+            member for member in tar.getmembers()
+            if Path(member.name).name.endswith(".model")
+            and "tokenizer" in Path(member.name).name.lower()
+        ]
+        selected = next(
+            (member for member in candidates
+             if Path(member.name).name == Path(configured_name).name),
+            candidates[0] if candidates else None,
+        )
+        if selected is not None:
+            f = tar.extractfile(selected)
+            if f:
+                (dest_dir / "tokenizer.model").write_bytes(f.read())
     # Generate a fast tokenizer.json from the SentencePiece model.
     # Use the tokenizers library directly to avoid HF warnings in stdout.
     tok_model_path = dest_dir / "tokenizer.model"
@@ -146,6 +162,64 @@ def _extract_tokenizer_from_nemo(nemo_path: str, dest_dir: Path) -> None:
         tok_cfg.write_text(json.dumps({
             "tokenizer_class": "PreTrainedTokenizerFast",
         }, indent=2))
+    return tok_model_path
+
+
+def _canary_prompt_metadata(nemo_cfg: dict, tokenizer_model: Path) -> dict:
+    import sentencepiece as spm
+
+    processor = spm.SentencePieceProcessor(model_file=str(tokenizer_model))
+
+    def token_id(piece: str) -> int:
+        value = int(processor.piece_to_id(piece))
+        if value < 0 or processor.id_to_piece(value) != piece:
+            raise ValueError(
+                f"Canary tokenizer {tokenizer_model} is missing required token {piece!r}")
+        return value
+
+    def has_token(piece: str) -> bool:
+        value = int(processor.piece_to_id(piece))
+        return value >= 0 and processor.id_to_piece(value) == piece
+
+    defaults = {}
+    for prompt in nemo_cfg.get("prompt_defaults", []):
+        if prompt.get("role") == "user":
+            defaults = dict(prompt.get("slots", {}))
+            break
+    source = str(defaults.get("source_lang", "<|en|>"))
+    target = str(defaults.get("target_lang", source))
+    prompt_pieces = [
+        "▁", "<|startofcontext|>", "<|startoftranscript|>",
+        str(defaults.get("emotion", "<|emo:undefined|>")), source, target,
+        str(defaults.get("pnc", "<|pnc|>")),
+        str(defaults.get("itn", "<|noitn|>")),
+        str(defaults.get("timestamp", "<|notimestamp|>")),
+        str(defaults.get("diarize", "<|nodiarize|>")),
+    ]
+
+    configured_languages = nemo_cfg.get("supported_languages")
+    if configured_languages:
+        languages = [str(language) for language in configured_languages]
+    else:
+        languages = [
+            language for language in _CANARY_V2_LANGUAGES
+            if has_token(f"<|{language}|>")
+        ]
+    return {
+        "decoder_start_token_ids": [token_id(piece) for piece in prompt_pieces],
+        "eot_token_id": token_id("<|endoftext|>"),
+        "canary_supported_languages": languages,
+        "canary_language_token_ids": [token_id(f"<|{language}|>") for language in languages],
+        "canary_source_language_position": 4,
+        "canary_target_language_position": 5,
+        "canary_punctuation_position": 6,
+        "canary_timestamp_position": 8,
+        "canary_punctuation_token_id": token_id("<|pnc|>"),
+        "canary_no_punctuation_token_id": token_id("<|nopnc|>"),
+        "canary_timestamp_token_id": token_id("<|timestamp|>"),
+        "canary_no_timestamp_token_id": token_id("<|notimestamp|>"),
+        "canary_translation_requires_english": True,
+    }
 
 
 def _sinusoidal_pe(max_len: int, d_model: int) -> np.ndarray:
@@ -569,6 +643,7 @@ class CanaryPlugin:
 
     def __init__(self):
         self._vl_config: dict = {}
+        self._prompt_metadata: dict = {}
 
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("canary", "canary_asr", "enc_dec_multi_task")
@@ -576,7 +651,9 @@ class CanaryPlugin:
     def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
         w = WeightDict()
         sd, ncfg = _load_nemo_archive(model_dir)
-        _extract_tokenizer_from_nemo(model_dir, Path(model_dir))
+        tokenizer_model = _extract_tokenizer_from_nemo(model_dir, Path(model_dir), ncfg)
+        if tokenizer_model.exists():
+            self._prompt_metadata = _canary_prompt_metadata(ncfg, tokenizer_model)
 
         ec = ncfg.get("encoder", {})
         hidden = int(ec.get("d_model", 1024))
@@ -954,17 +1031,14 @@ class CanaryPlugin:
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict | None:
         """Override synthetic config with actual values from the NeMo model."""
-        return {
+        overrides = {
             "num_hidden_layers": config.num_hidden_layers,
             "num_attention_heads": config.num_attention_heads,
             "hidden_size": config.hidden_size,
             "vocab_size": config.vocab_size,
-            # NeMo canary2 default prompt context_ids:
-            # ▁ <|startofcontext|> <|startoftranscript|> <|emo:undefined|>
-            # <|en|> <|en|> <|pnc|> <|noitn|> <|notimestamp|> <|nodiarize|>
-            "decoder_start_token_ids": [16053, 7, 4, 16, 64, 64, 5, 9, 11, 13],
-            "eot_token_id": 3,  # <|endoftext|>
         }
+        overrides.update(self._prompt_metadata)
+        return overrides
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
         return self._vl_config or {

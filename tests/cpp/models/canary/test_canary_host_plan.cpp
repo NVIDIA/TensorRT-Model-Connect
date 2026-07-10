@@ -18,6 +18,7 @@
 #include "runtime/models/canary/canary_cross_kv_apply.h"
 #include "runtime/models/canary/canary_cross_kv_plan.h"
 #include "runtime/models/canary/canary_host_plan.h"
+#include "runtime/models/canary/canary_request.h"
 
 #include <cstdint>
 #include <cstring>
@@ -74,6 +75,68 @@ void test_encoder_length_planning() {
           "canary actual encoder length returns zero for full-length mel");
     check(trtmc::compute_canary_actual_encoder_length(100, 0, 1500) == 0,
           "canary actual encoder length returns zero for invalid full mel length");
+}
+
+trtmc::CanaryConfig configurable_canary() {
+    trtmc::CanaryConfig cfg;
+    cfg.max_target_positions = 64;
+    cfg.decoder_start_token_ids = {100, 101, 102, 103, 20, 20, 30, 31, 40, 41};
+    cfg.supported_languages = {"en", "fr"};
+    cfg.language_token_ids = {20, 21};
+    cfg.punctuation_token_id = 30;
+    cfg.no_punctuation_token_id = 32;
+    cfg.timestamp_token_id = 42;
+    cfg.no_timestamp_token_id = 40;
+    return cfg;
+}
+
+void test_configurable_request_prompt() {
+    const auto model = configurable_canary();
+    trtmc::TranscriptionConfig request;
+    request.max_output_tokens = 20;
+    request.beam_size = 4;
+    request.task = trtmc::TranscriptionTask::kTranslate;
+    request.source_language = "en";
+    request.target_language = "fr";
+    request.punctuation = false;
+    request.timestamps = true;
+
+    const auto tokens = trtmc::make_canary_request_tokens(model, request, nullptr);
+    check(tokens == std::vector<int32_t>({100, 101, 102, 103, 20, 21, 32, 31, 42, 41}),
+          "Canary request replaces language and output control prompt slots");
+}
+
+void test_configurable_request_validation() {
+    const auto model = configurable_canary();
+    trtmc::TranscriptionConfig request;
+    request.max_output_tokens = 20;
+
+    auto rejects = [&model](const trtmc::TranscriptionConfig& candidate) {
+        try {
+            (void)trtmc::make_canary_request_tokens(model, candidate, nullptr);
+            return false;
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+    };
+
+    request.target_language = "fr";
+    check(rejects(request), "Canary transcription rejects different target language");
+    request.task = trtmc::TranscriptionTask::kTranslate;
+    request.target_language = "en";
+    check(rejects(request), "Canary translation rejects equal languages");
+    request.target_language = "fr";
+    request.source_language = "de";
+    check(rejects(request), "Canary rejects language absent from bundle metadata");
+    request.source_language = "en";
+    request.beam_size = 17;
+    check(rejects(request), "Canary rejects beam size above supported bound");
+    request.beam_size = 1;
+    request.max_output_tokens = 65;
+    check(rejects(request), "Canary rejects output length above model bound");
+    request.max_output_tokens = 20;
+    request.segment_duration_seconds = -1.0F;
+    check(rejects(request), "Canary rejects negative segment duration");
 }
 
 void test_mel_padding_and_truncation_are_row_major() {
@@ -198,6 +261,8 @@ void test_cross_kv_apply_reports_failures() {
 int main() {
     test_expected_mel_length_and_initial_tokens();
     test_encoder_length_planning();
+    test_configurable_request_prompt();
+    test_configurable_request_validation();
     test_mel_padding_and_truncation_are_row_major();
     test_encoder_mask_and_cross_kv_plan();
     test_cross_kv_apply_tracks_zero_and_copy_operations();

@@ -170,6 +170,8 @@ void test_audio_and_solve_flags() {
         parse({"trtmc", "transcribe", "bundle.trtfb", "--audio", "input.wav", "--stream",
                "--chunk-ms", "80", "--att-context-size", "5,2", "--pad-and-drop-preencoded"});
     check(transcribe.audio_in == "input.wav", "transcribe audio");
+    check(transcribe.audio_inputs == std::vector<std::string>({"input.wav"}),
+          "transcribe audio list");
     check(transcribe.stream, "transcribe stream");
     check(transcribe.chunk_ms == 80, "transcribe chunk ms");
     check(transcribe.att_context_left == 5 && transcribe.att_context_right == 2,
@@ -180,6 +182,37 @@ void test_audio_and_solve_flags() {
         parse({"trtmc", "solve", "bundle.trtfb", "--branch-input", "1,2", "--trunk-input", "3,4"});
     check(solve.branch_input == "1,2", "solve branch");
     check(solve.trunk_input == "3,4", "solve trunk");
+}
+
+void test_canary_transcription_flags_and_batch() {
+    auto args = parse({"trtmc", "transcribe", "bundle.trtfb", "--audio", "one.wav",
+                       "--audio", "two.wav", "--beam-size", "4", "--source-language", "en",
+                       "--target-language", "fr", "--task", "translate", "--no-punctuation",
+                       "--timestamps", "--max-input-seconds", "45.5",
+                       "--segment-length-seconds", "20"});
+    check(!args.parse_error, "Canary transcription controls parse");
+    check(args.audio_inputs == std::vector<std::string>({"one.wav", "two.wav"}),
+          "Canary repeated audio inputs form batch");
+    check(args.beam_size == 4, "Canary beam size");
+    check(args.source_language == "en" && args.target_language == "fr",
+          "Canary source and target languages");
+    check(args.transcription_task == "translate", "Canary translation task");
+    check(!args.punctuation, "Canary punctuation toggle");
+    check(args.timestamps, "Canary timestamp toggle");
+    check(args.max_input_seconds > 45.49F && args.max_input_seconds < 45.51F,
+          "Canary maximum input seconds");
+    check(args.segment_length_seconds == 20.0F, "Canary segment length seconds");
+
+    check(parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--beam-size", "0"})
+              .parse_error,
+          "Canary rejects zero beam size");
+    check(parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--task", "other"})
+              .parse_error,
+          "Canary rejects unknown task");
+    check(parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav",
+                 "--max-input-seconds", "nan"})
+              .parse_error,
+          "Canary rejects non-finite duration");
 }
 
 void test_unknown_command_fails() {
@@ -329,6 +362,7 @@ int main() {
     test_detect_parses_contract_flags();
     test_inspect_and_config_flags();
     test_audio_and_solve_flags();
+    test_canary_transcription_flags_and_batch();
     test_unknown_command_fails();
     test_unknown_flag_fails();
     test_missing_value_fails();

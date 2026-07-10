@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -51,6 +53,91 @@ run_canary_decode_loop(const std::vector<int32_t>& initial_tokens, int32_t max_n
         }
     }
 
+    return result;
+}
+
+struct CanaryBeamHypothesis {
+    std::vector<int32_t> output_ids;
+    double score{0.0};
+    bool finished{false};
+};
+
+template <typename LogitsFn>
+inline CanaryDecodeLoopResult
+run_canary_beam_search(const std::vector<int32_t>& initial_tokens, int32_t max_new_tokens,
+                       int32_t eot_token_id, int32_t beam_size, LogitsFn&& logits_for_prefix) {
+    CanaryDecodeLoopResult result;
+    if (max_new_tokens <= 0 || beam_size <= 0)
+        return result;
+
+    std::vector<CanaryBeamHypothesis> beams(1);
+    for (int32_t step = 0; step < max_new_tokens; ++step) {
+        std::vector<CanaryBeamHypothesis> candidates;
+        bool all_finished = true;
+        for (const auto& beam : beams) {
+            if (beam.finished) {
+                candidates.push_back(beam);
+                continue;
+            }
+            all_finished = false;
+            std::vector<int32_t> prefix = initial_tokens;
+            prefix.insert(prefix.end(), beam.output_ids.begin(), beam.output_ids.end());
+            std::vector<float> logits;
+            if (!logits_for_prefix(prefix, logits, result.error)) {
+                result.decode_failed = true;
+                return result;
+            }
+            if (logits.empty()) {
+                result.decode_failed = true;
+                result.error = "Canary beam search received empty logits";
+                return result;
+            }
+
+            const float max_logit = *std::max_element(logits.begin(), logits.end());
+            double exp_sum = 0.0;
+            for (const float logit : logits)
+                exp_sum += std::exp(static_cast<double>(logit - max_logit));
+            const double log_normalizer = static_cast<double>(max_logit) + std::log(exp_sum);
+
+            std::vector<int32_t> indices(logits.size());
+            for (std::size_t i = 0; i < indices.size(); ++i)
+                indices[i] = static_cast<int32_t>(i);
+            const int32_t top_count =
+                std::min<int32_t>(beam_size, static_cast<int32_t>(indices.size()));
+            std::partial_sort(
+                indices.begin(), indices.begin() + top_count, indices.end(),
+                [&logits](int32_t lhs, int32_t rhs) {
+                    const float lhs_logit = logits[static_cast<std::size_t>(lhs)];
+                    const float rhs_logit = logits[static_cast<std::size_t>(rhs)];
+                    return lhs_logit == rhs_logit ? lhs < rhs : lhs_logit > rhs_logit;
+                });
+            for (int32_t i = 0; i < top_count; ++i) {
+                const int32_t token = indices[static_cast<std::size_t>(i)];
+                CanaryBeamHypothesis candidate = beam;
+                candidate.output_ids.push_back(token);
+                candidate.score += static_cast<double>(logits[static_cast<std::size_t>(token)]) -
+                                   log_normalizer;
+                candidate.finished = token == eot_token_id;
+                candidates.push_back(std::move(candidate));
+            }
+        }
+        if (all_finished)
+            break;
+
+        std::stable_sort(candidates.begin(), candidates.end(),
+                         [](const CanaryBeamHypothesis& lhs,
+                            const CanaryBeamHypothesis& rhs) {
+                             if (lhs.score != rhs.score)
+                                 return lhs.score > rhs.score;
+                             return lhs.output_ids < rhs.output_ids;
+                         });
+        if (candidates.size() > static_cast<std::size_t>(beam_size))
+            candidates.resize(static_cast<std::size_t>(beam_size));
+        beams = std::move(candidates);
+    }
+
+    if (!beams.empty())
+        result.output_ids = std::move(beams.front().output_ids);
     return result;
 }
 

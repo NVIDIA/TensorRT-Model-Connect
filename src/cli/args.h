@@ -30,6 +30,7 @@ struct CliArgs {
     std::string sde_noise_raw;
     std::string document;
     std::string audio_in;
+    std::vector<std::string> audio_inputs;
     std::string audio_out;
     std::string field_input;
     std::string branch_input;
@@ -68,6 +69,14 @@ struct CliArgs {
     int att_context_left{70};
     int att_context_right{13};
     std::string language;
+    int beam_size{1};
+    std::string source_language{"en"};
+    std::string target_language{"en"};
+    std::string transcription_task{"transcribe"};
+    bool punctuation{true};
+    bool timestamps{false};
+    float max_input_seconds{0.0F};
+    float segment_length_seconds{0.0F};
     std::string runtime_cache;
     std::vector<std::string> backend_search_paths;
     std::vector<std::string> model_plugin_search_paths;

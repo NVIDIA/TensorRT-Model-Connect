@@ -11,14 +11,18 @@
 #include "runtime/models/canary/canary_decode_policy.h"
 #include "runtime/models/canary/canary_host_plan.h"
 #include "runtime/models/canary/canary_mel_spectrogram.h"
+#include "runtime/models/canary/canary_request.h"
 #include "runtime/models/canary/decode_runtime.h"
 #include "trtmc/tokenizer.h"
 #include "utils/wav_reader.h"
 
 #include <chrono>
+#include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -47,6 +51,22 @@ struct CanaryStageTimestamps {
     CanaryClock::time_point decoder_end;
     CanaryClock::time_point tokenize_end;
 };
+
+std::string remove_punctuation_outside_control_tokens(const std::string& text) {
+    std::string cleaned;
+    cleaned.reserve(text.size());
+    bool in_control_token = false;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const unsigned char ch = static_cast<unsigned char>(text[i]);
+        if (!in_control_token && ch == '<' && i + 1 < text.size() && text[i + 1] == '|')
+            in_control_token = true;
+        if (in_control_token || std::ispunct(ch) == 0)
+            cleaned.push_back(static_cast<char>(ch));
+        if (in_control_token && ch == '>' && i > 0 && text[i - 1] == '|')
+            in_control_token = false;
+    }
+    return cleaned;
+}
 
 void report_canary_stage_timing(bool enabled, const CanaryStageTimestamps& timestamps) {
     if (!enabled)
@@ -123,6 +143,93 @@ CanaryPipeline::~CanaryPipeline() {
 
 TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_samples,
                                       int32_t max_new_tokens, int32_t input_sample_rate) {
+    TranscriptionConfig cfg;
+    cfg.max_output_tokens = max_new_tokens;
+    cfg.input_sample_rate = input_sample_rate;
+    return transcribe(audio_data, num_samples, cfg);
+}
+
+TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_samples,
+                                      const TranscriptionConfig& cfg) {
+    if (audio_data == nullptr || num_samples <= 0)
+        throw std::invalid_argument("Canary transcription requires non-empty audio samples");
+
+    auto initial_tokens = make_canary_request_tokens(canary_config_, cfg, tokenizer_.get());
+    const int32_t available_output_tokens =
+        canary_config_.max_target_positions - static_cast<int32_t>(initial_tokens.size());
+    if (available_output_tokens <= 0 || cfg.max_output_tokens > available_output_tokens) {
+        throw std::invalid_argument("Canary max_output_tokens must be in [1, " +
+                                    std::to_string(std::max(available_output_tokens, 0)) +
+                                    "] after accounting for the decoder prompt");
+    }
+
+    const int32_t sample_rate = cfg.input_sample_rate > 0 ? cfg.input_sample_rate
+                                                          : mel_sampling_rate_;
+    const double duration_seconds =
+        static_cast<double>(num_samples) / static_cast<double>(sample_rate);
+    if (cfg.max_input_duration_seconds > 0.0F &&
+        duration_seconds > static_cast<double>(cfg.max_input_duration_seconds) + 1.0e-6) {
+        throw std::invalid_argument(
+            "Canary input duration " + std::to_string(duration_seconds) +
+            " seconds exceeds max_input_duration_seconds=" +
+            std::to_string(cfg.max_input_duration_seconds));
+    }
+
+    const double model_segment_seconds = static_cast<double>(mel_chunk_length_);
+    double segment_seconds = static_cast<double>(cfg.segment_duration_seconds);
+    if (segment_seconds <= 0.0)
+        segment_seconds = model_segment_seconds;
+    if (segment_seconds <= 0.0 || segment_seconds > model_segment_seconds) {
+        throw std::invalid_argument(
+            "Canary segment_duration_seconds must be > 0 and <= the bundle limit of " +
+            std::to_string(model_segment_seconds) + " seconds");
+    }
+    if (cfg.segment_duration_seconds <= 0.0F && duration_seconds > model_segment_seconds) {
+        throw std::invalid_argument(
+            "Canary input exceeds the bundle's single-segment limit of " +
+            std::to_string(model_segment_seconds) +
+            " seconds; set segment_duration_seconds to enable segmented decoding");
+    }
+
+    const int64_t segment_samples_64 =
+        static_cast<int64_t>(std::llround(segment_seconds * static_cast<double>(sample_rate)));
+    if (segment_samples_64 <= 0 || segment_samples_64 > std::numeric_limits<int32_t>::max())
+        throw std::invalid_argument("Canary segment duration produces an invalid sample count");
+    const int32_t segment_samples = static_cast<int32_t>(segment_samples_64);
+
+    TextResult combined;
+    for (int64_t offset = 0; offset < num_samples; offset += segment_samples) {
+        const int32_t count = static_cast<int32_t>(
+            std::min<int64_t>(segment_samples, static_cast<int64_t>(num_samples) - offset));
+        auto segment = transcribe_segment(audio_data + offset, count, sample_rate, initial_tokens,
+                                          cfg.max_output_tokens, cfg.beam_size);
+        if (!cfg.punctuation)
+            segment.text = remove_punctuation_outside_control_tokens(segment.text);
+        if (cfg.timestamps) {
+            TranscriptionSegment timed;
+            timed.start_seconds =
+                static_cast<double>(offset) / static_cast<double>(sample_rate);
+            timed.end_seconds =
+                static_cast<double>(offset + count) / static_cast<double>(sample_rate);
+            timed.text = segment.text;
+            timed.token_ids = segment.token_ids;
+            combined.segments.push_back(std::move(timed));
+        }
+        if (!combined.text.empty() && !segment.text.empty())
+            combined.text += '\n';
+        combined.text += segment.text;
+        combined.token_ids.insert(combined.token_ids.end(), segment.token_ids.begin(),
+                                  segment.token_ids.end());
+        combined.prefill_ms += segment.prefill_ms;
+        combined.decode_ms += segment.decode_ms;
+    }
+    return combined;
+}
+
+TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t num_samples,
+                                              int32_t input_sample_rate,
+                                              const std::vector<int32_t>& initial_tokens,
+                                              int32_t max_output_tokens, int32_t beam_size) {
     const bool report_stage_timing = canary_stage_timing_enabled();
     const auto transcribe_start = CanaryClock::now();
 
@@ -178,9 +285,8 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
     const auto cross_kv_end = CanaryClock::now();
 
     // Step 4: Run decoder
-    std::vector<int32_t> initial_tokens = make_canary_initial_decoder_tokens(canary_config_);
     std::cerr << "[canary] Running decoder ..." << std::endl;
-    auto output_ids = run_decoder(initial_tokens, max_new_tokens);
+    auto output_ids = run_decoder(initial_tokens, max_output_tokens, beam_size);
     const auto decoder_end = CanaryClock::now();
 
     // Step 5: Decode token IDs
@@ -277,7 +383,28 @@ void CanaryPipeline::setup_cross_attention(int32_t actual_enc_seq_len) {
 }
 
 std::vector<int32_t> CanaryPipeline::run_decoder(const std::vector<int32_t>& initial_tokens,
-                                                 int32_t max_new_tokens) {
+                                                 int32_t max_new_tokens, int32_t beam_size) {
+    if (beam_size > 1) {
+        auto result = run_canary_beam_search(
+            initial_tokens, max_new_tokens, canary_config_.eot_token_id, beam_size,
+            [this](const std::vector<int32_t>& prefix, std::vector<float>& logits,
+                   std::string& error) {
+                try {
+                    state_->reset();
+                    state_->bind_to(*decoder_);
+                    for (const int32_t token : prefix)
+                        run_decoder_step(token, logits);
+                    return true;
+                } catch (const std::exception& e) {
+                    error = e.what();
+                    return false;
+                }
+            });
+        if (result.decode_failed)
+            throw std::runtime_error("Canary beam search failed: " + result.error);
+        return result.output_ids;
+    }
+
     state_->reset();
     state_->bind_to(*decoder_);
 

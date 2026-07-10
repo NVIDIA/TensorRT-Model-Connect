@@ -131,6 +131,35 @@ void test_decode_loop_handles_zero_budget_and_empty_logits() {
           "canary decode loop treats empty-logit case as clean no-op");
 }
 
+void test_beam_search_recovers_better_sequence_than_greedy_prefix() {
+    const auto result = trtmc::run_canary_beam_search(
+        {9}, 2, 2, 2,
+        [](const std::vector<int32_t>& prefix, std::vector<float>& logits, std::string&) {
+            if (prefix.size() == 1) {
+                logits = {0.0F, -0.1F, -10.0F};
+            } else if (prefix.back() == 1) {
+                logits = {-10.0F, -10.0F, 2.0F};
+            } else {
+                logits = {0.0F, 0.0F, 0.0F};
+            }
+            return true;
+        });
+    check(!result.decode_failed, "Canary beam search succeeds");
+    check(result.output_ids == std::vector<int32_t>({1, 2}),
+          "Canary beam search selects highest sequence probability and stops on EOT");
+}
+
+void test_beam_search_reports_replay_failure() {
+    const auto result = trtmc::run_canary_beam_search(
+        {9}, 2, 2, 2,
+        [](const std::vector<int32_t>&, std::vector<float>&, std::string& error) {
+            error = "replay-fail";
+            return false;
+        });
+    check(result.decode_failed, "Canary beam search reports prefix replay failure");
+    check(result.error == "replay-fail", "Canary beam search forwards replay error");
+}
+
 } // namespace
 
 int main() {
@@ -138,6 +167,8 @@ int main() {
     test_decode_loop_reports_prefill_failure();
     test_decode_loop_reports_decode_failure_after_emitting_token();
     test_decode_loop_handles_zero_budget_and_empty_logits();
+    test_beam_search_recovers_better_sequence_than_greedy_prefix();
+    test_beam_search_reports_replay_failure();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " canary decode policy test(s) failed\n";

@@ -17,7 +17,9 @@
 //                        Image-generation extras:
 //                        [--negative-prompt "text"] [--num-inference-steps N]
 //                        [--height N] [--width N]
-//   trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] [--hf-python PATH]
+//   trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--beam-size N]
+//                        [--source-language TAG] [--target-language TAG]
+//                        [--task transcribe|translate] [--timestamps]
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
 //   trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]
@@ -1294,17 +1296,36 @@ int cmd_solve(const CliArgs& args) {
 }
 
 int cmd_transcribe(const CliArgs& args) {
-    if (args.bundle_path.empty() || args.audio_in.empty()) {
+    const std::vector<std::string> audio_paths =
+        !args.audio_inputs.empty() ? args.audio_inputs
+                                   : (args.audio_in.empty() ? std::vector<std::string>{}
+                                                            : std::vector<std::string>{args.audio_in});
+    if (args.bundle_path.empty() || audio_paths.empty()) {
         std::cerr << "Error: transcribe requires bundle + --audio\n";
         return EXIT_FAILURE;
     }
 
     auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
 
-    auto audio = trtmc::io::read_wav(args.audio_in);
     int32_t max_tokens = args.max_new_tokens > 0 ? args.max_new_tokens : 224;
 
     if (args.stream) {
+        if (audio_paths.size() != 1) {
+            std::cerr << "Error: --stream accepts exactly one --audio input\n";
+            return EXIT_FAILURE;
+        }
+        const bool has_offline_only_controls =
+            args.beam_size != 1 || args.transcription_task != "transcribe" ||
+            !args.punctuation || args.timestamps || args.max_input_seconds > 0.0F ||
+            args.segment_length_seconds > 0.0F ||
+            (args.language.empty() &&
+             (args.source_language != "en" || args.target_language != "en"));
+        if (has_offline_only_controls) {
+            std::cerr << "Error: decoding, duration, and segment controls are only "
+                         "supported for offline transcription\n";
+            return EXIT_FAILURE;
+        }
+        auto audio = trtmc::io::read_wav(audio_paths.front());
         trtmc::TranscriptionStreamConfig cfg;
         cfg.input_sample_rate = audio.sample_rate;
         cfg.max_new_tokens = max_tokens;
@@ -1335,10 +1356,42 @@ int cmd_transcribe(const CliArgs& args) {
         return EXIT_SUCCESS;
     }
 
-    auto result =
-        pipeline->transcribe(audio.samples.data(), static_cast<int32_t>(audio.samples.size()),
-                             max_tokens, audio.sample_rate);
-    std::cout << result.text << '\n';
+    std::vector<trtmc::TranscriptionRequest> requests;
+    requests.reserve(audio_paths.size());
+    for (const auto& path : audio_paths) {
+        auto audio = trtmc::io::read_wav(path);
+        trtmc::TranscriptionRequest request;
+        request.audio_samples = std::move(audio.samples);
+        request.config.max_output_tokens = max_tokens;
+        request.config.input_sample_rate = audio.sample_rate;
+        request.config.beam_size = args.beam_size;
+        request.config.source_language = args.source_language;
+        request.config.target_language = args.target_language;
+        request.config.task = args.transcription_task == "translate"
+                                  ? trtmc::TranscriptionTask::kTranslate
+                                  : trtmc::TranscriptionTask::kTranscribe;
+        request.config.punctuation = args.punctuation;
+        request.config.timestamps = args.timestamps;
+        request.config.max_input_duration_seconds = args.max_input_seconds;
+        request.config.segment_duration_seconds = args.segment_length_seconds;
+        requests.push_back(std::move(request));
+    }
+
+    auto results = pipeline->transcribe_batch(requests);
+    for (std::size_t i = 0; i < results.size(); ++i) {
+        if (args.timestamps) {
+            for (const auto& segment : results[i].segments) {
+                if (results.size() > 1)
+                    std::cout << audio_paths[i] << '\t';
+                std::cout << std::fixed << std::setprecision(3) << segment.start_seconds << '\t'
+                          << segment.end_seconds << '\t' << segment.text << '\n';
+            }
+        } else {
+            if (results.size() > 1)
+                std::cout << audio_paths[i] << '\t';
+            std::cout << results[i].text << '\n';
+        }
+    }
     return EXIT_SUCCESS;
 }
 

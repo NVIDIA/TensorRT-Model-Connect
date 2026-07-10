@@ -10,6 +10,7 @@ Shared test code is limited to filesystem and serialization helpers.
 from __future__ import annotations
 
 import importlib
+import sys
 from types import SimpleNamespace
 
 import numpy as np
@@ -300,6 +301,57 @@ class TestCanaryPlugin:
         assert weights["_dec_layers"] == self.DEC_LAYERS
         assert weights["_hidden"] == self.HIDDEN
         assert weights["_vocab"] == self.VOCAB
+
+    def test_prompt_metadata_is_derived_from_local_tokenizer(self, monkeypatch, tmp_path):
+        canary_module = importlib.import_module(
+            "tensorrt_model_connect.families.canary.plugin")
+
+        pieces = [
+            "<unk>", "▁", "<|startofcontext|>", "<|startoftranscript|>",
+            "<|emo:neutral|>", "<|de|>", "<|en|>", "<|pnc|>", "<|nopnc|>",
+            "<|itn|>", "<|noitn|>", "<|timestamp|>", "<|notimestamp|>",
+            "<|nodiarize|>", "<|endoftext|>",
+        ]
+
+        class FakeSentencePiece:
+            def __init__(self, model_file):
+                assert model_file.endswith("tokenizer.model")
+
+            def piece_to_id(self, piece):
+                return pieces.index(piece) if piece in pieces else 0
+
+            def id_to_piece(self, index):
+                return pieces[index]
+
+        monkeypatch.setitem(
+            sys.modules,
+            "sentencepiece",
+            SimpleNamespace(SentencePieceProcessor=FakeSentencePiece),
+        )
+        metadata = canary_module._canary_prompt_metadata(
+            {
+                "supported_languages": ["de", "en"],
+                "prompt_defaults": [{
+                    "role": "user",
+                    "slots": {
+                        "source_lang": "<|de|>",
+                        "target_lang": "<|en|>",
+                        "emotion": "<|emo:neutral|>",
+                        "pnc": "<|nopnc|>",
+                        "itn": "<|itn|>",
+                        "timestamp": "<|timestamp|>",
+                        "diarize": "<|nodiarize|>",
+                    },
+                }],
+            },
+            tmp_path / "tokenizer.model",
+        )
+
+        assert metadata["decoder_start_token_ids"] == [1, 2, 3, 4, 5, 6, 8, 9, 11, 13]
+        assert metadata["canary_supported_languages"] == ["de", "en"]
+        assert metadata["canary_language_token_ids"] == [5, 6]
+        assert metadata["canary_no_punctuation_token_id"] == 8
+        assert metadata["canary_timestamp_token_id"] == 11
 
     def test_tp_build_rejects_single_device_mode(self):
         decoder_tp_builder = self._tp_builder_module()

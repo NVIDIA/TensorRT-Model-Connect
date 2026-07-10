@@ -220,7 +220,9 @@ void print_usage() {
            "  trtmc solve           <bundle.trtfb> --field-input CSV\n"
            "  trtmc solve           <bundle.trtfb> --branch-input CSV [--trunk-input CSV]\n"
            "  trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] "
-           "[--language TAG] "
+           "[--beam-size N] [--language TAG] [--source-language TAG] [--target-language TAG] "
+           "[--task transcribe|translate] [--punctuation|--no-punctuation] [--timestamps] "
+           "[--max-input-seconds F] [--segment-length-seconds F] "
            "[--stream] [--chunk-ms N] [--att-context-size L,R] "
            "[--pad-and-drop-preencoded] [--hf-python PATH]\n"
            "  trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav\n"
@@ -579,11 +581,79 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--audio" && need_value(arg)) {
-            args.audio_in = argv[++i];
+            args.audio_inputs.emplace_back(argv[++i]);
+            if (args.audio_in.empty())
+                args.audio_in = args.audio_inputs.back();
             continue;
         }
         if (arg == "--language" && need_value(arg)) {
             args.language = argv[++i];
+            args.source_language = args.language;
+            args.target_language = args.language;
+            continue;
+        }
+        if (arg == "--beam-size" && need_value(arg)) {
+            auto value = parse_int_value(arg, "an integer in [1, 16]");
+            if (!value || *value < 1 || *value > 16) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer in [1, 16]";
+                return args;
+            }
+            args.beam_size = *value;
+            continue;
+        }
+        if (arg == "--source-language" && need_value(arg)) {
+            args.source_language = argv[++i];
+            continue;
+        }
+        if (arg == "--target-language" && need_value(arg)) {
+            args.target_language = argv[++i];
+            continue;
+        }
+        if (arg == "--task" && need_value(arg)) {
+            args.transcription_task = argv[++i];
+            if (args.transcription_task != "transcribe" &&
+                args.transcription_task != "translate") {
+                args.parse_error = true;
+                args.error_message = "--task expects transcribe or translate";
+                return args;
+            }
+            continue;
+        }
+        if (arg == "--punctuation") {
+            args.punctuation = true;
+            continue;
+        }
+        if (arg == "--no-punctuation") {
+            args.punctuation = false;
+            continue;
+        }
+        if (arg == "--timestamps") {
+            args.timestamps = true;
+            continue;
+        }
+        if (arg == "--no-timestamps") {
+            args.timestamps = false;
+            continue;
+        }
+        if (arg == "--max-input-seconds" && need_value(arg)) {
+            auto value = parse_float_value(arg, "a finite number > 0");
+            if (!value || *value <= 0.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number > 0";
+                return args;
+            }
+            args.max_input_seconds = *value;
+            continue;
+        }
+        if (arg == "--segment-length-seconds" && need_value(arg)) {
+            auto value = parse_float_value(arg, "a finite number > 0");
+            if (!value || *value <= 0.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number > 0";
+                return args;
+            }
+            args.segment_length_seconds = *value;
             continue;
         }
         if (arg == "--point-x" && need_value(arg)) {

@@ -4,6 +4,7 @@
 id = "canary"
 plugin = "canary"
 module = "plugin"
+model_dir_adapter = "nemo_archive.py|resolve_model_dir"
 nemo_archive_adapter = "nemo_archive.py|resolve_nemo_archive"
 nemo_model_type = "canary"
 nemo_target_patterns = [

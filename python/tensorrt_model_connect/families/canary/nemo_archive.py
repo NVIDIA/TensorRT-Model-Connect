@@ -20,12 +20,16 @@ _TARGET_MARKERS = ("encdecmultitaskmodel", "canary")
 def _read_model_config(nemo_path: Path) -> dict[str, Any]:
     import yaml
 
-    with tarfile.open(str(nemo_path), "r") as tar:
-        for member in tar.getmembers():
-            if Path(member.name).name == "model_config.yaml":
-                handle = tar.extractfile(member)
-                if handle is not None:
-                    return yaml.safe_load(handle.read()) or {}
+    try:
+        with tarfile.open(str(nemo_path), "r") as tar:
+            for member in tar.getmembers():
+                if Path(member.name).name == "model_config.yaml":
+                    handle = tar.extractfile(member)
+                    if handle is not None:
+                        loaded = yaml.safe_load(handle.read()) or {}
+                        return loaded if isinstance(loaded, dict) else {}
+    except (OSError, tarfile.TarError, yaml.YAMLError):
+        return {}
     return {}
 
 
@@ -55,7 +59,11 @@ def resolve_nemo_archive(nemo_path: Path) -> str | None:
     dec_layers = int(dec_cfg.get("num_layers", 8))
     dec_heads = int(dec_cfg.get("num_attention_heads", 8))
     dec_ffn = int(dec_cfg.get("inner_size", 4 * hidden))
-    vocab_size = int(cfg.get("vocab_size", 1024))
+    decoder_cfg = cfg.get("decoder", {})
+    head_cfg = cfg.get("head", {})
+    vocab_size = int(
+        cfg.get("vocab_size") or head_cfg.get("num_classes")
+        or decoder_cfg.get("num_classes") or 1024)
 
     tmp_dir = tempfile.mkdtemp(prefix="trtmc_nemo_canary_")
     tmp_path = Path(tmp_dir)
@@ -79,3 +87,14 @@ def resolve_nemo_archive(nemo_path: Path) -> str | None:
         file=sys.stderr,
     )
     return tmp_dir
+
+
+def resolve_model_dir(model_dir: Path) -> str | None:
+    """Stage a local directory containing a compatible Canary archive."""
+    if not model_dir.is_dir():
+        return None
+    for nemo_path in sorted(model_dir.glob("*.nemo")):
+        resolved = resolve_nemo_archive(nemo_path)
+        if resolved is not None:
+            return resolved
+    return None

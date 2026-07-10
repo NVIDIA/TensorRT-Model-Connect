@@ -111,7 +111,25 @@ class CanaryPlugin final : public IPipelinePlugin {
         int32_t eot_token_id = extract_json_int(json, "eot_token_id", -1);
         wc.eot_token_id = (eot_token_id >= 0) ? eot_token_id : ctx.config.id_eos;
         wc.mel_length = extract_json_int(json, "mel_length", 0);
-        wc.decoder_start_token_ids = extract_json_int_array(json, "decoder_start_token_ids");
+        wc.decoder_start_token_ids =
+            extract_json_int_array(json, "decoder_start_token_ids", 256);
+        wc.supported_languages = extract_json_string_array(json, "canary_supported_languages");
+        wc.language_token_ids =
+            extract_json_int_array(json, "canary_language_token_ids", 256);
+        wc.source_language_position =
+            extract_json_int(json, "canary_source_language_position", 4);
+        wc.target_language_position =
+            extract_json_int(json, "canary_target_language_position", 5);
+        wc.punctuation_position = extract_json_int(json, "canary_punctuation_position", 6);
+        wc.timestamp_position = extract_json_int(json, "canary_timestamp_position", 8);
+        wc.punctuation_token_id = extract_json_int(json, "canary_punctuation_token_id", -1);
+        wc.no_punctuation_token_id =
+            extract_json_int(json, "canary_no_punctuation_token_id", -1);
+        wc.timestamp_token_id = extract_json_int(json, "canary_timestamp_token_id", -1);
+        wc.no_timestamp_token_id =
+            extract_json_int(json, "canary_no_timestamp_token_id", -1);
+        wc.translation_requires_english =
+            extract_json_bool(json, "canary_translation_requires_english", true);
         wc.disable_cuda_graph = canary_cuda_graph_disabled(ctx);
 
         // Create CanaryKvCache for decoder self-attention
