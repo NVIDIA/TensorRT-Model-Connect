@@ -96,8 +96,8 @@ can be attributed and reverted independently.
 
 | ID | Change | Behavior change | Full run | Decision |
 | --- | --- | --- | --- | --- |
-| E0 | Structured proof-step, lease-wait, and lease-hold timing | None; observation only | Pending | Pending |
-| E1 | Prepare and validate the CI image once per workflow, then pin its identity | Image lifecycle only | Pending | Pending |
+| E0 | Structured proof-step, lease-wait, and lease-hold timing | None; observation only | [29078366125](https://github.com/NVIDIA/TensorRT-Model-Connect/actions/runs/29078366125) | Valid measurement; retain instrumentation for experiments |
+| E1 | Memoize full CI-image validation once per immutable image/script on each host | Image validation lifecycle only | Pending | Pending |
 | E2 | Resource-aware admission using measured lease-hold time and resource class, layered on FIFO fairness | Scheduling only | Pending | Pending |
 | E3 | Move demonstrably CPU-only preparation outside the GPU lease | Lease boundary only | Pending | Pending |
 | E4 | Content-addressed compiler cache, if scratch-build evidence supports it | Build reuse only; proof build remains required | Pending | Pending |
@@ -128,6 +128,101 @@ E0 records the following without changing execution order:
 Monotonic durations are authoritative for elapsed time. UTC timestamps are for
 cross-artifact correlation only.
 
+## E0 Observation Result
+
+E0 used PR head `077e063c3306ed45bf3371ecd92d2451e08098fd` and tested
+merge snapshot `d0fe3cff4244ead20a46d587ecf02160b8d65e72`. The full run
+selected and passed all 77 models. All 77 artifacts matched their selected
+model, and all 77 engine-build verifications proved exactly one invocation.
+
+The per-model source data is retained in
+[`ci-e0-29078366125-model-timings.csv`](ci-experiment-data/ci-e0-29078366125-model-timings.csv).
+
+| Metric | Baseline 29060715158 | E0 29078366125 | Change |
+| --- | ---: | ---: | ---: |
+| Workflow elapsed | 1:35:34 | 1:34:59 | -0:00:35 (-0.6%) |
+| Model-matrix span | 1:33:24 | 1:33:15 | -0:00:09 (-0.2%) |
+| Sum of model-job wall time | 24:11:19 | 24:09:42 | -0:01:37 |
+| Sum of proof-step time | 22:13:16 | 21:57:09 | -0:16:07 |
+| Sum of image-ensure time | 1:43:53 | 1:58:27 | +0:14:34 |
+| Mean model-job time | 18:51 | 18:50 | -0:00:01 |
+| Median model-job time | 11:17 | 10:57 | -0:00:20 |
+
+The 35-second workflow difference is noise, not an optimization result. E0
+changed observation only and demonstrates no material timing regression.
+
+### Lease and capacity result
+
+| Metric | All 77 | Shared (67) | Exclusive GPU (10) |
+| --- | ---: | ---: | ---: |
+| Aggregate lease wait | 10:51:40 | 7:41:38 | 3:10:02 |
+| Mean lease wait | 8:28 | 6:53 | 19:00 |
+| Median lease wait | 2:12 | 0:01 | 11:20 |
+| p95 lease wait | 46:42 | 39:25 | 48:29 |
+| Aggregate lease hold | 10:58:33 | 8:20:10 | 2:38:23 |
+| Median lease hold | 6:39 | 6:13 | 10:25 |
+
+Counting a shared proof as one slot and an exclusive proof as four slots, lease
+holds occupied 68,023 of 89,520 available GPU slot-seconds during the matrix
+span: 76.0% lease-slot utilization. Approximately 5:58:17 of slot-time was not
+leased because of host preparation, lease queueing, and whole-GPU drain
+fragmentation, despite up to 16 active GitHub jobs.
+
+Largest waits:
+
+| Model | Class | Lease wait | Lease hold |
+| --- | --- | ---: | ---: |
+| lance | shared | 49:00 | 6:13 |
+| locateanything | shared | 48:38 | 8:57 |
+| flux | exclusive | 48:29 | 17:11 |
+| qwen3_5 | exclusive | 46:42 | 9:16 |
+| deepseek_ocr | shared | 39:40 | 15:42 |
+| phi_moe | shared | 39:25 | 10:24 |
+| z_image | shared | 38:46 | 12:37 |
+| magpie_tts | shared | 37:10 | 11:48 |
+
+Largest real holds:
+
+| Model | Class | Lease hold | Engine build |
+| --- | --- | ---: | ---: |
+| qwen3_omni | exclusive | 41:35 | 35:43 |
+| sana_wm | exclusive | 35:59 | 19:54 |
+| nemotron_speech_streaming | shared | 29:32 | 27:40 |
+| qwen_image | shared | 21:10 | 17:00 |
+| wan_t2v | shared | 19:39 | 15:46 |
+| personaplex | shared | 19:35 | 17:46 |
+| gpt_oss | exclusive | 19:33 | 14:28 |
+| flux | exclusive | 17:11 | 9:35 |
+
+### Internal phase result
+
+Phase sums overlap across parallel model jobs. Engine build is a subset of E2E
+and must not be added to it.
+
+| Phase | Aggregate | Median/model | p95/model |
+| --- | ---: | ---: | ---: |
+| Projection validation | 1:30 | 0:01 | 0:02 |
+| Configure | 12:31 | 0:10 | 0:12 |
+| Scratch build | 50:18 | 0:38 | 0:48 |
+| DSO isolation | 1:45 | 0:01 | 0:02 |
+| C++ tests | 3:23 | 0:00 | 0:10 |
+| Python tests | 55:15 | 0:10 | 2:21 |
+| E2E reference/runtime | 8:48:52 | 4:28 | 20:17 |
+| Engine build subset | 6:56:08 | 3:40 | 17:46 |
+
+The primary optimizable bottleneck is resource admission and lease scheduling,
+not test selection. Engine builds are the largest real workload and remain
+mandatory. Repeated image verification is a separate host-side candidate: E0
+spent 1:58:27 in image-ensure steps (median 1:03, p95 4:59, max 6:11), with
+global-lock serialization visible in the first batch.
+
+E1 therefore uses a per-host immutable validation credential rather than a
+single runner job. The credential is keyed by Docker input fingerprint and the
+ensure script hash, contains the immutable image ID, and is checked under the
+existing global lock. Each host still performs a full capability validation on
+a miss; a current image-ID/fingerprint mismatch invalidates the credential.
+This remains safe if the runner label later spans more than one physical host.
+
 ## Local Validation Ledger
 
 Validation at E0 before its first push:
@@ -152,7 +247,7 @@ as local-environment/baseline failures, not silently excluded from the record.
 | ID | Commit | Run | 77 selected | Result | Workflow | Matrix | Notes |
 | --- | --- | --- | --- | --- | ---: | ---: | --- |
 | Baseline | `31708284cb786a84417d8400fe09620415b4054e` | [29060715158](https://github.com/NVIDIA/TensorRT-Model-Connect/actions/runs/29060715158) | Yes | 77 passed | 1:35:34 | 1:33:24 | Primary comparison |
-| E0 | Pending | Pending | Pending | Pending | Pending | Pending | Observation-only instrumentation |
+| E0 | `077e063c3306ed45bf3371ecd92d2451e08098fd` (tested `d0fe3cff4244ead20a46d587ecf02160b8d65e72`) | [29078366125](https://github.com/NVIDIA/TensorRT-Model-Connect/actions/runs/29078366125) | Yes | 77 passed | 1:34:59 | 1:33:15 | Observation valid; no material timing change |
 
 For failed or canceled runs, retain the run in this ledger and record the exact
 failed model/stage. Do not discard unfavorable measurements.
