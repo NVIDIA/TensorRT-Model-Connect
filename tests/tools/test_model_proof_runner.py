@@ -1994,6 +1994,7 @@ def test_fifth_shared_proof_times_out_when_all_four_slots_are_busy(
     assert not list(lock_dir.glob("admission-global-*.lock"))
 
 
+@pytest.mark.model_proof_allocator
 def test_gpu_admission_queue_prunes_a_stale_ticket(tmp_path: Path) -> None:
     fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
     output = tmp_path / "proof"
@@ -2237,6 +2238,7 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
             exclusive.communicate(timeout=10)
 
 
+@pytest.mark.model_proof_allocator
 def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_waiter(
     tmp_path: Path,
 ) -> None:
