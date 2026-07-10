@@ -24,6 +24,33 @@ from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_RUNTIME_TIMEOUT_S = 600
+_MAX_RUNTIME_TIMEOUT_S = 3600
+
+
+def _runtime_timeout_s(case: E2ECase) -> int:
+    """Return the model-owned runtime budget for this testcase."""
+    value = case.inputs.get("runtime_timeout_s", _DEFAULT_RUNTIME_TIMEOUT_S)
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 1
+        or value > _MAX_RUNTIME_TIMEOUT_S
+    ):
+        raise ValueError(
+            "runtime_timeout_s must be an integer from 1 to "
+            f"{_MAX_RUNTIME_TIMEOUT_S}; got {value!r}"
+        )
+    return value
+
+
+def _timeout_stream(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
 
 class OmniMultimodalRunner:
     """Execute TRT omni-multimodal inference via the C++ binary.
@@ -58,10 +85,33 @@ class OmniMultimodalRunner:
             env["LD_LIBRARY_PATH"] = ctx.ld_library_path
 
         logger.info("Running omni stage %s: %s", stage_name, " ".join(cmd))
+        timeout_s = _runtime_timeout_s(case)
         t0 = time.monotonic()
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, env=env, timeout=600,
-        )
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, env=env, timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as exc:
+            elapsed = time.monotonic() - t0
+            stderr = _timeout_stream(exc.stderr)
+            if not stderr:
+                stderr = "No partial stderr was captured before timeout.\n"
+            truncated, log_path = save_full_stderr(
+                stderr,
+                ctx.artifacts_dir or "",
+                f"omni_{stage_name}_timeout",
+                case.name,
+            )
+            msg = (
+                f"Omni stage {stage_name} exceeded its model-owned runtime "
+                f"budget of {timeout_s}s after {elapsed:.1f}s; command: "
+                f"{' '.join(cmd)}"
+            )
+            if truncated:
+                msg += f"; partial stderr: {truncated.rstrip()}"
+            if log_path:
+                msg += f" (full partial stderr: {log_path})"
+            raise RuntimeError(msg) from exc
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
