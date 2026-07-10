@@ -241,11 +241,26 @@ def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
 
     assert suite["dataset"]["kind"] == "asr_chat_json"
     assert suite["scoring"]["scorer"] == "asr_transcript"
-    assert suite["default_model_names"] == ["nemotron-speech-streaming-en-0.6b"]
+    assert suite["default_model_names"] == [
+        "nemotron-3.5-asr-streaming-0.6b",
+        "nemotron-speech-streaming-en-0.6b",
+    ]
     assert suite["selectors"]["runtime_strategies"] == [
         "nemotron_speech_streaming_speech_to_text_rnnt"
     ]
     assert suite["selectors"]["families"] == ["nemotron_speech_streaming"]
+    model = next(
+        model
+        for model in task_eval.load_manifest_records()
+        if model["name"] == "nemotron-3.5-asr-streaming-0.6b"
+    )
+    resolved = task_eval.resolve_suite_for_model(suite, model)
+    assert resolved["generation"]["language"] == "en-US"
+    assert resolved["generation"]["streaming"] == {
+        "enabled": True,
+        "chunk_ms": 1120,
+        "att_context_size": [56, 13],
+    }
     non_streaming = task_eval.suite_by_id(suites, "librispeech_clean_asr")
     assert "nemotron_speech_streaming" in non_streaming["selectors"]["exclude_families"]
 
@@ -1907,6 +1922,25 @@ def test_asr_transcript_scorer_reports_wer_cer_and_exact_rate() -> None:
     assert score["samples"][1]["correct"] is False
 
 
+def test_asr_transcript_scorer_strips_nemotron_language_tag() -> None:
+    answers = {"requests": [{"answer": "The examination resulted in no discovery"}]}
+    predictions = {
+        "responses": [
+            {
+                "sample_id": "tagged",
+                "output_text": "The examination resulted in no discovery. <en-US>",
+            }
+        ]
+    }
+
+    score = task_eval.score_predictions(predictions, answers, scorer="asr_transcript")
+
+    assert score["overall_accuracy"] == 1.0
+    assert score["samples"][0]["normalized_prediction"] == (
+        "the examination resulted in no discovery"
+    )
+
+
 def test_asr_transcript_scorer_marks_high_wer_wrong_and_skips_errors() -> None:
     answers = {
         "requests": [
@@ -1930,7 +1964,7 @@ def test_asr_transcript_scorer_marks_high_wer_wrong_and_skips_errors() -> None:
     assert score["samples"][1]["skipped"] is True
 
 
-def test_asr_transcript_agreement_uses_correctness_thresholds() -> None:
+def test_asr_transcript_agreement_uses_direct_transcript_similarity() -> None:
     answers = {
         "requests": [
             {"answer": "alpha beta", "subject": "test-clean"},
@@ -1952,12 +1986,20 @@ def test_asr_transcript_agreement_uses_correctness_thresholds() -> None:
 
     summary = task_eval.compare_prediction_sets(hf, trtfb, answers, scorer="asr_transcript")
 
-    assert summary["prediction_agreement_rate"] == 0.5
+    expected_similarity = (
+        1.0
+        + 1.0
+        - task_eval._normalized_edit_distance("gamma delta", "totally wrong")
+    ) / 2.0
+    assert summary["prediction_agreement_rate"] == pytest.approx(expected_similarity)
+    assert summary["normalized_transcript_exact_agreement_rate"] == 0.5
+    assert summary["correctness_agreement_rate"] == 0.5
     assert summary["agreement_count"] == 1
     assert summary["buckets"]["both_correct"] == 1
     assert summary["buckets"]["hf_correct_trtfb_wrong"] == 1
     assert summary["disagreements"][0]["hf_prediction"] == "gamma delta"
     assert summary["disagreements"][0]["trtfb_prediction"] == "totally wrong"
+    assert summary["asr_parity_samples"][0]["transcript_similarity"] == 1.0
 
 
 def test_selected_models_for_suite_accepts_manifest_name() -> None:
@@ -2305,6 +2347,29 @@ def test_nemo_asr_reference_detection_identifies_streaming() -> None:
             reference_family="asr_canary",
         )
     )
+
+
+def test_nemotron_35_runtime_flags_enable_language_and_streaming() -> None:
+    flags = task_eval._asr_runtime_flags(
+        {"language": "en-US"},
+        {
+            "streaming": {
+                "enabled": True,
+                "chunk_ms": 1120,
+                "att_context_size": [56, 13],
+            }
+        },
+    )
+
+    assert flags == [
+        "--language",
+        "en-US",
+        "--stream",
+        "--chunk-ms",
+        "1120",
+        "--att-context-size",
+        "56,13",
+    ]
 
 
 def test_run_hf_reference_dispatches_asr_workdir(tmp_path: Path, monkeypatch) -> None:
@@ -3488,6 +3553,11 @@ def test_eval_one_model_skips_prompt_length_check_for_asr_suite(
     assert result["hf_accuracy"] == 1.0
     assert result["trtfb_accuracy"] == 1.0
     assert result["prediction_agreement_rate"] == 1.0
+    assert result["status"] == "passed"
+    assert result["gates"] == {
+        "max_accuracy_drop_from_hf": 0.05,
+        "min_prediction_agreement": 0.9,
+    }
 
 
 def test_eval_one_model_runs_hf_for_golden_snapshot_vlm_model(tmp_path: Path, monkeypatch) -> None:

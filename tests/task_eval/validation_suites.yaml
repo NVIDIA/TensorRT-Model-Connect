@@ -390,6 +390,7 @@ suites:
       streaming/RNNT speech-to-text bundles.
     user_contract: exact_transcript
     default_model_names:
+      - nemotron-3.5-asr-streaming-0.6b
       - nemotron-speech-streaming-en-0.6b
     dataset:
       kind: asr_chat_json
@@ -424,6 +425,14 @@ suites:
     gates:
       max_accuracy_drop_from_hf: 0.05
       min_prediction_agreement: 0.90
+    model_profiles:
+      nemotron-3.5-asr-streaming-0.6b:
+        generation:
+          language: en-US
+          streaming:
+            enabled: true
+            chunk_ms: 1120
+            att_context_size: [56, 13]
     ci:
       eligible: false
       lane: local_only

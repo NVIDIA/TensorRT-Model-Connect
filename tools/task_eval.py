@@ -1504,6 +1504,13 @@ def prepare_asr_chat_dataset(
                 "prompt": asr_request_prompt(request),
                 "audio": str(output_audio),
             }
+            language = str(
+                request.get("language")
+                or suite.get("generation", {}).get("language", "")
+                or ""
+            )
+            if language:
+                sample["language"] = language
             f.write(json.dumps(sample, ensure_ascii=False) + "\n")
 
     answers = _copy_dataset_header(data, output_requests)
@@ -2272,6 +2279,7 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
             ]
             if args.hf_python:
                 cmd.extend(["--hf-python", args.hf_python])
+            cmd.extend(_asr_runtime_flags(prompt_row, defaults))
 
             log_f.write(f"$ {' '.join(cmd)}\n")
             start = time.perf_counter()
@@ -2311,6 +2319,30 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
             raw_f.flush()
             print(f"[task_eval.asr_trtfb] sample={idx + 1}/{len(prompt_rows)}", file=sys.stderr)
     write_predictions(predictions, rows)
+
+
+def _asr_runtime_flags(
+    prompt_row: dict[str, Any], defaults: dict[str, Any]
+) -> list[str]:
+    flags: list[str] = []
+    language = str(prompt_row.get("language") or defaults.get("language", "") or "")
+    if language:
+        flags.extend(["--language", language])
+    streaming = defaults.get("streaming", {})
+    if not isinstance(streaming, dict) or not streaming.get("enabled"):
+        return flags
+    flags.append("--stream")
+    if streaming.get("chunk_ms") is not None:
+        flags.extend(["--chunk-ms", str(int(streaming["chunk_ms"]))])
+    attention_context = streaming.get("att_context_size")
+    if isinstance(attention_context, (list, tuple)) and len(attention_context) == 2:
+        flags.extend(
+            [
+                "--att-context-size",
+                f"{int(attention_context[0])},{int(attention_context[1])}",
+            ]
+        )
+    return flags
 
 
 def clean_text(text: str) -> str:
@@ -2380,6 +2412,10 @@ def is_correct_for_request(
 
 
 def normalize_asr_transcript(text: str) -> str:
+    # Prompt-conditioned Nemotron ASR can append its detected/selected locale.
+    # The model card treats this as metadata and strips it for clean transcript
+    # scoring, matching HF decoding with skip_special_tokens=True.
+    text = re.sub(r"<[a-z]{2,3}(?:-[a-z]{2})?>", " ", str(text or ""), flags=re.IGNORECASE)
     text = clean_text(str(text or "")).lower()
     text = re.sub(r"[^\w\s]", " ", text)
     text = re.sub(r"_", " ", text)
@@ -4073,9 +4109,11 @@ def compare_prediction_sets(
     if len(hf_responses) != len(trt_responses):
         raise ValueError("HF and TRTFB predictions must have the same length")
 
-    agreement = 0
+    agreement_score = 0.0
+    correctness_agreement = 0
     buckets = Counter()
     disagreements: list[dict[str, Any]] = []
+    asr_parity_samples: list[dict[str, Any]] = []
     for idx, (hf_row, trt_row, req) in enumerate(
         zip(hf_responses, trt_responses, requests, strict=True)
     ):
@@ -4097,17 +4135,37 @@ def compare_prediction_sets(
         trtfb_sample = trtfb_score["samples"][idx]
         hf_ok = bool(hf_sample.get("correct", False))
         trt_ok = bool(trtfb_sample.get("correct", False))
+        correctness_match = hf_ok == trt_ok
         agreement_match = (
-            hf_ok == trt_ok
-            if scorer in {"ocrbench_v2", "asr_transcript", "tts_intelligibility"}
+            correctness_match
+            if scorer in {"ocrbench_v2", "tts_intelligibility"}
             else hf_pred == trt_pred
         )
+        prediction_score = float(agreement_match)
+        if scorer == "asr_transcript":
+            transcript_similarity = max(
+                0.0, 1.0 - _normalized_edit_distance(hf_pred, trt_pred)
+            )
+            prediction_score = transcript_similarity
+            asr_parity_samples.append(
+                {
+                    "index": idx,
+                    "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
+                    "hf_prediction": hf_pred,
+                    "trtfb_prediction": trt_pred,
+                    "transcript_exact": agreement_match,
+                    "transcript_similarity": transcript_similarity,
+                    "correctness_agreement": correctness_match,
+                }
+            )
         if require_valid_prediction and (
             not bool(hf_sample.get("valid_prediction", False))
             or not bool(trtfb_sample.get("valid_prediction", False))
         ):
             agreement_match = False
-        agreement += int(agreement_match)
+            prediction_score = 0.0
+        agreement_score += prediction_score
+        correctness_agreement += int(correctness_match)
         if hf_ok and trt_ok:
             buckets["both_correct"] += 1
         elif hf_ok and not trt_ok:
@@ -4133,18 +4191,30 @@ def compare_prediction_sets(
             )
 
     total = len(requests)
-    return {
+    summary = {
         "hf": hf_score,
         "trtfb": trtfb_score,
         "accuracy_delta_trtfb_minus_hf": (
             trtfb_score["overall_accuracy"] - hf_score["overall_accuracy"]
         ),
-        "prediction_agreement_rate": (agreement / total) if total else 0.0,
-        "agreement_count": agreement,
+        "prediction_agreement_rate": (agreement_score / total) if total else 0.0,
+        "agreement_count": correctness_agreement,
+        "correctness_agreement_rate": (
+            correctness_agreement / total if total else 0.0
+        ),
         "total_count": total,
         "buckets": dict(buckets),
         "disagreements": disagreements,
     }
+    if scorer == "asr_transcript":
+        exact_count = sum(
+            bool(sample["transcript_exact"]) for sample in asr_parity_samples
+        )
+        summary["normalized_transcript_exact_agreement_rate"] = (
+            exact_count / total if total else 0.0
+        )
+        summary["asr_parity_samples"] = asr_parity_samples
+    return summary
 
 
 def _load_diffusion_task_eval_comparator(work_dir: Path) -> Any:
@@ -4520,10 +4590,21 @@ def write_summary_markdown(summary: dict[str, Any], path: Path) -> None:
         "",
         f"- accuracy_delta_trtfb_minus_hf: {summary['accuracy_delta_trtfb_minus_hf']:.4f}",
         f"- prediction_agreement_rate: {summary['prediction_agreement_rate']:.4f}",
+    ]
+    if "normalized_transcript_exact_agreement_rate" in summary:
+        lines.extend(
+            [
+                f"- normalized_transcript_exact_agreement_rate: "
+                f"{summary['normalized_transcript_exact_agreement_rate']:.4f}",
+                f"- correctness_agreement_rate: "
+                f"{summary['correctness_agreement_rate']:.4f}",
+            ]
+        )
+    lines.extend([
         "",
         "| Bucket | Count |",
         "|---|---:|",
-    ]
+    ])
     for key in ("both_correct", "hf_correct_trtfb_wrong", "hf_wrong_trtfb_correct", "both_wrong"):
         lines.append(f"| {key} | {summary['buckets'].get(key, 0)} |")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -5243,6 +5324,10 @@ def run_asr_hf_reference(args: argparse.Namespace) -> None:
         torch.cuda.empty_cache()
 
 
+def _is_prompt_conditioned_nemo_asr(model_id: str) -> bool:
+    return "nemotron-3.5-asr-streaming" in model_id.lower()
+
+
 def _run_nemo_asr_hf_reference(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
@@ -5255,6 +5340,20 @@ def _run_nemo_asr_hf_reference(args: argparse.Namespace) -> None:
     raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
     pred_path = work_dir / (args.predictions or "hf_predictions.json")
     canary_audio_dir = work_dir / "hf_canary_audio"
+
+    # The model card requires Transformers >=5.13 for Nemotron 3.5. The
+    # standard NeMo transcribe path in older environments cannot keep the
+    # prompt feature aligned with cache-aware encoder frames.
+    if _is_prompt_conditioned_nemo_asr(args.model):
+        _run_nemotron35_transformers_reference(
+            args=args,
+            prompt_rows=prompt_rows,
+            raw_path=raw_path,
+            pred_path=pred_path,
+            target_sr=target_sr,
+            canary_audio_dir=canary_audio_dir,
+        )
+        return
 
     try:
         import nemo.collections.asr as nemo_asr
@@ -5270,7 +5369,9 @@ def _run_nemo_asr_hf_reference(args: argparse.Namespace) -> None:
         return
 
     map_location = str(getattr(args, "device", "") or "cpu")
-    model = nemo_asr.models.ASRModel.from_pretrained(args.model, map_location=map_location)
+    model = nemo_asr.models.ASRModel.from_pretrained(
+        args.model, map_location=map_location
+    )
     try:
         if map_location and map_location != "cpu" and hasattr(model, "to"):
             model = model.to(map_location)
@@ -5309,6 +5410,93 @@ def _run_nemo_asr_hf_reference(args: argparse.Namespace) -> None:
     gc.collect()
 
 
+def _run_nemotron35_transformers_reference(
+    *,
+    args: argparse.Namespace,
+    prompt_rows: list[dict[str, Any]],
+    raw_path: Path,
+    pred_path: Path,
+    target_sr: int,
+    canary_audio_dir: Path,
+) -> None:
+    try:
+        import torch
+        from transformers import AutoModel, AutoProcessor
+    except Exception as exc:  # pragma: no cover - runtime dependency
+        raise RuntimeError(
+            "Nemotron 3.5 ASR reference requires transformers>=5.13"
+        ) from exc
+
+    device = torch.device(str(getattr(args, "device", "") or "cpu"))
+    common_kwargs = {
+        "trust_remote_code": bool(getattr(args, "trust_remote_code", False)),
+        "local_files_only": bool(getattr(args, "local_files_only", False)),
+    }
+    processor = AutoProcessor.from_pretrained(args.model, **common_kwargs)
+    model = AutoModel.from_pretrained(
+        args.model,
+        torch_dtype=_model_dtype(torch, getattr(args, "dtype", "auto")),
+        **common_kwargs,
+    ).eval()
+    model.to(device)
+    defaults = generation_defaults(Path(args.work_dir))
+    max_new_tokens = int(defaults.get("max_new_tokens", 256) or 256)
+
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_f:
+        for idx, prompt_row in enumerate(prompt_rows):
+            sample_id = str(prompt_row.get("sample_id", f"asr_{idx:06d}"))
+            audio_path = str(prompt_row.get("audio", ""))
+            if not audio_path:
+                raise ValueError(
+                    f"Nemotron 3.5 ASR HF reference expects an audio path for sample {idx}"
+                )
+            audio, sample_rate = _read_wav_float32(audio_path)
+            audio = _resample_audio(audio, sample_rate, target_sr)
+            mono_path = canary_audio_dir / _safe_sample_filename(sample_id, ".wav")
+            _write_wav_pcm16(mono_path, audio, target_sr)
+            language = str(
+                prompt_row.get("language")
+                or defaults.get("language", "en-US")
+                or "en-US"
+            )
+            inputs = processor(
+                audio,
+                sampling_rate=target_sr,
+                language=language,
+                return_tensors="pt",
+            )
+            inputs = _to_device(inputs, device)
+            start = time.perf_counter()
+            with torch.inference_mode():
+                generated = model.generate(**inputs, max_new_tokens=max_new_tokens)
+            wall_ms = (time.perf_counter() - start) * 1000.0
+            sequences = generated.sequences if hasattr(generated, "sequences") else generated
+            token_ids = [int(token_id) for token_id in sequences[0].detach().cpu().tolist()]
+            row = {
+                "sample_id": sample_id,
+                "output_text": processor.batch_decode(
+                    sequences, skip_special_tokens=True
+                )[0],
+                "generated_tokens": len(token_ids),
+                "generated_token_ids": token_ids,
+                "wall_ms": wall_ms,
+                "source": "hf",
+            }
+            responses.append(row)
+            raw_f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            raw_f.flush()
+            print(
+                f"[task_eval.nemotron35_hf] sample={idx + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _run_nemo_asr_hf_pipeline_reference(
     *,
     args: argparse.Namespace,
@@ -5334,10 +5522,8 @@ def _run_nemo_asr_hf_pipeline_reference(
         model=args.model,
         torch_dtype=_model_dtype(torch, getattr(args, "dtype", "auto")),
         device=device,
-        model_kwargs={
-            "trust_remote_code": bool(getattr(args, "trust_remote_code", False)),
-            "local_files_only": bool(getattr(args, "local_files_only", False)),
-        },
+        trust_remote_code=bool(getattr(args, "trust_remote_code", False)),
+        local_files_only=bool(getattr(args, "local_files_only", False)),
     )
     responses: list[dict[str, Any]] = []
     with raw_path.open("w", encoding="utf-8") as raw_f:
@@ -5353,7 +5539,7 @@ def _run_nemo_asr_hf_pipeline_reference(
             mono_path = canary_audio_dir / _safe_sample_filename(sample_id, ".wav")
             _write_wav_pcm16(mono_path, audio, target_sr)
             start = time.perf_counter()
-            result = pipe(str(mono_path))
+            result = pipe({"raw": audio, "sampling_rate": target_sr})
             wall_ms = (time.perf_counter() - start) * 1000.0
             row = {
                 "sample_id": sample_id,
@@ -5577,6 +5763,7 @@ def run_tts_hf_reference(args: argparse.Namespace) -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
     scoring = work_scoring(work_dir)
     transcripts = _transcribe_audio_files(
         [Path(row["wav_path"]) for row in responses],
@@ -7296,6 +7483,37 @@ def eval_one_model(
             "hf_valid_prediction_rate": summary["hf"].get("valid_prediction_rate"),
             "trtfb_valid_prediction_rate": summary["trtfb"].get("valid_prediction_rate"),
         }
+        if scorer == "asr_transcript":
+            gates = suite.get("gates", {})
+            max_accuracy_drop = float(
+                gates.get("max_accuracy_drop_from_hf", 0.05)
+            )
+            min_agreement = float(gates.get("min_prediction_agreement", 0.90))
+            accuracy_drop = (
+                summary["hf"]["overall_accuracy"]
+                - summary["trtfb"]["overall_accuracy"]
+            )
+            result.update(
+                {
+                    "status": (
+                        "passed"
+                        if accuracy_drop <= max_accuracy_drop
+                        and summary["prediction_agreement_rate"] >= min_agreement
+                        else "failed"
+                    ),
+                    "accuracy_drop_from_hf": accuracy_drop,
+                    "normalized_transcript_exact_agreement_rate": summary[
+                        "normalized_transcript_exact_agreement_rate"
+                    ],
+                    "correctness_agreement_rate": summary[
+                        "correctness_agreement_rate"
+                    ],
+                    "gates": {
+                        "max_accuracy_drop_from_hf": max_accuracy_drop,
+                        "min_prediction_agreement": min_agreement,
+                    },
+                }
+            )
     (work_dir / "eval_result.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False),
         encoding="utf-8",
