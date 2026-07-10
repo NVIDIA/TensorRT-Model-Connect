@@ -2247,7 +2247,10 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         "TRTMC_GPU_ID": "6",
         "TRTMC_MODEL_PROOF_GPU_IDS": "6",
         "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "1",
-        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "15",
+        # This test deliberately holds several waiters while it observes their
+        # ordering.  The lease timeout must outlive the coordinated setup;
+        # otherwise an older ticket can expire before the last waiter starts.
+        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "180",
     }
 
     def start_case(
@@ -2318,6 +2321,12 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
             ):
                 break
             time.sleep(0.05)
+        admission_tickets = sorted(lock_dir.glob("admission-global-*.lock"))
+        assert len(admission_tickets) == 2
+        assert [
+            ticket.read_text(encoding="utf-8").split("model=", maxsplit=1)[1].split()[0]
+            for ticket in admission_tickets
+        ] == ["m2m_100", "bark"]
         younger_shared, _, younger_shared_output = start_case(
             "younger-shared", "convbert", younger_shared_release
         )
