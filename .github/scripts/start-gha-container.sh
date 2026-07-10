@@ -5,6 +5,11 @@
 set -euo pipefail
 
 container_name="${TRTMC_CI_CONTAINER_NAME:-trtmc-ci-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}}"
+workspace="${TRTMC_CI_WORKSPACE:-${GITHUB_WORKSPACE:-}}"
+if [ -z "$workspace" ] || [ ! -d "$workspace" ]; then
+  echo "::error::CI workspace does not exist: ${workspace:-unset}"
+  exit 1
+fi
 
 if [ -n "${GITHUB_ENV:-}" ]; then
   echo "TRTMC_CI_CONTAINER_NAME=${container_name}" >> "$GITHUB_ENV"
@@ -20,7 +25,7 @@ docker rm -f "$container_name" >/dev/null 2>&1 || true
 hardened="${TRTMC_CI_HARDENED:-false}"
 extra_mounts=()
 container_options=()
-workspace_mount="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE"
+workspace_mount="$workspace:$workspace"
 if [ "$hardened" = "true" ]; then
   scratch_parent="$(realpath -m "${RUNNER_TEMP:-/tmp}")"
   scratch_host_input="${TRTMC_CI_SCRATCH_HOST:-${scratch_parent%/}/trtmc-premerge-unit-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}}"
@@ -82,8 +87,8 @@ if [ "$hardened" != "true" ]; then
   mkdir_if_set "${HF_MODULES_CACHE:-}"
 fi
 
-if [ "$hardened" != "true" ] && [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
-  chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || {
+if [ "$hardened" != "true" ]; then
+  chmod -R a+rwX "$workspace" 2>/dev/null || {
     echo "::warning::Could not normalize workspace permissions before entering the CI container."
   }
 fi
@@ -170,7 +175,7 @@ docker run -d \
   "${container_options[@]}" \
   "${extra_mounts[@]}" \
   -v "$workspace_mount" \
-  -w "$GITHUB_WORKSPACE" \
+  -w "$workspace" \
   "${env_args[@]}" \
   "$TRTMC_CI_IMAGE" \
   bash -lc 'trap "exit 0" TERM INT; sleep infinity & wait'

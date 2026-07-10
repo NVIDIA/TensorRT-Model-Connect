@@ -418,6 +418,9 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "Start clean unit-test container" in unit_tests
     assert "run-gha-stage.sh premerge-unit" in unit_tests
     assert "TRTMC_PREMERGE_UNIT_SCOPE: ${{ needs.impact.outputs.unit_scope }}" in unit_tests
+    assert "TRTMC_CI_WORKSPACE: ${{ github.workspace }}/premerge-unit-checkout" in unit_tests
+    assert "path: premerge-unit-checkout" in unit_tests
+    assert unit_tests.count("working-directory: ${{ env.TRTMC_CI_WORKSPACE }}") == 3
     assert 'TRTMC_CI_HARDENED: "true"' in unit_tests
     assert "TRTMC_CONTAINER_OPTIONS:" not in unit_tests
     assert "id: ci_image" in unit_tests
@@ -746,6 +749,8 @@ def test_premerge_unit_container_is_unprivileged_offline_and_cpu_only() -> None:
     assert 'TRTMC_CI_HARDENED: "true"' in unit_tests
     assert "--gpus" not in unit_tests
     assert "/workspace/users/yifeif:/workspace/users/yifeif" not in unit_tests
+    assert 'workspace="${TRTMC_CI_WORKSPACE:-${GITHUB_WORKSPACE:-}}"' in start
+    assert 'workspace_mount="$workspace:$workspace"' in start
     hardened_allowlist = start.split('if [ "$hardened" = "true" ]; then', maxsplit=2)[2]
     hardened_allowlist = hardened_allowlist.split('env_args+=', maxsplit=1)[0]
     assert "HF_TOKEN" not in hardened_allowlist

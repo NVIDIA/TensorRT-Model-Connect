@@ -7,6 +7,11 @@ set -euo pipefail
 stage="${1:?usage: run-gha-stage.sh <stage>}"
 
 container_name="${TRTMC_CI_CONTAINER_NAME:-trtmc-ci-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}}"
+workspace="${TRTMC_CI_WORKSPACE:-${GITHUB_WORKSPACE:-}}"
+if [ -z "$workspace" ] || [ ! -d "$workspace" ]; then
+  echo "::error::CI workspace does not exist: ${workspace:-unset}"
+  exit 1
+fi
 
 if [ "$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || true)" != "true" ]; then
   echo "::error::CI container '$container_name' is not running. Start it with .github/scripts/start-gha-container.sh before running stages."
@@ -15,7 +20,7 @@ fi
 
 if [ "${TRTMC_CI_HARDENED:-false}" = "true" ]; then
   docker exec \
-    -w "$GITHUB_WORKSPACE" \
+    -w "$workspace" \
     -e CI_BASE_REF \
     -e GITHUB_EVENT_NAME \
     -e GITHUB_REF_NAME \
@@ -34,7 +39,7 @@ if [ "${TRTMC_CI_HARDENED:-false}" = "true" ]; then
 fi
 
 docker exec \
-  -w "$GITHUB_WORKSPACE" \
+  -w "$workspace" \
   -e CI_BASE_REF \
   -e ENGINE_DIR \
   -e TRTMC_STORAGE_ROOT \
