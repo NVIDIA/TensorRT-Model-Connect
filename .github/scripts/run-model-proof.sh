@@ -18,6 +18,8 @@ proof_gpu_slots_per_gpu=""
 proof_gpu_reservation_fd=""
 proof_gpu_reservation_file=""
 proof_gpu_allocator_fd=""
+proof_gpu_admission_fd=""
+proof_gpu_admission_file=""
 declare -a proof_gpu_slot_ids=()
 declare -a proof_gpu_lease_fds=()
 declare -a proof_gpu_lease_files=()
@@ -34,6 +36,9 @@ die() {
 cleanup_proof_container() {
   local rc="$1"
   trap - EXIT INT TERM
+  # A queued proof owns no GPU yet, so let the next ticket advance before any
+  # potentially slow container teardown or fallback-report work.
+  release_gpu_admission_ticket
   if [ -n "$proof_container_name" ]; then
     docker rm -f "$proof_container_name" >/dev/null 2>&1 || true
   fi
@@ -67,6 +72,125 @@ release_proof_gpu_lease() {
     close_dynamic_fd "$proof_gpu_allocator_fd"
     proof_gpu_allocator_fd=""
   fi
+  release_gpu_admission_ticket
+}
+
+acquire_gpu_admission_ticket() {
+  local lock_dir="$1"
+  local scope="$2"
+  local deadline="$3"
+  [ -z "$proof_gpu_admission_fd" ] || return 0
+
+  local remaining=$((deadline - SECONDS))
+  [ "$remaining" -gt 0 ] || return 1
+  local enqueue_fd enqueue_file="$lock_dir/admission-$scope.enqueue.lock"
+  exec {enqueue_fd}>"$enqueue_file" || \
+    die "could not open GPU admission enqueue lock: $enqueue_file"
+  if ! flock -w "$remaining" -x "$enqueue_fd"; then
+    close_dynamic_fd "$enqueue_fd"
+    return 1
+  fi
+
+  local counter_file="$lock_dir/admission-$scope.next"
+  local counter_tmp="$counter_file.tmp.$$"
+  local counter=0
+  if [ -e "$counter_file" ]; then
+    IFS= read -r counter < "$counter_file" || \
+      die "could not read GPU admission counter: $counter_file"
+    [[ "$counter" =~ ^(0|[1-9][0-9]*)$ ]] || \
+      die "invalid GPU admission counter in: $counter_file"
+  fi
+  if [ "${#counter}" -gt 19 ] || \
+     { [ "${#counter}" -eq 19 ] && [[ "$counter" > "9000000000000000000" ]]; }; then
+    die "GPU admission counter exceeds the supported range in: $counter_file"
+  fi
+
+  local padded_counter ticket_file ticket_number
+  printf -v padded_counter '%020d' "$counter"
+  # Recover monotonically even if the counter file was lost after tickets were
+  # created. Gaps are harmless, but reusing a live ticket number is not.
+  for ticket_file in "$lock_dir"/"admission-$scope-"*.lock; do
+    [ -e "$ticket_file" ] || continue
+    ticket_number="${ticket_file##*/admission-$scope-}"
+    ticket_number="${ticket_number%.lock}"
+    [[ "$ticket_number" =~ ^[0-9]{20}$ ]] || \
+      die "invalid GPU admission ticket name: $ticket_file"
+    if [[ "$ticket_number" > "$padded_counter" ]]; then
+      padded_counter="$ticket_number"
+    fi
+  done
+  [[ "$padded_counter" < "09000000000000000000" ]] || \
+    die "GPU admission ticket sequence exhausted for scope: $scope"
+  counter=$((10#$padded_counter + 1))
+  printf '%s\n' "$counter" > "$counter_tmp" || \
+    die "could not update GPU admission counter: $counter_file"
+  mv -f -- "$counter_tmp" "$counter_file" || \
+    die "could not publish GPU admission counter: $counter_file"
+
+  local padded_ticket final_ticket
+  printf -v padded_ticket '%020d' "$counter"
+  final_ticket="$lock_dir/admission-$scope-$padded_ticket.lock"
+  proof_gpu_admission_file="$final_ticket.tmp.$$"
+  (set -o noclobber; : > "$proof_gpu_admission_file") 2>/dev/null || \
+    die "could not create GPU admission ticket: $proof_gpu_admission_file"
+  exec {proof_gpu_admission_fd}<>"$proof_gpu_admission_file" || \
+    die "could not open GPU admission ticket: $proof_gpu_admission_file"
+  flock -n -x "$proof_gpu_admission_fd" || \
+    die "could not lock new GPU admission ticket: $proof_gpu_admission_file"
+  printf 'pid=%s model=%s resource_class=%s queue_scope=%s\n' \
+    "$$" "$model" "$proof_gpu_resource_class" "$scope" >&"$proof_gpu_admission_fd"
+  ln -- "$proof_gpu_admission_file" "$final_ticket" || \
+    die "could not publish GPU admission ticket: $final_ticket"
+  rm -f -- "$proof_gpu_admission_file" || \
+    die "could not remove temporary GPU admission ticket: $proof_gpu_admission_file"
+  proof_gpu_admission_file="$final_ticket"
+  flock -u "$enqueue_fd" >/dev/null 2>&1 || true
+  close_dynamic_fd "$enqueue_fd"
+}
+
+gpu_admission_ticket_has_turn() {
+  local lock_dir="$1"
+  local scope="$2"
+  local ticket_file ticket_fd
+  acquire_gpu_allocator_mutex "$lock_dir" || return 1
+  for ticket_file in "$lock_dir"/"admission-$scope-"*.lock; do
+    [ -e "$ticket_file" ] || continue
+    if [ "$ticket_file" = "$proof_gpu_admission_file" ]; then
+      release_gpu_allocator_mutex
+      return 0
+    fi
+    if ! exec {ticket_fd}<"$ticket_file"; then
+      continue
+    fi
+    if flock -n -x "$ticket_fd"; then
+      if ! rm -f -- "$ticket_file"; then
+        flock -u "$ticket_fd" >/dev/null 2>&1 || true
+        close_dynamic_fd "$ticket_fd"
+        release_gpu_allocator_mutex
+        die "could not prune stale GPU admission ticket: $ticket_file"
+      fi
+      flock -u "$ticket_fd" >/dev/null 2>&1 || true
+      close_dynamic_fd "$ticket_fd"
+      continue
+    fi
+    close_dynamic_fd "$ticket_fd"
+    release_gpu_allocator_mutex
+    return 1
+  done
+  release_gpu_allocator_mutex
+  die "GPU admission ticket disappeared before service: $proof_gpu_admission_file"
+}
+
+release_gpu_admission_ticket() {
+  if [ -n "$proof_gpu_admission_file" ]; then
+    rm -f -- "$proof_gpu_admission_file" || true
+  fi
+  if [ -n "$proof_gpu_admission_fd" ]; then
+    flock -u "$proof_gpu_admission_fd" >/dev/null 2>&1 || true
+    close_dynamic_fd "$proof_gpu_admission_fd"
+  fi
+  proof_gpu_admission_fd=""
+  proof_gpu_admission_file=""
 }
 
 usage() {
@@ -347,6 +471,25 @@ select_proof_gpu() {
 
   local deadline=$((SECONDS + timeout))
   local attempted=0 reserve_rc=0
+  local admission_scope="global"
+  # Register once in a monotonic queue. Every retry then retains its position
+  # instead of entering a new race in which younger matrix jobs can repeatedly
+  # overtake an older waiter as GPU capacity becomes available.
+  while ! acquire_gpu_admission_ticket "$lock_dir" "$admission_scope" "$deadline"; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      die "timed out after ${timeout}s waiting for a ${resource_class} model-proof GPU lease from: ${candidate_gpu_ids[*]}"
+    fi
+    sleep 1
+  done
+  while ! gpu_admission_ticket_has_turn "$lock_dir" "$admission_scope"; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      die "timed out after ${timeout}s waiting for a ${resource_class} model-proof GPU lease from: ${candidate_gpu_ids[*]}"
+    fi
+    sleep 1
+  done
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    die "timed out after ${timeout}s waiting for a ${resource_class} model-proof GPU lease from: ${candidate_gpu_ids[*]}"
+  fi
   while true; do
     if [ "$attempted" -eq 1 ] && [ "$SECONDS" -ge "$deadline" ]; then
       die "timed out after ${timeout}s waiting for a ${resource_class} model-proof GPU lease from: ${candidate_gpu_ids[*]}"
@@ -356,6 +499,7 @@ select_proof_gpu() {
     if [ "$resource_class" = "shared" ]; then
       if try_acquire_shared_gpu_slot \
           "$lock_dir" "$slots_per_gpu" "$explicit_slot" "${candidate_gpu_ids[@]}"; then
+        release_gpu_admission_ticket
         echo "Leased shared model-proof GPU $proof_gpu_id slot ${proof_gpu_slot_ids[0]} via ${proof_gpu_lease_files[0]}"
         return 0
       fi
@@ -370,8 +514,11 @@ select_proof_gpu() {
       reserve_rc=$?
       set -e
       if [ "$reserve_rc" -eq 0 ]; then
+        release_gpu_admission_ticket
         echo "Leased exclusive model-proof GPU $proof_gpu_id slots ${proof_gpu_slot_ids[*]}"
         return 0
+      elif [ "$reserve_rc" -eq 2 ]; then
+        release_gpu_admission_ticket
       fi
     fi
     sleep 1

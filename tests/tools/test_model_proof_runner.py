@@ -225,7 +225,7 @@ def _gpu_lease(output: Path) -> dict:
 
 def _lock_is_busy(path: Path) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as stream:
+    with path.open("a+", encoding="utf-8") as stream:
         try:
             fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -1991,6 +1991,48 @@ def test_fifth_shared_proof_times_out_when_all_four_slots_are_busy(
     assert result.returncode != 0
     assert "timed out after 1s waiting for a shared model-proof GPU lease from: 9" in result.stderr
     assert not _proof_gpu_ids_if_present(docker_log)
+    assert not list(lock_dir.glob("admission-global-*.lock"))
+
+
+def test_gpu_admission_queue_prunes_a_stale_ticket(tmp_path: Path) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "TRTMC_GPU_ID": "9",
+            "TRTMC_MODEL_PROOF_GPU_IDS": "9",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "1",
+        }
+    )
+    lock_dir = tmp_path / "gpu-locks"
+    lock_dir.mkdir()
+    stale_ticket = lock_dir / "admission-global-00000000000000000001.lock"
+    stale_ticket.write_text("pid=999999 model=stale\n", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--model",
+            "convbert",
+            "--revision",
+            "HEAD",
+            "--output-dir",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not stale_ticket.exists()
+    assert not list(lock_dir.glob("admission-global-*.lock"))
+    assert (lock_dir / "admission-global.next").read_text(encoding="utf-8") == "2\n"
+    assert _proof_gpu_ids(docker_log) == ["9"]
 
 
 @pytest.mark.model_proof_allocator
@@ -2195,6 +2237,174 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
             exclusive.communicate(timeout=10)
 
 
+def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_waiter(
+    tmp_path: Path,
+) -> None:
+    lock_dir = tmp_path / "gpu-locks"
+    common_env = {
+        "TRTMC_GPU_ID": "6",
+        "TRTMC_MODEL_PROOF_GPU_IDS": "6",
+        "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "1",
+        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "15",
+    }
+
+    def start_case(
+        name: str, model: str, release_file: Path
+    ) -> tuple[subprocess.Popen[str], Path, Path]:
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        fake_bin, docker_log = _write_successful_fake_docker(case_dir)
+        output = case_dir / "proof"
+        env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+        env.update(common_env)
+        env["FAKE_PROOF_RELEASE_FILE"] = str(release_file)
+        process = subprocess.Popen(
+            [
+                "bash",
+                str(RUNNER),
+                "--model",
+                model,
+                "--revision",
+                "HEAD",
+                "--output-dir",
+                str(output),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        return process, docker_log, output
+
+    first_release = tmp_path / "release-first-exclusive"
+    oldest_release = tmp_path / "release-oldest-shared"
+    younger_shared_release = tmp_path / "release-younger-shared"
+    younger_exclusive_release = tmp_path / "release-younger-exclusive"
+    first, _, first_output = start_case("first-exclusive", "flux", first_release)
+    oldest: subprocess.Popen[str] | None = None
+    younger_shared: subprocess.Popen[str] | None = None
+    younger_exclusive: subprocess.Popen[str] | None = None
+    try:
+        deadline = time.monotonic() + 30
+        while (
+            time.monotonic() < deadline
+            and not (first_output / "artifacts" / "gpu-lease.json").is_file()
+        ):
+            time.sleep(0.05)
+        assert (first_output / "artifacts" / "gpu-lease.json").is_file()
+
+        oldest, _, oldest_output = start_case("oldest-shared", "m2m_100", oldest_release)
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not list(
+            lock_dir.glob("admission-global-*.lock")
+        ):
+            time.sleep(0.05)
+        admission_tickets = sorted(lock_dir.glob("admission-global-*.lock"))
+        assert len(admission_tickets) == 1
+        assert "model=m2m_100" in admission_tickets[0].read_text(encoding="utf-8")
+        assert _lock_is_busy(admission_tickets[0])
+
+        younger_exclusive, _, younger_exclusive_output = start_case(
+            "younger-exclusive", "bark", younger_exclusive_release
+        )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            admission_tickets = sorted(lock_dir.glob("admission-global-*.lock"))
+            if len(admission_tickets) == 2 and all(
+                ticket.stat().st_size > 0 for ticket in admission_tickets
+            ):
+                break
+            time.sleep(0.05)
+        younger_shared, _, younger_shared_output = start_case(
+            "younger-shared", "convbert", younger_shared_release
+        )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            admission_tickets = sorted(lock_dir.glob("admission-global-*.lock"))
+            if len(admission_tickets) == 3 and all(
+                ticket.stat().st_size > 0 for ticket in admission_tickets
+            ):
+                break
+            time.sleep(0.05)
+        admission_tickets = sorted(lock_dir.glob("admission-global-*.lock"))
+        assert len(admission_tickets) == 3
+        assert [
+            ticket.read_text(encoding="utf-8").split("model=", maxsplit=1)[1].split()[0]
+            for ticket in admission_tickets
+        ] == ["m2m_100", "bark", "convbert"]
+
+        first_release.touch()
+        deadline = time.monotonic() + 30
+        while (
+            time.monotonic() < deadline
+            and not (oldest_output / "artifacts" / "gpu-lease.json").is_file()
+            and not (
+                younger_exclusive_output / "artifacts" / "gpu-lease.json"
+            ).is_file()
+            and not (younger_shared_output / "artifacts" / "gpu-lease.json").is_file()
+        ):
+            time.sleep(0.05)
+
+        assert (oldest_output / "artifacts" / "gpu-lease.json").is_file()
+        assert not (
+            younger_exclusive_output / "artifacts" / "gpu-lease.json"
+        ).exists()
+        assert not (younger_shared_output / "artifacts" / "gpu-lease.json").exists()
+        assert _gpu_lease(oldest_output)["resource_class"] == "shared"
+
+        oldest_release.touch()
+        deadline = time.monotonic() + 30
+        while (
+            time.monotonic() < deadline
+            and not (younger_exclusive_output / "artifacts" / "gpu-lease.json").is_file()
+        ):
+            time.sleep(0.05)
+        assert (younger_exclusive_output / "artifacts" / "gpu-lease.json").is_file()
+        assert not (younger_shared_output / "artifacts" / "gpu-lease.json").exists()
+        assert _gpu_lease(younger_exclusive_output)["resource_class"] == "exclusive_gpu"
+
+        younger_exclusive_release.touch()
+        deadline = time.monotonic() + 30
+        while (
+            time.monotonic() < deadline
+            and not (younger_shared_output / "artifacts" / "gpu-lease.json").is_file()
+        ):
+            time.sleep(0.05)
+        assert (younger_shared_output / "artifacts" / "gpu-lease.json").is_file()
+        assert _gpu_lease(younger_shared_output)["resource_class"] == "shared"
+        younger_shared_release.touch()
+
+        first_stdout, first_stderr = first.communicate(timeout=30)
+        assert first.returncode == 0, first_stdout + first_stderr
+        oldest_stdout, oldest_stderr = oldest.communicate(timeout=30)
+        assert oldest.returncode == 0, oldest_stdout + oldest_stderr
+        younger_shared_stdout, younger_shared_stderr = younger_shared.communicate(timeout=30)
+        assert younger_shared.returncode == 0, younger_shared_stdout + younger_shared_stderr
+        younger_exclusive_stdout, younger_exclusive_stderr = younger_exclusive.communicate(
+            timeout=30
+        )
+        assert younger_exclusive.returncode == 0, (
+            younger_exclusive_stdout + younger_exclusive_stderr
+        )
+        assert not list(lock_dir.glob("admission-global-*.lock"))
+    finally:
+        for release_file in (
+            first_release,
+            oldest_release,
+            younger_shared_release,
+            younger_exclusive_release,
+        ):
+            release_file.touch()
+        for process in (first, oldest, younger_shared, younger_exclusive):
+            if process is not None and process.poll() is None:
+                try:
+                    process.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.communicate(timeout=10)
+
+
 def _proof_gpu_ids_if_present(docker_log: Path) -> list[str]:
     if not docker_log.is_file():
         return []
@@ -2239,4 +2449,8 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     assert (
         "TRTMC_MODEL_PROOF_GPU_IDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_IDS || '0,1,2,3' }}" in workflow
     )
-    assert "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS:" in workflow
+    assert (
+        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: "
+        "${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || '3600' }}"
+        in workflow
+    )
