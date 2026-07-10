@@ -136,7 +136,8 @@ selected and passed all 77 models. All 77 artifacts matched their selected
 model, and all 77 engine-build verifications proved exactly one invocation.
 
 The per-model source data is retained in
-[`ci-e0-29078366125-model-timings.csv`](ci-experiment-data/ci-e0-29078366125-model-timings.csv).
+[`ci-e0-29078366125-model-timings.md`](ci-experiment-data/ci-e0-29078366125-model-timings.md)
+as fenced CSV.
 
 | Metric | Baseline 29060715158 | E0 29078366125 | Change |
 | --- | ---: | ---: | ---: |
@@ -248,6 +249,7 @@ as local-environment/baseline failures, not silently excluded from the record.
 | --- | --- | --- | --- | --- | ---: | ---: | --- |
 | Baseline | `31708284cb786a84417d8400fe09620415b4054e` | [29060715158](https://github.com/NVIDIA/TensorRT-Model-Connect/actions/runs/29060715158) | Yes | 77 passed | 1:35:34 | 1:33:24 | Primary comparison |
 | E0 | `077e063c3306ed45bf3371ecd92d2451e08098fd` (tested `d0fe3cff4244ead20a46d587ecf02160b8d65e72`) | [29078366125](https://github.com/NVIDIA/TensorRT-Model-Connect/actions/runs/29078366125) | Yes | 77 passed | 1:34:59 | 1:33:15 | Observation valid; no material timing change |
+| E1 preflight | `fea31fd2c7d44b5891217ebb6253285951a2042f` (tested `ed6b0c18bd0eb724abd224b03dabe5e5ad0c4384`) | [29084852953](https://github.com/NVIDIA/TensorRT-Model-Connect/actions/runs/29084852953) | No | Impact failed | 0:00:58 | Not started | Experiment CSV had no ownership class; retain failure and store data as owned Markdown |
 
 For failed or canceled runs, retain the run in this ledger and record the exact
 failed model/stage. Do not discard unfavorable measurements.

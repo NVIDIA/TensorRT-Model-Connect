@@ -1,3 +1,8 @@
+# E0 Run 29078366125 Per-Model Timings
+
+All durations are seconds. Engine build is a subset of E2E and is not additive.
+
+```csv
 model,resource_class,job_s,image_ensure_s,proof_step_s,lease_wait_s,lease_hold_s,projection_s,configure_s,scratch_build_s,dso_s,cpp_tests_s,python_tests_s,e2e_s,engine_build_s,result_verification_s,html_report_s
 albert,shared,321.0,125.0,185.0,1.029,179.34,1.104,9.556,35.029,1.251,6.734,26.095,96.754,62.373,0.166,0.209
 bark,exclusive_gpu,1080.0,28.0,1041.0,462.945,572.226,1.004,8.594,40.851,1.742,6.844,7.169,501.536,334.983,0.235,0.25
@@ -76,3 +81,4 @@ whisper,shared,256.0,60.0,186.0,0.03,179.949,1.015,8.548,36.334,1.223,8.625,4.14
 xglm,shared,1192.0,28.0,1153.0,660.03,486.92,1.164,10.218,43.62,1.42,0.124,97.884,327.607,266.156,0.296,0.25
 xlnet,shared,342.0,124.0,207.0,0.033,201.719,1.037,9.189,37.608,1.487,6.394,3.884,139.196,104.846,0.208,0.218
 z_image,shared,3122.0,22.0,3088.0,2325.952,756.635,1.476,11.157,32.8,1.173,0.262,3.009,703.439,508.52,0.253,0.235
+```
