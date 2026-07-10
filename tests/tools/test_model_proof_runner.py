@@ -223,6 +223,49 @@ def _gpu_lease(output: Path) -> dict:
     return json.loads((output / "artifacts" / "gpu-lease.json").read_text(encoding="utf-8"))
 
 
+def _update_proof_step_program() -> str:
+    runner = RUNNER.read_text(encoding="utf-8")
+    function = runner.split("update_proof_step() {", maxsplit=1)[1].split(
+        "update_proof_fact() {", maxsplit=1
+    )[0]
+    return function.split("<<'PY'\n", maxsplit=1)[1].rsplit("\nPY", maxsplit=1)[0]
+
+
+def _update_proof_step(
+    status_file: Path,
+    step: str,
+    status: str,
+    evidence: str = "",
+) -> None:
+    result = subprocess.run(
+        [sys.executable, "-", str(status_file), step, status, evidence],
+        input=_update_proof_step_program(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_proof_step_timing_records_monotonic_elapsed_time(tmp_path: Path) -> None:
+    status_file = tmp_path / "model-proof-status.json"
+    status_file.write_text(
+        json.dumps({"steps": {"configure": {"status": "pending"}}}),
+        encoding="utf-8",
+    )
+
+    _update_proof_step(status_file, "configure", "running", "configure.log")
+    time.sleep(0.01)
+    _update_proof_step(status_file, "configure", "passed", "configure.log")
+
+    step = json.loads(status_file.read_text(encoding="utf-8"))["steps"]["configure"]
+    assert step["status"] == "passed"
+    assert step["started_at"].endswith("Z")
+    assert step["completed_at"].endswith("Z")
+    assert step["completed_monotonic_ns"] >= step["started_monotonic_ns"]
+    assert step["duration_s"] >= 0.01
+
+
 def _lock_is_busy(path: Path) -> bool:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as stream:
@@ -1617,7 +1660,14 @@ def test_explicit_runner_gpu_id_still_acquires_a_slot_lease(tmp_path: Path) -> N
     assert "Leased shared model-proof GPU 7 slot 0" in result.stdout
     assert _proof_gpu_ids(docker_log) == ["7"]
     assert (output / "artifacts" / "gpu-id.txt").read_text().strip() == "7"
-    assert _gpu_lease(output) == {
+    lease = _gpu_lease(output)
+    assert lease.pop("lease_wait_seconds") >= 0
+    assert lease.pop("lease_hold_seconds") >= 0
+    assert lease.pop("lease_timing_clock") == "CLOCK_MONOTONIC"
+    assert lease.pop("lease_requested_at").endswith("Z")
+    assert lease.pop("lease_acquired_at").endswith("Z")
+    assert lease.pop("lease_released_at").endswith("Z")
+    assert lease == {
         "schema_version": 1,
         "model": "convbert",
         "source_revision": subprocess.check_output(
@@ -2209,6 +2259,11 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     assert '"resource_class": resource_class' in text
     assert '"gpu_resource_class": resource_class' in text
     assert '"gpu_lease_evidence": "gpu-lease.json"' in text
+    assert '"lease_wait_seconds": round(' in text
+    assert 'payload["lease_hold_seconds"] = round(' in text
+    assert '"lease_timing_clock": "CLOCK_MONOTONIC"' in text
+    assert '"timing_clock": "CLOCK_MONOTONIC"' in text
+    assert 'step["duration_s"] = round(' in text
     assert (
         "TRTMC_MODEL_PROOF_GPU_IDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_IDS || '0,1,2,3' }}" in workflow
     )

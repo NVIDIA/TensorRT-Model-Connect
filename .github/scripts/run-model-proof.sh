@@ -402,6 +402,8 @@ initialize_proof_status() {
     /artifacts/model-proof-status.json <<'PY'
 import json
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 (
@@ -415,8 +417,12 @@ from pathlib import Path
     output,
 ) = sys.argv[1:]
 gpu_slots = [int(item) for item in gpu_slot_text.split(",") if item]
+created_at = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+created_monotonic_ns = time.monotonic_ns()
 payload = {
     "schema_version": 1,
+    "created_at": created_at,
+    "timing_clock": "CLOCK_MONOTONIC",
     "model": model,
     "source_revision": revision,
     "suite": suite,
@@ -433,7 +439,12 @@ payload = {
     "steps": {
         "hf_cache_isolation": {"status": "pending", "evidence": "hf-cache-repos.json"},
         "model_reference_isolation": {"status": "pending", "evidence": "selection.json"},
-        "projection_validation": {"status": "running", "evidence": "source-projection.json, selection.json"},
+        "projection_validation": {
+            "status": "running",
+            "evidence": "source-projection.json, selection.json",
+            "started_at": created_at,
+            "started_monotonic_ns": created_monotonic_ns,
+        },
         "configure": {"status": "pending", "evidence": "configure.log"},
         "scratch_build": {"status": "pending", "evidence": "build.log"},
         "dso_isolation": {"status": "pending", "evidence": "model-dsos.txt, model-dso.dynamic.txt"},
@@ -456,12 +467,29 @@ update_proof_step() {
   "$(python_bin)" - /artifacts/model-proof-status.json "$step" "$status" "$evidence" <<'PY'
 import json
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 path = Path(sys.argv[1])
 payload = json.loads(path.read_text(encoding="utf-8"))
 step = payload.setdefault("steps", {}).setdefault(sys.argv[2], {})
-step["status"] = sys.argv[3]
+status = sys.argv[3]
+observed_at = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+observed_monotonic_ns = time.monotonic_ns()
+if status == "running":
+    step.setdefault("started_at", observed_at)
+    step.setdefault("started_monotonic_ns", observed_monotonic_ns)
+elif status in {"passed", "failed", "skipped", "not-run"}:
+    step.setdefault("started_at", observed_at)
+    step.setdefault("started_monotonic_ns", observed_monotonic_ns)
+    step["completed_at"] = observed_at
+    step["completed_monotonic_ns"] = observed_monotonic_ns
+    step["duration_s"] = round(
+        max(0, observed_monotonic_ns - int(step["started_monotonic_ns"])) / 1_000_000_000,
+        6,
+    )
+step["status"] = status
 if sys.argv[4]:
     step["evidence"] = sys.argv[4]
 path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -491,6 +519,8 @@ finalize_model_report() {
   "$(python_bin)" - /artifacts/model-proof-status.json "$validation_rc" <<'PY'
 import json
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 path = Path(sys.argv[1])
@@ -498,14 +528,32 @@ rc = int(sys.argv[2])
 payload = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
 payload["validation_exit_code"] = rc
 payload["outcome"] = "report-validation" if rc == 0 else "failed"
+observed_at = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+observed_monotonic_ns = time.monotonic_ns()
+
+
+def finish_step(step, status):
+    step.setdefault("started_at", observed_at)
+    step.setdefault("started_monotonic_ns", observed_monotonic_ns)
+    step["status"] = status
+    step["completed_at"] = observed_at
+    step["completed_monotonic_ns"] = observed_monotonic_ns
+    step["duration_s"] = round(
+        max(0, observed_monotonic_ns - int(step["started_monotonic_ns"])) / 1_000_000_000,
+        6,
+    )
+
+
 for step in (payload.get("steps") or {}).values():
     if isinstance(step, dict) and step.get("status") == "running":
-        step["status"] = "passed" if rc == 0 else "failed"
+        finish_step(step, "passed" if rc == 0 else "failed")
     elif isinstance(step, dict) and step.get("status") == "pending" and rc != 0:
-        step["status"] = "not-run"
+        finish_step(step, "not-run")
 report_step = payload.setdefault("steps", {}).setdefault("html_report", {})
 report_step["status"] = "running"
 report_step["evidence"] = "model-proof-report.html"
+report_step.setdefault("started_at", observed_at)
+report_step.setdefault("started_monotonic_ns", observed_monotonic_ns)
 evidence = []
 for item in sorted(Path("/artifacts").rglob("*")):
     if not item.is_file() or item.name == "model-proof-report.html":
@@ -531,6 +579,8 @@ PY
   "$(python_bin)" - /artifacts/model-proof-status.json "$validation_rc" "$report_rc" <<'PY'
 import json
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 path = Path(sys.argv[1])
@@ -538,8 +588,18 @@ validation_rc = int(sys.argv[2])
 report_rc = int(sys.argv[3])
 payload = json.loads(path.read_text(encoding="utf-8"))
 report_step = payload.setdefault("steps", {}).setdefault("html_report", {})
+observed_at = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+observed_monotonic_ns = time.monotonic_ns()
+report_step.setdefault("started_at", observed_at)
+report_step.setdefault("started_monotonic_ns", observed_monotonic_ns)
 report_step["status"] = "passed" if report_rc == 0 else "failed"
 report_step["evidence"] = "model-proof-report.html"
+report_step["completed_at"] = observed_at
+report_step["completed_monotonic_ns"] = observed_monotonic_ns
+report_step["duration_s"] = round(
+    max(0, observed_monotonic_ns - int(report_step["started_monotonic_ns"])) / 1_000_000_000,
+    6,
+)
 payload["report_exit_code"] = report_rc
 if validation_rc != 0:
     payload["outcome"] = "failed"
@@ -550,6 +610,7 @@ elif report_rc != 0:
 else:
     payload["outcome"] = "passed"
     payload["exit_code"] = 0
+payload["completed_at"] = observed_at
 path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY
   if [ -f /artifacts/model-proof-report.html ]; then
@@ -1177,6 +1238,7 @@ run_inner() {
   trap 'finalize_model_report "$?"' EXIT
   validate_inner_gpu_lease
   initialize_proof_status
+  update_proof_step hf_cache_isolation running "hf-cache-repos.json"
   local hf_cache_repository_count
   hf_cache_repository_count="$(validate_inner_hf_cache_view)"
   [[ "$hf_cache_repository_count" =~ ^[1-9][0-9]*$ ]] || \
@@ -1190,6 +1252,7 @@ run_inner() {
   write_model_proof_selection /src /artifacts/selection.json "$config_file"
 
   local model_reference_revision
+  update_proof_step model_reference_isolation running "selection.json"
   model_reference_revision="$(validate_inner_model_reference_cache "$config_file")"
   if [ "$model_reference_revision" = not-required ]; then
     update_proof_step model_reference_isolation passed \
@@ -1957,19 +2020,51 @@ trap - EXIT
   [ "$hf_cache_repository_count" -gt 0 ] || \
     die "selected Hugging Face cache evidence produced no repository copies"
 
+  local lease_requested_at lease_requested_monotonic_ns
+  read -r lease_requested_at lease_requested_monotonic_ns < <(python3 - <<'PY'
+from datetime import datetime, timezone
+import time
+
+observed_at = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+print(observed_at, time.monotonic_ns())
+PY
+)
   select_proof_gpu "$resource_class"
+  local lease_acquired_at lease_acquired_monotonic_ns
+  read -r lease_acquired_at lease_acquired_monotonic_ns < <(python3 - <<'PY'
+from datetime import datetime, timezone
+import time
+
+observed_at = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+print(observed_at, time.monotonic_ns())
+PY
+)
   local gpu_id="$proof_gpu_id"
   local gpu_slot_ids
   gpu_slot_ids="$(IFS=,; printf '%s' "${proof_gpu_slot_ids[*]}")"
   printf '%s\n' "$gpu_id" > "$artifacts_dir/gpu-id.txt"
   python3 - \
     "$artifacts_dir/gpu-lease.json" "$model" "$revision" "$gpu_id" \
-    "$gpu_slot_ids" "$proof_gpu_slots_per_gpu" "$proof_gpu_resource_class" <<'PY'
+    "$gpu_slot_ids" "$proof_gpu_slots_per_gpu" "$proof_gpu_resource_class" \
+    "$lease_requested_at" "$lease_requested_monotonic_ns" \
+    "$lease_acquired_at" "$lease_acquired_monotonic_ns" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-output, model, revision, gpu_id, slot_text, slots_per_gpu, resource_class = sys.argv[1:]
+(
+    output,
+    model,
+    revision,
+    gpu_id,
+    slot_text,
+    slots_per_gpu,
+    resource_class,
+    lease_requested_at,
+    lease_requested_monotonic_ns,
+    lease_acquired_at,
+    lease_acquired_monotonic_ns,
+) = sys.argv[1:]
 gpu_slots = [int(item) for item in slot_text.split(",") if item]
 payload = {
     "schema_version": 1,
@@ -1983,6 +2078,14 @@ payload = {
     "gpu_slots_per_device": int(slots_per_gpu),
     "resource_class": resource_class,
     "gpu_resource_class": resource_class,
+    "lease_requested_at": lease_requested_at,
+    "lease_acquired_at": lease_acquired_at,
+    "lease_wait_seconds": round(
+        max(0, int(lease_acquired_monotonic_ns) - int(lease_requested_monotonic_ns))
+        / 1_000_000_000,
+        6,
+    ),
+    "lease_timing_clock": "CLOCK_MONOTONIC",
 }
 Path(output).write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 PY
@@ -2045,6 +2148,34 @@ PY
     2>&1 | tee "$artifacts_dir/console.log"
   local rc="${PIPESTATUS[0]}"
   set -e
+  local lease_released_at lease_released_monotonic_ns
+  read -r lease_released_at lease_released_monotonic_ns < <(python3 - <<'PY'
+from datetime import datetime, timezone
+import time
+
+observed_at = datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+print(observed_at, time.monotonic_ns())
+PY
+)
+  python3 - \
+    "$artifacts_dir/gpu-lease.json" "$lease_acquired_monotonic_ns" \
+    "$lease_released_at" "$lease_released_monotonic_ns" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+lease_acquired_monotonic_ns = int(sys.argv[2])
+lease_released_at = sys.argv[3]
+lease_released_monotonic_ns = int(sys.argv[4])
+payload = json.loads(path.read_text(encoding="utf-8"))
+payload["lease_released_at"] = lease_released_at
+payload["lease_hold_seconds"] = round(
+    max(0, lease_released_monotonic_ns - lease_acquired_monotonic_ns) / 1_000_000_000,
+    6,
+)
+path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+PY
   [ "$rc" -eq 0 ] || die "isolated model proof failed for $model (exit $rc)"
   [ -f "$artifacts_dir/proof.json" ] || die "model proof did not emit proof.json"
   [ -f "$artifacts_dir/model-proof-report.html" ] || \
