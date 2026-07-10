@@ -4,6 +4,7 @@
  */
 
 // trtmc CLI — command-line interface using the new C++ library API.
+// CI coverage experiment: CLI-only changes must run units without model proofs.
 //
 // Usage:
 //   trtmc build           <hf-model-or-dir> -o <bundle.trtfb> [builder args...]
