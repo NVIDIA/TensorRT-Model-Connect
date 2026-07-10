@@ -437,6 +437,9 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
           "but cuBLAS was not found")
       endif()
       target_link_libraries(trtmc_model_${_trtmc_model} PRIVATE ${TRTMC_CUBLAS_LIBRARY})
+    elseif(_trtmc_model_link_library STREQUAL "threads")
+      find_package(Threads REQUIRED)
+      target_link_libraries(trtmc_model_${_trtmc_model} PRIVATE Threads::Threads)
     else()
       message(FATAL_ERROR
         "Unknown runtime_link_libraries entry '${_trtmc_model_link_library}' "

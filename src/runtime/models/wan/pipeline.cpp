@@ -16,10 +16,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <numeric>
 #include <random>
+#include <thread>
 
 namespace trtmc {
 
@@ -103,17 +105,81 @@ struct DDIMState {
 
 void cpu_matmul_bias(const float* A, const float* B, const float* bias, float* out, int32_t M,
                      int32_t K, int32_t N) {
-    for (int32_t i = 0; i < M; ++i) {
-        for (int32_t j = 0; j < N; ++j) {
-            double acc = 0.0;
-            for (int32_t k = 0; k < K; ++k) {
-                acc += static_cast<double>(A[i * K + k]) * static_cast<double>(B[k * N + j]);
-            }
-            if (bias != nullptr) {
-                acc += static_cast<double>(bias[j]);
-            }
-            out[i * N + j] = static_cast<float>(acc);
+    const auto operation_count = static_cast<std::uint64_t>(M) * static_cast<std::uint64_t>(K) *
+                                 static_cast<std::uint64_t>(N);
+    int32_t max_threads = static_cast<int32_t>(std::thread::hardware_concurrency());
+    if (max_threads <= 0) {
+        max_threads = 1;
+    }
+    max_threads = std::min<int32_t>(max_threads, 16);
+    if (const char* value = std::getenv("TRTMC_WAN_CPU_GEMM_THREADS")) {
+        char* end = nullptr;
+        const long parsed = std::strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed > 0) {
+            max_threads = static_cast<int32_t>(std::min<long>(parsed, 256));
         }
+    }
+
+    // Thread creation is not worthwhile for small timestep projections. The
+    // large text and patch projections have independent output rows and are
+    // safe to split without changing any element's reduction order.
+    const int32_t num_threads =
+        operation_count >= 16'000'000ULL ? std::min<int32_t>(M, max_threads) : 1;
+
+    const auto compute_rows = [=](int32_t row_begin, int32_t row_end, double* accumulators) {
+        for (int32_t i = row_begin; i < row_end; ++i) {
+            std::fill_n(accumulators, N, 0.0);
+            for (int32_t k = 0; k < K; ++k) {
+                const double a = static_cast<double>(A[i * K + k]);
+                const float* b_row = B + static_cast<std::size_t>(k) * static_cast<std::size_t>(N);
+                for (int32_t j = 0; j < N; ++j) {
+                    accumulators[j] += a * static_cast<double>(b_row[j]);
+                }
+            }
+            float* out_row = out + static_cast<std::size_t>(i) * static_cast<std::size_t>(N);
+            for (int32_t j = 0; j < N; ++j) {
+                double value = accumulators[j];
+                if (bias != nullptr) {
+                    value += static_cast<double>(bias[j]);
+                }
+                out_row[j] = static_cast<float>(value);
+            }
+        }
+    };
+
+    if (num_threads == 1) {
+        std::vector<double> accumulators(static_cast<std::size_t>(N));
+        compute_rows(0, M, accumulators.data());
+        return;
+    }
+
+    // Allocate all scratch storage before starting workers so an allocation
+    // failure cannot escape a worker thread and terminate the process.
+    std::vector<double> thread_accumulators(static_cast<std::size_t>(num_threads) *
+                                            static_cast<std::size_t>(N));
+    std::vector<std::thread> workers;
+    workers.reserve(static_cast<std::size_t>(num_threads));
+    const int32_t rows_per_thread = (M + num_threads - 1) / num_threads;
+    try {
+        for (int32_t thread_index = 0; thread_index < num_threads; ++thread_index) {
+            const int32_t row_begin = thread_index * rows_per_thread;
+            const int32_t row_end = std::min<int32_t>(M, row_begin + rows_per_thread);
+            if (row_begin >= row_end) {
+                break;
+            }
+            double* accumulators =
+                thread_accumulators.data() +
+                static_cast<std::size_t>(thread_index) * static_cast<std::size_t>(N);
+            workers.emplace_back(compute_rows, row_begin, row_end, accumulators);
+        }
+    } catch (...) {
+        for (auto& worker : workers) {
+            worker.join();
+        }
+        throw;
+    }
+    for (auto& worker : workers) {
+        worker.join();
     }
 }
 
@@ -924,11 +990,11 @@ void WanPipeline::init_vae_caches() {
     const int32_t num_caches = config_.num_vae_caches;
     auto out_infos = vae_->output_info();
 
-    // We need a stream for DeviceTensor operations — get it from the VAE module
-    // by querying the device pointer (which implicitly gives us a usable device).
-    // DeviceTensor needs a cudaStream_t; we create a dedicated one.
-    cudaStream_t cache_stream = nullptr;
-    cudaStreamCreate(&cache_stream);
+    // Cache initialization, VAE execution, and cache_out -> cache_in copies must
+    // share a stream. Using a separate stream here leaves the asynchronous
+    // memset/copies unordered relative to the VAE enqueue and makes consecutive
+    // generations nondeterministic.
+    const cudaStream_t cache_stream = vae_->stream();
 
     for (int32_t ci = 0; ci < num_caches; ++ci) {
         const std::string cache_out_name = "cache_out_" + std::to_string(ci);
@@ -962,14 +1028,6 @@ void WanPipeline::init_vae_caches() {
     vae_caches_initialized_ = true;
 
     std::cerr << "[diffusion] VAE caches initialized: " << vae_cache_in_.size() << " cache pairs\n";
-
-    // Clean up the stream (DeviceTensors store a copy)
-    // Note: DeviceTensor operations are async on their stored stream.
-    // We keep the stream alive since DeviceTensors reference it.
-    // Actually, DeviceTensors keep a copy of the stream handle, so we
-    // must NOT destroy it. Store it as a shared_ptr via keep_alive.
-    auto stream_deleter = [](void* s) { cudaStreamDestroy(static_cast<cudaStream_t>(s)); };
-    vae_->keep_alive(std::shared_ptr<void>(cache_stream, stream_deleter));
 }
 
 void WanPipeline::zero_vae_caches() {
