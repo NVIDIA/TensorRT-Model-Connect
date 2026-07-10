@@ -28,6 +28,7 @@
 //   trtmc version
 
 #include "cli/args.h"
+#include "stb_image_resize2.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -775,19 +776,22 @@ int cmd_segment(const CliArgs& args) {
     const float mean[3] = {0.485F, 0.456F, 0.406F};
     const float stdv[3] = {0.229F, 0.224F, 0.225F};
 
+    std::vector<float> resized_pixels(static_cast<std::size_t>(3) * target_h * target_w);
+    if (stbir_resize(image.pixels.data(), image.width, image.height,
+                     image.width * 3 * static_cast<int32_t>(sizeof(float)), resized_pixels.data(),
+                     target_w, target_h, target_w * 3 * static_cast<int32_t>(sizeof(float)),
+                     STBIR_RGB, STBIR_TYPE_FLOAT, STBIR_EDGE_CLAMP,
+                     STBIR_FILTER_TRIANGLE) == nullptr) {
+        std::cerr << "Error: failed to resize segmentation image\n";
+        return EXIT_FAILURE;
+    }
+
     std::vector<float> chw_pixels(static_cast<std::size_t>(3) * target_h * target_w);
     for (int32_t y = 0; y < target_h; ++y) {
         for (int32_t x = 0; x < target_w; ++x) {
-            // Bilinear-ish nearest-neighbor resize
-            const int32_t src_y =
-                std::min(static_cast<int32_t>(static_cast<float>(y) * image.height / target_h),
-                         image.height - 1);
-            const int32_t src_x =
-                std::min(static_cast<int32_t>(static_cast<float>(x) * image.width / target_w),
-                         image.width - 1);
-            const auto src_idx = static_cast<std::size_t>((src_y * image.width + src_x) * 3);
+            const auto src_idx = static_cast<std::size_t>((y * target_w + x) * 3);
             for (int32_t c = 0; c < 3; ++c) {
-                const float val = (image.pixels[src_idx + c] - mean[c]) / stdv[c];
+                const float val = (resized_pixels[src_idx + c] - mean[c]) / stdv[c];
                 chw_pixels[static_cast<std::size_t>(c) * target_h * target_w +
                            static_cast<std::size_t>(y) * target_w + x] = val;
             }
