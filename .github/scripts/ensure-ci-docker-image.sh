@@ -119,6 +119,12 @@ compute_docker_input_fingerprint() {
 
 expected_fingerprint="$(compute_docker_input_fingerprint)"
 image="${base_image}-${expected_fingerprint:0:12}"
+validator_fingerprint="$(sha256sum "$0" | awk '{ print $1 }')"
+if ! [[ "$validator_fingerprint" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "ERROR: Could not fingerprint the CI image validator" >&2
+  exit 1
+fi
+validation_cache_file="${lock_file}.verified-$(id -u)-${expected_fingerprint}-${validator_fingerprint}"
 
 if [ -n "${GITHUB_ENV:-}" ]; then
   printf 'TRTMC_CI_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
@@ -217,16 +223,68 @@ rebuild_reasons=()
 mapfile -t changed_paths < <(collect_docker_input_changes)
 
 version_file="$(mktemp)"
-trap 'rm -f "$version_file"' EXIT
+validation_cache_tmp=""
+cleanup_validation_files() {
+  rm -f "$version_file"
+  if [ -n "$validation_cache_tmp" ]; then
+    rm -f "$validation_cache_tmp"
+  fi
+}
+trap cleanup_validation_files EXIT
+
+restore_cached_validation() {
+  local expected_image_ref="$1"
+  [ -f "$validation_cache_file" ] && \
+    [ ! -L "$validation_cache_file" ] && \
+    [ "$(stat -c '%u' "$validation_cache_file")" = "$(id -u)" ] || return 1
+  [ "$(awk -F= '$1 == "IMAGE_REF" { print $2 }' "$validation_cache_file")" = \
+    "$expected_image_ref" ] || return 1
+  [ "$(awk -F= '$1 == "TENSORRT_VERSION" { print $2 }' "$validation_cache_file")" = \
+    "$expected_trt" ] || return 1
+  [ "$(awk -F= '$1 == "MODELOPT_VERSION" { print $2 }' "$validation_cache_file")" = \
+    "$expected_modelopt" ] || return 1
+  [ "$(awk -F= '$1 == "NLOHMANN_JSON_HEADER" { print $2 }' "$validation_cache_file")" = \
+    present ] || return 1
+  [ "$(awk -F= '$1 == "NEMO_PROMPT_RNNT" { print $2 }' "$validation_cache_file")" = \
+    available ] || return 1
+  [ "$(awk -F= '$1 == "PYTHON_PROFILES" { print $2 }' "$validation_cache_file")" = \
+    "$expected_python_profiles" ] || return 1
+  sed '/^IMAGE_REF=/d' "$validation_cache_file" > "$version_file"
+}
+
+persist_validation_cache() {
+  local image_ref="$1"
+  validation_cache_tmp="$(mktemp "${validation_cache_file}.tmp.XXXXXX")"
+  chmod 0600 "$validation_cache_tmp"
+  {
+    printf 'IMAGE_REF=%s\n' "$image_ref"
+    sed '/^IMAGE_REF=/d' "$version_file"
+  } > "$validation_cache_tmp"
+  mv -f -- "$validation_cache_tmp" "$validation_cache_file"
+  validation_cache_tmp=""
+}
+
+validation_cache_hit=0
+validation_cache_status=miss
+image_rebuilt=0
 
 if ! docker image inspect "$image" >/dev/null 2>&1; then
   rebuild_reasons+=("CI Docker image '$image' is missing")
 else
+  current_image_ref="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)"
+  if ! [[ "$current_image_ref" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    rebuild_reasons+=("CI Docker image '$image' returned an invalid immutable ID")
+  fi
   current_fingerprint="$(query_image_fingerprint 2>/dev/null || true)"
   if [ "$current_fingerprint" != "$expected_fingerprint" ]; then
     rebuild_reasons+=("Docker input fingerprint mismatch: image has '${current_fingerprint:-missing}', source expects '$expected_fingerprint'")
-  fi
-  if ! query_image_versions > "$version_file"; then
+  elif [[ "$current_image_ref" =~ ^sha256:[0-9a-f]{64}$ ]] && \
+    restore_cached_validation "$current_image_ref"; then
+    validation_cache_hit=1
+    validation_cache_status=hit
+    echo "Reusing full CI image validation for immutable image '$current_image_ref'"
+    summary "Reused full CI image validation for immutable image \`$current_image_ref\`."
+  elif ! query_image_versions > "$version_file"; then
     rebuild_reasons+=("CI Docker image '$image' could not report dependency versions")
   else
     current_trt="$(awk -F= '$1 == "TENSORRT_VERSION" { print $2 }' "$version_file")"
@@ -277,6 +335,7 @@ if [ "${#rebuild_reasons[@]}" -gt 0 ]; then
     -t "$image" \
     -f "$dockerfile" \
     .
+  image_rebuilt=1
 else
   echo "CI Docker image '$image' already matches $dockerfile"
 fi
@@ -287,7 +346,14 @@ if [ "$current_fingerprint" != "$expected_fingerprint" ]; then
   exit 1
 fi
 
-query_image_versions > "$version_file"
+image_ref="$(docker image inspect --format '{{.Id}}' "$image")"
+if ! [[ "$image_ref" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "ERROR: CI Docker image '$image' returned an invalid immutable ID: $image_ref" >&2
+  exit 1
+fi
+if [ "$image_rebuilt" -eq 1 ] || [ ! -s "$version_file" ]; then
+  query_image_versions > "$version_file"
+fi
 current_trt="$(awk -F= '$1 == "TENSORRT_VERSION" { print $2 }' "$version_file")"
 current_modelopt="$(awk -F= '$1 == "MODELOPT_VERSION" { print $2 }' "$version_file")"
 current_nlohmann="$(awk -F= '$1 == "NLOHMANN_JSON_HEADER" { print $2 }' "$version_file")"
@@ -319,13 +385,13 @@ if [ "$current_python_profiles" != "$expected_python_profiles" ]; then
   exit 1
 fi
 
-image_ref="$(docker image inspect --format '{{.Id}}' "$image")"
-if ! [[ "$image_ref" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-  echo "ERROR: CI Docker image '$image' returned an invalid immutable ID: $image_ref" >&2
-  exit 1
+if [ "$validation_cache_hit" -eq 0 ]; then
+  persist_validation_cache "$image_ref"
 fi
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+  echo "validation_cache=$validation_cache_status" >> "$GITHUB_OUTPUT"
 fi
 
+echo "CI image validation cache: $validation_cache_status"
 echo "CI Docker image '$image' verified: TensorRT $current_trt, modelopt $current_modelopt, nlohmann/json headers, NeMo prompt RNN-T and prebuilt Python profiles ($current_python_profiles) present, image $image_ref"

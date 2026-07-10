@@ -729,6 +729,162 @@ def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> 
     assert "TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}" in workflow
 
 
+def test_ci_image_validation_cache_reuses_only_the_same_immutable_image(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    fingerprint_state = tmp_path / "image-fingerprint"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf \'%s\\n\' "$*" >> "$FAKE_DOCKER_LOG"\n'
+        'if [ "${1:-}" = image ] && [ "${2:-}" = inspect ]; then\n'
+        '  [ -f "$FAKE_FINGERPRINT_STATE" ] || exit 1\n'
+        '  if [[ " $* " == *".Id"* ]]; then\n'
+        '    printf \'%s\\n\' "$FAKE_IMAGE_ID"\n'
+        '  elif [[ " $* " == *".Config.Labels"* ]]; then\n'
+        '    /bin/cat "$FAKE_FINGERPRINT_STATE"\n'
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        'if [ "${1:-}" = build ]; then\n'
+        '  fingerprint=""\n'
+        '  for argument in "$@"; do\n'
+        '    case "$argument" in\n'
+        "      org.nvidia.trtmc.ci-input-fingerprint=*)\n"
+        '        fingerprint="${argument#*=}"\n'
+        "        ;;\n"
+        "    esac\n"
+        "  done\n"
+        '  [ -n "$fingerprint" ] || exit 98\n'
+        '  printf \'%s\\n\' "$fingerprint" > "$FAKE_FINGERPRINT_STATE"\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [ "${1:-}" = run ]; then\n'
+        '  printf \'TENSORRT_VERSION=%s\\n\' "$FAKE_TENSORRT_VERSION"\n'
+        '  printf \'MODELOPT_VERSION=%s\\n\' "$FAKE_MODELOPT_VERSION"\n'
+        "  printf 'NLOHMANN_JSON_HEADER=present\\n'\n"
+        "  printf 'NEMO_PROMPT_RNNT=available\\n'\n"
+        '  printf \'PYTHON_PROFILES=%s\\n\' "$FAKE_PYTHON_PROFILES"\n'
+        "  exit 0\n"
+        "fi\n"
+        "exit 99\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    expected_trt = re.search(r"^ARG TENSORRT_VERSION=(.+)$", dockerfile, re.MULTILINE)
+    expected_modelopt = re.search(r"^ARG MODELOPT_VERSION=(.+)$", dockerfile, re.MULTILINE)
+    assert expected_trt is not None
+    assert expected_modelopt is not None
+    profile_program = textwrap.dedent(
+        """
+        from tensorrt_model_connect.python_profiles import (
+            DEFAULT_PROFILE,
+            load_python_profile_registry,
+        )
+
+        profiles = load_python_profile_registry()["profiles"]
+        print(",".join(sorted(name for name in profiles if name != DEFAULT_PROFILE)))
+        """
+    )
+    python_env = os.environ.copy()
+    python_env["PYTHONPATH"] = str(REPO_ROOT / "python")
+    expected_profiles = subprocess.check_output(
+        [sys.executable, "-c", profile_program],
+        cwd=REPO_ROOT,
+        env=python_env,
+        text=True,
+    ).strip()
+
+    output_file = tmp_path / "github-output"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "FAKE_DOCKER_LOG": str(docker_log),
+            "FAKE_FINGERPRINT_STATE": str(fingerprint_state),
+            "FAKE_IMAGE_ID": f"sha256:{'a' * 64}",
+            "FAKE_TENSORRT_VERSION": expected_trt.group(1),
+            "FAKE_MODELOPT_VERSION": expected_modelopt.group(1),
+            "FAKE_PYTHON_PROFILES": expected_profiles,
+            "GITHUB_OUTPUT": str(output_file),
+            "TRTMC_CI_IMAGE": "trtmc-test-image",
+            "TRTMC_CI_IMAGE_LOCK_FILE": str(tmp_path / "image.lock"),
+        }
+    )
+
+    first = subprocess.run(
+        ["bash", str(IMAGE_ENSURE)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    second = subprocess.run(
+        ["bash", str(IMAGE_ENSURE)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "Reusing full CI image validation for immutable image" in second.stdout
+    docker_calls = docker_log.read_text(encoding="utf-8").splitlines()
+    assert sum(call.startswith("build ") for call in docker_calls) == 1
+    assert sum(call.startswith("run ") for call in docker_calls) == 1
+    cache_files = list(tmp_path.glob("image.lock.verified-*"))
+    assert len(cache_files) == 1
+    assert f"IMAGE_REF=sha256:{'a' * 64}" in cache_files[0].read_text(encoding="utf-8")
+
+    cache_files[0].write_text(
+        cache_files[0]
+        .read_text(encoding="utf-8")
+        .replace(f"TENSORRT_VERSION={expected_trt.group(1)}", "TENSORRT_VERSION=corrupt"),
+        encoding="utf-8",
+    )
+    corrupt_cache = subprocess.run(
+        ["bash", str(IMAGE_ENSURE)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert corrupt_cache.returncode == 0, corrupt_cache.stdout + corrupt_cache.stderr
+    docker_calls = docker_log.read_text(encoding="utf-8").splitlines()
+    assert sum(call.startswith("build ") for call in docker_calls) == 1
+    assert sum(call.startswith("run ") for call in docker_calls) == 2
+
+    env["FAKE_IMAGE_ID"] = f"sha256:{'b' * 64}"
+    changed_image = subprocess.run(
+        ["bash", str(IMAGE_ENSURE)],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert changed_image.returncode == 0, changed_image.stdout + changed_image.stderr
+    docker_calls = docker_log.read_text(encoding="utf-8").splitlines()
+    assert sum(call.startswith("build ") for call in docker_calls) == 1
+    assert sum(call.startswith("run ") for call in docker_calls) == 3
+    assert f"IMAGE_REF=sha256:{'b' * 64}" in cache_files[0].read_text(encoding="utf-8")
+    outputs = output_file.read_text(encoding="utf-8").splitlines()
+    assert outputs.count("validation_cache=hit") == 1
+    assert outputs.count("validation_cache=miss") == 3
+
+
 def test_model_proof_job_budget_reserves_singleton_finalization() -> None:
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
     job_configuration = workflow.split("jobs:\n  prove:", maxsplit=1)[1].split(
