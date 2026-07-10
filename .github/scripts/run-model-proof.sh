@@ -1957,6 +1957,7 @@ trap - EXIT
   [ "$hf_cache_repository_count" -gt 0 ] || \
     die "selected Hugging Face cache evidence produced no repository copies"
 
+  printf '%s\n' "$resource_class" > "$artifacts_dir/gpu-lease-requested.txt"
   select_proof_gpu "$resource_class"
   local gpu_id="$proof_gpu_id"
   local gpu_slot_ids

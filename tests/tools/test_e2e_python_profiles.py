@@ -83,6 +83,7 @@ def test_resolve_case_python_profiles_uses_manifest_profile_named_env(monkeypatc
 def test_resolve_profile_python_materializes_declared_venv(monkeypatch, tmp_path):
     requirements = tmp_path / "empty.lock.txt"
     requirements.write_text("", encoding="utf-8")
+    monkeypatch.delenv(shared_profiles.PREBUILT_ONLY_ENV, raising=False)
     monkeypatch.setenv("TRTMC_PYTHON_PROFILE_ROOT", str(tmp_path / "profiles"))
     monkeypatch.setattr(
         shared_profiles,

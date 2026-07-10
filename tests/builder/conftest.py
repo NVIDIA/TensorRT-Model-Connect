@@ -66,11 +66,12 @@ def _trt_available() -> bool:
     try:
         import tensorrt as trt  # noqa: F401
         try:
-            from cuda.bindings import runtime as cudart  # noqa: F401
+            from cuda.bindings import runtime as cudart
         except ImportError:
-            from cuda import cudart  # type: ignore[no-redef]  # noqa: F401
-        return True
-    except ImportError:
+            from cuda import cudart  # type: ignore[no-redef]
+        status, count = cudart.cudaGetDeviceCount()
+        return int(status) == 0 and int(count) > 0
+    except (ImportError, RuntimeError):
         return False
 
 

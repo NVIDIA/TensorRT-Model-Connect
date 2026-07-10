@@ -181,6 +181,8 @@ class TestFlashInferKernelSetup:
     """Verify kernels/flashinfer_decode.setup() works correctly."""
 
     @requires_flashinfer
+    @pytest.mark.gpu
+    @pytest.mark.trt
     def test_setup_returns_valid_kernel_name_and_so_path(self):
         """setup() returns (kernel_name, so_path) with valid .so file."""
         from tensorrt_model_connect.kernels import flashinfer_decode
@@ -192,6 +194,8 @@ class TestFlashInferKernelSetup:
         assert Path(so_path).stat().st_size > 0
 
     @requires_flashinfer
+    @pytest.mark.gpu
+    @pytest.mark.trt
     def test_setup_registers_tvm_ffi_global(self):
         """setup() registers the kernel as a TVM-FFI global function."""
         import tvm_ffi
@@ -202,6 +206,8 @@ class TestFlashInferKernelSetup:
         assert func is not None
 
     @requires_flashinfer
+    @pytest.mark.gpu
+    @pytest.mark.trt
     def test_setup_different_head_dims(self):
         """setup() works for different head dimensions."""
         from tensorrt_model_connect.kernels import flashinfer_decode

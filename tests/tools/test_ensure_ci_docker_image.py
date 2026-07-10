@@ -109,6 +109,8 @@ def _run_ensure_script(
     rebuilt_profiles: str = DEFAULT_PROFILES,
     changed_paths: tuple[str, ...] = (),
     repo_root: Path = REPO_ROOT,
+    run_id: str = "",
+    verification_dir: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str, str]:
     bin_dir, log_path = _write_fake_docker(tmp_path, existing_images)
     if changed_paths:
@@ -145,8 +147,12 @@ exit 2
             "TRTMC_CI_IMAGE": "trtmc-dev-gb300:manylinux_2_39",
             "CI_BASE_REF": "fake-base" if changed_paths else "",
             "FAKE_GIT_CHANGED_PATHS": "\n".join(changed_paths),
+            "GITHUB_RUN_ID": run_id,
+            "GITHUB_RUN_ATTEMPT": "1",
         }
     )
+    if verification_dir is not None:
+        env["TRTMC_CI_IMAGE_VERIFICATION_DIR"] = str(verification_dir)
     script = repo_root / SCRIPT.relative_to(REPO_ROOT)
     result = subprocess.run(
         ["bash", str(script)],
@@ -200,7 +206,7 @@ default_execution_profiles = ["reference|demo"]
     (demo_root / "verify.py").write_text("import demo_package\n", encoding="utf-8")
 
     (repo_root / "Dockerfile").write_text(
-        "ARG TENSORRT_VERSION=11.0.0.114\nARG MODELOPT_VERSION=0.44.0\n",
+        "ARG TENSORRT_VERSION=11.2.0.113\nARG MODELOPT_VERSION=0.44.0\n",
         encoding="utf-8",
     )
     return repo_root, manifest, requirements
@@ -291,6 +297,33 @@ def test_matching_fingerprint_image_is_reused_for_pr_rerun(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr
     assert "build " not in docker_log
     assert f"CI Docker image '{resolved_image}' already matches" in result.stdout
+
+
+def test_matching_image_is_fully_validated_once_per_workflow_run(tmp_path: Path) -> None:
+    verification_dir = tmp_path / "verification"
+    bootstrap_result, bootstrap_env, bootstrap_log = _run_ensure_script(
+        tmp_path / "bootstrap",
+        existing_images={},
+        run_id="12345",
+        verification_dir=verification_dir,
+    )
+    assert bootstrap_result.returncode == 0, bootstrap_result.stderr
+    resolved_image = re.search(r"^TRTMC_CI_IMAGE=(.+)$", bootstrap_env, re.MULTILINE).group(1)
+    fingerprint = re.search(
+        r"--label org\.nvidia\.trtmc\.ci-input-fingerprint=([0-9a-f]{64})",
+        bootstrap_log,
+    ).group(1)
+
+    result, _, docker_log = _run_ensure_script(
+        tmp_path / "sibling",
+        existing_images={resolved_image: fingerprint},
+        run_id="12345",
+        verification_dir=verification_dir,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert " run " not in f" {docker_log} "
+    assert "reused from this workflow run's verified image" in result.stdout
 
 
 def test_missing_prebuilt_profiles_rebuilds_the_image(tmp_path: Path) -> None:

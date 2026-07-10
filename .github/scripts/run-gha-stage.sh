@@ -13,6 +13,26 @@ if [ "$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || 
   exit 1
 fi
 
+if [ "${TRTMC_CI_HARDENED:-false}" = "true" ]; then
+  docker exec \
+    -w "$GITHUB_WORKSPACE" \
+    -e CI_BASE_REF \
+    -e GITHUB_EVENT_NAME \
+    -e GITHUB_REF_NAME \
+    -e GITHUB_RUN_ID \
+    -e GITHUB_RUN_ATTEMPT \
+    -e PYTHONHASHSEED \
+    -e BUILD_ALL_TIMEOUT \
+    -e CPP_UNIT_TIMEOUT \
+    -e PYTHON_BUILDER_TIMEOUT \
+    -e TRTMC_UNIT_BUILD_JOBS \
+    -e TRTMC_UNIT_TEST_JOBS \
+    -e TRTMC_PREMERGE_UNIT_SCOPE \
+    "$container_name" \
+    bash .github/scripts/run-trtmc-ci.sh "$stage"
+  exit $?
+fi
+
 docker exec \
   -w "$GITHUB_WORKSPACE" \
   -e CI_BASE_REF \
@@ -47,6 +67,9 @@ docker exec \
   -e BUILD_ALL_TIMEOUT \
   -e CPP_UNIT_TIMEOUT \
   -e PYTHON_BUILDER_TIMEOUT \
+  -e TRTMC_UNIT_BUILD_JOBS \
+  -e TRTMC_UNIT_TEST_JOBS \
+  -e TRTMC_PREMERGE_UNIT_SCOPE \
   -e CPP_COVERAGE_TIMEOUT \
   -e CPP_COVERAGE_BUILD_DIR \
   -e GRAPH_OP_TIMEOUT \

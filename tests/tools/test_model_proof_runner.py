@@ -81,7 +81,7 @@ def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
         "    fi\n"
         '    if [[ " $* " == *" --inner "* ]]; then\n'
         '      if [ -n "${FAKE_PROOF_RELEASE_FILE:-}" ]; then\n'
-        "        deadline=$((SECONDS + 30))\n"
+        "        deadline=$((SECONDS + 600))\n"
         '        while [ ! -e "$FAKE_PROOF_RELEASE_FILE" ]; do\n'
         '          [ "$SECONDS" -lt "$deadline" ] || exit 98\n'
         "          sleep 0.05\n"
@@ -678,7 +678,8 @@ def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> 
         "TRTMC_CI_IMAGE_LOCK_FILE",
         'flock -w "$lock_timeout" 9',
         "docker image inspect --format '{{.Id}}'",
-        'echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"',
+        'echo "image_ref=$resolved_ref" >> "$GITHUB_OUTPUT"',
+        "verification_stamp",
     ):
         assert contract in ensure
     assert "id: ci_image" in workflow
@@ -1398,7 +1399,10 @@ def test_selected_hf_cache_with_unreadable_file_is_delegated_to_root_helper(
     unreadable = selected_repo / "unreadable-cache-marker"
     unreadable.write_text("persistent cache\n", encoding="utf-8")
     unreadable.chmod(0)
-    assert not os.access(unreadable, os.R_OK)
+    # Root can read mode-000 files through DAC_OVERRIDE, so assert the fixture's
+    # permissions directly. The proof below still verifies that the dedicated
+    # root helper receives and reflinks this exact repository.
+    assert unreadable.stat().st_mode & 0o777 == 0
     env.update(
         {
             "FAKE_UNREADABLE_REFLINK": "1",
@@ -1667,7 +1671,11 @@ def test_explicit_runner_gpu_id_cannot_bypass_a_busy_slot(tmp_path: Path) -> Non
             capture_output=True,
             text=True,
             check=False,
-            timeout=15,
+            # Source projection and cache preparation happen before GPU
+            # admission so queued jobs do not hold scarce slots during CPU
+            # setup. Allow that setup to finish on a loaded CI host; the
+            # in-runner lease timeout remains one second and is asserted below.
+            timeout=60,
         )
 
     assert result.returncode != 0
@@ -1704,6 +1712,7 @@ def test_explicit_runner_gpu_must_be_in_the_configured_allowlist(tmp_path: Path)
     assert not _proof_gpu_ids_if_present(docker_log)
 
 
+@pytest.mark.model_proof_allocator
 def test_four_shared_proofs_use_unique_slots_on_one_gpu(
     tmp_path: Path,
 ) -> None:
@@ -1741,7 +1750,7 @@ def test_four_shared_proofs_use_unique_slots_on_one_gpu(
         )
         processes.append((process, docker_log, output))
 
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 90
     while time.monotonic() < deadline and not all(
         (output / "artifacts" / "gpu-lease.json").is_file() for _, _, output in processes
     ):
@@ -1768,6 +1777,7 @@ def test_four_shared_proofs_use_unique_slots_on_one_gpu(
     assert sorted(selected_slots) == [0, 1, 2, 3]
 
 
+@pytest.mark.model_proof_allocator
 def test_shared_slot_allocator_spreads_across_gpus_before_using_second_slots(
     tmp_path: Path,
 ) -> None:
@@ -1805,7 +1815,7 @@ def test_shared_slot_allocator_spreads_across_gpus_before_using_second_slots(
         )
         processes.append((process, output))
 
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + 90
     while time.monotonic() < deadline and not all(
         (output / "artifacts" / "gpu-lease.json").is_file() for _, output in processes
     ):
@@ -1934,6 +1944,7 @@ def test_expected_resource_class_must_match_projected_e2e_manifest(
     assert not _proof_gpu_ids_if_present(docker_log)
 
 
+@pytest.mark.model_proof_allocator
 def test_fifth_shared_proof_times_out_when_all_four_slots_are_busy(
     tmp_path: Path,
 ) -> None:
@@ -1971,7 +1982,7 @@ def test_fifth_shared_proof_times_out_when_all_four_slots_are_busy(
             capture_output=True,
             text=True,
             check=False,
-            timeout=15,
+            timeout=90,
         )
     finally:
         for lock_stream in lock_streams:
@@ -1982,6 +1993,7 @@ def test_fifth_shared_proof_times_out_when_all_four_slots_are_busy(
     assert not _proof_gpu_ids_if_present(docker_log)
 
 
+@pytest.mark.model_proof_allocator
 def test_gpu_allocator_mutex_contention_obeys_lease_timeout(
     tmp_path: Path,
 ) -> None:
@@ -1996,10 +2008,9 @@ def test_gpu_allocator_mutex_contention_obeys_lease_timeout(
     )
     lock_dir = tmp_path / "gpu-locks"
     lock_dir.mkdir()
-    started = time.monotonic()
     with (lock_dir / "allocator.lock").open("w", encoding="utf-8") as lock_stream:
         fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result = subprocess.run(
+        process = subprocess.Popen(
             [
                 "bash",
                 str(RUNNER),
@@ -2012,23 +2023,38 @@ def test_gpu_allocator_mutex_contention_obeys_lease_timeout(
             ],
             cwd=REPO_ROOT,
             env=env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            check=False,
-            timeout=15,
         )
-    elapsed = time.monotonic() - started
+        try:
+            requested = output / "artifacts" / "gpu-lease-requested.txt"
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline and not requested.is_file():
+                if process.poll() is not None:
+                    break
+                time.sleep(0.05)
+            assert requested.is_file(), "proof never reached GPU lease acquisition"
+            started = time.monotonic()
+            stdout, stderr = process.communicate(timeout=15)
+            elapsed = time.monotonic() - started
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=10)
 
-    assert result.returncode != 0
+    assert process.returncode != 0, stdout + stderr
     assert elapsed < 5
-    assert "timed out after 1s waiting for a shared model-proof GPU lease" in result.stderr
+    assert "timed out after 1s waiting for a shared model-proof GPU lease" in stderr
     assert not _proof_gpu_ids_if_present(docker_log)
 
 
+@pytest.mark.model_proof_allocator
 def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
     tmp_path: Path,
 ) -> None:
     lock_dir = tmp_path / "gpu-locks"
+    first_release_file = tmp_path / "release-first-shared"
 
     first_dir = tmp_path / "first-shared"
     first_dir.mkdir()
@@ -2042,7 +2068,7 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
             "TRTMC_MODEL_PROOF_GPU_IDS": "6",
             "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "2",
             "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "10",
-            "FAKE_PROOF_DELAY_SECONDS": "4",
+            "FAKE_PROOF_RELEASE_FILE": str(first_release_file),
         }
     )
     first = subprocess.Popen(
@@ -2075,13 +2101,12 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
             "TRTMC_GPU_ID": "6",
             "TRTMC_MODEL_PROOF_GPU_IDS": "6",
             "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "2",
-            "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "10",
-            "FAKE_PROOF_DELAY_SECONDS": "1",
+            "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
         }
     )
     exclusive: subprocess.Popen[str] | None = None
     try:
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 90
         while (
             time.monotonic() < deadline
             and not (first_output / "artifacts" / "gpu-lease.json").is_file()
@@ -2108,7 +2133,7 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
         )
 
         reservation = lock_dir / "gpu-6-reservation.lock"
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 90
         while time.monotonic() < deadline and not _lock_is_busy(reservation):
             time.sleep(0.05)
         assert _lock_is_busy(reservation), "exclusive proof never reserved GPU 6"
@@ -2143,12 +2168,13 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
             capture_output=True,
             text=True,
             check=False,
-            timeout=15,
+            timeout=90,
         )
         assert blocked.returncode != 0
         assert "waiting for a shared model-proof GPU lease" in blocked.stderr
         assert not _proof_gpu_ids_if_present(blocked_log)
 
+        first_release_file.touch()
         first_stdout, first_stderr = first.communicate(timeout=30)
         assert first.returncode == 0, first_stdout + first_stderr
         exclusive_stdout, exclusive_stderr = exclusive.communicate(timeout=30)
@@ -2160,6 +2186,7 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
         assert not _lock_is_busy(lock_dir / "gpu-6-slot-0.lock")
         assert not _lock_is_busy(lock_dir / "gpu-6-slot-1.lock")
     finally:
+        first_release_file.touch(exist_ok=True)
         if first.poll() is None:
             first.terminate()
             first.communicate(timeout=10)

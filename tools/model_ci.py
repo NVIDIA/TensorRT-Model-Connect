@@ -118,6 +118,49 @@ LEGAL_OR_DOC_EXACT = frozenset(
 )
 LEGAL_OR_DOC_PREFIXES = ("website/",)
 
+# These shared surfaces are covered by CPU/C++ unit tests and do not change a
+# model implementation or its isolated E2E contract. Model-root ownership is
+# resolved before this list, so model-owned C++ tests remain model impact.
+UNIT_TEST_ONLY_EXACT = frozenset(
+    {
+        "include/trtmc/config/cli_support.h",
+        "python/tensorrt_model_connect/__main__.py",
+        "python/tensorrt_model_connect/build_cli.py",
+        "python/tensorrt_model_connect/runtime_config/cli_support.py",
+        "src/runtime/config/cli_support.cpp",
+    }
+)
+UNIT_TEST_ONLY_PREFIXES = (
+    "tests/builder/",
+    "tests/cpp/",
+    "tests/tools/",
+)
+CLI_UNIT_ONLY_PREFIXES = ("src/cli/",)
+
+# These shared-location tests require real model plugins or GPU execution and
+# therefore cannot be certified by the source-only CPU aggregate. Fail closed
+# on a direct edit until each test is moved behind explicit model ownership or
+# uses a synthetic CPU fixture.
+MODEL_COUPLED_TEST_EXACT = frozenset(
+    {
+        "tests/builder/test_dynamic_batch_profile.py",
+        "tests/builder/test_flashinfer_benchmark.py",
+        "tests/builder/test_graph_blocks.py",
+        "tests/builder/test_tvm_ffi_plugin.py",
+        "tests/cpp/test_c_abi_runtime_regression.cpp",
+        "tests/cpp/test_cuda_buffer.cpp",
+        "tests/cpp/test_cuda_graph.cpp",
+        "tests/cpp/test_cuda_stream.cpp",
+        "tests/cpp/test_device_tensor.cpp",
+        "tests/cpp/test_model_plugin_loader.cpp",
+        "tests/cpp/test_trt_module.cpp",
+        "tests/cpp/test_trt_runtime_lifetime.cpp",
+        "tests/cpp/test_tvm_ffi_module_loader.cpp",
+        "tests/cpp/test_tvm_ffi_plugin.cpp",
+        "tests/cpp/test_tvm_ffi_plugin_v2.cpp",
+    }
+)
+
 PLATFORM_EXACT = frozenset(
     {
         ".clang-format",
@@ -479,11 +522,24 @@ def _classify_path(path: str, catalog: OwnershipCatalog) -> tuple[str, str | Non
         raise ModelCIError(f"path is under a model root but has no MODEL.toml owner: {path}")
     if _is_legal_or_docs(path):
         return "legal_docs", None
+    if path in MODEL_COUPLED_TEST_EXACT:
+        raise ModelCIError(
+            "model-coupled test has no isolated model owner; move it into a "
+            f"MODEL.toml contract or use a synthetic plugin before changing it: {path}"
+        )
+    if path in UNIT_TEST_ONLY_EXACT or any(
+        path.startswith(prefix) for prefix in CLI_UNIT_ONLY_PREFIXES
+    ):
+        return "unit_cli", None
+    if any(
+        path.startswith(prefix) for prefix in UNIT_TEST_ONLY_PREFIXES
+    ):
+        return "unit_tests", None
     if path in PLATFORM_EXACT or any(path.startswith(prefix) for prefix in PLATFORM_PREFIXES):
         return "platform", None
     if any(path.startswith(prefix) for prefix in CI_OR_TOOLING_PREFIXES):
         return "ci_tooling", None
-    raise ModelCIError(f"changed path has no model, platform, CI, legal, or docs owner: {path}")
+    return "unknown", None
 
 
 def _diff_entries(repo_root: Path, base: str, head: str) -> tuple[DiffEntry, ...]:
@@ -532,18 +588,22 @@ def _result(
     mode: str,
     changes: list[dict[str, object]],
     matrix_models: Iterable[str] | None = None,
+    run_unit_tests: bool = False,
+    unit_scope: str = "none",
 ) -> dict[str, object]:
     selected = sorted(set(models))
     scheduled = list(matrix_models) if matrix_models is not None else selected
     if len(scheduled) != len(set(scheduled)) or set(scheduled) != set(selected):
         raise ModelCIError("matrix model order must contain each affected model exactly once")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": mode,
         "has_models": bool(selected),
         "expected_count": len(selected),
         "affected_models": selected,
         "matrix": {"include": [{"model": model} for model in scheduled]},
+        "run_unit_tests": run_unit_tests,
+        "unit_scope": unit_scope,
         "changes": changes,
     }
 
@@ -653,6 +713,7 @@ def calculate_impact(
     head: str,
     *,
     platform_change_policy: str,
+    fallback_models: Sequence[str] = (),
 ) -> dict[str, object]:
     base_sha = _resolve_revision(repo_root, base)
     head_sha = _resolve_revision(repo_root, head)
@@ -666,6 +727,7 @@ def calculate_impact(
     head_catalog = discover_catalog(repo_root, head, allow_legacy_shared_runtime=True)
     affected: set[str] = set()
     broad_change = False
+    unit_scope = "none"
     serialized_changes: list[dict[str, object]] = []
     for change in _diff_entries(repo_root, comparison_base, head_sha):
         classifications: list[dict[str, str]] = []
@@ -683,8 +745,14 @@ def calculate_impact(
             if owner is not None:
                 item["model"] = owner
                 affected.add(owner)
-            elif kind in {"platform", "ci_tooling"}:
+            elif kind == "unit_cli":
+                if unit_scope == "none":
+                    unit_scope = "cli"
+            elif kind == "unit_tests":
+                unit_scope = "all"
+            elif kind in {"platform", "ci_tooling", "unknown"}:
                 broad_change = True
+                unit_scope = "all"
             classifications.append(item)
         serialized_changes.append(
             {
@@ -701,14 +769,35 @@ def calculate_impact(
     ):
         broad_change = True
     if broad_change:
-        if platform_change_policy != "all":
+        affected.intersection_update(head_catalog.models)
+        if platform_change_policy == "all":
+            affected.update(head_catalog.models)
+            mode = "all"
+        elif platform_change_policy == "fallback":
+            requested_fallback = list(fallback_models)
+            if not requested_fallback:
+                raise ModelCIError(
+                    "platform or CI/tooling fallback requires at least one --fallback-model"
+                )
+            if len(requested_fallback) != len(set(requested_fallback)):
+                raise ModelCIError("fallback model list contains duplicates")
+            invalid = [model for model in requested_fallback if not _MODEL_ID_RE.fullmatch(model)]
+            if invalid:
+                raise ModelCIError(f"fallback model list contains unsafe ids: {invalid}")
+            missing = sorted(set(requested_fallback) - set(head_catalog.models))
+            if missing:
+                raise ModelCIError(f"fallback models are absent from the head catalog: {missing}")
+            affected.update(requested_fallback)
+            mode = "fallback"
+        else:
             raise ModelCIError(
-                "platform or CI/tooling change requires --platform-change-policy all"
+                "platform or CI/tooling change requires --platform-change-policy "
+                "fallback or all"
             )
-        affected.update(head_catalog.models)
-        mode = "all"
     elif affected:
         mode = "models"
+    elif unit_scope != "none":
+        mode = "unit"
     else:
         mode = "none"
     result = _result(
@@ -716,6 +805,8 @@ def calculate_impact(
         mode=mode,
         changes=serialized_changes,
         matrix_models=_scheduled_models(repo_root, head_catalog, affected),
+        run_unit_tests=unit_scope != "none" or broad_change,
+        unit_scope="all" if broad_change else unit_scope,
     )
     result["base_revision"] = base_catalog.revision
     result["head_revision"] = head_catalog.revision
@@ -729,6 +820,8 @@ def _write_github_output(path: Path, result: dict[str, object]) -> None:
         "affected_models": json.dumps(result["affected_models"], separators=(",", ":")),
         "expected_count": str(result["expected_count"]),
         "mode": str(result["mode"]),
+        "run_unit_tests": str(bool(result["run_unit_tests"])).lower(),
+        "unit_scope": str(result["unit_scope"]),
     }
     with path.open("a", encoding="utf-8") as stream:
         for key, value in outputs.items():
@@ -905,7 +998,17 @@ def build_parser() -> argparse.ArgumentParser:
     impact.add_argument("--repo-root", type=_repo_root, default=default_root)
     impact.add_argument("--base", required=True)
     impact.add_argument("--head", required=True)
-    impact.add_argument("--platform-change-policy", choices=("all", "fail"), default="all")
+    impact.add_argument(
+        "--platform-change-policy",
+        choices=("fallback", "all", "fail"),
+        default="fail",
+    )
+    impact.add_argument(
+        "--fallback-model",
+        action="append",
+        default=[],
+        help="Fixed representative model to include for broad premerge impact (repeatable)",
+    )
     _add_common_output(impact)
 
     all_models = subparsers.add_parser("all", help="emit every model as a matrix")
@@ -939,6 +1042,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.base,
                 args.head,
                 platform_change_policy=args.platform_change_policy,
+                fallback_models=args.fallback_model,
             )
             if args.github_output is not None:
                 _write_github_output(args.github_output, result)

@@ -17,9 +17,51 @@ docker image inspect "$TRTMC_CI_IMAGE" >/dev/null || {
 
 docker rm -f "$container_name" >/dev/null 2>&1 || true
 
+hardened="${TRTMC_CI_HARDENED:-false}"
 extra_mounts=()
-if [ -d /workspace/users/yifeif ]; then
-  extra_mounts+=(-v /workspace/users/yifeif:/workspace/users/yifeif)
+container_options=()
+workspace_mount="$GITHUB_WORKSPACE:$GITHUB_WORKSPACE"
+if [ "$hardened" = "true" ]; then
+  scratch_parent="$(realpath -m "${RUNNER_TEMP:-/tmp}")"
+  scratch_host_input="${TRTMC_CI_SCRATCH_HOST:-${scratch_parent%/}/trtmc-premerge-unit-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}}"
+  if [ -L "$scratch_host_input" ]; then
+    echo "::error::Hardened unit scratch must not be a symlink: $scratch_host_input"
+    exit 1
+  fi
+  scratch_host="$(realpath -m "$scratch_host_input")"
+  case "$scratch_host" in
+    "$scratch_parent"/*) ;;
+    *)
+      echo "::error::Hardened unit scratch must be inside RUNNER_TEMP: $scratch_host"
+      exit 1
+      ;;
+  esac
+  mkdir -p "$scratch_host/tmp"
+  extra_mounts+=(-v "$scratch_host:/work")
+  workspace_mount+=":ro"
+  container_options+=(
+    --network none
+    --read-only
+    --tmpfs /tmp:rw,exec,nosuid,nodev,size=16g
+    --cap-drop ALL
+    --security-opt no-new-privileges
+    --user "$(id -u):$(id -g)"
+    --ipc private
+    --runtime runc
+    -e HOME=/tmp
+    -e TMPDIR=/work/tmp
+    -e PIP_NO_INDEX=1
+    -e TRTMC_CI_SCRATCH_DIR=/work
+    -e NVIDIA_VISIBLE_DEVICES=void
+    -e CUDA_VISIBLE_DEVICES=
+  )
+else
+  if [ -d /workspace/users/yifeif ]; then
+    extra_mounts+=(-v /workspace/users/yifeif:/workspace/users/yifeif)
+  fi
+  # Preserve the existing trusted nightly-container options. Premerge unit
+  # jobs use the fixed hardened options above instead of repository variables.
+  read -r -a container_options <<< "${TRTMC_CONTAINER_OPTIONS:-}"
 fi
 
 mkdir_if_set() {
@@ -31,14 +73,16 @@ mkdir_if_set() {
   fi
 }
 
-mkdir_if_set "${TRTMC_STORAGE_ROOT:-}"
-mkdir_if_set "${ENGINE_DIR:-}"
-mkdir_if_set "${HF_HOME:-}"
-mkdir_if_set "${HF_HUB_CACHE:-}"
-mkdir_if_set "${HUGGINGFACE_HUB_CACHE:-}"
-mkdir_if_set "${HF_MODULES_CACHE:-}"
+if [ "$hardened" != "true" ]; then
+  mkdir_if_set "${TRTMC_STORAGE_ROOT:-}"
+  mkdir_if_set "${ENGINE_DIR:-}"
+  mkdir_if_set "${HF_HOME:-}"
+  mkdir_if_set "${HF_HUB_CACHE:-}"
+  mkdir_if_set "${HUGGINGFACE_HUB_CACHE:-}"
+  mkdir_if_set "${HF_MODULES_CACHE:-}"
+fi
 
-if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
+if [ "$hardened" != "true" ] && [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
   chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || {
     echo "::warning::Could not normalize workspace permissions before entering the CI container."
   }
@@ -47,6 +91,14 @@ fi
 env_args=()
 add_env() {
   local name="$1"
+  if [ "$hardened" = "true" ]; then
+    case "$name" in
+      CI_BASE_REF | GITHUB_EVENT_NAME | GITHUB_REF_NAME | GITHUB_RUN_ID | GITHUB_RUN_ATTEMPT | \
+        PYTHONHASHSEED | BUILD_ALL_TIMEOUT | CPP_UNIT_TIMEOUT | PYTHON_BUILDER_TIMEOUT | \
+        TRTMC_UNIT_BUILD_JOBS | TRTMC_UNIT_TEST_JOBS | TRTMC_PREMERGE_UNIT_SCOPE) ;;
+      *) return ;;
+    esac
+  fi
   env_args+=(-e "${name}=${!name-}")
 }
 
@@ -83,6 +135,9 @@ for name in \
   BUILD_ALL_TIMEOUT \
   CPP_UNIT_TIMEOUT \
   PYTHON_BUILDER_TIMEOUT \
+  TRTMC_UNIT_BUILD_JOBS \
+  TRTMC_UNIT_TEST_JOBS \
+  TRTMC_PREMERGE_UNIT_SCOPE \
   CPP_COVERAGE_TIMEOUT \
   CPP_COVERAGE_BUILD_DIR \
   GRAPH_OP_TIMEOUT \
@@ -110,15 +165,21 @@ for name in \
   add_env "$name"
 done
 
-# shellcheck disable=SC2086
 docker run -d \
   --name "$container_name" \
-  $TRTMC_CONTAINER_OPTIONS \
+  "${container_options[@]}" \
   "${extra_mounts[@]}" \
-  -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+  -v "$workspace_mount" \
   -w "$GITHUB_WORKSPACE" \
   "${env_args[@]}" \
   "$TRTMC_CI_IMAGE" \
   bash -lc 'trap "exit 0" TERM INT; sleep infinity & wait'
+
+if [ "$hardened" = "true" ] && \
+   docker exec "$container_name" bash -lc 'compgen -G "/dev/nvidia*" >/dev/null'; then
+  echo "::error::Hardened unit container unexpectedly exposes NVIDIA devices."
+  docker rm -f "$container_name" >/dev/null 2>&1 || true
+  exit 1
+fi
 
 echo "Started CI container: $container_name"

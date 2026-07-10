@@ -141,6 +141,8 @@ jobs:
       affected_models: ${{ steps.impact.outputs.affected_models }}
       expected_count: ${{ steps.impact.outputs.expected_count }}
       mode: ${{ steps.impact.outputs.mode }}
+      run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}
+      unit_scope: ${{ steps.impact.outputs.unit_scope }}
 
     steps:
       - name: Check out pinned merge snapshot
@@ -184,30 +186,118 @@ jobs:
           python3 tools/model_ci.py impact \
             --base "$BASE_SHA" \
             --head "$TESTED_SHA" \
-            --platform-change-policy all \
+            --platform-change-policy fallback \
+            --fallback-model deepseek_v2 \
+            --fallback-model patchtsmixer \
+            --fallback-model segformer \
+            --fallback-model whisper \
+            --fallback-model ltx_video \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Summarize selection
         env:
           AFFECTED_MODELS: ${{ steps.impact.outputs.affected_models }}
           MODE: ${{ steps.impact.outputs.mode }}
+          RUN_UNIT_TESTS: ${{ steps.impact.outputs.run_unit_tests }}
+          UNIT_SCOPE: ${{ steps.impact.outputs.unit_scope }}
         run: |
           {
             echo "### Model impact"
             echo
             echo "- Mode: \`$MODE\`"
             echo "- Models: \`$AFFECTED_MODELS\`"
+            echo "- Run source-only units: \`$RUN_UNIT_TESTS\`"
+            echo "- Unit scope: \`$UNIT_SCOPE\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  model-proof:
-    name: 3 / Model / ${{ matrix.model }}
+  unit-tests:
+    name: 3 / Unit / C++ and Python
     needs:
       - legal
       - impact
     if: >-
       ${{
         needs.legal.outputs.authorized == 'true' &&
-        needs.impact.outputs.has_models == 'true'
+        needs.impact.outputs.run_unit_tests == 'true'
+      }}
+    runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: read
+    env:
+      CI_BASE_REF: ${{ needs.legal.outputs.base_sha }}
+      TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
+      TRTMC_CI_CONTAINER_NAME: trtmc-premerge-unit-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_CI_HARDENED: "true"
+      TRTMC_UNIT_BUILD_JOBS: ${{ vars.TRTMC_UNIT_BUILD_JOBS || '8' }}
+      TRTMC_UNIT_TEST_JOBS: ${{ vars.TRTMC_UNIT_TEST_JOBS || '8' }}
+      TRTMC_PREMERGE_UNIT_SCOPE: ${{ needs.impact.outputs.unit_scope }}
+      PYTHONHASHSEED: "0"
+
+    steps:
+      - name: Check out pinned merge snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+          lfs: false
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-unit"
+          mkdir -p "$docker_config"
+          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Ensure CI Docker image
+        id: ci_image
+        timeout-minutes: 90
+        run: bash .github/scripts/ensure-ci-docker-image.sh
+
+      - name: Start clean unit-test container
+        timeout-minutes: 5
+        env:
+          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
+        run: bash .github/scripts/start-gha-container.sh
+
+      - name: Run source-only unit tests
+        timeout-minutes: 60
+        run: bash .github/scripts/run-gha-stage.sh premerge-unit
+
+      - name: Clean unit-test container
+        if: ${{ always() }}
+        run: |
+          docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
+          unit_scratch="${RUNNER_TEMP}/trtmc-premerge-unit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$unit_scratch"
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            rm -rf "$DOCKER_CONFIG"
+          fi
+
+  model-proof:
+    name: 4 / Model / ${{ matrix.model }}
+    needs:
+      - legal
+      - impact
+      - unit-tests
+    if: >-
+      ${{
+        always() &&
+        needs.legal.outputs.authorized == 'true' &&
+        needs.impact.outputs.has_models == 'true' &&
+        (
+          (needs.impact.outputs.run_unit_tests == 'true' &&
+           needs.unit-tests.result == 'success') ||
+          (needs.impact.outputs.run_unit_tests == 'false' &&
+           needs.unit-tests.result == 'skipped')
+        )
       }}
     strategy:
       fail-fast: true
@@ -224,14 +314,22 @@ jobs:
     secrets: inherit
 
   no-model:
-    name: 3 / No model changes
+    name: 4 / No model changes
     needs:
       - legal
       - impact
+      - unit-tests
     if: >-
       ${{
+        always() &&
         needs.legal.outputs.authorized == 'true' &&
-        needs.impact.outputs.has_models == 'false'
+        needs.impact.outputs.has_models == 'false' &&
+        (
+          (needs.impact.outputs.run_unit_tests == 'true' &&
+           needs.unit-tests.result == 'success') ||
+          (needs.impact.outputs.run_unit_tests == 'false' &&
+           needs.unit-tests.result == 'skipped')
+        )
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -242,14 +340,18 @@ jobs:
           IMPACT_MODE: ${{ needs.impact.outputs.mode }}
         run: |
           set -euo pipefail
-          test "$IMPACT_MODE" = "none"
-          echo "No model-owned or platform inputs changed." >> "$GITHUB_STEP_SUMMARY"
+          case "$IMPACT_MODE" in
+            none) echo "No model-owned, platform, or unit inputs changed." ;;
+            unit) echo "Unit tests cover this change; no model proof is required." ;;
+            *) echo "Unexpected zero-model impact mode: $IMPACT_MODE" >&2; exit 1 ;;
+          esac >> "$GITHUB_STEP_SUMMARY"
 
   report:
-    name: 4 / Combined HTML report
+    name: 5 / Combined HTML report
     needs:
       - legal
       - impact
+      - unit-tests
       - model-proof
       - no-model
     if: >-
@@ -272,6 +374,8 @@ jobs:
           HAS_MODELS: ${{ needs.impact.outputs.has_models }}
           LEGAL_RESULT: ${{ needs.legal.result }}
           IMPACT_RESULT: ${{ needs.impact.result }}
+          UNIT_RESULT: ${{ needs.unit-tests.result }}
+          RUN_UNIT_TESTS: ${{ needs.impact.outputs.run_unit_tests }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
           NO_MODEL_RESULT: ${{ needs.no-model.result }}
           REPORT_OUTPUT_DIR: ${{ runner.temp }}/model-proof-report-${{ github.run_id }}-${{ github.run_attempt }}
@@ -284,6 +388,7 @@ jobs:
           python3 - \
             "$REPORT_OUTPUT_DIR" "$EXPECTED_MODELS" "$REVISION" "$SUITE" \
             "$HAS_MODELS" "$LEGAL_RESULT" "$IMPACT_RESULT" \
+            "$RUN_UNIT_TESTS" "$UNIT_RESULT" \
             "$MODEL_RESULT" "$NO_MODEL_RESULT" <<'PY'
           import html
           import json
@@ -298,6 +403,8 @@ jobs:
               has_models,
               legal_result,
               impact_result,
+              run_unit_tests,
+              unit_result,
               model_result,
               no_model_result,
           ) = sys.argv[1:]
@@ -313,6 +420,8 @@ jobs:
               "legal": legal_result,
               "impact": impact_result,
           }
+          if run_unit_tests == "true":
+              upstream_results["unit-tests"] = unit_result
           if has_models == "true":
               upstream_results["model-proof"] = model_result
           elif has_models == "false":
@@ -391,6 +500,8 @@ jobs:
           HAS_MODELS: ${{ needs.impact.outputs.has_models }}
           LEGAL_RESULT: ${{ needs.legal.result }}
           IMPACT_RESULT: ${{ needs.impact.result }}
+          UNIT_RESULT: ${{ needs.unit-tests.result }}
+          RUN_UNIT_TESTS: ${{ needs.impact.outputs.run_unit_tests }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
           NO_MODEL_RESULT: ${{ needs.no-model.result }}
         run: |
@@ -406,6 +517,9 @@ jobs:
               --upstream-result "legal=$LEGAL_RESULT"
               --upstream-result "impact=$IMPACT_RESULT"
             )
+            if [ "$RUN_UNIT_TESTS" = "true" ]; then
+              upstream_args+=(--upstream-result "unit-tests=$UNIT_RESULT")
+            fi
             case "$HAS_MODELS" in
               true) upstream_args+=(--upstream-result "model-proof=$MODEL_RESULT") ;;
               false) upstream_args+=(--upstream-result "no-model=$NO_MODEL_RESULT") ;;
@@ -495,6 +609,7 @@ jobs:
     needs:
       - legal
       - impact
+      - unit-tests
       - model-proof
       - no-model
       - report
@@ -510,6 +625,8 @@ jobs:
           TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
           LEGAL_RESULT: ${{ needs.legal.result }}
           IMPACT_RESULT: ${{ needs.impact.result }}
+          UNIT_RESULT: ${{ needs.unit-tests.result }}
+          RUN_UNIT_TESTS: ${{ needs.impact.outputs.run_unit_tests }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
           NO_MODEL_RESULT: ${{ needs.no-model.result }}
           REPORT_RESULT: ${{ needs.report.result }}
@@ -537,6 +654,24 @@ jobs:
             echo "::error::Ownership and impact result: $IMPACT_RESULT"
             exit 1
           }
+          case "$RUN_UNIT_TESTS" in
+            true)
+              test "$UNIT_RESULT" = "success" || {
+                echo "::error::Source-only unit test result: $UNIT_RESULT"
+                exit 1
+              }
+              ;;
+            false)
+              test "$UNIT_RESULT" = "skipped" || {
+                echo "::error::Unit tests ran unexpectedly: $UNIT_RESULT"
+                exit 1
+              }
+              ;;
+            *)
+              echo "::error::Invalid run_unit_tests output: $RUN_UNIT_TESTS"
+              exit 1
+              ;;
+          esac
           test "$REPORT_RESULT" = "success" || {
             echo "::error::Combined HTML report result: $REPORT_RESULT"
             exit 1

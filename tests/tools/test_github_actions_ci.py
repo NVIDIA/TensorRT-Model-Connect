@@ -112,6 +112,18 @@ def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
     assert "-e TRTMC_E2E_DEPRIORITIZE_GPU0" in text
 
 
+def test_github_stage_wrapper_exports_premerge_unit_parallelism() -> None:
+    stage = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    start = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
+    for name in (
+        "TRTMC_UNIT_BUILD_JOBS",
+        "TRTMC_UNIT_TEST_JOBS",
+        "TRTMC_PREMERGE_UNIT_SCOPE",
+    ):
+        assert f"-e {name}" in stage
+        assert name in start
+
+
 def test_github_stage_wrapper_exports_diffusion_vlm_config() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     start_text = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
@@ -186,6 +198,7 @@ def test_diffusion_vlm_shared_ci_has_no_model_owned_default() -> None:
 def test_full_python_builder_runs_e2e_harness_unit_tests() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
     assert "tests/e2e_harness/test_*.py" in text
+    assert "--ignore=tests/builder/test_cli.py" not in text
 
 
 def test_selective_python_always_runs_static_ci_smoke_tests() -> None:
@@ -266,7 +279,7 @@ def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> 
 
     premerge = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
     assert "model-proof.yml" in premerge
-    assert "4 / Combined HTML report" in premerge
+    assert "5 / Combined HTML report" in premerge
     assert "Download isolated model proof artifacts" in premerge
     assert "merge-multiple: false" in premerge
     assert (
@@ -346,7 +359,7 @@ def test_legal_job_pins_snapshot_rejects_forks_and_consumes_run_ci() -> None:
 def test_unrelated_label_cannot_emit_or_satisfy_required_contexts() -> None:
     text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
     legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
-    impact = text.split("\n  impact:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    impact = text.split("\n  impact:", maxsplit=1)[1].split("\n  unit-tests:", maxsplit=1)[0]
     required = text.split("\n  required:", maxsplit=1)[1]
 
     # Both ruleset contexts exist only on the run-ci event. Unrelated labels
@@ -374,7 +387,10 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     text = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
 
     legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
-    impact = text.split("\n  impact:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    impact = text.split("\n  impact:", maxsplit=1)[1].split("\n  unit-tests:", maxsplit=1)[0]
+    unit_tests = text.split("\n  unit-tests:", maxsplit=1)[1].split(
+        "\n  model-proof:", maxsplit=1
+    )[0]
     model_proof = text.split("\n  model-proof:", maxsplit=1)[1].split("\n  no-model:", maxsplit=1)[
         0
     ]
@@ -388,16 +404,45 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "needs.legal.outputs.authorized == 'true'" in impact
     assert "python3 tools/model_ci.py validate" in impact
     assert "python3 tools/model_ci.py impact" in impact
-    assert "--platform-change-policy all" in impact
+    assert "--platform-change-policy fallback" in impact
+    assert "--platform-change-policy all" not in impact
+    assert impact.count("--fallback-model ") == 5
+    for model in ("deepseek_v2", "patchtsmixer", "segformer", "whisper", "ltx_video"):
+        assert f"--fallback-model {model}" in impact
     assert "matrix: ${{ steps.impact.outputs.matrix }}" in impact
+    assert "run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}" in impact
+    assert "unit_scope: ${{ steps.impact.outputs.unit_scope }}" in impact
+
+    assert "name: 3 / Unit / C++ and Python" in unit_tests
+    assert "needs.impact.outputs.run_unit_tests == 'true'" in unit_tests
+    assert "Start clean unit-test container" in unit_tests
+    assert "run-gha-stage.sh premerge-unit" in unit_tests
+    assert "TRTMC_PREMERGE_UNIT_SCOPE: ${{ needs.impact.outputs.unit_scope }}" in unit_tests
+    assert 'TRTMC_CI_HARDENED: "true"' in unit_tests
+    assert "TRTMC_CONTAINER_OPTIONS:" not in unit_tests
+    assert "id: ci_image" in unit_tests
+    assert "TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}" in unit_tests
+    assert "timeout-minutes: 90" in unit_tests
+    assert "timeout-minutes: 60" in unit_tests
+    assert "Build trtmc pip package" not in unit_tests
+    assert "chmod -R a+rwX" not in unit_tests
+    assert ".ci/premerge-unit-build" not in unit_tests
+    assert 'unit_scratch="${RUNNER_TEMP}/trtmc-premerge-unit-' in unit_tests
+    assert 'rm -rf -- "$unit_scratch"' in unit_tests
 
     assert "- legal" in model_proof
     assert "- impact" in model_proof
+    assert "- unit-tests" in model_proof
     assert "needs.legal.outputs.authorized == 'true'" in model_proof
     assert "needs.impact.outputs.has_models == 'true'" in model_proof
+    assert "needs.impact.outputs.run_unit_tests == 'true'" in model_proof
+    assert "needs.impact.outputs.run_unit_tests == 'false'" in model_proof
+    assert "needs.unit-tests.result == 'success'" in model_proof
+    assert "needs.unit-tests.result == 'skipped'" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
-    assert "name: 3 / Model / ${{ matrix.model }}" in model_proof
+    assert "name: 4 / Model / ${{ matrix.model }}" in model_proof
     assert "fail-fast: true" in model_proof
+    assert "continue-on-error" not in model_proof
     assert "max-parallel: 16" in model_proof
     assert "matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}" in model_proof
     assert "model: ${{ matrix.model }}" in model_proof
@@ -406,13 +451,15 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
 
     assert "- legal" in no_model
     assert "- impact" in no_model
+    assert "- unit-tests" in no_model
     assert "needs.legal.outputs.authorized == 'true'" in no_model
     assert "needs.impact.outputs.has_models == 'false'" in no_model
-    assert 'test "$IMPACT_MODE" = "none"' in no_model
+    assert 'none) echo "No model-owned, platform, or unit inputs changed."' in no_model
+    assert 'unit) echo "Unit tests cover this change; no model proof is required."' in no_model
 
-    for dependency in ("legal", "impact", "model-proof", "no-model"):
+    for dependency in ("legal", "impact", "unit-tests", "model-proof", "no-model"):
         assert f"- {dependency}" in report
-    assert "4 / Combined HTML report" in report
+    assert "5 / Combined HTML report" in report
     assert "always()" in report
     assert "github.event.label.name == 'run-ci'" in report
     assert "needs.legal.outputs.authorized == 'true'" not in report
@@ -423,6 +470,7 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "needs.legal.outputs.tested_sha || github.sha" in report
     assert '--upstream-result "legal=$LEGAL_RESULT"' in report
     assert '--upstream-result "impact=$IMPACT_RESULT"' in report
+    assert '--upstream-result "unit-tests=$UNIT_RESULT"' in report
     assert '--upstream-result "model-proof=$MODEL_RESULT"' in report
     assert '--upstream-result "no-model=$NO_MODEL_RESULT"' in report
     assert "scripts/generate_model_proof_report.py" in report
@@ -432,11 +480,12 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "Upload combined model proof HTML report" in report
     assert "Enforce combined report certification" in report
 
-    for dependency in ("legal", "impact", "model-proof", "no-model", "report"):
+    for dependency in ("legal", "impact", "unit-tests", "model-proof", "no-model", "report"):
         assert f"- {dependency}" in required
     assert "'Premerge CI' || 'Ignored label / Premerge CI'" in required
     assert "always()" in required
     assert 'test "$MODEL_RESULT" = "success"' in required
+    assert 'test "$UNIT_RESULT" = "success"' in required
     assert 'test "$REPORT_RESULT" = "success"' in required
 
 
@@ -463,6 +512,8 @@ def test_premerge_report_bootstrap_names_upstream_failure_before_checkout(
             "premerge",
             "",
             "failure",
+            "skipped",
+            "false",
             "skipped",
             "skipped",
             "skipped",
@@ -593,7 +644,7 @@ def test_nightly_uses_manylinux_image_and_builds_wheel_first() -> None:
     assert "Setup TensorRT-Model-Connect" not in text
 
 
-def test_premerge_delegates_only_model_owned_work_to_the_proof() -> None:
+def test_premerge_keeps_model_proofs_separate_from_source_only_units() -> None:
     premerge = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
     for obsolete_global_stage in (
         "Build trtmc pip package",
@@ -605,8 +656,124 @@ def test_premerge_delegates_only_model_owned_work_to_the_proof() -> None:
         "Selective E2E tests",
     ):
         assert obsolete_global_stage not in premerge
-    assert "run-gha-stage.sh" not in premerge
+    assert premerge.count("run-gha-stage.sh") == 1
+    assert "run-gha-stage.sh premerge-unit" in premerge
     assert "uses: ./.github/workflows/model-proof.yml" in premerge
+
+
+def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
+    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    stage = script.split("run_premerge_unit_tests() {", maxsplit=1)[1].split(
+        "\nwrite_skipped_python_coverage() {", maxsplit=1
+    )[0]
+    cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
+
+    assert "pip install" not in stage
+    assert 'PYTHONPATH="$source_root/python:$source_root' in stage
+    assert 'TRTMC_CI_SCRATCH_DIR:-/tmp' in stage
+    assert 'TRTMC_PREMERGE_UNIT_BUILD_DIR:-$scratch_dir/premerge-unit-build' in stage
+    assert '-m "not gpu and not trt and not e2e and not model_proof_allocator"' in stage
+    assert "tests/builder/" in stage
+    assert "tests/tools/" in stage
+    assert "tests/e2e_harness/test_*.py" in stage
+    assert "-q -x" in stage
+    assert "--dist=worksteal" in stage
+    assert 'not model_proof_allocator"' in stage
+    assert "-m model_proof_allocator" in stage
+    assert "native_targets=(trtmc test_cli_args test_config_cli_support)" in stage
+    assert "native_targets=(trtmc trtmc_platform_cpp_tests)" in stage
+    assert 'TRTMC_PREMERGE_UNIT_SCOPE:-all' in stage
+    assert "tests/builder/test_cli.py" in stage
+    assert '"$build_dir/trtmc" version' in stage
+    assert '"$build_dir/trtmc" --help' in stage
+    assert "--stop-on-failure" in stage
+    assert "libtrtmc_model_*.so*" in stage
+    assert "-DTRTMC_ENABLE_TRT=OFF" not in stage
+    assert "-DTRTMC_BUILD_BACKEND_TRT=OFF" not in stage
+    assert "-DTRTMC_ENABLE_TVM_FFI=OFF" not in stage
+    assert "conan " not in stage
+    assert "build_pip_package" not in stage
+    assert "trtmc_model_plugins" not in stage
+    assert "add_custom_target(trtmc_platform_cpp_tests)" in cmake
+    assert "trtmc_add_test(test_model_plugin_loader MODEL_OWNED)" in cmake
+    assert "test_c_abi_runtime_regression   NO_SRC_INCLUDE MODEL_OWNED" in cmake
+    assert "MODEL_OWNED\n        ${_trtmc_test_options}" in cmake
+    for gpu_test in (
+        "test_trt_runtime_lifetime REQUIRES_TRT REQUIRES_GPU",
+        "test_trt_module REQUIRES_TRT REQUIRES_GPU",
+        "test_cuda_buffer REQUIRES_TRT REQUIRES_GPU",
+        "test_cuda_stream REQUIRES_TRT REQUIRES_GPU",
+        "test_cuda_graph REQUIRES_TRT REQUIRES_GPU",
+        "test_device_tensor REQUIRES_GPU",
+        "test_tvm_ffi_plugin REQUIRES_TRT REQUIRES_GPU",
+        "test_tvm_ffi_plugin_v2 NO_SRC_INCLUDE REQUIRES_TRT REQUIRES_GPU",
+        "test_tvm_ffi_module_loader REQUIRES_TRT REQUIRES_GPU",
+    ):
+        assert f"trtmc_add_test({gpu_test})" in cmake
+
+
+def test_premerge_unit_container_is_unprivileged_offline_and_cpu_only() -> None:
+    start = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
+    workflow = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
+    unit_tests = workflow.split("\n  unit-tests:", maxsplit=1)[1].split(
+        "\n  model-proof:", maxsplit=1
+    )[0]
+
+    for option in (
+        "--network none",
+        "--read-only",
+        "--tmpfs /tmp:rw,exec,nosuid,nodev,size=16g",
+        "--cap-drop ALL",
+        "--security-opt no-new-privileges",
+        '--user "$(id -u):$(id -g)"',
+        "--ipc private",
+        "-e HOME=/tmp",
+        "-e TMPDIR=/work/tmp",
+        "-e PIP_NO_INDEX=1",
+        "-e TRTMC_CI_SCRATCH_DIR=/work",
+        "-e NVIDIA_VISIBLE_DEVICES=void",
+        "-e CUDA_VISIBLE_DEVICES=",
+        "--runtime runc",
+        'workspace_mount+=":ro"',
+        'extra_mounts+=(-v "$scratch_host:/work")',
+    ):
+        assert option in start
+    assert 'if [ "$hardened" = "true" ]' in start
+    assert 'if [ "$hardened" != "true" ]' in start
+    assert 'compgen -G "/dev/nvidia*"' in start
+    assert "Hardened unit scratch must be inside RUNNER_TEMP" in start
+    assert "Hardened unit scratch must not be a symlink" in start
+    assert 'TRTMC_CI_HARDENED: "true"' in unit_tests
+    assert "--gpus" not in unit_tests
+    assert "/workspace/users/yifeif:/workspace/users/yifeif" not in unit_tests
+    hardened_allowlist = start.split('if [ "$hardened" = "true" ]; then', maxsplit=2)[2]
+    hardened_allowlist = hardened_allowlist.split('env_args+=', maxsplit=1)[0]
+    assert "HF_TOKEN" not in hardened_allowlist
+    assert "HUGGING_FACE_HUB_TOKEN" not in hardened_allowlist
+
+    stage = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    hardened_exec = stage.split(
+        'if [ "${TRTMC_CI_HARDENED:-false}" = "true" ]; then', maxsplit=1
+    )[1].split("\nfi", maxsplit=1)[0]
+    assert "TRTMC_PREMERGE_UNIT_SCOPE" in hardened_exec
+    assert "HF_TOKEN" not in hardened_exec
+    assert "HUGGING_FACE_HUB_TOKEN" not in hardened_exec
+
+
+def test_unowned_gpu_only_builder_suites_are_excluded_from_cpu_units() -> None:
+    stage = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    for relative in (
+        "tests/builder/test_flashinfer_benchmark.py",
+        "tests/builder/test_tvm_ffi_plugin.py",
+    ):
+        assert f"--ignore={relative}" in stage
+
+    ffi_architecture = (REPO_ROOT / "tests/builder/test_ffi_architecture.py").read_text()
+    flashinfer_section = ffi_architecture.split(
+        "class TestFlashInferKernelSetup:", maxsplit=1
+    )[1].split("class TestEngineBuilderKernelArtifacts:", maxsplit=1)[0]
+    assert flashinfer_section.count("@pytest.mark.gpu") == 3
+    assert flashinfer_section.count("@pytest.mark.trt") == 3
 
 
 def test_model_proof_runs_one_isolated_model_with_unique_complete_evidence() -> None:

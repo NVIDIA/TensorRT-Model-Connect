@@ -11,6 +11,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TOOL = REPO_ROOT / "tools" / "model_ci.py"
@@ -161,8 +163,25 @@ def _run(
     )
 
 
-def _impact(repo: Path, base: str, head: str) -> dict[str, object]:
-    result = _run(repo, "impact", "--base", base, "--head", head)
+def _impact(
+    repo: Path,
+    base: str,
+    head: str,
+    *,
+    fallback_models: tuple[str, ...] = ("model_a",),
+) -> dict[str, object]:
+    args = [
+        "impact",
+        "--base",
+        base,
+        "--head",
+        head,
+        "--platform-change-policy",
+        "fallback",
+    ]
+    for model in fallback_models:
+        args.extend(("--fallback-model", model))
+    result = _run(repo, *args)
     return json.loads(result.stdout)
 
 
@@ -185,6 +204,7 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
     )
 
     assert validated["models"] == ["model_a", "model_b"]
+    assert result["schema_version"] == 2
     assert result["matrix"] == {"include": [{"model": "model_a"}, {"model": "model_b"}]}
     assert output.read_text(encoding="utf-8").splitlines() == [
         'matrix={"include":[{"model":"model_a"},{"model":"model_b"}]}',
@@ -192,6 +212,8 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
         'affected_models=["model_a","model_b"]',
         "expected_count=2",
         "mode=all",
+        "run_unit_tests=false",
+        "unit_scope=none",
     ]
 
 
@@ -250,6 +272,8 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
     assert result["mode"] == "models"
     assert result["affected_models"] == ["model_a"]
     assert result["matrix"] == {"include": [{"model": "model_a"}]}
+    assert result["run_unit_tests"] is False
+    assert result["unit_scope"] == "none"
 
 
 def test_impact_selects_each_modified_model_once(tmp_path: Path) -> None:
@@ -287,17 +311,21 @@ def test_impact_treats_legal_and_docs_as_no_model_change(tmp_path: Path) -> None
     assert result["mode"] == "none"
     assert result["has_models"] is False
     assert result["matrix"] == {"include": []}
+    assert result["run_unit_tests"] is False
+    assert result["unit_scope"] == "none"
 
 
-def test_impact_treats_platform_change_as_all_models(tmp_path: Path) -> None:
+def test_impact_treats_platform_change_as_fixed_fallback(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
     _write(repo, "src/runtime/core/core.cpp", "// changed platform core\n")
     head = _commit(repo, "platform")
 
     result = _impact(repo, base, head)
 
-    assert result["mode"] == "all"
-    assert result["affected_models"] == ["model_a", "model_b"]
+    assert result["mode"] == "fallback"
+    assert result["affected_models"] == ["model_a"]
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
 
 
 def test_impact_treats_shared_family_registry_as_platform(tmp_path: Path) -> None:
@@ -307,8 +335,83 @@ def test_impact_treats_shared_family_registry_as_platform(tmp_path: Path) -> Non
 
     result = _impact(repo, base, head)
 
-    assert result["mode"] == "all"
+    assert result["mode"] == "fallback"
+    assert result["affected_models"] == ["model_a"]
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
+
+
+@pytest.mark.parametrize(
+    "path, expected_scope",
+    (
+        ("src/cli/main.cpp", "cli"),
+        ("src/cli/args.h", "cli"),
+        ("src/runtime/config/cli_support.cpp", "cli"),
+        ("include/trtmc/config/cli_support.h", "cli"),
+        ("python/tensorrt_model_connect/build_cli.py", "cli"),
+        ("python/tensorrt_model_connect/runtime_config/cli_support.py", "cli"),
+        ("tests/builder/test_cli.py", "all"),
+        ("tests/cpp/test_cli_args.cpp", "all"),
+        ("tests/tools/test_cli_contract.py", "all"),
+    ),
+)
+def test_cli_and_unit_test_changes_run_units_without_model_proofs(
+    tmp_path: Path,
+    path: str,
+    expected_scope: str,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, path, "// changed\n" if path.endswith((".cpp", ".h")) else "# changed\n")
+    head = _commit(repo, "unit-only change")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "unit"
+    assert result["affected_models"] == []
+    assert result["matrix"] == {"include": []}
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == expected_scope
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "CMakeLists.txt",
+        ".github/workflows/trtmc-ci.yml",
+        "tools/model_ci.py",
+        "new_platform/implementation.py",
+    ),
+)
+def test_broad_or_unknown_changes_select_only_fixed_fallback(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, path, "# changed\n")
+    head = _commit(repo, "broad change")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["affected_models"] == ["model_a"]
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
+
+
+def test_mixed_model_and_broad_change_keeps_direct_model_plus_fallback(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, "src/runtime/models/model_b/plugin.cpp", "// changed model b\n")
+    _write(repo, "CMakeLists.txt", "# changed platform\n")
+    head = _commit(repo, "mixed change")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
     assert result["affected_models"] == ["model_a", "model_b"]
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
 
 
 def test_impact_includes_deletions_and_both_sides_of_rename(tmp_path: Path) -> None:
@@ -329,10 +432,39 @@ def test_impact_includes_deletions_and_both_sides_of_rename(tmp_path: Path) -> N
     assert any(str(change["status"]).startswith("R") for change in result["changes"])
 
 
-def test_impact_rejects_unknown_source_path(tmp_path: Path) -> None:
+def test_whole_model_deletion_runs_units_and_fixed_fallback(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
-    _write(repo, "mystery/implementation.py", "VALUE = 1\n")
-    head = _commit(repo, "unknown source")
+    _git(
+        repo,
+        "rm",
+        "-r",
+        "python/tensorrt_model_connect/families/model_b",
+        "src/runtime/models/model_b",
+        "tests/e2e/models/model_b",
+        "tests/cpp/models/model_b",
+    )
+    head = _commit(repo, "delete model b")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["affected_models"] == ["model_a"]
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
+
+
+def test_deleting_configured_fallback_requires_policy_update(tmp_path: Path) -> None:
+    repo, base = _make_repo(tmp_path)
+    _git(
+        repo,
+        "rm",
+        "-r",
+        "python/tensorrt_model_connect/families/model_a",
+        "src/runtime/models/model_a",
+        "tests/e2e/models/model_a",
+        "tests/cpp/models/model_a",
+    )
+    head = _commit(repo, "delete fallback model")
 
     result = _run(
         repo,
@@ -341,11 +473,119 @@ def test_impact_rejects_unknown_source_path(tmp_path: Path) -> None:
         base,
         "--head",
         head,
+        "--platform-change-policy",
+        "fallback",
+        "--fallback-model",
+        "model_a",
         check=False,
     )
 
     assert result.returncode == 2
-    assert "has no model, platform, CI, legal, or docs owner" in result.stderr
+    assert "fallback models are absent from the head catalog" in result.stderr
+
+
+def test_impact_rejects_unowned_path_below_model_root(tmp_path: Path) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, "tests/e2e/models/unowned/test_unowned.py", "VALUE = 1\n")
+    head = _commit(repo, "unowned model source")
+
+    result = _run(
+        repo,
+        "impact",
+        "--base",
+        base,
+        "--head",
+        head,
+        "--platform-change-policy",
+        "fallback",
+        "--fallback-model",
+        "model_a",
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "under a model root but has no MODEL.toml owner" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "tests/builder/test_dynamic_batch_profile.py",
+        "tests/builder/test_flashinfer_benchmark.py",
+        "tests/builder/test_graph_blocks.py",
+        "tests/builder/test_tvm_ffi_plugin.py",
+        "tests/cpp/test_c_abi_runtime_regression.cpp",
+        "tests/cpp/test_cuda_buffer.cpp",
+        "tests/cpp/test_cuda_graph.cpp",
+        "tests/cpp/test_cuda_stream.cpp",
+        "tests/cpp/test_device_tensor.cpp",
+        "tests/cpp/test_model_plugin_loader.cpp",
+        "tests/cpp/test_trt_module.cpp",
+        "tests/cpp/test_trt_runtime_lifetime.cpp",
+        "tests/cpp/test_tvm_ffi_module_loader.cpp",
+        "tests/cpp/test_tvm_ffi_plugin.cpp",
+        "tests/cpp/test_tvm_ffi_plugin_v2.cpp",
+    ),
+)
+def test_model_coupled_shared_tests_fail_closed_until_owned(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, path, "// changed coupled test\n")
+    head = _commit(repo, "change coupled test")
+
+    result = _run(
+        repo,
+        "impact",
+        "--base",
+        base,
+        "--head",
+        head,
+        "--platform-change-policy",
+        "fallback",
+        "--fallback-model",
+        "model_a",
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "model-coupled test has no isolated model owner" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "fallback_args, message",
+    (
+        ((), "requires at least one --fallback-model"),
+        (("model_a", "model_a"), "contains duplicates"),
+        (("missing",), "absent from the head catalog"),
+        (("../unsafe",), "contains unsafe ids"),
+    ),
+)
+def test_broad_impact_rejects_invalid_fallback_configuration(
+    tmp_path: Path,
+    fallback_args: tuple[str, ...],
+    message: str,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, "CMakeLists.txt", "# changed platform\n")
+    head = _commit(repo, "broad change")
+    args = [
+        "impact",
+        "--base",
+        base,
+        "--head",
+        head,
+        "--platform-change-policy",
+        "fallback",
+    ]
+    for model in fallback_args:
+        args.extend(("--fallback-model", model))
+
+    result = _run(repo, *args, check=False)
+
+    assert result.returncode == 2
+    assert message in result.stderr
 
 
 def test_validate_rejects_overlapping_runtime_ownership(tmp_path: Path) -> None:

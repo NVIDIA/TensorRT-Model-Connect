@@ -464,6 +464,109 @@ print('|'.join(tests))
   fi
 }
 
+run_premerge_unit_tests() {
+  verify_environment
+
+  local source_root="$PWD"
+  local scratch_dir="${TRTMC_CI_SCRATCH_DIR:-/tmp}"
+  local build_dir="${TRTMC_PREMERGE_UNIT_BUILD_DIR:-$scratch_dir/premerge-unit-build}"
+  local build_jobs="${TRTMC_UNIT_BUILD_JOBS:-8}"
+  local test_jobs="${TRTMC_UNIT_TEST_JOBS:-8}"
+  local unit_scope="${TRTMC_PREMERGE_UNIT_SCOPE:-all}"
+  local -a python_tests=()
+  local -a native_targets=()
+  local -a ctest_selector=()
+
+  if ! [[ "$build_jobs" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: TRTMC_UNIT_BUILD_JOBS must be a positive integer" >&2
+    return 2
+  fi
+  if ! [[ "$test_jobs" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: TRTMC_UNIT_TEST_JOBS must be a positive integer" >&2
+    return 2
+  fi
+
+  case "$unit_scope" in
+    cli)
+      python_tests=(
+        tests/builder/test_cli.py
+        tests/builder/test_cli_coverage.py
+        tests/builder/test_config_cli_support.py
+        tests/builder/test_config_isolation_demo.py
+        tests/builder/test_max_batch_size_cli.py
+        tests/builder/test_owned_schedulers.py::test_package_main_module_invokes_build_cli_main
+      )
+      native_targets=(trtmc test_cli_args test_config_cli_support)
+      ctest_selector=(-R '^(test_cli_args|test_config_cli_support)$')
+      ;;
+    all)
+      python_tests=(
+        tests/builder/
+        tests/tools/
+        tests/e2e_harness/test_*.py
+      )
+      native_targets=(trtmc trtmc_platform_cpp_tests)
+      ctest_selector=(-L platform)
+      ;;
+    *)
+      echo "ERROR: TRTMC_PREMERGE_UNIT_SCOPE must be cli or all" >&2
+      return 2
+      ;;
+  esac
+  echo "Premerge unit scope: $unit_scope"
+
+  # Run source-only Python tests first so inexpensive contract failures stop
+  # before any native compilation. PYTHONPATH exposes the checkout without an
+  # editable install, network access, or writes outside the checkout.
+  run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-20m}" \
+    env PYTHONPATH="$source_root/python:$source_root${PYTHONPATH:+:$PYTHONPATH}" \
+    python -m pytest "${python_tests[@]}" \
+      -q -x -n "$test_jobs" --dist=worksteal -p no:cacheprovider \
+      -m "not gpu and not trt and not e2e and not model_proof_allocator" \
+      --ignore=tests/builder/test_flashinfer_benchmark.py \
+      --ignore=tests/builder/test_tvm_ffi_plugin.py
+
+  # These tests intentionally launch several simultaneous model projections
+  # and assert tight lease deadlines. Run them after the parallel phase so
+  # unrelated CPU load cannot change the allocator behavior under test.
+  if [ "$unit_scope" = "all" ]; then
+    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-20m}" \
+      env PYTHONPATH="$source_root/python:$source_root${PYTHONPATH:+:$PYTHONPATH}" \
+      python -m pytest tests/tools/test_model_proof_runner.py \
+        -q -x -p no:cacheprovider -m model_proof_allocator
+  fi
+
+  rm -rf -- "$build_dir"
+  cmake -S "$source_root" -B "$build_dir" -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DTRTMC_BUILD_TESTS=ON \
+    -DTRTMC_BUILD_BENCHMARKS=OFF \
+    -DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF \
+    -DTRTMC_BUILD_DIFFUSION_KERNELS=OFF \
+    -DFETCHCONTENT_FULLY_DISCONNECTED=ON
+  run_with_timeout "${BUILD_ALL_TIMEOUT:-15m}" \
+    cmake --build "$build_dir" --parallel "$build_jobs" \
+      --target "${native_targets[@]}"
+
+  if [ "$unit_scope" = "cli" ]; then
+    run_with_timeout 1m "$build_dir/trtmc" version
+    run_with_timeout 1m "$build_dir/trtmc" --help
+  fi
+
+  local leaked_plugin
+  leaked_plugin="$(
+    find "$build_dir" -type f -name 'libtrtmc_model_*.so*' -print -quit
+  )"
+  if [ -n "$leaked_plugin" ]; then
+    echo "ERROR: source-only unit build produced a model plugin: $leaked_plugin" >&2
+    return 1
+  fi
+
+  run_with_timeout "${CPP_UNIT_TIMEOUT:-20m}" \
+    ctest --test-dir "$build_dir" --output-on-failure --stop-on-failure \
+      "${ctest_selector[@]}" -j "$test_jobs"
+}
+
 write_skipped_python_coverage() {
   local reason="${1:-Skipped}"
   echo '<?xml version="1.0" ?><coverage version="7.6" timestamp="0" lines-valid="0" lines-covered="0" line-rate="1.0" branches-valid="0" branches-covered="0" branch-rate="1.0" complexity="0"><packages/></coverage>' > coverage/python-cobertura.xml
@@ -563,12 +666,10 @@ for test in selected:
     echo "Selective Python tests:"
     printf '  %s\n' "${selected_python_tests[@]}"
     run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest "${selected_python_tests[@]}" -v \
-      --ignore=tests/builder/test_cli.py \
       -n auto "${cov_args[@]}"
   else
     echo "Running all builder + tools tests"
     run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/e2e_harness/test_*.py -v \
-      --ignore=tests/builder/test_cli.py \
       -n auto "${cov_args[@]}"
   fi
 
@@ -1819,6 +1920,9 @@ run_stage() {
     python-builder)
       run_step "Setup TensorRT-Model-Connect wheel runtime" setup_wheel_runtime_environment
       run_step "Python builder and tools tests" run_python_builder_tests
+      ;;
+    premerge-unit)
+      run_step "Source-only C++ and Python unit tests" run_premerge_unit_tests
       ;;
     cpp-coverage)
       run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment

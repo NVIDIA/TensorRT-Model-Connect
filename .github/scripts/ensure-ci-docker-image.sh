@@ -8,6 +8,7 @@ base_image="${TRTMC_CI_IMAGE:-trtmc-dev-gb300:manylinux_2_39}"
 dockerfile="${TRTMC_CI_DOCKERFILE:-Dockerfile}"
 lock_file="${TRTMC_CI_IMAGE_LOCK_FILE:-/tmp/trtmc-ci-docker-image.lock}"
 lock_timeout="${TRTMC_CI_IMAGE_LOCK_TIMEOUT:-5400}"
+verification_dir="${TRTMC_CI_IMAGE_VERIFICATION_DIR:-/tmp/trtmc-ci-image-verifications}"
 fingerprint_label="org.nvidia.trtmc.ci-input-fingerprint"
 
 if ! [[ "$lock_timeout" =~ ^[1-9][0-9]*$ ]]; then
@@ -147,6 +148,36 @@ if [ -z "$expected_modelopt" ]; then
   exit 1
 fi
 
+emit_image_ref() {
+  local resolved_ref="$1"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    echo "image_ref=$resolved_ref" >> "$GITHUB_OUTPUT"
+  fi
+}
+
+# Every matrix child uses the same immutable merge snapshot and host-local
+# Docker daemon. Validate the image once per workflow run, then let siblings
+# reuse that proof after a cheap immutable-image-ID check. The global flock
+# makes the stamp atomic and also keeps separate runs from rebuilding together.
+verification_stamp=""
+run_id="${GITHUB_RUN_ID:-}"
+run_attempt="${GITHUB_RUN_ATTEMPT:-1}"
+if [[ "$run_id" =~ ^[0-9]+$ ]] && [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]]; then
+  mkdir -p "$verification_dir"
+  verification_stamp="${verification_dir%/}/${run_id}-${run_attempt}-${expected_fingerprint}.verified"
+  if [ -f "$verification_stamp" ]; then
+    stamped_ref="$(<"$verification_stamp")"
+    current_ref="$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)"
+    if [[ "$stamped_ref" =~ ^sha256:[0-9a-f]{64}$ ]] && \
+       [ "$current_ref" = "$stamped_ref" ]; then
+      emit_image_ref "$current_ref"
+      echo "CI Docker image '$image' reused from this workflow run's verified image $current_ref"
+      exit 0
+    fi
+    rm -f -- "$verification_stamp"
+  fi
+fi
+
 summary() {
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"
@@ -214,6 +245,7 @@ collect_docker_input_changes() {
 }
 
 rebuild_reasons=()
+image_metadata_valid=false
 mapfile -t changed_paths < <(collect_docker_input_changes)
 
 version_file="$(mktemp)"
@@ -261,6 +293,9 @@ else
     if [ "$current_python_profiles" != "$expected_python_profiles" ]; then
       rebuild_reasons+=("prebuilt Python profiles differ: image has '${current_python_profiles:-missing}', source expects '$expected_python_profiles'")
     fi
+    if [ "${#rebuild_reasons[@]}" -eq 0 ]; then
+      image_metadata_valid=true
+    fi
   fi
 fi
 
@@ -284,6 +319,7 @@ if [ "${#rebuild_reasons[@]}" -gt 0 ]; then
     -t "$image" \
     -f "$dockerfile" \
     .
+  image_metadata_valid=false
 else
   echo "CI Docker image '$image' already matches $dockerfile"
 fi
@@ -294,12 +330,14 @@ if [ "$current_fingerprint" != "$expected_fingerprint" ]; then
   exit 1
 fi
 
-query_image_versions > "$version_file"
-current_trt="$(awk -F= '$1 == "TENSORRT_VERSION" { print $2 }' "$version_file")"
-current_modelopt="$(awk -F= '$1 == "MODELOPT_VERSION" { print $2 }' "$version_file")"
-current_nlohmann="$(awk -F= '$1 == "NLOHMANN_JSON_HEADER" { print $2 }' "$version_file")"
-current_nemo_prompt_rnnt="$(awk -F= '$1 == "NEMO_PROMPT_RNNT" { print $2 }' "$version_file")"
-current_python_profiles="$(awk -F= '$1 == "PYTHON_PROFILES" { print $2 }' "$version_file")"
+if [ "$image_metadata_valid" != "true" ]; then
+  query_image_versions > "$version_file"
+  current_trt="$(awk -F= '$1 == "TENSORRT_VERSION" { print $2 }' "$version_file")"
+  current_modelopt="$(awk -F= '$1 == "MODELOPT_VERSION" { print $2 }' "$version_file")"
+  current_nlohmann="$(awk -F= '$1 == "NLOHMANN_JSON_HEADER" { print $2 }' "$version_file")"
+  current_nemo_prompt_rnnt="$(awk -F= '$1 == "NEMO_PROMPT_RNNT" { print $2 }' "$version_file")"
+  current_python_profiles="$(awk -F= '$1 == "PYTHON_PROFILES" { print $2 }' "$version_file")"
+fi
 
 if [ "$current_trt" != "$expected_trt" ]; then
   echo "ERROR: CI Docker image '$image' has TensorRT '$current_trt'; expected '$expected_trt' from $dockerfile" >&2
@@ -331,8 +369,11 @@ if ! [[ "$image_ref" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   echo "ERROR: CI Docker image '$image' returned an invalid immutable ID: $image_ref" >&2
   exit 1
 fi
-if [ -n "${GITHUB_OUTPUT:-}" ]; then
-  echo "image_ref=$image_ref" >> "$GITHUB_OUTPUT"
+emit_image_ref "$image_ref"
+if [ -n "$verification_stamp" ]; then
+  stamp_tmp="${verification_stamp}.tmp.$$"
+  printf '%s\n' "$image_ref" > "$stamp_tmp"
+  mv -f -- "$stamp_tmp" "$verification_stamp"
 fi
 
 echo "CI Docker image '$image' verified: TensorRT $current_trt, modelopt $current_modelopt, nlohmann/json headers, NeMo prompt RNN-T and prebuilt Python profiles ($current_python_profiles) present, image $image_ref"
