@@ -584,6 +584,123 @@ suites:
       notes: >
         P2021-only until the DPG-Bench scorecard is visually calibrated.
 
+  - id: imagenette_image_classification
+    description: >
+      HF-to-TRTMC image-classification parity on Imagenette validation, a
+      public ten-class subset of ImageNet-1k. The selected timm checkpoint was
+      fine-tuned on ImageNet-1k at 224x224, so labels retain their original
+      ImageNet-1k class IDs. Gold top-1 accuracy and backend agreement are
+      reported separately.
+    user_contract: image_classification
+    default_model_names:
+      - timm-vit-base-p16-224-augreg-in21k-ft-in1k
+    dataset:
+      kind: image_classification_json
+      name: Imagenette 320 validation (ImageNet-1k subset)
+      default_path: /mnt/data/Imagenette/imagenette2-320_task_eval.json
+      image_field: image
+      answer_field: label
+      subject_field: synset
+    selectors:
+      task_strategies:
+        - image_classification
+      runtime_strategies:
+        - timm_vit_image_classification
+      families:
+        - timm_vit
+      user_contracts:
+        - image_classification
+    scoring:
+      scorer: image_classification_parity
+      task_metric: top1_accuracy
+    gates:
+      max_top1_accuracy_drop_from_hf: 0.01
+      min_top1_agreement: 0.98
+    ci:
+      eligible: false
+      lane: local_only
+
+  - id: ade20k_semantic_segmentation
+    description: >
+      Semantic-segmentation parity and task quality on the ADE20K validation
+      split used by the SegFormer checkpoint. Ground-truth labels are normalized
+      to the checkpoint's 0..149 scene_parse_150 IDs with 255 as ignore.
+    user_contract: segmentation_mask
+    default_model_names:
+      - segformer-b0-ade
+    dataset:
+      kind: semantic_segmentation_json
+      name: ADE20K validation
+      default_path: /mnt/data/ADE20K/ade20k_validation_task_eval.json
+      image_field: image
+      mask_field: mask
+      subject_field: subset
+      num_classes: 150
+      ignore_index: 255
+    selectors:
+      task_strategies:
+        - segmentation
+      runtime_strategies:
+        - segformer_segmentation
+      families:
+        - segformer
+      user_contracts:
+        - segmentation_mask
+    scoring:
+      scorer: semantic_segmentation_parity
+      task_metric: mean_iou
+    gates:
+      min_backend_pixel_agreement: 0.98
+      min_backend_mean_iou: 0.95
+      max_mean_iou_drop_from_hf: 0.01
+    ci:
+      eligible: false
+      lane: local_only
+
+  - id: coco2017_prompted_segmentation
+    description: >
+      Point-prompted segmentation parity on COCO 2017 validation. SAM uses a
+      deterministic foreground point and its instance mask. Backend mask
+      agreement is gated while COCO ground-truth IoU is reported and guarded
+      against regression from the HF reference.
+    user_contract: prompted_mask
+    default_model_names:
+      - sam-vit-base
+    dataset:
+      kind: prompted_segmentation_json
+      name: COCO 2017 validation prompted segmentation
+      default_path: /mnt/data/COCO2017_prompted_segmentation/coco2017_prompted_segmentation.json
+      image_field: image
+      point_mask_field: instance_mask
+      text_mask_field: category_mask
+      subject_field: category
+    selectors:
+      task_strategies:
+        - prompted_segmentation
+      runtime_strategies:
+        - sam_prompted_segmentation
+      families:
+        - sam
+      user_contracts:
+        - prompted_mask
+    scoring:
+      scorer: prompted_segmentation_parity
+      task_metric: mask_iou
+    gates:
+      # Match the reviewed SAM model-owned iou_per_prompt contract. The
+      # aggregate COCO ground-truth guard below independently prevents a
+      # numerically close but worse task result from passing.
+      min_backend_mask_iou: 0.70
+      max_ground_truth_iou_drop_from_hf: 0.05
+    model_overrides:
+      by_family:
+        sam:
+          prompt_mode: point
+          ground_truth_mask_field: instance_mask
+    ci:
+      eligible: false
+      lane: local_only
+
   - id: stsbenchmark_encoder_embedding_parity
     description: >
       HF-versus-TRTMC vector parity for encoder-only NLP and text embedding

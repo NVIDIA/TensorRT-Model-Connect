@@ -632,6 +632,7 @@ class HfTransformersReference:
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         output_path = str(Path(model_dir) / "hf_seg.npy")
+        raw_output_path = str(Path(model_dir) / "hf_seg_raw.npy")
 
         image_path = self._resolve_image_path(case.inputs.get("image", ""))
         trust_remote_code = case.metadata.get("trust_remote_code", False)
@@ -647,6 +648,7 @@ class HfTransformersReference:
             image_path = {image_path!r}
             trust_remote_code = {trust_remote_code!r}
             output_path = {output_path!r}
+            raw_output_path = {raw_output_path!r}
 
             processor = AutoImageProcessor.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code)
@@ -659,8 +661,12 @@ class HfTransformersReference:
             inputs = processor(images=image, return_tensors="pt")
             with torch.no_grad():
                 outputs = model(**inputs)
-            logits = outputs.logits[0].float().cpu().numpy()
-            class_map = np.argmax(logits, axis=0).astype(np.int32)
+            raw_class_map = outputs.logits[0].argmax(dim=0)
+            raw_class_map = raw_class_map.cpu().numpy().astype(np.int32)
+            np.save(raw_output_path, raw_class_map)
+            class_map = processor.post_process_semantic_segmentation(
+                outputs, target_sizes=[image.size[::-1]])[0]
+            class_map = class_map.cpu().numpy().astype(np.int32)
             np.save(output_path, class_map)
             print(f"OK classes={{class_map.max() + 1}}")
         """)
@@ -672,6 +678,8 @@ class HfTransformersReference:
                 import numpy as np
 
                 data["class_map"] = np.load(output_path)
+                if Path(raw_output_path).is_file():
+                    data["raw_class_map_path"] = raw_output_path
 
                 try:
                     from PIL import Image

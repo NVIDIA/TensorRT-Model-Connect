@@ -137,6 +137,8 @@ class PromptedSegmentationRunner:
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python:
             cmd.extend(["--hf-python", str(runtime_cli_python)])
+        if ctx.model_plugin_dir:
+            cmd.extend(["--model-plugin-dir", ctx.model_plugin_dir])
         cmd = _wrap_distributed_command(cmd, case)
 
         env = dict(os.environ)

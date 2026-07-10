@@ -1194,6 +1194,266 @@ def resolve_dataset_asset_path(dataset_path: Path, asset_ref: str) -> Path:
     raise FileNotFoundError(f"Could not resolve dataset asset {asset_ref!r}; tried: {candidates}")
 
 
+def _load_indexed_json_requests(
+    dataset_path: Path,
+    *,
+    subject: str,
+    subject_field: str,
+    limit: int,
+    sample_seed: int | None,
+) -> tuple[dict[str, Any], list[tuple[int, dict[str, Any]]]]:
+    data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    requests = data.get("requests")
+    if not isinstance(requests, list):
+        raise ValueError(f"{dataset_path}: expected top-level 'requests' list")
+    indexed: list[tuple[int, dict[str, Any]]] = []
+    for index, request in enumerate(requests):
+        if not isinstance(request, dict):
+            raise ValueError(f"{dataset_path}: request {index} must be an object")
+        if subject and str(request.get(subject_field, "")) != subject:
+            continue
+        indexed.append((index, request))
+    if sample_seed is not None:
+        random.Random(sample_seed).shuffle(indexed)
+    if limit > 0:
+        indexed = indexed[:limit]
+    return data, indexed
+
+
+def _write_vision_task_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    data: dict[str, Any],
+    indexed: list[tuple[int, dict[str, Any]]],
+    prompt_rows: list[dict[str, Any]],
+    prepared_requests: list[dict[str, Any]],
+    limit: int,
+    subject: str,
+    sample_seed: int | None,
+    task_eval_config: dict[str, Any] | None,
+) -> dict[str, Path]:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+    answers = _copy_dataset_header(data, prepared_requests)
+    answers["scoring"] = suite.get("scoring", {})
+    answers_path.write_text(
+        json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    with prompts_path.open("w", encoding="utf-8") as prompts_file:
+        for row in prompt_rows:
+            prompts_file.write(json.dumps(row, ensure_ascii=False) + "\n")
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_kind": suite.get("dataset", {}).get("kind", ""),
+        "request_count": len(indexed),
+        "subject": subject or "all",
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "scoring": suite.get("scoring", {}),
+        "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
+    }
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
+def prepare_image_classification_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    dataset_config = suite.get("dataset", {})
+    subject_field = str(dataset_config.get("subject_field", "synset"))
+    data, indexed = _load_indexed_json_requests(
+        dataset_path,
+        subject=subject,
+        subject_field=subject_field,
+        limit=limit,
+        sample_seed=sample_seed,
+    )
+    prepared_requests: list[dict[str, Any]] = []
+    prompt_rows: list[dict[str, Any]] = []
+    for eval_index, (dataset_index, request) in enumerate(indexed):
+        image_ref = str(request.get("image", "") or "")
+        if not image_ref:
+            raise ValueError(f"{dataset_path}: request {dataset_index} has no image")
+        try:
+            label = int(request["label"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} has invalid label"
+            ) from exc
+        image_path = resolve_dataset_asset_path(dataset_path, image_ref)
+        sample_id = str(request.get("id", f"imagenette_{dataset_index:06d}"))
+        row = {
+            "sample_id": sample_id,
+            "dataset_index": dataset_index,
+            "eval_index": eval_index,
+            "subject": str(request.get(subject_field, "")),
+            "image": str(image_path),
+            "label": label,
+            "label_name": str(request.get("label_name", "")),
+        }
+        prompt_rows.append(row)
+        prepared_requests.append({**request, **row})
+    return _write_vision_task_dataset(
+        dataset_path=dataset_path,
+        work_dir=work_dir,
+        suite=suite,
+        data=data,
+        indexed=indexed,
+        prompt_rows=prompt_rows,
+        prepared_requests=prepared_requests,
+        limit=limit,
+        subject=subject,
+        sample_seed=sample_seed,
+        task_eval_config=task_eval_config,
+    )
+
+
+def prepare_semantic_segmentation_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    dataset_config = suite.get("dataset", {})
+    subject_field = str(dataset_config.get("subject_field", "subset"))
+    data, indexed = _load_indexed_json_requests(
+        dataset_path,
+        subject=subject,
+        subject_field=subject_field,
+        limit=limit,
+        sample_seed=sample_seed,
+    )
+    prepared_requests: list[dict[str, Any]] = []
+    prompt_rows: list[dict[str, Any]] = []
+    for eval_index, (dataset_index, request) in enumerate(indexed):
+        image_ref = str(request.get("image", "") or "")
+        mask_ref = str(request.get("mask", "") or "")
+        if not image_ref or not mask_ref:
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} requires image and mask"
+            )
+        image_path = resolve_dataset_asset_path(dataset_path, image_ref)
+        mask_path = resolve_dataset_asset_path(dataset_path, mask_ref)
+        sample_id = str(request.get("id", f"ade20k_{dataset_index:06d}"))
+        row = {
+            "sample_id": sample_id,
+            "dataset_index": dataset_index,
+            "eval_index": eval_index,
+            "subject": str(request.get(subject_field, "")),
+            "image": str(image_path),
+            "mask": str(mask_path),
+        }
+        prompt_rows.append(row)
+        prepared_requests.append({**request, **row})
+    return _write_vision_task_dataset(
+        dataset_path=dataset_path,
+        work_dir=work_dir,
+        suite=suite,
+        data=data,
+        indexed=indexed,
+        prompt_rows=prompt_rows,
+        prepared_requests=prepared_requests,
+        limit=limit,
+        subject=subject,
+        sample_seed=sample_seed,
+        task_eval_config=task_eval_config,
+    )
+
+
+def prepare_prompted_segmentation_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    dataset_config = suite.get("dataset", {})
+    subject_field = str(dataset_config.get("subject_field", "category"))
+    data, indexed = _load_indexed_json_requests(
+        dataset_path,
+        subject=subject,
+        subject_field=subject_field,
+        limit=limit,
+        sample_seed=sample_seed,
+    )
+    prepared_requests: list[dict[str, Any]] = []
+    prompt_rows: list[dict[str, Any]] = []
+    for eval_index, (dataset_index, request) in enumerate(indexed):
+        required = ("image", "instance_mask", "category_mask", "text_prompt")
+        missing = [field for field in required if not request.get(field)]
+        if missing:
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} is missing {missing}"
+            )
+        try:
+            point_x = float(request["point_x"])
+            point_y = float(request["point_y"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} has invalid point prompt"
+            ) from exc
+        if not (0.0 <= point_x <= 1.0 and 0.0 <= point_y <= 1.0):
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} point must be normalized"
+            )
+        image_path = resolve_dataset_asset_path(dataset_path, str(request["image"]))
+        instance_mask = resolve_dataset_asset_path(
+            dataset_path, str(request["instance_mask"])
+        )
+        category_mask = resolve_dataset_asset_path(
+            dataset_path, str(request["category_mask"])
+        )
+        sample_id = str(request.get("id", f"coco_prompt_{dataset_index:06d}"))
+        row = {
+            "sample_id": sample_id,
+            "dataset_index": dataset_index,
+            "eval_index": eval_index,
+            "subject": str(request.get(subject_field, "")),
+            "image": str(image_path),
+            "instance_mask": str(instance_mask),
+            "category_mask": str(category_mask),
+            "point_x": point_x,
+            "point_y": point_y,
+            "text_prompt": str(request["text_prompt"]),
+        }
+        prompt_rows.append(row)
+        prepared_requests.append({**request, **row})
+    return _write_vision_task_dataset(
+        dataset_path=dataset_path,
+        work_dir=work_dir,
+        suite=suite,
+        data=data,
+        indexed=indexed,
+        prompt_rows=prompt_rows,
+        prepared_requests=prepared_requests,
+        limit=limit,
+        subject=subject,
+        sample_seed=sample_seed,
+        task_eval_config=task_eval_config,
+    )
+
+
 def vlm_request_image_refs(request: dict[str, Any]) -> list[str]:
     refs: list[str] = []
     messages = request.get("messages")
@@ -1798,6 +2058,36 @@ def prepare_task_dataset(
         )
     if dataset_kind == "seedtts_json":
         return prepare_seedtts_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
+    if dataset_kind == "image_classification_json":
+        return prepare_image_classification_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
+    if dataset_kind == "semantic_segmentation_json":
+        return prepare_semantic_segmentation_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
+    if dataset_kind == "prompted_segmentation_json":
+        return prepare_prompted_segmentation_dataset(
             dataset_path=dataset_path,
             work_dir=work_dir,
             suite=suite,
@@ -4660,6 +4950,14 @@ def _is_encoder_embedding_dataset_kind(kind: str) -> bool:
     return kind == "sts_pair_jsonl"
 
 
+def _is_vision_task_dataset_kind(kind: str) -> bool:
+    return kind in {
+        "image_classification_json",
+        "semantic_segmentation_json",
+        "prompted_segmentation_json",
+    }
+
+
 def work_scoring(work_dir: Path) -> dict[str, Any]:
     scoring = work_manifest(work_dir).get("scoring", {})
     return scoring if isinstance(scoring, dict) else {}
@@ -5559,6 +5857,246 @@ def _run_nemo_asr_hf_pipeline_reference(
     write_predictions(pred_path, responses)
 
 
+def _load_vision_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
+    task_eval_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        task_eval_config = {}
+    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+    if not manifest_ref:
+        raise ValueError("vision task eval requires task_eval.model_manifest")
+    manifest_path = Path(manifest_ref)
+    if not manifest_path.is_absolute():
+        manifest_path = REPO_ROOT / manifest_path
+    case = load_manifest(manifest_path)
+    model_test_dir = str(case.metadata.get("model_test_dir", "") or "")
+    activate_model_plugins(model_test_dir)
+    reference = get_reference(case.reference_backend)
+    runner = get_runner(case.task_strategy)
+    if reference is None:
+        raise RuntimeError(
+            f"No reference plugin {case.reference_backend!r} for {case.family}"
+        )
+    if runner is None:
+        raise RuntimeError(f"No runner plugin {case.task_strategy!r} for {case.family}")
+    return case, reference, runner
+
+
+def _vision_case_for_request(
+    template: Any,
+    prompt_row: dict[str, Any],
+    task_eval_config: dict[str, Any],
+    index: int,
+) -> Any:
+    case = copy.deepcopy(template)
+    case.name = str(prompt_row.get("sample_id", f"vision_{index:06d}"))
+    case.inputs["image"] = str(prompt_row["image"])
+    prompt_mode = str(task_eval_config.get("prompt_mode", "") or "")
+    if prompt_mode == "point":
+        case.inputs["point_x"] = float(prompt_row["point_x"])
+        case.inputs["point_y"] = float(prompt_row["point_y"])
+        case.inputs["is_foreground"] = True
+    elif prompt_mode == "text":
+        text_prompt = str(prompt_row["text_prompt"])
+        case.inputs["prompt"] = text_prompt
+        case.inputs["text_prompt"] = text_prompt
+    return case
+
+
+def _vision_full_inference_stage(case: Any) -> Any:
+    from tests.e2e_harness.contracts import StageSpec
+
+    for stage in case.stages:
+        if stage.name == "full_inference":
+            return stage
+    return StageSpec(name="full_inference", required=True)
+
+
+def _persist_numpy_output(value: Any, path: Path) -> str:
+    import numpy as np
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(path, np.asarray(value))
+    return str(path)
+
+
+def _vision_response(
+    *,
+    case: Any,
+    source: str,
+    output: Any,
+    dataset_kind: str,
+    prompt_row: dict[str, Any],
+    artifact_dir: Path,
+) -> dict[str, Any]:
+    data = output.data if isinstance(output.data, dict) else {}
+    metadata = output.metadata if isinstance(output.metadata, dict) else {}
+    response: dict[str, Any] = {
+        "sample_id": case.name,
+        "source": source,
+        "returncode": int(data.get("returncode", metadata.get("returncode", 0))),
+        "image": str(prompt_row["image"]),
+        "wall_ms": float(output.timing_s) * 1000.0,
+    }
+    if dataset_kind == "image_classification_json":
+        response.update(
+            {
+                "top_class": int(data["top_class"]),
+                "top_score": float(data.get("top_score", 0.0)),
+                "num_classes": int(data.get("num_classes", 0)),
+            }
+        )
+        return response
+    if dataset_kind == "semantic_segmentation_json":
+        class_map_path = str(
+            data.get("class_map_path")
+            or data.get("segmentation_map_path")
+            or data.get("output_path")
+            or ""
+        )
+        if not class_map_path and data.get("class_map") is not None:
+            class_map_path = _persist_numpy_output(
+                data["class_map"], artifact_dir / case.name / f"{source}_class_map.npy"
+            )
+        if not class_map_path or not Path(class_map_path).is_file():
+            raise RuntimeError(f"{source} semantic segmentation produced no class map")
+        response["class_map_path"] = class_map_path
+        raw_class_map_path = str(data.get("raw_class_map_path") or "")
+        if raw_class_map_path:
+            if not Path(raw_class_map_path).is_file():
+                raise RuntimeError(
+                    f"{source} semantic segmentation raw class map does not exist: "
+                    f"{raw_class_map_path}"
+                )
+            response["raw_class_map_path"] = raw_class_map_path
+        response["visualization_path"] = str(
+            data.get("viz_path") or data.get("output_path") or ""
+        )
+        return response
+    if dataset_kind == "prompted_segmentation_json":
+        masks_path = str(data.get("masks_path", "") or "")
+        masks = data.get("masks")
+        if not masks_path and masks is not None:
+            masks_path = _persist_numpy_output(
+                masks, artifact_dir / case.name / f"{source}_masks.npy"
+            )
+        if not masks_path or not Path(masks_path).is_file():
+            raise RuntimeError(f"{source} prompted segmentation produced no masks")
+        scores = data.get("mask_scores") or data.get("iou_scores") or data.get("scores") or []
+        response.update(
+            {
+                "masks_path": masks_path,
+                "mask_scores": [float(value) for value in scores],
+                "num_masks": int(data.get("num_masks", 0)),
+                "point_x": prompt_row.get("point_x"),
+                "point_y": prompt_row.get("point_y"),
+                "text_prompt": str(prompt_row.get("text_prompt", "")),
+                "segmented_image_path": str(data.get("segmented_image_path", "") or ""),
+            }
+        )
+        return response
+    raise ValueError(f"Unsupported vision task dataset kind {dataset_kind!r}")
+
+
+def run_vision_hf_reference(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, reference, _runner = _load_vision_task_eval_plugins(work_dir)
+    manifest = work_manifest(work_dir)
+    dataset_kind = str(manifest.get("dataset_kind", ""))
+    task_eval_config = manifest.get("task_eval", {})
+    task_eval_config = task_eval_config if isinstance(task_eval_config, dict) else {}
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "hf_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "hf_predictions.json")
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_file:
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _vision_case_for_request(template, prompt_row, task_eval_config, index)
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                hf_python=sys.executable,
+                reference_python=sys.executable,
+            )
+            output = reference.run_stage(
+                case, _vision_full_inference_stage(case), context
+            )
+            response = _vision_response(
+                case=case,
+                source="hf",
+                output=output,
+                dataset_kind=dataset_kind,
+                prompt_row=prompt_row,
+                artifact_dir=artifacts_dir,
+            )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            print(
+                f"[task_eval.vision_hf] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
+def run_vision_trtfb(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, _reference, runner = _load_vision_task_eval_plugins(work_dir)
+    manifest = work_manifest(work_dir)
+    dataset_kind = str(manifest.get("dataset_kind", ""))
+    task_eval_config = manifest.get("task_eval", {})
+    task_eval_config = task_eval_config if isinstance(task_eval_config, dict) else {}
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    bundle_path = Path(args.bundle).resolve()
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_file:
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _vision_case_for_request(template, prompt_row, task_eval_config, index)
+            case.bundle = bundle_path.name
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                binary_path=str(args.trtmc_binary),
+                hf_python=str(getattr(args, "hf_python", "") or ""),
+                runtime_python=str(getattr(args, "hf_python", "") or ""),
+                engine_dir=str(bundle_path.parent),
+                model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
+            )
+            output = runner.run_stage(
+                case, _vision_full_inference_stage(case), context
+            )
+            response = _vision_response(
+                case=case,
+                source="trtfb",
+                output=output,
+                dataset_kind=dataset_kind,
+                prompt_row=prompt_row,
+                artifact_dir=artifacts_dir,
+            )
+            if response["returncode"] != 0:
+                raise RuntimeError(
+                    f"TRT vision run failed for {case.name}: "
+                    f"returncode={response['returncode']}"
+                )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            print(
+                f"[task_eval.vision_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
 def _load_diffusion_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
     task_eval_config = work_manifest(work_dir).get("task_eval", {})
     if not isinstance(task_eval_config, dict):
@@ -5891,6 +6429,9 @@ def run_encoder_embedding_hf_reference(args: argparse.Namespace) -> None:
 
 def run_hf_reference(args: argparse.Namespace) -> None:
     dataset_kind = _work_dataset_kind(Path(args.work_dir))
+    if _is_vision_task_dataset_kind(dataset_kind):
+        run_vision_hf_reference(args)
+        return
     if _is_encoder_embedding_dataset_kind(dataset_kind):
         run_encoder_embedding_hf_reference(args)
         return
@@ -6497,6 +7038,9 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
 def run_trtfb(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     dataset_kind = _work_dataset_kind(work_dir)
+    if _is_vision_task_dataset_kind(dataset_kind):
+        run_vision_trtfb(args)
+        return
     if _is_encoder_embedding_dataset_kind(dataset_kind):
         run_encoder_embedding_trtfb(args)
         return
@@ -7103,6 +7647,367 @@ def compare_encoder_embedding_prediction_sets(
     }
 
 
+def _task_eval_response_rows(data: dict[str, Any], label: str) -> list[dict[str, Any]]:
+    rows = data.get("responses", [])
+    if not isinstance(rows, list):
+        raise ValueError(f"{label} predictions must contain a response list")
+    return rows
+
+
+def compare_image_classification_prediction_sets(
+    hf_data: dict[str, Any],
+    trtfb_data: dict[str, Any],
+    answers: dict[str, Any],
+    *,
+    gates: dict[str, Any],
+) -> dict[str, Any]:
+    hf_rows = _task_eval_response_rows(hf_data, "HF")
+    trtfb_rows = _task_eval_response_rows(trtfb_data, "TRTMC")
+    requests = answers.get("requests", [])
+    if not isinstance(requests, list):
+        raise ValueError("Classification answers must contain requests")
+    hf_by_id = {str(row["sample_id"]): row for row in hf_rows}
+    trtfb_by_id = {str(row["sample_id"]): row for row in trtfb_rows}
+    cases: list[dict[str, Any]] = []
+    for request in requests:
+        sample_id = str(request.get("sample_id") or request.get("id") or "")
+        hf_row = hf_by_id.get(sample_id)
+        trtfb_row = trtfb_by_id.get(sample_id)
+        if hf_row is None or trtfb_row is None:
+            cases.append({"sample_id": sample_id, "passed": False, "error": "missing prediction"})
+            continue
+        label = int(request["label"])
+        hf_top = int(hf_row["top_class"])
+        trtfb_top = int(trtfb_row["top_class"])
+        cases.append(
+            {
+                "sample_id": sample_id,
+                "label": label,
+                "label_name": str(request.get("label_name", "")),
+                "hf_top_class": hf_top,
+                "trtfb_top_class": trtfb_top,
+                "hf_correct": hf_top == label,
+                "trtfb_correct": trtfb_top == label,
+                "top1_agreement": hf_top == trtfb_top,
+            }
+        )
+    valid = [case for case in cases if "error" not in case]
+    hf_accuracy = _mean([float(case["hf_correct"]) for case in valid])
+    trtfb_accuracy = _mean([float(case["trtfb_correct"]) for case in valid])
+    agreement = _mean([float(case["top1_agreement"]) for case in valid])
+    max_drop = float(gates.get("max_top1_accuracy_drop_from_hf", 0.01))
+    min_agreement = float(gates.get("min_top1_agreement", 0.98))
+    accuracy_drop = hf_accuracy - trtfb_accuracy
+    status = (
+        "passed"
+        if valid
+        and len(valid) == len(cases)
+        and accuracy_drop <= max_drop
+        and agreement >= min_agreement
+        else "failed"
+    )
+    return {
+        "status": status,
+        "valid_count": len(valid),
+        "sample_count": len(cases),
+        "hf_top1_accuracy": hf_accuracy,
+        "trtfb_top1_accuracy": trtfb_accuracy,
+        "top1_accuracy_drop_from_hf": accuracy_drop,
+        "top1_agreement": agreement,
+        "gates": {
+            "max_top1_accuracy_drop_from_hf": max_drop,
+            "min_top1_agreement": min_agreement,
+        },
+        "cases": cases,
+    }
+
+
+def _load_segmentation_array(path: str) -> Any:
+    import numpy as np
+
+    artifact = Path(path)
+    if artifact.suffix.lower() == ".npy":
+        return np.load(artifact, allow_pickle=False)
+    from PIL import Image
+
+    return np.asarray(Image.open(artifact).convert("L"))
+
+
+def _resize_label_array(values: Any, shape: tuple[int, int]) -> Any:
+    import numpy as np
+
+    array = np.asarray(values)
+    if array.shape == shape:
+        return array
+    from PIL import Image
+
+    resized = Image.fromarray(array.astype(np.uint8)).resize(
+        (shape[1], shape[0]), Image.Resampling.NEAREST
+    )
+    return np.asarray(resized)
+
+
+def _segmentation_confusion(
+    reference: Any,
+    prediction: Any,
+    *,
+    num_classes: int,
+    ignore_index: int | None = None,
+) -> Any:
+    import numpy as np
+
+    ref = np.asarray(reference, dtype=np.int64)
+    pred = _resize_label_array(prediction, ref.shape).astype(np.int64)
+    valid = (ref >= 0) & (ref < num_classes) & (pred >= 0) & (pred < num_classes)
+    if ignore_index is not None:
+        valid &= ref != ignore_index
+    encoded = num_classes * ref[valid] + pred[valid]
+    return np.bincount(encoded, minlength=num_classes * num_classes).reshape(
+        num_classes, num_classes
+    )
+
+
+def _segmentation_metrics(confusion: Any) -> dict[str, float]:
+    import numpy as np
+
+    matrix = np.asarray(confusion, dtype=np.float64)
+    true_positive = np.diag(matrix)
+    gt_total = matrix.sum(axis=1)
+    pred_total = matrix.sum(axis=0)
+    union = gt_total + pred_total - true_positive
+    present = union > 0
+    mean_iou = float(np.mean(true_positive[present] / union[present])) if present.any() else 0.0
+    total = matrix.sum()
+    pixel_accuracy = float(true_positive.sum() / total) if total > 0 else 0.0
+    return {"mean_iou": mean_iou, "pixel_accuracy": pixel_accuracy}
+
+
+def compare_semantic_segmentation_prediction_sets(
+    hf_data: dict[str, Any],
+    trtfb_data: dict[str, Any],
+    answers: dict[str, Any],
+    *,
+    gates: dict[str, Any],
+    num_classes: int,
+    ignore_index: int,
+) -> dict[str, Any]:
+    import numpy as np
+
+    hf_by_id = {
+        str(row["sample_id"]): row
+        for row in _task_eval_response_rows(hf_data, "HF")
+    }
+    trtfb_by_id = {
+        str(row["sample_id"]): row
+        for row in _task_eval_response_rows(trtfb_data, "TRTMC")
+    }
+    requests = answers.get("requests", [])
+    hf_ground = np.zeros((num_classes, num_classes), dtype=np.int64)
+    trtfb_ground = np.zeros_like(hf_ground)
+    backend = np.zeros_like(hf_ground)
+    cases: list[dict[str, Any]] = []
+    for request in requests:
+        sample_id = str(request.get("sample_id") or request.get("id") or "")
+        if sample_id not in hf_by_id or sample_id not in trtfb_by_id:
+            cases.append({"sample_id": sample_id, "passed": False, "error": "missing prediction"})
+            continue
+        ground_truth = _load_segmentation_array(str(request["mask"]))
+        hf_map = _load_segmentation_array(str(hf_by_id[sample_id]["class_map_path"]))
+        hf_backend_map = _load_segmentation_array(
+            str(
+                hf_by_id[sample_id].get("raw_class_map_path")
+                or hf_by_id[sample_id]["class_map_path"]
+            )
+        )
+        trtfb_map = _load_segmentation_array(
+            str(trtfb_by_id[sample_id]["class_map_path"])
+        )
+        hf_conf = _segmentation_confusion(
+            ground_truth,
+            hf_map,
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+        )
+        trtfb_conf = _segmentation_confusion(
+            ground_truth,
+            trtfb_map,
+            num_classes=num_classes,
+            ignore_index=ignore_index,
+        )
+        resized_hf = _resize_label_array(hf_backend_map, trtfb_map.shape)
+        backend_conf = _segmentation_confusion(
+            resized_hf,
+            trtfb_map,
+            num_classes=num_classes,
+        )
+        hf_ground += hf_conf
+        trtfb_ground += trtfb_conf
+        backend += backend_conf
+        case_backend = _segmentation_metrics(backend_conf)
+        cases.append(
+            {
+                "sample_id": sample_id,
+                "backend_pixel_agreement": case_backend["pixel_accuracy"],
+                "backend_mean_iou": case_backend["mean_iou"],
+                "hf_ground_truth_mean_iou": _segmentation_metrics(hf_conf)["mean_iou"],
+                "trtfb_ground_truth_mean_iou": _segmentation_metrics(trtfb_conf)["mean_iou"],
+            }
+        )
+    hf_metrics = _segmentation_metrics(hf_ground)
+    trtfb_metrics = _segmentation_metrics(trtfb_ground)
+    backend_metrics = _segmentation_metrics(backend)
+    min_pixel = float(gates.get("min_backend_pixel_agreement", 0.98))
+    min_backend_iou = float(gates.get("min_backend_mean_iou", 0.95))
+    max_drop = float(gates.get("max_mean_iou_drop_from_hf", 0.01))
+    mean_iou_drop = hf_metrics["mean_iou"] - trtfb_metrics["mean_iou"]
+    valid_count = sum("error" not in case for case in cases)
+    status = (
+        "passed"
+        if valid_count > 0
+        and valid_count == len(cases)
+        and backend_metrics["pixel_accuracy"] >= min_pixel
+        and backend_metrics["mean_iou"] >= min_backend_iou
+        and mean_iou_drop <= max_drop
+        else "failed"
+    )
+    return {
+        "status": status,
+        "sample_count": len(cases),
+        "valid_count": valid_count,
+        "hf_mean_iou": hf_metrics["mean_iou"],
+        "trtfb_mean_iou": trtfb_metrics["mean_iou"],
+        "mean_iou_drop_from_hf": mean_iou_drop,
+        "hf_pixel_accuracy": hf_metrics["pixel_accuracy"],
+        "trtfb_pixel_accuracy": trtfb_metrics["pixel_accuracy"],
+        "backend_mean_iou": backend_metrics["mean_iou"],
+        "backend_pixel_agreement": backend_metrics["pixel_accuracy"],
+        "gates": {
+            "min_backend_pixel_agreement": min_pixel,
+            "min_backend_mean_iou": min_backend_iou,
+            "max_mean_iou_drop_from_hf": max_drop,
+        },
+        "cases": cases,
+    }
+
+
+def _mask_stack(path: str) -> Any:
+    import numpy as np
+
+    masks = np.asarray(np.load(path, allow_pickle=False))
+    while masks.ndim > 3 and masks.shape[0] == 1:
+        masks = masks[0]
+    if masks.ndim == 2:
+        masks = masks[None, ...]
+    if masks.ndim != 3:
+        raise ValueError(f"Expected [mask,height,width] at {path}, got {masks.shape}")
+    return masks.astype(bool)
+
+
+def _selected_prompt_mask(masks: Any, scores: list[Any], prompt_mode: str) -> Any:
+    import numpy as np
+
+    if prompt_mode == "text":
+        return np.any(masks, axis=0)
+    index = int(np.argmax(np.asarray(scores, dtype=np.float64))) if scores else 0
+    return masks[min(index, masks.shape[0] - 1)]
+
+
+def _binary_mask_iou(left: Any, right: Any) -> float:
+    import numpy as np
+
+    left_mask = np.asarray(left, dtype=bool)
+    right_mask = _resize_label_array(np.asarray(right, dtype=np.uint8), left_mask.shape) > 0
+    intersection = np.logical_and(left_mask, right_mask).sum()
+    union = np.logical_or(left_mask, right_mask).sum()
+    return float(intersection / union) if union else 1.0
+
+
+def compare_prompted_segmentation_prediction_sets(
+    hf_data: dict[str, Any],
+    trtfb_data: dict[str, Any],
+    answers: dict[str, Any],
+    *,
+    gates: dict[str, Any],
+    prompt_mode: str,
+    ground_truth_mask_field: str,
+) -> dict[str, Any]:
+    hf_by_id = {
+        str(row["sample_id"]): row
+        for row in _task_eval_response_rows(hf_data, "HF")
+    }
+    trtfb_by_id = {
+        str(row["sample_id"]): row
+        for row in _task_eval_response_rows(trtfb_data, "TRTMC")
+    }
+    cases: list[dict[str, Any]] = []
+    for request in answers.get("requests", []):
+        sample_id = str(request.get("sample_id") or request.get("id") or "")
+        hf_row = hf_by_id.get(sample_id)
+        trtfb_row = trtfb_by_id.get(sample_id)
+        if hf_row is None or trtfb_row is None:
+            cases.append({"sample_id": sample_id, "passed": False, "error": "missing prediction"})
+            continue
+        hf_mask = _selected_prompt_mask(
+            _mask_stack(str(hf_row["masks_path"])),
+            list(hf_row.get("mask_scores", [])),
+            prompt_mode,
+        )
+        trtfb_mask = _selected_prompt_mask(
+            _mask_stack(str(trtfb_row["masks_path"])),
+            list(trtfb_row.get("mask_scores", [])),
+            prompt_mode,
+        )
+        ground_truth = _load_segmentation_array(str(request[ground_truth_mask_field])) > 0
+        backend_iou = _binary_mask_iou(hf_mask, trtfb_mask)
+        hf_gt_iou = _binary_mask_iou(ground_truth, hf_mask)
+        trtfb_gt_iou = _binary_mask_iou(ground_truth, trtfb_mask)
+        cases.append(
+            {
+                "sample_id": sample_id,
+                "prompt_mode": prompt_mode,
+                "text_prompt": str(request.get("text_prompt", "")),
+                "backend_mask_iou": backend_iou,
+                "hf_ground_truth_iou": hf_gt_iou,
+                "trtfb_ground_truth_iou": trtfb_gt_iou,
+                "ground_truth_iou_drop_from_hf": hf_gt_iou - trtfb_gt_iou,
+                "hf_segmented_image_path": str(hf_row.get("segmented_image_path", "")),
+                "trtfb_segmented_image_path": str(
+                    trtfb_row.get("segmented_image_path", "")
+                ),
+            }
+        )
+    valid = [case for case in cases if "error" not in case]
+    mean_backend_iou = _mean([float(case["backend_mask_iou"]) for case in valid])
+    hf_gt_iou = _mean([float(case["hf_ground_truth_iou"]) for case in valid])
+    trtfb_gt_iou = _mean([float(case["trtfb_ground_truth_iou"]) for case in valid])
+    min_backend_iou = float(gates.get("min_backend_mask_iou", 0.90))
+    max_gt_drop = float(gates.get("max_ground_truth_iou_drop_from_hf", 0.05))
+    gt_drop = hf_gt_iou - trtfb_gt_iou
+    status = (
+        "passed"
+        if valid
+        and len(valid) == len(cases)
+        and mean_backend_iou >= min_backend_iou
+        and gt_drop <= max_gt_drop
+        else "failed"
+    )
+    return {
+        "status": status,
+        "sample_count": len(cases),
+        "valid_count": len(valid),
+        "prompt_mode": prompt_mode,
+        "mean_backend_mask_iou": mean_backend_iou,
+        "hf_mean_ground_truth_iou": hf_gt_iou,
+        "trtfb_mean_ground_truth_iou": trtfb_gt_iou,
+        "ground_truth_iou_drop_from_hf": gt_drop,
+        "gates": {
+            "min_backend_mask_iou": min_backend_iou,
+            "max_ground_truth_iou_drop_from_hf": max_gt_drop,
+        },
+        "cases": cases,
+    }
+
+
 def write_encoder_embedding_summary_markdown(summary: dict[str, Any], path: Path) -> None:
     lines = [
         "# Encoder / Embedding Parity Summary",
@@ -7212,6 +8117,7 @@ def eval_one_model(
         and not _is_diffusion_media_dataset_kind(dataset_kind)
         and not _is_diffusion_text_dataset_kind(dataset_kind)
         and not _is_tts_dataset_kind(dataset_kind)
+        and not _is_vision_task_dataset_kind(dataset_kind)
     ):
         prompt_rows_path = work_dir / "prompts.jsonl"
         max_prompt_len = max_prompt_token_length(
@@ -7279,7 +8185,96 @@ def eval_one_model(
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 
-    if scorer == "encoder_embedding_parity":
+    if scorer == "image_classification_parity":
+        hf_data = json.loads(
+            (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
+        )
+        trtfb_data = json.loads(
+            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        )
+        summary = compare_image_classification_prediction_sets(
+            hf_data,
+            trtfb_data,
+            json.loads(answers_path.read_text(encoding="utf-8")),
+            gates=suite.get("gates", {}),
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "valid_count": summary["valid_count"],
+            "hf_top1_accuracy": summary["hf_top1_accuracy"],
+            "trtfb_top1_accuracy": summary["trtfb_top1_accuracy"],
+            "top1_accuracy_drop_from_hf": summary["top1_accuracy_drop_from_hf"],
+            "top1_agreement": summary["top1_agreement"],
+        }
+    elif scorer == "semantic_segmentation_parity":
+        hf_data = json.loads(
+            (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
+        )
+        trtfb_data = json.loads(
+            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        )
+        dataset_config = suite.get("dataset", {})
+        summary = compare_semantic_segmentation_prediction_sets(
+            hf_data,
+            trtfb_data,
+            json.loads(answers_path.read_text(encoding="utf-8")),
+            gates=suite.get("gates", {}),
+            num_classes=int(dataset_config.get("num_classes", 150)),
+            ignore_index=int(dataset_config.get("ignore_index", 255)),
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "valid_count": summary["valid_count"],
+            "hf_mean_iou": summary["hf_mean_iou"],
+            "trtfb_mean_iou": summary["trtfb_mean_iou"],
+            "mean_iou_drop_from_hf": summary["mean_iou_drop_from_hf"],
+            "backend_mean_iou": summary["backend_mean_iou"],
+            "backend_pixel_agreement": summary["backend_pixel_agreement"],
+        }
+    elif scorer == "prompted_segmentation_parity":
+        hf_data = json.loads(
+            (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
+        )
+        trtfb_data = json.loads(
+            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        )
+        summary = compare_prompted_segmentation_prediction_sets(
+            hf_data,
+            trtfb_data,
+            json.loads(answers_path.read_text(encoding="utf-8")),
+            gates=suite.get("gates", {}),
+            prompt_mode=str(task_eval_config.get("prompt_mode", "")),
+            ground_truth_mask_field=str(
+                task_eval_config.get("ground_truth_mask_field", "instance_mask")
+            ),
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "valid_count": summary["valid_count"],
+            "prompt_mode": summary["prompt_mode"],
+            "mean_backend_mask_iou": summary["mean_backend_mask_iou"],
+            "hf_mean_ground_truth_iou": summary["hf_mean_ground_truth_iou"],
+            "trtfb_mean_ground_truth_iou": summary["trtfb_mean_ground_truth_iou"],
+            "ground_truth_iou_drop_from_hf": summary[
+                "ground_truth_iou_drop_from_hf"
+            ],
+        }
+    elif scorer == "encoder_embedding_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         trtfb_data = json.loads(
             (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
@@ -7817,6 +8812,28 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
         return (
             f"model={model['name']} gen_ppl={ppl} "
             f"entropy={result['unigram_entropy']:.4f} "
+            f"status={result.get('status', '')} {common}"
+        )
+    if result.get("mode") == "image_classification_parity":
+        return (
+            f"model={model['name']} hf_top1={result['hf_top1_accuracy']:.4f} "
+            f"trtfb_top1={result['trtfb_top1_accuracy']:.4f} "
+            f"top1_agreement={result['top1_agreement']:.4f} "
+            f"status={result.get('status', '')} {common}"
+        )
+    if result.get("mode") == "semantic_segmentation_parity":
+        return (
+            f"model={model['name']} hf_miou={result['hf_mean_iou']:.4f} "
+            f"trtfb_miou={result['trtfb_mean_iou']:.4f} "
+            f"backend_miou={result['backend_mean_iou']:.4f} "
+            f"status={result.get('status', '')} {common}"
+        )
+    if result.get("mode") == "prompted_segmentation_parity":
+        return (
+            f"model={model['name']} backend_mask_iou="
+            f"{result['mean_backend_mask_iou']:.4f} "
+            f"hf_gt_iou={result['hf_mean_ground_truth_iou']:.4f} "
+            f"trtfb_gt_iou={result['trtfb_mean_ground_truth_iou']:.4f} "
             f"status={result.get('status', '')} {common}"
         )
     return (
@@ -8380,6 +9397,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
         "unconditional_text_json",
         "seedtts_json",
         "sts_pair_jsonl",
+        "image_classification_json",
+        "semantic_segmentation_json",
+        "prompted_segmentation_json",
     }:
         raise ValueError(f"eval does not support dataset kind {dataset_kind!r}")
     models = load_manifest_records(Path(args.models_dir))

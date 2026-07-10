@@ -297,6 +297,321 @@ def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
     }
 
 
+def test_default_suites_include_model_aligned_vision_tasks() -> None:
+    suites = task_eval.load_suites()
+
+    classification = task_eval.suite_by_id(suites, "imagenette_image_classification")
+    assert classification["dataset"]["kind"] == "image_classification_json"
+    assert classification["scoring"]["task_metric"] == "top1_accuracy"
+    assert classification["default_model_names"] == [
+        "timm-vit-base-p16-224-augreg-in21k-ft-in1k"
+    ]
+
+    semantic = task_eval.suite_by_id(suites, "ade20k_semantic_segmentation")
+    assert semantic["dataset"]["kind"] == "semantic_segmentation_json"
+    assert semantic["dataset"]["num_classes"] == 150
+    assert semantic["scoring"]["task_metric"] == "mean_iou"
+    assert semantic["default_model_names"] == ["segformer-b0-ade"]
+
+    prompted = task_eval.suite_by_id(suites, "coco2017_prompted_segmentation")
+    assert prompted["dataset"]["kind"] == "prompted_segmentation_json"
+    assert prompted["default_model_names"] == ["sam-vit-base"]
+    assert prompted["model_overrides"]["by_family"]["sam"]["prompt_mode"] == "point"
+
+
+def test_prepare_vision_datasets_resolves_model_specific_assets(tmp_path: Path) -> None:
+    image = tmp_path / "image.jpg"
+    mask = tmp_path / "mask.png"
+    category_mask = tmp_path / "category.png"
+    for path in (image, mask, category_mask):
+        path.write_bytes(b"fixture")
+
+    cases = [
+        (
+            "imagenette_image_classification",
+            {
+                "id": "class-1",
+                "image": image.name,
+                "label": 217,
+                "label_name": "English springer",
+                "synset": "n02102040",
+            },
+            task_eval.prepare_image_classification_dataset,
+        ),
+        (
+            "ade20k_semantic_segmentation",
+            {"id": "seg-1", "image": image.name, "mask": mask.name, "subset": "validation"},
+            task_eval.prepare_semantic_segmentation_dataset,
+        ),
+        (
+            "coco2017_prompted_segmentation",
+            {
+                "id": "prompt-1",
+                "image": image.name,
+                "instance_mask": mask.name,
+                "category_mask": category_mask.name,
+                "point_x": 0.25,
+                "point_y": 0.75,
+                "text_prompt": "dog",
+                "category": "dog",
+            },
+            task_eval.prepare_prompted_segmentation_dataset,
+        ),
+    ]
+    suites = task_eval.load_suites()
+    for suite_id, request, prepare in cases:
+        dataset = tmp_path / f"{suite_id}.json"
+        dataset.write_text(
+            json.dumps({"dataset": suite_id, "requests": [request]}), encoding="utf-8"
+        )
+        outputs = prepare(
+            dataset_path=dataset,
+            work_dir=tmp_path / f"work-{suite_id}",
+            suite=task_eval.suite_by_id(suites, suite_id),
+        )
+        rows = task_eval.load_jsonl(outputs["prompts"])
+        assert len(rows) == 1
+        assert rows[0]["image"] == str(image.resolve())
+        manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+        assert manifest["request_count"] == 1
+
+
+def test_image_classification_parity_separates_accuracy_and_agreement() -> None:
+    answers = {
+        "requests": [
+            {"sample_id": "a", "label": 1, "label_name": "one"},
+            {"sample_id": "b", "label": 2, "label_name": "two"},
+        ]
+    }
+    hf = {"responses": [{"sample_id": "a", "top_class": 1}, {"sample_id": "b", "top_class": 0}]}
+    trtfb = {
+        "responses": [
+            {"sample_id": "a", "top_class": 1},
+            {"sample_id": "b", "top_class": 0},
+        ]
+    }
+
+    summary = task_eval.compare_image_classification_prediction_sets(
+        hf, trtfb, answers, gates={"min_top1_agreement": 1.0}
+    )
+
+    assert summary["status"] == "passed"
+    assert summary["hf_top1_accuracy"] == 0.5
+    assert summary["trtfb_top1_accuracy"] == 0.5
+    assert summary["top1_agreement"] == 1.0
+
+
+def test_image_classification_runner_forwards_model_plugin_dir(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from tests.e2e.models.timm_vit.e2e_plugins.runners import image_classification
+    from tests.e2e_harness.contracts import RunContext
+
+    case = task_eval.load_manifest(
+        Path(
+            "tests/e2e/models/timm_vit/manifests/"
+            "timm-vit-base-p16-224-augreg-in21k-ft-in1k.json"
+        )
+    )
+    commands = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return SimpleNamespace(returncode=0, stdout='{"top_class": 1}', stderr="")
+
+    monkeypatch.setattr(image_classification.subprocess, "run", fake_run)
+    context = RunContext(
+        case=case,
+        binary_path="/tmp/trtmc",
+        engine_dir="/tmp/engines",
+        model_plugin_dir="/tmp/plugins/timm_vit",
+    )
+
+    image_classification.ImageClassificationRunner().run_stage(
+        case, case.stages[0], context
+    )
+
+    assert commands[0][-2:] == ["--model-plugin-dir", "/tmp/plugins/timm_vit"]
+
+
+def test_semantic_segmentation_parity_reports_dataset_miou(tmp_path: Path) -> None:
+    import numpy as np
+
+    ground = np.array([[0, 0], [1, 1]], dtype=np.uint8)
+    hf_map = ground.copy()
+    trtfb_map = ground.copy()
+    paths = {}
+    for name, values in (("ground", ground), ("hf", hf_map), ("trtfb", trtfb_map)):
+        path = tmp_path / f"{name}.npy"
+        np.save(path, values)
+        paths[name] = path
+    answers = {"requests": [{"sample_id": "seg", "mask": str(paths["ground"])}]}
+    hf = {"responses": [{"sample_id": "seg", "class_map_path": str(paths["hf"])}]}
+    trtfb = {
+        "responses": [{"sample_id": "seg", "class_map_path": str(paths["trtfb"])}]
+    }
+
+    summary = task_eval.compare_semantic_segmentation_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        gates={},
+        num_classes=2,
+        ignore_index=255,
+    )
+
+    assert summary["status"] == "passed"
+    assert summary["hf_mean_iou"] == 1.0
+    assert summary["trtfb_mean_iou"] == 1.0
+    assert summary["backend_pixel_agreement"] == 1.0
+
+
+def test_semantic_segmentation_uses_raw_hf_map_for_backend_parity(
+    tmp_path: Path,
+) -> None:
+    import numpy as np
+
+    ground = np.array([[0, 0], [1, 1]], dtype=np.uint8)
+    hf_postprocessed = ground.copy()
+    hf_raw = np.array([[0]], dtype=np.uint8)
+    trtfb_raw = hf_raw.copy()
+    paths = {}
+    for name, values in (
+        ("ground", ground),
+        ("hf", hf_postprocessed),
+        ("hf_raw", hf_raw),
+        ("trtfb", trtfb_raw),
+    ):
+        path = tmp_path / f"{name}.npy"
+        np.save(path, values)
+        paths[name] = path
+    answers = {"requests": [{"sample_id": "seg", "mask": str(paths["ground"])}]}
+    hf = {
+        "responses": [
+            {
+                "sample_id": "seg",
+                "class_map_path": str(paths["hf"]),
+                "raw_class_map_path": str(paths["hf_raw"]),
+            }
+        ]
+    }
+    trtfb = {
+        "responses": [{"sample_id": "seg", "class_map_path": str(paths["trtfb"])}]
+    }
+
+    summary = task_eval.compare_semantic_segmentation_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        gates={"max_mean_iou_drop_from_hf": 1.0},
+        num_classes=2,
+        ignore_index=255,
+    )
+
+    assert summary["hf_mean_iou"] == 1.0
+    assert summary["backend_pixel_agreement"] == 1.0
+    assert summary["backend_mean_iou"] == 1.0
+
+
+def test_prompted_segmentation_uses_family_prompt_semantics(tmp_path: Path) -> None:
+    import numpy as np
+
+    ground = np.array([[1, 1], [0, 0]], dtype=np.uint8)
+    masks = np.stack([ground, np.zeros_like(ground)])
+    ground_path = tmp_path / "ground.npy"
+    hf_path = tmp_path / "hf.npy"
+    trtfb_path = tmp_path / "trtfb.npy"
+    np.save(ground_path, ground)
+    np.save(hf_path, masks)
+    np.save(trtfb_path, masks)
+    answers = {
+        "requests": [
+            {
+                "sample_id": "prompt",
+                "instance_mask": str(ground_path),
+                "category_mask": str(ground_path),
+                "text_prompt": "object",
+            }
+        ]
+    }
+    hf = {
+        "responses": [
+            {"sample_id": "prompt", "masks_path": str(hf_path), "mask_scores": [0.9, 0.1]}
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {
+                "sample_id": "prompt",
+                "masks_path": str(trtfb_path),
+                "mask_scores": [0.9, 0.1],
+            }
+        ]
+    }
+
+    point = task_eval.compare_prompted_segmentation_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        gates={},
+        prompt_mode="point",
+        ground_truth_mask_field="instance_mask",
+    )
+    text = task_eval.compare_prompted_segmentation_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        gates={},
+        prompt_mode="text",
+        ground_truth_mask_field="category_mask",
+    )
+
+    assert point["status"] == "passed"
+    assert text["status"] == "passed"
+    assert point["mean_backend_mask_iou"] == 1.0
+    assert text["mean_backend_mask_iou"] == 1.0
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (
+            {
+                "mode": "image_classification_parity",
+                "hf_top1_accuracy": 1.0,
+                "trtfb_top1_accuracy": 1.0,
+                "top1_agreement": 1.0,
+            },
+            "hf_top1=1.0000",
+        ),
+        (
+            {
+                "mode": "semantic_segmentation_parity",
+                "hf_mean_iou": 0.5,
+                "trtfb_mean_iou": 0.5,
+                "backend_mean_iou": 1.0,
+            },
+            "backend_miou=1.0000",
+        ),
+        (
+            {
+                "mode": "prompted_segmentation_parity",
+                "mean_backend_mask_iou": 1.0,
+                "hf_mean_ground_truth_iou": 0.8,
+                "trtfb_mean_ground_truth_iou": 0.8,
+            },
+            "backend_mask_iou=1.0000",
+        ),
+    ],
+)
+def test_vision_result_lines_use_task_specific_metrics(result, expected) -> None:
+    result.update({"hf_reused": False, "bundle_built": False, "status": "passed"})
+
+    line = task_eval._format_result_line({"name": "vision-model"}, result)
+
+    assert expected in line
+
+
 def test_default_suites_include_encoder_embedding_parity() -> None:
     suite = task_eval.suite_by_id(
         task_eval.load_suites(), "stsbenchmark_encoder_embedding_parity"

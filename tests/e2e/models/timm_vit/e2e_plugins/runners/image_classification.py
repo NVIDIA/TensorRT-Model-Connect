@@ -119,6 +119,8 @@ class ImageClassificationRunner:
         runtime_cli_python = ctx.runtime_cli_hf_python()
         if runtime_cli_python:
             cmd.extend(["--hf-python", runtime_cli_python])
+        if ctx.model_plugin_dir:
+            cmd.extend(["--model-plugin-dir", ctx.model_plugin_dir])
 
         env = dict(os.environ)
         if ctx.ld_library_path:
