@@ -16,8 +16,8 @@
 #include "trtmc/tokenizer.h"
 #include "utils/wav_reader.h"
 
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -52,17 +52,25 @@ struct CanaryStageTimestamps {
     CanaryClock::time_point tokenize_end;
 };
 
+bool is_canary_control_token_start(const std::string& text, std::size_t position) {
+    return text[position] == '<' && position + 1 < text.size() && text[position + 1] == '|';
+}
+
+bool is_canary_control_token_end(const std::string& text, std::size_t position) {
+    return text[position] == '>' && position > 0 && text[position - 1] == '|';
+}
+
 std::string remove_punctuation_outside_control_tokens(const std::string& text) {
     std::string cleaned;
     cleaned.reserve(text.size());
     bool in_control_token = false;
     for (std::size_t i = 0; i < text.size(); ++i) {
         const unsigned char ch = static_cast<unsigned char>(text[i]);
-        if (!in_control_token && ch == '<' && i + 1 < text.size() && text[i + 1] == '|')
+        if (!in_control_token && is_canary_control_token_start(text, i))
             in_control_token = true;
         if (in_control_token || std::ispunct(ch) == 0)
             cleaned.push_back(static_cast<char>(ch));
-        if (in_control_token && ch == '>' && i > 0 && text[i - 1] == '|')
+        if (in_control_token && is_canary_control_token_end(text, i))
             in_control_token = false;
     }
     return cleaned;
@@ -82,6 +90,88 @@ void report_canary_stage_timing(bool enabled, const CanaryStageTimestamps& times
            << ",\"total_ms\":" << elapsed_ms(timestamps.transcribe_start, timestamps.tokenize_end)
            << '}';
     std::cerr << timing.str() << std::endl;
+}
+
+void validate_canary_audio_input(const float* audio_data, int32_t num_samples) {
+    if (audio_data == nullptr || num_samples <= 0) {
+        throw std::invalid_argument("Canary transcription requires non-empty audio samples");
+    }
+}
+
+void validate_canary_output_budget(const CanaryConfig& model, const TranscriptionConfig& cfg,
+                                   std::size_t prompt_tokens) {
+    const int32_t available_output_tokens =
+        model.max_target_positions - static_cast<int32_t>(prompt_tokens);
+    if (available_output_tokens <= 0 || cfg.max_output_tokens > available_output_tokens) {
+        throw std::invalid_argument("Canary max_output_tokens must be in [1, " +
+                                    std::to_string(std::max(available_output_tokens, 0)) +
+                                    "] after accounting for the decoder prompt");
+    }
+}
+
+double validate_canary_input_duration(int32_t num_samples, int32_t sample_rate,
+                                      const TranscriptionConfig& cfg) {
+    const double duration_seconds =
+        static_cast<double>(num_samples) / static_cast<double>(sample_rate);
+    if (cfg.max_input_duration_seconds > 0.0F &&
+        duration_seconds > static_cast<double>(cfg.max_input_duration_seconds) + 1.0e-6) {
+        throw std::invalid_argument("Canary input duration " + std::to_string(duration_seconds) +
+                                    " seconds exceeds max_input_duration_seconds=" +
+                                    std::to_string(cfg.max_input_duration_seconds));
+    }
+    return duration_seconds;
+}
+
+double resolve_canary_segment_duration(double input_duration_seconds, double model_segment_seconds,
+                                       const TranscriptionConfig& cfg) {
+    const double segment_seconds = cfg.segment_duration_seconds > 0.0F
+                                       ? static_cast<double>(cfg.segment_duration_seconds)
+                                       : model_segment_seconds;
+    if (segment_seconds <= 0.0 || segment_seconds > model_segment_seconds) {
+        throw std::invalid_argument(
+            "Canary segment_duration_seconds must be > 0 and <= the bundle limit of " +
+            std::to_string(model_segment_seconds) + " seconds");
+    }
+    if (cfg.segment_duration_seconds <= 0.0F && input_duration_seconds > model_segment_seconds) {
+        throw std::invalid_argument(
+            "Canary input exceeds the bundle's single-segment limit of " +
+            std::to_string(model_segment_seconds) +
+            " seconds; set segment_duration_seconds to enable segmented decoding");
+    }
+    return segment_seconds;
+}
+
+int32_t canary_segment_sample_count(double segment_seconds, int32_t sample_rate) {
+    const int64_t segment_samples =
+        static_cast<int64_t>(std::llround(segment_seconds * static_cast<double>(sample_rate)));
+    if (segment_samples <= 0 || segment_samples > std::numeric_limits<int32_t>::max()) {
+        throw std::invalid_argument("Canary segment duration produces an invalid sample count");
+    }
+    return static_cast<int32_t>(segment_samples);
+}
+
+void append_canary_transcription_segment(TextResult& combined, TextResult segment, int64_t offset,
+                                         int32_t count, int32_t sample_rate,
+                                         const TranscriptionConfig& cfg) {
+    if (!cfg.punctuation) {
+        segment.text = remove_punctuation_outside_control_tokens(segment.text);
+    }
+    if (cfg.timestamps) {
+        TranscriptionSegment timed;
+        timed.start_seconds = static_cast<double>(offset) / static_cast<double>(sample_rate);
+        timed.end_seconds = static_cast<double>(offset + count) / static_cast<double>(sample_rate);
+        timed.text = segment.text;
+        timed.token_ids = segment.token_ids;
+        combined.segments.push_back(std::move(timed));
+    }
+    if (!combined.text.empty() && !segment.text.empty()) {
+        combined.text += '\n';
+    }
+    combined.text += segment.text;
+    combined.token_ids.insert(combined.token_ids.end(), segment.token_ids.begin(),
+                              segment.token_ids.end());
+    combined.prefill_ms += segment.prefill_ms;
+    combined.decode_ms += segment.decode_ms;
 }
 
 } // namespace
@@ -151,51 +241,18 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
 
 TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_samples,
                                       const TranscriptionConfig& cfg) {
-    if (audio_data == nullptr || num_samples <= 0)
-        throw std::invalid_argument("Canary transcription requires non-empty audio samples");
+    validate_canary_audio_input(audio_data, num_samples);
 
     auto initial_tokens = make_canary_request_tokens(canary_config_, cfg, tokenizer_.get());
-    const int32_t available_output_tokens =
-        canary_config_.max_target_positions - static_cast<int32_t>(initial_tokens.size());
-    if (available_output_tokens <= 0 || cfg.max_output_tokens > available_output_tokens) {
-        throw std::invalid_argument("Canary max_output_tokens must be in [1, " +
-                                    std::to_string(std::max(available_output_tokens, 0)) +
-                                    "] after accounting for the decoder prompt");
-    }
+    validate_canary_output_budget(canary_config_, cfg, initial_tokens.size());
 
-    const int32_t sample_rate = cfg.input_sample_rate > 0 ? cfg.input_sample_rate
-                                                          : mel_sampling_rate_;
-    const double duration_seconds =
-        static_cast<double>(num_samples) / static_cast<double>(sample_rate);
-    if (cfg.max_input_duration_seconds > 0.0F &&
-        duration_seconds > static_cast<double>(cfg.max_input_duration_seconds) + 1.0e-6) {
-        throw std::invalid_argument(
-            "Canary input duration " + std::to_string(duration_seconds) +
-            " seconds exceeds max_input_duration_seconds=" +
-            std::to_string(cfg.max_input_duration_seconds));
-    }
-
+    const int32_t sample_rate =
+        cfg.input_sample_rate > 0 ? cfg.input_sample_rate : mel_sampling_rate_;
+    const double duration_seconds = validate_canary_input_duration(num_samples, sample_rate, cfg);
     const double model_segment_seconds = static_cast<double>(mel_chunk_length_);
-    double segment_seconds = static_cast<double>(cfg.segment_duration_seconds);
-    if (segment_seconds <= 0.0)
-        segment_seconds = model_segment_seconds;
-    if (segment_seconds <= 0.0 || segment_seconds > model_segment_seconds) {
-        throw std::invalid_argument(
-            "Canary segment_duration_seconds must be > 0 and <= the bundle limit of " +
-            std::to_string(model_segment_seconds) + " seconds");
-    }
-    if (cfg.segment_duration_seconds <= 0.0F && duration_seconds > model_segment_seconds) {
-        throw std::invalid_argument(
-            "Canary input exceeds the bundle's single-segment limit of " +
-            std::to_string(model_segment_seconds) +
-            " seconds; set segment_duration_seconds to enable segmented decoding");
-    }
-
-    const int64_t segment_samples_64 =
-        static_cast<int64_t>(std::llround(segment_seconds * static_cast<double>(sample_rate)));
-    if (segment_samples_64 <= 0 || segment_samples_64 > std::numeric_limits<int32_t>::max())
-        throw std::invalid_argument("Canary segment duration produces an invalid sample count");
-    const int32_t segment_samples = static_cast<int32_t>(segment_samples_64);
+    const double segment_seconds =
+        resolve_canary_segment_duration(duration_seconds, model_segment_seconds, cfg);
+    const int32_t segment_samples = canary_segment_sample_count(segment_seconds, sample_rate);
 
     TextResult combined;
     for (int64_t offset = 0; offset < num_samples; offset += segment_samples) {
@@ -203,25 +260,8 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
             std::min<int64_t>(segment_samples, static_cast<int64_t>(num_samples) - offset));
         auto segment = transcribe_segment(audio_data + offset, count, sample_rate, initial_tokens,
                                           cfg.max_output_tokens, cfg.beam_size);
-        if (!cfg.punctuation)
-            segment.text = remove_punctuation_outside_control_tokens(segment.text);
-        if (cfg.timestamps) {
-            TranscriptionSegment timed;
-            timed.start_seconds =
-                static_cast<double>(offset) / static_cast<double>(sample_rate);
-            timed.end_seconds =
-                static_cast<double>(offset + count) / static_cast<double>(sample_rate);
-            timed.text = segment.text;
-            timed.token_ids = segment.token_ids;
-            combined.segments.push_back(std::move(timed));
-        }
-        if (!combined.text.empty() && !segment.text.empty())
-            combined.text += '\n';
-        combined.text += segment.text;
-        combined.token_ids.insert(combined.token_ids.end(), segment.token_ids.begin(),
-                                  segment.token_ids.end());
-        combined.prefill_ms += segment.prefill_ms;
-        combined.decode_ms += segment.decode_ms;
+        append_canary_transcription_segment(combined, std::move(segment), offset, count,
+                                            sample_rate, cfg);
     }
     return combined;
 }
