@@ -210,6 +210,36 @@ jobs:
             echo "- Unit scope: \`$UNIT_SCOPE\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  source-quality:
+    name: Source quality
+    needs: legal
+    if: ${{ needs.legal.outputs.authorized == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      CI_BASE_REF: ${{ needs.legal.outputs.base_sha }}
+
+    steps:
+      - name: Check out pinned merge snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install source quality tools
+        run: python -m pip install --disable-pip-version-check --quiet lizard ruff clang-format
+
+      - name: Check source quality
+        run: bash .github/scripts/run-trtmc-ci.sh source-quality
+
   unit-tests:
     name: 3 / Unit / C++ and Python
     needs:
@@ -614,6 +644,7 @@ jobs:
     needs:
       - legal
       - impact
+      - source-quality
       - unit-tests
       - model-proof
       - no-model
@@ -630,6 +661,7 @@ jobs:
           TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
           LEGAL_RESULT: ${{ needs.legal.result }}
           IMPACT_RESULT: ${{ needs.impact.result }}
+          SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
           RUN_UNIT_TESTS: ${{ needs.impact.outputs.run_unit_tests }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
@@ -657,6 +689,10 @@ jobs:
           test -n "$TESTED_SHA"
           test "$IMPACT_RESULT" = "success" || {
             echo "::error::Ownership and impact result: $IMPACT_RESULT"
+            exit 1
+          }
+          test "$SOURCE_QUALITY_RESULT" = "success" || {
+            echo "::error::Source quality result: $SOURCE_QUALITY_RESULT"
             exit 1
           }
           case "$RUN_UNIT_TESTS" in

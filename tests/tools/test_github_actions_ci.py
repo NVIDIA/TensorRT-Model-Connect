@@ -492,6 +492,39 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert 'test "$REPORT_RESULT" = "success"' in required
 
 
+def test_premerge_ci_requires_gpu_free_source_quality() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
+    source_quality = workflow.split("\n  source-quality:", maxsplit=1)[1].split(
+        "\n  unit-tests:", maxsplit=1
+    )[0]
+    required = workflow.split("\n  required:", maxsplit=1)[1]
+    stage = (REPO_ROOT / ".github/scripts/run-trtmc-ci.sh").read_text()
+    source_quality_stage = stage.split("    source-quality)", maxsplit=1)[1].split(
+        "      ;;", maxsplit=1
+    )[0]
+
+    assert "name: Source quality" in source_quality
+    assert "needs: legal" in source_quality
+    assert "needs.legal.outputs.authorized == 'true'" in source_quality
+    assert "runs-on: ubuntu-latest" in source_quality
+    assert "CI_BASE_REF: ${{ needs.legal.outputs.base_sha }}" in source_quality
+    assert "ref: ${{ needs.legal.outputs.tested_sha }}" in source_quality
+    assert "fetch-depth: 0" in source_quality
+    assert "actions/setup-python@v5" in source_quality
+    assert "pip install --disable-pip-version-check --quiet lizard ruff clang-format" in source_quality
+    assert "bash .github/scripts/run-trtmc-ci.sh source-quality" in source_quality
+    assert "self-hosted" not in source_quality
+    assert "docker" not in source_quality.lower()
+    assert "cuda" not in source_quality.lower()
+
+    assert 'run_step "Check cyclomatic complexity" check_cyclomatic_complexity' in source_quality_stage
+    assert 'run_step "Lint changed files" lint_changed_files' in source_quality_stage
+
+    assert "- source-quality" in required
+    assert "SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}" in required
+    assert 'test "$SOURCE_QUALITY_RESULT" = "success"' in required
+
+
 def test_premerge_report_bootstrap_names_upstream_failure_before_checkout(
     tmp_path: Path,
 ) -> None:

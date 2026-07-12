@@ -1945,6 +1945,10 @@ run_stage() {
       run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
       run_step "Lint changed files" lint_changed_files
       ;;
+    source-quality)
+      run_step "Check cyclomatic complexity" check_cyclomatic_complexity
+      run_step "Lint changed files" lint_changed_files
+      ;;
     cpp-unit)
       run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment
       run_step "C++ unit tests" run_cpp_unit_tests
