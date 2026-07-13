@@ -156,6 +156,7 @@ shared_builder_module python/tensorrt_model_connect/config.py # shared Python bu
 shared_builder_module python/tensorrt_model_connect/debug_runner.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_build_budget.py # shared build-budget policy surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_builder.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/hf_snapshot.py # shared HF snapshot selection used by every builder and gated offline preflight; broad all-model impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_defs/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/engine_defs/base.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/fp8_calibrate.py # shared Python builder surface; broad builder impact is intentional
