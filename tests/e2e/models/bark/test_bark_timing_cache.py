@@ -14,9 +14,24 @@ from tensorrt_model_connect.families.bark import timing_cache
 class _FakeCache:
     def __init__(self, payload: bytes):
         self.payload = bytearray(payload)
+        self.tactics = {"0x01": SimpleNamespace(tacticHash=101, timingMSec=1.0)}
+        self.updated_keys: list[str] = []
 
     def serialize(self) -> bytes:
         return bytes(self.payload)
+
+    def queryKeys(self) -> list[str]:
+        return list(self.tactics)
+
+    def query(self, key: str):
+        return self.tactics[key]
+
+    def update(self, key: str, value) -> bool:
+        if key not in self.tactics:
+            return False
+        self.updated_keys.append(key)
+        self.tactics[key] = value
+        return True
 
 
 class _FakeConfig:
@@ -27,6 +42,7 @@ class _FakeConfig:
         self.max_num_tactics = -1
         self.avg_timing_iterations = -1
         self.created_payloads: list[bytes] = []
+        self.ignore_mismatches: list[bool] = []
 
     def set_flag(self, flag: str) -> None:
         self.flags.append(flag)
@@ -36,7 +52,7 @@ class _FakeConfig:
         return _FakeCache(payload)
 
     def set_timing_cache(self, cache: _FakeCache, ignore_mismatch: bool) -> bool:
-        assert ignore_mismatch is False
+        self.ignore_mismatches.append(ignore_mismatch)
         self.cache = cache
         return True
 
@@ -45,8 +61,17 @@ class _FakeConfig:
 
 
 class _FakeBuilder:
-    def __init__(self, appended_payload: bytes = b""):
+    def __init__(
+        self,
+        appended_payload: bytes = b"",
+        tactic_hash: int | None = None,
+        timing_msec: float | None = None,
+        add_tactic: bool = False,
+    ):
         self.appended_payload = appended_payload
+        self.tactic_hash = tactic_hash
+        self.timing_msec = timing_msec
+        self.add_tactic = add_tactic
         self.calls = 0
 
     def build_serialized_network(self, network, config):
@@ -55,6 +80,19 @@ class _FakeBuilder:
         if self.appended_payload:
             assert config.cache is not None
             config.cache.payload.extend(self.appended_payload)
+        if self.tactic_hash is not None:
+            assert config.cache is not None
+            config.cache.tactics["0x01"] = SimpleNamespace(
+                tacticHash=self.tactic_hash, timingMSec=2.0
+            )
+        if self.timing_msec is not None:
+            assert config.cache is not None
+            config.cache.tactics["0x01"] = SimpleNamespace(
+                tacticHash=101, timingMSec=self.timing_msec
+            )
+        if self.add_tactic:
+            assert config.cache is not None
+            config.cache.tactics["0x02"] = SimpleNamespace(tacticHash=303, timingMSec=3.0)
         return b"plan"
 
 
@@ -107,11 +145,12 @@ def test_record_mode_accumulates_an_editable_cache(
     assert first_config.builder_optimization_level == 3
     assert first_config.max_num_tactics == 7
     assert first_config.avg_timing_iterations == 5
+    assert first_config.ignore_mismatches == [False]
 
 
-@pytest.mark.parametrize("mutate_cache", [False, True])
-def test_verified_mode_is_strict_and_rejects_tactic_updates(
-    monkeypatch, tmp_path, fake_builder_flags, mutate_cache
+@pytest.mark.parametrize("mutate_serialized_cache", [False, True])
+def test_verified_mode_accepts_device_metadata_changes_when_tactics_are_unchanged(
+    monkeypatch, tmp_path, fake_builder_flags, mutate_serialized_cache
 ) -> None:
     cache_path = tmp_path / "bark.cache"
     payload = b"verified-tactics"
@@ -120,14 +159,11 @@ def test_verified_mode_is_strict_and_rejects_tactic_updates(
     monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_PATH", str(cache_path))
     monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_SHA256", hashlib.sha256(payload).hexdigest())
     config = _FakeConfig()
-    builder = _FakeBuilder(b"-new-tactic" if mutate_cache else b"")
+    builder = _FakeBuilder(b"-device-metadata" if mutate_serialized_cache else b"")
 
-    if mutate_cache:
-        with pytest.raises(RuntimeError, match="timing-cache miss or tactic update"):
-            timing_cache.build_bark_serialized_network(builder, "network", config)
-    else:
-        plan = timing_cache.build_bark_serialized_network(builder, "network", config)
-        assert plan == b"plan"
+    plan = timing_cache.build_bark_serialized_network(builder, "network", config)
+
+    assert plan == b"plan"
 
     assert config.created_payloads == [payload]
     assert config.flags == [
@@ -135,7 +171,57 @@ def test_verified_mode_is_strict_and_rejects_tactic_updates(
         "no-compilation-cache",
         "error-on-miss",
     ]
+    assert config.ignore_mismatches == [True]
+    assert config.cache is not None
+    assert config.cache.updated_keys == ["0x01"]
     assert cache_path.read_bytes() == payload
+
+
+def test_verified_mode_rejects_tactic_updates(monkeypatch, tmp_path, fake_builder_flags) -> None:
+    cache_path = tmp_path / "bark.cache"
+    payload = b"verified-tactics"
+    cache_path.write_bytes(payload)
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_MODE", "verified")
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_PATH", str(cache_path))
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_SHA256", hashlib.sha256(payload).hexdigest())
+
+    with pytest.raises(RuntimeError, match="tactic selection changed"):
+        timing_cache.build_bark_serialized_network(
+            _FakeBuilder(tactic_hash=202), "network", _FakeConfig()
+        )
+
+
+def test_verified_mode_accepts_updated_timing_for_the_same_tactic(
+    monkeypatch, tmp_path, fake_builder_flags
+) -> None:
+    cache_path = tmp_path / "bark.cache"
+    payload = b"verified-tactics"
+    cache_path.write_bytes(payload)
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_MODE", "verified")
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_PATH", str(cache_path))
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_SHA256", hashlib.sha256(payload).hexdigest())
+
+    plan = timing_cache.build_bark_serialized_network(
+        _FakeBuilder(timing_msec=9.5), "network", _FakeConfig()
+    )
+
+    assert plan == b"plan"
+
+
+def test_verified_mode_rejects_new_timing_cache_keys(
+    monkeypatch, tmp_path, fake_builder_flags
+) -> None:
+    cache_path = tmp_path / "bark.cache"
+    payload = b"verified-tactics"
+    cache_path.write_bytes(payload)
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_MODE", "verified")
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_PATH", str(cache_path))
+    monkeypatch.setenv("TRTMC_BARK_TIMING_CACHE_SHA256", hashlib.sha256(payload).hexdigest())
+
+    with pytest.raises(RuntimeError, match=r"added=1, removed=0, changed=0"):
+        timing_cache.build_bark_serialized_network(
+            _FakeBuilder(add_tactic=True), "network", _FakeConfig()
+        )
 
 
 def test_verified_mode_rejects_wrong_digest_before_tensorrt_attach(monkeypatch, tmp_path) -> None:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import math
 import os
 from pathlib import Path
 import re
@@ -30,7 +31,7 @@ class _CacheState:
     mode: str
     path: Path
     cache: Any
-    original_sha256: str | None
+    tactic_hashes: dict[str, int] | None
 
 
 def _mode() -> str:
@@ -81,6 +82,58 @@ def _expected_sha256(path: Path, payload: bytes) -> str:
     return actual
 
 
+def _query_tactic_hashes(cache: Any, path: Path) -> dict[str, int]:
+    for method in ("queryKeys", "query"):
+        if not hasattr(cache, method):
+            raise RuntimeError(f"TensorRT does not support verified Bark tactic queries ({method})")
+    try:
+        keys = list(cache.queryKeys())
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"failed to query verified Bark timing cache {path}: {exc}") from exc
+    if not keys:
+        raise RuntimeError(f"verified Bark timing cache has no tactic entries: {path}")
+
+    tactics: dict[str, int] = {}
+    try:
+        for key in keys:
+            key_text = str(key)
+            value = cache.query(key)
+            tactic_hash = int(value.tacticHash)
+            timing_msec = float(value.timingMSec)
+            if tactic_hash == (1 << 64) - 1 or not math.isfinite(timing_msec) or timing_msec < 0:
+                raise ValueError(f"invalid tactic value for {key_text}")
+            if key_text in tactics:
+                raise ValueError(f"duplicate timing-cache key {key_text}")
+            tactics[key_text] = tactic_hash
+    except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"failed to inspect verified Bark timing cache {path}: {exc}") from exc
+    return tactics
+
+
+def _replay_tactics(cache: Any, path: Path) -> dict[str, int]:
+    if not hasattr(cache, "update"):
+        raise RuntimeError("TensorRT does not support verified Bark tactic replay (update)")
+    expected = _query_tactic_hashes(cache, path)
+    try:
+        for key in cache.queryKeys():
+            if not cache.update(key, cache.query(key)):
+                raise RuntimeError(f"TensorRT rejected tactic {key}")
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"failed to replay verified Bark tactics from {path}: {exc}") from exc
+    return expected
+
+
+def _tactic_delta(expected: dict[str, int], actual: dict[str, int]) -> str:
+    added = sorted(actual.keys() - expected.keys())
+    removed = sorted(expected.keys() - actual.keys())
+    changed = sorted(key for key in expected.keys() & actual.keys() if expected[key] != actual[key])
+    samples = [f"added {key}={actual[key]}" for key in added[:2]]
+    samples.extend(f"removed {key}={expected[key]}" for key in removed[:2])
+    samples.extend(f"changed {key}={expected[key]}->{actual[key]}" for key in changed[:2])
+    detail = "; ".join(samples) if samples else "no key-level difference found"
+    return f"added={len(added)}, removed={len(removed)}, changed={len(changed)}; {detail}"
+
+
 def _attach(config: Any, mode: str) -> _CacheState:
     path_text = os.environ.get(_PATH_ENV, "").strip()
     if not path_text:
@@ -97,7 +150,8 @@ def _attach(config: Any, mode: str) -> _CacheState:
         raise RuntimeError(f"failed to read Bark timing cache {path}: {exc}") from exc
     if mode == "verified" and not payload:
         raise RuntimeError(f"verified Bark timing cache is empty: {path}")
-    original_sha256 = _expected_sha256(path, payload) if mode == "verified" else None
+    if mode == "verified":
+        _expected_sha256(path, payload)
 
     for flag_name in ("EDITABLE_TIMING_CACHE", "DISABLE_COMPILATION_CACHE"):
         _set_required_flag(config, flag_name)
@@ -106,12 +160,13 @@ def _attach(config: Any, mode: str) -> _CacheState:
 
     try:
         cache = config.create_timing_cache(payload)
-        accepted = config.set_timing_cache(cache, False)
+        tactic_hashes = _replay_tactics(cache, path) if mode == "verified" else None
+        accepted = config.set_timing_cache(cache, mode == "verified")
     except (RuntimeError, TypeError, ValueError) as exc:
         raise RuntimeError(f"failed to attach {mode} Bark timing cache {path}: {exc}") from exc
     if not accepted:
         raise RuntimeError(f"TensorRT rejected {mode} Bark timing cache {path}")
-    return _CacheState(mode, path, cache, original_sha256)
+    return _CacheState(mode, path, cache, tactic_hashes)
 
 
 def _active_cache(config: Any, state: _CacheState) -> Any:
@@ -122,13 +177,14 @@ def _active_cache(config: Any, state: _CacheState) -> Any:
     return state.cache
 
 
-def _verify_unchanged(config: Any, state: _CacheState) -> None:
-    payload = _serialize(_active_cache(config, state), state.path)
-    actual = hashlib.sha256(payload).hexdigest()
-    if actual != state.original_sha256:
+def _verify_tactics_unchanged(config: Any, state: _CacheState) -> None:
+    if state.tactic_hashes is None:
+        raise RuntimeError("verified Bark timing cache is missing its tactic fingerprint")
+    actual = _query_tactic_hashes(_active_cache(config, state), state.path)
+    if actual != state.tactic_hashes:
         raise RuntimeError(
-            f"verified Bark timing cache changed during build: {state.path}; "
-            "a timing-cache miss or tactic update occurred"
+            f"verified Bark tactic selection changed during build: {state.path}; "
+            f"{_tactic_delta(state.tactic_hashes, actual)}"
         )
 
 
@@ -156,7 +212,7 @@ def build_bark_serialized_network(builder: Any, network: Any, config: Any) -> An
         trt_compat.unwrap(network), trt_compat.unwrap(config)
     )
     if mode == "verified":
-        _verify_unchanged(config, state)
+        _verify_tactics_unchanged(config, state)
     elif plan is not None:
         _save_recording(config, state)
     return plan
