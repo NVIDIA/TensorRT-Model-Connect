@@ -404,6 +404,8 @@ class IPipeline {
     }
 
     // -- Segmentation --
+    // Image pixels are RGB HWC float values in [0, 1]. The owning model family
+    // applies its bundle-defined resize, normalization, and layout transform.
     virtual SegmentResult segment(const float* pixels, int32_t height, int32_t width) {
         (void)pixels;
         (void)height;
@@ -438,6 +440,8 @@ class IPipeline {
     }
 
     // -- Image classification --
+    // Image pixels are RGB HWC float values in [0, 1]. The owning model family
+    // applies its bundle-defined resize, crop, normalization, and layout transform.
     virtual ClassificationResult classify(const float* pixels, int32_t height, int32_t width) {
         (void)pixels;
         (void)height;

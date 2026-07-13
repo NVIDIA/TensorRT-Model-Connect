@@ -344,8 +344,6 @@ def test_impact_treats_shared_family_registry_as_platform(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     "path, expected_scope",
     (
-        ("src/cli/main.cpp", "cli"),
-        ("src/cli/args.h", "cli"),
         ("src/runtime/config/cli_support.cpp", "cli"),
         ("include/trtmc/config/cli_support.h", "cli"),
         ("python/tensorrt_model_connect/build_cli.py", "cli"),
@@ -371,6 +369,20 @@ def test_cli_and_unit_test_changes_run_units_without_model_proofs(
     assert result["matrix"] == {"include": []}
     assert result["run_unit_tests"] is True
     assert result["unit_scope"] == expected_scope
+
+
+@pytest.mark.parametrize("path", ("src/cli/main.cpp", "src/cli/args.h"))
+def test_runtime_cli_changes_run_model_fallback(tmp_path: Path, path: str) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, path, "// changed\n")
+    head = _commit(repo, "runtime CLI change")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["affected_models"] == ["model_a"]
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
 
 
 @pytest.mark.parametrize(

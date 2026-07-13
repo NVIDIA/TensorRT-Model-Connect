@@ -659,8 +659,9 @@ class HfTransformersReference:
             inputs = processor(images=image, return_tensors="pt")
             with torch.no_grad():
                 outputs = model(**inputs)
-            logits = outputs.logits[0].float().cpu().numpy()
-            class_map = np.argmax(logits, axis=0).astype(np.int32)
+            class_map = processor.post_process_semantic_segmentation(
+                outputs, target_sizes=[image.size[::-1]])[0]
+            class_map = class_map.cpu().numpy().astype(np.int32)
             np.save(output_path, class_map)
             print(f"OK classes={{class_map.max() + 1}}")
         """)

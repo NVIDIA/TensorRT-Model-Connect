@@ -135,8 +135,6 @@ UNIT_TEST_ONLY_PREFIXES = (
     "tests/cpp/",
     "tests/tools/",
 )
-CLI_UNIT_ONLY_PREFIXES = ("src/cli/",)
-
 # These shared-location tests require real model plugins or GPU execution and
 # therefore cannot be certified by the source-only CPU aggregate. Fail closed
 # on a direct edit until each test is moved behind explicit model ownership or
@@ -527,9 +525,7 @@ def _classify_path(path: str, catalog: OwnershipCatalog) -> tuple[str, str | Non
             "model-coupled test has no isolated model owner; move it into a "
             f"MODEL.toml contract or use a synthetic plugin before changing it: {path}"
         )
-    if path in UNIT_TEST_ONLY_EXACT or any(
-        path.startswith(prefix) for prefix in CLI_UNIT_ONLY_PREFIXES
-    ):
+    if path in UNIT_TEST_ONLY_EXACT:
         return "unit_cli", None
     if any(
         path.startswith(prefix) for prefix in UNIT_TEST_ONLY_PREFIXES

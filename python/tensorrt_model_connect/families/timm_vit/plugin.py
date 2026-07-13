@@ -474,6 +474,7 @@ class TimmVitPlugin:
             "image_mean": mean,
             "image_std": std,
             "crop_pct": float(config.raw.get("crop_pct", 0.9)),
+            "interpolation": str(config.raw.get("interpolation", "bicubic")),
         }
 
 

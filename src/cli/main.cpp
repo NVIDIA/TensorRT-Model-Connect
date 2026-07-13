@@ -28,7 +28,6 @@
 //   trtmc version
 
 #include "cli/args.h"
-#include "stb_image_resize2.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -770,40 +769,12 @@ int cmd_segment(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    // Preprocess: resize to 512x512, normalize with ImageNet mean/std, convert to CHW
-    const int32_t target_h = 512;
-    const int32_t target_w = 512;
-    const float mean[3] = {0.485F, 0.456F, 0.406F};
-    const float stdv[3] = {0.229F, 0.224F, 0.225F};
-
-    std::vector<float> resized_pixels(static_cast<std::size_t>(3) * target_h * target_w);
-    if (stbir_resize(image.pixels.data(), image.width, image.height,
-                     image.width * 3 * static_cast<int32_t>(sizeof(float)), resized_pixels.data(),
-                     target_w, target_h, target_w * 3 * static_cast<int32_t>(sizeof(float)),
-                     STBIR_RGB, STBIR_TYPE_FLOAT, STBIR_EDGE_CLAMP,
-                     STBIR_FILTER_TRIANGLE) == nullptr) {
-        std::cerr << "Error: failed to resize segmentation image\n";
-        return EXIT_FAILURE;
-    }
-
-    std::vector<float> chw_pixels(static_cast<std::size_t>(3) * target_h * target_w);
-    for (int32_t y = 0; y < target_h; ++y) {
-        for (int32_t x = 0; x < target_w; ++x) {
-            const auto src_idx = static_cast<std::size_t>((y * target_w + x) * 3);
-            for (int32_t c = 0; c < 3; ++c) {
-                const float val = (resized_pixels[src_idx + c] - mean[c]) / stdv[c];
-                chw_pixels[static_cast<std::size_t>(c) * target_h * target_w +
-                           static_cast<std::size_t>(y) * target_w + x] = val;
-            }
-        }
-    }
-
-    auto result = pipeline->segment(chw_pixels.data(), target_h, target_w);
+    auto result = pipeline->segment(image.pixels.data(), image.height, image.width);
 
     // Save class map as grayscale PNG (pixel value = class index)
     const std::string out_path = args.output_dir.empty() ? "/tmp/seg_output.png" : args.output_dir;
-    const int32_t out_h = result.height > 0 ? result.height : target_h;
-    const int32_t out_w = result.width > 0 ? result.width : target_w;
+    const int32_t out_h = result.height > 0 ? result.height : image.height;
+    const int32_t out_w = result.width > 0 ? result.width : image.width;
     const auto total_px = static_cast<std::size_t>(out_h) * out_w;
     std::vector<unsigned char> gray(total_px);
     for (std::size_t i = 0; i < total_px && i < result.mask.size(); ++i)
@@ -816,52 +787,6 @@ int cmd_segment(const CliArgs& args) {
 
     std::cout << "Segmentation saved: " << out_path << " (" << out_w << "x" << out_h << ")\n";
     return EXIT_SUCCESS;
-}
-
-std::vector<float> preprocess_classification_image(const trtmc::io::LoadedImage& image) {
-    constexpr int32_t target = 224;
-    constexpr float crop_pct = 0.9F;
-    const int32_t resize_short = static_cast<int32_t>(static_cast<float>(target) / crop_pct + 0.5F);
-    const float mean[3] = {0.5F, 0.5F, 0.5F};
-    const float stdv[3] = {0.5F, 0.5F, 0.5F};
-
-    int32_t resized_h = resize_short;
-    int32_t resized_w = resize_short;
-    if (image.height <= image.width) {
-        resized_h = resize_short;
-        resized_w =
-            std::max(1, static_cast<int32_t>(
-                            static_cast<float>(image.width) * resize_short / image.height + 0.5F));
-    } else {
-        resized_w = resize_short;
-        resized_h =
-            std::max(1, static_cast<int32_t>(
-                            static_cast<float>(image.height) * resize_short / image.width + 0.5F));
-    }
-
-    const int32_t crop_y = std::max(0, (resized_h - target) / 2);
-    const int32_t crop_x = std::max(0, (resized_w - target) / 2);
-    std::vector<float> chw(static_cast<std::size_t>(3) * target * target);
-
-    for (int32_t y = 0; y < target; ++y) {
-        const int32_t ry = crop_y + y;
-        const int32_t src_y =
-            std::min(image.height - 1,
-                     static_cast<int32_t>(static_cast<float>(ry) * image.height / resized_h));
-        for (int32_t x = 0; x < target; ++x) {
-            const int32_t rx = crop_x + x;
-            const int32_t src_x =
-                std::min(image.width - 1,
-                         static_cast<int32_t>(static_cast<float>(rx) * image.width / resized_w));
-            const auto src_idx = static_cast<std::size_t>((src_y * image.width + src_x) * 3);
-            for (int32_t c = 0; c < 3; ++c) {
-                const float val = (image.pixels[src_idx + c] - mean[c]) / stdv[c];
-                chw[static_cast<std::size_t>(c) * target * target +
-                    static_cast<std::size_t>(y) * target + x] = val;
-            }
-        }
-    }
-    return chw;
 }
 
 int cmd_classify(const CliArgs& args) {
@@ -877,21 +802,18 @@ int cmd_classify(const CliArgs& args) {
         return EXIT_FAILURE;
     }
 
-    auto chw_pixels = preprocess_classification_image(image);
-    constexpr int32_t target = 224;
-
     trtmc::ClassificationResult result;
     if (args.benchmark > 0) {
         const int warmup_n = std::max(0, args.warmup);
         const int bench_n = args.benchmark;
         for (int i = 0; i < warmup_n; ++i)
-            result = pipeline->classify(chw_pixels.data(), target, target);
+            result = pipeline->classify(image.pixels.data(), image.height, image.width);
 
         std::vector<double> times;
         times.reserve(static_cast<std::size_t>(bench_n));
         for (int i = 0; i < bench_n; ++i) {
             const auto t0 = std::chrono::steady_clock::now();
-            result = pipeline->classify(chw_pixels.data(), target, target);
+            result = pipeline->classify(image.pixels.data(), image.height, image.width);
             const auto t1 = std::chrono::steady_clock::now();
             times.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
         }
@@ -900,7 +822,7 @@ int cmd_classify(const CliArgs& args) {
         std::cerr << std::fixed << std::setprecision(6) << "[trtmc.benchmark] classify_ms=" << mean
                   << " iterations=" << bench_n << " warmup=" << warmup_n << '\n';
     } else {
-        result = pipeline->classify(chw_pixels.data(), target, target);
+        result = pipeline->classify(image.pixels.data(), image.height, image.width);
     }
 
     std::cout << "{"

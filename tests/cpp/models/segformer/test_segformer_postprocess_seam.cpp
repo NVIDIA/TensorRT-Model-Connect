@@ -121,6 +121,25 @@ void test_segformer_postprocess_logits_size_mismatch() {
     check(class_map.empty(), "postprocess logits mismatch: class_map cleared");
 }
 
+void test_segformer_postprocess_resizes_logits_before_argmax() {
+    const trtmc::SegformerLogitsShape shape{2, 2, 2};
+    const std::vector<float> logits = {
+        0.0F, 0.0F, 0.0F, 0.0F, -1.0F, 1.0F, 1.0F, 1.0F,
+    };
+
+    std::vector<int32_t> class_map;
+    const auto status =
+        trtmc::resize_segformer_logits_and_compute_class_map(logits, shape, 3, 3, class_map);
+
+    check(status == trtmc::SegformerPostprocessStatus::kOk,
+          "postprocess resized logits: status ok");
+    check(class_map.size() == 9, "postprocess resized logits: output size");
+    if (class_map.size() == 9) {
+        check(class_map[0] == 0, "postprocess resized logits: top-left class");
+        check(class_map[4] == 1, "postprocess resized logits: bilinear center class");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -128,6 +147,7 @@ int main() {
     test_segformer_postprocess_tie_selects_first_class();
     test_segformer_postprocess_invalid_shape();
     test_segformer_postprocess_logits_size_mismatch();
+    test_segformer_postprocess_resizes_logits_before_argmax();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " SegFormer postprocess seam test(s) failed" << '\n';

@@ -646,35 +646,11 @@ class HfTransformersReference:
             import timm
             import torch
             from PIL import Image
+            from timm.data import create_transform, resolve_model_data_config
 
             hf_id = {hf_id!r}
             image_path = {image_path!r}
             output_path = {output_path!r}
-
-            target = 224
-            crop_pct = 0.9
-            resize_short = int(target / crop_pct + 0.5)
-            image = Image.open(image_path).convert("RGB")
-            width, height = image.size
-            if height <= width:
-                resized_h = resize_short
-                resized_w = max(1, int(width * resize_short / height + 0.5))
-            else:
-                resized_w = resize_short
-                resized_h = max(1, int(height * resize_short / width + 0.5))
-
-            source = np.asarray(image, dtype=np.float32) / 255.0
-            crop_x = max(0, (resized_w - target) // 2)
-            crop_y = max(0, (resized_h - target) // 2)
-            chw = np.empty((3, target, target), dtype=np.float32)
-            for y in range(target):
-                ry = crop_y + y
-                src_y = min(height - 1, int(float(ry) * height / resized_h))
-                for x in range(target):
-                    rx = crop_x + x
-                    src_x = min(width - 1, int(float(rx) * width / resized_w))
-                    chw[:, y, x] = (source[src_y, src_x, :] - 0.5) / 0.5
-            chw = chw[None, ...].copy()
 
             model_ref = f"hf-hub:{{hf_id}}"
             try:
@@ -684,9 +660,12 @@ class HfTransformersReference:
             model.eval()
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             model.to(device)
+            data_config = resolve_model_data_config(model)
+            transform = create_transform(**data_config, is_training=False)
+            image = Image.open(image_path).convert("RGB")
+            tensor = transform(image).unsqueeze(0).to(device)
 
             with torch.no_grad():
-                tensor = torch.from_numpy(chw).to(device)
                 logits = model(tensor)[0].float().cpu().numpy()
 
             top_class = int(np.argmax(logits))

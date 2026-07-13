@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 
 namespace trtmc {
 
@@ -33,6 +34,22 @@ TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::stri
 
 std::string tp_engine_section_name(int32_t rank) {
     return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+TimmVitPreprocessConfig make_timm_vit_preprocess_config(const std::string& json) {
+    TimmVitPreprocessConfig cfg;
+    cfg.input_image_h = extract_json_int(json, "input_image_h", cfg.input_image_h);
+    cfg.input_image_w = extract_json_int(json, "input_image_w", cfg.input_image_w);
+    cfg.crop_pct = extract_json_float(json, "crop_pct", cfg.crop_pct);
+    cfg.interpolation = extract_json_string(json, "interpolation", cfg.interpolation);
+
+    auto mean = extract_json_float_array(json, "image_mean", 3);
+    if (mean.size() == 3)
+        cfg.image_mean = std::move(mean);
+    auto stdv = extract_json_float_array(json, "image_std", 3);
+    if (stdv.size() == 3)
+        cfg.image_std = std::move(stdv);
+    return cfg;
 }
 
 } // namespace
@@ -56,8 +73,9 @@ class TimmVitPlugin final : public IPipelinePlugin {
 
         auto loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, engine_section), "engine_plan", opts);
-        return std::make_unique<ImageClassificationPipeline>(std::move(loaded.module),
-                                                             ctx.bundle.info.model_id);
+        return std::make_unique<ImageClassificationPipeline>(
+            std::move(loaded.module), make_timm_vit_preprocess_config(ctx.config_json),
+            ctx.bundle.info.model_id);
     }
 };
 

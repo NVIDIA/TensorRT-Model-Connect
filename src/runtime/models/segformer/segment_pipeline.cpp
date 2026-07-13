@@ -5,35 +5,17 @@
 
 #include "runtime/models/segformer/segment_pipeline.h"
 
+#include "runtime/models/segformer/segformer_postprocess_seam.h"
+
 #include <cstdint>
-#include <cstring>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace trtmc {
 
 namespace {
-
-// Argmax over class dimension: logits[C, H, W] -> class_map[H, W].
-void argmax_class_map(const float* logits, int32_t num_classes, int32_t out_h, int32_t out_w,
-                      std::vector<int32_t>& class_map) {
-    const auto plane_size = static_cast<std::size_t>(out_h) * out_w;
-    class_map.resize(plane_size);
-
-    for (std::size_t px = 0; px < plane_size; ++px) {
-        int32_t best_class = 0;
-        float best_val = -1e30F;
-        for (int32_t c = 0; c < num_classes; ++c) {
-            const float val = logits[static_cast<std::size_t>(c) * plane_size + px];
-            if (val > best_val) {
-                best_val = val;
-                best_class = c;
-            }
-        }
-        class_map[px] = best_class;
-    }
-}
 
 // Extract (num_classes, H, W) from output shape, handling optional batch dim.
 bool parse_segmentation_shape(const std::vector<int64_t>& shape, int32_t& num_classes,
@@ -66,16 +48,21 @@ const Tensor* find_segmentation_output(const TensorMap& outputs) {
 
 // ─── SegmentPipeline ───
 
-SegmentPipeline::SegmentPipeline(std::unique_ptr<TrtModule> model, std::string model_id_str)
-    : model_(std::move(model)), model_id_(std::move(model_id_str)) {
+SegmentPipeline::SegmentPipeline(std::unique_ptr<TrtModule> model,
+                                 SegformerPreprocessConfig preprocess_config,
+                                 std::string model_id_str)
+    : model_(std::move(model)), preprocess_config_(std::move(preprocess_config)),
+      model_id_(std::move(model_id_str)) {
     if (!model_ || !model_->ok())
         throw std::runtime_error("SegmentPipeline: invalid model");
 }
 
 SegmentResult SegmentPipeline::segment(const float* pixels, int32_t height, int32_t width) {
+    auto pixel_values = preprocess_segformer_image(pixels, height, width, preprocess_config_);
+
     Tensor img_t;
-    img_t.data = const_cast<float*>(pixels);
-    img_t.shape = {3, height, width};
+    img_t.data = pixel_values.data();
+    img_t.shape = {3, preprocess_config_.input_image_h, preprocess_config_.input_image_w};
     img_t.dtype = DType::kFloat32;
 
     auto outputs = model_->forward({{"pixel_values", img_t}});
@@ -89,9 +76,15 @@ SegmentResult SegmentPipeline::segment(const float* pixels, int32_t height, int3
     int32_t num_classes = 0, out_h = 0, out_w = 0;
 
     if (parse_segmentation_shape(out_tensor->shape, num_classes, out_h, out_w)) {
-        result.height = out_h;
-        result.width = out_w;
-        argmax_class_map(data, num_classes, out_h, out_w, result.mask);
+        const auto logits_size = static_cast<std::size_t>(num_classes) * out_h * out_w;
+        const std::vector<float> logits(data, data + logits_size);
+        const SegformerLogitsShape logits_shape{num_classes, out_h, out_w};
+        const auto status = resize_segformer_logits_and_compute_class_map(
+            logits, logits_shape, height, width, result.mask);
+        if (status != SegformerPostprocessStatus::kOk)
+            throw std::runtime_error("SegmentPipeline: invalid SegFormer logits shape");
+        result.height = height;
+        result.width = width;
     } else {
         auto n = out_tensor->numel();
         result.height = height;

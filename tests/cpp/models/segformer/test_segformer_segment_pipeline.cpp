@@ -38,6 +38,15 @@ static void check(bool condition, const char* name) {
 
 static trtmc::TrtLogger g_logger;
 
+static trtmc::SegformerPreprocessConfig make_test_preprocess_config() {
+    trtmc::SegformerPreprocessConfig config;
+    config.input_image_h = 4;
+    config.input_image_w = 4;
+    config.output_h = 4;
+    config.output_w = 4;
+    return config;
+}
+
 // Mock: pixel_values[3,4,4] float -> output_mask[1,16] float.
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine() {
     auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
@@ -160,7 +169,7 @@ static void test_segment_pipeline() {
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    trtmc::SegmentPipeline pipeline(std::move(module));
+    trtmc::SegmentPipeline pipeline(std::move(module), make_test_preprocess_config());
 
     check(std::string(pipeline.pipeline_type()) == "SegmentPipeline", "segment name");
 
@@ -183,7 +192,7 @@ static void test_segment_with_class_output() {
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    trtmc::SegmentPipeline pipeline(std::move(module));
+    trtmc::SegmentPipeline pipeline(std::move(module), make_test_preprocess_config());
 
     float img[3 * 4 * 4] = {0};
     auto result = pipeline.segment(img, 4, 4);
@@ -216,7 +225,7 @@ static void test_segment_4d_output() {
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    trtmc::SegmentPipeline pipeline(std::move(module));
+    trtmc::SegmentPipeline pipeline(std::move(module), make_test_preprocess_config());
 
     float img[3 * 4 * 4] = {0};
     auto result = pipeline.segment(img, 4, 4);
@@ -239,7 +248,7 @@ static void test_segment_mask_named_output() {
 
     auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
                                                          engine->createExecutionContext(), stream);
-    trtmc::SegmentPipeline pipeline(std::move(module));
+    trtmc::SegmentPipeline pipeline(std::move(module), make_test_preprocess_config());
 
     float img[3 * 4 * 4] = {0};
     auto result = pipeline.segment(img, 4, 4);

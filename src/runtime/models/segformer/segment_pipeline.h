@@ -8,6 +8,7 @@
 // SegmentPipeline: single-pass segmentation (SegFormer).
 // Uses a single TrtModule for pixel_values -> logits/mask output.
 
+#include "runtime/models/segformer/segformer_preprocess_seam.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 
@@ -20,7 +21,9 @@ namespace trtmc {
 
 class SegmentPipeline final : public IPipeline {
   public:
-    explicit SegmentPipeline(std::unique_ptr<TrtModule> model, std::string model_id_str = "");
+    explicit SegmentPipeline(std::unique_ptr<TrtModule> model,
+                             SegformerPreprocessConfig preprocess_config = {},
+                             std::string model_id_str = "");
 
     SegmentResult segment(const float* pixels, int32_t height, int32_t width) override;
 
@@ -29,6 +32,7 @@ class SegmentPipeline final : public IPipeline {
 
   private:
     std::unique_ptr<TrtModule> model_;
+    SegformerPreprocessConfig preprocess_config_;
     std::string model_id_;
 };
 

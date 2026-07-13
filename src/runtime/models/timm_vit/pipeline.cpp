@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
+#include <utility>
 
 namespace trtmc {
 
@@ -24,17 +25,21 @@ const Tensor* find_logits_output(const TensorMap& outputs) {
 } // namespace
 
 ImageClassificationPipeline::ImageClassificationPipeline(std::unique_ptr<TrtModule> model,
+                                                         TimmVitPreprocessConfig preprocess_config,
                                                          std::string model_id_str)
-    : model_(std::move(model)), model_id_(std::move(model_id_str)) {
+    : model_(std::move(model)), preprocess_config_(std::move(preprocess_config)),
+      model_id_(std::move(model_id_str)) {
     if (!model_ || !model_->ok())
         throw std::runtime_error("ImageClassificationPipeline: invalid model");
 }
 
 ClassificationResult ImageClassificationPipeline::classify(const float* pixels, int32_t height,
                                                            int32_t width) {
+    auto pixel_values = preprocess_timm_vit_image(pixels, height, width, preprocess_config_);
+
     Tensor img_t;
-    img_t.data = const_cast<float*>(pixels);
-    img_t.shape = {1, 3, height, width};
+    img_t.data = pixel_values.data();
+    img_t.shape = {1, 3, preprocess_config_.input_image_h, preprocess_config_.input_image_w};
     img_t.dtype = DType::kFloat32;
 
     auto outputs = model_->forward({{"pixel_values", img_t}});

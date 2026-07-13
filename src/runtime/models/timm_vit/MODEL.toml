@@ -5,3 +5,6 @@ id = "timm_vit"
 runtime_library = "libtrtmc_model_timm_vit.so"
 runtime_plugins = ["plugin.cpp|register_timm_vit_plugin"]
 runtime_strategies = ["timm_vit_image_classification"]
+runtime_tests = [
+  "test_timm_vit_image_preprocess_seam|test_timm_vit_image_preprocess_seam.cpp|trtmc_model_timm_vit|_|_",
+]

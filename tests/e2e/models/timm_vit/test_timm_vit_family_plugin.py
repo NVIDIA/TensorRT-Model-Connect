@@ -83,6 +83,28 @@ def test_model_config_uses_timm_architecture_when_model_type_absent(tmp_path: Pa
     assert plugin.matches(cfg.model_type)
 
 
+def test_bundle_config_preserves_image_preprocess_contract(tmp_path: Path):
+    _write_tiny_vit(tmp_path)
+    raw = json.loads((tmp_path / "config.json").read_text())
+    raw.update({
+        "mean": [0.1, 0.2, 0.3],
+        "std": [0.4, 0.5, 0.6],
+        "crop_pct": 0.875,
+        "interpolation": "bilinear",
+    })
+    (tmp_path / "config.json").write_text(json.dumps(raw))
+    cfg = ModelConfig.from_dir(tmp_path)
+
+    bundle_config = plugin.get_bundle_config_overrides(cfg)
+
+    assert bundle_config["input_image_h"] == 224
+    assert bundle_config["input_image_w"] == 224
+    assert bundle_config["image_mean"] == [0.1, 0.2, 0.3]
+    assert bundle_config["image_std"] == [0.4, 0.5, 0.6]
+    assert bundle_config["crop_pct"] == pytest.approx(0.875)
+    assert bundle_config["interpolation"] == "bilinear"
+
+
 def test_load_weights_maps_timm_vit_shapes(tmp_path: Path):
     raw = _write_tiny_vit(tmp_path)
     cfg = ModelConfig.from_dir(tmp_path)

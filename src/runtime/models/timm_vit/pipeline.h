@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "runtime/models/timm_vit/image_preprocess_seam.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 
@@ -16,6 +17,7 @@ namespace trtmc {
 class ImageClassificationPipeline final : public IPipeline {
   public:
     explicit ImageClassificationPipeline(std::unique_ptr<TrtModule> model,
+                                         TimmVitPreprocessConfig preprocess_config = {},
                                          std::string model_id_str = "");
 
     ClassificationResult classify(const float* pixels, int32_t height, int32_t width) override;
@@ -25,6 +27,7 @@ class ImageClassificationPipeline final : public IPipeline {
 
   private:
     std::unique_ptr<TrtModule> model_;
+    TimmVitPreprocessConfig preprocess_config_;
     std::string model_id_;
 };
 

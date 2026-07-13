@@ -75,10 +75,27 @@ void test_segformer_preprocess_rejects_empty_image() {
     try {
         trtmc::SegformerPreprocessConfig config;
         (void)trtmc::preprocess_segformer_image({}, config);
-    } catch (const std::runtime_error&) {
+    } catch (const std::invalid_argument&) {
         threw = true;
     }
     check(threw, "segformer preprocess rejects empty image");
+}
+
+void test_segformer_preprocess_uses_bilinear_resize() {
+    const std::vector<float> pixels = {
+        0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+    };
+    trtmc::SegformerPreprocessConfig config;
+    config.input_image_h = 3;
+    config.input_image_w = 3;
+    config.image_mean = {0.0F, 0.0F, 0.0F};
+    config.image_std = {1.0F, 1.0F, 1.0F};
+
+    const auto pixel_values = trtmc::preprocess_segformer_image(pixels.data(), 2, 2, config);
+    check(pixel_values.size() == 27, "segformer bilinear resize size");
+    if (pixel_values.size() == 27) {
+        check_close(pixel_values[4], 0.5F, 1e-6F, "segformer bilinear resize blends center pixel");
+    }
 }
 
 } // namespace
@@ -86,6 +103,7 @@ void test_segformer_preprocess_rejects_empty_image() {
 int main() {
     test_segformer_preprocess_normalizes_decoded_image();
     test_segformer_preprocess_rejects_empty_image();
+    test_segformer_preprocess_uses_bilinear_resize();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " SegFormer preprocess seam test(s) failed\n";

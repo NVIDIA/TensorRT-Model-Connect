@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 
 namespace trtmc {
 
@@ -34,6 +35,23 @@ TensorParallelRuntimeConfig parse_tensor_parallel_runtime_config(const std::stri
 
 std::string tp_engine_section_name(int32_t rank) {
     return "engine_plan_tp_rank" + std::to_string(rank);
+}
+
+SegformerPreprocessConfig make_segformer_preprocess_config(const std::string& json) {
+    SegformerPreprocessConfig cfg;
+    cfg.num_classes = extract_json_int(json, "num_classes", cfg.num_classes);
+    cfg.input_image_h = extract_json_int(json, "input_image_h", cfg.input_image_h);
+    cfg.input_image_w = extract_json_int(json, "input_image_w", cfg.input_image_w);
+    cfg.output_h = extract_json_int(json, "output_h", cfg.output_h);
+    cfg.output_w = extract_json_int(json, "output_w", cfg.output_w);
+
+    auto mean = extract_json_float_array(json, "image_mean", 3);
+    if (mean.size() == 3)
+        cfg.image_mean = std::move(mean);
+    auto stdv = extract_json_float_array(json, "image_std", 3);
+    if (stdv.size() == 3)
+        cfg.image_std = std::move(stdv);
+    return cfg;
 }
 
 } // namespace
@@ -61,6 +79,7 @@ class SegformerPlugin final : public IPipelinePlugin {
         auto loaded = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, encoder_section), "engine_plan", encoder_opts);
         return std::make_unique<SegmentPipeline>(std::move(loaded.module),
+                                                 make_segformer_preprocess_config(ctx.config_json),
                                                  ctx.bundle.info.model_id);
     }
 };
