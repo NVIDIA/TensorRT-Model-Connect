@@ -112,7 +112,10 @@ blocking_flock() {
   local fd="$1"
   local deadline="$2"
   local watchdog="${TRTMC_MODEL_PROOF_FLOCK_WATCHDOG_SECONDS:-30}"
-  [[ "$watchdog" =~ ^[1-9][0-9]*$ ]] || watchdog=30
+  # Bound the digit count before integer comparison so an oversized CI value
+  # cannot overflow Bash's signed-integer parser and defeat the watchdog.
+  [[ "$watchdog" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$watchdog" -le 21600 ] || \
+    die "TRTMC_MODEL_PROOF_FLOCK_WATCHDOG_SECONDS must be an integer from 1 to 21600"
   local remaining chunk
   while true; do
     remaining=$((deadline - SECONDS))
@@ -564,9 +567,20 @@ select_proof_gpu() {
   # blocks on a predecessor ticket), so this interval bounds the wake latency
   # of exactly one process system-wide.
   local poll_interval="${TRTMC_MODEL_PROOF_POLL_INTERVAL:-0.25}"
-  [[ "$poll_interval" =~ ^[0-9]+(\.[0-9]+)?$ ]] && \
-    [[ ! "$poll_interval" =~ ^0+(\.0+)?$ ]] || \
-    die "TRTMC_MODEL_PROOF_POLL_INTERVAL must be a positive number of seconds"
+  # Bound the whole-number part before using Bash integer comparisons. Without
+  # this guard, an oversized value falls through to an effectively unbounded sleep.
+  [[ "$poll_interval" =~ ^(0|[1-9][0-9]{0,4})(\.[0-9]+)?$ ]] && \
+    [[ ! "$poll_interval" =~ ^0(\.0+)?$ ]] || \
+    die "TRTMC_MODEL_PROOF_POLL_INTERVAL must be a positive number no greater than 21600 seconds"
+  local poll_whole="${poll_interval%%.*}"
+  local poll_fraction=""
+  if [[ "$poll_interval" == *.* ]]; then
+    poll_fraction="${poll_interval#*.}"
+  fi
+  if [ "$poll_whole" -gt 21600 ] || \
+     { [ "$poll_whole" -eq 21600 ] && [[ "$poll_fraction" =~ [1-9] ]]; }; then
+    die "TRTMC_MODEL_PROOF_POLL_INTERVAL must be a positive number no greater than 21600 seconds"
+  fi
 
   local lock_dir="${TRTMC_MODEL_PROOF_GPU_LOCK_DIR:-/tmp/trtmc-model-proof-gpu-locks}"
   [ -n "$lock_dir" ] || die "TRTMC_MODEL_PROOF_GPU_LOCK_DIR must not be empty"

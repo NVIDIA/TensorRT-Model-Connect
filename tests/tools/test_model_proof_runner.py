@@ -1885,9 +1885,29 @@ def test_automatic_gpu_lease_rejects_invalid_id_configuration(
             "21601",
             "must be an integer from 1 to 21600",
         ),
+        (
+            "TRTMC_MODEL_PROOF_POLL_INTERVAL",
+            "9223372036854775808",
+            "must be a positive number no greater than 21600 seconds",
+        ),
+        (
+            "TRTMC_MODEL_PROOF_POLL_INTERVAL",
+            "21600.1",
+            "must be a positive number no greater than 21600 seconds",
+        ),
+        (
+            "TRTMC_MODEL_PROOF_FLOCK_WATCHDOG_SECONDS",
+            "9223372036854775808",
+            "must be an integer from 1 to 21600",
+        ),
+        (
+            "TRTMC_MODEL_PROOF_FLOCK_WATCHDOG_SECONDS",
+            "21601",
+            "must be an integer from 1 to 21600",
+        ),
     ],
 )
-def test_gpu_lease_rejects_invalid_slot_and_timeout_configuration(
+def test_gpu_lease_rejects_invalid_numeric_configuration(
     tmp_path: Path,
     name: str,
     value: str,
@@ -2008,9 +2028,8 @@ def test_poll_interval_cannot_sleep_past_the_lease_timeout(tmp_path: Path) -> No
 
     The capacity-poll sleep is clamped to the remaining deadline; without the
     clamp a 300s interval would sleep far past a 1s lease timeout while still
-    reporting "timed out after 1s". The elapsed bound discriminates only
-    between "clamped" (host overhead, well under 150s even on a heavily
-    loaded runner) and "unclamped" (at least one full 300s sleep).
+    reporting "timed out after 1s". Measure from the queue-joined marker to the
+    timeout error so loaded-runner host setup cannot weaken the assertion.
     """
     fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
     output = tmp_path / "proof"
@@ -2027,8 +2046,7 @@ def test_poll_interval_cannot_sleep_past_the_lease_timeout(tmp_path: Path) -> No
     lock_dir.mkdir()
     with (lock_dir / "gpu-9-slot-0.lock").open("w", encoding="utf-8") as lock_stream:
         fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        started = time.monotonic()
-        result = subprocess.run(
+        process = subprocess.Popen(
             [
                 "bash",
                 str(RUNNER),
@@ -2041,16 +2059,40 @@ def test_poll_interval_cannot_sleep_past_the_lease_timeout(tmp_path: Path) -> No
             ],
             cwd=REPO_ROOT,
             env=env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            check=False,
-            timeout=420,
         )
-        elapsed = time.monotonic() - started
+        try:
+            joined_file = output / "artifacts" / "gpu-queue-joined.txt"
+            join_deadline = time.monotonic() + 90
+            while time.monotonic() < join_deadline and not joined_file.is_file():
+                assert process.poll() is None
+                time.sleep(0.05)
+            assert joined_file.is_file()
 
-    assert result.returncode != 0
-    assert "timed out after 1s waiting for a shared model-proof GPU lease from: 9" in result.stderr
-    assert elapsed < 150, f"lease timeout was pierced by the poll interval: {elapsed:.3f}s"
+            timeout_message = (
+                "timed out after 1s waiting for a shared model-proof GPU lease from: 9"
+            )
+            error_file = output / "artifacts" / "host-error.log"
+            started = time.monotonic()
+            error_deadline = started + 10
+            while time.monotonic() < error_deadline:
+                if error_file.is_file() and timeout_message in error_file.read_text(
+                    encoding="utf-8"
+                ):
+                    break
+                time.sleep(0.05)
+            lease_elapsed = time.monotonic() - started
+            stdout, stderr = process.communicate(timeout=90)
+        finally:
+            _finish_proof_cases([process])
+
+    assert process.returncode != 0, stdout + stderr
+    assert timeout_message in stderr
+    assert lease_elapsed < 10, (
+        f"lease timeout was pierced by the poll interval: {lease_elapsed:.3f}s"
+    )
     assert not list(lock_dir.glob("admission-global-*.lock"))
 
 
