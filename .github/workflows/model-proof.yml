@@ -208,6 +208,17 @@ jobs:
           echo "exit_code=$proof_rc" >> "$GITHUB_OUTPUT"
           exit "$proof_rc"
 
+      - name: Reconcile model proof containers
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        env:
+          MODEL: ${{ inputs.model }}
+        working-directory: ${{ github.workspace }}/model-proof-source
+        run: |
+          set -euo pipefail
+          bash .github/scripts/run-model-proof.sh \
+            --cleanup-containers \
+            --model "$MODEL"
+
       - name: Finalize model proof fallback
         if: ${{ always() }}
         env:

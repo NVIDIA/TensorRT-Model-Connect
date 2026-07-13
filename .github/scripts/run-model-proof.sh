@@ -169,6 +169,61 @@ reclaim_orphaned_proof_containers() {
   done <<< "$rows"
 }
 
+cleanup_run_model_proof_containers() {
+  command -v docker >/dev/null || die "docker is required"
+  local run_id="${GITHUB_RUN_ID:-}"
+  local run_attempt="${GITHUB_RUN_ATTEMPT:-}"
+  [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || \
+    die "GITHUB_RUN_ID must be a positive integer for container cleanup"
+  [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]] || \
+    die "GITHUB_RUN_ATTEMPT must be a positive integer for container cleanup"
+
+  local -a filters=(
+    --filter 'label=com.nvidia.trtmc.model-proof.job=1'
+    --filter "label=com.nvidia.trtmc.model-proof.run-id=$run_id"
+    --filter "label=com.nvidia.trtmc.model-proof.run-attempt=$run_attempt"
+    --filter "label=com.nvidia.trtmc.model-proof.model=$model"
+  )
+  local format='{{.ID}} {{.Label "com.nvidia.trtmc.model-proof.run-id"}} {{.Label "com.nvidia.trtmc.model-proof.run-attempt"}} {{.Label "com.nvidia.trtmc.model-proof.model"}}'
+  local rows container_id labeled_run_id labeled_run_attempt labeled_model
+  local -a container_ids=()
+  local retry
+  for retry in 1 2 3; do
+    if ! rows="$(docker ps -a --no-trunc "${filters[@]}" --format "$format")"; then
+      die "could not inspect model-proof containers for run $run_id attempt $run_attempt model $model"
+    fi
+    container_ids=()
+    while read -r container_id labeled_run_id labeled_run_attempt labeled_model; do
+      [ -n "$container_id" ] || continue
+      [[ "$container_id" =~ ^[a-f0-9]{64}$ ]] || \
+        die "model-proof cleanup found an unsafe container ID: $container_id"
+      [ "$labeled_run_id" = "$run_id" ] && \
+        [ "$labeled_run_attempt" = "$run_attempt" ] && \
+        [ "$labeled_model" = "$model" ] || \
+        die "model-proof cleanup inventory did not match the requested job"
+      container_ids+=("$container_id")
+    done <<< "$rows"
+    if [ "${#container_ids[@]}" -eq 0 ]; then
+      echo "No model-proof containers remain for run $run_id attempt $run_attempt model $model"
+      return 0
+    fi
+
+    # Cancellation can race the host trap or Docker's --rm handling. Removing
+    # exact full IDs is idempotent; only the subsequent exact-label inventory
+    # decides whether reconciliation succeeded.
+    docker rm -f "${container_ids[@]}" >/dev/null 2>&1 || true
+    [ "$retry" -eq 3 ] || sleep 1
+  done
+  if ! rows="$(docker ps -a --no-trunc "${filters[@]}" --format "$format")"; then
+    die "could not verify model-proof container cleanup for run $run_id attempt $run_attempt model $model"
+  fi
+  if [ -z "$rows" ]; then
+    echo "No model-proof containers remain for run $run_id attempt $run_attempt model $model"
+    return 0
+  fi
+  die "model-proof containers remain after cleanup for run $run_id attempt $run_attempt model $model"
+}
+
 acquire_proof_gpu_machine_lock() {
   [ -z "$proof_gpu_machine_fd" ] || return 0
   command -v flock >/dev/null || die "flock is required for model-proof GPU leasing"
@@ -411,6 +466,7 @@ usage() {
   cat <<'EOF'
 usage: run-model-proof.sh --model ID [--suite premerge|nightly] [--revision SHA] [--output-dir DIR]
        run-model-proof.sh --inner --model ID --suite SUITE --revision SHA --output-dir DIR
+       run-model-proof.sh --cleanup-containers --model ID
 EOF
 }
 
@@ -419,6 +475,7 @@ suite="premerge"
 revision="HEAD"
 output_dir=""
 inner=0
+cleanup_containers_only=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --model)
@@ -441,6 +498,10 @@ while [ "$#" -gt 0 ]; do
       inner=1
       shift
       ;;
+    --cleanup-containers)
+      cleanup_containers_only=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -458,6 +519,12 @@ case "$suite" in
   premerge|nightly) ;;
   *) die "--suite must be premerge or nightly" ;;
 esac
+
+if [ "$cleanup_containers_only" -eq 1 ]; then
+  [ "$inner" -eq 0 ] || die "--cleanup-containers cannot be combined with --inner"
+  cleanup_run_model_proof_containers
+  exit 0
+fi
 
 python_bin() {
   if [ -x "${TRTMC_HF_PYTHON:-/opt/venv/bin/python}" ]; then
@@ -2208,6 +2275,12 @@ PY
 
   local container_name="trtmc-model-proof-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$model"
   container_name="${container_name//_/-}"
+  local -a job_identity_labels=(
+    --label com.nvidia.trtmc.model-proof.job=1
+    --label "com.nvidia.trtmc.model-proof.run-id=${GITHUB_RUN_ID:-local}"
+    --label "com.nvidia.trtmc.model-proof.run-attempt=${GITHUB_RUN_ATTEMPT:-0}"
+    --label "com.nvidia.trtmc.model-proof.model=$model"
+  )
   local cache_check_container_name="${container_name}-cache-check"
   proof_container_name="$cache_check_container_name"
   docker rm -f "$cache_check_container_name" >/dev/null 2>&1 || true
@@ -2215,6 +2288,7 @@ PY
   local -a cache_check_docker_args=(
     run --rm
     --name "$cache_check_container_name"
+    "${job_identity_labels[@]}"
     --read-only
     --network none
     --cap-drop ALL
@@ -2356,6 +2430,7 @@ PY
     local -a cache_copy_docker_args=(
       run --rm
       --name "$cache_copy_container_name"
+      "${job_identity_labels[@]}"
       --read-only
       --network none
       --cap-drop ALL
@@ -2443,6 +2518,7 @@ PY
     --shm-size "${TRTMC_MODEL_PROOF_SHM_SIZE:-16g}"
     --gpus "device=$gpu_id"
     --label com.nvidia.trtmc.model-proof=1
+    "${job_identity_labels[@]}"
     --label "com.nvidia.trtmc.model-proof.gpu=$gpu_id"
     --label "com.nvidia.trtmc.model-proof.slots=$gpu_slot_ids"
     --label "com.nvidia.trtmc.model-proof.lock-namespace=$proof_gpu_lock_namespace"

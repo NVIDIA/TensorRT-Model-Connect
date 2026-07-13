@@ -751,6 +751,112 @@ def test_runner_removes_only_its_container_without_masking_exit_status() -> None
     assert "trap 'cleanup_proof_container 143' TERM" in text
 
 
+def test_workflow_reconciles_exact_job_containers_after_a_cancelled_proof() -> None:
+    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+    reconciliation = workflow.split(
+        "- name: Reconcile model proof containers", maxsplit=1
+    )[1].split("- name: Finalize model proof fallback", maxsplit=1)[0]
+
+    assert "if: ${{ always() && steps.checkout.outcome == 'success' }}" in reconciliation
+    assert "--cleanup-containers" in reconciliation
+    assert '--model "$MODEL"' in reconciliation
+    assert workflow.index("Reconcile model proof containers") < workflow.index(
+        "Finalize model proof fallback"
+    )
+
+
+def test_every_host_container_has_exact_workflow_job_identity_labels(tmp_path: Path) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update({"GITHUB_RUN_ID": "4242", "GITHUB_RUN_ATTEMPT": "3"})
+
+    result = _run_fake_proof(env, output)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    runs = [
+        line
+        for line in docker_log.read_text(encoding="utf-8").splitlines()
+        if line.startswith("run ")
+    ]
+    assert len(runs) == 3
+    for run in runs:
+        assert "--label com.nvidia.trtmc.model-proof.job=1" in run
+        assert "--label com.nvidia.trtmc.model-proof.run-id=4242" in run
+        assert "--label com.nvidia.trtmc.model-proof.run-attempt=3" in run
+        assert "--label com.nvidia.trtmc.model-proof.model=convbert" in run
+
+
+def test_cleanup_mode_removes_only_exact_labeled_job_containers(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    state = tmp_path / "container-present"
+    state.write_text("present\n", encoding="utf-8")
+    remove_count = tmp_path / "remove-count"
+    container_id = "d" * 64
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf \'%s\\n\' "$*" >> "$DOCKER_LOG"\n'
+        'case "${1:-}" in\n'
+        "  ps)\n"
+        '    if [ -e "$FAKE_CONTAINER_STATE" ]; then\n'
+        f'      printf \'%s\\n\' "{container_id} 4242 3 convbert"\n'
+        "    fi\n"
+        "    ;;\n"
+        "  rm)\n"
+        "    count=0\n"
+        '    if [ -e "$FAKE_REMOVE_COUNT" ]; then read -r count < "$FAKE_REMOVE_COUNT"; fi\n'
+        "    count=$((count + 1))\n"
+        '    printf \'%s\\n\' "$count" > "$FAKE_REMOVE_COUNT"\n'
+        '    if [ "$count" -ge 3 ]; then rm -f -- "$FAKE_CONTAINER_STATE"; fi\n'
+        "    ;;\n"
+        "  *) exit 99 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "DOCKER_LOG": str(docker_log),
+            "FAKE_CONTAINER_STATE": str(state),
+            "FAKE_REMOVE_COUNT": str(remove_count),
+            "GITHUB_RUN_ID": "4242",
+            "GITHUB_RUN_ATTEMPT": "3",
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--cleanup-containers",
+            "--model",
+            "convbert",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = docker_log.read_text(encoding="utf-8").splitlines()
+    inventory = next(line for line in lines if line.startswith("ps "))
+    assert "label=com.nvidia.trtmc.model-proof.job=1" in inventory
+    assert "label=com.nvidia.trtmc.model-proof.run-id=4242" in inventory
+    assert "label=com.nvidia.trtmc.model-proof.run-attempt=3" in inventory
+    assert "label=com.nvidia.trtmc.model-proof.model=convbert" in inventory
+    assert f"rm -f {container_id}" in lines
+    assert remove_count.read_text(encoding="utf-8").strip() == "3"
+    assert not state.exists()
+
+
 @pytest.mark.parametrize(("orphan_slots", "removed"), [("0", True), ("1", False)])
 def test_runner_reclaims_only_a_labeled_orphan_overlapping_its_lease(
     tmp_path: Path,
@@ -953,7 +1059,7 @@ def test_model_proof_uses_a_dedicated_self_hosted_checkout() -> None:
     assert "path: model-proof-source" in checkout
     assert "clean: true" in checkout
     assert "persist-credentials: false" in checkout
-    assert workflow.count("working-directory: ${{ github.workspace }}/model-proof-source") == 2
+    assert workflow.count("working-directory: ${{ github.workspace }}/model-proof-source") == 3
 
 
 def test_model_proof_bootstraps_html_without_a_checkout_dependency() -> None:
