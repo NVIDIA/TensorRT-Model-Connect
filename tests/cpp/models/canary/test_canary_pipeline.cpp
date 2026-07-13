@@ -69,12 +69,13 @@ void test_canary_transcribe() {
     wcfg.no_timestamp_token_id = 2;
 
     trtmc::MelFilterbank mel_fb;
-    mel_fb.n_freq_bins = 201;
+    mel_fb.n_freq_bins = 257;
     mel_fb.n_mel_bins = 80;
-    mel_fb.data.assign(201 * 80, 0.1F);
+    mel_fb.data.assign(257 * 80, 0.1F);
 
     trtmc::CanaryPipeline pipeline(std::move(encoder), std::move(decoder), std::move(cache), wcfg,
-                                   4, 0, std::move(mel_fb), 400, 160, 1, 16000, stream);
+                                   4, 0, std::move(mel_fb), 512, 400, 160, 1, 16000, 0.97F, true,
+                                   stream);
 
     check(std::string(pipeline.pipeline_type()) == "CanaryPipeline", "canary pipeline_type");
     check(decoder_ptr->cuda_graph_active(), "canary enables decoder CUDA graph by default");
@@ -210,9 +211,9 @@ void test_canary_constructor_validates_encoder() {
     trtmc::CanaryConfig wcfg;
     wcfg.mel_length = 4;
     trtmc::MelFilterbank mel_fb;
-    mel_fb.n_freq_bins = 201;
+    mel_fb.n_freq_bins = 257;
     mel_fb.n_mel_bins = 80;
-    mel_fb.data.assign(201 * 80, 0.1F);
+    mel_fb.data.assign(257 * 80, 0.1F);
 
     const std::vector<float> dec_logits = {0.1F, 0.2F, 0.9F};
     auto dec_engine = trtmc::test::build_mock_step_engine(9, 3, dec_logits);
@@ -226,7 +227,8 @@ void test_canary_constructor_validates_encoder() {
     bool threw = false;
     try {
         trtmc::CanaryPipeline pipeline(nullptr, std::move(decoder), std::move(cache), wcfg, 4, 0,
-                                       std::move(mel_fb), 400, 160, 1, 16000, stream);
+                                       std::move(mel_fb), 512, 400, 160, 1, 16000, 0.97F, true,
+                                       stream);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -265,12 +267,13 @@ void test_canary_with_cross_kv() {
     wcfg.disable_cuda_graph = true;
 
     trtmc::MelFilterbank mel_fb;
-    mel_fb.n_freq_bins = 201;
+    mel_fb.n_freq_bins = 257;
     mel_fb.n_mel_bins = 80;
-    mel_fb.data.assign(201 * 80, 0.1F);
+    mel_fb.data.assign(257 * 80, 0.1F);
 
     trtmc::CanaryPipeline pipeline(std::move(encoder), std::move(decoder), std::move(cache), wcfg,
-                                   4, 1, std::move(mel_fb), 400, 160, 1, 16000, stream);
+                                   4, 1, std::move(mel_fb), 512, 400, 160, 1, 16000, 0.97F, true,
+                                   stream);
 
     check(std::string(pipeline.pipeline_type()) == "CanaryPipeline",
           "canary cross-kv: pipeline_type");

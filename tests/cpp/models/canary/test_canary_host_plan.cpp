@@ -194,6 +194,22 @@ void test_encoder_mask_and_cross_kv_plan() {
           "canary cross-kv plan returns empty plan for invalid shape");
 }
 
+void test_canary_pcm16_quantization() {
+    std::vector<float> samples = {
+        -1.5F, -1.0F, -1.5F / 32768.0F, 1.5F / 32768.0F, 1.0F, 1.5F,
+    };
+    trtmc::quantize_canary_pcm16_inplace(samples);
+    check(samples == std::vector<float>({
+                         -1.0F,
+                         -1.0F,
+                         -1.0F / 32768.0F,
+                         1.0F / 32768.0F,
+                         32767.0F / 32768.0F,
+                         32767.0F / 32768.0F,
+                     }),
+          "canary PCM16 canonicalization clips and truncates like the NeMo reference WAV");
+}
+
 void test_cross_kv_apply_tracks_zero_and_copy_operations() {
     const auto plan = trtmc::make_canary_cross_kv_plan(8, 4, 3);
     trtmc::CanaryCrossKvApplyStats stats;
@@ -265,6 +281,7 @@ int main() {
     test_configurable_request_validation();
     test_mel_padding_and_truncation_are_row_major();
     test_encoder_mask_and_cross_kv_plan();
+    test_canary_pcm16_quantization();
     test_cross_kv_apply_tracks_zero_and_copy_operations();
     test_cross_kv_apply_reports_failures();
 

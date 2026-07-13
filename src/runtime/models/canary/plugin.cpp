@@ -152,15 +152,20 @@ class CanaryPlugin final : public IPipelinePlugin {
         auto mel_fb = load_mel_filterbank(ctx.bundle);
         auto tok = create_tokenizer_from_bundle(ctx.bundle);
 
-        int32_t mel_n_fft = extract_json_int(json, "mel_n_fft", 400);
+        int32_t mel_n_fft = extract_json_int(json, "mel_n_fft", 512);
+        int32_t mel_win_length = extract_json_int(json, "mel_win_length", 400);
         int32_t mel_hop_length = extract_json_int(json, "mel_hop_length", 160);
         int32_t mel_chunk_length = extract_json_int(json, "mel_chunk_length", 30);
         int32_t mel_sampling_rate = extract_json_int(json, "mel_sampling_rate", 16000);
+        float mel_preemph = extract_json_float(json, "mel_preemph", 0.97F);
+        bool mel_normalize_per_feature =
+            extract_json_string(json, "mel_normalize", "per_feature") == "per_feature";
 
         return std::make_unique<CanaryPipeline>(
             std::move(enc_loaded.module), std::move(dec_loaded.module), std::move(state),
-            std::move(wc), ctx.config.hidden_size, dl, std::move(mel_fb), mel_n_fft, mel_hop_length,
-            mel_chunk_length, mel_sampling_rate, stream, std::move(tok), ctx.bundle.info.model_id);
+            std::move(wc), ctx.config.hidden_size, dl, std::move(mel_fb), mel_n_fft, mel_win_length,
+            mel_hop_length, mel_chunk_length, mel_sampling_rate, mel_preemph,
+            mel_normalize_per_feature, stream, std::move(tok), ctx.bundle.info.model_id);
     }
 };
 

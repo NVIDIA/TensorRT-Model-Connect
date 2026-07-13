@@ -336,8 +336,7 @@ class IPipeline {
     // overload so existing speech pipelines remain compatible.
     virtual TextResult transcribe(const float* audio_samples, int32_t num_samples,
                                   const TranscriptionConfig& cfg) {
-        return transcribe(audio_samples, num_samples, cfg.max_output_tokens,
-                          cfg.input_sample_rate);
+        return transcribe(audio_samples, num_samples, cfg.max_output_tokens, cfg.input_sample_rate);
     }
 
     // Each request owns its samples and its complete per-input configuration.

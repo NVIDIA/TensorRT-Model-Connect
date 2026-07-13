@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -690,3 +691,30 @@ def test_elf_l0_manifests_use_upstream_replay_contract() -> None:
         assert "skip_reason" not in case.metadata
         assert Path(case.inputs["elf_replay_artifact"]).is_file()
         assert any(stage.artifact_type == "text_samples" for stage in case.stages)
+        if name == "elf-b-owt-l0":
+            assert case.metadata["e2e_parallel_resource"] == "exclusive_gpu"
+            build_env = case.metadata["build_env"]
+            assert build_env["TRTMC_BUILDER_OPTIMIZATION_LEVEL"] == "1"
+            assert build_env["TRTMC_MAX_NUM_TACTICS"] == ""
+            assert build_env["TRTMC_AVG_TIMING_ITERATIONS"] == ""
+            assert build_env["TRTMC_TRT_TIMING_CACHE_PATH"] == ""
+            assert build_env["TRTMC_TRT_TIMING_CACHE_DIR"] == ""
+            assert build_env["TRTMC_ELF_TIMING_CACHE_GENERATE"] == "0"
+
+            cache_spec = build_env["TRTMC_ELF_TIMING_CACHE_PATH"]
+            metadata_spec = build_env["TRTMC_ELF_TIMING_CACHE_METADATA_PATH"]
+            assert cache_spec["relative_to"] == "model"
+            assert metadata_spec["relative_to"] == "model"
+            cache_path = ELF_MODEL_DIR / cache_spec["path"]
+            metadata_path = ELF_MODEL_DIR / metadata_spec["path"]
+            assert cache_path.is_file()
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            assert metadata == {
+                "schema_version": 1,
+                "builder_optimization_level": 1,
+                "compute_capability": "10.3",
+                "gpu": "NVIDIA GB300",
+                "path": cache_path.name,
+                "sha256": hashlib.sha256(cache_path.read_bytes()).hexdigest(),
+                "tensorrt_version": "11.2.0.113",
+            }

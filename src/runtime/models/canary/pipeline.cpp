@@ -298,13 +298,16 @@ CanaryBatchWorkGroups group_canary_batch_work(const std::vector<CanaryBatchSegme
 CanaryPreparedSegment
 prepare_canary_batch_segment(const CanaryBatchSegment& item, const TranscriptionRequest& request,
                              const MelFilterbank* mel_filterbank, int32_t mel_n_fft,
-                             int32_t mel_hop_length, int32_t mel_chunk_length,
-                             int32_t mel_sampling_rate, const CanaryConfig& canary_config) {
+                             int32_t mel_win_length, int32_t mel_hop_length,
+                             int32_t mel_chunk_length, int32_t mel_sampling_rate,
+                             float mel_preemph, bool mel_normalize_per_feature,
+                             const CanaryConfig& canary_config) {
     const float* samples = request.audio_samples.data() + item.offset;
     int32_t sample_count = item.count;
     std::vector<float> resampled;
     if (item.sample_rate != mel_sampling_rate) {
         resampled = resample_linear(samples, sample_count, item.sample_rate, mel_sampling_rate);
+        quantize_canary_pcm16_inplace(resampled);
         samples = resampled.data();
         sample_count = static_cast<int32_t>(resampled.size());
     }
@@ -313,8 +316,8 @@ prepare_canary_batch_segment(const CanaryBatchSegment& item, const Transcription
     if (mel_filterbank != nullptr && !mel_filterbank->data.empty()) {
         prepared.mel = canary::extract_mel_spectrogram(
             samples, sample_count, mel_filterbank->data.data(), mel_filterbank->n_freq_bins,
-            mel_filterbank->n_mel_bins, mel_n_fft, mel_hop_length, mel_chunk_length,
-            mel_sampling_rate);
+            mel_filterbank->n_mel_bins, mel_n_fft, mel_win_length, mel_hop_length,
+            mel_chunk_length, mel_sampling_rate, mel_preemph, mel_normalize_per_feature);
     }
     if (!prepared.mel.data.empty()) {
         const int32_t valid_frames =
@@ -329,19 +332,23 @@ prepare_canary_batch_segment(const CanaryBatchSegment& item, const Transcription
 std::vector<std::future<CanaryPreparedSegment>> launch_canary_batch_preparation(
     const std::vector<std::size_t>& indices, std::size_t chunk_start, std::size_t chunk_end,
     const std::vector<CanaryBatchSegment>& work, const std::vector<TranscriptionRequest>& requests,
-    const MelFilterbank* mel_filterbank, int32_t mel_n_fft, int32_t mel_hop_length,
-    int32_t mel_chunk_length, int32_t mel_sampling_rate, const CanaryConfig& canary_config) {
+    const MelFilterbank* mel_filterbank, int32_t mel_n_fft, int32_t mel_win_length,
+    int32_t mel_hop_length, int32_t mel_chunk_length, int32_t mel_sampling_rate,
+    float mel_preemph, bool mel_normalize_per_feature, const CanaryConfig& canary_config) {
     std::vector<std::future<CanaryPreparedSegment>> futures;
     futures.reserve(chunk_end - chunk_start);
     for (std::size_t cursor = chunk_start; cursor < chunk_end; ++cursor) {
         const std::size_t index = indices[cursor];
         futures.push_back(std::async(
-            std::launch::async, [&requests, &work, index, mel_filterbank, mel_n_fft, mel_hop_length,
-                                 mel_chunk_length, mel_sampling_rate, &canary_config] {
+            std::launch::async,
+            [&requests, &work, index, mel_filterbank, mel_n_fft, mel_win_length,
+             mel_hop_length, mel_chunk_length, mel_sampling_rate, mel_preemph,
+             mel_normalize_per_feature, &canary_config] {
                 const auto& item = work[index];
                 return prepare_canary_batch_segment(
-                    item, requests[item.request_index], mel_filterbank, mel_n_fft, mel_hop_length,
-                    mel_chunk_length, mel_sampling_rate, canary_config);
+                    item, requests[item.request_index], mel_filterbank, mel_n_fft, mel_win_length,
+                    mel_hop_length, mel_chunk_length, mel_sampling_rate, mel_preemph,
+                    mel_normalize_per_feature, canary_config);
             }));
     }
     return futures;
@@ -679,21 +686,21 @@ std::vector<std::vector<int32_t>> take_canary_beam_batch_output(CanaryBeamBatch&
 // CanaryPipeline
 // ═══════════════════════════════════════════════════════════════════════════
 
-CanaryPipeline::CanaryPipeline(std::unique_ptr<TrtModule> encoder,
-                               std::unique_ptr<TrtModule> decoder,
-                               std::unique_ptr<CanaryInferenceState> state,
-                               CanaryConfig canary_config, int32_t hidden_size,
-                               int32_t num_decoder_layers, MelFilterbank mel_fb, int32_t mel_n_fft,
-                               int32_t mel_hop_length, int32_t mel_chunk_length,
-                               int32_t mel_sampling_rate, cudaStream_t stream,
-                               std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+CanaryPipeline::CanaryPipeline(
+    std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
+    std::unique_ptr<CanaryInferenceState> state, CanaryConfig canary_config, int32_t hidden_size,
+    int32_t num_decoder_layers, MelFilterbank mel_fb, int32_t mel_n_fft, int32_t mel_win_length,
+    int32_t mel_hop_length, int32_t mel_chunk_length, int32_t mel_sampling_rate, float mel_preemph,
+    bool mel_normalize_per_feature, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+    std::string model_id_str)
     : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
       canary_config_(std::move(canary_config)), hidden_size_(hidden_size),
       num_decoder_layers_(num_decoder_layers),
       mel_fb_(std::make_unique<MelFilterbank>(std::move(mel_fb))), mel_n_fft_(mel_n_fft),
-      mel_hop_length_(mel_hop_length), mel_chunk_length_(mel_chunk_length),
-      mel_sampling_rate_(mel_sampling_rate), stream_(stream), tokenizer_(std::move(tokenizer)),
-      model_id_(std::move(model_id_str)) {
+      mel_win_length_(mel_win_length), mel_hop_length_(mel_hop_length),
+      mel_chunk_length_(mel_chunk_length), mel_sampling_rate_(mel_sampling_rate),
+      mel_preemph_(mel_preemph), mel_normalize_per_feature_(mel_normalize_per_feature),
+      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
     validate_canary_pipeline_components(encoder_.get(), decoder_.get(), state_.get());
 
     // Decoder shapes are stable within each dynamic cache-row bucket. Capture
@@ -794,7 +801,8 @@ CanaryPipeline::transcribe_batch(const std::vector<TranscriptionRequest>& reques
 
             auto futures = launch_canary_batch_preparation(
                 indices, chunk_start, chunk_end, work, requests, mel_fb_.get(), mel_n_fft_,
-                mel_hop_length_, mel_chunk_length_, mel_sampling_rate_, canary_config_);
+                mel_win_length_, mel_hop_length_, mel_chunk_length_, mel_sampling_rate_,
+                mel_preemph_, mel_normalize_per_feature_, canary_config_);
             auto chunk = collect_canary_prepared_batch_chunk(futures, indices, chunk_start, work,
                                                              segment_results);
             if (chunk.valid_indices.empty())
@@ -829,6 +837,10 @@ TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t n
                   << mel_sampling_rate_ << " Hz" << std::endl;
         resampled_buf =
             resample_linear(audio_data, num_samples, input_sample_rate, mel_sampling_rate_);
+        // The NeMo file-based reference serializes its resampled signal as
+        // PCM16 before feature extraction. Mirror that model-local boundary so
+        // low-amplitude inputs reach the frontend with identical quantization.
+        quantize_canary_pcm16_inplace(resampled_buf);
         samples_ptr = resampled_buf.data();
         samples_count = static_cast<int32_t>(resampled_buf.size());
     }
@@ -837,10 +849,10 @@ TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t n
     // Step 1: Extract mel spectrogram
     canary::MelResult mel;
     if (mel_fb_ && !mel_fb_->data.empty()) {
-        mel =
-            canary::extract_mel_spectrogram(samples_ptr, samples_count, mel_fb_->data.data(),
-                                            mel_fb_->n_freq_bins, mel_fb_->n_mel_bins, mel_n_fft_,
-                                            mel_hop_length_, mel_chunk_length_, mel_sampling_rate_);
+        mel = canary::extract_mel_spectrogram(
+            samples_ptr, samples_count, mel_fb_->data.data(), mel_fb_->n_freq_bins,
+            mel_fb_->n_mel_bins, mel_n_fft_, mel_win_length_, mel_hop_length_, mel_chunk_length_,
+            mel_sampling_rate_, mel_preemph_, mel_normalize_per_feature_);
     }
     const auto mel_end = CanaryClock::now();
 
@@ -1011,6 +1023,23 @@ void CanaryPipeline::setup_cross_attention(const std::vector<int32_t>& actual_en
                                            canary_config_.max_source_positions, hidden_size_};
     bind_canary_cross_attention_layers(*decoder_, num_decoder_layers_, cross_kv_ptr_, cross_shape);
     decoder_->sync();
+
+    // NeMo masks encoder padding in decoder cross-attention. Zeroing padded
+    // encoder rows is not sufficient because the decoder K/V projections have
+    // biases and would turn those rows back into non-zero attention keys.
+    const int32_t max_source_positions = canary_config_.max_source_positions;
+    cross_attention_mask_.clear();
+    cross_attention_mask_.reserve(lane_to_sample.size() *
+                                  static_cast<std::size_t>(max_source_positions));
+    for (const int32_t sample : lane_to_sample) {
+        if (sample < 0 || static_cast<std::size_t>(sample) >= actual_enc_seq_lens.size())
+            throw std::invalid_argument("Canary cross-attention lane maps to an invalid sample");
+        const int32_t actual_enc_seq_len = actual_enc_seq_lens[static_cast<std::size_t>(sample)];
+        const int32_t valid_enc_seq_len =
+            actual_enc_seq_len > 0 ? actual_enc_seq_len : max_source_positions;
+        auto mask = build_canary_encoder_mask_values(max_source_positions, valid_enc_seq_len);
+        cross_attention_mask_.insert(cross_attention_mask_.end(), mask.begin(), mask.end());
+    }
 }
 
 std::vector<int32_t> CanaryPipeline::run_decoder(const std::vector<int32_t>& initial_tokens,
@@ -1234,6 +1263,17 @@ void CanaryPipeline::run_decoder_step(int32_t token_id, std::vector<float>& logi
 
     TensorMap inputs;
     inputs["token_id"] = token_tensor;
+    if (decoder_->has_input("cross_attention_mask")) {
+        const auto source_positions =
+            static_cast<std::size_t>(canary_config_.max_source_positions);
+        if (cross_attention_mask_.size() != source_positions)
+            throw std::runtime_error("Canary cross-attention mask has an invalid single-lane shape");
+        Tensor cross_mask_tensor;
+        cross_mask_tensor.data = cross_attention_mask_.data();
+        cross_mask_tensor.shape = {1, 1, canary_config_.max_source_positions};
+        cross_mask_tensor.dtype = DType::kFloat32;
+        inputs["cross_attention_mask"] = cross_mask_tensor;
+    }
     state_->prepare_step(inputs);
 
     TensorMap outputs = decoder_->forward(inputs);
@@ -1264,6 +1304,18 @@ void CanaryPipeline::run_decoder_step_batch(const std::vector<int32_t>& token_id
 
     TensorMap inputs;
     inputs["token_id"] = token_tensor;
+    if (decoder_->has_input("cross_attention_mask")) {
+        const auto source_positions =
+            static_cast<std::size_t>(canary_config_.max_source_positions);
+        if (cross_attention_mask_.size() != token_ids.size() * source_positions)
+            throw std::runtime_error("Canary cross-attention mask has an invalid batched shape");
+        Tensor cross_mask_tensor;
+        cross_mask_tensor.data = cross_attention_mask_.data();
+        cross_mask_tensor.shape = {static_cast<int64_t>(token_ids.size()), 1,
+                                   canary_config_.max_source_positions};
+        cross_mask_tensor.dtype = DType::kFloat32;
+        inputs["cross_attention_mask"] = cross_mask_tensor;
+    }
     state_->prepare_step(inputs);
     TensorMap outputs = decoder_->forward(inputs);
     auto it = outputs.find("logits");

@@ -79,6 +79,14 @@ inline std::vector<float> build_canary_encoder_mask_values(int32_t enc_seq, int3
     return mask;
 }
 
+inline void quantize_canary_pcm16_inplace(std::vector<float>& samples) {
+    for (float& sample : samples) {
+        const float scaled = std::clamp(sample * 32768.0F, -32768.0F, 32767.0F);
+        const auto pcm = static_cast<int16_t>(scaled);
+        sample = static_cast<float>(pcm) / 32768.0F;
+    }
+}
+
 inline std::vector<int32_t> make_canary_initial_decoder_tokens(const CanaryConfig& cfg) {
     if (!cfg.decoder_start_token_ids.empty()) {
         return cfg.decoder_start_token_ids;

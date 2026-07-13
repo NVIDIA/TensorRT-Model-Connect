@@ -77,60 +77,93 @@ void test_canary_fft_matches_direct_dft() {
 
 void test_canary_shape_and_empty_audio() {
     const int32_t sample_rate = 16000;
-    const int32_t n_fft = 400;
+    const int32_t n_fft = 512;
+    const int32_t win_length = 400;
     const int32_t hop_length = 160;
     const int32_t chunk_length_s = 30;
     const int32_t n_freq_bins = n_fft / 2 + 1;
     const int32_t n_mel_bins = 80;
     auto fb = make_identity_filterbank(n_freq_bins, n_mel_bins);
 
-    const auto mel =
-        trtmc::canary::extract_mel_spectrogram(nullptr, 0, fb.data(), n_freq_bins, n_mel_bins,
-                                               n_fft, hop_length, chunk_length_s, sample_rate);
+    const auto mel = trtmc::canary::extract_mel_spectrogram(
+        nullptr, 0, fb.data(), n_freq_bins, n_mel_bins, n_fft, win_length, hop_length,
+        chunk_length_s, sample_rate, 0.97F, true);
 
     check(mel.n_mels == n_mel_bins, "canary mel keeps mel bin count");
     check(mel.n_frames == 3000, "canary mel frame count matches 30s HF window");
     check(static_cast<int32_t>(mel.data.size()) == n_mel_bins * mel.n_frames,
           "canary mel data size matches shape");
-    check(std::all_of(mel.data.begin(), mel.data.end(), [](float value) { return value == -1.5F; }),
-          "canary empty audio keeps the normalized zero-power value");
+    check(mel.valid_frames == 0, "canary empty audio has no valid feature frames");
+    check(std::all_of(mel.data.begin(), mel.data.end(), [](float value) { return value == 0.0F; }),
+          "canary empty audio uses NeMo's zero pad value");
 }
 
-void test_canary_short_audio_matches_full_zero_padded_reference() {
+trtmc::canary::MelResult extract_test_mel(const std::vector<float>& audio) {
     const int32_t sample_rate = 32;
     const int32_t n_fft = 8;
+    const int32_t win_length = 6;
     const int32_t hop_length = 2;
     const int32_t chunk_length_s = 1;
     const int32_t n_freq_bins = n_fft / 2 + 1;
     const int32_t n_mel_bins = n_freq_bins;
     auto fb = make_identity_filterbank(n_freq_bins, n_mel_bins);
+    return trtmc::canary::extract_mel_spectrogram(
+        audio.data(), static_cast<int32_t>(audio.size()), fb.data(), n_freq_bins, n_mel_bins, n_fft,
+        win_length, hop_length, chunk_length_s, sample_rate, 0.97F, true);
+}
 
-    std::vector<float> short_audio = {0.25F, -0.5F,  0.75F, 1.0F, -0.25F, 0.125F,
-                                      0.5F,  -0.75F, 0.2F,  0.4F, -0.1F};
-    std::vector<float> full_audio(static_cast<std::size_t>(sample_rate * chunk_length_s), 0.0F);
-    std::copy(short_audio.begin(), short_audio.end(), full_audio.begin());
-
-    const auto optimized = trtmc::canary::extract_mel_spectrogram(
-        short_audio.data(), static_cast<int32_t>(short_audio.size()), fb.data(), n_freq_bins,
-        n_mel_bins, n_fft, hop_length, chunk_length_s, sample_rate);
-    const auto reference = trtmc::canary::extract_mel_spectrogram(
-        full_audio.data(), static_cast<int32_t>(full_audio.size()), fb.data(), n_freq_bins,
-        n_mel_bins, n_fft, hop_length, chunk_length_s, sample_rate);
-
-    check(optimized.n_frames == reference.n_frames,
-          "canary optimized mel preserves the full chunk shape");
-    check(optimized.valid_frames == static_cast<int32_t>(short_audio.size()) / hop_length,
-          "canary optimized mel reports short audio frames");
-    check(reference.valid_frames == reference.n_frames,
-          "canary full zero-padded reference computes the full chunk");
-    check(optimized.data.size() == reference.data.size(),
-          "canary optimized mel preserves the full data size");
-
-    bool values_match = optimized.data.size() == reference.data.size();
-    for (std::size_t i = 0; values_match && i < optimized.data.size(); ++i) {
-        values_match = std::abs(optimized.data[i] - reference.data[i]) <= 1e-6F;
+void test_canary_low_volume_uses_per_feature_normalization() {
+    std::vector<float> audio(24);
+    for (std::size_t i = 0; i < audio.size(); ++i) {
+        audio[i] = static_cast<float>(0.35 * std::sin(static_cast<double>(i) * 0.47) +
+                                      0.2 * std::cos(static_cast<double>(i) * 0.19));
     }
-    check(values_match, "canary optimized mel matches full zero-padded values");
+    for (float& sample : audio)
+        sample *= 0.12F;
+
+    const auto quiet = extract_test_mel(audio);
+    bool centered = true;
+    bool has_normalized_variation = false;
+    for (int32_t m = 0; m < quiet.n_mels; ++m) {
+        const std::size_t base = static_cast<std::size_t>(m) * quiet.n_frames;
+        double mean = 0.0;
+        double square_sum = 0.0;
+        for (int32_t t = 0; t < quiet.valid_frames; ++t) {
+            mean += quiet.data[base + t];
+            square_sum += static_cast<double>(quiet.data[base + t]) * quiet.data[base + t];
+        }
+        mean /= quiet.valid_frames;
+        centered = centered && std::abs(mean) < 1e-5;
+        has_normalized_variation = has_normalized_variation || square_sum > 1.0;
+    }
+    check(centered, "canary low-volume features use NeMo per-feature centering");
+    check(has_normalized_variation,
+          "canary low-volume features retain normalized speech variation");
+}
+
+void test_canary_silence_padding_uses_valid_frame_statistics() {
+    std::vector<float> audio(24, 0.0F);
+    for (std::size_t i = 6; i < 18; ++i) {
+        audio[i] = static_cast<float>(0.4 * std::sin(static_cast<double>(i - 6) * 0.61));
+    }
+    const auto mel = extract_test_mel(audio);
+    check(mel.valid_frames == static_cast<int32_t>(audio.size()) / 2,
+          "canary silence-padded audio preserves its valid duration");
+
+    bool normalized = true;
+    bool padded_tail_zero = true;
+    for (int32_t m = 0; m < mel.n_mels; ++m) {
+        const std::size_t base = static_cast<std::size_t>(m) * mel.n_frames;
+        double mean = 0.0;
+        for (int32_t t = 0; t < mel.valid_frames; ++t)
+            mean += mel.data[base + t];
+        mean /= mel.valid_frames;
+        normalized = normalized && std::abs(mean) < 1e-5;
+        for (int32_t t = mel.valid_frames; t < mel.n_frames; ++t)
+            padded_tail_zero = padded_tail_zero && mel.data[base + t] == 0.0F;
+    }
+    check(normalized, "canary silence-padded audio is normalized over valid frames only");
+    check(padded_tail_zero, "canary chunk padding uses NeMo's zero feature value");
 }
 
 } // namespace
@@ -138,6 +171,7 @@ void test_canary_short_audio_matches_full_zero_padded_reference() {
 int main() {
     test_canary_fft_matches_direct_dft();
     test_canary_shape_and_empty_audio();
-    test_canary_short_audio_matches_full_zero_padded_reference();
+    test_canary_low_volume_uses_per_feature_normalization();
+    test_canary_silence_padding_uses_valid_frame_statistics();
     return failures;
 }

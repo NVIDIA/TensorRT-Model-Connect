@@ -215,6 +215,7 @@ def _add_canary_tp_decoder_layer(
     cross_k,
     cross_v,
     attention_mask,
+    cross_attention_mask,
     eps_tensor,
     weights,
     prefix: str,
@@ -291,10 +292,13 @@ def _add_canary_tp_decoder_layer(
     cv_proj = _add_linear_with_bias(
         network, cross_v_typed, hidden_size, local_attention_size,
         weights[f"{prefix}.xw_v"], weights[f"{prefix}.xb_v"], dtype=dtype)
+    cross_mask_4d = graph_ops.add_3d_mask_to_4d(
+        network, cross_attention_mask)
     ccf = _add_batched_attention_manual(
         network, cq, ck_proj, cv_proj,
         num_heads=local_heads, head_dim=head_dim,
         kv_seq=max_source_positions,
+        mask=cross_mask_4d,
         fp32_accumulation=True)
     ca = graph_ops.add_matmul_rhs_constant(
         network, ccf, local_attention_size, hidden_size,
@@ -376,6 +380,9 @@ def build_canary_tp_decoder_engine(
     position_id = network.add_input("position_id", trt.int32, (-1,))
     attention_mask = network.add_input(
         "attention_mask", trt.float32, (-1, 1, attention_window))
+    cross_attention_mask = network.add_input(
+        "cross_attention_mask", trt.float32,
+        (-1, 1, max_source_positions))
 
     cache_k_inputs, cache_v_inputs = [], []
     for i in range(dec_layers):
@@ -404,6 +411,10 @@ def build_canary_tp_decoder_engine(
         "attention_mask", (1, 1, attention_window),
         (16, 1, attention_window),
         (CANARY_MAX_DECODER_LANES, 1, attention_window))
+    profile.set_shape(
+        "cross_attention_mask", (1, 1, max_source_positions),
+        (16, 1, max_source_positions),
+        (CANARY_MAX_DECODER_LANES, 1, max_source_positions))
     for i in range(dec_layers):
         suffix = f"_{i}"
         profile.set_shape(
@@ -440,6 +451,8 @@ def build_canary_tp_decoder_engine(
 
     if work_trt_dtype != trt.float32:
         attention_mask = network.add_cast(attention_mask, work_trt_dtype).get_output(0)
+        cross_attention_mask = network.add_cast(
+            cross_attention_mask, work_trt_dtype).get_output(0)
 
     hidden_state = network.add_elementwise(
         network.add_gather(embedding_table, token_id, 0).get_output(0),
@@ -460,6 +473,7 @@ def build_canary_tp_decoder_engine(
             cross_k=cross_k_inputs[layer_idx],
             cross_v=cross_v_inputs[layer_idx],
             attention_mask=attention_mask,
+            cross_attention_mask=cross_attention_mask,
             eps_tensor=eps_tensor,
             weights=rank_weights,
             prefix=prefix,

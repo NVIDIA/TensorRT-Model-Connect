@@ -1,0 +1,9 @@
+{
+  "builder_optimization_level": 1,
+  "compute_capability": "10.3",
+  "gpu": "NVIDIA GB300",
+  "path": "tensorrt-11.2.0.113-gb300-opt1.bin",
+  "schema_version": 1,
+  "sha256": "9c7bbaaea7af6666bbb24c146308d1bcf6e1d7024a5ac4f708a16e17f131d4e7",
+  "tensorrt_version": "11.2.0.113"
+}

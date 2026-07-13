@@ -30,8 +30,9 @@ class CanaryPipeline final : public IPipeline {
     CanaryPipeline(std::unique_ptr<TrtModule> encoder, std::unique_ptr<TrtModule> decoder,
                    std::unique_ptr<CanaryInferenceState> state, CanaryConfig canary_config,
                    int32_t hidden_size, int32_t num_decoder_layers, MelFilterbank mel_fb,
-                   int32_t mel_n_fft, int32_t mel_hop_length, int32_t mel_chunk_length,
-                   int32_t mel_sampling_rate, cudaStream_t stream,
+                   int32_t mel_n_fft, int32_t mel_win_length, int32_t mel_hop_length,
+                   int32_t mel_chunk_length, int32_t mel_sampling_rate, float mel_preemph,
+                   bool mel_normalize_per_feature, cudaStream_t stream,
                    std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
 
     ~CanaryPipeline() override;
@@ -91,9 +92,12 @@ class CanaryPipeline final : public IPipeline {
     int32_t num_decoder_layers_;
     std::unique_ptr<MelFilterbank> mel_fb_;
     int32_t mel_n_fft_;
+    int32_t mel_win_length_;
     int32_t mel_hop_length_;
     int32_t mel_chunk_length_;
     int32_t mel_sampling_rate_;
+    float mel_preemph_;
+    bool mel_normalize_per_feature_;
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
@@ -102,6 +106,7 @@ class CanaryPipeline final : public IPipeline {
     std::size_t cross_kv_sample_bytes_{0};
     int32_t encoder_batch_capacity_{1};
     int32_t decoder_lane_capacity_{1};
+    std::vector<float> cross_attention_mask_;
 };
 
 } // namespace trtmc

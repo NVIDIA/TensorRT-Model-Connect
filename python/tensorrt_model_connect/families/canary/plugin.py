@@ -615,7 +615,7 @@ def _add_batched_attention(network, q, k, v, *, num_heads, head_dim,
 
 
 def _add_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k,
-                       cross_v, attention_mask, eps, weights,
+                       cross_v, attention_mask, cross_attention_mask, eps, weights,
                        pfx, hsz, nheads, hdim, ffn, maxcache, maxsrc,
                        dtype=np.float32):
     aw = maxcache + 1
@@ -662,9 +662,12 @@ def _add_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k,
     cv = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(
         network, cross_v, hsz, hsz, weights[f"{pfx}.xw_v"], dtype=dtype), hsz,
         weights[f"{pfx}.xb_v"], dtype=dtype)
+    cross_mask_4d = graph_ops.add_3d_mask_to_4d(
+        network, cross_attention_mask)
     ccf = _add_batched_attention(
-        network, cq, ck, cv, num_heads=nheads, head_dim=hdim,
-        kv_seq=maxsrc)
+        network, cq, ck, cv,
+        num_heads=nheads, head_dim=hdim,
+        kv_seq=maxsrc, mask=cross_mask_4d)
     ca = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(
         network, ccf, hsz, hsz, weights[f"{pfx}.xw_o"], dtype=dtype), hsz,
         weights[f"{pfx}.xb_o"], dtype=dtype)
@@ -921,6 +924,8 @@ class CanaryPlugin:
         tid = net.add_input("token_id", trt.int32, (-1,))
         pid = net.add_input("position_id", trt.int32, (-1,))
         amask = net.add_input("attention_mask", trt.float32, (-1, 1, aw))
+        cross_amask = net.add_input(
+            "cross_attention_mask", trt.float32, (-1, 1, es))
         cki, cvi, xki, xvi = [], [], [], []
         for i in range(dl):
             cki.append(net.add_input(graph_ops.layer_tensor_name("cache_k", i), trt.float32, (-1, max_cache_length, h)))
@@ -935,6 +940,9 @@ class CanaryPlugin:
             "attention_mask": (
                 (1, 1, aw), (16, 1, aw),
                 (CANARY_MAX_DECODER_LANES, 1, aw)),
+            "cross_attention_mask": (
+                (1, 1, es), (16, 1, es),
+                (CANARY_MAX_DECODER_LANES, 1, es)),
         }
         for name, shapes in batch_shapes.items():
             profile.set_shape(name, *shapes)
@@ -999,6 +1007,7 @@ class CanaryPlugin:
             layer_cross_k = xki[li]
             layer_cross_v = xvi[li]
             layer_mask = amask
+            layer_cross_mask = cross_amask
             if layer_cache_k.dtype != layer_trt_dtype:
                 layer_cache_k = net.add_cast(
                     layer_cache_k, layer_trt_dtype).get_output(0)
@@ -1011,11 +1020,14 @@ class CanaryPlugin:
             if layer_mask.dtype != layer_trt_dtype:
                 layer_mask = net.add_cast(
                     layer_mask, layer_trt_dtype).get_output(0)
+                layer_cross_mask = net.add_cast(
+                    layer_cross_mask, layer_trt_dtype).get_output(0)
             r = _add_decoder_layer(
                 network=net, hidden=hs,
                 cache_k=layer_cache_k, cache_v=layer_cache_v,
                 cross_k=layer_cross_k, cross_v=layer_cross_v,
                 attention_mask=layer_mask,
+                cross_attention_mask=layer_cross_mask,
                 eps=fp32_eps if layer_np_dtype == np.float32 else eps,
                 weights=weights, pfx=pfx,
                 hsz=h, nheads=dh, hdim=hd, ffn=df,

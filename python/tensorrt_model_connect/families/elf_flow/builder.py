@@ -17,6 +17,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
+from . import timing_cache
 from .config import make_elf_rope_cache, resolve_elf_config
 
 trt = trt_compat.get_trt()
@@ -257,6 +258,7 @@ def build_elf_flow_engine(
     # Keep the fp32 build in full fp32 rather than TensorRT's default TF32 path
     # so replay parity against the GitHub JAX implementation stays tight.
     builder_config.clear_flag(trt.BuilderFlag.TF32)
+    model_timing_cache = timing_cache.attach_model_timing_cache(builder_config, trt)
 
     boundary_selector = cfg["depth"]
     use_fp32_boundary = (
@@ -417,4 +419,7 @@ def build_elf_flow_engine(
     plan = builder.build_serialized_network(network, builder_config)
     if plan is None:
         raise RuntimeError("TRT engine serialization failed for ELF")
+    timing_cache.persist_generated_model_timing_cache(
+        builder_config, model_timing_cache
+    )
     return bytes(plan)

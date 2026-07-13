@@ -31,6 +31,23 @@ class TestCanaryPlugin:
     HEADS, HEAD_DIM, FFN = 2, 8, 32
     MEL_BINS, CONV_KERNEL, SUB_CH = 8, 3, 4
 
+    def test_audio_config_preserves_nemo_frontend_contract(self):
+        plugin = importlib.import_module(
+            "tensorrt_model_connect.families.canary.plugin")
+
+        audio_config = plugin.CanaryPlugin().get_audio_config(SimpleNamespace())
+
+        assert audio_config == {
+            "mel_frontend": "nemo",
+            "mel_n_fft": 512,
+            "mel_win_length": 400,
+            "mel_hop_length": 160,
+            "mel_chunk_length": 30,
+            "mel_sampling_rate": 16000,
+            "mel_preemph": 0.97,
+            "mel_normalize": "per_feature",
+        }
+
     def test_vision_build_forwards_fp32_layer_selection(self, monkeypatch):
         plugin = importlib.import_module(
             "tensorrt_model_connect.families.canary.plugin")

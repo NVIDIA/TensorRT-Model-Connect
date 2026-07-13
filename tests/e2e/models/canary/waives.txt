@@ -1,3 +1,1 @@
 # Model-local E2E waives. Format: [platform/]model-name SKIP|XFAIL (reason)
-canary-1b-v2-asr-probe05 XFAIL  (ASR probe low-volume parity gap: TRT transcript diverges from NeMo reference)
-canary-1b-v2-asr-probe06 XFAIL  (ASR probe silence-padding parity gap: TRT transcript diverges from NeMo reference)

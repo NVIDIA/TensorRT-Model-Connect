@@ -7,6 +7,7 @@
   "runtime_strategy": "diffusion_sana_wm",
   "task_strategy": "diffusion_media_generation",
   "e2e_parallel_resource": "exclusive_gpu",
+  "build_timeout_s": 7200,
   "build_args": {
     "max_cache_length": 256
   },

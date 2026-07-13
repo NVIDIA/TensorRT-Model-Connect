@@ -894,6 +894,8 @@ class HfTransformersReference:
             voice_preset = {voice_preset!r}
             output_path = {output_path!r}
             wav_path = {wav_path!r}
+            device = torch.device(
+                "cuda" if torch.cuda.is_available() else "cpu")
 
             # Make Bark reference generation deterministic across runs.
             random.seed(seed)
@@ -912,6 +914,7 @@ class HfTransformersReference:
             model = BarkModel.from_pretrained(
                 hf_id, trust_remote_code=trust_remote_code,
                 torch_dtype={torch_dtype_expr})
+            model.to(device)
             model.eval()
 
             if voice_preset:
@@ -919,6 +922,10 @@ class HfTransformersReference:
                     prompt, voice_preset=voice_preset, return_tensors="pt")
             else:
                 inputs = processor(prompt, return_tensors="pt")
+            inputs = {{
+                key: value.to(device) if hasattr(value, "to") else value
+                for key, value in inputs.items()
+            }}
             with torch.no_grad():
                 audio_values = model.generate(**inputs)
 
