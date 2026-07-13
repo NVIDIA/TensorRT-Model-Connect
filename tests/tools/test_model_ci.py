@@ -144,6 +144,7 @@ def _make_repo(
     _write(repo, "scripts/reporting/__init__.py", "")
     _write(repo, "scripts/reporting/vlm_assessment.py", "# report component\n")
     _write(repo, "scripts/schedule_e2e.py", "# shared E2E scheduler\n")
+    _write(repo, "scripts/hf_cache_download_worker.py", "# cache download worker\n")
     _write(repo, "scripts/warm_hf_cache.py", "# cache check\n")
     _write(repo, "tools/__init__.py", "")
     _write(repo, "tools/diff_logits.py", "# shared logits diff\n")
@@ -838,6 +839,7 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         "scripts/reporting/__init__.py",
         "scripts/reporting/vlm_assessment.py",
         "scripts/schedule_e2e.py",
+        "scripts/hf_cache_download_worker.py",
         "scripts/warm_hf_cache.py",
         "tools/__init__.py",
         "tools/diff_logits.py",

@@ -1362,9 +1362,18 @@ class TestNoImpact:
         assert match.rule == "no_impact"
         assert match.models == []
 
-    def test_e2e_runner_scripts_trigger_all_models(self, imap):
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "scripts/run_e2e_parallel.sh",
+            "scripts/schedule_e2e.py",
+            "scripts/hf_cache_download_worker.py",
+            "scripts/warm_hf_cache.py",
+        ],
+    )
+    def test_e2e_runner_scripts_trigger_all_models(self, imap, path):
         """E2E runner changes must not skip E2E validation."""
-        match = test_impact.classify_file("scripts/run_e2e_parallel.sh", imap)
+        match = test_impact.classify_file(path, imap)
         assert match.rule == "e2e_runner_script"
         assert match.models == imap.all_model_names
         assert match.unit_tiers == ["tools"]
@@ -3319,6 +3328,25 @@ class TestCoverageMapIntegration:
             "tests/tools/test_github_actions_ci.py",
             "tests/tools/test_schedule_e2e.py",
         ]
+        assert result.fallback_tiers == []
+
+    @pytest.mark.parametrize("coverage_map", [None, {}])
+    @pytest.mark.parametrize(
+        "path",
+        ["scripts/hf_cache_download_worker.py", "scripts/warm_hf_cache.py"],
+    )
+    def test_hf_cache_scripts_select_focused_tools_tests(
+        self, imap, coverage_map, path,
+    ):
+        result = test_impact.analyze_impact(
+            [path],
+            imap,
+            coverage_map=coverage_map,
+        )
+
+        assert result.e2e_models == imap.all_model_names
+        assert result.unit_tiers == ["tools"]
+        assert result.tools_tests == ["tests/tools/test_warm_hf_cache_static.py"]
         assert result.fallback_tiers == []
 
     @pytest.mark.parametrize("coverage_map", [None, {}])

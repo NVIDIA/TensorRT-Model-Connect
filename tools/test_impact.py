@@ -1673,6 +1673,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
                 {
                     "scripts/run_e2e_parallel.sh",
                     "scripts/schedule_e2e.py",
+                    "scripts/hf_cache_download_worker.py",
                     "scripts/warm_hf_cache.py",
                 }
             ),
@@ -1968,6 +1969,12 @@ _EXPLICIT_TOOLS_TEST_TARGETS = {
     "scripts/run_e2e_parallel.sh": (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_schedule_e2e.py",
+    ),
+    "scripts/hf_cache_download_worker.py": (
+        "tests/tools/test_warm_hf_cache_static.py",
+    ),
+    "scripts/warm_hf_cache.py": (
+        "tests/tools/test_warm_hf_cache_static.py",
     ),
     "tests/e2e_harness/model_runner.py": ("tests/tools/test_model_e2e_runner.py",),
 }

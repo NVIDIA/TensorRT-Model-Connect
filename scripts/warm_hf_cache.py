@@ -37,6 +37,7 @@ import fnmatch
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import time
 
@@ -50,7 +51,6 @@ try:
     from huggingface_hub import hf_hub_download
     from huggingface_hub import snapshot_download
     from huggingface_hub.file_download import repo_folder_name
-    from huggingface_hub.utils import HfHubHTTPError
 except ImportError:
     print("ERROR: huggingface_hub not available", file=sys.stderr)
     sys.exit(1)
@@ -166,6 +166,9 @@ _TOKENIZER_DOWNLOAD_PATTERNS = [
     "*.model",
     "*.spm",
 ]
+_DOWNLOAD_WORKER = ROOT / "scripts" / "hf_cache_download_worker.py"
+_DOWNLOAD_ATTEMPTS = 2
+_DEFAULT_ATTEMPT_TIMEOUT_SECONDS = 600.0
 
 
 def _is_hf_file_cached(hf_id: str, filename: str) -> bool:
@@ -229,7 +232,24 @@ parser.add_argument(
          "repository IDs and their canonical cache folders to this JSON file. "
          "This is used to construct a positive per-model cache view.",
 )
+parser.add_argument(
+    "--attempt-timeout-seconds",
+    type=float,
+    default=_DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
+    metavar="SECONDS",
+    help="Maximum wall time for each online download attempt (default: 600).",
+)
+parser.add_argument(
+    "--fail-fast",
+    action="store_true",
+    help="Stop after the first failed item. Requires --strict or "
+         "--emit-cache-repos so the early stop cannot report success.",
+)
 args = parser.parse_args()
+if args.attempt_timeout_seconds <= 0:
+    parser.error("--attempt-timeout-seconds must be greater than zero")
+if args.fail_fast and not (args.strict or args.emit_cache_repos):
+    parser.error("--fail-fast requires --strict or --emit-cache-repos")
 
 models_dir = ROOT / "tests" / "e2e" / "models"
 manifests = sorted({
@@ -417,6 +437,157 @@ def _component_has_weight(snapshot_dir: pathlib.Path, component: str) -> bool:
     )
 
 
+def _worker_command(
+    operation: str,
+    hf_id: str,
+    *,
+    allow_patterns: list[str] | None = None,
+    filename: str = "",
+) -> list[str]:
+    command = [
+        sys.executable,
+        str(_DOWNLOAD_WORKER),
+        "--operation",
+        operation,
+        "--repo-id",
+        hf_id,
+    ]
+    if operation == "snapshot":
+        command.extend(["--allow-patterns-json", json.dumps(allow_patterns or [])])
+    elif operation == "file":
+        command.extend(["--filename", filename])
+    else:
+        raise ValueError(f"unsupported download worker operation: {operation}")
+    return command
+
+
+def _worker_failure_detail(completed: subprocess.CompletedProcess[str]) -> str:
+    output = completed.stderr.strip() or completed.stdout.strip()
+    if len(output) > 2000:
+        output = "..." + output[-1997:]
+    suffix = f": {output}" if output else ""
+    return f"worker exited with status {completed.returncode}{suffix}"
+
+
+def _run_download_worker(
+    operation: str,
+    hf_id: str,
+    *,
+    timeout_seconds: float,
+    disable_xet: bool,
+    allow_patterns: list[str] | None = None,
+    filename: str = "",
+) -> tuple[str | None, str]:
+    environment = os.environ.copy()
+    if disable_xet:
+        # This is applied to a fresh interpreter, before it imports the Hub.
+        environment["HF_HUB_DISABLE_XET"] = "1"
+    else:
+        # Attempt one is always the default backend, even if the runner or
+        # container image has a process-wide fallback override.
+        environment.pop("HF_HUB_DISABLE_XET", None)
+    command = _worker_command(
+        operation,
+        hf_id,
+        allow_patterns=allow_patterns,
+        filename=filename,
+    )
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env=environment,
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = (exc.stderr or exc.stdout or "").strip()
+        suffix = f"; last worker output: {output[-1000:]}" if output else ""
+        return None, f"timed out and was killed after {timeout_seconds:g}s{suffix}"
+    if completed.returncode != 0:
+        return None, _worker_failure_detail(completed)
+    try:
+        payload = json.loads(completed.stdout)
+        path = payload["path"]
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        return None, f"worker returned invalid success evidence: {exc}"
+    if not isinstance(path, str) or not path:
+        return None, "worker returned an empty or non-string cache path"
+    return path, ""
+
+
+def _download_validation_error(
+    operation: str,
+    path: str,
+    *,
+    hf_id: str,
+    require_weights: bool,
+) -> str:
+    downloaded_path = pathlib.Path(path)
+    if operation == "file":
+        return "" if downloaded_path.is_file() else f"downloaded file is missing: {path}"
+    if not downloaded_path.is_dir():
+        return f"downloaded snapshot directory is missing: {path}"
+    if _snapshot_has_required_files(
+        downloaded_path,
+        hf_id=hf_id,
+        require_weights=require_weights,
+    ):
+        return ""
+    return (
+        "downloaded snapshot is incomplete: missing a config/model_index "
+        "entrypoint, required local weight artifact, or required component"
+    )
+
+
+def _run_download_attempts(
+    operation: str,
+    hf_id: str,
+    *,
+    timeout_seconds: float,
+    allow_patterns: list[str] | None = None,
+    filename: str = "",
+    require_weights: bool = True,
+) -> tuple[str | None, str]:
+    attempt_details: list[str] = []
+    for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+        disable_xet = attempt == _DOWNLOAD_ATTEMPTS
+        started = time.monotonic()
+        path, error = _run_download_worker(
+            operation,
+            hf_id,
+            timeout_seconds=timeout_seconds,
+            disable_xet=disable_xet,
+            allow_patterns=allow_patterns,
+            filename=filename,
+        )
+        elapsed = time.monotonic() - started
+        mode = "Xet disabled" if disable_xet else "default transfer backend"
+        prefix = (
+            f"{hf_id}: attempt {attempt}/{_DOWNLOAD_ATTEMPTS} "
+            f"({mode}, {elapsed:.1f}s)"
+        )
+        if error:
+            attempt_details.append(f"{prefix} failed: {error}")
+            continue
+        try:
+            validation_error = _download_validation_error(
+                operation,
+                path or "",
+                hf_id=hf_id,
+                require_weights=require_weights,
+            )
+        except Exception as exc:  # noqa: BLE001 - validation must fail closed
+            validation_error = f"cache validation raised {type(exc).__name__}: {exc}"
+        if validation_error:
+            attempt_details.append(f"{prefix} failed validation: {validation_error}")
+            continue
+        attempt_details.append(f"{prefix} succeeded")
+        return path, "; ".join(attempt_details)
+    return None, "; ".join(attempt_details)
+
+
 def _warm_snapshot(
     hf_id: str,
     *,
@@ -425,6 +596,7 @@ def _warm_snapshot(
     selective: bool,
     local_only: bool = False,
     require_weights: bool = True,
+    timeout_seconds: float = _DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
 ) -> tuple[str, str]:
     """Resolve locally first, downloading only when the cache is incomplete."""
     if (selective or local_only) and _is_cached(
@@ -436,29 +608,39 @@ def _warm_snapshot(
         return "failed", "required snapshot is not available in the local cache"
     if gated and not token_available:
         return "failed", "gated model is not cached and no HF token is available"
-    try:
-        local_dir = snapshot_download(
-            hf_id,
-            allow_patterns=(
-                _HF_DOWNLOAD_PATTERNS
-                if require_weights
-                else _TOKENIZER_DOWNLOAD_PATTERNS
-            ),
-        )
-        if not _snapshot_has_required_files(
-            pathlib.Path(local_dir),
-            hf_id=hf_id,
-            require_weights=require_weights,
-        ):
-            raise RuntimeError(
-                "downloaded snapshot is still missing a config/model_index "
-                "entrypoint or required local weight artifact"
-            )
-    except HfHubHTTPError as exc:
-        return "failed", f"HTTP {exc.response.status_code}: {exc}"
-    except Exception as exc:  # noqa: BLE001
-        return "failed", str(exc)
-    return "downloaded", ""
+    local_dir, detail = _run_download_attempts(
+        "snapshot",
+        hf_id,
+        timeout_seconds=timeout_seconds,
+        allow_patterns=(
+            _HF_DOWNLOAD_PATTERNS
+            if require_weights
+            else _TOKENIZER_DOWNLOAD_PATTERNS
+        ),
+        require_weights=require_weights,
+    )
+    return ("downloaded", detail) if local_dir else ("failed", detail)
+
+
+def _warm_file(
+    hf_id: str,
+    filename: str,
+    *,
+    selective: bool,
+    local_only: bool,
+    timeout_seconds: float = _DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
+) -> tuple[str, str]:
+    if (selective or local_only) and _is_hf_file_cached(hf_id, filename):
+        return "cached", ""
+    if local_only:
+        return "failed", "required file is not available in the local cache"
+    local_path, detail = _run_download_attempts(
+        "file",
+        hf_id,
+        timeout_seconds=timeout_seconds,
+        filename=filename,
+    )
+    return ("downloaded", detail) if local_path else ("failed", detail)
 
 
 def _warm_exit_code(strict: bool, failures: list[str]) -> int:
@@ -554,6 +736,8 @@ print(f"HF Hub cache: {hf_constants.HF_HUB_CACHE}")
 
 warned: list[str] = []
 skipped: list[str] = []
+stopped_early = False
+fail_closed = args.strict or bool(args.emit_cache_repos)
 hf_token_available = bool(
     os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 )
@@ -566,49 +750,62 @@ for i, (name, hf_id, gated, require_weights) in enumerate(entries, 1):
         selective=selective,
         local_only=args.local_only,
         require_weights=require_weights,
+        timeout_seconds=args.attempt_timeout_seconds,
     )
     if status == "cached":
         print(f"  [{i:3d}/{len(entries)}] {name}  CACHED (skip)")
         skipped.append(name)
         continue
     if status == "downloaded":
-        print(f"  [{i:3d}/{len(entries)}] {name}  OK")
+        print(f"  [{i:3d}/{len(entries)}] {name}  OK: {detail}")
         # Small inter-request delay to stay well below the API rate limit.
         time.sleep(0.3)
         continue
     if gated and not hf_token_available:
         print(f"  [{i:3d}/{len(entries)}] {name}  SKIP ({detail})")
-        if not args.strict:
+        if not fail_closed:
             skipped.append(name)
             continue
     else:
         print(f"  [{i:3d}/{len(entries)}] {name}  WARN: {detail}")
     if status == "failed":
         warned.append(name)
+        if args.fail_fast:
+            print(
+                f"Fail-fast: stopping after exhausted item {name} ({hf_id}).",
+                file=sys.stderr,
+            )
+            stopped_early = True
+            break
 
-if file_assets:
+if file_assets and not stopped_early:
     print()
     print("Warming family file assets...")
-for i, (name, hf_id, filename) in enumerate(file_assets, 1):
-    if (selective or args.local_only) and _is_hf_file_cached(hf_id, filename):
+for i, (name, hf_id, filename) in enumerate(file_assets if not stopped_early else [], 1):
+    status, detail = _warm_file(
+        hf_id,
+        filename,
+        selective=selective,
+        local_only=args.local_only,
+        timeout_seconds=args.attempt_timeout_seconds,
+    )
+    if status == "cached":
         print(f"  [{i:3d}/{len(file_assets)}] {name}  CACHED (skip)")
         skipped.append(name)
         continue
-    if args.local_only:
-        print(f"  [{i:3d}/{len(file_assets)}] {name}  WARN: required file is not cached")
-        warned.append(name)
+    if status == "downloaded":
+        print(f"  [{i:3d}/{len(file_assets)}] {name}  OK: {detail}")
+        time.sleep(0.3)
         continue
-
-    try:
-        hf_hub_download(hf_id, filename=filename)
-        print(f"  [{i:3d}/{len(file_assets)}] {name}  OK")
-    except HfHubHTTPError as e:
-        print(f"  [{i:3d}/{len(file_assets)}] {name}  WARN (HTTP {e.response.status_code}): {e}")
-        warned.append(name)
-    except Exception as e:  # noqa: BLE001
-        print(f"  [{i:3d}/{len(file_assets)}] {name}  WARN: {e}")
-        warned.append(name)
-    time.sleep(0.3)
+    print(f"  [{i:3d}/{len(file_assets)}] {name}  WARN: {detail}")
+    warned.append(name)
+    if args.fail_fast:
+        print(
+            f"Fail-fast: stopping after exhausted item {name} ({hf_id}/{filename}).",
+            file=sys.stderr,
+        )
+        stopped_early = True
+        break
 
 print()
 if selective and skipped:
@@ -643,6 +840,6 @@ if args.emit_cache_repos and not warned:
     else:
         print(f"Selected cache repository evidence: {args.emit_cache_repos}")
 
-strict_exit_code = _warm_exit_code(args.strict or bool(args.emit_cache_repos), warned)
+strict_exit_code = _warm_exit_code(fail_closed, warned)
 if strict_exit_code:
     sys.exit(strict_exit_code)

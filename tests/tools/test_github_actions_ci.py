@@ -36,13 +36,33 @@ def test_workflows_define_shared_hf_cache_env() -> None:
         "HF_MODULES_CACHE",
     ):
         assert f"{name}:" in nightly
+    assert (
+        "HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || "
+        "format('{0}/hub', vars.TRTMC_HF_HOME || "
+        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}"
+    ) in nightly
+    assert (
+        "HUGGINGFACE_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || "
+        "format('{0}/hub', vars.TRTMC_HF_HOME || "
+        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}"
+    ) in nightly
+    assert (
+        "HF_MODULES_CACHE: ${{ vars.TRTMC_HF_MODULES_CACHE || "
+        "format('{0}/modules', vars.TRTMC_HF_HOME || "
+        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}"
+    ) in nightly
 
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
     assert (
         "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || "
         "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}"
     ) in proof
-    assert "TRTMC_HF_HUB_CACHE:" not in proof and "TRTMC_HF_MODULES_CACHE:" not in proof
+    assert (
+        "TRTMC_HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || "
+        "format('{0}/hub', vars.TRTMC_HF_HOME || "
+        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}"
+    ) in proof
+    assert "TRTMC_HF_MODULES_CACHE:" not in proof
     runner = (REPO_ROOT / ".github/scripts/run-model-proof.sh").read_text()
     assert "$HOME/.cache/huggingface" in runner
     assert "${TRTMC_HF_HUB_CACHE:-$hf_cache_root/hub}" in runner
@@ -104,6 +124,24 @@ def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
         assert f"-e {name}" in stage_text
     assert "/workspace/users/yifeif:/workspace/users/yifeif" in start_text
     assert "docker exec" in stage_text
+
+
+def test_github_container_only_exports_nonempty_hf_transport_controls() -> None:
+    stage_text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    start_text = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
+
+    assert 'add_env_if_set() {' in start_text
+    assert '[ -n "${!name-}" ] || return 0' in start_text
+    assert (
+        "for name in \\\n"
+        "  HF_HUB_DISABLE_XET \\\n"
+        "  HF_HUB_DOWNLOAD_TIMEOUT \\\n"
+        "  HF_HUB_ETAG_TIMEOUT; do\n"
+        '  add_env_if_set "$name"\n'
+        "done"
+    ) in start_text
+    for name in ("HF_HUB_DISABLE_XET", "HF_HUB_DOWNLOAD_TIMEOUT", "HF_HUB_ETAG_TIMEOUT"):
+        assert f"-e {name}" not in stage_text
 
 
 def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
@@ -808,7 +846,12 @@ def test_nightly_strictly_warms_all_active_non_multi_device_cases() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     cache = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
     assert "Strictly warm every active single-GPU nightly model" in cache
-    assert "scripts/warm_hf_cache.py --exclude-ci-tier multi_device --strict" in cache
+    assert (
+        "python -u scripts/warm_hf_cache.py --exclude-ci-tier multi_device "
+        "--strict --fail-fast --attempt-timeout-seconds 600"
+    ) in cache
+    assert 'HF_HUB_DOWNLOAD_TIMEOUT: "60"' in cache
+    assert 'HF_HUB_ETAG_TIMEOUT: "30"' in cache
     assert "--exclude-ci-tier l0_only" not in cache
     assert "--exclude-ci-tier nightly_only" not in cache
 
@@ -1230,7 +1273,7 @@ def test_model_proof_runs_one_isolated_model_with_unique_complete_evidence() -> 
     assert proof.count("actions/checkout@v4") == 1
     assert proof.count("bash .github/scripts/ensure-ci-docker-image.sh") == 1
     assert "TRTMC_HF_CACHE:" in proof
-    assert "TRTMC_HF_HUB_CACHE:" not in proof
+    assert "TRTMC_HF_HUB_CACHE:" in proof
     assert "TRTMC_HF_MODULES_CACHE:" not in proof
     assert "TRTMC_MODEL_PROOF_BUILD_JOBS: ${{ vars.TRTMC_MODEL_PROOF_BUILD_JOBS || '2' }}" in proof
     assert "TRTMC_MODEL_PROOF_SLOTS_PER_GPU:" in proof

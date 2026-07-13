@@ -668,11 +668,12 @@ def test_runner_keeps_local_fallback_and_workflow_uses_runner_cache_paths() -> N
 
     assert "${HF_HOME:-$HOME/.cache/huggingface}" in runner
     assert "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || " in workflow
+    assert "TRTMC_HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || " in workflow
+    assert "format('{0}/hub', vars.TRTMC_HF_HOME || " in workflow
     assert (
         "TRTMC_MODEL_REFERENCE_CACHE_ROOT: ${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || "
         in workflow
     )
-    assert "TRTMC_HF_HUB_CACHE:" not in workflow
     assert "TRTMC_HF_MODULES_CACHE:" not in workflow
     assert "${TRTMC_HF_HUB_CACHE:-$hf_cache_root/hub}" in runner
     assert "TRTMC_HF_MODULES_CACHE" not in runner

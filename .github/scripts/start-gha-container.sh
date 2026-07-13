@@ -107,6 +107,12 @@ add_env() {
   env_args+=(-e "${name}=${!name-}")
 }
 
+add_env_if_set() {
+  local name="$1"
+  [ -n "${!name-}" ] || return 0
+  add_env "$name"
+}
+
 for name in \
   CI_BASE_REF \
   ENGINE_DIR \
@@ -169,6 +175,13 @@ for name in \
   HF_TOKEN \
   HUGGING_FACE_HUB_TOKEN; do
   add_env "$name"
+done
+
+for name in \
+  HF_HUB_DISABLE_XET \
+  HF_HUB_DOWNLOAD_TIMEOUT \
+  HF_HUB_ETAG_TIMEOUT; do
+  add_env_if_set "$name"
 done
 
 docker run -d \

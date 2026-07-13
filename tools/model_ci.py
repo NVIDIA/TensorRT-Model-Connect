@@ -67,6 +67,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "scripts/reporting/__init__.py",
         "scripts/reporting/vlm_assessment.py",
         "scripts/schedule_e2e.py",
+        "scripts/hf_cache_download_worker.py",
         "scripts/warm_hf_cache.py",
         "tests/__init__.py",
         "tests/builder/__init__.py",
