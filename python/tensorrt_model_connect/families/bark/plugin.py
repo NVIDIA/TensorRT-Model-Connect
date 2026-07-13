@@ -41,6 +41,7 @@ from ...parallel_config import (
     require_tensorrt_11_for_tensor_parallel,
 )
 from .decoder_tp_builder import build_bark_tp_decoder_engine
+from .timing_cache import build_bark_serialized_network
 
 
 trt = trt_compat.get_trt()
@@ -903,7 +904,7 @@ def _build_bark_decoder_engine(
               f"(layers={num_layers}, hidden={hidden}, vocab={vocab}) ...",
               file=sys.stderr)
 
-    plan = builder.build_serialized_network(network, trt_config)
+    plan = build_bark_serialized_network(builder, network, trt_config)
     if plan is None:
         raise RuntimeError(f"TensorRT engine build failed for Bark {sub_model}")
     return bytes(plan)
@@ -1104,7 +1105,7 @@ def _build_bark_fine_engine(
               f"codebook_size={codebook_size}) ...",
               file=sys.stderr)
 
-    plan = builder.build_serialized_network(network, trt_config)
+    plan = build_bark_serialized_network(builder, network, trt_config)
     if plan is None:
         raise RuntimeError("TensorRT engine build failed for Bark fine model")
     return bytes(plan)

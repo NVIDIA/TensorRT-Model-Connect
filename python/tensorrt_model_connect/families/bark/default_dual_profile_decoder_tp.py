@@ -51,6 +51,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from . import graph_blocks
+from .timing_cache import build_bark_serialized_network
 from .utils import (
     const_in_work_dtype as _const_in_work_dtype,
     create_builder_context,
@@ -627,7 +628,7 @@ def build_dual_profile_tp_decoder_engine(
               f"precision={precision}, tp={parallel.tp_size}, rank={parallel.rank}) ...",
               file=sys.stderr)
 
-    plan = builder.build_serialized_network(network, trt_config)
+    plan = build_bark_serialized_network(builder, network, trt_config)
     if plan is None:
         raise RuntimeError("Tensor-parallel decoder engine build failed")
     return bytes(plan)

@@ -24,6 +24,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
+from .timing_cache import build_bark_serialized_network
 
 
 trt = trt_compat.get_trt()
@@ -272,7 +273,7 @@ def build_encodec_decoder_engine(
               f"(codebooks={num_codebooks}, dim={codebook_dim}, seq={seq_length}) ...",
               file=sys.stderr)
 
-    plan = builder.build_serialized_network(network, trt_config)
+    plan = build_bark_serialized_network(builder, network, trt_config)
     if plan is None:
         raise RuntimeError("TensorRT engine build failed for EnCodec decoder")
     return bytes(plan)

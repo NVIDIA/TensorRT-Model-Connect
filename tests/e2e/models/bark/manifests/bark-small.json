@@ -7,6 +7,10 @@
   "task_strategy": "text_to_audio",
   "precision": "fp16",
   "e2e_parallel_resource": "exclusive_gpu",
+  "build_env": {
+    "TRTMC_BARK_TIMING_CACHE_MODE": "record",
+    "TRTMC_BARK_TIMING_CACHE_PATH": "/artifacts/bark-small-gb300-trt11.2-fp16.cache"
+  },
   "max_cache_length": 1024,
   "trust_remote_code": false,
   "testcases": [

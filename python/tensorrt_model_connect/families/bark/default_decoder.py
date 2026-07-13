@@ -28,6 +28,7 @@ from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
 from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+from .timing_cache import build_bark_serialized_network
 from .utils import const_in_work_dtype, create_builder_context
 
 trt = trt_compat.get_trt()
@@ -519,7 +520,7 @@ def build_standard_decoder_engine(
               f"cache={max_cache_length}, precision={precision}) ...",
               file=sys.stderr)
 
-    plan = builder.build_serialized_network(network, trt_config)
+    plan = build_bark_serialized_network(builder, network, trt_config)
     if plan is None:
         raise RuntimeError("TensorRT engine build failed")
 

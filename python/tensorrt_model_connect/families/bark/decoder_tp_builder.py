@@ -20,6 +20,7 @@ from tensorrt_model_connect import trt_compat
 from . import graph_ops
 from .checkpoint_mapper import WeightDict
 from .config import ModelConfig
+from .timing_cache import build_bark_serialized_network
 from ...parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
@@ -416,7 +417,7 @@ def build_bark_tp_decoder_engine(
             file=sys.stderr,
         )
 
-    plan = builder.build_serialized_network(network, trt_config)
+    plan = build_bark_serialized_network(builder, network, trt_config)
     if plan is None:
         raise RuntimeError(f"TensorRT engine build failed for Bark {sub_model} TP rank")
     return bytes(plan)
