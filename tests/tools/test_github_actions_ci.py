@@ -667,6 +667,21 @@ def test_workflow_dispatch_lint_uses_resolved_ci_base_ref() -> None:
     assert 'base_ref="${CI_BASE_REF:-origin/${GITHUB_REF_NAME:-main}}"' in text
 
 
+def test_manual_branch_nightly_lints_the_complete_main_diff() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    source_quality = text.split("\n  source-quality:", maxsplit=1)[1].split(
+        "\n  unit-tests:", maxsplit=1
+    )[0]
+    comparison = source_quality.split(
+        "- name: Resolve source-quality comparison base", maxsplit=1
+    )[1].split("- name: Set up Python", maxsplit=1)[0]
+
+    assert '"${GITHUB_EVENT_NAME:-}" = "workflow_dispatch"' in comparison
+    assert '"${GITHUB_REF_NAME:-}" != "main"' in comparison
+    assert 'base_sha="$(git merge-base "$tested_sha" origin/main)"' in comparison
+    assert 'base_sha="$(git rev-parse "${tested_sha}^"' in comparison
+
+
 def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     inventory = text.split("\n  inventory:", maxsplit=1)[1].split(
@@ -768,6 +783,25 @@ def test_nightly_source_quality_does_not_use_self_hosted_shared_storage() -> Non
     ):
         assert f'{variable}: ""' in source_quality
     assert "/workspace/" not in source_quality
+
+
+def test_nightly_self_hosted_stages_use_the_configured_proof_runner_pool() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    selector = (
+        "runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || "
+        "vars.TRTMC_RUNNER_LABELS || '[\"self-hosted\"]') }}"
+    )
+
+    for start, end in (
+        ("unit-tests", "cache-warm"),
+        ("cache-warm", "package"),
+        ("package", "model-proof"),
+        ("diffusion-vlm", "report"),
+    ):
+        block = text.split(f"\n  {start}:", maxsplit=1)[1].split(
+            f"\n  {end}:", maxsplit=1
+        )[0]
+        assert selector in block
 
 
 def test_nightly_strictly_warms_all_active_non_multi_device_cases() -> None:
