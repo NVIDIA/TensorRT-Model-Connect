@@ -7,10 +7,36 @@ from __future__ import annotations
 
 import subprocess
 
+import huggingface_hub
+
 from tests.e2e.models.locateanything.e2e_plugins.references import (
     hf_transformers as locateanything_hf_transformers,
 )
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
+
+
+def test_cached_model_ref_uses_selective_snapshot_contract(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def _fake_snapshot_download(repo_id, **kwargs):
+        captured["repo_id"] = repo_id
+        captured["kwargs"] = kwargs
+        return "/cached/selective-snapshot"
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", _fake_snapshot_download)
+
+    resolved = locateanything_hf_transformers._resolve_cached_model_ref(
+        "nvidia/LocateAnything-3B"
+    )
+
+    from tensorrt_model_connect.hf_snapshot import hf_snapshot_allow_patterns
+
+    assert resolved == "/cached/selective-snapshot"
+    assert captured["repo_id"] == "nvidia/LocateAnything-3B"
+    assert captured["kwargs"] == {
+        "allow_patterns": hf_snapshot_allow_patterns(),
+        "local_files_only": True,
+    }
 
 
 def test_vl_reference_uses_manual_processor(monkeypatch, tmp_path) -> None:

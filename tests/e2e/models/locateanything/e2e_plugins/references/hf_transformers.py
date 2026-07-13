@@ -117,7 +117,7 @@ def _decode_vl_generated_text(
 
 
 def _resolve_cached_model_ref(hf_id: str) -> str:
-    """Prefer a locally cached HF snapshot to avoid Hub API rate limits."""
+    """Prefer the selectively cached Model Connect snapshot."""
     if not hf_id:
         return hf_id
     p = Path(hf_id)
@@ -126,8 +126,13 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
 
     try:
         from huggingface_hub import snapshot_download
+        from tensorrt_model_connect.hf_snapshot import hf_snapshot_allow_patterns
 
-        return snapshot_download(hf_id, local_files_only=True)
+        return snapshot_download(
+            hf_id,
+            allow_patterns=hf_snapshot_allow_patterns(),
+            local_files_only=True,
+        )
     except Exception:
         return hf_id
 
