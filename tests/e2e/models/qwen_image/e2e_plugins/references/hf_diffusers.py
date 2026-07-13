@@ -43,8 +43,15 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
         return hf_id
     try:
         from huggingface_hub import snapshot_download
+        from tensorrt_model_connect.hf_snapshot import hf_snapshot_allow_patterns
 
-        snapshot = Path(snapshot_download(hf_id, local_files_only=True))
+        snapshot = Path(
+            snapshot_download(
+                hf_id,
+                allow_patterns=hf_snapshot_allow_patterns(),
+                local_files_only=True,
+            )
+        )
     except Exception:
         return hf_id
 
@@ -109,6 +116,8 @@ class HfDiffusersReference:
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
         frames_dir = os.path.join(model_dir, "hf_frames")
         os.makedirs(frames_dir, exist_ok=True)
+        for stale_frame in Path(frames_dir).glob("frame_*.png"):
+            stale_frame.unlink()
 
         family = case.family
         qi_negative_prompt = case.inputs.get("negative_prompt", " ")
@@ -230,6 +239,14 @@ print(f"Generated {{len(frames)}} frames")
                     result.returncode,
                     result.stderr[-500:],
                 )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Qwen Image HF reference failed (rc={result.returncode}): "
+                f"{result.stderr[-500:]}"
+            )
+        if not frame_files:
+            raise RuntimeError("Qwen Image HF reference produced no frames")
 
         data: dict = {
             "returncode": result.returncode,
