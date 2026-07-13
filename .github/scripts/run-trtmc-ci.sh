@@ -529,8 +529,11 @@ run_premerge_unit_tests() {
   # These tests intentionally launch several simultaneous model projections
   # and assert tight lease deadlines. Run them after the parallel phase so
   # unrelated CPU load cannot change the allocator behavior under test.
+  # Each spawned proof pays the full host-setup cost (~40s on CI runners),
+  # so this serial suite needs its own budget: the previous shared 20m limit
+  # ended up within ~90s of a green run's duration.
   if [ "$unit_scope" = "all" ]; then
-    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-20m}" \
+    run_with_timeout "${MODEL_PROOF_ALLOCATOR_TIMEOUT:-30m}" \
       env PYTHONPATH="$source_root/python:$source_root${PYTHONPATH:+:$PYTHONPATH}" \
       python -m pytest tests/tools/test_model_proof_runner.py \
         -q -x -p no:cacheprovider -m model_proof_allocator

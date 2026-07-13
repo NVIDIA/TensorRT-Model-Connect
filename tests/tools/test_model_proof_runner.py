@@ -121,6 +121,10 @@ def _fake_proof_environment(
             "TRTMC_HF_CACHE": str(tmp_path / "hf-cache"),
             "TRTMC_MODEL_PROOF_GPU_LOCK_DIR": str(tmp_path / "gpu-locks"),
             "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "5",
+            # Fast state transitions keep the multi-process coordination tests
+            # deterministic without widening their assertion windows.
+            "TRTMC_MODEL_PROOF_POLL_INTERVAL": "0.05",
+            "TRTMC_MODEL_PROOF_FLOCK_WATCHDOG_SECONDS": "2",
         }
     )
     return env
@@ -195,9 +199,10 @@ def _write_sana_reference_config(path: Path) -> None:
 def _prepare_reference_program() -> str:
     text = RUNNER.read_text(encoding="utf-8")
     function = text.split("prepare_private_model_reference_cache() {", maxsplit=1)[1]
-    function = "prepare_private_model_reference_cache() {" + function.split(
-        "\n\nrun_host() {", maxsplit=1
-    )[0]
+    function = (
+        "prepare_private_model_reference_cache() {"
+        + function.split("\n\nrun_host() {", maxsplit=1)[0]
+    )
     return (
         "set -euo pipefail\n"
         'model="sana_wm"\n'
@@ -636,7 +641,10 @@ def test_runner_keeps_local_fallback_and_workflow_uses_runner_cache_paths() -> N
 
     assert "${HF_HOME:-$HOME/.cache/huggingface}" in runner
     assert "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || " in workflow
-    assert "TRTMC_MODEL_REFERENCE_CACHE_ROOT: ${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || " in workflow
+    assert (
+        "TRTMC_MODEL_REFERENCE_CACHE_ROOT: ${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || "
+        in workflow
+    )
     assert "TRTMC_HF_HUB_CACHE:" not in workflow
     assert "TRTMC_HF_MODULES_CACHE:" not in workflow
     assert "${TRTMC_HF_HUB_CACHE:-$hf_cache_root/hub}" in runner
@@ -1129,7 +1137,7 @@ def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -
     assert '--mount "type=bind,src=$hf_hub_cache,dst=/hf-cache/hub,readonly"' in cache_check
     assert "dst=/hf-cache/modules" not in cache_check
     assert '--mount "type=bind,src=$hf_private_hub,dst=/hf-cache/hub"' in proof
-    assert 'src=$hf_private_hub,dst=/hf-cache/hub,readonly' not in proof
+    assert "src=$hf_private_hub,dst=/hf-cache/hub,readonly" not in proof
     assert "hf_repo_mount_args" not in host
     assert "src=$hf_hub_cache,dst=/hf-cache/hub" not in proof
     assert "dst=/hf-cache/modules" not in proof
@@ -1221,9 +1229,7 @@ def test_sana_reference_cache_is_copied_to_selected_private_view(
     assert not any(path.name == ".git" for path in private_root.rglob(".git"))
     assert {path.name for path in private_root.iterdir()} == {"sana_wm"}
 
-    evidence = json.loads(
-        (artifacts / "model-reference-cache.json").read_text(encoding="utf-8")
-    )
+    evidence = json.loads((artifacts / "model-reference-cache.json").read_text(encoding="utf-8"))
     assert evidence == {
         "schema_version": 1,
         "model": "sana_wm",
@@ -1997,6 +2003,58 @@ def test_fifth_shared_proof_times_out_when_all_four_slots_are_busy(
 
 
 @pytest.mark.model_proof_allocator
+def test_poll_interval_cannot_sleep_past_the_lease_timeout(tmp_path: Path) -> None:
+    """A poll interval larger than the lease budget must not delay the timeout.
+
+    The capacity-poll sleep is clamped to the remaining deadline; without the
+    clamp a 300s interval would sleep far past a 1s lease timeout while still
+    reporting "timed out after 1s". The elapsed bound discriminates only
+    between "clamped" (host overhead, well under 150s even on a heavily
+    loaded runner) and "unclamped" (at least one full 300s sleep).
+    """
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "TRTMC_MODEL_PROOF_GPU_IDS": "9",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "1",
+            "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "1",
+            "TRTMC_MODEL_PROOF_POLL_INTERVAL": "300",
+        }
+    )
+    lock_dir = tmp_path / "gpu-locks"
+    lock_dir.mkdir()
+    with (lock_dir / "gpu-9-slot-0.lock").open("w", encoding="utf-8") as lock_stream:
+        fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        started = time.monotonic()
+        result = subprocess.run(
+            [
+                "bash",
+                str(RUNNER),
+                "--model",
+                "convbert",
+                "--revision",
+                "HEAD",
+                "--output-dir",
+                str(output),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=420,
+        )
+        elapsed = time.monotonic() - started
+
+    assert result.returncode != 0
+    assert "timed out after 1s waiting for a shared model-proof GPU lease from: 9" in result.stderr
+    assert elapsed < 150, f"lease timeout was pierced by the poll interval: {elapsed:.3f}s"
+    assert not list(lock_dir.glob("admission-global-*.lock"))
+
+
+@pytest.mark.model_proof_allocator
 def test_gpu_admission_queue_prunes_a_stale_ticket(tmp_path: Path) -> None:
     fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
     output = tmp_path / "proof"
@@ -2305,9 +2363,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
 
         oldest, _, oldest_output = start_case("oldest-shared", "m2m_100", oldest_release)
         deadline = time.monotonic() + coordination_timeout_s
-        while time.monotonic() < deadline and not list(
-            lock_dir.glob("admission-global-*.lock")
-        ):
+        while time.monotonic() < deadline and not list(lock_dir.glob("admission-global-*.lock")):
             time.sleep(0.05)
         admission_tickets = sorted(lock_dir.glob("admission-global-*.lock"))
         assert len(admission_tickets) == 1
@@ -2354,17 +2410,13 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         while (
             time.monotonic() < deadline
             and not (oldest_output / "artifacts" / "gpu-lease.json").is_file()
-            and not (
-                younger_exclusive_output / "artifacts" / "gpu-lease.json"
-            ).is_file()
+            and not (younger_exclusive_output / "artifacts" / "gpu-lease.json").is_file()
             and not (younger_shared_output / "artifacts" / "gpu-lease.json").is_file()
         ):
             time.sleep(0.05)
 
         assert (oldest_output / "artifacts" / "gpu-lease.json").is_file()
-        assert not (
-            younger_exclusive_output / "artifacts" / "gpu-lease.json"
-        ).exists()
+        assert not (younger_exclusive_output / "artifacts" / "gpu-lease.json").exists()
         assert not (younger_shared_output / "artifacts" / "gpu-lease.json").exists()
         assert _gpu_lease(oldest_output)["resource_class"] == "shared"
 
@@ -2420,6 +2472,342 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
                     process.communicate(timeout=10)
 
 
+def _start_proof_case(
+    tmp_path: Path,
+    name: str,
+    model: str,
+    release_file: Path,
+    common_env: dict[str, str],
+) -> tuple[subprocess.Popen[str], Path]:
+    case_dir = tmp_path / name
+    case_dir.mkdir()
+    fake_bin, docker_log = _write_successful_fake_docker(case_dir)
+    output = case_dir / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(common_env)
+    env["FAKE_PROOF_RELEASE_FILE"] = str(release_file)
+    process = subprocess.Popen(
+        [
+            "bash",
+            str(RUNNER),
+            "--model",
+            model,
+            "--revision",
+            "HEAD",
+            "--output-dir",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return process, output
+
+
+def _finish_proof_cases(processes: list[subprocess.Popen[str] | None]) -> None:
+    for process in processes:
+        if process is not None and process.poll() is None:
+            try:
+                process.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                process.communicate(timeout=10)
+
+
+@pytest.mark.model_proof_allocator
+def test_gpu_lock_directory_file_protocol_is_frozen(tmp_path: Path) -> None:
+    """The lock-directory layout and its live semantics are a contract.
+
+    Old and new script revisions share one lock directory on a runner while
+    premerge branches overlap, so the file names, the ticket flock semantics
+    (a live ticket is exclusively flocked by its owner; the slot lease stays
+    flocked while the proof runs), and the single-hard-link publication must
+    never change in place; a protocol change requires a new lock-directory
+    generation.
+    """
+    lock_dir = tmp_path / "gpu-locks"
+    coordination_timeout_s = 90
+    common_env = {
+        "TRTMC_GPU_ID": "6",
+        "TRTMC_MODEL_PROOF_GPU_IDS": "6",
+        "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "1",
+        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
+    }
+    holder_release = tmp_path / "release-holder"
+    waiter_release = tmp_path / "release-waiter"
+    waiter_release.touch()
+    holder, holder_output = _start_proof_case(
+        tmp_path, "holder", "convbert", holder_release, common_env
+    )
+    waiter: subprocess.Popen[str] | None = None
+    try:
+        deadline = time.monotonic() + coordination_timeout_s
+        while (
+            time.monotonic() < deadline
+            and not (holder_output / "artifacts" / "gpu-lease.json").is_file()
+        ):
+            time.sleep(0.05)
+        assert (holder_output / "artifacts" / "gpu-lease.json").is_file()
+        # A held lease is an exclusively flocked slot file.
+        assert _lock_is_busy(lock_dir / "gpu-6-slot-0.lock")
+
+        waiter, waiter_output = _start_proof_case(
+            tmp_path, "waiter", "convbert", waiter_release, common_env
+        )
+        deadline = time.monotonic() + coordination_timeout_s
+        while time.monotonic() < deadline and not list(lock_dir.glob("admission-global-*.lock")):
+            time.sleep(0.05)
+        tickets = sorted(lock_dir.glob("admission-global-*.lock"))
+        assert len(tickets) == 1
+        ticket = tickets[0]
+        # Live-ticket semantics: exclusively flocked by its owner from the
+        # moment it becomes visible.
+        assert re.fullmatch(r"admission-global-[0-9]{20}\.lock", ticket.name)
+        assert _lock_is_busy(ticket)
+        # Publication settles to a single hard link with no temporary alias:
+        # the ticket becomes visible via ln just before its .tmp source and
+        # the counter .tmp are removed, so wait out that window first.
+        joined_file = waiter_output / "artifacts" / "gpu-queue-joined.txt"
+        deadline = time.monotonic() + coordination_timeout_s
+        while time.monotonic() < deadline and (
+            list(lock_dir.glob("*.tmp.*")) or not joined_file.is_file()
+        ):
+            time.sleep(0.05)
+        assert not list(lock_dir.glob("*.tmp.*"))
+        assert ticket.stat().st_nlink == 1
+        assert joined_file.read_text(encoding="utf-8") == ticket.name + "\n"
+
+        holder_release.touch()
+        waiter_stdout, waiter_stderr = waiter.communicate(timeout=coordination_timeout_s)
+        assert waiter.returncode == 0, waiter_stdout + waiter_stderr
+        holder_stdout, holder_stderr = holder.communicate(timeout=30)
+        assert holder.returncode == 0, holder_stdout + holder_stderr
+
+        # End-state layout: exactly the frozen protocol files, nothing else.
+        assert sorted(path.name for path in lock_dir.iterdir()) == [
+            "admission-global.enqueue.lock",
+            "admission-global.next",
+            "allocator.lock",
+            "gpu-6-reservation.lock",
+            "gpu-6-slot-0.lock",
+        ]
+        # The slot lease is released once no proof runs.
+        assert not _lock_is_busy(lock_dir / "gpu-6-slot-0.lock")
+    finally:
+        holder_release.touch()
+        _finish_proof_cases([holder, waiter])
+
+
+@pytest.mark.model_proof_allocator
+def test_killed_queue_predecessor_wakes_waiter_and_is_pruned(tmp_path: Path) -> None:
+    lock_dir = tmp_path / "gpu-locks"
+    coordination_timeout_s = 90
+    common_env = {
+        "TRTMC_GPU_ID": "6",
+        "TRTMC_MODEL_PROOF_GPU_IDS": "6",
+        "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "1",
+        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
+    }
+    holder_release = tmp_path / "release-holder"
+    waiter_release = tmp_path / "release-waiter"
+    waiter_release.touch()
+    holder, holder_output = _start_proof_case(
+        tmp_path, "holder", "m2m_100", holder_release, common_env
+    )
+    doomed: subprocess.Popen[str] | None = None
+    waiter: subprocess.Popen[str] | None = None
+    try:
+        deadline = time.monotonic() + coordination_timeout_s
+        while (
+            time.monotonic() < deadline
+            and not (holder_output / "artifacts" / "gpu-lease.json").is_file()
+        ):
+            time.sleep(0.05)
+        assert (holder_output / "artifacts" / "gpu-lease.json").is_file()
+
+        doomed, _ = _start_proof_case(tmp_path, "doomed", "convbert", waiter_release, common_env)
+        deadline = time.monotonic() + coordination_timeout_s
+        while (
+            time.monotonic() < deadline and len(list(lock_dir.glob("admission-global-*.lock"))) < 1
+        ):
+            time.sleep(0.05)
+        assert len(list(lock_dir.glob("admission-global-*.lock"))) == 1
+
+        waiter, waiter_output = _start_proof_case(
+            tmp_path, "waiter", "convbert", waiter_release, common_env
+        )
+        deadline = time.monotonic() + coordination_timeout_s
+        while (
+            time.monotonic() < deadline and len(list(lock_dir.glob("admission-global-*.lock"))) < 2
+        ):
+            time.sleep(0.05)
+        assert len(list(lock_dir.glob("admission-global-*.lock"))) == 2
+
+        # SIGKILL the middle of the chain: the kernel drops its ticket flock,
+        # which must wake the waiter behind it; the waiter then prunes the
+        # stale ticket and inherits the queue head.
+        doomed.kill()
+        doomed.communicate(timeout=30)
+        holder_release.touch()
+
+        waiter_stdout, waiter_stderr = waiter.communicate(timeout=coordination_timeout_s)
+        assert waiter.returncode == 0, waiter_stdout + waiter_stderr
+        assert (waiter_output / "artifacts" / "gpu-lease.json").is_file()
+        holder_stdout, holder_stderr = holder.communicate(timeout=30)
+        assert holder.returncode == 0, holder_stdout + holder_stderr
+        assert not list(lock_dir.glob("admission-global-*.lock"))
+    finally:
+        holder_release.touch()
+        _finish_proof_cases([holder, doomed, waiter])
+
+
+@pytest.mark.model_proof_allocator
+def test_exclusive_drain_completes_as_holders_release_in_any_order(
+    tmp_path: Path,
+) -> None:
+    lock_dir = tmp_path / "gpu-locks"
+    coordination_timeout_s = 90
+    common_env = {
+        "TRTMC_GPU_ID": "6",
+        "TRTMC_MODEL_PROOF_GPU_IDS": "6",
+        "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "3",
+        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
+    }
+    releases = [tmp_path / f"release-shared-{index}" for index in range(3)]
+    exclusive_release = tmp_path / "release-exclusive"
+    exclusive_release.touch()
+    holders: list[subprocess.Popen[str] | None] = [None, None, None]
+    holder_outputs: list[Path] = []
+    exclusive: subprocess.Popen[str] | None = None
+    try:
+        for index in range(3):
+            process, output = _start_proof_case(
+                tmp_path, f"shared-{index}", "m2m_100", releases[index], common_env
+            )
+            holders[index] = process
+            holder_outputs.append(output)
+            deadline = time.monotonic() + coordination_timeout_s
+            while (
+                time.monotonic() < deadline
+                and not (output / "artifacts" / "gpu-lease.json").is_file()
+            ):
+                time.sleep(0.05)
+            assert (output / "artifacts" / "gpu-lease.json").is_file()
+
+        exclusive, exclusive_output = _start_proof_case(
+            tmp_path, "exclusive", "bark", exclusive_release, common_env
+        )
+        # The exclusive proof reserves the GPU, gives its queue position back,
+        # and then drains the remaining holders event-driven.
+        deadline = time.monotonic() + coordination_timeout_s
+        while time.monotonic() < deadline and not (
+            _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
+            and not list(lock_dir.glob("admission-global-*.lock"))
+        ):
+            time.sleep(0.05)
+        assert _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
+        assert not list(lock_dir.glob("admission-global-*.lock"))
+
+        # Release the holders in a non-sequential order and wait for each one
+        # to actually exit (its slot flock is then provably dropped) before
+        # releasing the next, so the out-of-order arrival at the drain is
+        # deterministic rather than scheduler-dependent: slot 1 frees while
+        # slot 0 is still held, forcing the drain to sit blocked on slot 0.
+        for index in (1, 0, 2):
+            releases[index].touch()
+            holder = holders[index]
+            assert holder is not None
+            holder_stdout, holder_stderr = holder.communicate(timeout=coordination_timeout_s)
+            assert holder.returncode == 0, f"shared-{index}: " + holder_stdout + holder_stderr
+
+        exclusive_stdout, exclusive_stderr = exclusive.communicate(timeout=coordination_timeout_s)
+        assert exclusive.returncode == 0, exclusive_stdout + exclusive_stderr
+        lease = _gpu_lease(exclusive_output)
+        assert lease["resource_class"] == "exclusive_gpu"
+        assert sorted(lease["gpu_slots"]) == [0, 1, 2]
+    finally:
+        for release_file in releases:
+            release_file.touch()
+        _finish_proof_cases([*holders, exclusive])
+
+
+@pytest.mark.model_proof_allocator
+def test_long_queue_is_served_in_strict_fifo_order(tmp_path: Path) -> None:
+    lock_dir = tmp_path / "gpu-locks"
+    coordination_timeout_s = 90
+    waiter_count = 6
+    common_env = {
+        "TRTMC_GPU_ID": "6",
+        "TRTMC_MODEL_PROOF_GPU_IDS": "6",
+        "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "1",
+        "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
+    }
+    holder_release = tmp_path / "release-holder"
+    waiter_release = tmp_path / "release-waiter"
+    waiter_release.touch()
+    holder, holder_output = _start_proof_case(
+        tmp_path, "holder", "m2m_100", holder_release, common_env
+    )
+    waiters: list[subprocess.Popen[str] | None] = [None] * waiter_count
+    waiter_outputs: list[Path] = []
+    try:
+        deadline = time.monotonic() + coordination_timeout_s
+        while (
+            time.monotonic() < deadline
+            and not (holder_output / "artifacts" / "gpu-lease.json").is_file()
+        ):
+            time.sleep(0.05)
+        assert (holder_output / "artifacts" / "gpu-lease.json").is_file()
+
+        # Start all waiters at once so their host setup runs concurrently
+        # (sequential starts made this test dominate the CI step budget).
+        # The enqueue order is whatever the race produced; the FIFO contract
+        # is asserted afterwards from the recorded ticket numbers.
+        for index in range(waiter_count):
+            process, output = _start_proof_case(
+                tmp_path, f"waiter-{index}", "convbert", waiter_release, common_env
+            )
+            waiters[index] = process
+            waiter_outputs.append(output)
+        deadline = time.monotonic() + coordination_timeout_s
+        while (
+            time.monotonic() < deadline
+            and len(list(lock_dir.glob("admission-global-*.lock"))) < waiter_count
+        ):
+            time.sleep(0.05)
+        assert len(list(lock_dir.glob("admission-global-*.lock"))) == waiter_count
+
+        holder_release.touch()
+        for index, process in enumerate(waiters):
+            assert process is not None
+            stdout, stderr = process.communicate(timeout=coordination_timeout_s)
+            assert process.returncode == 0, f"waiter-{index}: " + stdout + stderr
+        holder.communicate(timeout=30)
+        assert holder.returncode == 0
+
+        # Enqueue order (ticket numbers) must equal service order (lease
+        # creation times): the chain wakes exactly one successor per release
+        # and nobody overtakes.
+        tickets = [
+            (output / "artifacts" / "gpu-queue-joined.txt").read_text(encoding="utf-8")
+            for output in waiter_outputs
+        ]
+        assert len(set(tickets)) == waiter_count
+        order_by_ticket = sorted(range(waiter_count), key=lambda i: tickets[i])
+        lease_times = [
+            (output / "artifacts" / "gpu-lease.json").stat().st_mtime_ns
+            for output in waiter_outputs
+        ]
+        order_by_service = sorted(range(waiter_count), key=lambda i: lease_times[i])
+        assert order_by_service == order_by_ticket
+        assert not list(lock_dir.glob("admission-global-*.lock"))
+    finally:
+        holder_release.touch()
+        _finish_proof_cases([holder, *waiters])
+
+
 def _proof_gpu_ids_if_present(docker_log: Path) -> list[str]:
     if not docker_log.is_file():
         return []
@@ -2466,6 +2854,5 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     )
     assert (
         "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: "
-        "${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || '3600' }}"
-        in workflow
+        "${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || '3600' }}" in workflow
     )
