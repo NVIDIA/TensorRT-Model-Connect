@@ -445,7 +445,8 @@ jobs:
         needs.inventory.outputs.has_models == 'true'
       }}
     strategy:
-      fail-fast: false
+      # A failed model invalidates the nightly; stop queued and sibling proofs.
+      fail-fast: true
       max-parallel: 16
       matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
     permissions:

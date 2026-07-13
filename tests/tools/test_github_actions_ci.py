@@ -769,7 +769,7 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
     assert "needs.source-quality.result == 'success'" in model_proof
     assert "needs.cache-warm.result == 'success'" in model_proof
     assert "needs.package.result == 'success'" in model_proof
-    assert "fail-fast: false" in model_proof
+    assert "fail-fast: true" in model_proof
     assert "max-parallel: 16" in model_proof
     assert "matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
