@@ -582,7 +582,7 @@ write_python_package_gate_coverage_config() {
   local config_path="$1"
   cat > "$config_path" <<'EOF'
 [run]
-source =
+source_pkgs =
     tensorrt_model_connect
 branch = True
 omit =
@@ -668,12 +668,15 @@ for test in selected:
     mapfile -t selected_python_tests < "$selected_tests_file"
     echo "Selective Python tests:"
     printf '  %s\n' "${selected_python_tests[@]}"
-    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest "${selected_python_tests[@]}" -v \
-      -n auto "${cov_args[@]}"
+    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" \
+      env TRTMC_TEST_INSTALLED_WHEEL=1 \
+      python -m pytest "${selected_python_tests[@]}" -v -n auto "${cov_args[@]}"
   else
     echo "Running all builder + tools tests"
-    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/e2e_harness/test_*.py -v \
-      -n auto -m "not model_proof_allocator and not gpu and not trt" "${cov_args[@]}"
+    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" \
+      env TRTMC_TEST_INSTALLED_WHEEL=1 \
+      python -m pytest tests/builder/ tests/tools/ tests/e2e_harness/test_*.py -v \
+        -n auto -m "not model_proof_allocator and not gpu and not trt" "${cov_args[@]}"
 
     # The allocator contract intentionally launches several concurrent model
     # projections and asserts tight lease deadlines. Keep unrelated xdist load
@@ -684,6 +687,7 @@ for test in selected:
       serial_cov_args+=(--cov-append)
     fi
     run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" \
+      env TRTMC_TEST_INSTALLED_WHEEL=1 \
       python -m pytest tests/tools/test_model_proof_runner.py -v \
         -p no:cacheprovider -m model_proof_allocator "${serial_cov_args[@]}"
   fi

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
 import sys
 from pathlib import Path
@@ -15,8 +16,19 @@ import pytest
 
 
 _PKG_ROOT = Path(__file__).resolve().parents[2] / "python"
-if str(_PKG_ROOT) not in sys.path:
+_TEST_INSTALLED_WHEEL = os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") == "1"
+if not _TEST_INSTALLED_WHEEL and str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
+
+if _TEST_INSTALLED_WHEEL:
+    import tensorrt_model_connect as _installed_package
+
+    installed_path = Path(_installed_package.__file__).resolve()
+    if installed_path.is_relative_to(_PKG_ROOT):
+        raise RuntimeError(
+            "TRTMC_TEST_INSTALLED_WHEEL=1 imported tensorrt_model_connect "
+            f"from the source checkout: {installed_path}"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -940,6 +940,7 @@ def test_nightly_python_coverage_runs_allocator_contract_serially() -> None:
         "\n  model-proof:", maxsplit=1
     )[0]
     script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    builder_conftest = (REPO_ROOT / "tests" / "builder" / "conftest.py").read_text()
     coverage = script.split("run_python_builder_tests() {", maxsplit=1)[1].split(
         "\nrun_cpp_coverage() {", maxsplit=1
     )[0]
@@ -951,6 +952,10 @@ def test_nightly_python_coverage_runs_allocator_contract_serially() -> None:
     assert serial in coverage
     assert "-p no:cacheprovider -m model_proof_allocator" in coverage
     assert "serial_cov_args+=(--cov-append)" in coverage
+    assert coverage.count("TRTMC_TEST_INSTALLED_WHEEL=1") == 3
+    assert 'source_pkgs =\n    tensorrt_model_connect' in script
+    assert 'os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") == "1"' in builder_conftest
+    assert "imported tensorrt_model_connect" in builder_conftest
     assert coverage.index(parallel) < coverage.index(serial)
     assert "TRTMC_CPU_CONTAINER_OPTIONS" in package
     assert "--gpus all" not in package
