@@ -1831,6 +1831,15 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
         ),
         ClassificationRule(
+            priority=484,
+            name="nightly_artifact_selector_tool",
+            matcher=_path_equals("tools/select_latest_attempt_artifact.py"),
+            resolver=_match_result(
+                "nightly_artifact_selector_tool", _no_models, ["tools"], False,
+            ),
+            covered_by=("TestUnitTiers.test_nightly_artifact_selector_tool",),
+        ),
+        ClassificationRule(
             priority=485,
             name="model_ci_tool",
             matcher=_path_equals("tools/model_ci.py"),
@@ -1934,6 +1943,10 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
 
 
 _EXPLICIT_TOOLS_TEST_TARGETS = {
+    "tools/select_latest_attempt_artifact.py": (
+        "tests/tools/test_github_actions_ci.py",
+        "tests/tools/test_select_latest_attempt_artifact.py",
+    ),
     "tools/model_ci.py": (
         "tests/tools/test_model_ci.py",
     ),
