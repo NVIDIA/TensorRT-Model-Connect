@@ -5,6 +5,7 @@
   "family": "personaplex",
   "runtime_strategy": "personaplex_speech_to_speech",
   "task_strategy": "speech_to_speech",
+  "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 512,
   "trust_remote_code": true,
   "precision": "fp16",

@@ -3,12 +3,33 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
+import pytest
 
 from tests.e2e_harness.contracts import E2ECase, StageOutput, ThresholdProfile
 from tests.e2e.models.personaplex.e2e_plugins.contract import (
     PersonaPlexSpeechToSpeechPlugin,
 )
+
+
+_MANIFEST_DIR = Path(__file__).parent / "manifests"
+
+
+@pytest.mark.parametrize(
+    "manifest_name",
+    (
+        "personaplex-7b.json",
+        "personaplex-7b-l0.json",
+        "personaplex-7b-l0-tp4.json",
+    ),
+)
+def test_personaplex_builds_require_an_exclusive_gpu(manifest_name: str) -> None:
+    manifest = json.loads((_MANIFEST_DIR / manifest_name).read_text(encoding="utf-8"))
+
+    assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
 
 
 def _thresholds() -> ThresholdProfile:
