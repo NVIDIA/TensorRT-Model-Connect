@@ -643,6 +643,89 @@ def test_verify_results_accepts_advisory_metric_failure_in_passing_stage(
     assert "PASS decoder-small" in result.stdout
 
 
+def test_verify_results_accepts_skipped_optional_stage(tmp_path: Path) -> None:
+    repo_root = _make_repo(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    result_data = _passing_result("decoder-small")
+    result_data["case_config"] = {
+        "stages": [
+            {"name": "advisory_probe", "required": False},
+            {"name": "full_inference", "required": True},
+        ]
+    }
+    result_data["stages"]["advisory_probe"] = {
+        "status": "skipped",
+        "metrics": {},
+        "message": "No comparison logic for advisory probe",
+    }
+    _write_result(artifacts_dir, "decoder-small", result_data)
+
+    result = _run(
+        "verify-results",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        "decoder-small",
+        "--artifacts-dir",
+        str(artifacts_dir),
+    )
+
+    assert "PASS decoder-small" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("required", "stage_status", "returncode", "expected_error"),
+    [
+        (True, "skipped", 0, "status is 'skipped'"),
+        (False, "failed", 0, "status is 'failed'"),
+        (False, "error", 0, "status is 'error'"),
+        (False, "skipped", 1, "returncode is 1"),
+    ],
+)
+def test_verify_results_rejects_invalid_optional_stage_execution(
+    tmp_path: Path,
+    required: bool,
+    stage_status: str,
+    returncode: int,
+    expected_error: str,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    result_data = _passing_result("decoder-small")
+    result_data["case_config"] = {
+        "stages": [{"name": "advisory_probe", "required": required}]
+    }
+    result_data["stages"]["advisory_probe"] = {
+        "status": stage_status,
+        "metrics": {},
+    }
+    result_data["stage_outputs"]["advisory_probe"] = {
+        "metadata": {"returncode": returncode}
+    }
+    _write_result(artifacts_dir, "decoder-small", result_data)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "verify-results",
+            "--repo-root",
+            str(repo_root),
+            "--model",
+            "decoder-small",
+            "--artifacts-dir",
+            str(artifacts_dir),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "FAIL decoder-small" in result.stdout
+    assert expected_error in result.stderr
+
+
 def test_verify_results_uses_first_testcase_when_model_has_no_same_named_case(
     tmp_path: Path,
 ) -> None:

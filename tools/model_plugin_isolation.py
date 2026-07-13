@@ -642,6 +642,22 @@ def _returncode_failures(value: object, path: str = "result") -> list[str]:
     return failures
 
 
+def _optional_stage_names(result: dict[str, object]) -> set[str]:
+    case_config = result.get("case_config")
+    if not isinstance(case_config, dict):
+        return set()
+    stage_specs = case_config.get("stages")
+    if not isinstance(stage_specs, list):
+        return set()
+    return {
+        str(stage_spec["name"])
+        for stage_spec in stage_specs
+        if isinstance(stage_spec, dict)
+        and stage_spec.get("name")
+        and stage_spec.get("required") is False
+    }
+
+
 def _verify_model_result(
     model_name: str,
     result_case: str,
@@ -676,6 +692,7 @@ def _verify_model_result(
     if result.get("failure_type") not in (None, ""):
         errors.append(f"failure_type is {result.get('failure_type')!r}")
 
+    optional_stage_names = _optional_stage_names(result)
     stages = result.get("stages")
     if not isinstance(stages, dict) or not stages:
         errors.append("stages is missing or empty")
@@ -684,9 +701,13 @@ def _verify_model_result(
             if not isinstance(stage, dict):
                 errors.append(f"stage {stage_name!r} is not an object")
                 continue
-            if stage.get("status") != "passed":
+            stage_status = stage.get("status")
+            optional_skip = (
+                stage_name in optional_stage_names and stage_status == "skipped"
+            )
+            if stage_status != "passed" and not optional_skip:
                 errors.append(
-                    f"stage {stage_name!r} status is {stage.get('status')!r}, expected 'passed'"
+                    f"stage {stage_name!r} status is {stage_status!r}, expected 'passed'"
                 )
             metrics = stage.get("metrics", {})
             if not isinstance(metrics, dict):
