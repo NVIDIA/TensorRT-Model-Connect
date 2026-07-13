@@ -1728,6 +1728,7 @@ def test_four_shared_proofs_use_unique_slots_on_one_gpu(
             {
                 "TRTMC_MODEL_PROOF_GPU_IDS": "2",
                 "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+                "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "180",
                 "FAKE_PROOF_RELEASE_FILE": str(release_file),
             }
         )
@@ -1793,6 +1794,7 @@ def test_shared_slot_allocator_spreads_across_gpus_before_using_second_slots(
             {
                 "TRTMC_MODEL_PROOF_GPU_IDS": "2,3",
                 "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "2",
+                "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "180",
                 "FAKE_PROOF_RELEASE_FILE": str(release_file),
             }
         )
