@@ -605,6 +605,33 @@ def test_nightly_selects_production_single_gpu_cases_without_redundant_l0(
     assert all(case["ci_tier"] != "multi_device" for case in selection["e2e_cases"])
 
 
+def test_flux_nightly_model_proof_reserves_an_exclusive_gpu(tmp_path: Path) -> None:
+    selection = _run_test_selection(
+        tmp_path,
+        "flux",
+        "nightly",
+        lease_env={
+            "TRTMC_MODEL_PROOF_GPU_ID": "2",
+            "TRTMC_MODEL_PROOF_GPU_SLOT_IDS": "0,1,2,3",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+            "TRTMC_MODEL_PROOF_RESOURCE_CLASS": "exclusive_gpu",
+        },
+    )
+
+    assert selection["resource_class"] == "exclusive_gpu"
+    assert selection["gpu_resource_class"] == "exclusive_gpu"
+    assert selection["gpu_slot_ids"] == [0, 1, 2, 3]
+    assert selection["gpu_slot"] is None
+    assert {
+        case["name"]: case["gpu_resource_class"]
+        for case in selection["e2e_cases"]
+    } == {
+        "flux-2-dev": "exclusive_gpu",
+        "flux-2-dev-fp8": "shared",
+        "flux-schnell": "shared",
+    }
+
+
 @pytest.mark.parametrize("family", ("locateanything", "ltx_video"))
 def test_nightly_retains_l0_as_an_owners_only_single_gpu_fallback(
     tmp_path: Path, family: str
