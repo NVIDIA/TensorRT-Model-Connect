@@ -30,3 +30,10 @@ reason = "JSON-formatted test data is consumed by strict JSON parsers; comments 
 license = "Apache-2.0"
 source = "https://github.com/NVIDIA/TensorRT-Model-Connect/blob/c6462c95d2acec3e329398775006f6e4995a3954/tests/runtime_strategy_matrix.yaml"
 sha256 = "0ef45969c39ffae1bc760860f84a9cc0b9bb296cd6e45e7ad5a5dcf0aff15236"
+
+[[exceptions]]
+path = "tests/e2e/models/bark/data/timing_cache/bark-small-gb300-trt11.2-fp16.cache"
+reason = "Generated TensorRT timing-cache test data is binary and cannot carry an SPDX comment; preserve the CI-recorded bytes unchanged."
+license = "Apache-2.0"
+source = "https://github.com/NVIDIA/TensorRT-Model-Connect/actions/runs/29229851009"
+sha256 = "c07a25e04c06374b847092c1d3accacb482c25da96276e13a9e8775e6aba78ca"
