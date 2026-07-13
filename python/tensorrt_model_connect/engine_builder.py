@@ -91,7 +91,7 @@ def _untracked_compile_time(
     return max(0.0, measured_compile_elapsed - tracked_compile_elapsed)
 
 
-# Compatibility alias for existing callers and tests.
+# Backward-compatible alias for existing callers and builder contract tests.
 _HF_ALLOW_PATTERNS = [*GENERIC_HF_ALLOW_PATTERNS]
 
 

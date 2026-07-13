@@ -1743,7 +1743,7 @@ PY
     TRTMC_ENGINE_BUILD_GUARD_DIR=/artifacts/engine-builds \
     TRTMC_ENGINE_BUILD_REVISION="$revision" \
     LD_LIBRARY_PATH="$ld_library_path" \
-    "$py" -m pytest "$e2e_test" -v -p no:cacheprovider \
+    "$py" -m pytest "$e2e_test" -v -rs -p no:cacheprovider \
       --rootdir /src -c /src/pyproject.toml \
       "${e2e_filter_args[@]}" \
       --engine-dir /work/engines \
@@ -1754,7 +1754,17 @@ PY
       --rebuild-engines \
       --junitxml=/artifacts/e2e/junit.xml \
       2>&1 | tee /artifacts/e2e.log
+  # Pytest exits successfully when every selected case is skipped.  Validate
+  # result artifacts first so a preflight skip fails with its direct reason
+  # instead of surfacing later as a secondary missing-build-ledger error.
+  update_proof_step result_verification running "e2e-verification.json"
+  "$py" /src/tools/model_plugin_isolation.py verify-results \
+    --repo-root /src \
+    --models-file "$models_file" \
+    --artifacts-dir /artifacts/e2e \
+    --report /artifacts/e2e-verification.json
   update_proof_step e2e_reference passed "e2e/junit.xml, e2e/*/result.json"
+  update_proof_step result_verification passed "e2e-verification.json"
 
   "$py" /src/tools/model_plugin_isolation.py verify-builds \
     --models-file "$models_file" \
@@ -1763,14 +1773,6 @@ PY
     --report /artifacts/engine-build-verification.json
   update_proof_step engine_build_budget passed \
     "engine-builds/*.json, engine-build-verification.json"
-
-  update_proof_step result_verification running "e2e-verification.json"
-  "$py" /src/tools/model_plugin_isolation.py verify-results \
-    --repo-root /src \
-    --models-file "$models_file" \
-    --artifacts-dir /artifacts/e2e \
-    --report /artifacts/e2e-verification.json
-  update_proof_step result_verification passed "e2e-verification.json"
 
   "$py" - "$model" "$revision" "$runtime_model" "$runtime_library" \
     "$TRTMC_MODEL_PROOF_GPU_ID" "$TRTMC_MODEL_PROOF_GPU_SLOT_IDS" \

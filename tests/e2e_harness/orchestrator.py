@@ -135,8 +135,17 @@ def _check_hf_auth(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, st
     if hf_id:
         try:
             from huggingface_hub import snapshot_download
+            from tensorrt_model_connect.hf_snapshot import (
+                hf_snapshot_allow_patterns,
+            )
 
-            snapshot = Path(snapshot_download(hf_id, local_files_only=True))
+            snapshot = Path(
+                snapshot_download(
+                    hf_id,
+                    allow_patterns=hf_snapshot_allow_patterns(),
+                    local_files_only=True,
+                )
+            )
             if snapshot.is_dir():
                 return True, f"HF snapshot available offline: {hf_id}"
         except Exception:

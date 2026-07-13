@@ -233,8 +233,17 @@ def test_hf_auth_preflight_accepts_a_warmed_offline_snapshot(
     monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
-    def resolve_offline(hf_id: str, *, local_files_only: bool) -> str:
+    def resolve_offline(
+        hf_id: str,
+        *,
+        allow_patterns: list[str],
+        local_files_only: bool,
+    ) -> str:
         assert hf_id == case.hf_id
+        assert "config.json" in allow_patterns
+        assert "model.safetensors" in allow_patterns
+        assert "LICENSE" not in allow_patterns
+        assert "sam3.pt" not in allow_patterns
         assert local_files_only is True
         return str(snapshot)
 

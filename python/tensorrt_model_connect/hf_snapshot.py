@@ -1,14 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared Hugging Face snapshot selection contract."""
+"""Shared Hugging Face snapshot selection contract.
+
+Model Connect intentionally caches only files used by its builders and
+references.  Every local snapshot probe must use this same positive allowlist;
+an unfiltered ``snapshot_download`` would require unrelated upstream files and
+reject an otherwise complete Model Connect cache.
+"""
 
 from __future__ import annotations
 
 from .families import family_hf_allow_patterns
 
 
-GENERIC_HF_ALLOW_PATTERNS = (
+GENERIC_HF_ALLOW_PATTERNS: tuple[str, ...] = (
     "config.json",
     "generation_config.json",
     "preprocessor_config.json",
@@ -31,5 +37,9 @@ GENERIC_HF_ALLOW_PATTERNS = (
 
 
 def hf_snapshot_allow_patterns() -> list[str]:
-    """Return every model file pattern accepted by the shared builder."""
-    return [*GENERIC_HF_ALLOW_PATTERNS, *family_hf_allow_patterns(), "*.nemo"]
+    """Return the complete builder/reference snapshot allowlist."""
+    return [
+        *GENERIC_HF_ALLOW_PATTERNS,
+        *family_hf_allow_patterns(),
+        "*.nemo",
+    ]

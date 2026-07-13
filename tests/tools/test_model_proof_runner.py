@@ -1022,6 +1022,14 @@ def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None
     ):
         assert contract in runner
 
+    assert runner.index("model_plugin_isolation.py verify-results") < runner.index(
+        "model_plugin_isolation.py verify-builds"
+    )
+    assert runner.index("model_plugin_isolation.py verify-results") < runner.index(
+        'update_proof_step e2e_reference passed'
+    )
+    assert '"$py" -m pytest "$e2e_test" -v -rs' in runner
+
 
 def test_model_proof_report_assets_are_inside_the_positive_projection() -> None:
     model_ci = (REPO_ROOT / "tools" / "model_ci.py").read_text(encoding="utf-8")

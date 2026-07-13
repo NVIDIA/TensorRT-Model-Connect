@@ -227,6 +227,16 @@ def test_family_allow_patterns_are_used_for_cache_warming() -> None:
     assert "_HF_DOWNLOAD_PATTERNS" in text
 
 
+def test_cache_warm_patterns_cover_shared_snapshot_contract() -> None:
+    from tensorrt_model_connect.hf_snapshot import hf_snapshot_allow_patterns
+
+    warm_patterns = _literal_string_list("_HF_ALLOW_PATTERNS")
+    warm_patterns.update(_family_metadata_specs("hf_allow_patterns"))
+    warm_patterns.add("*.nemo")
+
+    assert set(hf_snapshot_allow_patterns()) <= warm_patterns
+
+
 def test_shared_cache_patterns_cover_builder_and_offline_snapshot_metadata() -> None:
     tree = ast.parse(WARM_HF_CACHE.read_text())
     allow_patterns = next(
