@@ -281,27 +281,49 @@ def test_validate_uses_gpu_count_preflight_for_device_tier(tmp_path: Path) -> No
     assert "ci_tier='multi_device'" in result.stderr
 
 
-def test_matrix_schedules_unknown_then_longest_known_premerge_models(
+def test_nightly_matrix_schedules_exclusive_then_shared_and_longest_first(
     tmp_path: Path,
 ) -> None:
     repo, _ = _make_repo(tmp_path)
-    for model, seconds in (("model_a", 25), ("model_b", 200)):
+    for model in ("model_c", "model_d", "model_e", "model_f"):
+        _add_model(repo, model)
+    estimates = {
+        "model_a-fast": 100,
+        "model_a-slow": 150,
+        "model_b-case": 200,
+        "model_d-fast": 150,
+        "model_d-slow": 200,
+        "model_e-case": 300,
+    }
+    for model in ("model_a", "model_b", "model_c", "model_d", "model_e", "model_f"):
         manifest_path = repo / f"tests/e2e/models/{model}/manifests/{model}.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["testcases"] = [{"name": f"{model}-case", "ci_tier": "l0_only"}]
+        if model == "model_a":
+            manifest["testcases"] = [
+                {"name": "model_a-fast", "ci_tier": "contract_only"},
+                {"name": "model_a-slow", "ci_tier": "contract_only"},
+            ]
+        elif model == "model_d":
+            manifest["testcases"] = [
+                {"name": "model_d-fast", "ci_tier": "l0_only"},
+                {"name": "model_d-slow", "ci_tier": "l0_only"},
+            ]
+        elif model in {"model_c", "model_f"}:
+            manifest["testcases"] = [
+                {"name": f"{model}-nightly", "ci_tier": "nightly_only"}
+            ]
+        else:
+            manifest["testcases"] = [{"name": f"{model}-case", "ci_tier": "l0_only"}]
+        if model in {"model_d", "model_e", "model_f"}:
+            manifest["e2e_parallel_resource"] = "exclusive_gpu"
         manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
-        if model == "model_b":
-            _add_model(repo, "model_c")
     _write(
         repo,
         "tests/e2e/timing_estimates.json",
         json.dumps(
             {
                 "schema_version": 1,
-                "estimates_s": {
-                    "model_a-case": 25,
-                    "model_b-case": 200,
-                },
+                "estimates_s": estimates,
             }
         )
         + "\n",
@@ -310,14 +332,25 @@ def test_matrix_schedules_unknown_then_longest_known_premerge_models(
 
     result = json.loads(_run(repo, "all", "--revision", revision).stdout)
 
-    # model_c has no estimate, so it runs first conservatively. The known
-    # models then follow longest-processing-time order.
-    assert result["affected_models"] == ["model_a", "model_b", "model_c"]
+    # Exclusive-GPU models are emitted first. A selected nightly-only case with
+    # no timing makes the owner unknown. Known durations sum every selected
+    # production case, or every L0 case when it is the owner's nightly fallback.
+    assert result["affected_models"] == [
+        "model_a",
+        "model_b",
+        "model_c",
+        "model_d",
+        "model_e",
+        "model_f",
+    ]
     assert result["matrix"] == {
         "include": [
+            {"model": "model_f", "selection_kind": "direct"},
+            {"model": "model_d", "selection_kind": "direct"},
+            {"model": "model_e", "selection_kind": "direct"},
             {"model": "model_c", "selection_kind": "direct"},
-            {"model": "model_b", "selection_kind": "direct"},
             {"model": "model_a", "selection_kind": "direct"},
+            {"model": "model_b", "selection_kind": "direct"},
         ]
     }
 

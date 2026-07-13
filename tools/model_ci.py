@@ -738,14 +738,19 @@ def _scheduled_models(
     repo_root: Path,
     catalog: OwnershipCatalog,
     models: Iterable[str],
+    *,
+    exclusive_gpu_first: bool = False,
 ) -> list[str]:
-    """Order model matrix entries longest-first using the pinned timing data.
+    """Order model matrix entries by resource class and pinned timing data.
 
     GitHub starts matrix children in include order when runner capacity becomes
-    available.  Unknown timings are scheduled first because they are the least
-    bounded.  The selected premerge case mirrors the isolated proof runner's
-    L0/contract/fastest preference; allocation safety is still enforced later
-    from the projected manifest rather than trusting this scheduling hint.
+    available.  Nightly can put exclusive-GPU models first so they reserve full
+    devices before shared work fills every slot.  Its duration is the sum of
+    every nightly-selected case, or unknown when any case lacks an estimate.
+    Within each resource class, unknown timings run first because they are the
+    least bounded, followed by longest-known first.  Premerge continues to use
+    the one selected L0/contract/fastest case.  Allocation safety is still
+    enforced later from the projected manifest rather than trusting this hint.
     """
     entries_by_path = {entry.path: entry for entry in catalog.entries}
     timing_estimates: dict[str, float] = {}
@@ -764,6 +769,7 @@ def _scheduled_models(
             }
 
     estimates: dict[str, float | None] = {}
+    exclusive_gpu: dict[str, bool] = {}
     for model in set(models):
         cases: list[dict[str, object]] = []
         for family in catalog.e2e_families.get(model, ()):
@@ -797,8 +803,25 @@ def _scheduled_models(
                             "tier": tier,
                             "l0_replacement": str(testcase.get("l0_replacement") or ""),
                             "estimated_seconds": timing_estimates.get(name),
+                            "resource_class": str(
+                                manifest.get("e2e_parallel_resource") or "shared"
+                            ),
                         }
                     )
+        production_cases = [case for case in cases if case["tier"] != "l0_only"]
+        nightly_cases = production_cases or cases
+        exclusive_gpu[model] = any(
+            case["resource_class"] == "exclusive_gpu" for case in nightly_cases
+        )
+        if exclusive_gpu_first:
+            nightly_estimates = [case["estimated_seconds"] for case in nightly_cases]
+            estimates[model] = (
+                sum(float(estimate) for estimate in nightly_estimates)
+                if nightly_estimates
+                and all(isinstance(estimate, (int, float)) for estimate in nightly_estimates)
+                else None
+            )
+            continue
         eligible = [case for case in cases if case["tier"] != "nightly_only"]
         replacements = {
             str(case["l0_replacement"])
@@ -826,6 +849,7 @@ def _scheduled_models(
     return sorted(
         set(models),
         key=lambda model: (
+            0 if not exclusive_gpu_first or exclusive_gpu.get(model, False) else 1,
             0 if estimates.get(model) is None else 1,
             -(estimates.get(model) or 0.0),
             model,
@@ -1194,7 +1218,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 catalog.models,
                 mode="all",
                 changes=[],
-                matrix_models=_scheduled_models(args.repo_root, catalog, catalog.models),
+                matrix_models=_scheduled_models(
+                    args.repo_root,
+                    catalog,
+                    catalog.models,
+                    exclusive_gpu_first=True,
+                ),
             )
             result["revision"] = catalog.revision
             if args.github_output is not None:
