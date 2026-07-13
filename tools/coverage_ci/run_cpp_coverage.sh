@@ -17,7 +17,7 @@ REPORT_ROOT="${coverage_dir}" \
   SUMMARY_TXT="${coverage_dir}/cpp-coverage-summary.txt" \
   HTML_REPORT="${coverage_dir}/cpp-coverage.html" \
   GATE_LOG="${coverage_dir}/cpp-gate.log" \
-  "${REPO_ROOT}/tools/coverage/cpp_coverage.sh"
+  "${REPO_ROOT}/tools/coverage/cpp_coverage.sh" "$@"
 cov_rc=$?
 set -e
 

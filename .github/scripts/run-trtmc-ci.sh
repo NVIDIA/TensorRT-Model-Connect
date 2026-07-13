@@ -673,7 +673,19 @@ for test in selected:
   else
     echo "Running all builder + tools tests"
     run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" python -m pytest tests/builder/ tests/tools/ tests/e2e_harness/test_*.py -v \
-      -n auto "${cov_args[@]}"
+      -n auto -m "not model_proof_allocator and not gpu and not trt" "${cov_args[@]}"
+
+    # The allocator contract intentionally launches several concurrent model
+    # projections and asserts tight lease deadlines. Keep unrelated xdist load
+    # out of that timing-sensitive proof, then append its coverage to the same
+    # nightly package report.
+    local serial_cov_args=("${cov_args[@]}")
+    if [ "$python_coverage_required" = "true" ]; then
+      serial_cov_args+=(--cov-append)
+    fi
+    run_with_timeout "${PYTHON_BUILDER_TIMEOUT:-40m}" \
+      python -m pytest tests/tools/test_model_proof_runner.py -v \
+        -p no:cacheprovider -m model_proof_allocator "${serial_cov_args[@]}"
   fi
 
   if [ "$python_coverage_required" != "true" ]; then
@@ -723,8 +735,23 @@ run_cpp_coverage() {
       return 0
       ;;
   esac
+  local -a ctest_args=()
+  case "${CPP_COVERAGE_SCOPE:-all}" in
+    all)
+      export CPP_COVERAGE_BUILD_TARGET=trtmc_cpp_tests
+      ;;
+    platform)
+      export CPP_COVERAGE_BUILD_TARGET=trtmc_platform_cpp_tests
+      ctest_args=(-L platform)
+      ;;
+    *)
+      echo "ERROR: CPP_COVERAGE_SCOPE must be all or platform" >&2
+      return 1
+      ;;
+  esac
   python -m pip install --disable-pip-version-check --quiet "gcovr==8.2"
-  run_with_timeout "${CPP_COVERAGE_TIMEOUT:-40m}" bash tools/coverage_ci/run_cpp_coverage.sh
+  run_with_timeout "${CPP_COVERAGE_TIMEOUT:-40m}" \
+    bash tools/coverage_ci/run_cpp_coverage.sh "${ctest_args[@]}"
 }
 
 run_graph_op_tests() {

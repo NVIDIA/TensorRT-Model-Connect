@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tools.count_diffusion_frame_pairs import (
     count_diffusion_frame_pairs,
     discover_diffusion_frame_pairs,
     main,
+    validate_complete_diffusion_frame_pairs,
 )
 
 
@@ -100,3 +103,35 @@ def test_zero_pair_count_and_json_output(tmp_path, capsys) -> None:
     assert main([str(artifacts_dir), "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload == {"count": 0, "pairs": []}
+
+
+def test_complete_mode_requires_every_diffusion_result_to_have_a_pair(tmp_path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    complete = artifacts_dir / "complete"
+    incomplete = artifacts_dir / "incomplete"
+    _write_result(complete, case_name="complete")
+    _write_frame_pair(complete, "hf_frames")
+    _write_result(incomplete, case_name="incomplete")
+    (incomplete / "frames").mkdir()
+    (incomplete / "frames" / "frame_0000.png").write_bytes(b"trt")
+
+    with pytest.raises(ValueError, match=r"missing=\['incomplete'\]"):
+        validate_complete_diffusion_frame_pairs(artifacts_dir)
+
+    with pytest.raises(SystemExit) as error:
+        main([str(artifacts_dir), "--require-complete"])
+    assert error.value.code == 2
+
+
+def test_complete_mode_returns_the_exact_unique_case_inventory(tmp_path, capsys) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    for case_name in ("alpha", "beta"):
+        model_dir = artifacts_dir / case_name
+        _write_result(model_dir, case_name=case_name)
+        _write_frame_pair(model_dir, "ref_frames")
+
+    pairs = validate_complete_diffusion_frame_pairs(artifacts_dir)
+
+    assert [pair["case_name"] for pair in pairs] == ["alpha", "beta"]
+    assert main([str(artifacts_dir), "--require-complete"]) == 0
+    assert capsys.readouterr().out.strip() == "2"

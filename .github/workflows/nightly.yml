@@ -3,22 +3,18 @@
 
 name: TensorRT-Model-Connect Nightly CI
 
+run-name: >-
+  Nightly · ${{ github.ref_name }} · ${{ github.sha }}
+
 on:
   schedule:
     - cron: "0 10 * * *"
   workflow_dispatch:
-    inputs:
-      ref:
-        description: "Git ref to test with the full nightly workflow"
-        required: false
-        default: "main"
 
-permissions:
-  contents: write
-  packages: read
+permissions: {}
 
 concurrency:
-  group: trtmc-nightly-main
+  group: trtmc-nightly-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -29,195 +25,1131 @@ env:
   HUGGINGFACE_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/hub' }}
   HF_MODULES_CACHE: ${{ vars.TRTMC_HF_MODULES_CACHE || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache/modules' }}
   TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
-  TRTMC_CI_CONTAINER_NAME: trtmc-ci-${{ github.run_id }}-${{ github.run_attempt }}
   TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CONTAINER_OPTIONS || '--gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
   TRTMC_PACKAGE_PYTHON_TAGS: ${{ vars.TRTMC_PACKAGE_PYTHON_TAGS || 'py310 py312' }}
   TRTMC_PACKAGE_WHEEL_ARCH: ${{ vars.TRTMC_PACKAGE_WHEEL_ARCH || 'manylinux_2_39_aarch64' }}
+  TRTMC_MODEL_PROOF_GPU_LOCK_DIR: ${{ vars.TRTMC_MODEL_PROOF_GPU_LOCK_DIR || '/tmp/trtmc-model-proof-gpu-locks' }}
+  TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS: ${{ vars.TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS || '10800' }}
   PYTHONHASHSEED: "0"
-  PYTHON_COVERAGE_MIN_LINE: "38"
-  PYTHON_COVERAGE_MIN_BRANCH: "25"
-  CPP_COVERAGE_MIN_LINE: "36"
-  CPP_COVERAGE_MIN_FUNCTION: "46"
-  CPP_COVERAGE_MIN_BRANCH: "21"
-  FULL_E2E: "true"
-  RUN_COVERAGE_MAP: "true"
-  REBUILD_ENGINES: "true"
-  DIFFUSION_VLM_ASSESSMENT: "true"
-  DIFFUSION_VLM_CONFIG: ${{ vars.TRTMC_DIFFUSION_VLM_CONFIG || '' }}
-  DIFFUSION_VLM_MODEL_ID: ${{ vars.TRTMC_DIFFUSION_VLM_MODEL_ID || '' }}
-  DIFFUSION_VLM_MAX_SIDE: ${{ vars.TRTMC_DIFFUSION_VLM_MAX_SIDE || '' }}
-  DIFFUSION_VLM_MAX_NEW_TOKENS: ${{ vars.TRTMC_DIFFUSION_VLM_MAX_NEW_TOKENS || '' }}
-  DIFFUSION_VLM_TIMEOUT: ${{ vars.TRTMC_DIFFUSION_VLM_TIMEOUT || '' }}
-  NIGHTLY_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || 'main' }}
-  HF_TOKEN: ${{ secrets.HF_TOKEN }}
-  HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
-  nightly-ci:
-    name: Nightly Full CI
-    runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
-    timeout-minutes: 720
+  legal:
+    name: 1 / Legal compliance
+    permissions:
+      contents: read
+    uses: ./.github/workflows/legal.yml
+    with:
+      revision: ${{ github.sha }}
 
-    defaults:
-      run:
-        shell: bash
+  inventory:
+    name: 2 / All-model inventory
+    needs: legal
+    if: ${{ needs.legal.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      has_models: ${{ steps.inventory.outputs.has_models }}
+      matrix: ${{ steps.inventory.outputs.matrix }}
+      affected_models: ${{ steps.inventory.outputs.affected_models }}
+      expected_count: ${{ steps.inventory.outputs.expected_count }}
+      mode: ${{ steps.inventory.outputs.mode }}
 
     steps:
-      - name: Pre-clean self-hosted workspace
-        run: |
-          set -euo pipefail
-          if [ -d "$GITHUB_WORKSPACE" ]; then
-            chmod -R a+rwX "$GITHUB_WORKSPACE" 2>/dev/null || true
-            docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
-            if docker image inspect "$TRTMC_CI_IMAGE" >/dev/null 2>&1; then
-              docker run --rm \
-                -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
-                -w "$GITHUB_WORKSPACE" \
-                "$TRTMC_CI_IMAGE" \
-                bash -lc '
-                  set -euo pipefail
-                  cleanup_workspace() {
-                    find . -mindepth 1 -maxdepth 1 ! -name .git -exec chmod -R u+rwX {} + 2>/dev/null || true
-                    find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
-                  }
-                  cleanup_workspace || {
-                    echo "::warning::Initial workspace cleanup failed; retrying after canceled-run processes settle"
-                    sleep 10
-                    cleanup_workspace
-                  }
-                '
-            else
-              echo "::warning::Docker image '$TRTMC_CI_IMAGE' is not present before checkout; using host workspace cleanup so the checked-out Dockerfile can build it later."
-              find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! -name .git -exec chmod -R u+rwX {} + 2>/dev/null || true
-              find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} + || true
-            fi
-          fi
-
-      - name: Check out nightly ref
+      - name: Check out certified nightly snapshot
         uses: actions/checkout@v4
         with:
-          ref: ${{ env.NIGHTLY_REF }}
+          ref: ${{ needs.legal.outputs.tested_sha }}
           fetch-depth: 0
-          clean: false
-          lfs: false
+          persist-credentials: false
 
-      - name: Resolve comparison base
+      - name: Validate ownership manifests
+        env:
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+        run: python3 tools/model_ci.py validate --revision "$TESTED_SHA"
+
+      - name: Select every ownership model
+        id: inventory
+        env:
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
         run: |
           set -euo pipefail
-          git fetch origin main --quiet
-          if [ "$NIGHTLY_REF" = "main" ]; then
-            base="HEAD~1"
+          python3 tools/model_ci.py all \
+            --revision "$TESTED_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Verify and summarize full inventory
+        env:
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+          HAS_MODELS: ${{ steps.inventory.outputs.has_models }}
+          EXPECTED_COUNT: ${{ steps.inventory.outputs.expected_count }}
+          EXPECTED_MODELS: ${{ steps.inventory.outputs.affected_models }}
+          MODE: ${{ steps.inventory.outputs.mode }}
+        run: |
+          set -euo pipefail
+          test "$HAS_MODELS" = "true"
+          test "$MODE" = "all"
+          test "$EXPECTED_COUNT" -gt 0
+          {
+            echo "### Nightly all-model inventory"
+            echo
+            echo "- Certified revision: \`$TESTED_SHA\`"
+            echo "- Ownership models: \`$EXPECTED_COUNT\`"
+            echo "- Selection: \`$EXPECTED_MODELS\`"
+            echo "- Scope: every ownership model; production single-GPU cases with L0 fallback"
+            echo "- Multi-device variants: outside this owner-level suite, matching the prior nightly contract"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  source-quality:
+    name: 3 / Source quality
+    needs:
+      - legal
+      - inventory
+    if: >-
+      ${{
+        needs.legal.result == 'success' &&
+        needs.inventory.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out certified nightly snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve source-quality comparison base
+        env:
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+        run: |
+          set -euo pipefail
+          tested_sha="$(git rev-parse "${TESTED_SHA}^{commit}")"
+          if base_sha="$(git rev-parse "${tested_sha}^" 2>/dev/null)"; then
+            :
           else
-            base="origin/main"
+            base_sha="$tested_sha"
           fi
-          echo "CI_BASE_REF=$base" >> "$GITHUB_ENV"
-          echo "Running nightly on GitHub ref '$NIGHTLY_REF': $(git rev-parse HEAD)"
+          echo "CI_BASE_REF=$base_sha" >> "$GITHUB_ENV"
 
-      - name: Report CI mode
-        run: |
-          set -euo pipefail
-          echo "CI mode: nightly/full E2E on GitHub ref '$NIGHTLY_REF'"
-          echo "FULL_E2E=$FULL_E2E"
-          echo "RUN_COVERAGE_MAP=$RUN_COVERAGE_MAP"
-          echo "REBUILD_ENGINES=$REBUILD_ENGINES"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install source-quality tools
+        run: python -m pip install --disable-pip-version-check --quiet lizard ruff clang-format
+
+      - name: Check family coverage
+        run: python scripts/check_family_coverage.py
+
+      - name: Check source quality
+        run: bash .github/scripts/run-trtmc-ci.sh source-quality
+
+  unit-tests:
+    name: 3 / Source-only unit / C++ and Python
+    needs:
+      - legal
+      - inventory
+    if: >-
+      ${{
+        needs.legal.result == 'success' &&
+        needs.inventory.result == 'success'
+      }}
+    runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: read
+    env:
+      CI_BASE_REF: ${{ needs.legal.outputs.tested_sha }}
+      TRTMC_CI_CONTAINER_NAME: trtmc-nightly-unit-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-unit-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_CI_HARDENED: "true"
+      TRTMC_UNIT_BUILD_JOBS: ${{ vars.TRTMC_UNIT_BUILD_JOBS || '8' }}
+      TRTMC_UNIT_TEST_JOBS: ${{ vars.TRTMC_UNIT_TEST_JOBS || '8' }}
+      TRTMC_PREMERGE_UNIT_SCOPE: all
+
+    steps:
+      - name: Check out certified nightly snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          path: nightly-unit-${{ github.run_id }}-${{ github.run_attempt }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+          lfs: false
 
       - name: Log in to GitHub Container Registry
         env:
           GHCR_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-nightly-unit"
           mkdir -p "$docker_config"
           echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
           printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
             --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Ensure CI Docker image
-        timeout-minutes: 180
+        id: ci_image
+        timeout-minutes: 90
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         run: bash .github/scripts/ensure-ci-docker-image.sh
 
-      - name: Start CI container
+      - name: Start clean source-only unit container
         timeout-minutes: 5
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        env:
+          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
+        run: bash .github/scripts/start-gha-container.sh
+
+      - name: Run source-only unit tests
+        timeout-minutes: 60
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        run: bash .github/scripts/run-gha-stage.sh premerge-unit
+
+      - name: Clean source-only unit container
+        if: ${{ always() }}
+        run: |
+          docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
+          unit_scratch="${RUNNER_TEMP}/trtmc-premerge-unit-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$unit_scratch"
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            rm -rf "$DOCKER_CONFIG"
+          fi
+
+  cache-warm:
+    name: 3 / HF cache / Active single-GPU nightly cases
+    needs:
+      - legal
+      - inventory
+    if: >-
+      ${{
+        needs.legal.result == 'success' &&
+        needs.inventory.result == 'success'
+      }}
+    runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: read
+    env:
+      TRTMC_CI_CONTAINER_NAME: trtmc-nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CPU_CONTAINER_OPTIONS || '--ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+
+    steps:
+      - name: Check out certified nightly snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          path: nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+          lfs: false
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-nightly-cache"
+          mkdir -p "$docker_config"
+          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Ensure CI Docker image
+        id: ci_image
+        timeout-minutes: 90
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        run: bash .github/scripts/ensure-ci-docker-image.sh
+
+      - name: Start cache-warm container
+        timeout-minutes: 5
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        env:
+          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
+        run: bash .github/scripts/start-gha-container.sh
+
+      - name: Strictly warm every active single-GPU nightly model
+        timeout-minutes: 120
+        run: |
+          set -euo pipefail
+          docker exec \
+            -w "$TRTMC_CI_WORKSPACE" \
+            "$TRTMC_CI_CONTAINER_NAME" \
+            bash -lc 'env -u HF_HUB_OFFLINE python scripts/warm_hf_cache.py --exclude-ci-tier multi_device --strict'
+
+      - name: Clean cache-warm container
+        if: ${{ always() }}
+        run: |
+          docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            rm -rf "$DOCKER_CONFIG"
+          fi
+
+  package:
+    name: 3 / Coverage and wheel package
+    needs:
+      - legal
+      - inventory
+    if: >-
+      ${{
+        needs.legal.result == 'success' &&
+        needs.inventory.result == 'success'
+      }}
+    runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      packages: read
+    env:
+      TRTMC_CI_CONTAINER_NAME: trtmc-nightly-package-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-package-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CPU_CONTAINER_OPTIONS || '--ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
+      FULL_E2E: "true"
+      PYTHON_COVERAGE_MIN_LINE: "38"
+      PYTHON_COVERAGE_MIN_BRANCH: "25"
+      CPP_COVERAGE_MIN_LINE: "36"
+      CPP_COVERAGE_MIN_FUNCTION: "46"
+      CPP_COVERAGE_MIN_BRANCH: "21"
+      CPP_COVERAGE_SCOPE: platform
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+
+    steps:
+      - name: Check out certified nightly snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          path: nightly-package-${{ github.run_id }}-${{ github.run_attempt }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+          lfs: false
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-nightly-package"
+          mkdir -p "$docker_config"
+          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Ensure CI Docker image
+        id: ci_image
+        timeout-minutes: 90
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        run: bash .github/scripts/ensure-ci-docker-image.sh
+
+      - name: Start package container
+        timeout-minutes: 5
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        env:
+          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
         run: bash .github/scripts/start-gha-container.sh
 
       - name: Build trtmc pip package
-        timeout-minutes: 30
+        id: package_build
+        timeout-minutes: 60
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         run: bash .github/scripts/run-gha-stage.sh package
 
-      - name: Impact analysis
-        if: ${{ always() }}
-        timeout-minutes: 5
-        run: bash .github/scripts/run-gha-stage.sh impact
-
-      - name: Build C++ test executables
-        if: ${{ always() }}
-        timeout-minutes: 15
-        run: bash .github/scripts/run-gha-stage.sh build
-
-      - name: Check family coverage
-        if: ${{ always() }}
-        timeout-minutes: 15
-        run: bash .github/scripts/run-gha-stage.sh family-coverage
-
-      - name: Check cyclomatic complexity
-        if: ${{ always() }}
-        timeout-minutes: 15
-        run: bash .github/scripts/run-gha-stage.sh complexity
-
-      - name: Lint changed files
-        if: ${{ always() }}
-        timeout-minutes: 5
-        run: bash .github/scripts/run-gha-stage.sh lint
-
-      - name: C++ unit tests
-        if: ${{ always() }}
-        timeout-minutes: 20
-        run: bash .github/scripts/run-gha-stage.sh cpp-unit
-
-      - name: Python builder and tools tests
-        if: ${{ always() }}
-        timeout-minutes: 40
+      - name: Python package coverage
+        if: ${{ always() && steps.package_build.outcome == 'success' }}
+        timeout-minutes: 60
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         run: bash .github/scripts/run-gha-stage.sh python-builder
 
-      - name: C++ coverage
+      - name: C++ platform coverage
         if: ${{ always() }}
-        timeout-minutes: 40
+        timeout-minutes: 60
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         run: bash .github/scripts/run-gha-stage.sh cpp-coverage
 
-      - name: Graph-op GPU tests
-        if: ${{ always() }}
-        timeout-minutes: 20
-        run: bash .github/scripts/run-gha-stage.sh graph-ops
-
-      - name: Full E2E tests
-        if: ${{ always() }}
-        timeout-minutes: 360
-        run: bash .github/scripts/run-gha-stage.sh full-e2e
-
-      - name: Generate coverage map
-        if: ${{ always() }}
-        timeout-minutes: 90
-        run: bash .github/scripts/run-gha-stage.sh coverage-map
-
-      - name: Model smoke test from trtmc pip package
-        timeout-minutes: 60
-        run: bash .github/scripts/run-gha-stage.sh wheel-model-smoke
-
       - name: Upload trtmc pip package artifact
+        if: ${{ always() && steps.package_build.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: trtmc-pip-package-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 30
-          path: dist/*.whl
+          path: ${{ env.TRTMC_CI_WORKSPACE }}/dist/*.whl
+
+      - name: Upload nightly coverage artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-nightly-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: ${{ env.TRTMC_CI_WORKSPACE }}/coverage/
+
+      - name: Clean package container
+        if: ${{ always() }}
+        run: |
+          docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            rm -rf "$DOCKER_CONFIG"
+          fi
+
+  model-proof:
+    name: 4 / Model / ${{ matrix.model }}
+    needs:
+      - legal
+      - inventory
+      - source-quality
+      - unit-tests
+      - cache-warm
+      - package
+    if: >-
+      ${{
+        always() &&
+        needs.legal.result == 'success' &&
+        needs.inventory.result == 'success' &&
+        needs.source-quality.result == 'success' &&
+        needs.unit-tests.result == 'success' &&
+        needs.cache-warm.result == 'success' &&
+        needs.package.result == 'success' &&
+        needs.inventory.outputs.has_models == 'true'
+      }}
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/model-proof.yml
+    with:
+      model: ${{ matrix.model }}
+      revision: ${{ needs.legal.outputs.tested_sha }}
+      suite: nightly
+
+  diffusion-vlm:
+    name: 5 / Diffusion semantic assessment
+    needs:
+      - legal
+      - inventory
+      - model-proof
+    if: >-
+      ${{
+        always() &&
+        needs.legal.result == 'success' &&
+        needs.inventory.result == 'success' &&
+        needs.model-proof.result == 'success'
+      }}
+    runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 420
+    permissions:
+      actions: read
+      contents: read
+      packages: read
+    env:
+      TRTMC_CI_CONTAINER_NAME: trtmc-nightly-vlm-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-vlm-${{ github.run_id }}-${{ github.run_attempt }}
+      DIFFUSION_VLM_CONFIG: ${{ vars.TRTMC_DIFFUSION_VLM_CONFIG || '' }}
+      DIFFUSION_VLM_MODEL_ID: ${{ vars.TRTMC_DIFFUSION_VLM_MODEL_ID || '' }}
+      DIFFUSION_VLM_MAX_SIDE: ${{ vars.TRTMC_DIFFUSION_VLM_MAX_SIDE || '' }}
+      DIFFUSION_VLM_MAX_NEW_TOKENS: ${{ vars.TRTMC_DIFFUSION_VLM_MAX_NEW_TOKENS || '' }}
+      DIFFUSION_VLM_TIMEOUT: ${{ vars.TRTMC_DIFFUSION_VLM_TIMEOUT || '' }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+
+    steps:
+      - name: Check out certified nightly snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          path: nightly-vlm-${{ github.run_id }}-${{ github.run_attempt }}
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+          lfs: false
+
+      - name: Download isolated nightly model proof artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: model-proof-*-${{ needs.legal.outputs.tested_sha }}-*
+          path: ${{ env.TRTMC_CI_WORKSPACE }}/model-proof-parts
+          merge-multiple: false
+
+      - name: Collect diffusion frame pairs from isolated proofs
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        run: |
+          set -euo pipefail
+          python3 - model-proof-parts e2e_artifacts/artifacts <<'PY'
+          import json
+          import re
+          import shutil
+          import sys
+          from pathlib import Path
+
+          parts = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          output.mkdir(parents=True, exist_ok=True)
+          artifact_re = re.compile(
+              r"model-proof-(?P<model>[a-z0-9][a-z0-9._-]*)-"
+              r"(?P<revision>[0-9a-f]{40})-(?P<attempt>[1-9][0-9]*)"
+          )
+          attempts = {}
+          for artifact_dir in sorted(path for path in parts.iterdir() if path.is_dir()):
+              match = artifact_re.fullmatch(artifact_dir.name)
+              if match is None:
+                  raise SystemExit(f"invalid model-proof artifact directory: {artifact_dir}")
+              model = match.group("model")
+              attempt = int(match.group("attempt"))
+              previous = attempts.get(model)
+              if previous is None or attempt > previous[0]:
+                  attempts[model] = (attempt, artifact_dir)
+          copied = []
+          for _, artifact_dir in sorted(attempts.values(), key=lambda item: item[1].name):
+              for result_path in sorted(artifact_dir.rglob("result.json")):
+                  case_dir = result_path.parent
+                  if case_dir.parent.name != "e2e":
+                      continue
+                  payload = json.loads(result_path.read_text(encoding="utf-8"))
+                  case_name = payload.get("case_name")
+                  if not isinstance(case_name, str) or not case_name or case_name != case_dir.name:
+                      raise SystemExit(f"invalid isolated result path: {result_path}")
+                  target = output / case_name
+                  if target.exists():
+                      raise SystemExit(f"duplicate isolated result case: {case_name}")
+                  shutil.copytree(case_dir, target)
+                  copied.append(case_name)
+          if not copied:
+              raise SystemExit("no isolated E2E result directories were downloaded")
+          print(f"Collected {len(copied)} isolated E2E result directories")
+          PY
+          pair_count="$(python3 tools/count_diffusion_frame_pairs.py e2e_artifacts/artifacts --require-complete)"
+          test "$pair_count" -gt 0 || {
+            echo "::error::No complete TRT/reference diffusion frame pairs were produced"
+            exit 1
+          }
+          echo "Diffusion frame pairs: $pair_count"
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          docker_config="${RUNNER_TEMP}/trtmc-docker-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-nightly-vlm"
+          mkdir -p "$docker_config"
+          echo "DOCKER_CONFIG=$docker_config" >> "$GITHUB_ENV"
+          printf '%s' "$GHCR_TOKEN" | DOCKER_CONFIG="$docker_config" docker login ghcr.io \
+            --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Ensure CI Docker image
+        id: ci_image
+        timeout-minutes: 90
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        run: bash .github/scripts/ensure-ci-docker-image.sh
+
+      - name: Start diffusion-assessment container
+        timeout-minutes: 5
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        env:
+          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
+        run: bash .github/scripts/start-gha-container.sh
+
+      - name: Run diffusion VLM semantic gate
+        timeout-minutes: 270
+        run: |
+          set -euo pipefail
+          [[ "$TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || {
+            echo "::error::TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS must be a positive integer"
+            exit 1
+          }
+          mkdir -p -- "$TRTMC_MODEL_PROOF_GPU_LOCK_DIR"
+          exec 9<>"$TRTMC_MODEL_PROOF_GPU_LOCK_DIR/whole-machine.lock"
+          flock -w "$TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS" -x 9 || {
+            echo "::error::Timed out waiting for exclusive whole-machine GPU access"
+            exit 1
+          }
+          docker exec -i \
+            -w "$TRTMC_CI_WORKSPACE" \
+            "$TRTMC_CI_CONTAINER_NAME" \
+            python - \
+              "$TRTMC_CI_WORKSPACE/e2e_artifacts/artifacts" \
+              "$TRTMC_CI_WORKSPACE/e2e_artifacts/diffusion_vlm_assessment.json" \
+              "${{ needs.legal.outputs.tested_sha }}" \
+              "${{ github.run_id }}" \
+              "${{ github.run_attempt }}" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          artifacts_dir = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          source_revision = sys.argv[3]
+          workflow_run_id = sys.argv[4]
+          workflow_run_attempt = int(sys.argv[5])
+          requested = os.environ.get("DIFFUSION_VLM_CONFIG", "").strip()
+          if requested:
+              config = Path(requested)
+              if not config.is_file():
+                  raise SystemExit(f"DIFFUSION_VLM_CONFIG does not exist: {config}")
+          else:
+              configs = sorted(Path("tests/e2e/models").glob("*/diffusion_vlm_assessment.json"))
+              defaults = []
+              for candidate in configs:
+                  payload = json.loads(candidate.read_text(encoding="utf-8"))
+                  if payload.get("default") is True:
+                      defaults.append(candidate)
+              if len(defaults) != 1:
+                  raise SystemExit(
+                      "expected exactly one default model-owned diffusion VLM config; "
+                      f"found {defaults}"
+                  )
+              config = defaults[0]
+
+          settings = json.loads(config.read_text(encoding="utf-8"))
+          values = {
+              "model_id": os.environ.get("DIFFUSION_VLM_MODEL_ID") or settings.get("model_id"),
+              "max_side": os.environ.get("DIFFUSION_VLM_MAX_SIDE") or settings.get("max_side"),
+              "max_new_tokens": os.environ.get("DIFFUSION_VLM_MAX_NEW_TOKENS") or settings.get("max_new_tokens"),
+              "timeout": os.environ.get("DIFFUSION_VLM_TIMEOUT") or settings.get("timeout"),
+          }
+          missing = [name for name, value in values.items() if not value]
+          if missing:
+              raise SystemExit(f"diffusion VLM settings are incomplete: {missing}")
+          command = [
+              sys.executable,
+              "tools/evaluate_diffusion_vlm_similarity.py",
+              "--artifacts-dir", str(artifacts_dir),
+              "--output", str(output),
+              "--config", str(config),
+              "--model-id", str(values["model_id"]),
+              "--max-side", str(values["max_side"]),
+              "--max-new-tokens", str(values["max_new_tokens"]),
+          ]
+          environment = os.environ.copy()
+          environment.pop("HF_HUB_OFFLINE", None)
+
+          def duration_seconds(value: object) -> float:
+              text = str(value).strip().lower()
+              multiplier = 1.0
+              if text.endswith("h"):
+                  multiplier = 3600.0
+                  text = text[:-1]
+              elif text.endswith("m"):
+                  multiplier = 60.0
+                  text = text[:-1]
+              elif text.endswith("s"):
+                  text = text[:-1]
+              seconds = float(text) * multiplier
+              if seconds <= 0:
+                  raise ValueError("timeout must be positive")
+              return seconds
+
+          subprocess.run(
+              command,
+              check=True,
+              env=environment,
+              timeout=duration_seconds(values["timeout"]),
+          )
+          from tools.count_diffusion_frame_pairs import (
+              validate_complete_diffusion_frame_pairs,
+          )
+
+          expected_pairs = validate_complete_diffusion_frame_pairs(artifacts_dir)
+          expected_names = sorted(str(pair["case_name"]) for pair in expected_pairs)
+          assessment = json.loads(output.read_text(encoding="utf-8"))
+          results = assessment.get("results")
+          if not isinstance(results, list):
+              raise SystemExit("diffusion VLM assessment has no results array")
+          assessed_names = [
+              str(result.get("case_name") or "")
+              for result in results
+              if isinstance(result, dict)
+          ]
+          if (
+              len(assessed_names) != len(results)
+              or len(assessed_names) != len(set(assessed_names))
+              or sorted(assessed_names) != expected_names
+          ):
+              raise SystemExit(
+                  "diffusion VLM assessment does not exactly cover current frame pairs: "
+                  f"expected={expected_names}, assessed={sorted(assessed_names)}"
+              )
+          assessment["expected_case_names"] = expected_names
+          assessment["assessed_case_names"] = sorted(assessed_names)
+          assessment["coverage_complete"] = True
+          assessment["source_revision"] = source_revision
+          assessment["workflow_run_id"] = workflow_run_id
+          assessment["workflow_run_attempt"] = workflow_run_attempt
+          output.write_text(json.dumps(assessment, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload diffusion semantic assessment
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-nightly-vlm-${{ github.run_id }}-${{ needs.legal.outputs.tested_sha }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ env.TRTMC_CI_WORKSPACE }}/e2e_artifacts/diffusion_vlm_assessment.json
+
+      - name: Clean diffusion-assessment container
+        if: ${{ always() }}
+        run: |
+          docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            rm -rf "$DOCKER_CONFIG"
+          fi
+
+  report:
+    name: 6 / Combined HTML report
+    needs:
+      - legal
+      - inventory
+      - source-quality
+      - unit-tests
+      - cache-warm
+      - package
+      - model-proof
+      - diffusion-vlm
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Bootstrap combined nightly HTML before checkout
+        env:
+          EXPECTED_MODELS: ${{ needs.inventory.outputs.affected_models }}
+          REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
+          LEGAL_RESULT: ${{ needs.legal.result }}
+          INVENTORY_RESULT: ${{ needs.inventory.result }}
+          SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
+          UNIT_RESULT: ${{ needs.unit-tests.result }}
+          CACHE_RESULT: ${{ needs.cache-warm.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          MODEL_RESULT: ${{ needs.model-proof.result }}
+          VLM_RESULT: ${{ needs.diffusion-vlm.result }}
+          REPORT_OUTPUT_DIR: ${{ runner.temp }}/nightly-model-report-${{ github.run_id }}-${{ github.run_attempt }}
+          PARTS_DIR: ${{ runner.temp }}/nightly-model-parts-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          echo "REPORT_OUTPUT_DIR=$REPORT_OUTPUT_DIR" >> "$GITHUB_ENV"
+          echo "PARTS_DIR=$PARTS_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$REPORT_OUTPUT_DIR" "$PARTS_DIR"
+          python3 - \
+            "$REPORT_OUTPUT_DIR" "$EXPECTED_MODELS" "$REVISION" \
+            "$LEGAL_RESULT" "$INVENTORY_RESULT" "$SOURCE_QUALITY_RESULT" \
+            "$UNIT_RESULT" "$CACHE_RESULT" "$PACKAGE_RESULT" "$MODEL_RESULT" \
+            "$VLM_RESULT" <<'PY'
+          import html
+          import json
+          import sys
+          from pathlib import Path
+
+          (
+              output_dir,
+              raw_models,
+              revision,
+              legal_result,
+              inventory_result,
+              source_quality_result,
+              unit_result,
+              cache_result,
+              package_result,
+              model_result,
+              vlm_result,
+          ) = sys.argv[1:]
+          root = Path(output_dir)
+          try:
+              models = json.loads(raw_models)
+          except json.JSONDecodeError:
+              models = []
+          if not isinstance(models, list):
+              models = []
+          models = [model for model in models if isinstance(model, str)]
+          upstream_results = {
+              "legal": legal_result,
+              "inventory": inventory_result,
+              "source-quality": source_quality_result,
+              "unit-tests": unit_result,
+              "cache-warm": cache_result,
+              "package": package_result,
+              "model-proof": model_result,
+              "diffusion-vlm": vlm_result,
+          }
+          issues = ["Combined nightly report generation has not completed."]
+          issues.extend(
+              f"Upstream job {name!r} finished with result {result!r}."
+              for name, result in upstream_results.items()
+              if result != "success"
+          )
+          status = {
+              "schema_version": 1,
+              "report_kind": "combined_model_proof",
+              "outcome": "failed",
+              "source_revision": revision,
+              "suite": "nightly",
+              "upstream_results": upstream_results,
+              "expected_models": models,
+              "discovered_models": [],
+              "expected_count": len(models),
+              "discovered_count": 0,
+              "result_count": 0,
+              "issue_count": len(issues),
+              "issues": issues,
+              "models": [],
+          }
+          (root / "model-proof-report-status.json").write_text(
+              json.dumps(status, indent=2) + "\n", encoding="utf-8"
+          )
+          issue_items = "".join(f"<li>{html.escape(issue)}</li>" for issue in issues)
+          document = f"""<!DOCTYPE html>
+          <html lang="en"><head><meta charset="utf-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1" />
+          <title>TensorRT-Model-Connect Nightly Isolated Model Report</title>
+          <style>body{{font-family:system-ui,sans-serif;max-width:1100px;margin:2rem auto;padding:0 1rem}}.pending{{padding:1rem;background:#fff7ed;border:1px solid #fdba74;border-radius:.5rem}}code{{overflow-wrap:anywhere}}</style>
+          </head><body><h1>TensorRT-Model-Connect Nightly Isolated Model Report</h1>
+          <div class="pending"><strong>The combined report did not complete.</strong></div>
+          <p>Revision: <code>{html.escape(revision)}</code></p>
+          <p>Expected ownership models: {len(models)}</p>
+          <h2>Available diagnostics</h2><ul>{issue_items}</ul></body></html>"""
+          (root / "model-proof-report.html").write_text(document, encoding="utf-8")
+          PY
+
+      - name: Check out certified nightly snapshot for report tooling
+        id: checkout
+        if: ${{ always() }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download isolated nightly model proof artifacts
+        id: download
+        if: ${{ always() && needs.inventory.outputs.has_models == 'true' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: model-proof-*-${{ needs.legal.outputs.tested_sha }}-*
+          path: ${{ runner.temp }}/nightly-model-parts-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: false
+
+      - name: Download diffusion semantic assessment
+        id: vlm_download
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: trtmc-nightly-vlm-${{ github.run_id }}-${{ needs.legal.outputs.tested_sha }}-*
+          path: ${{ runner.temp }}/nightly-vlm-parts-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: false
+
+      - name: Select latest diffusion semantic assessment attempt
+        id: vlm_select
+        if: ${{ always() && steps.checkout.outcome == 'success' && steps.vlm_download.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          python3 tools/select_latest_attempt_artifact.py \
+            --parts-dir "${{ runner.temp }}/nightly-vlm-parts-${{ github.run_id }}-${{ github.run_attempt }}" \
+            --artifact-prefix "trtmc-nightly-vlm-${{ github.run_id }}-${{ needs.legal.outputs.tested_sha }}-" \
+            --max-attempt "${{ github.run_attempt }}" \
+            --required-glob diffusion_vlm_assessment.json \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Compose fail-closed nightly model report
+        id: compose
+        if: ${{ always() }}
+        env:
+          EXPECTED_MODELS: ${{ needs.inventory.outputs.affected_models }}
+          REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
+          VLM_DOWNLOAD_OUTCOME: ${{ steps.vlm_download.outcome }}
+          VLM_SELECTION_OUTCOME: ${{ steps.vlm_select.outcome }}
+          VLM_ASSESSMENT: ${{ steps.vlm_select.outputs.selected_file }}
+          VLM_SELECTED_ATTEMPT: ${{ steps.vlm_select.outputs.selected_attempt }}
+          LEGAL_RESULT: ${{ needs.legal.result }}
+          INVENTORY_RESULT: ${{ needs.inventory.result }}
+          SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
+          UNIT_RESULT: ${{ needs.unit-tests.result }}
+          CACHE_RESULT: ${{ needs.cache-warm.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          MODEL_RESULT: ${{ needs.model-proof.result }}
+          VLM_RESULT: ${{ needs.diffusion-vlm.result }}
+        run: |
+          set -uo pipefail
+          compose_rc=1
+          if [ "$CHECKOUT_OUTCOME" != "success" ]; then
+            echo "::error::Report tooling checkout did not succeed: $CHECKOUT_OUTCOME"
+          else
+            if [ "$DOWNLOAD_OUTCOME" != "success" ]; then
+              echo "::error::Model proof artifact download did not succeed: $DOWNLOAD_OUTCOME"
+            fi
+            if [ "$VLM_DOWNLOAD_OUTCOME" = "success" ] && \
+               [ "$VLM_SELECTION_OUTCOME" = "success" ] && \
+               [ -f "$VLM_ASSESSMENT" ]; then
+              if python3 - \
+                  "$VLM_ASSESSMENT" "$REVISION" "$GITHUB_RUN_ID" \
+                  "$VLM_SELECTED_ATTEMPT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          path, revision, run_id, raw_attempt = sys.argv[1:]
+          payload = json.loads(Path(path).read_text(encoding="utf-8"))
+          if not isinstance(payload, dict):
+              raise SystemExit("diffusion assessment must be a JSON object")
+          expected = {
+              "source_revision": revision,
+              "workflow_run_id": run_id,
+              "workflow_run_attempt": int(raw_attempt),
+              "coverage_complete": True,
+          }
+          mismatches = {
+              field: {"expected": value, "actual": payload.get(field)}
+              for field, value in expected.items()
+              if payload.get(field) != value
+          }
+          for field in ("expected_case_names", "assessed_case_names"):
+              value = payload.get(field)
+              if not isinstance(value, list) or not value:
+                  mismatches[field] = {"expected": "non-empty list", "actual": value}
+          if mismatches:
+              raise SystemExit(
+                  "diffusion assessment artifact provenance mismatch: "
+                  + json.dumps(mismatches, sort_keys=True)
+              )
+          PY
+              then
+                while IFS= read -r status_path; do
+                  cp "$VLM_ASSESSMENT" "$(dirname "$status_path")/diffusion_vlm_assessment.json"
+                done < <(find "$PARTS_DIR" -type f -name model-proof-status.json -print)
+              else
+                echo "::error::Diffusion semantic artifact provenance validation failed"
+              fi
+            else
+              echo "::error::Diffusion semantic artifact transport failed: download=$VLM_DOWNLOAD_OUTCOME selection=$VLM_SELECTION_OUTCOME"
+            fi
+            if python3 scripts/generate_model_proof_report.py \
+                --parts-dir "$PARTS_DIR" \
+                --expected-models "$EXPECTED_MODELS" \
+                --revision "$REVISION" \
+                --suite nightly \
+                --project-dir "$GITHUB_WORKSPACE" \
+                --output "$REPORT_OUTPUT_DIR/model-proof-report.html" \
+                --status-output "$REPORT_OUTPUT_DIR/model-proof-report-status.json" \
+                --upstream-result "legal=$LEGAL_RESULT" \
+                --upstream-result "inventory=$INVENTORY_RESULT" \
+                --upstream-result "source-quality=$SOURCE_QUALITY_RESULT" \
+                --upstream-result "unit-tests=$UNIT_RESULT" \
+                --upstream-result "cache-warm=$CACHE_RESULT" \
+                --upstream-result "package=$PACKAGE_RESULT" \
+                --upstream-result "model-proof=$MODEL_RESULT" \
+                --upstream-result "diffusion-vlm=$VLM_RESULT" \
+                --upstream-result "model-artifact-download=$DOWNLOAD_OUTCOME" \
+                --upstream-result "vlm-artifact-download=$VLM_DOWNLOAD_OUTCOME" \
+                --upstream-result "vlm-artifact-selection=$VLM_SELECTION_OUTCOME"; then
+              compose_rc=0
+            else
+              compose_rc=$?
+            fi
+          fi
+          echo "exit_code=$compose_rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Upload combined nightly HTML report
+        id: report_upload
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-nightly-html-report-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/nightly-model-report-${{ github.run_id }}-${{ github.run_attempt }}/model-proof-report.html
+            ${{ runner.temp }}/nightly-model-report-${{ github.run_id }}-${{ github.run_attempt }}/model-proof-report-status.json
+
+      - name: Enforce complete nightly report certification
+        if: ${{ always() }}
+        env:
+          COMPOSE_EXIT_CODE: ${{ steps.compose.outputs.exit_code }}
+          REPORT_UPLOAD_OUTCOME: ${{ steps.report_upload.outcome }}
+          EXPECTED_MODELS: ${{ needs.inventory.outputs.affected_models }}
+          REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          test "$REPORT_UPLOAD_OUTCOME" = "success" || {
+            echo "::error::Combined HTML artifact upload result: $REPORT_UPLOAD_OUTCOME"
+            exit 1
+          }
+          test "${COMPOSE_EXIT_CODE:-1}" -eq 0 || {
+            echo "::error::Combined report certification exited ${COMPOSE_EXIT_CODE:-missing}"
+            exit 1
+          }
+          python3 - \
+            "$REPORT_OUTPUT_DIR/model-proof-report-status.json" \
+            "$EXPECTED_MODELS" "$REVISION" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          status_path, raw_expected, revision = sys.argv[1:]
+          status = json.loads(Path(status_path).read_text(encoding="utf-8"))
+          expected = json.loads(raw_expected)
+          errors = []
+          required = {
+              "schema_version": 1,
+              "report_kind": "combined_model_proof",
+              "outcome": "passed",
+              "source_revision": revision,
+              "suite": "nightly",
+              "expected_models": expected,
+              "discovered_models": expected,
+              "expected_count": len(expected),
+              "discovered_count": len(expected),
+              "selected_artifact_count": len(expected),
+              "issue_count": 0,
+          }
+          for key, wanted in required.items():
+              if status.get(key) != wanted:
+                  errors.append(f"{key}: expected {wanted!r}, found {status.get(key)!r}")
+          entries = status.get("models")
+          if not isinstance(entries, list) or len(entries) != len(expected):
+              errors.append("model result entries do not exactly match the inventory")
+          elif any(entry.get("status") != "passed" for entry in entries):
+              errors.append("one or more model result entries are not passed")
+          result_count = status.get("result_count")
+          if not isinstance(result_count, int) or result_count < len(expected):
+              errors.append("nightly report does not contain at least one E2E result per model")
+          if errors:
+              raise SystemExit("Nightly report status is not certified:\n- " + "\n- ".join(errors))
+          PY
+
+      - name: Write nightly report summary
+        if: ${{ always() }}
+        env:
+          REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
+          EXPECTED_COUNT: ${{ needs.inventory.outputs.expected_count }}
+        run: |
+          {
+            echo "### Nightly isolated model report"
+            echo
+            echo "- Revision: \`$REVISION\`"
+            echo "- Expected ownership models: \`${EXPECTED_COUNT:-0}\`"
+            echo "- Artifact: \`trtmc-nightly-html-report-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  required:
+    name: 7 / Nightly CI
+    needs:
+      - legal
+      - inventory
+      - source-quality
+      - unit-tests
+      - cache-warm
+      - package
+      - model-proof
+      - diffusion-vlm
+      - report
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Verify every nightly gate
+        env:
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+          LEGAL_RESULT: ${{ needs.legal.result }}
+          INVENTORY_RESULT: ${{ needs.inventory.result }}
+          SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
+          UNIT_RESULT: ${{ needs.unit-tests.result }}
+          CACHE_RESULT: ${{ needs.cache-warm.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          MODEL_RESULT: ${{ needs.model-proof.result }}
+          VLM_RESULT: ${{ needs.diffusion-vlm.result }}
+          REPORT_RESULT: ${{ needs.report.result }}
+          HAS_MODELS: ${{ needs.inventory.outputs.has_models }}
+          EXPECTED_COUNT: ${{ needs.inventory.outputs.expected_count }}
+        run: |
+          set -euo pipefail
+          test -n "$TESTED_SHA"
+          for result in \
+            "$LEGAL_RESULT" "$INVENTORY_RESULT" "$SOURCE_QUALITY_RESULT" \
+            "$UNIT_RESULT" "$CACHE_RESULT" "$PACKAGE_RESULT" \
+            "$MODEL_RESULT" "$VLM_RESULT" "$REPORT_RESULT"; do
+            test "$result" = "success"
+          done
+          test "$HAS_MODELS" = "true"
+          test "$EXPECTED_COUNT" -gt 0
+          echo "All nightly gates passed for \`$TESTED_SHA\`." >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: 8 / Publish nightly wheels
+    needs:
+      - legal
+      - required
+    if: >-
+      ${{
+        needs.required.result == 'success' &&
+        (github.event_name == 'schedule' || github.ref == 'refs/heads/main')
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Check out certified nightly snapshot for release tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download certified trtmc pip package
+        uses: actions/download-artifact@v4
+        with:
+          pattern: trtmc-pip-package-${{ github.run_id }}-*
+          path: ${{ runner.temp }}/nightly-wheel-parts-${{ github.run_id }}-${{ github.run_attempt }}
+          merge-multiple: false
+
+      - name: Select latest certified package attempt
+        id: wheel_select
+        run: |
+          python3 tools/select_latest_attempt_artifact.py \
+            --parts-dir "${{ runner.temp }}/nightly-wheel-parts-${{ github.run_id }}-${{ github.run_attempt }}" \
+            --artifact-prefix "trtmc-pip-package-${{ github.run_id }}-" \
+            --max-attempt "${{ github.run_attempt }}" \
+            --required-glob '*.whl' \
+            --github-output "$GITHUB_OUTPUT"
 
       - name: Publish trtmc pip package to GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+          WHEEL_DIR: ${{ steps.wheel_select.outputs.selected_dir }}
         run: |
           set -euo pipefail
-          compgen -G "dist/*.whl" >/dev/null || {
-            echo "::error::No trtmc wheel found under dist/"
+          compgen -G "$WHEEL_DIR/*.whl" >/dev/null || {
+            echo "::error::No certified trtmc wheel found under $WHEEL_DIR"
             exit 1
           }
           release_payload="$(python3 - <<'PY'
@@ -228,9 +1160,9 @@ jobs:
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           print(json.dumps({
               "tag_name": tag,
-              "target_commitish": os.environ["GITHUB_SHA"],
+              "target_commitish": os.environ["TESTED_SHA"],
               "name": f"TRTMC Nightly {os.environ['GITHUB_RUN_ID']} attempt {os.environ['GITHUB_RUN_ATTEMPT']}",
-              "body": f"Nightly TensorRT-Model-Connect pip package built by {run_url}.",
+              "body": f"Nightly TensorRT-Model-Connect wheels certified by {run_url}.",
               "draft": False,
               "prerelease": True,
               "make_latest": "false",
@@ -250,7 +1182,7 @@ jobs:
           print(json.load(open("release.json"))["upload_url"].split("{", 1)[0])
           PY
           )"
-          for asset in dist/*.whl; do
+          for asset in "$WHEEL_DIR"/*.whl; do
             name="$(basename "$asset")"
             curl -sSfL \
               -X POST \
@@ -263,46 +1195,3 @@ jobs:
               > /dev/null
             echo "Published release asset: $name"
           done
-
-      - name: Write CI summary
-        if: always()
-        run: |
-          set -euo pipefail
-          python3 scripts/generate_ci_summary.py \
-            --mode nightly \
-            --artifacts-dir e2e_artifacts/artifacts \
-            --report-path e2e_artifacts/e2e_report.html \
-            --html-artifact-name "trtmc-nightly-html-report-${GITHUB_RUN_ID}" \
-            --full-artifact-name "trtmc-nightly-${GITHUB_RUN_ID}" \
-            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload E2E HTML report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trtmc-nightly-html-report-${{ github.run_id }}
-          if-no-files-found: ignore
-          retention-days: 14
-          path: e2e_artifacts/e2e_report.html
-
-      - name: Upload nightly artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: trtmc-nightly-${{ github.run_id }}
-          if-no-files-found: ignore
-          retention-days: 14
-          path: |
-            impact.json
-            coverage_map.json
-            coverage/
-            e2e_artifacts/
-
-      - name: Stop CI container
-        if: always()
-        run: |
-          docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
-          if [ -n "${DOCKER_CONFIG:-}" ]; then
-            rm -rf "$DOCKER_CONFIG"
-          fi

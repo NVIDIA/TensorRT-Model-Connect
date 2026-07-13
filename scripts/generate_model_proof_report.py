@@ -200,6 +200,72 @@ def _raw_result_cases(
     return names, payloads
 
 
+def _validate_nightly_diffusion_assessments(
+    results: list[dict[str, Any]], revision: str, issues: list[str]
+) -> None:
+    diffusion_results = [
+        result
+        for result in results
+        if not result.get("_summary_only")
+        and isinstance(result.get("case_config"), dict)
+        and result["case_config"].get("task_strategy")
+        == "diffusion_media_generation"
+    ]
+    expected_cases = sorted(
+        str(result.get("case_name") or "") for result in diffusion_results
+    )
+    if not expected_cases:
+        return
+    if any(not case_name for case_name in expected_cases):
+        issues.append("nightly diffusion results contain an empty case name")
+        return
+    if len(expected_cases) != len(set(expected_cases)):
+        issues.append(
+            f"nightly diffusion results contain duplicate cases: {expected_cases!r}"
+        )
+        return
+
+    for result in diffusion_results:
+        case_name = str(result.get("case_name"))
+        assessment = result.get("vlm_assessment")
+        if not isinstance(assessment, dict):
+            issues.append(f"{case_name}: required nightly diffusion assessment is missing")
+            continue
+        judgment = assessment.get("vlm_judgment")
+        gate = judgment.get("vlm_gate") if isinstance(judgment, dict) else None
+        if not isinstance(gate, dict) or gate.get("failed") is not False:
+            issues.append(f"{case_name}: nightly diffusion semantic gate is not passing")
+
+        provenance = assessment.get("_assessment_provenance")
+        if not isinstance(provenance, dict):
+            issues.append(f"{case_name}: diffusion assessment provenance is missing")
+            continue
+        required = {
+            "source_revision": revision,
+            "coverage_complete": True,
+            "expected_case_names": expected_cases,
+            "assessed_case_names": expected_cases,
+        }
+        for field, expected in required.items():
+            if provenance.get(field) != expected:
+                issues.append(
+                    f"{case_name}: diffusion assessment {field} is "
+                    f"{provenance.get(field)!r}, expected {expected!r}"
+                )
+        run_id = provenance.get("workflow_run_id")
+        if not isinstance(run_id, str) or not run_id.isdigit():
+            issues.append(f"{case_name}: diffusion assessment workflow_run_id is invalid")
+        run_attempt = provenance.get("workflow_run_attempt")
+        if (
+            not isinstance(run_attempt, int)
+            or isinstance(run_attempt, bool)
+            or run_attempt < 1
+        ):
+            issues.append(
+                f"{case_name}: diffusion assessment workflow_run_attempt is invalid"
+            )
+
+
 def _check_equal(issues: list[str], model: str, label: str, actual: Any, expected: Any) -> None:
     if actual != expected:
         issues.append(f"{model}: {label} must be {expected!r}, found {actual!r}")
@@ -525,10 +591,14 @@ def compose(args: argparse.Namespace) -> int:
             }
         )
 
+    if args.suite == "nightly":
+        _validate_nightly_diffusion_assessments(all_results, args.revision, issues)
+
     # The per-model path uses 32 MiB so normal audio/video evidence remains
     # visible.  Apply the same bounded limit to the combined report.
     e2e_report._MAX_EMBED_BYTES = _MAX_EMBED_BYTES
-    title = f"Premerge Isolated Model Report: {args.revision[:12]}"
+    suite_title = "Nightly" if args.suite == "nightly" else "Premerge"
+    title = f"{suite_title} Isolated Model Report: {args.revision[:12]}"
     try:
         html_content = e2e_report.render_report(
             all_results,

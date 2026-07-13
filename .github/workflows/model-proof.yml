@@ -30,7 +30,7 @@ jobs:
     runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     # Reserve time after the bounded image/proof steps for fallback generation
     # and artifact publication even when a model reaches its proof timeout.
-    timeout-minutes: 300
+    timeout-minutes: ${{ inputs.suite == 'nightly' && 480 || 300 }}
 
     defaults:
       run:
@@ -45,9 +45,9 @@ jobs:
       TRTMC_MODEL_PROOF_GPU_IDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_IDS || '0,1,2,3' }}
       TRTMC_MODEL_PROOF_SLOTS_PER_GPU: ${{ vars.TRTMC_MODEL_PROOF_SLOTS_PER_GPU || '4' }}
       TRTMC_MODEL_PROOF_GPU_LOCK_DIR: ${{ vars.TRTMC_MODEL_PROOF_GPU_LOCK_DIR || '/tmp/trtmc-model-proof-gpu-locks' }}
-      TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || '3600' }}
+      TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || (inputs.suite == 'nightly' && '5400' || '3600') }}
       TRTMC_MODEL_PROOF_MIN_FREE_GIB: ${{ vars.TRTMC_MODEL_PROOF_MIN_FREE_GIB || '40' }}
-      TRTMC_MODEL_PROOF_STALE_MINUTES: ${{ vars.TRTMC_MODEL_PROOF_STALE_MINUTES || '240' }}
+      TRTMC_MODEL_PROOF_STALE_MINUTES: ${{ vars.TRTMC_MODEL_PROOF_STALE_MINUTES || (inputs.suite == 'nightly' && '600' || '360') }}
       PYTHONHASHSEED: "0"
 
     steps:
@@ -188,7 +188,7 @@ jobs:
 
       - name: Run isolated model proof
         id: proof
-        timeout-minutes: 150
+        timeout-minutes: ${{ inputs.suite == 'nightly' && 360 || 150 }}
         env:
           MODEL: ${{ inputs.model }}
           REVISION: ${{ inputs.revision }}

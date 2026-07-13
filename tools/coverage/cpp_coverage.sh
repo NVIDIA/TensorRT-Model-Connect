@@ -23,6 +23,10 @@ Environment:
   COVERAGE_COMPILE_FLAGS Compiler flags (default: "--coverage -O0 -g0")
   COVERAGE_LINK_FLAGS    Linker flags (default: "--coverage")
   BUILD_PARALLEL         Build parallelism passed to cmake --build --parallel
+  CPP_COVERAGE_BUILD_TARGET
+                         Aggregate C++ test target to build (default:
+                         trtmc_cpp_tests; nightly isolation uses
+                         trtmc_platform_cpp_tests)
   CMAKE_EXTRA_ARGS       Extra CMake configure args (space-separated)
   TRTMC_ENABLE_LIBTORCH_MULTINOMIAL
                          Enable optional libtorch multinomial bridge (default: OFF)
@@ -78,6 +82,7 @@ CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE:-Coverage}"
 COVERAGE_COMPILE_FLAGS="${COVERAGE_COMPILE_FLAGS:---coverage -O0 -g0}"
 COVERAGE_LINK_FLAGS="${COVERAGE_LINK_FLAGS:---coverage}"
 BUILD_PARALLEL="${BUILD_PARALLEL:-}"
+CPP_COVERAGE_BUILD_TARGET="${CPP_COVERAGE_BUILD_TARGET:-trtmc_cpp_tests}"
 TRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF}"
 CPP_COVERAGE_MIN_LINE="${CPP_COVERAGE_MIN_LINE:-100}"
 CPP_COVERAGE_MIN_FUNCTION="${CPP_COVERAGE_MIN_FUNCTION:-100}"
@@ -86,6 +91,14 @@ TRT_INC_DIR="${TRT_INC_DIR:-}"
 TRT_LIB_DIR="${TRT_LIB_DIR:-}"
 CUDA_INC_DIR="${CUDA_INC_DIR:-/usr/local/cuda/include}"
 CUDART_LIBRARY="${CUDART_LIBRARY:-/usr/local/cuda/lib64/libcudart.so}"
+
+case "${CPP_COVERAGE_BUILD_TARGET}" in
+  trtmc_cpp_tests|trtmc_platform_cpp_tests) ;;
+  *)
+    echo "ERROR: CPP_COVERAGE_BUILD_TARGET must be trtmc_cpp_tests or trtmc_platform_cpp_tests" >&2
+    exit 1
+    ;;
+esac
 
 for tool in cmake ctest gcovr; do
   if ! command -v "${tool}" >/dev/null 2>&1; then
@@ -166,10 +179,12 @@ if [[ -n "${BUILD_PARALLEL}" ]]; then
   build_parallel_args=(--parallel "${BUILD_PARALLEL}")
 fi
 
-cmake --build "${BUILD_DIR}" "${build_parallel_args[@]}"
+if [[ "${CPP_COVERAGE_BUILD_TARGET}" == "trtmc_cpp_tests" ]]; then
+  cmake --build "${BUILD_DIR}" "${build_parallel_args[@]}"
+fi
 # C++ unit test executables are excluded from the default wheel build, so
 # coverage must request the aggregate test target explicitly before ctest.
-cmake --build "${BUILD_DIR}" --target trtmc_cpp_tests "${build_parallel_args[@]}"
+cmake --build "${BUILD_DIR}" --target "${CPP_COVERAGE_BUILD_TARGET}" "${build_parallel_args[@]}"
 
 # Remove stale runtime coverage data from previous runs.
 find "${BUILD_DIR}" -name "*.gcda" -delete || true
@@ -189,16 +204,23 @@ for exclude in "${EXCLUDES[@]}"; do
   gcovr_base+=(--exclude "${exclude}")
 done
 
-gcovr "${gcovr_base[@]}" \
+run_gcovr() {
+  # gcovr scans its current directory in addition to --object-directory. Run
+  # from the fresh coverage tree so stale build-cov data in a shared checkout
+  # cannot be mixed into this run.
+  (cd "${BUILD_DIR}" && gcovr "$@" "${BUILD_DIR}")
+}
+
+run_gcovr "${gcovr_base[@]}" \
   --xml "${COBERTURA_XML}" \
   --xml-pretty \
   --html-details "${HTML_REPORT}"
 
-gcovr "${gcovr_base[@]}" \
+run_gcovr "${gcovr_base[@]}" \
   --txt-summary | tee "${SUMMARY_TXT}"
 
 set +e
-gcovr "${gcovr_base[@]}" \
+run_gcovr "${gcovr_base[@]}" \
   --print-summary \
   --fail-under-line "${CPP_COVERAGE_MIN_LINE}" \
   --fail-under-function "${CPP_COVERAGE_MIN_FUNCTION}" \

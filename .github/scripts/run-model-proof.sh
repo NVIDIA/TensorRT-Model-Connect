@@ -22,6 +22,9 @@ proof_gpu_admission_fd=""
 proof_gpu_admission_file=""
 proof_gpu_predecessor_fd=""
 proof_gpu_predecessor_file=""
+proof_gpu_machine_fd=""
+proof_gpu_machine_file=""
+proof_gpu_lease_deadline=""
 declare -a proof_gpu_slot_ids=()
 declare -a proof_gpu_lease_fds=()
 declare -a proof_gpu_lease_files=()
@@ -40,6 +43,7 @@ declare -a proof_gpu_lease_files=()
 #   admission-<scope>-<20 digits>.lock   FIFO ticket, flocked by its owner
 #   gpu-<id>-reservation.lock            exclusive-proof entry fence
 #   gpu-<id>-slot-<n>.lock               slot lease, held while the proof runs
+#   whole-machine.lock                   shared by proofs, exclusive by all-GPU stages
 
 die() {
   if [ -n "$proof_artifacts_dir" ]; then
@@ -91,6 +95,40 @@ release_proof_gpu_lease() {
   fi
   release_admission_predecessor
   release_gpu_admission_ticket
+  if [ -n "$proof_gpu_machine_fd" ]; then
+    flock -u "$proof_gpu_machine_fd" >/dev/null 2>&1 || true
+    close_dynamic_fd "$proof_gpu_machine_fd"
+    proof_gpu_machine_fd=""
+    proof_gpu_machine_file=""
+    proof_gpu_lease_deadline=""
+  fi
+}
+
+acquire_proof_gpu_machine_lock() {
+  [ -z "$proof_gpu_machine_fd" ] || return 0
+  command -v flock >/dev/null || die "flock is required for model-proof GPU leasing"
+
+  local lock_dir="${TRTMC_MODEL_PROOF_GPU_LOCK_DIR:-/tmp/trtmc-model-proof-gpu-locks}"
+  [ -n "$lock_dir" ] || die "TRTMC_MODEL_PROOF_GPU_LOCK_DIR must not be empty"
+  mkdir -p -- "$lock_dir" || die "could not create GPU lease directory: $lock_dir"
+
+  local timeout="${TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS:-10800}"
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] && [ "$timeout" -le 21600 ] || \
+    die "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS must be an integer from 1 to 21600"
+
+  proof_gpu_machine_file="$lock_dir/whole-machine.lock"
+  : >> "$proof_gpu_machine_file" || \
+    die "could not open whole-machine GPU lock: $proof_gpu_machine_file"
+  exec {proof_gpu_machine_fd}<>"$proof_gpu_machine_file" || \
+    die "could not open whole-machine GPU lock: $proof_gpu_machine_file"
+  proof_gpu_lease_deadline=$((SECONDS + timeout))
+  if ! flock -w "$timeout" -s "$proof_gpu_machine_fd"; then
+    close_dynamic_fd "$proof_gpu_machine_fd"
+    proof_gpu_machine_fd=""
+    proof_gpu_machine_file=""
+    die "timed out after ${timeout}s waiting for the whole-machine GPU lock"
+  fi
+  echo "Acquired shared whole-machine GPU lock via $proof_gpu_machine_file"
 }
 
 release_admission_predecessor() {
@@ -616,6 +654,9 @@ select_proof_gpu() {
   fi
 
   local deadline=$((SECONDS + timeout))
+  if [[ "${proof_gpu_lease_deadline:-}" =~ ^[1-9][0-9]*$ ]]; then
+    deadline="$proof_gpu_lease_deadline"
+  fi
   local attempted=0 reserve_rc=0 poll_remaining=0
   local admission_scope="global"
   # Register once in a crash-safe monotonic queue. Every later wait keeps
@@ -1081,7 +1122,11 @@ if suite == "premerge":
     )
     selected_cases = candidates[:1]
 else:
-    selected_cases = cases
+    # Nightly proves every production single-GPU case. L0 cases are synthetic
+    # premerge substitutes, so retain them only when an owner has no larger
+    # single-GPU case (for example LocateAnything and LTX Video).
+    production_cases = [case for case in cases if case["ci_tier"] != "l0_only"]
+    selected_cases = production_cases or cases
 
 resource_class = (
     "exclusive_gpu"
@@ -2261,6 +2306,7 @@ trap - EXIT
     die "selected Hugging Face cache evidence produced no repository copies"
 
   printf '%s\n' "$resource_class" > "$artifacts_dir/gpu-lease-requested.txt"
+  acquire_proof_gpu_machine_lock
   select_proof_gpu "$resource_class"
   local gpu_id="$proof_gpu_id"
   local gpu_slot_ids

@@ -124,6 +124,13 @@ def test_github_stage_wrapper_exports_premerge_unit_parallelism() -> None:
         assert name in start
 
 
+def test_github_stage_wrapper_exports_cpp_coverage_scope() -> None:
+    stage = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    start = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
+    assert "-e CPP_COVERAGE_SCOPE" in stage
+    assert "CPP_COVERAGE_SCOPE" in start
+
+
 def test_github_stage_wrapper_exports_diffusion_vlm_config() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
     start_text = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
@@ -257,18 +264,25 @@ def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> 
     ) in proof
     assert "retention-days: 7" in proof
     assert "${{ inputs.model }}/artifacts/" in proof
-    assert "name: trtmc-nightly-${{ github.run_id }}" in nightly
+    assert (
+        "name: trtmc-nightly-html-report-${{ github.run_id }}-${{ github.run_attempt }}"
+        in nightly
+    )
     assert "retention-days: 14" in nightly
 
 
 def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> None:
     nightly = (REPO_ROOT / ".github/workflows/nightly.yml").read_text()
-    assert "Upload E2E HTML report" in nightly
-    assert "trtmc-nightly-html-report-${{ github.run_id }}" in nightly
-    assert "path: e2e_artifacts/e2e_report.html" in nightly
+    assert "Upload combined nightly HTML report" in nightly
+    assert (
+        "trtmc-nightly-html-report-${{ github.run_id }}-${{ github.run_attempt }}"
+        in nightly
+    )
+    assert "model-proof-report.html" in nightly
+    assert "model-proof-report-status.json" in nightly
     assert "retention-days: 14" in nightly
-    assert "e2e_artifacts/" in nightly
-    assert "!e2e_artifacts/e2e_report.html" not in nightly
+    assert "scripts/generate_model_proof_report.py" in nightly
+    assert "--suite nightly" in nightly
 
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
     assert "Upload isolated model proof artifact" in proof
@@ -617,12 +631,35 @@ def test_label_triggered_premerge_ci_uses_pr_merge_ref_checkout() -> None:
     assert "revision: ${{ needs.legal.outputs.tested_sha }}" in model_block
 
 
-def test_nightly_workflow_dispatch_can_validate_requested_ref() -> None:
+def test_nightly_pins_the_event_snapshot_before_any_job_is_queued() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     assert "workflow_dispatch:" in text
-    assert "NIGHTLY_REF:" in text
-    assert "ref: ${{ env.NIGHTLY_REF }}" in text
-    assert 'base="origin/main"' in text
+    assert "inputs:" not in text.split("permissions:", maxsplit=1)[0]
+    assert "Nightly · ${{ github.ref_name }} · ${{ github.sha }}" in text
+    assert "group: trtmc-nightly-${{ github.ref }}" in text
+    legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  inventory:", maxsplit=1)[0]
+    assert "uses: ./.github/workflows/legal.yml" in legal
+    assert "revision: ${{ github.sha }}" in legal
+
+
+def test_reusable_legal_outputs_the_immutable_checked_out_sha() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "legal.yml").read_text()
+    assert "tested_sha:" in text
+    assert "value: ${{ jobs.legal-compliance.outputs.tested_sha }}" in text
+    assert "tested_sha: ${{ steps.resolve.outputs.tested_sha }}" in text
+    assert "id: resolve" in text
+    assert "persist-credentials: false" in text
+    assert "git rev-parse 'HEAD^{commit}'" in text
+    assert 'git cat-file -e "${tested_sha}^{commit}"' in text
+    assert 'echo "tested_sha=$tested_sha" >> "$GITHUB_OUTPUT"' in text
+
+
+def test_nightly_reuses_the_legal_certified_sha_for_all_downstream_work() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    assert text.count("ref: ${{ needs.legal.outputs.tested_sha }}") >= 5
+    assert "revision: ${{ needs.legal.outputs.tested_sha }}" in text
+    assert "pattern: model-proof-*-${{ needs.legal.outputs.tested_sha }}-*" in text
+    assert "TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}" in text
 
 
 def test_workflow_dispatch_lint_uses_resolved_ci_base_ref() -> None:
@@ -630,30 +667,308 @@ def test_workflow_dispatch_lint_uses_resolved_ci_base_ref() -> None:
     assert 'base_ref="${CI_BASE_REF:-origin/${GITHUB_REF_NAME:-main}}"' in text
 
 
-def test_nightly_attempts_all_test_stages_after_failures() -> None:
+def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    required_steps = (
+    inventory = text.split("\n  inventory:", maxsplit=1)[1].split(
+        "\n  source-quality:", maxsplit=1
+    )[0]
+    source_quality = text.split("\n  source-quality:", maxsplit=1)[1].split(
+        "\n  unit-tests:", maxsplit=1
+    )[0]
+    unit_tests = text.split("\n  unit-tests:", maxsplit=1)[1].split(
+        "\n  cache-warm:", maxsplit=1
+    )[0]
+    model_proof = text.split("\n  model-proof:", maxsplit=1)[1].split(
+        "\n  report:", maxsplit=1
+    )[0]
+    report = text.split("\n  report:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
+    required = text.split("\n  required:", maxsplit=1)[1].split("\n  release:", maxsplit=1)[0]
+
+    assert "needs: legal" in inventory
+    assert "python3 tools/model_ci.py validate --revision \"$TESTED_SHA\"" in inventory
+    assert "python3 tools/model_ci.py all" in inventory
+    assert '--revision "$TESTED_SHA"' in inventory
+    assert '--github-output "$GITHUB_OUTPUT"' in inventory
+    for output in ("has_models", "matrix", "affected_models", "expected_count", "mode"):
+        assert f"{output}: ${{{{ steps.inventory.outputs.{output} }}}}" in inventory
+
+    assert "- legal" in source_quality and "- inventory" in source_quality
+    assert "Check family coverage" in source_quality
+    assert "run-trtmc-ci.sh source-quality" in source_quality
+    assert "- legal" in unit_tests and "- inventory" in unit_tests
+    assert "run-gha-stage.sh premerge-unit" in unit_tests
+    assert "TRTMC_PREMERGE_UNIT_SCOPE: all" in unit_tests
+    assert 'TRTMC_CI_HARDENED: "true"' in unit_tests
+
+    for dependency in (
+        "legal",
+        "inventory",
+        "source-quality",
+        "unit-tests",
+        "cache-warm",
+        "package",
+    ):
+        assert f"- {dependency}" in model_proof
+    assert "always()" in model_proof
+    assert "needs.legal.result == 'success'" in model_proof
+    assert "needs.inventory.result == 'success'" in model_proof
+    assert "needs.unit-tests.result == 'success'" in model_proof
+    assert "needs.source-quality.result == 'success'" in model_proof
+    assert "needs.cache-warm.result == 'success'" in model_proof
+    assert "needs.package.result == 'success'" in model_proof
+    assert "fail-fast: false" in model_proof
+    assert "max-parallel: 16" in model_proof
+    assert "matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}" in model_proof
+    assert "uses: ./.github/workflows/model-proof.yml" in model_proof
+    assert "model: ${{ matrix.model }}" in model_proof
+    assert "revision: ${{ needs.legal.outputs.tested_sha }}" in model_proof
+    assert "suite: nightly" in model_proof
+
+    assert "if: ${{ always() }}" in report
+    for dependency in (
+        "legal",
+        "inventory",
+        "source-quality",
+        "unit-tests",
+        "cache-warm",
+        "package",
+        "model-proof",
+        "diffusion-vlm",
+    ):
+        assert f"- {dependency}" in report
+    assert "if: ${{ always() }}" in required
+    for dependency in (
+        "legal",
+        "inventory",
+        "source-quality",
+        "unit-tests",
+        "cache-warm",
+        "package",
+        "model-proof",
+        "diffusion-vlm",
+        "report",
+    ):
+        assert f"- {dependency}" in required
+
+
+def test_nightly_strictly_warms_all_active_non_multi_device_cases() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    cache = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
+    assert "Strictly warm every active single-GPU nightly model" in cache
+    assert "scripts/warm_hf_cache.py --exclude-ci-tier multi_device --strict" in cache
+    assert "--exclude-ci-tier l0_only" not in cache
+    assert "--exclude-ci-tier nightly_only" not in cache
+
+
+def test_nightly_report_requires_exact_all_model_results_and_evidence() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    report = text.split("\n  report:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
+    assert "EXPECTED_MODELS: ${{ needs.inventory.outputs.affected_models }}" in report
+    assert "REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}" in report
+    assert "pattern: model-proof-*-${{ needs.legal.outputs.tested_sha }}-*" in report
+    assert "merge-multiple: false" in report
+    assert "scripts/generate_model_proof_report.py" in report
+    assert "--suite nightly" in report
+    for upstream in (
+        "legal",
+        "inventory",
+        "source-quality",
+        "unit-tests",
+        "cache-warm",
+        "package",
+        "model-proof",
+        "diffusion-vlm",
+    ):
+        assert f'--upstream-result "{upstream}=$' in report
+    assert '"outcome": "passed"' in report
+    assert '"discovered_models": expected' in report
+    assert '"selected_artifact_count": len(expected)' in report
+    assert 'entry.get("status") != "passed"' in report
+    assert 'status.get("result_count")' in report
+    assert "at least one E2E result per model" in report
+    assert "issue_count" in report
+    assert "Enforce complete nightly report certification" in report
+
+
+def test_nightly_preserves_diffusion_vlm_gate_and_injects_it_into_the_html() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
+    report = text.split("\n  report:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
+    assert "needs:" in vlm and "- model-proof" in vlm
+    assert "always()" in vlm
+    assert "tools/count_diffusion_frame_pairs.py" in vlm
+    assert "--require-complete" in vlm
+    assert "No complete TRT/reference diffusion frame pairs were produced" in vlm
+    assert "tools/evaluate_diffusion_vlm_similarity.py" in vlm
+    assert "diffusion_vlm_assessment.json" in vlm
+    assert "validate_complete_diffusion_frame_pairs" in vlm
+    assert 'assessment["coverage_complete"] = True' in vlm
+    assert 'assessment["source_revision"] = source_revision' in vlm
+    assert 'assessment["workflow_run_id"] = workflow_run_id' in vlm
+    assert 'assessment["workflow_run_attempt"] = workflow_run_attempt' in vlm
+    assert "needs.model-proof.result == 'success'" in vlm
+    assert "does not exactly cover current frame pairs" in vlm
+    assert "Upload diffusion semantic assessment" in vlm
+    assert (
+        "trtmc-nightly-vlm-${{ github.run_id }}-"
+        "${{ needs.legal.outputs.tested_sha }}-${{ github.run_attempt }}" in vlm
+    )
+    assert "Download diffusion semantic assessment" in report
+    assert (
+        "pattern: trtmc-nightly-vlm-${{ github.run_id }}-"
+        "${{ needs.legal.outputs.tested_sha }}-*" in report
+    )
+    assert "merge-multiple: false" in report
+    assert "Select latest diffusion semantic assessment attempt" in report
+    assert "tools/select_latest_attempt_artifact.py" in report
+    assert 'cp "$VLM_ASSESSMENT"' in report
+    assert 'diffusion_vlm_assessment.json"' in report
+    assert '--upstream-result "diffusion-vlm=$VLM_RESULT"' in report
+    assert '--upstream-result "model-artifact-download=$DOWNLOAD_OUTCOME"' in report
+    assert '--upstream-result "vlm-artifact-download=$VLM_DOWNLOAD_OUTCOME"' in report
+    assert '--upstream-result "vlm-artifact-selection=$VLM_SELECTION_OUTCOME"' in report
+
+
+def test_nightly_all_gpu_gate_uses_the_model_proof_machine_lock() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split(
+        "\n  report:", maxsplit=1
+    )[0]
+    proof_runner = (
+        REPO_ROOT / ".github" / "scripts" / "run-model-proof.sh"
+    ).read_text()
+
+    assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR:" in text
+    assert "whole-machine.lock" in vlm
+    assert 'flock -w "$TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS" -x 9' in vlm
+    assert "acquire_proof_gpu_machine_lock" in proof_runner
+    assert 'flock -w "$timeout" -s "$proof_gpu_machine_fd"' in proof_runner
+    assert text.index("- model-proof", text.index("\n  diffusion-vlm:")) < text.index(
+        "Run diffusion VLM semantic gate"
+    )
+
+
+def test_nightly_grants_write_permission_only_after_the_final_gate() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    before_release, release = text.split("\n  release:", maxsplit=1)
+    assert "permissions: {}" in before_release
+    assert "contents: write" not in before_release
+    assert text.count("contents: write") == 1
+    assert "contents: write" in release
+    assert "needs.required.result == 'success'" in release
+    assert "github.event_name == 'schedule' || github.ref == 'refs/heads/main'" in release
+    assert "target_commitish" in release
+    assert 'os.environ["TESTED_SHA"]' in release
+    assert "secrets: inherit" not in text
+
+
+def test_nightly_removes_the_legacy_monolithic_gpu_and_coverage_paths() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    for obsolete in (
+        "run-gha-stage.sh impact",
+        "run-gha-stage.sh graph-ops",
+        "run-gha-stage.sh full-e2e",
+        "run-gha-stage.sh coverage-map",
         "Impact analysis",
-        "Build C++ test executables",
-        "Check family coverage",
-        "Check cyclomatic complexity",
-        "Lint changed files",
-        "C++ unit tests",
-        "Python builder and tools tests",
-        "C++ coverage",
         "Graph-op GPU tests",
         "Full E2E tests",
         "Generate coverage map",
+        "RUN_COVERAGE_MAP:",
+        "tools/test_impact.py",
+    ):
+        assert obsolete not in text
+
+
+def test_nightly_preserves_python_and_cpp_coverage_without_rebuilding_the_wheel() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    assert package.count("run-gha-stage.sh package") == 1
+    assert "Python package coverage" in package
+    assert "run-gha-stage.sh python-builder" in package
+    assert "C++ platform coverage" in package
+    assert "run-gha-stage.sh cpp-coverage" in package
+    assert "CPP_COVERAGE_SCOPE: platform" in package
+    assert 'FULL_E2E: "true"' in package
+    for threshold in (
+        'PYTHON_COVERAGE_MIN_LINE: "38"',
+        'PYTHON_COVERAGE_MIN_BRANCH: "25"',
+        'CPP_COVERAGE_MIN_LINE: "36"',
+        'CPP_COVERAGE_MIN_FUNCTION: "46"',
+        'CPP_COVERAGE_MIN_BRANCH: "21"',
+    ):
+        assert threshold in package
+    assert "Upload nightly coverage artifacts" in package
+    assert "trtmc-nightly-coverage-${{ github.run_id }}" in package
+
+    ci_script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    coverage_script = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
+    coverage_wrapper = (
+        REPO_ROOT / "tools" / "coverage_ci" / "run_cpp_coverage.sh"
+    ).read_text()
+    assert "export CPP_COVERAGE_BUILD_TARGET=trtmc_platform_cpp_tests" in ci_script
+    assert "ctest_args=(-L platform)" in ci_script
+    assert 'cpp_coverage.sh" "$@"' in coverage_wrapper
+    assert '--target "${CPP_COVERAGE_BUILD_TARGET}"' in coverage_script
+    assert (
+        'if [[ "${CPP_COVERAGE_BUILD_TARGET}" == "trtmc_cpp_tests" ]]; then'
+        in coverage_script
     )
-    for step_name in required_steps:
-        block = text.split(f"- name: {step_name}", maxsplit=1)[1].split("\n\n", maxsplit=1)[0]
-        assert "if: ${{ always() }}" in block
+
+
+def test_nightly_long_jobs_reserve_finalization_time() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    package = text.split("\n  package:", maxsplit=1)[1].split(
+        "\n  model-proof:", maxsplit=1
+    )[0]
+    vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split(
+        "\n  report:", maxsplit=1
+    )[0]
+
+    package_job_minutes = 330
+    package_step_minutes = 90 + 5 + 60 + 60 + 60
+    vlm_job_minutes = 420
+    vlm_step_minutes = 90 + 5 + 270
+    assert "timeout-minutes: 330" in package
+    assert package_job_minutes >= package_step_minutes + 30
+    assert "timeout-minutes: 420" in vlm
+    assert vlm_job_minutes >= vlm_step_minutes + 30
+
+
+def test_nightly_python_coverage_runs_allocator_contract_serially() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    package = workflow.split("\n  package:", maxsplit=1)[1].split(
+        "\n  model-proof:", maxsplit=1
+    )[0]
+    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    coverage = script.split("run_python_builder_tests() {", maxsplit=1)[1].split(
+        "\nrun_cpp_coverage() {", maxsplit=1
+    )[0]
+
+    assert "run-gha-stage.sh python-builder" in package
+    parallel = '-n auto -m "not model_proof_allocator and not gpu and not trt"'
+    serial = "python -m pytest tests/tools/test_model_proof_runner.py -v"
+    assert parallel in coverage
+    assert serial in coverage
+    assert "-p no:cacheprovider -m model_proof_allocator" in coverage
+    assert "serial_cov_args+=(--cov-append)" in coverage
+    assert coverage.index(parallel) < coverage.index(serial)
+    assert "TRTMC_CPU_CONTAINER_OPTIONS" in package
+    assert "--gpus all" not in package
+
+
+def test_nightly_graph_stage_numbers_are_unambiguous() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    assert "name: 5 / Diffusion semantic assessment" in text
+    assert "name: 6 / Combined HTML report" in text
+    assert "name: 7 / Nightly CI" in text
+    assert "name: 8 / Publish nightly wheels" in text
 
 
 def test_github_workflows_write_e2e_markdown_summary() -> None:
     nightly = (REPO_ROOT / ".github/workflows/nightly.yml").read_text()
-    assert "Write CI summary" in nightly
-    assert "scripts/generate_ci_summary.py" in nightly
+    assert "Write nightly report summary" in nightly
+    assert "### Nightly isolated model report" in nightly
+    assert "trtmc-nightly-html-report-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" in nightly
     assert '>> "$GITHUB_STEP_SUMMARY"' in nightly
 
     premerge = (REPO_ROOT / ".github/workflows/trtmc-ci.yml").read_text()
@@ -663,14 +978,31 @@ def test_github_workflows_write_e2e_markdown_summary() -> None:
     assert '>> "$GITHUB_STEP_SUMMARY"' in premerge
 
 
-def test_nightly_runs_wheel_model_smoke_before_upload_and_release() -> None:
+def test_nightly_validates_the_installed_wheel_without_a_second_model_build() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    package_index = text.index("Build trtmc pip package")
-    smoke_index = text.index("Model smoke test from trtmc pip package")
-    upload_index = text.index("Upload trtmc pip package artifact")
-    publish_index = text.index("Publish trtmc pip package to GitHub Release")
-    assert package_index < smoke_index < upload_index < publish_index
-    assert "run-gha-stage.sh wheel-model-smoke" in text
+    package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    release = text.split("\n  release:", maxsplit=1)[1]
+    package_index = package.index("Build trtmc pip package")
+    installed_wheel_index = package.index("Python package coverage")
+    upload_index = package.index("Upload trtmc pip package artifact")
+    assert package_index < installed_wheel_index < upload_index
+    assert "run-gha-stage.sh python-builder" in package
+    assert "run-gha-stage.sh wheel-model-smoke" not in package
+    assert "Model smoke test from trtmc pip package" not in package
+    ci_script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    assert "setup_wheel_runtime_environment" in ci_script
+    assert "verify_built_wheel_installed" in ci_script
+    assert "needs.required.result == 'success'" in release
+    assert "github.event_name == 'schedule' || github.ref == 'refs/heads/main'" in release
+    assert "Download certified trtmc pip package" in release
+    assert "pattern: trtmc-pip-package-${{ github.run_id }}-*" in release
+    assert "merge-multiple: false" in release
+    assert "Select latest certified package attempt" in release
+    assert "tools/select_latest_attempt_artifact.py" in release
+    assert 'for asset in "$WHEEL_DIR"/*.whl' in release
+    assert "Publish trtmc pip package to GitHub Release" in release
+    assert "target_commitish" in release
+    assert 'os.environ["TESTED_SHA"]' in release
 
 
 def test_nightly_uses_manylinux_image_and_builds_wheel_first() -> None:
@@ -682,8 +1014,11 @@ def test_nightly_uses_manylinux_image_and_builds_wheel_first() -> None:
     assert "TRTMC_PACKAGE_WHEEL_ARCH:" in text
     assert "manylinux_2_39_aarch64" in text
     assert "TRTMC_PACKAGE_CI_IMAGE" not in text
-    assert text.index("Start CI container") < text.index("Build trtmc pip package")
-    assert text.index("Build trtmc pip package") < text.index("Impact analysis")
+    package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    assert package.index("Start package container") < package.index("Build trtmc pip package")
+    assert package.index("Build trtmc pip package") < package.index(
+        "Python package coverage"
+    )
     assert "Setup TensorRT-Model-Connect" not in text
 
 
@@ -1086,7 +1421,9 @@ def test_full_e2e_stages_all_runtime_plugins_from_reusable_build() -> None:
 
 def test_cpp_coverage_builds_excluded_test_target() -> None:
     coverage = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
-    assert "--target trtmc_cpp_tests" in coverage
+    assert 'CPP_COVERAGE_BUILD_TARGET="${CPP_COVERAGE_BUILD_TARGET:-trtmc_cpp_tests}"' in coverage
+    assert '--target "${CPP_COVERAGE_BUILD_TARGET}"' in coverage
+    assert '(cd "${BUILD_DIR}" && gcovr "$@" "${BUILD_DIR}")' in coverage
 
 
 def test_cpp_coverage_gate_excludes_model_owned_runtime_plugins() -> None:

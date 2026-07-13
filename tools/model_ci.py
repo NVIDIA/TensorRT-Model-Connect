@@ -323,6 +323,63 @@ def _validate_model_roots() -> None:
                 raise ModelCIError(f"overlapping model ownership roots: {left} and {right}")
 
 
+def _required_gpu_count(payload: dict[str, object], path: str) -> int:
+    """Return the declared device count for one effective E2E testcase."""
+    required = 1
+    build_args = payload.get("build_args", {})
+    distributed = payload.get("distributed_runtime", {})
+    if not isinstance(build_args, dict) or not isinstance(distributed, dict):
+        raise ModelCIError(f"E2E manifest device settings must be objects: {path}")
+    parallel = build_args.get("parallel", {})
+    if not isinstance(parallel, dict):
+        raise ModelCIError(f"E2E manifest build_args.parallel must be an object: {path}")
+    for field, value in (
+        ("build_args.parallel.tp_size", parallel.get("tp_size")),
+        ("distributed_runtime.world_size", distributed.get("world_size")),
+    ):
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ModelCIError(f"E2E manifest {field} must be a positive integer: {path}")
+        required = max(required, value)
+    preflights = payload.get("preflight_requirements", [])
+    if not isinstance(preflights, list):
+        raise ModelCIError(f"E2E manifest preflight_requirements must be an array: {path}")
+    for preflight in preflights:
+        if not isinstance(preflight, dict) or preflight.get("kind") != "gpu_count_min":
+            continue
+        args = preflight.get("args", {})
+        value = args.get("count") if isinstance(args, dict) else None
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ModelCIError(
+                f"E2E manifest gpu_count_min count must be a positive integer: {path}"
+            )
+        required = max(required, value)
+    return required
+
+
+def _validate_e2e_manifest_device_tiers(payload: dict[str, object], path: str) -> None:
+    defaults = {key: value for key, value in payload.items() if key != "testcases"}
+    testcases = payload.get("testcases")
+    effective_cases: list[dict[str, object]]
+    if isinstance(testcases, list) and testcases:
+        effective_cases = []
+        for index, testcase in enumerate(testcases):
+            if not isinstance(testcase, dict):
+                raise ModelCIError(f"E2E manifest testcases[{index}] must be an object: {path}")
+            effective_cases.append({**defaults, **testcase})
+    else:
+        effective_cases = [defaults]
+    for testcase in effective_cases:
+        required = _required_gpu_count(testcase, path)
+        if required > 1 and testcase.get("ci_tier") != "multi_device":
+            name = testcase.get("name", payload.get("name", "<unnamed>"))
+            raise ModelCIError(
+                f"E2E testcase {name!r} requires {required} GPUs but is not "
+                f"ci_tier='multi_device': {path}"
+            )
+
+
 def discover_catalog(
     repo_root: Path,
     revision: str,
@@ -400,6 +457,9 @@ def discover_catalog(
             payload = json.loads(_read_blob(repo_root, entry.object_id))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise ModelCIError(f"invalid E2E manifest JSON: {entry.path}") from exc
+        if not isinstance(payload, dict):
+            raise ModelCIError(f"E2E manifest must contain an object: {entry.path}")
+        _validate_e2e_manifest_device_tiers(payload, entry.path)
         strategy = payload.get("runtime_strategy")
         if strategy is None:
             continue

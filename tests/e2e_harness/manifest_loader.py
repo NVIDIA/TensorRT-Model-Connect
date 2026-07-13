@@ -890,6 +890,48 @@ def _validate_manifest(raw: dict, path: str) -> None:
             f"Manifest {path!r}: build_timeout_s must be a positive integer"
         )
 
+    required_gpu_count = 1
+    build_args = raw.get("build_args", {})
+    if not isinstance(build_args, dict):
+        raise TypeError(f"Manifest {path!r}: build_args must be an object")
+    parallel = build_args.get("parallel", {})
+    if not isinstance(parallel, dict):
+        raise TypeError(f"Manifest {path!r}: build_args.parallel must be an object")
+    distributed = raw.get("distributed_runtime", {})
+    if not isinstance(distributed, dict):
+        raise TypeError(f"Manifest {path!r}: distributed_runtime must be an object")
+    for field, value in (
+        ("build_args.parallel.tp_size", parallel.get("tp_size")),
+        ("distributed_runtime.world_size", distributed.get("world_size")),
+    ):
+        if value is None:
+            continue
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise TypeError(f"Manifest {path!r}: {field} must be a positive integer")
+        required_gpu_count = max(required_gpu_count, value)
+    preflight_requirements = raw.get("preflight_requirements", [])
+    if not isinstance(preflight_requirements, list):
+        raise TypeError(f"Manifest {path!r}: preflight_requirements must be an array")
+    for preflight in preflight_requirements:
+        if not isinstance(preflight, dict) or preflight.get("kind") != "gpu_count_min":
+            continue
+        args = preflight.get("args", {})
+        if not isinstance(args, dict):
+            raise TypeError(
+                f"Manifest {path!r}: preflight gpu_count_min args must be an object"
+            )
+        value = args.get("count")
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise TypeError(
+                f"Manifest {path!r}: preflight gpu_count_min count must be a positive integer"
+            )
+        required_gpu_count = max(required_gpu_count, value)
+    if required_gpu_count > 1 and raw.get("ci_tier") != "multi_device":
+        raise ValueError(
+            f"Manifest {path!r}: a {required_gpu_count}-GPU testcase must use "
+            "ci_tier='multi_device'"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Public API

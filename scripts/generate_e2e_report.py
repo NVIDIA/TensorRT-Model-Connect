@@ -399,6 +399,14 @@ def _load_diffusion_vlm_assessments(artifacts_dir: Path) -> Dict[str, Dict[str, 
         return {}
 
     model_id = payload.get("model_id", "")
+    provenance = {
+        "source_revision": payload.get("source_revision"),
+        "workflow_run_id": payload.get("workflow_run_id"),
+        "workflow_run_attempt": payload.get("workflow_run_attempt"),
+        "coverage_complete": payload.get("coverage_complete"),
+        "expected_case_names": payload.get("expected_case_names"),
+        "assessed_case_names": payload.get("assessed_case_names"),
+    }
     by_case: Dict[str, Dict[str, Any]] = {}
     for item in payload.get("results", []):
         if not isinstance(item, dict):
@@ -409,6 +417,7 @@ def _load_diffusion_vlm_assessments(artifacts_dir: Path) -> Dict[str, Dict[str, 
         enriched = dict(item)
         enriched.setdefault("model_id", model_id)
         enriched.setdefault("_assessment_path", str(assessment_path))
+        enriched["_assessment_provenance"] = provenance
         by_case[case_name] = enriched
     return by_case
 

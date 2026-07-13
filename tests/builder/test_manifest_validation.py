@@ -182,6 +182,56 @@ class TestManifestValidation:
         }
         _validate_manifest(data, "test.json")  # Should not raise
 
+    def test_multi_gpu_case_must_use_the_multi_device_tier(self):
+        data = {
+            "name": "tp4-test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+            "build_args": {"parallel": {"mode": "tensor_parallel", "tp_size": 4}},
+            "distributed_runtime": {"enabled": True, "world_size": 4},
+            "ci_tier": "nightly_only",
+        }
+
+        with pytest.raises(ValueError, match="4-GPU testcase.*multi_device"):
+            _validate_manifest(data, "test.json")
+
+        data["ci_tier"] = "multi_device"
+        _validate_manifest(data, "test.json")
+
+    @pytest.mark.parametrize(
+        ("field", "value", "message"),
+        [
+            ("build_args", [], "build_args must be an object"),
+            (
+                "build_args",
+                {"parallel": []},
+                "build_args.parallel must be an object",
+            ),
+            (
+                "distributed_runtime",
+                [],
+                "distributed_runtime must be an object",
+            ),
+            (
+                "preflight_requirements",
+                [{"kind": "gpu_count_min", "args": []}],
+                "preflight gpu_count_min args must be an object",
+            ),
+        ],
+    )
+    def test_device_settings_must_be_objects(self, field, value, message):
+        data = {
+            "name": "device-validation-test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+            field: value,
+        }
+
+        with pytest.raises(TypeError, match=message):
+            _validate_manifest(data, "test.json")
+
     def test_model_owned_layout_is_discovered(self, tmp_path):
         """Nested tests/e2e/models/<family>/manifests layout is supported."""
         models_dir = tmp_path / "models"

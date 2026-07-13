@@ -529,16 +529,12 @@ def test_inner_selection_records_the_leased_gpu_evidence(tmp_path: Path) -> None
         (
             "flux",
             {
-                "flux-2-dev-fp8-l0",
                 "flux-2-dev-fp8",
-                "flux-2-dev-l0",
                 "flux-2-dev",
-                "flux-schnell-l0-batch2",
-                "flux-schnell-l0",
                 "flux-schnell",
             },
         ),
-        ("personaplex", {"personaplex-7b-l0", "personaplex-7b"}),
+        ("personaplex", {"personaplex-7b"}),
         (
             "canary",
             {
@@ -554,7 +550,7 @@ def test_inner_selection_records_the_leased_gpu_evidence(tmp_path: Path) -> None
         ),
     ),
 )
-def test_nightly_selects_the_full_nested_single_gpu_suite(
+def test_nightly_selects_production_single_gpu_cases_without_redundant_l0(
     tmp_path: Path,
     family: str,
     expected_cases: set[str],
@@ -564,6 +560,37 @@ def test_nightly_selects_the_full_nested_single_gpu_suite(
     assert selection["suite"] == "nightly"
     assert {case["name"] for case in selection["e2e_cases"]} == expected_cases
     assert any(case["ci_tier"] == "nightly_only" for case in selection["e2e_cases"])
+    assert all(case["ci_tier"] != "l0_only" for case in selection["e2e_cases"])
+    assert all(case["ci_tier"] != "multi_device" for case in selection["e2e_cases"])
+
+
+@pytest.mark.parametrize("family", ("locateanything", "ltx_video"))
+def test_nightly_retains_l0_as_an_owners_only_single_gpu_fallback(
+    tmp_path: Path, family: str
+) -> None:
+    selection = _run_test_selection(tmp_path, family, "nightly")
+
+    assert selection["e2e_cases"]
+    assert all(case["ci_tier"] == "l0_only" for case in selection["e2e_cases"])
+
+
+@pytest.mark.parametrize(
+    ("family", "multi_gpu_case"),
+    (
+        ("internvl", "internvl3-8b-tp4"),
+        ("qwen_moe", "qwen3-moe-30b-a3b-tp4"),
+    ),
+)
+def test_nightly_single_gpu_selection_excludes_tp4_cases(
+    tmp_path: Path,
+    family: str,
+    multi_gpu_case: str,
+) -> None:
+    selection = _run_test_selection(tmp_path, family, "nightly")
+
+    selected = {case["name"] for case in selection["e2e_cases"]}
+    assert multi_gpu_case not in selected
+    assert selected
     assert all(case["ci_tier"] != "multi_device" for case in selection["e2e_cases"])
 
 
@@ -705,9 +732,34 @@ def test_model_proof_job_budget_reserves_singleton_finalization() -> None:
         "- name: Finalize model proof fallback", maxsplit=1
     )[0]
 
-    assert "timeout-minutes: 300" in job_configuration
-    assert "timeout-minutes: 150" in proof
+    assert (
+        "timeout-minutes: ${{ inputs.suite == 'nightly' && 480 || 300 }}"
+        in job_configuration
+    )
+    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 360 || 150 }}" in proof
+    assert "inputs.suite == 'nightly' && '5400' || '3600'" in job_configuration
+    assert "inputs.suite == 'nightly' && '600' || '360'" in job_configuration
     assert "inputs.expected_count" not in workflow
+
+    nightly_job_minutes = 480
+    image_minutes = 90
+    nightly_proof_minutes = 360
+    finalization_margin_minutes = 30
+    lease_minutes = 5400 // 60
+    sana_build_minutes = json.loads(
+        (
+            REPO_ROOT
+            / "tests/e2e/models/sana_wm/manifests/sana-wm-bidirectional.json"
+        ).read_text(encoding="utf-8")
+    )["build_timeout_s"] // 60
+    e2e_and_report_margin_minutes = 150
+    assert nightly_proof_minutes >= (
+        lease_minutes + sana_build_minutes + e2e_and_report_margin_minutes
+    )
+    assert nightly_job_minutes >= (
+        image_minutes + nightly_proof_minutes + finalization_margin_minutes
+    )
+    assert nightly_proof_minutes <= 360
 
 
 def test_model_proof_uses_a_dedicated_self_hosted_checkout() -> None:
@@ -1690,6 +1742,47 @@ def test_explicit_runner_gpu_id_cannot_bypass_a_busy_slot(tmp_path: Path) -> Non
     assert not _proof_gpu_ids_if_present(docker_log)
 
 
+def test_model_proof_cannot_bypass_an_exclusive_whole_machine_lock(
+    tmp_path: Path,
+) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "TRTMC_GPU_ID": "0",
+            "TRTMC_MODEL_PROOF_GPU_IDS": "0",
+            "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "1",
+        }
+    )
+    lock_dir = tmp_path / "gpu-locks"
+    lock_dir.mkdir()
+    with (lock_dir / "whole-machine.lock").open("w", encoding="utf-8") as lock_stream:
+        fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(
+            [
+                "bash",
+                str(RUNNER),
+                "--model",
+                "convbert",
+                "--revision",
+                "HEAD",
+                "--output-dir",
+                str(output),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+
+    assert result.returncode != 0
+    assert "waiting for the whole-machine GPU lock" in result.stderr
+    assert not _proof_gpu_ids_if_present(docker_log)
+
+
 def test_explicit_runner_gpu_must_be_in_the_configured_allowlist(tmp_path: Path) -> None:
     fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
     output = tmp_path / "proof"
@@ -2595,6 +2688,8 @@ def test_gpu_lock_directory_file_protocol_is_frozen(tmp_path: Path) -> None:
         assert (holder_output / "artifacts" / "gpu-lease.json").is_file()
         # A held lease is an exclusively flocked slot file.
         assert _lock_is_busy(lock_dir / "gpu-6-slot-0.lock")
+        # Every model proof shares the machine-wide fence while it owns GPU work.
+        assert _lock_is_busy(lock_dir / "whole-machine.lock")
 
         waiter, waiter_output = _start_proof_case(
             tmp_path, "waiter", "convbert", waiter_release, common_env
@@ -2635,9 +2730,11 @@ def test_gpu_lock_directory_file_protocol_is_frozen(tmp_path: Path) -> None:
             "allocator.lock",
             "gpu-6-reservation.lock",
             "gpu-6-slot-0.lock",
+            "whole-machine.lock",
         ]
-        # The slot lease is released once no proof runs.
+        # Both GPU fencing layers are released once no proof runs.
         assert not _lock_is_busy(lock_dir / "gpu-6-slot-0.lock")
+        assert not _lock_is_busy(lock_dir / "whole-machine.lock")
     finally:
         holder_release.touch()
         _finish_proof_cases([holder, waiter])
@@ -2897,5 +2994,7 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     )
     assert (
         "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: "
-        "${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || '3600' }}" in workflow
+        "${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || "
+        "(inputs.suite == 'nightly' && '5400' || '3600') }}"
+        in workflow
     )

@@ -77,6 +77,7 @@ def _write_part(
     suffix: str = "",
     attempt: int = 1,
     strategy: str = "text_generation_causal",
+    suite: str = "premerge",
 ) -> Path:
     artifact = parts / f"model-proof-{owner}-{REVISION}-{attempt}"
     root = artifact / f"artifacts{suffix}"
@@ -127,7 +128,7 @@ def _write_part(
         "report_kind": "model_proof",
         "model": owner,
         "source_revision": REVISION,
-        "suite": "premerge",
+        "suite": suite,
         "outcome": "passed",
         "exit_code": 0,
         "validation_exit_code": 0,
@@ -141,7 +142,7 @@ def _write_part(
         "passed": True,
         "model": owner,
         "source_revision": REVISION,
-        "suite": "premerge",
+        "suite": suite,
         "runtime_model": owner.replace("-", "_"),
         "runtime_library": f"libtrtmc_model_{owner.replace('-', '_')}.so",
         "runtime_library_sha256": "b" * 64,
@@ -160,7 +161,7 @@ def _write_part(
     selection = {
         "schema_version": 1,
         "requested_model": owner,
-        "suite": "premerge",
+        "suite": suite,
         "gpu_id": "1",
         "runtime_library": proof["runtime_library"],
         "e2e_test": f"tests/e2e/models/{owner}/test_{owner}_e2e.py",
@@ -193,11 +194,37 @@ def _write_part(
     return root
 
 
+def _write_vlm_assessment(root: Path, cases: list[str], *, revision: str = REVISION) -> None:
+    (root / "diffusion_vlm_assessment.json").write_text(
+        json.dumps(
+            {
+                "model_id": "vlm-judge",
+                "source_revision": revision,
+                "workflow_run_id": "42",
+                "workflow_run_attempt": 2,
+                "coverage_complete": True,
+                "expected_case_names": sorted(cases),
+                "assessed_case_names": sorted(cases),
+                "results": [
+                    {
+                        "case_name": case,
+                        "vlm_judgment": {"vlm_gate": {"failed": False}},
+                    }
+                    for case in cases
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def _run(
     tmp_path: Path,
     expected: Any,
     *,
     upstream_results: list[str] | None = None,
+    suite: str = "premerge",
 ) -> tuple[int, Path, Path]:
     composer = _import_composer()
     output = tmp_path / "combined.html"
@@ -211,7 +238,7 @@ def _run(
         "--revision",
         REVISION,
         "--suite",
-        "premerge",
+        suite,
         "--project-dir",
         str(tmp_path),
         "--output",
@@ -246,6 +273,49 @@ def test_combines_audio_and_visual_proofs_in_old_style_report(tmp_path: Path) ->
     assert status["expected_count"] == 2
     assert status["result_count"] == 2
     assert [item["status"] for item in status["models"]] == ["passed", "passed"]
+
+
+def test_nightly_report_uses_nightly_title(tmp_path: Path) -> None:
+    parts = tmp_path / "parts"
+    _write_part(parts, "alpha", "alpha-case", suite="nightly")
+
+    rc, output, status_path = _run(tmp_path, ["alpha"], suite="nightly")
+
+    assert rc == 0
+    rendered = output.read_text(encoding="utf-8")
+    assert f"Nightly Isolated Model Report: {REVISION[:12]}" in rendered
+    assert "Premerge Isolated Model Report" not in rendered
+    assert json.loads(status_path.read_text(encoding="utf-8"))["suite"] == "nightly"
+
+
+def test_nightly_diffusion_report_requires_current_complete_vlm_provenance(
+    tmp_path: Path,
+) -> None:
+    parts = tmp_path / "parts"
+    root = _write_part(
+        parts,
+        "visual-owner",
+        "visual-case",
+        strategy="diffusion_media_generation",
+        suite="nightly",
+    )
+    _write_vlm_assessment(root, ["visual-case"])
+
+    rc, _, status_path = _run(tmp_path, ["visual-owner"], suite="nightly")
+
+    assert rc == 0
+    assert json.loads(status_path.read_text(encoding="utf-8"))["outcome"] == "passed"
+
+    _write_vlm_assessment(root, ["visual-case"], revision="b" * 40)
+    rc, _, status_path = _run(tmp_path, ["visual-owner"], suite="nightly")
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+
+    assert rc != 0
+    assert status["outcome"] == "failed"
+    assert any(
+        "diffusion assessment source_revision" in issue
+        for issue in status["issues"]
+    )
 
 
 def test_combined_report_rebases_isolated_src_input_media(tmp_path: Path) -> None:

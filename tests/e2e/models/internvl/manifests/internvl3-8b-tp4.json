@@ -33,7 +33,7 @@
       "reference_backend": "golden_snapshot",
       "reference_family": "vl_instruct_qa",
       "user_contract": "vl_answer",
-      "ci_tier": "nightly_only",
+      "ci_tier": "multi_device",
       "task_eval": {
         "vlm_fallback_prompt_template": "<IMG_CONTEXT>\n{prompt}"
       },

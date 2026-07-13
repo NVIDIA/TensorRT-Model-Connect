@@ -238,6 +238,48 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
     ]
 
 
+def test_validate_rejects_multi_gpu_case_outside_multi_device_tier(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["build_args"] = {
+        "parallel": {"mode": "tensor_parallel", "tp_size": 4}
+    }
+    manifest["distributed_runtime"] = {"enabled": True, "world_size": 4}
+    manifest["testcases"] = [{"name": "model_a-tp4", "ci_tier": "nightly_only"}]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    revision = _commit(repo, "add invalid tp4 tier")
+
+    result = _run(repo, "validate", "--revision", revision, check=False)
+
+    assert result.returncode != 0
+    assert "requires 4 GPUs" in result.stderr
+    assert "ci_tier='multi_device'" in result.stderr
+
+
+def test_validate_uses_gpu_count_preflight_for_device_tier(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["testcases"] = [
+        {
+            "name": "model_a-multi-gpu",
+            "ci_tier": "nightly_only",
+            "preflight_requirements": [
+                {"kind": "gpu_count_min", "args": {"count": 2}, "gating": True}
+            ],
+        }
+    ]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    revision = _commit(repo, "add invalid multi-gpu preflight tier")
+
+    result = _run(repo, "validate", "--revision", revision, check=False)
+
+    assert result.returncode != 0
+    assert "requires 2 GPUs" in result.stderr
+    assert "ci_tier='multi_device'" in result.stderr
+
+
 def test_matrix_schedules_unknown_then_longest_known_premerge_models(
     tmp_path: Path,
 ) -> None:
