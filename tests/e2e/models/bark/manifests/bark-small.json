@@ -8,8 +8,12 @@
   "precision": "fp16",
   "e2e_parallel_resource": "exclusive_gpu",
   "build_env": {
-    "TRTMC_BARK_TIMING_CACHE_MODE": "record",
-    "TRTMC_BARK_TIMING_CACHE_PATH": "/artifacts/bark-small-gb300-trt11.2-fp16.cache"
+    "TRTMC_BARK_TIMING_CACHE_MODE": "verified",
+    "TRTMC_BARK_TIMING_CACHE_PATH": {
+      "path": "data/timing_cache/bark-small-gb300-trt11.2-fp16.cache",
+      "relative_to": "model"
+    },
+    "TRTMC_BARK_TIMING_CACHE_SHA256": "c07a25e04c06374b847092c1d3accacb482c25da96276e13a9e8775e6aba78ca"
   },
   "max_cache_length": 1024,
   "trust_remote_code": false,
