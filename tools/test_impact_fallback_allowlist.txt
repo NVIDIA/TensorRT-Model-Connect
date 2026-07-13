@@ -136,6 +136,7 @@ no_impact tools/nsys_to_layer_timing.py # developer utility script; no CI test i
 no_impact tools/perf_compare.py # developer utility script; no CI test impact is intentional
 no_impact tools/perfdb.py # developer utility script; no CI test impact is intentional
 no_impact tools/prepare_dpg_bench.py # offline dataset conversion utility; task-eval behavior is tested separately
+no_impact tools/prepare_vision_task_eval_datasets.py # offline dataset conversion utility; vision task-eval behavior is tested separately
 no_impact tools/profile_report.py # developer utility script; no CI test impact is intentional
 no_impact tools/sol_estimate.py # developer utility script; no CI test impact is intentional
 no_impact tools/test_graph_ops.py # developer utility script; no CI test impact is intentional
