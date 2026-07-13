@@ -25,6 +25,8 @@ proof_gpu_predecessor_file=""
 proof_gpu_machine_fd=""
 proof_gpu_machine_file=""
 proof_gpu_lease_deadline=""
+proof_gpu_lock_dir=""
+proof_gpu_lock_namespace=""
 declare -a proof_gpu_slot_ids=()
 declare -a proof_gpu_lease_fds=()
 declare -a proof_gpu_lease_files=()
@@ -56,7 +58,12 @@ die() {
 
 cleanup_proof_container() {
   local rc="$1"
-  trap - EXIT INT TERM
+  trap - EXIT
+  # GitHub Actions cancels a shell step with INT, then escalates to TERM after
+  # 7.5 seconds.  Do not let that second signal interrupt docker teardown:
+  # process-owned flock leases disappear as soon as this shell exits, while a
+  # daemon-owned proof container would otherwise keep using its GPU.
+  trap '' INT TERM
   # A queued proof owns no GPU yet, so let the next ticket advance before any
   # potentially slow container teardown or fallback-report work.
   release_gpu_admission_ticket
@@ -104,13 +111,95 @@ release_proof_gpu_lease() {
   fi
 }
 
+reclaim_orphaned_proof_containers() {
+  local gpu_id="$1"
+  shift
+  local -a leased_slots=("$@")
+  [[ "$proof_gpu_lock_namespace" =~ ^[a-f0-9]{64}$ ]] || \
+    die "model-proof GPU lock namespace is unavailable"
+  local rows
+  if ! rows="$(docker ps --no-trunc \
+      --filter 'label=com.nvidia.trtmc.model-proof=1' \
+      --filter "label=com.nvidia.trtmc.model-proof.gpu=$gpu_id" \
+      --filter "label=com.nvidia.trtmc.model-proof.lock-namespace=$proof_gpu_lock_namespace" \
+      --format '{{.ID}} {{.Label "com.nvidia.trtmc.model-proof.slots"}}')"; then
+    die "could not inspect existing model-proof containers on GPU $gpu_id"
+  fi
+
+  local container_id container_slots slot leased_slot overlaps
+  local -a existing_slots=()
+  while read -r container_id container_slots; do
+    [ -n "$container_id" ] || continue
+    [[ "$container_id" =~ ^[a-f0-9]{64}$ ]] || \
+      die "existing model-proof container has an unsafe ID: $container_id"
+    [[ "$container_slots" =~ ^(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*$ ]] || \
+      die "existing model-proof container $container_id has invalid GPU slot labels"
+    overlaps=0
+    IFS=, read -r -a existing_slots <<< "$container_slots"
+    for slot in "${existing_slots[@]}"; do
+      for leased_slot in "${leased_slots[@]}"; do
+        if [ "$slot" = "$leased_slot" ]; then
+          overlaps=1
+          break 2
+        fi
+      done
+    done
+    [ "$overlaps" -eq 1 ] || continue
+
+    # Owning the same slot flock proves that no live host proof still owns this
+    # labeled container. Reclaim only that exact daemon object before reusing
+    # the lease. This prevents overlap after SIGKILL/force-cancel; it is an
+    # allocator-time safety recovery, not a bounded orphan-cleanup mechanism.
+    echo "Removing orphaned model-proof container $container_id from GPU $gpu_id slot(s) $container_slots"
+    if ! docker rm -f "$container_id" >/dev/null 2>&1; then
+      # The orphan can finish and auto-remove between inventory and rm. Accept
+      # only that exact race; daemon/query failures and a still-present full ID
+      # remain hard failures while this host continues to fence the slot.
+      local remaining_ids
+      if ! remaining_ids="$(docker ps -a --no-trunc \
+          --filter "id=$container_id" --format '{{.ID}}')"; then
+        die "could not confirm removal of orphaned model-proof container $container_id"
+      fi
+      local remaining_id
+      while read -r remaining_id; do
+        [ "$remaining_id" != "$container_id" ] || \
+          die "could not remove orphaned model-proof container $container_id"
+      done <<< "$remaining_ids"
+    fi
+  done <<< "$rows"
+}
+
 acquire_proof_gpu_machine_lock() {
   [ -z "$proof_gpu_machine_fd" ] || return 0
   command -v flock >/dev/null || die "flock is required for model-proof GPU leasing"
 
-  local lock_dir="${TRTMC_MODEL_PROOF_GPU_LOCK_DIR:-/tmp/trtmc-model-proof-gpu-locks}"
-  [ -n "$lock_dir" ] || die "TRTMC_MODEL_PROOF_GPU_LOCK_DIR must not be empty"
-  mkdir -p -- "$lock_dir" || die "could not create GPU lease directory: $lock_dir"
+  local configured_lock_dir="${TRTMC_MODEL_PROOF_GPU_LOCK_DIR:-/tmp/trtmc-model-proof-gpu-locks}"
+  [ -n "$configured_lock_dir" ] || die "TRTMC_MODEL_PROOF_GPU_LOCK_DIR must not be empty"
+  mkdir -p -- "$configured_lock_dir" || \
+    die "could not create GPU lease directory: $configured_lock_dir"
+  if ! IFS=$'\t' read -r proof_gpu_lock_dir proof_gpu_lock_namespace < <(
+    python3 - "$configured_lock_dir" <<'PY'
+import hashlib
+import os
+import sys
+from pathlib import Path
+
+directory = Path(sys.argv[1]).resolve(strict=True)
+if not directory.is_dir():
+    raise SystemExit("configured GPU lock path is not a directory")
+metadata = os.stat(directory)
+identity = f"{directory}\0{metadata.st_dev}\0{metadata.st_ino}".encode()
+if any(character in str(directory) for character in "\t\r\n"):
+    raise SystemExit("configured GPU lock path contains unsupported whitespace")
+print(directory, hashlib.sha256(identity).hexdigest(), sep="\t")
+PY
+  ); then
+    die "could not resolve GPU lease directory: $configured_lock_dir"
+  fi
+  [ -n "$proof_gpu_lock_dir" ] && \
+    [[ "$proof_gpu_lock_namespace" =~ ^[a-f0-9]{64}$ ]] || \
+    die "could not identify GPU lease directory: $configured_lock_dir"
+  local lock_dir="$proof_gpu_lock_dir"
 
   local timeout="${TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS:-10800}"
   [[ "$timeout" =~ ^[1-9][0-9]*$ ]] && [ "$timeout" -le 21600 ] || \
@@ -620,9 +709,9 @@ select_proof_gpu() {
     die "TRTMC_MODEL_PROOF_POLL_INTERVAL must be a positive number no greater than 21600 seconds"
   fi
 
-  local lock_dir="${TRTMC_MODEL_PROOF_GPU_LOCK_DIR:-/tmp/trtmc-model-proof-gpu-locks}"
-  [ -n "$lock_dir" ] || die "TRTMC_MODEL_PROOF_GPU_LOCK_DIR must not be empty"
-  mkdir -p -- "$lock_dir" || die "could not create GPU lease directory: $lock_dir"
+  local lock_dir="$proof_gpu_lock_dir"
+  [ -n "$lock_dir" ] && [ -d "$lock_dir" ] || \
+    die "canonical model-proof GPU lock directory is unavailable"
 
   local -a configured_gpu_ids=()
   IFS=, read -r -a configured_gpu_ids <<< "$configured_ids"
@@ -2313,6 +2402,7 @@ trap - EXIT
   local gpu_id="$proof_gpu_id"
   local gpu_slot_ids
   gpu_slot_ids="$(IFS=,; printf '%s' "${proof_gpu_slot_ids[*]}")"
+  reclaim_orphaned_proof_containers "$gpu_id" "${proof_gpu_slot_ids[@]}"
   printf '%s\n' "$gpu_id" > "$artifacts_dir/gpu-id.txt"
   python3 - \
     "$artifacts_dir/gpu-lease.json" "$model" "$revision" "$gpu_id" \
@@ -2352,6 +2442,10 @@ PY
     --ipc private
     --shm-size "${TRTMC_MODEL_PROOF_SHM_SIZE:-16g}"
     --gpus "device=$gpu_id"
+    --label com.nvidia.trtmc.model-proof=1
+    --label "com.nvidia.trtmc.model-proof.gpu=$gpu_id"
+    --label "com.nvidia.trtmc.model-proof.slots=$gpu_slot_ids"
+    --label "com.nvidia.trtmc.model-proof.lock-namespace=$proof_gpu_lock_namespace"
     --user "$(id -u):$(id -g)"
     --mount "type=bind,src=$projection_dir,dst=/src,readonly"
     --mount "type=bind,src=$work_dir,dst=/work"

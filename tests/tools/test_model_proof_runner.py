@@ -41,7 +41,27 @@ def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
         "set -euo pipefail\n"
         'printf \'%s\\n\' "$*" >> "$DOCKER_LOG"\n'
         'case "${1:-}" in\n'
-        "  image|rm) exit 0 ;;\n"
+        "  image) exit 0 ;;\n"
+        "  rm)\n"
+        '    if [ "${3:-}" = "${FAKE_ORPHAN_CONTAINER_ID:-}" ]; then\n'
+        '      exit "${FAKE_ORPHAN_RM_EXIT_CODE:-0}"\n'
+        "    fi\n"
+        "    exit 0\n"
+        "    ;;\n"
+        "  ps)\n"
+        '    if [ "${FAKE_DOCKER_PS_EXIT_CODE:-0}" -ne 0 ]; then\n'
+        '      exit "$FAKE_DOCKER_PS_EXIT_CODE"\n'
+        "    fi\n"
+        '    if [[ " $* " == *" -a "* ]]; then\n'
+        '      record="${FAKE_ORPHAN_CONFIRM_RECORD:-}"\n'
+        "    else\n"
+        '      record="${FAKE_ORPHAN_CONTAINER_RECORD:-}"\n'
+        "    fi\n"
+        '    if [ -n "$record" ]; then\n'
+        '      printf \'%s\\n\' "$record"\n'
+        "    fi\n"
+        "    exit 0\n"
+        "    ;;\n"
         "  run)\n"
         '    if [[ " $* " == *" /src/scripts/warm_hf_cache.py "* ]]; then\n'
         '      mkdir -p "$FAKE_ARTIFACTS"\n'
@@ -128,6 +148,26 @@ def _fake_proof_environment(
         }
     )
     return env
+
+
+def _run_fake_proof(env: dict[str, str], output: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "bash",
+            str(RUNNER),
+            "--model",
+            "convbert",
+            "--revision",
+            "HEAD",
+            "--output-dir",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def _write_fake_pinned_model_reference(
@@ -697,13 +737,154 @@ def test_runner_removes_only_its_container_without_masking_exit_status() -> None
     cleanup = text.split("cleanup_proof_container() {", maxsplit=1)[1].split("\n}\n", maxsplit=1)[0]
 
     assert 'local rc="$1"' in cleanup
+    assert "trap - EXIT" in cleanup
+    assert "trap '' INT TERM" in cleanup
     assert 'docker rm -f "$proof_container_name"' in cleanup
+    assert cleanup.index('docker rm -f "$proof_container_name"') < cleanup.index(
+        "release_proof_gpu_lease"
+    )
     assert 'exit "$rc"' in cleanup
     assert "artifacts" not in cleanup
     assert 'proof_container_name="$container_name"' in text
     assert "trap 'cleanup_proof_container \"$?\"' EXIT" in text
     assert "trap 'cleanup_proof_container 130' INT" in text
     assert "trap 'cleanup_proof_container 143' TERM" in text
+
+
+@pytest.mark.parametrize(("orphan_slots", "removed"), [("0", True), ("1", False)])
+def test_runner_reclaims_only_a_labeled_orphan_overlapping_its_lease(
+    tmp_path: Path,
+    orphan_slots: str,
+    removed: bool,
+) -> None:
+    orphan_id = "d" * 64
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "FAKE_ORPHAN_CONTAINER_ID": orphan_id,
+            "FAKE_ORPHAN_CONTAINER_RECORD": f"{orphan_id} {orphan_slots}",
+            "TRTMC_MODEL_PROOF_GPU_IDS": "7",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "2",
+        }
+    )
+
+    result = _run_fake_proof(env, output)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    docker_lines = docker_log.read_text(encoding="utf-8").splitlines()
+    orphan_remove = f"rm -f {orphan_id}"
+    assert (orphan_remove in docker_lines) is removed
+    proof_run = next(line for line in docker_lines if " --inner " in f" {line} ")
+    assert "--label com.nvidia.trtmc.model-proof=1" in proof_run
+    assert "--label com.nvidia.trtmc.model-proof.gpu=7" in proof_run
+    assert "--label com.nvidia.trtmc.model-proof.slots=0" in proof_run
+    namespace_match = re.search(
+        r"--label com\.nvidia\.trtmc\.model-proof\.lock-namespace=([a-f0-9]{64})",
+        proof_run,
+    )
+    assert namespace_match is not None
+    inspection = next(line for line in docker_lines if line.startswith("ps "))
+    assert inspection.startswith("ps --no-trunc ")
+    assert (
+        f"label=com.nvidia.trtmc.model-proof.lock-namespace={namespace_match.group(1)}"
+        in inspection
+    )
+    if removed:
+        inspection_index = next(
+            index
+            for index, line in enumerate(docker_lines)
+            if line.startswith("ps ") and "model-proof.gpu=7" in line
+        )
+        assert inspection_index < docker_lines.index(orphan_remove) < docker_lines.index(proof_run)
+
+
+@pytest.mark.parametrize(
+    ("record", "ps_exit_code", "expected_error"),
+    [
+        (
+            f"{'d' * 64} invalid",
+            "0",
+            f"existing model-proof container {'d' * 64} has invalid GPU slot labels",
+        ),
+        ("", "75", "could not inspect existing model-proof containers on GPU 7"),
+    ],
+)
+def test_orphan_reclamation_fails_closed_on_untrusted_or_unavailable_inventory(
+    tmp_path: Path,
+    record: str,
+    ps_exit_code: str,
+    expected_error: str,
+) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "FAKE_ORPHAN_CONTAINER_RECORD": record,
+            "FAKE_DOCKER_PS_EXIT_CODE": ps_exit_code,
+            "TRTMC_MODEL_PROOF_GPU_IDS": "7",
+        }
+    )
+
+    result = _run_fake_proof(env, output)
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+    docker_lines = docker_log.read_text(encoding="utf-8").splitlines()
+    assert not any(" --inner " in f" {line} " for line in docker_lines)
+    assert f"rm -f {'d' * 64}" not in docker_lines
+
+
+def test_orphan_reclamation_accepts_only_the_auto_remove_race(tmp_path: Path) -> None:
+    orphan_id = "d" * 64
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "FAKE_ORPHAN_CONTAINER_ID": orphan_id,
+            "FAKE_ORPHAN_CONTAINER_RECORD": f"{orphan_id} 0",
+            "FAKE_ORPHAN_RM_EXIT_CODE": "1",
+            "TRTMC_MODEL_PROOF_GPU_IDS": "7",
+        }
+    )
+
+    result = _run_fake_proof(env, output)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    docker_lines = docker_log.read_text(encoding="utf-8").splitlines()
+    assert f"rm -f {orphan_id}" in docker_lines
+    assert any(
+        line.startswith("ps -a --no-trunc ") and f"--filter id={orphan_id}" in line
+        for line in docker_lines
+    )
+
+
+def test_orphan_reclamation_rejects_a_failed_remove_when_full_id_remains(
+    tmp_path: Path,
+) -> None:
+    orphan_id = "d" * 64
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.update(
+        {
+            "FAKE_ORPHAN_CONTAINER_ID": orphan_id,
+            "FAKE_ORPHAN_CONTAINER_RECORD": f"{orphan_id} 0",
+            "FAKE_ORPHAN_CONFIRM_RECORD": orphan_id,
+            "FAKE_ORPHAN_RM_EXIT_CODE": "1",
+            "TRTMC_MODEL_PROOF_GPU_IDS": "7",
+        }
+    )
+
+    result = _run_fake_proof(env, output)
+
+    assert result.returncode != 0
+    assert f"could not remove orphaned model-proof container {orphan_id}" in result.stderr
+    docker_lines = docker_log.read_text(encoding="utf-8").splitlines()
+    assert not any(" --inner " in f" {line} " for line in docker_lines)
 
 
 def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> None:
