@@ -1301,9 +1301,10 @@ int cmd_solve(const CliArgs& args) {
 
 int cmd_transcribe(const CliArgs& args) {
     const std::vector<std::string> audio_paths =
-        !args.audio_inputs.empty() ? args.audio_inputs
-                                   : (args.audio_in.empty() ? std::vector<std::string>{}
-                                                            : std::vector<std::string>{args.audio_in});
+        !args.audio_inputs.empty()
+            ? args.audio_inputs
+            : (args.audio_in.empty() ? std::vector<std::string>{}
+                                     : std::vector<std::string>{args.audio_in});
     if (args.bundle_path.empty() || audio_paths.empty()) {
         std::cerr << "Error: transcribe requires bundle + --audio\n";
         return EXIT_FAILURE;
@@ -1319,8 +1320,8 @@ int cmd_transcribe(const CliArgs& args) {
             return EXIT_FAILURE;
         }
         const bool has_offline_only_controls =
-            args.beam_size != 1 || args.transcription_task != "transcribe" ||
-            !args.punctuation || args.timestamps || args.max_input_seconds > 0.0F ||
+            args.beam_size != 1 || args.transcription_task != "transcribe" || !args.punctuation ||
+            args.timestamps || args.max_input_seconds > 0.0F ||
             args.segment_length_seconds > 0.0F ||
             (args.language.empty() &&
              (args.source_language != "en" || args.target_language != "en"));
