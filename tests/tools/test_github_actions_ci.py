@@ -751,6 +751,25 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
         assert f"- {dependency}" in required
 
 
+def test_nightly_source_quality_does_not_use_self_hosted_shared_storage() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    source_quality = text.split("\n  source-quality:", maxsplit=1)[1].split(
+        "\n  unit-tests:", maxsplit=1
+    )[0]
+
+    assert "runs-on: ubuntu-latest" in source_quality
+    for variable in (
+        "ENGINE_DIR",
+        "TRTMC_STORAGE_ROOT",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "HF_MODULES_CACHE",
+    ):
+        assert f'{variable}: ""' in source_quality
+    assert "/workspace/" not in source_quality
+
+
 def test_nightly_strictly_warms_all_active_non_multi_device_cases() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     cache = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]

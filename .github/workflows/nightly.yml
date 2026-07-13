@@ -115,6 +115,16 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    # This job runs directly on a GitHub-hosted runner. Do not inherit the
+    # self-hosted runner's absolute cache paths: run-trtmc-ci initializes any
+    # configured shared directories before dispatching the requested stage.
+    env:
+      ENGINE_DIR: ""
+      TRTMC_STORAGE_ROOT: ""
+      HF_HOME: ""
+      HF_HUB_CACHE: ""
+      HUGGINGFACE_HUB_CACHE: ""
+      HF_MODULES_CACHE: ""
 
     steps:
       - name: Check out certified nightly snapshot
