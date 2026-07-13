@@ -661,7 +661,7 @@ try_acquire_shared_gpu_slot() {
   return 1
 }
 
-try_reserve_exclusive_gpu() {
+try_acquire_exclusive_gpu() {
   local lock_dir="$1"
   local slots_per_gpu="$2"
   local deadline="$3"
@@ -671,8 +671,10 @@ try_reserve_exclusive_gpu() {
 
   acquire_gpu_allocator_mutex "$lock_dir" "$deadline" || return 1
 
-  # Prefer a GPU that is already idle so an exclusive proof can start without
-  # draining shared work. The allocator mutex makes the all-slot attempt atomic.
+  # The oldest admission ticket prevents younger work from refilling capacity,
+  # so it is enough to atomically scan for the first GPU whose slots have all
+  # drained. Do not pin the waiter to an arbitrary busy GPU: another device may
+  # become idle much sooner.
   for gpu_id in "${candidate_gpu_ids[@]}"; do
     reservation_file="$lock_dir/gpu-$gpu_id-reservation.lock"
     exec {reservation_fd}>"$reservation_file" || \
@@ -691,51 +693,8 @@ try_reserve_exclusive_gpu() {
     close_dynamic_fd "$reservation_fd"
   done
 
-  # No GPU is idle. Reserve one GPU now; existing shared holders may finish,
-  # but new shared proofs cannot enter it while the exclusive proof waits.
-  for gpu_id in "${candidate_gpu_ids[@]}"; do
-    reservation_file="$lock_dir/gpu-$gpu_id-reservation.lock"
-    exec {reservation_fd}>"$reservation_file" || \
-      die "could not open GPU reservation lock: $reservation_file"
-    if flock -n "$reservation_fd"; then
-      proof_gpu_id="$gpu_id"
-      proof_gpu_reservation_fd="$reservation_fd"
-      proof_gpu_reservation_file="$reservation_file"
-      release_gpu_allocator_mutex
-      return 2
-    fi
-    close_dynamic_fd "$reservation_fd"
-  done
-
   release_gpu_allocator_mutex
   return 1
-}
-
-# Incrementally lock every slot of the reserved GPU, keeping each slot as it
-# is acquired. The held reservation fences new proofs out, existing holders
-# only ever release, and slots are taken in fixed 0..n-1 order, so this
-# blocking acquisition cannot deadlock. The allocator mutex must NOT be held
-# here: this function waits. Partially acquired slots are released by the
-# regular cleanup path on failure. Returns 0 leased and 1 on deadline.
-drain_reserved_gpu_slots() {
-  local lock_dir="$1"
-  local slots_per_gpu="$2"
-  local deadline="$3"
-  [ -n "$proof_gpu_reservation_fd" ] || \
-    die "cannot drain GPU slots without holding a reservation"
-  local slot slot_fd slot_file
-  for ((slot = 0; slot < slots_per_gpu; slot++)); do
-    slot_file="$lock_dir/gpu-$proof_gpu_id-slot-$slot.lock"
-    exec {slot_fd}>"$slot_file" || die "could not open GPU slot lock: $slot_file"
-    if ! blocking_flock "$slot_fd" "$deadline"; then
-      close_dynamic_fd "$slot_fd"
-      return 1
-    fi
-    proof_gpu_lease_fds+=("$slot_fd")
-    proof_gpu_lease_files+=("$slot_file")
-    proof_gpu_slot_ids+=("$slot")
-  done
-  return 0
 }
 
 select_proof_gpu() {
@@ -757,7 +716,7 @@ select_proof_gpu() {
   local timeout="${TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS:-10800}"
   [[ "$timeout" =~ ^[1-9][0-9]*$ ]] && [ "$timeout" -le 21600 ] || \
     die "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS must be an integer from 1 to 21600"
-  # Only the queue head ever polls for shared capacity (everyone behind it
+  # Only the queue head ever polls for GPU capacity (everyone behind it
   # blocks on a predecessor ticket), so this interval bounds the wake latency
   # of exactly one process system-wide.
   local poll_interval="${TRTMC_MODEL_PROOF_POLL_INTERVAL:-0.25}"
@@ -813,7 +772,7 @@ select_proof_gpu() {
   if [[ "${proof_gpu_lease_deadline:-}" =~ ^[1-9][0-9]*$ ]]; then
     deadline="$proof_gpu_lease_deadline"
   fi
-  local attempted=0 reserve_rc=0 poll_remaining=0
+  local attempted=0 poll_remaining=0
   local admission_scope="global"
   # Register once in a crash-safe monotonic queue. Every later wait keeps
   # this position, so younger matrix jobs can never overtake an older waiter
@@ -843,25 +802,15 @@ select_proof_gpu() {
         return 0
       fi
     else
-      set +e
-      try_reserve_exclusive_gpu \
-        "$lock_dir" "$slots_per_gpu" "$deadline" "${candidate_gpu_ids[@]}"
-      reserve_rc=$?
-      set -e
-      if [ "$reserve_rc" -eq 0 ]; then
+      if try_acquire_exclusive_gpu \
+          "$lock_dir" "$slots_per_gpu" "$deadline" \
+          "${candidate_gpu_ids[@]}"; then
         release_gpu_admission_ticket
-        echo "Leased exclusive model-proof GPU $proof_gpu_id slots ${proof_gpu_slot_ids[*]}"
-        return 0
-      elif [ "$reserve_rc" -eq 2 ]; then
-        # The GPU is reserved: new proofs are fenced out and the remaining
-        # holders only exit. Give up the queue position so the line advances,
-        # then drain the reserved GPU slot by slot, event-driven.
-        release_gpu_admission_ticket
-        drain_reserved_gpu_slots "$lock_dir" "$slots_per_gpu" "$deadline" || \
-          die "timed out after ${timeout}s waiting for a ${resource_class} model-proof GPU lease from: ${candidate_gpu_ids[*]}"
         echo "Leased exclusive model-proof GPU $proof_gpu_id slots ${proof_gpu_slot_ids[*]}"
         return 0
       fi
+      # Intentionally retain the oldest FIFO ticket while existing work
+      # drains, so younger shared proofs cannot steal the first idle slots.
     fi
     # Clamp the poll sleep to the remaining lease budget so a large
     # configured interval can never sleep past the deadline and report a

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import fcntl
 import json
 import os
@@ -2585,7 +2586,7 @@ def test_gpu_allocator_mutex_contention_obeys_lease_timeout(
 
 
 @pytest.mark.model_proof_allocator
-def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
+def test_exclusive_gpu_ticket_drains_existing_shared_and_blocks_new_shared(
     tmp_path: Path,
 ) -> None:
     lock_dir = tmp_path / "gpu-locks"
@@ -2669,9 +2670,15 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
 
         reservation = lock_dir / "gpu-6-reservation.lock"
         deadline = time.monotonic() + 90
-        while time.monotonic() < deadline and not _lock_is_busy(reservation):
+        while time.monotonic() < deadline and not list(
+            lock_dir.glob("admission-global-*.lock")
+        ):
             time.sleep(0.05)
-        assert _lock_is_busy(reservation), "exclusive proof never reserved GPU 6"
+        tickets = list(lock_dir.glob("admission-global-*.lock"))
+        assert len(tickets) == 1
+        assert "model=flux" in tickets[0].read_text(encoding="utf-8")
+        assert _lock_is_busy(tickets[0])
+        assert not _lock_is_busy(reservation)
 
         blocked_dir = tmp_path / "blocked-shared"
         blocked_dir.mkdir()
@@ -2728,6 +2735,156 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
         if exclusive is not None and exclusive.poll() is None:
             exclusive.terminate()
             exclusive.communicate(timeout=10)
+
+
+@pytest.mark.model_proof_allocator
+def test_oldest_exclusive_waiter_takes_the_first_idle_gpu(
+    tmp_path: Path,
+) -> None:
+    lock_dir = tmp_path / "gpu-locks"
+    coordination_timeout_s = 90
+    processes: list[subprocess.Popen[str]] = []
+    release_files: list[Path] = []
+
+    def start_case(
+        name: str,
+        model: str,
+        release_file: Path,
+        *,
+        explicit_gpu: str | None = None,
+    ) -> tuple[subprocess.Popen[str], Path, Path]:
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        fake_bin, docker_log = _write_successful_fake_docker(case_dir)
+        output = case_dir / "proof"
+        env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+        env.update(
+            {
+                "TRTMC_MODEL_PROOF_GPU_IDS": "6,7",
+                "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+                "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "600",
+                "FAKE_PROOF_RELEASE_FILE": str(release_file),
+            }
+        )
+        if explicit_gpu is not None:
+            env["TRTMC_GPU_ID"] = explicit_gpu
+        process = subprocess.Popen(
+            [
+                "bash",
+                str(RUNNER),
+                "--model",
+                model,
+                "--revision",
+                "HEAD",
+                "--output-dir",
+                str(output),
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        processes.append(process)
+        release_files.append(release_file)
+        return process, docker_log, output
+
+    def wait_for(predicate: Callable[[], bool], message: str) -> None:
+        deadline = time.monotonic() + coordination_timeout_s
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.05)
+        raise AssertionError(message)
+
+    gpu6_release = tmp_path / "release-gpu6-holder"
+    gpu7_release = tmp_path / "release-gpu7-holder"
+    exclusive_release = tmp_path / "release-exclusive"
+    younger_release = tmp_path / "release-younger-shared"
+    try:
+        gpu6_holder, _, gpu6_output = start_case(
+            "gpu6-holder", "convbert", gpu6_release, explicit_gpu="6"
+        )
+        wait_for(
+            lambda: (gpu6_output / "artifacts" / "gpu-lease.json").is_file(),
+            "GPU 6 holder never acquired its lease",
+        )
+        gpu7_holder, _, gpu7_output = start_case(
+            "gpu7-holder", "m2m_100", gpu7_release, explicit_gpu="7"
+        )
+        wait_for(
+            lambda: (gpu7_output / "artifacts" / "gpu-lease.json").is_file(),
+            "GPU 7 holder never acquired its lease",
+        )
+
+        exclusive, exclusive_log, exclusive_output = start_case(
+            "oldest-exclusive", "flux", exclusive_release
+        )
+        gpu6_reservation = lock_dir / "gpu-6-reservation.lock"
+        wait_for(
+            lambda: len(list(lock_dir.glob("admission-global-*.lock"))) == 1,
+            "exclusive proof did not retain its admission ticket while draining",
+        )
+        exclusive_ticket = list(lock_dir.glob("admission-global-*.lock"))[0]
+        assert "model=flux" in exclusive_ticket.read_text(encoding="utf-8")
+        assert not (exclusive_output / "artifacts" / "gpu-lease.json").exists()
+        assert not _lock_is_busy(gpu6_reservation)
+
+        younger, younger_log, younger_output = start_case(
+            "younger-shared", "convbert", younger_release, explicit_gpu="7"
+        )
+        wait_for(
+            lambda: len(list(lock_dir.glob("admission-global-*.lock"))) == 2,
+            "younger proof never entered the admission queue",
+        )
+        assert not (younger_output / "artifacts" / "gpu-lease.json").exists()
+
+        # GPU 6 remains occupied, but GPU 7 becomes idle. The oldest exclusive
+        # request must claim all four slots on GPU 7 before the younger shared
+        # request can steal any of that newly available capacity.
+        gpu7_release.touch()
+        gpu7_stdout, gpu7_stderr = gpu7_holder.communicate(timeout=30)
+        assert gpu7_holder.returncode == 0, gpu7_stdout + gpu7_stderr
+        wait_for(
+            lambda: (exclusive_output / "artifacts" / "gpu-lease.json").is_file(),
+            "exclusive proof did not claim GPU 7 after it became idle",
+        )
+        exclusive_lease = _gpu_lease(exclusive_output)
+        assert exclusive_lease["gpu_id"] == "7"
+        assert exclusive_lease["gpu_slots"] == [0, 1, 2, 3]
+        assert exclusive_lease["slots_per_gpu"] == 4
+        assert not (younger_output / "artifacts" / "gpu-lease.json").exists()
+        assert not _lock_is_busy(gpu6_reservation)
+        assert _lock_is_busy(lock_dir / "gpu-7-reservation.lock")
+
+        exclusive_release.touch()
+        exclusive_stdout, exclusive_stderr = exclusive.communicate(timeout=30)
+        assert exclusive.returncode == 0, exclusive_stdout + exclusive_stderr
+        assert _proof_gpu_ids(exclusive_log) == ["7"]
+        wait_for(
+            lambda: (younger_output / "artifacts" / "gpu-lease.json").is_file(),
+            "younger shared proof did not run after the exclusive proof",
+        )
+        assert _gpu_lease(younger_output)["gpu_id"] == "7"
+        younger_release.touch()
+        younger_stdout, younger_stderr = younger.communicate(timeout=30)
+        assert younger.returncode == 0, younger_stdout + younger_stderr
+        assert _proof_gpu_ids(younger_log) == ["7"]
+
+        gpu6_release.touch()
+        gpu6_stdout, gpu6_stderr = gpu6_holder.communicate(timeout=30)
+        assert gpu6_holder.returncode == 0, gpu6_stdout + gpu6_stderr
+        assert not list(lock_dir.glob("admission-global-*.lock"))
+    finally:
+        for release_file in release_files:
+            release_file.touch(exist_ok=True)
+        for process in processes:
+            if process.poll() is None:
+                try:
+                    process.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    process.communicate(timeout=10)
 
 
 @pytest.mark.model_proof_allocator
@@ -3100,7 +3257,7 @@ def test_killed_queue_predecessor_wakes_waiter_and_is_pruned(tmp_path: Path) -> 
 
 
 @pytest.mark.model_proof_allocator
-def test_exclusive_drain_completes_as_holders_release_in_any_order(
+def test_exclusive_ticket_waits_for_all_holders_in_any_order(
     tmp_path: Path,
 ) -> None:
     lock_dir = tmp_path / "gpu-locks"
@@ -3135,28 +3292,33 @@ def test_exclusive_drain_completes_as_holders_release_in_any_order(
         exclusive, exclusive_output = _start_proof_case(
             tmp_path, "exclusive", "bark", exclusive_release, common_env
         )
-        # The exclusive proof reserves the GPU, gives its queue position back,
-        # and then drains the remaining holders event-driven.
+        # The exclusive proof keeps the oldest queue position without pinning
+        # itself to a partially occupied GPU.
         deadline = time.monotonic() + coordination_timeout_s
-        while time.monotonic() < deadline and not (
-            _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
-            and not list(lock_dir.glob("admission-global-*.lock"))
+        while time.monotonic() < deadline and not list(
+            lock_dir.glob("admission-global-*.lock")
         ):
             time.sleep(0.05)
-        assert _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
-        assert not list(lock_dir.glob("admission-global-*.lock"))
+        tickets = list(lock_dir.glob("admission-global-*.lock"))
+        assert len(tickets) == 1
+        assert "model=bark" in tickets[0].read_text(encoding="utf-8")
+        assert _lock_is_busy(tickets[0])
+        assert not _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
+        assert not (exclusive_output / "artifacts" / "gpu-lease.json").exists()
 
-        # Release the holders in a non-sequential order and wait for each one
-        # to actually exit (its slot flock is then provably dropped) before
-        # releasing the next, so the out-of-order arrival at the drain is
-        # deterministic rather than scheduler-dependent: slot 1 frees while
-        # slot 0 is still held, forcing the drain to sit blocked on slot 0.
+        # Release holders out of order. The exclusive proof must not publish a
+        # partial lease; it can proceed only after every slot is simultaneously
+        # available for one atomic acquisition.
         for index in (1, 0, 2):
             releases[index].touch()
             holder = holders[index]
             assert holder is not None
             holder_stdout, holder_stderr = holder.communicate(timeout=coordination_timeout_s)
             assert holder.returncode == 0, f"shared-{index}: " + holder_stdout + holder_stderr
+            if index != 2:
+                assert not (exclusive_output / "artifacts" / "gpu-lease.json").exists()
+                assert _lock_is_busy(tickets[0])
+                assert not _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
 
         exclusive_stdout, exclusive_stderr = exclusive.communicate(timeout=coordination_timeout_s)
         assert exclusive.returncode == 0, exclusive_stdout + exclusive_stderr
