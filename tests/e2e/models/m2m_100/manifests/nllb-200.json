@@ -5,6 +5,7 @@
   "family": "m2m_100",
   "runtime_strategy": "m2m_100_seq2seq_encoder_decoder",
   "task_strategy": "text_generation_causal",
+  "e2e_parallel_resource": "exclusive_gpu",
   "precision": "fp16",
   "max_cache_length": 256,
   "testcases": [

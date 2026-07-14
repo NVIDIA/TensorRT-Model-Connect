@@ -530,6 +530,7 @@ def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
         ("convbert", "shared"),
         ("flux", "exclusive_gpu"),
         ("gpt2", "exclusive_gpu"),
+        ("m2m_100", "exclusive_gpu"),
         ("mixtral", "exclusive_gpu"),
         ("timesfm", "exclusive_gpu"),
     ),
@@ -2875,7 +2876,7 @@ def test_oldest_exclusive_waiter_takes_the_first_idle_gpu(
             "GPU 6 holder never acquired its lease",
         )
         gpu7_holder, _, gpu7_output = start_case(
-            "gpu7-holder", "m2m_100", gpu7_release, explicit_gpu="7"
+            "gpu7-holder", "albert", gpu7_release, explicit_gpu="7"
         )
         wait_for(
             lambda: (gpu7_output / "artifacts" / "gpu-lease.json").is_file(),
@@ -3015,13 +3016,13 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
             time.sleep(0.05)
         assert (first_output / "artifacts" / "gpu-lease.json").is_file()
 
-        oldest, _, oldest_output = start_case("oldest-shared", "m2m_100", oldest_release)
+        oldest, _, oldest_output = start_case("oldest-shared", "albert", oldest_release)
         deadline = time.monotonic() + coordination_timeout_s
         while time.monotonic() < deadline and not list(lock_dir.glob("admission-global-*.lock")):
             time.sleep(0.05)
         admission_tickets = sorted(lock_dir.glob("admission-global-*.lock"))
         assert len(admission_tickets) == 1
-        assert "model=m2m_100" in admission_tickets[0].read_text(encoding="utf-8")
+        assert "model=albert" in admission_tickets[0].read_text(encoding="utf-8")
         assert _lock_is_busy(admission_tickets[0])
 
         younger_exclusive, _, younger_exclusive_output = start_case(
@@ -3040,7 +3041,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         assert [
             ticket.read_text(encoding="utf-8").split("model=", maxsplit=1)[1].split()[0]
             for ticket in admission_tickets
-        ] == ["m2m_100", "bark"]
+        ] == ["albert", "bark"]
         younger_shared, _, younger_shared_output = start_case(
             "younger-shared", "convbert", younger_shared_release
         )
@@ -3057,7 +3058,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         assert [
             ticket.read_text(encoding="utf-8").split("model=", maxsplit=1)[1].split()[0]
             for ticket in admission_tickets
-        ] == ["m2m_100", "bark", "convbert"]
+        ] == ["albert", "bark", "convbert"]
 
         first_release.touch()
         deadline = time.monotonic() + coordination_timeout_s
@@ -3272,7 +3273,7 @@ def test_killed_queue_predecessor_wakes_waiter_and_is_pruned(tmp_path: Path) -> 
     waiter_release = tmp_path / "release-waiter"
     waiter_release.touch()
     holder, holder_output = _start_proof_case(
-        tmp_path, "holder", "m2m_100", holder_release, common_env
+        tmp_path, "holder", "albert", holder_release, common_env
     )
     doomed: subprocess.Popen[str] | None = None
     waiter: subprocess.Popen[str] | None = None
@@ -3342,7 +3343,7 @@ def test_exclusive_drain_completes_as_holders_release_in_any_order(
     try:
         for index in range(3):
             process, output = _start_proof_case(
-                tmp_path, f"shared-{index}", "m2m_100", releases[index], common_env
+                tmp_path, f"shared-{index}", "albert", releases[index], common_env
             )
             holders[index] = process
             holder_outputs.append(output)
@@ -3403,7 +3404,7 @@ def test_long_queue_is_served_in_strict_fifo_order(tmp_path: Path) -> None:
     waiter_release = tmp_path / "release-waiter"
     waiter_release.touch()
     holder, holder_output = _start_proof_case(
-        tmp_path, "holder", "m2m_100", holder_release, common_env
+        tmp_path, "holder", "albert", holder_release, common_env
     )
     waiters: list[subprocess.Popen[str] | None] = [None] * waiter_count
     waiter_outputs: list[Path] = []
