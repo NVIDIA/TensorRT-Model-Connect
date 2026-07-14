@@ -163,6 +163,258 @@ suites:
         Intended for local/p2021 validation before a sampled CI variant is
         enabled.
 
+  - id: humaneval_code_continuation_parity
+    description: >
+      Greedy code-completion parity on the official HumanEval prompts used by
+      both CodeGen and StarCoder2 evaluations. Functional pass@1 is intentionally
+      not executed by this runner; the gate requires every sampled HF and TRTFB
+      completion to agree token-for-token.
+    user_contract: code_completion
+    default_model_names:
+      - codegen-350m
+      - starcoder2-3b
+    dataset:
+      kind: text_generation_json
+      name: OpenAI HumanEval
+      default_path: /mnt/data/HumanEval/humaneval_task_eval.json
+      prompt_source: prompt
+      answer_field: answer
+      subject_field: subject
+      sample_prefix: humaneval
+    selectors:
+      model_names:
+        - codegen-350m
+        - starcoder2-3b
+      task_strategies:
+        - text_generation_causal
+      user_contracts:
+        - code_completion
+    generation:
+      max_new_tokens: 64
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+    model_overrides:
+      by_model:
+        codegen-350m:
+          build_generation_headroom: true
+        starcoder2-3b:
+          build_generation_headroom: true
+    gates:
+      min_exact_match_rate: 1.0
+      min_token_prefix_agreement: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Run with --limit 10 on GB300. Generated code is not executed by
+        task-eval; HumanEval pass@1 remains a separate diagnostic.
+
+  - id: wikitext103_distilgpt2_continuation_parity
+    description: >
+      Greedy language-model continuation parity for DistilGPT2 on WikiText-103,
+      the benchmark reported by its model card. Full-corpus perplexity is outside
+      this smoke runner; the gate requires every sampled continuation to agree.
+    user_contract: continuation_parity
+    default_model_names:
+      - distilgpt2
+    dataset:
+      kind: text_generation_json
+      name: WikiText-103 test
+      default_path: /mnt/data/WikiText103/wikitext103_task_eval.json
+      prompt_source: prompt
+      answer_field: answer
+      subject_field: subject
+      sample_prefix: wikitext103
+    selectors:
+      model_names:
+        - distilgpt2
+      task_strategies:
+        - text_generation_causal
+      user_contracts:
+        - model_card_generation_parity
+    generation:
+      max_new_tokens: 64
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+    model_overrides:
+      by_model:
+        distilgpt2:
+          build_generation_headroom: true
+    gates:
+      min_exact_match_rate: 1.0
+      min_token_prefix_agreement: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Run with --limit 10 on GB300; full-corpus perplexity is not meaningful
+        on the smoke slice.
+
+  - id: newstest2019_en_ru_marian_translation_parity
+    description: >
+      English-to-Russian translation parity for Marian on WMT newstest2019,
+      one of the checkpoint model card's reported benchmarks. SacreBLEU is
+      reported separately while exact sampled HF/TRTFB agreement is gated.
+    user_contract: translation
+    default_model_names:
+      - marian-en-ru
+    dataset:
+      kind: text_generation_json
+      name: WMT newstest2019 English-Russian
+      default_path: /mnt/data/WMT19_en_ru/newstest2019_en_ru_task_eval.json
+      prompt_source: prompt
+      answer_field: answer
+      subject_field: subject
+      sample_prefix: newstest2019_en_ru
+    selectors:
+      model_names:
+        - marian-en-ru
+      task_strategies:
+        - text_generation_causal
+      runtime_strategies:
+        - marian_translation
+      user_contracts:
+        - translation
+    generation:
+      max_new_tokens: 128
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+      task_metric: sacrebleu
+    gates:
+      min_exact_match_rate: 1.0
+      min_token_prefix_agreement: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Run with --limit 10 on GB300. BLEU on ten samples is diagnostic only.
+
+  - id: wmt14_en_de_t5_translation_parity
+    description: >
+      English-to-German translation parity for T5-small on the WMT task used by
+      the T5 paper. Inputs retain the checkpoint's required task prefix;
+      SacreBLEU is diagnostic and exact sampled backend agreement is gated.
+    user_contract: seq2seq_output
+    default_model_names:
+      - t5-small
+    dataset:
+      kind: text_generation_json
+      name: WMT14 English-German
+      default_path: /mnt/data/WMT14_de_en/wmt14_en_de_t5_task_eval.json
+      prompt_source: prompt
+      answer_field: answer
+      subject_field: subject
+      sample_prefix: wmt14_en_de
+    selectors:
+      model_names:
+        - t5-small
+      task_strategies:
+        - text_generation_causal
+      runtime_strategies:
+        - t5_text_to_text
+      user_contracts:
+        - seq2seq_output
+    generation:
+      max_new_tokens: 128
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+      task_metric: sacrebleu
+    gates:
+      min_exact_match_rate: 1.0
+      min_token_prefix_agreement: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Dataset prompts must be prefixed with "translate English to German:".
+        Derive them by reversing the existing WMT14 de-en parallel JSONL under
+        /mnt/data/WMT14_de_en. Run with --limit 10 on GB300; BLEU is diagnostic
+        on the smoke slice.
+
+  - id: flores200_en_fr_riva_translation_parity
+    description: >
+      English-to-French translation parity for Riva Translate on FLORES-200,
+      one of the checkpoint model card's reported benchmark families. Dataset
+      prompts use the model-card en-fr chat expansion so both backends consume
+      the identical rendered text. SacreBLEU remains diagnostic.
+    user_contract: translation
+    default_model_names:
+      - riva-translate-4b
+    dataset:
+      kind: text_generation_json
+      name: FLORES-200 devtest English-French
+      default_path: /mnt/data/FLORES200_en_fr/flores200_en_fr_task_eval.json
+      prompt_source: prompt
+      answer_field: answer
+      subject_field: subject
+      sample_prefix: flores200_en_fr
+    selectors:
+      model_names:
+        - riva-translate-4b
+      task_strategies:
+        - text_generation_causal
+      runtime_strategies:
+        - mistral_decoder_kv_cache
+      user_contracts:
+        - translation
+    generation:
+      max_new_tokens: 128
+      temperature: 1.0
+      top_k: 1
+      top_p: 1.0
+      min_p: 0.0
+      seed: -1
+      apply_chat_template: false
+      enable_thinking: false
+      do_sample: false
+    scoring:
+      scorer: continuation
+      task_metric: sacrebleu
+    model_overrides:
+      by_model:
+        riva-translate-4b:
+          build_generation_headroom: true
+    gates:
+      min_exact_match_rate: 1.0
+      min_token_prefix_agreement: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Run with --limit 10 on GB300. BLEU on ten samples is diagnostic only.
+
   - id: vlm_mmmu_pro_vision_mcq
     description: >
       Local VLM multiple-choice accuracy evaluation on MMMU-Pro-Vision. This

@@ -496,7 +496,16 @@ def prepare_mmlu_dataset(
         sample_seed=sample_seed,
     )
     work_dir.mkdir(parents=True, exist_ok=True)
-    requests = [req for _idx, req in indexed]
+    sample_prefix = str(suite.get("dataset", {}).get("sample_prefix", "mmlu"))
+    requests = []
+    for dataset_index, request in indexed:
+        prepared_request = dict(request)
+        prepared_request["sample_id"] = str(
+            request.get("id")
+            or request.get("sample_id")
+            or f"{sample_prefix}_{dataset_index:06d}"
+        )
+        requests.append(prepared_request)
     answers = _copy_dataset_header(data, requests)
     answers_path = work_dir / "answers.json"
     prompts_path = work_dir / "prompts.jsonl"
@@ -504,10 +513,12 @@ def prepare_mmlu_dataset(
 
     answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
     with prompts_path.open("w", encoding="utf-8") as f:
-        for out_idx, (dataset_index, request) in enumerate(indexed):
+        for out_idx, ((dataset_index, request), prepared_request) in enumerate(
+            zip(indexed, requests, strict=True)
+        ):
             prompt = render_mmlu_prompt(_request_prompt(request), task_eval_config)
             sample = {
-                "sample_id": f"mmlu_{dataset_index:06d}",
+                "sample_id": prepared_request["sample_id"],
                 "dataset_index": dataset_index,
                 "eval_index": out_idx,
                 "subject": request.get("subject", ""),
@@ -2124,7 +2135,7 @@ def prepare_task_dataset(
     task_eval_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     dataset_kind = suite.get("dataset", {}).get("kind", "")
-    if dataset_kind == "mmlu_five_shot_json":
+    if dataset_kind in {"mmlu_five_shot_json", "text_generation_json"}:
         return prepare_mmlu_dataset(
             dataset_path=dataset_path,
             work_dir=work_dir,
@@ -4365,6 +4376,27 @@ def apply_metric_gates(result: dict[str, Any], gates: dict[str, Any]) -> dict[st
     return result
 
 
+def continuation_task_quality_diagnostics(
+    task_metric: str,
+    hf_predictions: dict[str, Any],
+    trtfb_predictions: dict[str, Any],
+    answers: dict[str, Any],
+) -> dict[str, Any]:
+    if task_metric != "sacrebleu":
+        return {}
+    hf_quality = score_sacrebleu_predictions(hf_predictions, answers)
+    trtfb_quality = score_sacrebleu_predictions(trtfb_predictions, answers)
+    return {
+        "hf": hf_quality,
+        "trtfb": trtfb_quality,
+        "hf_corpus_bleu": hf_quality["corpus_bleu"],
+        "trtfb_corpus_bleu": trtfb_quality["corpus_bleu"],
+        "corpus_bleu_abs_delta": abs(
+            hf_quality["corpus_bleu"] - trtfb_quality["corpus_bleu"]
+        ),
+    }
+
+
 def score_predictions(
     predictions_data: dict[str, Any],
     answers_data: dict[str, Any],
@@ -6592,6 +6624,29 @@ def encoder_reference_class_names(reference_family: str) -> tuple[str, str]:
     return "AutoModel", "AutoTokenizer"
 
 
+def load_hf_text_generation_model(
+    transformers_module: Any,
+    model_id: str,
+    *,
+    model_kwargs: dict[str, Any],
+    trust_remote_code: bool,
+    local_files_only: bool,
+) -> tuple[Any, bool]:
+    """Load the matching causal or encoder-decoder HF generation class."""
+    config = transformers_module.AutoConfig.from_pretrained(
+        model_id,
+        trust_remote_code=trust_remote_code,
+        local_files_only=local_files_only,
+    )
+    is_encoder_decoder = bool(getattr(config, "is_encoder_decoder", False))
+    model_class = (
+        transformers_module.AutoModelForSeq2SeqLM
+        if is_encoder_decoder
+        else transformers_module.AutoModelForCausalLM
+    )
+    return model_class.from_pretrained(model_id, **model_kwargs).eval(), is_encoder_decoder
+
+
 def run_encoder_embedding_hf_reference(args: argparse.Namespace) -> None:
     try:
         import torch
@@ -6723,7 +6778,7 @@ def run_hf_reference(args: argparse.Namespace) -> None:
         return
     try:
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer, logging
+        import transformers
     except Exception as exc:  # pragma: no cover - runtime dependency
         raise RuntimeError("run-hf requires torch and transformers") from exc
 
@@ -6752,8 +6807,8 @@ def run_hf_reference(args: argparse.Namespace) -> None:
     )
     generation_overrides = hf_generation_overrides(work_dir)
 
-    logging.set_verbosity_error()
-    tokenizer = AutoTokenizer.from_pretrained(
+    transformers.logging.set_verbosity_error()
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
         args.model,
         trust_remote_code=args.trust_remote_code,
         local_files_only=args.local_files_only,
@@ -6776,7 +6831,13 @@ def run_hf_reference(args: argparse.Namespace) -> None:
         model_kwargs["device_map"] = args.device_map
     if args.attn_impl:
         model_kwargs["attn_implementation"] = args.attn_impl
-    model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs).eval()
+    model, is_encoder_decoder = load_hf_text_generation_model(
+        transformers,
+        args.model,
+        model_kwargs=model_kwargs,
+        trust_remote_code=args.trust_remote_code,
+        local_files_only=args.local_files_only,
+    )
     if not args.device_map:
         device = torch.device(args.device)
         model.to(device)
@@ -6816,8 +6877,19 @@ def run_hf_reference(args: argparse.Namespace) -> None:
                     **generation_overrides,
                 )
             wall_ms = (time.perf_counter() - start) * 1000.0
-            generated = output_ids[0, encoded["input_ids"].shape[1] :]
-            output_text = tokenizer.decode(generated, skip_special_tokens=False)
+            if is_encoder_decoder:
+                generated = output_ids[0]
+                decoder_start_token_id = getattr(model.config, "decoder_start_token_id", None)
+                if (
+                    decoder_start_token_id is not None
+                    and generated.numel() > 0
+                    and int(generated[0]) == int(decoder_start_token_id)
+                ):
+                    generated = generated[1:]
+                output_text = tokenizer.decode(generated, skip_special_tokens=True)
+            else:
+                generated = output_ids[0, encoded["input_ids"].shape[1] :]
+                output_text = tokenizer.decode(generated, skip_special_tokens=False)
             generated_token_ids = [int(token_id) for token_id in generated.tolist()]
             row = {
                 "sample_id": prompt_rows[idx].get("sample_id", f"mmlu_{idx:06d}"),
@@ -8858,7 +8930,7 @@ def eval_one_model(
         summary = compare_continuation_sets(
             hf_data,
             trtfb_data,
-            tokenize=_model_tokenizer(model, args),
+            require_token_ids=True,
         )
         (work_dir / "summary.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -8873,6 +8945,29 @@ def eval_one_model(
             "mean_first_divergence": summary["mean_first_divergence"],
             "prediction_agreement_rate": summary["token_prefix_agreement"],
         }
+        diagnostics = continuation_task_quality_diagnostics(
+            str(suite.get("scoring", {}).get("task_metric", "")),
+            hf_data,
+            trtfb_data,
+            json.loads(answers_path.read_text(encoding="utf-8")),
+        )
+        if diagnostics:
+            result.update(
+                {
+                    "hf_corpus_bleu": diagnostics["hf_corpus_bleu"],
+                    "trtfb_corpus_bleu": diagnostics["trtfb_corpus_bleu"],
+                    "corpus_bleu_abs_delta": diagnostics["corpus_bleu_abs_delta"],
+                }
+            )
+            summary["task_quality_diagnostics"] = {
+                "hf": diagnostics["hf"],
+                "trtfb": diagnostics["trtfb"],
+                "corpus_bleu_abs_delta": diagnostics["corpus_bleu_abs_delta"],
+            }
+            (work_dir / "summary.json").write_text(
+                json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        apply_metric_gates(result, suite.get("gates", {}))
     elif scorer == "diffusion_image_clip_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
         trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
@@ -9847,6 +9942,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     dataset_kind = suite.get("dataset", {}).get("kind", "")
     if dataset_kind not in {
         "mmlu_five_shot_json",
+        "text_generation_json",
         "vlm_chat_json",
         "vlm_unified_json",
         "asr_chat_json",

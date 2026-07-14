@@ -265,6 +265,34 @@ def test_default_suites_include_librispeech_clean_asr_streaming() -> None:
     assert "nemotron_speech_streaming" in non_streaming["selectors"]["exclude_families"]
 
 
+def test_default_suites_include_text_generation_gap_models() -> None:
+    suites = task_eval.load_suites()
+    expected = {
+        "humaneval_code_continuation_parity": ["codegen-350m", "starcoder2-3b"],
+        "wikitext103_distilgpt2_continuation_parity": ["distilgpt2"],
+        "newstest2019_en_ru_marian_translation_parity": ["marian-en-ru"],
+        "wmt14_en_de_t5_translation_parity": ["t5-small"],
+        "flores200_en_fr_riva_translation_parity": ["riva-translate-4b"],
+    }
+
+    for suite_id, model_names in expected.items():
+        suite = task_eval.suite_by_id(suites, suite_id)
+        assert suite["dataset"]["kind"] == "text_generation_json"
+        assert suite["scoring"]["scorer"] == "continuation"
+        assert suite["default_model_names"] == model_names
+        assert suite["gates"]["min_exact_match_rate"] == 1.0
+        assert suite["gates"]["min_token_prefix_agreement"] == 1.0
+
+    for suite_id in (
+        "newstest2019_en_ru_marian_translation_parity",
+        "wmt14_en_de_t5_translation_parity",
+        "flores200_en_fr_riva_translation_parity",
+    ):
+        assert task_eval.suite_by_id(suites, suite_id)["scoring"]["task_metric"] == (
+            "sacrebleu"
+        )
+
+
 def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
     suites = task_eval.load_suites()
     suite = task_eval.suite_by_id(suites, "dpg_bench_diffusion_image")
@@ -1189,6 +1217,99 @@ def test_prepare_mmlu_writes_answers_and_trtfb_jsonl(tmp_path: Path) -> None:
     assert manifest["request_count"] == 1
 
 
+def test_prepare_text_generation_json_preserves_dataset_sample_id(tmp_path: Path) -> None:
+    dataset = tmp_path / "humaneval.json"
+    dataset.write_text(
+        json.dumps(
+            {
+                "dataset": "OpenAI HumanEval",
+                "requests": [
+                    {
+                        "id": "HumanEval/0",
+                        "prompt": "def add(a, b):\n",
+                        "answer": "    return a + b\n",
+                        "subject": "python",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    suite = task_eval.suite_by_id(
+        task_eval.load_suites(), "humaneval_code_continuation_parity"
+    )
+
+    outputs = task_eval.prepare_task_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=10,
+    )
+
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
+    assert answers["requests"][0]["sample_id"] == "HumanEval/0"
+    assert prompts[0]["sample_id"] == "HumanEval/0"
+    assert prompts[0]["prompt"] == "def add(a, b):\n"
+    assert manifest["dataset_kind"] == "text_generation_json"
+    assert manifest["limit"] == 10
+
+
+@pytest.mark.parametrize(
+    ("is_encoder_decoder", "expected_model_class"),
+    [(False, "causal"), (True, "seq2seq")],
+)
+def test_load_hf_text_generation_model_selects_configured_auto_class(
+    is_encoder_decoder: bool, expected_model_class: str
+) -> None:
+    calls: list[tuple[str, str, dict]] = []
+
+    class AutoConfig:
+        @staticmethod
+        def from_pretrained(model_id, **kwargs):
+            calls.append(("config", model_id, kwargs))
+            return SimpleNamespace(is_encoder_decoder=is_encoder_decoder)
+
+    class Model:
+        def __init__(self, kind):
+            self.kind = kind
+
+        def eval(self):
+            calls.append(("eval", self.kind, {}))
+            return self
+
+    def auto_model(kind):
+        return SimpleNamespace(
+            from_pretrained=lambda model_id, **kwargs: (
+                calls.append((kind, model_id, kwargs)) or Model(kind)
+            )
+        )
+
+    transformers = SimpleNamespace(
+        AutoConfig=AutoConfig,
+        AutoModelForCausalLM=auto_model("causal"),
+        AutoModelForSeq2SeqLM=auto_model("seq2seq"),
+    )
+
+    model, detected_seq2seq = task_eval.load_hf_text_generation_model(
+        transformers,
+        "example/model",
+        model_kwargs={"torch_dtype": "auto"},
+        trust_remote_code=True,
+        local_files_only=True,
+    )
+
+    assert model.kind == expected_model_class
+    assert detected_seq2seq is is_encoder_decoder
+    assert calls[0] == (
+        "config",
+        "example/model",
+        {"trust_remote_code": True, "local_files_only": True},
+    )
+    assert calls[1] == (expected_model_class, "example/model", {"torch_dtype": "auto"})
+
+
 def test_prepare_diffusion_prompts_writes_stable_prompt_rows(tmp_path: Path) -> None:
     dataset = tmp_path / "PartiPrompts.tsv"
     dataset.write_text(
@@ -1878,6 +1999,15 @@ def test_compare_continuation_cli_writes_json_summary(tmp_path: Path) -> None:
     assert summary["exact_match_rate"] == 0.5
     assert summary["token_prefix_agreement"] == 0.75
     assert summary["samples"][1]["first_divergence"] == 1
+
+
+def test_dataset_benchmark_serializes_generated_token_ids() -> None:
+    source = (
+        task_eval.REPO_ROOT / "examples" / "trtmc_dataset_benchmark.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert '\\"generated_token_ids\\":[' in source
+    assert "result.token_ids[token_idx]" in source
 
 
 def test_convert_trtfb_uses_generated_text_field(tmp_path: Path) -> None:
@@ -4497,6 +4627,58 @@ def test_diffusion_text_scores_gold_and_unconditional_quality(monkeypatch) -> No
     assert quality["generation_ppl"] == 24.1
     assert quality["unigram_entropy"] == 5.15
     assert quality["distinct_1"] == 0.5
+
+
+def test_continuation_translation_reports_bleu_without_gating_task_quality(
+    monkeypatch,
+) -> None:
+    answers = {
+        "requests": [
+            {"sample_id": "translation_0", "answer": "Bonjour.", "subject": "en-fr"}
+        ]
+    }
+    hf = {
+        "responses": [
+            {
+                "sample_id": "translation_0",
+                "output_text": "Bonjour.",
+                "generated_token_ids": [1, 2],
+            }
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {
+                "sample_id": "translation_0",
+                "output_text": "Salut.",
+                "generated_token_ids": [3, 4],
+            }
+        ]
+    }
+    scores = iter(
+        [
+            SimpleNamespace(
+                score=42.0, bp=1.0, sys_len=2, ref_len=2, precisions=[100.0]
+            ),
+            SimpleNamespace(
+                score=37.5, bp=1.0, sys_len=2, ref_len=2, precisions=[75.0]
+            ),
+        ]
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "sacrebleu",
+        SimpleNamespace(corpus_bleu=lambda _hypotheses, _references: next(scores)),
+    )
+
+    diagnostics = task_eval.continuation_task_quality_diagnostics(
+        "sacrebleu", hf, trtfb, answers
+    )
+
+    assert diagnostics["hf_corpus_bleu"] == 42.0
+    assert diagnostics["trtfb_corpus_bleu"] == 37.5
+    assert diagnostics["corpus_bleu_abs_delta"] == 4.5
+    assert task_eval.continuation_task_quality_diagnostics("", hf, trtfb, answers) == {}
 
 
 def test_diffusion_text_hf_parity_uses_token_agreement_only() -> None:

@@ -389,12 +389,18 @@ int main(int argc, char** argv) {
         output << "{\"sample_id\":\"" << json_escape(sample.sample_id) << "\""
                << ",\"gold_answer\":\"" << json_escape(sample.answer) << "\""
                << ",\"pred_answer\":\"" << json_escape(pred_answer) << "\""
-               << ",\"generated_tokens\":" << generated_tokens << ",\"prefill_ms\":" << std::fixed
-               << std::setprecision(6) << result.prefill_ms << ",\"decode_ms\":" << std::fixed
-               << std::setprecision(6) << result.decode_ms << ",\"wall_ms\":" << std::fixed
-               << std::setprecision(6) << wall_ms << ",\"tokens_per_sec\":" << std::fixed
-               << std::setprecision(6) << tok_per_sec << ",\"text\":\"" << json_escape(result.text)
-               << "\"}\n";
+               << ",\"generated_tokens\":" << generated_tokens << ",\"generated_token_ids\":[";
+        for (std::size_t token_idx = 0; token_idx < result.token_ids.size(); ++token_idx) {
+            if (token_idx > 0)
+                output << ',';
+            output << result.token_ids[token_idx];
+        }
+        output << "]"
+               << ",\"prefill_ms\":" << std::fixed << std::setprecision(6) << result.prefill_ms
+               << ",\"decode_ms\":" << std::fixed << std::setprecision(6) << result.decode_ms
+               << ",\"wall_ms\":" << std::fixed << std::setprecision(6) << wall_ms
+               << ",\"tokens_per_sec\":" << std::fixed << std::setprecision(6) << tok_per_sec
+               << ",\"text\":\"" << json_escape(result.text) << "\"}\n";
         output.flush();
 
         std::cerr << "[trtmc.dataset_benchmark] sample=" << sample.sample_id
