@@ -1330,6 +1330,51 @@ def test_model_proof_runs_one_isolated_model_with_unique_complete_evidence() -> 
     assert "proof.json" in runner
 
 
+def test_model_proof_keeps_long_lived_scratch_out_of_runner_temp() -> None:
+    text = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
+    bootstrap = text.split(
+        "      - name: Bootstrap model HTML before checkout", maxsplit=1
+    )[1].split("      - name: Check model proof disk headroom", maxsplit=1)[0]
+    disk = text.split("      - name: Check model proof disk headroom", maxsplit=1)[
+        1
+    ].split("      - name: Check out exact source revision", maxsplit=1)[0]
+    checkout = text.split("      - name: Check out exact source revision", maxsplit=1)[
+        1
+    ].split("      - name: Log in to GitHub Container Registry", maxsplit=1)[0]
+    run_proof = text.split("      - name: Run isolated model proof", maxsplit=1)[1].split(
+        "      - name: Reconcile model proof containers", maxsplit=1
+    )[0]
+    finalize = text.split("      - name: Finalize model proof fallback", maxsplit=1)[
+        1
+    ].split("      - name: Upload isolated model proof artifact", maxsplit=1)[0]
+    upload = text.split("      - name: Upload isolated model proof artifact", maxsplit=1)[
+        1
+    ].split("      - name: Enforce isolated model certification", maxsplit=1)[0]
+    cleanup = text.split("      - name: Clean model proof scratch space", maxsplit=1)[1]
+    durable = (
+        "${{ github.workspace }}/model-proof-output-${{ github.run_id }}-"
+        "${{ github.run_attempt }}-${{ inputs.model }}"
+    )
+
+    assert f"MODEL_PROOF_OUTPUT_DIR: {durable}" in bootstrap
+    assert bootstrap.index('[[ "$MODEL" =~ ^[a-z0-9][a-z0-9._-]*$ ]]') < bootstrap.index(
+        'mkdir -p "$MODEL_PROOF_OUTPUT_DIR/artifacts"'
+    )
+    assert "path: model-proof-source" in checkout
+    assert "model-proof-source" not in durable
+    assert "${{ runner.temp }}/model-proof-" not in text
+    assert '"$RUNNER_TEMP"/model-proof-' not in text
+    assert "-name 'model-proof-output-*'" in disk
+    assert 'df -Pk "$GITHUB_WORKSPACE"' in disk
+    assert "GITHUB_OUTPUT" not in run_proof
+    assert "steps.proof.outputs.exit_code" not in finalize
+    assert "proof-exit-code.txt" in run_proof
+    assert "proof-exit-code.txt" in finalize
+    assert f"path: {durable}/artifacts/" in upload
+    assert '"$GITHUB_WORKSPACE"/model-proof-output-*' in cleanup
+    assert 'df -h "$GITHUB_WORKSPACE"' in cleanup
+
+
 def test_package_stage_builds_py310_and_py312_wheels() -> None:
     text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
     assert "TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312" in text

@@ -1234,7 +1234,7 @@ def test_workflow_singleton_gate_rejects_invalid_certification(
     assert message in result.stderr
 
 
-def test_model_proof_resolves_runner_temp_only_after_runner_assignment() -> None:
+def test_model_proof_resolves_durable_workspace_after_runner_assignment() -> None:
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
     job_configuration = workflow.split("\n    steps:", maxsplit=1)[0]
     bootstrap = workflow.split("- name: Bootstrap model HTML before checkout", maxsplit=1)[1].split(
@@ -1243,12 +1243,25 @@ def test_model_proof_resolves_runner_temp_only_after_runner_assignment() -> None
     proof = workflow.split("- name: Run isolated model proof", maxsplit=1)[1].split(
         "- name: Finalize model proof fallback", maxsplit=1
     )[0]
+    finalize = workflow.split("- name: Finalize model proof fallback", maxsplit=1)[1].split(
+        "- name: Upload isolated model proof artifact", maxsplit=1
+    )[0]
 
     assert "MODEL_PROOF_OUTPUT_DIR:" not in job_configuration
-    assert "MODEL_PROOF_OUTPUT_DIR: ${{ runner.temp }}" in bootstrap
+    assert (
+        "MODEL_PROOF_OUTPUT_DIR: ${{ github.workspace }}/model-proof-output-"
+        "${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.model }}"
+    ) in bootstrap
+    assert "${{ runner.temp }}/model-proof-" not in workflow
     assert 'echo "MODEL_PROOF_OUTPUT_DIR=$MODEL_PROOF_OUTPUT_DIR" >> "$GITHUB_ENV"' in bootstrap
     assert "${{ env.MODEL_PROOF_OUTPUT_DIR }}" not in proof
     assert '--output-dir "$MODEL_PROOF_OUTPUT_DIR"' in proof
+    assert 'printf \'%s\\n\' "$proof_rc" > "$MODEL_PROOF_OUTPUT_DIR/proof-exit-code.txt"' in proof
+    assert "GITHUB_OUTPUT" not in proof
+    assert "steps.proof.outputs.exit_code" not in finalize
+    assert 'proof_exit_code=1' in finalize
+    assert 'proof-exit-code.txt' in finalize
+    assert '--exit-code "$proof_exit_code"' in finalize
 
 
 def test_model_proof_checks_disk_headroom_before_checkout() -> None:
@@ -1268,7 +1281,7 @@ def test_model_proof_checks_disk_headroom_before_checkout() -> None:
     assert 'proof_capacity="$((${#gpu_ids[@]} * TRTMC_MODEL_PROOF_SLOTS_PER_GPU))"' in disk_check
     assert 'required_gib="$((TRTMC_MODEL_PROOF_MIN_FREE_GIB * proof_capacity))"' in disk_check
     assert 'required_kib="$((required_gib * 1024 * 1024))"' in disk_check
-    assert 'df -Pk "$RUNNER_TEMP"' in disk_check
+    assert 'df -Pk "$GITHUB_WORKSPACE"' in disk_check
     assert "Insufficient model-proof disk headroom" in disk_check
 
 
@@ -1287,7 +1300,7 @@ def test_model_proof_uploads_before_singleton_gate_and_cleanup() -> None:
     )
     assert "if: ${{ always() }}" in gate
     assert "id: artifact_upload" in workflow
-    assert '"$RUNNER_TEMP"/model-proof-*' in cleanup
+    assert '"$GITHUB_WORKSPACE"/model-proof-output-*' in cleanup
     assert "-name work -o -name projection" in cleanup
     assert 'ARTIFACT_UPLOAD_OUTCOME" = "success"' in cleanup
     assert 'rm -rf -- "$MODEL_PROOF_OUTPUT_DIR"' in cleanup

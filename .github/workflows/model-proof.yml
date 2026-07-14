@@ -57,9 +57,15 @@ jobs:
           MODEL: ${{ inputs.model }}
           REVISION: ${{ inputs.revision }}
           SUITE: ${{ inputs.suite }}
-          MODEL_PROOF_OUTPUT_DIR: ${{ runner.temp }}/model-proof-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.model }}
+          # A cancelled worker can finish clearing runner.temp after this runner
+          # is reassigned. Keep long-lived proof state beside, not inside, it.
+          MODEL_PROOF_OUTPUT_DIR: ${{ github.workspace }}/model-proof-output-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.model }}
         run: |
           set -euo pipefail
+          if ! [[ "$MODEL" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+            echo "Unsafe model identifier: $MODEL" >&2
+            exit 1
+          fi
           echo "MODEL_PROOF_OUTPUT_DIR=$MODEL_PROOF_OUTPUT_DIR" >> "$GITHUB_ENV"
           mkdir -p "$MODEL_PROOF_OUTPUT_DIR/artifacts"
           python3 - "$MODEL_PROOF_OUTPUT_DIR/artifacts" "$MODEL" "$REVISION" "$SUITE" <<'PY'
@@ -127,14 +133,15 @@ jobs:
           fi
           while IFS= read -r -d '' stale_dir; do
             case "$stale_dir" in
-              "$RUNNER_TEMP"/model-proof-*) ;;
+              "$GITHUB_WORKSPACE"/model-proof-output-*) ;;
               *) echo "Refusing to clean unsafe stale path: $stale_dir" >&2; exit 1 ;;
             esac
+            [ "$stale_dir" != "$MODEL_PROOF_OUTPUT_DIR" ] || continue
             find "$stale_dir" -mindepth 1 -maxdepth 1 -type d \
               \( -name work -o -name projection \) -exec rm -rf -- {} +
           done < <(
-            find "$RUNNER_TEMP" -mindepth 1 -maxdepth 1 -type d \
-              -name 'model-proof-*' -mmin "+$TRTMC_MODEL_PROOF_STALE_MINUTES" \
+            find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -type d \
+              -name 'model-proof-output-*' -mmin "+$TRTMC_MODEL_PROOF_STALE_MINUTES" \
               -print0
           )
           IFS=, read -r -a gpu_ids <<< "$TRTMC_MODEL_PROOF_GPU_IDS"
@@ -147,7 +154,7 @@ jobs:
             seen_gpu_ids[$gpu_id]=1
           done
           proof_capacity="$((${#gpu_ids[@]} * TRTMC_MODEL_PROOF_SLOTS_PER_GPU))"
-          available_kib="$(df -Pk "$RUNNER_TEMP" | awk 'NR == 2 {print $4}')"
+          available_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 {print $4}')"
           required_gib="$((TRTMC_MODEL_PROOF_MIN_FREE_GIB * proof_capacity))"
           required_kib="$((required_gib * 1024 * 1024))"
           if [ "$available_kib" -lt "$required_kib" ]; then
@@ -205,7 +212,7 @@ jobs:
             --output-dir "$MODEL_PROOF_OUTPUT_DIR"
           proof_rc=$?
           set -e
-          echo "exit_code=$proof_rc" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$proof_rc" > "$MODEL_PROOF_OUTPUT_DIR/proof-exit-code.txt"
           exit "$proof_rc"
 
       - name: Reconcile model proof containers
@@ -228,7 +235,6 @@ jobs:
           CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
           CI_IMAGE_OUTCOME: ${{ steps.ci_image.outcome }}
           PROOF_OUTCOME: ${{ steps.proof.outcome }}
-          PROOF_EXIT_CODE: ${{ steps.proof.outputs.exit_code }}
         run: |
           set -euo pipefail
           if [ -n "${DOCKER_CONFIG:-}" ]; then
@@ -241,6 +247,14 @@ jobs:
           fi
           if [ "$PROOF_OUTCOME" = "success" ]; then
             exit 0
+          fi
+          proof_exit_code=1
+          if [ -f "$MODEL_PROOF_OUTPUT_DIR/proof-exit-code.txt" ]; then
+            IFS= read -r proof_exit_code < "$MODEL_PROOF_OUTPUT_DIR/proof-exit-code.txt" || \
+              proof_exit_code=1
+            if ! [[ "$proof_exit_code" =~ ^[0-9]+$ ]]; then
+              proof_exit_code=1
+            fi
           fi
           if [ "$CHECKOUT_OUTCOME" = "success" ] && \
              [ -f "$GITHUB_WORKSPACE/model-proof-source/.github/scripts/write-model-proof-fallback-report.py" ]; then
@@ -255,7 +269,7 @@ jobs:
               --suite "$SUITE" \
               --outcome failed \
               --phase "$phase" \
-              --exit-code "${PROOF_EXIT_CODE:-1}" \
+              --exit-code "$proof_exit_code" \
               --detail "Source checkout outcome: $CHECKOUT_OUTCOME" \
               --detail "CI image outcome: $CI_IMAGE_OUTCOME" \
               --detail "Model proof outcome: $PROOF_OUTCOME" \
@@ -302,7 +316,7 @@ jobs:
           name: model-proof-${{ inputs.model }}-${{ inputs.revision }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
-          path: ${{ runner.temp }}/model-proof-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.model }}/artifacts/
+          path: ${{ github.workspace }}/model-proof-output-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.model }}/artifacts/
 
       - name: Enforce isolated model certification
         if: ${{ always() }}
@@ -355,7 +369,7 @@ jobs:
         run: |
           set -euo pipefail
           case "${MODEL_PROOF_OUTPUT_DIR:-}" in
-            "$RUNNER_TEMP"/model-proof-*) ;;
+            "$GITHUB_WORKSPACE"/model-proof-output-*) ;;
             *) echo "Refusing to clean unsafe model proof path: ${MODEL_PROOF_OUTPUT_DIR:-}" >&2; exit 1 ;;
           esac
           find "$MODEL_PROOF_OUTPUT_DIR" -mindepth 1 -maxdepth 1 -type d \
@@ -365,4 +379,4 @@ jobs:
           else
             echo "Keeping local proof artifacts because upload did not succeed."
           fi
-          df -h "$RUNNER_TEMP"
+          df -h "$GITHUB_WORKSPACE"
