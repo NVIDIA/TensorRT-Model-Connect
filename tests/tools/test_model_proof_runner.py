@@ -634,6 +634,35 @@ def test_flux_nightly_model_proof_reserves_an_exclusive_gpu(tmp_path: Path) -> N
     }
 
 
+def test_llama_nightly_model_proof_reserves_an_exclusive_gpu(tmp_path: Path) -> None:
+    selection = _run_test_selection(
+        tmp_path,
+        "llama",
+        "nightly",
+        lease_env={
+            "TRTMC_MODEL_PROOF_GPU_ID": "2",
+            "TRTMC_MODEL_PROOF_GPU_SLOT_IDS": "0,1,2,3",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+            "TRTMC_MODEL_PROOF_RESOURCE_CLASS": "exclusive_gpu",
+        },
+    )
+
+    assert selection["resource_class"] == "exclusive_gpu"
+    assert selection["gpu_resource_class"] == "exclusive_gpu"
+    assert selection["gpu_slot_ids"] == [0, 1, 2, 3]
+    assert selection["gpu_slot"] is None
+    assert {
+        case["name"]: case["gpu_resource_class"]
+        for case in selection["e2e_cases"]
+    } == {
+        "falcon3-1b": "exclusive_gpu",
+        "minitron-4b-depth": "shared",
+        "minitron-4b-width": "shared",
+        "nemotron-nano-4b": "shared",
+        "tinyllama-1.1b": "shared",
+    }
+
+
 @pytest.mark.parametrize("family", ("locateanything", "ltx_video"))
 def test_nightly_retains_l0_as_an_owners_only_single_gpu_fallback(
     tmp_path: Path, family: str
