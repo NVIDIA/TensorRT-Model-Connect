@@ -16,11 +16,9 @@ def test_acceptance_build_reserves_gpu_for_stable_tactic_selection() -> None:
     assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
 
 
-def test_acceptance_build_keeps_late_decoder_tail_in_fp32() -> None:
+def test_acceptance_build_uses_fp32_for_point_forecast_parity() -> None:
     manifest_path = Path(__file__).parent / "manifests" / "timesfm-2.0-500m-official.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    fp32_layers = set(manifest["fp32_layers"])
-
-    assert set(range(35, 50)) <= fp32_layers
-    assert {50, 51, 52, 53} <= fp32_layers
+    assert manifest["precision"] == "fp32"
+    assert "fp32_layers" not in manifest
