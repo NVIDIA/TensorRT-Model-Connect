@@ -12,6 +12,11 @@ on:
         description: "Git ref to test with the full nightly workflow"
         required: false
         default: "main"
+      bark_gpu_validation:
+        description: "Temporary diagnostic: run Bark proof on physical GPUs 2 and 3"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -53,7 +58,64 @@ env:
   HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
+  bark-gpu-validation:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.bark_gpu_validation }}
+    name: Bark physical GPU ${{ matrix.gpu }}
+    runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu: [2, 3]
+    env:
+      TRTMC_MODEL_PROOF_BUILD_JOBS: ${{ vars.TRTMC_MODEL_PROOF_BUILD_JOBS || '2' }}
+      TRTMC_MODEL_PROOF_GPU_IDS: "0,1,2,3"
+      TRTMC_MODEL_PROOF_SLOTS_PER_GPU: ${{ vars.TRTMC_MODEL_PROOF_SLOTS_PER_GPU || '4' }}
+      TRTMC_MODEL_PROOF_GPU_LOCK_DIR: ${{ vars.TRTMC_MODEL_PROOF_GPU_LOCK_DIR || '/tmp/trtmc-model-proof-gpu-locks' }}
+      TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || '3600' }}
+      TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}
+      TRTMC_MODEL_REFERENCE_CACHE_ROOT: ${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || '/workspace/users/yifeif/tensorrt-model-connect' }}
+
+    steps:
+      - name: Check out exact merged revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve exact revision
+        run: echo "BARK_VALIDATION_REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Ensure CI Docker image
+        id: ci_image
+        timeout-minutes: 90
+        run: bash .github/scripts/ensure-ci-docker-image.sh
+
+      - name: Run Bark proof on requested physical GPU
+        timeout-minutes: 150
+        env:
+          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
+          TRTMC_GPU_ID: ${{ matrix.gpu }}
+        run: |
+          output_dir="$RUNNER_TEMP/bark-gpu-${{ matrix.gpu }}"
+          bash .github/scripts/run-model-proof.sh \
+            --model bark \
+            --revision "$BARK_VALIDATION_REVISION" \
+            --suite premerge \
+            --output-dir "$output_dir"
+
+      - name: Upload Bark GPU diagnostic artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bark-gpu-${{ matrix.gpu }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/bark-gpu-${{ matrix.gpu }}/artifacts
+          retention-days: 7
+          if-no-files-found: error
+
   nightly-ci:
+    if: ${{ !inputs.bark_gpu_validation }}
     name: Nightly Full CI
     runs-on: ${{ fromJSON(vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 720
