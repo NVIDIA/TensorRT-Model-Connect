@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.e2e_harness.contracts import E2EResult
+from tests.e2e_harness.contracts import E2ECase, E2EResult
 from tests.e2e_harness.manifest_loader import get_model_by_name
 from tests.e2e_harness import model_runner
 from tests.e2e_harness.orchestrator import BundleResolution
@@ -76,6 +76,46 @@ def test_ci_tier_filters_children_without_changing_model_identity() -> None:
     )
 
     assert [case.name for case in selected] == ["canary-1b-v2"]
+
+
+def test_platform_threshold_overrides_are_scoped_to_matching_platform() -> None:
+    case = E2ECase(
+        name="elf-b-owt-l0",
+        hf_id="embedded-language-flows/ELF-B-owt",
+        family="elf_flow",
+        runtime_strategy="elf_flow",
+        task_strategy="diffusion_text_generation",
+        threshold_overrides={
+            "contract_max_upstream_text_ned": 0.01,
+            "contract_min_upstream_token_agreement_rate": 0.99,
+        },
+        metadata={
+            "platform_threshold_overrides": {
+                "THOR": {"contract_max_upstream_text_ned": 0.011}
+            }
+        },
+    )
+
+    thor_case = model_runner._case_with_platform_thresholds(case, "THOR")
+    default_case = model_runner._case_with_platform_thresholds(case, "")
+
+    assert thor_case.threshold_overrides == {
+        "contract_max_upstream_text_ned": 0.011,
+        "contract_min_upstream_token_agreement_rate": 0.99,
+    }
+    assert default_case is case
+    assert case.threshold_overrides["contract_max_upstream_text_ned"] == 0.01
+
+
+def test_elf_flow_thor_threshold_override_keeps_default_contract() -> None:
+    model = get_model_by_name("elf-b-owt-l0", MODELS_DIR / "elf_flow")
+    assert model is not None
+    case = model.testcases[0]
+
+    assert case.threshold_overrides["contract_max_upstream_text_ned"] == 0.01
+    assert case.metadata["platform_threshold_overrides"]["THOR"] == {
+        "contract_max_upstream_text_ned": 0.011
+    }
 
 
 def test_model_collection_applies_worker_partition() -> None:

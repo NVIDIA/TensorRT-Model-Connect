@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -168,6 +169,28 @@ def _make_context(
     )
 
 
+def _case_with_platform_thresholds(case: E2ECase, platform: str) -> E2ECase:
+    platform_key = str(platform or "").strip()
+    if not platform_key:
+        return case
+
+    platform_overrides = case.metadata.get("platform_threshold_overrides", {})
+    if not isinstance(platform_overrides, dict):
+        return case
+
+    overrides = platform_overrides.get(platform_key)
+    if not isinstance(overrides, dict) or not overrides:
+        return case
+
+    return replace(
+        case,
+        threshold_overrides={
+            **case.threshold_overrides,
+            **overrides,
+        },
+    )
+
+
 def _skip_detail(result) -> str:
     if result.determinism and "preflight" in result.determinism:
         failed = [detail for detail in result.determinism["preflight"] if not detail.get("passed")]
@@ -278,16 +301,18 @@ def run_model_e2e(
         pytest.fail(f"Model not found in {model_dir}: {model_name}")
 
     config = request.config
+    platform = config.getoption("--e2e-platform", default="")
     cases = selected_testcases(
         model,
         config=config,
         case_matches_model=case_matches_model,
         is_multi_device_case=is_multi_device_case,
     )
+    cases = [_case_with_platform_thresholds(case, platform) for case in cases]
     if not cases:
         pytest.skip(f"No selected testcases for model {model_name}")
 
-    waives = load_waives(config.getoption("--e2e-platform", default=""))
+    waives = load_waives(platform)
     outcomes: list[dict] = []
     runnable: list[tuple[E2ECase, str]] = []
     for case in cases:

@@ -41,6 +41,7 @@ _DEFAULT_MODELS_DIR = Path(__file__).resolve().parent.parent / "e2e" / "models"
 _THRESHOLD_SIDECAR_FIELDS = frozenset(
     {
         "threshold_overrides",
+        "platform_threshold_overrides",
         "logit_atol",
         "layer_atol",
         "min_pixel_agreement",
@@ -205,11 +206,42 @@ def _load_threshold_sidecar(
     if overrides is not None and not isinstance(overrides, dict):
         raise TypeError(f"{sidecar_path}: threshold_overrides must be an object")
 
+    platform_overrides = raw.get("platform_threshold_overrides", {})
+    if platform_overrides is not None and not isinstance(platform_overrides, dict):
+        raise TypeError(
+            f"{sidecar_path}: platform_threshold_overrides must be an object"
+        )
+
     for key, value in raw.items():
         if key == "threshold_overrides":
             for metric in value:
                 if not isinstance(metric, str):
                     raise TypeError(f"{sidecar_path}: threshold_overrides keys must be strings")
+        elif key == "platform_threshold_overrides":
+            for platform_name, platform_metrics in value.items():
+                if not isinstance(platform_name, str):
+                    raise TypeError(
+                        f"{sidecar_path}: platform_threshold_overrides keys must be strings"
+                    )
+                if not isinstance(platform_metrics, dict):
+                    raise TypeError(
+                        f"{sidecar_path}: platform_threshold_overrides[{platform_name!r}] "
+                        "must be an object"
+                    )
+                for metric, metric_value in platform_metrics.items():
+                    if not isinstance(metric, str):
+                        raise TypeError(
+                            f"{sidecar_path}: platform_threshold_overrides"
+                            f"[{platform_name!r}] keys must be strings"
+                        )
+                    if (
+                        not isinstance(metric_value, (int, float))
+                        or isinstance(metric_value, bool)
+                    ):
+                        raise TypeError(
+                            f"{sidecar_path}: platform_threshold_overrides"
+                            f"[{platform_name!r}][{metric!r}] must be numeric"
+                        )
         elif not isinstance(value, (int, float)) or isinstance(value, bool):
             raise TypeError(f"{sidecar_path}: {key} must be numeric")
 
