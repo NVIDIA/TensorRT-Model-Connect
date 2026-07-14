@@ -2266,6 +2266,15 @@ def test_dataset_benchmark_serializes_generated_token_ids() -> None:
     ).read_text(encoding="utf-8")
 
     assert '\\"generated_token_ids\\":[' in source
+
+
+def test_dataset_benchmark_accepts_model_plugin_directory() -> None:
+    source = (
+        task_eval.REPO_ROOT / "examples" / "trtmc_dataset_benchmark.cpp"
+    ).read_text(encoding="utf-8")
+
+    assert 'arg == "--model-plugin-dir"' in source
+    assert "load_options.model_plugin_search_paths.emplace_back" in source
     assert "result.token_ids[token_idx]" in source
 
 
