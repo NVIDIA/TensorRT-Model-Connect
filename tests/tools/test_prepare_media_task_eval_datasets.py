@@ -6,10 +6,12 @@ from __future__ import annotations
 import json
 import sys
 import types
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from tools import prepare_media_task_eval_datasets as prepare_media
@@ -110,6 +112,40 @@ def test_prepare_gedit_loads_local_hf_arrow_checkout(
             },
         )
     ]
+
+
+def test_prepare_gedit_streams_local_arrow_without_datasets(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    pa = pytest.importorskip("pyarrow")
+    source = tmp_path / "gedit-source"
+    source.mkdir()
+    arrow = source / "data-00000-of-00001.arrow"
+    rows = []
+    for index in range(10):
+        encoded = BytesIO()
+        Image.new("RGB", (8, 8), (index, 20, 30)).save(encoded, format="PNG")
+        rows.append(
+            {
+                "key": f"sample-{index}",
+                "instruction": f"edit instruction {index}",
+                "instruction_language": "en",
+                "task_type": f"task_{index}",
+                "input_image": {"bytes": encoded.getvalue(), "path": None},
+            }
+        )
+    table = pa.Table.from_pylist(rows)
+    with pa.OSFile(str(arrow), "wb") as sink:
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+    monkeypatch.setitem(sys.modules, "datasets", None)
+
+    output = prepare_media.prepare_gedit(str(source), tmp_path / "out")
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["request_count"] == 10
+    assert len(list((output.parent / "images").glob("*.png"))) == 10
 
 
 def _write_sana_split(root: Path, split: str, color_offset: int) -> None:

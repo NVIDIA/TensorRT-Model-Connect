@@ -518,7 +518,8 @@ def test_default_suites_include_media_generation_gap_models() -> None:
     assert video["gates"]["min_trt_hf_image_clip_cosine"] == 0.85
 
     image_edit = task_eval.suite_by_id(suites, "gedit_bench_image_edit")
-    assert image_edit["default_model_names"] == ["qwen-image-edit-2511"]
+    assert image_edit["default_model_names"] == image_edit["selectors"]["model_names"]
+    assert len(image_edit["default_model_names"]) == 1
     assert image_edit["dataset"]["asset_fields"] == ["image"]
     assert image_edit["gates"]["require_matching_initial_latents"] == 1
 
@@ -3487,10 +3488,10 @@ def test_diffusion_sample_inputs_and_response_record_shared_conditions(
     condition = tmp_path / "condition.png"
     condition.write_bytes(b"condition-image")
     template = E2ECase(
-        name="qwen-image-edit-2511",
-        hf_id="Qwen/Qwen-Image-Edit-2511",
-        family="qwen_image",
-        runtime_strategy="diffusion_qwen_image",
+        name="image-edit-model",
+        hf_id="example/image-edit-model",
+        family="image_edit_family",
+        runtime_strategy="diffusion_image_edit",
         task_strategy="diffusion_media_generation",
         inputs={"image": "/old/image.png", "action": "w-320"},
     )

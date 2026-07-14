@@ -18,6 +18,7 @@ import re
 import shutil
 from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -218,10 +219,6 @@ def prepare_gedit_rows(
 
 def prepare_gedit(source: str, output_root: Path, limit: int = 10) -> Path:
     """Load the official HF dataset (or a local dataset checkout) and convert it."""
-    try:
-        from datasets import load_dataset
-    except ImportError as exc:
-        raise RuntimeError("GEdit preparation requires the 'datasets' package") from exc
     source_path = Path(source)
     if source_path.exists():
         arrow_files = sorted(source_path.glob("data-*.arrow"))
@@ -229,12 +226,23 @@ def prepare_gedit(source: str, output_root: Path, limit: int = 10) -> Path:
             arrow_files = sorted(source_path.glob("**/data-*.arrow"))
         if not arrow_files:
             raise ValueError(f"{source_path}: no GEdit data-*.arrow files found")
-        rows = load_dataset(
-            "arrow",
-            data_files=[str(path.resolve()) for path in arrow_files],
-            split="train",
-        )
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            rows = _local_gedit_arrow_rows(arrow_files)
+        else:
+            rows = load_dataset(
+                "arrow",
+                data_files=[str(path.resolve()) for path in arrow_files],
+                split="train",
+            )
     else:
+        try:
+            from datasets import load_dataset
+        except ImportError as exc:
+            raise RuntimeError(
+                "Remote GEdit preparation requires the 'datasets' package"
+            ) from exc
         rows = load_dataset(
             source,
             revision=GEDIT_REVISION,
@@ -242,6 +250,28 @@ def prepare_gedit(source: str, output_root: Path, limit: int = 10) -> Path:
             streaming=True,
         )
     return prepare_gedit_rows(rows, output_root / "GEdit-Bench", limit)
+
+
+def _local_gedit_arrow_rows(paths: Iterable[Path]) -> Iterator[dict[str, Any]]:
+    """Stream rows from a Hugging Face Arrow checkout without datasets."""
+    try:
+        import pyarrow as pa
+        import pyarrow.ipc as ipc
+    except ImportError as exc:
+        raise RuntimeError(
+            "Local GEdit preparation requires either 'datasets' or 'pyarrow'"
+        ) from exc
+
+    for path in paths:
+        with pa.memory_map(str(path), "r") as source:
+            for batch in ipc.open_stream(source):
+                for row in batch.to_pylist():
+                    for field in ("input_image", "input_image_raw"):
+                        encoded = row.get(field)
+                        if isinstance(encoded, dict) and encoded.get("bytes"):
+                            with Image.open(BytesIO(encoded["bytes"])) as image:
+                                row[field] = image.copy()
+                    yield row
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
