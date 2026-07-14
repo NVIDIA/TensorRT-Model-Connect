@@ -476,7 +476,15 @@ wait_for_gpu_admission_turn() {
 
 release_gpu_admission_ticket() {
   if [ -n "$proof_gpu_admission_file" ]; then
-    rm -f -- "$proof_gpu_admission_file" || true
+    local handoff_suffix=".handoff.$$"
+    local visible_file="$proof_gpu_admission_file"
+    local handoff_file="${visible_file}${handoff_suffix}"
+    if [[ "$visible_file" == *"$handoff_suffix" ]]; then
+      handoff_file="$visible_file"
+      visible_file="${visible_file%"$handoff_suffix"}"
+    fi
+    # Remove both aliases so signals are safe in either rename/assignment gap.
+    rm -f -- "$visible_file" "$handoff_file" || true
   fi
   if [ -n "$proof_gpu_admission_fd" ]; then
     flock -u "$proof_gpu_admission_fd" >/dev/null 2>&1 || true

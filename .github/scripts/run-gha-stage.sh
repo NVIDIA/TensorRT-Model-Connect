@@ -13,13 +13,46 @@ if [ -z "$workspace" ] || [ ! -d "$workspace" ]; then
   exit 1
 fi
 
+stage_pid=""
+cleanup_cancelled_stage() {
+  local rc="$1"
+  # GitHub first signals the step shell and may escalate shortly afterward.
+  # Ignore repeated signals long enough to kill the exact run-owned container;
+  # a later `if: always()` step is not guaranteed to start after cancellation.
+  trap '' INT TERM
+  docker rm -f "$container_name" >/dev/null 2>&1 || true
+  if [ -n "$stage_pid" ] && kill -0 "$stage_pid" >/dev/null 2>&1; then
+    kill -KILL "$stage_pid" >/dev/null 2>&1 || true
+    wait "$stage_pid" >/dev/null 2>&1 || true
+  fi
+  exit "$rc"
+}
+
+trap 'cleanup_cancelled_stage 130' INT
+trap 'cleanup_cancelled_stage 143' TERM
+
 if [ "$(docker inspect -f '{{.State.Running}}' "$container_name" 2>/dev/null || true)" != "true" ]; then
   echo "::error::CI container '$container_name' is not running. Start it with .github/scripts/start-gha-container.sh before running stages."
   exit 1
 fi
 
+run_attached_stage() {
+  local rc
+  "$@" &
+  stage_pid=$!
+  # The wait builtin is interrupted immediately by INT/TERM, unlike waiting
+  # for a foreground external command. This lets the traps above remove the
+  # container even when docker exec or its attached process ignores signals.
+  set +e
+  wait "$stage_pid"
+  rc=$?
+  set -e
+  stage_pid=""
+  return "$rc"
+}
+
 if [ "${TRTMC_CI_HARDENED:-false}" = "true" ]; then
-  docker exec \
+  run_attached_stage docker exec \
     -w "$workspace" \
     -e CI_BASE_REF \
     -e GITHUB_EVENT_NAME \
@@ -38,7 +71,7 @@ if [ "${TRTMC_CI_HARDENED:-false}" = "true" ]; then
   exit $?
 fi
 
-docker exec \
+run_attached_stage docker exec \
   -w "$workspace" \
   -e CI_BASE_REF \
   -e ENGINE_DIR \

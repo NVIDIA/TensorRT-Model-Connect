@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
 
 
@@ -124,6 +127,73 @@ def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
         assert f"-e {name}" in stage_text
     assert "/workspace/users/yifeif:/workspace/users/yifeif" in start_text
     assert "docker exec" in stage_text
+
+
+def test_github_stage_wrapper_removes_exact_container_on_cancellation(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_log = tmp_path / "docker.log"
+    exec_started = tmp_path / "exec-started"
+    container_removed = tmp_path / "container-removed"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf \'%s\\n\' "$*" >> "$DOCKER_LOG"\n'
+        'case "${1:-}" in\n'
+        "  inspect) printf 'true\\n' ;;\n"
+        '  exec) touch "$DOCKER_EXEC_STARTED"; trap \'\' INT TERM; '
+        'while [ ! -f "$DOCKER_REMOVED" ]; do sleep 0.1; done ;;\n'
+        '  rm) touch "$DOCKER_REMOVED"; exit 0 ;;\n'
+        "  *) exit 2 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    container_name = "trtmc-nightly-package-4242-1"
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "DOCKER_LOG": str(docker_log),
+            "DOCKER_EXEC_STARTED": str(exec_started),
+            "DOCKER_REMOVED": str(container_removed),
+            "TRTMC_CI_CONTAINER_NAME": container_name,
+            "TRTMC_CI_WORKSPACE": str(workspace),
+        }
+    )
+    process = subprocess.Popen(
+        ["bash", str(REPO_ROOT / ".github/scripts/run-gha-stage.sh"), "python-builder"],
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not exec_started.is_file():
+            assert process.poll() is None
+            time.sleep(0.05)
+        assert exec_started.is_file()
+        started = time.monotonic()
+        os.killpg(process.pid, signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=10)
+        elapsed = time.monotonic() - started
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=10)
+
+    assert process.returncode == 143, stdout + stderr
+    assert elapsed < 2
+    assert container_removed.is_file()
+    assert f"rm -f {container_name}" in docker_log.read_text(encoding="utf-8")
 
 
 def test_github_container_only_exports_nonempty_hf_transport_controls() -> None:
