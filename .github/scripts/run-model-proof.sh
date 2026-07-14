@@ -43,6 +43,8 @@ declare -a proof_gpu_lease_files=()
 #   admission-<scope>.enqueue.lock       serializes ticket creation
 #   admission-<scope>.next               monotonic ticket counter
 #   admission-<scope>-<20 digits>.lock   FIFO ticket, flocked by its owner
+#   ...lock.handoff.<pid>                 temporary hidden alias during an
+#                                         allocator-guarded GPU handoff
 #   gpu-<id>-reservation.lock            exclusive-proof entry fence
 #   gpu-<id>-slot-<n>.lock               slot lease, held while the proof runs
 #   whole-machine.lock                   shared by proofs, exclusive by all-GPU stages
@@ -392,9 +394,31 @@ locate_admission_predecessor() {
   local lock_dir="$1"
   local scope="$2"
   local deadline="$3"
-  local ticket_file ticket_fd found_self=0
+  local ticket_file ticket_fd handoff_file handoff_fd found_self=0
   release_admission_predecessor
   acquire_gpu_allocator_mutex "$lock_dir" "$deadline" || return 1
+
+  # A hard-killed exclusive waiter may leave its hidden handoff path behind
+  # after the inode flock and allocator mutex are released. These aliases are
+  # never queue entries; remove only unlocked ones while holding the allocator
+  # mutex so a live transactional handoff cannot be mistaken for stale state.
+  for handoff_file in "$lock_dir"/"admission-$scope-"*.lock.handoff.*; do
+    [ -e "$handoff_file" ] || continue
+    if ! exec {handoff_fd}<>"$handoff_file"; then
+      continue
+    fi
+    if flock -n -x "$handoff_fd"; then
+      if ! rm -f -- "$handoff_file"; then
+        flock -u "$handoff_fd" >/dev/null 2>&1 || true
+        close_dynamic_fd "$handoff_fd"
+        release_gpu_allocator_mutex
+        die "could not prune stale GPU admission handoff: $handoff_file"
+      fi
+      flock -u "$handoff_fd" >/dev/null 2>&1 || true
+    fi
+    close_dynamic_fd "$handoff_fd"
+  done
+
   for ticket_file in "$lock_dir"/"admission-$scope-"*.lock; do
     [ -e "$ticket_file" ] || continue
     if [ "$ticket_file" = "$proof_gpu_admission_file" ]; then
@@ -590,14 +614,14 @@ release_candidate_slot_locks() {
   candidate_fds_ref=()
 }
 
-try_acquire_all_gpu_slots() {
+try_acquire_exclusive_gpu_atomically() {
   local gpu_id="$1"
   local lock_dir="$2"
   local slots_per_gpu="$3"
   local -a candidate_fds=()
   local -a candidate_files=()
   local -a candidate_slots=()
-  local slot slot_fd slot_file
+  local slot slot_fd slot_file reservation_fd reservation_file
   for ((slot = 0; slot < slots_per_gpu; slot++)); do
     slot_file="$lock_dir/gpu-$gpu_id-slot-$slot.lock"
     exec {slot_fd}>"$slot_file" || die "could not open GPU slot lock: $slot_file"
@@ -610,10 +634,25 @@ try_acquire_all_gpu_slots() {
     candidate_files+=("$slot_file")
     candidate_slots+=("$slot")
   done
+
+  # Acquire the reservation only after every slot is held. The allocator mutex
+  # prevents new admissions during this scan, so a busy GPU never publishes a
+  # transient reservation that could be mistaken for a committed assignment.
+  reservation_file="$lock_dir/gpu-$gpu_id-reservation.lock"
+  exec {reservation_fd}>"$reservation_file" || \
+    die "could not open GPU reservation lock: $reservation_file"
+  if ! flock -n "$reservation_fd"; then
+    close_dynamic_fd "$reservation_fd"
+    release_candidate_slot_locks candidate_fds
+    return 1
+  fi
+
   proof_gpu_id="$gpu_id"
   proof_gpu_lease_fds=("${candidate_fds[@]}")
   proof_gpu_lease_files=("${candidate_files[@]}")
   proof_gpu_slot_ids=("${candidate_slots[@]}")
+  proof_gpu_reservation_fd="$reservation_fd"
+  proof_gpu_reservation_file="$reservation_file"
   return 0
 }
 
@@ -661,40 +700,96 @@ try_acquire_shared_gpu_slot() {
   return 1
 }
 
-try_acquire_exclusive_gpu() {
+try_reserve_exclusive_gpu() {
   local lock_dir="$1"
   local slots_per_gpu="$2"
   local deadline="$3"
   shift 3
   local -a candidate_gpu_ids=("$@")
-  local gpu_id reservation_fd reservation_file
+  local gpu_id reservation_fd reservation_file visible_ticket handoff_ticket
 
   acquire_gpu_allocator_mutex "$lock_dir" "$deadline" || return 1
+
+  # With one eligible GPU there is no first-idle choice to preserve. Reserve
+  # it once, complete the queue handoff under the allocator mutex, and let the
+  # caller block event-driven on the remaining slot holders. Skipping the
+  # multi-GPU availability scan also avoids publishing a transient reservation
+  # that is not yet the committed queue-to-GPU handoff.
+  if [ "${#candidate_gpu_ids[@]}" -eq 1 ]; then
+    gpu_id="${candidate_gpu_ids[0]}"
+    reservation_file="$lock_dir/gpu-$gpu_id-reservation.lock"
+    exec {reservation_fd}>"$reservation_file" || \
+      die "could not open GPU reservation lock: $reservation_file"
+
+    # Hide the queue entry without unlocking its inode. Other waiters cannot
+    # scan while this process holds the allocator mutex, and successors that
+    # already pinned the ticket remain blocked. This makes the visible
+    # ticket-to-reservation transition transactional: restore the path if the
+    # reservation is unavailable, or retire the hidden ticket after success.
+    visible_ticket="$proof_gpu_admission_file"
+    [ -n "$visible_ticket" ] || die "exclusive GPU handoff has no admission ticket"
+    handoff_ticket="${visible_ticket}.handoff.$$"
+    mv -- "$visible_ticket" "$handoff_ticket" || \
+      die "could not begin GPU admission handoff: $visible_ticket"
+    proof_gpu_admission_file="$handoff_ticket"
+    if flock -n "$reservation_fd"; then
+      proof_gpu_id="$gpu_id"
+      proof_gpu_reservation_fd="$reservation_fd"
+      proof_gpu_reservation_file="$reservation_file"
+      release_gpu_admission_ticket
+      release_gpu_allocator_mutex
+      return 2
+    fi
+    mv -- "$handoff_ticket" "$visible_ticket" || \
+      die "could not restore GPU admission ticket after reservation contention: $visible_ticket"
+    proof_gpu_admission_file="$visible_ticket"
+    close_dynamic_fd "$reservation_fd"
+    release_gpu_allocator_mutex
+    return 1
+  fi
 
   # The oldest admission ticket prevents younger work from refilling capacity,
   # so it is enough to atomically scan for the first GPU whose slots have all
   # drained. Do not pin the waiter to an arbitrary busy GPU: another device may
   # become idle much sooner.
   for gpu_id in "${candidate_gpu_ids[@]}"; do
-    reservation_file="$lock_dir/gpu-$gpu_id-reservation.lock"
-    exec {reservation_fd}>"$reservation_file" || \
-      die "could not open GPU reservation lock: $reservation_file"
-    if ! flock -n "$reservation_fd"; then
-      close_dynamic_fd "$reservation_fd"
-      continue
-    fi
-    if try_acquire_all_gpu_slots "$gpu_id" "$lock_dir" "$slots_per_gpu"; then
-      proof_gpu_reservation_fd="$reservation_fd"
-      proof_gpu_reservation_file="$reservation_file"
+    if try_acquire_exclusive_gpu_atomically \
+        "$gpu_id" "$lock_dir" "$slots_per_gpu"; then
+      release_gpu_admission_ticket
       release_gpu_allocator_mutex
       return 0
     fi
-    flock -u "$reservation_fd" || true
-    close_dynamic_fd "$reservation_fd"
   done
 
+  # Keep the oldest global ticket and rescan until whichever eligible device
+  # becomes fully idle first can be acquired atomically. An arbitrary early
+  # reservation could pin this proof behind the slowest GPU.
   release_gpu_allocator_mutex
   return 1
+}
+
+# Incrementally lock every slot of the sole reserved GPU. The reservation
+# fences new work out, current holders only release, and fixed slot order makes
+# this blocking acquisition deadlock-free. Returns 0 leased and 1 on deadline.
+drain_reserved_gpu_slots() {
+  local lock_dir="$1"
+  local slots_per_gpu="$2"
+  local deadline="$3"
+  [ -n "$proof_gpu_reservation_fd" ] || \
+    die "cannot drain GPU slots without holding a reservation"
+  local slot slot_fd slot_file
+  for ((slot = 0; slot < slots_per_gpu; slot++)); do
+    slot_file="$lock_dir/gpu-$proof_gpu_id-slot-$slot.lock"
+    exec {slot_fd}>"$slot_file" || die "could not open GPU slot lock: $slot_file"
+    if ! blocking_flock "$slot_fd" "$deadline"; then
+      close_dynamic_fd "$slot_fd"
+      return 1
+    fi
+    proof_gpu_lease_fds+=("$slot_fd")
+    proof_gpu_lease_files+=("$slot_file")
+    proof_gpu_slot_ids+=("$slot")
+  done
+  return 0
 }
 
 select_proof_gpu() {
@@ -772,7 +867,7 @@ select_proof_gpu() {
   if [[ "${proof_gpu_lease_deadline:-}" =~ ^[1-9][0-9]*$ ]]; then
     deadline="$proof_gpu_lease_deadline"
   fi
-  local attempted=0 poll_remaining=0
+  local attempted=0 reserve_rc=0 poll_remaining=0
   local admission_scope="global"
   # Register once in a crash-safe monotonic queue. Every later wait keeps
   # this position, so younger matrix jobs can never overtake an older waiter
@@ -802,15 +897,24 @@ select_proof_gpu() {
         return 0
       fi
     else
-      if try_acquire_exclusive_gpu \
-          "$lock_dir" "$slots_per_gpu" "$deadline" \
-          "${candidate_gpu_ids[@]}"; then
-        release_gpu_admission_ticket
+      set +e
+      try_reserve_exclusive_gpu \
+        "$lock_dir" "$slots_per_gpu" "$deadline" "${candidate_gpu_ids[@]}"
+      reserve_rc=$?
+      set -e
+      if [ "$reserve_rc" -eq 0 ]; then
+        echo "Leased exclusive model-proof GPU $proof_gpu_id slots ${proof_gpu_slot_ids[*]}"
+        return 0
+      elif [ "$reserve_rc" -eq 2 ]; then
+        # A sole eligible GPU is reserved and its queue handoff is complete.
+        # Wait directly on the remaining slot holders instead of polling.
+        drain_reserved_gpu_slots "$lock_dir" "$slots_per_gpu" "$deadline" || \
+          die "timed out after ${timeout}s waiting for a ${resource_class} model-proof GPU lease from: ${candidate_gpu_ids[*]}"
         echo "Leased exclusive model-proof GPU $proof_gpu_id slots ${proof_gpu_slot_ids[*]}"
         return 0
       fi
-      # Intentionally retain the oldest FIFO ticket while existing work
-      # drains, so younger shared proofs cannot steal the first idle slots.
+      # With multiple candidates, retain the oldest FIFO ticket while existing
+      # work drains so younger proofs cannot steal the first fully idle GPU.
     fi
     # Clamp the poll sleep to the remaining lease budget so a large
     # configured interval can never sleep past the deadline and report a

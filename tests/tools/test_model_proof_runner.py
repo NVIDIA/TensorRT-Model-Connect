@@ -2568,6 +2568,10 @@ def test_gpu_admission_queue_prunes_a_stale_ticket(tmp_path: Path) -> None:
     lock_dir.mkdir()
     stale_ticket = lock_dir / "admission-global-00000000000000000001.lock"
     stale_ticket.write_text("pid=999999 model=stale\n", encoding="utf-8")
+    stale_handoff = (
+        lock_dir / "admission-global-00000000000000000000.lock.handoff.999999"
+    )
+    stale_handoff.write_text("pid=999999 model=stale-handoff\n", encoding="utf-8")
 
     result = subprocess.run(
         [
@@ -2589,6 +2593,7 @@ def test_gpu_admission_queue_prunes_a_stale_ticket(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert not stale_ticket.exists()
+    assert not stale_handoff.exists()
     assert not list(lock_dir.glob("admission-global-*.lock"))
     assert (lock_dir / "admission-global.next").read_text(encoding="utf-8") == "2\n"
     assert _proof_gpu_ids(docker_log) == ["9"]
@@ -2651,7 +2656,7 @@ def test_gpu_allocator_mutex_contention_obeys_lease_timeout(
 
 
 @pytest.mark.model_proof_allocator
-def test_exclusive_gpu_ticket_drains_existing_shared_and_blocks_new_shared(
+def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
     tmp_path: Path,
 ) -> None:
     lock_dir = tmp_path / "gpu-locks"
@@ -2735,15 +2740,10 @@ def test_exclusive_gpu_ticket_drains_existing_shared_and_blocks_new_shared(
 
         reservation = lock_dir / "gpu-6-reservation.lock"
         deadline = time.monotonic() + 90
-        while time.monotonic() < deadline and not list(
-            lock_dir.glob("admission-global-*.lock")
-        ):
+        while time.monotonic() < deadline and not _lock_is_busy(reservation):
             time.sleep(0.05)
-        tickets = list(lock_dir.glob("admission-global-*.lock"))
-        assert len(tickets) == 1
-        assert "model=flux" in tickets[0].read_text(encoding="utf-8")
-        assert _lock_is_busy(tickets[0])
-        assert not _lock_is_busy(reservation)
+        assert _lock_is_busy(reservation), "exclusive proof never reserved GPU 6"
+        assert not list(lock_dir.glob("admission-global-*.lock"))
 
         blocked_dir = tmp_path / "blocked-shared"
         blocked_dir.mkdir()
@@ -3322,7 +3322,7 @@ def test_killed_queue_predecessor_wakes_waiter_and_is_pruned(tmp_path: Path) -> 
 
 
 @pytest.mark.model_proof_allocator
-def test_exclusive_ticket_waits_for_all_holders_in_any_order(
+def test_exclusive_drain_completes_as_holders_release_in_any_order(
     tmp_path: Path,
 ) -> None:
     lock_dir = tmp_path / "gpu-locks"
@@ -3357,33 +3357,25 @@ def test_exclusive_ticket_waits_for_all_holders_in_any_order(
         exclusive, exclusive_output = _start_proof_case(
             tmp_path, "exclusive", "bark", exclusive_release, common_env
         )
-        # The exclusive proof keeps the oldest queue position without pinning
-        # itself to a partially occupied GPU.
+        # One eligible GPU is reserved, the global queue advances, and the
+        # exclusive proof drains the remaining holders event-driven.
         deadline = time.monotonic() + coordination_timeout_s
-        while time.monotonic() < deadline and not list(
-            lock_dir.glob("admission-global-*.lock")
+        while time.monotonic() < deadline and not (
+            _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
+            and not list(lock_dir.glob("admission-global-*.lock"))
         ):
             time.sleep(0.05)
-        tickets = list(lock_dir.glob("admission-global-*.lock"))
-        assert len(tickets) == 1
-        assert "model=bark" in tickets[0].read_text(encoding="utf-8")
-        assert _lock_is_busy(tickets[0])
-        assert not _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
-        assert not (exclusive_output / "artifacts" / "gpu-lease.json").exists()
+        assert _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
+        assert not list(lock_dir.glob("admission-global-*.lock"))
 
-        # Release holders out of order. The exclusive proof must not publish a
-        # partial lease; it can proceed only after every slot is simultaneously
-        # available for one atomic acquisition.
+        # Release holders in a non-sequential order. Waiting on fixed slot order
+        # must still complete after every holder exits.
         for index in (1, 0, 2):
             releases[index].touch()
             holder = holders[index]
             assert holder is not None
             holder_stdout, holder_stderr = holder.communicate(timeout=coordination_timeout_s)
             assert holder.returncode == 0, f"shared-{index}: " + holder_stdout + holder_stderr
-            if index != 2:
-                assert not (exclusive_output / "artifacts" / "gpu-lease.json").exists()
-                assert _lock_is_busy(tickets[0])
-                assert not _lock_is_busy(lock_dir / "gpu-6-reservation.lock")
 
         exclusive_stdout, exclusive_stderr = exclusive.communicate(timeout=coordination_timeout_s)
         assert exclusive.returncode == 0, exclusive_stdout + exclusive_stderr
