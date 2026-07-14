@@ -192,6 +192,185 @@ def _write_stsbenchmark(path: Path) -> None:
     )
 
 
+def _write_time_series_csv(path: Path, row_count: int = 40) -> None:
+    lines = ["date,A,B"]
+    for index in range(row_count):
+        lines.append(f"2026-01-{index + 1:02d},{index},{100 + index}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_default_suites_include_etth1_time_series_parity() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "etth1_time_series_parity")
+
+    assert suite["dataset"]["kind"] == "time_series_csv"
+    assert suite["scoring"]["scorer"] == "time_series_parity"
+    assert suite["gates"]["min_sample_agreement_rate"] == 1.0
+    assert suite["default_model_names"] == [
+        "chronos-bolt-tiny-official",
+        "patchtsmixer-granite-official",
+        "patchtst-etth1-regression-distribution",
+        "patchtst-granite-official",
+        "timesfm-2.0-500m-official",
+    ]
+    models = task_eval.load_manifest_records()
+    plan = task_eval.build_plan([suite], models)
+    assert {row["model"] for row in plan if row["selected"]} == set(suite["default_model_names"])
+
+
+def test_prepare_time_series_csv_dataset_uses_time_major_windows(tmp_path: Path) -> None:
+    dataset_path = tmp_path / "series.csv"
+    _write_time_series_csv(dataset_path)
+    work_dir = tmp_path / "work"
+    suite = {
+        "id": "time_series_test",
+        "dataset": {"kind": "time_series_csv", "name": "test series"},
+        "scoring": {"scorer": "time_series_parity"},
+    }
+
+    task_eval.prepare_time_series_csv_dataset(
+        dataset_path=dataset_path,
+        work_dir=work_dir,
+        suite=suite,
+        limit=2,
+        task_eval_config={
+            "time_series": {
+                "input_columns": ["A", "B"],
+                "target_columns": ["B"],
+                "input_key": "branch_input",
+                "context_length": 3,
+                "prediction_length": 2,
+                "stride": 2,
+                "test_fraction": 0.5,
+                "frequency": 0,
+            }
+        },
+    )
+
+    prompts = task_eval.load_jsonl(work_dir / "prompts.jsonl")
+    answers = json.loads((work_dir / "answers.json").read_text(encoding="utf-8"))
+    manifest = json.loads((work_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert len(prompts) == len(answers["requests"]) == 2
+    assert prompts[0]["dataset_index"] == 20
+    assert prompts[0]["context_index"] == 17
+    assert prompts[0]["inputs"] == {
+        "branch_input": [17.0, 117.0, 18.0, 118.0, 19.0, 119.0],
+        "trunk_input": [0],
+    }
+    assert prompts[0]["target_values"] == [120.0, 121.0]
+    assert manifest["time_series"]["context_length"] == 3
+
+
+def test_time_series_case_replaces_manifest_probe_inputs() -> None:
+    template = SimpleNamespace(name="template", inputs={"field_input": [999], "stale": True})
+
+    case = task_eval._time_series_case_for_request(
+        template,
+        {
+            "sample_id": "etth1_000001",
+            "inputs": {"branch_input": [1.0, 2.0], "trunk_input": [0]},
+        },
+        0,
+    )
+
+    assert case.name == "etth1_000001"
+    assert case.inputs == {"branch_input": [1.0, 2.0], "trunk_input": [0]}
+    assert template.inputs == {"field_input": [999], "stale": True}
+
+
+def test_time_series_trtfb_reuses_model_runner_and_writes_run_log(
+    tmp_path: Path, monkeypatch
+) -> None:
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"dataset_kind": "time_series_csv"}), encoding="utf-8"
+    )
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps(
+            {
+                "sample_id": "etth1_011520",
+                "inputs": {"field_input": [1.0, 2.0, 3.0]},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    template = SimpleNamespace(
+        name="template",
+        inputs={"field_input": [999.0]},
+        stages=[],
+        bundle="template.trtfb",
+    )
+    captured_inputs: list[dict] = []
+
+    class FakeRunner:
+        def run_stage(self, case, stage, context):
+            captured_inputs.append(dict(case.inputs))
+            return SimpleNamespace(
+                data={"output_field": [1.5, 2.5], "output_dim": 2},
+                metadata={"command": ["trtmc", "solve"], "returncode": 0},
+                timing_s=0.01,
+            )
+
+    monkeypatch.setattr(
+        task_eval,
+        "_load_time_series_task_eval_plugins",
+        lambda _work_dir: (template, object(), FakeRunner()),
+    )
+    task_eval.run_time_series_trtfb(
+        SimpleNamespace(
+            work_dir=str(work_dir),
+            raw_output="",
+            predictions="",
+            log="",
+            bundle=str(tmp_path / "model.trtfb"),
+            trtmc_binary="trtmc",
+            hf_python="python",
+            model_plugin_dir="",
+        )
+    )
+
+    predictions = json.loads(
+        (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+    )
+    log_row = task_eval.load_jsonl(work_dir / "trtfb_run.log")[0]
+    assert captured_inputs == [{"field_input": [1.0, 2.0, 3.0]}]
+    assert predictions["responses"][0]["output_values"] == [1.5, 2.5]
+    assert log_row["sample_id"] == "etth1_011520"
+    assert log_row["command"] == ["trtmc", "solve"]
+
+
+def test_time_series_parity_requires_every_sample_to_pass() -> None:
+    hf = {
+        "responses": [
+            {"sample_id": "a", "output_values": [1.0, 2.0]},
+            {"sample_id": "b", "output_values": [3.0, 4.0]},
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {"sample_id": "a", "output_values": [1.0, 2.0001]},
+            {"sample_id": "b", "output_values": [3.0, 4.1]},
+        ]
+    }
+
+    summary = task_eval.compare_time_series_prediction_sets(
+        hf,
+        trtfb,
+        gates={
+            "max_relative_l2": 1e-3,
+            "max_absolute_error": 1e-3,
+            "min_sample_agreement_rate": 1.0,
+        },
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["passed_count"] == 1
+    assert summary["sample_agreement_rate"] == 0.5
+    assert summary["cases"][0]["passed"] is True
+    assert summary["cases"][1]["passed"] is False
+
+
 def test_default_suites_include_ocrbench_v2_unified() -> None:
     suites = task_eval.load_suites()
     suite = task_eval.suite_by_id(suites, "ocrbench_v2_unified")

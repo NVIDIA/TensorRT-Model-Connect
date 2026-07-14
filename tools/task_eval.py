@@ -2124,6 +2124,176 @@ def prepare_sts_pair_dataset(
     return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
 
 
+def _time_series_columns(value: Any, *, field: str) -> list[str]:
+    if isinstance(value, str):
+        columns = [value]
+    elif isinstance(value, list):
+        columns = [str(column) for column in value]
+    else:
+        columns = []
+    if not columns or any(not column for column in columns):
+        raise ValueError(f"time_series.{field} must contain at least one column name")
+    return columns
+
+
+def prepare_time_series_csv_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    """Prepare model-shaped numeric windows from a shared time-series CSV."""
+    if subject:
+        raise ValueError("time_series_csv does not support --subject filtering")
+    config = task_eval_config if isinstance(task_eval_config, dict) else {}
+    time_series = config.get("time_series", {})
+    if not isinstance(time_series, dict):
+        raise ValueError("task_eval.time_series must be a mapping")
+
+    input_columns = _time_series_columns(time_series.get("input_columns"), field="input_columns")
+    target_columns = _time_series_columns(
+        time_series.get("target_columns", input_columns), field="target_columns"
+    )
+    input_key = str(time_series.get("input_key", "field_input") or "field_input")
+    if input_key not in {"field_input", "branch_input"}:
+        raise ValueError("time_series.input_key must be either 'field_input' or 'branch_input'")
+    context_length = int(time_series.get("context_length", 0) or 0)
+    prediction_length = int(time_series.get("prediction_length", 0) or 0)
+    stride = int(time_series.get("stride", prediction_length or 1) or 0)
+    dataset_config = suite.get("dataset", {})
+    test_fraction = float(time_series.get("test_fraction", 0.2))
+    if context_length <= 0 or prediction_length <= 0 or stride <= 0:
+        raise ValueError(
+            "time_series context_length, prediction_length, and stride must be positive"
+        )
+    if not 0.0 < test_fraction <= 1.0:
+        raise ValueError("time_series.test_fraction must be in (0, 1]")
+
+    with dataset_path.open(newline="", encoding="utf-8") as csv_file:
+        reader = csv.DictReader(csv_file)
+        fieldnames = set(reader.fieldnames or [])
+        required_columns = set(input_columns) | set(target_columns)
+        missing_columns = sorted(required_columns - fieldnames)
+        if missing_columns:
+            raise ValueError(f"{dataset_path}: missing time-series columns {missing_columns}")
+        rows = list(reader)
+    minimum_rows = context_length + prediction_length
+    if len(rows) < minimum_rows:
+        raise ValueError(f"{dataset_path}: needs at least {minimum_rows} rows, found {len(rows)}")
+
+    test_target_start = int(
+        time_series.get(
+            "test_target_start",
+            dataset_config.get("test_target_start", int(len(rows) * (1.0 - test_fraction))),
+        )
+    )
+    test_end = int(time_series.get("test_end", dataset_config.get("test_end", len(rows))))
+    if not context_length <= test_target_start < test_end <= len(rows):
+        raise ValueError(
+            "time_series test_target_start/test_end do not define a valid test window"
+        )
+    first_start = test_target_start - context_length
+    last_start = test_end - context_length - prediction_length
+    if last_start < first_start:
+        raise ValueError("time_series test window is shorter than prediction_length")
+    starts = list(range(first_start, last_start + 1, stride))
+    if sample_seed is not None:
+        random.Random(sample_seed).shuffle(starts)
+    if limit > 0:
+        starts = starts[:limit]
+
+    timestamp_column = str(time_series.get("timestamp_column", "date") or "")
+    sample_prefix = str(dataset_config.get("sample_prefix", "time_series") or "time_series")
+    frequency = time_series.get("frequency")
+    work_dir.mkdir(parents=True, exist_ok=True)
+    answers_path = work_dir / "answers.json"
+    prompts_path = work_dir / "prompts.jsonl"
+    manifest_path = work_dir / "manifest.json"
+    requests: list[dict[str, Any]] = []
+    with prompts_path.open("w", encoding="utf-8") as prompts_file:
+        for eval_index, start in enumerate(starts):
+            context_rows = rows[start : start + context_length]
+            target_rows = rows[start + context_length : start + context_length + prediction_length]
+            try:
+                input_values = [
+                    float(row[column]) for row in context_rows for column in input_columns
+                ]
+                target_values = [
+                    float(row[column]) for row in target_rows for column in target_columns
+                ]
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{dataset_path}: non-numeric value in window starting at row {start}"
+                ) from exc
+            target_index = start + context_length
+            sample_id = f"{sample_prefix}_{target_index:06d}"
+            inputs: dict[str, Any] = {input_key: input_values}
+            if frequency is not None:
+                inputs["trunk_input"] = [int(frequency)]
+            request = {
+                "sample_id": sample_id,
+                "dataset_index": target_index,
+                "context_index": start,
+                "input_columns": input_columns,
+                "target_columns": target_columns,
+                "target_values": target_values,
+            }
+            if timestamp_column and timestamp_column in fieldnames:
+                request["context_start"] = str(context_rows[0][timestamp_column])
+                request["context_end"] = str(context_rows[-1][timestamp_column])
+                request["target_start"] = str(target_rows[0][timestamp_column])
+                request["target_end"] = str(target_rows[-1][timestamp_column])
+            requests.append(request)
+            prompts_file.write(
+                json.dumps(
+                    {
+                        **request,
+                        "eval_index": eval_index,
+                        "inputs": inputs,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    answers = {
+        "dataset": str(suite.get("dataset", {}).get("name", dataset_path.stem)),
+        "scoring": suite.get("scoring", {}),
+        "requests": requests,
+    }
+    answers_path.write_text(json.dumps(answers, indent=2, ensure_ascii=False), encoding="utf-8")
+    manifest = {
+        "suite": suite["id"],
+        "dataset": str(dataset_path),
+        "dataset_kind": suite.get("dataset", {}).get("kind", ""),
+        "request_count": len(requests),
+        "limit": limit,
+        "sample_seed": sample_seed,
+        "scoring": suite.get("scoring", {}),
+        "time_series": {
+            "input_columns": input_columns,
+            "target_columns": target_columns,
+            "input_key": input_key,
+            "context_length": context_length,
+            "prediction_length": prediction_length,
+            "stride": stride,
+            "test_fraction": test_fraction,
+            "test_target_start": test_target_start,
+            "test_end": test_end,
+            **({"frequency": int(frequency)} if frequency is not None else {}),
+        },
+        "files": {"answers": str(answers_path), "prompts": str(prompts_path)},
+    }
+    if task_eval_config:
+        manifest["task_eval"] = task_eval_config
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"answers": answers_path, "prompts": prompts_path, "manifest": manifest_path}
+
+
 def prepare_task_dataset(
     *,
     dataset_path: Path,
@@ -2247,6 +2417,16 @@ def prepare_task_dataset(
         )
     if dataset_kind == "sts_pair_jsonl":
         return prepare_sts_pair_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
+    if dataset_kind == "time_series_csv":
+        return prepare_time_series_csv_dataset(
             dataset_path=dataset_path,
             work_dir=work_dir,
             suite=suite,
@@ -2531,7 +2711,7 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
     defaults = generation_defaults(work_dir)
     raw_output = work_dir / (args.raw_output or "trtfb_raw.jsonl")
     predictions = work_dir / (args.predictions or "trtfb_predictions.json")
-    log_path = work_dir / (args.log or "trtfb_run.log")
+    log_path = work_dir / (getattr(args, "log", "") or "trtfb_run.log")
     max_new_tokens = (
         args.max_new_tokens
         if args.max_new_tokens is not None
@@ -5078,6 +5258,10 @@ def _is_encoder_embedding_dataset_kind(kind: str) -> bool:
     return kind == "sts_pair_jsonl"
 
 
+def _is_time_series_dataset_kind(kind: str) -> bool:
+    return kind == "time_series_csv"
+
+
 def _is_vision_task_dataset_kind(kind: str) -> bool:
     return kind in {
         "image_classification_json",
@@ -6013,6 +6197,166 @@ def _load_vision_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
     return case, reference, runner
 
 
+def _load_time_series_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
+    task_eval_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        task_eval_config = {}
+    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+    if not manifest_ref:
+        raise ValueError("time-series task eval requires task_eval.model_manifest")
+    manifest_path = Path(manifest_ref)
+    if not manifest_path.is_absolute():
+        manifest_path = REPO_ROOT / manifest_path
+    case = load_manifest(manifest_path)
+    activate_model_plugins(str(case.metadata.get("model_test_dir", "") or ""))
+    reference = get_reference(case.reference_backend)
+    runner = get_runner(case.task_strategy)
+    if reference is None:
+        raise RuntimeError(f"No reference plugin {case.reference_backend!r} for {case.family}")
+    if runner is None:
+        raise RuntimeError(f"No runner plugin {case.task_strategy!r} for {case.family}")
+    return case, reference, runner
+
+
+def _time_series_case_for_request(template: Any, prompt_row: dict[str, Any], index: int) -> Any:
+    case = copy.deepcopy(template)
+    case.name = str(prompt_row.get("sample_id", f"time_series_{index:06d}"))
+    inputs = prompt_row.get("inputs")
+    if not isinstance(inputs, dict) or not inputs:
+        raise ValueError(f"Time-series sample {case.name!r} has no numeric inputs")
+    case.inputs = copy.deepcopy(inputs)
+    return case
+
+
+def _time_series_full_inference_stage(case: Any) -> Any:
+    from tests.e2e_harness.contracts import StageSpec
+
+    for stage in case.stages:
+        if stage.name == "full_inference":
+            return stage
+    return StageSpec(name="full_inference", required=True)
+
+
+def _time_series_response(*, case: Any, source: str, output: Any) -> dict[str, Any]:
+    data = output.data if isinstance(output.data, dict) else {}
+    metadata = output.metadata if isinstance(output.metadata, dict) else {}
+    error = str(data.get("error", "") or "")
+    values = data.get("output_field", data.get("field"))
+    if error:
+        raise RuntimeError(f"{source} time-series inference failed for {case.name}: {error}")
+    if not isinstance(values, list) or not values:
+        raise RuntimeError(
+            f"{source} time-series inference produced no output tensor for {case.name}"
+        )
+    try:
+        output_values = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"{source} time-series inference produced non-numeric output for {case.name}"
+        ) from exc
+    output_shape = data.get("output_shape")
+    if not isinstance(output_shape, list):
+        output_shape = [int(data.get("output_dim", len(output_values)))]
+    return {
+        "sample_id": case.name,
+        "source": source,
+        "output_values": output_values,
+        "output_shape": [int(dim) for dim in output_shape],
+        "output_name": str(data.get("reference_output_name", "") or ""),
+        "returncode": int(metadata.get("returncode", 0) or 0),
+        "wall_ms": float(output.timing_s) * 1000.0,
+    }
+
+
+def run_time_series_hf_reference(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, reference, _runner = _load_time_series_task_eval_plugins(work_dir)
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "hf_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "hf_predictions.json")
+    responses: list[dict[str, Any]] = []
+    with raw_path.open("w", encoding="utf-8") as raw_file:
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _time_series_case_for_request(template, prompt_row, index)
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                hf_python=sys.executable,
+                reference_python=sys.executable,
+            )
+            output = reference.run_stage(case, _time_series_full_inference_stage(case), context)
+            response = _time_series_response(case=case, source="hf", output=output)
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            print(
+                f"[task_eval.time_series_hf] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
+def run_time_series_trtfb(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, _reference, runner = _load_time_series_task_eval_plugins(work_dir)
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    log_path = work_dir / (args.log or "trtfb_run.log")
+    bundle_path = Path(args.bundle).resolve()
+    responses: list[dict[str, Any]] = []
+    with (
+        raw_path.open("w", encoding="utf-8") as raw_file,
+        log_path.open("w", encoding="utf-8") as log_file,
+    ):
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _time_series_case_for_request(template, prompt_row, index)
+            case.bundle = bundle_path.name
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                binary_path=str(args.trtmc_binary),
+                hf_python=str(getattr(args, "hf_python", "") or ""),
+                runtime_python=str(getattr(args, "hf_python", "") or ""),
+                engine_dir=str(bundle_path.parent),
+                model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
+            )
+            output = runner.run_stage(case, _time_series_full_inference_stage(case), context)
+            log_file.write(
+                json.dumps(
+                    {
+                        "sample_id": case.name,
+                        **(output.metadata if isinstance(output.metadata, dict) else {}),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            log_file.flush()
+            response = _time_series_response(case=case, source="trtfb", output=output)
+            if response["returncode"] != 0:
+                raise RuntimeError(
+                    f"TRT time-series run failed for {case.name}: "
+                    f"returncode={response['returncode']}"
+                )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            print(
+                f"[task_eval.time_series_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
 def _vision_case_for_request(
     template: Any,
     prompt_row: dict[str, Any],
@@ -6755,6 +7099,9 @@ def run_hf_reference(args: argparse.Namespace) -> None:
     if _is_reranking_dataset_kind(dataset_kind):
         run_reranking_hf_reference(args)
         return
+    if _is_time_series_dataset_kind(dataset_kind):
+        run_time_series_hf_reference(args)
+        return
     if _is_vision_task_dataset_kind(dataset_kind):
         run_vision_hf_reference(args)
         return
@@ -7384,6 +7731,9 @@ def run_trtfb(args: argparse.Namespace) -> None:
     if _is_reranking_dataset_kind(dataset_kind):
         run_reranking_trtfb(args)
         return
+    if _is_time_series_dataset_kind(dataset_kind):
+        run_time_series_trtfb(args)
+        return
     if _is_vision_task_dataset_kind(dataset_kind):
         run_vision_trtfb(args)
         return
@@ -8000,6 +8350,129 @@ def _task_eval_response_rows(data: dict[str, Any], label: str) -> list[dict[str,
     return rows
 
 
+def compare_time_series_prediction_sets(
+    hf_data: dict[str, Any],
+    trtfb_data: dict[str, Any],
+    *,
+    gates: dict[str, Any],
+) -> dict[str, Any]:
+    """Gate every numeric sample with the model-owned E2E parity metrics."""
+    hf_rows = _task_eval_response_rows(hf_data, "HF")
+    trtfb_rows = _task_eval_response_rows(trtfb_data, "TRTMC")
+    if len(hf_rows) != len(trtfb_rows):
+        raise ValueError(
+            f"Time-series HF/TRTMC prediction count mismatch: {len(hf_rows)} != {len(trtfb_rows)}"
+        )
+    max_relative_l2 = float(gates.get("max_relative_l2", 0.01))
+    max_absolute_error = float(gates.get("max_absolute_error", 0.1))
+    min_sample_agreement_rate = float(gates.get("min_sample_agreement_rate", 1.0))
+    cases: list[dict[str, Any]] = []
+    for index, (hf_row, trtfb_row) in enumerate(zip(hf_rows, trtfb_rows, strict=True)):
+        hf_id = str(hf_row.get("sample_id", index))
+        trtfb_id = str(trtfb_row.get("sample_id", index))
+        if hf_id != trtfb_id:
+            raise ValueError(
+                f"Time-series sample id mismatch at {index}: {hf_id!r} != {trtfb_id!r}"
+            )
+        hf_values = hf_row.get("output_values")
+        trtfb_values = trtfb_row.get("output_values")
+        if not isinstance(hf_values, list) or not isinstance(trtfb_values, list):
+            raise ValueError(f"Time-series prediction {hf_id!r} is missing output_values")
+        if len(hf_values) != len(trtfb_values) or not hf_values:
+            cases.append(
+                {
+                    "sample_id": hf_id,
+                    "passed": False,
+                    "error": (
+                        "output element count mismatch: "
+                        f"HF={len(hf_values)} TRTMC={len(trtfb_values)}"
+                    ),
+                }
+            )
+            continue
+        hf_vector = [float(value) for value in hf_values]
+        trtfb_vector = [float(value) for value in trtfb_values]
+        if not all(math.isfinite(value) for value in hf_vector + trtfb_vector):
+            cases.append(
+                {
+                    "sample_id": hf_id,
+                    "passed": False,
+                    "error": "non-finite output value",
+                }
+            )
+            continue
+        squared_error = sum(
+            (trtfb - hf) ** 2 for hf, trtfb in zip(hf_vector, trtfb_vector, strict=True)
+        )
+        reference_squared_norm = sum(value * value for value in hf_vector)
+        relative_l2 = (
+            math.sqrt(squared_error / reference_squared_norm)
+            if reference_squared_norm >= 1e-24
+            else math.sqrt(squared_error)
+        )
+        absolute_error = max(
+            abs(trtfb - hf) for hf, trtfb in zip(hf_vector, trtfb_vector, strict=True)
+        )
+        cases.append(
+            {
+                "sample_id": hf_id,
+                "output_numel": len(hf_vector),
+                "hf_output_shape": hf_row.get("output_shape", []),
+                "trtfb_output_shape": trtfb_row.get("output_shape", []),
+                "relative_l2": relative_l2,
+                "max_absolute_error": absolute_error,
+                "passed": (relative_l2 <= max_relative_l2 and absolute_error <= max_absolute_error),
+            }
+        )
+
+    valid_cases = [case for case in cases if "relative_l2" in case]
+    passed_count = sum(bool(case.get("passed")) for case in cases)
+    agreement_rate = passed_count / len(cases) if cases else 0.0
+    status = (
+        "passed"
+        if cases and len(valid_cases) == len(cases) and agreement_rate >= min_sample_agreement_rate
+        else "failed"
+    )
+    return {
+        "status": status,
+        "sample_count": len(cases),
+        "valid_count": len(valid_cases),
+        "passed_count": passed_count,
+        "sample_agreement_rate": agreement_rate,
+        "mean_relative_l2": (
+            sum(float(case["relative_l2"]) for case in valid_cases) / len(valid_cases)
+            if valid_cases
+            else float("inf")
+        ),
+        "max_relative_l2": max(
+            (float(case["relative_l2"]) for case in valid_cases),
+            default=float("inf"),
+        ),
+        "max_absolute_error": max(
+            (float(case["max_absolute_error"]) for case in valid_cases),
+            default=float("inf"),
+        ),
+        "gates": {
+            "max_relative_l2": max_relative_l2,
+            "max_absolute_error": max_absolute_error,
+            "min_sample_agreement_rate": min_sample_agreement_rate,
+        },
+        "cases": cases,
+    }
+
+
+def write_time_series_summary_markdown(summary: dict[str, Any], path: Path) -> None:
+    lines = [
+        "# Time-series HF/TRTMC Parity Summary",
+        "",
+        f"- status: {summary['status']}",
+        f"- sample_agreement_rate: {summary['sample_agreement_rate']:.4f}",
+        f"- max_relative_l2: {summary['max_relative_l2']:.6e}",
+        f"- max_absolute_error: {summary['max_absolute_error']:.6e}",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def compare_image_classification_prediction_sets(
     hf_data: dict[str, Any],
     trtfb_data: dict[str, Any],
@@ -8605,6 +9078,7 @@ def eval_one_model(
         and not _is_diffusion_media_dataset_kind(dataset_kind)
         and not _is_diffusion_text_dataset_kind(dataset_kind)
         and not _is_tts_dataset_kind(dataset_kind)
+        and not _is_time_series_dataset_kind(dataset_kind)
         and not _is_vision_task_dataset_kind(dataset_kind)
     ):
         prompt_rows_path = work_dir / "prompts.jsonl"
@@ -8673,7 +9147,31 @@ def eval_one_model(
     if prompt_normalization is not None:
         base_result["prompt_normalization"] = prompt_normalization
 
-    if scorer == "image_classification_parity":
+    if scorer == "time_series_parity":
+        hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
+        trtfb_data = json.loads((work_dir / "trtfb_predictions.json").read_text(encoding="utf-8"))
+        summary = compare_time_series_prediction_sets(
+            hf_data,
+            trtfb_data,
+            gates=suite.get("gates", {}),
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        write_time_series_summary_markdown(summary, work_dir / "summary.md")
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "valid_count": summary["valid_count"],
+            "passed_count": summary["passed_count"],
+            "sample_agreement_rate": summary["sample_agreement_rate"],
+            "prediction_agreement_rate": summary["sample_agreement_rate"],
+            "mean_relative_l2": summary["mean_relative_l2"],
+            "max_relative_l2": summary["max_relative_l2"],
+            "max_absolute_error": summary["max_absolute_error"],
+        }
+    elif scorer == "image_classification_parity":
         hf_data = json.loads(
             (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
         )
@@ -9316,6 +9814,13 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
             f"min_pairwise={result['min_pairwise_ordering_agreement']:.4f} "
             f"status={result.get('status', '')} {common}"
         )
+    if result.get("mode") == "time_series_parity":
+        return (
+            f"model={model['name']} agreement={result['sample_agreement_rate']:.4f} "
+            f"max_rel_l2={result['max_relative_l2']:.6e} "
+            f"max_abs_error={result['max_absolute_error']:.6e} "
+            f"status={result.get('status', '')} {common}"
+        )
     if result.get("mode") == "encoder_embedding_parity":
         return (
             f"model={model['name']} vector_pass_rate={result['vector_pass_rate']:.4f} "
@@ -9955,6 +10460,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         "image_classification_json",
         "semantic_segmentation_json",
         "prompted_segmentation_json",
+        "time_series_csv",
     }:
         raise ValueError(f"eval does not support dataset kind {dataset_kind!r}")
     models = load_manifest_records(Path(args.models_dir))

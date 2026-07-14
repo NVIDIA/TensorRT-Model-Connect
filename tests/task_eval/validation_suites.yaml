@@ -960,6 +960,130 @@ suites:
       eligible: false
       lane: local_only
 
+  - id: etth1_time_series_parity
+    description: >
+      Per-sample HF-versus-TRTMC numeric parity on official ETTh1 test windows.
+      Model-specific adapters preserve each checkpoint's native contract:
+      univariate quantile/point forecasts, seven-channel point forecasts, and
+      six-channel regression. Every sample must satisfy both relative-L2 and
+      maximum-absolute-error gates.
+    user_contract: time_series_prediction_parity
+    default_model_names:
+      - chronos-bolt-tiny-official
+      - patchtsmixer-granite-official
+      - patchtst-etth1-regression-distribution
+      - patchtst-granite-official
+      - timesfm-2.0-500m-official
+    dataset:
+      kind: time_series_csv
+      name: ETT-small ETTh1
+      default_path: /mnt/data/ETTh1/ETTh1.csv
+      source: https://github.com/zhouhaoyi/ETDataset/tree/main/ETT-small
+      sample_prefix: etth1
+      # Standard ETT-hourly split: 12 train + 4 validation + 4 test months.
+      test_target_start: 11520
+      test_end: 14400
+    selectors:
+      task_strategies:
+        - neural_operator
+      runtime_strategies:
+        - chronos_bolt_trt
+        - patchtsmixer_trt
+        - patchtst_trt
+        - timesfm_trt
+      families:
+        - chronos_bolt
+        - patchtsmixer
+        - patchtst
+        - timesfm
+      user_contracts:
+        - time_series_point_forecast
+        - time_series_quantile_forecast
+        - time_series_regression
+    scoring:
+      scorer: time_series_parity
+    gates:
+      min_sample_agreement_rate: 1.0
+      max_relative_l2: 0.01
+      max_absolute_error: 0.1
+    model_overrides:
+      by_model:
+        chronos-bolt-tiny-official:
+          time_series:
+            input_columns: [OT]
+            target_columns: [OT]
+            input_key: branch_input
+            context_length: 512
+            prediction_length: 64
+            stride: 64
+            test_fraction: 0.2
+        patchtsmixer-granite-official:
+          time_series:
+            input_columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL, OT]
+            target_columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL, OT]
+            input_key: field_input
+            context_length: 512
+            prediction_length: 96
+            stride: 96
+            test_fraction: 0.2
+        patchtst-etth1-regression-distribution:
+          time_series:
+            input_columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL]
+            target_columns: [OT]
+            input_key: field_input
+            context_length: 512
+            prediction_length: 1
+            stride: 24
+            test_fraction: 0.2
+        patchtst-granite-official:
+          time_series:
+            input_columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL, OT]
+            target_columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL, OT]
+            input_key: field_input
+            context_length: 512
+            prediction_length: 96
+            stride: 96
+            test_fraction: 0.2
+        timesfm-2.0-500m-official:
+          time_series:
+            input_columns: [OT]
+            target_columns: [OT]
+            input_key: branch_input
+            context_length: 2048
+            prediction_length: 128
+            stride: 128
+            test_fraction: 0.2
+            frequency: 0
+    model_profiles:
+      # Reuse the reviewed single-device E2E thresholds for each checkpoint.
+      chronos-bolt-tiny-official:
+        gates:
+          max_relative_l2: 2.0e-08
+          max_absolute_error: 8.0e-06
+      patchtsmixer-granite-official:
+        gates:
+          max_relative_l2: 5.0e-04
+          max_absolute_error: 2.5e-04
+      patchtst-etth1-regression-distribution:
+        gates:
+          max_relative_l2: 5.0e-04
+          max_absolute_error: 5.0e-04
+      patchtst-granite-official:
+        gates:
+          max_relative_l2: 3.0e-03
+          max_absolute_error: 4.0e-03
+      timesfm-2.0-500m-official:
+        gates:
+          max_relative_l2: 4.0e-03
+          max_absolute_error: 7.0e-03
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        Run with --limit 10 on GB300. ETTh1 is shared by all five checkpoints,
+        but output quality metrics are not mixed across their distinct forecast
+        and regression contracts; this suite gates backend prediction parity.
+
   - id: stsbenchmark_encoder_embedding_parity
     description: >
       HF-versus-TRTMC vector parity for encoder-only NLP and text embedding
