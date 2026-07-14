@@ -23,7 +23,6 @@ from .config import ModelConfig
 from .engine_build_budget import enforce_single_full_bundle_build
 from .families import (
     available_plugin_ids,
-    family_hf_allow_patterns,
     family_has_capability,
     find_plugin,
     find_diffusion_plugin,
@@ -31,6 +30,7 @@ from .families import (
     resolve_family_model_dir,
     resolve_nemo_archive_model_dir,
 )
+from .hf_snapshot import GENERIC_HF_ALLOW_PATTERNS, hf_snapshot_allow_patterns
 from .bundle_writer import BundleInfo, BundleSection, write_bundle
 from . import trt_compat
 from .triattention_export import (
@@ -91,27 +91,8 @@ def _untracked_compile_time(
     return max(0.0, measured_compile_elapsed - tracked_compile_elapsed)
 
 
-# Standard HF file patterns to download (matches what the builder needs).
-_HF_ALLOW_PATTERNS = [
-    "config.json",
-    "generation_config.json",
-    "preprocessor_config.json",
-    "processor_config.json",
-    "model.safetensors",
-    "model-*.safetensors",
-    "model.safetensors-*.safetensors",
-    "model.safetensors.index.json",
-    "pytorch_model.bin",
-    "tokenizer.json",
-    "tokenizer_config.json",
-    "chat_template.jinja",
-    "vocab.json",
-    "merges.txt",
-    "special_tokens_map.json",
-    "*.model",
-    "*.spm",
-    "*.py",
-]
+# Compatibility alias for existing callers and tests.
+_HF_ALLOW_PATTERNS = [*GENERIC_HF_ALLOW_PATTERNS]
 
 
 def _compute_dynamic_kv_profile_rows(
@@ -545,7 +526,7 @@ def _resolve_model(model_id_or_path: str) -> str:
     try:
         local_dir = snapshot_download(
             repo_id=model_id_or_path,
-            allow_patterns=_HF_ALLOW_PATTERNS + family_hf_allow_patterns() + ["*.nemo"],
+            allow_patterns=hf_snapshot_allow_patterns(),
         )
     except Exception as exc:
         _raise_friendly_download_error(model_id_or_path, exc)

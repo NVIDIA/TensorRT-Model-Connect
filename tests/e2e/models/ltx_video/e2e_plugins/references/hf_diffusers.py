@@ -39,8 +39,17 @@ def _resolve_cached_model_ref(hf_id: str) -> str:
         return hf_id
     try:
         from huggingface_hub import snapshot_download
+        from tensorrt_model_connect.hf_snapshot import hf_snapshot_allow_patterns
 
-        return str(Path(snapshot_download(hf_id, local_files_only=True)))
+        return str(
+            Path(
+                snapshot_download(
+                    hf_id,
+                    allow_patterns=hf_snapshot_allow_patterns(),
+                    local_files_only=True,
+                )
+            )
+        )
     except Exception:
         return hf_id
 
