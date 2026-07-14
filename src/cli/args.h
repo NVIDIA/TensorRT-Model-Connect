@@ -70,6 +70,7 @@ struct CliArgs {
     int att_context_right{13};
     std::string language;
     int beam_size{1};
+    float beam_length_penalty{1.0F};
     std::string source_language{"en"};
     std::string target_language{"en"};
     std::string transcription_task{"transcribe"};

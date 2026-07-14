@@ -88,10 +88,51 @@ void test_canary_transcribe() {
     request.max_output_tokens = 5;
     request.input_sample_rate = 16000;
     request.timestamps = true;
-    const auto timed = pipeline.transcribe(audio.data(), static_cast<int32_t>(audio.size()), request);
+    const auto timed =
+        pipeline.transcribe(audio.data(), static_cast<int32_t>(audio.size()), request);
     check(timed.segments.size() == 1, "canary timestamp request returns one segment");
     check(timed.segments[0].start_seconds == 0.0 && timed.segments[0].end_seconds > 0.0,
           "canary timestamp segment reports input interval in seconds");
+
+    request.timestamps = false;
+    request.beam_size = 2;
+    const auto beam =
+        pipeline.transcribe(audio.data(), static_cast<int32_t>(audio.size()), request);
+    check(beam.token_ids == std::vector<int32_t>({2}),
+          "canary beam search runs with branchable inference states");
+
+    cudaStreamDestroy(stream);
+}
+
+void test_canary_kv_cache_branch_copy() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    trtmc::CanaryKvCache source(1, 4, 2, stream);
+    const std::vector<float> source_k = {1.0F, 2.0F, 3.0F, 4.0F, 9.0F, 9.0F, 9.0F, 9.0F};
+    const std::vector<float> source_v = {5.0F, 6.0F, 7.0F, 8.0F, 9.0F, 9.0F, 9.0F, 9.0F};
+    check(source.cache_k(0).copy_from_host(source_k.data()), "canary branch source K upload");
+    check(source.cache_v(0).copy_from_host(source_v.data()), "canary branch source V upload");
+    source.set_position(2);
+
+    auto branch = source.create_empty();
+    branch->copy_from(source);
+    auto* copied = dynamic_cast<trtmc::CanaryKvCache*>(branch.get());
+    check(copied != nullptr, "canary branch retains concrete state type");
+    check(branch->position() == 2, "canary branch preserves logical cache position");
+
+    std::vector<float> copied_k(source_k.size(), 0.0F);
+    std::vector<float> copied_v(source_v.size(), 0.0F);
+    if (copied != nullptr) {
+        check(copied->cache_k(0).copy_to_host(copied_k.data()), "canary branch K download");
+        check(copied->cache_v(0).copy_to_host(copied_v.data()), "canary branch V download");
+    }
+    check(std::vector<float>(copied_k.begin(), copied_k.begin() + 4) ==
+              std::vector<float>(source_k.begin(), source_k.begin() + 4),
+          "canary branch copies valid K rows");
+    check(std::vector<float>(copied_v.begin(), copied_v.begin() + 4) ==
+              std::vector<float>(source_v.begin(), source_v.begin() + 4),
+          "canary branch copies valid V rows");
 
     cudaStreamDestroy(stream);
 }
@@ -216,6 +257,7 @@ void test_canary_cross_kv_invalid_plan() {
 
 int main() {
     test_canary_transcribe();
+    test_canary_kv_cache_branch_copy();
     test_canary_constructor_validates_encoder();
     test_canary_with_cross_kv();
     test_canary_cross_kv_stats();

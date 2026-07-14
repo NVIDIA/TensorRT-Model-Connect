@@ -28,6 +28,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 namespace trtmc {
 
@@ -68,6 +69,15 @@ class CanaryInferenceState {
     // Mark the transition from prompt prefill to autoregressive decoding.
     // State types that do not distinguish the phases can ignore this.
     virtual void mark_prefill_complete() {}
+
+    // Allocate an unbound state with the same layout. Beam search uses these
+    // states to retain branches while keeping the decoder bound to one stable
+    // scratch state (and therefore one stable CUDA Graph address set).
+    virtual std::unique_ptr<CanaryInferenceState> create_empty() const = 0;
+
+    // Replace this state with a device-to-device copy of another compatible
+    // state. Implementations may copy only the logically valid prefix.
+    virtual void copy_from(const CanaryInferenceState& other) = 0;
 
     // --- Queries ---
 

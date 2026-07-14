@@ -59,14 +59,21 @@ The source and target must differ for `translate`; one of them must be `en`.
   --source-language en \
   --target-language fr \
   --task translate \
-  --beam-size 4 \
+  --beam-size 2 \
+  --beam-length-penalty 1 \
   --max-new-tokens 120
 ```
 
 `--beam-size 1` is the backward-compatible greedy path. Values from 2 through
-16 use deterministic beam search. The current engine stores one decoder
-hypothesis, so beam search replays candidate prefixes and trades throughput for
-search quality.
+16 use deterministic beam search. Beam branches retain their decoder KV cache,
+so each surviving hypothesis advances by one decoder call instead of replaying
+its full prefix. Beam search still performs more decoder work than greedy;
+start with beam size 2 and validate quality and latency on representative audio.
+
+Beam scores use cumulative token log probability divided by decoded length
+raised to `--beam-length-penalty`. The default `1` ranks by average token log
+probability and avoids an inherent preference for short hypotheses. Set it to
+`0` to rank by unnormalized cumulative log probability.
 
 Use `--no-punctuation` to request the checkpoint's no-punctuation prompt and
 remove remaining punctuation from decoded text. `--punctuation` is the default.
@@ -96,6 +103,7 @@ model. Segment decoding has no overlap or cross-segment decoder context.
 | --- | --- | --- |
 | `--max-new-tokens` | Tokens; at least 1 and no more than the bundle target limit minus prompt tokens | Applied independently to every segment. |
 | `--beam-size` | Integer in `[1, 16]` | `1` is greedy; larger values use beam search. |
+| `--beam-length-penalty` | Finite number greater than or equal to `0`; default `1` | Divides each beam score by `output_length^value`; ignored by greedy decoding. |
 | `--max-input-seconds` | Seconds; finite and greater than 0 | Rejects an input whose total duration exceeds the value. |
 | `--segment-length-seconds` | Seconds; finite, greater than 0, and no greater than the bundle audio window | Splits long input into ordered independent requests. |
 
@@ -135,7 +143,8 @@ english.config.target_language = "en";
 
 trtmc::TranscriptionRequest translation = english;
 translation.audio_samples = second_pcm;
-translation.config.beam_size = 4;
+translation.config.beam_size = 2;
+translation.config.beam_length_penalty = 1.0F;
 translation.config.target_language = "fr";
 translation.config.task = trtmc::TranscriptionTask::kTranslate;
 translation.config.timestamps = true;

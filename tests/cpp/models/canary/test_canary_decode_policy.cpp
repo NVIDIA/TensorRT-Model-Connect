@@ -132,12 +132,25 @@ void test_decode_loop_handles_zero_budget_and_empty_logits() {
 }
 
 void test_beam_search_recovers_better_sequence_than_greedy_prefix() {
+    int prefill_calls = 0;
+    int advance_calls = 0;
     const auto result = trtmc::run_canary_beam_search(
-        {9}, 2, 2, 2,
-        [](const std::vector<int32_t>& prefix, std::vector<float>& logits, std::string&) {
-            if (prefix.size() == 1) {
+        {9}, 2, 2, 2, 0.0F,
+        [&prefill_calls](const std::vector<int32_t>& prefix, std::vector<float>& logits,
+                         std::string&) {
+            ++prefill_calls;
+            if (prefix == std::vector<int32_t>({9}))
                 logits = {0.0F, -0.1F, -10.0F};
-            } else if (prefix.back() == 1) {
+            return true;
+        },
+        [&advance_calls](int32_t generation, int32_t parent_slot, int32_t child_slot, int32_t token,
+                         std::vector<float>& logits, std::string&) {
+            ++advance_calls;
+            check(generation == 0, "Canary beam search advances only the required generation");
+            check(parent_slot == 0, "Canary first beam generation branches from root state");
+            check(child_slot >= 0 && child_slot < 2,
+                  "Canary beam search assigns bounded child state slots");
+            if (token == 1) {
                 logits = {-10.0F, -10.0F, 2.0F};
             } else {
                 logits = {0.0F, 0.0F, 0.0F};
@@ -147,17 +160,58 @@ void test_beam_search_recovers_better_sequence_than_greedy_prefix() {
     check(!result.decode_failed, "Canary beam search succeeds");
     check(result.output_ids == std::vector<int32_t>({1, 2}),
           "Canary beam search selects highest sequence probability and stops on EOT");
+    check(prefill_calls == 1, "Canary beam search prefills the prompt once");
+    check(advance_calls == 2, "Canary beam search advances each retained branch once");
 }
 
-void test_beam_search_reports_replay_failure() {
+void test_beam_search_reports_prefill_failure() {
     const auto result = trtmc::run_canary_beam_search(
-        {9}, 2, 2, 2,
+        {9}, 2, 2, 2, 1.0F,
         [](const std::vector<int32_t>&, std::vector<float>&, std::string& error) {
-            error = "replay-fail";
+            error = "prefill-fail";
+            return false;
+        },
+        [](int32_t, int32_t, int32_t, int32_t, std::vector<float>&, std::string&) { return true; });
+    check(result.prefill_failed, "Canary beam search reports prompt prefill failure");
+    check(!result.decode_failed, "Canary prefill failure is not a decode failure");
+    check(result.error == "prefill-fail", "Canary beam search forwards prefill error");
+}
+
+void test_beam_search_reports_branch_advance_failure() {
+    const auto result = trtmc::run_canary_beam_search(
+        {9}, 2, 2, 2, 1.0F,
+        [](const std::vector<int32_t>&, std::vector<float>& logits, std::string&) {
+            logits = {1.0F, 0.0F, -10.0F};
+            return true;
+        },
+        [](int32_t, int32_t, int32_t, int32_t, std::vector<float>&, std::string& error) {
+            error = "advance-fail";
             return false;
         });
-    check(result.decode_failed, "Canary beam search reports prefix replay failure");
-    check(result.error == "replay-fail", "Canary beam search forwards replay error");
+    check(result.decode_failed, "Canary beam search reports branch advance failure");
+    check(result.error == "advance-fail", "Canary beam search forwards branch error");
+}
+
+void test_beam_search_applies_configurable_length_normalization() {
+    auto decode = [](float length_penalty) {
+        return trtmc::run_canary_beam_search(
+            {9}, 2, 1, 2, length_penalty,
+            [](const std::vector<int32_t>&, std::vector<float>& logits, std::string&) {
+                logits = {-0.1F, 0.0F};
+                return true;
+            },
+            [](int32_t, int32_t, int32_t, int32_t, std::vector<float>& logits, std::string&) {
+                logits = {-10.0F, 0.0F};
+                return true;
+            });
+    };
+
+    const auto raw = decode(0.0F);
+    const auto normalized = decode(1.0F);
+    check(raw.output_ids == std::vector<int32_t>({1}),
+          "Canary raw beam score favors the shorter sequence");
+    check(normalized.output_ids == std::vector<int32_t>({0, 1}),
+          "Canary length-normalized beam score can retain the longer sequence");
 }
 
 } // namespace
@@ -168,7 +222,9 @@ int main() {
     test_decode_loop_reports_decode_failure_after_emitting_token();
     test_decode_loop_handles_zero_budget_and_empty_logits();
     test_beam_search_recovers_better_sequence_than_greedy_prefix();
-    test_beam_search_reports_replay_failure();
+    test_beam_search_reports_prefill_failure();
+    test_beam_search_reports_branch_advance_failure();
+    test_beam_search_applies_configurable_length_normalization();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " canary decode policy test(s) failed\n";

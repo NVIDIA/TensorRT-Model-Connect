@@ -340,6 +340,40 @@ void CanaryKvCache::advance(int32_t n_tokens) {
     }
 }
 
+std::unique_ptr<CanaryInferenceState> CanaryKvCache::create_empty() const {
+    return std::make_unique<CanaryKvCache>(num_layers_, max_length_, kv_dim_, stream_, cache_dtype_,
+                                           names_);
+}
+
+void CanaryKvCache::copy_from(const CanaryInferenceState& other) {
+    const auto* source = dynamic_cast<const CanaryKvCache*>(&other);
+    if (source == nullptr || source->num_layers_ != num_layers_ ||
+        source->max_length_ != max_length_ || source->kv_dim_ != kv_dim_ ||
+        source->cache_dtype_ != cache_dtype_ || source->stream_ != stream_) {
+        throw std::invalid_argument("CanaryKvCache::copy_from: incompatible state");
+    }
+
+    const int32_t valid_rows = std::max(0, std::min(source->position_, max_length_));
+    const std::size_t copy_bytes = static_cast<std::size_t>(valid_rows) *
+                                   static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    for (int32_t i = 0; i < num_layers_ && copy_bytes > 0; ++i) {
+        const auto li = static_cast<std::size_t>(i);
+        auto status = cudaMemcpyAsync(cache_k_[li].data(), source->cache_k_[li].data(), copy_bytes,
+                                      cudaMemcpyDeviceToDevice, stream_);
+        if (status != cudaSuccess) {
+            throw std::runtime_error(std::string("CanaryKvCache::copy_from K failed: ") +
+                                     cudaGetErrorString(status));
+        }
+        status = cudaMemcpyAsync(cache_v_[li].data(), source->cache_v_[li].data(), copy_bytes,
+                                 cudaMemcpyDeviceToDevice, stream_);
+        if (status != cudaSuccess) {
+            throw std::runtime_error(std::string("CanaryKvCache::copy_from V failed: ") +
+                                     cudaGetErrorString(status));
+        }
+    }
+    position_ = valid_rows;
+}
+
 void CanaryKvCache::reset() {
     position_ = 0;
     for (int32_t i = 0; i < num_layers_; ++i) {

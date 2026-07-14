@@ -132,6 +132,9 @@ void test_configurable_request_validation() {
     request.beam_size = 17;
     check(rejects(request), "Canary rejects beam size above supported bound");
     request.beam_size = 1;
+    request.beam_length_penalty = -1.0F;
+    check(rejects(request), "Canary rejects negative beam length penalty");
+    request.beam_length_penalty = 1.0F;
     request.max_output_tokens = 65;
     check(rejects(request), "Canary rejects output length above model bound");
     request.max_output_tokens = 20;

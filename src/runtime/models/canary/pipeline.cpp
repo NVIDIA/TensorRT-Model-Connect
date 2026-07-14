@@ -258,8 +258,9 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
     for (int64_t offset = 0; offset < num_samples; offset += segment_samples) {
         const int32_t count = static_cast<int32_t>(
             std::min<int64_t>(segment_samples, static_cast<int64_t>(num_samples) - offset));
-        auto segment = transcribe_segment(audio_data + offset, count, sample_rate, initial_tokens,
-                                          cfg.max_output_tokens, cfg.beam_size);
+        auto segment =
+            transcribe_segment(audio_data + offset, count, sample_rate, initial_tokens,
+                               cfg.max_output_tokens, cfg.beam_size, cfg.beam_length_penalty);
         append_canary_transcription_segment(combined, std::move(segment), offset, count,
                                             sample_rate, cfg);
     }
@@ -269,7 +270,8 @@ TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_sampl
 TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t num_samples,
                                               int32_t input_sample_rate,
                                               const std::vector<int32_t>& initial_tokens,
-                                              int32_t max_output_tokens, int32_t beam_size) {
+                                              int32_t max_output_tokens, int32_t beam_size,
+                                              float beam_length_penalty) {
     const bool report_stage_timing = canary_stage_timing_enabled();
     const auto transcribe_start = CanaryClock::now();
 
@@ -326,7 +328,8 @@ TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t n
 
     // Step 4: Run decoder
     std::cerr << "[canary] Running decoder ..." << std::endl;
-    auto output_ids = run_decoder(initial_tokens, max_output_tokens, beam_size);
+    auto output_ids =
+        run_decoder(initial_tokens, max_output_tokens, beam_size, beam_length_penalty);
     const auto decoder_end = CanaryClock::now();
 
     // Step 5: Decode token IDs
@@ -423,10 +426,13 @@ void CanaryPipeline::setup_cross_attention(int32_t actual_enc_seq_len) {
 }
 
 std::vector<int32_t> CanaryPipeline::run_decoder(const std::vector<int32_t>& initial_tokens,
-                                                 int32_t max_new_tokens, int32_t beam_size) {
+                                                 int32_t max_new_tokens, int32_t beam_size,
+                                                 float beam_length_penalty) {
     if (beam_size > 1) {
+        ensure_beam_state_capacity(beam_size);
         auto result = run_canary_beam_search(
             initial_tokens, max_new_tokens, canary_config_.eot_token_id, beam_size,
+            beam_length_penalty,
             [this](const std::vector<int32_t>& prefix, std::vector<float>& logits,
                    std::string& error) {
                 try {
@@ -434,13 +440,28 @@ std::vector<int32_t> CanaryPipeline::run_decoder(const std::vector<int32_t>& ini
                     state_->bind_to(*decoder_);
                     for (const int32_t token : prefix)
                         run_decoder_step(token, logits);
+                    beam_states_a_.front()->copy_from(*state_);
+                    return true;
+                } catch (const std::exception& e) {
+                    error = e.what();
+                    return false;
+                }
+            },
+            [this](int32_t generation, int32_t parent_slot, int32_t child_slot, int32_t token,
+                   std::vector<float>& logits, std::string& error) {
+                try {
+                    auto& parents = generation % 2 == 0 ? beam_states_a_ : beam_states_b_;
+                    auto& children = generation % 2 == 0 ? beam_states_b_ : beam_states_a_;
+                    state_->copy_from(*parents.at(static_cast<std::size_t>(parent_slot)));
+                    run_decoder_step(token, logits);
+                    children.at(static_cast<std::size_t>(child_slot))->copy_from(*state_);
                     return true;
                 } catch (const std::exception& e) {
                     error = e.what();
                     return false;
                 }
             });
-        if (result.decode_failed)
+        if (result.prefill_failed || result.decode_failed)
             throw std::runtime_error("Canary beam search failed: " + result.error);
         return result.output_ids;
     }
@@ -465,6 +486,18 @@ std::vector<int32_t> CanaryPipeline::run_decoder(const std::vector<int32_t>& ini
     }
 
     return result.output_ids;
+}
+
+void CanaryPipeline::ensure_beam_state_capacity(int32_t beam_size) {
+    const auto target = static_cast<std::size_t>(beam_size);
+    while (beam_states_a_.size() < target) {
+        auto state_a = state_->create_empty();
+        auto state_b = state_->create_empty();
+        if (!state_a || !state_b || !state_a->ok() || !state_b->ok())
+            throw std::runtime_error("CanaryPipeline: failed to allocate beam inference state");
+        beam_states_a_.push_back(std::move(state_a));
+        beam_states_b_.push_back(std::move(state_b));
+    }
 }
 
 void CanaryPipeline::run_decoder_step(int32_t token_id, std::vector<float>& logits) {

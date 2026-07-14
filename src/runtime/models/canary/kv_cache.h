@@ -48,6 +48,8 @@ class CanaryKvCache : public CanaryInferenceState {
     void bind_to(TrtModule& module) override;
     void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
     void advance(int32_t n_tokens = 1) override;
+    std::unique_ptr<CanaryInferenceState> create_empty() const override;
+    void copy_from(const CanaryInferenceState& other) override;
     int32_t position() const override { return position_; }
     int32_t max_length() const override { return max_length_; }
     int32_t preferred_cache_rows() const override;
