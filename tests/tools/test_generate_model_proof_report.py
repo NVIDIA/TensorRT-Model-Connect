@@ -194,6 +194,29 @@ def _write_part(
     return root
 
 
+def _append_result_case(root: Path, owner: str, case: str) -> None:
+    case_dir = root / "e2e" / case
+    case_dir.mkdir()
+    (case_dir / "result.json").write_text(
+        json.dumps(_result(case, owner)), encoding="utf-8"
+    )
+
+    selection_path = root / "selection.json"
+    selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    selection["e2e_cases"].append({"name": case, "model": owner})
+    selection_path.write_text(json.dumps(selection, indent=2) + "\n", encoding="utf-8")
+
+    junit_path = root / "e2e" / "junit.xml"
+    junit = junit_path.read_text(encoding="utf-8")
+    junit_path.write_text(
+        junit.replace(
+            "</testsuite>",
+            f'<testcase name="test_model_e2e[{case}]" /></testsuite>',
+        ),
+        encoding="utf-8",
+    )
+
+
 def _write_vlm_assessment(root: Path, cases: list[str], *, revision: str = REVISION) -> None:
     (root / "diffusion_vlm_assessment.json").write_text(
         json.dumps(
@@ -225,6 +248,8 @@ def _run(
     *,
     upstream_results: list[str] | None = None,
     suite: str = "premerge",
+    expected_result_count: int | None = None,
+    expected_cases_by_model: dict[str, list[str]] | None = None,
 ) -> tuple[int, Path, Path]:
     composer = _import_composer()
     output = tmp_path / "combined.html"
@@ -246,6 +271,15 @@ def _run(
         "--status-output",
         str(status),
     ]
+    if expected_result_count is not None:
+        args.extend(("--expected-result-count", str(expected_result_count)))
+    if expected_cases_by_model is not None:
+        args.extend(
+            (
+                "--expected-cases-by-model",
+                json.dumps(expected_cases_by_model, separators=(",", ":"), sort_keys=True),
+            )
+        )
     for result in upstream_results or []:
         args.extend(("--upstream-result", result))
     rc = composer.main(args)
@@ -279,13 +313,151 @@ def test_nightly_report_uses_nightly_title(tmp_path: Path) -> None:
     parts = tmp_path / "parts"
     _write_part(parts, "alpha", "alpha-case", suite="nightly")
 
-    rc, output, status_path = _run(tmp_path, ["alpha"], suite="nightly")
+    rc, output, status_path = _run(
+        tmp_path,
+        ["alpha"],
+        suite="nightly",
+        expected_result_count=1,
+        expected_cases_by_model={"alpha": ["alpha-case"]},
+    )
 
     assert rc == 0
     rendered = output.read_text(encoding="utf-8")
     assert f"Nightly Isolated Model Report: {REVISION[:12]}" in rendered
     assert "Premerge Isolated Model Report" not in rendered
     assert json.loads(status_path.read_text(encoding="utf-8"))["suite"] == "nightly"
+
+
+def test_expected_result_count_is_recorded_and_exact(tmp_path: Path) -> None:
+    parts = tmp_path / "parts"
+    _write_part(parts, "alpha", "alpha-case", suite="nightly")
+    _write_part(parts, "beta", "beta-case", suite="nightly")
+
+    rc, _, status_path = _run(
+        tmp_path,
+        ["alpha", "beta"],
+        suite="nightly",
+        expected_result_count=2,
+        expected_cases_by_model={
+            "alpha": ["alpha-case"],
+            "beta": ["beta-case"],
+        },
+    )
+
+    assert rc == 0
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["outcome"] == "passed"
+    assert status["expected_cases_by_model"] == {
+        "alpha": ["alpha-case"],
+        "beta": ["beta-case"],
+    }
+    assert status["expected_result_count"] == 2
+    assert status["result_count"] == 2
+
+
+def test_result_count_excludes_pytest_only_summary_rows(tmp_path: Path) -> None:
+    root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    (root / "e2e" / "junit.xml").write_text(
+        '<testsuite><testcase name="test_model_e2e[alpha-case]" />'
+        '<testcase name="test_model_e2e[diagnostic-only]" /></testsuite>',
+        encoding="utf-8",
+    )
+
+    rc, _, status_path = _run(
+        tmp_path,
+        ["alpha"],
+        expected_result_count=1,
+    )
+
+    assert rc == 2
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["outcome"] == "failed"
+    assert status["expected_result_count"] == 1
+    assert status["result_count"] == 1
+
+
+def test_result_count_under_inventory_fails_closed(tmp_path: Path) -> None:
+    _write_part(tmp_path / "parts", "alpha", "alpha-case", suite="nightly")
+
+    rc, output, status_path = _run(
+        tmp_path,
+        ["alpha"],
+        suite="nightly",
+        expected_result_count=2,
+        expected_cases_by_model={"alpha": ["alpha-case", "missing-alpha-case"]},
+    )
+
+    assert rc == 2
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["outcome"] == "failed"
+    assert status["expected_result_count"] == 2
+    assert status["result_count"] == 1
+    assert any(
+        "contains 1 certified E2E results; expected exactly 2" in issue
+        for issue in status["issues"]
+    )
+    assert "expected exactly" in output.read_text(encoding="utf-8")
+
+
+def test_result_count_over_inventory_fails_closed(tmp_path: Path) -> None:
+    root = _write_part(
+        tmp_path / "parts", "alpha", "alpha-case", suite="nightly"
+    )
+    _append_result_case(root, "alpha", "zeta-alpha-case")
+
+    rc, output, status_path = _run(
+        tmp_path,
+        ["alpha"],
+        suite="nightly",
+        expected_result_count=1,
+        expected_cases_by_model={"alpha": ["alpha-case"]},
+    )
+
+    assert rc == 2
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["outcome"] == "failed"
+    assert status["expected_result_count"] == 1
+    assert status["result_count"] == 2
+    assert any(
+        "contains 2 certified E2E results; expected exactly 1" in issue
+        for issue in status["issues"]
+    )
+    assert "expected exactly" in output.read_text(encoding="utf-8")
+
+
+def test_expected_cases_reject_equal_cardinality_substitution(tmp_path: Path) -> None:
+    parts = tmp_path / "parts"
+    _write_part(parts, "alpha", "alpha-case", suite="nightly")
+    _write_part(parts, "beta", "beta-case", suite="nightly")
+
+    rc, output, status_path = _run(
+        tmp_path,
+        ["alpha", "beta"],
+        suite="nightly",
+        expected_result_count=2,
+        expected_cases_by_model={
+            "alpha": ["replacement-alpha-case"],
+            "beta": ["beta-case"],
+        },
+    )
+
+    assert rc == 2
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["result_count"] == status["expected_result_count"] == 2
+    assert status["expected_cases_by_model"]["alpha"] == ["replacement-alpha-case"]
+    assert any("do not exactly match inventory cases" in issue for issue in status["issues"])
+    assert "replacement-alpha-case" in output.read_text(encoding="utf-8")
+
+
+def test_nightly_requires_both_inventory_result_contracts(tmp_path: Path) -> None:
+    _write_part(tmp_path / "parts", "alpha", "alpha-case", suite="nightly")
+
+    rc, _, status_path = _run(tmp_path, ["alpha"], suite="nightly")
+
+    assert rc == 2
+    issues = json.loads(status_path.read_text(encoding="utf-8"))["issues"]
+    assert "nightly requires expected cases by model" in issues
+    assert "nightly requires an expected result count" in issues
 
 
 def test_nightly_diffusion_report_requires_current_complete_vlm_provenance(
@@ -301,13 +473,26 @@ def test_nightly_diffusion_report_requires_current_complete_vlm_provenance(
     )
     _write_vlm_assessment(root, ["visual-case"])
 
-    rc, _, status_path = _run(tmp_path, ["visual-owner"], suite="nightly")
+    nightly_inventory = {
+        "suite": "nightly",
+        "expected_result_count": 1,
+        "expected_cases_by_model": {"visual-owner": ["visual-case"]},
+    }
+    rc, _, status_path = _run(
+        tmp_path,
+        ["visual-owner"],
+        **nightly_inventory,
+    )
 
     assert rc == 0
     assert json.loads(status_path.read_text(encoding="utf-8"))["outcome"] == "passed"
 
     _write_vlm_assessment(root, ["visual-case"], revision="b" * 40)
-    rc, _, status_path = _run(tmp_path, ["visual-owner"], suite="nightly")
+    rc, _, status_path = _run(
+        tmp_path,
+        ["visual-owner"],
+        **nightly_inventory,
+    )
     status = json.loads(status_path.read_text(encoding="utf-8"))
 
     assert rc != 0

@@ -83,6 +83,7 @@ def _add_model(
                 "name": logical_id,
                 "family": logical_id,
                 "runtime_strategy": strategy,
+                "testcases": [{"name": logical_id}],
             }
         )
         + "\n",
@@ -225,6 +226,11 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
             {"model": "model_b", "selection_kind": "direct"},
         ]
     }
+    assert result["expected_cases_by_model"] == {
+        "model_a": ["model_a"],
+        "model_b": ["model_b"],
+    }
+    assert result["expected_result_count"] == 2
     assert output.read_text(encoding="utf-8").splitlines() == [
         'matrix={"include":[{"model":"model_a","selection_kind":"direct"},'
         '{"model":"model_b","selection_kind":"direct"}]}',
@@ -236,6 +242,8 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
         "mode=all",
         "run_unit_tests=false",
         "unit_scope=none",
+        'expected_cases_by_model={"model_a":["model_a"],"model_b":["model_b"]}',
+        "expected_result_count=2",
     ]
 
 
@@ -302,6 +310,7 @@ def test_nightly_matrix_schedules_exclusive_then_shared_and_longest_first(
             manifest["testcases"] = [
                 {"name": "model_a-fast", "ci_tier": "contract_only"},
                 {"name": "model_a-slow", "ci_tier": "contract_only"},
+                {"name": "model_a-tp", "ci_tier": "multi_device"},
             ]
         elif model == "model_d":
             manifest["testcases"] = [
@@ -353,6 +362,29 @@ def test_nightly_matrix_schedules_exclusive_then_shared_and_longest_first(
             {"model": "model_b", "selection_kind": "direct"},
         ]
     }
+    assert result["expected_cases_by_model"] == {
+        "model_a": ["model_a-fast", "model_a-slow"],
+        "model_b": ["model_b-case"],
+        "model_c": ["model_c-nightly"],
+        "model_d": ["model_d-fast", "model_d-slow"],
+        "model_e": ["model_e-case"],
+        "model_f": ["model_f-nightly"],
+    }
+    assert result["expected_result_count"] == 8
+
+
+def test_all_rejects_an_owner_without_a_single_gpu_nightly_case(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path, model_ids=("model_a",))
+    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["testcases"] = [{"name": "model_a-tp", "ci_tier": "multi_device"}]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    revision = _commit(repo, "leave no single gpu case")
+
+    result = _run(repo, "all", "--revision", revision, check=False)
+
+    assert result.returncode == 2
+    assert "model 'model_a' has no active single-GPU nightly E2E case" in result.stderr
 
 
 def test_impact_selects_only_model_a(tmp_path: Path) -> None:

@@ -740,7 +740,7 @@ def _scheduled_models(
     models: Iterable[str],
     *,
     exclusive_gpu_first: bool = False,
-) -> list[str]:
+) -> tuple[list[str], dict[str, list[str]]]:
     """Order model matrix entries by resource class and pinned timing data.
 
     GitHub starts matrix children in include order when runner capacity becomes
@@ -751,6 +751,9 @@ def _scheduled_models(
     least bounded, followed by longest-known first.  Premerge continues to use
     the one selected L0/contract/fastest case.  Allocation safety is still
     enforced later from the projected manifest rather than trusting this hint.
+    The second return value maps every owner to the exact sorted production
+    single-GPU cases that nightly must certify, including an owner's L0
+    fallback only when that owner has no production case.
     """
     entries_by_path = {entry.path: entry for entry in catalog.entries}
     timing_estimates: dict[str, float] = {}
@@ -768,9 +771,11 @@ def _scheduled_models(
                 if isinstance(value, (int, float)) and not isinstance(value, bool)
             }
 
+    selected_models = set(models)
     estimates: dict[str, float | None] = {}
     exclusive_gpu: dict[str, bool] = {}
-    for model in set(models):
+    expected_cases_by_model: dict[str, list[str]] = {}
+    for model in selected_models:
         cases: list[dict[str, object]] = []
         for family in catalog.e2e_families.get(model, ()):
             prefix = f"tests/e2e/models/{family}/manifests/"
@@ -810,6 +815,16 @@ def _scheduled_models(
                     )
         production_cases = [case for case in cases if case["tier"] != "l0_only"]
         nightly_cases = production_cases or cases
+        if not nightly_cases and exclusive_gpu_first:
+            raise ModelCIError(
+                f"model {model!r} has no active single-GPU nightly E2E case"
+            )
+        expected_cases = sorted(str(case["name"]) for case in nightly_cases)
+        if len(expected_cases) != len(set(expected_cases)):
+            raise ModelCIError(
+                f"model {model!r} has duplicate active nightly E2E case names"
+            )
+        expected_cases_by_model[model] = expected_cases
         exclusive_gpu[model] = any(
             case["resource_class"] == "exclusive_gpu" for case in nightly_cases
         )
@@ -846,14 +861,20 @@ def _scheduled_models(
             else None
         )
 
-    return sorted(
-        set(models),
-        key=lambda model: (
-            0 if not exclusive_gpu_first or exclusive_gpu.get(model, False) else 1,
-            0 if estimates.get(model) is None else 1,
-            -(estimates.get(model) or 0.0),
-            model,
+    return (
+        sorted(
+            selected_models,
+            key=lambda model: (
+                0 if not exclusive_gpu_first or exclusive_gpu.get(model, False) else 1,
+                0 if estimates.get(model) is None else 1,
+                -(estimates.get(model) or 0.0),
+                model,
+            ),
         ),
+        {
+            model: expected_cases_by_model[model]
+            for model in sorted(expected_cases_by_model)
+        },
     )
 
 
@@ -962,11 +983,12 @@ def calculate_impact(
         mode = "unit"
     else:
         mode = "none"
+    matrix_models, _ = _scheduled_models(repo_root, head_catalog, affected)
     result = _result(
         affected,
         mode=mode,
         changes=serialized_changes,
-        matrix_models=_scheduled_models(repo_root, head_catalog, affected),
+        matrix_models=matrix_models,
         direct_models=direct_affected,
         fallback_models=fallback_selected,
         run_unit_tests=unit_scope != "none" or broad_change,
@@ -989,6 +1011,12 @@ def _write_github_output(path: Path, result: dict[str, object]) -> None:
         "run_unit_tests": str(bool(result["run_unit_tests"])).lower(),
         "unit_scope": str(result["unit_scope"]),
     }
+    if "expected_cases_by_model" in result:
+        outputs["expected_cases_by_model"] = json.dumps(
+            result["expected_cases_by_model"], separators=(",", ":"), sort_keys=True
+        )
+    if "expected_result_count" in result:
+        outputs["expected_result_count"] = str(result["expected_result_count"])
     with path.open("a", encoding="utf-8") as stream:
         for key, value in outputs.items():
             stream.write(f"{key}={value}\n")
@@ -1214,16 +1242,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _write_github_output(args.github_output, result)
         elif args.command == "all":
             catalog = discover_catalog(args.repo_root, args.revision)
+            matrix_models, expected_cases_by_model = _scheduled_models(
+                args.repo_root,
+                catalog,
+                catalog.models,
+                exclusive_gpu_first=True,
+            )
             result = _result(
                 catalog.models,
                 mode="all",
                 changes=[],
-                matrix_models=_scheduled_models(
-                    args.repo_root,
-                    catalog,
-                    catalog.models,
-                    exclusive_gpu_first=True,
-                ),
+                matrix_models=matrix_models,
+            )
+            result["expected_cases_by_model"] = expected_cases_by_model
+            result["expected_result_count"] = sum(
+                len(cases) for cases in expected_cases_by_model.values()
             )
             result["revision"] = catalog.revision
             if args.github_output is not None:

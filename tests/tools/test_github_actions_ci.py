@@ -742,8 +742,19 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
     assert "python3 tools/model_ci.py all" in inventory
     assert '--revision "$TESTED_SHA"' in inventory
     assert '--github-output "$GITHUB_OUTPUT"' in inventory
-    for output in ("has_models", "matrix", "affected_models", "expected_count", "mode"):
+    for output in (
+        "has_models",
+        "matrix",
+        "affected_models",
+        "expected_count",
+        "expected_cases_by_model",
+        "expected_result_count",
+        "mode",
+    ):
         assert f"{output}: ${{{{ steps.inventory.outputs.{output} }}}}" in inventory
+    assert 'test "$EXPECTED_RESULT_COUNT" -ge "$EXPECTED_COUNT"' in inventory
+    assert "sorted(cases_by_model) != models" in inventory
+    assert "nightly case inventory count is inconsistent" in inventory
 
     assert "- legal" in source_quality and "- inventory" in source_quality
     assert "Check family coverage" in source_quality
@@ -860,10 +871,20 @@ def test_nightly_report_requires_exact_all_model_results_and_evidence() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     report = text.split("\n  report:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
     assert "EXPECTED_MODELS: ${{ needs.inventory.outputs.affected_models }}" in report
+    assert (
+        "EXPECTED_RESULT_COUNT: ${{ needs.inventory.outputs.expected_result_count }}"
+        in report
+    )
+    assert (
+        "EXPECTED_CASES_BY_MODEL: ${{ needs.inventory.outputs.expected_cases_by_model }}"
+        in report
+    )
     assert "REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}" in report
     assert "pattern: model-proof-*-${{ needs.legal.outputs.tested_sha }}-*" in report
     assert "merge-multiple: false" in report
     assert "scripts/generate_model_proof_report.py" in report
+    assert '--expected-cases-by-model "$EXPECTED_CASES_BY_MODEL"' in report
+    assert '--expected-result-count "$EXPECTED_RESULT_COUNT"' in report
     assert "--suite nightly" in report
     for upstream in (
         "legal",
@@ -880,8 +901,14 @@ def test_nightly_report_requires_exact_all_model_results_and_evidence() -> None:
     assert '"discovered_models": expected' in report
     assert '"selected_artifact_count": len(expected)' in report
     assert 'entry.get("status") != "passed"' in report
-    assert 'status.get("result_count")' in report
-    assert "at least one E2E result per model" in report
+    assert '"expected_result_count": expected_result_count' in report
+    assert '"expected_cases_by_model": expected_cases_by_model' in report
+    assert '"result_count": expected_result_count' in report
+    assert "selected_cases != inventory_cases" in report
+    assert "result_cases != inventory_cases" in report
+    assert "reported_result_count != expected_result_count" in report
+    assert "expected exactly {expected_result_count}" in report
+    assert "at least one E2E result per model" not in report
     assert "issue_count" in report
     assert "Enforce complete nightly report certification" in report
 

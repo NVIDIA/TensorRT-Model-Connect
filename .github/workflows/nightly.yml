@@ -54,6 +54,8 @@ jobs:
       matrix: ${{ steps.inventory.outputs.matrix }}
       affected_models: ${{ steps.inventory.outputs.affected_models }}
       expected_count: ${{ steps.inventory.outputs.expected_count }}
+      expected_cases_by_model: ${{ steps.inventory.outputs.expected_cases_by_model }}
+      expected_result_count: ${{ steps.inventory.outputs.expected_result_count }}
       mode: ${{ steps.inventory.outputs.mode }}
 
     steps:
@@ -84,6 +86,8 @@ jobs:
           TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
           HAS_MODELS: ${{ steps.inventory.outputs.has_models }}
           EXPECTED_COUNT: ${{ steps.inventory.outputs.expected_count }}
+          EXPECTED_CASES_BY_MODEL: ${{ steps.inventory.outputs.expected_cases_by_model }}
+          EXPECTED_RESULT_COUNT: ${{ steps.inventory.outputs.expected_result_count }}
           EXPECTED_MODELS: ${{ steps.inventory.outputs.affected_models }}
           MODE: ${{ steps.inventory.outputs.mode }}
         run: |
@@ -91,11 +95,40 @@ jobs:
           test "$HAS_MODELS" = "true"
           test "$MODE" = "all"
           test "$EXPECTED_COUNT" -gt 0
+          test "$EXPECTED_RESULT_COUNT" -ge "$EXPECTED_COUNT"
+          python3 - "$EXPECTED_MODELS" "$EXPECTED_CASES_BY_MODEL" \
+            "$EXPECTED_RESULT_COUNT" <<'PY'
+          import json
+          import sys
+
+          raw_models, raw_cases_by_model, raw_result_count = sys.argv[1:]
+          models = json.loads(raw_models)
+          cases_by_model = json.loads(raw_cases_by_model)
+          expected_result_count = int(raw_result_count)
+          if not isinstance(models, list) or not all(
+              isinstance(model, str) for model in models
+          ):
+              raise SystemExit("nightly ownership model inventory is invalid")
+          if not isinstance(cases_by_model, dict) or sorted(cases_by_model) != models:
+              raise SystemExit("nightly case inventory does not exactly match model owners")
+          for model, cases in cases_by_model.items():
+              if (
+                  not isinstance(cases, list)
+                  or not cases
+                  or not all(isinstance(case, str) and case for case in cases)
+                  or cases != sorted(cases)
+                  or len(cases) != len(set(cases))
+              ):
+                  raise SystemExit(f"nightly case inventory is invalid for {model!r}")
+          if sum(len(cases) for cases in cases_by_model.values()) != expected_result_count:
+              raise SystemExit("nightly case inventory count is inconsistent")
+          PY
           {
             echo "### Nightly all-model inventory"
             echo
             echo "- Certified revision: \`$TESTED_SHA\`"
             echo "- Ownership models: \`$EXPECTED_COUNT\`"
+            echo "- Expected E2E results: \`$EXPECTED_RESULT_COUNT\`"
             echo "- Selection: \`$EXPECTED_MODELS\`"
             echo "- Scope: every ownership model; production single-GPU cases with L0 fallback"
             echo "- Multi-device variants: outside this owner-level suite, matching the prior nightly contract"
@@ -754,6 +787,8 @@ jobs:
       - name: Bootstrap combined nightly HTML before checkout
         env:
           EXPECTED_MODELS: ${{ needs.inventory.outputs.affected_models }}
+          EXPECTED_CASES_BY_MODEL: ${{ needs.inventory.outputs.expected_cases_by_model }}
+          EXPECTED_RESULT_COUNT: ${{ needs.inventory.outputs.expected_result_count }}
           REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
           LEGAL_RESULT: ${{ needs.legal.result }}
           INVENTORY_RESULT: ${{ needs.inventory.result }}
@@ -771,7 +806,8 @@ jobs:
           echo "PARTS_DIR=$PARTS_DIR" >> "$GITHUB_ENV"
           mkdir -p "$REPORT_OUTPUT_DIR" "$PARTS_DIR"
           python3 - \
-            "$REPORT_OUTPUT_DIR" "$EXPECTED_MODELS" "$REVISION" \
+            "$REPORT_OUTPUT_DIR" "$EXPECTED_MODELS" "$EXPECTED_CASES_BY_MODEL" \
+            "$EXPECTED_RESULT_COUNT" "$REVISION" \
             "$LEGAL_RESULT" "$INVENTORY_RESULT" "$SOURCE_QUALITY_RESULT" \
             "$UNIT_RESULT" "$CACHE_RESULT" "$PACKAGE_RESULT" "$MODEL_RESULT" \
             "$VLM_RESULT" <<'PY'
@@ -783,6 +819,8 @@ jobs:
           (
               output_dir,
               raw_models,
+              raw_cases_by_model,
+              raw_result_count,
               revision,
               legal_result,
               inventory_result,
@@ -801,6 +839,16 @@ jobs:
           if not isinstance(models, list):
               models = []
           models = [model for model in models if isinstance(model, str)]
+          try:
+              expected_cases_by_model = json.loads(raw_cases_by_model)
+          except json.JSONDecodeError:
+              expected_cases_by_model = None
+          if not isinstance(expected_cases_by_model, dict):
+              expected_cases_by_model = None
+          try:
+              expected_result_count = int(raw_result_count)
+          except ValueError:
+              expected_result_count = None
           upstream_results = {
               "legal": legal_result,
               "inventory": inventory_result,
@@ -812,6 +860,10 @@ jobs:
               "diffusion-vlm": vlm_result,
           }
           issues = ["Combined nightly report generation has not completed."]
+          if expected_cases_by_model is None:
+              issues.append("Nightly inventory has no valid expected case map.")
+          if expected_result_count is None or expected_result_count < 0:
+              issues.append("Nightly inventory has no valid expected E2E result count.")
           issues.extend(
               f"Upstream job {name!r} finished with result {result!r}."
               for name, result in upstream_results.items()
@@ -827,6 +879,8 @@ jobs:
               "expected_models": models,
               "discovered_models": [],
               "expected_count": len(models),
+              "expected_cases_by_model": expected_cases_by_model,
+              "expected_result_count": expected_result_count,
               "discovered_count": 0,
               "result_count": 0,
               "issue_count": len(issues),
@@ -846,6 +900,7 @@ jobs:
           <div class="pending"><strong>The combined report did not complete.</strong></div>
           <p>Revision: <code>{html.escape(revision)}</code></p>
           <p>Expected ownership models: {len(models)}</p>
+          <p>Expected E2E results: {html.escape(str(expected_result_count))}</p>
           <h2>Available diagnostics</h2><ul>{issue_items}</ul></body></html>"""
           (root / "model-proof-report.html").write_text(document, encoding="utf-8")
           PY
@@ -896,6 +951,8 @@ jobs:
         if: ${{ always() }}
         env:
           EXPECTED_MODELS: ${{ needs.inventory.outputs.affected_models }}
+          EXPECTED_CASES_BY_MODEL: ${{ needs.inventory.outputs.expected_cases_by_model }}
+          EXPECTED_RESULT_COUNT: ${{ needs.inventory.outputs.expected_result_count }}
           REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
           CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
           DOWNLOAD_OUTCOME: ${{ steps.download.outcome }}
@@ -968,6 +1025,8 @@ jobs:
             if python3 scripts/generate_model_proof_report.py \
                 --parts-dir "$PARTS_DIR" \
                 --expected-models "$EXPECTED_MODELS" \
+                --expected-cases-by-model "$EXPECTED_CASES_BY_MODEL" \
+                --expected-result-count "$EXPECTED_RESULT_COUNT" \
                 --revision "$REVISION" \
                 --suite nightly \
                 --project-dir "$GITHUB_WORKSPACE" \
@@ -1010,6 +1069,8 @@ jobs:
           COMPOSE_EXIT_CODE: ${{ steps.compose.outputs.exit_code }}
           REPORT_UPLOAD_OUTCOME: ${{ steps.report_upload.outcome }}
           EXPECTED_MODELS: ${{ needs.inventory.outputs.affected_models }}
+          EXPECTED_CASES_BY_MODEL: ${{ needs.inventory.outputs.expected_cases_by_model }}
+          EXPECTED_RESULT_COUNT: ${{ needs.inventory.outputs.expected_result_count }}
           REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
         run: |
           set -euo pipefail
@@ -1023,15 +1084,51 @@ jobs:
           }
           python3 - \
             "$REPORT_OUTPUT_DIR/model-proof-report-status.json" \
-            "$EXPECTED_MODELS" "$REVISION" <<'PY'
+            "$EXPECTED_MODELS" "$EXPECTED_CASES_BY_MODEL" \
+            "$EXPECTED_RESULT_COUNT" "$REVISION" <<'PY'
           import json
           import sys
           from pathlib import Path
 
-          status_path, raw_expected, revision = sys.argv[1:]
+          (
+              status_path,
+              raw_expected,
+              raw_expected_cases_by_model,
+              raw_expected_result_count,
+              revision,
+          ) = sys.argv[1:]
           status = json.loads(Path(status_path).read_text(encoding="utf-8"))
           expected = json.loads(raw_expected)
+          expected_cases_by_model = json.loads(raw_expected_cases_by_model)
+          expected_result_count = int(raw_expected_result_count)
           errors = []
+          if (
+              not isinstance(expected_cases_by_model, dict)
+              or sorted(expected_cases_by_model) != expected
+          ):
+              errors.append("expected case map does not exactly match model inventory")
+              expected_cases_by_model = {}
+          else:
+              for model, cases in expected_cases_by_model.items():
+                  if (
+                      not isinstance(cases, list)
+                      or not cases
+                      or not all(isinstance(case, str) and case for case in cases)
+                      or cases != sorted(cases)
+                      or len(cases) != len(set(cases))
+                  ):
+                      errors.append(f"expected case map is invalid for {model!r}")
+              mapped_result_count = sum(
+                  len(cases)
+                  for cases in expected_cases_by_model.values()
+                  if isinstance(cases, list)
+              )
+              if mapped_result_count != expected_result_count:
+                  errors.append(
+                      "expected case map contains "
+                      f"{mapped_result_count} results; "
+                      f"expected exactly {expected_result_count}"
+                  )
           required = {
               "schema_version": 1,
               "report_kind": "combined_model_proof",
@@ -1039,10 +1136,13 @@ jobs:
               "source_revision": revision,
               "suite": "nightly",
               "expected_models": expected,
+              "expected_cases_by_model": expected_cases_by_model,
               "discovered_models": expected,
               "expected_count": len(expected),
+              "expected_result_count": expected_result_count,
               "discovered_count": len(expected),
               "selected_artifact_count": len(expected),
+              "result_count": expected_result_count,
               "issue_count": 0,
           }
           for key, wanted in required.items():
@@ -1051,11 +1151,37 @@ jobs:
           entries = status.get("models")
           if not isinstance(entries, list) or len(entries) != len(expected):
               errors.append("model result entries do not exactly match the inventory")
-          elif any(entry.get("status") != "passed" for entry in entries):
+          elif any(
+              not isinstance(entry, dict) or entry.get("status") != "passed"
+              for entry in entries
+          ):
               errors.append("one or more model result entries are not passed")
-          result_count = status.get("result_count")
-          if not isinstance(result_count, int) or result_count < len(expected):
-              errors.append("nightly report does not contain at least one E2E result per model")
+          else:
+              reported_result_count = 0
+              entry_models = [entry.get("model") for entry in entries]
+              if entry_models != expected:
+                  errors.append("model result entry order does not match inventory")
+              for entry in entries:
+                  model = entry.get("model")
+                  inventory_cases = expected_cases_by_model.get(model, [])
+                  selected_cases = entry.get("selected_cases")
+                  result_cases = entry.get("result_cases")
+                  if selected_cases != inventory_cases:
+                      errors.append(
+                          f"model {model!r} selected cases do not match inventory"
+                      )
+                  if result_cases != inventory_cases:
+                      errors.append(
+                          f"model {model!r} result cases do not match inventory"
+                      )
+                  if isinstance(result_cases, list):
+                      reported_result_count += len(result_cases)
+              if reported_result_count != expected_result_count:
+                  errors.append(
+                      "model result entries contain "
+                      f"{reported_result_count} E2E results; "
+                      f"expected exactly {expected_result_count}"
+                  )
           if errors:
               raise SystemExit("Nightly report status is not certified:\n- " + "\n- ".join(errors))
           PY
@@ -1065,12 +1191,14 @@ jobs:
         env:
           REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}
           EXPECTED_COUNT: ${{ needs.inventory.outputs.expected_count }}
+          EXPECTED_RESULT_COUNT: ${{ needs.inventory.outputs.expected_result_count }}
         run: |
           {
             echo "### Nightly isolated model report"
             echo
             echo "- Revision: \`$REVISION\`"
             echo "- Expected ownership models: \`${EXPECTED_COUNT:-0}\`"
+            echo "- Expected E2E results: \`${EXPECTED_RESULT_COUNT:-0}\`"
             echo "- Artifact: \`trtmc-nightly-html-report-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -1105,6 +1233,8 @@ jobs:
           REPORT_RESULT: ${{ needs.report.result }}
           HAS_MODELS: ${{ needs.inventory.outputs.has_models }}
           EXPECTED_COUNT: ${{ needs.inventory.outputs.expected_count }}
+          EXPECTED_CASES_BY_MODEL: ${{ needs.inventory.outputs.expected_cases_by_model }}
+          EXPECTED_RESULT_COUNT: ${{ needs.inventory.outputs.expected_result_count }}
         run: |
           set -euo pipefail
           test -n "$TESTED_SHA"
@@ -1116,6 +1246,8 @@ jobs:
           done
           test "$HAS_MODELS" = "true"
           test "$EXPECTED_COUNT" -gt 0
+          test -n "$EXPECTED_CASES_BY_MODEL"
+          test "$EXPECTED_RESULT_COUNT" -ge "$EXPECTED_COUNT"
           echo "All nightly gates passed for \`$TESTED_SHA\`." >> "$GITHUB_STEP_SUMMARY"
 
   release:

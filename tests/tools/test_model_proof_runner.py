@@ -23,6 +23,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / ".github" / "scripts" / "run-model-proof.sh"
+MODEL_CI = REPO_ROOT / "tools" / "model_ci.py"
 IMAGE_ENSURE = REPO_ROOT / ".github" / "scripts" / "ensure-ci-docker-image.sh"
 PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "model-proof.yml"
 FALLBACK_WRITER = REPO_ROOT / ".github" / "scripts" / "write-model-proof-fallback-report.py"
@@ -660,6 +661,30 @@ def test_nightly_single_gpu_selection_excludes_tp4_cases(
     assert multi_gpu_case not in selected
     assert selected
     assert all(case["ci_tier"] != "multi_device" for case in selection["e2e_cases"])
+
+
+def test_nightly_inventory_exactly_matches_every_model_proof_selection(
+    tmp_path: Path,
+) -> None:
+    result = subprocess.run(
+        [sys.executable, str(MODEL_CI), "all", "--revision", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    inventory = json.loads(result.stdout)
+    selected_cases_by_model = {}
+    for model in inventory["affected_models"]:
+        selection = _run_test_selection(tmp_path, model, "nightly")
+        selected_cases_by_model[model] = [
+            case["name"] for case in selection["e2e_cases"]
+        ]
+
+    assert inventory["expected_cases_by_model"] == selected_cases_by_model
+    assert inventory["expected_result_count"] == sum(
+        len(cases) for cases in selected_cases_by_model.values()
+    )
 
 
 def test_runner_declares_the_hermetic_container_boundary() -> None:
