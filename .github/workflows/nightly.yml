@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-name: TensorRT-Model-Connect Nightly CI
+name: Bark GPU Diagnostic
 
 on:
   schedule:
@@ -17,6 +17,14 @@ on:
         required: false
         type: boolean
         default: false
+      bark_gpu_id:
+        description: "Physical GPU for the temporary Bark diagnostic"
+        required: false
+        type: choice
+        options:
+          - "2"
+          - "3"
+        default: "2"
 
 permissions:
   contents: write
@@ -60,13 +68,9 @@ env:
 jobs:
   bark-gpu-validation:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.bark_gpu_validation }}
-    name: Bark physical GPU ${{ matrix.gpu }}
+    name: Bark physical GPU ${{ inputs.bark_gpu_id }}
     runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 300
-    strategy:
-      fail-fast: false
-      matrix:
-        gpu: [2, 3]
     env:
       TRTMC_MODEL_PROOF_BUILD_JOBS: ${{ vars.TRTMC_MODEL_PROOF_BUILD_JOBS || '2' }}
       TRTMC_MODEL_PROOF_GPU_IDS: "0,1,2,3"
@@ -96,9 +100,9 @@ jobs:
         timeout-minutes: 150
         env:
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
-          TRTMC_GPU_ID: ${{ matrix.gpu }}
+          TRTMC_GPU_ID: ${{ inputs.bark_gpu_id }}
         run: |
-          output_dir="$RUNNER_TEMP/bark-gpu-${{ matrix.gpu }}"
+          output_dir="$RUNNER_TEMP/bark-gpu-${{ inputs.bark_gpu_id }}"
           bash .github/scripts/run-model-proof.sh \
             --model bark \
             --revision "$BARK_VALIDATION_REVISION" \
@@ -109,8 +113,8 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: bark-gpu-${{ matrix.gpu }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/bark-gpu-${{ matrix.gpu }}/artifacts
+          name: bark-gpu-${{ inputs.bark_gpu_id }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/bark-gpu-${{ inputs.bark_gpu_id }}/artifacts
           retention-days: 7
           if-no-files-found: error
 
