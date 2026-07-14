@@ -9,6 +9,7 @@ import ast
 import copy
 import csv
 import gc
+import hashlib
 import html
 import json
 import math
@@ -51,6 +52,26 @@ DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
 CHOICE_LETTERS = set("ABCDEFGHIJ")
 GPT_OSS_MMLU_SYSTEM_PROMPT = "You are a helpful assistant. Answer with only the option letter."
+_DIFFUSION_SAMPLE_INPUT_FIELDS = frozenset(
+    {
+        "action",
+        "camera_intrinsics",
+        "camera_intrinsics_file",
+        "image",
+        "image_path",
+        "prompt_file",
+        "rotation_speed_deg",
+        "translation_speed",
+    }
+)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def load_structured_file(path: Path) -> dict[str, Any]:
@@ -845,6 +866,12 @@ def prepare_diffusion_prompt_json_dataset(
     task_eval_config: dict[str, Any] | None = None,
 ) -> dict[str, Path]:
     data = json.loads(dataset_path.read_text(encoding="utf-8"))
+    dataset_config = suite.get("dataset", {})
+    asset_fields = dataset_config.get("asset_fields", [])
+    if not isinstance(asset_fields, list) or not all(
+        isinstance(field, str) for field in asset_fields
+    ):
+        raise ValueError(f"Suite {suite['id']} dataset.asset_fields must be a list of strings")
     requests = data.get("requests")
     if not isinstance(requests, list):
         raise ValueError(f"{dataset_path}: expected top-level 'requests' list")
@@ -864,6 +891,21 @@ def prepare_diffusion_prompt_json_dataset(
         prepared.setdefault("dataset_index", source_position)
         prepared.setdefault("category", category)
         prepared.setdefault("challenge", "")
+        for field in asset_fields:
+            value = prepared.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"{dataset_path}: request {source_position} has no {field!r} asset"
+                )
+            asset_path = Path(value)
+            if not asset_path.is_absolute():
+                asset_path = dataset_path.parent / asset_path
+            if not asset_path.is_file():
+                raise FileNotFoundError(
+                    f"{dataset_path}: request {source_position} {field!r} asset "
+                    f"does not exist: {asset_path}"
+                )
+            prepared[field] = str(asset_path.resolve())
         indexed.append((source_position, prepared))
     if sample_seed is not None:
         rng = random.Random(sample_seed)
@@ -4969,6 +5011,34 @@ def compare_diffusion_image_predictions(
                 f"Diffusion sample id mismatch at index {index}: "
                 f"expected={expected_id!r} hf={hf_id!r} trtfb={trt_id!r}"
             )
+        expected_prompt = str(request.get("prompt", ""))
+        hf_prompt = str(hf_row.get("prompt", ""))
+        trt_prompt = str(trt_row.get("prompt", ""))
+        if expected_prompt and (
+            hf_prompt != expected_prompt or trt_prompt != expected_prompt
+        ):
+            raise ValueError(
+                f"Diffusion prompt mismatch at index {index}: "
+                f"expected={expected_prompt!r} hf={hf_prompt!r} trtfb={trt_prompt!r}"
+            )
+        shared_inputs: dict[str, Any] = {}
+        for field in ("seed", "condition_image_sha256", "action"):
+            hf_value = hf_row.get(field)
+            trt_value = trt_row.get(field)
+            if hf_value in (None, "") and trt_value in (None, ""):
+                continue
+            if hf_value != trt_value:
+                raise ValueError(
+                    f"Diffusion shared input mismatch at index {index} for {field}: "
+                    f"hf={hf_value!r} trtfb={trt_value!r}"
+                )
+            expected_value = request.get(field)
+            if field != "seed" and expected_value not in (None, "") and hf_value != expected_value:
+                raise ValueError(
+                    f"Diffusion dataset input mismatch at index {index} for {field}: "
+                    f"expected={expected_value!r} actual={hf_value!r}"
+                )
+            shared_inputs[field] = hf_value
         hf_latent_hash = str(hf_row.get("initial_latents_sha256", ""))
         trt_latent_hash = str(trt_row.get("initial_latents_sha256", ""))
         require_matching_latents = float(gates.get("require_matching_initial_latents", 0)) > 0
@@ -5002,6 +5072,7 @@ def compare_diffusion_image_predictions(
                 "trtfb_image": str(_first_generated_image(str(trt_row.get("frames_dir", ""))) or ""),
                 "status": StageStatus.ERROR.value,
                 "metrics": {},
+                "shared_inputs": shared_inputs,
             })
             continue
 
@@ -5139,6 +5210,7 @@ def compare_diffusion_image_predictions(
             "hf_image": str(_first_generated_image(str(hf_output.data["frames_dir"])) or ""),
             "trtfb_image": str(_first_generated_image(str(trt_output.data["frames_dir"])) or ""),
             "initial_latents_sha256": hf_latent_hash,
+            "shared_inputs": shared_inputs,
             "status": result.status,
             "metrics": sample_metrics,
             "message": result.message,
@@ -6782,6 +6854,9 @@ def _diffusion_case_for_prompt(
     case.name = str(prompt_row.get("sample_id", f"diffusion_{index:06d}"))
     case.inputs.update(generation)
     case.inputs["prompt"] = str(prompt_row["prompt"])
+    for field in _DIFFUSION_SAMPLE_INPUT_FIELDS:
+        if field in prompt_row:
+            case.inputs[field] = copy.deepcopy(prompt_row[field])
     seed = int(generation.get("seed", case.determinism.get("seed", 42)))
     case.inputs["seed"] = seed + index
     return case
@@ -6796,9 +6871,15 @@ def _diffusion_end_to_end_stage(case: Any) -> Any:
     return StageSpec(name="end_to_end", required=True)
 
 
-def _diffusion_response(sample_id: str, source: str, output: Any) -> dict[str, Any]:
+def _diffusion_response(
+    sample_id: str,
+    source: str,
+    output: Any,
+    *,
+    case: Any | None = None,
+) -> dict[str, Any]:
     data = output.data if isinstance(output.data, dict) else {}
-    return {
+    response = {
         "sample_id": sample_id,
         "source": source,
         "returncode": int(data.get("returncode", 1)),
@@ -6809,6 +6890,17 @@ def _diffusion_response(sample_id: str, source: str, output: Any) -> dict[str, A
         "initial_latents_sha256": str(data.get("initial_latents_sha256", "")),
         "wall_ms": float(output.timing_s) * 1000.0,
     }
+    if case is not None:
+        response["seed"] = int(case.inputs.get("seed", case.determinism.get("seed", 42)))
+        response["action"] = str(case.inputs.get("action", ""))
+        image_value = str(
+            case.inputs.get("image") or case.inputs.get("image_path") or ""
+        )
+        response["condition_image"] = image_value
+        image_path = Path(image_value) if image_value else None
+        if image_path is not None and image_path.is_file():
+            response["condition_image_sha256"] = _sha256_file(image_path)
+    return response
 
 
 def run_diffusion_hf_reference(args: argparse.Namespace) -> None:
@@ -6835,7 +6927,7 @@ def run_diffusion_hf_reference(args: argparse.Namespace) -> None:
             output = reference.run_stage(
                 case, _diffusion_end_to_end_stage(case), context
             )
-            response = _diffusion_response(case.name, "hf", output)
+            response = _diffusion_response(case.name, "hf", output, case=case)
             response["prompt"] = str(prompt_row["prompt"])
             if response["returncode"] != 0 or response["num_frames"] < 1:
                 raise RuntimeError(
@@ -7288,7 +7380,7 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
             output = runner.run_stage(
                 case, _diffusion_end_to_end_stage(case), context
             )
-            response = _diffusion_response(case.name, "trtfb", output)
+            response = _diffusion_response(case.name, "trtfb", output, case=case)
             response["prompt"] = str(prompt_row["prompt"])
             if response["returncode"] != 0 or response["num_frames"] < 1:
                 raise RuntimeError(

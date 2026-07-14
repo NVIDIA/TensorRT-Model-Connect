@@ -504,6 +504,42 @@ def test_default_suites_include_one_dpg_bench_diffusion_image_suite() -> None:
     }
 
 
+def test_default_suites_include_media_generation_gap_models() -> None:
+    suites = task_eval.load_suites()
+
+    video = task_eval.suite_by_id(suites, "vbench_t2v_diffusion_video")
+    assert video["default_model_names"] == [
+        "ltx-video-l0",
+        "wan21-t2v-1.3b-l0",
+    ]
+    assert video["dataset"]["default_path"] == (
+        "/mnt/data/VBench/vbench_t2v_task_eval.json"
+    )
+    assert video["gates"]["min_trt_hf_image_clip_cosine"] == 0.85
+
+    image_edit = task_eval.suite_by_id(suites, "gedit_bench_image_edit")
+    assert image_edit["default_model_names"] == ["qwen-image-edit-2511"]
+    assert image_edit["dataset"]["asset_fields"] == ["image"]
+    assert image_edit["gates"]["require_matching_initial_latents"] == 1
+
+    world_model = task_eval.suite_by_id(
+        suites, "sana_wm_benchmark_diffusion_video"
+    )
+    assert world_model["default_model_names"] == ["sana-wm-bidirectional"]
+    assert world_model["dataset"]["asset_fields"] == [
+        "image",
+        "prompt_file",
+        "camera_intrinsics_file",
+    ]
+
+    models = task_eval.load_manifest_records()
+    for suite in (video, image_edit, world_model):
+        selected = task_eval.selected_models_for_suite(
+            suite, models, single_device_only=True
+        )
+        assert [model["name"] for model in selected] == suite["default_model_names"]
+
+
 def test_default_suites_include_model_aligned_vision_tasks() -> None:
     suites = task_eval.load_suites()
 
@@ -1565,6 +1601,49 @@ def test_prepare_task_dataset_dispatches_diffusion_prompt_json(tmp_path: Path) -
     manifest = json.loads(outputs["manifest"].read_text(encoding="utf-8"))
     assert manifest["dataset_kind"] == "diffusion_prompt_json"
     assert manifest["dataset_name"] == "DPG-Bench"
+
+
+def test_prepare_diffusion_json_resolves_declared_sample_assets(
+    tmp_path: Path,
+) -> None:
+    condition = tmp_path / "images" / "condition.png"
+    condition.parent.mkdir()
+    condition.write_bytes(b"condition")
+    dataset = tmp_path / "gedit.json"
+    dataset.write_text(
+        json.dumps(
+            {
+                "dataset": "GEdit-Bench",
+                "requests": [
+                    {
+                        "sample_id": "gedit_000000",
+                        "prompt": "turn the object blue",
+                        "image": "images/condition.png",
+                        "category": "color",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    suite = {
+        "id": "gedit_bench_image_edit",
+        "dataset": {
+            "kind": "diffusion_prompt_json",
+            "asset_fields": ["image"],
+        },
+    }
+
+    outputs = task_eval.prepare_diffusion_prompt_json_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+    )
+
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    assert answers["requests"][0]["image"] == str(condition.resolve())
+    assert prompts[0]["image"] == str(condition.resolve())
 
 
 def test_prepare_mmlu_applies_gpt_oss_family_override(tmp_path: Path) -> None:
@@ -3398,6 +3477,114 @@ def test_diffusion_response_preserves_initial_latent_identity() -> None:
     )
 
     assert response["initial_latents_sha256"] == "abc123"
+
+
+def test_diffusion_sample_inputs_and_response_record_shared_conditions(
+    tmp_path: Path,
+) -> None:
+    from tests.e2e_harness.contracts import E2ECase, StageOutput
+
+    condition = tmp_path / "condition.png"
+    condition.write_bytes(b"condition-image")
+    template = E2ECase(
+        name="qwen-image-edit-2511",
+        hf_id="Qwen/Qwen-Image-Edit-2511",
+        family="qwen_image",
+        runtime_strategy="diffusion_qwen_image",
+        task_strategy="diffusion_media_generation",
+        inputs={"image": "/old/image.png", "action": "w-320"},
+    )
+    case = task_eval._diffusion_case_for_prompt(
+        template,
+        {
+            "sample_id": "gedit_000000",
+            "prompt": "turn it blue",
+            "image": str(condition),
+            "action": "w-160,d-160",
+        },
+        {"seed": 42},
+        3,
+    )
+
+    assert case.inputs["image"] == str(condition)
+    assert case.inputs["action"] == "w-160,d-160"
+    assert case.inputs["seed"] == 45
+    response = task_eval._diffusion_response(
+        case.name,
+        "hf",
+        StageOutput(
+            stage_name="end_to_end",
+            data={"returncode": 0, "num_frames": 1},
+        ),
+        case=case,
+    )
+    assert response["seed"] == 45
+    assert response["action"] == "w-160,d-160"
+    assert response["condition_image_sha256"] == task_eval._sha256_file(condition)
+
+
+def test_diffusion_parity_rejects_mismatched_shared_sample_inputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    base = {
+        "sample_id": "sample-1",
+        "returncode": 0,
+        "num_frames": 1,
+        "frames_dir": "/frames",
+        "prompt": "a moving object",
+        "seed": 42,
+    }
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_comparator",
+        lambda _work_dir: object(),
+    )
+
+    with pytest.raises(ValueError, match="shared input mismatch.*seed"):
+        task_eval.compare_diffusion_image_predictions(
+            {"responses": [base]},
+            {"responses": [{**base, "seed": 43}]},
+            {"requests": [{"sample_id": "sample-1", "prompt": "a moving object"}]},
+            work_dir=tmp_path,
+            gates={},
+        )
+
+
+def test_diffusion_parity_rejects_dataset_condition_digest_mismatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    row = {
+        "sample_id": "sample-1",
+        "returncode": 0,
+        "num_frames": 1,
+        "frames_dir": "/frames",
+        "prompt": "turn it blue",
+        "condition_image_sha256": "actual-digest",
+    }
+    monkeypatch.setattr(
+        task_eval,
+        "_load_diffusion_task_eval_comparator",
+        lambda _work_dir: object(),
+    )
+
+    with pytest.raises(ValueError, match="dataset input mismatch.*condition_image"):
+        task_eval.compare_diffusion_image_predictions(
+            {"responses": [row]},
+            {"responses": [row]},
+            {
+                "requests": [
+                    {
+                        "sample_id": "sample-1",
+                        "prompt": "turn it blue",
+                        "condition_image_sha256": "declared-digest",
+                    }
+                ]
+            },
+            work_dir=tmp_path,
+            gates={},
+        )
 
 
 def test_diffusion_parity_rejects_mismatched_initial_latents(

@@ -836,6 +836,162 @@ suites:
       notes: >
         P2021-only until the DPG-Bench scorecard is visually calibrated.
 
+  - id: vbench_t2v_diffusion_video
+    description: >
+      HF-to-TRTMC text-to-video parity on a fixed ten-prompt slice of the
+      official VBench prompt suite. The slice spans motion, dynamics, object
+      composition, human action, color, spatial relationships, scene, and
+      temporal/appearance style. Every sample records the shared seed and
+      reference-relative frame metrics; VBench quality scoring remains a
+      separate downstream concern.
+    user_contract: diffusion_video
+    default_model_names:
+      - ltx-video-l0
+      - wan21-t2v-1.3b-l0
+    dataset:
+      kind: diffusion_prompt_json
+      default_path: /mnt/data/VBench/vbench_t2v_task_eval.json
+      prompt_field: prompt
+      subject_field: category
+    selectors:
+      model_names:
+        - ltx-video-l0
+        - wan21-t2v-1.3b-l0
+      task_strategies:
+        - diffusion_media_generation
+      runtime_strategies:
+        - diffusion_ltx
+        - diffusion_wan
+      user_contracts:
+        - diffusion_video
+      families:
+        - ltx_video
+        - wan_t2v
+    generation:
+      seed: 42
+    scoring:
+      scorer: diffusion_image_clip_parity
+    gates:
+      min_pixel_mean: 0.15
+      max_pixel_mean: 0.85
+      min_pixel_std: 0.05
+      temporal_consistency: 0.60
+      min_trt_hf_image_clip_cosine: 0.85
+    family_profiles:
+      ltx_video:
+        gates:
+          psnr: 5.0
+          ssim: 0.1
+      wan_t2v:
+        gates:
+          psnr: 2.0
+          ssim: -1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GB300-only sampled validation. Run with --limit 10; do not expand to
+        the full VBench prompt suite in task-eval.
+
+  - id: gedit_bench_image_edit
+    description: >
+      HF-to-TRTMC image-edit parity on ten task-diverse English inputs from
+      the official GEdit-Bench used by the Qwen-Image technical report. Input
+      images are deterministically center-cropped to the manifest's static
+      1024x1024 condition geometry. Each sample records the condition-image
+      digest, shared seed and initial-latent digest before semantic comparison.
+    user_contract: image-to-image
+    default_model_names:
+      - qwen-image-edit-2511
+    dataset:
+      kind: diffusion_prompt_json
+      default_path: /mnt/data/GEdit-Bench/gedit_bench_task_eval.json
+      prompt_field: prompt
+      subject_field: category
+      asset_fields:
+        - image
+    selectors:
+      model_names:
+        - qwen-image-edit-2511
+      task_strategies:
+        - diffusion_media_generation
+      runtime_strategies:
+        - diffusion_qwen_image
+      user_contracts:
+        - image-to-image
+      families:
+        - qwen_image
+    generation:
+      seed: 42
+      video_num_frames: 1
+      use_shared_initial_latents: true
+    scoring:
+      scorer: diffusion_image_clip_parity
+    gates:
+      min_pixel_mean: 0.15
+      max_pixel_mean: 0.85
+      min_pixel_std: 0.05
+      min_trt_hf_image_clip_cosine: 0.85
+      require_matching_initial_latents: 1
+      psnr: 5.0
+      ssim: 0.1
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GB300-only sampled validation. Run with --limit 10; this suite reports
+        implementation agreement, not the GEdit judge score.
+
+  - id: sana_wm_benchmark_diffusion_video
+    description: >
+      HF-to-TRTMC image-to-video parity on ten scenes sampled from the
+      official SANA-WM 80-scene benchmark. Both backends consume the same
+      image, prompt, intrinsics, seed, and 320-step action-string trajectory.
+      The current native TRT runtime cannot ingest the benchmark's arbitrary
+      c2w files, so official 60-second pose-accuracy scoring remains out of
+      scope and is recorded as a dataset limitation.
+    user_contract: diffusion_video
+    default_model_names:
+      - sana-wm-bidirectional
+    dataset:
+      kind: diffusion_prompt_json
+      default_path: /mnt/data/SANA-WM-Bench/sana_wm_task_eval.json
+      prompt_field: prompt
+      subject_field: category
+      asset_fields:
+        - image
+        - prompt_file
+        - camera_intrinsics_file
+    selectors:
+      model_names:
+        - sana-wm-bidirectional
+      task_strategies:
+        - diffusion_media_generation
+      runtime_strategies:
+        - diffusion_sana_wm
+      user_contracts:
+        - diffusion_video
+      families:
+        - sana_wm
+    generation:
+      seed: 42
+    scoring:
+      scorer: diffusion_image_clip_parity
+    gates:
+      min_pixel_mean: 0.15
+      max_pixel_mean: 0.85
+      min_pixel_std: 0.05
+      temporal_consistency: 0.60
+      min_trt_hf_image_clip_cosine: 0.85
+      psnr: 5.0
+      ssim: 0.1
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        GB300-only sampled validation. Run with --limit 10; the full official
+        961-frame benchmark and its pose evaluator are intentionally excluded.
+
   - id: imagenette_image_classification
     description: >
       HF-to-TRTMC image-classification parity on Imagenette validation, a
