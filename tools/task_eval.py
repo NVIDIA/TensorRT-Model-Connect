@@ -10553,6 +10553,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         "semantic_segmentation_json",
         "prompted_segmentation_json",
         "time_series_csv",
+        "reranking_json",
     }:
         raise ValueError(f"eval does not support dataset kind {dataset_kind!r}")
     models = load_manifest_records(Path(args.models_dir))

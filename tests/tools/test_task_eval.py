@@ -4707,6 +4707,53 @@ def test_eval_parser_accepts_explicit_model_plugin_dir() -> None:
     assert args.model_plugin_dir == "/runtime/models/pixart"
 
 
+def test_eval_accepts_reranking_dataset_kind(tmp_path: Path, monkeypatch) -> None:
+    suite = {"id": "beir_scifact_reranking", "dataset": {"kind": "reranking_json"}}
+    model = {
+        "name": "reranker",
+        "hf_id": "org/reranker",
+        "bundle": "reranker.trtfb",
+    }
+    monkeypatch.setattr(task_eval, "load_suites", lambda *_args, **_kwargs: [suite])
+    monkeypatch.setattr(task_eval, "load_manifest_records", lambda *_args, **_kwargs: [model])
+    monkeypatch.setattr(
+        task_eval,
+        "selected_models_for_suite",
+        lambda *_args, **_kwargs: [model],
+    )
+    monkeypatch.setattr(
+        task_eval,
+        "eval_one_model",
+        lambda **_kwargs: {
+            "suite": suite["id"],
+            "model": model["name"],
+            "mode": "reranking_parity",
+            "sample_pass_rate": 1.0,
+            "mean_pairwise_ordering_agreement": 1.0,
+            "min_pairwise_ordering_agreement": 1.0,
+            "hf_reused": False,
+            "bundle_built": False,
+        },
+    )
+    args = argparse.Namespace(
+        suites="",
+        suite=suite["id"],
+        models_dir="",
+        waives="",
+        waive_platform="",
+        include_waived=False,
+        model=[],
+        single_device_only=True,
+        bundle="",
+        work_root=str(tmp_path / "work"),
+        engine_dir=str(tmp_path / "bundles"),
+        fail_fast=False,
+        disable_model_process_isolation=True,
+    )
+
+    assert task_eval.cmd_eval(args) == 0
+
+
 def test_eval_stops_after_oom_when_gpu_cleanup_is_not_confirmed(
     tmp_path: Path, monkeypatch
 ) -> None:
