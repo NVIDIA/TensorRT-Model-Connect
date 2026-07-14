@@ -14,7 +14,6 @@ test_manifests = [
 reference_backend = "hf_diffusers"
 oracle_level = "L1_external_reference"
 stages = [
-  { name = "vae_decode", required = false },
   { name = "end_to_end", required = true },
 ]
 input_fields = [

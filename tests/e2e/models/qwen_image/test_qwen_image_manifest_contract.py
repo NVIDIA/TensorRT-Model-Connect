@@ -41,6 +41,22 @@ def test_qwen_image_manifest_declares_hf_image_contract(
     assert case.metadata.get("task_mode") == task_mode
 
 
+def test_qwen_image_nightly_defaults_run_end_to_end_contract_once() -> None:
+    """Nightly Qwen-Image cases must not repeat the full TRT and HF pipelines."""
+    manifests = Path(__file__).with_name("manifests")
+
+    for manifest_name in (
+        "qwen-image.json",
+        "qwen-image-2512.json",
+        "qwen-image-edit-2511.json",
+    ):
+        case = load_manifest(manifests / manifest_name)
+
+        assert case.task_strategy == "diffusion_media_generation"
+        assert [stage.name for stage in case.stages] == ["end_to_end"]
+        assert all(stage.required for stage in case.stages)
+
+
 def test_qwen_image_l0_keeps_nightly_quality_gate_at_reduced_scale() -> None:
     manifests = Path(__file__).with_name("manifests")
     l0_case = load_manifest(manifests / "qwen-image-l0.json")
