@@ -686,7 +686,8 @@ def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> 
         "TRTMC_CI_IMAGE_LOCK_FILE",
         'flock -w "$lock_timeout" 9',
         "docker image inspect --format '{{.Id}}'",
-        'echo "image_ref=$resolved_ref" >> "$GITHUB_OUTPUT"',
+        'printf \'image_ref=%s\\n\' "$resolved_ref" >> "$GITHUB_OUTPUT"',
+        'mkdir -p "$(dirname "$GITHUB_OUTPUT")"',
         "verification_stamp",
     ):
         assert contract in ensure

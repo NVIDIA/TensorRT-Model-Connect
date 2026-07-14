@@ -111,6 +111,7 @@ def _run_ensure_script(
     repo_root: Path = REPO_ROOT,
     run_id: str = "",
     verification_dir: Path | None = None,
+    github_output: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str, str]:
     bin_dir, log_path = _write_fake_docker(tmp_path, existing_images)
     if changed_paths:
@@ -153,6 +154,8 @@ exit 2
     )
     if verification_dir is not None:
         env["TRTMC_CI_IMAGE_VERIFICATION_DIR"] = str(verification_dir)
+    if github_output is not None:
+        env["GITHUB_OUTPUT"] = str(github_output)
     script = repo_root / SCRIPT.relative_to(REPO_ROOT)
     result = subprocess.run(
         ["bash", str(script)],
@@ -297,6 +300,30 @@ def test_matching_fingerprint_image_is_reused_for_pr_rerun(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr
     assert "build " not in docker_log
     assert f"CI Docker image '{resolved_image}' already matches" in result.stdout
+
+
+def test_reused_image_creates_missing_github_output_parent(tmp_path: Path) -> None:
+    bootstrap_result, bootstrap_env, bootstrap_log = _run_ensure_script(
+        tmp_path / "bootstrap",
+        existing_images={},
+    )
+    assert bootstrap_result.returncode == 0, bootstrap_result.stderr
+    resolved_image = re.search(r"^TRTMC_CI_IMAGE=(.+)$", bootstrap_env, re.MULTILINE).group(1)
+    fingerprint = re.search(
+        r"--label org\.nvidia\.trtmc\.ci-input-fingerprint=([0-9a-f]{64})",
+        bootstrap_log,
+    ).group(1)
+    github_output = tmp_path / "missing-file-command-dir" / "set_output"
+
+    result, _, _ = _run_ensure_script(
+        tmp_path / "matching",
+        existing_images={resolved_image: fingerprint},
+        changed_paths=(".github/scripts/ensure-ci-docker-image.sh",),
+        github_output=github_output,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert github_output.read_text(encoding="utf-8") == f"image_ref=sha256:{fingerprint}\n"
 
 
 def test_matching_image_is_fully_validated_once_per_workflow_run(tmp_path: Path) -> None:

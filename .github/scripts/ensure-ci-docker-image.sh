@@ -151,7 +151,8 @@ fi
 emit_image_ref() {
   local resolved_ref="$1"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
-    echo "image_ref=$resolved_ref" >> "$GITHUB_OUTPUT"
+    mkdir -p "$(dirname "$GITHUB_OUTPUT")"
+    printf 'image_ref=%s\n' "$resolved_ref" >> "$GITHUB_OUTPUT"
   fi
 }
 
