@@ -22,6 +22,19 @@ def test_flux2_fp8_manifest_uses_end_to_end_image_contract() -> None:
     assert "Wan-specific" in case.metadata["notes"]
 
 
+def test_flux_production_defaults_run_end_to_end_contract_once() -> None:
+    """Production Flux cases must not repeat the full TRT and HF pipelines."""
+    manifests_dir = Path(__file__).with_name("manifests")
+
+    for manifest_name in ("flux-2-dev.json", "flux-schnell.json"):
+        case = load_manifest(manifests_dir / manifest_name)
+
+        assert case.reference_family == "diffusers_image_gen"
+        assert case.user_contract == "diffusion_image"
+        assert [stage.name for stage in case.stages] == ["end_to_end"]
+        assert all(stage.required for stage in case.stages)
+
+
 def test_flux_batch2_manifest_declares_real_batch_contract() -> None:
     manifest_path = Path(__file__).with_name("manifests") / "flux-schnell-l0-batch2.json"
     case = load_manifest(manifest_path)
