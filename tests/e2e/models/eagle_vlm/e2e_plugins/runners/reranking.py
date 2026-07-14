@@ -78,6 +78,8 @@ class RerankingRunner:
             ]
             if runtime_cli_python:
                 cmd.extend(["--hf-python", runtime_cli_python])
+            if ctx.model_plugin_dir:
+                cmd.extend(["--model-plugin-dir", ctx.model_plugin_dir])
             run_env = dict(env)
             if distributed_runtime:
                 _ensure_distributed_runtime_env(

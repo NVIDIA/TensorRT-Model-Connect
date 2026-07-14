@@ -315,8 +315,106 @@ def test_default_suites_include_model_aligned_vision_tasks() -> None:
 
     prompted = task_eval.suite_by_id(suites, "coco2017_prompted_segmentation")
     assert prompted["dataset"]["kind"] == "prompted_segmentation_json"
-    assert prompted["default_model_names"] == ["sam-vit-base"]
+    assert prompted["default_model_names"] == ["sam-vit-base", "sam3"]
     assert prompted["model_overrides"]["by_family"]["sam"]["prompt_mode"] == "point"
+    assert prompted["model_overrides"]["by_family"]["sam3"]["prompt_mode"] == "text"
+
+
+def test_default_suites_include_scifact_reranking_parity() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "beir_scifact_reranking")
+    selected = task_eval.selected_models_for_suite(
+        suite, task_eval.load_manifest_records(), single_device_only=True
+    )
+
+    assert suite["dataset"]["kind"] == "reranking_json"
+    assert suite["scoring"]["scorer"] == "reranking_parity"
+    assert [model["name"] for model in selected] == ["nemotron-rerank-vl-1b-v2"]
+    assert suite["gates"]["min_sample_pass_rate"] == 1.0
+
+
+def test_prepare_reranking_dataset_preserves_query_documents_and_gold(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "scifact.json"
+    dataset.write_text(
+        json.dumps(
+            {
+                "dataset": "BEIR SciFact test",
+                "requests": [
+                    {
+                        "id": "scifact-1",
+                        "subset": "test",
+                        "query": "Does the evidence support the claim?",
+                        "documents": ["relevant evidence", "distractor evidence"],
+                        "relevant_document_indices": [0],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "beir_scifact_reranking")
+
+    outputs = task_eval.prepare_reranking_dataset(
+        dataset_path=dataset,
+        work_dir=tmp_path / "work",
+        suite=suite,
+        limit=1,
+    )
+
+    prompts = task_eval.load_jsonl(outputs["prompts"])
+    answers = json.loads(outputs["answers"].read_text(encoding="utf-8"))
+    assert prompts[0]["query"] == "Does the evidence support the claim?"
+    assert prompts[0]["documents"] == ["relevant evidence", "distractor evidence"]
+    assert answers["requests"][0]["relevant_document_indices"] == [0]
+
+
+def test_reranking_parity_records_each_low_agreement_sample() -> None:
+    from tests.e2e.models.eagle_vlm.e2e_plugins.comparators.reranking import (
+        RerankingComparator,
+    )
+
+    answers = {
+        "requests": [
+            {"sample_id": "agree", "relevant_document_indices": [0]},
+            {"sample_id": "disagree", "relevant_document_indices": [0]},
+        ]
+    }
+    hf = {
+        "responses": [
+            {"sample_id": "agree", "scores": [0.9, 0.2, 0.1]},
+            {"sample_id": "disagree", "scores": [0.9, 0.2, 0.1]},
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {"sample_id": "agree", "scores": [0.8, 0.3, 0.1]},
+            {"sample_id": "disagree", "scores": [0.1, 0.2, 0.9]},
+        ]
+    }
+
+    summary = task_eval.compare_reranking_prediction_sets(
+        hf,
+        trtfb,
+        answers,
+        gates={
+            "pairwise_ordering_agreement": 1.0,
+            "kendall_tau": 1.0,
+            "spearman_rho": 1.0,
+            "score_correlation": 0.95,
+            "min_sample_pass_rate": 1.0,
+        },
+        comparator=RerankingComparator(),
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["sample_pass_rate"] == 0.5
+    assert len(summary["cases"]) == 2
+    disagreement = next(
+        case for case in summary["cases"] if case["sample_id"] == "disagree"
+    )
+    assert disagreement["passed"] is False
+    assert disagreement["metrics"]["pairwise_ordering_agreement"]["value"] < 1.0
 
 
 def test_prepare_vision_datasets_resolves_model_specific_assets(tmp_path: Path) -> None:

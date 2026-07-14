@@ -659,13 +659,15 @@ suites:
 
   - id: coco2017_prompted_segmentation
     description: >
-      Point-prompted segmentation parity on COCO 2017 validation. SAM uses a
-      deterministic foreground point and its instance mask. Backend mask
-      agreement is gated while COCO ground-truth IoU is reported and guarded
-      against regression from the HF reference.
+      Unified prompted-segmentation parity on COCO 2017 validation. SAM uses a
+      deterministic foreground point and its instance mask; SAM3 uses the COCO
+      category text prompt and the exhaustive union of category instances.
+      Backend mask agreement is gated while COCO ground-truth IoU is reported
+      and guarded against regression from the HF reference.
     user_contract: prompted_mask
     default_model_names:
       - sam-vit-base
+      - sam3
     dataset:
       kind: prompted_segmentation_json
       name: COCO 2017 validation prompted segmentation
@@ -679,8 +681,10 @@ suites:
         - prompted_segmentation
       runtime_strategies:
         - sam_prompted_segmentation
+        - sam3_prompted_segmentation
       families:
         - sam
+        - sam3
       user_contracts:
         - prompted_mask
     scoring:
@@ -697,6 +701,9 @@ suites:
         sam:
           prompt_mode: point
           ground_truth_mask_field: instance_mask
+        sam3:
+          prompt_mode: text
+          ground_truth_mask_field: category_mask
     ci:
       eligible: false
       lane: local_only
@@ -777,6 +784,49 @@ suites:
       xlnet-base:
         gates:
           min_vector_cosine: 0.95
+
+  - id: beir_scifact_reranking
+    description: >
+      Per-query HF-versus-TRTMC ranking parity on the BEIR SciFact test split.
+      Each sample ranks the same relevant passage and deterministic distractors;
+      every low-agreement sample is retained in summary.json. Gold top-1
+      retrieval accuracy is reported separately as a task-quality diagnostic.
+    user_contract: ranking_order
+    default_model_names:
+      - nemotron-rerank-vl-1b-v2
+    dataset:
+      kind: reranking_json
+      name: BEIR SciFact test reranking
+      default_path: /mnt/data/BEIR_scifact_reranking/beir_scifact_reranking.json
+      subject_field: subset
+    selectors:
+      model_names:
+        - nemotron-rerank-vl-1b-v2
+      task_strategies:
+        - reranking
+      runtime_strategies:
+        - eagle_vlm_reranking
+      families:
+        - eagle_vlm
+      user_contracts:
+        - ranking_order
+    scoring:
+      scorer: reranking_parity
+      task_metric: top1_retrieval_accuracy
+    gates:
+      # Match the model-owned E2E ranking contract per query.
+      pairwise_ordering_agreement: 1.0
+      kendall_tau: 1.0
+      spearman_rho: 1.0
+      score_correlation: 0.95
+      min_sample_pass_rate: 1.0
+    ci:
+      eligible: false
+      lane: local_only
+      notes: >
+        The limit-10 GB300 run is smoke coverage; use the complete processed
+        SciFact test set for a stable task-quality score.
+
   - id: wmt14_de_en_elf_diffusion_text
     description: >
       HF-versus-TRTMC parity evaluation for ELF-B translation on WMT14

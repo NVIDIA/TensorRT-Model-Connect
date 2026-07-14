@@ -58,6 +58,7 @@ def test_runner_scores_each_manifest_document(monkeypatch, tmp_path) -> None:
         case=case,
         binary_path="/bin/trtmc",
         engine_dir=str(tmp_path),
+        model_plugin_dir="/tmp/model-plugins/eagle_vlm",
     )
 
     output = reranking.RerankingRunner().run_stage(
@@ -66,5 +67,6 @@ def test_runner_scores_each_manifest_document(monkeypatch, tmp_path) -> None:
     assert output.data["scores"] == [0.25, 0.5, 0.75]
     assert output.data["documents"] == ["Venus text", "Mars text", "Jupiter text"]
     assert [cmd[6] for cmd in calls] == ["Venus text", "Mars text", "Jupiter text"]
+    assert calls[0][-2:] == ["--model-plugin-dir", "/tmp/model-plugins/eagle_vlm"]
     assert output.metadata["document_count"] == 3
     assert output.metadata["document_1"]["stdout"] == "Relevance score: 0.5"

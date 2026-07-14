@@ -1220,7 +1220,7 @@ def _load_indexed_json_requests(
     return data, indexed
 
 
-def _write_vision_task_dataset(
+def _write_indexed_json_task_dataset(
     *,
     dataset_path: Path,
     work_dir: Path,
@@ -1307,7 +1307,7 @@ def prepare_image_classification_dataset(
         }
         prompt_rows.append(row)
         prepared_requests.append({**request, **row})
-    return _write_vision_task_dataset(
+    return _write_indexed_json_task_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
         suite=suite,
@@ -1363,7 +1363,7 @@ def prepare_semantic_segmentation_dataset(
         }
         prompt_rows.append(row)
         prepared_requests.append({**request, **row})
-    return _write_vision_task_dataset(
+    return _write_indexed_json_task_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
         suite=suite,
@@ -1439,7 +1439,85 @@ def prepare_prompted_segmentation_dataset(
         }
         prompt_rows.append(row)
         prepared_requests.append({**request, **row})
-    return _write_vision_task_dataset(
+    return _write_indexed_json_task_dataset(
+        dataset_path=dataset_path,
+        work_dir=work_dir,
+        suite=suite,
+        data=data,
+        indexed=indexed,
+        prompt_rows=prompt_rows,
+        prepared_requests=prepared_requests,
+        limit=limit,
+        subject=subject,
+        sample_seed=sample_seed,
+        task_eval_config=task_eval_config,
+    )
+
+
+def prepare_reranking_dataset(
+    *,
+    dataset_path: Path,
+    work_dir: Path,
+    suite: dict[str, Any],
+    limit: int = 0,
+    subject: str = "",
+    sample_seed: int | None = None,
+    task_eval_config: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    dataset_config = suite.get("dataset", {})
+    subject_field = str(dataset_config.get("subject_field", "subset"))
+    data, indexed = _load_indexed_json_requests(
+        dataset_path,
+        subject=subject,
+        subject_field=subject_field,
+        limit=limit,
+        sample_seed=sample_seed,
+    )
+    prepared_requests: list[dict[str, Any]] = []
+    prompt_rows: list[dict[str, Any]] = []
+    for eval_index, (dataset_index, request) in enumerate(indexed):
+        query = str(request.get("query", "") or "")
+        documents = request.get("documents")
+        if not query:
+            raise ValueError(f"{dataset_path}: request {dataset_index} has no query")
+        if not isinstance(documents, list) or len(documents) < 2:
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} requires at least two documents"
+            )
+        documents = [str(document) for document in documents]
+        if any(not document for document in documents):
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} contains an empty document"
+            )
+        relevant = request.get("relevant_document_indices", [])
+        if not isinstance(relevant, list):
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} relevant indices must be a list"
+            )
+        try:
+            relevant_indices = [int(index) for index in relevant]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} has invalid relevant indices"
+            ) from exc
+        if any(index < 0 or index >= len(documents) for index in relevant_indices):
+            raise ValueError(
+                f"{dataset_path}: request {dataset_index} relevant index is out of range"
+            )
+        sample_id = str(request.get("id", f"reranking_{dataset_index:06d}"))
+        row = {
+            "sample_id": sample_id,
+            "dataset_index": dataset_index,
+            "eval_index": eval_index,
+            "subject": str(request.get(subject_field, "")),
+            "prompt": query,
+            "query": query,
+            "documents": documents,
+            "relevant_document_indices": relevant_indices,
+        }
+        prompt_rows.append(row)
+        prepared_requests.append({**request, **row})
+    return _write_indexed_json_task_dataset(
         dataset_path=dataset_path,
         work_dir=work_dir,
         suite=suite,
@@ -2096,6 +2174,16 @@ def prepare_task_dataset(
             sample_seed=sample_seed,
             task_eval_config=task_eval_config,
         )
+    if dataset_kind == "reranking_json":
+        return prepare_reranking_dataset(
+            dataset_path=dataset_path,
+            work_dir=work_dir,
+            suite=suite,
+            limit=limit,
+            subject=subject,
+            sample_seed=sample_seed,
+            task_eval_config=task_eval_config,
+        )
     if dataset_kind == "vlm_chat_json":
         return prepare_vlm_chat_dataset(
             dataset_path=dataset_path,
@@ -2301,9 +2389,17 @@ def max_prompt_token_length(
     )
     max_len = 0
     for row in load_jsonl(prompts_path):
-        prompt = str(row.get("prompt", ""))
-        length = len(tokenizer(prompt, add_special_tokens=False).input_ids)
-        max_len = max(max_len, length)
+        documents = row.get("documents")
+        if isinstance(documents, list) and documents:
+            query = str(row.get("query", row.get("prompt", "")))
+            prompts = [
+                f"question:{query}   passage:{document}" for document in documents
+            ]
+        else:
+            prompts = [str(row.get("prompt", ""))]
+        for prompt in prompts:
+            length = len(tokenizer(prompt, add_special_tokens=False).input_ids)
+            max_len = max(max_len, length)
     return max_len
 
 
@@ -4958,6 +5054,10 @@ def _is_vision_task_dataset_kind(kind: str) -> bool:
     }
 
 
+def _is_reranking_dataset_kind(kind: str) -> bool:
+    return kind == "reranking_json"
+
+
 def work_scoring(work_dir: Path) -> dict[str, Any]:
     scoring = work_manifest(work_dir).get("scoring", {})
     return scoring if isinstance(scoring, dict) else {}
@@ -6097,6 +6197,174 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
     write_predictions(pred_path, responses)
 
 
+def _load_reranking_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any, Any]:
+    task_eval_config = work_manifest(work_dir).get("task_eval", {})
+    if not isinstance(task_eval_config, dict):
+        task_eval_config = {}
+    manifest_ref = str(task_eval_config.get("model_manifest", "") or "")
+    if not manifest_ref:
+        raise ValueError("reranking task eval requires task_eval.model_manifest")
+    manifest_path = Path(manifest_ref)
+    if not manifest_path.is_absolute():
+        manifest_path = REPO_ROOT / manifest_path
+    case = load_manifest(manifest_path)
+    model_test_dir = str(case.metadata.get("model_test_dir", "") or "")
+    activate_model_plugins(model_test_dir)
+    reference = get_reference(case.reference_backend)
+    runner = get_runner(case.task_strategy)
+    comparator = get_comparator(case.task_strategy)
+    if reference is None:
+        raise RuntimeError(
+            f"No reference plugin {case.reference_backend!r} for {case.family}"
+        )
+    if runner is None:
+        raise RuntimeError(f"No runner plugin {case.task_strategy!r} for {case.family}")
+    if comparator is None:
+        raise RuntimeError(
+            f"No comparator plugin {case.task_strategy!r} for {case.family}"
+        )
+    return case, reference, runner, comparator
+
+
+def _reranking_case_for_request(
+    template: Any, prompt_row: dict[str, Any], index: int
+) -> Any:
+    case = copy.deepcopy(template)
+    case.name = str(prompt_row.get("sample_id", f"reranking_{index:06d}"))
+    case.inputs["prompt"] = str(prompt_row["query"])
+    case.inputs["documents"] = [str(document) for document in prompt_row["documents"]]
+    return case
+
+
+def _reranking_full_inference_stage(case: Any) -> Any:
+    from tests.e2e_harness.contracts import StageSpec
+
+    for stage in case.stages:
+        if stage.name == "full_inference":
+            return stage
+    return StageSpec(name="full_inference", required=True)
+
+
+def _reranking_response(
+    *, case: Any, source: str, output: Any, prompt_row: dict[str, Any]
+) -> dict[str, Any]:
+    data = output.data if isinstance(output.data, dict) else {}
+    scores = data.get("scores")
+    if not isinstance(scores, list) or len(scores) != len(prompt_row["documents"]):
+        raise RuntimeError(
+            f"{source} reranking produced {len(scores) if isinstance(scores, list) else 0} "
+            f"scores for {len(prompt_row['documents'])} documents"
+        )
+    return {
+        "sample_id": case.name,
+        "source": source,
+        "query": str(prompt_row["query"]),
+        "documents": [str(document) for document in prompt_row["documents"]],
+        "scores": [float(score) for score in scores],
+        "wall_ms": float(output.timing_s) * 1000.0,
+    }
+
+
+def _write_reranking_run_metadata(log_file: Any, sample_id: str, output: Any) -> None:
+    metadata = output.metadata if isinstance(output.metadata, dict) else {}
+    log_file.write(
+        json.dumps({"sample_id": sample_id, "metadata": metadata}, ensure_ascii=False)
+        + "\n"
+    )
+    log_file.flush()
+
+
+def run_reranking_hf_reference(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, reference, _runner, _comparator = _load_reranking_task_eval_plugins(
+        work_dir
+    )
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "hf_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "hf_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "hf_predictions.json")
+    metadata_path = work_dir / "hf_reference_metadata.jsonl"
+    responses: list[dict[str, Any]] = []
+    with (
+        raw_path.open("w", encoding="utf-8") as raw_file,
+        metadata_path.open("w", encoding="utf-8") as metadata_file,
+    ):
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _reranking_case_for_request(template, prompt_row, index)
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                hf_python=sys.executable,
+                reference_python=sys.executable,
+            )
+            output = reference.run_stage(
+                case, _reranking_full_inference_stage(case), context
+            )
+            response = _reranking_response(
+                case=case, source="hf", output=output, prompt_row=prompt_row
+            )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            _write_reranking_run_metadata(metadata_file, case.name, output)
+            print(
+                f"[task_eval.reranking_hf] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
+def run_reranking_trtfb(args: argparse.Namespace) -> None:
+    from tests.e2e_harness.contracts import RunContext
+
+    work_dir = Path(args.work_dir)
+    template, _reference, runner, _comparator = _load_reranking_task_eval_plugins(
+        work_dir
+    )
+    prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    artifacts_dir = work_dir / "trtfb_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
+    pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    metadata_path = work_dir / (args.log or "trtfb_run.log")
+    bundle_path = Path(args.bundle).resolve()
+    responses: list[dict[str, Any]] = []
+    with (
+        raw_path.open("w", encoding="utf-8") as raw_file,
+        metadata_path.open("w", encoding="utf-8") as metadata_file,
+    ):
+        for index, prompt_row in enumerate(prompt_rows):
+            case = _reranking_case_for_request(template, prompt_row, index)
+            case.bundle = bundle_path.name
+            context = RunContext(
+                case=case,
+                artifacts_dir=str(artifacts_dir),
+                binary_path=str(args.trtmc_binary),
+                hf_python=str(getattr(args, "hf_python", "") or ""),
+                runtime_python=str(getattr(args, "hf_python", "") or ""),
+                engine_dir=str(bundle_path.parent),
+                model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
+            )
+            output = runner.run_stage(
+                case, _reranking_full_inference_stage(case), context
+            )
+            response = _reranking_response(
+                case=case, source="trtfb", output=output, prompt_row=prompt_row
+            )
+            responses.append(response)
+            raw_file.write(json.dumps(response, ensure_ascii=False) + "\n")
+            raw_file.flush()
+            _write_reranking_run_metadata(metadata_file, case.name, output)
+            print(
+                f"[task_eval.reranking_trtfb] sample={index + 1}/{len(prompt_rows)}",
+                file=sys.stderr,
+            )
+    write_predictions(pred_path, responses)
+
+
 def _load_diffusion_task_eval_plugins(work_dir: Path) -> tuple[Any, Any, Any]:
     task_eval_config = work_manifest(work_dir).get("task_eval", {})
     if not isinstance(task_eval_config, dict):
@@ -6429,6 +6697,9 @@ def run_encoder_embedding_hf_reference(args: argparse.Namespace) -> None:
 
 def run_hf_reference(args: argparse.Namespace) -> None:
     dataset_kind = _work_dataset_kind(Path(args.work_dir))
+    if _is_reranking_dataset_kind(dataset_kind):
+        run_reranking_hf_reference(args)
+        return
     if _is_vision_task_dataset_kind(dataset_kind):
         run_vision_hf_reference(args)
         return
@@ -7038,6 +7309,9 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
 def run_trtfb(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     dataset_kind = _work_dataset_kind(work_dir)
+    if _is_reranking_dataset_kind(dataset_kind):
+        run_reranking_trtfb(args)
+        return
     if _is_vision_task_dataset_kind(dataset_kind):
         run_vision_trtfb(args)
         return
@@ -8008,6 +8282,148 @@ def compare_prompted_segmentation_prediction_sets(
     }
 
 
+def compare_reranking_prediction_sets(
+    hf_data: dict[str, Any],
+    trtfb_data: dict[str, Any],
+    answers: dict[str, Any],
+    *,
+    gates: dict[str, Any],
+    comparator: Any,
+) -> dict[str, Any]:
+    from tests.e2e_harness.contracts import (
+        StageOutput,
+        StageSpec,
+        StageStatus,
+        ThresholdProfile,
+    )
+
+    hf_by_id = {
+        str(row["sample_id"]): row
+        for row in _task_eval_response_rows(hf_data, "HF")
+    }
+    trtfb_by_id = {
+        str(row["sample_id"]): row
+        for row in _task_eval_response_rows(trtfb_data, "TRTMC")
+    }
+    metric_thresholds = {
+        "pairwise_ordering_agreement": float(
+            gates.get("pairwise_ordering_agreement", 0.9)
+        ),
+        "kendall_tau": float(gates.get("kendall_tau", 0.8)),
+        "spearman_rho": float(gates.get("spearman_rho", 0.8)),
+        "score_correlation": float(gates.get("score_correlation", 0.9)),
+    }
+    threshold = ThresholdProfile(
+        task_strategy="reranking", metrics=metric_thresholds
+    )
+    stage = StageSpec(name="full_inference", required=True)
+    cases: list[dict[str, Any]] = []
+    for request in answers.get("requests", []):
+        sample_id = str(request.get("sample_id") or request.get("id") or "")
+        hf_row = hf_by_id.get(sample_id)
+        trtfb_row = trtfb_by_id.get(sample_id)
+        if hf_row is None or trtfb_row is None:
+            cases.append(
+                {"sample_id": sample_id, "passed": False, "error": "missing prediction"}
+            )
+            continue
+        hf_scores = hf_row.get("scores")
+        trtfb_scores = trtfb_row.get("scores")
+        if not isinstance(hf_scores, list) or not isinstance(trtfb_scores, list):
+            cases.append(
+                {"sample_id": sample_id, "passed": False, "error": "missing scores"}
+            )
+            continue
+        if not hf_scores or len(hf_scores) != len(trtfb_scores):
+            cases.append(
+                {
+                    "sample_id": sample_id,
+                    "passed": False,
+                    "error": (
+                        f"score count mismatch: HF={len(hf_scores)}, "
+                        f"TRTMC={len(trtfb_scores)}"
+                    ),
+                }
+            )
+            continue
+        comparison = comparator.compare(
+            StageOutput(stage_name=stage.name, data={"scores": trtfb_scores}),
+            StageOutput(stage_name=stage.name, data={"scores": hf_scores}),
+            threshold,
+            stage,
+        )
+        metrics = {
+            name: {
+                "value": float(metric.value),
+                "threshold": metric.threshold,
+                "operator": metric.operator,
+                "passed": bool(metric.passed),
+                "note": metric.note,
+            }
+            for name, metric in comparison.metrics.items()
+        }
+        relevant_indices = {
+            int(index) for index in request.get("relevant_document_indices", [])
+        }
+        hf_top_index = max(range(len(hf_scores)), key=lambda index: hf_scores[index])
+        trtfb_top_index = max(
+            range(len(trtfb_scores)), key=lambda index: trtfb_scores[index]
+        )
+        cases.append(
+            {
+                "sample_id": sample_id,
+                "passed": comparison.status == StageStatus.PASSED.value,
+                "status": comparison.status,
+                "message": comparison.message,
+                "metrics": metrics,
+                "hf_scores": [float(score) for score in hf_scores],
+                "trtfb_scores": [float(score) for score in trtfb_scores],
+                "hf_top_document_index": hf_top_index,
+                "trtfb_top_document_index": trtfb_top_index,
+                "relevant_document_indices": sorted(relevant_indices),
+                "hf_top1_correct": hf_top_index in relevant_indices,
+                "trtfb_top1_correct": trtfb_top_index in relevant_indices,
+            }
+        )
+    valid = [case for case in cases if "error" not in case]
+    passed_count = sum(bool(case["passed"]) for case in valid)
+    sample_pass_rate = passed_count / len(valid) if valid else 0.0
+    min_sample_pass_rate = float(gates.get("min_sample_pass_rate", 1.0))
+    metric_summaries: dict[str, dict[str, float]] = {}
+    for name in metric_thresholds:
+        values = [float(case["metrics"][name]["value"]) for case in valid]
+        metric_summaries[name] = {
+            "mean": _mean(values),
+            "min": min(values) if values else 0.0,
+        }
+    gold_cases = [case for case in valid if case["relevant_document_indices"]]
+    hf_top1_accuracy = _mean(
+        [1.0 if case["hf_top1_correct"] else 0.0 for case in gold_cases]
+    )
+    trtfb_top1_accuracy = _mean(
+        [1.0 if case["trtfb_top1_correct"] else 0.0 for case in gold_cases]
+    )
+    status = (
+        "passed"
+        if valid
+        and len(valid) == len(cases)
+        and sample_pass_rate >= min_sample_pass_rate
+        else "failed"
+    )
+    return {
+        "status": status,
+        "sample_count": len(cases),
+        "valid_count": len(valid),
+        "passed_count": passed_count,
+        "sample_pass_rate": sample_pass_rate,
+        "hf_top1_accuracy": hf_top1_accuracy,
+        "trtfb_top1_accuracy": trtfb_top1_accuracy,
+        "metrics": metric_summaries,
+        "gates": {**metric_thresholds, "min_sample_pass_rate": min_sample_pass_rate},
+        "cases": cases,
+    }
+
+
 def write_encoder_embedding_summary_markdown(summary: dict[str, Any], path: Path) -> None:
     lines = [
         "# Encoder / Embedding Parity Summary",
@@ -8273,6 +8689,42 @@ def eval_one_model(
             "ground_truth_iou_drop_from_hf": summary[
                 "ground_truth_iou_drop_from_hf"
             ],
+        }
+    elif scorer == "reranking_parity":
+        hf_data = json.loads(
+            (work_dir / "hf_predictions.json").read_text(encoding="utf-8")
+        )
+        trtfb_data = json.loads(
+            (work_dir / "trtfb_predictions.json").read_text(encoding="utf-8")
+        )
+        _template, _reference, _runner, comparator = (
+            _load_reranking_task_eval_plugins(work_dir)
+        )
+        summary = compare_reranking_prediction_sets(
+            hf_data,
+            trtfb_data,
+            json.loads(answers_path.read_text(encoding="utf-8")),
+            gates=suite.get("gates", {}),
+            comparator=comparator,
+        )
+        (work_dir / "summary.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        result = {
+            **base_result,
+            "mode": scorer,
+            "status": summary["status"],
+            "valid_count": summary["valid_count"],
+            "passed_count": summary["passed_count"],
+            "sample_pass_rate": summary["sample_pass_rate"],
+            "hf_top1_accuracy": summary["hf_top1_accuracy"],
+            "trtfb_top1_accuracy": summary["trtfb_top1_accuracy"],
+            "mean_pairwise_ordering_agreement": summary["metrics"][
+                "pairwise_ordering_agreement"
+            ]["mean"],
+            "min_pairwise_ordering_agreement": summary["metrics"][
+                "pairwise_ordering_agreement"
+            ]["min"],
         }
     elif scorer == "encoder_embedding_parity":
         hf_data = json.loads((work_dir / "hf_predictions.json").read_text(encoding="utf-8"))
@@ -8762,6 +9214,13 @@ def write_diffusion_text_summary_markdown(summary: dict[str, Any], path: Path) -
 
 def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
     common = f"hf_reused={result['hf_reused']} bundle_built={result['bundle_built']}"
+    if result.get("mode") == "reranking_parity":
+        return (
+            f"model={model['name']} sample_pass_rate={result['sample_pass_rate']:.4f} "
+            f"mean_pairwise={result['mean_pairwise_ordering_agreement']:.4f} "
+            f"min_pairwise={result['min_pairwise_ordering_agreement']:.4f} "
+            f"status={result.get('status', '')} {common}"
+        )
     if result.get("mode") == "encoder_embedding_parity":
         return (
             f"model={model['name']} vector_pass_rate={result['vector_pass_rate']:.4f} "
