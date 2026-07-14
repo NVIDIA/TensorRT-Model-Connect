@@ -130,9 +130,22 @@ UNIT_TEST_ONLY_EXACT = frozenset(
         "src/runtime/config/cli_support.cpp",
     }
 )
+# Task-eval and the selective impact analyzer are certified by the complete
+# source-only tools suite. Representative model proofs do not execute these
+# entrypoints, so treating them as broad model impact would add GPU work
+# without validating the changed behavior.
+FULL_UNIT_TEST_ONLY_EXACT = frozenset(
+    {
+        "tools/elf_hf_reference.py",
+        "tools/prepare_elf_task_eval_datasets.py",
+        "tools/task_eval.py",
+        "tools/test_impact.py",
+    }
+)
 UNIT_TEST_ONLY_PREFIXES = (
     "tests/builder/",
     "tests/cpp/",
+    "tests/task_eval/",
     "tests/tools/",
 )
 # These shared-location tests require real model plugins or GPU execution and
@@ -202,6 +215,7 @@ CI_OR_TOOLING_PREFIXES = (
 
 _MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
 _MANIFEST_ID_RE = re.compile(r'(?m)^\s*id\s*=\s*"([^"]+)"\s*$')
+_TASK_EVAL_OPTIONAL_EXTRA_RE = re.compile(r"task-eval\s*=\s*\[.*\]\s*\Z")
 
 
 class ModelCIError(RuntimeError):
@@ -527,7 +541,7 @@ def _classify_path(path: str, catalog: OwnershipCatalog) -> tuple[str, str | Non
         )
     if path in UNIT_TEST_ONLY_EXACT:
         return "unit_cli", None
-    if any(
+    if path in FULL_UNIT_TEST_ONLY_EXACT or any(
         path.startswith(prefix) for prefix in UNIT_TEST_ONLY_PREFIXES
     ):
         return "unit_tests", None
@@ -578,26 +592,81 @@ def _diff_entries(repo_root: Path, base: str, head: str) -> tuple[DiffEntry, ...
     return tuple(entries)
 
 
+def _is_task_eval_optional_extra_only_change(
+    repo_root: Path,
+    base: str,
+    head: str,
+) -> bool:
+    """Return whether pyproject changed only the one-line task-eval extra.
+
+    Keep this deliberately fail-closed: comments, multiline rewrites, build
+    metadata, and runtime dependency changes remain platform impact until a
+    reviewer adds a more precise contract.
+    """
+    diff = str(
+        _run_git(
+            repo_root,
+            [
+                "diff",
+                "--no-ext-diff",
+                "--no-color",
+                "--unified=0",
+                base,
+                head,
+                "--",
+                "pyproject.toml",
+            ],
+            text=True,
+        )
+    )
+    changed_lines = [
+        line[1:].strip()
+        for line in diff.splitlines()
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+    ]
+    return bool(changed_lines) and all(
+        _TASK_EVAL_OPTIONAL_EXTRA_RE.fullmatch(line) is not None for line in changed_lines
+    )
+
+
 def _result(
     models: Iterable[str],
     *,
     mode: str,
     changes: list[dict[str, object]],
     matrix_models: Iterable[str] | None = None,
+    direct_models: Iterable[str] | None = None,
+    fallback_models: Iterable[str] = (),
     run_unit_tests: bool = False,
     unit_scope: str = "none",
 ) -> dict[str, object]:
     selected = sorted(set(models))
+    direct = set(selected if direct_models is None else direct_models)
+    fallback = set(fallback_models)
+    if direct.intersection(fallback):
+        raise ModelCIError("direct and fallback model selections must not overlap")
+    if direct.union(fallback) != set(selected):
+        raise ModelCIError("direct and fallback selections must explain every affected model")
     scheduled = list(matrix_models) if matrix_models is not None else selected
     if len(scheduled) != len(set(scheduled)) or set(scheduled) != set(selected):
         raise ModelCIError("matrix model order must contain each affected model exactly once")
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": mode,
         "has_models": bool(selected),
         "expected_count": len(selected),
         "affected_models": selected,
-        "matrix": {"include": [{"model": model} for model in scheduled]},
+        "direct_models": sorted(direct),
+        "fallback_models": sorted(fallback),
+        "matrix": {
+            "include": [
+                {
+                    "model": model,
+                    "selection_kind": "fallback" if model in fallback else "direct",
+                }
+                for model in scheduled
+            ]
+        },
         "run_unit_tests": run_unit_tests,
         "unit_scope": unit_scope,
         "changes": changes,
@@ -722,8 +791,14 @@ def calculate_impact(
     base_catalog = discover_catalog(repo_root, comparison_base, allow_legacy_shared_runtime=True)
     head_catalog = discover_catalog(repo_root, head, allow_legacy_shared_runtime=True)
     affected: set[str] = set()
+    fallback_selected: set[str] = set()
     broad_change = False
     unit_scope = "none"
+    pyproject_task_eval_only = _is_task_eval_optional_extra_only_change(
+        repo_root,
+        comparison_base,
+        head_sha,
+    )
     serialized_changes: list[dict[str, object]] = []
     for change in _diff_entries(repo_root, comparison_base, head_sha):
         classifications: list[dict[str, str]] = []
@@ -737,6 +812,8 @@ def calculate_impact(
                 continue
             seen_path_revision.add((path, catalog.revision))
             kind, owner = _classify_path(path, catalog)
+            if path == "pyproject.toml" and pyproject_task_eval_only:
+                kind = "unit_tests"
             item = {"path": path, "kind": kind}
             if owner is not None:
                 item["model"] = owner
@@ -758,6 +835,7 @@ def calculate_impact(
                 "classifications": classifications,
             }
         )
+    direct_affected = set(affected)
     if (
         affected - set(head_catalog.models)
         or affected.intersection(base_catalog.legacy_shared_runtime)
@@ -766,8 +844,10 @@ def calculate_impact(
         broad_change = True
     if broad_change:
         affected.intersection_update(head_catalog.models)
+        direct_affected.intersection_update(head_catalog.models)
         if platform_change_policy == "all":
             affected.update(head_catalog.models)
+            direct_affected.update(head_catalog.models)
             mode = "all"
         elif platform_change_policy == "fallback":
             requested_fallback = list(fallback_models)
@@ -784,6 +864,7 @@ def calculate_impact(
             if missing:
                 raise ModelCIError(f"fallback models are absent from the head catalog: {missing}")
             affected.update(requested_fallback)
+            fallback_selected.update(set(requested_fallback) - direct_affected)
             mode = "fallback"
         else:
             raise ModelCIError(
@@ -801,6 +882,8 @@ def calculate_impact(
         mode=mode,
         changes=serialized_changes,
         matrix_models=_scheduled_models(repo_root, head_catalog, affected),
+        direct_models=direct_affected,
+        fallback_models=fallback_selected,
         run_unit_tests=unit_scope != "none" or broad_change,
         unit_scope="all" if broad_change else unit_scope,
     )
@@ -814,6 +897,8 @@ def _write_github_output(path: Path, result: dict[str, object]) -> None:
         "matrix": json.dumps(result["matrix"], separators=(",", ":")),
         "has_models": str(bool(result["has_models"])).lower(),
         "affected_models": json.dumps(result["affected_models"], separators=(",", ":")),
+        "direct_models": json.dumps(result["direct_models"], separators=(",", ":")),
+        "fallback_models": json.dumps(result["fallback_models"], separators=(",", ":")),
         "expected_count": str(result["expected_count"]),
         "mode": str(result["mode"]),
         "run_unit_tests": str(bool(result["run_unit_tests"])).lower(),

@@ -139,6 +139,8 @@ jobs:
       has_models: ${{ steps.impact.outputs.has_models }}
       matrix: ${{ steps.impact.outputs.matrix }}
       affected_models: ${{ steps.impact.outputs.affected_models }}
+      direct_models: ${{ steps.impact.outputs.direct_models }}
+      fallback_models: ${{ steps.impact.outputs.fallback_models }}
       expected_count: ${{ steps.impact.outputs.expected_count }}
       mode: ${{ steps.impact.outputs.mode }}
       run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}
@@ -197,6 +199,8 @@ jobs:
       - name: Summarize selection
         env:
           AFFECTED_MODELS: ${{ steps.impact.outputs.affected_models }}
+          DIRECT_MODELS: ${{ steps.impact.outputs.direct_models }}
+          FALLBACK_MODELS: ${{ steps.impact.outputs.fallback_models }}
           MODE: ${{ steps.impact.outputs.mode }}
           RUN_UNIT_TESTS: ${{ steps.impact.outputs.run_unit_tests }}
           UNIT_SCOPE: ${{ steps.impact.outputs.unit_scope }}
@@ -206,6 +210,8 @@ jobs:
             echo
             echo "- Mode: \`$MODE\`"
             echo "- Models: \`$AFFECTED_MODELS\`"
+            echo "- Directly affected models: \`$DIRECT_MODELS\`"
+            echo "- Representative fallback models: \`$FALLBACK_MODELS\`"
             echo "- Run source-only units: \`$RUN_UNIT_TESTS\`"
             echo "- Unit scope: \`$UNIT_SCOPE\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -317,7 +323,7 @@ jobs:
           fi
 
   model-proof:
-    name: 4 / Model / ${{ matrix.model }}
+    name: 4 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]
     needs:
       - legal
       - impact

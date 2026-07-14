@@ -410,8 +410,12 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     for model in ("deepseek_v2", "patchtsmixer", "segformer", "whisper", "ltx_video"):
         assert f"--fallback-model {model}" in impact
     assert "matrix: ${{ steps.impact.outputs.matrix }}" in impact
+    assert "direct_models: ${{ steps.impact.outputs.direct_models }}" in impact
+    assert "fallback_models: ${{ steps.impact.outputs.fallback_models }}" in impact
     assert "run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}" in impact
     assert "unit_scope: ${{ steps.impact.outputs.unit_scope }}" in impact
+    assert "Directly affected models" in impact
+    assert "Representative fallback models" in impact
 
     assert "name: 3 / Unit / C++ and Python" in unit_tests
     assert "needs.impact.outputs.run_unit_tests == 'true'" in unit_tests
@@ -443,7 +447,10 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "needs.unit-tests.result == 'success'" in model_proof
     assert "needs.unit-tests.result == 'skipped'" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
-    assert "name: 4 / Model / ${{ matrix.model }}" in model_proof
+    assert (
+        "name: 4 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]"
+        in model_proof
+    )
     assert "fail-fast: true" in model_proof
     assert "continue-on-error" not in model_proof
     assert "max-parallel: 16" in model_proof

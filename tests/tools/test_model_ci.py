@@ -107,6 +107,14 @@ def _make_repo(
     for model_id in model_ids:
         _add_model(repo, model_id)
     _write(repo, "python/tensorrt_model_connect/families/__init__.py", "# registry\n")
+    _write(
+        repo,
+        "pyproject.toml",
+        "[project]\n"
+        'dependencies = ["runtime-package>=1"]\n\n'
+        "[project.optional-dependencies]\n"
+        'test = ["pytest>=7"]\n',
+    )
     _write(repo, "CMakeLists.txt", "# platform build\n")
     _write(repo, "src/runtime/core/core.cpp", "// platform core\n")
     _write(repo, "README.md", "# Documentation\n")
@@ -143,6 +151,9 @@ def _make_repo(
     _write(repo, "tools/diffusion_helpers.py", "# shared diffusion helpers\n")
     _write(repo, "tools/model_plugin_isolation.py", "# proof verifier\n")
     _write(repo, "tools/test_impact.py", "# shared impact analyzer\n")
+    _write(repo, "tools/task_eval.py", "# task-eval runner\n")
+    _write(repo, "tests/task_eval/validation_suites.yaml", "suites: []\n")
+    _write(repo, "tests/tools/test_task_eval.py", "# task-eval unit tests\n")
     _write(repo, "tools/tool_helpers.py", "# shared tool helpers\n")
     _write(repo, "scripts/repro_trt_fp8_mha.py", "# unrelated model script\n")
     _write(repo, "tools/diff_t5.py", "# unrelated model diff\n")
@@ -204,12 +215,22 @@ def test_validate_and_all_emit_deterministic_matrix_and_github_outputs(
     )
 
     assert validated["models"] == ["model_a", "model_b"]
-    assert result["schema_version"] == 2
-    assert result["matrix"] == {"include": [{"model": "model_a"}, {"model": "model_b"}]}
+    assert result["schema_version"] == 3
+    assert result["direct_models"] == ["model_a", "model_b"]
+    assert result["fallback_models"] == []
+    assert result["matrix"] == {
+        "include": [
+            {"model": "model_a", "selection_kind": "direct"},
+            {"model": "model_b", "selection_kind": "direct"},
+        ]
+    }
     assert output.read_text(encoding="utf-8").splitlines() == [
-        'matrix={"include":[{"model":"model_a"},{"model":"model_b"}]}',
+        'matrix={"include":[{"model":"model_a","selection_kind":"direct"},'
+        '{"model":"model_b","selection_kind":"direct"}]}',
         "has_models=true",
         'affected_models=["model_a","model_b"]',
+        'direct_models=["model_a","model_b"]',
+        "fallback_models=[]",
         "expected_count=2",
         "mode=all",
         "run_unit_tests=false",
@@ -251,9 +272,9 @@ def test_matrix_schedules_unknown_then_longest_known_premerge_models(
     assert result["affected_models"] == ["model_a", "model_b", "model_c"]
     assert result["matrix"] == {
         "include": [
-            {"model": "model_c"},
-            {"model": "model_b"},
-            {"model": "model_a"},
+            {"model": "model_c", "selection_kind": "direct"},
+            {"model": "model_b", "selection_kind": "direct"},
+            {"model": "model_a", "selection_kind": "direct"},
         ]
     }
 
@@ -271,7 +292,9 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
 
     assert result["mode"] == "models"
     assert result["affected_models"] == ["model_a"]
-    assert result["matrix"] == {"include": [{"model": "model_a"}]}
+    assert result["direct_models"] == ["model_a"]
+    assert result["fallback_models"] == []
+    assert result["matrix"] == {"include": [{"model": "model_a", "selection_kind": "direct"}]}
     assert result["run_unit_tests"] is False
     assert result["unit_scope"] == "none"
 
@@ -324,6 +347,9 @@ def test_impact_treats_platform_change_as_fixed_fallback(tmp_path: Path) -> None
 
     assert result["mode"] == "fallback"
     assert result["affected_models"] == ["model_a"]
+    assert result["direct_models"] == []
+    assert result["fallback_models"] == ["model_a"]
+    assert result["matrix"] == {"include": [{"model": "model_a", "selection_kind": "fallback"}]}
     assert result["run_unit_tests"] is True
     assert result["unit_scope"] == "all"
 
@@ -366,6 +392,8 @@ def test_cli_and_unit_test_changes_run_units_without_model_proofs(
 
     assert result["mode"] == "unit"
     assert result["affected_models"] == []
+    assert result["direct_models"] == []
+    assert result["fallback_models"] == []
     assert result["matrix"] == {"include": []}
     assert result["run_unit_tests"] is True
     assert result["unit_scope"] == expected_scope
@@ -422,6 +450,99 @@ def test_mixed_model_and_broad_change_keeps_direct_model_plus_fallback(
 
     assert result["mode"] == "fallback"
     assert result["affected_models"] == ["model_a", "model_b"]
+    assert result["direct_models"] == ["model_b"]
+    assert result["fallback_models"] == ["model_a"]
+    assert result["matrix"] == {
+        "include": [
+            {"model": "model_a", "selection_kind": "fallback"},
+            {"model": "model_b", "selection_kind": "direct"},
+        ]
+    }
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
+
+
+def test_task_eval_only_pr_runs_units_without_model_proofs(tmp_path: Path) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(
+        repo,
+        "pyproject.toml",
+        "[project]\n"
+        'dependencies = ["runtime-package>=1"]\n\n'
+        "[project.optional-dependencies]\n"
+        'test = ["pytest>=7"]\n'
+        'task-eval = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]\n',
+    )
+    _write(
+        repo,
+        "tests/task_eval/validation_suites.yaml",
+        "suites:\n  - id: elf_text_parity\n",
+    )
+    _write(repo, "tests/tools/test_task_eval.py", "# expanded task-eval unit tests\n")
+    _write(repo, "tests/tools/test_test_impact.py", "# task-eval impact tests\n")
+    _write(repo, "tools/task_eval.py", "# expanded task-eval runner\n")
+    _write(repo, "tools/elf_hf_reference.py", "# isolated ELF reference\n")
+    _write(
+        repo,
+        "tools/prepare_elf_task_eval_datasets.py",
+        "# ELF task-eval dataset preparation\n",
+    )
+    _write(repo, "tools/test_impact.py", "# task-eval impact refinement\n")
+    head = _commit(repo, "add task-eval coverage")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "unit"
+    assert result["affected_models"] == []
+    assert result["direct_models"] == []
+    assert result["fallback_models"] == []
+    assert result["matrix"] == {"include": []}
+    assert result["run_unit_tests"] is True
+    assert result["unit_scope"] == "all"
+    assert {
+        classification["kind"]
+        for change in result["changes"]
+        for classification in change["classifications"]
+    } == {"unit_tests"}
+
+
+def test_task_eval_optional_extra_mixed_with_runtime_dependency_uses_fallback(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(
+        repo,
+        "pyproject.toml",
+        "[project]\n"
+        'dependencies = ["runtime-package>=1", "new-runtime-package>=1"]\n\n'
+        "[project.optional-dependencies]\n"
+        'test = ["pytest>=7"]\n'
+        'task-eval = ["rouge-score>=0.1.2"]\n',
+    )
+    head = _commit(repo, "change runtime and task-eval dependencies")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "fallback"
+    assert result["direct_models"] == []
+    assert result["fallback_models"] == ["model_a"]
+
+
+def test_task_eval_and_model_change_runs_direct_model_proof_plus_units(
+    tmp_path: Path,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, "tools/task_eval.py", "# expanded task-eval runner\n")
+    _write(repo, "src/runtime/models/model_b/plugin.cpp", "// changed model b\n")
+    head = _commit(repo, "change task-eval and model b")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "models"
+    assert result["affected_models"] == ["model_b"]
+    assert result["direct_models"] == ["model_b"]
+    assert result["fallback_models"] == []
+    assert result["matrix"] == {"include": [{"model": "model_b", "selection_kind": "direct"}]}
     assert result["run_unit_tests"] is True
     assert result["unit_scope"] == "all"
 
