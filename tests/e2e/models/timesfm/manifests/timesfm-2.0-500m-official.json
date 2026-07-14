@@ -19,6 +19,12 @@
     8,
     9,
     10,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
     41,
     42,
     43,
@@ -26,6 +32,8 @@
     45,
     46,
     47,
+    48,
+    49,
     50,
     51,
     52,
@@ -60,7 +68,7 @@
       },
       "metadata": {
         "core": false,
-        "notes": "Official Google TimesFM 2.0 500M PyTorch checkpoint exercised through unified E2E with short univariate sample input. FP16 GEMMs request FP32 accumulation. Decoder layers 11-40 and 48-49 use FP16, so 32 of 50 decoder layers remain reduced precision. Layers 0-10 and 41-47 plus selectors 50-53 retain the precision-sensitive early and late residual paths, input FFN, frequency embedding, horizon head, and non-invariant biases in FP32."
+        "notes": "Official Google TimesFM 2.0 500M PyTorch checkpoint exercised through unified E2E with short univariate sample input. FP16 GEMMs request FP32 accumulation. Decoder layers 11-34 use FP16, so 24 of 50 decoder layers remain reduced precision. Layers 0-10 and 35-49 plus selectors 50-53 retain the precision-sensitive early and late residual paths, input FFN, frequency embedding, horizon head, and non-invariant biases in FP32."
       }
     }
   ]
