@@ -85,15 +85,18 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+          path: bark-validation-source
           fetch-depth: 0
           persist-credentials: false
 
       - name: Resolve exact revision
+        working-directory: ${{ github.workspace }}/bark-validation-source
         run: echo "BARK_VALIDATION_REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Ensure CI Docker image
         id: ci_image
         timeout-minutes: 90
+        working-directory: ${{ github.workspace }}/bark-validation-source
         run: bash .github/scripts/ensure-ci-docker-image.sh
 
       - name: Run Bark proof on requested physical GPU
@@ -101,6 +104,7 @@ jobs:
         env:
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
           TRTMC_GPU_ID: ${{ inputs.bark_gpu_id }}
+        working-directory: ${{ github.workspace }}/bark-validation-source
         run: |
           output_dir="$RUNNER_TEMP/bark-gpu-${{ inputs.bark_gpu_id }}"
           bash .github/scripts/run-model-proof.sh \
