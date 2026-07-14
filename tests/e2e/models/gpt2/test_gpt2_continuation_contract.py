@@ -62,8 +62,20 @@ def test_allows_prompt_echo_when_explicitly_configured() -> None:
     assert result.metrics["prompt_excluded"].passed
 
 
-def test_acceptance_build_reserves_gpu_for_stable_tactic_selection() -> None:
+def test_acceptance_build_uses_stable_execution_configuration() -> None:
     manifest_path = Path(__file__).parent / "manifests" / "gpt2-125m.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
+    assert manifest["precision"] == "fp32"
+    assert manifest["testcases"] == [
+        {
+            "name": "gpt2-125m",
+            "trace_id": "IT-E2E-GPT2-01",
+            "reference_family": "causal_base_continuation",
+            "user_contract": "continuation_parity",
+            "reference_precision": "fp32",
+            "prompt": "The capital of France is",
+            "max_new_tokens": 20,
+        }
+    ]
