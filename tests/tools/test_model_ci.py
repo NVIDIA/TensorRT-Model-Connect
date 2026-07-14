@@ -407,6 +407,37 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
     assert result["unit_scope"] == "none"
 
 
+def test_impact_allows_head_to_migrate_legacy_multi_gpu_tier(tmp_path: Path) -> None:
+    repo, _ = _make_repo(tmp_path)
+    manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["build_args"] = {
+        "parallel": {"mode": "tensor_parallel", "tp_size": 4}
+    }
+    manifest["distributed_runtime"] = {"enabled": True, "world_size": 4}
+    manifest["testcases"] = [{"name": "model_a-tp4", "ci_tier": "nightly_only"}]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    base = _commit(repo, "add legacy tp4 tier")
+
+    base_validation = _run(repo, "validate", "--revision", base, check=False)
+    assert base_validation.returncode == 2
+    assert "ci_tier='multi_device'" in base_validation.stderr
+
+    manifest["testcases"] = [{"name": "model_a-tp4", "ci_tier": "multi_device"}]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    head = _commit(repo, "migrate tp4 tier")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "models"
+    assert result["affected_models"] == ["model_a"]
+    assert result["direct_models"] == ["model_a"]
+    assert json.loads(_run(repo, "validate", "--revision", head).stdout)["models"] == [
+        "model_a",
+        "model_b",
+    ]
+
+
 def test_impact_selects_each_modified_model_once(tmp_path: Path) -> None:
     repo, base = _make_repo(tmp_path)
     _write(repo, "src/runtime/models/model_a/plugin.cpp", "// changed a\n")

@@ -359,7 +359,12 @@ def _required_gpu_count(payload: dict[str, object], path: str) -> int:
     return required
 
 
-def _validate_e2e_manifest_device_tiers(payload: dict[str, object], path: str) -> None:
+def _validate_e2e_manifest_device_tiers(
+    payload: dict[str, object],
+    path: str,
+    *,
+    allow_legacy_tier: bool = False,
+) -> None:
     defaults = {key: value for key, value in payload.items() if key != "testcases"}
     testcases = payload.get("testcases")
     effective_cases: list[dict[str, object]]
@@ -373,7 +378,11 @@ def _validate_e2e_manifest_device_tiers(payload: dict[str, object], path: str) -
         effective_cases = [defaults]
     for testcase in effective_cases:
         required = _required_gpu_count(testcase, path)
-        if required > 1 and testcase.get("ci_tier") != "multi_device":
+        if (
+            required > 1
+            and testcase.get("ci_tier") != "multi_device"
+            and not allow_legacy_tier
+        ):
             name = testcase.get("name", payload.get("name", "<unnamed>"))
             raise ModelCIError(
                 f"E2E testcase {name!r} requires {required} GPUs but is not "
@@ -386,6 +395,7 @@ def discover_catalog(
     revision: str,
     *,
     allow_legacy_shared_runtime: bool = False,
+    allow_legacy_device_tier: bool = False,
 ) -> OwnershipCatalog:
     """Discover model IDs from MODEL.toml blobs at one Git revision."""
     _validate_model_roots()
@@ -460,7 +470,11 @@ def discover_catalog(
             raise ModelCIError(f"invalid E2E manifest JSON: {entry.path}") from exc
         if not isinstance(payload, dict):
             raise ModelCIError(f"E2E manifest must contain an object: {entry.path}")
-        _validate_e2e_manifest_device_tiers(payload, entry.path)
+        _validate_e2e_manifest_device_tiers(
+            payload,
+            entry.path,
+            allow_legacy_tier=allow_legacy_device_tier,
+        )
         strategy = payload.get("runtime_strategy")
         if strategy is None:
             continue
@@ -894,7 +908,12 @@ def calculate_impact(
         ).strip()
     except ModelCIError:
         comparison_base = base_sha
-    base_catalog = discover_catalog(repo_root, comparison_base, allow_legacy_shared_runtime=True)
+    base_catalog = discover_catalog(
+        repo_root,
+        comparison_base,
+        allow_legacy_shared_runtime=True,
+        allow_legacy_device_tier=True,
+    )
     head_catalog = discover_catalog(repo_root, head, allow_legacy_shared_runtime=True)
     affected: set[str] = set()
     fallback_selected: set[str] = set()
