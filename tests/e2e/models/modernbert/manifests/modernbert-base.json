@@ -5,7 +5,7 @@
   "family": "modernbert",
   "runtime_strategy": "modernbert_encoder_only",
   "task_strategy": "encoder_only_nlp",
-  "precision": "fp16",
+  "precision": "fp32",
   "max_cache_length": 256,
   "testcases": [
     {
