@@ -45,8 +45,7 @@ double elapsed_ms(CanaryClock::time_point start, CanaryClock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
-std::string decode_canary_tokens(const ITokenizer& tokenizer,
-                                 const std::vector<int32_t>& token_ids,
+std::string decode_canary_tokens(const ITokenizer& tokenizer, const std::vector<int32_t>& token_ids,
                                  int32_t eot_token_id) {
     auto content_end = token_ids.end();
     while (content_end != token_ids.begin() && *(content_end - 1) == eot_token_id)
@@ -189,13 +188,36 @@ void append_canary_transcription_segment(TextResult& combined, TextResult segmen
 int32_t canary_module_batch_capacity(const TrtModule& module, const std::string& input_name) {
     if (!module.has_input(input_name) || !module.input_is_dynamic(input_name))
         return 1;
-    const auto shape = module.input_profile_shape(
-        input_name, module.profile_idx(), ProfileShapeSelector::kMax);
+    const auto shape =
+        module.input_profile_shape(input_name, module.profile_idx(), ProfileShapeSelector::kMax);
     if (shape.empty() || shape.front() <= 0 ||
         shape.front() > std::numeric_limits<int32_t>::max()) {
         return 1;
     }
     return static_cast<int32_t>(shape.front());
+}
+
+void validate_canary_pipeline_components(const TrtModule* encoder, const TrtModule* decoder,
+                                         const CanaryInferenceState* state) {
+    if (encoder == nullptr || !encoder->ok())
+        throw std::runtime_error("CanaryPipeline: invalid encoder module");
+    if (decoder == nullptr || !decoder->ok())
+        throw std::runtime_error("CanaryPipeline: invalid decoder module");
+    if (state == nullptr || !state->ok())
+        throw std::runtime_error("CanaryPipeline: invalid inference state");
+}
+
+void* allocate_canary_cross_kv_buffer(int32_t num_decoder_layers, std::size_t bytes) {
+    if (num_decoder_layers <= 0 || bytes == 0)
+        return nullptr;
+    void* buffer = nullptr;
+    const auto status = cudaMalloc(&buffer, bytes);
+    if (status != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("CanaryPipeline: cross-attention allocation failed: ") +
+            cudaGetErrorString(status));
+    }
+    return buffer;
 }
 
 struct CanaryBatchSegment {
@@ -212,6 +234,444 @@ struct CanaryPreparedSegment {
     canary::MelResult mel;
     int32_t actual_encoder_length{0};
 };
+
+struct CanaryBatchWorkGroups {
+    std::unordered_map<int32_t, std::vector<std::size_t>> by_beam_size;
+    std::vector<int32_t> beam_order;
+};
+
+struct CanaryPreparedBatchChunk {
+    std::vector<std::size_t> valid_indices;
+    std::vector<std::vector<float>> mel_batch;
+    std::vector<int32_t> valid_frames;
+    std::vector<int32_t> actual_encoder_lengths;
+    std::vector<std::vector<int32_t>> prompts;
+    std::vector<int32_t> output_limits;
+    int32_t mel_bins{0};
+    int32_t mel_frames{0};
+};
+
+std::vector<CanaryBatchSegment>
+build_canary_batch_work(const std::vector<TranscriptionRequest>& requests,
+                        const CanaryConfig& canary_config, ITokenizer* tokenizer,
+                        int32_t mel_sampling_rate, int32_t mel_chunk_length) {
+    std::vector<CanaryBatchSegment> work;
+    for (std::size_t request_index = 0; request_index < requests.size(); ++request_index) {
+        const auto& request = requests[request_index];
+        validate_canary_audio_input(request.audio_samples.data(),
+                                    static_cast<int32_t>(request.audio_samples.size()));
+        auto initial_tokens = make_canary_request_tokens(canary_config, request.config, tokenizer);
+        validate_canary_output_budget(canary_config, request.config, initial_tokens.size());
+
+        const int32_t sample_rate = request.config.input_sample_rate > 0
+                                        ? request.config.input_sample_rate
+                                        : mel_sampling_rate;
+        const auto sample_count = static_cast<int32_t>(request.audio_samples.size());
+        const double duration_seconds =
+            validate_canary_input_duration(sample_count, sample_rate, request.config);
+        const double segment_seconds = resolve_canary_segment_duration(
+            duration_seconds, static_cast<double>(mel_chunk_length), request.config);
+        const int32_t segment_samples = canary_segment_sample_count(segment_seconds, sample_rate);
+
+        for (int64_t offset = 0; offset < sample_count; offset += segment_samples) {
+            const int32_t count = static_cast<int32_t>(
+                std::min<int64_t>(segment_samples, static_cast<int64_t>(sample_count) - offset));
+            work.push_back({request_index, offset, count, sample_rate, initial_tokens,
+                            request.config.max_output_tokens, request.config.beam_size});
+        }
+    }
+    return work;
+}
+
+CanaryBatchWorkGroups group_canary_batch_work(const std::vector<CanaryBatchSegment>& work) {
+    CanaryBatchWorkGroups groups;
+    for (std::size_t index = 0; index < work.size(); ++index) {
+        const int32_t beam_size = work[index].beam_size;
+        auto [it, inserted] = groups.by_beam_size.try_emplace(beam_size);
+        if (inserted)
+            groups.beam_order.push_back(beam_size);
+        it->second.push_back(index);
+    }
+    return groups;
+}
+
+CanaryPreparedSegment
+prepare_canary_batch_segment(const CanaryBatchSegment& item, const TranscriptionRequest& request,
+                             const MelFilterbank* mel_filterbank, int32_t mel_n_fft,
+                             int32_t mel_hop_length, int32_t mel_chunk_length,
+                             int32_t mel_sampling_rate, const CanaryConfig& canary_config) {
+    const float* samples = request.audio_samples.data() + item.offset;
+    int32_t sample_count = item.count;
+    std::vector<float> resampled;
+    if (item.sample_rate != mel_sampling_rate) {
+        resampled = resample_linear(samples, sample_count, item.sample_rate, mel_sampling_rate);
+        samples = resampled.data();
+        sample_count = static_cast<int32_t>(resampled.size());
+    }
+
+    CanaryPreparedSegment prepared;
+    if (mel_filterbank != nullptr && !mel_filterbank->data.empty()) {
+        prepared.mel = canary::extract_mel_spectrogram(
+            samples, sample_count, mel_filterbank->data.data(), mel_filterbank->n_freq_bins,
+            mel_filterbank->n_mel_bins, mel_n_fft, mel_hop_length, mel_chunk_length,
+            mel_sampling_rate);
+    }
+    if (!prepared.mel.data.empty()) {
+        const int32_t valid_frames =
+            prepared.mel.valid_frames > 0 ? prepared.mel.valid_frames : prepared.mel.n_frames;
+        prepared.actual_encoder_length = compute_canary_actual_encoder_length(
+            valid_frames, resolve_canary_expected_mel_length(canary_config),
+            canary_config.max_source_positions);
+    }
+    return prepared;
+}
+
+std::vector<std::future<CanaryPreparedSegment>> launch_canary_batch_preparation(
+    const std::vector<std::size_t>& indices, std::size_t chunk_start, std::size_t chunk_end,
+    const std::vector<CanaryBatchSegment>& work, const std::vector<TranscriptionRequest>& requests,
+    const MelFilterbank* mel_filterbank, int32_t mel_n_fft, int32_t mel_hop_length,
+    int32_t mel_chunk_length, int32_t mel_sampling_rate, const CanaryConfig& canary_config) {
+    std::vector<std::future<CanaryPreparedSegment>> futures;
+    futures.reserve(chunk_end - chunk_start);
+    for (std::size_t cursor = chunk_start; cursor < chunk_end; ++cursor) {
+        const std::size_t index = indices[cursor];
+        futures.push_back(std::async(
+            std::launch::async, [&requests, &work, index, mel_filterbank, mel_n_fft, mel_hop_length,
+                                 mel_chunk_length, mel_sampling_rate, &canary_config] {
+                const auto& item = work[index];
+                return prepare_canary_batch_segment(
+                    item, requests[item.request_index], mel_filterbank, mel_n_fft, mel_hop_length,
+                    mel_chunk_length, mel_sampling_rate, canary_config);
+            }));
+    }
+    return futures;
+}
+
+void set_or_validate_canary_mel_shape(const CanaryPreparedSegment& prepared,
+                                      CanaryPreparedBatchChunk& chunk) {
+    if (chunk.mel_batch.empty()) {
+        chunk.mel_bins = prepared.mel.n_mels;
+        chunk.mel_frames = prepared.mel.n_frames;
+        return;
+    }
+    if (prepared.mel.n_mels != chunk.mel_bins || prepared.mel.n_frames != chunk.mel_frames) {
+        throw std::runtime_error("Canary mel batch contains mismatched shapes");
+    }
+}
+
+CanaryPreparedBatchChunk collect_canary_prepared_batch_chunk(
+    std::vector<std::future<CanaryPreparedSegment>>& futures,
+    const std::vector<std::size_t>& indices, std::size_t chunk_start,
+    const std::vector<CanaryBatchSegment>& work, std::vector<TextResult>& segment_results) {
+    CanaryPreparedBatchChunk chunk;
+    for (std::size_t future_index = 0; future_index < futures.size(); ++future_index) {
+        const std::size_t index = indices[chunk_start + future_index];
+        auto prepared = futures[future_index].get();
+        if (prepared.mel.data.empty()) {
+            segment_results[index] = TextResult{"[mel extraction failed]", {}};
+            continue;
+        }
+        set_or_validate_canary_mel_shape(prepared, chunk);
+        chunk.valid_indices.push_back(index);
+        chunk.valid_frames.push_back(prepared.mel.valid_frames > 0 ? prepared.mel.valid_frames
+                                                                   : prepared.mel.n_frames);
+        chunk.actual_encoder_lengths.push_back(prepared.actual_encoder_length);
+        chunk.mel_batch.push_back(std::move(prepared.mel.data));
+        chunk.prompts.push_back(work[index].initial_tokens);
+        chunk.output_limits.push_back(work[index].max_output_tokens);
+    }
+    return chunk;
+}
+
+void store_canary_batch_decodes(std::vector<std::vector<int32_t>>& output_ids,
+                                const std::vector<std::size_t>& valid_indices,
+                                ITokenizer* tokenizer, int32_t eot_token_id,
+                                std::vector<TextResult>& segment_results) {
+    for (std::size_t batch = 0; batch < valid_indices.size(); ++batch) {
+        TextResult result;
+        result.token_ids = std::move(output_ids[batch]);
+        if (tokenizer != nullptr && !result.token_ids.empty())
+            result.text = decode_canary_tokens(*tokenizer, result.token_ids, eot_token_id);
+        segment_results[valid_indices[batch]] = std::move(result);
+    }
+}
+
+void report_canary_batch_timing(CanaryClock::time_point begin, std::size_t batch_size,
+                                int32_t beam_size) {
+    if (!canary_stage_timing_enabled())
+        return;
+    const double total = elapsed_ms(begin, CanaryClock::now());
+    std::cerr << "[trtmc.canary_batch_timing.json] {\"batch_size\":" << batch_size
+              << ",\"beam_size\":" << beam_size << ",\"total_ms\":" << total
+              << ",\"per_sample_ms\":" << total / static_cast<double>(batch_size) << '}'
+              << std::endl;
+}
+
+std::vector<TextResult>
+merge_canary_batch_segments(const std::vector<TranscriptionRequest>& requests,
+                            const std::vector<CanaryBatchSegment>& work,
+                            std::vector<TextResult>& segment_results) {
+    std::vector<TextResult> results(requests.size());
+    for (std::size_t index = 0; index < work.size(); ++index) {
+        const auto& item = work[index];
+        append_canary_transcription_segment(
+            results[item.request_index], std::move(segment_results[index]), item.offset, item.count,
+            item.sample_rate, requests[item.request_index].config);
+    }
+    return results;
+}
+
+struct CanaryEncoderBatchMask {
+    std::vector<float> values;
+    std::vector<int64_t> shape;
+};
+
+std::vector<float> pack_canary_mel_batch(const std::vector<std::vector<float>>& mel_data,
+                                         std::size_t sample_values) {
+    std::vector<float> packed(mel_data.size() * sample_values, 0.0F);
+    for (std::size_t batch = 0; batch < mel_data.size(); ++batch) {
+        if (mel_data[batch].size() != sample_values)
+            throw std::invalid_argument("Canary encoder batch mel shape mismatch");
+        std::copy(mel_data[batch].begin(), mel_data[batch].end(),
+                  packed.begin() + static_cast<std::ptrdiff_t>(batch * sample_values));
+    }
+    return packed;
+}
+
+void copy_canary_encoder_mask_row(const std::vector<float>& row, bool full_attention_mask,
+                                  int32_t encoder_sequence_length, float* output) {
+    if (!full_attention_mask) {
+        std::copy(row.begin(), row.end(), output);
+        return;
+    }
+    for (int32_t query = 0; query < encoder_sequence_length; ++query) {
+        std::copy(row.begin(), row.end(),
+                  output + static_cast<std::ptrdiff_t>(query) * encoder_sequence_length);
+    }
+}
+
+CanaryEncoderBatchMask make_canary_encoder_batch_mask(const std::vector<int32_t>& valid_mel_frames,
+                                                      int32_t expected_mel_length,
+                                                      int32_t encoder_sequence_length,
+                                                      const std::vector<int64_t>& engine_shape) {
+    const bool full_attention_mask =
+        engine_shape.size() == 4 && engine_shape[2] == encoder_sequence_length;
+    const std::size_t values_per_sample =
+        full_attention_mask ? static_cast<std::size_t>(encoder_sequence_length) *
+                                  static_cast<std::size_t>(encoder_sequence_length)
+                            : static_cast<std::size_t>(encoder_sequence_length);
+
+    CanaryEncoderBatchMask mask;
+    mask.values.resize(valid_mel_frames.size() * values_per_sample);
+    for (std::size_t batch = 0; batch < valid_mel_frames.size(); ++batch) {
+        int32_t actual_encoder_length = compute_canary_actual_encoder_length(
+            valid_mel_frames[batch], expected_mel_length, encoder_sequence_length);
+        if (actual_encoder_length <= 0)
+            actual_encoder_length = encoder_sequence_length;
+        const auto row =
+            build_canary_encoder_mask_values(encoder_sequence_length, actual_encoder_length);
+        copy_canary_encoder_mask_row(row, full_attention_mask, encoder_sequence_length,
+                                     mask.values.data() +
+                                         static_cast<std::ptrdiff_t>(batch * values_per_sample));
+    }
+    mask.shape = full_attention_mask
+                     ? std::vector<int64_t>{static_cast<int64_t>(valid_mel_frames.size()), 1,
+                                            encoder_sequence_length, encoder_sequence_length}
+                     : std::vector<int64_t>{static_cast<int64_t>(valid_mel_frames.size()), 1, 1,
+                                            encoder_sequence_length};
+    return mask;
+}
+
+void zero_pad_canary_encoder_batch(uint8_t* encoder_output,
+                                   const std::vector<int32_t>& actual_encoder_lengths,
+                                   int32_t max_source_positions, int32_t hidden_size,
+                                   std::size_t sample_bytes, cudaStream_t stream) {
+    for (std::size_t sample = 0; sample < actual_encoder_lengths.size(); ++sample) {
+        const auto plan = make_canary_cross_kv_plan(max_source_positions, hidden_size,
+                                                    actual_encoder_lengths[sample]);
+        if (!plan.zero_pad_encoder_output || plan.pad_bytes == 0)
+            continue;
+        const auto status = cudaMemsetAsync(
+            encoder_output + sample * sample_bytes + plan.valid_bytes, 0, plan.pad_bytes, stream);
+        if (status != cudaSuccess)
+            throw std::runtime_error("Canary encoder padding failed");
+    }
+}
+
+void copy_canary_cross_attention_lanes(uint8_t* cross_attention, const uint8_t* encoder_output,
+                                       const std::vector<int32_t>& lane_to_sample,
+                                       std::size_t sample_count, std::size_t sample_bytes,
+                                       cudaStream_t stream) {
+    for (std::size_t lane = 0; lane < lane_to_sample.size(); ++lane) {
+        const int32_t sample = lane_to_sample[lane];
+        if (sample < 0 || static_cast<std::size_t>(sample) >= sample_count)
+            throw std::out_of_range("Canary cross-attention sample lane is out of range");
+        const auto status =
+            cudaMemcpyAsync(cross_attention + lane * sample_bytes,
+                            encoder_output + static_cast<std::size_t>(sample) * sample_bytes,
+                            sample_bytes, cudaMemcpyDeviceToDevice, stream);
+        if (status != cudaSuccess)
+            throw std::runtime_error("Canary cross-attention copy failed");
+    }
+}
+
+void bind_canary_cross_attention_layers(TrtModule& decoder, int32_t num_decoder_layers,
+                                        void* cross_kv, const std::vector<int64_t>& cross_shape) {
+    for (int32_t layer = 0; layer < num_decoder_layers; ++layer) {
+        const std::string suffix = "_" + std::to_string(layer);
+        if (decoder.input_rank("cross_k" + suffix) == 3) {
+            decoder.bind_external("cross_k" + suffix, cross_kv, cross_shape);
+            decoder.bind_external("cross_v" + suffix, cross_kv, cross_shape);
+        } else {
+            decoder.bind_external("cross_k" + suffix, cross_kv);
+            decoder.bind_external("cross_v" + suffix, cross_kv);
+        }
+    }
+}
+
+std::size_t validate_canary_batch_prompts(const std::vector<std::vector<int32_t>>& initial_tokens) {
+    if (initial_tokens.empty())
+        return 0;
+    const std::size_t prompt_length = initial_tokens.front().size();
+    for (const auto& prompt : initial_tokens) {
+        if (prompt.size() != prompt_length)
+            throw std::invalid_argument("Canary batch prompts must have equal lengths");
+    }
+    return prompt_length;
+}
+
+bool update_canary_greedy_batch_step(const std::vector<float>& logits, std::size_t vocab_size,
+                                     int32_t step, const std::vector<int32_t>& max_new_tokens,
+                                     int32_t eot_token_id, std::vector<int32_t>& tokens,
+                                     std::vector<std::vector<int32_t>>& output,
+                                     std::vector<bool>& finished) {
+    bool all_finished = true;
+    for (std::size_t batch = 0; batch < tokens.size(); ++batch) {
+        if (finished[batch] || step >= max_new_tokens[batch]) {
+            tokens[batch] = eot_token_id;
+            finished[batch] = true;
+            continue;
+        }
+        const auto begin = logits.begin() + static_cast<std::ptrdiff_t>(batch * vocab_size);
+        const auto end = begin + static_cast<std::ptrdiff_t>(vocab_size);
+        tokens[batch] = static_cast<int32_t>(std::distance(begin, std::max_element(begin, end)));
+        output[batch].push_back(tokens[batch]);
+        finished[batch] = tokens[batch] == eot_token_id || step + 1 >= max_new_tokens[batch];
+        all_finished = all_finished && finished[batch];
+    }
+    return all_finished;
+}
+
+using CanaryBeamBatch = std::vector<std::vector<CanaryBeamHypothesis>>;
+
+struct CanaryBeamBatchStep {
+    CanaryBeamBatch beams;
+    std::vector<int32_t> parent_lanes;
+    std::vector<int32_t> tokens;
+    bool any_active{false};
+};
+
+CanaryBeamBatch initialize_canary_beam_batch(const std::vector<float>& logits,
+                                             int32_t request_batch, std::size_t vocab_size) {
+    CanaryBeamBatch beams(static_cast<std::size_t>(request_batch));
+    for (int32_t batch = 0; batch < request_batch; ++batch) {
+        CanaryBeamHypothesis initial;
+        initial.state_slot = batch;
+        const auto begin = logits.begin() + static_cast<std::ptrdiff_t>(batch) *
+                                                static_cast<std::ptrdiff_t>(vocab_size);
+        initial.logits.assign(begin, begin + static_cast<std::ptrdiff_t>(vocab_size));
+        beams[static_cast<std::size_t>(batch)].push_back(std::move(initial));
+    }
+    return beams;
+}
+
+bool canary_beam_candidate_is_active(const CanaryBeamCandidate& candidate, bool sample_finished,
+                                     bool final_step) {
+    return !sample_finished && !candidate.hypothesis.finished && !final_step &&
+           candidate.parent_slot >= 0;
+}
+
+bool append_canary_next_beam_sample(const std::vector<CanaryBeamHypothesis>& current_beams,
+                                    int32_t max_new_tokens, int32_t step, int32_t batch,
+                                    int32_t beam_size, int32_t eot_token_id,
+                                    std::vector<int32_t>& parent_lanes,
+                                    std::vector<int32_t>& tokens,
+                                    std::vector<CanaryBeamHypothesis>& next_beams) {
+    CanaryDecodeLoopResult status;
+    std::vector<CanaryBeamCandidate> candidates;
+    bool sample_finished = false;
+    if (!collect_canary_beam_candidates(current_beams, eot_token_id, beam_size, candidates,
+                                        sample_finished, status)) {
+        throw std::runtime_error("Canary batched beam search failed: " + status.error);
+    }
+    rank_canary_beam_candidates(candidates, beam_size, CanaryDefaultBeamLengthPenalty);
+    const bool final_step = step + 1 >= max_new_tokens;
+    for (int32_t beam = 0; beam < beam_size; ++beam) {
+        const int32_t lane = batch * beam_size + beam;
+        auto& candidate = candidates.at(static_cast<std::size_t>(beam));
+        const bool active = canary_beam_candidate_is_active(candidate, sample_finished, final_step);
+        if (active) {
+            parent_lanes[static_cast<std::size_t>(lane)] = candidate.parent_slot;
+            tokens[static_cast<std::size_t>(lane)] = candidate.token;
+            candidate.hypothesis.state_slot = lane;
+        } else {
+            candidate.hypothesis.state_slot = -1;
+        }
+        next_beams.push_back(std::move(candidate.hypothesis));
+    }
+    return std::any_of(next_beams.begin(), next_beams.end(),
+                       [](const CanaryBeamHypothesis& beam) { return beam.state_slot >= 0; });
+}
+
+CanaryBeamBatchStep make_canary_beam_batch_step(const CanaryBeamBatch& beams,
+                                                const std::vector<int32_t>& max_new_tokens,
+                                                int32_t step, int32_t beam_size,
+                                                int32_t eot_token_id) {
+    const int32_t request_batch = static_cast<int32_t>(beams.size());
+    const auto decoder_lanes = static_cast<std::size_t>(request_batch * beam_size);
+    CanaryBeamBatchStep next;
+    next.beams.resize(beams.size());
+    next.parent_lanes.assign(decoder_lanes, 0);
+    next.tokens.assign(decoder_lanes, eot_token_id);
+    for (int32_t batch = 0; batch < request_batch; ++batch) {
+        next.any_active |= append_canary_next_beam_sample(
+            beams[static_cast<std::size_t>(batch)], max_new_tokens[static_cast<std::size_t>(batch)],
+            step, batch, beam_size, eot_token_id, next.parent_lanes, next.tokens,
+            next.beams[static_cast<std::size_t>(batch)]);
+    }
+    return next;
+}
+
+std::vector<int32_t> make_canary_beam_lane_to_sample(int32_t decoder_lanes, int32_t beam_size) {
+    std::vector<int32_t> lane_to_sample(static_cast<std::size_t>(decoder_lanes));
+    for (int32_t lane = 0; lane < decoder_lanes; ++lane)
+        lane_to_sample[static_cast<std::size_t>(lane)] = lane / beam_size;
+    return lane_to_sample;
+}
+
+void update_canary_beam_batch_logits(CanaryBeamBatch& beams, const std::vector<float>& logits,
+                                     int32_t beam_size, std::size_t vocab_size) {
+    for (std::size_t batch = 0; batch < beams.size(); ++batch) {
+        for (int32_t beam = 0; beam < beam_size; ++beam) {
+            const auto lane = static_cast<std::ptrdiff_t>(
+                batch * static_cast<std::size_t>(beam_size) + static_cast<std::size_t>(beam));
+            auto& hypothesis = beams[batch][static_cast<std::size_t>(beam)];
+            if (hypothesis.state_slot < 0)
+                continue;
+            const auto begin = logits.begin() + lane * static_cast<std::ptrdiff_t>(vocab_size);
+            hypothesis.logits.assign(begin, begin + static_cast<std::ptrdiff_t>(vocab_size));
+        }
+    }
+}
+
+std::vector<std::vector<int32_t>> take_canary_beam_batch_output(CanaryBeamBatch& beams) {
+    std::vector<std::vector<int32_t>> output(beams.size());
+    for (std::size_t batch = 0; batch < beams.size(); ++batch) {
+        if (!beams[batch].empty())
+            output[batch] = std::move(beams[batch].front().output_ids);
+    }
+    return output;
+}
 
 } // namespace
 
@@ -234,12 +694,7 @@ CanaryPipeline::CanaryPipeline(std::unique_ptr<TrtModule> encoder,
       mel_hop_length_(mel_hop_length), mel_chunk_length_(mel_chunk_length),
       mel_sampling_rate_(mel_sampling_rate), stream_(stream), tokenizer_(std::move(tokenizer)),
       model_id_(std::move(model_id_str)) {
-    if (!encoder_ || !encoder_->ok())
-        throw std::runtime_error("CanaryPipeline: invalid encoder module");
-    if (!decoder_ || !decoder_->ok())
-        throw std::runtime_error("CanaryPipeline: invalid decoder module");
-    if (!state_ || !state_->ok())
-        throw std::runtime_error("CanaryPipeline: invalid inference state");
+    validate_canary_pipeline_components(encoder_.get(), decoder_.get(), state_.get());
 
     // Decoder shapes are stable within each dynamic cache-row bucket. Capture
     // the TensorRT enqueue on the first step and replay it until a shape change
@@ -261,13 +716,7 @@ CanaryPipeline::CanaryPipeline(std::unique_ptr<TrtModule> encoder,
                              static_cast<std::size_t>(hidden_size_) * sizeof(float);
     const std::size_t cross_bytes =
         static_cast<std::size_t>(decoder_lane_capacity_) * cross_kv_sample_bytes_;
-    if (num_decoder_layers_ > 0 && cross_bytes > 0) {
-        const auto status = cudaMalloc(&cross_kv_ptr_, cross_bytes);
-        if (status != cudaSuccess) {
-            throw std::runtime_error(std::string("CanaryPipeline: cross-attention allocation failed: ") +
-                                     cudaGetErrorString(status));
-        }
-    }
+    cross_kv_ptr_ = allocate_canary_cross_kv_buffer(num_decoder_layers_, cross_bytes);
 }
 
 CanaryPipeline::~CanaryPipeline() {
@@ -315,170 +764,52 @@ CanaryPipeline::transcribe_batch(const std::vector<TranscriptionRequest>& reques
     if (requests.empty())
         return {};
 
-    std::vector<CanaryBatchSegment> work;
-    for (std::size_t request_index = 0; request_index < requests.size(); ++request_index) {
-        const auto& request = requests[request_index];
-        validate_canary_audio_input(request.audio_samples.data(),
-                                    static_cast<int32_t>(request.audio_samples.size()));
-        auto initial_tokens =
-            make_canary_request_tokens(canary_config_, request.config, tokenizer_.get());
-        validate_canary_output_budget(canary_config_, request.config, initial_tokens.size());
-
-        const int32_t sample_rate = request.config.input_sample_rate > 0
-                                        ? request.config.input_sample_rate
-                                        : mel_sampling_rate_;
-        const auto sample_count = static_cast<int32_t>(request.audio_samples.size());
-        const double duration_seconds =
-            validate_canary_input_duration(sample_count, sample_rate, request.config);
-        const double segment_seconds = resolve_canary_segment_duration(
-            duration_seconds, static_cast<double>(mel_chunk_length_), request.config);
-        const int32_t segment_samples =
-            canary_segment_sample_count(segment_seconds, sample_rate);
-
-        for (int64_t offset = 0; offset < sample_count; offset += segment_samples) {
-            const int32_t count = static_cast<int32_t>(std::min<int64_t>(
-                segment_samples, static_cast<int64_t>(sample_count) - offset));
-            work.push_back({request_index, offset, count, sample_rate, initial_tokens,
-                            request.config.max_output_tokens, request.config.beam_size});
-        }
-    }
+    auto work = build_canary_batch_work(requests, canary_config_, tokenizer_.get(),
+                                        mel_sampling_rate_, mel_chunk_length_);
 
     std::vector<TextResult> segment_results(work.size());
-    std::unordered_map<int32_t, std::vector<std::size_t>> work_by_beam;
-    std::vector<int32_t> beam_order;
-    for (std::size_t index = 0; index < work.size(); ++index) {
-        const int32_t beam_size = work[index].beam_size;
-        auto [it, inserted] = work_by_beam.try_emplace(beam_size);
-        if (inserted)
-            beam_order.push_back(beam_size);
-        it->second.push_back(index);
-    }
+    const auto groups = group_canary_batch_work(work);
 
-    for (const int32_t beam_size : beam_order) {
-        const auto& indices = work_by_beam.at(beam_size);
+    for (const int32_t beam_size : groups.beam_order) {
+        const auto& indices = groups.by_beam_size.at(beam_size);
         if (beam_size > decoder_lane_capacity_) {
             for (const std::size_t index : indices) {
                 const auto& item = work[index];
                 const auto& audio = requests[item.request_index].audio_samples;
-                segment_results[index] = transcribe_segment(
-                    audio.data() + item.offset, item.count, item.sample_rate,
-                    item.initial_tokens, item.max_output_tokens, item.beam_size);
+                segment_results[index] =
+                    transcribe_segment(audio.data() + item.offset, item.count, item.sample_rate,
+                                       item.initial_tokens, item.max_output_tokens, item.beam_size);
             }
             continue;
         }
 
         const int32_t decoder_request_capacity =
             std::max(decoder_lane_capacity_ / std::max(beam_size, 1), 1);
-        const std::size_t chunk_capacity = static_cast<std::size_t>(
-            std::min(encoder_batch_capacity_, decoder_request_capacity));
+        const std::size_t chunk_capacity =
+            static_cast<std::size_t>(std::min(encoder_batch_capacity_, decoder_request_capacity));
         for (std::size_t chunk_start = 0; chunk_start < indices.size();
              chunk_start += chunk_capacity) {
-            const std::size_t chunk_end =
-                std::min(chunk_start + chunk_capacity, indices.size());
+            const std::size_t chunk_end = std::min(chunk_start + chunk_capacity, indices.size());
             const auto chunk_begin_time = CanaryClock::now();
 
-            std::vector<std::future<CanaryPreparedSegment>> futures;
-            futures.reserve(chunk_end - chunk_start);
-            for (std::size_t cursor = chunk_start; cursor < chunk_end; ++cursor) {
-                const std::size_t index = indices[cursor];
-                futures.push_back(std::async(std::launch::async, [this, &requests, &work, index] {
-                    const auto& item = work[index];
-                    const auto& audio = requests[item.request_index].audio_samples;
-                    const float* samples = audio.data() + item.offset;
-                    int32_t sample_count = item.count;
-                    std::vector<float> resampled;
-                    if (item.sample_rate != mel_sampling_rate_) {
-                        resampled = resample_linear(samples, sample_count, item.sample_rate,
-                                                    mel_sampling_rate_);
-                        samples = resampled.data();
-                        sample_count = static_cast<int32_t>(resampled.size());
-                    }
-
-                    CanaryPreparedSegment prepared;
-                    if (mel_fb_ && !mel_fb_->data.empty()) {
-                        prepared.mel = canary::extract_mel_spectrogram(
-                            samples, sample_count, mel_fb_->data.data(), mel_fb_->n_freq_bins,
-                            mel_fb_->n_mel_bins, mel_n_fft_, mel_hop_length_, mel_chunk_length_,
-                            mel_sampling_rate_);
-                    }
-                    if (!prepared.mel.data.empty()) {
-                        const int32_t valid_frames = prepared.mel.valid_frames > 0
-                                                         ? prepared.mel.valid_frames
-                                                         : prepared.mel.n_frames;
-                        prepared.actual_encoder_length = compute_canary_actual_encoder_length(
-                            valid_frames, resolve_canary_expected_mel_length(canary_config_),
-                            canary_config_.max_source_positions);
-                    }
-                    return prepared;
-                }));
-            }
-
-            std::vector<std::size_t> valid_indices;
-            std::vector<std::vector<float>> mel_batch;
-            std::vector<int32_t> valid_frames;
-            std::vector<int32_t> actual_encoder_lengths;
-            std::vector<std::vector<int32_t>> prompts;
-            std::vector<int32_t> output_limits;
-            int32_t mel_bins = 0;
-            int32_t mel_frames = 0;
-            for (std::size_t future_index = 0; future_index < futures.size(); ++future_index) {
-                const std::size_t index = indices[chunk_start + future_index];
-                auto prepared = futures[future_index].get();
-                if (prepared.mel.data.empty()) {
-                    segment_results[index] = TextResult{"[mel extraction failed]", {}};
-                    continue;
-                }
-                if (mel_batch.empty()) {
-                    mel_bins = prepared.mel.n_mels;
-                    mel_frames = prepared.mel.n_frames;
-                } else if (prepared.mel.n_mels != mel_bins ||
-                           prepared.mel.n_frames != mel_frames) {
-                    throw std::runtime_error("Canary mel batch contains mismatched shapes");
-                }
-                valid_indices.push_back(index);
-                valid_frames.push_back(prepared.mel.valid_frames > 0
-                                           ? prepared.mel.valid_frames
-                                           : prepared.mel.n_frames);
-                actual_encoder_lengths.push_back(prepared.actual_encoder_length);
-                mel_batch.push_back(std::move(prepared.mel.data));
-                prompts.push_back(work[index].initial_tokens);
-                output_limits.push_back(work[index].max_output_tokens);
-            }
-
-            if (valid_indices.empty())
+            auto futures = launch_canary_batch_preparation(
+                indices, chunk_start, chunk_end, work, requests, mel_fb_.get(), mel_n_fft_,
+                mel_hop_length_, mel_chunk_length_, mel_sampling_rate_, canary_config_);
+            auto chunk = collect_canary_prepared_batch_chunk(futures, indices, chunk_start, work,
+                                                             segment_results);
+            if (chunk.valid_indices.empty())
                 continue;
 
-            run_encoder_batch(mel_batch, mel_bins, mel_frames, valid_frames);
-            auto output_ids = run_decoder_batch(
-                prompts, output_limits, beam_size, actual_encoder_lengths);
-            for (std::size_t batch = 0; batch < valid_indices.size(); ++batch) {
-                TextResult result;
-                result.token_ids = std::move(output_ids[batch]);
-                if (tokenizer_ && !result.token_ids.empty())
-                    result.text = decode_canary_tokens(
-                        *tokenizer_, result.token_ids, canary_config_.eot_token_id);
-                segment_results[valid_indices[batch]] = std::move(result);
-            }
-
-            if (canary_stage_timing_enabled()) {
-                const double total = elapsed_ms(chunk_begin_time, CanaryClock::now());
-                std::cerr << "[trtmc.canary_batch_timing.json] {\"batch_size\":"
-                          << valid_indices.size() << ",\"beam_size\":" << beam_size
-                          << ",\"total_ms\":" << total << ",\"per_sample_ms\":"
-                          << total / static_cast<double>(valid_indices.size()) << '}'
-                          << std::endl;
-            }
+            run_encoder_batch(chunk.mel_batch, chunk.mel_bins, chunk.mel_frames,
+                              chunk.valid_frames);
+            auto output_ids = run_decoder_batch(chunk.prompts, chunk.output_limits, beam_size,
+                                                chunk.actual_encoder_lengths);
+            store_canary_batch_decodes(output_ids, chunk.valid_indices, tokenizer_.get(),
+                                       canary_config_.eot_token_id, segment_results);
+            report_canary_batch_timing(chunk_begin_time, chunk.valid_indices.size(), beam_size);
         }
     }
-
-    std::vector<TextResult> results(requests.size());
-    for (std::size_t index = 0; index < work.size(); ++index) {
-        const auto& item = work[index];
-        append_canary_transcription_segment(
-            results[item.request_index], std::move(segment_results[index]), item.offset,
-            item.count, item.sample_rate, requests[item.request_index].config);
-    }
-    return results;
+    return merge_canary_batch_segments(requests, work, segment_results);
 }
 
 TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t num_samples,
@@ -548,8 +879,7 @@ TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t n
     TextResult out;
     out.token_ids = std::move(output_ids);
     if (tokenizer_ && !out.token_ids.empty()) {
-        out.text =
-            decode_canary_tokens(*tokenizer_, out.token_ids, canary_config_.eot_token_id);
+        out.text = decode_canary_tokens(*tokenizer_, out.token_ids, canary_config_.eot_token_id);
     }
     const auto tokenize_end = CanaryClock::now();
 
@@ -562,10 +892,10 @@ TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t n
 void CanaryPipeline::run_encoder(const float* mel_data, int32_t mel_bins, int32_t mel_length,
                                  int32_t valid_mel_frames) {
     if (encoder_->input_rank("mel_features") == 3) {
-        const std::size_t mel_size = static_cast<std::size_t>(mel_bins) *
-                                     static_cast<std::size_t>(mel_length);
-        run_encoder_batch({std::vector<float>(mel_data, mel_data + mel_size)}, mel_bins,
-                          mel_length, {valid_mel_frames});
+        const std::size_t mel_size =
+            static_cast<std::size_t>(mel_bins) * static_cast<std::size_t>(mel_length);
+        run_encoder_batch({std::vector<float>(mel_data, mel_data + mel_size)}, mel_bins, mel_length,
+                          {valid_mel_frames});
         return;
     }
 
@@ -628,15 +958,9 @@ void CanaryPipeline::run_encoder_batch(const std::vector<std::vector<float>>& me
     const int32_t expected_length = resolve_canary_expected_mel_length(canary_config_);
     if (mel_length != expected_length)
         throw std::invalid_argument("Canary encoder batch requires padded mel frames");
-    const std::size_t sample_values = static_cast<std::size_t>(mel_bins) *
-                                      static_cast<std::size_t>(expected_length);
-    std::vector<float> packed_mel(mel_data.size() * sample_values, 0.0F);
-    for (std::size_t batch = 0; batch < mel_data.size(); ++batch) {
-        if (mel_data[batch].size() != sample_values)
-            throw std::invalid_argument("Canary encoder batch mel shape mismatch");
-        std::copy(mel_data[batch].begin(), mel_data[batch].end(),
-                  packed_mel.begin() + static_cast<std::ptrdiff_t>(batch * sample_values));
-    }
+    const std::size_t sample_values =
+        static_cast<std::size_t>(mel_bins) * static_cast<std::size_t>(expected_length);
+    std::vector<float> packed_mel = pack_canary_mel_batch(mel_data, sample_values);
 
     TensorMap inputs;
     Tensor mel_tensor;
@@ -645,42 +969,15 @@ void CanaryPipeline::run_encoder_batch(const std::vector<std::vector<float>>& me
     mel_tensor.dtype = DType::kFloat32;
     inputs["mel_features"] = mel_tensor;
 
-    std::vector<float> packed_mask;
+    CanaryEncoderBatchMask packed_mask;
     if (encoder_->has_input("encoder_mask")) {
         const int32_t enc_seq = canary_config_.max_source_positions;
-        const auto engine_shape = encoder_->tensor_shape("encoder_mask");
-        const bool full_attention_mask =
-            engine_shape.size() == 4 && engine_shape[2] == enc_seq;
-        const std::size_t mask_values =
-            full_attention_mask
-                ? static_cast<std::size_t>(enc_seq) * static_cast<std::size_t>(enc_seq)
-                : static_cast<std::size_t>(enc_seq);
-        packed_mask.resize(mel_data.size() * mask_values);
-        for (std::size_t batch = 0; batch < mel_data.size(); ++batch) {
-            int32_t actual_enc = compute_canary_actual_encoder_length(
-                valid_mel_frames[batch], expected_length, enc_seq);
-            if (actual_enc <= 0)
-                actual_enc = enc_seq;
-            const auto row = build_canary_encoder_mask_values(enc_seq, actual_enc);
-            auto out = packed_mask.begin() +
-                       static_cast<std::ptrdiff_t>(batch * mask_values);
-            if (full_attention_mask) {
-                for (int32_t query = 0; query < enc_seq; ++query) {
-                    std::copy(row.begin(), row.end(),
-                              out + static_cast<std::ptrdiff_t>(query) * enc_seq);
-                }
-            } else {
-                std::copy(row.begin(), row.end(), out);
-            }
-        }
+        packed_mask = make_canary_encoder_batch_mask(valid_mel_frames, expected_length, enc_seq,
+                                                     encoder_->tensor_shape("encoder_mask"));
 
         Tensor mask_tensor;
-        mask_tensor.data = packed_mask.data();
-        mask_tensor.shape = full_attention_mask
-                                ? std::vector<int64_t>{
-                                      static_cast<int64_t>(mel_data.size()), 1, enc_seq, enc_seq}
-                                : std::vector<int64_t>{
-                                      static_cast<int64_t>(mel_data.size()), 1, 1, enc_seq};
+        mask_tensor.data = packed_mask.values.data();
+        mask_tensor.shape = packed_mask.shape;
         mask_tensor.dtype = DType::kFloat32;
         inputs["encoder_mask"] = mask_tensor;
     }
@@ -693,9 +990,8 @@ void CanaryPipeline::setup_cross_attention(int32_t actual_enc_seq_len) {
     setup_cross_attention({actual_enc_seq_len}, {0});
 }
 
-void CanaryPipeline::setup_cross_attention(
-    const std::vector<int32_t>& actual_enc_seq_lens,
-    const std::vector<int32_t>& lane_to_sample) {
+void CanaryPipeline::setup_cross_attention(const std::vector<int32_t>& actual_enc_seq_lens,
+                                           const std::vector<int32_t>& lane_to_sample) {
     if (num_decoder_layers_ <= 0)
         return;
     if (cross_kv_ptr_ == nullptr || lane_to_sample.empty() ||
@@ -704,44 +1000,16 @@ void CanaryPipeline::setup_cross_attention(
     }
 
     auto* encoder_output = static_cast<uint8_t*>(encoder_->device_ptr("encoder_output"));
-    for (std::size_t sample = 0; sample < actual_enc_seq_lens.size(); ++sample) {
-        const auto plan = make_canary_cross_kv_plan(
-            canary_config_.max_source_positions, hidden_size_, actual_enc_seq_lens[sample]);
-        if (plan.zero_pad_encoder_output && plan.pad_bytes > 0) {
-            const auto status = cudaMemsetAsync(
-                encoder_output + sample * cross_kv_sample_bytes_ + plan.valid_bytes, 0,
-                plan.pad_bytes, stream_);
-            if (status != cudaSuccess)
-                throw std::runtime_error("Canary encoder padding failed");
-        }
-    }
+    zero_pad_canary_encoder_batch(encoder_output, actual_enc_seq_lens,
+                                  canary_config_.max_source_positions, hidden_size_,
+                                  cross_kv_sample_bytes_, stream_);
+    copy_canary_cross_attention_lanes(static_cast<uint8_t*>(cross_kv_ptr_), encoder_output,
+                                      lane_to_sample, actual_enc_seq_lens.size(),
+                                      cross_kv_sample_bytes_, stream_);
 
-    auto* cross = static_cast<uint8_t*>(cross_kv_ptr_);
-    for (std::size_t lane = 0; lane < lane_to_sample.size(); ++lane) {
-        const int32_t sample = lane_to_sample[lane];
-        if (sample < 0 || static_cast<std::size_t>(sample) >= actual_enc_seq_lens.size())
-            throw std::out_of_range("Canary cross-attention sample lane is out of range");
-        const auto status = cudaMemcpyAsync(
-            cross + lane * cross_kv_sample_bytes_,
-            encoder_output + static_cast<std::size_t>(sample) * cross_kv_sample_bytes_,
-            cross_kv_sample_bytes_, cudaMemcpyDeviceToDevice, stream_);
-        if (status != cudaSuccess)
-            throw std::runtime_error("Canary cross-attention copy failed");
-    }
-
-    const std::vector<int64_t> cross_shape{
-        static_cast<int64_t>(lane_to_sample.size()), canary_config_.max_source_positions,
-        hidden_size_};
-    for (int32_t i = 0; i < num_decoder_layers_; ++i) {
-        const std::string suffix = "_" + std::to_string(i);
-        if (decoder_->input_rank("cross_k" + suffix) == 3) {
-            decoder_->bind_external("cross_k" + suffix, cross_kv_ptr_, cross_shape);
-            decoder_->bind_external("cross_v" + suffix, cross_kv_ptr_, cross_shape);
-        } else {
-            decoder_->bind_external("cross_k" + suffix, cross_kv_ptr_);
-            decoder_->bind_external("cross_v" + suffix, cross_kv_ptr_);
-        }
-    }
+    const std::vector<int64_t> cross_shape{static_cast<int64_t>(lane_to_sample.size()),
+                                           canary_config_.max_source_positions, hidden_size_};
+    bind_canary_cross_attention_layers(*decoder_, num_decoder_layers_, cross_kv_ptr_, cross_shape);
     decoder_->sync();
 }
 
@@ -773,10 +1041,10 @@ std::vector<int32_t> CanaryPipeline::run_decoder(const std::vector<int32_t>& ini
     return result.output_ids;
 }
 
-std::vector<std::vector<int32_t>> CanaryPipeline::run_decoder_batch(
-    const std::vector<std::vector<int32_t>>& initial_tokens,
-    const std::vector<int32_t>& max_new_tokens, int32_t beam_size,
-    const std::vector<int32_t>& actual_enc_seq_lens) {
+std::vector<std::vector<int32_t>>
+CanaryPipeline::run_decoder_batch(const std::vector<std::vector<int32_t>>& initial_tokens,
+                                  const std::vector<int32_t>& max_new_tokens, int32_t beam_size,
+                                  const std::vector<int32_t>& actual_enc_seq_lens) {
     if (initial_tokens.empty() || initial_tokens.size() != max_new_tokens.size() ||
         initial_tokens.size() != actual_enc_seq_lens.size()) {
         throw std::invalid_argument("Canary decoder batch has inconsistent inputs");
@@ -786,21 +1054,16 @@ std::vector<std::vector<int32_t>> CanaryPipeline::run_decoder_batch(
     setup_cross_attention(actual_enc_seq_lens, identity);
     if (beam_size <= 1)
         return run_greedy_decoder_batch(initial_tokens, max_new_tokens);
-    return run_beam_decoder_batch(initial_tokens, max_new_tokens, beam_size,
-                                  actual_enc_seq_lens);
+    return run_beam_decoder_batch(initial_tokens, max_new_tokens, beam_size, actual_enc_seq_lens);
 }
 
-std::vector<std::vector<int32_t>> CanaryPipeline::run_greedy_decoder_batch(
-    const std::vector<std::vector<int32_t>>& initial_tokens,
-    const std::vector<int32_t>& max_new_tokens) {
+std::vector<std::vector<int32_t>>
+CanaryPipeline::run_greedy_decoder_batch(const std::vector<std::vector<int32_t>>& initial_tokens,
+                                         const std::vector<int32_t>& max_new_tokens) {
     const std::size_t batch_size = initial_tokens.size();
-    const std::size_t prompt_length = initial_tokens.front().size();
+    const std::size_t prompt_length = validate_canary_batch_prompts(initial_tokens);
     if (prompt_length == 0)
         return std::vector<std::vector<int32_t>>(batch_size);
-    for (const auto& prompt : initial_tokens) {
-        if (prompt.size() != prompt_length)
-            throw std::invalid_argument("Canary batch prompts must have equal lengths");
-    }
 
     auto& cache = batch_cache();
     cache.set_batch_size(static_cast<int32_t>(batch_size));
@@ -823,44 +1086,27 @@ std::vector<std::vector<int32_t>> CanaryPipeline::run_greedy_decoder_batch(
     std::vector<bool> finished(batch_size, false);
     const int32_t max_steps = *std::max_element(max_new_tokens.begin(), max_new_tokens.end());
     for (int32_t step = 0; step < max_steps; ++step) {
-        bool all_finished = true;
-        for (std::size_t batch = 0; batch < batch_size; ++batch) {
-            if (finished[batch] || step >= max_new_tokens[batch]) {
-                tokens[batch] = canary_config_.eot_token_id;
-                finished[batch] = true;
-                continue;
-            }
-            const auto begin = logits.begin() +
-                               static_cast<std::ptrdiff_t>(batch * vocab_size);
-            const auto end = begin + static_cast<std::ptrdiff_t>(vocab_size);
-            tokens[batch] =
-                static_cast<int32_t>(std::distance(begin, std::max_element(begin, end)));
-            output[batch].push_back(tokens[batch]);
-            finished[batch] = tokens[batch] == canary_config_.eot_token_id ||
-                              step + 1 >= max_new_tokens[batch];
-            all_finished = all_finished && finished[batch];
-        }
-        if (all_finished)
+        if (update_canary_greedy_batch_step(logits, vocab_size, step, max_new_tokens,
+                                            canary_config_.eot_token_id, tokens, output,
+                                            finished)) {
             break;
+        }
         run_decoder_step_batch(tokens, logits);
     }
     return output;
 }
 
-std::vector<std::vector<int32_t>> CanaryPipeline::run_beam_decoder_batch(
-    const std::vector<std::vector<int32_t>>& initial_tokens,
-    const std::vector<int32_t>& max_new_tokens, int32_t beam_size,
-    const std::vector<int32_t>& actual_enc_seq_lens) {
+std::vector<std::vector<int32_t>>
+CanaryPipeline::run_beam_decoder_batch(const std::vector<std::vector<int32_t>>& initial_tokens,
+                                       const std::vector<int32_t>& max_new_tokens,
+                                       int32_t beam_size,
+                                       const std::vector<int32_t>& actual_enc_seq_lens) {
     const int32_t request_batch = static_cast<int32_t>(initial_tokens.size());
     const int32_t decoder_lanes = request_batch * beam_size;
     if (decoder_lanes > decoder_lane_capacity_)
         throw std::invalid_argument("Canary batched beam search exceeds decoder lane capacity");
 
-    const std::size_t prompt_length = initial_tokens.front().size();
-    for (const auto& prompt : initial_tokens) {
-        if (prompt.size() != prompt_length)
-            throw std::invalid_argument("Canary batch prompts must have equal lengths");
-    }
+    const std::size_t prompt_length = validate_canary_batch_prompts(initial_tokens);
 
     auto& scratch = batch_cache();
     scratch.set_batch_size(request_batch);
@@ -886,94 +1132,26 @@ std::vector<std::vector<int32_t>> CanaryPipeline::run_beam_decoder_batch(
     persistent->set_batch_size(request_batch);
     persistent->copy_from(*state_);
 
-    std::vector<std::vector<CanaryBeamHypothesis>> beams(
-        static_cast<std::size_t>(request_batch));
-    for (int32_t batch = 0; batch < request_batch; ++batch) {
-        CanaryBeamHypothesis initial;
-        initial.state_slot = batch;
-        const auto begin = logits.begin() +
-                           static_cast<std::ptrdiff_t>(batch) *
-                               static_cast<std::ptrdiff_t>(vocab_size);
-        initial.logits.assign(begin, begin + static_cast<std::ptrdiff_t>(vocab_size));
-        beams[static_cast<std::size_t>(batch)].push_back(std::move(initial));
-    }
+    auto beams = initialize_canary_beam_batch(logits, request_batch, vocab_size);
 
-    std::vector<int32_t> beam_lane_to_sample(static_cast<std::size_t>(decoder_lanes));
-    for (int32_t lane = 0; lane < decoder_lanes; ++lane)
-        beam_lane_to_sample[static_cast<std::size_t>(lane)] = lane / beam_size;
+    const auto beam_lane_to_sample = make_canary_beam_lane_to_sample(decoder_lanes, beam_size);
     setup_cross_attention(actual_enc_seq_lens, beam_lane_to_sample);
 
     const int32_t max_steps = *std::max_element(max_new_tokens.begin(), max_new_tokens.end());
     for (int32_t step = 0; step < max_steps; ++step) {
-        std::vector<std::vector<CanaryBeamHypothesis>> next_beams(
-            static_cast<std::size_t>(request_batch));
-        std::vector<int32_t> parent_lanes(static_cast<std::size_t>(decoder_lanes), 0);
-        tokens.assign(static_cast<std::size_t>(decoder_lanes), canary_config_.eot_token_id);
-        bool any_active = false;
-
-        for (int32_t batch = 0; batch < request_batch; ++batch) {
-            CanaryDecodeLoopResult status;
-            std::vector<CanaryBeamCandidate> candidates;
-            bool sample_finished = false;
-            if (!collect_canary_beam_candidates(
-                    beams[static_cast<std::size_t>(batch)], canary_config_.eot_token_id,
-                    beam_size, candidates, sample_finished, status)) {
-                throw std::runtime_error("Canary batched beam search failed: " + status.error);
-            }
-            rank_canary_beam_candidates(
-                candidates, beam_size, CanaryDefaultBeamLengthPenalty);
-            const bool final_step = step + 1 >= max_new_tokens[static_cast<std::size_t>(batch)];
-
-            for (int32_t beam = 0; beam < beam_size; ++beam) {
-                const int32_t lane = batch * beam_size + beam;
-                auto& candidate = candidates.at(static_cast<std::size_t>(beam));
-                const bool active = !sample_finished && !candidate.hypothesis.finished &&
-                                    !final_step && candidate.parent_slot >= 0;
-                if (active) {
-                    parent_lanes[static_cast<std::size_t>(lane)] = candidate.parent_slot;
-                    tokens[static_cast<std::size_t>(lane)] = candidate.token;
-                    candidate.hypothesis.state_slot = lane;
-                    any_active = true;
-                } else {
-                    candidate.hypothesis.state_slot = -1;
-                }
-                next_beams[static_cast<std::size_t>(batch)].push_back(
-                    std::move(candidate.hypothesis));
-            }
-        }
-
-        beams = std::move(next_beams);
-        if (!any_active)
+        auto next = make_canary_beam_batch_step(beams, max_new_tokens, step, beam_size,
+                                                canary_config_.eot_token_id);
+        beams = std::move(next.beams);
+        if (!next.any_active)
             break;
 
-        scratch.copy_lanes_from(*persistent, parent_lanes);
+        scratch.copy_lanes_from(*persistent, next.parent_lanes);
         state_->bind_to(*decoder_);
-        run_decoder_step_batch(tokens, logits);
+        run_decoder_step_batch(next.tokens, logits);
         persistent->copy_from(*state_);
-
-        for (int32_t batch = 0; batch < request_batch; ++batch) {
-            for (int32_t beam = 0; beam < beam_size; ++beam) {
-                const int32_t lane = batch * beam_size + beam;
-                auto& hypothesis =
-                    beams[static_cast<std::size_t>(batch)][static_cast<std::size_t>(beam)];
-                if (hypothesis.state_slot < 0)
-                    continue;
-                const auto begin = logits.begin() +
-                                   static_cast<std::ptrdiff_t>(lane) *
-                                       static_cast<std::ptrdiff_t>(vocab_size);
-                hypothesis.logits.assign(
-                    begin, begin + static_cast<std::ptrdiff_t>(vocab_size));
-            }
-        }
+        update_canary_beam_batch_logits(beams, logits, beam_size, vocab_size);
     }
-
-    std::vector<std::vector<int32_t>> output(static_cast<std::size_t>(request_batch));
-    for (int32_t batch = 0; batch < request_batch; ++batch) {
-        if (!beams[static_cast<std::size_t>(batch)].empty())
-            output[static_cast<std::size_t>(batch)] =
-                std::move(beams[static_cast<std::size_t>(batch)].front().output_ids);
-    }
-    return output;
+    return take_canary_beam_batch_output(beams);
 }
 
 std::vector<int32_t> CanaryPipeline::run_beam_decoder(const std::vector<int32_t>& initial_tokens,

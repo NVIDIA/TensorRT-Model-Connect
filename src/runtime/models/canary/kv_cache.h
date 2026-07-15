@@ -98,8 +98,7 @@ class CanaryKvCache : public CanaryInferenceState {
 
     // Gather cache lanes from another compatible state. source_lanes maps
     // each destination lane to a source lane and is used by batched beam search.
-    void copy_lanes_from(const CanaryKvCache& source,
-                         const std::vector<int32_t>& source_lanes);
+    void copy_lanes_from(const CanaryKvCache& source, const std::vector<int32_t>& source_lanes);
 
     // Bind only the cache_k/v INPUT pointers to `module`. Used for the
     // prefill TrtModule whose present_k/v outputs have shape (Sq, kv_dim)

@@ -26,15 +26,37 @@ int32_t round_up_rows(int32_t value, int32_t bucket, int32_t maximum) {
     return std::min(rounded, maximum);
 }
 
+bool profile_dimension_is_dynamic(const std::vector<int64_t>& min_shape,
+                                  const std::vector<int64_t>& max_shape, int32_t dimension) {
+    if (dimension < 0)
+        return false;
+    const auto index = static_cast<std::size_t>(dimension);
+    if (index >= min_shape.size() || index >= max_shape.size())
+        return false;
+    return min_shape[index] != max_shape[index];
+}
+
+bool canary_dynamic_cache_binding_enabled(TrtModule& module, const CanaryKvCacheNames& names) {
+    if (names.cache_k.empty())
+        return false;
+    const auto& cache_name = names.cache_k.front();
+    if (!module.input_is_dynamic(cache_name))
+        return false;
+    const int32_t row_dimension = module.input_rank(cache_name) == 3 ? 1 : 0;
+    return profile_dimension_is_dynamic(
+        module.input_profile_shape(cache_name, module.profile_idx(), ProfileShapeSelector::kMin),
+        module.input_profile_shape(cache_name, module.profile_idx(), ProfileShapeSelector::kMax),
+        row_dimension);
+}
+
 } // namespace
 
 CanaryKvCache::CanaryKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
                              cudaStream_t stream, DType cache_dtype, int32_t batch_capacity,
                              CanaryKvCacheNames names)
     : num_layers_(num_layers), max_length_(max_length), kv_dim_(kv_dim),
-      batch_capacity_(std::max(batch_capacity, 1)), stream_(stream),
-      cache_dtype_(cache_dtype), cache_element_size_(dtype_size(cache_dtype)),
-      names_(std::move(names)) {
+      batch_capacity_(std::max(batch_capacity, 1)), stream_(stream), cache_dtype_(cache_dtype),
+      cache_element_size_(dtype_size(cache_dtype)), names_(std::move(names)) {
 
     // If names were not supplied, generate standard defaults.
     if (names_.cache_k.empty()) {
@@ -58,9 +80,8 @@ CanaryKvCache::CanaryKvCache(int32_t num_layers, int32_t max_length, int32_t kv_
 
     for (int32_t i = 0; i < num_layers; ++i) {
         const std::vector<int64_t> cache_shape =
-            uses_batched_layout()
-                ? std::vector<int64_t>{batch_capacity_, max_length, kv_dim}
-                : std::vector<int64_t>{max_length, kv_dim};
+            uses_batched_layout() ? std::vector<int64_t>{batch_capacity_, max_length, kv_dim}
+                                  : std::vector<int64_t>{max_length, kv_dim};
         const std::vector<int64_t> present_shape =
             uses_batched_layout() ? std::vector<int64_t>{batch_capacity_, kv_dim}
                                   : std::vector<int64_t>{1, kv_dim};
@@ -240,34 +261,19 @@ void CanaryKvCache::bind_to(TrtModule& module) {
     // Enable dynamic row binding only when cache_k[0] itself is dynamic.
     // Static-shape engines with fixed [max_length, kv_dim] cache reject
     // setInputShape on cache inputs even when other inputs are dynamic.
-    dynamic_binding_enabled_ = false;
-    if (!names_.cache_k.empty() && module.input_is_dynamic(names_.cache_k.front())) {
-        const auto& cache_name = names_.cache_k.front();
-        const int32_t rank = module.input_rank(cache_name);
-        const int32_t row_dim = rank == 3 ? 1 : 0;
-        const auto min_shape = module.input_profile_shape(
-            cache_name, module.profile_idx(), ProfileShapeSelector::kMin);
-        const auto max_shape = module.input_profile_shape(
-            cache_name, module.profile_idx(), ProfileShapeSelector::kMax);
-        if (row_dim >= 0 && static_cast<std::size_t>(row_dim) < min_shape.size() &&
-            static_cast<std::size_t>(row_dim) < max_shape.size()) {
-            dynamic_binding_enabled_ = min_shape[static_cast<std::size_t>(row_dim)] !=
-                                       max_shape[static_cast<std::size_t>(row_dim)];
-        }
-    }
+    dynamic_binding_enabled_ = canary_dynamic_cache_binding_enabled(module, names_);
     bound_cache_rows_ = 0;
     const int32_t initial_cache_rows =
         dynamic_binding_enabled_ ? preferred_cache_rows() : max_length_;
-    const bool engine_uses_batch = !names_.cache_k.empty() &&
-                                   module.input_rank(names_.cache_k.front()) == 3;
+    const bool engine_uses_batch =
+        !names_.cache_k.empty() && module.input_rank(names_.cache_k.front()) == 3;
     if (uses_batched_layout() && !engine_uses_batch && batch_size_ != 1) {
         throw std::invalid_argument(
             "CanaryKvCache cannot bind multiple lanes to a rank-2 decoder cache");
     }
     const std::vector<int64_t> cache_shape =
-        engine_uses_batch
-            ? std::vector<int64_t>{batch_size_, initial_cache_rows, kv_dim_}
-            : std::vector<int64_t>{initial_cache_rows, kv_dim_};
+        engine_uses_batch ? std::vector<int64_t>{batch_size_, initial_cache_rows, kv_dim_}
+                          : std::vector<int64_t>{initial_cache_rows, kv_dim_};
 
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
@@ -366,12 +372,12 @@ void CanaryKvCache::advance(int32_t n_tokens) {
             auto li = static_cast<std::size_t>(i);
             if (uses_batched_layout()) {
                 const auto cache_pitch = static_cast<std::size_t>(max_length_) * row_bytes;
-                cudaMemcpy2DAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
-                                  cache_pitch, present_k_[li].data(), row_bytes, row_bytes,
+                cudaMemcpy2DAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, cache_pitch,
+                                  present_k_[li].data(), row_bytes, row_bytes,
                                   static_cast<std::size_t>(batch_size_), cudaMemcpyDeviceToDevice,
                                   stream_);
-                cudaMemcpy2DAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
-                                  cache_pitch, present_v_[li].data(), row_bytes, row_bytes,
+                cudaMemcpy2DAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, cache_pitch,
+                                  present_v_[li].data(), row_bytes, row_bytes,
                                   static_cast<std::size_t>(batch_size_), cudaMemcpyDeviceToDevice,
                                   stream_);
             } else {
@@ -433,9 +439,9 @@ void CanaryKvCache::copy_from(const CanaryInferenceState& other) {
         cudaError_t status;
         if (uses_batched_layout()) {
             const auto pitch = static_cast<std::size_t>(max_length_) * row_bytes;
-            status = cudaMemcpy2DAsync(
-                cache_k_[li].data(), pitch, source->cache_k_[li].data(), pitch, copy_bytes,
-                static_cast<std::size_t>(batch_size_), cudaMemcpyDeviceToDevice, stream_);
+            status = cudaMemcpy2DAsync(cache_k_[li].data(), pitch, source->cache_k_[li].data(),
+                                       pitch, copy_bytes, static_cast<std::size_t>(batch_size_),
+                                       cudaMemcpyDeviceToDevice, stream_);
         } else {
             status = cudaMemcpyAsync(cache_k_[li].data(), source->cache_k_[li].data(), copy_bytes,
                                      cudaMemcpyDeviceToDevice, stream_);
@@ -446,9 +452,9 @@ void CanaryKvCache::copy_from(const CanaryInferenceState& other) {
         }
         if (uses_batched_layout()) {
             const auto pitch = static_cast<std::size_t>(max_length_) * row_bytes;
-            status = cudaMemcpy2DAsync(
-                cache_v_[li].data(), pitch, source->cache_v_[li].data(), pitch, copy_bytes,
-                static_cast<std::size_t>(batch_size_), cudaMemcpyDeviceToDevice, stream_);
+            status = cudaMemcpy2DAsync(cache_v_[li].data(), pitch, source->cache_v_[li].data(),
+                                       pitch, copy_bytes, static_cast<std::size_t>(batch_size_),
+                                       cudaMemcpyDeviceToDevice, stream_);
         } else {
             status = cudaMemcpyAsync(cache_v_[li].data(), source->cache_v_[li].data(), copy_bytes,
                                      cudaMemcpyDeviceToDevice, stream_);

@@ -144,16 +144,10 @@ void test_canary_kv_cache_batch_lane_copy() {
     trtmc::CanaryKvCache source(1, 3, 1, stream, trtmc::DType::kFloat32, 4);
     source.set_batch_size(3);
     const std::vector<float> source_k = {
-        1.0F, 2.0F, 3.0F,
-        4.0F, 5.0F, 6.0F,
-        7.0F, 8.0F, 9.0F,
-        0.0F, 0.0F, 0.0F,
+        1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F, 7.0F, 8.0F, 9.0F, 0.0F, 0.0F, 0.0F,
     };
     const std::vector<float> source_v = {
-        11.0F, 12.0F, 13.0F,
-        14.0F, 15.0F, 16.0F,
-        17.0F, 18.0F, 19.0F,
-        0.0F, 0.0F, 0.0F,
+        11.0F, 12.0F, 13.0F, 14.0F, 15.0F, 16.0F, 17.0F, 18.0F, 19.0F, 0.0F, 0.0F, 0.0F,
     };
     check(source.cache_k(0).copy_from_host(source_k.data()), "canary batch source K upload");
     check(source.cache_v(0).copy_from_host(source_v.data()), "canary batch source V upload");
@@ -174,18 +168,34 @@ void test_canary_kv_cache_batch_lane_copy() {
         check(gathered->cache_v(0).copy_to_host(gathered_v.data()),
               "canary batch gathered V download");
         check(gathered_k == std::vector<float>({
-                                  7.0F, 8.0F, 0.0F,
-                                  1.0F, 2.0F, 0.0F,
-                                  7.0F, 8.0F, 0.0F,
-                                  4.0F, 5.0F, 0.0F,
-                              }),
+                                7.0F,
+                                8.0F,
+                                0.0F,
+                                1.0F,
+                                2.0F,
+                                0.0F,
+                                7.0F,
+                                8.0F,
+                                0.0F,
+                                4.0F,
+                                5.0F,
+                                0.0F,
+                            }),
               "canary batch gather reorders K lanes");
         check(gathered_v == std::vector<float>({
-                                  17.0F, 18.0F, 0.0F,
-                                  11.0F, 12.0F, 0.0F,
-                                  17.0F, 18.0F, 0.0F,
-                                  14.0F, 15.0F, 0.0F,
-                              }),
+                                17.0F,
+                                18.0F,
+                                0.0F,
+                                11.0F,
+                                12.0F,
+                                0.0F,
+                                17.0F,
+                                18.0F,
+                                0.0F,
+                                14.0F,
+                                15.0F,
+                                0.0F,
+                            }),
               "canary batch gather reorders V lanes");
     }
 
