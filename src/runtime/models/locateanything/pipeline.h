@@ -24,6 +24,13 @@
 
 namespace trtmc {
 
+// Decode generated LocateAnything tokens while preserving the model's semantic
+// localization tokens. The generic BPE decoder intentionally removes tokens
+// marked as special, but LocateAnything uses <ref>, <box>, and <0>..<1000> as
+// part of its user-visible answer.
+std::string locateanything_decode_generated_text(const ITokenizer& tokenizer,
+                                                 const std::vector<int32_t>& token_ids);
+
 struct LocateAnythingConfig {
     int32_t vocab_size{0};
     int32_t id_bos{0};

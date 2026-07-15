@@ -1,6 +1,7 @@
 {
   "threshold_overrides": {
     "layer_atol": 0.05,
+    "localization_box_iou": 0.9,
     "logit_atol": 0.001,
     "normalized_text_edit_distance": 0.5,
     "semantic_similarity": 0.8,

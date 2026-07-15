@@ -66,6 +66,51 @@ class VLFixedTokenizer : public trtmc::ITokenizer {
     std::string token_for_id(int32_t) const override { return ""; }
 };
 
+class GroundingTokenizer : public trtmc::ITokenizer {
+  public:
+    std::vector<int32_t> encode(const std::string&) const override { return {}; }
+
+    std::string decode(const std::vector<int32_t>& ids) const override {
+        std::string text;
+        for (const int32_t id : ids) {
+            if (id == 2)
+                text += "red";
+            else if (id == 3)
+                text += " vehicle";
+        }
+        return text;
+    }
+
+    int32_t id_for_token(std::string_view) const override { return 0; }
+
+    std::string token_for_id(int32_t id) const override {
+        switch (id) {
+        case 1:
+            return "<ref>";
+        case 4:
+            return "</ref>";
+        case 5:
+            return "<box>";
+        case 6:
+            return "<304>";
+        case 7:
+            return "<267>";
+        case 8:
+            return "<828>";
+        case 9:
+            return "<708>";
+        case 10:
+            return "</box>";
+        case 11:
+            return "<|im_end|>";
+        case 12:
+            return "<-1>";
+        default:
+            return "";
+        }
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Engine builders
 // ---------------------------------------------------------------------------
@@ -127,6 +172,16 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_vision_encoder() {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+static void test_grounding_decode_preserves_semantic_special_tokens() {
+    GroundingTokenizer tokenizer;
+    const std::vector<int32_t> generated{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+    const std::string decoded = trtmc::locateanything_decode_generated_text(tokenizer, generated);
+    check(decoded == "<ref>red vehicle</ref><box><304><267><828><708></box>",
+          "grounding decode: preserves ref, box, and coordinate tokens only");
+    check(trtmc::locateanything_decode_generated_text(tokenizer, {12}).empty(),
+          "grounding decode: rejects negative coordinate syntax");
+}
 
 static void test_vl_text_only() {
     auto engine = build_mock_decoder();
@@ -615,6 +670,7 @@ static void test_vl_generate_with_tokenizer() {
 }
 
 int main() {
+    test_grounding_decode_preserves_semantic_special_tokens();
     test_vl_text_only();
     test_vl_text_only_max_tokens();
     test_vl_validates_decoder();

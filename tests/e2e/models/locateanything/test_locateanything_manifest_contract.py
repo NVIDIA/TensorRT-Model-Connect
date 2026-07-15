@@ -17,3 +17,4 @@ def test_locateanything_manifest_declares_hf_image_text_to_text_contract() -> No
     assert case.hf_id == "nvidia/LocateAnything-3B"
     assert case.task_strategy == "vision_language_generation"
     assert case.user_contract == "image-text-to-text"
+    assert case.inputs["prompt"] == "Find the white vehicle in this image."

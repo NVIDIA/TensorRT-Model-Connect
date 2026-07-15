@@ -8,11 +8,56 @@
 #include "runtime/models/locateanything/image_preprocessor.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
 
 namespace trtmc {
+
+namespace {
+
+bool is_coordinate_token(std::string_view token) {
+    if (token.size() < 3 || token.front() != '<' || token.back() != '>')
+        return false;
+
+    int32_t value = 0;
+    const char* begin = token.data() + 1;
+    const char* end = token.data() + token.size() - 1;
+    const auto [parsed_end, error] = std::from_chars(begin, end, value);
+    return error == std::errc{} && parsed_end == end && value >= 0 && value <= 1000;
+}
+
+bool is_localization_token(std::string_view token) {
+    return token == "<ref>" || token == "</ref>" || token == "<box>" || token == "</box>" ||
+           is_coordinate_token(token);
+}
+
+} // namespace
+
+std::string locateanything_decode_generated_text(const ITokenizer& tokenizer,
+                                                 const std::vector<int32_t>& token_ids) {
+    std::string output;
+    std::vector<int32_t> regular_tokens;
+    auto flush_regular_tokens = [&]() {
+        if (regular_tokens.empty())
+            return;
+        output += tokenizer.decode(regular_tokens);
+        regular_tokens.clear();
+    };
+
+    for (const int32_t token_id : token_ids) {
+        const std::string token = tokenizer.token_for_id(token_id);
+        if (!is_localization_token(token)) {
+            regular_tokens.push_back(token_id);
+            continue;
+        }
+        flush_regular_tokens();
+        output += token;
+    }
+    flush_regular_tokens();
+    return output;
+}
 
 LocateAnythingPipeline::LocateAnythingPipeline(
     std::unique_ptr<TrtModule> text_decoder, std::unique_ptr<TrtModule> vision_encoder,
@@ -47,7 +92,7 @@ TextResult LocateAnythingPipeline::generate(const std::string& prompt, const Gen
 
     std::vector<int32_t> new_tokens(
         output_ids.begin() + static_cast<std::ptrdiff_t>(input_ids.size()), output_ids.end());
-    std::string text = tokenizer_->decode(new_tokens);
+    std::string text = locateanything_decode_generated_text(*tokenizer_, new_tokens);
 
     return TextResult{std::move(text), std::move(new_tokens)};
 }
@@ -196,7 +241,8 @@ TextResult LocateAnythingPipeline::generate(const std::string& prompt, const flo
 
     std::vector<int32_t> new_tokens(out.begin() + static_cast<std::ptrdiff_t>(input_ids.size()),
                                     out.end());
-    return TextResult{tokenizer_->decode(new_tokens), std::move(new_tokens)};
+    return TextResult{locateanything_decode_generated_text(*tokenizer_, new_tokens),
+                      std::move(new_tokens)};
 }
 
 LocateAnythingPipeline::GenerationResult
