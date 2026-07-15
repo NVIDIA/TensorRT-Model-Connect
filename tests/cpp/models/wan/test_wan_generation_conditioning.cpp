@@ -157,6 +157,33 @@ void test_initial_latents_handle_odd_sizes() {
     check(std::fabs(latents[4]) > 0.0F, "wan initial latents fill trailing odd element");
 }
 
+void test_initial_latents_honor_caller_bytes_and_size() {
+    const std::vector<float> supplied = {0.25F, -0.5F, 0.75F, -1.0F};
+    std::vector<float> latents;
+    std::string error;
+
+    check(trtmc::diffusion::resolve_wan_initial_latents(4, supplied, 99, latents, error),
+          "wan initial latents accept a caller override");
+    check(latents == supplied, "wan initial latents preserve caller bytes");
+
+    error.clear();
+    check(!trtmc::diffusion::resolve_wan_initial_latents(5, supplied, 99, latents, error),
+          "wan initial latents reject a mismatched caller override");
+    check(!error.empty(), "wan initial latent size mismatch reports an error");
+}
+
+void test_initial_latents_honor_requested_seed() {
+    std::vector<float> seed_one;
+    std::vector<float> seed_two;
+    std::string error;
+
+    check(trtmc::diffusion::resolve_wan_initial_latents(8, {}, 1, seed_one, error),
+          "wan initial latents generate from the requested seed");
+    check(trtmc::diffusion::resolve_wan_initial_latents(8, {}, 2, seed_two, error),
+          "wan initial latents generate from a different requested seed");
+    check(seed_one != seed_two, "wan requested seeds produce different latents");
+}
+
 } // namespace
 
 int main() {
@@ -166,6 +193,8 @@ int main() {
     test_text_conditioning_propagates_encoder_failures();
     test_initial_latents_are_deterministic_by_seed();
     test_initial_latents_handle_odd_sizes();
+    test_initial_latents_honor_caller_bytes_and_size();
+    test_initial_latents_honor_requested_seed();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " wan generation conditioning test(s) failed\n";

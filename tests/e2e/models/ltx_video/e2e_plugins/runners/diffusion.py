@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .. import _case_artifact_dir, save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..parity import ensure_initial_latents, uses_shared_initial_latents
 
 logger = logging.getLogger(__name__)
 
@@ -159,8 +160,13 @@ class DiffusionMediaRunner:
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 30)
 
+        shared_initial_latents = None
         try:
-            initial_latents_raw = _ensure_initial_latents(case, ctx, bundle_path)
+            if uses_shared_initial_latents(case):
+                shared_initial_latents = ensure_initial_latents(case, ctx)
+                initial_latents_raw = str(shared_initial_latents.path)
+            else:
+                initial_latents_raw = _ensure_initial_latents(case, ctx, bundle_path)
         except Exception as exc:
             return StageOutput(
                 stage_name=stage.name,
@@ -233,6 +239,13 @@ class DiffusionMediaRunner:
                 "stderr": stderr_truncated,
                 "prompt": prompt,
             }
+            if shared_initial_latents is not None:
+                data.update(
+                    {
+                        "initial_latents_path": str(shared_initial_latents.path),
+                        "initial_latents_sha256": shared_initial_latents.sha256,
+                    }
+                )
             if stderr_log:
                 data["stderr_log"] = stderr_log
 

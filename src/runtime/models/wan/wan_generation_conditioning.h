@@ -86,5 +86,24 @@ inline std::vector<float> make_wan_initial_latents(std::size_t latent_count, uin
     return latents;
 }
 
+inline bool resolve_wan_initial_latents(std::size_t latent_count,
+                                        const std::vector<float>& supplied_latents,
+                                        int32_t requested_seed, std::vector<float>& latents,
+                                        std::string& error) {
+    if (!supplied_latents.empty()) {
+        if (supplied_latents.size() != latent_count) {
+            error = "Wan initial latent count mismatch: expected " + std::to_string(latent_count) +
+                    ", got " + std::to_string(supplied_latents.size());
+            return false;
+        }
+        latents = supplied_latents;
+        return true;
+    }
+
+    const uint32_t seed = requested_seed >= 0 ? static_cast<uint32_t>(requested_seed) : 42U;
+    latents = make_wan_initial_latents(latent_count, seed);
+    return true;
+}
+
 } // namespace diffusion
 } // namespace trtmc

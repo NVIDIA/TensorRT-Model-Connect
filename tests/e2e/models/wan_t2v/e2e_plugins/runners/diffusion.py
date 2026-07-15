@@ -26,6 +26,7 @@ from pathlib import Path
 
 from .. import save_full_stderr, _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..parity import ensure_initial_latents, uses_shared_initial_latents
 from ._runtime_common import (
     _distributed_runtime_config,
     _ensure_distributed_runtime_env,
@@ -289,6 +290,11 @@ class DiffusionMediaRunner:
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 30)
         ld_path = _build_ld_library_path(ctx)
+        initial_latents = (
+            ensure_initial_latents(case, ctx)
+            if uses_shared_initial_latents(case)
+            else None
+        )
 
         with tempfile.TemporaryDirectory(prefix="trtmc_frames_") as frame_dir:
             cmd = [
@@ -301,6 +307,8 @@ class DiffusionMediaRunner:
                 cmd.extend(["--guidance-scale", str(guidance_scale)])
             if "seed" in case.inputs:
                 cmd.extend(["--seed", str(case.inputs["seed"])])
+            if initial_latents is not None:
+                cmd.extend(["--initial-latents-raw", str(initial_latents.path)])
             output_target = frame_dir
             runtime_cli_python = ctx.runtime_cli_hf_python()
             if runtime_cli_python:
@@ -393,6 +401,13 @@ class DiffusionMediaRunner:
                 e2e_data["distributed_runtime"] = distributed_runtime
             if memory_meta is not None:
                 e2e_data["gpu_memory"] = memory_meta
+            if initial_latents is not None:
+                e2e_data.update(
+                    {
+                        "initial_latents_path": str(initial_latents.path),
+                        "initial_latents_sha256": initial_latents.sha256,
+                    }
+                )
 
             metadata = {"command": cmd}
             if distributed_runtime:

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .. import _case_artifact_dir
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
+from ..parity import ensure_initial_latents, uses_shared_initial_latents
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,16 @@ class HfDiffusersReference:
         video_num_frames = case.inputs.get("video_num_frames", 17)
         guidance_scale = float(case.inputs.get("guidance_scale", 3.0))
         python = ctx.reference_python_path() or sys.executable
-        initial_latents_raw = _initial_latents_path(case, ctx)
+        shared_initial_latents = (
+            ensure_initial_latents(case, ctx)
+            if uses_shared_initial_latents(case)
+            else None
+        )
+        initial_latents_raw = (
+            str(shared_initial_latents.path)
+            if shared_initial_latents is not None
+            else _initial_latents_path(case, ctx)
+        )
 
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
@@ -129,14 +139,14 @@ seed = {int(case.inputs.get("seed", case.determinism.get("seed", 42)))}
 
 pipe = LTXPipeline.from_pretrained(model_ref, torch_dtype=torch.float32)
 pipe.to("cuda")
-latents = None
+initial_latents = None
 if os.path.exists(initial_latents_raw):
     packed = np.fromfile(initial_latents_raw, dtype=np.float32)
     channels = int(pipe.transformer.config.in_channels)
     if packed.size % channels != 0:
         raise RuntimeError(
             f"invalid LTX initial latent size {{packed.size}} for {{channels}} channels")
-    latents = torch.from_numpy(
+    initial_latents = torch.from_numpy(
         packed.reshape(1, packed.size // channels, channels)).to(
             device="cuda", dtype=torch.float32)
 output = pipe(
@@ -147,7 +157,7 @@ output = pipe(
     width=video_width,
     num_frames=video_num_frames,
     guidance_scale=guidance_scale,
-    latents=latents,
+    latents=initial_latents,
     generator=torch.Generator("cuda").manual_seed(seed),
 )
 frames = output.frames[0]
@@ -186,15 +196,23 @@ print(f"Generated {{len(frames)}} frames")
                     result.stderr[-500:],
                 )
 
+        data = {
+            "returncode": result.returncode,
+            "num_frames": len(frame_files),
+            "frames_dir": frames_dir,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+        if shared_initial_latents is not None:
+            data.update(
+                {
+                    "initial_latents_path": str(shared_initial_latents.path),
+                    "initial_latents_sha256": shared_initial_latents.sha256,
+                }
+            )
         return StageOutput(
             stage_name=stage.name,
-            data={
-                "returncode": result.returncode,
-                "num_frames": len(frame_files),
-                "frames_dir": frames_dir,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-            },
+            data=data,
             text=result.stdout,
             timing_s=elapsed,
             metadata={"backend": "hf_diffusers"},

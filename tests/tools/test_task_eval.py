@@ -536,7 +536,9 @@ def test_default_suites_include_media_generation_gap_models() -> None:
     assert video["dataset"]["default_path"] == (
         "/mnt/data/VBench/vbench_t2v_task_eval.json"
     )
+    assert video["generation"]["use_shared_initial_latents"] is True
     assert video["gates"]["min_trt_hf_image_clip_cosine"] == 0.85
+    assert video["gates"]["require_matching_initial_latents"] == 1
 
     image_edit = task_eval.suite_by_id(suites, "gedit_bench_image_edit")
     assert image_edit["default_model_names"] == image_edit["selectors"]["model_names"]

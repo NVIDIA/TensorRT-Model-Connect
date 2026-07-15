@@ -861,9 +861,11 @@ suites:
         - wan_t2v
     generation:
       seed: 42
+      use_shared_initial_latents: true
     scoring:
       scorer: diffusion_image_clip_parity
     gates:
+      require_matching_initial_latents: 1
       min_pixel_mean: 0.15
       max_pixel_mean: 0.85
       min_pixel_std: 0.05

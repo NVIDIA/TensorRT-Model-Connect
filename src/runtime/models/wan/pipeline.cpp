@@ -1183,8 +1183,13 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
         compute_wan_pos_embed_2d(layout.nh_p, layout.nw_p, layout.dim, pos_embed_2d);
     }
 
-    // Initialize random latents
-    std::vector<float> latents = diffusion::make_wan_initial_latents(plan.latent_count);
+    // Initialize from the caller-provided parity tensor, or honor the requested seed.
+    std::vector<float> latents;
+    if (!diffusion::resolve_wan_initial_latents(plan.latent_count, cfg.initial_latents, cfg.seed,
+                                                latents, error)) {
+        std::cerr << "[diffusion] Invalid initial latents: " << error << "\n";
+        return video_to_image(result, config_.video_height, config_.video_width);
+    }
 
     // Set up scheduler
     FlowMatchEulerState fm_scheduler;
