@@ -1007,13 +1007,23 @@ class HfTransformersReference:
                     return AutoTokenizer.from_pretrained(
                         model_ref, trust_remote_code=trust_remote_code)
                 except Exception as auto_exc:
+                    from huggingface_hub import hf_hub_download
                     from tokenizers import Tokenizer
 
                     model_path = Path(model_ref)
-                    raw_tokenizer = Tokenizer.from_file(
-                        str(model_path / "tokenizer.json"))
+                    if model_path.is_dir():
+                        tokenizer_json = model_path / "tokenizer.json"
+                        tokenizer_config_path = model_path / "tokenizer_config.json"
+                    else:
+                        tokenizer_json = Path(
+                            hf_hub_download(model_ref, "tokenizer.json"))
+                        try:
+                            tokenizer_config_path = Path(
+                                hf_hub_download(model_ref, "tokenizer_config.json"))
+                        except Exception:
+                            tokenizer_config_path = Path()
+                    raw_tokenizer = Tokenizer.from_file(str(tokenizer_json))
                     tokenizer_config = {{}}
-                    tokenizer_config_path = model_path / "tokenizer_config.json"
                     if tokenizer_config_path.is_file():
                         tokenizer_config = json.loads(
                             tokenizer_config_path.read_text(encoding="utf-8"))

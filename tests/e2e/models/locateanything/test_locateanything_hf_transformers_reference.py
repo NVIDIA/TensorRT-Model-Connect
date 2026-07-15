@@ -75,6 +75,7 @@ def test_vl_reference_uses_manual_processor(monkeypatch, tmp_path) -> None:
     assert "AutoModel.from_pretrained" in script
     assert "config=config" in script
     assert "def _load_locateanything_tokenizer" in script
+    assert "hf_hub_download" in script
     assert "Tokenizer.from_file" in script
     assert "model_max_length" in script
     assert "def batch_decode" in script
