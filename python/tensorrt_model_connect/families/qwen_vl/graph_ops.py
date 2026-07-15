@@ -103,6 +103,43 @@ def add_matmul_rhs_constant(
     return _cast_back_to_trt_dtype(network, mm.get_output(0), lhs.dtype)
 
 
+def add_matmul_rhs_tensor(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    rhs: trt.ITensor,
+    *,
+    fp32_accumulation: bool = True,
+) -> trt.ITensor:
+    """Matrix multiply ``lhs @ rhs`` when both operands are runtime tensors."""
+    if fp32_accumulation:
+        return _add_matrix_multiply_with_fp32_accumulation(
+            network,
+            lhs, trt.MatrixOperation.NONE,
+            rhs, trt.MatrixOperation.NONE,
+        )
+    mm = network.add_matrix_multiply(
+        lhs, trt.MatrixOperation.NONE,
+        rhs, trt.MatrixOperation.NONE,
+    )
+    return _cast_back_to_trt_dtype(network, mm.get_output(0), lhs.dtype)
+
+
+def add_lora_delta(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    lora_a: trt.ITensor,
+    lora_b: trt.ITensor,
+) -> trt.ITensor:
+    """Compute ``(lhs @ A) @ B`` for dynamically bound LoRA tensors.
+
+    ``A`` is stored as ``[in_features, max_rank]`` and ``B`` as
+    ``[max_rank, out_features]``.  The PEFT scale ``alpha / rank`` must be
+    folded into B by the adapter loader before binding.
+    """
+    low_rank = add_matmul_rhs_tensor(network, lhs, lora_a)
+    return add_matmul_rhs_tensor(network, low_rank, lora_b)
+
+
 def add_bias_sum(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -2611,6 +2648,96 @@ def add_apply_rope_native_sequence(
         network, rope.get_output(0), attention_size, sequence_length)
 
 
+def add_apply_mrope_native(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    cos_cache_2d: trt.ITensor,
+    sin_cache_2d: trt.ITensor,
+    position_ids: trt.ITensor,
+    mrope_section: tuple[int, int, int],
+    rotary_embedding_dim: int,
+    interleaved: bool = False,
+) -> trt.ITensor:
+    """Apply Qwen2.5-VL temporal/height/width RoPE to one token."""
+    rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
+    sections = tuple(int(value) for value in mrope_section)
+    if len(sections) != 3 or any(value <= 0 for value in sections):
+        raise ValueError("mrope_section must contain three positive integers")
+    if sum(sections) != rotary_embedding_dim // 2:
+        raise ValueError(
+            "mrope_section must sum to half the rotary embedding dimension; "
+            f"got {sections} for rotary dimension {rotary_embedding_dim}")
+
+    def build_cache(cache: trt.ITensor) -> trt.ITensor:
+        selected = network.add_gather(cache, position_ids, 0).get_output(0)
+        offset = 0
+        parts = []
+        for axis, width in enumerate(sections):
+            part = network.add_slice(
+                selected, start=(axis, offset), shape=(1, width), stride=(1, 1))
+            parts.append(part.get_output(0))
+            offset += width
+        joined = network.add_concatenation(parts)
+        joined.axis = 1
+        shaped = network.add_shuffle(joined.get_output(0))
+        shaped.reshape_dims = (1, 1, rotary_embedding_dim // 2)
+        return shaped.get_output(0)
+
+    return add_apply_rope_native_sequence(
+        network, inp, num_heads, head_dim,
+        build_cache(cos_cache_2d), build_cache(sin_cache_2d),
+        rotary_embedding_dim, interleaved, sequence_length=1)
+
+
+def add_apply_mrope_native_sequence(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    cos_cache_2d: trt.ITensor,
+    sin_cache_2d: trt.ITensor,
+    position_ids: trt.ITensor,
+    mrope_section: tuple[int, int, int],
+    rotary_embedding_dim: int,
+    interleaved: bool = False,
+) -> trt.ITensor:
+    """Apply Qwen2.5-VL mRoPE to a runtime-dynamic token sequence."""
+    rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
+    sections = tuple(int(value) for value in mrope_section)
+    if len(sections) != 3 or any(value <= 0 for value in sections):
+        raise ValueError("mrope_section must contain three positive integers")
+    half_dim = rotary_embedding_dim // 2
+    if sum(sections) != half_dim:
+        raise ValueError(
+            "mrope_section must sum to half the rotary embedding dimension; "
+            f"got {sections} for rotary dimension {rotary_embedding_dim}")
+
+    def build_cache(cache: trt.ITensor) -> trt.ITensor:
+        selected = network.add_gather(cache, position_ids, 0).get_output(0)
+        offset = 0
+        parts = []
+        for axis, width in enumerate(sections):
+            axis_index = add_constant(
+                network, (1,), np.array([axis], dtype=np.int32), dtype=np.int32)
+            axis_values = network.add_gather(selected, axis_index, 0).get_output(0)
+            column_indices = add_constant(
+                network, (width,), np.arange(offset, offset + width, dtype=np.int32),
+                dtype=np.int32)
+            part = network.add_gather(axis_values, column_indices, 2)
+            parts.append(part.get_output(0))
+            offset += width
+        joined = network.add_concatenation(parts)
+        joined.axis = 2
+        return joined.get_output(0)
+
+    return add_apply_rope_native_sequence(
+        network, inp, num_heads, head_dim,
+        build_cache(cos_cache_2d), build_cache(sin_cache_2d),
+        rotary_embedding_dim, interleaved, sequence_length=None)
+
+
 def add_apply_rope_native_from_full_cache(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -2806,7 +2933,7 @@ def _repeat_kv_heads_4d(
     return concat.get_output(0)
 
 
-def _add_attention_core_with_logit_softcap(
+def _add_decomposed_attention_core(
     network: trt.INetworkDefinition,
     q_4d: trt.ITensor,
     k_4d: trt.ITensor,
@@ -2817,7 +2944,7 @@ def _add_attention_core_with_logit_softcap(
     head_dim: int,
     mask: trt.ITensor | None,
     scale: float,
-    logit_softcap: float,
+    logit_softcap: float | None = None,
 ) -> trt.ITensor:
     output_dtype = q_4d.dtype
     k_4d = _repeat_kv_heads_4d(
@@ -2844,8 +2971,10 @@ def _add_attention_core_with_logit_softcap(
     scores = network.add_elementwise(
         scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
 
-    scores = add_tanh_softcap(
-        network, scores, logit_softcap, scalar_shape=(1, 1, 1, 1))
+    if logit_softcap is not None and float(logit_softcap) > 0.0:
+        scores = add_tanh_softcap(
+            network, scores, float(logit_softcap),
+            scalar_shape=(1, 1, 1, 1))
 
     if score_mask is not None:
         scores = network.add_elementwise(
@@ -2879,6 +3008,7 @@ def add_attention_from_rows(
     scale: float | None = None,
     logit_softcap: float | None = None,
     fp32_accumulation: bool = False,
+    force_decomposed_attention: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
@@ -2900,14 +3030,18 @@ def add_attention_from_rows(
         tag=None if tag is None else tag + ".v")
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-    if logit_softcap is not None and float(logit_softcap) > 0.0:
+    use_decomposed_attention = (
+        force_decomposed_attention
+        or (logit_softcap is not None and float(logit_softcap) > 0.0)
+    )
+    if use_decomposed_attention:
         if causal:
             raise NotImplementedError(
-                "logit_softcap attention requires an explicit additive mask")
-        ctx_4d = _add_attention_core_with_logit_softcap(
+                "decomposed attention requires an explicit additive mask")
+        ctx_4d = _add_decomposed_attention_core(
             network, q_4d, k_4d, v_4d,
             num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
-            mask=mask, scale=scale, logit_softcap=float(logit_softcap))
+            mask=mask, scale=scale, logit_softcap=logit_softcap)
     else:
         ctx_4d = add_attention_core(
             network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,

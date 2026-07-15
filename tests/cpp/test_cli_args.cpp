@@ -100,6 +100,10 @@ void test_run_parses_common_flags() {
                        "--greedy",
                        "--chat-template",
                        "--no-thinking",
+                       "--lora-adapter",
+                       "/tmp/adapter",
+                       "--lora-adapter-id",
+                       "adapter-1",
                        "--kv-cache-size",
                        "2GiB",
                        "--backend-dir",
@@ -123,6 +127,8 @@ void test_run_parses_common_flags() {
     check(args.greedy, "run greedy");
     check(args.chat_template, "run chat template");
     check(args.no_thinking, "run no thinking");
+    check(args.lora_adapter_path == "/tmp/adapter", "run LoRA adapter path");
+    check(args.lora_adapter_id == "adapter-1", "run LoRA adapter ID");
     check(args.kv_cache_size_bytes == 2147483648ULL, "run kv cache size");
     check(args.backend_search_paths.size() == 1 && args.backend_search_paths[0] == "/tmp/lib",
           "run backend dir");

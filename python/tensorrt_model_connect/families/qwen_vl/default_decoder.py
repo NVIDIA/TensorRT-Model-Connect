@@ -28,6 +28,7 @@ from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
 from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+from .lora import DynamicLoraConfig
 from .utils import const_in_work_dtype, create_builder_context
 
 trt = trt_compat.get_trt()
@@ -106,6 +107,7 @@ def build_standard_decoder_engine(
     # the active engine layout while building.
     config.raw["_decoder_engine_layout_supported"] = True
     decoder_engine_role = str(config.raw.get("_decoder_engine_role", "dual_profile"))
+    lora_config = DynamicLoraConfig.from_model_config(config)
 
     # Dispatch to the dynamic-Sq builder for dual-profile and split-prefill
     # engines. Quantized builds (``quant_ctx``) thread Q/DQ insertion through
@@ -169,6 +171,15 @@ def build_standard_decoder_engine(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
     dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
+    force_decomposed_attention = bool(
+        config.raw.get("_force_decomposed_attention", False))
+    rope_scaling = config.raw.get("rope_scaling") or {}
+    raw_mrope_section = (
+        rope_scaling.get("mrope_section")
+        if isinstance(rope_scaling, dict) else None)
+    mrope_section = (
+        tuple(int(value) for value in raw_mrope_section)
+        if raw_mrope_section is not None else None)
     dynamic_kv_opt_rows = int(config.raw.get("_dynamic_kv_opt_length", max_cache_length))
     dynamic_kv_opt_rows = max(1, min(dynamic_kv_opt_rows, max_cache_length))
     raw_profile_rows = config.raw.get("_dynamic_kv_profile_rows")
@@ -209,6 +220,9 @@ def build_standard_decoder_engine(
     # ---------------------------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
+    mrope_position_ids = (
+        network.add_input("mrope_position_ids", trt.int32, (3,))
+        if mrope_section is not None else None)
     attention_mask = network.add_input(
         "attention_mask", trt.float32,
         (1, -1) if dynamic_kv_cache else (1, attention_window))
@@ -303,6 +317,14 @@ def build_standard_decoder_engine(
 
     if position_type == "rope":
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
+        if mrope_section is not None:
+            if len(mrope_section) != 3 or any(value <= 0 for value in mrope_section):
+                raise ValueError(
+                    "rope_scaling.mrope_section must contain three positive integers")
+            if sum(mrope_section) != rotary_embedding_dim // 2:
+                raise ValueError(
+                    "rope_scaling.mrope_section must sum to half the rotary dimension; "
+                    f"got {mrope_section} for rotary dimension {rotary_embedding_dim}")
         cos_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, True,
             partial_rotary_factor, interleaved=interleaved_rope)
@@ -450,8 +472,12 @@ def build_standard_decoder_engine(
             sin_half_tensor=sin_half_tensor,
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
+            mrope_position_ids=mrope_position_ids,
+            mrope_section=mrope_section,
             ffi_attention_kernel=ffi_attention_kernel,
             dynamic_kv_cache=dynamic_kv_cache,
+            force_decomposed_attention=force_decomposed_attention,
+            lora_config=lora_config,
         )
 
         hidden_state = result["hidden"]
@@ -582,8 +608,12 @@ def _add_decoder_layer(
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
+    mrope_position_ids: trt.ITensor | None = None,
+    mrope_section: tuple[int, int, int] | None = None,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
+    force_decomposed_attention: bool = False,
+    lora_config: DynamicLoraConfig | None = None,
     eps: float | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
@@ -608,8 +638,12 @@ def _add_decoder_layer(
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=rotary_embedding_dim,
         interleaved_rope=interleaved_rope,
+        mrope_position_ids=mrope_position_ids,
+        mrope_section=mrope_section,
         ffi_attention_kernel=ffi_attention_kernel,
         dynamic_kv_cache=dynamic_kv_cache,
+        force_decomposed_attention=force_decomposed_attention,
+        lora_config=lora_config,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]
@@ -646,7 +680,8 @@ def _add_decoder_layer(
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2, weights=weights, prefix=prefix,
             hidden_size=hidden_size, mlp_size=mlp_size, dtype=dtype,
-            quant_ctx=quant_ctx, layer_prefix=prefix)
+            quant_ctx=quant_ctx, layer_prefix=prefix,
+            lora_config=lora_config)
 
     # Final residual connection
     if parallel_residual:

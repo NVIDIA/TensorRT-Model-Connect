@@ -6,6 +6,7 @@
 #include "utils/json_helpers.h"
 
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -94,20 +95,117 @@ ArrayParseState advance_array_pos(const std::string& text, std::size_t& pos) {
     return ArrayParseState::kReady;
 }
 
+int hex_digit_value(char c) {
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+bool parse_hex_quad(const std::string& text, std::size_t pos, uint32_t& value) {
+    if (pos + 4 > text.size())
+        return false;
+    value = 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        const int digit = hex_digit_value(text[pos + i]);
+        if (digit < 0)
+            return false;
+        value = (value << 4U) | static_cast<uint32_t>(digit);
+    }
+    return true;
+}
+
+bool append_utf8(uint32_t codepoint, std::string& out) {
+    if (codepoint <= 0x7FU) {
+        out.push_back(static_cast<char>(codepoint));
+    } else if (codepoint <= 0x7FFU) {
+        out.push_back(static_cast<char>(0xC0U | (codepoint >> 6U)));
+        out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+    } else if (codepoint <= 0xFFFFU) {
+        if (codepoint >= 0xD800U && codepoint <= 0xDFFFU)
+            return false;
+        out.push_back(static_cast<char>(0xE0U | (codepoint >> 12U)));
+        out.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
+        out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+    } else if (codepoint <= 0x10FFFFU) {
+        out.push_back(static_cast<char>(0xF0U | (codepoint >> 18U)));
+        out.push_back(static_cast<char>(0x80U | ((codepoint >> 12U) & 0x3FU)));
+        out.push_back(static_cast<char>(0x80U | ((codepoint >> 6U) & 0x3FU)));
+        out.push_back(static_cast<char>(0x80U | (codepoint & 0x3FU)));
+    } else {
+        return false;
+    }
+    return true;
+}
+
 bool read_quoted_token(const std::string& text, std::size_t& pos, std::string& out) {
     if (pos >= text.size() || text[pos] != '"') {
         return false;
     }
 
-    const std::size_t first_quote = pos;
-    const std::size_t second_quote = text.find('"', first_quote + 1);
-    if (second_quote == std::string::npos || second_quote <= first_quote + 1) {
-        return false;
-    }
+    out.clear();
+    ++pos;
+    while (pos < text.size()) {
+        const char c = text[pos++];
+        if (c == '"')
+            return !out.empty();
+        if (static_cast<unsigned char>(c) < 0x20U)
+            return false;
+        if (c != '\\') {
+            out.push_back(c);
+            continue;
+        }
+        if (pos >= text.size())
+            return false;
 
-    out = text.substr(first_quote + 1, second_quote - first_quote - 1);
-    pos = second_quote + 1;
-    return true;
+        const char escaped = text[pos++];
+        switch (escaped) {
+        case '"':
+        case '\\':
+        case '/':
+            out.push_back(escaped);
+            break;
+        case 'b':
+            out.push_back('\b');
+            break;
+        case 'f':
+            out.push_back('\f');
+            break;
+        case 'n':
+            out.push_back('\n');
+            break;
+        case 'r':
+            out.push_back('\r');
+            break;
+        case 't':
+            out.push_back('\t');
+            break;
+        case 'u': {
+            uint32_t codepoint = 0;
+            if (!parse_hex_quad(text, pos, codepoint))
+                return false;
+            pos += 4;
+            if (codepoint >= 0xD800U && codepoint <= 0xDBFFU) {
+                if (pos + 6 > text.size() || text[pos] != '\\' || text[pos + 1] != 'u')
+                    return false;
+                uint32_t low = 0;
+                if (!parse_hex_quad(text, pos + 2, low) || low < 0xDC00U || low > 0xDFFFU)
+                    return false;
+                pos += 6;
+                codepoint = 0x10000U + ((codepoint - 0xD800U) << 10U) + (low - 0xDC00U);
+            }
+            if (!append_utf8(codepoint, out))
+                return false;
+            break;
+        }
+        default:
+            return false;
+        }
+    }
+    return false;
 }
 
 template <typename T, typename Parser>

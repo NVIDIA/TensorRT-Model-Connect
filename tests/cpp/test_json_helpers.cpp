@@ -103,6 +103,17 @@ bool test_extract_json_string_nested_braces() {
     return true;
 }
 
+bool test_extract_json_string_escapes_and_unicode() {
+    const std::string json = R"({"prompt":"schema: {\"name\": \"caf\u00e9\"}\nnext \ud83d\ude80"})";
+    const std::string expected = "schema: {\"name\": \"caf\xC3\xA9\"}\nnext \xF0\x9F\x9A\x80";
+    const std::string result = trtmc::extract_json_string(json, "prompt", "fallback");
+    if (result != expected) {
+        std::cerr << "extract_json_string_escapes: got '" << result << "'" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // extract_json_int tests
 // ---------------------------------------------------------------------------
@@ -451,6 +462,7 @@ int main() {
     run("extract_json_string_present", test_extract_json_string_present);
     run("extract_json_string_absent", test_extract_json_string_absent);
     run("extract_json_string_nested", test_extract_json_string_nested_braces);
+    run("extract_json_string_escapes", test_extract_json_string_escapes_and_unicode);
     run("extract_json_string_empty_value", test_extract_json_string_empty_value_returns_fallback);
     run("extract_json_int_positive", test_extract_json_int_positive);
     run("extract_json_int_negative", test_extract_json_int_negative);

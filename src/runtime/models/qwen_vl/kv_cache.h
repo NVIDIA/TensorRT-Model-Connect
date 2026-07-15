@@ -14,6 +14,7 @@
 #include "runtime/models/qwen_vl/inference_state.h"
 #include "trtmc/runtime/device_tensor.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -113,7 +114,9 @@ class QwenVlKvCache : public QwenVlInferenceState {
     // Buffers owned by this object — Tensor.data in prepare_step() points here.
     std::vector<float> mask_buf_;
     std::vector<int32_t> pos_buf_vec_;
+    std::array<int32_t, 3> mrope_pos_buf_{};
     bool has_position_input_{false};
+    bool has_mrope_position_input_{false};
     bool dynamic_binding_enabled_{false};
     int32_t bound_cache_rows_{0};
     DType cache_dtype_{DType::kFloat32};

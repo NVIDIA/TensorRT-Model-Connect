@@ -73,6 +73,8 @@ class Pipeline:
         prompt: str,
         *,
         image: str | None = None,
+        lora_adapter: str | None = None,
+        lora_adapter_id: str = "default",
         max_new_tokens: int = 20,
         timeout: float = 120.0,
     ) -> str:
@@ -81,6 +83,8 @@ class Pipeline:
         Args:
             prompt: Input text prompt.
             image: Optional path to an image file (for VL models).
+            lora_adapter: Optional path to a PEFT LoRA adapter directory.
+            lora_adapter_id: Runtime ID assigned to ``lora_adapter``.
             max_new_tokens: Maximum tokens to generate.
             timeout: Subprocess timeout in seconds.
 
@@ -95,6 +99,14 @@ class Pipeline:
 
         if image is not None:
             cmd.extend(["--image", str(image)])
+
+        if lora_adapter is not None:
+            if not lora_adapter_id:
+                raise ValueError("lora_adapter_id must not be empty")
+            cmd.extend([
+                "--lora-adapter", str(lora_adapter),
+                "--lora-adapter-id", lora_adapter_id,
+            ])
 
         if self.hf_python is not None:
             cmd.extend(["--hf-python", self.hf_python])

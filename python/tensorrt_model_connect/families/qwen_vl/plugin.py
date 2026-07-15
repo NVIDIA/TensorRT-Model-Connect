@@ -33,7 +33,9 @@ from .checkpoint_mapper import (
     _transpose_2d,
 )
 from ...parallel_config import normalize_parallel_config
+from ...quantization.adapters import StandardDecoderCalibrationAdapter
 from .decoder_tp_builder import build_qwen_vl_tp_decoder_engine
+from .lora import DynamicLoraConfig
 from .standard_decoder_builder import build_standard_decoder_engine
 from . import graph_ops
 from . import graph_blocks
@@ -56,9 +58,38 @@ def _is_qwen3_vl(config: ModelConfig) -> bool:
     return bool(vc.get("deepstack_visual_indexes"))
 
 
+def _fixed_image_dimensions(config: ModelConfig) -> tuple[int, int]:
+    """Resolve and validate the fixed Qwen-VL vision profile dimensions."""
+    family_options = config.raw.get("_family_build_options", {})
+    vision_options = (
+        family_options.get("qwen_vl_vision", {})
+        if isinstance(family_options, dict) else {}
+    )
+    if not isinstance(vision_options, dict):
+        raise ValueError("qwen_vl_vision build options must be an object")
+
+    height = int(vision_options.get("image_height", _DEFAULT_FIXED_IMAGE_SIZE))
+    width = int(vision_options.get("image_width", _DEFAULT_FIXED_IMAGE_SIZE))
+    vision_config = config.raw.get("vision_config", {})
+    patch_size = int(vision_config.get("patch_size", 14))
+    merge_size = int(vision_config.get("spatial_merge_size", 2))
+    alignment = patch_size * merge_size
+    if height <= 0 or width <= 0:
+        raise ValueError("Qwen-VL image dimensions must be positive")
+    if height % alignment or width % alignment:
+        raise ValueError(
+            "Qwen-VL image dimensions must be divisible by patch_size * "
+            f"spatial_merge_size ({alignment}); got {height}x{width}")
+    if _is_qwen3_vl(config) and height != width:
+        raise ValueError(
+            "Rectangular vision profiles currently support Qwen2.5-VL only")
+    return height, width
+
+
 class QwenVLPlugin:
     name = "qwen_vl"
     runtime_strategy = "qwen_vl_vision_language"
+    runtime_capabilities = {"decoder_kv"}
     embed_input = True
 
     def matches(self, model_type: str) -> bool:
@@ -80,6 +111,14 @@ class QwenVLPlugin:
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
+        lora_config = DynamicLoraConfig.from_model_config(config)
+        if lora_config.enabled:
+            if _is_qwen3_vl(config):
+                raise NotImplementedError(
+                    "Dynamic LoRA binding currently supports Qwen2.5-VL only")
+            if parallel.enabled:
+                raise NotImplementedError(
+                    "Dynamic LoRA binding is not yet supported with tensor parallelism")
         if _is_qwen3_vl(config):
             vc = config.raw.get("vision_config", {})
             deepstack_indexes = vc.get("deepstack_visual_indexes", [])
@@ -116,6 +155,12 @@ class QwenVLPlugin:
                 verbose=verbose,
                 debug_layer_outputs=debug_layer_outputs,
                 parallel_config=parallel)
+        # TRT 11's fused IAttention builder currently fails for the long
+        # single-token decoder profiles needed by full-resolution Qwen2.5-VL
+        # image prompts. Keep native attention for smaller profiles and use
+        # the mathematically equivalent decomposed QK/softmax/V graph when the
+        # cache exceeds the validated native-attention range.
+        config.raw["_force_decomposed_attention"] = max_cache_length > 384
         return build_standard_decoder_engine(
             config, weights, max_cache_length, precision=precision, verbose=verbose,
             quant_ctx=quant_ctx, embed_input=True,
@@ -139,12 +184,13 @@ class QwenVLPlugin:
         vision_precision = (
             "fp32" if precision == "fp16" and _VISION_COMPONENT in selected_fp32
             else precision)
+        fixed_h, fixed_w = _fixed_image_dimensions(config)
 
         if _is_qwen3_vl(config):
             from .qwen_vl_vision_builder import build_qwen3_vl_vision_engine
             return build_qwen3_vl_vision_engine(
                 vision_config, vision_weights,
-                fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
+                fixed_image_size=fixed_h,
                 precision=vision_precision,
                 fp32_layers=vision_fp32_layers,
                 verbose=verbose)
@@ -153,6 +199,8 @@ class QwenVLPlugin:
             return build_qwen_vl_vision_engine(
                 vision_config, vision_weights,
                 fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
+                fixed_image_height=fixed_h,
+                fixed_image_width=fixed_w,
                 precision=vision_precision,
                 verbose=verbose)
 
@@ -163,26 +211,34 @@ class QwenVLPlugin:
 
         patch_size = vision_config.get("patch_size", 14)
         merge_size = vision_config.get("spatial_merge_size", 2)
-        fixed_image_size = _DEFAULT_FIXED_IMAGE_SIZE
+        fixed_h, fixed_w = _fixed_image_dimensions(config)
 
-        grid_h = fixed_image_size // patch_size
-        grid_w = fixed_image_size // patch_size
+        grid_h = fixed_h // patch_size
+        grid_w = fixed_w // patch_size
         num_patches = grid_h * grid_w
         num_merged = num_patches // (merge_size * merge_size)
 
-        # Both Qwen2.5-VL and Qwen3-VL use merge-group pixel ordering
-        preproc = "merge_group_chw"
+        # Rectangular buckets preserve the source aspect ratio before applying
+        # Qwen's required merge-group pixel ordering. Square profiles retain
+        # the established direct-resize behavior for compatibility.
+        preproc = (
+            "aspect_preserve_merge_group_chw"
+            if fixed_h != fixed_w else "merge_group_chw"
+        )
 
         vl_cfg = {
             "image_token_id": 151655,
-            "fixed_image_size": fixed_image_size,
+            "fixed_image_size": _DEFAULT_FIXED_IMAGE_SIZE,
+            "fixed_image_height": fixed_h,
+            "fixed_image_width": fixed_w,
             "num_image_pad_tokens": num_merged,
             "vision_output_dim": config.hidden_size,
             "preprocessor_type": preproc,
             "vl_prompt_template": (
+                "<|im_start|>system\n"
+                "You are a helpful assistant.<|im_end|>\n"
                 "<|im_start|>user\n"
-                "<|vision_start|>{image_pads}<|vision_end|>\n"
-                "{prompt}<|im_end|>\n"
+                "{prompt}<|vision_start|>{image_pads}<|vision_end|><|im_end|>\n"
                 "<|im_start|>assistant\n"
             ),
             "image_token_str": "<|image_pad|>",
@@ -193,6 +249,15 @@ class QwenVLPlugin:
             vl_cfg["deepstack_num_levels"] = len(ds_indexes)
 
         return vl_cfg
+
+    def get_lora_config(self, config: ModelConfig) -> dict[str, object]:
+        """Persist the dynamic binding contract in the bundle config."""
+        return DynamicLoraConfig.from_model_config(config).bundle_config()
+
+    def quant_adapter(self, format_name: str) -> StandardDecoderCalibrationAdapter:
+        """Map HF decoder projection names to Qwen-VL graph seam names."""
+        del format_name
+        return StandardDecoderCalibrationAdapter()
 
 
 # ---------------------------------------------------------------------------

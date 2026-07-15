@@ -98,6 +98,7 @@ def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) ->
     assert kwargs["precision"] == "bf16"
     assert kwargs["embed_input"] is True
     assert kwargs["verbose"] is True
+    assert calls["build"][0].raw["_force_decomposed_attention"] is False
 
 
 def test_qwen25_vl_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
@@ -116,6 +117,33 @@ def test_qwen25_vl_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -
         config, {}, 31, precision="fp16", embed_input=True)
 
     assert result == b"qwen-vl-dual-profile-plan"
+    assert calls["build"][3]["embed_input"] is True
+
+
+def test_qwen25_vl_lora_keeps_dual_profile_prefill(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen_vl.default_decoder")
+    calls: dict[str, object] = {}
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls["build"] = (config, weights, max_cache_length, kwargs)
+        return b"qwen-vl-lora-dual-profile-plan"
+
+    monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
+    config = _config(qwen3=False)
+    config.raw["_decoder_engine_role"] = "decode"
+    config.raw["_family_build_options"] = {
+        "qwen_vl_lora": {
+            "enabled": True,
+            "max_rank": 16,
+            "target_modules": "q_proj,v_proj",
+        }
+    }
+
+    result = module.build_standard_decoder_engine(
+        config, {}, 31, precision="fp16", embed_input=True)
+
+    assert result == b"qwen-vl-lora-dual-profile-plan"
     assert calls["build"][3]["embed_input"] is True
 
 

@@ -360,14 +360,44 @@ def _to_numpy_fp32(t) -> np.ndarray:
     return np.asarray(t, dtype=np.float32)
 
 
-def _load_tensor(readers: list, name: str) -> np.ndarray:
+def _is_float8_tensor(t) -> bool:
+    """Return whether *t* stores a supported float8 checkpoint tensor."""
+    dtype_name = str(getattr(t, "dtype", "")).lower()
+    return "float8_e4m3" in dtype_name or "f8_e4m3" in dtype_name
+
+
+def _get_raw_tensor(readers: list, name: str):
+    """Look up a tensor without converting away its checkpoint dtype."""
     tensor_map = getattr(readers, "tensor_map", None)
     if tensor_map is not None:
         reader = tensor_map.get(name)
         if reader is None:
             raise KeyError(f"Tensor not found: {name}")
-        return _to_numpy_fp32(reader.get_tensor(name))
-    for r in readers:
-        if name in r.keys():
-            return _to_numpy_fp32(r.get_tensor(name))
+        return reader.get_tensor(name)
+    for reader in readers:
+        if name in reader.keys():
+            return reader.get_tensor(name)
     raise KeyError(f"Tensor not found: {name}")
+
+
+def _load_tensor(readers: list, name: str) -> np.ndarray:
+    raw = _get_raw_tensor(readers, name)
+    value = _to_numpy_fp32(raw)
+    if not _is_float8_tensor(raw):
+        return value
+
+    # Compressed-Tensors float-quantized checkpoints store the dequantization
+    # factor beside each FP8 projection. A non-quantized TRT build consumes
+    # ordinary FP16/FP32 constants, so restore the represented weight here.
+    if not name.endswith(".weight"):
+        raise ValueError(f"Unsupported float8 checkpoint tensor: {name}")
+    scale_name = f"{name[:-len('.weight')]}.weight_scale"
+    if not _has_tensor(readers, scale_name):
+        raise ValueError(
+            f"Float8 checkpoint tensor {name} is missing {scale_name}")
+    scale = _to_numpy_fp32(_get_raw_tensor(readers, scale_name))
+    if scale.size != 1:
+        raise NotImplementedError(
+            "Qwen-VL float8 checkpoint loading currently supports scalar "
+            f"weight scales only; {scale_name} has shape {scale.shape}")
+    return value * float(scale.reshape(-1)[0])

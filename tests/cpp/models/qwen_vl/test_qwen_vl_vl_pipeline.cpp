@@ -33,13 +33,20 @@
 #include "runtime/backend/trt_module_impl.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/models/qwen_vl/kv_cache.h"
+#include "runtime/models/qwen_vl/lora_peft_loader.h"
 #include "runtime/models/qwen_vl/pipeline.h"
+#include "trtmc/runtime/pipeline_pool.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
 
 #include <NvInfer.h>
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cuda_runtime_api.h>
+#include <filesystem>
+#include <fstream>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -220,6 +227,73 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
     auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
     return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         rt->deserializeCudaEngine(plan->data(), plan->size()));
+}
+
+static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_lora_decoder() {
+    auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
+    auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
+    auto c = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(b->createBuilderConfig());
+    c->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 4 << 20);
+
+    auto* tok = n->addInput("token_id", nvinfer1::DataType::kINT32, nvinfer1::Dims{1, {1}});
+    auto* mask = n->addInput("attention_mask", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{1, {8}});
+    auto* lora_a =
+        n->addInput("lora_a_layer_0_w_q", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{2, {1, 1}});
+    auto* lora_b =
+        n->addInput("lora_b_layer_0_w_q", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{2, {1, 4}});
+
+    float base_logits[4] = {0.1F, 0.2F, 0.9F, 0.3F};
+    auto* base = n->addConstant(nvinfer1::Dims{2, {1, 4}},
+                                nvinfer1::Weights{nvinfer1::DataType::kFLOAT, base_logits, 4});
+    auto* delta = n->addMatrixMultiply(*lora_a, nvinfer1::MatrixOperation::kNONE, *lora_b,
+                                       nvinfer1::MatrixOperation::kNONE);
+    auto* logits = n->addElementWise(*base->getOutput(0), *delta->getOutput(0),
+                                     nvinfer1::ElementWiseOperation::kSUM);
+    logits->getOutput(0)->setName("logits");
+    n->markOutput(*logits->getOutput(0));
+
+    n->addIdentity(*tok)->getOutput(0)->setName("_t");
+    n->addIdentity(*mask)->getOutput(0)->setName("_m");
+
+    auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
+    if (!plan)
+        return nullptr;
+    auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
+        rt->deserializeCudaEngine(plan->data(), plan->size()));
+}
+
+static std::filesystem::path write_mock_peft_adapter() {
+    namespace fs = std::filesystem;
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path root = fs::temp_directory_path() / ("trtmc_qwen_lora_" + std::to_string(nonce));
+    fs::create_directories(root);
+
+    std::ofstream(root / "adapter_config.json")
+        << R"({"peft_type":"LORA","r":1,"lora_alpha":2,)"
+           R"("target_modules":["q_proj"],"bias":"none",)"
+           R"("fan_in_fan_out":false,"use_dora":false,"use_rslora":false,)"
+           R"("modules_to_save":null})";
+
+    const std::string prefix = "base_model.model.model.language_model.layers.0.self_attn.q_proj.";
+    std::string header_text = "{\"" + prefix +
+                              "lora_A.weight\":{\"dtype\":\"BF16\",\"shape\":[1,1],"
+                              "\"data_offsets\":[0,2]},\"" +
+                              prefix +
+                              "lora_B.weight\":{\"dtype\":\"BF16\",\"shape\":[4,1],"
+                              "\"data_offsets\":[2,10]}}";
+    while (header_text.size() % 8 != 0)
+        header_text.push_back(' ');
+
+    std::ofstream weights(root / "adapter_model.safetensors", std::ios::binary);
+    const uint64_t header_size = header_text.size();
+    for (int i = 0; i < 8; ++i)
+        weights.put(static_cast<char>((header_size >> (8 * i)) & 0xFFU));
+    weights.write(header_text.data(), static_cast<std::streamsize>(header_text.size()));
+    // BF16: A=[1], B=[[2], [0], [0], [0]]. Alpha/rank=2 is folded into B.
+    const uint16_t tensor_data[] = {0x3F80U, 0x4000U, 0U, 0U, 0U};
+    weights.write(reinterpret_cast<const char*>(tensor_data), sizeof(tensor_data));
+    return root;
 }
 
 // Mock vision encoder: pixel_values[3,4,4] float32 -> image_features[4] float32
@@ -795,6 +869,180 @@ static void test_vl_generate_with_tokenizer() {
     cudaStreamDestroy(stream);
 }
 
+static void test_vl_dynamic_lora_adapter_switching() {
+    auto engine = build_mock_lora_decoder();
+    if (!engine) {
+        std::cerr << "SKIP dynamic_lora\n";
+        return;
+    }
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto decoder = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
+                                                          engine->createExecutionContext(), stream);
+    auto cache = std::make_unique<trtmc::QwenVlKvCache>(1, 8, 4, stream);
+    trtmc::QwenVlConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 99;
+    cfg.has_position_input = false;
+    trtmc::QwenVlPreprocessConfig vl_pp;
+    trtmc::QwenVlPipeline pipeline(std::move(decoder), nullptr, std::move(cache), cfg, vl_pp,
+                                   stream);
+
+    check(pipeline.has_dynamic_lora(), "dynamic_lora: engine inputs detected");
+    check(pipeline.lora_input_names().size() == 2, "dynamic_lora: two bindings detected");
+
+    float ones[1] = {1.0F};
+    float adapter_a_delta[4] = {2.0F, 0.0F, 0.0F, 0.0F};
+    float adapter_b_delta[4] = {0.0F, 2.0F, 0.0F, 0.0F};
+    auto make_adapter = [&](float* delta) {
+        trtmc::TensorMap tensors;
+        tensors["lora_a_layer_0_w_q"] = trtmc::Tensor{ones, {1, 1}, trtmc::DType::kFloat32};
+        tensors["lora_b_layer_0_w_q"] = trtmc::Tensor{delta, {1, 4}, trtmc::DType::kFloat32};
+        return tensors;
+    };
+    pipeline.register_lora_adapter("adapter-a", make_adapter(adapter_a_delta));
+    pipeline.register_lora_adapter("adapter-b", make_adapter(adapter_b_delta));
+
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 1;
+
+    auto base = pipeline.generate_ids({3}, gen_cfg);
+    check(base.token_ids.back() == 2, "dynamic_lora: zero binding selects base output");
+
+    gen_cfg.lora_adapter_id = "adapter-a";
+    auto adapter_a = pipeline.generate_ids({3}, gen_cfg);
+    check(adapter_a.token_ids.back() == 0, "dynamic_lora: adapter A selected");
+
+    gen_cfg.lora_adapter_id = "adapter-b";
+    auto adapter_b = pipeline.generate_ids({3}, gen_cfg);
+    check(adapter_b.token_ids.back() == 1, "dynamic_lora: adapter B selected");
+
+    gen_cfg.lora_adapter_id.clear();
+    auto base_again = pipeline.generate_ids({3}, gen_cfg);
+    check(base_again.token_ids.back() == 2, "dynamic_lora: clear restores base output");
+
+    bool unknown_threw = false;
+    try {
+        gen_cfg.lora_adapter_id = "missing";
+        (void)pipeline.generate_ids({3}, gen_cfg);
+    } catch (const std::invalid_argument&) {
+        unknown_threw = true;
+    }
+    check(unknown_threw, "dynamic_lora: unknown adapter rejected");
+
+    const auto adapter_dir = write_mock_peft_adapter();
+    pipeline.load_lora_adapter("adapter-file", adapter_dir.string());
+    check(pipeline.supports_lora_adapters(), "dynamic_lora: public capability detected");
+    check(pipeline.loaded_lora_adapters().size() == 3,
+          "dynamic_lora: public API lists loaded adapters");
+    gen_cfg.lora_adapter_id = "adapter-file";
+    auto adapter_file = pipeline.generate_ids({3}, gen_cfg);
+    check(adapter_file.token_ids.back() == 0, "dynamic_lora: PEFT directory selected");
+    pipeline.unload_lora_adapter("adapter-file");
+    check(pipeline.loaded_lora_adapters().size() == 2, "dynamic_lora: public API unloads adapter");
+    std::filesystem::remove_all(adapter_dir);
+
+    // The Qwen-VL cache must not evict an adapter pinned by the active
+    // execution context. Fill its four-entry capacity, select A, then add E;
+    // the least-recently-used unpinned adapter B should be removed.
+    pipeline.register_lora_adapter("adapter-c", make_adapter(adapter_b_delta));
+    pipeline.register_lora_adapter("adapter-d", make_adapter(adapter_b_delta));
+    gen_cfg.lora_adapter_id = "adapter-a";
+    (void)pipeline.generate_ids({3}, gen_cfg);
+    pipeline.register_lora_adapter("adapter-e", make_adapter(adapter_b_delta));
+    const auto cached_ids = pipeline.loaded_lora_adapters();
+    check(cached_ids.size() == 4, "dynamic_lora: Qwen-VL cache enforces capacity");
+    check(std::find(cached_ids.begin(), cached_ids.end(), "adapter-a") != cached_ids.end(),
+          "dynamic_lora: active adapter remains pinned");
+    check(std::find(cached_ids.begin(), cached_ids.end(), "adapter-b") == cached_ids.end(),
+          "dynamic_lora: least-recently-used unpinned adapter evicted");
+    auto pinned_a = pipeline.generate_ids({3}, gen_cfg);
+    check(pinned_a.token_ids.back() == 0,
+          "dynamic_lora: pinned adapter remains bound after eviction");
+
+    cudaStreamDestroy(stream);
+}
+
+static void test_vl_pool_isolates_concurrent_lora_selection() {
+    auto engine = build_mock_lora_decoder();
+    if (!engine) {
+        std::cerr << "SKIP dynamic_lora_pool\n";
+        return;
+    }
+
+    cudaStream_t stream_a;
+    cudaStream_t stream_b;
+    cudaStreamCreate(&stream_a);
+    cudaStreamCreate(&stream_b);
+
+    auto decoder_a = std::make_unique<trtmc::TrtModuleImpl>(
+        engine.get(), engine->createExecutionContext(), stream_a);
+    auto decoder_b = std::make_unique<trtmc::TrtModuleImpl>(
+        engine.get(), engine->createExecutionContext(), stream_b);
+    std::vector<trtmc::TensorInfo> adapter_contract;
+    for (const auto& info : decoder_a->input_info()) {
+        if (info.name.rfind("lora_a_", 0) == 0 || info.name.rfind("lora_b_", 0) == 0)
+            adapter_contract.push_back(info);
+    }
+    auto adapter_cache =
+        std::make_shared<trtmc::qwen_vl::LoraAdapterCache>(adapter_contract, stream_a);
+
+    trtmc::QwenVlConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 99;
+    cfg.has_position_input = false;
+    trtmc::QwenVlPreprocessConfig vl_pp;
+    auto pipeline_a = std::make_unique<trtmc::QwenVlPipeline>(
+        std::move(decoder_a), nullptr, std::make_unique<trtmc::QwenVlKvCache>(1, 8, 4, stream_a),
+        cfg, vl_pp, stream_a, nullptr, "lane-a", nullptr, adapter_cache);
+    auto pipeline_b = std::make_unique<trtmc::QwenVlPipeline>(
+        std::move(decoder_b), nullptr, std::make_unique<trtmc::QwenVlKvCache>(1, 8, 4, stream_b),
+        cfg, vl_pp, stream_b, nullptr, "lane-b", nullptr, adapter_cache);
+
+    float ones[1] = {1.0F};
+    float adapter_a_delta[4] = {2.0F, 0.0F, 0.0F, 0.0F};
+    float adapter_b_delta[4] = {0.0F, 2.0F, 0.0F, 0.0F};
+    auto make_adapter = [&](float* delta) {
+        trtmc::TensorMap tensors;
+        tensors["lora_a_layer_0_w_q"] = trtmc::Tensor{ones, {1, 1}, trtmc::DType::kFloat32};
+        tensors["lora_b_layer_0_w_q"] = trtmc::Tensor{delta, {1, 4}, trtmc::DType::kFloat32};
+        return tensors;
+    };
+    pipeline_a->register_lora_adapter("adapter-a", make_adapter(adapter_a_delta));
+    pipeline_a->register_lora_adapter("adapter-b", make_adapter(adapter_b_delta));
+    check(pipeline_b->loaded_lora_adapters().size() == 2,
+          "dynamic_lora_pool: lanes share adapter registry");
+
+    {
+        std::vector<std::unique_ptr<trtmc::IPipeline>> lanes;
+        lanes.push_back(std::move(pipeline_a));
+        lanes.push_back(std::move(pipeline_b));
+        trtmc::PipelinePool pool(std::move(lanes));
+        auto lease_a = pool.acquire();
+        auto lease_b = pool.acquire();
+        auto* qwen_a = dynamic_cast<trtmc::QwenVlPipeline*>(lease_a.get());
+        auto* qwen_b = dynamic_cast<trtmc::QwenVlPipeline*>(lease_b.get());
+        check(qwen_a != nullptr && qwen_b != nullptr, "dynamic_lora_pool: leases Qwen lanes");
+
+        trtmc::GenerateConfig config_a;
+        config_a.max_new_tokens = 1;
+        config_a.lora_adapter_id = "adapter-a";
+        trtmc::GenerateConfig config_b = config_a;
+        config_b.lora_adapter_id = "adapter-b";
+        auto result_a = std::async(
+            std::launch::async, [qwen_a, config_a] { return qwen_a->generate_ids({3}, config_a); });
+        auto result_b = std::async(
+            std::launch::async, [qwen_b, config_b] { return qwen_b->generate_ids({3}, config_b); });
+        check(result_a.get().token_ids.back() == 0, "dynamic_lora_pool: request A keeps adapter A");
+        check(result_b.get().token_ids.back() == 1, "dynamic_lora_pool: request B keeps adapter B");
+    }
+    adapter_cache.reset();
+    cudaStreamDestroy(stream_a);
+    cudaStreamDestroy(stream_b);
+}
+
 int main() {
     test_vl_text_only();
     test_vl_text_only_max_tokens();
@@ -808,6 +1056,8 @@ int main() {
     test_vl_generate_with_embed_decoder();
     test_vl_sequence_prefill_uses_one_text_launch();
     test_vl_generate_with_tokenizer();
+    test_vl_dynamic_lora_adapter_switching();
+    test_vl_pool_isolates_concurrent_lora_selection();
     if (failures > 0)
         std::cerr << failures << " FAILED\n";
     return failures;

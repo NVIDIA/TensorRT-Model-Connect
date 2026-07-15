@@ -14,6 +14,7 @@
 #include "trtmc/config/schema_registry.h"
 #include "trtmc/runtime/pipeline_plugin.h"
 #include "trtmc/runtime/pipeline_plugin_loader.h"
+#include "trtmc/runtime/pipeline_pool.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "utils/data_dir.h"
@@ -290,6 +291,53 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
     std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
               << std::endl;
     return pipeline;
+}
+
+std::unique_ptr<PipelinePool> PipelineFactory::from_bundle_pool(const std::string& bundle_path,
+                                                                std::size_t pool_size,
+                                                                const LoadOptions& options) {
+    if (pool_size == 0)
+        throw std::invalid_argument("Pipeline pool size must be positive");
+
+    BundleFile bundle = ReadBundleFile(bundle_path);
+    if (bundle.sections.empty())
+        throw std::runtime_error("Failed to read bundle: " + bundle_path);
+
+    std::string config_text;
+    for (const auto& section : bundle.sections) {
+        if (section.name == "config.json" && !section.data.empty()) {
+            config_text.assign(section.data.begin(), section.data.end());
+            break;
+        }
+    }
+
+    std::string strategy = resolve_runtime_strategy(config_text);
+    auto* plugin = lookup_plugin_or_throw(strategy, options.model_plugin_search_paths);
+    std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
+    IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name,
+                                                options.backend_search_paths);
+
+    BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
+    base_cfg.runtime_strategy = strategy;
+    std::optional<config::ConfigBundle> resolved = try_resolve_runtime_config(
+        config_text, bundle_path, options.config_path, options.set_tokens);
+
+    PipelineContext ctx{bundle,
+                        base_cfg,
+                        config_text,
+                        options.hf_python,
+                        bundle_path,
+                        backend,
+                        options.runtime_cache_path,
+                        options.cuda_graphs,
+                        options.kv_cache_size_bytes,
+                        resolved ? &*resolved : nullptr};
+    auto pipelines = plugin->create_pool(ctx, pool_size);
+    auto pool = std::make_unique<PipelinePool>(std::move(pipelines));
+
+    std::cerr << "[trtmc] Pipeline pool loaded (strategy=" << strategy << ", lanes=" << pool_size
+              << ", backend=trt_new_runtime)" << std::endl;
+    return pool;
 }
 
 std::unique_ptr<IPipeline> load(const std::string& bundle_path, const std::string& hf_python,

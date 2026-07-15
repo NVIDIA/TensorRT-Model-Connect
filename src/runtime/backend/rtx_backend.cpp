@@ -160,6 +160,30 @@ class RtxBackend final : public IBackend {
         return out;
     }
 
+    BackendContextModules
+    create_context_modules(const void* plan_data, size_t plan_size,
+                           const std::vector<ModuleCreateOptions>& options) override {
+        if (options.empty())
+            throw std::invalid_argument("[trtmc] Context module options must not be empty");
+        auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
+        if (!engine_raw)
+            throw std::runtime_error("[trtmc] Failed to deserialize engine (RTX)");
+        std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
+                                                      [](nvinfer1::ICudaEngine* p) { delete p; });
+
+        BackendContextModules out;
+        out.modules.reserve(options.size());
+        for (const auto& lane_options : options) {
+            const int32_t profile_idx = lane_options.optimization_profile;
+            if (profile_idx < 0 || profile_idx >= engine->getNbOptimizationProfiles())
+                throw std::invalid_argument("[trtmc] Invalid optimization profile index");
+            StreamSetup stream_setup = resolve_stream(lane_options.stream);
+            out.modules.push_back(
+                create_profile_module(engine, stream_setup, lane_options, profile_idx));
+        }
+        return out;
+    }
+
     const char* name() const override { return "trt_rtx"; }
 
   private:

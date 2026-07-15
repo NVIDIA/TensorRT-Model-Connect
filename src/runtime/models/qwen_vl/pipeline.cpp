@@ -6,6 +6,7 @@
 #include "runtime/models/qwen_vl/pipeline.h"
 
 #include "runtime/models/qwen_vl/image_preprocessor.h"
+#include "runtime/models/qwen_vl/lora_peft_loader.h"
 #include "runtime/models/qwen_vl/tensor_names.h"
 
 #include <algorithm>
@@ -16,6 +17,36 @@
 namespace trtmc {
 
 namespace {
+
+bool is_lora_input(const std::string& name) {
+    return name.rfind("lora_a_", 0) == 0 || name.rfind("lora_b_", 0) == 0;
+}
+
+std::vector<TensorInfo> qwen_vl_lora_input_contract(const TrtModule& module) {
+    std::vector<TensorInfo> inputs;
+    for (const auto& info : module.input_info()) {
+        if (is_lora_input(info.name))
+            inputs.push_back(info);
+    }
+    return inputs;
+}
+
+bool same_qwen_vl_lora_contract(std::vector<TensorInfo> lhs, std::vector<TensorInfo> rhs) {
+    const auto by_name = [](const TensorInfo& left, const TensorInfo& right) {
+        return left.name < right.name;
+    };
+    std::sort(lhs.begin(), lhs.end(), by_name);
+    std::sort(rhs.begin(), rhs.end(), by_name);
+    if (lhs.size() != rhs.size())
+        return false;
+    for (std::size_t index = 0; index < lhs.size(); ++index) {
+        if (lhs[index].name != rhs[index].name || lhs[index].shape != rhs[index].shape ||
+            lhs[index].dtype != rhs[index].dtype) {
+            return false;
+        }
+    }
+    return true;
+}
 
 void validate_pipeline_components(const TrtModule* text_decoder, const QwenVlInferenceState* state,
                                   const TrtModule* prefill) {
@@ -42,19 +73,125 @@ QwenVlPipeline::QwenVlPipeline(std::unique_ptr<TrtModule> text_decoder,
                                QwenVlPreprocessConfig vl_preprocess, cudaStream_t stream,
                                std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
                                std::unique_ptr<QwenVlISampler> sampler,
-                               std::unique_ptr<TrtModule> prefill)
+                               std::shared_ptr<qwen_vl::LoraAdapterCache> adapter_cache)
+    : QwenVlPipeline(std::move(text_decoder), std::move(vision_encoder), std::move(state), config,
+                     std::move(vl_preprocess), stream, std::move(tokenizer),
+                     std::move(model_id_str), std::move(sampler), nullptr,
+                     std::move(adapter_cache)) {}
+
+QwenVlPipeline::QwenVlPipeline(std::unique_ptr<TrtModule> text_decoder,
+                               std::unique_ptr<TrtModule> vision_encoder,
+                               std::unique_ptr<QwenVlInferenceState> state, QwenVlConfig config,
+                               QwenVlPreprocessConfig vl_preprocess, cudaStream_t stream,
+                               std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
+                               std::unique_ptr<QwenVlISampler> sampler,
+                               std::unique_ptr<TrtModule> prefill,
+                               std::shared_ptr<qwen_vl::LoraAdapterCache> adapter_cache)
     : text_decoder_(std::move(text_decoder)), prefill_(std::move(prefill)),
       vision_encoder_(std::move(vision_encoder)), state_(std::move(state)), config_(config),
       vl_preprocess_(std::move(vl_preprocess)), stream_(stream), tokenizer_(std::move(tokenizer)),
       model_id_(std::move(model_id_str)), sampler_(std::move(sampler)) {
     validate_pipeline_components(text_decoder_.get(), state_.get(), prefill_.get());
     sync_vision_config(config_, vl_preprocess_);
+
+    auto lora_contract = qwen_vl_lora_input_contract(*text_decoder_);
+    lora_bindings_ = std::make_unique<qwen_vl::LoraInputBindings>(*text_decoder_, lora_contract);
+    lora_adapter_cache_ = std::move(adapter_cache);
+    if (!lora_adapter_cache_) {
+        lora_adapter_cache_ =
+            std::make_shared<qwen_vl::LoraAdapterCache>(lora_contract, text_decoder_->stream());
+    }
+    lora_binding_context_ =
+        std::make_unique<qwen_vl::LoraBindingContext>(*lora_bindings_, *lora_adapter_cache_);
+
+    if (prefill_) {
+        auto prefill_contract = qwen_vl_lora_input_contract(*prefill_);
+        if (!same_qwen_vl_lora_contract(lora_contract, prefill_contract)) {
+            throw std::runtime_error(
+                "QwenVlPipeline: prefill and decode LoRA input contracts differ");
+        }
+        prefill_lora_bindings_ =
+            std::make_unique<qwen_vl::LoraInputBindings>(*prefill_, std::move(prefill_contract));
+        if (prefill_lora_bindings_->enabled()) {
+            prefill_lora_binding_context_ = std::make_unique<qwen_vl::LoraBindingContext>(
+                *prefill_lora_bindings_, *lora_adapter_cache_);
+        }
+    }
+}
+
+std::vector<std::string> QwenVlPipeline::lora_input_names() const {
+    return lora_bindings_ ? lora_bindings_->input_names() : std::vector<std::string>{};
+}
+
+void QwenVlPipeline::clear_lora_adapter() {
+    select_lora_adapter("");
+}
+
+void QwenVlPipeline::register_lora_adapter(const std::string& adapter_id,
+                                           const TensorMap& host_tensors) {
+    if (!lora_adapter_cache_)
+        throw std::runtime_error("QwenVlPipeline: LoRA adapter cache is unavailable");
+    if ((lora_binding_context_ && lora_binding_context_->active_adapter_id() == adapter_id) ||
+        (prefill_lora_binding_context_ &&
+         prefill_lora_binding_context_->active_adapter_id() == adapter_id)) {
+        clear_lora_adapter();
+    }
+    lora_adapter_cache_->register_adapter(adapter_id, host_tensors);
+}
+
+void QwenVlPipeline::load_lora_adapter(const std::string& adapter_id,
+                                       const std::string& adapter_path) {
+    if (!has_dynamic_lora())
+        throw std::runtime_error("QwenVlPipeline: engine has no dynamic LoRA inputs");
+    auto adapter = qwen_vl_load_peft_lora_adapter(adapter_path, lora_bindings_->input_info());
+    register_lora_adapter(adapter_id, adapter.tensor_views());
+}
+
+void QwenVlPipeline::unload_lora_adapter(const std::string& adapter_id) {
+    if (!lora_adapter_cache_)
+        throw std::runtime_error("QwenVlPipeline: LoRA adapter cache is unavailable");
+    if ((lora_binding_context_ && lora_binding_context_->active_adapter_id() == adapter_id) ||
+        (prefill_lora_binding_context_ &&
+         prefill_lora_binding_context_->active_adapter_id() == adapter_id)) {
+        clear_lora_adapter();
+    }
+    lora_adapter_cache_->unregister_adapter(adapter_id);
+}
+
+std::vector<std::string> QwenVlPipeline::loaded_lora_adapters() const {
+    return lora_adapter_cache_ ? lora_adapter_cache_->adapter_ids() : std::vector<std::string>{};
+}
+
+void QwenVlPipeline::select_lora_adapter(const std::string& adapter_id) {
+    if (!lora_binding_context_)
+        throw std::runtime_error("QwenVlPipeline: LoRA binding context is unavailable");
+    const std::string previous_decode = lora_binding_context_->active_adapter_id();
+    const std::string previous_prefill = prefill_lora_binding_context_
+                                             ? prefill_lora_binding_context_->active_adapter_id()
+                                             : std::string{};
+    try {
+        lora_binding_context_->select(adapter_id);
+        if (prefill_lora_binding_context_)
+            prefill_lora_binding_context_->select(adapter_id);
+    } catch (...) {
+        try {
+            if (prefill_lora_binding_context_)
+                prefill_lora_binding_context_->select(previous_prefill);
+        } catch (...) {
+        }
+        try {
+            lora_binding_context_->select(previous_decode);
+        } catch (...) {
+        }
+        throw;
+    }
 }
 
 TextResult QwenVlPipeline::generate(const std::string& prompt, const GenerateConfig& cfg) {
     if (!tokenizer_)
         throw std::runtime_error("QwenVlPipeline: no tokenizer configured");
 
+    select_lora_adapter(cfg.lora_adapter_id);
     auto input_ids = tokenizer_->encode(prompt);
     auto [max_new, eos] = resolve_gen_limits(cfg);
     auto sp = qwen_vl_sampling_params_from_config(cfg, eos);
@@ -368,6 +505,7 @@ TextResult QwenVlPipeline::generate(const std::string& prompt, const float* imag
     if (!tokenizer_)
         throw std::runtime_error("QwenVlPipeline: no tokenizer configured");
 
+    select_lora_adapter(cfg.lora_adapter_id);
     bool valid = image_pixels && image_height > 0 && image_width > 0;
     if (!valid || !vision_encoder_)
         return generate(prompt, cfg);
@@ -402,6 +540,7 @@ TextResult QwenVlPipeline::generate(const std::string& prompt, const float* imag
 
 QwenVlPipeline::GenerationResult QwenVlPipeline::generate_ids(const std::vector<int32_t>& input_ids,
                                                               const GenerateConfig& cfg) {
+    select_lora_adapter(cfg.lora_adapter_id);
     int32_t max_new = cfg.max_new_tokens;
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
     auto sp = qwen_vl_sampling_params_from_config(cfg, eos);
@@ -475,24 +614,44 @@ std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
     state_->bind_to(*text_decoder_);
 
     std::vector<float> logits;
+    const int32_t grid_h =
+        vl_preprocess_.patch_size > 0 && vl_preprocess_.merge_size > 0
+            ? (vl_preprocess_.fixed_image_height > 0 ? vl_preprocess_.fixed_image_height
+                                                     : vl_preprocess_.fixed_image_size) /
+                  (vl_preprocess_.patch_size * vl_preprocess_.merge_size)
+            : 0;
+    const int32_t grid_w =
+        vl_preprocess_.patch_size > 0 && vl_preprocess_.merge_size > 0
+            ? (vl_preprocess_.fixed_image_width > 0 ? vl_preprocess_.fixed_image_width
+                                                    : vl_preprocess_.fixed_image_size) /
+                  (vl_preprocess_.patch_size * vl_preprocess_.merge_size)
+            : 0;
+    const bool use_mrope = text_decoder_->has_input("mrope_position_ids");
+    const auto mrope = use_mrope ? qwen_vl_build_mrope_positions(input_ids, config_.image_token_id,
+                                                                 num_features, grid_h, grid_w)
+                                 : QwenVlMropePositions{};
     if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,
-                                feature_dim, logits)) {
+                                feature_dim, use_mrope ? &mrope : nullptr, logits)) {
         int32_t feature_index = 0;
-        for (const auto& tid : input_ids)
+        for (std::size_t index = 0; index < input_ids.size(); ++index) {
+            const auto tid = input_ids[index];
+            const auto* position = use_mrope ? &mrope.token_positions[index] : nullptr;
             run_vl_prefill_token(tid, image_features, deepstack_features, num_features, feature_dim,
-                                 feature_index, logits);
+                                 feature_index, position, logits);
+        }
     }
     state_->mark_prefill_complete();
 
     std::vector<int32_t> output = input_ids;
-    run_vl_decode_loop(active_sampler, params, output, logits, max_new_tokens);
+    run_vl_decode_loop(active_sampler, params, output, logits, max_new_tokens,
+                       use_mrope ? mrope.next_position : -1);
     return output;
 }
 
 bool QwenVlPipeline::run_vl_prefill_batched(
     const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
     const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
-    int32_t feature_dim, std::vector<float>& logits) {
+    int32_t feature_dim, const QwenVlMropePositions* mrope, std::vector<float>& logits) {
     const auto sq = static_cast<int32_t>(input_ids.size());
     auto* kv_cache =
         eligible_vl_prefill_cache(prefill_.get(), state_.get(), config_, sq, feature_dim);
@@ -508,6 +667,20 @@ bool QwenVlPipeline::run_vl_prefill_batched(
 
     TensorMap inputs;
     add_vl_prefill_base_inputs(inputs, *state_, input_ids, embedding_inputs, feature_dim);
+    std::vector<int32_t> mrope_positions;
+    if (prefill_->has_input("mrope_position_ids")) {
+        if (mrope == nullptr || mrope->token_positions.size() != input_ids.size())
+            return false;
+        mrope_positions.resize(static_cast<std::size_t>(3 * sq));
+        for (int32_t token_index = 0; token_index < sq; ++token_index) {
+            for (int32_t axis = 0; axis < 3; ++axis) {
+                mrope_positions[static_cast<std::size_t>(axis * sq + token_index)] =
+                    mrope->token_positions[static_cast<std::size_t>(token_index)]
+                                          [static_cast<std::size_t>(axis)];
+            }
+        }
+        inputs["mrope_position_ids"] = Tensor{mrope_positions.data(), {3, sq}, DType::kInt32};
+    }
     if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, sq, feature_dim))
         return false;
 
@@ -527,10 +700,12 @@ void QwenVlPipeline::run_vl_prefill_token(int32_t token_id,
                                           const std::vector<float>& image_features,
                                           const std::vector<std::vector<float>>& deepstack_features,
                                           int32_t num_features, int32_t feature_dim,
-                                          int32_t& feature_index, std::vector<float>& logits) {
+                                          int32_t& feature_index,
+                                          const std::array<int32_t, 3>* mrope_position,
+                                          std::vector<float>& logits) {
     const bool use_image_embed = token_id == config_.image_token_id && feature_index < num_features;
     if (!use_image_embed) {
-        run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, logits);
+        run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, mrope_position, logits);
         return;
     }
 
@@ -539,31 +714,42 @@ void QwenVlPipeline::run_vl_prefill_token(int32_t token_id,
     const auto deepstack_embeds =
         select_deepstack_feature_pointers(deepstack_features, feature_index, feature_dim);
     run_text_step_with_embed(token_id, embed, 1.0F, deepstack_embeds,
-                             deepstack_embeds.empty() ? 0.0F : 1.0F, logits);
+                             deepstack_embeds.empty() ? 0.0F : 1.0F, mrope_position, logits);
     ++feature_index;
 }
 
 void QwenVlPipeline::run_vl_decode_loop(QwenVlISampler* sampler, const QwenVlSamplingParams& params,
                                         std::vector<int32_t>& output, std::vector<float>& logits,
-                                        int32_t max_new_tokens) {
+                                        int32_t max_new_tokens, int32_t mrope_position) {
     const int32_t vocab_size = static_cast<int32_t>(logits.size());
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         QwenVlSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos)
             break;
-        run_text_step(result.token_id, logits);
+        run_text_step(result.token_id, logits, mrope_position);
+        if (mrope_position >= 0)
+            ++mrope_position;
     }
 }
 
-void QwenVlPipeline::run_text_step(int32_t token_id, std::vector<float>& logits) {
-    run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, logits);
+void QwenVlPipeline::run_text_step(int32_t token_id, std::vector<float>& logits,
+                                   int32_t mrope_position) {
+    if (mrope_position < 0 || !text_decoder_->has_input("mrope_position_ids")) {
+        run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, nullptr, logits);
+        return;
+    }
+    std::array<int32_t, 3> mrope_pos{};
+    mrope_pos.fill(mrope_position);
+    run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, &mrope_pos, logits);
 }
 
 void QwenVlPipeline::run_text_step_with_embed(int32_t token_id, const float* input_embed,
                                               float use_input_embed,
                                               const std::vector<const float*>& deepstack_embeds,
-                                              float deepstack_active, std::vector<float>& logits) {
+                                              float deepstack_active,
+                                              const std::array<int32_t, 3>* mrope_position,
+                                              std::vector<float>& logits) {
     TensorMap inputs;
 
     Tensor token_t;
@@ -573,6 +759,11 @@ void QwenVlPipeline::run_text_step_with_embed(int32_t token_id, const float* inp
     inputs["token_id"] = token_t;
 
     state_->prepare_step(inputs);
+
+    if (mrope_position != nullptr && text_decoder_->has_input("mrope_position_ids")) {
+        inputs["mrope_position_ids"] =
+            Tensor{const_cast<int32_t*>(mrope_position->data()), {3}, DType::kInt32};
+    }
 
     std::vector<float> zero_embed;
     std::vector<float> zero_deepstack;

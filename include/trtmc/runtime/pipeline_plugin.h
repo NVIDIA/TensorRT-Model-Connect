@@ -13,7 +13,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace trtmc {
 
@@ -96,6 +98,20 @@ class IPipelinePlugin {
     // 3. Loading TRT engines, creating caches, tokenizers, etc.
     // 4. Returning the fully constructed pipeline
     virtual std::unique_ptr<IPipeline> create(const PipelineContext& ctx) = 0;
+
+    // Create independent request lanes for PipelinePool. The default is
+    // correct for every model but deserializes one engine per lane. Plugins
+    // can override this to share engine weights across execution contexts.
+    virtual std::vector<std::unique_ptr<IPipeline>> create_pool(const PipelineContext& ctx,
+                                                                std::size_t count) {
+        if (count == 0)
+            throw std::invalid_argument("Pipeline pool size must be positive");
+        std::vector<std::unique_ptr<IPipeline>> pipelines;
+        pipelines.reserve(count);
+        for (std::size_t index = 0; index < count; ++index)
+            pipelines.push_back(create(ctx));
+        return pipelines;
+    }
 };
 
 } // namespace trtmc

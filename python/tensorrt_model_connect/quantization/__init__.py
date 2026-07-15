@@ -105,6 +105,12 @@ def build_quant_context(
     elif plan.scale_source == "dynamic":
         # NVFP4 uses dynamic quantization (runtime scales)
         provider = DynamicQuantizationProvider()
+    elif plan.scale_source == "prequantized" or str(config.raw.get(
+            "quantization_config", {}).get(
+            "quant_method", "")).lower() in {
+                "awq", "gptq", "compressed-tensors", "compressed_tensors"
+            }:
+        provider = PreQuantizedCheckpointProvider()
     else:
         # Auto-calibrate with ModelOpt
         provider = ModelOptCalibrationProvider(

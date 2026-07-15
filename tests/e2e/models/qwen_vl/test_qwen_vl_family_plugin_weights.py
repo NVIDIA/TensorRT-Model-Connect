@@ -9,8 +9,6 @@ Shared test code is limited to filesystem and serialization helpers.
 
 from __future__ import annotations
 
-
-
 from tests.builder.family_plugin_test_support import (
     ModelConfig,
     _rand,

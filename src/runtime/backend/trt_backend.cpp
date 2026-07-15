@@ -183,6 +183,49 @@ class TrtBackend final : public IBackend {
         return out;
     }
 
+    BackendContextModules
+    create_context_modules(const void* plan_data, size_t plan_size,
+                           const std::vector<ModuleCreateOptions>& options) override {
+        if (options.empty())
+            throw std::invalid_argument("[trtmc] Context module options must not be empty");
+        auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
+        if (!engine_raw)
+            throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
+        std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
+                                                      [](nvinfer1::ICudaEngine* p) { delete p; });
+
+        BackendContextModules out;
+        out.modules.reserve(options.size());
+        for (const auto& lane_options : options) {
+            const int32_t profile_idx = lane_options.optimization_profile;
+            if (profile_idx < 0 || profile_idx >= engine->getNbOptimizationProfiles())
+                throw std::invalid_argument("[trtmc] Invalid optimization profile index");
+            auto* ctx = engine->createExecutionContext();
+            if (!ctx)
+                throw std::runtime_error("[trtmc] Failed to create TRT execution context");
+
+            cudaStream_t stream = lane_options.stream;
+            std::shared_ptr<void> stream_owner;
+            if (!stream) {
+                auto owned = std::make_shared<CudaStream>();
+                if (!owned->ok()) {
+                    delete ctx;
+                    throw std::runtime_error("[trtmc] Failed to create CUDA stream");
+                }
+                stream = owned->get();
+                stream_owner = owned;
+            }
+
+            auto module = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream, profile_idx,
+                                                          lane_options.distributed_communicator);
+            if (!module->ok())
+                throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
+            keep_backend_resources(*module, engine, stream_owner, lane_options.distributed_owner);
+            out.modules.push_back(std::move(module));
+        }
+        return out;
+    }
+
     const char* name() const override { return "trt"; }
 
   private:

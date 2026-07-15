@@ -181,7 +181,6 @@ class TestPreQuantizedCheckpointProvider:
         assert isinstance(result, QuantScaleMap)
         assert len(result.scales) == 0  # no safetensors files present
 
-
 class _FakeAdapter:
     def map_layer_name(self, layer_name: str) -> str | None:
         if layer_name == "skip.this":

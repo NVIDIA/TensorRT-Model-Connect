@@ -13,10 +13,13 @@
 
 #include "trtmc/pipeline.h"
 
+#include <cstddef>
 #include <memory>
 #include <string>
 
 namespace trtmc {
+
+class PipelinePool;
 
 class PipelineFactory {
   public:
@@ -26,6 +29,9 @@ class PipelineFactory {
                                                   bool cuda_graphs = false);
     static std::unique_ptr<IPipeline> from_bundle(const std::string& bundle_path,
                                                   const LoadOptions& options);
+    static std::unique_ptr<PipelinePool> from_bundle_pool(const std::string& bundle_path,
+                                                          std::size_t pool_size,
+                                                          const LoadOptions& options = {});
 };
 
 } // namespace trtmc

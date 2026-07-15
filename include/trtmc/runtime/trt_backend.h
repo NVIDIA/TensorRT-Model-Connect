@@ -12,6 +12,7 @@
 #include "trtmc/runtime/trt_module.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <cuda_runtime_api.h>
 #include <memory>
 #include <string>
@@ -25,6 +26,7 @@ struct ModuleCreateOptions {
     cudaStream_t stream{nullptr};            // nullptr = backend creates one
     const char* runtime_cache_path{""};      // RTX: JIT kernel cache file path
     bool cuda_graphs{false};                 // RTX: whole-graph CUDA capture
+    int32_t optimization_profile{0};         // profile selected for this execution context
     void* distributed_communicator{nullptr}; // TensorRT 11.0+ NCCL communicator, optional
     std::shared_ptr<void> distributed_owner; // keeps communicator alive
 };
@@ -45,6 +47,13 @@ struct BackendProfileModule {
 
 struct BackendProfileModules {
     std::vector<BackendProfileModule> modules;
+};
+
+// One execution module per request lane. All modules share a single
+// deserialized engine, while each ModuleCreateOptions entry may provide an
+// independent CUDA stream and distributed-runtime ownership.
+struct BackendContextModules {
+    std::vector<std::unique_ptr<ITrtModule>> modules;
 };
 
 // Per-DSO backend. Holds shared state (TRT runtime, RTX runtime cache).
@@ -70,6 +79,13 @@ class IBackend {
     create_profile_modules(const void* plan_data, size_t plan_size,
                            const ModuleCreateOptions& options,
                            const std::vector<int32_t>& profile_indices) = 0;
+
+    // Deserialize once and create one execution context for each options
+    // entry, using its requested optimization profile. Intended for
+    // concurrent request lanes.
+    virtual BackendContextModules
+    create_context_modules(const void* plan_data, size_t plan_size,
+                           const std::vector<ModuleCreateOptions>& options) = 0;
 
     // Backend identity: "trt" or "trt_rtx"
     virtual const char* name() const = 0;

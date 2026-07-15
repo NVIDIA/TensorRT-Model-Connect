@@ -130,6 +130,29 @@ class TestPipelineCall:
             assert cmd[idx + 1] == "/tmp/photo.jpg"
             assert output == "A cat sitting on a couch"
 
+    def test_prompt_with_lora_adapter(self):
+        """A PEFT adapter directory and runtime ID are forwarded to the CLI."""
+        pipe = self._make_pipeline()
+        mock_result = MagicMock(returncode=0, stdout="answer\n")
+
+        with patch("tensorrt_model_connect.pipeline.subprocess.run",
+                   return_value=mock_result) as mock_run:
+            output = pipe(
+                "test prompt",
+                lora_adapter="/tmp/test-adapter",
+                lora_adapter_id="adapter-1",
+            )
+
+            cmd = mock_run.call_args[0][0]
+            assert cmd[cmd.index("--lora-adapter") + 1] == "/tmp/test-adapter"
+            assert cmd[cmd.index("--lora-adapter-id") + 1] == "adapter-1"
+            assert output == "answer"
+
+    def test_empty_lora_adapter_id_rejected(self):
+        pipe = self._make_pipeline()
+        with pytest.raises(ValueError, match="lora_adapter_id must not be empty"):
+            pipe("test prompt", lora_adapter="/tmp/test-adapter", lora_adapter_id="")
+
     def test_prompt_without_image(self):
         """When image is None, --image is not in the command."""
         pipe = self._make_pipeline()

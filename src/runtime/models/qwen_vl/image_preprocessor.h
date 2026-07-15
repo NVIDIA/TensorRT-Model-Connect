@@ -7,6 +7,7 @@
 
 #include "runtime/models/qwen_vl/decoded_image.h"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -16,6 +17,8 @@ namespace trtmc {
 // VL preprocessing config parsed from bundle's config.json + preprocessor_config.json.
 struct QwenVlPreprocessConfig {
     int32_t fixed_image_size{448};
+    int32_t fixed_image_height{0};
+    int32_t fixed_image_width{0};
     int32_t patch_size{14};
     int32_t merge_size{2};
     int32_t temporal_patch_size{2};
@@ -44,9 +47,22 @@ struct QwenVlPreprocessedImage {
     bool ok{false};
 };
 
+struct QwenVlMropePositions {
+    std::vector<std::array<int32_t, 3>> token_positions;
+    int32_t next_position{0};
+};
+
+// Build Hugging Face-compatible Qwen2.5-VL temporal/height/width positions
+// for a single image. grid_height/grid_width are post-merge token dimensions.
+QwenVlMropePositions qwen_vl_build_mrope_positions(const std::vector<int32_t>& input_ids,
+                                                   int32_t image_token_id,
+                                                   int32_t num_image_features, int32_t grid_height,
+                                                   int32_t grid_width);
+
 // Load and preprocess a single image for the vision encoder.
 // Dispatches to the appropriate strategy based on config.preprocessor_type:
 //   "merge_group_chw":    [C*T, H, W] with merge-group patch permutation
+//   "aspect_preserve_merge_group_chw": merge-group layout after aspect-preserving resize + pad
 //   "simple_chw":          [C, H, W] standard resize + normalize
 //   "center_crop_chw":     [C, H, W] center-crop to square, then resize + normalize
 //   "aspect_preserve_chw": [C, H, W] aspect-ratio-preserving resize + zero-pad

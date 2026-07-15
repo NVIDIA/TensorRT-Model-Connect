@@ -24,10 +24,11 @@ import numpy as np
 import pytest
 
 from tests.builder.conftest import requires_trt
-from tests.builder.owned_graph_modules import load_graph_ops
+from tests.builder.owned_graph_modules import load_family_graph_ops, load_graph_ops
 
 pytest.importorskip("tensorrt_model_connect", reason="tensorrt_model_connect requires tensorrt")
 graph_ops = load_graph_ops()
+qwen_vl_graph_ops = load_family_graph_ops("qwen_vl")
 
 
 # ---------------------------------------------------------------------------
@@ -506,3 +507,48 @@ class TestAddAttentionCore:
         # TRT fused attention can differ from NumPy by sub-1e-3 rounding.
         np.testing.assert_allclose(out, ref, atol=1e-3,
                                    err_msg="masked attention mismatch")
+
+class TestAddApplyMropeNative:
+    """Qwen2.5-VL M-RoPE selects T/H/W frequency sections."""
+
+    @requires_trt
+    def test_matches_numpy_reference(self):
+        num_heads, head_dim = 2, 16
+        sections = (2, 2, 4)
+        positions = np.array([2, 4, 6], dtype=np.int32)
+        rng = np.random.default_rng(29)
+        x = rng.standard_normal((1, num_heads * head_dim)).astype(np.float32)
+        cos = qwen_vl_graph_ops.make_rope_table_half_dim(
+            16, head_dim, 10000.0, True)
+        sin = qwen_vl_graph_ops.make_rope_table_half_dim(
+            16, head_dim, 10000.0, False)
+
+        def build(network, trt_inputs):
+            cos_t = qwen_vl_graph_ops.add_constant(
+                network, cos.shape, cos, dtype=np.float32)
+            sin_t = qwen_vl_graph_ops.add_constant(
+                network, sin.shape, sin, dtype=np.float32)
+            return {
+                "out": qwen_vl_graph_ops.add_apply_mrope_native(
+                    network, trt_inputs["x"], num_heads, head_dim,
+                    cos_t, sin_t, trt_inputs["positions"], sections, head_dim)
+            }
+
+        out = _run_strongly_typed(
+            build, {"x": x, "positions": positions})["out"]
+
+        offsets = np.cumsum((0,) + sections)
+        cos_m = np.concatenate([
+            cos[positions[axis], offsets[axis]:offsets[axis + 1]]
+            for axis in range(3)
+        ])
+        sin_m = np.concatenate([
+            sin[positions[axis], offsets[axis]:offsets[axis + 1]]
+            for axis in range(3)
+        ])
+        xh = x.reshape(num_heads, head_dim)
+        first, second = np.split(xh, 2, axis=-1)
+        ref = np.concatenate(
+            [first * cos_m - second * sin_m,
+             second * cos_m + first * sin_m], axis=-1).reshape(1, -1)
+        np.testing.assert_allclose(out, ref, atol=1e-4)

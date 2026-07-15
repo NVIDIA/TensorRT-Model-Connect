@@ -230,6 +230,28 @@ class TestAddMatmulRhsConstant:
         np.testing.assert_allclose(result["out"], ref, atol=1e-4)
 
 
+# 6b. add_lora_delta
+@requires_trt
+class TestAddLoraDelta:
+    def test_vs_numpy(self, trt_runner):
+        rng = np.random.RandomState(7)
+        lhs_np = rng.randn(3, 8).astype(np.float32)
+        lora_a_np = rng.randn(8, 4).astype(np.float32)
+        lora_b_np = rng.randn(4, 6).astype(np.float32)
+
+        def build(net, inp):
+            return {"out": graph_ops.add_lora_delta(
+                net, inp["x"], inp["lora_a"], inp["lora_b"])}
+
+        result = trt_runner(build, {
+            "x": lhs_np,
+            "lora_a": lora_a_np,
+            "lora_b": lora_b_np,
+        })
+        np.testing.assert_allclose(
+            result["out"], (lhs_np @ lora_a_np) @ lora_b_np, atol=1e-4)
+
+
 # 7. add_bias_sum
 @requires_trt
 class TestAddBiasSum:

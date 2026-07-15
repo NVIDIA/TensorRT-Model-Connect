@@ -50,6 +50,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from . import graph_blocks
+from .lora import DynamicLoraConfig
 from .utils import (
     const_in_work_dtype as _const_in_work_dtype,
     create_builder_context,
@@ -227,6 +228,24 @@ def build_dual_profile_decoder_engine(
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
+    lora_config = DynamicLoraConfig.from_model_config(config)
+    rope_scaling = config.raw.get("rope_scaling") or {}
+    raw_mrope_section = (
+        rope_scaling.get("mrope_section")
+        if isinstance(rope_scaling, dict) else None)
+    mrope_section = (
+        tuple(int(value) for value in raw_mrope_section)
+        if raw_mrope_section is not None else None)
+    if mrope_section is not None:
+        if position_type != "rope":
+            raise ValueError("mRoPE requires position_type='rope'")
+        if len(mrope_section) != 3 or any(value <= 0 for value in mrope_section):
+            raise ValueError(
+                "rope_scaling.mrope_section must contain three positive integers")
+        if sum(mrope_section) != rotary_embedding_dim // 2:
+            raise ValueError(
+                "rope_scaling.mrope_section must sum to half the rotary dimension; "
+                f"got {mrope_section} for rotary dimension {rotary_embedding_dim}")
 
     builder_context = create_builder_context(
         verbose=verbose,
@@ -246,6 +265,9 @@ def build_dual_profile_decoder_engine(
     # ---- Inputs (dynamic Sq) ---------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (-1,))
     position_id = network.add_input("position_id", trt.int32, (-1,))
+    mrope_position_ids = (
+        network.add_input("mrope_position_ids", trt.int32, (3, -1))
+        if mrope_section is not None else None)
     attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
     input_embed_tensor = None
     use_input_embed_tensor = None
@@ -288,6 +310,10 @@ def build_dual_profile_decoder_engine(
         min_sq = opt_sq if fixed else 1
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+        if mrope_position_ids is not None:
+            prof.set_shape(
+                "mrope_position_ids",
+                (3, min_sq), (3, opt_sq), (3, max_sq))
         prof.set_shape(
             "attention_mask",
             (min_sq, max_cache_length + min_sq),
@@ -416,7 +442,8 @@ def build_dual_profile_decoder_engine(
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
 
     # Quantization-aware matmul (passes weight_name through to QuantContext).
-    matmul = _make_matmul_fn(network, work_np_dtype, quant_ctx)
+    matmul = _make_matmul_fn(
+        network, work_np_dtype, quant_ctx, lora_config=lora_config)
 
     # ---- Embedding -------------------------------------------------------
     emb = network.add_gather(embedding_table, token_id, 0)
@@ -527,16 +554,26 @@ def build_dual_profile_decoder_engine(
         # Position embedding (RoPE only; learned was applied above and ALiBi
         # is added into the attention mask).
         if position_type == "rope":
-            q = graph_ops.add_apply_rope_native(
-                network, q, num_heads, head_dim,
-                cos_half_table, sin_half_table, position_id,
-                rotary_embedding_dim, interleaved_rope,
-                sequence_length=None)
-            k = graph_ops.add_apply_rope_native(
-                network, k, num_kv_heads, head_dim,
-                cos_half_table, sin_half_table, position_id,
-                rotary_embedding_dim, interleaved_rope,
-                sequence_length=None)
+            if mrope_position_ids is not None and mrope_section is not None:
+                q = graph_ops.add_apply_mrope_native_sequence(
+                    network, q, num_heads, head_dim,
+                    cos_half_table, sin_half_table, mrope_position_ids,
+                    mrope_section, rotary_embedding_dim, interleaved_rope)
+                k = graph_ops.add_apply_mrope_native_sequence(
+                    network, k, num_kv_heads, head_dim,
+                    cos_half_table, sin_half_table, mrope_position_ids,
+                    mrope_section, rotary_embedding_dim, interleaved_rope)
+            else:
+                q = graph_ops.add_apply_rope_native(
+                    network, q, num_heads, head_dim,
+                    cos_half_table, sin_half_table, position_id,
+                    rotary_embedding_dim, interleaved_rope,
+                    sequence_length=None)
+                k = graph_ops.add_apply_rope_native(
+                    network, k, num_kv_heads, head_dim,
+                    cos_half_table, sin_half_table, position_id,
+                    rotary_embedding_dim, interleaved_rope,
+                    sequence_length=None)
 
         # Present K / V (this step's raw K / V), shape (Sq, attn_size).
         present_k_outs.append(k)

@@ -33,6 +33,7 @@ trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
+    from .lora import DynamicLoraConfig
     from ...quantization.context import QuantContext
 
 
@@ -41,22 +42,36 @@ if TYPE_CHECKING:
 # blocks themselves).
 # ---------------------------------------------------------------------------
 
-def make_matmul_fn(network, dtype, quant_ctx):
+def make_matmul_fn(network, dtype, quant_ctx, lora_config=None):
     """Create a matmul callable that routes through quant_ctx if present.
 
     Returns a function: (lhs, lhs_w, rhs_w, rhs_weights, weight_name) -> ITensor
     """
-    if quant_ctx is None:
-        def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
-            return graph_ops.add_matmul_rhs_constant(
+    def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
+        if quant_ctx is None:
+            base = graph_ops.add_matmul_rhs_constant(
                 network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype)
-        return matmul
-    else:
-        def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
-            return quant_ctx.maybe_quantized_matmul(
+        else:
+            base = quant_ctx.maybe_quantized_matmul(
                 network, lhs, lhs_w, rhs_w, rhs_weights, weight_name,
                 dtype=dtype)
-        return matmul
+
+        if lora_config is None or not lora_config.targets_weight(weight_name):
+            return base
+
+        a_name, b_name = lora_config.input_names(weight_name)
+        lora_a = network.add_input(
+            a_name, lhs.dtype, (lhs_w, lora_config.max_rank))
+        lora_b = network.add_input(
+            b_name, lhs.dtype, (lora_config.max_rank, rhs_w))
+        if lora_a is None or lora_b is None:
+            raise RuntimeError(
+                f"Failed to add dynamic LoRA inputs for projection {weight_name}")
+        delta = graph_ops.add_lora_delta(network, lhs, lora_a, lora_b)
+        return network.add_elementwise(
+            base, delta, trt.ElementWiseOperation.SUM).get_output(0)
+
+    return matmul
 
 
 _make_matmul_fn = make_matmul_fn
@@ -167,9 +182,13 @@ def add_attention_block(
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
+    mrope_position_ids: trt.ITensor | None = None,
+    mrope_section: tuple[int, int, int] | None = None,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
     sequence_length: int | None = 1,
+    force_decomposed_attention: bool = False,
+    lora_config: DynamicLoraConfig | None = None,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
 
@@ -182,7 +201,7 @@ def add_attention_block(
     ALiBi is represented as a per-head additive attention mask and still uses
     native IAttention.
     """
-    matmul = _make_matmul_fn(network, dtype, quant_ctx)
+    matmul = _make_matmul_fn(network, dtype, quant_ctx, lora_config)
     attention_window = max_cache_length + 1
     if num_kv_heads is None:
         num_kv_heads = num_heads
@@ -243,14 +262,27 @@ def add_attention_block(
                 "TRT native IRotaryEmbeddingLayer")
         rope_dim = rotary_embedding_dim or head_dim
         rope_dim = graph_ops.validate_native_rope_dim(rope_dim)
-        q = graph_ops.add_apply_rope_native(
-            network, q, num_heads, head_dim,
-            cos_half_tensor, sin_half_tensor, position_id,
-            rope_dim, interleaved_rope, sequence_length=sequence_length)
-        k = graph_ops.add_apply_rope_native(
-            network, k, num_kv_heads, head_dim,
-            cos_half_tensor, sin_half_tensor, position_id,
-            rope_dim, interleaved_rope, sequence_length=sequence_length)
+        if mrope_position_ids is not None and mrope_section is not None:
+            if sequence_length != 1:
+                raise NotImplementedError(
+                    "graph_blocks mRoPE currently supports single-token execution")
+            q = graph_ops.add_apply_mrope_native(
+                network, q, num_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, mrope_position_ids,
+                mrope_section, rope_dim, interleaved_rope)
+            k = graph_ops.add_apply_mrope_native(
+                network, k, num_kv_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, mrope_position_ids,
+                mrope_section, rope_dim, interleaved_rope)
+        else:
+            q = graph_ops.add_apply_rope_native(
+                network, q, num_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, position_id,
+                rope_dim, interleaved_rope, sequence_length=sequence_length)
+            k = graph_ops.add_apply_rope_native(
+                network, k, num_kv_heads, head_dim,
+                cos_half_tensor, sin_half_tensor, position_id,
+                rope_dim, interleaved_rope, sequence_length=sequence_length)
 
     # Save present K/V (before concatenation, this is the raw projection output)
     present_k = k
@@ -309,6 +341,7 @@ def add_attention_block(
             causal=False,
             mask=mask_4d,
             scale=attention_scale,
+            force_decomposed_attention=force_decomposed_attention,
         )
     elif ffi_attention_kernel is not None:
         if num_kv_heads != num_heads:
@@ -351,9 +384,10 @@ def add_swiglu_mlp(
     dtype: np.dtype = np.float32,
     quant_ctx: QuantContext | None = None,
     layer_prefix: str = "",
+    lora_config: DynamicLoraConfig | None = None,
 ) -> trt.ITensor:
     """Gate/up/down SwiGLU MLP. Returns output tensor."""
-    matmul = _make_matmul_fn(network, dtype, quant_ctx)
+    matmul = _make_matmul_fn(network, dtype, quant_ctx, lora_config)
     _lp = layer_prefix or prefix
 
     gate = matmul(inp, hidden_size, mlp_size,

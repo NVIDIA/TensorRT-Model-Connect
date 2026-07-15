@@ -246,10 +246,64 @@ class PreQuantizedCheckpointProvider:
             return self._extract_gptq(model_dir, config, exclude_patterns)
         elif quant_method == "awq":
             return self._extract_awq(model_dir, config, exclude_patterns)
+        elif quant_method in ("compressed-tensors", "compressed_tensors"):
+            if quant_format.name != "fp8":
+                raise ValueError(
+                    "Compressed-Tensors float-quantized checkpoints require "
+                    f"the fp8 format, got {quant_format.name!r}")
+            if adapter is None:
+                raise ValueError(
+                    "Compressed-Tensors scale extraction requires a family "
+                    "quantization adapter")
+            return self._extract_compressed_tensors(
+                model_dir, exclude_patterns, adapter)
         else:
             raise ValueError(
                 f"Unsupported pre-quantized format: {quant_method!r}. "
-                "Expected 'gptq' or 'awq'.")
+                "Expected 'gptq', 'awq', or 'compressed-tensors'.")
+
+    def _extract_compressed_tensors(
+        self,
+        model_dir: str,
+        exclude_patterns: list[str],
+        adapter: CalibrationAdapter,
+    ) -> QuantScaleMap:
+        """Extract per-tensor FP8 scales from Compressed-Tensors weights."""
+        from safetensors import safe_open
+
+        scales: dict[str, LayerScales] = {}
+        for sf_path in Path(model_dir).glob("*.safetensors"):
+            with safe_open(str(sf_path), framework="pt", device="cpu") as reader:
+                keys = set(reader.keys())
+                for key in keys:
+                    if not key.endswith(".weight_scale"):
+                        continue
+                    layer_name = key.removesuffix(".weight_scale")
+                    input_key = f"{layer_name}.input_scale"
+                    if input_key not in keys:
+                        raise ValueError(
+                            f"Compressed-Tensors layer {layer_name} is missing "
+                            f"{input_key}")
+                    mapped = adapter.map_layer_name(layer_name)
+                    if mapped is None or _matches_exclude_pattern(
+                            mapped, exclude_patterns):
+                        continue
+                    weight_scale = reader.get_tensor(key).float().cpu().numpy()
+                    input_scale = reader.get_tensor(input_key).float().cpu().numpy()
+                    if weight_scale.size != 1 or input_scale.size != 1:
+                        raise NotImplementedError(
+                            "Compressed-Tensors FP8 loading currently supports "
+                            f"per-tensor scales only; {layer_name} has "
+                            f"weight_scale={weight_scale.shape}, "
+                            f"input_scale={input_scale.shape}")
+                    scales[mapped] = LayerScales(
+                        input_scale=float(input_scale.reshape(-1)[0]),
+                        weight_scale=float(weight_scale.reshape(-1)[0]),
+                    )
+
+        logger.info(
+            "Extracted Compressed-Tensors FP8 scales for %d layers", len(scales))
+        return QuantScaleMap(scales=scales)
 
     def _extract_gptq(self, model_dir, config, exclude_patterns):
         """Extract scales from GPTQ checkpoint."""

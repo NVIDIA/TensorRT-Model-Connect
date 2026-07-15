@@ -417,6 +417,10 @@ int cmd_run(const CliArgs& args) {
     cfg.min_p = args.min_p;
     cfg.top_k = args.top_k;
     cfg.seed = args.seed;
+    if (!args.lora_adapter_path.empty()) {
+        pipeline->load_lora_adapter(args.lora_adapter_id, args.lora_adapter_path);
+        cfg.lora_adapter_id = args.lora_adapter_id;
+    }
     if (!args.initial_latents_raw.empty()) {
         std::string error;
         auto latents = read_float32_raw_file(args.initial_latents_raw, error);

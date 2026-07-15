@@ -11,6 +11,7 @@ import json
 import re
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -823,6 +824,13 @@ def build_bundle(
                 quant_scales=quant_scales,
                 quant_calibration_samples=quant_calibration_samples,
             )
+            quant_method = str(config.raw.get(
+                "quantization_config", {}).get("quant_method", "")).lower()
+            if (quant_plan.scale_source == "modelopt"
+                    and quant_method in {
+                        "awq", "gptq", "compressed-tensors", "compressed_tensors"
+                    }):
+                quant_plan = replace(quant_plan, scale_source="prequantized")
             exclude_patterns = (plugin.quant_exclude_patterns(quant_plan.quant_format)
                                 if hasattr(plugin, 'quant_exclude_patterns') else None)
             quant_ctx = build_quant_context(

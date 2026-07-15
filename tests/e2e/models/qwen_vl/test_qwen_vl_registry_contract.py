@@ -22,6 +22,7 @@ def test_qwen_vl_runtime_contract() -> None:
     plugin = find_plugin("qwen2_vl")
     assert plugin is not None
     assert getattr(plugin, "runtime_strategy", None) == "qwen_vl_vision_language"
+    assert "decoder_kv" in getattr(plugin, "runtime_capabilities", set())
     assert getattr(plugin, "embed_input", False) is True
     assert callable(getattr(plugin, "build_vision_engine", None))
     assert callable(getattr(plugin, "get_vl_config", None))

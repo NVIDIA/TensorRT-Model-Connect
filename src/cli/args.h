@@ -21,6 +21,8 @@ struct CliArgs {
     std::string hf_python;
     std::uint64_t kv_cache_size_bytes{0};
     std::string image_path;
+    std::string lora_adapter_path;
+    std::string lora_adapter_id{"default"};
     std::string output_dir;
     std::string output_json;
     std::string initial_latents_raw;

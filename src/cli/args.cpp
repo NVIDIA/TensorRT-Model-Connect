@@ -190,6 +190,7 @@ void print_usage() {
            "  trtmc run             <bundle.trtfb> --prompt \"text\" [--image PATH] "
            "[--max-new-tokens N] [--temperature F] [--top-p F] [--min-p F] "
            "[--top-k N] [--seed N] [--benchmark N] [--warmup N] [--hf-python PATH] "
+           "[--lora-adapter DIR] [--lora-adapter-id ID] "
            "[--kv-cache-size SIZE] [--chat-template] [--no-thinking] "
            "[--generation-mode MODE] [--block-length N] [--threshold F] "
            "[--num-samples N] [--num-steps N] [--guidance-scale S] [--cfg-scale S] "
@@ -458,6 +459,19 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--image" && need_value(arg)) {
             args.image_path = argv[++i];
+            continue;
+        }
+        if (arg == "--lora-adapter" && need_value(arg)) {
+            args.lora_adapter_path = argv[++i];
+            continue;
+        }
+        if (arg == "--lora-adapter-id" && need_value(arg)) {
+            args.lora_adapter_id = argv[++i];
+            if (args.lora_adapter_id.empty()) {
+                args.parse_error = true;
+                args.error_message = "--lora-adapter-id must not be empty";
+                return args;
+            }
             continue;
         }
         if ((arg == "--output" || arg == "-o") && need_value(arg)) {

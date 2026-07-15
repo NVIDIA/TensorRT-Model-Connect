@@ -193,6 +193,9 @@ struct GenerateConfig {
     bool enable_thinking{true};        ///< If false, disable reasoning/thinking mode
     bool stop_on_boxed_answer{false};  ///< Stop once generated text contains a full \boxed{...}
     int32_t stop_check_interval{16};   ///< Token interval for answer-stop checks
+    // Empty selects the base model. A non-empty ID selects a LoRA adapter
+    // registered with a LoRA-capable runtime before generation.
+    std::string lora_adapter_id;
 };
 
 class ITranscriptionStream {
@@ -473,6 +476,27 @@ class IPipeline {
         (void)conf_threshold;
         throw std::runtime_error(std::string(pipeline_type()) + " does not support detect()");
     }
+
+    // -- Dynamic LoRA adapters --
+    // Adapter files remain external to the base bundle. Implementations load
+    // and cache them by ID; GenerateConfig::lora_adapter_id selects one for a
+    // generation request. An empty ID always selects the base model.
+    virtual bool supports_lora_adapters() const { return false; }
+
+    virtual void load_lora_adapter(const std::string& adapter_id, const std::string& adapter_path) {
+        (void)adapter_id;
+        (void)adapter_path;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support dynamic LoRA adapters");
+    }
+
+    virtual void unload_lora_adapter(const std::string& adapter_id) {
+        (void)adapter_id;
+        throw std::runtime_error(std::string(pipeline_type()) +
+                                 " does not support dynamic LoRA adapters");
+    }
+
+    virtual std::vector<std::string> loaded_lora_adapters() const { return {}; }
 
     // -- Metadata --
     virtual const char* model_id() const = 0;

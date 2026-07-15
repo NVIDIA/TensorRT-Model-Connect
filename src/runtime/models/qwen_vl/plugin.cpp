@@ -15,6 +15,7 @@
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -92,6 +93,43 @@ QwenVlKvCacheNames build_kv_cache_names(const BaseConfig& config) {
     return kv_names;
 }
 
+BackendContextModules load_context_modules(IBackend* backend, const std::vector<char>* plan,
+                                           const char* label,
+                                           const std::vector<ModuleCreateOptions>& options) {
+    if (!plan || plan->empty())
+        throw std::runtime_error(std::string("Bundle missing ") + label);
+    if (!backend)
+        throw std::runtime_error("No backend loaded");
+    const auto started = std::chrono::steady_clock::now();
+    auto loaded = backend->create_context_modules(plan->data(), plan->size(), options);
+    const auto finished = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double, std::milli>(finished - started).count();
+    log_trt_load_timing(label, elapsed, plan->size());
+    if (loaded.modules.size() != options.size())
+        throw std::runtime_error(std::string("Failed to create all execution contexts for ") +
+                                 label);
+    for (auto& module : loaded.modules) {
+        if (!module || !module->ok())
+            throw std::runtime_error(std::string("Failed to create execution context for ") +
+                                     label);
+        module->set_timing_label(label);
+    }
+    return loaded;
+}
+
+bool is_lora_input(const std::string& name) {
+    return name.rfind("lora_a_", 0) == 0 || name.rfind("lora_b_", 0) == 0;
+}
+
+std::vector<TensorInfo> lora_input_contract(const ITrtModule& module) {
+    std::vector<TensorInfo> contract;
+    for (const auto& info : module.input_info()) {
+        if (is_lora_input(info.name))
+            contract.push_back(info);
+    }
+    return contract;
+}
+
 DualProfileModules load_text_modules(const PipelineContext& ctx, TextModuleRuntime& runtime,
                                      const std::shared_ptr<QwenVlCudaStream>& stream) {
     auto loaded =
@@ -139,34 +177,83 @@ std::string bundle_section_text(const BundleFile& bundle, const std::string& sec
 class VLPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+        auto pipelines = create_lanes(ctx, 1);
+        return std::move(pipelines.front());
+    }
+
+    std::vector<std::unique_ptr<IPipeline>> create_pool(const PipelineContext& ctx,
+                                                        std::size_t count) override {
+        return create_lanes(ctx, count);
+    }
+
+  private:
+    std::vector<std::unique_ptr<IPipeline>> create_lanes(const PipelineContext& ctx,
+                                                         std::size_t count) {
+        if (count == 0)
+            throw std::invalid_argument("Qwen-VL pipeline pool size must be positive");
         load_ffi_kernels_from_bundle(ctx.bundle);
 
         const auto tp_config = parse_tensor_parallel_runtime_config(ctx.config_json);
+        if (count > 1 && tp_config.enabled)
+            throw std::runtime_error(
+                "Qwen-VL pipeline pools do not yet support tensor parallelism");
         auto text_runtime = initialize_text_module_runtime(tp_config);
 
-        auto shared_stream = std::make_shared<QwenVlCudaStream>();
-        if (!shared_stream->ok())
-            throw std::runtime_error("VLPlugin: failed to create CUDA stream");
+        std::vector<std::shared_ptr<QwenVlCudaStream>> streams;
+        std::vector<ModuleCreateOptions> lane_options;
+        streams.reserve(count);
+        lane_options.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            auto stream = std::make_shared<QwenVlCudaStream>();
+            if (!stream->ok())
+                throw std::runtime_error("VLPlugin: failed to create CUDA stream");
+            ModuleCreateOptions options;
+            options.stream = stream->get();
+            options.runtime_cache_path = ctx.runtime_cache_path.c_str();
+            options.cuda_graphs = ctx.cuda_graphs;
+            configure_text_module_options(text_runtime, options, tp_config);
+            lane_options.push_back(text_runtime.options);
+            streams.push_back(std::move(stream));
+        }
 
-        ModuleCreateOptions opts;
-        opts.stream = shared_stream->get();
-        opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
-        opts.cuda_graphs = ctx.cuda_graphs;
+        std::vector<std::unique_ptr<ITrtModule>> decode_modules(count);
+        std::vector<std::unique_ptr<ITrtModule>> prefill_modules(count);
+        if (count == 1) {
+            auto loaded = load_text_modules(ctx, text_runtime, streams.front());
+            decode_modules.front() = std::move(loaded.decode);
+            prefill_modules.front() = std::move(loaded.prefill);
+        } else {
+            std::vector<ModuleCreateOptions> profile_options;
+            profile_options.reserve(count * 2);
+            for (const auto& options : lane_options) {
+                auto prefill_options = options;
+                prefill_options.optimization_profile = 0;
+                profile_options.push_back(prefill_options);
+                auto decode_options = options;
+                decode_options.optimization_profile = 1;
+                profile_options.push_back(decode_options);
+            }
+            auto loaded = load_context_modules(
+                ctx.backend, find_section(ctx.bundle, text_runtime.engine_section),
+                text_runtime.engine_section.c_str(), profile_options);
+            for (std::size_t index = 0; index < count; ++index) {
+                prefill_modules[index] = std::move(loaded.modules[index * 2]);
+                decode_modules[index] = std::move(loaded.modules[index * 2 + 1]);
+                prefill_modules[index]->keep_alive(streams[index]);
+                decode_modules[index]->keep_alive(streams[index]);
+                if (text_runtime.tp_group.owner) {
+                    prefill_modules[index]->keep_alive(text_runtime.tp_group.owner);
+                    decode_modules[index]->keep_alive(text_runtime.tp_group.owner);
+                }
+            }
+        }
 
-        configure_text_module_options(text_runtime, opts, tp_config);
-
-        QwenVlKvCacheNames kv_names = build_kv_cache_names(ctx.config);
-
-        auto loaded = load_text_modules(ctx, text_runtime, shared_stream);
-
-        cudaStream_t stream = loaded.decode->stream();
         const std::string cache_k_name =
-            kv_names.cache_k.empty() ? std::string("cache_k_0") : kv_names.cache_k.front();
-        int32_t kv_dim = decoder_cache_row_width(*loaded.decode, cache_k_name, ctx.config);
-        DType cache_dtype = loaded.decode->tensor_dtype(cache_k_name);
-        std::unique_ptr<QwenVlInferenceState> state =
-            std::make_unique<QwenVlKvCache>(ctx.config.num_layers, ctx.config.max_cache_length,
-                                            kv_dim, stream, cache_dtype, std::move(kv_names));
+            ctx.config.io_map.cache_k_pattern.empty()
+                ? std::string("cache_k_0")
+                : qwen_vl_expand_layer_name(ctx.config.io_map.cache_k_pattern, 0);
+        int32_t kv_dim = decoder_cache_row_width(*decode_modules.front(), cache_k_name, ctx.config);
+        DType cache_dtype = decode_modules.front()->tensor_dtype(cache_k_name);
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
@@ -176,7 +263,7 @@ class VLPlugin final : public IPipelinePlugin {
         vlc.id_eos = ctx.config.id_eos;
         vlc.image_token_id = extract_json_int(ctx.config_json, "image_token_id", -1);
         vlc.vision_output_dim = extract_json_int(ctx.config_json, "vision_output_dim", 0);
-        vlc.has_position_input = loaded.decode->has_input("position_id");
+        vlc.has_position_input = decode_modules.front()->has_input("position_id");
         vlc.num_layers = ctx.config.num_layers;
         vlc.prefill_max_length = ctx.config.max_cache_length;
         vlc.present_k_pattern = ctx.config.io_map.present_k_pattern;
@@ -184,9 +271,30 @@ class VLPlugin final : public IPipelinePlugin {
 
         bool has_vision_engine = extract_json_int(ctx.config_json, "has_vision_engine", 0) != 0;
 
-        // Try to load the vision encoder engine from the bundle.
-        std::unique_ptr<TrtModule> vision_module =
-            load_vision_module(ctx.backend, ctx.bundle, opts, shared_stream, has_vision_engine);
+        std::vector<std::unique_ptr<ITrtModule>> vision_modules(count);
+        const auto* vision_plan = find_section(ctx.bundle, "vision_engine_plan");
+        if (count == 1) {
+            vision_modules.front() = load_vision_module(
+                ctx.backend, ctx.bundle, lane_options.front(), streams.front(), has_vision_engine);
+        } else if (vision_plan && !vision_plan->empty()) {
+            try {
+                auto loaded = load_context_modules(ctx.backend, vision_plan, "vision_engine_plan",
+                                                   lane_options);
+                vision_modules = std::move(loaded.modules);
+                for (std::size_t index = 0; index < count; ++index)
+                    vision_modules[index]->keep_alive(streams[index]);
+                std::cerr << "[trtmc] Vision encoder loaded" << std::endl;
+            } catch (...) {
+                if (has_vision_engine) {
+                    std::cerr << "[trtmc] WARNING: Bundle declares vision engine but "
+                                 "deserialization failed"
+                              << std::endl;
+                }
+            }
+        } else if (has_vision_engine) {
+            std::cerr << "[trtmc] WARNING: Bundle declares vision engine but the plan is missing"
+                      << std::endl;
+        }
 
         // Build VL preprocessing config from bundle's config.json +
         // preprocessor_config.json sections.
@@ -195,10 +303,21 @@ class VLPlugin final : public IPipelinePlugin {
             bundle_section_text(ctx.bundle, "preprocessor_config.json");
         auto vl_preprocess = qwen_vl_parse_preprocess_config(config_text, preproc_text);
 
-        return std::make_unique<QwenVlPipeline>(std::move(loaded.decode), std::move(vision_module),
-                                                std::move(state), vlc, vl_preprocess, stream,
-                                                std::move(tokenizer), ctx.bundle.info.model_id,
-                                                nullptr, std::move(loaded.prefill));
+        auto adapter_cache = std::make_shared<qwen_vl::LoraAdapterCache>(
+            lora_input_contract(*decode_modules.front()), streams.front()->get());
+        std::vector<std::unique_ptr<IPipeline>> pipelines;
+        pipelines.reserve(count);
+        for (std::size_t index = 0; index < count; ++index) {
+            auto state = std::make_unique<QwenVlKvCache>(
+                ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, streams[index]->get(),
+                cache_dtype, build_kv_cache_names(ctx.config));
+            pipelines.push_back(std::make_unique<QwenVlPipeline>(
+                std::move(decode_modules[index]), std::move(vision_modules[index]),
+                std::move(state), vlc, vl_preprocess, streams[index]->get(), tokenizer,
+                ctx.bundle.info.model_id, nullptr, std::move(prefill_modules[index]),
+                adapter_cache));
+        }
+        return pipelines;
     }
 };
 

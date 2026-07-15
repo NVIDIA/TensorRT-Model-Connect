@@ -30,10 +30,14 @@
 // =============================================================================
 
 #include "trtmc/pipeline.h"
+#include "trtmc/runtime/pipeline_pool.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <iostream>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -66,6 +70,32 @@ class RecordingTranscriptionPipeline final : public trtmc::IPipeline {
     }
 
     std::vector<trtmc::TranscriptionConfig> observed;
+};
+
+class PoolTestPipeline final : public trtmc::IPipeline {
+  public:
+    explicit PoolTestPipeline(std::string id) : id_(std::move(id)) {}
+
+    const char* model_id() const override { return id_.c_str(); }
+    const char* pipeline_type() const override { return "PoolTestPipeline"; }
+    bool supports_lora_adapters() const override { return true; }
+
+    void load_lora_adapter(const std::string& adapter_id, const std::string&) override {
+        adapters_.insert(adapter_id);
+    }
+
+    void unload_lora_adapter(const std::string& adapter_id) override {
+        if (adapters_.erase(adapter_id) == 0)
+            throw std::invalid_argument("unknown adapter");
+    }
+
+    std::vector<std::string> loaded_lora_adapters() const override {
+        return {adapters_.begin(), adapters_.end()};
+    }
+
+  private:
+    std::string id_;
+    std::set<std::string> adapters_;
 };
 
 static void test_null_input_returns_null() {
@@ -269,6 +299,46 @@ static void test_transcription_batch_preserves_per_request_config() {
           "transcription batch preserves per-request config");
 }
 
+static void test_pipeline_pool_leases_and_adapter_maintenance() {
+    std::vector<std::unique_ptr<trtmc::IPipeline>> pipelines;
+    pipelines.push_back(std::make_unique<PoolTestPipeline>("lane-0"));
+    pipelines.push_back(std::make_unique<PoolTestPipeline>("lane-1"));
+    trtmc::PipelinePool pool(std::move(pipelines));
+
+    check(pool.size() == 2 && pool.available() == 2, "pipeline pool initial capacity");
+    auto first = pool.acquire();
+    auto second = pool.acquire();
+    check(pool.available() == 0, "pipeline pool leases are exclusive");
+    check(std::string(first->model_id()) != std::string(second->model_id()),
+          "pipeline pool leases distinct lanes");
+    check(!pool.try_acquire().has_value(), "pipeline pool reports exhaustion");
+
+    const std::string released_lane = first->model_id();
+    auto waiter = std::async(std::launch::async, [&pool] {
+        auto lease = pool.acquire();
+        return std::string(lease->model_id());
+    });
+    check(waiter.wait_for(std::chrono::milliseconds(20)) == std::future_status::timeout,
+          "pipeline pool waits when all lanes are busy");
+    first = {};
+    check(waiter.get() == released_lane, "pipeline pool reuses released lane");
+    second = {};
+
+    pool.load_lora_adapter("adapter-a", "/synthetic/adapter");
+    check(pool.supports_lora_adapters(), "pipeline pool reports shared adapter capability");
+    check(pool.loaded_lora_adapters() == std::vector<std::string>{"adapter-a"},
+          "pipeline pool registers adapter across lanes");
+    auto lane_a = pool.acquire();
+    auto lane_b = pool.acquire();
+    check(lane_a->loaded_lora_adapters() == std::vector<std::string>{"adapter-a"} &&
+              lane_b->loaded_lora_adapters() == std::vector<std::string>{"adapter-a"},
+          "pipeline pool keeps lane adapter registries consistent");
+    lane_a = {};
+    lane_b = {};
+    pool.unload_lora_adapter("adapter-a");
+    check(pool.loaded_lora_adapters().empty(), "pipeline pool unloads adapter across lanes");
+}
+
 int main() {
     test_null_input_returns_null();
     test_invalid_path_returns_null();
@@ -278,6 +348,7 @@ int main() {
     test_delete_null_safe();
     test_ipipeline_default_virtuals();
     test_transcription_batch_preserves_per_request_config();
+    test_pipeline_pool_leases_and_adapter_maintenance();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

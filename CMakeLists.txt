@@ -175,6 +175,7 @@ add_library(trtmc_core SHARED
   src/runtime/backend/trt_version.cpp
   src/runtime/core/distributed_runtime.cpp
   src/runtime/core/device_tensor.cpp
+  src/runtime/core/pipeline_pool.cpp
   src/runtime/core/stb_impl.cpp
   src/tokenizer/vocab_tokenizer.cpp
   src/tokenizer/ipa_tokenizer.cpp
