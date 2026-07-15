@@ -14,6 +14,8 @@
 
 namespace trtmc {
 
+inline constexpr float CanaryDefaultBeamLengthPenalty = 1.0F;
+
 struct CanaryDecodeLoopResult {
     std::vector<int32_t> output_ids;
     bool prefill_failed{false};

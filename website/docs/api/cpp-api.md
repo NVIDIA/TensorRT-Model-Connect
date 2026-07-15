@@ -86,7 +86,6 @@ trtmc::TranscriptionConfig cfg;
 cfg.input_sample_rate = 16000;
 cfg.max_output_tokens = 80;
 cfg.beam_size = 2;
-cfg.beam_length_penalty = 1.0F;
 cfg.source_language = "en";
 cfg.target_language = "fr";
 cfg.task = trtmc::TranscriptionTask::kTranslate;
@@ -101,10 +100,6 @@ for (const auto& segment : result.segments) {
               << "\t" << segment.text << "\n";
 }
 ```
-
-`beam_length_penalty` defaults to `1.0F`, which divides cumulative log
-probability by decoded length. It is ignored for greedy decoding. The Canary
-CLI uses this default automatically when `--beam-size` is greater than `1`.
 
 `transcribe_batch(const std::vector<TranscriptionRequest>&)` preserves each
 request's samples and config. The default implementation is sequential and

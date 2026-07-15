@@ -69,11 +69,10 @@ so each surviving hypothesis advances by one decoder call instead of replaying
 its full prefix. Beam search still performs more decoder work than greedy;
 start with beam size 2 and validate quality and latency on representative audio.
 
-Beam scores use cumulative token log probability divided by decoded length.
-This fixed CLI behavior corresponds to the C++ API's default
-`beam_length_penalty` value of `1.0` and avoids an inherent preference for
-short hypotheses. Programmatic callers can set the field to `0` to rank by
-unnormalized cumulative log probability.
+Canary uses a fixed beam length penalty of `1.0`: cumulative token log
+probability is divided by decoded length. This default ranks by average token
+log probability and avoids an inherent preference for short hypotheses. It is
+applied automatically by both the CLI and C++ API.
 
 Use `--no-punctuation` to request the checkpoint's no-punctuation prompt and
 remove remaining punctuation from decoded text. `--punctuation` is the default.
@@ -143,7 +142,6 @@ english.config.target_language = "en";
 trtmc::TranscriptionRequest translation = english;
 translation.audio_samples = second_pcm;
 translation.config.beam_size = 2;
-translation.config.beam_length_penalty = 1.0F;
 translation.config.target_language = "fr";
 translation.config.task = trtmc::TranscriptionTask::kTranslate;
 translation.config.timestamps = true;
@@ -151,10 +149,6 @@ translation.config.timestamps = true;
 std::vector<trtmc::TextResult> results =
     pipeline->transcribe_batch({english, translation});
 ```
-
-`TranscriptionConfig::beam_length_penalty` defaults to `1.0F`; assigning it in
-the example makes the beam scoring policy explicit. It is ignored when
-`beam_size` is `1`.
 
 The default batch implementation executes requests sequentially and preserves
 their order and individual configs. The legacy four-argument `transcribe`

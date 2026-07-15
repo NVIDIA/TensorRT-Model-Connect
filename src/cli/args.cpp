@@ -612,7 +612,8 @@ CliArgs parse_args(int argc, char** argv) {
         }
         if (arg == "--task" && need_value(arg)) {
             args.transcription_task = argv[++i];
-            if (args.transcription_task != "transcribe" && args.transcription_task != "translate") {
+            if (args.transcription_task != "transcribe" &&
+                args.transcription_task != "translate") {
                 args.parse_error = true;
                 args.error_message = "--task expects transcribe or translate";
                 return args;

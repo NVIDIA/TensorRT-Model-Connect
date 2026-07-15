@@ -257,7 +257,6 @@ static void test_transcription_batch_preserves_per_request_config() {
     trtmc::TranscriptionRequest second;
     second.audio_samples = {3.0F};
     second.config.beam_size = 4;
-    second.config.beam_length_penalty = 0.7F;
     second.config.source_language = "fr";
 
     const auto results = pipeline.transcribe_batch({first, second});
@@ -268,11 +267,6 @@ static void test_transcription_batch_preserves_per_request_config() {
     check(pipeline.observed.size() == 2 && pipeline.observed[0].source_language == "en" &&
               pipeline.observed[1].source_language == "fr",
           "transcription batch preserves per-request config");
-    check(pipeline.observed.size() == 2 && pipeline.observed[0].beam_length_penalty == 1.0F,
-          "transcription config applies default beam length penalty");
-    check(pipeline.observed.size() == 2 && pipeline.observed[1].beam_length_penalty > 0.69F &&
-              pipeline.observed[1].beam_length_penalty < 0.71F,
-          "transcription batch preserves beam length penalty");
 }
 
 int main() {

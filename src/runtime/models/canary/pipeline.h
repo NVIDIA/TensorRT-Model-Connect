@@ -48,17 +48,14 @@ class CanaryPipeline final : public IPipeline {
     TextResult transcribe_segment(const float* audio_data, int32_t num_samples,
                                   int32_t input_sample_rate,
                                   const std::vector<int32_t>& initial_tokens,
-                                  int32_t max_output_tokens, int32_t beam_size,
-                                  float beam_length_penalty);
+                                  int32_t max_output_tokens, int32_t beam_size);
     void run_encoder(const float* mel_data, int32_t mel_bins, int32_t mel_length,
                      int32_t valid_mel_frames);
     void setup_cross_attention(int32_t actual_enc_seq_len);
     std::vector<int32_t> run_decoder(const std::vector<int32_t>& initial_tokens,
-                                     int32_t max_new_tokens, int32_t beam_size,
-                                     float beam_length_penalty);
+                                     int32_t max_new_tokens, int32_t beam_size);
     std::vector<int32_t> run_beam_decoder(const std::vector<int32_t>& initial_tokens,
-                                          int32_t max_new_tokens, int32_t beam_size,
-                                          float beam_length_penalty);
+                                          int32_t max_new_tokens, int32_t beam_size);
     void run_decoder_step(int32_t token_id, std::vector<float>& logits);
     void ensure_beam_state_capacity(int32_t beam_size);
 

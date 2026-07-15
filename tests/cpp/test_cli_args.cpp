@@ -185,27 +185,11 @@ void test_audio_and_solve_flags() {
 }
 
 void test_canary_transcription_flags_and_batch() {
-    auto args = parse({"trtmc",
-                       "transcribe",
-                       "bundle.trtfb",
-                       "--audio",
-                       "one.wav",
-                       "--audio",
-                       "two.wav",
-                       "--beam-size",
-                       "4",
-                       "--source-language",
-                       "en",
-                       "--target-language",
-                       "fr",
-                       "--task",
-                       "translate",
-                       "--no-punctuation",
-                       "--timestamps",
-                       "--max-input-seconds",
-                       "45.5",
-                       "--segment-length-seconds",
-                       "20"});
+    auto args = parse({"trtmc", "transcribe", "bundle.trtfb", "--audio", "one.wav",
+                       "--audio", "two.wav", "--beam-size", "4", "--source-language", "en",
+                       "--target-language", "fr", "--task", "translate", "--no-punctuation",
+                       "--timestamps", "--max-input-seconds", "45.5",
+                       "--segment-length-seconds", "20"});
     check(!args.parse_error, "Canary transcription controls parse");
     check(args.audio_inputs == std::vector<std::string>({"one.wav", "two.wav"}),
           "Canary repeated audio inputs form batch");
@@ -225,10 +209,10 @@ void test_canary_transcription_flags_and_batch() {
     check(parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--task", "other"})
               .parse_error,
           "Canary rejects unknown task");
-    check(
-        parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--max-input-seconds", "nan"})
-            .parse_error,
-        "Canary rejects non-finite duration");
+    check(parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav",
+                 "--max-input-seconds", "nan"})
+              .parse_error,
+          "Canary rejects non-finite duration");
 }
 
 void test_unknown_command_fails() {

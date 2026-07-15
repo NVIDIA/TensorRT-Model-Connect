@@ -192,7 +192,9 @@ void test_beam_search_reports_branch_advance_failure() {
     check(result.error == "advance-fail", "Canary beam search forwards branch error");
 }
 
-void test_beam_search_applies_configurable_length_normalization() {
+void test_beam_search_applies_default_length_normalization() {
+    check(trtmc::CanaryDefaultBeamLengthPenalty == 1.0F,
+          "Canary beam search keeps average-log-probability scoring as its default");
     auto decode = [](float length_penalty) {
         return trtmc::run_canary_beam_search(
             {9}, 2, 1, 2, length_penalty,
@@ -207,7 +209,7 @@ void test_beam_search_applies_configurable_length_normalization() {
     };
 
     const auto raw = decode(0.0F);
-    const auto normalized = decode(1.0F);
+    const auto normalized = decode(trtmc::CanaryDefaultBeamLengthPenalty);
     check(raw.output_ids == std::vector<int32_t>({1}),
           "Canary raw beam score favors the shorter sequence");
     check(normalized.output_ids == std::vector<int32_t>({0, 1}),
@@ -224,7 +226,7 @@ int main() {
     test_beam_search_recovers_better_sequence_than_greedy_prefix();
     test_beam_search_reports_prefill_failure();
     test_beam_search_reports_branch_advance_failure();
-    test_beam_search_applies_configurable_length_normalization();
+    test_beam_search_applies_default_length_normalization();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " canary decode policy test(s) failed\n";

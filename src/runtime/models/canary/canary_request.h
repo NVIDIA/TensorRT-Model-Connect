@@ -62,9 +62,6 @@ inline void validate_canary_request_options(const TranscriptionConfig& request) 
         throw std::invalid_argument("Canary beam_size must be in [1, " +
                                     std::to_string(CanaryMaxBeamSize) + "]");
     }
-    if (!std::isfinite(request.beam_length_penalty) || request.beam_length_penalty < 0.0F) {
-        throw std::invalid_argument("Canary beam_length_penalty must be a finite value >= 0");
-    }
     if (request.input_sample_rate < 0) {
         throw std::invalid_argument("Canary input_sample_rate must be 0 or a positive Hz value");
     }
