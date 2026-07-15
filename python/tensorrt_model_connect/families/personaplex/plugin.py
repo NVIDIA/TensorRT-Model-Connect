@@ -71,6 +71,7 @@ from .checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
+from .utils import BuilderContextFactory, with_builder_context
 from ...build_timing import timed_trt_compile
 from ...parallel_config import (
     normalize_parallel_config,
@@ -1102,12 +1103,14 @@ def _build_mimi_rope_tables(seq_len, head_dim, base=10000.0):
     return cos_full, sin_full
 
 
+@with_builder_context(workspace_bytes=1 << 30, explicit_batch=True)
 def _build_mimi_encoder_engine(
     weights: WeightDict,
     *,
     precision: str = "fp32",
     verbose: bool = False,
     model_dir: str | Path | None = None,
+    _builder_context_factory: BuilderContextFactory,
 ) -> bytes | None:
     """Build Mimi encoder as a native TRT engine.
 
@@ -1152,16 +1155,10 @@ def _build_mimi_encoder_engine(
     # this produces the same 53 frames as HF for 100800 input samples.
     num_input_samples = 100800
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(
-        trt_compat.network_creation_flags(
-            explicit_batch=True,
-            strongly_typed=True,
-        )
-    )
-    config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    builder_context = _builder_context_factory()
+    builder = builder_context.builder
+    network = builder_context.network
+    config = builder_context.config
 
     # Input: [1, 1, num_input_samples]
     audio_input = network.add_input(
@@ -1445,6 +1442,7 @@ def _build_mimi_encoder_engine(
     return plan_bytes
 
 
+@with_builder_context(workspace_bytes=1 << 30, explicit_batch=True)
 def _build_mimi_decoder_engine(
     weights: WeightDict,
     *,
@@ -1453,6 +1451,7 @@ def _build_mimi_decoder_engine(
     num_input_codebooks: int = 0,
     num_frames: int = 53,
     model_dir: str | Path | None = None,
+    _builder_context_factory: BuilderContextFactory,
 ) -> bytes | None:
     """Build Mimi decoder as a native TRT engine.
 
@@ -1500,16 +1499,10 @@ def _build_mimi_decoder_engine(
     # Runtime can decode up to this many frames per invocation.
     num_frames = int(max(1, num_frames))
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(
-        trt_compat.network_creation_flags(
-            explicit_batch=True,
-            strongly_typed=True,
-        )
-    )
-    config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    builder_context = _builder_context_factory()
+    builder = builder_context.builder
+    network = builder_context.network
+    config = builder_context.config
 
     # Input: [num_codebooks, num_frames] as float32 (indices cast from int32)
     # Use num_input_codebooks if specified (e.g., 16 for PersonaPlex), else full 32

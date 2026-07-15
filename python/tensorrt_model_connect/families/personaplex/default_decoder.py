@@ -28,7 +28,11 @@ from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
 from .default_dual_profile_decoder import build_dual_profile_decoder_engine
-from .utils import const_in_work_dtype, create_builder_context
+from .utils import (
+    BuilderContextFactory,
+    const_in_work_dtype,
+    with_builder_context,
+)
 
 trt = trt_compat.get_trt()
 
@@ -50,6 +54,7 @@ def _mark_debug_output(
     network.mark_output(out)
 
 
+@with_builder_context(workspace_bytes=1 << 30)
 def build_standard_decoder_engine(
     config: ModelConfig,
     weights: WeightDict,
@@ -70,6 +75,7 @@ def build_standard_decoder_engine(
     debug_layer_outputs: bool = False,
     hidden_state_output: bool = False,
     fp32_layers: tuple[int, ...] = (),
+    _builder_context_factory: BuilderContextFactory,
 ) -> bytes:
     """Build a TRT engine plan (serialized bytes) for a standard decoder.
 
@@ -189,10 +195,7 @@ def build_standard_decoder_engine(
     else:
         dynamic_kv_profile_rows = []
 
-    builder_context = create_builder_context(
-        verbose=verbose,
-        workspace_bytes=1 << 30,
-    )
+    builder_context = _builder_context_factory()
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config

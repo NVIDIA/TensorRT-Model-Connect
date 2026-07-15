@@ -52,9 +52,10 @@ from tensorrt_model_connect import trt_compat
 from . import graph_ops
 from . import graph_blocks
 from .utils import (
+    BuilderContextFactory,
     const_in_work_dtype as _const_in_work_dtype,
-    create_builder_context,
     norm_multi as _norm_multi,
+    with_builder_context,
 )
 from ...parallel_config import (
     add_all_reduce_sum,
@@ -155,6 +156,7 @@ def _supports_config(config: "ModelConfig", weights: "WeightDict") -> None:
 # ---------------------------------------------------------------------------
 
 
+@with_builder_context(workspace_bytes=1 << 30)
 def build_dual_profile_tp_decoder_engine(
     config: "ModelConfig",
     weights: "WeightDict",
@@ -175,6 +177,7 @@ def build_dual_profile_tp_decoder_engine(
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
     parallel_config=None,
+    _builder_context_factory: BuilderContextFactory,
 ) -> bytes:
     """Build a rank-local tensor-parallel engine with prefill/decode profiles.
 
@@ -237,10 +240,7 @@ def build_dual_profile_tp_decoder_engine(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
 
-    builder_context = create_builder_context(
-        verbose=verbose,
-        workspace_bytes=1 << 30,
-    )
+    builder_context = _builder_context_factory()
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config

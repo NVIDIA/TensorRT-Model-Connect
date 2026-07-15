@@ -6,6 +6,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import wraps
+from inspect import signature
+from traceback import clear_frames
+from typing import Callable
 
 import numpy as np
 from tensorrt_model_connect import trt_compat
@@ -16,14 +20,34 @@ from . import graph_ops
 trt = trt_compat.get_trt()
 
 
-@dataclass(frozen=True)
+@dataclass
 class BuilderContext:
-    """TensorRT objects shared by engine builders."""
+    """TensorRT objects shared by engine builders.
 
-    logger: trt.Logger
-    builder: trt.Builder
-    network: trt.INetworkDefinition
-    config: trt.IBuilderConfig
+    TensorRT requires child objects to be released before their factory and
+    requires the logger to outlive every object created through it.  Keeping
+    the release order here avoids relying on Python frame-local destruction
+    order, which does not satisfy that contract.
+    """
+
+    logger: trt.Logger | None
+    builder: trt.Builder | None
+    network: trt.INetworkDefinition | None
+    config: trt.IBuilderConfig | None
+    _closed: bool = False
+
+    def close(self) -> None:
+        """Release TensorRT objects once, in child-to-parent order."""
+        if self._closed:
+            return
+        self._closed = True
+        self.config = None
+        self.network = None
+        self.builder = None
+        self.logger = None
+
+
+BuilderContextFactory = Callable[[], BuilderContext]
 
 
 def create_builder_context(
@@ -31,25 +55,95 @@ def create_builder_context(
     verbose: bool,
     workspace_bytes: int,
     strongly_typed: bool = True,
+    explicit_batch: bool = False,
     disable_tf32: bool = False,
 ) -> BuilderContext:
     """Create a TensorRT builder, network, and config with common defaults."""
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    flags = 0
-    if strongly_typed:
-        flags |= 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
-    network = builder.create_network(flags)
-    config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
-    if disable_tf32:
-        config.clear_flag(trt.BuilderFlag.TF32)
-    return BuilderContext(
-        logger=logger,
-        builder=builder,
-        network=network,
-        config=config,
+    context = BuilderContext(
+        logger=trt.Logger(
+            trt.Logger.VERBOSE if verbose else trt.Logger.WARNING),
+        builder=None,
+        network=None,
+        config=None,
     )
+    try:
+        context.builder = trt.Builder(context.logger)
+        flags = trt_compat.network_creation_flags(
+            strongly_typed=strongly_typed,
+            explicit_batch=explicit_batch,
+        )
+        context.network = context.builder.create_network(flags)
+        context.config = context.builder.create_builder_config()
+        context.config.set_memory_pool_limit(
+            trt.MemoryPoolType.WORKSPACE, workspace_bytes)
+        if disable_tf32:
+            context.config.clear_flag(trt.BuilderFlag.TF32)
+        return context
+    except BaseException:
+        context.close()
+        raise
+
+
+def with_builder_context(
+    *,
+    workspace_bytes: int,
+    strongly_typed: bool = True,
+    explicit_batch: bool = False,
+    disable_tf32: bool = False,
+):
+    """Give a builder function a lazy context with guaranteed cleanup.
+
+    The context is created only when the wrapped function asks for it.  This
+    matters for the standard decoder, which can dispatch to another builder
+    before it needs its own TensorRT objects.  The wrapped function's frame is
+    fully unwound before ``close`` runs, so local network tensors and aliases
+    cannot outlive the ordered context teardown.
+    """
+
+    def decorate(function):
+        public_signature = signature(function).replace(parameters=[
+            parameter
+            for name, parameter in signature(function).parameters.items()
+            if name != "_builder_context_factory"
+        ])
+
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            context: BuilderContext | None = None
+
+            def context_factory() -> BuilderContext:
+                nonlocal context
+                if context is None:
+                    context = create_builder_context(
+                        verbose=bool(kwargs.get("verbose", False)),
+                        workspace_bytes=workspace_bytes,
+                        strongly_typed=strongly_typed,
+                        explicit_batch=explicit_batch,
+                        disable_tf32=disable_tf32,
+                    )
+                return context
+
+            try:
+                return function(
+                    *args,
+                    _builder_context_factory=context_factory,
+                    **kwargs,
+                )
+            except BaseException as error:
+                # A live traceback retains the failed builder frame and its
+                # local TensorRT aliases.  Clear finished frames before the
+                # context teardown so the logger still outlives every child.
+                clear_frames(error.__traceback__)
+                raise
+            finally:
+                if context is not None:
+                    context.close()
+
+        wrapped._trtmc_ordered_builder_context = True
+        wrapped.__signature__ = public_signature
+        return wrapped
+
+    return decorate
 
 
 def const_in_work_dtype(

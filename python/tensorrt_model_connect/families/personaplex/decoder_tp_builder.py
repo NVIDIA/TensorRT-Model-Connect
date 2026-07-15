@@ -19,6 +19,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_blocks
 from . import graph_ops
+from .utils import BuilderContextFactory, with_builder_context
 from ...parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
@@ -63,6 +64,7 @@ def _apply_norm(
         dtype=dtype, eps=eps)
 
 
+@with_builder_context(workspace_bytes=1 << 30)
 def build_personaplex_tp_decoder_engine(
     config: "ModelConfig",
     weights: "WeightDict",
@@ -83,6 +85,7 @@ def build_personaplex_tp_decoder_engine(
     debug_layer_outputs: bool = False,
     hidden_state_output: bool = True,
     parallel_config=None,
+    _builder_context_factory: BuilderContextFactory,
 ) -> bytes:
     """Build one rank-local PersonaPlex temporal decoder engine."""
     if quant_ctx is not None:
@@ -111,11 +114,10 @@ def build_personaplex_tp_decoder_engine(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    builder_context = _builder_context_factory()
+    builder = builder_context.builder
+    network = builder_context.network
+    trt_config = builder_context.config
 
     if precision == "fp16":
         work_np_dtype = np.float16
