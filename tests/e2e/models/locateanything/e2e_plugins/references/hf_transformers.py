@@ -891,7 +891,11 @@ class HfTransformersReference:
             from tensorrt_model_connect.families.locateanything.vl_debug_runner import (
                 preprocess_image_inputs_for_trt,
             )
-            from transformers import AutoConfig, AutoModel, AutoTokenizer
+            from transformers import AutoConfig, AutoModel, AutoTokenizer, PretrainedConfig
+
+            if torch.cuda.is_available():
+                # Avoid Thor PyTorch/cuDNN sublibrary mismatches in HF reference conv2d.
+                torch.backends.cudnn.enabled = False
 
             hf_id = {hf_id!r}
             model_ref = {model_ref!r}
@@ -963,19 +967,39 @@ class HfTransformersReference:
                     _compat_get_expanded_tied_weights_keys
                 )
 
+            def _load_locateanything_raw_config(model_ref):
+                raw_config_path = Path(model_ref) / "config.json"
+                if raw_config_path.is_file():
+                    return json.loads(raw_config_path.read_text(encoding="utf-8"))
+                try:
+                    raw_config, _ = PretrainedConfig.get_config_dict(
+                        model_ref, trust_remote_code=trust_remote_code)
+                except Exception:
+                    return {{}}
+                return raw_config if isinstance(raw_config, dict) else {{}}
+
             def _load_locateanything_config(model_ref):
                 config = AutoConfig.from_pretrained(
                     model_ref, trust_remote_code=trust_remote_code)
-                raw_config_path = Path(model_ref) / "config.json"
-                if raw_config_path.is_file() and hasattr(config, "text_config"):
-                    raw_config = json.loads(raw_config_path.read_text(encoding="utf-8"))
+                raw_config = _load_locateanything_raw_config(model_ref)
+                if hasattr(config, "text_config") and not hasattr(
+                    config.text_config, "rope_theta"
+                ):
                     raw_text_config = raw_config.get("text_config", {{}})
-                    if not hasattr(config.text_config, "rope_theta"):
-                        rope_theta = raw_text_config.get("rope_theta")
-                        if rope_theta is None:
-                            rope_parameters = raw_text_config.get("rope_parameters", {{}})
-                            rope_theta = rope_parameters.get("rope_theta", 10000.0)
-                        config.text_config.rope_theta = float(rope_theta)
+                    if not isinstance(raw_text_config, dict):
+                        raw_text_config = {{}}
+                    rope_theta = raw_text_config.get("rope_theta")
+                    if rope_theta is None:
+                        rope_parameters = raw_text_config.get("rope_parameters", {{}})
+                        if isinstance(rope_parameters, dict):
+                            rope_theta = rope_parameters.get("rope_theta")
+                    if rope_theta is None:
+                        rope_scaling = raw_text_config.get("rope_scaling", {{}})
+                        if isinstance(rope_scaling, dict):
+                            rope_theta = rope_scaling.get("rope_theta")
+                    if rope_theta is None:
+                        rope_theta = raw_config.get("rope_theta", 10000.0)
+                    config.text_config.rope_theta = float(rope_theta)
                 return config
 
             def _load_locateanything_tokenizer(model_ref):

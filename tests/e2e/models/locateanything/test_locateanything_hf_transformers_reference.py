@@ -57,14 +57,20 @@ def test_vl_reference_uses_manual_processor(monkeypatch, tmp_path) -> None:
     assert cmd[:2] == ["/ref/python", "-c"]
     script = cmd[2]
     assert "AutoProcessor" not in script
-    assert "from transformers import AutoConfig, AutoModel, AutoTokenizer" in script
+    assert (
+        "from transformers import AutoConfig, AutoModel, AutoTokenizer, "
+        "PretrainedConfig"
+    ) in script
     assert "def _install_tied_weight_compat" in script
     assert "all_tied_weights_keys" in script
     assert "DynamicCache.to_legacy_cache" in script
     assert "DynamicCache.from_legacy_cache" in script
     assert "get_expanded_tied_weights_keys" in script
     assert "model.embed_tokens.weight" in script
+    assert "torch.backends.cudnn.enabled = False" in script
     assert "def _load_locateanything_config" in script
+    assert "def _load_locateanything_raw_config" in script
+    assert "PretrainedConfig.get_config_dict" in script
     assert "config.text_config.rope_theta" in script
     assert "AutoModel.from_pretrained" in script
     assert "config=config" in script
