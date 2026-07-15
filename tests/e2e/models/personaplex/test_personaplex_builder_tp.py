@@ -34,6 +34,11 @@ _MLP = 64
 _VOCAB = 32
 
 
+def test_personaplex_mimi_loader_requires_checkpoint_owned_weights(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError, match="checkpoint-owned Mimi codec"):
+        personaplex_plugin._load_mimi_weights(tmp_path)
+
+
 def _personaplex_tp_builder_module():
     return pytest.importorskip(
         "tensorrt_model_connect.families.personaplex.decoder_tp_builder",

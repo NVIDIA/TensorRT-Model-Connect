@@ -49,6 +49,7 @@ def test_manifest_exposes_model_owned_reference_tokens() -> None:
         model_dir / "data" / "personaplex_recording_official_tokens_greedy.npy"
     )
     assert Path(case.inputs["speech_reference_tokens"]).is_file()
+    assert case.inputs["speech_test_max_frames"] == 100
 
 
 def test_reference_tokens_are_decoded_to_case_local_wav(

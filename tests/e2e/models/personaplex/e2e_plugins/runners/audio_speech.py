@@ -202,7 +202,7 @@ class SpeechToSpeechRunner:
             cmd = [
                 binary, "speak", bundle_path,
                 "--audio-in", audio_input,
-                "--tail-frames", str(max_frames),
+                "--max-new-tokens", str(max_frames),
             ]
             if distributed_runtime:
                 wrapper = (

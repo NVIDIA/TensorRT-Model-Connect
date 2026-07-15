@@ -22,6 +22,9 @@ void infer_speech_vocab_sizes(SpeechConfig& sc, const std::string& json, const B
 
 BaseConfig make_depth_engine_config(const std::string& json, const BaseConfig& base);
 
+std::vector<const std::vector<char>*>
+find_depth_engine_plans_in_codebook_order(const BundleFile& bundle);
+
 std::vector<std::unique_ptr<TrtModule>> load_depth_engines(IBackend* backend,
                                                            const BundleFile& bundle,
                                                            const ModuleCreateOptions& options = {});

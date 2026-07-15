@@ -16,6 +16,7 @@ from tests.e2e.models.personaplex.e2e_plugins.contract import (
 
 
 _MANIFEST_DIR = Path(__file__).parent / "manifests"
+_THRESHOLD_PATH = Path(__file__).parent / "thresholds" / "personaplex-7b.json"
 
 
 @pytest.mark.parametrize(
@@ -33,12 +34,10 @@ def test_personaplex_builds_require_an_exclusive_gpu(manifest_name: str) -> None
 
 
 def _thresholds() -> ThresholdProfile:
+    threshold_data = json.loads(_THRESHOLD_PATH.read_text(encoding="utf-8"))
     return ThresholdProfile(
         task_strategy="speech_to_speech",
-        metrics={
-            "contract_token_match": 0.5,
-            "contract_min_rms": 0.001,
-        },
+        metrics=threshold_data["threshold_overrides"],
     )
 
 
@@ -69,12 +68,65 @@ def test_contract_compares_runner_tokens_with_official_reference_tokens() -> Non
 
     assert result.passed
     assert result.metrics["token_match"].value == 1.0
+    assert result.metrics["token_match"].threshold == 0.8
+    assert result.metrics["depth_token_match_rate"].passed
+    assert result.metrics["depth_token_match_rate"].threshold == 0.7
+    assert result.metrics["audio_token_match_rate"].passed
+    assert result.metrics["audio_token_match_rate"].threshold == 0.7
+    assert result.metrics["frame_exact_match_rate"].threshold == 0.7
+    assert result.metrics["rms"].threshold == 0.001
 
 
-def test_contract_preserves_original_half_token_match_threshold() -> None:
-    reference = np.arange(24, dtype=np.int32).reshape(3, 8)
+def test_contract_rejects_nightly_token_match_below_declared_minimum() -> None:
+    reference = np.zeros((25, 8), dtype=np.int32)
     actual = reference.copy()
-    actual.reshape(-1)[14:] = -1
+    actual.reshape(-1)[149:] = 1
+    thresholds = _thresholds()
+    thresholds.metrics["contract_token_match"] = 0.5
+    result = PersonaPlexSpeechToSpeechPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            data={
+                "wav_path": "/tmp/output.wav",
+                "rms": 0.01,
+                "output_tokens": actual,
+            },
+        ),
+        StageOutput(
+            stage_name="full_generation",
+            data={"reference_tokens": reference},
+        ),
+        _case(),
+        thresholds,
+    )
+
+    assert not result.passed
+    assert result.metrics["token_match"].value == pytest.approx(0.745)
+    assert result.metrics["token_match"].threshold == 0.8
+    assert not result.metrics["token_match"].passed
+    assert result.metrics["depth_token_match_rate"].passed
+    assert result.metrics["audio_token_match_rate"].passed
+    assert result.metrics["frame_exact_match_rate"].passed
+
+
+def test_contract_rejects_missing_reference_tokens() -> None:
+    result = PersonaPlexSpeechToSpeechPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            data={"wav_path": "/tmp/output.wav", "rms": 0.01},
+        ),
+        StageOutput(stage_name="full_generation", data={}),
+        _case(),
+        _thresholds(),
+    )
+
+    assert not result.passed
+    assert not result.metrics["reference_tokens_available"].passed
+
+
+def test_contract_rejects_extra_runtime_frames() -> None:
+    reference = np.arange(24, dtype=np.int32).reshape(3, 8)
+    actual = np.concatenate([reference, reference[-1:]], axis=0)
     result = PersonaPlexSpeechToSpeechPlugin().verify(
         StageOutput(
             stage_name="full_generation",
@@ -92,21 +144,6 @@ def test_contract_preserves_original_half_token_match_threshold() -> None:
         _thresholds(),
     )
 
-    assert result.passed
-    assert result.metrics["token_match"].value == 14 / 24
-    assert result.metrics["token_match"].threshold == 0.5
-
-
-def test_contract_rejects_missing_reference_tokens() -> None:
-    result = PersonaPlexSpeechToSpeechPlugin().verify(
-        StageOutput(
-            stage_name="full_generation",
-            data={"wav_path": "/tmp/output.wav", "rms": 0.01},
-        ),
-        StageOutput(stage_name="full_generation", data={}),
-        _case(),
-        _thresholds(),
-    )
-
     assert not result.passed
-    assert not result.metrics["reference_tokens_available"].passed
+    assert not result.metrics["frame_count_match"].passed
+    assert result.metrics["token_match"].passed

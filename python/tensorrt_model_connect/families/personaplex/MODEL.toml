@@ -12,6 +12,12 @@ aliases = [
 prefixes = [
   "personaplex",
 ]
+hf_allow_patterns = [
+  "tokenizer-e351c8d8-checkpoint125.safetensors",
+]
+hf_required_files = [
+  "nvidia/personaplex-7b-v1|tokenizer-e351c8d8-checkpoint125.safetensors",
+]
 hf_warm_dependencies = [
   "personaplex-mimi-codec|kyutai/mimi",
 ]

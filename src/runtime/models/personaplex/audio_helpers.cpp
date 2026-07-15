@@ -6,6 +6,7 @@
 #include "audio_helpers.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace trtmc {
 
@@ -64,7 +65,7 @@ std::vector<std::unique_ptr<TrtModule>> load_depth_engines(IBackend* backend,
                                                            const BundleFile& bundle,
                                                            const ModuleCreateOptions& options) {
     std::vector<std::unique_ptr<TrtModule>> depth_engines;
-    auto depth_plans = find_sections_by_prefix(bundle, "depth_engine_plan_");
+    auto depth_plans = find_depth_engine_plans_in_codebook_order(bundle);
     if (!depth_plans.empty()) {
         for (std::size_t i = 0; i < depth_plans.size(); ++i) {
             auto m = extract_optional_module(
@@ -80,6 +81,26 @@ std::vector<std::unique_ptr<TrtModule>> load_depth_engines(IBackend* backend,
             depth_engines.push_back(std::move(m));
     }
     return depth_engines;
+}
+
+std::vector<const std::vector<char>*>
+find_depth_engine_plans_in_codebook_order(const BundleFile& bundle) {
+    constexpr const char* prefix = "depth_engine_plan_";
+    const auto matching_sections = find_sections_by_prefix(bundle, prefix);
+
+    std::vector<const std::vector<char>*> ordered_plans;
+    ordered_plans.reserve(matching_sections.size());
+    // Prefix lookup is lexicographic, which places index 10 before index 2.
+    // Resolve each contiguous codebook section by its exact numeric name.
+    for (std::size_t codebook = 0; codebook < matching_sections.size(); ++codebook) {
+        const auto* plan = find_section(bundle, prefix + std::to_string(codebook));
+        if (plan == nullptr) {
+            throw std::runtime_error(
+                "PersonaPlex depth engine sections must use contiguous numeric indices");
+        }
+        ordered_plans.push_back(plan);
+    }
+    return ordered_plans;
 }
 
 SpeechConfig build_speech_config_from_bundle(const BundleFile& bundle, const std::string& json,

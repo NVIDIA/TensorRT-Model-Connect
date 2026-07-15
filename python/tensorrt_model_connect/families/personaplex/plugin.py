@@ -903,7 +903,7 @@ def _translate_personaplex_mimi_weights(
 
 
 def _load_mimi_weights(model_dir: str | Path | None = None):
-    """Load the checkpoint-owned Mimi codec, with kyutai/mimi as fallback.
+    """Load the checkpoint-owned Mimi codec.
 
     Returns a dict mapping weight name -> numpy array.
     Codebook embeddings are computed as embed_sum / cluster_usage.
@@ -912,17 +912,20 @@ def _load_mimi_weights(model_dir: str | Path | None = None):
     from safetensors import safe_open
     import json
 
+    if model_dir is not None:
+        candidate = Path(model_dir) / _PERSONAPLEX_MIMI_FILENAME
+        if not candidate.is_file():
+            raise FileNotFoundError(
+                "PersonaPlex requires its checkpoint-owned Mimi codec: "
+                f"{candidate}"
+            )
+        sf_path = str(candidate)
+    else:
+        sf_path = hf_hub_download("kyutai/mimi", "model.safetensors")
+
     cfg_path = hf_hub_download("kyutai/mimi", "config.json")
     with open(cfg_path) as f:
         mimi_cfg = json.load(f)
-
-    sf_path = None
-    if model_dir is not None:
-        candidate = Path(model_dir) / _PERSONAPLEX_MIMI_FILENAME
-        if candidate.is_file():
-            sf_path = str(candidate)
-    if sf_path is None:
-        sf_path = hf_hub_download("kyutai/mimi", "model.safetensors")
 
     mimi_weights = {}
     with safe_open(sf_path, framework="pt") as sf:

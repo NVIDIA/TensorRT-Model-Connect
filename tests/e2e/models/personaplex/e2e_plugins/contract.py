@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 from tests.e2e_harness.contracts import MetricResult
+
+
 # Model-owned contract helpers. Keep behavior here so contract semantics do not
 # drift across model families through shared harness code.
 def contract_config(case):
@@ -141,6 +143,13 @@ def make_error(stage_name: str, error: str):
         message=f"Contract verification error: {error}",
     )
 
+
+def _strictest_threshold(metrics, *names: str, default: float) -> float:
+    """Return the strictest configured minimum across equivalent keys."""
+    configured = [float(metrics[name]) for name in names if name in metrics]
+    return max(configured) if configured else default
+
+
 class PersonaPlexSpeechToSpeechPlugin:
     reference_families = ["s2s_personaplex"]
     user_contract = "speech_response"
@@ -154,7 +163,34 @@ class PersonaPlexSpeechToSpeechPlugin:
         trt_wav = trt_output.data.get("wav_path")
         trt_rms = trt_output.data.get("rms")
         trt_duration = trt_output.data.get("duration_s")
-        min_rms = threshold.metrics.get("contract_min_rms", 0.001)
+        min_rms = _strictest_threshold(
+            threshold.metrics,
+            "speech_min_rms",
+            "contract_min_rms",
+            default=0.001,
+        )
+        token_threshold = _strictest_threshold(
+            threshold.metrics,
+            "speech_min_token_match",
+            "contract_token_match",
+            default=0.8,
+        )
+        depth_threshold = _strictest_threshold(
+            threshold.metrics,
+            "depth_token_match_rate",
+            default=0.7,
+        )
+        audio_threshold = _strictest_threshold(
+            threshold.metrics,
+            "audio_token_match_rate",
+            default=0.7,
+        )
+        frame_threshold = _strictest_threshold(
+            threshold.metrics,
+            "frame_exact_match_rate",
+            "speech_min_frame_exact",
+            default=0.7,
+        )
 
         metrics = {}
         has_wav = trt_wav is not None and isinstance(trt_wav, str) and len(trt_wav) > 0
@@ -165,14 +201,15 @@ class PersonaPlexSpeechToSpeechPlugin:
             passed=has_wav,
         )
 
-        if trt_rms is not None:
-            rms_ok = float(trt_rms) >= min_rms
-            metrics["rms"] = MetricResult(
-                value=float(trt_rms),
-                threshold=min_rms,
-                operator=">=",
-                passed=rms_ok,
-            )
+        rms_value = float(trt_rms) if trt_rms is not None else 0.0
+        rms_ok = trt_rms is not None and rms_value >= min_rms
+        metrics["rms"] = MetricResult(
+            value=rms_value,
+            threshold=min_rms,
+            operator=">=",
+            passed=rms_ok,
+            note="configured by speech_min_rms",
+        )
 
         if trt_duration is not None:
             dur_ok = float(trt_duration) >= 0.1
@@ -193,21 +230,83 @@ class PersonaPlexSpeechToSpeechPlugin:
             passed=tokens_available,
         )
         if tokens_available:
-            trt_arr = np.asarray(trt_tokens).reshape(-1)
-            ref_arr = np.asarray(ref_tokens).reshape(-1)
-            token_count = min(trt_arr.size, ref_arr.size)
-            if token_count > 0:
-                token_match = float(np.mean(
-                    trt_arr[:token_count] == ref_arr[:token_count]))
-                token_threshold = threshold.metrics.get(
-                    "contract_token_match", 0.5)
+            trt_arr = np.asarray(trt_tokens)
+            ref_arr = np.asarray(ref_tokens)
+            layout_compatible = (
+                trt_arr.ndim == 2
+                and ref_arr.ndim == 2
+                and trt_arr.shape[1] == ref_arr.shape[1]
+                and trt_arr.shape[1] >= 2
+            )
+            metrics["token_layout_compatible"] = MetricResult(
+                value=1.0 if layout_compatible else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=layout_compatible,
+                note=(
+                    f"TRT shape={trt_arr.shape}, reference shape={ref_arr.shape}; "
+                    "expected [frames, depth+audio codebooks]"
+                ),
+            )
+
+            frame_count_match = layout_compatible and trt_arr.shape[0] == ref_arr.shape[0]
+            metrics["frame_count_match"] = MetricResult(
+                value=1.0 if frame_count_match else 0.0,
+                threshold=1.0,
+                operator="==",
+                passed=frame_count_match,
+                note=(f"TRT frames={trt_arr.shape[0]}, reference frames={ref_arr.shape[0]}"),
+            )
+
+            frame_count = (
+                min(trt_arr.shape[0], ref_arr.shape[0])
+                if layout_compatible
+                else 0
+            )
+            if frame_count > 0:
+                trt_aligned = trt_arr[:frame_count]
+                ref_aligned = ref_arr[:frame_count]
+
+                token_match = float(np.mean(trt_aligned == ref_aligned))
                 metrics["token_match"] = MetricResult(
                     value=token_match,
                     threshold=token_threshold,
                     operator=">=",
                     passed=token_match >= token_threshold,
+                    note="configured by speech_min_token_match",
                 )
-            else:
+
+                depth_match = float(np.mean(trt_aligned[:, 0] == ref_aligned[:, 0]))
+                metrics["depth_token_match_rate"] = MetricResult(
+                    value=depth_match,
+                    threshold=depth_threshold,
+                    operator=">=",
+                    passed=depth_match >= depth_threshold,
+                )
+
+                audio_match = float(np.mean(trt_aligned[:, 1:] == ref_aligned[:, 1:]))
+                metrics["audio_token_match_rate"] = MetricResult(
+                    value=audio_match,
+                    threshold=audio_threshold,
+                    operator=">=",
+                    passed=audio_match >= audio_threshold,
+                )
+
+                frame_exact = float(np.mean(np.all(
+                    trt_aligned == ref_aligned,
+                    axis=1,
+                )))
+                metrics["frame_exact_match_rate"] = MetricResult(
+                    value=frame_exact,
+                    threshold=frame_threshold,
+                    operator=">=",
+                    passed=frame_exact >= frame_threshold,
+                    note=(
+                        "strictest of frame_exact_match_rate and "
+                        "speech_min_frame_exact"
+                    ),
+                )
+            elif layout_compatible:
                 metrics["non_empty_reference_overlap"] = MetricResult(
                     value=0.0,
                     threshold=1.0,
@@ -215,7 +314,10 @@ class PersonaPlexSpeechToSpeechPlugin:
                     passed=False,
                 )
 
-        rule = "audio health + token match"
+        rule = (
+            "audio health + frame count + aggregate token match + "
+            "depth token match + audio token match + frame exact match"
+        )
         if all(metric.passed for metric in metrics.values()):
             return make_pass("full_generation", metrics, rule)
         return make_fail(

@@ -5,6 +5,7 @@
 
 #include "../../support/mock_trt_engines.h"
 #include "runtime/backend/trt_module_impl.h"
+#include "runtime/models/personaplex/audio_helpers.h"
 #include "runtime/models/personaplex/kv_cache.h"
 #include "runtime/models/personaplex/pipeline.h"
 #include "runtime/models/personaplex/speech_config.h"
@@ -71,11 +72,32 @@ void test_speech_validates_temporal() {
     check(threw, "speech: null temporal throws");
 }
 
+void test_depth_engines_are_ordered_by_numeric_codebook() {
+    trtmc::BundleFile bundle;
+    const std::vector<int> insertion_order = {10, 2, 0, 7, 1, 9, 5, 3, 8, 4, 6};
+    for (const int codebook : insertion_order) {
+        trtmc::BundleSection section;
+        section.name = "depth_engine_plan_" + std::to_string(codebook);
+        const std::string contents = "plan-" + std::to_string(codebook);
+        section.data.assign(contents.begin(), contents.end());
+        bundle.sections.push_back(std::move(section));
+    }
+
+    const auto plans = trtmc::find_depth_engine_plans_in_codebook_order(bundle);
+    check(plans.size() == insertion_order.size(), "all depth engine plans found");
+    for (std::size_t codebook = 0; codebook < plans.size(); ++codebook) {
+        const std::string contents(plans[codebook]->begin(), plans[codebook]->end());
+        check(contents == "plan-" + std::to_string(codebook),
+              "depth engine plan uses numeric codebook order");
+    }
+}
+
 } // namespace
 
 int main() {
     test_speech_pipeline_construction();
     test_speech_validates_temporal();
+    test_depth_engines_are_ordered_by_numeric_codebook();
     if (failures > 0) {
         std::cerr << failures << " speech pipeline test(s) FAILED\n";
     }
