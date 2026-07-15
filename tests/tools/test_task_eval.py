@@ -203,6 +203,12 @@ def test_default_suites_include_etth1_time_series_parity() -> None:
     suite = task_eval.suite_by_id(task_eval.load_suites(), "etth1_time_series_parity")
 
     assert suite["dataset"]["kind"] == "time_series_csv"
+    assert suite["dataset"]["source_revision"] == (
+        "1d16c8f4f943005d613b5bc962e9eeb06058cf07"
+    )
+    assert suite["dataset"]["sha256"] == (
+        "f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066"
+    )
     assert suite["scoring"]["scorer"] == "time_series_parity"
     assert suite["gates"]["min_sample_agreement_rate"] == 1.0
     assert suite["default_model_names"] == [
@@ -215,6 +221,22 @@ def test_default_suites_include_etth1_time_series_parity() -> None:
     models = task_eval.load_manifest_records()
     plan = task_eval.build_plan([suite], models)
     assert {row["model"] for row in plan if row["selected"]} == set(suite["default_model_names"])
+    assert suite["ci"]["eligible"] is True
+    assert suite["ci"]["lane"] == "nightly"
+    assert suite["ci"]["limit"] == 10
+    assert suite["ci"]["sample_seed"] == 20260715
+    expected_gates = {
+        "chronos-bolt-tiny-official": (1.0e-06, 8.0e-06),
+        "patchtsmixer-granite-official": (5.0e-04, 2.5e-02),
+        "patchtst-etth1-regression-distribution": (1.0e-03, 1.0e-03),
+        "patchtst-granite-official": (1.5e-03, 3.5e-02),
+        "timesfm-2.0-500m-official": (4.0e-03, 7.0e-03),
+    }
+    for model_name, (max_relative_l2, max_absolute_error) in expected_gates.items():
+        profile = suite["model_profiles"][model_name]
+        assert profile["gates"]["max_relative_l2"] == max_relative_l2
+        assert profile["gates"]["max_absolute_error"] == max_absolute_error
+        assert suite["model_overrides"]["by_model"][model_name]["time_series"]["stride"] == 24
 
 
 def test_prepare_time_series_csv_dataset_uses_time_major_windows(tmp_path: Path) -> None:

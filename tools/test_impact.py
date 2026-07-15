@@ -1854,6 +1854,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="task_eval_tool",
             matcher=_path_in({
                 "tools/task_eval.py",
+                "tools/task_eval_ci.py",
                 "tools/elf_hf_reference.py",
                 "tools/prepare_elf_task_eval_datasets.py",
             }),

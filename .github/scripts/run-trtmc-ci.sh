@@ -1314,6 +1314,77 @@ run_full_e2e() {
   run_e2e_with_diffusion_vlm "${FULL_E2E_TIMEOUT:-6h}" "${args[@]}"
 }
 
+select_task_eval_gpu() {
+  if [ -n "${TRTMC_TASK_EVAL_GPU_ID:-}" ]; then
+    [[ "$TRTMC_TASK_EVAL_GPU_ID" =~ ^(0|[1-9][0-9]*)$ ]] || {
+      echo "ERROR: TRTMC_TASK_EVAL_GPU_ID must be a non-negative integer" >&2
+      return 2
+    }
+    nvidia-smi --query-gpu=index,name --format=csv,noheader \
+      | awk -F, -v requested="$TRTMC_TASK_EVAL_GPU_ID" '
+          {
+            index=$1
+            name=$2
+            gsub(/[[:space:]]/, "", index)
+            if (index == requested && toupper(name) ~ /GB300/) { found=1 }
+          }
+          END { exit(found ? 0 : 1) }
+        ' || {
+          echo "ERROR: requested task-eval GPU is unavailable or is not a GB300" >&2
+          return 2
+        }
+    printf '%s\n' "$TRTMC_TASK_EVAL_GPU_ID"
+    return 0
+  fi
+
+  local selected
+  selected="$(
+    nvidia-smi --query-gpu=index,name --format=csv,noheader \
+      | awk -F, 'toupper($2) ~ /GB300/ {
+          gsub(/[[:space:]]/, "", $1)
+          print $1
+          exit
+        }'
+  )"
+  if [ -z "$selected" ]; then
+    echo "ERROR: ETTh1 task-eval requires a GB300 GPU" >&2
+    return 2
+  fi
+  printf '%s\n' "$selected"
+}
+
+run_etth1_task_eval() {
+  [ -n "${ENGINE_DIR:-}" ] || {
+    echo "ERROR: ENGINE_DIR is required for ETTh1 task-eval" >&2
+    return 2
+  }
+  local model_plugin_dir="$PWD/e2e_artifacts/model_plugins"
+  [ -d "$model_plugin_dir" ] || {
+    echo "ERROR: full E2E did not prepare the model plugin directory" >&2
+    return 2
+  }
+  local gpu_id
+  gpu_id="$(select_task_eval_gpu)"
+  local private_root="$PWD/.ci/task-eval"
+  local artifact_dir="$PWD/task_eval_artifacts"
+  rm -rf "$private_root" "$artifact_dir"
+  mkdir -p "$private_root" "$artifact_dir"
+
+  CUDA_VISIBLE_DEVICES="$gpu_id" \
+    run_with_timeout "${TRTMC_TASK_EVAL_TIMEOUT:-2h}" \
+      python tools/task_eval_ci.py \
+        --suite etth1_time_series_parity \
+        --lane nightly \
+        --dataset-cache-root "$private_root/datasets" \
+        --work-root "$private_root/work" \
+        --artifact-dir "$artifact_dir" \
+        --engine-dir "$ENGINE_DIR" \
+        --model-plugin-dir "$model_plugin_dir" \
+        --trtmc-binary "$(command -v trtmc)" \
+        --hf-python "$(command -v python)" \
+        --cuda-visible-devices "$gpu_id"
+}
+
 run_e2e_with_diffusion_vlm() {
   local timeout_limit="$1"
   shift
@@ -2016,6 +2087,10 @@ run_stage() {
     full-e2e)
       run_step "Setup TensorRT-Model-Connect wheel runtime" setup_wheel_runtime_environment
       run_step "Full E2E tests" run_full_e2e
+      ;;
+    task-eval-etth1)
+      run_step "Setup TensorRT-Model-Connect wheel runtime" setup_wheel_runtime_environment
+      run_step "ETTh1 task-eval" run_etth1_task_eval
       ;;
     coverage-map)
       run_step "Setup TensorRT-Model-Connect wheel runtime" setup_wheel_runtime_environment

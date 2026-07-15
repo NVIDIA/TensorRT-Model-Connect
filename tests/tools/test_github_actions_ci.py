@@ -1077,6 +1077,7 @@ def test_nightly_removes_the_legacy_monolithic_gpu_and_coverage_paths() -> None:
         "Impact analysis",
         "Graph-op GPU tests",
         "Full E2E tests",
+        "ETTh1 task-eval",
         "Generate coverage map",
         "RUN_COVERAGE_MAP:",
         "tools/test_impact.py",

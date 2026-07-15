@@ -154,6 +154,7 @@ def _make_repo(
     _write(repo, "tools/model_plugin_isolation.py", "# proof verifier\n")
     _write(repo, "tools/test_impact.py", "# shared impact analyzer\n")
     _write(repo, "tools/task_eval.py", "# task-eval runner\n")
+    _write(repo, "tools/task_eval_ci.py", "# task-eval CI gate\n")
     _write(repo, "tests/task_eval/validation_suites.yaml", "suites: []\n")
     _write(repo, "tests/tools/test_task_eval.py", "# task-eval unit tests\n")
     _write(repo, "tools/tool_helpers.py", "# shared tool helpers\n")

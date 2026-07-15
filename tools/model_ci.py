@@ -139,6 +139,7 @@ FULL_UNIT_TEST_ONLY_EXACT = frozenset(
     {
         "tools/elf_hf_reference.py",
         "tools/prepare_elf_task_eval_datasets.py",
+        "tools/task_eval_ci.py",
         "tools/task_eval.py",
         "tools/test_impact.py",
     }
