@@ -185,6 +185,14 @@ def _normalized_substring_hits(text: str, substrings: list[str]) -> tuple[int, l
     ]
     return len(substrings) - len(missing), missing
 
+
+def _ocr_ned_threshold(threshold) -> float:
+    """Read the OCR edit-distance limit declared by the model profile."""
+    return threshold.metrics.get(
+        "normalized_text_edit_distance",
+        threshold.metrics.get("contract_ned_threshold", 0.05),
+    )
+
 class DeepseekOcrVLQAPlugin:
     reference_families = ["ocr_markdown"]
     user_contract = "vl_answer"
@@ -290,7 +298,17 @@ class DeepseekOcrVLQAPlugin:
                 )
 
             hits, missing = _normalized_substring_hits(trt_text, required_substrings)
-            passed = not missing
+            trt_answer = normalize_text(
+                extract_answer(StageOutput(stage_name=stage, text=trt_text), prompt)
+            )
+            ref_answer = normalize_text(
+                extract_answer(StageOutput(stage_name=stage, text=ref_text), prompt)
+            )
+            ned = levenshtein_ned(trt_answer, ref_answer)
+            ned_threshold = _ocr_ned_threshold(threshold)
+            substrings_passed = not missing
+            ned_passed = ned <= ned_threshold
+            passed = substrings_passed and ned_passed
             metrics = {
                 "reference_contract_substrings": MetricResult(
                     value=float(len(required_substrings)),
@@ -303,17 +321,36 @@ class DeepseekOcrVLQAPlugin:
                     value=float(hits),
                     threshold=float(len(required_substrings)),
                     operator="==",
-                    passed=passed,
+                    passed=substrings_passed,
                     note="required OCR substrings present in TRT output",
+                ),
+                "normalized_text_edit_distance": MetricResult(
+                    value=ned,
+                    threshold=ned_threshold,
+                    operator="<=",
+                    passed=ned_passed,
+                    note="distance from the complete human-readable OCR reference",
                 ),
             }
             if passed:
-                return make_pass("full_generation", metrics, "required OCR substrings present")
+                return make_pass(
+                    "full_generation",
+                    metrics,
+                    "required OCR substrings AND normalized text edit distance",
+                )
+
+            failures = []
+            if missing:
+                failures.append("missing expected text: " + ", ".join(missing))
+            if not ned_passed:
+                failures.append(
+                    f"full-text NED={ned:.3f} exceeds {ned_threshold:.3f}"
+                )
             return make_fail(
                 "full_generation",
                 metrics,
-                "required OCR substrings present",
-                "TRT OCR output missing expected text: " + ", ".join(missing),
+                "required OCR substrings AND normalized text edit distance",
+                "TRT OCR output failed parity: " + "; ".join(failures),
             )
 
         if not ref_text:
@@ -363,7 +400,11 @@ class DeepseekOcrVLQAPlugin:
 
         exact = trt_answer == ref_answer
         ned = levenshtein_ned(trt_answer, ref_answer)
-        ned_threshold = threshold.metrics.get("contract_ned_threshold", 0.05 if is_ocr else 0.15)
+        ned_threshold = (
+            _ocr_ned_threshold(threshold)
+            if is_ocr
+            else threshold.metrics.get("contract_ned_threshold", 0.15)
+        )
         metrics = {
             "exact_match": MetricResult(
                 value=1.0 if exact else 0.0,

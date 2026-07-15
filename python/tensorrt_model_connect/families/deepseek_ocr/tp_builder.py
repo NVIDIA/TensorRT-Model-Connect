@@ -351,10 +351,10 @@ def build_deepseek_ocr_tp_engine(
             "build_deepseek_ocr_tp_engine requires tensor_parallel mode with "
             "tp_size > 1")
 
-    image_prefill_tokens = 257
+    image_prefill_tokens = 145
     if max_cache_length <= image_prefill_tokens:
         print(
-            "[trtmc build] WARNING: DeepSeek-OCR-2 uses 257 image prefill "
+            "[trtmc build] WARNING: DeepSeek-OCR-2 uses 145 image prefill "
             f"tokens. max_cache_length={max_cache_length} is too small and "
             "can cause prompt echo / repeated skip-like tokens. Use "
             "--max-cache-length 4096.",

@@ -34,7 +34,7 @@
       "reference_family": "ocr_markdown",
       "user_contract": "ocr_text",
       "prompt": "Extract the text from this image.",
-      "max_new_tokens": 96,
+      "max_new_tokens": 220,
       "test_image": "data/orc_test_img.jpeg",
       "reference_backend": "golden_snapshot",
       "preflight_requirements": [
@@ -72,7 +72,7 @@
           "ocr_mode": true
         }
       },
-      "notes": "DeepSeek-OCR TP2 coverage. The checkpoint has 10 attention/KV heads, so TP4 is not valid. Uses the same checkpoint, image input, prompt, cache length, golden snapshot, and OCR contract as deepseek-ocr-l0 while running the language decoder through rank-local TP engines."
+      "notes": "DeepSeek-OCR TP2 coverage. The checkpoint has 10 attention/KV heads, so TP4 is not valid. Uses the same checkpoint, 768-pixel single-view input, prompt, cache length, complete OCR golden snapshot, and 220-token budget as deepseek-ocr-l0 while running the language decoder through rank-local TP engines."
     }
   ]
 }

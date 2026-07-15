@@ -10,15 +10,15 @@ DeepSeek-V2 MoE with shared experts for layers >= first_k_dense_replace, and
 dense SwiGLU for earlier layers.
 
 Vision pipeline:
-  1. SAM ViT-B: [1, 3, 1024, 1024] -> patch embed -> 12 blocks (window/global
+  1. SAM ViT-B: [1, 3, 768, 768] -> patch embed -> 12 blocks (window/global
      attention with relative position biases) -> neck + downsample convs
-     -> [1, 896, 16, 16]
-  2. Qwen2 Decoder-as-Encoder: flatten SAM features [1, 256, 896], concat with
-     learned queries [256, 896], run 24 Qwen2 layers with mixed attention
+     -> [1, 896, 12, 12]
+  2. Qwen2 Decoder-as-Encoder: flatten SAM features [1, 144, 896], concat with
+     learned queries [144, 896], run 24 Qwen2 layers with mixed attention
      (bidirectional for image, causal for queries), take query outputs
-     -> [1, 256, 896]
-  3. Linear Projector: [1, 256, 896] -> [1, 256, 1280]
-  4. View Separator: append [1, 1280] -> total 257 vision tokens
+     -> [1, 144, 896]
+  3. Linear Projector: [1, 144, 896] -> [1, 144, 1280]
+  4. View Separator: append [1, 1280] -> total 145 vision tokens
 
 Architecture:
   - Attention: Standard Q/K/V/O (no biases, no GQA — heads == kv_heads)
@@ -28,8 +28,8 @@ Architecture:
   - Norm: RMSNorm
 
 Operational note:
-  - DeepSeek-OCR VL prefill injects 257 image tokens before user text.
-  - Very small max_cache_length (especially <=257) can degrade OCR output
+  - DeepSeek-OCR VL prefill injects 145 image tokens before user text.
+  - Very small max_cache_length (especially <=145) can degrade OCR output
     (prompt echo / repeated "skip" style tokens). Use 4096 for stable OCR.
 """
 
@@ -258,10 +258,10 @@ class DeepSeekOCRPlugin:
                 verbose=verbose,
                 parallel_config=parallel)
 
-        image_prefill_tokens = 257
+        image_prefill_tokens = 145
         if max_cache_length <= image_prefill_tokens:
             print(
-                "[trtmc build] WARNING: DeepSeek-OCR-2 uses 257 image prefill tokens. "
+                "[trtmc build] WARNING: DeepSeek-OCR-2 uses 145 image prefill tokens. "
                 f"max_cache_length={max_cache_length} is too small and can cause "
                 "prompt echo / repeated skip-like tokens. Use --max-cache-length 4096.",
                 file=sys.stderr,
@@ -548,8 +548,8 @@ class DeepSeekOCRPlugin:
         Native TRT API implementation (no ONNX). Full pipeline:
         SAM ViT-B -> downsample convs -> Qwen2 encoder -> projector -> view_sep.
 
-        Input:  pixel_values  [1, 3, 1024, 1024] float32
-        Output: image_features [257, 1280] float32  (256 projected + 1 view_sep)
+        Input:  pixel_values  [1, 3, 768, 768] float32
+        Output: image_features [145, 1280] float32  (144 projected + 1 view_sep)
         """
         return _build_deepseek_ocr_vision_engine(
             model_dir, config, precision=precision, verbose=verbose)
@@ -579,10 +579,10 @@ class DeepSeekOCRPlugin:
         hidden = config.hidden_size  # 1280 (language decoder hidden)
         return {
             "image_token_id": config.raw.get("image_token_id", 128815),
-            "fixed_image_size": 1024,
-            "num_image_pad_tokens": 257,  # 256 projected + 1 view_separator
+            "fixed_image_size": 768,
+            "num_image_pad_tokens": 145,  # 144 projected + 1 view_separator
             "vision_output_dim": hidden,
-            "preprocessor_type": "pad_center_chw",
+            "preprocessor_type": "simple_chw",
             "image_mean": [0.5, 0.5, 0.5],
             "image_std": [0.5, 0.5, 0.5],
             "interpolation": "bicubic",
@@ -901,6 +901,59 @@ def _get_rel_pos(q_size: int, k_size: int, rel_pos: np.ndarray) -> np.ndarray:
     return rel_pos_resized[indices]
 
 
+def _make_qwen2_vision_attention_mask(
+    image_tokens: int,
+    *,
+    dtype=np.float32,
+) -> np.ndarray:
+    """Match DeepSeek-OCR's mixed image/query attention policy.
+
+    Image rows attend bidirectionally to every image token. Query rows attend
+    to every image token and causally to earlier query rows, matching the
+    checkpoint's ``CustomQwen2Decoder._create_custom_4d_mask`` implementation.
+    """
+    if image_tokens <= 0:
+        raise ValueError("image_tokens must be positive")
+
+    total_tokens = image_tokens * 2
+    mask = np.full((total_tokens, total_tokens), -10000.0, dtype=dtype)
+    mask[:image_tokens, :image_tokens] = 0.0
+    for query_index in range(image_tokens):
+        row = image_tokens + query_index
+        mask[row, :row + 1] = 0.0
+    return mask
+
+
+def _resize_sam_position_embedding(
+    position_embedding: np.ndarray,
+    target_grid_size: int,
+) -> np.ndarray:
+    """Resize SAM's absolute position embedding exactly like the HF model."""
+    if target_grid_size <= 0:
+        raise ValueError("target_grid_size must be positive")
+    if position_embedding.ndim != 4 or position_embedding.shape[0] != 1:
+        raise ValueError(
+            "SAM position embedding must have shape [1, H, W, hidden]")
+    if position_embedding.shape[1] != position_embedding.shape[2]:
+        raise ValueError("SAM position embedding must use a square grid")
+    if position_embedding.shape[1] == target_grid_size:
+        return np.ascontiguousarray(position_embedding, dtype=np.float32)
+
+    import torch
+    import torch.nn.functional as torch_functional
+
+    source = torch.from_numpy(position_embedding).permute(0, 3, 1, 2).float()
+    resized = torch_functional.interpolate(
+        source,
+        size=(target_grid_size, target_grid_size),
+        mode="bicubic",
+        antialias=True,
+        align_corners=False,
+    )
+    return np.ascontiguousarray(
+        resized.permute(0, 2, 3, 1).cpu().numpy(), dtype=np.float32)
+
+
 def _build_sam_attention(
     network: trt.INetworkDefinition,
     inp_4d: trt.ITensor,
@@ -1202,7 +1255,7 @@ def _load_vision_weights(
 
     # --- Qwen2 encoder ---
     vw["qwen2.queries"] = _load_tensor(
-        readers, "model.qwen2_model.query_1024.weight").astype(np.float32)
+        readers, "model.qwen2_model.query_768.weight").astype(np.float32)
     vw["qwen2.final_norm"] = _load_tensor(
         readers, "model.qwen2_model.model.model.norm.weight").astype(np.float32)
 
@@ -1258,8 +1311,8 @@ def _build_deepseek_ocr_vision_engine(
 
     Pipeline: SAM ViT-B -> downsample -> Qwen2 encoder -> projector -> view_sep
 
-    Input:  pixel_values  [1, 3, 1024, 1024] float32
-    Output: image_features [257, 1280] float32 (256 projected + 1 view_sep)
+    Input:  pixel_values  [1, 3, 768, 768] float32
+    Output: image_features [145, 1280] float32 (144 projected + 1 view_sep)
     """
     print("[trtmc build] Building DeepSeek-OCR-2 vision engine (native TRT) ...",
           file=sys.stderr)
@@ -1281,10 +1334,10 @@ def _build_deepseek_ocr_vision_engine(
     sam_head_dim = sam_hidden // sam_heads  # 64
     sam_mlp_dim = int(sam_hidden * 3.7362)  # ~2869, but actual is 3072 from weights
     sam_mlp_dim = vw["sam.block0.mlp.fc1.bias"].shape[0]  # 3072
-    image_size = 1024
+    image_size = 768
     patch_size = 16
-    grid_size = image_size // patch_size  # 64
-    seq_len = grid_size * grid_size  # 4096
+    grid_size = image_size // patch_size  # 48
+    seq_len = grid_size * grid_size  # 2304
     global_attn_indexes = {2, 5, 8, 11}
 
     # Qwen2 config
@@ -1296,12 +1349,15 @@ def _build_deepseek_ocr_vision_engine(
     qwen2_q_dim = qwen2_heads * qwen2_head_dim  # 896
     qwen2_kv_dim = qwen2_kv_heads * qwen2_head_dim  # 128
     qwen2_mlp_dim = vw["qwen2.layer0.w_gate"].shape[1]  # 4864
-    qwen2_num_queries = vw["qwen2.queries"].shape[0]  # 256
-    qwen2_total_seq = seq_len // (4 * 4) + qwen2_num_queries  # 256 + 256 = 512
-    # Wait, SAM output is [1, 896, 16, 16] -> flatten -> [1, 256, 896]
-    sam_out_spatial = 16  # after neck + downsample
-    sam_out_seq = sam_out_spatial * sam_out_spatial  # 256
-    qwen2_total_seq = sam_out_seq + qwen2_num_queries  # 512
+    qwen2_num_queries = vw["qwen2.queries"].shape[0]  # 144
+    # SAM output is [1, 896, 12, 12] -> flatten -> [1, 144, 896].
+    sam_out_spatial = grid_size // 4
+    sam_out_seq = sam_out_spatial * sam_out_spatial
+    if qwen2_num_queries != sam_out_seq:
+        raise ValueError(
+            "DeepSeek-OCR query table does not match the SAM output grid: "
+            f"queries={qwen2_num_queries}, SAM tokens={sam_out_seq}")
+    qwen2_total_seq = sam_out_seq + qwen2_num_queries
 
     # Projector config
     proj_in = qwen2_hidden  # 896
@@ -1332,7 +1388,7 @@ def _build_deepseek_ocr_vision_engine(
         pixel_values = network.add_cast(
             pixel_values, work_trt_dtype).get_output(0)
 
-    # Patch embedding: Conv2d [1, 3, 1024, 1024] -> [1, 768, 64, 64]
+    # Patch embedding: Conv2d [1, 3, 768, 768] -> [1, 768, 48, 48]
     pe_w = vw["sam.patch_embed.weight"]
     pe_b = vw["sam.patch_embed.bias"]
     patch_conv = network.add_convolution_nd(
@@ -1342,13 +1398,15 @@ def _build_deepseek_ocr_vision_engine(
         bias=trt.Weights(np.ascontiguousarray(pe_b, dtype=work_np_dtype)))
     patch_conv.stride_nd = (patch_size, patch_size)
 
-    # NCHW -> NHWC: [1, 768, 64, 64] -> [1, 64, 64, 768]
+    # NCHW -> NHWC: [1, 768, 48, 48] -> [1, 48, 48, 768]
     to_nhwc = network.add_shuffle(patch_conv.get_output(0))
     to_nhwc.first_transpose = trt.Permutation([0, 2, 3, 1])
 
     # Add position embedding
+    resized_position_embedding = _resize_sam_position_embedding(
+        vw["sam.pos_embed"], grid_size)
     pos_c = graph_ops.add_constant(
-        network, (1, grid_size, grid_size, sam_hidden), vw["sam.pos_embed"],
+        network, (1, grid_size, grid_size, sam_hidden), resized_position_embedding,
         dtype=work_np_dtype)
     pos_sum = network.add_elementwise(
         to_nhwc.get_output(0), pos_c, trt.ElementWiseOperation.SUM)
@@ -1453,7 +1511,7 @@ def _build_deepseek_ocr_vision_engine(
     ln2_4d.reshape_dims = (1, grid_size, grid_size, 256)
     ln2_nchw = network.add_shuffle(ln2_4d.get_output(0))
     ln2_nchw.first_transpose = trt.Permutation([0, 3, 1, 2])
-    # SAM neck output: [1, 256, 64, 64]
+    # SAM neck output: [1, 256, 48, 48]
 
     # Downsample: net_2 Conv2d(256->512, 3x3, stride=2, pad=1)
     net2 = network.add_convolution_nd(
@@ -1464,7 +1522,7 @@ def _build_deepseek_ocr_vision_engine(
         bias=trt.Weights(np.zeros(512, dtype=work_np_dtype)))
     net2.stride_nd = (2, 2)
     net2.padding_nd = (1, 1)
-    # [1, 512, 32, 32]
+    # [1, 512, 24, 24]
 
     # Downsample: net_3 Conv2d(512->896, 3x3, stride=2, pad=1)
     net3 = network.add_convolution_nd(
@@ -1475,33 +1533,33 @@ def _build_deepseek_ocr_vision_engine(
         bias=trt.Weights(np.zeros(896, dtype=work_np_dtype)))
     net3.stride_nd = (2, 2)
     net3.padding_nd = (1, 1)
-    # SAM final output: [1, 896, 16, 16]
+    # SAM final output: [1, 896, 12, 12]
 
     # ===================================================================
     # Stage 2: Qwen2 Decoder-as-Encoder
     # ===================================================================
-    # Flatten SAM features: [1, 896, 16, 16] -> NHWC -> [1, 256, 896]
+    # Flatten SAM features: [1, 896, 12, 12] -> NHWC -> [1, 144, 896]
     sam_nhwc = network.add_shuffle(net3.get_output(0))
     sam_nhwc.first_transpose = trt.Permutation([0, 2, 3, 1])
     sam_flat = network.add_shuffle(sam_nhwc.get_output(0))
-    sam_flat.reshape_dims = (1, sam_out_seq, qwen2_hidden)  # [1, 256, 896]
+    sam_flat.reshape_dims = (1, sam_out_seq, qwen2_hidden)  # [1, 144, 896]
 
-    # Learned queries: [256, 896] -> [1, 256, 896]
+    # Learned queries: [144, 896] -> [1, 144, 896]
     queries_c = graph_ops.add_constant(
         network, (1, qwen2_num_queries, qwen2_hidden), vw["qwen2.queries"],
         dtype=work_np_dtype)
 
-    # Concatenate: [1, 256, 896] + [1, 256, 896] -> [1, 512, 896]
+    # Concatenate: [1, 144, 896] + [1, 144, 896] -> [1, 288, 896]
     enc_concat = network.add_concatenation(
         [sam_flat.get_output(0), queries_c])
     enc_concat.axis = 1
-    enc_input = enc_concat.get_output(0)  # [1, 512, 896]
+    enc_input = enc_concat.get_output(0)  # [1, 288, 896]
 
-    # Flatten to 2D for transformer: [512, 896]
+    # Flatten to 2D for transformer: [288, 896]
     enc_2d = network.add_shuffle(enc_input)
     enc_2d.reshape_dims = (qwen2_total_seq, qwen2_hidden)
 
-    # Precompute native RoPE half-dim caches for Qwen2 positions 0..511.
+    # Precompute native RoPE half-dim caches for Qwen2 positions 0..287.
     cos_half_np = graph_ops.make_rope_table_half_dim(
         qwen2_total_seq, qwen2_head_dim, rope_theta, True)
     sin_half_np = graph_ops.make_rope_table_half_dim(
@@ -1516,18 +1574,12 @@ def _build_deepseek_ocr_vision_engine(
         np.arange(qwen2_total_seq, dtype=np.int32),
         dtype=np.int32)
 
-    enc_state = enc_2d.get_output(0)  # [512, 896]
+    enc_state = enc_2d.get_output(0)  # [288, 896]
 
     attn_scale = 1.0 / np.sqrt(qwen2_head_dim)
 
-    # Standard causal mask (lower-triangular). HF Qwen2 SDPA uses is_causal=True
-    # which creates this mask internally. All tokens attend only to preceding tokens.
-    qwen2_mask_np = np.full(
-        (qwen2_total_seq, qwen2_total_seq), -10000.0,
-        dtype=work_np_dtype)
-    for i in range(qwen2_total_seq):
-        for j in range(i + 1):
-            qwen2_mask_np[i, j] = 0.0
+    qwen2_mask_np = _make_qwen2_vision_attention_mask(
+        qwen2_num_queries, dtype=work_np_dtype)
     qwen2_mask_c = graph_ops.add_constant(
         network, (1, qwen2_total_seq, qwen2_total_seq),
         qwen2_mask_np.reshape(1, qwen2_total_seq, qwen2_total_seq),
@@ -1543,7 +1595,7 @@ def _build_deepseek_ocr_vision_engine(
             vw[f"{wp}.input_norm"], None, rms_eps_t, "rmsnorm",
             dtype=work_np_dtype)
 
-        # Q projection: [512, 896] @ [896, 896] -> [512, 896]
+        # Q projection: [288, 896] @ [896, 896] -> [288, 896]
         q = graph_ops.add_matmul_rhs_constant(
             network, norm1, qwen2_hidden, qwen2_q_dim, vw[f"{wp}.w_q"],
             dtype=work_np_dtype)
@@ -1551,7 +1603,7 @@ def _build_deepseek_ocr_vision_engine(
             network, q, qwen2_q_dim, vw[f"{wp}.q_bias"],
             dtype=work_np_dtype)
 
-        # K projection: [512, 896] @ [896, 128] -> [512, 128]
+        # K projection: [288, 896] @ [896, 128] -> [288, 128]
         k = graph_ops.add_matmul_rhs_constant(
             network, norm1, qwen2_hidden, qwen2_kv_dim, vw[f"{wp}.w_k"],
             dtype=work_np_dtype)
@@ -1559,7 +1611,7 @@ def _build_deepseek_ocr_vision_engine(
             network, k, qwen2_kv_dim, vw[f"{wp}.k_bias"],
             dtype=work_np_dtype)
 
-        # V projection: [512, 896] @ [896, 128] -> [512, 128]
+        # V projection: [288, 896] @ [896, 128] -> [288, 128]
         v = graph_ops.add_matmul_rhs_constant(
             network, norm1, qwen2_hidden, qwen2_kv_dim, vw[f"{wp}.w_v"],
             dtype=work_np_dtype)
@@ -1587,7 +1639,7 @@ def _build_deepseek_ocr_vision_engine(
             mask=mask_4d,
             scale=attn_scale)
 
-        # Output projection: [512, 896] @ [896, 896] -> [512, 896]
+        # Output projection: [288, 896] @ [896, 896] -> [288, 896]
         attn_out = graph_ops.add_matmul_rhs_constant(
             network, ctx_flat,
             qwen2_q_dim, qwen2_hidden, vw[f"{wp}.w_o"],
@@ -1629,13 +1681,13 @@ def _build_deepseek_ocr_vision_engine(
         vw["qwen2.final_norm"], None, rms_eps_t, "rmsnorm",
         dtype=work_np_dtype)
 
-    # Extract query outputs: last 256 tokens from [512, 896]
+    # Extract query outputs: last 144 tokens from [288, 896]
     query_out = network.add_slice(
         enc_state,
         start=(sam_out_seq, 0),
         shape=(qwen2_num_queries, qwen2_hidden),
         stride=(1, 1))
-    # [256, 896]
+    # [144, 896]
 
     # ===================================================================
     # Stage 3: Linear Projector
@@ -1645,7 +1697,7 @@ def _build_deepseek_ocr_vision_engine(
         proj_in, proj_out, vw["proj.weight"], dtype=work_np_dtype)
     projected = graph_ops.add_bias_sum(
         network, projected, proj_out, vw["proj.bias"], dtype=work_np_dtype)
-    # [256, 1280]
+    # [144, 1280]
 
     # ===================================================================
     # Stage 4: View Separator
@@ -1656,7 +1708,7 @@ def _build_deepseek_ocr_vision_engine(
     final_concat = network.add_concatenation(
         [projected, view_sep_c])
     final_concat.axis = 0
-    # [257, 1280]
+    # [145, 1280]
 
     output = final_concat.get_output(0)
     if output.dtype != trt.float32:
@@ -1667,7 +1719,7 @@ def _build_deepseek_ocr_vision_engine(
     if verbose:
         print(f"[trtmc build] Building vision TRT engine "
               f"(SAM: {sam_layers} blocks, Qwen2: {qwen2_layers} layers, "
-              f"output: 257x{proj_out}) ...", file=sys.stderr)
+              f"output: 145x{proj_out}) ...", file=sys.stderr)
 
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:

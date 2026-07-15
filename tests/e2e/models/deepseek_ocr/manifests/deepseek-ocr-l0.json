@@ -25,7 +25,7 @@
       "reference_family": "ocr_markdown",
       "user_contract": "ocr_text",
       "prompt": "Extract the text from this image.",
-      "max_new_tokens": 96,
+      "max_new_tokens": 220,
       "test_image": "data/orc_test_img.jpeg",
       "reference_backend": "golden_snapshot",
       "metadata": {
@@ -36,7 +36,7 @@
           "ocr_mode": true
         }
       },
-      "notes": "PR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, deepseek_ocr_vision_language runtime, and full cache budget. Decoder layers 6-11 and selector 12's embedding/final-logit boundary use FP32 to preserve the OCR text contract with TensorRT 11.2 while the remaining decoder path stays FP16. The shorter decode validates the visible Architecture section emitted by the OCR fixture while nightly keeps the full OCR transcript contract."
+      "notes": "PR L0 repro for DeepSeek-OCR. Uses the same checkpoint, image input, 768-pixel single-view vision path, deepseek_ocr_vision_language runtime, and full cache budget. The 220-token decode covers the restored introductory text and the complete Architecture contract while nightly retains a larger completion budget."
     }
   ]
 }

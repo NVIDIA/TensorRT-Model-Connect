@@ -244,6 +244,64 @@ def test_vl_qa_ocr_accepts_literal_fixture_spacing_and_terminal_norm() -> None:
 
     assert result.status == StageStatus.PASSED.value
     assert result.metrics["required_ocr_substrings"].value == len(required)
+    assert result.metrics["normalized_text_edit_distance"].passed
+
+
+def test_vl_qa_ocr_rejects_nightly_truncation_despite_marker_hits() -> None:
+    """Regression for the false pass in Nightly run 29445075597."""
+    generated = """\
+Architecture:
+Attention:Standard Q/K/V/O (no biases,no GQA-heads == kv heads)
+RoPE:Standard rotary position embeddings
+Layer 0:Dense SwiGLU MLP (intermediate_size=6848)
+Layers 1-11:MoE (64 experts,top-6,intermediate=896)+ shared experts (2,
+Norm:RMSNorm
+Vision: SAM ViT-B + Qwen2 encoder (not supported in TRT yet, text-only)
+Vision: SAM ViT-B + Qwen2 encoder (not supported in TRT yet, text-only)"""
+    reference = """\
+DeepSeek-OCR-2 is a VL model with a DeepSeek-V2-style language decoder. Unlike
+the full DeepSeek-V2 which uses Multi-head Latent Attention (MLA), OCR-2 uses
+standard Llama-style multi-head attention (use_mla=False). The MLP layers use
+DeepSeek-V2 MoE with shared experts for layers >= first_k_dense_replace, and
+dense SwiGLU for earlier layers.
+Architecture:
+Attention:Standard Q/K/V/O no biases, no GQA - heads == kv_heads)
+RoPE:Standard rotary position embeddings
+Layer 0:Dense SwiGLU MLP (intermediate_size=6848)
+Layers 1-11:MoE 64 experts, top-6, intermediate=896) + shared experts 2
+Norm: RMSNorm
+Vision: SAM ViT-B + Qwen2 encoder (not supported in TRT yet, text-only)"""
+    required = [
+        "Architecture",
+        "Attention:Standard Q/K/V/O",
+        "RoPE:Standard rotary position embeddings",
+        "Layer 0:Dense SwiGLU MLP",
+        "Layers 1-11:MoE",
+        "Vision: SAM ViT-B + Qwen2 encoder",
+    ]
+
+    result = DeepseekOcrVLQAPlugin().verify(
+        StageOutput(
+            stage_name="full_generation",
+            data={"generated_text": generated},
+            metadata={"returncode": 0},
+        ),
+        StageOutput(
+            stage_name="full_generation",
+            data={"text": reference, "required_substrings": required},
+        ),
+        _case(reference_backend="golden_snapshot"),
+        ThresholdProfile(
+            task_strategy="vision_language_generation",
+            metrics={"normalized_text_edit_distance": 0.5},
+        ),
+    )
+
+    assert result.status == StageStatus.FAILED.value
+    assert result.metrics["required_ocr_substrings"].passed
+    assert not result.metrics["normalized_text_edit_distance"].passed
+    assert result.metrics["normalized_text_edit_distance"].value > 0.63
+    assert "full-text NED" in result.message
 
 
 def test_vl_qa_ocr_still_rejects_truncation_before_terminal_norm() -> None:

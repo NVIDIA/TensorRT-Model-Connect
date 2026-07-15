@@ -220,3 +220,41 @@ def test_deepseek_ocr_forwards_fp16_to_vision_engine(monkeypatch) -> None:
         "precision": "fp16",
         "verbose": True,
     }
+
+
+def test_deepseek_ocr_vision_mask_keeps_image_attention_bidirectional() -> None:
+    mask = deepseek_ocr_module._make_qwen2_vision_attention_mask(3)
+
+    assert mask.shape == (6, 6)
+    np.testing.assert_array_equal(mask[:3, :3], np.zeros((3, 3)))
+    np.testing.assert_array_equal(mask[:3, 3:], np.full((3, 3), -10000.0))
+    np.testing.assert_array_equal(
+        mask[3], [0.0, 0.0, 0.0, 0.0, -10000.0, -10000.0])
+    np.testing.assert_array_equal(
+        mask[4], [0.0, 0.0, 0.0, 0.0, 0.0, -10000.0])
+    np.testing.assert_array_equal(mask[5], np.zeros(6))
+
+
+def test_deepseek_ocr_vision_mask_rejects_empty_image_sequence() -> None:
+    with pytest.raises(ValueError, match="image_tokens must be positive"):
+        deepseek_ocr_module._make_qwen2_vision_attention_mask(0)
+
+
+def test_deepseek_ocr_resizes_sam_position_embedding_for_768_view() -> None:
+    position_embedding = np.ones((1, 64, 64, 4), dtype=np.float32)
+
+    resized = deepseek_ocr_module._resize_sam_position_embedding(
+        position_embedding, 48)
+
+    assert resized.shape == (1, 48, 48, 4)
+    assert resized.dtype == np.float32
+    np.testing.assert_allclose(resized, 1.0, atol=1e-6)
+
+
+def test_deepseek_ocr_uses_official_768_single_view_contract() -> None:
+    vl_config = deepseek_ocr_module.DeepSeekOCRPlugin().get_vl_config(_config())
+
+    assert vl_config is not None
+    assert vl_config["fixed_image_size"] == 768
+    assert vl_config["num_image_pad_tokens"] == 145
+    assert vl_config["preprocessor_type"] == "simple_chw"
