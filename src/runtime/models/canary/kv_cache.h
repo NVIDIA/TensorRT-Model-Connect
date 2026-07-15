@@ -96,6 +96,7 @@ class CanaryKvCache : public CanaryInferenceState {
     void bind_cache_inputs(TrtModule& module);
 
   private:
+    bool is_compatible_with(const CanaryKvCache& other) const;
     void rebind_cache_rows(int32_t cache_rows);
     std::vector<int64_t> mask_shape_for_engine(int32_t mask_width, std::size_t mask_buf_size) const;
     void write_position_input(TensorMap& inputs, int32_t seq_len);

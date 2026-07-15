@@ -56,6 +56,9 @@ class CanaryPipeline final : public IPipeline {
     std::vector<int32_t> run_decoder(const std::vector<int32_t>& initial_tokens,
                                      int32_t max_new_tokens, int32_t beam_size,
                                      float beam_length_penalty);
+    std::vector<int32_t> run_beam_decoder(const std::vector<int32_t>& initial_tokens,
+                                          int32_t max_new_tokens, int32_t beam_size,
+                                          float beam_length_penalty);
     void run_decoder_step(int32_t token_id, std::vector<float>& logits);
     void ensure_beam_state_capacity(int32_t beam_size);
 

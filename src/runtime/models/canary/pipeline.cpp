@@ -428,43 +428,8 @@ void CanaryPipeline::setup_cross_attention(int32_t actual_enc_seq_len) {
 std::vector<int32_t> CanaryPipeline::run_decoder(const std::vector<int32_t>& initial_tokens,
                                                  int32_t max_new_tokens, int32_t beam_size,
                                                  float beam_length_penalty) {
-    if (beam_size > 1) {
-        ensure_beam_state_capacity(beam_size);
-        auto result = run_canary_beam_search(
-            initial_tokens, max_new_tokens, canary_config_.eot_token_id, beam_size,
-            beam_length_penalty,
-            [this](const std::vector<int32_t>& prefix, std::vector<float>& logits,
-                   std::string& error) {
-                try {
-                    state_->reset();
-                    state_->bind_to(*decoder_);
-                    for (const int32_t token : prefix)
-                        run_decoder_step(token, logits);
-                    beam_states_a_.front()->copy_from(*state_);
-                    return true;
-                } catch (const std::exception& e) {
-                    error = e.what();
-                    return false;
-                }
-            },
-            [this](int32_t generation, int32_t parent_slot, int32_t child_slot, int32_t token,
-                   std::vector<float>& logits, std::string& error) {
-                try {
-                    auto& parents = generation % 2 == 0 ? beam_states_a_ : beam_states_b_;
-                    auto& children = generation % 2 == 0 ? beam_states_b_ : beam_states_a_;
-                    state_->copy_from(*parents.at(static_cast<std::size_t>(parent_slot)));
-                    run_decoder_step(token, logits);
-                    children.at(static_cast<std::size_t>(child_slot))->copy_from(*state_);
-                    return true;
-                } catch (const std::exception& e) {
-                    error = e.what();
-                    return false;
-                }
-            });
-        if (result.prefill_failed || result.decode_failed)
-            throw std::runtime_error("Canary beam search failed: " + result.error);
-        return result.output_ids;
-    }
+    if (beam_size > 1)
+        return run_beam_decoder(initial_tokens, max_new_tokens, beam_size, beam_length_penalty);
 
     state_->reset();
     state_->bind_to(*decoder_);
@@ -485,6 +450,44 @@ std::vector<int32_t> CanaryPipeline::run_decoder(const std::vector<int32_t>& ini
         std::cerr << "[canary] Decode step failed: " << result.error << std::endl;
     }
 
+    return result.output_ids;
+}
+
+std::vector<int32_t> CanaryPipeline::run_beam_decoder(const std::vector<int32_t>& initial_tokens,
+                                                      int32_t max_new_tokens, int32_t beam_size,
+                                                      float beam_length_penalty) {
+    ensure_beam_state_capacity(beam_size);
+    auto result = run_canary_beam_search(
+        initial_tokens, max_new_tokens, canary_config_.eot_token_id, beam_size, beam_length_penalty,
+        [this](const std::vector<int32_t>& prefix, std::vector<float>& logits, std::string& error) {
+            try {
+                state_->reset();
+                state_->bind_to(*decoder_);
+                for (const int32_t token : prefix)
+                    run_decoder_step(token, logits);
+                beam_states_a_.front()->copy_from(*state_);
+                return true;
+            } catch (const std::exception& e) {
+                error = e.what();
+                return false;
+            }
+        },
+        [this](int32_t generation, int32_t parent_slot, int32_t child_slot, int32_t token,
+               std::vector<float>& logits, std::string& error) {
+            try {
+                auto& parents = generation % 2 == 0 ? beam_states_a_ : beam_states_b_;
+                auto& children = generation % 2 == 0 ? beam_states_b_ : beam_states_a_;
+                state_->copy_from(*parents.at(static_cast<std::size_t>(parent_slot)));
+                run_decoder_step(token, logits);
+                children.at(static_cast<std::size_t>(child_slot))->copy_from(*state_);
+                return true;
+            } catch (const std::exception& e) {
+                error = e.what();
+                return false;
+            }
+        });
+    if (result.prefill_failed || result.decode_failed)
+        throw std::runtime_error("Canary beam search failed: " + result.error);
     return result.output_ids;
 }
 

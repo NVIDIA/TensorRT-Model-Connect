@@ -11,6 +11,7 @@
 #include <cassert>
 #include <cstring>
 #include <stdexcept>
+#include <tuple>
 
 namespace trtmc {
 
@@ -345,11 +346,15 @@ std::unique_ptr<CanaryInferenceState> CanaryKvCache::create_empty() const {
                                            names_);
 }
 
+bool CanaryKvCache::is_compatible_with(const CanaryKvCache& other) const {
+    return std::tie(num_layers_, max_length_, kv_dim_, cache_dtype_, stream_) ==
+           std::tie(other.num_layers_, other.max_length_, other.kv_dim_, other.cache_dtype_,
+                    other.stream_);
+}
+
 void CanaryKvCache::copy_from(const CanaryInferenceState& other) {
     const auto* source = dynamic_cast<const CanaryKvCache*>(&other);
-    if (source == nullptr || source->num_layers_ != num_layers_ ||
-        source->max_length_ != max_length_ || source->kv_dim_ != kv_dim_ ||
-        source->cache_dtype_ != cache_dtype_ || source->stream_ != stream_) {
+    if (source == nullptr || !is_compatible_with(*source)) {
         throw std::invalid_argument("CanaryKvCache::copy_from: incompatible state");
     }
 
