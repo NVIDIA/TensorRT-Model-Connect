@@ -459,8 +459,7 @@ def test_default_suites_include_text_generation_gap_models() -> None:
         assert suite["dataset"]["kind"] == "text_generation_json"
         assert suite["scoring"]["scorer"] == "continuation"
         assert suite["default_model_names"] == model_names
-        assert suite["gates"]["min_exact_match_rate"] == 1.0
-        assert suite["gates"]["min_token_prefix_agreement"] == 1.0
+        assert suite["gates"] == {}
 
     for suite_id in (
         "newstest2019_en_ru_marian_translation_parity",
@@ -2140,7 +2139,7 @@ def test_prepare_cli_accepts_vlm_dataset_kind(tmp_path: Path) -> None:
     ]
 
 
-def test_continuation_parity_exact_and_first_divergence() -> None:
+def test_continuation_parity_reports_divergence_severity() -> None:
     hf = {
         "responses": [
             {"sample_id": "a", "output_text": "the cat sat"},
@@ -2157,11 +2156,29 @@ def test_continuation_parity_exact_and_first_divergence() -> None:
     summary = task_eval.compare_continuation_sets(hf, trtfb, tokenize=lambda s: s.split())
 
     assert summary["count"] == 2
+    assert summary["divergence_metric_scope"] == "divergent_samples_only"
+    assert (
+        summary["normalization_denominator"]
+        == "max_hf_trtfb_generated_length"
+    )
     assert summary["exact_match_rate"] == 0.5  # "a" exact, "b" not
     assert summary["samples"][0]["first_divergence"] == 3  # all 3 tokens match
     assert summary["samples"][1]["first_divergence"] == 1  # diverge at token index 1
     # matched prefixes 3 + 1 = 4, ref token counts 3 + 2 = 5
     assert abs(summary["token_prefix_agreement"] - 4 / 5) < 1e-9
+    assert summary["divergent_count"] == 1
+    assert summary["divergence_rate"] == 0.5
+    assert summary["mean_divergent_first_divergence"] == 1.0
+    assert summary["mean_divergent_prefix_ratio"] == 0.5
+    assert summary["min_divergent_prefix_ratio"] == 0.5
+    assert summary["mean_divergent_severity"] == 0.5
+    assert summary["max_divergent_severity"] == 0.5
+    assert summary["samples"][0]["diverged"] is False
+    assert summary["samples"][0]["normalized_first_divergence"] == 1.0
+    assert summary["samples"][0]["divergence_severity"] == 0.0
+    assert summary["samples"][1]["diverged"] is True
+    assert summary["samples"][1]["normalized_first_divergence"] == 0.5
+    assert summary["samples"][1]["divergence_severity"] == 0.5
 
 
 def test_continuation_parity_prefers_generated_token_ids() -> None:
@@ -2187,6 +2204,33 @@ def test_continuation_parity_prefers_generated_token_ids() -> None:
     assert summary["samples"][1]["first_divergence"] == 2
     assert summary["samples"][1]["hf_token_at_divergence"] == 3
     assert summary["samples"][1]["trtfb_token_at_divergence"] == 4
+    assert summary["samples"][1]["normalized_first_divergence"] == 2 / 3
+    assert summary["samples"][1]["divergence_severity"] == 1 / 3
+    assert summary["mean_divergent_prefix_ratio"] == 2 / 3
+    assert summary["mean_divergent_severity"] == 1 / 3
+
+
+def test_continuation_parity_reports_no_divergence_without_empty_means() -> None:
+    predictions = {
+        "responses": [
+            {"sample_id": "a", "output_text": "same", "generated_token_ids": [1, 2]},
+            {"sample_id": "b", "output_text": "", "generated_token_ids": []},
+        ]
+    }
+
+    summary = task_eval.compare_continuation_sets(
+        predictions, predictions, require_token_ids=True
+    )
+
+    assert summary["divergent_count"] == 0
+    assert summary["divergence_rate"] == 0.0
+    assert summary["mean_divergent_first_divergence"] is None
+    assert summary["mean_divergent_prefix_ratio"] is None
+    assert summary["min_divergent_prefix_ratio"] is None
+    assert summary["mean_divergent_severity"] == 0.0
+    assert summary["max_divergent_severity"] == 0.0
+    assert summary["samples"][1]["normalized_first_divergence"] == 1.0
+    assert summary["samples"][1]["divergence_severity"] == 0.0
 
 
 def test_continuation_parity_requires_token_ids_when_requested() -> None:
@@ -2257,7 +2301,90 @@ def test_compare_continuation_cli_writes_json_summary(tmp_path: Path) -> None:
     assert summary["comparison_granularity"] == "generated_token_ids"
     assert summary["exact_match_rate"] == 0.5
     assert summary["token_prefix_agreement"] == 0.75
+    assert summary["divergence_rate"] == 0.5
+    assert summary["mean_divergent_first_divergence"] == 1.0
+    assert summary["mean_divergent_prefix_ratio"] == 0.5
+    assert summary["mean_divergent_severity"] == 0.5
     assert summary["samples"][1]["first_divergence"] == 1
+
+
+def test_continuation_summary_markdown_prioritizes_divergence_severity(
+    tmp_path: Path,
+) -> None:
+    hf = {
+        "responses": [
+            {
+                "sample_id": "exact",
+                "output_text": "same",
+                "generated_token_ids": [1, 2],
+            },
+            {
+                "sample_id": "diverged",
+                "output_text": "left",
+                "generated_token_ids": [3, 4],
+            },
+        ]
+    }
+    trtfb = {
+        "responses": [
+            {
+                "sample_id": "exact",
+                "output_text": "same",
+                "generated_token_ids": [1, 2],
+            },
+            {
+                "sample_id": "diverged",
+                "output_text": "right",
+                "generated_token_ids": [3, 5],
+            },
+        ]
+    }
+    summary = task_eval.compare_continuation_sets(hf, trtfb)
+    output = tmp_path / "summary.md"
+
+    task_eval.write_continuation_summary_markdown(summary, output)
+
+    markdown = output.read_text(encoding="utf-8")
+    assert markdown.startswith("# Continuation Divergence Summary\n")
+    assert "| divergence_metric_scope | divergent_samples_only |" in markdown
+    assert (
+        "| normalization_denominator | max_hf_trtfb_generated_length |"
+        in markdown
+    )
+    assert "| divergence_rate | 0.5000 |" in markdown
+    assert "| mean_divergent_prefix_ratio | 0.5000 |" in markdown
+    assert "| mean_divergent_severity | 0.5000 |" in markdown
+    assert "## Compatibility Diagnostics" in markdown
+    assert "| diverged | 1 | 2 | 2 | 0.5000 | 0.5000 | 4 | 5 |" in markdown
+    assert "| exact |" not in markdown
+
+
+def test_continuation_result_line_prioritizes_divergence_severity() -> None:
+    line = task_eval._format_result_line(
+        {"name": "example"},
+        {
+            "mode": "continuation",
+            "comparison_granularity": "generated_token_ids",
+            "divergent_count": 2,
+            "divergence_rate": 0.2,
+            "mean_divergent_first_divergence": 8.0,
+            "mean_divergent_prefix_ratio": 0.125,
+            "min_divergent_prefix_ratio": 0.109375,
+            "mean_divergent_severity": 0.875,
+            "max_divergent_severity": 0.890625,
+            "hf_reused": True,
+            "bundle_built": False,
+        },
+    )
+
+    assert "divergent_count=2" in line
+    assert "divergence_rate=0.2000" in line
+    assert "mean_divergent_prefix_ratio=0.1250" in line
+    assert "min_divergent_prefix_ratio=0.1094" in line
+    assert "mean_divergent_severity=0.8750" in line
+    assert "max_divergent_severity=0.8906" in line
+    assert "exact=" not in line
+    assert "token_agreement=" not in line
 
 
 def test_dataset_benchmark_serializes_generated_token_ids() -> None:

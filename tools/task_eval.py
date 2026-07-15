@@ -9529,10 +9529,24 @@ def eval_one_model(
         result = {
             **base_result,
             "mode": "continuation",
+            "evaluation_policy": (
+                "threshold_gated" if suite.get("gates", {}) else "diagnostic_only"
+            ),
             "comparison_granularity": summary.get("comparison_granularity", ""),
             "exact_match_rate": summary["exact_match_rate"],
             "token_prefix_agreement": summary["token_prefix_agreement"],
             "mean_first_divergence": summary["mean_first_divergence"],
+            "divergent_count": summary["divergent_count"],
+            "divergence_rate": summary["divergence_rate"],
+            "mean_divergent_first_divergence": summary[
+                "mean_divergent_first_divergence"
+            ],
+            "mean_divergent_prefix_ratio": summary["mean_divergent_prefix_ratio"],
+            "min_divergent_prefix_ratio": summary["min_divergent_prefix_ratio"],
+            "mean_divergent_severity": summary["mean_divergent_severity"],
+            "max_divergent_severity": summary["max_divergent_severity"],
+            # Preserve the historical generic agreement field for downstream
+            # consumers; the divergence fields above are the primary output.
             "prediction_agreement_rate": summary["token_prefix_agreement"],
         }
         diagnostics = continuation_task_quality_diagnostics(
@@ -9654,10 +9668,13 @@ def eval_one_model(
 
 
 # ---------------------------------------------------------------------------
-# Continuation parity for base / completion models (generation-only, no logits).
+# Continuation divergence diagnostics for base / completion models
+# (generation-only, no logits).
 # HF reference and TRTFB both greedily generate from the same plain-text prompt;
-# we compare the two continuations. No gold answer or logprobs are needed — the
-# metric is HF<->TRTFB output agreement (conversion fidelity).
+# we compare the two continuations. No gold answer or logprobs are needed. The
+# primary metrics describe how often they diverge and how much of each divergent
+# continuation remains after its first differing token. Legacy agreement fields
+# remain in the result for compatibility.
 # ---------------------------------------------------------------------------
 
 
@@ -9718,6 +9735,9 @@ def compare_continuation_sets(
     total_matched = 0
     total_reference = 0
     div_positions: list[int] = []
+    divergent_positions: list[int] = []
+    divergent_prefix_ratios: list[float] = []
+    divergent_severities: list[float] = []
     samples: list[dict[str, Any]] = []
     for idx, (hf_row, trt_row) in enumerate(zip(hf_rows, trt_rows, strict=True)):
         hf_text = str(hf_row.get("output_text", ""))
@@ -9734,9 +9754,17 @@ def compare_continuation_sets(
         exact += int(is_exact)
         divergence = _first_divergence(hf_tokens, trt_tokens)
         reference_len = max(1, len(hf_tokens), len(trt_tokens))
+        normalized_divergence = 1.0 if is_exact else divergence / reference_len
+        divergence_severity = (
+            0.0 if is_exact else (reference_len - divergence) / reference_len
+        )
         total_matched += min(divergence, reference_len)
         total_reference += reference_len
         div_positions.append(divergence)
+        if not is_exact:
+            divergent_positions.append(divergence)
+            divergent_prefix_ratios.append(normalized_divergence)
+            divergent_severities.append(divergence_severity)
         hf_token_at_divergence = hf_tokens[divergence] if divergence < len(hf_tokens) else None
         trt_token_at_divergence = trt_tokens[divergence] if divergence < len(trt_tokens) else None
         samples.append(
@@ -9745,7 +9773,10 @@ def compare_continuation_sets(
                 "sample_id": hf_row.get("sample_id", f"sample_{idx}"),
                 "exact": is_exact,
                 "text_exact": text_is_exact,
+                "diverged": not is_exact,
                 "first_divergence": divergence,
+                "normalized_first_divergence": normalized_divergence,
+                "divergence_severity": divergence_severity,
                 "hf_len": len(hf_tokens),
                 "trtfb_len": len(trt_tokens),
                 "hf_token_at_divergence": hf_token_at_divergence,
@@ -9757,8 +9788,11 @@ def compare_continuation_sets(
     exact_rate = (exact / count) if count else 0.0
     prefix_agreement = (total_matched / total_reference) if total_reference else 0.0
     mean_divergence = (sum(div_positions) / count) if count else 0.0
+    divergent_count = len(divergent_positions)
     return {
         "comparison_granularity": comparison_granularity,
+        "divergence_metric_scope": "divergent_samples_only",
+        "normalization_denominator": "max_hf_trtfb_generated_length",
         "exact_match_rate": exact_rate,
         "token_id_exact_match_rate": exact_rate if has_all_token_ids else None,
         "text_exact_match_rate": (text_exact / count) if count else 0.0,
@@ -9766,6 +9800,23 @@ def compare_continuation_sets(
         "token_id_prefix_agreement": prefix_agreement if has_all_token_ids else None,
         "mean_first_divergence": mean_divergence,
         "mean_first_token_id_divergence": mean_divergence if has_all_token_ids else None,
+        "divergent_count": divergent_count,
+        "divergence_rate": divergent_count / count if count else 0.0,
+        "mean_divergent_first_divergence": (
+            sum(divergent_positions) / divergent_count if divergent_count else None
+        ),
+        "mean_divergent_prefix_ratio": (
+            sum(divergent_prefix_ratios) / divergent_count if divergent_count else None
+        ),
+        "min_divergent_prefix_ratio": (
+            min(divergent_prefix_ratios) if divergent_prefix_ratios else None
+        ),
+        "mean_divergent_severity": (
+            sum(divergent_severities) / divergent_count if divergent_count else 0.0
+        ),
+        "max_divergent_severity": (
+            max(divergent_severities) if divergent_severities else 0.0
+        ),
         "count": count,
         "exact_count": exact,
         "text_exact_count": text_exact,
@@ -9799,9 +9850,16 @@ def cmd_compare_continuation(args: argparse.Namespace) -> int:
     output_path = Path(args.output) if args.output else work_dir / "continuation_parity.json"
     output_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(
-        f"exact_match={summary['exact_match_rate']:.4f} "
-        f"token_agreement={summary['token_prefix_agreement']:.4f} "
-        f"mean_first_divergence={summary['mean_first_divergence']:.2f} "
+        f"divergent_count={summary['divergent_count']} "
+        f"divergence_rate={summary['divergence_rate']:.4f} "
+        f"mean_divergent_first_divergence="
+        f"{_format_optional_float(summary['mean_divergent_first_divergence'], precision=2)} "
+        f"mean_divergent_prefix_ratio="
+        f"{_format_optional_float(summary['mean_divergent_prefix_ratio'])} "
+        f"min_divergent_prefix_ratio="
+        f"{_format_optional_float(summary['min_divergent_prefix_ratio'])} "
+        f"mean_divergent_severity={summary['mean_divergent_severity']:.4f} "
+        f"max_divergent_severity={summary['max_divergent_severity']:.4f} "
         f"output={output_path}"
     )
     return 0
@@ -9831,11 +9889,30 @@ def _format_optional_float(value: Any, *, precision: int = 4) -> str:
 
 def write_continuation_summary_markdown(summary: dict[str, Any], path: Path) -> None:
     lines = [
-        "# Continuation Parity Summary",
+        "# Continuation Divergence Summary",
+        "",
+        "`first_divergence` is the number of generated tokens that match before the "
+        "first difference. Prefix and severity aggregates include divergent samples "
+        "only; exact samples do not dilute divergence severity.",
         "",
         "| Metric | Value |",
         "|---|---:|",
         f"| comparison_granularity | {summary.get('comparison_granularity', '')} |",
+        f"| divergence_metric_scope | {summary.get('divergence_metric_scope', '')} |",
+        f"| normalization_denominator | {summary.get('normalization_denominator', '')} |",
+        f"| sample_count | {summary['count']} |",
+        f"| divergent_count | {summary['divergent_count']} |",
+        f"| divergence_rate | {summary['divergence_rate']:.4f} |",
+        f"| mean_divergent_first_divergence | {_format_optional_float(summary.get('mean_divergent_first_divergence'), precision=2)} |",
+        f"| mean_divergent_prefix_ratio | {_format_optional_float(summary.get('mean_divergent_prefix_ratio'))} |",
+        f"| min_divergent_prefix_ratio | {_format_optional_float(summary.get('min_divergent_prefix_ratio'))} |",
+        f"| mean_divergent_severity | {summary['mean_divergent_severity']:.4f} |",
+        f"| max_divergent_severity | {summary['max_divergent_severity']:.4f} |",
+        "",
+        "## Compatibility Diagnostics",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
         f"| exact_match_rate | {summary['exact_match_rate']:.4f} |",
         f"| token_id_exact_match_rate | {_format_optional_float(summary.get('token_id_exact_match_rate'))} |",
         f"| text_exact_match_rate | {summary['text_exact_match_rate']:.4f} |",
@@ -9843,8 +9920,27 @@ def write_continuation_summary_markdown(summary: dict[str, Any], path: Path) -> 
         f"| token_id_prefix_agreement | {_format_optional_float(summary.get('token_id_prefix_agreement'))} |",
         f"| mean_first_divergence | {summary['mean_first_divergence']:.2f} |",
         f"| mean_first_token_id_divergence | {_format_optional_float(summary.get('mean_first_token_id_divergence'), precision=2)} |",
-        f"| count | {summary['count']} |",
     ]
+    divergent_samples = [sample for sample in summary.get("samples", []) if sample["diverged"]]
+    lines.extend(["", "## Divergent Samples", ""])
+    if not divergent_samples:
+        lines.append("No divergent samples.")
+    else:
+        lines.extend(
+            [
+                "| Sample | First divergence | HF length | TRTFB length | Prefix ratio | Severity | HF token | TRTFB token |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for sample in divergent_samples:
+            lines.append(
+                f"| {sample['sample_id']} | {sample['first_divergence']} | "
+                f"{sample['hf_len']} | {sample['trtfb_len']} | "
+                f"{sample['normalized_first_divergence']:.4f} | "
+                f"{sample['divergence_severity']:.4f} | "
+                f"{sample['hf_token_at_divergence']} | "
+                f"{sample['trtfb_token_at_divergence']} |"
+            )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -9922,9 +10018,16 @@ def _format_result_line(model: dict[str, Any], result: dict[str, Any]) -> str:
         )
     if result.get("mode") == "continuation":
         return (
-            f"model={model['name']} exact={result['exact_match_rate']:.4f} "
-            f"token_agreement={result['token_prefix_agreement']:.4f} "
-            f"mean_first_divergence={result['mean_first_divergence']:.2f} "
+            f"model={model['name']} divergent_count={result['divergent_count']} "
+            f"divergence_rate={result['divergence_rate']:.4f} "
+            f"mean_divergent_first_divergence="
+            f"{_format_optional_float(result['mean_divergent_first_divergence'], precision=2)} "
+            f"mean_divergent_prefix_ratio="
+            f"{_format_optional_float(result['mean_divergent_prefix_ratio'])} "
+            f"min_divergent_prefix_ratio="
+            f"{_format_optional_float(result['min_divergent_prefix_ratio'])} "
+            f"mean_divergent_severity={result['mean_divergent_severity']:.4f} "
+            f"max_divergent_severity={result['max_divergent_severity']:.4f} "
             f"granularity={result.get('comparison_granularity', '')} {common}"
         )
     if result.get("mode") == "diffusion_image_clip_parity":
@@ -10085,7 +10188,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--raw", required=True)
     p.add_argument("--predictions", required=True)
 
-    p = sub.add_parser("compare-continuation")
+    p = sub.add_parser(
+        "compare-continuation",
+        help="Measure HF/TRTFB continuation divergence frequency and severity.",
+    )
     p.add_argument("--work-dir", required=True)
     p.add_argument("--hf-predictions")
     p.add_argument("--trtfb-predictions")

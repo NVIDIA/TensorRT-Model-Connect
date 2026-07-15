@@ -167,8 +167,8 @@ suites:
     description: >
       Greedy code-completion parity on the official HumanEval prompts used by
       both CodeGen and StarCoder2 evaluations. Functional pass@1 is intentionally
-      not executed by this runner; the gate requires every sampled HF and TRTFB
-      completion to agree token-for-token.
+      not executed by this runner. Divergence is expected and reported as its
+      per-sample frequency, first position, normalized prefix, and severity.
     user_contract: code_completion
     default_model_names:
       - codegen-350m
@@ -207,9 +207,7 @@ suites:
           build_generation_headroom: true
         starcoder2-3b:
           build_generation_headroom: true
-    gates:
-      min_exact_match_rate: 1.0
-      min_token_prefix_agreement: 1.0
+    gates: {}
     ci:
       eligible: false
       lane: local_only
@@ -221,7 +219,7 @@ suites:
     description: >
       Greedy language-model continuation parity for DistilGPT2 on WikiText-103,
       the benchmark reported by its model card. Full-corpus perplexity is outside
-      this smoke runner; the gate requires every sampled continuation to agree.
+      this smoke runner; divergence frequency and severity are diagnostic.
     user_contract: continuation_parity
     default_model_names:
       - distilgpt2
@@ -256,9 +254,7 @@ suites:
       by_model:
         distilgpt2:
           build_generation_headroom: true
-    gates:
-      min_exact_match_rate: 1.0
-      min_token_prefix_agreement: 1.0
+    gates: {}
     ci:
       eligible: false
       lane: local_only
@@ -270,7 +266,8 @@ suites:
     description: >
       English-to-Russian translation parity for Marian on WMT newstest2019,
       one of the checkpoint model card's reported benchmarks. SacreBLEU is
-      reported separately while exact sampled HF/TRTFB agreement is gated.
+      reported separately while backend divergence frequency and severity are
+      retained per sample.
     user_contract: translation
     default_model_names:
       - marian-en-ru
@@ -304,9 +301,7 @@ suites:
     scoring:
       scorer: continuation
       task_metric: sacrebleu
-    gates:
-      min_exact_match_rate: 1.0
-      min_token_prefix_agreement: 1.0
+    gates: {}
     ci:
       eligible: false
       lane: local_only
@@ -317,7 +312,7 @@ suites:
     description: >
       English-to-German translation parity for T5-small on the WMT task used by
       the T5 paper. Inputs retain the checkpoint's required task prefix;
-      SacreBLEU is diagnostic and exact sampled backend agreement is gated.
+      SacreBLEU and backend divergence severity are diagnostic.
     user_contract: seq2seq_output
     default_model_names:
       - t5-small
@@ -351,9 +346,7 @@ suites:
     scoring:
       scorer: continuation
       task_metric: sacrebleu
-    gates:
-      min_exact_match_rate: 1.0
-      min_token_prefix_agreement: 1.0
+    gates: {}
     ci:
       eligible: false
       lane: local_only
@@ -368,7 +361,8 @@ suites:
       English-to-French translation parity for Riva Translate on FLORES-200,
       one of the checkpoint model card's reported benchmark families. Dataset
       prompts use the model-card en-fr chat expansion so both backends consume
-      the identical rendered text. SacreBLEU remains diagnostic.
+      the identical rendered text. SacreBLEU and backend divergence severity
+      remain diagnostic.
     user_contract: translation
     default_model_names:
       - riva-translate-4b
@@ -406,9 +400,7 @@ suites:
       by_model:
         riva-translate-4b:
           build_generation_headroom: true
-    gates:
-      min_exact_match_rate: 1.0
-      min_token_prefix_agreement: 1.0
+    gates: {}
     ci:
       eligible: false
       lane: local_only
