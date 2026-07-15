@@ -19,9 +19,7 @@ from tests.e2e_harness.manifest_loader import get_case_by_name
 MODEL_DIR = Path(__file__).resolve().parent
 SNAPSHOT_PATH = MODEL_DIR / "data" / "qwen3_omni_hf_reference.json"
 OFFICIAL_PROMPT = "Please say hello from Qwen3 Omni in one short sentence."
-EXPECTED_WAV_SHA256 = (
-    "2648af9d3de015de2e7c73f829e374b95f287a9c5e1c548569a33068e8aa99ef"
-)
+EXPECTED_WAV_SHA256 = "2648af9d3de015de2e7c73f829e374b95f287a9c5e1c548569a33068e8aa99ef"
 
 
 def _case(
@@ -36,7 +34,7 @@ def _case(
         runtime_strategy="qwen3_omni_multimodal",
         task_strategy="omni_multimodal",
         reference_backend="torch_reference",
-        oracle_level="L4_invariants",
+        oracle_level="L3_snapshot_regression",
         inputs={"prompt": prompt, "max_new_tokens": 16, "seed": 42},
         determinism={"seed": 42, "reruns": 0},
         metadata={
@@ -47,17 +45,25 @@ def _case(
     )
 
 
-def test_manifest_uses_pinned_hf_evidence_without_strengthening_l4_oracle() -> None:
+def test_manifest_uses_pinned_hf_waveform_as_l4_oracle() -> None:
     case = get_case_by_name("qwen3-omni-30b-a3b-instruct", MODEL_DIR)
 
     assert case is not None
     assert case.reference_backend == "torch_reference"
-    assert case.oracle_level == "L4_invariants"
+    assert case.oracle_level == "L3_snapshot_regression"
     assert case.inputs["prompt"] == OFFICIAL_PROMPT
     assert case.inputs["seed"] == 42
     assert case.metadata["reference_speaker"] == "Ethan"
     assert case.metadata["reference_talker_max_new_tokens"] == 32
     assert Path(case.metadata["golden_snapshot_path"]) == SNAPSHOT_PATH
+    assert case.threshold_overrides == {
+        "audio_artifact_bytes_min": 44.0,
+        "audio_duration_s_min": 0.5,
+        "audio_reference_duration_ratio_min": 0.5,
+        "audio_rms_min": 0.005,
+        "audio_peak_min": 0.02,
+        "audio_reference_waveform_cosine_min": 0.25,
+    }
     assert any(
         requirement.kind == "asset_exists"
         and Path(requirement.args["path"]) == SNAPSHOT_PATH
@@ -83,19 +89,17 @@ def test_pinned_reference_materializes_case_local_playable_hf_audio(
 
     expected_wav = tmp_path / "artifacts" / case.name / "hf_reference.wav"
     assert output.data["_invariant_only"] is True
-    assert output.data["reference_role"] == "human_review_only"
+    assert output.data["reference_role"] == "automated_waveform_oracle"
     assert output.data["wav_path"] == str(expected_wav)
     assert output.data["sample_rate"] == 24_000
     assert output.data["num_samples"] == 37_845
     assert output.data["duration_s"] == pytest.approx(1.576875)
     assert output.data["decoded_text"] == "Hello from Qwen-Omni!"
-    assert output.data["resolved_revision"] == (
-        "26291f793822fb6be9555850f06dfe95f2d7e695"
-    )
+    assert output.data["resolved_revision"] == ("26291f793822fb6be9555850f06dfe95f2d7e695")
     assert output.data["raw_sha256"] == EXPECTED_WAV_SHA256
     assert output.text == "Hello from Qwen-Omni!"
-    assert output.metadata["source"] == "official_hf_pinned_human_review"
-    assert output.metadata["comparison_mode"] == "invariant_only"
+    assert output.metadata["source"] == "official_hf_pinned_waveform_oracle"
+    assert output.metadata["comparison_mode"] == "waveform_cosine_and_invariants"
     assert hashlib.sha256(expected_wav.read_bytes()).hexdigest() == EXPECTED_WAV_SHA256
     assert output.timing_s >= 0.0
 
@@ -128,9 +132,9 @@ def test_snapshot_records_complete_generation_provenance() -> None:
 def test_reference_rejects_prompt_drift(tmp_path: Path) -> None:
     case = _case(prompt="A different prompt")
 
-    with pytest.raises(RuntimeError, match=(
-        r"provenance mismatch for prompt: expected 'A different prompt', got "
-    )):
+    with pytest.raises(
+        RuntimeError, match=(r"provenance mismatch for prompt: expected 'A different prompt', got ")
+    ):
         torch_reference.TorchReference().run_stage(
             case,
             StageSpec(name="talker_decode"),

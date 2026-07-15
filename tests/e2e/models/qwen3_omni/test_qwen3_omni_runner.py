@@ -53,8 +53,7 @@ def test_thinker_stage_drops_unsupported_stage_flag(monkeypatch, tmp_path) -> No
 
     monkeypatch.setattr(omni.subprocess, "run", _fake_run)
 
-    out = omni.OmniMultimodalRunner().run_stage(
-        case, StageSpec(name="thinker_decode"), ctx)
+    out = omni.OmniMultimodalRunner().run_stage(case, StageSpec(name="thinker_decode"), ctx)
 
     cmd = captured["cmd"]
     assert cmd[1] == "run"
@@ -75,12 +74,12 @@ def test_vision_stage_maps_to_embed_without_stage_flag(monkeypatch, tmp_path) ->
     def _fake_run(cmd, **kwargs):
         captured["cmd"] = cmd
         return subprocess.CompletedProcess(
-            cmd, 0, stdout='{"embedding": [0.1, 0.2], "dim": 2}\n', stderr="")
+            cmd, 0, stdout='{"embedding": [0.1, 0.2], "dim": 2}\n', stderr=""
+        )
 
     monkeypatch.setattr(omni.subprocess, "run", _fake_run)
 
-    out = omni.OmniMultimodalRunner().run_stage(
-        case, StageSpec(name="vision_encode"), ctx)
+    out = omni.OmniMultimodalRunner().run_stage(case, StageSpec(name="vision_encode"), ctx)
 
     cmd = captured["cmd"]
     assert cmd[1] == "embed"
@@ -90,11 +89,7 @@ def test_vision_stage_maps_to_embed_without_stage_flag(monkeypatch, tmp_path) ->
 
 
 def test_qwen3_omni_manifest_owns_extended_runtime_budget() -> None:
-    manifest_path = (
-        Path(__file__).parent
-        / "manifests"
-        / "qwen3-omni-30b-a3b-instruct.json"
-    )
+    manifest_path = Path(__file__).parent / "manifests" / "qwen3-omni-30b-a3b-instruct.json"
     model = load_model_manifest(manifest_path)
 
     assert model.testcases[0].inputs["runtime_timeout_s"] == 900
@@ -117,8 +112,7 @@ def test_omni_runner_uses_model_owned_runtime_budget(monkeypatch, tmp_path) -> N
 
     monkeypatch.setattr(omni.subprocess, "run", _fake_run)
 
-    omni.OmniMultimodalRunner().run_stage(
-        case, StageSpec(name="thinker_decode"), ctx)
+    omni.OmniMultimodalRunner().run_stage(case, StageSpec(name="thinker_decode"), ctx)
 
     assert captured["timeout"] == 900
 
@@ -143,15 +137,28 @@ def test_omni_timeout_preserves_partial_stderr(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(omni.subprocess, "run", _timeout)
 
     with pytest.raises(RuntimeError, match="model-owned runtime budget of 900s"):
-        omni.OmniMultimodalRunner().run_stage(
-            case, StageSpec(name="thinker_decode"), ctx)
+        omni.OmniMultimodalRunner().run_stage(case, StageSpec(name="thinker_decode"), ctx)
 
-    timeout_log = (
-        tmp_path
-        / case.name
-        / "omni_thinker_decode_timeout_stderr.log"
-    )
+    timeout_log = tmp_path / case.name / "omni_thinker_decode_timeout_stderr.log"
     assert "still loading" in timeout_log.read_text(encoding="utf-8")
+
+
+def test_talker_rejects_simple_waveform_fallback(monkeypatch, tmp_path) -> None:
+    case = _make_case(inputs={"prompt": "hello", "max_new_tokens": 16})
+    ctx = _make_ctx(case, tmp_path)
+
+    def _fallback(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            stdout="",
+            stderr=("[trtmc] Omni: no Code2Wav engine, generating simple waveform\n"),
+        )
+
+    monkeypatch.setattr(omni.subprocess, "run", _fallback)
+
+    with pytest.raises(RuntimeError, match="Code2Wav engine is missing"):
+        omni.OmniMultimodalRunner().run_stage(case, StageSpec(name="talker_decode"), ctx)
 
 
 def test_composite_runner_uses_run_without_stage_flag(monkeypatch, tmp_path) -> None:
@@ -170,8 +177,7 @@ def test_composite_runner_uses_run_without_stage_flag(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr(omni.subprocess, "run", _fake_run)
 
-    out = omni.CompositePipelineRunner().run_stage(
-        case, StageSpec(name="end_to_end"), ctx)
+    out = omni.CompositePipelineRunner().run_stage(case, StageSpec(name="end_to_end"), ctx)
 
     cmd = captured["cmd"]
     assert cmd[1] == "run"

@@ -24,21 +24,10 @@ struct OmniAudioEncodePlan {
     std::size_t output_elements{0};
 };
 
-struct OmniTalkerPlan {
-    bool should_run_talker{false};
-    int32_t num_tokens{0};
-};
-
 struct OmniCodecPlan {
     bool should_run_codec{false};
     int32_t n_codebooks{0};
     int32_t n_frames{0};
-};
-
-struct OmniTalkerDecodePlan {
-    int32_t n_codebooks{0};
-    int32_t codebook_size{0};
-    int32_t num_tokens{0};
 };
 
 inline OmniAudioEncodePlan make_omni_audio_encode_plan(const OmniConfig& config,
@@ -65,15 +54,6 @@ inline std::vector<float> build_omni_audio_encoder_input(const float* mel_featur
     return input_padded;
 }
 
-inline OmniTalkerPlan make_omni_talker_plan(std::size_t text_token_count,
-                                            std::size_t hidden_state_count,
-                                            bool has_talker_engine) {
-    OmniTalkerPlan plan;
-    plan.should_run_talker = has_talker_engine && text_token_count > 0 && hidden_state_count > 0;
-    plan.num_tokens = static_cast<int32_t>(text_token_count);
-    return plan;
-}
-
 inline OmniCodecPlan make_omni_codec_plan(const OmniConfig& config, std::size_t codec_token_count) {
     OmniCodecPlan plan;
     plan.n_codebooks = config.talker_n_codebooks;
@@ -82,39 +62,6 @@ inline OmniCodecPlan make_omni_codec_plan(const OmniConfig& config, std::size_t 
         plan.should_run_codec ? static_cast<int32_t>(codec_token_count) / plan.n_codebooks : 0;
     plan.should_run_codec = plan.should_run_codec && plan.n_frames > 0;
     return plan;
-}
-
-inline OmniTalkerDecodePlan make_omni_talker_decode_plan(int32_t n_codebooks, int32_t codebook_size,
-                                                         int32_t num_tokens) {
-    OmniTalkerDecodePlan plan;
-    plan.n_codebooks = n_codebooks;
-    plan.codebook_size = codebook_size;
-    plan.num_tokens = num_tokens;
-    return plan;
-}
-
-inline int32_t select_omni_codebook_argmax(const std::vector<float>& logits, int32_t offset,
-                                           int32_t codebook_size) {
-    if (offset + codebook_size > static_cast<int32_t>(logits.size())) {
-        return 0;
-    }
-
-    int32_t best = 0;
-    for (int32_t index = 1; index < codebook_size; ++index) {
-        if (logits[offset + index] > logits[offset + best]) {
-            best = index;
-        }
-    }
-    return best;
-}
-
-inline void append_omni_talker_codes_from_logits(const std::vector<float>& logits,
-                                                 const OmniTalkerDecodePlan& plan,
-                                                 std::vector<int32_t>& all_codes) {
-    for (int32_t codebook = 0; codebook < plan.n_codebooks; ++codebook) {
-        const int32_t offset = codebook * plan.codebook_size;
-        all_codes.push_back(select_omni_codebook_argmax(logits, offset, plan.codebook_size));
-    }
 }
 
 inline std::vector<int32_t>
@@ -129,6 +76,17 @@ build_omni_code2wav_input_codes(const std::vector<int32_t>& codec_tokens, int32_
         }
     }
     return input_codes;
+}
+
+inline std::size_t code2wav_output_samples(const OmniConfig& config, int32_t actual_frames,
+                                           std::size_t engine_output_samples) {
+    if (actual_frames <= 0 || config.code2wav_upsample_factor <= 0)
+        return 0;
+    const auto untrimmed = static_cast<std::size_t>(actual_frames) *
+                           static_cast<std::size_t>(config.code2wav_upsample_factor);
+    const auto delay = static_cast<std::size_t>(std::max(config.code2wav_output_delay, 0));
+    const auto model_samples = untrimmed > delay ? untrimmed - delay : 0;
+    return std::min(engine_output_samples, model_samples);
 }
 
 } // namespace trtmc

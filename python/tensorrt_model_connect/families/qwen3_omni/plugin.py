@@ -8,11 +8,11 @@ Qwen3-Omni is a 3-stage multimodal model:
      - Vision encoder (reuses Qwen VL pattern with 3D RoPE)
      - Audio encoder (Whisper-like mel -> transformer encoder)
      - MoE text decoder (Qwen3 MoE architecture)
-  2. Talker: Text embeddings -> RVQ speech codec tokens
-     - Takes Thinker hidden states + text tokens
-     - Produces 8-codebook RVQ tokens (codebook-by-codebook autoregressive)
+  2. Talker: Text embeddings -> 16-group RVQ speech codec tokens
+     - Runs the checkpoint's complete 20-layer MoE Talker and residual-code
+       predictor through the model-owned runtime bridge
   3. Code2Wav: Codec tokens -> audio waveform
-     - ConvNet-based waveform synthesizer (transposed convolutions)
+     - Exports the complete official pre-transformer, upsampler, and decoder
 
 The Thinker MoE decoder follows Qwen3 MoE (sibling model) with the same
 top-k softmax routing. Vision/audio features inject via embed_input mode
@@ -30,16 +30,15 @@ Weight key mapping:
     model.thinker.audio_tower.conv2.weight/bias
     model.thinker.audio_tower.layers.{i}.*
 
-  Talker:
-    model.talker.layers.{i}.*
-    model.talker.codec_head.{cb}.weight
-
   Code2Wav:
-    model.code2wav.upsample_blocks.{i}.weight/bias
+    model.code2wav.pre_transformer.*
+    model.code2wav.upsample.*
+    model.code2wav.decoder.*
 """
 
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
 
@@ -62,6 +61,18 @@ from .standard_decoder_builder import _mark_debug_output
 
 trt = trt_compat.get_trt()
 
+
+def _talker_model_locator(model_dir: Path) -> tuple[str, str]:
+    """Return a portable HF repo/revision pair, or the resolved local path."""
+    resolved = model_dir.resolve()
+    cache_repo = resolved.parent.parent.name
+    if resolved.parent.name == "snapshots" and cache_repo.startswith("models--"):
+        namespace, separator, repository = cache_repo.removeprefix("models--").partition("--")
+        if separator and namespace and repository:
+            return f"{namespace}/{repository}", resolved.name
+    return str(resolved), ""
+
+
 class Qwen3OmniPlugin:
     name = "qwen3_omni"
     runtime_strategy = "qwen3_omni_multimodal"
@@ -72,6 +83,8 @@ class Qwen3OmniPlugin:
         self._talker_cfg: dict = {}
         self._audio_encoder_cfg: dict = {}
         self._code2wav_cfg: dict = {}
+        self._talker_model_id = ""
+        self._talker_model_revision = ""
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
@@ -89,6 +102,7 @@ class Qwen3OmniPlugin:
           - Code2Wav weights (model.code2wav.*)
         """
         model_dir_path = Path(model_dir)
+        self._talker_model_id, self._talker_model_revision = _talker_model_locator(model_dir_path)
         readers = _open_safetensors(model_dir_path)
 
         hidden = config.hidden_size
@@ -308,13 +322,14 @@ class Qwen3OmniPlugin:
         weights["_talker_cfg"] = talker_cfg
 
         # Detect Code2Wav config
-        code2wav_cfg = self._detect_code2wav(readers)
+        code2wav_cfg = self._detect_code2wav(readers, config)
         self._code2wav_cfg = code2wav_cfg
         weights["_code2wav_cfg"] = code2wav_cfg
 
-        # Load audio encoder, talker, and code2wav weights.
-        # Handle both prefixes: thinker.audio_tower.* and
-        # model.thinker.audio_tower.* (similarly for talker/code2wav).
+        # Load only weights consumed by native extra-engine builders. The
+        # official Talker bridge loads its own checkpoint tensors at runtime;
+        # duplicating them here adds several GB to build memory for no output.
+        # Handle both common checkpoint prefixes.
         for reader in readers:
             for key in reader.keys():
                 # Audio tower weights
@@ -324,13 +339,6 @@ class Qwen3OmniPlugin:
                 elif key.startswith("model.thinker.audio_tower."):
                     canon = key[len("model.thinker."):]
                     weights[f"audio.{canon}"] = _load_tensor([reader], key)
-                # Talker weights
-                elif key.startswith("talker."):
-                    weights[f"talker.{key[len('talker.'):]}"] = (
-                        _load_tensor([reader], key))
-                elif key.startswith("model.talker."):
-                    weights[f"talker.{key[len('model.talker.'):]}"] = (
-                        _load_tensor([reader], key))
                 # Code2Wav weights
                 elif key.startswith("code2wav."):
                     weights[f"code2wav.{key[len('code2wav.'):]}"] = (
@@ -482,36 +490,43 @@ class Qwen3OmniPlugin:
             "codebook_size": int(codebook_size),
         }
 
-    def _detect_code2wav(self, readers) -> dict:
-        """Detect Code2Wav dimensions from weight shapes."""
-        # Look for upsample blocks (try both prefixes)
-        upsample_base = "code2wav.upsample"
-        if not _has_tensor(readers, f"{upsample_base}.0.weight"):
-            upsample_base = "code2wav.upsample_blocks"
-        if not _has_tensor(readers, f"{upsample_base}.0.weight"):
-            upsample_base = "model.code2wav.upsample_blocks"
-        n_upsample = 0
-        while _has_tensor(
-            readers, f"{upsample_base}.{n_upsample}.weight"
-        ):
-            n_upsample += 1
-
-        # Look for codebook embedding (try both prefixes)
+    def _detect_code2wav(self, readers, config: ModelConfig) -> dict:
+        """Detect the official Qwen3-Omni Code2Wav checkpoint layout."""
+        raw = config.raw.get("code2wav_config", {})
         embed_key = "code2wav.code_embedding.weight"
         if not _has_tensor(readers, embed_key):
-            embed_key = "code2wav.codebook_embed.weight"
+            embed_key = "model.code2wav.code_embedding.weight"
         if not _has_tensor(readers, embed_key):
-            embed_key = "model.code2wav.codebook_embed.weight"
-        if _has_tensor(readers, embed_key):
-            embed_w = _load_tensor(readers, embed_key)
-            codebook_vocab, embed_dim = embed_w.shape
-        else:
-            codebook_vocab, embed_dim = 0, 0
+            return {}
+
+        embedding = _load_tensor(readers, embed_key)
+        num_quantizers = int(raw.get("num_quantizers", 0))
+        codebook_size = int(raw.get("codebook_size", 0))
+        if (
+            num_quantizers <= 0
+            or codebook_size <= 0
+            or embedding.shape != (num_quantizers * codebook_size, int(raw.get("hidden_size", 0)))
+        ):
+            raise RuntimeError("Qwen3-Omni Code2Wav checkpoint/config dimensions do not match")
+
+        required = (
+            "code2wav.pre_transformer.layers.0.self_attn.q_proj.weight",
+            "code2wav.upsample.0.0.conv.weight",
+            "code2wav.decoder.0.conv.weight",
+            "code2wav.decoder.6.conv.weight",
+        )
+        if not all(_has_tensor(readers, name) for name in required):
+            raise RuntimeError(
+                "Qwen3-Omni Code2Wav checkpoint is incomplete: expected the "
+                "official pre-transformer, nested upsampler, and decoder layout"
+            )
 
         return {
-            "n_upsample_blocks": int(n_upsample),
-            "codebook_vocab": int(codebook_vocab),
-            "embed_dim": int(embed_dim),
+            "available": True,
+            "config": dict(raw),
+            "max_frames": 32,
+            "upsample_factor": 1920,
+            "output_delay": 555,
         }
 
     def build_engine(
@@ -772,48 +787,35 @@ class Qwen3OmniPlugin:
                 verbose=verbose)
 
     def build_extra_engines(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
         verbose: bool = False,
         build_timing: dict | None = None,
     ) -> dict:
-        """Build audio encoder, Talker, and Code2Wav engines."""
+        """Build the audio encoder and official Code2Wav engines."""
         result = {}
 
         # Build audio encoder engine
         audio_cfg = weights.get("_audio_encoder_cfg", {})
         if audio_cfg and audio_cfg.get("num_layers", 0) > 0:
             if verbose:
-                print("[trtmc build]   Building audio encoder engine ...",
-                      file=sys.stderr)
+                print("[trtmc build]   Building audio encoder engine ...", file=sys.stderr)
             with timed_trt_compile(build_timing, "extra_omni_audio_encoder"):
-                audio_plan = _build_audio_encoder_engine(
-                    weights, audio_cfg, verbose=verbose)
+                audio_plan = _build_audio_encoder_engine(weights, audio_cfg, verbose=verbose)
             if audio_plan is not None:
                 result["audio_encoder_plan"] = audio_plan
 
-        # Build Talker engine
-        talker_cfg = weights.get("_talker_cfg", {})
-        if talker_cfg and talker_cfg.get("num_layers", 0) > 0:
-            if verbose:
-                print("[trtmc build]   Building Talker engine ...",
-                      file=sys.stderr)
-            with timed_trt_compile(build_timing, "extra_omni_talker_decoder"):
-                talker_plan = _build_talker_engine(
-                    weights, talker_cfg, config, max_cache_length,
-                    verbose=verbose)
-            if talker_plan is not None:
-                result["talker_engine_plan"] = talker_plan
-
         # Build Code2Wav engine
         code2wav_cfg = weights.get("_code2wav_cfg", {})
-        if code2wav_cfg and code2wav_cfg.get("n_upsample_blocks", 0) > 0:
+        if code2wav_cfg.get("available"):
             if verbose:
-                print("[trtmc build]   Building Code2Wav engine ...",
-                      file=sys.stderr)
+                print("[trtmc build]   Building Code2Wav engine ...", file=sys.stderr)
             with timed_trt_compile(build_timing, "extra_omni_code2wav_decoder"):
-                code2wav_plan = _build_code2wav_engine(
-                    weights, code2wav_cfg, verbose=verbose)
+                code2wav_plan = _build_code2wav_engine(weights, code2wav_cfg, verbose=verbose)
             if code2wav_plan is not None:
                 result["code2wav_engine_plan"] = code2wav_plan
 
@@ -890,7 +892,7 @@ class Qwen3OmniPlugin:
         # Audio output config (flat keys matching C++ fast_path_config parser)
         overrides["audio_sample_rate"] = 24000
         overrides["omni_n_codebooks"] = self._talker_cfg.get(
-            "n_codebooks", 8)
+            "n_codebooks", 16)
         overrides["omni_codebook_size"] = self._talker_cfg.get(
             "codebook_size", 2048)
 
@@ -900,6 +902,15 @@ class Qwen3OmniPlugin:
         overrides["omni_talker_num_layers"] = self._talker_cfg.get(
             "num_layers", 0)
         overrides["omni_talker_max_cache_length"] = 1024
+        overrides["omni_talker_model_id"] = self._talker_model_id
+        overrides["omni_talker_model_revision"] = self._talker_model_revision
+
+        # The official decoder is causal and exported at a fixed 32-frame
+        # shape. Shorter generations are zero-padded and trimmed by the
+        # runtime using the model's 1920x stride and 555-sample causal delay.
+        overrides["omni_code2wav_max_frames"] = self._code2wav_cfg.get("max_frames", 32)
+        overrides["omni_code2wav_upsample_factor"] = self._code2wav_cfg.get("upsample_factor", 1920)
+        overrides["omni_code2wav_output_delay"] = self._code2wav_cfg.get("output_delay", 555)
 
         # Audio encoder config (flat keys for C++ parser)
         overrides["omni_audio_embed_dim"] = self._audio_encoder_cfg.get(
@@ -1220,229 +1231,155 @@ def _build_audio_encoder_engine(
 
 
 # ---------------------------------------------------------------------------
-# Talker engine builder (RVQ codec predictor)
-# ---------------------------------------------------------------------------
-
-def _build_talker_engine(
-    weights: WeightDict,
-    talker_cfg: dict,
-    config: ModelConfig,
-    max_cache_length: int,
-    verbose: bool = False,
-) -> bytes | None:
-    """Build Talker decoder engine.
-
-    The Talker takes Thinker hidden states and text tokens as input and
-    produces RVQ codec tokens. It uses a standard KV-cache decoder architecture
-    with codebook prediction heads.
-
-    Input: token_id [1] int32, standard KV cache inputs
-    Output: codec_logits [1, codebook_size] float32
-    """
-    talker_hidden = talker_cfg.get("hidden_size", 0)
-    talker_vocab = talker_cfg.get("vocab_size", 0)
-    num_layers = talker_cfg.get("num_layers", 0)
-    n_codebooks = talker_cfg.get("n_codebooks", 8)
-    codebook_size = talker_cfg.get("codebook_size", 2048)
-
-    if num_layers == 0 or talker_hidden == 0:
-        return None
-
-    if verbose:
-        print(f"[trtmc build]   Talker projection: layers={num_layers}, "
-              f"hidden={talker_hidden}, vocab={talker_vocab}, "
-              f"codebooks={n_codebooks}, cb_size={codebook_size}",
-              file=sys.stderr)
-
-    input_hidden = talker_cfg.get("hidden_size", talker_hidden)
-    decoder_hidden = talker_cfg.get("decoder_hidden_size", talker_hidden)
-    if (
-        "talker.hidden_projection.linear_fc1.weight" not in weights
-        or "talker.hidden_projection.linear_fc2.weight" not in weights
-        or "talker.codec_head.weight" not in weights
-    ):
-        return None
-
-    lm_head_keys = [
-        f"talker.code_predictor.lm_head.{i}.weight"
-        for i in range(max(n_codebooks - 1, 0))
-    ]
-    if any(k not in weights for k in lm_head_keys):
-        return None
-
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-
-    input_embed = network.add_input(
-        "input_embed", trt.float32, (input_hidden,))
-    hidden_in = network.add_shuffle(input_embed)
-    hidden_in.reshape_dims = (1, input_hidden)
-    hidden = hidden_in.get_output(0)
-
-    fc1_w = _transpose_2d(
-        weights["talker.hidden_projection.linear_fc1.weight"], "talker_fc1")
-    fc1 = graph_ops.add_matmul_rhs_constant(
-        network, hidden, input_hidden, input_hidden, fc1_w)
-    fc1_b = weights.get("talker.hidden_projection.linear_fc1.bias")
-    if fc1_b is not None:
-        fc1 = graph_ops.add_bias_sum(
-            network, fc1, input_hidden, fc1_b.astype(np.float32))
-
-    sigmoid = network.add_activation(fc1, trt.ActivationType.SIGMOID)
-    silu = network.add_elementwise(
-        fc1, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-
-    fc2_w = _transpose_2d(
-        weights["talker.hidden_projection.linear_fc2.weight"], "talker_fc2")
-    hidden = graph_ops.add_matmul_rhs_constant(
-        network, silu.get_output(0), input_hidden, decoder_hidden, fc2_w)
-    fc2_b = weights.get("talker.hidden_projection.linear_fc2.bias")
-    if fc2_b is not None:
-        hidden = graph_ops.add_bias_sum(
-            network, hidden, decoder_hidden, fc2_b.astype(np.float32))
-
-    codec_head = weights["talker.codec_head.weight"]
-    head_parts = []
-    first_head_rows = min(codebook_size, codec_head.shape[0])
-    if first_head_rows < codebook_size:
-        return None
-    first_head = _transpose_2d(
-        codec_head[:codebook_size], "talker_codec_head")
-    head_parts.append(graph_ops.add_matmul_rhs_constant(
-        network, hidden, decoder_hidden, codebook_size, first_head))
-
-    for i, key in enumerate(lm_head_keys):
-        head = _transpose_2d(weights[key], f"talker_lm_head_{i}")
-        head_parts.append(graph_ops.add_matmul_rhs_constant(
-            network, hidden, decoder_hidden, codebook_size, head))
-
-    if len(head_parts) == 1:
-        logits = head_parts[0]
-    else:
-        concat = network.add_concatenation(head_parts)
-        concat.axis = 1
-        logits = concat.get_output(0)
-
-    logits.name = "logits"
-    network.mark_output(logits)
-
-    plan = builder.build_serialized_network(network, trt_config)
-    if plan is None:
-        raise RuntimeError("TensorRT Qwen3-Omni Talker projection build failed")
-    return bytes(plan)
-
-
-# ---------------------------------------------------------------------------
 # Code2Wav engine builder (ConvNet waveform synthesizer)
 # ---------------------------------------------------------------------------
+
 
 def _build_code2wav_engine(
     weights: WeightDict,
     code2wav_cfg: dict,
     verbose: bool = False,
 ) -> bytes | None:
-    """Build Code2Wav engine: RVQ codec tokens -> audio waveform.
+    """Build the official Code2Wav graph: RVQ codes -> speech waveform.
 
-    Similar to EnCodec decoder: embedding lookup -> transposed convolutions.
+    The released checkpoint uses an eight-layer sliding-attention
+    pre-transformer, two ConvNeXt upsamplers, and four causal HiFi-GAN-style
+    decoder blocks. The old placeholder builder looked for flat
+    ``upsample_blocks.N.weight`` tensors that do not exist in this checkpoint,
+    so it silently omitted the engine. Exporting the upstream model-owned
+    module to ONNX preserves all 230 checkpoint tensors and lets TensorRT fuse
+    the complete static audio decoder.
     """
-    n_upsample = code2wav_cfg.get("n_upsample_blocks", 0)
-    codebook_vocab = code2wav_cfg.get("codebook_vocab", 0)
-    embed_dim = code2wav_cfg.get("embed_dim", 0)
-
-    if n_upsample == 0 or codebook_vocab == 0:
+    if not code2wav_cfg.get("available"):
         return None
 
-    # Max frames for the engine
-    max_frames = 256
+    import gc
+    import torch
+    from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
+        Qwen3OmniMoeCode2WavConfig,
+    )
+    from transformers.models.qwen3_omni_moe.modeling_qwen3_omni_moe import (
+        Qwen3OmniMoeCode2Wav,
+    )
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    trt_config = builder.create_builder_config()
-    trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+    model_config = Qwen3OmniMoeCode2WavConfig(**code2wav_cfg["config"])
+    model = Qwen3OmniMoeCode2Wav(model_config)
 
-    # Input: codec tokens [n_codebooks, max_frames] int32
-    n_codebooks = 8
-    codec_input = network.add_input(
-        "codec_tokens", trt.int32, (n_codebooks, max_frames))
+    state = {}
+    for name in model.state_dict():
+        key = f"code2wav.{name}"
+        value = weights.get(key)
+        if value is None:
+            raise RuntimeError(f"Qwen3-Omni Code2Wav checkpoint tensor is missing: {key}")
+        state[name] = torch.from_numpy(np.ascontiguousarray(value, dtype=np.float32))
+    model.load_state_dict(state, strict=True)
+    model.eval()
 
-    # Codebook embedding lookup
-    embed_key = "code2wav.codebook_embed.weight"
-    if embed_key not in weights:
-        return None
+    class _StaticCode2Wav(torch.nn.Module):
+        """Static, export-safe equivalent of the official forward method."""
 
-    embed_w = weights[embed_key].astype(np.float32)
-    embed_table = graph_ops.add_constant(
-        network, (codebook_vocab, embed_dim), embed_w)
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
 
-    # For now, just lookup first codebook and sum all
-    # This is a simplified version — full implementation would handle
-    # all codebooks with separate embedding tables
-    # Flatten tokens, gather, reshape, sum across codebooks
-    flat_tokens = network.add_shuffle(codec_input)
-    flat_tokens.reshape_dims = (n_codebooks * max_frames,)
+        def forward(self, codes):
+            codes = codes.to(torch.int64)
+            hidden = self.module.code_embedding(codes + self.module.code_offset).mean(1)
 
-    gathered = network.add_gather(embed_table, flat_tokens.get_output(0), 0)
-    reshaped = network.add_shuffle(gathered.get_output(0))
-    reshaped.reshape_dims = (n_codebooks, max_frames, embed_dim)
+            # Supplying the official 72-frame sliding causal mask explicitly
+            # avoids the torch.diff-based dynamic mask helper, which is not
+            # representable in ONNX opset 17. The engine shape is static.
+            length = hidden.shape[1]
+            indices = torch.arange(length, device=hidden.device)
+            row = indices[:, None]
+            col = indices[None, :]
+            allowed = (col <= row) & (col > row - self.module.config.sliding_window)
+            mask = torch.where(
+                allowed,
+                torch.zeros((), dtype=hidden.dtype, device=hidden.device),
+                torch.full(
+                    (),
+                    torch.finfo(hidden.dtype).min,
+                    dtype=hidden.dtype,
+                    device=hidden.device,
+                ),
+            )[None, None]
+            hidden = self.module.pre_transformer(
+                inputs_embeds=hidden,
+                attention_mask={
+                    "sliding_attention": mask,
+                    "full_attention": mask,
+                },
+            ).last_hidden_state
+            hidden = hidden.permute(0, 2, 1)
+            for blocks in self.module.upsample:
+                for block in blocks:
+                    hidden = block(hidden)
+            for block in self.module.decoder:
+                hidden = block(hidden)
+            return hidden.clamp(min=-1, max=1)
 
-    # Sum across codebooks
-    summed = network.add_reduce(
-        reshaped.get_output(0), trt.ReduceOperation.SUM, 1 << 0,
-        keep_dims=False)
-    hidden = summed.get_output(0)  # [max_frames, embed_dim]
-
-    # Transpose to [1, embed_dim, max_frames] for convolutions
-    transpose = network.add_shuffle(hidden)
-    transpose.reshape_dims = (1, max_frames, embed_dim)
-    transpose.second_transpose = trt.Permutation([0, 2, 1])
-    hidden = transpose.get_output(0)
-
-    # Upsampling transposed convolutions
-    total_upsample = 1
-    for i in range(n_upsample):
-        up_w_key = f"code2wav.upsample_blocks.{i}.weight"
-        up_b_key = f"code2wav.upsample_blocks.{i}.bias"
-        up_w = weights.get(up_w_key)
-        if up_w is None:
-            break
-
-        up_w_np = up_w.astype(np.float32)
-        out_channels = up_w_np.shape[1]  # transposed conv: [in, out, K]
-        kernel_size = up_w_np.shape[2] if up_w_np.ndim == 3 else 4
-        stride = kernel_size // 2 if kernel_size > 1 else 1
-
-        deconv = network.add_deconvolution_nd(
-            hidden, out_channels, (kernel_size,),
-            trt.Weights(np.ascontiguousarray(up_w_np)),
-            trt.Weights(weights[up_b_key].astype(np.float32)
-                        if up_b_key in weights
-                        else np.zeros(out_channels, dtype=np.float32)))
-        deconv.stride_nd = (stride,)
-        deconv.padding_nd = ((kernel_size - stride) // 2,)
-
-        relu = network.add_activation(
-            deconv.get_output(0), trt.ActivationType.RELU)
-        hidden = relu.get_output(0)
-        total_upsample *= stride
-
-    # Output: waveform [1, 1, num_samples]
-    hidden.name = "waveform"
-    network.mark_output(hidden)
-
+    max_frames = int(code2wav_cfg["max_frames"])
+    num_quantizers = int(model_config.num_quantizers)
+    export_module = _StaticCode2Wav(model).eval()
+    dummy_codes = torch.zeros((1, num_quantizers, max_frames), dtype=torch.int32)
+    onnx_buffer = io.BytesIO()
     if verbose:
-        print(f"[trtmc build] Building Qwen3-Omni Code2Wav engine "
-              f"({n_upsample} upsample blocks, embed={embed_dim}, "
-              f"max_frames={max_frames}, upsample={total_upsample}x) ...",
-              file=sys.stderr)
+        print(
+            "[trtmc build]   Exporting official Qwen3-Omni Code2Wav "
+            f"({num_quantizers} codebooks x {max_frames} frames) ...",
+            file=sys.stderr,
+        )
+    with torch.inference_mode():
+        torch.onnx.export(
+            export_module,
+            dummy_codes,
+            onnx_buffer,
+            opset_version=17,
+            input_names=["codec_tokens"],
+            output_names=["waveform"],
+            dynamo=False,
+        )
 
-    plan = builder.build_serialized_network(network, trt_config)
+    del export_module, model, state, dummy_codes
+    gc.collect()
+
+    logger = trt.Logger(trt.Logger.INFO if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(
+        trt_compat.network_creation_flags(
+            explicit_batch=True,
+            strongly_typed=True,
+        )
+    )
+    parser = trt.OnnxParser(network, logger)
+    if not parser.parse(onnx_buffer.getvalue()):
+        errors = [str(parser.get_error(i)) for i in range(parser.num_errors)]
+        raise RuntimeError("Qwen3-Omni Code2Wav ONNX parsing failed:\n" + "\n".join(errors))
+
+    expected_samples = max_frames * int(code2wav_cfg["upsample_factor"]) - int(
+        code2wav_cfg["output_delay"]
+    )
+    if tuple(network.get_input(0).shape) != (1, num_quantizers, max_frames) or tuple(
+        network.get_output(0).shape
+    ) != (1, 1, expected_samples):
+        raise RuntimeError(
+            "Qwen3-Omni Code2Wav ONNX shape contract mismatch: "
+            f"input={tuple(network.get_input(0).shape)}, "
+            f"output={tuple(network.get_output(0).shape)}"
+        )
+
+    build_config = builder.create_builder_config()
+    build_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+    if verbose:
+        print(
+            "[trtmc build]   Building complete Qwen3-Omni Code2Wav "
+            f"TensorRT engine ({expected_samples} samples) ...",
+            file=sys.stderr,
+        )
+    plan = builder.build_serialized_network(network, build_config)
     if plan is None:
-        raise RuntimeError("TensorRT Code2Wav build failed")
+        raise RuntimeError("TensorRT Qwen3-Omni Code2Wav build failed")
     return bytes(plan)
 
 

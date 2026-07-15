@@ -9,10 +9,9 @@
 // Trace ID:       UT-AUD-CPP-09
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-AUD-01
-// Intent:         Omni audio plan: encode padding/trimming, generation gating, codec decode
+// Intent:         Omni audio plan: encode padding/trimming and official codec decode
 // Preconditions:  OmniConfig with valid audio parameters
-// Postconditions: Frames padded/trimmed correctly, talker/codec gates match config, codebook argmax
-// correct
+// Postconditions: Frames padded/trimmed correctly and codec tensor/sample contracts hold
 // =============================================================================
 
 #include "runtime/models/qwen3_omni/omni_audio_plan.h"
@@ -62,36 +61,12 @@ void test_audio_encode_input_builder_zero_pads_tail() {
     check(padded[6] == 0.0F && padded.back() == 0.0F, "omni input builder zero-pads unused tail");
 }
 
-void test_generation_plans_gate_talker_and_codec() {
+void test_codec_plan_derives_official_frame_shape() {
     const trtmc::OmniConfig cfg = make_config();
-    const auto talker_plan = trtmc::make_omni_talker_plan(5, 0, true);
-    check(!talker_plan.should_run_talker, "omni talker plan requires hidden states");
-
-    const auto active_talker_plan = trtmc::make_omni_talker_plan(5, 10, true);
-    check(active_talker_plan.should_run_talker, "omni talker plan enables active talker stage");
-    check(active_talker_plan.num_tokens == 5, "omni talker plan forwards token count");
-
     const auto codec_plan = trtmc::make_omni_codec_plan(cfg, 8);
     check(codec_plan.should_run_codec, "omni codec plan enables codec with token payload");
     check(codec_plan.n_codebooks == 4, "omni codec plan forwards codebook count");
     check(codec_plan.n_frames == 2, "omni codec plan derives frame count");
-}
-
-void test_talker_decode_helpers_extract_codebook_argmax() {
-    const auto decode_plan = trtmc::make_omni_talker_decode_plan(2, 4, 3);
-    std::vector<int32_t> all_codes;
-    const std::vector<float> logits = {
-        0.1F, 0.4F, 0.3F, 0.2F, 0.0F, 1.0F, 0.5F, 0.6F,
-    };
-
-    trtmc::append_omni_talker_codes_from_logits(logits, decode_plan, all_codes);
-
-    check(decode_plan.num_tokens == 3, "omni talker decode plan forwards token count");
-    check(all_codes.size() == 2, "omni talker decode helper appends one code per codebook");
-    check(all_codes[0] == 1 && all_codes[1] == 1,
-          "omni talker decode helper selects argmax in each codebook slice");
-    check(trtmc::select_omni_codebook_argmax(logits, 20, 4) == 0,
-          "omni talker argmax helper returns zero for out-of-range slices");
 }
 
 void test_code2wav_input_builder_transposes_frame_major_tokens() {
@@ -111,14 +86,27 @@ void test_code2wav_input_builder_transposes_frame_major_tokens() {
           "omni code2wav input builder zero-pads trailing frames");
 }
 
+void test_code2wav_output_uses_official_stride_and_causal_delay() {
+    trtmc::OmniConfig cfg;
+    cfg.code2wav_upsample_factor = 1920;
+    cfg.code2wav_output_delay = 555;
+
+    check(trtmc::code2wav_output_samples(cfg, 16, 60885) == 30165,
+          "omni code2wav output trims the official causal decoder delay");
+    check(trtmc::code2wav_output_samples(cfg, 32, 60885) == 60885,
+          "omni code2wav output preserves the full static engine result");
+    check(trtmc::code2wav_output_samples(cfg, 0, 60885) == 0,
+          "omni code2wav output rejects zero frames");
+}
+
 } // namespace
 
 int main() {
     test_audio_encode_plan_pads_and_trims_frames();
     test_audio_encode_input_builder_zero_pads_tail();
-    test_generation_plans_gate_talker_and_codec();
-    test_talker_decode_helpers_extract_codebook_argmax();
+    test_codec_plan_derives_official_frame_shape();
     test_code2wav_input_builder_transposes_frame_major_tokens();
+    test_code2wav_output_uses_official_stride_and_causal_delay();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " omni audio plan test(s) failed\n";

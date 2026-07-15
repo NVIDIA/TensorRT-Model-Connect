@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_RUNTIME_TIMEOUT_S = 600
 _MAX_RUNTIME_TIMEOUT_S = 3600
+_SIMPLE_WAVEFORM_FALLBACK = "no Code2Wav engine, generating simple waveform"
 
 
 def _runtime_timeout_s(case: E2ECase) -> int:
@@ -63,17 +64,18 @@ class OmniMultimodalRunner:
     def strategy_name(self) -> str:
         return "qwen3_omni_multimodal"
 
-    def run_stage(
-        self, case: E2ECase, stage: StageSpec, ctx: RunContext
-    ) -> StageOutput:
+    def run_stage(self, case: E2ECase, stage: StageSpec, ctx: RunContext) -> StageOutput:
         stage_name = stage.name
 
         cmd, stage_meta = _build_omni_command(case, stage, ctx)
         if cmd is None:
             return StageOutput(
                 stage_name=stage_name,
-                metadata={"error": stage_meta.get("error", "Unsupported stage"),
-                          "skipped": True, **stage_meta},
+                metadata={
+                    "error": stage_meta.get("error", "Unsupported stage"),
+                    "skipped": True,
+                    **stage_meta,
+                },
             )
 
         runtime_cli_python = ctx.runtime_cli_hf_python()
@@ -89,7 +91,11 @@ class OmniMultimodalRunner:
         t0 = time.monotonic()
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, env=env, timeout=timeout_s,
+                cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=timeout_s,
             )
         except subprocess.TimeoutExpired as exc:
             elapsed = time.monotonic() - t0
@@ -116,13 +122,18 @@ class OmniMultimodalRunner:
 
         if result.returncode != 0:
             truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                f"omni_{stage_name}", case.name)
-            msg = (f"Omni stage {stage_name} failed (rc={result.returncode}): "
-                   f"{truncated}")
+                result.stderr, ctx.artifacts_dir or "", f"omni_{stage_name}", case.name
+            )
+            msg = f"Omni stage {stage_name} failed (rc={result.returncode}): {truncated}"
             if log_path:
                 msg += f" (full stderr: {log_path})"
             raise RuntimeError(msg)
+
+        if stage_name == "talker_decode" and _SIMPLE_WAVEFORM_FALLBACK in (result.stderr or ""):
+            raise RuntimeError(
+                "Qwen3-Omni talker_decode used the synthetic simple-waveform "
+                "fallback because the Code2Wav engine is missing"
+            )
 
         data = _parse_stage_output(result.stdout.strip(), stage_name)
 
@@ -152,9 +163,7 @@ class CompositePipelineRunner:
     def strategy_name(self) -> str:
         return "composite_pipeline"
 
-    def run_stage(
-        self, case: E2ECase, stage: StageSpec, ctx: RunContext
-    ) -> StageOutput:
+    def run_stage(self, case: E2ECase, stage: StageSpec, ctx: RunContext) -> StageOutput:
         stage_name = stage.name
 
         cmd, stage_meta = _build_composite_command(case, stage, ctx)
@@ -170,16 +179,19 @@ class CompositePipelineRunner:
         logger.info("Running composite stage %s: %s", stage_name, " ".join(cmd))
         t0 = time.monotonic()
         result = subprocess.run(
-            cmd, capture_output=True, text=True, env=env, timeout=600,
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=600,
         )
         elapsed = time.monotonic() - t0
 
         if result.returncode != 0:
             truncated, log_path = save_full_stderr(
-                result.stderr, ctx.artifacts_dir or "",
-                f"composite_{stage_name}", case.name)
-            msg = (f"Composite stage {stage_name} failed (rc={result.returncode}): "
-                   f"{truncated}")
+                result.stderr, ctx.artifacts_dir or "", f"composite_{stage_name}", case.name
+            )
+            msg = f"Composite stage {stage_name} failed (rc={result.returncode}): {truncated}"
             if log_path:
                 msg += f" (full stderr: {log_path})"
             raise RuntimeError(msg)
@@ -226,10 +238,12 @@ def _build_omni_command(
 
     if stage_name == "vision_encode":
         if not image:
-            stage_meta.update({
-                "error": "vision_encode requires image input",
-                "stage_resolution": "unsupported_missing_image",
-            })
+            stage_meta.update(
+                {
+                    "error": "vision_encode requires image input",
+                    "stage_resolution": "unsupported_missing_image",
+                }
+            )
             return None, stage_meta
         cmd = [ctx.binary_path, "embed", bundle_path, "--image", str(image)]
         if prompt:
@@ -239,10 +253,12 @@ def _build_omni_command(
 
     if stage_name == "audio_encode":
         if not audio:
-            stage_meta.update({
-                "error": "audio_encode requires audio input",
-                "stage_resolution": "unsupported_missing_audio",
-            })
+            stage_meta.update(
+                {
+                    "error": "audio_encode requires audio input",
+                    "stage_resolution": "unsupported_missing_audio",
+                }
+            )
             return None, stage_meta
         cmd = [ctx.binary_path, "transcribe", bundle_path, "--audio", str(audio)]
         if max_new_tokens > 0:
@@ -257,9 +273,13 @@ def _build_omni_command(
             "talker_decode.wav",
         )
         cmd = [
-            ctx.binary_path, "generate-audio", bundle_path,
-            "--prompt", str(prompt),
-            "--output", out_audio,
+            ctx.binary_path,
+            "generate-audio",
+            bundle_path,
+            "--prompt",
+            str(prompt),
+            "--output",
+            out_audio,
         ]
         if max_new_tokens > 0:
             cmd.extend(["--max-new-tokens", str(max_new_tokens)])
@@ -273,9 +293,13 @@ def _build_omni_command(
             "talker_decode.wav",
         )
         cmd = [
-            ctx.binary_path, "speak", bundle_path,
-            "--audio-in", str(audio),
-            "--audio-out", out_audio,
+            ctx.binary_path,
+            "speak",
+            bundle_path,
+            "--audio-in",
+            str(audio),
+            "--audio-out",
+            out_audio,
         ]
         if max_new_tokens > 0:
             cmd.extend(["--max-new-tokens", str(max_new_tokens)])
@@ -288,9 +312,7 @@ def _build_omni_command(
         cmd.extend(["--prompt", str(prompt)])
     if image and stage_name == "end_to_end":
         cmd.extend(["--image", str(image)])
-    if max_new_tokens > 0 and stage_name in (
-        "thinker_decode", "talker_decode", "end_to_end"
-    ):
+    if max_new_tokens > 0 and stage_name in ("thinker_decode", "talker_decode", "end_to_end"):
         cmd.extend(["--max-new-tokens", str(max_new_tokens)])
     stage_meta["entrypoint"] = "run"
     if stage_name not in ("thinker_decode", "talker_decode", "end_to_end"):

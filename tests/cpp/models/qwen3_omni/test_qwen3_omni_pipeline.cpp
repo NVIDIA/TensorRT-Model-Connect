@@ -56,8 +56,8 @@ void test_omni_pipeline_construction() {
     check(thinker_cache->ok(), "omni thinker cache ok");
 
     trtmc::OmniConfig cfg;
-    trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache), nullptr, nullptr,
-                                 nullptr, cfg, stream, nullptr, "test-omni");
+    trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache), nullptr, cfg, stream,
+                                 nullptr, "test-omni");
 
     check(std::string(pipeline.pipeline_type()) == "OmniPipeline", "OmniPipeline: pipeline_type");
     check(std::string(pipeline.model_id()) == "test-omni", "OmniPipeline: model_id");
@@ -81,9 +81,8 @@ void test_omni_generate_audio() {
     auto thinker_cache = std::make_unique<trtmc::Qwen3OmniKvCache>(0, 8, 0, stream);
 
     trtmc::OmniConfig cfg;
-    trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache), nullptr, nullptr,
-                                 nullptr, cfg, stream, std::make_shared<OmniFixedTokenizer>(),
-                                 "test-omni-gen");
+    trtmc::OmniPipeline pipeline(std::move(thinker), std::move(thinker_cache), nullptr, cfg, stream,
+                                 std::make_shared<OmniFixedTokenizer>(), "test-omni-gen");
 
     trtmc::GenerateConfig gen_cfg;
     gen_cfg.max_new_tokens = 1;
@@ -102,8 +101,7 @@ void test_omni_validates_thinker() {
         cudaStream_t stream;
         cudaStreamCreate(&stream);
         trtmc::OmniConfig cfg;
-        trtmc::OmniPipeline p(nullptr, nullptr, nullptr, nullptr, nullptr, cfg, stream, nullptr,
-                              "x");
+        trtmc::OmniPipeline p(nullptr, nullptr, nullptr, cfg, stream, nullptr, "x");
         check(false, "null thinker should throw");
         cudaStreamDestroy(stream);
     } catch (const std::exception&) {

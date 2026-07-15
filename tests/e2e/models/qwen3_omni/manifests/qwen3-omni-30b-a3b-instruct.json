@@ -15,7 +15,7 @@
       "name": "qwen3-omni-30b-a3b-instruct",
       "trace_id": "IT-E2E-QWEN3-OMNI-01",
       "reference_backend": "torch_reference",
-      "oracle_level": "L4_invariants",
+      "oracle_level": "L3_snapshot_regression",
       "golden_snapshot_path": "data/qwen3_omni_hf_reference.json",
       "user_contract": "tts_audio",
       "prompt": "Please say hello from Qwen3 Omni in one short sentence.",
@@ -26,12 +26,15 @@
       "seed": 42,
       "reference_speaker": "Ethan",
       "reference_talker_max_new_tokens": 32,
+      "metadata": {
+        "runtime_cli_requires_hf_python": true
+      },
       "stages": [
         {
           "name": "talker_decode",
           "required": true,
           "artifact_type": "waveform",
-          "comparison_mode": "invariant_check"
+          "comparison_mode": "waveform_cosine_and_invariants"
         }
       ]
     }

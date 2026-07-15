@@ -9,7 +9,7 @@ test_manifests = [
 
 [e2e_defaults.omni_multimodal]
 reference_backend = "torch_reference"
-oracle_level = "L4_invariants"
+oracle_level = "L3_snapshot_regression"
 stages = [
   { name = "thinker_decode", required = true },
   { name = "vision_encode", required = false },

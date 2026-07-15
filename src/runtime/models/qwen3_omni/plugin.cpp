@@ -4,13 +4,15 @@
  */
 
 // Qwen3OmniPlugin: handles "qwen3_omni_multimodal" strategy.
-// Omni pipeline with thinker (MoE decoder), optional talker, and optional code2wav.
+// Omni pipeline with TensorRT Thinker/Code2Wav and the official model-owned Talker bridge.
 
 #include "plugin_helpers.h"
 #include "runtime/models/qwen3_omni/pipeline.h"
 #include "runtime/models/qwen3_omni/recurrent_state.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
+
+#include <cstdlib>
 
 namespace trtmc {
 
@@ -30,43 +32,25 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
             ctx.backend, find_section(ctx.bundle, "engine_plan"), "omni thinker", opts);
         cudaStream_t stream = thinker_loaded.module->stream();
         int32_t kv_dim = compute_kv_dim(ctx.config);
-        DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
+        // The cache allocation must follow the engine binding, not the bundle's
+        // requested precision. Legacy Qwen3-Omni builders emitted FP32 cache
+        // bindings even for a bundle labelled BF16; allocating BF16 here
+        // truncated every present K/V row and corrupted subsequent tokens.
+        DType cache_dtype = thinker_loaded.module->tensor_dtype("cache_k_0");
         std::unique_ptr<Qwen3OmniInferenceState> thinker_state = std::make_unique<Qwen3OmniKvCache>(
             ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, cache_dtype);
         if (!thinker_state->ok())
             throw std::runtime_error("OmniPipeline: failed to create thinker Qwen3OmniKvCache");
 
-        int32_t omni_talker_hidden_size = extract_json_int(json, "omni_talker_hidden_size", 0);
-        int32_t omni_talker_max_cache_length =
-            extract_json_int(json, "omni_talker_max_cache_length", 1024);
-        int32_t omni_talker_num_layers = extract_json_int(json, "omni_talker_num_layers", 0);
-
-        // Talker (optional)
-        std::unique_ptr<TrtModule> talker_module;
-        std::unique_ptr<Qwen3OmniInferenceState> talker_state;
-        auto talker_loaded = try_load_trt_module_from_plan(
-            ctx.backend, find_section(ctx.bundle, "talker_engine_plan"), "talker", opts);
-        if (talker_loaded.module && talker_loaded.module->ok()) {
-            talker_module = std::move(talker_loaded.module);
-            if (talker_module->has_input("cache_k_0")) {
-                int32_t talker_kv_dim = omni_talker_hidden_size;
-                int32_t talker_cache_len = omni_talker_max_cache_length;
-                int32_t talker_layers =
-                    omni_talker_num_layers > 0 ? omni_talker_num_layers : ctx.config.num_layers;
-                talker_state = std::make_unique<Qwen3OmniKvCache>(
-                    talker_layers, talker_cache_len, talker_kv_dim, stream, cache_dtype);
-            } else {
-                talker_state = std::make_unique<Qwen3OmniRecurrentState>(
-                    0, std::vector<Qwen3OmniRecurrentState::TensorSpec>{}, stream);
-            }
-        }
-
-        // Code2Wav (optional)
+        // Code2Wav is required for the audio-capable Qwen3-Omni bundle.
         std::unique_ptr<TrtModule> code2wav_module;
         auto code2wav_loaded = try_load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, "code2wav_engine_plan"), "code2wav", opts);
         if (code2wav_loaded.module && code2wav_loaded.module->ok())
             code2wav_module = std::move(code2wav_loaded.module);
+        if (!code2wav_module)
+            throw std::runtime_error(
+                "OmniPipeline: required official Code2Wav engine is missing from bundle");
 
         // Build OmniConfig
         OmniConfig omni_cfg;
@@ -76,17 +60,31 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         omni_cfg.thinker_num_heads = ctx.config.num_heads;
         omni_cfg.num_experts = extract_json_int(json, "num_local_experts", 8);
         omni_cfg.num_experts_per_tok = extract_json_int(json, "num_experts_per_tok", 2);
-        omni_cfg.talker_hidden_size = omni_talker_hidden_size;
-        omni_cfg.talker_num_layers = omni_talker_num_layers;
-        omni_cfg.talker_n_codebooks = extract_json_int(json, "omni_n_codebooks", 8);
+        omni_cfg.talker_hidden_size = extract_json_int(json, "omni_talker_hidden_size", 0);
+        omni_cfg.talker_num_layers = extract_json_int(json, "omni_talker_num_layers", 0);
+        omni_cfg.talker_n_codebooks = extract_json_int(json, "omni_n_codebooks", 16);
         omni_cfg.talker_codebook_size = extract_json_int(json, "omni_codebook_size", 2048);
+        omni_cfg.code2wav_max_frames = extract_json_int(json, "omni_code2wav_max_frames", 32);
+        omni_cfg.code2wav_upsample_factor =
+            extract_json_int(json, "omni_code2wav_upsample_factor", 1920);
+        omni_cfg.code2wav_output_delay = extract_json_int(json, "omni_code2wav_output_delay", 555);
+        omni_cfg.hf_python = ctx.hf_python;
+        omni_cfg.talker_model_id = extract_json_string(
+            json, "omni_talker_model_id",
+            extract_json_string(json, "omni_talker_model_path", ctx.bundle.info.model_id));
+        omni_cfg.talker_model_revision =
+            extract_json_string(json, "omni_talker_model_revision", "");
+        if (const char* override_path = std::getenv("TRTMC_QWEN3_OMNI_MODEL_PATH");
+            override_path != nullptr && override_path[0] != '\0') {
+            omni_cfg.talker_model_id = override_path;
+            omni_cfg.talker_model_revision.clear();
+        }
 
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         return std::make_unique<OmniPipeline>(
-            std::move(thinker_loaded.module), std::move(thinker_state), std::move(talker_module),
-            std::move(talker_state), std::move(code2wav_module), std::move(omni_cfg), stream,
-            std::move(tokenizer), ctx.bundle.info.model_id);
+            std::move(thinker_loaded.module), std::move(thinker_state), std::move(code2wav_module),
+            std::move(omni_cfg), stream, std::move(tokenizer), ctx.bundle.info.model_id);
     }
 };
 

@@ -44,9 +44,7 @@ def _load_snapshot(path: Path) -> dict[str, Any]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            f"Qwen3-Omni HF snapshot could not be read at {path}: {exc}"
-        ) from exc
+        raise RuntimeError(f"Qwen3-Omni HF snapshot could not be read at {path}: {exc}") from exc
     return _require_mapping(raw, "root")
 
 
@@ -54,19 +52,20 @@ def _validate_provenance(case: E2ECase, snapshot: dict[str, Any]) -> None:
     expected = {
         "schema_version": SNAPSHOT_SCHEMA_VERSION,
         "source": "official_hugging_face_qwen3_omni",
-        "reference_role": "human_review_only",
-        "comparison_mode": "invariant_only",
+        "reference_role": "automated_waveform_oracle",
+        "comparison_mode": "waveform_cosine_and_invariants",
         "model_id": case.hf_id,
         "system_prompt": QWEN_AUDIO_SYSTEM_PROMPT,
         "prompt": str(case.inputs.get("prompt", "") or "").strip(),
         "speaker": str(case.metadata.get("reference_speaker", DEFAULT_SPEAKER)),
-        "seed": int(case.inputs.get(
-            "seed", case.determinism.get("seed", DEFAULT_SEED))),
+        "seed": int(case.inputs.get("seed", case.determinism.get("seed", DEFAULT_SEED))),
         "thinker_max_new_tokens": int(case.inputs.get("max_new_tokens", 16)),
-        "talker_max_new_tokens": int(case.metadata.get(
-            "reference_talker_max_new_tokens",
-            DEFAULT_TALKER_MAX_NEW_TOKENS,
-        )),
+        "talker_max_new_tokens": int(
+            case.metadata.get(
+                "reference_talker_max_new_tokens",
+                DEFAULT_TALKER_MAX_NEW_TOKENS,
+            )
+        ),
         "thinker_do_sample": False,
         "talker_do_sample": False,
     }
@@ -93,34 +92,26 @@ def _validate_provenance(case: E2ECase, snapshot: dict[str, Any]) -> None:
 def _decode_audio(snapshot: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
     audio = _require_mapping(snapshot.get("audio"), "audio")
     if audio.get("encoding") != "gzip+base64" or audio.get("format") != "wav":
-        raise RuntimeError(
-            "Qwen3-Omni HF snapshot audio must use gzip+base64 WAV encoding"
-        )
+        raise RuntimeError("Qwen3-Omni HF snapshot audio must use gzip+base64 WAV encoding")
     chunks = audio.get("gzip_base64_chunks")
     if (
         not isinstance(chunks, list)
         or not chunks
         or any(not isinstance(chunk, str) or not chunk for chunk in chunks)
     ):
-        raise RuntimeError(
-            "Qwen3-Omni HF snapshot audio chunks must be non-empty strings"
-        )
+        raise RuntimeError("Qwen3-Omni HF snapshot audio chunks must be non-empty strings")
 
     try:
         compressed = base64.b64decode("".join(chunks), validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise RuntimeError(
-            f"Qwen3-Omni HF snapshot audio is not valid base64: {exc}"
-        ) from exc
+        raise RuntimeError(f"Qwen3-Omni HF snapshot audio is not valid base64: {exc}") from exc
     if not compressed or len(compressed) > MAX_COMPRESSED_BYTES:
         raise RuntimeError(
             "Qwen3-Omni HF snapshot compressed audio size is outside the "
             f"allowed range: {len(compressed)} bytes"
         )
     if len(compressed) != audio.get("gzip_bytes"):
-        raise RuntimeError(
-            "Qwen3-Omni HF snapshot compressed audio size does not match provenance"
-        )
+        raise RuntimeError("Qwen3-Omni HF snapshot compressed audio size does not match provenance")
     compressed_sha = hashlib.sha256(compressed).hexdigest()
     if compressed_sha != audio.get("gzip_sha256"):
         raise RuntimeError(
@@ -130,23 +121,16 @@ def _decode_audio(snapshot: dict[str, Any]) -> tuple[bytes, dict[str, Any]]:
     try:
         wav_bytes = gzip.decompress(compressed)
     except (OSError, EOFError) as exc:
-        raise RuntimeError(
-            f"Qwen3-Omni HF snapshot audio is not valid gzip data: {exc}"
-        ) from exc
+        raise RuntimeError(f"Qwen3-Omni HF snapshot audio is not valid gzip data: {exc}") from exc
     if not wav_bytes or len(wav_bytes) > MAX_WAV_BYTES:
         raise RuntimeError(
-            "Qwen3-Omni HF snapshot WAV size is outside the allowed range: "
-            f"{len(wav_bytes)} bytes"
+            f"Qwen3-Omni HF snapshot WAV size is outside the allowed range: {len(wav_bytes)} bytes"
         )
     if len(wav_bytes) != audio.get("raw_bytes"):
-        raise RuntimeError(
-            "Qwen3-Omni HF snapshot WAV size does not match provenance"
-        )
+        raise RuntimeError("Qwen3-Omni HF snapshot WAV size does not match provenance")
     wav_sha = hashlib.sha256(wav_bytes).hexdigest()
     if wav_sha != audio.get("raw_sha256"):
-        raise RuntimeError(
-            "Qwen3-Omni HF snapshot WAV SHA-256 does not match provenance"
-        )
+        raise RuntimeError("Qwen3-Omni HF snapshot WAV SHA-256 does not match provenance")
     return wav_bytes, audio
 
 
@@ -186,7 +170,7 @@ def _validate_wav(path: Path, audio: dict[str, Any]) -> tuple[int, int]:
 
 
 class TorchReference:
-    """Materialize pinned official HF audio while preserving the L4 gate."""
+    """Materialize pinned official HF audio for the waveform-regression gate."""
 
     @property
     def backend_name(self) -> str:
@@ -194,9 +178,7 @@ class TorchReference:
         # provenance-checked snapshot rather than a per-CI 30B model load.
         return "torch_reference"
 
-    def run_stage(
-        self, case: E2ECase, stage: StageSpec, ctx: RunContext
-    ) -> StageOutput:
+    def run_stage(self, case: E2ECase, stage: StageSpec, ctx: RunContext) -> StageOutput:
         if case.task_strategy != "omni_multimodal" or stage.name != "talker_decode":
             return StageOutput(
                 stage_name=stage.name,
@@ -208,9 +190,7 @@ class TorchReference:
 
         snapshot_value = case.metadata.get("golden_snapshot_path", "")
         if not snapshot_value:
-            raise RuntimeError(
-                "Qwen3-Omni HF audio reference requires golden_snapshot_path"
-            )
+            raise RuntimeError("Qwen3-Omni HF audio reference requires golden_snapshot_path")
         snapshot_path = Path(str(snapshot_value))
         if not snapshot_path.is_absolute():
             snapshot_path = Path(__file__).resolve().parents[2] / snapshot_path
@@ -220,8 +200,7 @@ class TorchReference:
         _validate_provenance(case, snapshot)
         wav_bytes, audio = _decode_audio(snapshot)
 
-        model_dir = Path(_case_artifact_dir(
-            ctx.artifacts_dir or tempfile.gettempdir(), case.name))
+        model_dir = Path(_case_artifact_dir(ctx.artifacts_dir or tempfile.gettempdir(), case.name))
         wav_path = model_dir / "hf_reference.wav"
         wav_path.write_bytes(wav_bytes)
         sample_rate, num_samples = _validate_wav(wav_path, audio)
@@ -235,7 +214,7 @@ class TorchReference:
             "num_samples": num_samples,
             "duration_s": num_samples / sample_rate,
             "decoded_text": str(snapshot.get("decoded_text", "") or ""),
-            "reference_role": "human_review_only",
+            "reference_role": "automated_waveform_oracle",
             "system_prompt": QWEN_AUDIO_SYSTEM_PROMPT,
             "prompt": str(snapshot["prompt"]),
             "speaker": str(snapshot["speaker"]),
@@ -254,14 +233,14 @@ class TorchReference:
             timing_s=elapsed,
             metadata={
                 "backend": "torch_reference",
-                "source": "official_hf_pinned_human_review",
-                "comparison_mode": "invariant_only",
+                "source": "official_hf_pinned_waveform_oracle",
+                "comparison_mode": "waveform_cosine_and_invariants",
                 "snapshot_path": str(snapshot_path),
                 "resolved_revision": data["resolved_revision"],
                 "raw_sha256": data["raw_sha256"],
                 "note": (
-                    "Pinned official HF WAV is human-review evidence; the "
-                    "automated gate remains L4 TRT invariants."
+                    "Pinned official HF WAV gates aligned waveform cosine plus "
+                    "the L4 TRT audio invariants."
                 ),
             },
         )

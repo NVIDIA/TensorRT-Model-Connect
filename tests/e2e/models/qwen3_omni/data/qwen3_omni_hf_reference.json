@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "source": "official_hugging_face_qwen3_omni",
-  "reference_role": "human_review_only",
-  "comparison_mode": "invariant_only",
+  "reference_role": "automated_waveform_oracle",
+  "comparison_mode": "waveform_cosine_and_invariants",
   "model_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
   "resolved_revision": "26291f793822fb6be9555850f06dfe95f2d7e695",
   "transformers_version": "5.2.0",
