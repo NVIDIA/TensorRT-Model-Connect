@@ -5,7 +5,7 @@
   "family": "rwkv",
   "runtime_strategy": "rwkv_recurrent",
   "task_strategy": "text_generation_causal",
-  "precision": "fp16",
+  "precision": "fp32",
   "max_cache_length": 32,
   "trust_remote_code": false,
   "testcases": [

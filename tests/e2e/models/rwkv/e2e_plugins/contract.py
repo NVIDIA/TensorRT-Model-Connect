@@ -201,7 +201,10 @@ class RwkvCausalContinuationPlugin:
             )
 
         ned = levenshtein_ned(trt_text, ref_text)
-        ned_threshold = threshold.metrics.get("contract_ned_threshold", 0.25)
+        ned_threshold = threshold.metrics.get(
+            "normalized_text_edit_distance",
+            threshold.metrics.get("contract_ned_threshold", 0.2),
+        )
         prefix_len = min(50, min(len(trt_text), len(ref_text)))
         prefix_match = (trt_text[:prefix_len] == ref_text[:prefix_len]) if prefix_len > 0 else True
 
