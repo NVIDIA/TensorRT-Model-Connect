@@ -299,9 +299,8 @@ CanaryPreparedSegment
 prepare_canary_batch_segment(const CanaryBatchSegment& item, const TranscriptionRequest& request,
                              const MelFilterbank* mel_filterbank, int32_t mel_n_fft,
                              int32_t mel_win_length, int32_t mel_hop_length,
-                             int32_t mel_chunk_length, int32_t mel_sampling_rate,
-                             float mel_preemph, bool mel_normalize_per_feature,
-                             const CanaryConfig& canary_config) {
+                             int32_t mel_chunk_length, int32_t mel_sampling_rate, float mel_preemph,
+                             bool mel_normalize_per_feature, const CanaryConfig& canary_config) {
     const float* samples = request.audio_samples.data() + item.offset;
     int32_t sample_count = item.count;
     std::vector<float> resampled;
@@ -316,8 +315,8 @@ prepare_canary_batch_segment(const CanaryBatchSegment& item, const Transcription
     if (mel_filterbank != nullptr && !mel_filterbank->data.empty()) {
         prepared.mel = canary::extract_mel_spectrogram(
             samples, sample_count, mel_filterbank->data.data(), mel_filterbank->n_freq_bins,
-            mel_filterbank->n_mel_bins, mel_n_fft, mel_win_length, mel_hop_length,
-            mel_chunk_length, mel_sampling_rate, mel_preemph, mel_normalize_per_feature);
+            mel_filterbank->n_mel_bins, mel_n_fft, mel_win_length, mel_hop_length, mel_chunk_length,
+            mel_sampling_rate, mel_preemph, mel_normalize_per_feature);
     }
     if (!prepared.mel.data.empty()) {
         const int32_t valid_frames =
@@ -333,17 +332,16 @@ std::vector<std::future<CanaryPreparedSegment>> launch_canary_batch_preparation(
     const std::vector<std::size_t>& indices, std::size_t chunk_start, std::size_t chunk_end,
     const std::vector<CanaryBatchSegment>& work, const std::vector<TranscriptionRequest>& requests,
     const MelFilterbank* mel_filterbank, int32_t mel_n_fft, int32_t mel_win_length,
-    int32_t mel_hop_length, int32_t mel_chunk_length, int32_t mel_sampling_rate,
-    float mel_preemph, bool mel_normalize_per_feature, const CanaryConfig& canary_config) {
+    int32_t mel_hop_length, int32_t mel_chunk_length, int32_t mel_sampling_rate, float mel_preemph,
+    bool mel_normalize_per_feature, const CanaryConfig& canary_config) {
     std::vector<std::future<CanaryPreparedSegment>> futures;
     futures.reserve(chunk_end - chunk_start);
     for (std::size_t cursor = chunk_start; cursor < chunk_end; ++cursor) {
         const std::size_t index = indices[cursor];
         futures.push_back(std::async(
-            std::launch::async,
-            [&requests, &work, index, mel_filterbank, mel_n_fft, mel_win_length,
-             mel_hop_length, mel_chunk_length, mel_sampling_rate, mel_preemph,
-             mel_normalize_per_feature, &canary_config] {
+            std::launch::async, [&requests, &work, index, mel_filterbank, mel_n_fft, mel_win_length,
+                                 mel_hop_length, mel_chunk_length, mel_sampling_rate, mel_preemph,
+                                 mel_normalize_per_feature, &canary_config] {
                 const auto& item = work[index];
                 return prepare_canary_batch_segment(
                     item, requests[item.request_index], mel_filterbank, mel_n_fft, mel_win_length,
@@ -1264,10 +1262,10 @@ void CanaryPipeline::run_decoder_step(int32_t token_id, std::vector<float>& logi
     TensorMap inputs;
     inputs["token_id"] = token_tensor;
     if (decoder_->has_input("cross_attention_mask")) {
-        const auto source_positions =
-            static_cast<std::size_t>(canary_config_.max_source_positions);
+        const auto source_positions = static_cast<std::size_t>(canary_config_.max_source_positions);
         if (cross_attention_mask_.size() != source_positions)
-            throw std::runtime_error("Canary cross-attention mask has an invalid single-lane shape");
+            throw std::runtime_error(
+                "Canary cross-attention mask has an invalid single-lane shape");
         Tensor cross_mask_tensor;
         cross_mask_tensor.data = cross_attention_mask_.data();
         cross_mask_tensor.shape = {1, 1, canary_config_.max_source_positions};
@@ -1305,8 +1303,7 @@ void CanaryPipeline::run_decoder_step_batch(const std::vector<int32_t>& token_id
     TensorMap inputs;
     inputs["token_id"] = token_tensor;
     if (decoder_->has_input("cross_attention_mask")) {
-        const auto source_positions =
-            static_cast<std::size_t>(canary_config_.max_source_positions);
+        const auto source_positions = static_cast<std::size_t>(canary_config_.max_source_positions);
         if (cross_attention_mask_.size() != token_ids.size() * source_positions)
             throw std::runtime_error("Canary cross-attention mask has an invalid batched shape");
         Tensor cross_mask_tensor;
