@@ -60,7 +60,6 @@ The source and target must differ for `translate`; one of them must be `en`.
   --target-language fr \
   --task translate \
   --beam-size 2 \
-  --beam-length-penalty 1 \
   --max-new-tokens 120
 ```
 
@@ -70,10 +69,11 @@ so each surviving hypothesis advances by one decoder call instead of replaying
 its full prefix. Beam search still performs more decoder work than greedy;
 start with beam size 2 and validate quality and latency on representative audio.
 
-Beam scores use cumulative token log probability divided by decoded length
-raised to `--beam-length-penalty`. The default `1` ranks by average token log
-probability and avoids an inherent preference for short hypotheses. Set it to
-`0` to rank by unnormalized cumulative log probability.
+Beam scores use cumulative token log probability divided by decoded length.
+This fixed CLI behavior corresponds to the C++ API's default
+`beam_length_penalty` value of `1.0` and avoids an inherent preference for
+short hypotheses. Programmatic callers can set the field to `0` to rank by
+unnormalized cumulative log probability.
 
 Use `--no-punctuation` to request the checkpoint's no-punctuation prompt and
 remove remaining punctuation from decoded text. `--punctuation` is the default.
@@ -103,7 +103,6 @@ model. Segment decoding has no overlap or cross-segment decoder context.
 | --- | --- | --- |
 | `--max-new-tokens` | Tokens; at least 1 and no more than the bundle target limit minus prompt tokens | Applied independently to every segment. |
 | `--beam-size` | Integer in `[1, 16]` | `1` is greedy; larger values use beam search. |
-| `--beam-length-penalty` | Finite number greater than or equal to `0`; default `1` | Divides each beam score by `output_length^value`; ignored by greedy decoding. |
 | `--max-input-seconds` | Seconds; finite and greater than 0 | Rejects an input whose total duration exceeds the value. |
 | `--segment-length-seconds` | Seconds; finite, greater than 0, and no greater than the bundle audio window | Splits long input into ordered independent requests. |
 
@@ -152,6 +151,10 @@ translation.config.timestamps = true;
 std::vector<trtmc::TextResult> results =
     pipeline->transcribe_batch({english, translation});
 ```
+
+`TranscriptionConfig::beam_length_penalty` defaults to `1.0F`; assigning it in
+the example makes the beam scoring policy explicit. It is ignored when
+`beam_size` is `1`.
 
 The default batch implementation executes requests sequentially and preserves
 their order and individual configs. The legacy four-argument `transcribe`

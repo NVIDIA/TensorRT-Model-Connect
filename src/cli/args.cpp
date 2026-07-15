@@ -220,8 +220,7 @@ void print_usage() {
            "  trtmc solve           <bundle.trtfb> --field-input CSV\n"
            "  trtmc solve           <bundle.trtfb> --branch-input CSV [--trunk-input CSV]\n"
            "  trtmc transcribe      <bundle.trtfb> --audio FILE.wav [--max-new-tokens N] "
-           "[--beam-size N] [--beam-length-penalty F] [--language TAG] "
-           "[--source-language TAG] [--target-language TAG] "
+           "[--beam-size N] [--language TAG] [--source-language TAG] [--target-language TAG] "
            "[--task transcribe|translate] [--punctuation|--no-punctuation] [--timestamps] "
            "[--max-input-seconds F] [--segment-length-seconds F] "
            "[--stream] [--chunk-ms N] [--att-context-size L,R] "
@@ -601,16 +600,6 @@ CliArgs parse_args(int argc, char** argv) {
                 return args;
             }
             args.beam_size = *value;
-            continue;
-        }
-        if (arg == "--beam-length-penalty" && need_value(arg)) {
-            auto value = parse_float_value(arg, "a finite number >= 0");
-            if (!value || *value < 0.0F) {
-                args.parse_error = true;
-                args.error_message = arg + " expects a finite number >= 0";
-                return args;
-            }
-            args.beam_length_penalty = *value;
             continue;
         }
         if (arg == "--source-language" && need_value(arg)) {

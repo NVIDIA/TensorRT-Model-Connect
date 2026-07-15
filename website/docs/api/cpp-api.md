@@ -102,6 +102,10 @@ for (const auto& segment : result.segments) {
 }
 ```
 
+`beam_length_penalty` defaults to `1.0F`, which divides cumulative log
+probability by decoded length. It is ignored for greedy decoding. The Canary
+CLI uses this default automatically when `--beam-size` is greater than `1`.
+
 `transcribe_batch(const std::vector<TranscriptionRequest>&)` preserves each
 request's samples and config. The default implementation is sequential and
 returns results in request order. The legacy max-token/sample-rate overload is

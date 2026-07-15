@@ -205,15 +205,11 @@ void test_canary_transcription_flags_and_batch() {
                        "--max-input-seconds",
                        "45.5",
                        "--segment-length-seconds",
-                       "20",
-                       "--beam-length-penalty",
-                       "0.7"});
+                       "20"});
     check(!args.parse_error, "Canary transcription controls parse");
     check(args.audio_inputs == std::vector<std::string>({"one.wav", "two.wav"}),
           "Canary repeated audio inputs form batch");
     check(args.beam_size == 4, "Canary beam size");
-    check(args.beam_length_penalty > 0.69F && args.beam_length_penalty < 0.71F,
-          "Canary beam length penalty");
     check(args.source_language == "en" && args.target_language == "fr",
           "Canary source and target languages");
     check(args.transcription_task == "translate", "Canary translation task");
@@ -233,14 +229,6 @@ void test_canary_transcription_flags_and_batch() {
         parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--max-input-seconds", "nan"})
             .parse_error,
         "Canary rejects non-finite duration");
-    check(
-        parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--beam-length-penalty", "-1"})
-            .parse_error,
-        "Canary rejects negative beam length penalty");
-    check(parse({"trtmc", "transcribe", "b.trtfb", "--audio", "a.wav", "--beam-length-penalty",
-                 "nan"})
-              .parse_error,
-          "Canary rejects non-finite beam length penalty");
 }
 
 void test_unknown_command_fails() {
