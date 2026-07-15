@@ -39,9 +39,11 @@ class CanaryKvCache : public CanaryInferenceState {
     // Allocate cache buffers for the given configuration.
     // kv_dim = num_kv_heads * head_dim (size of one K or V row per layer).
     // cache_dtype controls the element type for K/V cache buffers (default FP32).
+    // batch_capacity is the maximum number of independent decoder lanes.
     // names provides explicit tensor names for engine I/O binding.
     CanaryKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
-                  DType cache_dtype = DType::kFloat32, CanaryKvCacheNames names = {});
+                  DType cache_dtype = DType::kFloat32, int32_t batch_capacity = 1,
+                  CanaryKvCacheNames names = {});
 
     // --- CanaryInferenceState overrides ---
     void reset() override;
@@ -88,6 +90,17 @@ class CanaryKvCache : public CanaryInferenceState {
     // remain masked out by subsequent prepare_step calls.
     void set_position(int32_t position);
 
+    // Select the active leading batch dimension. All lanes share the same
+    // logical decoder position because Canary prompts advance in lockstep.
+    void set_batch_size(int32_t batch_size);
+    int32_t batch_size() const { return batch_size_; }
+    int32_t batch_capacity() const { return batch_capacity_; }
+
+    // Gather cache lanes from another compatible state. source_lanes maps
+    // each destination lane to a source lane and is used by batched beam search.
+    void copy_lanes_from(const CanaryKvCache& source,
+                         const std::vector<int32_t>& source_lanes);
+
     // Bind only the cache_k/v INPUT pointers to `module`. Used for the
     // prefill TrtModule whose present_k/v outputs have shape (Sq, kv_dim)
     // — too big for CanaryKvCache's single-row present buffer. The caller reads
@@ -97,6 +110,7 @@ class CanaryKvCache : public CanaryInferenceState {
 
   private:
     bool is_compatible_with(const CanaryKvCache& other) const;
+    bool uses_batched_layout() const { return batch_capacity_ > 1; }
     void rebind_cache_rows(int32_t cache_rows);
     std::vector<int64_t> mask_shape_for_engine(int32_t mask_width, std::size_t mask_buf_size) const;
     void write_position_input(TensorMap& inputs, int32_t seq_len);
@@ -104,7 +118,7 @@ class CanaryKvCache : public CanaryInferenceState {
     void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
     void write_decode_mask(TensorMap& inputs);
 
-    std::vector<DeviceTensor> cache_k_;   // [num_layers], shape [max_length, kv_dim]
+    std::vector<DeviceTensor> cache_k_;   // [num_layers], [B, max_length, kv_dim] when batched
     std::vector<DeviceTensor> cache_v_;   // [num_layers]
     std::vector<DeviceTensor> present_k_; // [num_layers], shape [1, kv_dim] (single step output)
     std::vector<DeviceTensor> present_v_; // [num_layers]
@@ -112,6 +126,8 @@ class CanaryKvCache : public CanaryInferenceState {
     int32_t max_length_{0};
     int32_t kv_dim_{0};
     int32_t position_{0};
+    int32_t batch_capacity_{1};
+    int32_t batch_size_{1};
     cudaStream_t stream_{nullptr};
     // Buffers owned by this object — Tensor.data in prepare_step() points here.
     std::vector<float> mask_buf_;

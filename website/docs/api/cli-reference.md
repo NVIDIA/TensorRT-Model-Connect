@@ -81,7 +81,8 @@ Object detection is available through `trtmc detect` for pipelines that implemen
 ### Canary transcription options
 
 `trtmc transcribe` accepts repeated `--audio` inputs. These options apply to
-every input in that CLI batch:
+every input in that CLI batch. Canary executes up to 16 inputs per encoder
+batch and automatically chunks additional inputs:
 
 | Option | Purpose |
 | --- | --- |

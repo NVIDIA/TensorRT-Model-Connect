@@ -13,6 +13,7 @@
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 
+#include <algorithm>
 #include <exception>
 #include <limits>
 #include <string>
@@ -49,8 +50,18 @@ int32_t dim_at(const std::vector<int64_t>& shape, int32_t dim) {
 }
 
 int32_t decoder_cache_row_width(const TrtModule& module, const BaseConfig& config) {
-    const int32_t from_engine = dim_at(module.tensor_shape("cache_k_0"), 1);
+    const auto shape = module.tensor_shape("cache_k_0");
+    const int32_t from_engine =
+        shape.empty() ? -1 : dim_at(shape, static_cast<int32_t>(shape.size()) - 1);
     return from_engine > 0 ? from_engine : compute_kv_dim(config);
+}
+
+int32_t decoder_batch_capacity(const TrtModule& module) {
+    if (!module.input_is_dynamic("token_id"))
+        return 1;
+    const auto shape = module.input_profile_shape(
+        "token_id", module.profile_idx(), ProfileShapeSelector::kMax);
+    return std::max(dim_at(shape, 0), 1);
 }
 
 bool canary_cuda_graph_disabled(const PipelineContext& ctx) {
@@ -137,8 +148,10 @@ class CanaryPlugin final : public IPipelinePlugin {
         int32_t kv_dim = decoder_cache_row_width(*dec_loaded.module, ctx.config);
         int32_t max_cache = ctx.config.max_cache_length;
         DType cache_dtype = dec_loaded.module->tensor_dtype("cache_k_0");
+        const int32_t batch_capacity = decoder_batch_capacity(*dec_loaded.module);
         std::unique_ptr<CanaryInferenceState> state =
-            std::make_unique<CanaryKvCache>(dl, max_cache, kv_dim, stream, cache_dtype);
+            std::make_unique<CanaryKvCache>(dl, max_cache, kv_dim, stream, cache_dtype,
+                                            batch_capacity);
         if (!state->ok())
             throw std::runtime_error("Failed to create CanaryKvCache for Canary decoder");
 

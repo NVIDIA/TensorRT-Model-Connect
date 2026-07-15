@@ -21,6 +21,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
+from .batching import CANARY_MAX_DECODER_LANES
 from ...parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
@@ -137,7 +138,7 @@ def _add_linear_with_bias(
     return out
 
 
-def _add_attention_from_rows_manual(
+def _add_batched_attention_manual(
     network,
     q,
     k,
@@ -145,7 +146,6 @@ def _add_attention_from_rows_manual(
     *,
     num_heads: int,
     head_dim: int,
-    q_seq: int,
     kv_seq: int,
     mask=None,
     fp32_accumulation: bool = False,
@@ -157,12 +157,19 @@ def _add_attention_from_rows_manual(
     build stability.
     """
     output_dtype = q.dtype
-    q_4d = graph_ops.reshape_rows_to_heads_4d(
-        network, q, num_heads, head_dim, sequence_length=q_seq)
-    k_4d = graph_ops.reshape_rows_to_heads_4d(
-        network, k, num_heads, head_dim, sequence_length=kv_seq)
-    v_4d = graph_ops.reshape_rows_to_heads_4d(
-        network, v, num_heads, head_dim, sequence_length=kv_seq)
+    q_layer = network.add_shuffle(q)
+    q_layer.reshape_dims = (-1, num_heads, 1, head_dim)
+    q_4d = q_layer.get_output(0)
+    k_rows = network.add_shuffle(k)
+    k_rows.reshape_dims = (-1, kv_seq, num_heads, head_dim)
+    k_layer = network.add_shuffle(k_rows.get_output(0))
+    k_layer.first_transpose = trt.Permutation([0, 2, 1, 3])
+    k_4d = k_layer.get_output(0)
+    v_rows = network.add_shuffle(v)
+    v_rows.reshape_dims = (-1, kv_seq, num_heads, head_dim)
+    v_layer = network.add_shuffle(v_rows.get_output(0))
+    v_layer.first_transpose = trt.Permutation([0, 2, 1, 3])
+    v_4d = v_layer.get_output(0)
     if fp32_accumulation and output_dtype != trt.float32:
         q_4d = network.add_cast(q_4d, trt.float32).get_output(0)
         k_4d = network.add_cast(k_4d, trt.float32).get_output(0)
@@ -193,8 +200,10 @@ def _add_attention_from_rows_manual(
         v_4d, trt.MatrixOperation.NONE).get_output(0)
     if context.dtype != output_dtype:
         context = network.add_cast(context, output_dtype).get_output(0)
-    return graph_ops.reshape_heads_4d_to_rows(
-        network, context, num_heads * head_dim, sequence_length=q_seq)
+    rows = network.add_shuffle(context)
+    rows.first_transpose = trt.Permutation([0, 2, 1, 3])
+    rows.reshape_dims = (-1, num_heads * head_dim)
+    return rows.get_output(0)
 
 
 def _add_canary_tp_decoder_layer(
@@ -239,19 +248,19 @@ def _add_canary_tp_decoder_layer(
     present_k, present_v = k, v
 
     kr = network.add_shuffle(k)
-    kr.reshape_dims = (1, local_attention_size)
+    kr.reshape_dims = (-1, 1, local_attention_size)
     vr = network.add_shuffle(v)
-    vr.reshape_dims = (1, local_attention_size)
+    vr.reshape_dims = (-1, 1, local_attention_size)
     ak = network.add_concatenation([cache_k, kr.get_output(0)])
-    ak.axis = 0
+    ak.axis = 1
     av = network.add_concatenation([cache_v, vr.get_output(0)])
-    av.axis = 0
+    av.axis = 1
 
-    mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
-    context = _add_attention_from_rows_manual(
+    mask_4d = graph_ops.add_3d_mask_to_4d(network, attention_mask)
+    context = _add_batched_attention_manual(
         network, q, ak.get_output(0), av.get_output(0),
         num_heads=local_heads, head_dim=head_dim,
-        q_seq=1, kv_seq=attention_window,
+        kv_seq=attention_window,
         mask=mask_4d)
     sa = graph_ops.add_matmul_rhs_constant(
         network, context, local_attention_size, hidden_size,
@@ -282,10 +291,10 @@ def _add_canary_tp_decoder_layer(
     cv_proj = _add_linear_with_bias(
         network, cross_v_typed, hidden_size, local_attention_size,
         weights[f"{prefix}.xw_v"], weights[f"{prefix}.xb_v"], dtype=dtype)
-    ccf = _add_attention_from_rows_manual(
+    ccf = _add_batched_attention_manual(
         network, cq, ck_proj, cv_proj,
         num_heads=local_heads, head_dim=head_dim,
-        q_seq=1, kv_seq=max_source_positions,
+        kv_seq=max_source_positions,
         fp32_accumulation=True)
     ca = graph_ops.add_matmul_rhs_constant(
         network, ccf, local_attention_size, hidden_size,
@@ -363,28 +372,61 @@ def build_canary_tp_decoder_engine(
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
-    token_id = network.add_input("token_id", trt.int32, (1,))
-    position_id = network.add_input("position_id", trt.int32, (1,))
+    token_id = network.add_input("token_id", trt.int32, (-1,))
+    position_id = network.add_input("position_id", trt.int32, (-1,))
     attention_mask = network.add_input(
-        "attention_mask", trt.float32, (1, attention_window))
+        "attention_mask", trt.float32, (-1, 1, attention_window))
 
     cache_k_inputs, cache_v_inputs = [], []
     for i in range(dec_layers):
         cache_k_inputs.append(network.add_input(
             graph_ops.layer_tensor_name("cache_k", i),
-            work_trt_dtype, (max_cache_length, local_attention_size)))
+            work_trt_dtype, (-1, max_cache_length, local_attention_size)))
         cache_v_inputs.append(network.add_input(
             graph_ops.layer_tensor_name("cache_v", i),
-            work_trt_dtype, (max_cache_length, local_attention_size)))
+            work_trt_dtype, (-1, max_cache_length, local_attention_size)))
 
     cross_k_inputs, cross_v_inputs = [], []
     for i in range(dec_layers):
         cross_k_inputs.append(network.add_input(
             graph_ops.layer_tensor_name("cross_k", i),
-            trt.float32, (max_source_positions, hidden)))
+            trt.float32, (-1, max_source_positions, hidden)))
         cross_v_inputs.append(network.add_input(
             graph_ops.layer_tensor_name("cross_v", i),
-            trt.float32, (max_source_positions, hidden)))
+            trt.float32, (-1, max_source_positions, hidden)))
+
+    profile = builder.create_optimization_profile()
+    profile.set_shape(
+        "token_id", (1,), (16,), (CANARY_MAX_DECODER_LANES,))
+    profile.set_shape(
+        "position_id", (1,), (16,), (CANARY_MAX_DECODER_LANES,))
+    profile.set_shape(
+        "attention_mask", (1, 1, attention_window),
+        (16, 1, attention_window),
+        (CANARY_MAX_DECODER_LANES, 1, attention_window))
+    for i in range(dec_layers):
+        suffix = f"_{i}"
+        profile.set_shape(
+            "cache_k" + suffix,
+            (1, max_cache_length, local_attention_size),
+            (16, max_cache_length, local_attention_size),
+            (CANARY_MAX_DECODER_LANES, max_cache_length, local_attention_size))
+        profile.set_shape(
+            "cache_v" + suffix,
+            (1, max_cache_length, local_attention_size),
+            (16, max_cache_length, local_attention_size),
+            (CANARY_MAX_DECODER_LANES, max_cache_length, local_attention_size))
+        profile.set_shape(
+            "cross_k" + suffix,
+            (1, max_source_positions, hidden),
+            (16, max_source_positions, hidden),
+            (CANARY_MAX_DECODER_LANES, max_source_positions, hidden))
+        profile.set_shape(
+            "cross_v" + suffix,
+            (1, max_source_positions, hidden),
+            (16, max_source_positions, hidden),
+            (CANARY_MAX_DECODER_LANES, max_source_positions, hidden))
+    trt_config.add_optimization_profile(profile)
 
     embedding_table = graph_ops.add_constant(
         network, (vocab, hidden), rank_weights["dec_emb"],
@@ -462,7 +504,7 @@ def build_canary_tp_decoder_engine(
             "[trtmc build] Building Canary TP decoder "
             f"(rank={parallel.rank}/{tp}, {dec_layers}L, h={hidden}, "
             f"local_heads={local_heads}, cache={max_cache_length}, "
-            f"precision={precision})",
+            f"lanes=1..{CANARY_MAX_DECODER_LANES}, precision={precision})",
             file=sys.stderr,
         )
     plan = builder.build_serialized_network(network, trt_config)

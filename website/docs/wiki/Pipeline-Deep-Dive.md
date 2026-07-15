@@ -585,8 +585,9 @@ each plugin reads only the fields it requires.
    engines from scratch. There is no caching of deserialized engines across
    pipeline instances.
 
-2. **Single-sequence inference only.** KvCache and family-owned recurrent states manage state
-   for one sequence at a time. There is no batching support.
+2. **Batching is family-specific.** Most KvCache and family-owned recurrent
+   states manage one sequence at a time. Canary offline transcription supports
+   up to 16 encoder inputs and 32 decoder lanes per engine execution.
 
 3. **Synchronous execution.** All pipeline `generate()` methods are fully
    synchronous and block until completion. There is no async/streaming API.

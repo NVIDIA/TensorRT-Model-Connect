@@ -122,6 +122,12 @@ results retain input order, and every output line starts with its source path.
   --beam-size 2
 ```
 
+Canary bundles use a dynamic encoder batch from 1 through 16. The decoder has
+32 lanes so a batch of 16 can run the recommended beam size 2 in one decoder
+step. Larger CLI batches are split automatically while preserving input order.
+Beam sizes above 2 reduce the number of requests in each decoder chunk because
+each hypothesis occupies one decoder lane.
+
 ## C++ API
 
 The C++ batch API carries a complete configuration per request:
@@ -150,9 +156,12 @@ std::vector<trtmc::TextResult> results =
     pipeline->transcribe_batch({english, translation});
 ```
 
-The default batch implementation executes requests sequentially and preserves
-their order and individual configs. The legacy four-argument `transcribe`
-overload remains available and maps to the default greedy configuration.
+Canary validates every request before execution, groups requests by beam size,
+and processes up to 16 encoder inputs together. Mel extraction runs in parallel,
+and greedy or beam decoding advances all active requests in lockstep. Results
+preserve request and segment order even when per-request configs cause separate
+decoder groups. The legacy four-argument `transcribe` overload remains
+available and maps to the default greedy configuration.
 
 Unsupported languages, mismatched task/language combinations, invalid beam
 sizes, excessive output lengths, and invalid duration values throw

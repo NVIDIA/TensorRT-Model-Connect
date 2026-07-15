@@ -137,6 +137,61 @@ void test_canary_kv_cache_branch_copy() {
     cudaStreamDestroy(stream);
 }
 
+void test_canary_kv_cache_batch_lane_copy() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    trtmc::CanaryKvCache source(1, 3, 1, stream, trtmc::DType::kFloat32, 4);
+    source.set_batch_size(3);
+    const std::vector<float> source_k = {
+        1.0F, 2.0F, 3.0F,
+        4.0F, 5.0F, 6.0F,
+        7.0F, 8.0F, 9.0F,
+        0.0F, 0.0F, 0.0F,
+    };
+    const std::vector<float> source_v = {
+        11.0F, 12.0F, 13.0F,
+        14.0F, 15.0F, 16.0F,
+        17.0F, 18.0F, 19.0F,
+        0.0F, 0.0F, 0.0F,
+    };
+    check(source.cache_k(0).copy_from_host(source_k.data()), "canary batch source K upload");
+    check(source.cache_v(0).copy_from_host(source_v.data()), "canary batch source V upload");
+    source.set_position(2);
+
+    auto gathered_state = source.create_empty();
+    auto* gathered = dynamic_cast<trtmc::CanaryKvCache*>(gathered_state.get());
+    check(gathered != nullptr, "canary batch gather retains concrete state type");
+    if (gathered != nullptr) {
+        gathered->copy_lanes_from(source, {2, 0, 2, 1});
+        check(gathered->batch_size() == 4, "canary batch gather updates active batch");
+        check(gathered->position() == 2, "canary batch gather preserves cache position");
+
+        std::vector<float> gathered_k(12, 0.0F);
+        std::vector<float> gathered_v(12, 0.0F);
+        check(gathered->cache_k(0).copy_to_host(gathered_k.data()),
+              "canary batch gathered K download");
+        check(gathered->cache_v(0).copy_to_host(gathered_v.data()),
+              "canary batch gathered V download");
+        check(gathered_k == std::vector<float>({
+                                  7.0F, 8.0F, 0.0F,
+                                  1.0F, 2.0F, 0.0F,
+                                  7.0F, 8.0F, 0.0F,
+                                  4.0F, 5.0F, 0.0F,
+                              }),
+              "canary batch gather reorders K lanes");
+        check(gathered_v == std::vector<float>({
+                                  17.0F, 18.0F, 0.0F,
+                                  11.0F, 12.0F, 0.0F,
+                                  17.0F, 18.0F, 0.0F,
+                                  14.0F, 15.0F, 0.0F,
+                              }),
+              "canary batch gather reorders V lanes");
+    }
+
+    cudaStreamDestroy(stream);
+}
+
 void test_canary_constructor_validates_encoder() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -258,6 +313,7 @@ void test_canary_cross_kv_invalid_plan() {
 int main() {
     test_canary_transcribe();
     test_canary_kv_cache_branch_copy();
+    test_canary_kv_cache_batch_lane_copy();
     test_canary_constructor_validates_encoder();
     test_canary_with_cross_kv();
     test_canary_cross_kv_stats();
