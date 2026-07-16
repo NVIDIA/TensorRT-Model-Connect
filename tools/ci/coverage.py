@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Python test selection and C++/Python coverage reporting."""
+"""Select unit tests, collect coverage, and enforce the reviewed numeric gates.
+
+Boundary: coverage policy and artifacts live here; model E2E validation does not.
+"""
 
 from __future__ import annotations
 

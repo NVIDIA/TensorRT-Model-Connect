@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Collect, balance, execute, and summarize E2E tests across healthy GPUs."""
+"""Collect, execute, and summarize an E2E schedule across healthy GPUs.
+
+Boundary: worker-process lifecycle; load-balancing policy lives in ``e2e_schedule``.
+"""
 
 from __future__ import annotations
 

@@ -837,6 +837,15 @@ pytest tests/builder/ -m trt -v
 
 ---
 
+## CI orchestration
+
+The class-based CI control flow is documented in the
+[CI orchestration tutorial](../../../tools/ci/README.md). Start there to follow
+the `run-ci` trigger through impact analysis, unit gates, isolated model proofs,
+GPU scheduling, and the combined HTML report.
+
+---
+
 ## Coverage
 
 Coverage is configured in `pyproject.toml` and enforced by dedicated scripts.

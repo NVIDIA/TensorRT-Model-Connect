@@ -509,6 +509,7 @@ Per-strategy JSON threshold files defining default pass/fail criteria.
 | `hf_tokenizer.py` | HuggingFace tokenizer utility |
 | `eval_mmlu.py` | MMLU evaluation script |
 | `generate_e2e_report.py` | E2E test report generator |
+| `../tools/ci/README.md` | Tutorial and module map for class-based CI orchestration |
 | `../tools/ci/e2e_scheduler.py` | Class-based parallel E2E test runner |
 | `schedule_e2e.py` | E2E test scheduler |
 

@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Impact analysis, source quality, and source-only unit-test stages."""
+"""Run impact analysis, source-quality gates, and source-only unit tests.
+
+Boundary: pre-model CPU validation; isolated model certification is a later stage.
+"""
 
 from __future__ import annotations
 

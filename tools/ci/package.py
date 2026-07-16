@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build, inspect, install, and smoke-test the native Python wheel."""
+"""Build, inspect, install, and smoke-test the native Python wheel.
+
+Boundary: package correctness and reuse state; source-only unit tests live elsewhere.
+"""
 
 from __future__ import annotations
 

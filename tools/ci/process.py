@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Small subprocess and GitHub file-command helpers shared by CI classes."""
+"""Provide subprocess and GitHub file-command primitives to CI classes.
+
+Boundary: uniform mechanics and errors only; commands and policy come from callers.
+"""
 
 from __future__ import annotations
 

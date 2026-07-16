@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import signal
@@ -76,6 +77,28 @@ def test_ci_orchestration_uses_the_class_based_python_entrypoint() -> None:
     )
     assert "python3 -m tools.ci" in workflows
     assert "bash .github/scripts/" not in workflows
+
+
+def test_ci_modules_have_minimal_role_comments_and_a_complete_tutorial() -> None:
+    ci_directory = REPO_ROOT / "tools" / "ci"
+    modules = sorted(path for path in ci_directory.glob("*.py") if path.name != "__init__.py")
+    for module in modules:
+        docstring = ast.get_docstring(ast.parse(module.read_text(encoding="utf-8")))
+        assert docstring, f"{module.name} has no module documentation"
+        assert "Boundary:" in docstring, f"{module.name} does not state its responsibility boundary"
+
+    readme = (ci_directory / "README.md").read_text(encoding="utf-8")
+    missing_modules = [module.name for module in modules if f"`{module.name}`" not in readme]
+    assert missing_modules == []
+    for section in (
+        "## The system at a glance",
+        "## Pre-merge, step by step",
+        "## What nightly adds",
+        "## Module map",
+        "## Making a CI change",
+        "## Reading a failure",
+    ):
+        assert section in readme
 
 
 def test_workflows_define_shared_hf_cache_env() -> None:

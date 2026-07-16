@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Nightly ETTh1 preparation and evaluation for eligible model proofs."""
+"""Prepare and evaluate the nightly ETTh1 task suite for eligible models.
+
+Boundary: time-series task parity only; standard model E2E comparison remains mandatory.
+"""
 
 from __future__ import annotations
 

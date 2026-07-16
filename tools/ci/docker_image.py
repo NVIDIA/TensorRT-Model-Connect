@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Resolve, build, and validate the immutable Docker image used by CI."""
+"""Resolve, build, and validate the immutable Docker image used by CI.
+
+Boundary: image fingerprinting and readiness only; containers are started elsewhere.
+"""
 
 from __future__ import annotations
 

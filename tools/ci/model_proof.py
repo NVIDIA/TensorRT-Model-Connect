@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Host and container halves of the hermetic single-model certification."""
+"""Prepare and launch one hermetic single-model certification.
+
+Boundary: trusted host setup and container security; proof steps run in ``model_proof_inner``.
+"""
 
 from __future__ import annotations
 

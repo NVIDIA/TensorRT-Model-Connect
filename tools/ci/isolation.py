@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build and test each affected model from a source projection containing no peers."""
+"""Build and test affected models from source projections containing no peers.
+
+Boundary: multi-model isolation queues; one hermetic proof is owned by ``model_proof``.
+"""
 
 from __future__ import annotations
 

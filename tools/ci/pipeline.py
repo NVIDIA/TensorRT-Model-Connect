@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The readable stage graph executed inside the long-lived CI container."""
+"""Define the readable stage graph executed inside the long-lived CI container.
+
+Boundary: ordering only; each step delegates its behavior to a focused class.
+"""
 
 from __future__ import annotations
 

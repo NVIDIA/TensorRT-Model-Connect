@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Attach a named CI stage to its run-owned container."""
+"""Attach one named pipeline stage to its run-owned container.
+
+Boundary: host-to-container execution and cancellation; stage definitions live in ``pipeline``.
+"""
 
 from __future__ import annotations
 

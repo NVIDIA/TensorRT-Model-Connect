@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Command-line entry point for the class-based CI orchestration."""
+"""Translate the public ``python -m tools.ci`` commands into one responsible class.
+
+Boundary: argument parsing and dispatch only; workflow behavior belongs to the called class.
+"""
 
 from __future__ import annotations
 

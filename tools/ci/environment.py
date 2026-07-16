@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Environment variables intentionally forwarded into CI containers."""
+"""Declare the environment variables intentionally forwarded into CI containers.
+
+Boundary: this allowlist is the host-to-container configuration contract.
+"""
 
 COMMON_ENVIRONMENT = (
     "CI_BASE_REF",

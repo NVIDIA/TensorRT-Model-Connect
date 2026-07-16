@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Cross-process FIFO GPU leasing for isolated model proofs."""
+"""Allocate shared slots or whole GPUs to concurrent isolated model proofs.
+
+Boundary: cross-process fairness and locking only; this module never runs a model.
+"""
 
 from __future__ import annotations
 

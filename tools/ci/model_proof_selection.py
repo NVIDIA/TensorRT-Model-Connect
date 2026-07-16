@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validate a one-model projection and select the exact proof tests."""
+"""Validate a one-model projection and select its exact proof contract.
+
+Boundary: read and validate ownership metadata; do not build or execute the model here.
+"""
 
 from __future__ import annotations
 

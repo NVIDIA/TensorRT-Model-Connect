@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Selective and nightly E2E phases, including semantic artifact assessment."""
+"""Choose and run the selective or nightly E2E phases.
+
+Boundary: high-level E2E policy; worker scheduling and model isolation are delegated.
+"""
 
 from __future__ import annotations
 

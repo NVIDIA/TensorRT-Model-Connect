@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared state and operations for CI pipeline classes."""
+"""Provide shared repository state and external-command access to CI classes.
+
+Boundary: filesystem and process mechanics only; this module contains no stage policy.
+"""
 
 from __future__ import annotations
 

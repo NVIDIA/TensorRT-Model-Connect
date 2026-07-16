@@ -3,6 +3,8 @@
 
 """Schedule E2E tests across GPUs and workers for balanced load.
 
+Boundary: pure scheduling policy; this module does not launch test processes.
+
 Reads pytest test IDs (one per line on stdin), model manifests, and optional
 timing estimates, then distributes work across GPU worker slots by estimated
 critical-path load.

@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Start the long-lived container used by non-model CI stages."""
+"""Start the run-owned container used by non-model CI stages.
+
+Boundary: Docker mounts, devices, and forwarded environment variables are decided here.
+"""
 
 from __future__ import annotations
 

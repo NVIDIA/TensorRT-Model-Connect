@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Linear, evidence-producing implementation of the in-container model proof."""
+"""Execute the linear, evidence-producing proof inside the isolated container.
+
+Boundary: projected-source validation, build, tests, comparison, and per-model report.
+"""
 
 from __future__ import annotations
 
