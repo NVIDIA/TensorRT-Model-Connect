@@ -13,8 +13,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from scripts import schedule_e2e
-
+from . import e2e_schedule
 from .context import CiContext
 from .process import CiError
 
@@ -291,9 +290,9 @@ class E2EParallelRunner:
         return match.group(1) if match else value
 
     def _schedule(self) -> list[dict[str, object]]:
-        timing_path = schedule_e2e._default_timing_estimates_path(self.config.manifest_dir)
-        timing = schedule_e2e._load_timing_estimates(timing_path)
-        phases = schedule_e2e.schedule_phases(
+        timing_path = e2e_schedule._default_timing_estimates_path(self.config.manifest_dir)
+        timing = e2e_schedule._load_timing_estimates(timing_path)
+        phases = e2e_schedule.schedule_phases(
             self.test_ids,
             self.config.manifest_dir,
             len(self.gpu_ids),

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import subprocess
@@ -16,14 +15,9 @@ from pathlib import Path
 import pytest
 
 from tests.e2e_harness.manifest_loader import find_manifest_path
+from tools.ci import e2e_schedule as schedule_e2e
 from tools.ci.e2e_scheduler import E2EParallelConfig
 from tools.ci.process import CiError
-
-_SCHEDULE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "schedule_e2e.py"
-_SPEC = importlib.util.spec_from_file_location("schedule_e2e", _SCHEDULE_PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-schedule_e2e = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(schedule_e2e)
 
 
 def test_python_e2e_runner_parses_explicit_wall_time_limits() -> None:
@@ -31,6 +25,33 @@ def test_python_e2e_runner_parses_explicit_wall_time_limits() -> None:
     assert E2EParallelConfig.parse(["--timeout", "90m"], {}).timeout_seconds == 5400
     with pytest.raises(CiError, match="invalid E2E timeout"):
         E2EParallelConfig.parse(["--timeout", "soon"], {})
+
+
+def test_ci_scheduler_ignores_an_unrelated_scripts_package(tmp_path: Path) -> None:
+    """A site-installed ``scripts`` package must not shadow CI scheduler code."""
+    fake_package = tmp_path / "scripts"
+    fake_package.mkdir()
+    (fake_package / "__init__.py").write_text("# unrelated package\n", encoding="utf-8")
+    repository = Path(__file__).resolve().parents[2]
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(repository)))
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from tools.ci import e2e_scheduler; "
+            "print(e2e_scheduler.e2e_schedule.__name__)",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "tools.ci.e2e_schedule"
 
 
 def _write_manifest(manifest_dir: Path, name: str, **fields: object) -> None:

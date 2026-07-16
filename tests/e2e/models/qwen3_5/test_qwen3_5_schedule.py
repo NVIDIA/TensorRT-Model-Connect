@@ -5,19 +5,14 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
 from tests.e2e_harness.manifest_loader import find_manifest_path
+from tools.ci import e2e_schedule as schedule_e2e
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_SCHEDULE_PATH = _REPO_ROOT / "scripts" / "schedule_e2e.py"
-_SPEC = importlib.util.spec_from_file_location("schedule_e2e", _SCHEDULE_PATH)
-assert _SPEC is not None and _SPEC.loader is not None
-schedule_e2e = importlib.util.module_from_spec(_SPEC)
-_SPEC.loader.exec_module(schedule_e2e)
 
 
 def test_qwen35_is_marked_exclusive_gpu() -> None:

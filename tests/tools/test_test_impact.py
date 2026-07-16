@@ -1364,6 +1364,7 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
+            "tools/ci/e2e_schedule.py",
             "tools/ci/e2e_scheduler.py",
             "scripts/schedule_e2e.py",
             "scripts/hf_cache_download_worker.py",
@@ -3311,19 +3312,31 @@ class TestCoverageMapIntegration:
         assert "tools" not in result.fallback_tiers
 
     @pytest.mark.parametrize("coverage_map", [None, {}])
-    def test_e2e_runner_selects_explicit_tools_tests(self, imap, coverage_map):
-        """Shell runner edits select tests that Python coverage cannot discover."""
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            (
+                "tools/ci/e2e_scheduler.py",
+                [
+                    "tests/tools/test_github_actions_ci.py",
+                    "tests/tools/test_schedule_e2e.py",
+                ],
+            ),
+            ("tools/ci/e2e_schedule.py", ["tests/tools/test_schedule_e2e.py"]),
+        ],
+    )
+    def test_e2e_runner_selects_explicit_tools_tests(
+        self, imap, coverage_map, path, expected
+    ):
+        """E2E scheduler edits select tests that coverage cannot discover."""
         result = test_impact.analyze_impact(
-            ["tools/ci/e2e_scheduler.py"],
+            [path],
             imap,
             coverage_map=coverage_map,
         )
 
         assert result.unit_tiers == ["tools"]
-        assert result.tools_tests == [
-            "tests/tools/test_github_actions_ci.py",
-            "tests/tools/test_schedule_e2e.py",
-        ]
+        assert result.tools_tests == expected
         assert result.fallback_tiers == []
 
     @pytest.mark.parametrize("coverage_map", [None, {}])

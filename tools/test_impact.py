@@ -1671,6 +1671,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="e2e_runner_script",
             matcher=_path_in(
                 {
+                    "tools/ci/e2e_schedule.py",
                     "tools/ci/e2e_scheduler.py",
                     "scripts/schedule_e2e.py",
                     "scripts/hf_cache_download_worker.py",
@@ -1976,6 +1977,9 @@ _EXPLICIT_TOOLS_TEST_TARGETS = {
     ),
     "tools/ci/e2e_scheduler.py": (
         "tests/tools/test_github_actions_ci.py",
+        "tests/tools/test_schedule_e2e.py",
+    ),
+    "tools/ci/e2e_schedule.py": (
         "tests/tools/test_schedule_e2e.py",
     ),
     "scripts/hf_cache_download_worker.py": (
