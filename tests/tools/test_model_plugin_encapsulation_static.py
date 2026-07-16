@@ -1486,11 +1486,6 @@ def test_recurrent_state_is_model_owned() -> None:
             REPO_ROOT / "src" / "runtime" / "models" / "qwen3_5" / "recurrent_state.cpp",
             "Qwen35RecurrentState",
         ),
-        "qwen3_omni": (
-            REPO_ROOT / "src" / "runtime" / "models" / "qwen3_omni" / "recurrent_state.h",
-            REPO_ROOT / "src" / "runtime" / "models" / "qwen3_omni" / "recurrent_state.cpp",
-            "Qwen3OmniRecurrentState",
-        ),
     }
     violations = []
 

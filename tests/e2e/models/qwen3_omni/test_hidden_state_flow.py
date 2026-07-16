@@ -51,3 +51,14 @@ def test_qwen3_omni_runtime_requires_official_code2wav_and_python_talker() -> No
     assert 'overrides["omni_talker_model_id"] = self._talker_model_id' in builder
     assert 'overrides["omni_talker_model_revision"]' in builder
     assert 'find_section(ctx.bundle, "talker_engine_plan")' not in source
+
+
+def test_qwen3_omni_runtime_has_no_retired_talker_recurrent_state() -> None:
+    runtime = ROOT / "src/runtime/models/qwen3_omni"
+    plugin = (runtime / "plugin.cpp").read_text()
+
+    assert "Qwen3OmniKvCache" in plugin
+    assert "Qwen3OmniRecurrentState" not in plugin
+    assert 'runtime/models/qwen3_omni/recurrent_state.h' not in plugin
+    assert not (runtime / "recurrent_state.h").exists()
+    assert not (runtime / "recurrent_state.cpp").exists()

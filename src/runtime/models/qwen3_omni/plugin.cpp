@@ -8,7 +8,6 @@
 
 #include "plugin_helpers.h"
 #include "runtime/models/qwen3_omni/pipeline.h"
-#include "runtime/models/qwen3_omni/recurrent_state.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
 

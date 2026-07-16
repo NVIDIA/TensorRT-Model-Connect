@@ -7,9 +7,8 @@
 
 // Qwen3OmniInferenceState: unified interface for autoregressive inference state.
 //
-// Both KV-cache attention state and recurrent state implementations expose
-// this interface. Pipelines and plugins program against it — never against
-// concrete state classes.
+// The thinker KV-cache implementation exposes this interface. Pipelines and
+// plugins program against it rather than the concrete state class.
 //
 // The interface captures the lifecycle of per-sequence inference state:
 //   1. reset()        — prepare for a new sequence
@@ -18,10 +17,8 @@
 //   4. advance()      — update state after each decode step
 //   5. position()     — current sequence position
 //
-// Implementations:
-//   Qwen3OmniKvCache          — dense append-only (current default)
-//   Family-owned recurrent state — recurrent tensor state
-//   Family-owned hybrid state — Qwen3OmniKvCache + family-owned recurrent state composed
+// Implementation:
+//   Qwen3OmniKvCache — dense append-only thinker state
 //   (future: RingKvCache, PagedKvCache, MlaCache, SlidingWindowCache)
 
 #include "trtmc/runtime/tensor.h"
@@ -87,7 +84,7 @@ class Qwen3OmniInferenceState {
     virtual int32_t num_layers() const = 0;
 
     // Whether this state type needs an attention mask.
-    // Qwen3OmniKvCache -> true. Family-owned recurrent state -> false.
+    // Qwen3OmniKvCache returns true.
     virtual bool needs_attention_mask() const = 0;
 
     // Total device memory consumed by this state (bytes).
