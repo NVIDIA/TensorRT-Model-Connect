@@ -46,7 +46,14 @@ def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(tmp_path):
             return b"SAM3_VISION_PLAN"
 
         def build_extra_engines(self, config, weights, max_cache_length, *, verbose=False):
-            return {"sam3_core_engine_plan": b"SAM3_CORE_PLAN"}
+            return {
+                "sam3_core_engine_plan": b"SAM3_CORE_PLAN",
+                "sam3_tracker_init_engine_plan": b"SAM3_TRACKER_INIT_PLAN",
+                "sam3_tracker_step_engine_plan": b"SAM3_TRACKER_STEP_PLAN",
+                "sam3_tracker_step_batch2_engine_plan": b"SAM3_TRACKER_STEP_BATCH2_PLAN",
+                "sam3_tracker_memory_engine_plan": b"SAM3_TRACKER_MEMORY_PLAN",
+                "sam3_tracker_memory_batch2_engine_plan": b"SAM3_TRACKER_MEMORY_BATCH2_PLAN",
+            }
 
         def get_segmentation_config(self, config):
             return {
@@ -90,6 +97,15 @@ def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(tmp_path):
     assert section_map["engine_plan"] == b"SAM3_TEXT_PLAN"
     assert section_map["vision_engine_plan"] == b"SAM3_VISION_PLAN"
     assert section_map["sam3_core_engine_plan"] == b"SAM3_CORE_PLAN"
+    assert section_map["sam3_tracker_init_engine_plan"] == b"SAM3_TRACKER_INIT_PLAN"
+    assert section_map["sam3_tracker_step_engine_plan"] == b"SAM3_TRACKER_STEP_PLAN"
+    assert section_map["sam3_tracker_step_batch2_engine_plan"] == b"SAM3_TRACKER_STEP_BATCH2_PLAN"
+    assert section_map["sam3_tracker_memory_engine_plan"] == b"SAM3_TRACKER_MEMORY_PLAN"
+    assert (
+        section_map["sam3_tracker_memory_batch2_engine_plan"]
+        == b"SAM3_TRACKER_MEMORY_BATCH2_PLAN"
+    )
+    assert "sam3_core_batch5_engine_plan" not in section_map
 
     cfg = json.loads(section_map["config.json"].decode("utf-8"))
     assert cfg["prompted_segmentation_variant"] == "sam3_text_prompt_pcs"

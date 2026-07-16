@@ -6,10 +6,13 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from tests.e2e.models.sam3.e2e_plugins import runner as sam3_runner
 from tests.e2e.models.sam3.e2e_plugins.runners import segmentation
+from tests.e2e_harness import orchestrator
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
+from tests.e2e_harness.manifest_loader import load_manifest
 
 
 def _make_case(inputs: dict | None = None, **overrides) -> E2ECase:
@@ -58,7 +61,8 @@ def test_prompted_segmentation_runner_uses_text_prompt_cli(monkeypatch, tmp_path
     monkeypatch.setattr(segmentation.subprocess, "run", _fake_run)
 
     out = sam3_runner.Sam3PromptedSegmentationRunner().run_stage(
-        case, StageSpec(name="full_inference"), ctx)
+        case, StageSpec(name="full_inference"), ctx
+    )
 
     cmd = captured["cmd"]
     assert cmd[1] == "segment-prompted"
@@ -68,3 +72,25 @@ def test_prompted_segmentation_runner_uses_text_prompt_cli(monkeypatch, tmp_path
     assert "--point-y" not in cmd
     assert out.metadata["returncode"] == 1
     assert "sam3 vision_encoder" in out.metadata["stderr"]
+
+
+def test_sam3_manifest_build_uses_default_cli_precision(monkeypatch, tmp_path):
+    manifest_path = Path(__file__).resolve().parent / "manifests" / "sam3.json"
+    case = load_manifest(manifest_path)
+    ctx = _make_ctx(case, tmp_path)
+    captured: dict[str, list[str]] = {}
+
+    def _fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.delenv("TRTMC_ENGINE_BUILD_GUARD_DIR", raising=False)
+    monkeypatch.setattr(orchestrator.subprocess, "run", _fake_run)
+
+    bundle, _elapsed, error, _build_info = orchestrator._resolve_bundle(case, ctx)
+
+    assert case.metadata["precision"] == "fp32"
+    assert bundle == str(Path(ctx.engine_dir) / case.bundle)
+    assert error == ""
+    assert captured["cmd"][3:6] == ["build", "facebook/sam3", "-o"]
+    assert "--precision" not in captured["cmd"]

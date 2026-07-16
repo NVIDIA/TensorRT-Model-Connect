@@ -5,12 +5,15 @@
 
 #include "runtime/models/sam3/sam3_pipeline.h"
 
+#include "runtime/models/sam3/sam3_video_processor.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -44,6 +47,26 @@ struct Sam3PostprocessGeometry {
     std::size_t output_mask_area{0};
 };
 
+Sam3VideoFrameProcessor serialize_video_processor(Sam3VideoFrameProcessor processor,
+                                                  std::shared_ptr<std::mutex> execution_mutex) {
+    auto accept_prompt = std::move(processor.accept_prompt);
+    auto continue_borrowed = std::move(processor.continue_borrowed);
+    Sam3VideoFrameProcessor serialized;
+    serialized.accept_prompt =
+        [execution_mutex, accept_prompt = std::move(accept_prompt)](const auto& frame) mutable {
+            std::lock_guard<std::mutex> lock(*execution_mutex);
+            return accept_prompt(frame);
+        };
+    serialized.continue_borrowed =
+        [execution_mutex, continue_borrowed = std::move(continue_borrowed)](
+            Sam3VideoFrameResult prompt_result, const std::vector<Sam3VideoFrame>& remaining_frames,
+            int32_t total_frames) mutable {
+            std::lock_guard<std::mutex> lock(*execution_mutex);
+            return continue_borrowed(std::move(prompt_result), remaining_frames, total_frames);
+        };
+    return serialized;
+}
+
 std::vector<float> copy_float_tensor(const Tensor& tensor) {
     const auto* data = static_cast<const float*>(tensor.data);
     if (data == nullptr)
@@ -70,75 +93,15 @@ float sigmoid(float value) {
     return z / (1.0F + z);
 }
 
-std::array<float, 3> sam3_channel_values(const std::vector<float>& values,
-                                         std::array<float, 3> defaults) {
-    const auto count = std::min(values.size(), defaults.size());
-    for (std::size_t i = 0; i < count; ++i)
-        defaults[i] = values[i];
-    return defaults;
-}
-
-float sample_hwc_channel(const float* pixels, int32_t height, int32_t width, int32_t channel,
-                         float x, float y) {
-    const float clamped_x = std::clamp(x, 0.0F, static_cast<float>(width - 1));
-    const float clamped_y = std::clamp(y, 0.0F, static_cast<float>(height - 1));
-    const int32_t x0 = static_cast<int32_t>(std::floor(clamped_x));
-    const int32_t y0 = static_cast<int32_t>(std::floor(clamped_y));
-    const int32_t x1 = std::min(x0 + 1, width - 1);
-    const int32_t y1 = std::min(y0 + 1, height - 1);
-    const float wx = clamped_x - static_cast<float>(x0);
-    const float wy = clamped_y - static_cast<float>(y0);
-
-    const auto idx = [width](int32_t yy, int32_t xx, int32_t cc) {
-        return static_cast<std::size_t>((yy * width + xx) * 3 + cc);
-    };
-
-    const float v00 = pixels[idx(y0, x0, channel)];
-    const float v01 = pixels[idx(y0, x1, channel)];
-    const float v10 = pixels[idx(y1, x0, channel)];
-    const float v11 = pixels[idx(y1, x1, channel)];
-    const float top = v00 * (1.0F - wx) + v01 * wx;
-    const float bottom = v10 * (1.0F - wx) + v11 * wx;
-    return top * (1.0F - wy) + bottom * wy;
-}
-
 Sam3ImagePreprocessPlan build_sam3_preprocess_plan(const float* image_pixels, int32_t height,
                                                    int32_t width, const Sam3Config& config) {
     Sam3ImagePreprocessPlan plan;
     if (image_pixels == nullptr || height <= 0 || width <= 0 || config.image_size <= 0)
         return plan;
 
-    const int32_t image_size = config.image_size;
     plan.original_width = width;
     plan.original_height = height;
-    plan.pixel_values.assign(static_cast<std::size_t>(3) * static_cast<std::size_t>(image_size) *
-                                 static_cast<std::size_t>(image_size),
-                             0.0F);
-
-    const auto mean = sam3_channel_values(config.image_mean, {0.5F, 0.5F, 0.5F});
-    const auto stdv = sam3_channel_values(config.image_std, {0.5F, 0.5F, 0.5F});
-    for (int32_t y = 0; y < image_size; ++y) {
-        const float src_y = (static_cast<float>(y) + 0.5F) * static_cast<float>(height) /
-                                static_cast<float>(image_size) -
-                            0.5F;
-        for (int32_t x = 0; x < image_size; ++x) {
-            const float src_x = (static_cast<float>(x) + 0.5F) * static_cast<float>(width) /
-                                    static_cast<float>(image_size) -
-                                0.5F;
-            for (int32_t c = 0; c < 3; ++c) {
-                const float value =
-                    sample_hwc_channel(image_pixels, height, width, c, src_x, src_y);
-                const float normalized =
-                    (value - mean[static_cast<std::size_t>(c)]) / stdv[static_cast<std::size_t>(c)];
-                plan.pixel_values[static_cast<std::size_t>(c) *
-                                      static_cast<std::size_t>(image_size) *
-                                      static_cast<std::size_t>(image_size) +
-                                  static_cast<std::size_t>(y) *
-                                      static_cast<std::size_t>(image_size) +
-                                  static_cast<std::size_t>(x)] = normalized;
-            }
-        }
-    }
+    plan.pixel_values = preprocess_sam3_image(image_pixels, height, width, config);
 
     return plan;
 }
@@ -313,6 +276,32 @@ PromptedSegmentationResult postprocess_sam3_raw_outputs(Sam3RawOutputs raw,
     return result;
 }
 
+void validate_required_engine(const std::unique_ptr<TrtModule>& engine, const char* error_message) {
+    if (!engine || !engine->ok())
+        throw std::runtime_error(error_message);
+}
+
+void validate_optional_engine(const std::unique_ptr<TrtModule>& engine, const char* error_message) {
+    if (engine && !engine->ok())
+        throw std::runtime_error(error_message);
+}
+
+void require_complete_video_tracker_plan_set(
+    const std::unique_ptr<TrtModule>& tracker_init_engine,
+    const std::unique_ptr<TrtModule>& tracker_step_engine,
+    const std::unique_ptr<TrtModule>& tracker_memory_engine) {
+    if (!tracker_init_engine && !tracker_step_engine && !tracker_memory_engine) {
+        throw std::runtime_error(
+            "Sam3Pipeline: this legacy bundle does not include SAM3 video tracker plans; "
+            "rebuild it with the SAM3 tracker init, step, and memory plans");
+    }
+    if (!tracker_init_engine || !tracker_step_engine || !tracker_memory_engine) {
+        throw std::runtime_error(
+            "Sam3Pipeline: incomplete SAM3 video bundle; sam3_tracker_init_engine_plan, "
+            "sam3_tracker_step_engine_plan, and sam3_tracker_memory_engine_plan are required");
+    }
+}
+
 } // namespace
 
 Sam3Pipeline::Sam3Pipeline(std::unique_ptr<TrtModule> text_encoder,
@@ -332,20 +321,49 @@ Sam3Pipeline::Sam3Pipeline(std::unique_ptr<TrtModule> text_encoder,
                            std::unique_ptr<TrtModule> vision_encoder,
                            std::unique_ptr<TrtModule> core_engine,
                            std::shared_ptr<ITokenizer> tokenizer, Sam3Config config,
-                           std::string model_id_str)
+                           std::string model_id_str, std::unique_ptr<TrtModule> tracker_init_engine,
+                           std::unique_ptr<TrtModule> tracker_step_engine,
+                           std::unique_ptr<TrtModule> tracker_memory_engine,
+                           std::unique_ptr<TrtModule> tracker_step_batch2_engine,
+                           std::unique_ptr<TrtModule> tracker_memory_batch2_engine,
+                           std::unique_ptr<TrtModule> parallel_tracker_init_engine)
     : text_encoder_(std::move(text_encoder)), vision_encoder_(std::move(vision_encoder)),
-      core_engine_(std::move(core_engine)), tokenizer_(std::move(tokenizer)),
-      config_(std::move(config)), model_id_(std::move(model_id_str)) {
-    if (!text_encoder_ || !text_encoder_->ok())
-        throw std::runtime_error("Sam3Pipeline: invalid text_encoder");
-    if (vision_encoder_ && !vision_encoder_->ok())
-        throw std::runtime_error("Sam3Pipeline: invalid vision_encoder");
-    if (core_engine_ && !core_engine_->ok())
-        throw std::runtime_error("Sam3Pipeline: invalid core_engine");
+      core_engine_(std::move(core_engine)), tracker_init_engine_(std::move(tracker_init_engine)),
+      parallel_tracker_init_engine_(std::move(parallel_tracker_init_engine)),
+      tracker_step_engine_(std::move(tracker_step_engine)),
+      tracker_step_batch2_engine_(std::move(tracker_step_batch2_engine)),
+      tracker_memory_engine_(std::move(tracker_memory_engine)),
+      tracker_memory_batch2_engine_(std::move(tracker_memory_batch2_engine)),
+      tokenizer_(std::move(tokenizer)), config_(std::move(config)),
+      model_id_(std::move(model_id_str)) {
+    validate_required_engine(text_encoder_, "Sam3Pipeline: invalid text_encoder");
+    validate_optional_engine(vision_encoder_, "Sam3Pipeline: invalid vision_encoder");
+    validate_optional_engine(core_engine_, "Sam3Pipeline: invalid core_engine");
+    validate_optional_engine(tracker_init_engine_,
+                             "Sam3Pipeline: invalid sam3_tracker_init_engine_plan");
+    validate_optional_engine(parallel_tracker_init_engine_,
+                             "Sam3Pipeline: invalid parallel sam3_tracker_init_engine_plan");
+    validate_optional_engine(tracker_step_engine_,
+                             "Sam3Pipeline: invalid sam3_tracker_step_engine_plan");
+    validate_optional_engine(tracker_step_batch2_engine_,
+                             "Sam3Pipeline: invalid sam3_tracker_step_batch2_engine_plan");
+    validate_optional_engine(tracker_memory_engine_,
+                             "Sam3Pipeline: invalid sam3_tracker_memory_engine_plan");
+    validate_optional_engine(tracker_memory_batch2_engine_,
+                             "Sam3Pipeline: invalid sam3_tracker_memory_batch2_engine_plan");
     if (!tokenizer_)
         throw std::runtime_error("Sam3Pipeline: tokenizer is required for text-prompt PCS");
     if (config_.text_max_position_embeddings <= 0)
         throw std::runtime_error("Sam3Pipeline: invalid text max position embeddings");
+    if (vision_encoder_ && core_engine_ && tracker_init_engine_ && tracker_step_engine_ &&
+        tracker_memory_engine_) {
+        video_vision_workspace_ = make_sam3_video_vision_workspace(
+            *vision_encoder_, *core_engine_, *tracker_init_engine_, *tracker_step_engine_,
+            *tracker_memory_engine_, tracker_step_batch2_engine_.get(),
+            tracker_memory_batch2_engine_.get(), parallel_tracker_init_engine_.get());
+        if (!video_vision_workspace_)
+            throw std::runtime_error("Sam3Pipeline: SAM3 video device bindings are incompatible");
+    }
 }
 
 PromptedSegmentationResult Sam3Pipeline::segment_prompted(const float* image_pixels,
@@ -366,6 +384,7 @@ PromptedSegmentationResult Sam3Pipeline::segment_prompted_text(const float* imag
                                                                int32_t image_height,
                                                                int32_t image_width,
                                                                const std::string& text_prompt) {
+    std::lock_guard<std::mutex> execution_lock(*execution_mutex_);
     auto text = encode_text_prompt(text_prompt);
     if (text.features.empty() || text.hidden_states.empty()) {
         throw std::runtime_error("Sam3Pipeline: SAM3 text encoder produced no features");
@@ -411,12 +430,31 @@ PromptedSegmentationResult Sam3Pipeline::segment_prompted_text(const float* imag
     core_inputs["sam3_text_attention_mask"] = text_mask_tensor;
     add_required_vision_inputs(core_inputs, vision_outputs);
 
-    auto raw_outputs = core_engine_->forward(core_inputs);
-    return postprocess_sam3_raw_outputs(parse_sam3_raw_outputs(raw_outputs), image, config_);
+    return postprocess_sam3_raw_outputs(parse_sam3_raw_outputs(core_engine_->forward(core_inputs)),
+                                        image, config_);
 }
 
-Sam3TextFeatures Sam3Pipeline::encode_text_prompt_for_test(const std::string& text_prompt) const {
-    return encode_text_prompt(text_prompt);
+std::unique_ptr<Sam3VideoSegmentationSession>
+Sam3Pipeline::create_sam3_video_session(const std::string& text_prompt) {
+    std::lock_guard<std::mutex> execution_lock(*execution_mutex_);
+    require_complete_video_tracker_plan_set(tracker_init_engine_, tracker_step_engine_,
+                                            tracker_memory_engine_);
+    if (!vision_encoder_ || !core_engine_ || !video_vision_workspace_)
+        throw std::runtime_error("Sam3Pipeline: SAM3 video plans are incomplete");
+    auto text = encode_text_prompt(text_prompt);
+    Sam3VideoTextInput text_input;
+    text_input.features = std::move(text.features);
+    text_input.features_shape = std::move(text.features_shape);
+    text_input.attention_mask = std::move(text.attention_mask);
+    auto processor = make_sam3_video_frame_processor(
+        *vision_encoder_, *core_engine_, *tracker_init_engine_, *tracker_step_engine_,
+        *tracker_memory_engine_, config_, std::move(text_input), video_vision_workspace_,
+        tracker_step_batch2_engine_.get(), tracker_memory_batch2_engine_.get(),
+        parallel_tracker_init_engine_.get());
+    processor = serialize_video_processor(std::move(processor), execution_mutex_);
+    return std::unique_ptr<Sam3VideoSegmentationSession>(new Sam3VideoSegmentationSession(
+        text_prompt, std::move(processor), config_.max_video_frames,
+        Sam3VideoSegmentationSession::MaskValidation::kBinaryByConstruction));
 }
 
 Sam3TextFeatures Sam3Pipeline::encode_text_prompt(const std::string& text_prompt) const {

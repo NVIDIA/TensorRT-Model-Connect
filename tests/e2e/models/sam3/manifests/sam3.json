@@ -5,7 +5,7 @@
   "family": "sam3",
   "runtime_strategy": "sam3_prompted_segmentation",
   "task_strategy": "prompted_segmentation",
-  "precision": "fp16",
+  "precision": "fp32",
   "max_cache_length": 1,
   "trust_remote_code": false,
   "testcases": [

@@ -5,21 +5,26 @@
 
 #pragma once
 
-// Sam3Pipeline: SAM3 image PCS runtime surface.
-// Runs native tokenization plus SAM3 text, vision, and DETR/mask/scoring TRT
-// plans, then postprocesses into model-card masks, boxes, and scores.
+// Sam3Pipeline: SAM3 image PCS and prompted-concept video tracking surface.
+// Image calls run text, vision, and DETR/mask/scoring plans. Video sessions add
+// the checkpoint's learned tracker init, recurrent step, and post-policy memory
+// plans while retaining state in the model-owned session processor.
 
 #include "runtime/models/sam3/sam3_config.h"
+#include "runtime/models/sam3/sam3_video_session.h"
 #include "trtmc/pipeline.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/tokenizer.h"
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 namespace trtmc {
+
+struct Sam3VideoVisionWorkspace;
 
 struct Sam3TextFeatures {
     std::vector<float> features;
@@ -38,7 +43,13 @@ class Sam3Pipeline final : public IPipeline {
                  std::string model_id_str = "");
     Sam3Pipeline(std::unique_ptr<TrtModule> text_encoder, std::unique_ptr<TrtModule> vision_encoder,
                  std::unique_ptr<TrtModule> core_engine, std::shared_ptr<ITokenizer> tokenizer,
-                 Sam3Config config, std::string model_id_str = "");
+                 Sam3Config config, std::string model_id_str = "",
+                 std::unique_ptr<TrtModule> tracker_init_engine = nullptr,
+                 std::unique_ptr<TrtModule> tracker_step_engine = nullptr,
+                 std::unique_ptr<TrtModule> tracker_memory_engine = nullptr,
+                 std::unique_ptr<TrtModule> tracker_step_batch2_engine = nullptr,
+                 std::unique_ptr<TrtModule> tracker_memory_batch2_engine = nullptr,
+                 std::unique_ptr<TrtModule> parallel_tracker_init_engine = nullptr);
 
     PromptedSegmentationResult segment_prompted(const float* image_pixels, int32_t image_height,
                                                 int32_t image_width, float point_x = 0.5F,
@@ -49,7 +60,8 @@ class Sam3Pipeline final : public IPipeline {
                                                      int32_t image_height, int32_t image_width,
                                                      const std::string& text_prompt) override;
 
-    Sam3TextFeatures encode_text_prompt_for_test(const std::string& text_prompt) const;
+    std::unique_ptr<Sam3VideoSegmentationSession>
+    create_sam3_video_session(const std::string& text_prompt);
 
     const char* model_id() const override { return model_id_.c_str(); }
     const char* pipeline_type() const override { return "Sam3Pipeline"; }
@@ -60,6 +72,14 @@ class Sam3Pipeline final : public IPipeline {
     std::unique_ptr<TrtModule> text_encoder_;
     std::unique_ptr<TrtModule> vision_encoder_;
     std::unique_ptr<TrtModule> core_engine_;
+    std::unique_ptr<TrtModule> tracker_init_engine_;
+    std::unique_ptr<TrtModule> parallel_tracker_init_engine_;
+    std::unique_ptr<TrtModule> tracker_step_engine_;
+    std::unique_ptr<TrtModule> tracker_step_batch2_engine_;
+    std::unique_ptr<TrtModule> tracker_memory_engine_;
+    std::unique_ptr<TrtModule> tracker_memory_batch2_engine_;
+    std::shared_ptr<Sam3VideoVisionWorkspace> video_vision_workspace_;
+    std::shared_ptr<std::mutex> execution_mutex_{std::make_shared<std::mutex>()};
     std::shared_ptr<ITokenizer> tokenizer_;
     Sam3Config config_;
     std::string model_id_;
