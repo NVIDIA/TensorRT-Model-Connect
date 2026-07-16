@@ -858,14 +858,13 @@ Configuration:
 - **Excluded lines**: `pragma: no cover`, `if __name__ == "__main__"`, `raise NotImplementedError`
 
 CI integration (GitHub Actions):
-- `coverage-python` runs `tools/coverage_ci/run_python_coverage.sh`
-  - Emits `coverage/python-cobertura.xml`
-  - Enforces line=100% and branch=100%
-  - Uploads Cobertura artifacts
-- `coverage-cpp` runs `tools/coverage_ci/run_cpp_coverage.sh`
-  - Emits `coverage/cpp-cobertura.xml`
-  - Uploads Cobertura artifacts
-- Both jobs are hard gates in the test DAG before smoke/E2E jobs.
+- `python3 -m tools.ci stage python-builder` runs the selected Python tests and emits
+  `coverage/python-cobertura.xml`.
+- `python3 -m tools.ci stage cpp-coverage` runs the selected C++ coverage scope and emits
+  `coverage/cpp-cobertura.xml`.
+- `tools/ci/coverage.py` owns artifact validation and the configured CI thresholds.
+- The lower-level `tools/coverage/*.sh` programs remain local coverage engines; CI orchestration
+  and policy are implemented in Python.
 
 Note:
 - Python function coverage is not natively reported by `coverage.py`; Python gates therefore enforce line + branch.

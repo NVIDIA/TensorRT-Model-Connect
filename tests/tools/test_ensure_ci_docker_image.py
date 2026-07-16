@@ -9,11 +9,12 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-SCRIPT = REPO_ROOT / ".github" / "scripts" / "ensure-ci-docker-image.sh"
+SCRIPT = REPO_ROOT / "tools" / "ci" / "docker_image.py"
 DEFAULT_PROFILES = (
     "chronos,deepseek_ocr,elf_flow,internlm,magpie_tts_reference,"
     "nemotron_h_reference,phi4_multimodal"
@@ -156,9 +157,8 @@ exit 2
         env["TRTMC_CI_IMAGE_VERIFICATION_DIR"] = str(verification_dir)
     if github_output is not None:
         env["GITHUB_OUTPUT"] = str(github_output)
-    script = repo_root / SCRIPT.relative_to(REPO_ROOT)
     result = subprocess.run(
-        ["bash", str(script)],
+        [sys.executable, "-m", "tools.ci", "image", "ensure"],
         cwd=repo_root,
         env=env,
         text=True,
@@ -166,13 +166,16 @@ exit 2
         check=False,
     )
     github_env_text = github_env.read_text() if github_env.exists() else ""
-    return result, github_env_text, log_path.read_text()
+    docker_log = log_path.read_text() if log_path.exists() else ""
+    return result, github_env_text, docker_log
 
 
 def _write_profile_fingerprint_repo(tmp_path: Path) -> tuple[Path, Path, Path]:
     """Create the smallest source tree needed to exercise image fingerprinting."""
     repo_root = tmp_path / "repo"
     shutil.copytree(REPO_ROOT / ".github" / "scripts", repo_root / ".github" / "scripts")
+    shutil.copytree(REPO_ROOT / "tools" / "ci", repo_root / "tools" / "ci")
+    shutil.copy2(REPO_ROOT / "tools" / "__init__.py", repo_root / "tools" / "__init__.py")
 
     package_root = repo_root / "python" / "tensorrt_model_connect"
     families_root = package_root / "families"
@@ -294,7 +297,7 @@ def test_matching_fingerprint_image_is_reused_for_pr_rerun(tmp_path: Path) -> No
     result, _, docker_log = _run_ensure_script(
         tmp_path / "matching",
         existing_images={resolved_image: fingerprint},
-        changed_paths=(".github/scripts/ensure-ci-docker-image.sh",),
+        changed_paths=("tools/ci/docker_image.py",),
     )
 
     assert result.returncode == 0, result.stderr
@@ -318,7 +321,7 @@ def test_reused_image_creates_missing_github_output_parent(tmp_path: Path) -> No
     result, _, _ = _run_ensure_script(
         tmp_path / "matching",
         existing_images={resolved_image: fingerprint},
-        changed_paths=(".github/scripts/ensure-ci-docker-image.sh",),
+        changed_paths=("tools/ci/docker_image.py",),
         github_output=github_output,
     )
 
@@ -379,16 +382,18 @@ def test_missing_prebuilt_profiles_rebuilds_the_image(tmp_path: Path) -> None:
 def test_profile_sources_are_fingerprinted_and_repo_is_the_build_context() -> None:
     script = SCRIPT.read_text(encoding="utf-8")
 
-    assert "family_model_manifests" not in script
-    assert "python_profile_semantic_fingerprint" in script
-    assert "python-profile-registry" in script
-    assert "declared_profile_assets" in script
-    assert "python/tensorrt_model_connect/python_profiles.py" in script
-    assert '-f "$dockerfile" \\\n    .' in script
-    assert "trtmc-empty-docker-context" not in script
+    assert "class DockerImageManager" in script
+    assert "semantic_fingerprint" in script
+    assert 'b"python-profile-registry\\0"' in script
+    assert "assets: set[Path]" in script
+    assert 'package_root / "python_profiles.py"' in script
+    assert '"-f"' in script
+    assert "str(self.config.dockerfile)" in script
+    assert '"."' in script
     assert "profile builder source leaked into the runtime image" in script
-    assert "--user 65534:65534" in script
-    assert "--read-only" in script
+    assert '"--user"' in script
+    assert '"65534:65534"' in script
+    assert '"--read-only"' in script
 
 
 def test_profile_fingerprint_ignores_manifest_comments_and_ownership_fields(

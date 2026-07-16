@@ -191,7 +191,7 @@ jobs:
         working-directory: ${{ github.workspace }}/model-proof-source
         run: |
           set -euo pipefail
-          bash .github/scripts/ensure-ci-docker-image.sh \
+          python3 -m tools.ci image ensure \
             2>&1 | tee "$MODEL_PROOF_OUTPUT_DIR/ci-image.log"
 
       - name: Run isolated model proof
@@ -205,7 +205,7 @@ jobs:
         working-directory: ${{ github.workspace }}/model-proof-source
         run: |
           set +e
-          env -u TRTMC_GPU_ID bash .github/scripts/run-model-proof.sh \
+          env -u TRTMC_GPU_ID python3 -m tools.ci model-proof \
             --model "$MODEL" \
             --revision "$REVISION" \
             --suite "$SUITE" \
@@ -222,7 +222,7 @@ jobs:
         working-directory: ${{ github.workspace }}/model-proof-source
         run: |
           set -euo pipefail
-          bash .github/scripts/run-model-proof.sh \
+          python3 -m tools.ci model-proof \
             --cleanup-containers \
             --model "$MODEL"
 

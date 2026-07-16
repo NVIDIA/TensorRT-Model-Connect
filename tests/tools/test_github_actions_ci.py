@@ -18,6 +18,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
+def _ci_source(*filenames: str) -> str:
+    """Return the review surface for one or more class-based CI modules."""
+    return "\n".join(
+        (REPO_ROOT / "tools" / "ci" / filename).read_text(encoding="utf-8")
+        for filename in filenames
+    )
+
+
 def _single_default_model_config(filename: str) -> tuple[Path, dict]:
     configs = sorted((REPO_ROOT / "tests" / "e2e" / "models").glob(f"*/{filename}"))
     defaults = []
@@ -27,6 +35,47 @@ def _single_default_model_config(filename: str) -> tuple[Path, dict]:
             defaults.append((path, data))
     assert len(defaults) == 1
     return defaults[0]
+
+
+def test_ci_orchestration_uses_the_class_based_python_entrypoint() -> None:
+    legacy_scripts = (
+        ".github/scripts/ensure-ci-docker-image.sh",
+        ".github/scripts/start-gha-container.sh",
+        ".github/scripts/run-gha-stage.sh",
+        ".github/scripts/run-trtmc-ci.sh",
+        ".github/scripts/run-model-proof.sh",
+        "scripts/run_e2e_parallel.sh",
+        "tools/coverage_ci/run_cpp_coverage.sh",
+        "tools/coverage_ci/run_python_coverage.sh",
+    )
+    assert not [path for path in legacy_scripts if (REPO_ROOT / path).exists()]
+
+    source = _ci_source(
+        "container.py",
+        "coverage.py",
+        "docker_image.py",
+        "e2e_scheduler.py",
+        "model_proof.py",
+        "pipeline.py",
+        "stage.py",
+    )
+    for class_name in (
+        "CiContainer",
+        "CoverageRunner",
+        "DockerImageManager",
+        "E2EParallelRunner",
+        "ModelProofRunner",
+        "CiPipeline",
+        "ContainerStageRunner",
+    ):
+        assert f"class {class_name}" in source
+
+    workflows = "\n".join(
+        (REPO_ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+        for name in ("trtmc-ci.yml", "nightly.yml", "model-proof.yml")
+    )
+    assert "python3 -m tools.ci" in workflows
+    assert "bash .github/scripts/" not in workflows
 
 
 def test_workflows_define_shared_hf_cache_env() -> None:
@@ -66,10 +115,10 @@ def test_workflows_define_shared_hf_cache_env() -> None:
         "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}"
     ) in proof
     assert "TRTMC_HF_MODULES_CACHE:" not in proof
-    runner = (REPO_ROOT / ".github/scripts/run-model-proof.sh").read_text()
-    assert "$HOME/.cache/huggingface" in runner
-    assert "${TRTMC_HF_HUB_CACHE:-$hf_cache_root/hub}" in runner
-    assert "-e HF_MODULES_CACHE=/work/hf-modules" in runner
+    runner = _ci_source("model_proof.py", "model_proof_inner.py")
+    assert ".cache/huggingface" in runner
+    assert 'self.context.env.get("TRTMC_HF_HUB_CACHE"' in runner
+    assert '"HF_MODULES_CACHE": "/work/hf-modules"' in runner
 
 
 def test_workflows_pull_tensorrt_sdk_from_ghcr_without_artifactory_secrets() -> None:
@@ -80,9 +129,8 @@ def test_workflows_pull_tensorrt_sdk_from_ghcr_without_artifactory_secrets() -> 
     assert "ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs" in dockerfile
     assert "ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu" in dockerfile
 
-    ci_script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    install_call = 'install_tensorrt_sdk_wheel "$smoke_venv/bin/python"'
-    assert ci_script.count(install_call) == 2
+    package = _ci_source("package.py")
+    assert package.count("_install_tensorrt_sdk") >= 2
 
     for workflow in ("nightly.yml", "model-proof.yml"):
         text = (REPO_ROOT / ".github" / "workflows" / workflow).read_text()
@@ -113,8 +161,8 @@ def test_tensorrt_sdk_publisher_is_temporary_and_self_contained() -> None:
 
 
 def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
-    stage_text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
-    start_text = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
+    stage_text = _ci_source("stage.py", "environment.py")
+    start_text = _ci_source("container.py", "environment.py")
     for name in (
         "TRTMC_STORAGE_ROOT",
         "HF_HOME",
@@ -122,11 +170,12 @@ def test_github_stage_wrapper_mounts_and_exports_hf_cache_env() -> None:
         "HUGGINGFACE_HUB_CACHE",
         "HF_MODULES_CACHE",
     ):
-        assert f'mkdir_if_set "${{{name}:-}}"' in start_text
         assert name in start_text
-        assert f"-e {name}" in stage_text
-    assert "/workspace/users/yifeif:/workspace/users/yifeif" in start_text
-    assert "docker exec" in stage_text
+        assert name in stage_text
+    assert 'Path("/workspace/users/yifeif")' in start_text
+    assert 'f"{shared_users}:{shared_users}"' in start_text
+    assert '"docker"' in stage_text
+    assert '"exec"' in stage_text
 
 
 def test_github_stage_wrapper_removes_exact_container_on_cancellation(
@@ -144,7 +193,7 @@ def test_github_stage_wrapper_removes_exact_container_on_cancellation(
         'printf \'%s\\n\' "$*" >> "$DOCKER_LOG"\n'
         'case "${1:-}" in\n'
         "  inspect) printf 'true\\n' ;;\n"
-        '  exec) touch "$DOCKER_EXEC_STARTED"; trap \'\' INT TERM; '
+        "  exec) touch \"$DOCKER_EXEC_STARTED\"; trap '' INT TERM; "
         'while [ ! -f "$DOCKER_REMOVED" ]; do sleep 0.1; done ;;\n'
         '  rm) touch "$DOCKER_REMOVED"; exit 0 ;;\n'
         "  *) exit 2 ;;\n"
@@ -167,7 +216,7 @@ def test_github_stage_wrapper_removes_exact_container_on_cancellation(
         }
     )
     process = subprocess.Popen(
-        ["bash", str(REPO_ROOT / ".github/scripts/run-gha-stage.sh"), "python-builder"],
+        [sys.executable, "-m", "tools.ci", "stage", "python-builder"],
         cwd=REPO_ROOT,
         env=env,
         stdout=subprocess.PIPE,
@@ -197,57 +246,49 @@ def test_github_stage_wrapper_removes_exact_container_on_cancellation(
 
 
 def test_github_container_only_exports_nonempty_hf_transport_controls() -> None:
-    stage_text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
-    start_text = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
+    stage_text = _ci_source("stage.py")
+    start_text = _ci_source("container.py", "environment.py")
 
-    assert 'add_env_if_set() {' in start_text
-    assert '[ -n "${!name-}" ] || return 0' in start_text
-    assert (
-        "for name in \\\n"
-        "  HF_HUB_DISABLE_XET \\\n"
-        "  HF_HUB_DOWNLOAD_TIMEOUT \\\n"
-        "  HF_HUB_ETAG_TIMEOUT; do\n"
-        '  add_env_if_set "$name"\n'
-        "done"
-    ) in start_text
+    assert "OPTIONAL_HUGGING_FACE_ENVIRONMENT" in start_text
+    assert 'if self.env.get(name, "")' in start_text
     for name in ("HF_HUB_DISABLE_XET", "HF_HUB_DOWNLOAD_TIMEOUT", "HF_HUB_ETAG_TIMEOUT"):
-        assert f"-e {name}" not in stage_text
+        assert name not in stage_text
 
 
 def test_github_stage_wrapper_exports_e2e_gpu_controls() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
-    assert "-e TRTMC_E2E_EXCLUDE_GPU0" in text
-    assert "-e TRTMC_E2E_DEPRIORITIZE_GPU0" in text
+    text = _ci_source("environment.py")
+    assert "TRTMC_E2E_EXCLUDE_GPU0" in text
+    assert "TRTMC_E2E_DEPRIORITIZE_GPU0" in text
 
 
 def test_github_stage_wrapper_exports_premerge_unit_parallelism() -> None:
-    stage = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
-    start = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
+    stage = _ci_source("stage.py", "environment.py")
+    start = _ci_source("container.py", "environment.py")
     for name in (
         "TRTMC_UNIT_BUILD_JOBS",
         "TRTMC_UNIT_TEST_JOBS",
         "TRTMC_PREMERGE_UNIT_SCOPE",
     ):
-        assert f"-e {name}" in stage
+        assert name in stage
         assert name in start
 
 
 def test_github_stage_wrapper_exports_cpp_coverage_scope() -> None:
-    stage = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
-    start = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
-    assert "-e CPP_COVERAGE_SCOPE" in stage
+    stage = _ci_source("stage.py", "environment.py")
+    start = _ci_source("container.py", "environment.py")
+    assert "CPP_COVERAGE_SCOPE" in stage
     assert "CPP_COVERAGE_SCOPE" in start
 
 
 def test_github_stage_wrapper_exports_diffusion_vlm_config() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
-    start_text = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
-    assert "-e DIFFUSION_VLM_CONFIG" in text
+    text = _ci_source("stage.py", "environment.py")
+    start_text = _ci_source("container.py", "environment.py")
+    assert "DIFFUSION_VLM_CONFIG" in text
     assert "DIFFUSION_VLM_CONFIG" in start_text
 
 
 def test_github_stage_wrapper_exports_package_smoke_controls() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    text = _ci_source("environment.py")
     for name in (
         "TRTMC_PACKAGE_PYTHON_TAGS",
         "TRTMC_PACKAGE_WHEEL_ARCH",
@@ -260,29 +301,28 @@ def test_github_stage_wrapper_exports_package_smoke_controls() -> None:
         "TRTMC_WHEEL_SMOKE_BUILD_TIMEOUT",
         "TRTMC_WHEEL_SMOKE_RUN_TIMEOUT",
     ):
-        assert f"-e {name}" in text
+        assert name in text
 
 
 def test_github_stage_wrapper_does_not_export_diffusion_vlm_waives_file() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    text = _ci_source("stage.py", "environment.py")
     assert "DIFFUSION_VLM_WAIVES_FILE" not in text
 
 
 def test_diffusion_vlm_gate_failures_are_not_waived() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    text = _ci_source("e2e.py")
     assert "DIFFUSION_VLM_WAIVES_FILE" not in text
     assert "--waives" not in text
 
 
 def test_diffusion_vlm_pair_count_uses_helper() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    vlm_block = text.split("run_diffusion_vlm_assessment() {", maxsplit=1)[1].split(
-        "\ngenerate_coverage_map() {",
-        maxsplit=1,
+    text = _ci_source("e2e.py")
+    vlm_block = text.split("def diffusion_vlm_assessment", maxsplit=1)[1].split(
+        "def _prepare_plugins", maxsplit=1
     )[0]
-    assert "tools/count_diffusion_frame_pairs.py e2e_artifacts/artifacts" in vlm_block
-    assert '--config "$vlm_config"' in vlm_block
-    assert "python3 -c" not in vlm_block
+    assert "tools/count_diffusion_frame_pairs.py" in vlm_block
+    assert '"--config"' in vlm_block
+    assert "config_path" in vlm_block
 
 
 def test_diffusion_vlm_assessment_default_is_model_owned() -> None:
@@ -296,7 +336,7 @@ def test_diffusion_vlm_shared_ci_has_no_model_owned_default() -> None:
     shared_paths = (
         REPO_ROOT / ".github" / "workflows" / "nightly.yml",
         REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml",
-        REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh",
+        REPO_ROOT / "tools" / "ci" / "e2e.py",
         REPO_ROOT / "tools" / "evaluate_diffusion_vlm_similarity.py",
     )
     _, data = _single_default_model_config("diffusion_vlm_assessment.json")
@@ -311,13 +351,14 @@ def test_diffusion_vlm_shared_ci_has_no_model_owned_default() -> None:
 
 
 def test_full_python_builder_runs_e2e_harness_unit_tests() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert "tests/e2e_harness/test_*.py" in text
-    assert "--ignore=tests/builder/test_cli.py" not in text
+    text = _ci_source("coverage.py")
+    builder = text.split("def python_builder_tests", maxsplit=1)[1].split("def cpp", maxsplit=1)[0]
+    assert 'glob("test_*.py")' in builder
+    assert "--ignore=tests/builder/test_cli.py" not in builder
 
 
 def test_selective_python_always_runs_static_ci_smoke_tests() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    text = _ci_source("coverage.py")
     for test_path in (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_model_plugin_encapsulation_static.py",
@@ -328,25 +369,24 @@ def test_selective_python_always_runs_static_ci_smoke_tests() -> None:
 
 
 def test_python_package_coverage_gate_excludes_family_owned_modules() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert "write_python_package_gate_coverage_config" in text
+    text = _ci_source("coverage.py")
+    assert "_write_python_config" in text
     assert "*/tensorrt_model_connect/families/*" in text
-    assert 'python_cov_config="coverage/python-package-gate.coveragerc"' in text
-    assert '--cov-config="$python_cov_config"' in text
+    assert 'self.directory / "python-package-gate.coveragerc"' in text
+    assert 'f"--cov-config={config}"' in text
     assert "PYTHON_COVERAGE_MIN_LINE" in text
     assert "PYTHON_COVERAGE_MIN_BRANCH" in text
 
 
 def test_full_e2e_collection_uses_model_e2e_files_with_visible_errors() -> None:
-    text = (REPO_ROOT / "scripts" / "run_e2e_parallel.sh").read_text()
-    full_mode = text.split("mapfile -t E2E_COLLECT_FILES", maxsplit=1)[1].split(
-        "\nTOTAL=", maxsplit=1
+    text = _ci_source("e2e_scheduler.py")
+    full_mode = text.split("def _collect_tests", maxsplit=1)[1].split(
+        "def _model_name", maxsplit=1
     )[0]
-    assert "find tests/e2e/models -mindepth 2 -maxdepth 2 -type f" in full_mode
-    assert "-name 'test_*_e2e.py'" in full_mode
-    assert '"$HF_PYTHON" -m pytest "${E2E_COLLECT_FILES[@]}" --co -q' in full_mode
-    assert 'grep "test_model_e2e\\[" | sort || true' in full_mode
-    assert "2>/dev/null" not in full_mode
+    assert 'glob("*/test_*_e2e.py")' in full_mode
+    assert '"--co"' in full_mode
+    assert '"-q"' in full_mode
+    assert '"test_model_e2e[" in line' in full_mode
 
 
 def test_qwen_flashinfer_scripts_skip_pytest_collection() -> None:
@@ -373,8 +413,7 @@ def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> 
     assert "retention-days: 7" in proof
     assert "${{ inputs.model }}/artifacts/" in proof
     assert (
-        "name: trtmc-nightly-html-report-${{ github.run_id }}-${{ github.run_attempt }}"
-        in nightly
+        "name: trtmc-nightly-html-report-${{ github.run_id }}-${{ github.run_attempt }}" in nightly
     )
     assert "retention-days: 14" in nightly
 
@@ -382,10 +421,7 @@ def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> 
 def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> None:
     nightly = (REPO_ROOT / ".github/workflows/nightly.yml").read_text()
     assert "Upload combined nightly HTML report" in nightly
-    assert (
-        "trtmc-nightly-html-report-${{ github.run_id }}-${{ github.run_attempt }}"
-        in nightly
-    )
+    assert "trtmc-nightly-html-report-${{ github.run_id }}-${{ github.run_attempt }}" in nightly
     assert "model-proof-report.html" in nightly
     assert "model-proof-report-status.json" in nightly
     assert "retention-days: 14" in nightly
@@ -510,9 +546,9 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
 
     legal = text.split("\n  legal:", maxsplit=1)[1].split("\n  impact:", maxsplit=1)[0]
     impact = text.split("\n  impact:", maxsplit=1)[1].split("\n  unit-tests:", maxsplit=1)[0]
-    unit_tests = text.split("\n  unit-tests:", maxsplit=1)[1].split(
-        "\n  model-proof:", maxsplit=1
-    )[0]
+    unit_tests = text.split("\n  unit-tests:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[
+        0
+    ]
     model_proof = text.split("\n  model-proof:", maxsplit=1)[1].split("\n  no-model:", maxsplit=1)[
         0
     ]
@@ -542,7 +578,7 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "name: 3 / Unit / C++ and Python" in unit_tests
     assert "needs.impact.outputs.run_unit_tests == 'true'" in unit_tests
     assert "Start clean unit-test container" in unit_tests
-    assert "run-gha-stage.sh premerge-unit" in unit_tests
+    assert "python3 -m tools.ci stage premerge-unit" in unit_tests
     assert "TRTMC_PREMERGE_UNIT_SCOPE: ${{ needs.impact.outputs.unit_scope }}" in unit_tests
     assert "TRTMC_CI_WORKSPACE: ${{ github.workspace }}/premerge-unit-checkout" in unit_tests
     assert "path: premerge-unit-checkout" in unit_tests
@@ -569,10 +605,7 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "needs.unit-tests.result == 'success'" in model_proof
     assert "needs.unit-tests.result == 'skipped'" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
-    assert (
-        "name: 4 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]"
-        in model_proof
-    )
+    assert "name: 4 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]" in model_proof
     assert "fail-fast: true" in model_proof
     assert "continue-on-error" not in model_proof
     assert "max-parallel: 16" in model_proof
@@ -627,9 +660,9 @@ def test_premerge_ci_requires_gpu_free_source_quality() -> None:
         "\n  unit-tests:", maxsplit=1
     )[0]
     required = workflow.split("\n  required:", maxsplit=1)[1]
-    stage = (REPO_ROOT / ".github/scripts/run-trtmc-ci.sh").read_text()
-    source_quality_stage = stage.split("    source-quality)", maxsplit=1)[1].split(
-        "      ;;", maxsplit=1
+    stage = _ci_source("pipeline.py", "quality.py")
+    source_quality_stage = stage.split('"source-quality":', maxsplit=1)[1].split(
+        '"cpp-unit":', maxsplit=1
     )[0]
 
     assert "name: Source quality" in source_quality
@@ -640,25 +673,29 @@ def test_premerge_ci_requires_gpu_free_source_quality() -> None:
     assert "ref: ${{ needs.legal.outputs.tested_sha }}" in source_quality
     assert "fetch-depth: 0" in source_quality
     assert "actions/setup-python@v5" in source_quality
-    assert "pip install --disable-pip-version-check --quiet lizard ruff clang-format pytest" in source_quality
-    assert "bash .github/scripts/run-trtmc-ci.sh source-quality" in source_quality
+    assert (
+        "pip install --disable-pip-version-check --quiet lizard ruff clang-format pytest"
+        in source_quality
+    )
+    assert "python3 -m tools.ci pipeline source-quality" in source_quality
     assert "self-hosted" not in source_quality
     assert "docker" not in source_quality.lower()
     assert "cuda" not in source_quality.lower()
 
-    assert 'run_step "Check cyclomatic complexity" check_cyclomatic_complexity' in source_quality_stage
-    assert 'run_step "Lint changed files" lint_changed_files' in source_quality_stage
-    assert (
-        'run_step "Check model architecture contracts" run_model_architecture_contracts'
-        in source_quality_stage
-    )
+    assert '"Check cyclomatic complexity"' in source_quality_stage
+    assert "self.quality.complexity" in source_quality_stage
+    assert '"Lint changed files"' in source_quality_stage
+    assert "self.quality.lint_changed_files" in source_quality_stage
+    assert '"Check model architecture contracts"' in source_quality_stage
+    assert "self.quality.architecture_contracts" in source_quality_stage
 
-    architecture_contract = stage.split(
-        "run_model_architecture_contracts()", maxsplit=1
-    )[1].split("\n}", maxsplit=1)[0]
-    assert "python -m pytest" in architecture_contract
+    architecture_contract = stage.split("def architecture_contracts", maxsplit=1)[1].split(
+        "def _changed_files", maxsplit=1
+    )[0]
+    assert '"pytest"' in architecture_contract
     assert "tests/tools/test_model_plugin_encapsulation_static.py" in architecture_contract
-    assert "-q -p no:cacheprovider" in architecture_contract
+    assert '"-q"' in architecture_contract
+    assert '"no:cacheprovider"' in architecture_contract
 
     assert "- source-quality" in required
     assert "SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}" in required
@@ -782,8 +819,8 @@ def test_nightly_reuses_the_legal_certified_sha_for_all_downstream_work() -> Non
 
 
 def test_workflow_dispatch_lint_uses_resolved_ci_base_ref() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert 'base_ref="${CI_BASE_REF:-origin/${GITHUB_REF_NAME:-main}}"' in text
+    text = _ci_source("quality.py")
+    assert "f\"origin/{self.context.env.get('GITHUB_REF_NAME', 'main')}\"" in text
 
 
 def test_manual_branch_nightly_lints_the_complete_main_diff() -> None:
@@ -791,9 +828,9 @@ def test_manual_branch_nightly_lints_the_complete_main_diff() -> None:
     source_quality = text.split("\n  source-quality:", maxsplit=1)[1].split(
         "\n  unit-tests:", maxsplit=1
     )[0]
-    comparison = source_quality.split(
-        "- name: Resolve source-quality comparison base", maxsplit=1
-    )[1].split("- name: Set up Python", maxsplit=1)[0]
+    comparison = source_quality.split("- name: Resolve source-quality comparison base", maxsplit=1)[
+        1
+    ].split("- name: Set up Python", maxsplit=1)[0]
 
     assert '"${GITHUB_EVENT_NAME:-}" = "workflow_dispatch"' in comparison
     assert '"${GITHUB_REF_NAME:-}" != "main"' in comparison
@@ -809,17 +846,15 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
     source_quality = text.split("\n  source-quality:", maxsplit=1)[1].split(
         "\n  unit-tests:", maxsplit=1
     )[0]
-    unit_tests = text.split("\n  unit-tests:", maxsplit=1)[1].split(
-        "\n  cache-warm:", maxsplit=1
-    )[0]
-    model_proof = text.split("\n  model-proof:", maxsplit=1)[1].split(
-        "\n  report:", maxsplit=1
-    )[0]
+    unit_tests = text.split("\n  unit-tests:", maxsplit=1)[1].split("\n  cache-warm:", maxsplit=1)[
+        0
+    ]
+    model_proof = text.split("\n  model-proof:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
     report = text.split("\n  report:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
     required = text.split("\n  required:", maxsplit=1)[1].split("\n  release:", maxsplit=1)[0]
 
     assert "needs: legal" in inventory
-    assert "python3 tools/model_ci.py validate --revision \"$TESTED_SHA\"" in inventory
+    assert 'python3 tools/model_ci.py validate --revision "$TESTED_SHA"' in inventory
     assert "python3 tools/model_ci.py all" in inventory
     assert '--revision "$TESTED_SHA"' in inventory
     assert '--github-output "$GITHUB_OUTPUT"' in inventory
@@ -839,10 +874,13 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
 
     assert "- legal" in source_quality and "- inventory" in source_quality
     assert "Check family coverage" in source_quality
-    assert "pip install --disable-pip-version-check --quiet lizard ruff clang-format pytest" in source_quality
-    assert "run-trtmc-ci.sh source-quality" in source_quality
+    assert (
+        "pip install --disable-pip-version-check --quiet lizard ruff clang-format pytest"
+        in source_quality
+    )
+    assert "python3 -m tools.ci pipeline source-quality" in source_quality
     assert "- legal" in unit_tests and "- inventory" in unit_tests
-    assert "run-gha-stage.sh premerge-unit" in unit_tests
+    assert "python3 -m tools.ci stage premerge-unit" in unit_tests
     assert "TRTMC_PREMERGE_UNIT_SCOPE: all" in unit_tests
     assert 'TRTMC_CI_HARDENED: "true"' in unit_tests
 
@@ -929,9 +967,7 @@ def test_nightly_self_hosted_stages_use_the_configured_proof_runner_pool() -> No
         ("package", "model-proof"),
         ("diffusion-vlm", "report"),
     ):
-        block = text.split(f"\n  {start}:", maxsplit=1)[1].split(
-            f"\n  {end}:", maxsplit=1
-        )[0]
+        block = text.split(f"\n  {start}:", maxsplit=1)[1].split(f"\n  {end}:", maxsplit=1)[0]
         assert selector in block
 
 
@@ -939,10 +975,14 @@ def test_nightly_strictly_warms_all_active_non_multi_device_cases() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     cache = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
     assert "Strictly warm every active single-GPU nightly model" in cache
-    assert (
-        "python -u scripts/warm_hf_cache.py --exclude-ci-tier multi_device "
-        "--strict --fail-fast --attempt-timeout-seconds 600"
-    ) in cache
+    for argument in (
+        "python -u scripts/warm_hf_cache.py",
+        "--exclude-ci-tier multi_device",
+        "--strict",
+        "--fail-fast",
+        "--attempt-timeout-seconds 600",
+    ):
+        assert argument in cache
     assert 'HF_HUB_DOWNLOAD_TIMEOUT: "60"' in cache
     assert 'HF_HUB_ETAG_TIMEOUT: "30"' in cache
     assert "--exclude-ci-tier l0_only" not in cache
@@ -953,13 +993,9 @@ def test_nightly_report_requires_exact_all_model_results_and_evidence() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     report = text.split("\n  report:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
     assert "EXPECTED_MODELS: ${{ needs.inventory.outputs.affected_models }}" in report
+    assert "EXPECTED_RESULT_COUNT: ${{ needs.inventory.outputs.expected_result_count }}" in report
     assert (
-        "EXPECTED_RESULT_COUNT: ${{ needs.inventory.outputs.expected_result_count }}"
-        in report
-    )
-    assert (
-        "EXPECTED_CASES_BY_MODEL: ${{ needs.inventory.outputs.expected_cases_by_model }}"
-        in report
+        "EXPECTED_CASES_BY_MODEL: ${{ needs.inventory.outputs.expected_cases_by_model }}" in report
     )
     assert "REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}" in report
     assert "pattern: model-proof-*-${{ needs.legal.outputs.tested_sha }}-*" in report
@@ -1036,18 +1072,14 @@ def test_nightly_preserves_diffusion_vlm_gate_and_injects_it_into_the_html() -> 
 
 def test_nightly_all_gpu_gate_uses_the_model_proof_machine_lock() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split(
-        "\n  report:", maxsplit=1
-    )[0]
-    proof_runner = (
-        REPO_ROOT / ".github" / "scripts" / "run-model-proof.sh"
-    ).read_text()
+    vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
+    proof_runner = _ci_source("gpu_lease.py")
 
     assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR:" in text
     assert "whole-machine.lock" in vlm
     assert 'flock -w "$TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS" -x 9' in vlm
-    assert "acquire_proof_gpu_machine_lock" in proof_runner
-    assert 'flock -w "$timeout" -s "$proof_gpu_machine_fd"' in proof_runner
+    assert 'FileLock(self.lock_dir / "whole-machine.lock")' in proof_runner
+    assert "self._wait_lock(self.machine, deadline, shared=True)" in proof_runner
     assert text.index("- model-proof", text.index("\n  diffusion-vlm:")) < text.index(
         "Run diffusion VLM semantic gate"
     )
@@ -1070,10 +1102,10 @@ def test_nightly_grants_write_permission_only_after_the_final_gate() -> None:
 def test_nightly_removes_the_legacy_monolithic_gpu_and_coverage_paths() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     for obsolete in (
-        "run-gha-stage.sh impact",
-        "run-gha-stage.sh graph-ops",
-        "run-gha-stage.sh full-e2e",
-        "run-gha-stage.sh coverage-map",
+        "python3 -m tools.ci stage impact",
+        "python3 -m tools.ci stage graph-ops",
+        "python3 -m tools.ci stage full-e2e",
+        "python3 -m tools.ci stage coverage-map",
         "Impact analysis",
         "Graph-op GPU tests",
         "Full E2E tests",
@@ -1088,11 +1120,11 @@ def test_nightly_removes_the_legacy_monolithic_gpu_and_coverage_paths() -> None:
 def test_nightly_preserves_python_and_cpp_coverage_without_rebuilding_the_wheel() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
-    assert package.count("run-gha-stage.sh package") == 1
+    assert package.count("python3 -m tools.ci stage package") == 1
     assert "Python package coverage" in package
-    assert "run-gha-stage.sh python-builder" in package
+    assert "python3 -m tools.ci stage python-builder" in package
     assert "C++ platform coverage" in package
-    assert "run-gha-stage.sh cpp-coverage" in package
+    assert "python3 -m tools.ci stage cpp-coverage" in package
     assert "CPP_COVERAGE_SCOPE: platform" in package
     assert 'FULL_E2E: "true"' in package
     for threshold in (
@@ -1106,29 +1138,18 @@ def test_nightly_preserves_python_and_cpp_coverage_without_rebuilding_the_wheel(
     assert "Upload nightly coverage artifacts" in package
     assert "trtmc-nightly-coverage-${{ github.run_id }}" in package
 
-    ci_script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    ci_script = _ci_source("coverage.py")
     coverage_script = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
-    coverage_wrapper = (
-        REPO_ROOT / "tools" / "coverage_ci" / "run_cpp_coverage.sh"
-    ).read_text()
-    assert "export CPP_COVERAGE_BUILD_TARGET=trtmc_platform_cpp_tests" in ci_script
-    assert "ctest_args=(-L platform)" in ci_script
-    assert 'cpp_coverage.sh" "$@"' in coverage_wrapper
+    assert 'build_target, ctest_args = "trtmc_platform_cpp_tests", ["-L", "platform"]' in ci_script
+    assert '"bash", "tools/coverage/cpp_coverage.sh", *ctest_args' in ci_script
     assert '--target "${CPP_COVERAGE_BUILD_TARGET}"' in coverage_script
-    assert (
-        'if [[ "${CPP_COVERAGE_BUILD_TARGET}" == "trtmc_cpp_tests" ]]; then'
-        in coverage_script
-    )
+    assert 'if [[ "${CPP_COVERAGE_BUILD_TARGET}" == "trtmc_cpp_tests" ]]; then' in coverage_script
 
 
 def test_nightly_long_jobs_reserve_finalization_time() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    package = text.split("\n  package:", maxsplit=1)[1].split(
-        "\n  model-proof:", maxsplit=1
-    )[0]
-    vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split(
-        "\n  report:", maxsplit=1
-    )[0]
+    package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
 
     package_job_minutes = 330
     package_step_minutes = 90 + 5 + 60 + 60 + 60
@@ -1142,27 +1163,26 @@ def test_nightly_long_jobs_reserve_finalization_time() -> None:
 
 def test_nightly_python_coverage_runs_allocator_contract_serially() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    package = workflow.split("\n  package:", maxsplit=1)[1].split(
-        "\n  model-proof:", maxsplit=1
-    )[0]
-    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    package = workflow.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    script = _ci_source("coverage.py")
     builder_conftest = (REPO_ROOT / "tests" / "builder" / "conftest.py").read_text()
-    coverage = script.split("run_python_builder_tests() {", maxsplit=1)[1].split(
-        "\nrun_cpp_coverage() {", maxsplit=1
-    )[0]
+    coverage = script.split("def python_builder_tests", maxsplit=1)[1].split("def cpp", maxsplit=1)[
+        0
+    ]
 
-    assert "run-gha-stage.sh python-builder" in package
-    parallel = '-n auto -m "not model_proof_allocator and not gpu and not trt"'
-    serial = "python -m pytest tests/tools/test_model_proof_runner.py -v"
-    assert parallel in coverage
-    assert serial in coverage
-    assert "-p no:cacheprovider -m model_proof_allocator" in coverage
-    assert "serial_cov_args+=(--cov-append)" in coverage
-    assert coverage.count("TRTMC_TEST_INSTALLED_WHEEL=1") == 3
-    assert 'source_pkgs =\n    tensorrt_model_connect' in script
+    assert "python3 -m tools.ci stage python-builder" in package
+    assert '"-n", "auto"' in coverage
+    assert '"not model_proof_allocator and not gpu and not trt"' in coverage
+    assert '"tests/tools/test_model_proof_runner.py"' in coverage
+    assert '"model_proof_allocator"' in coverage
+    assert '"--cov-append"' in coverage
+    assert '"TRTMC_TEST_INSTALLED_WHEEL": "1"' in coverage
+    assert "source_pkgs =" in script and "tensorrt_model_connect" in script
     assert 'os.environ.get("TRTMC_TEST_INSTALLED_WHEEL") == "1"' in builder_conftest
     assert "imported tensorrt_model_connect" in builder_conftest
-    assert coverage.index(parallel) < coverage.index(serial)
+    assert coverage.index('"-n", "auto"') < coverage.index(
+        '"tests/tools/test_model_proof_runner.py"'
+    )
     assert "TRTMC_CPU_CONTAINER_OPTIONS" in package
     assert "--gpus all" not in package
 
@@ -1190,25 +1210,34 @@ def test_github_workflows_write_e2e_markdown_summary() -> None:
 
 
 def test_etth1_model_proofs_use_the_single_task_eval_entry_point() -> None:
-    stage = (REPO_ROOT / ".github" / "scripts" / "run-model-proof.sh").read_text()
+    stage = _ci_source("task_eval.py", "model_proof.py", "model_proof_inner.py")
     task_eval = (REPO_ROOT / "tools" / "task_eval.py").read_text()
 
-    assert "/src/tools/task_eval.py prepare-ci-dataset" in stage
-    assert "/src/tools/task_eval.py eval" in stage
+    assert '"/src/tools/task_eval.py"' in stage
+    assert '"prepare-ci-dataset"' in stage
+    assert '"eval"' in stage
     assert "task_eval_ci.py" not in stage
-    assert "--suite etth1_time_series_parity" in stage
-    assert "--ci-lane nightly" in stage
-    assert "--engine-dir /work/engines" in stage
-    assert "--model-plugin-dir /work/model-plugins" in stage
-    assert "--require-prebuilt-bundles" in stage
+    for argument in (
+        "--suite",
+        "etth1_time_series_parity",
+        "--ci-lane",
+        "nightly",
+        "--engine-dir",
+        "/work/engines",
+        "--model-plugin-dir",
+        "/work/model-plugins",
+        "--require-prebuilt-bundles",
+    ):
+        assert f'"{argument}"' in stage
     assert "ETTh1 task-eval requires a GB300 GPU" in stage
-    assert "--network none" in stage
+    assert '"--network"' in stage and '"none"' in stage
     assert "validate_eval_summary" in task_eval
     assert 'result.get("status") == "passed"' in task_eval
     assert "return complete and all" in task_eval
-    assert '"work_dir"' not in task_eval.split("def _public_ci_result", maxsplit=1)[1].split(
-        ")", maxsplit=1
-    )[0]
+    assert (
+        '"work_dir"'
+        not in task_eval.split("def _public_ci_result", maxsplit=1)[1].split(")", maxsplit=1)[0]
+    )
 
 
 def test_nightly_validates_the_installed_wheel_without_a_second_model_build() -> None:
@@ -1219,12 +1248,12 @@ def test_nightly_validates_the_installed_wheel_without_a_second_model_build() ->
     installed_wheel_index = package.index("Python package coverage")
     upload_index = package.index("Upload trtmc pip package artifact")
     assert package_index < installed_wheel_index < upload_index
-    assert "run-gha-stage.sh python-builder" in package
-    assert "run-gha-stage.sh wheel-model-smoke" not in package
+    assert "python3 -m tools.ci stage python-builder" in package
+    assert "python3 -m tools.ci stage wheel-model-smoke" not in package
     assert "Model smoke test from trtmc pip package" not in package
-    ci_script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert "setup_wheel_runtime_environment" in ci_script
-    assert "verify_built_wheel_installed" in ci_script
+    ci_script = _ci_source("pipeline.py", "package.py")
+    assert "_verify_wheel_runtime" in ci_script
+    assert "verify_installed" in ci_script
     assert "needs.required.result == 'success'" in release
     assert "github.event_name == 'schedule' || github.ref == 'refs/heads/main'" in release
     assert "Download certified trtmc pip package" in release
@@ -1249,9 +1278,7 @@ def test_nightly_uses_manylinux_image_and_builds_wheel_first() -> None:
     assert "TRTMC_PACKAGE_CI_IMAGE" not in text
     package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
     assert package.index("Start package container") < package.index("Build trtmc pip package")
-    assert package.index("Build trtmc pip package") < package.index(
-        "Python package coverage"
-    )
+    assert package.index("Build trtmc pip package") < package.index("Python package coverage")
     assert "Setup TensorRT-Model-Connect" not in text
 
 
@@ -1267,36 +1294,34 @@ def test_premerge_keeps_model_proofs_separate_from_source_only_units() -> None:
         "Selective E2E tests",
     ):
         assert obsolete_global_stage not in premerge
-    assert premerge.count("run-gha-stage.sh") == 1
-    assert "run-gha-stage.sh premerge-unit" in premerge
+    assert premerge.count("python3 -m tools.ci stage") == 1
+    assert "python3 -m tools.ci stage premerge-unit" in premerge
     assert "uses: ./.github/workflows/model-proof.yml" in premerge
 
 
 def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
-    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    stage = script.split("run_premerge_unit_tests() {", maxsplit=1)[1].split(
-        "\nwrite_skipped_python_coverage() {", maxsplit=1
-    )[0]
+    script = _ci_source("quality.py")
+    stage = script.split("def premerge", maxsplit=1)[1].split("def _premerge_scope", maxsplit=1)[0]
     cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
 
     assert "pip install" not in stage
-    assert 'PYTHONPATH="$source_root/python:$source_root' in stage
-    assert 'TRTMC_CI_SCRATCH_DIR:-/tmp' in stage
-    assert 'TRTMC_PREMERGE_UNIT_BUILD_DIR:-$scratch_dir/premerge-unit-build' in stage
-    assert '-m "not gpu and not trt and not e2e and not model_proof_allocator"' in stage
+    assert "source / 'python'" in stage
+    assert '"TRTMC_CI_SCRATCH_DIR", "/tmp"' in stage
+    assert "TRTMC_PREMERGE_UNIT_BUILD_DIR" in stage
+    assert '"not gpu and not trt and not e2e and not model_proof_allocator"' in stage
     assert "tests/builder/" in stage
     assert "tests/tools/" in stage
-    assert "tests/e2e_harness/test_*.py" in stage
-    assert "-q -x" in stage
-    assert "--dist=worksteal" in stage
+    assert 'glob("test_*.py")' in script
+    assert '"-q"' in stage and '"-x"' in stage
+    assert '"--dist=worksteal"' in stage
     assert 'not model_proof_allocator"' in stage
-    assert "-m model_proof_allocator" in stage
-    assert "native_targets=(trtmc test_cli_args test_config_cli_support)" in stage
-    assert "native_targets=(trtmc trtmc_platform_cpp_tests)" in stage
-    assert 'TRTMC_PREMERGE_UNIT_SCOPE:-all' in stage
-    assert "tests/builder/test_cli.py" in stage
-    assert '"$build_dir/trtmc" version' in stage
-    assert '"$build_dir/trtmc" --help' in stage
+    assert '"-m"' in stage and '"model_proof_allocator"' in stage
+    assert '["trtmc", "test_cli_args", "test_config_cli_support"]' in script
+    assert '["trtmc", "trtmc_platform_cpp_tests"]' in script
+    assert '"TRTMC_PREMERGE_UNIT_SCOPE", "all"' in stage
+    assert "tests/builder/test_cli.py" in script
+    assert '[build / "trtmc", "version"]' in stage
+    assert '[build / "trtmc", "--help"]' in stage
     assert "--stop-on-failure" in stage
     assert "libtrtmc_model_*.so*" in stage
     assert "-DTRTMC_ENABLE_TRT=OFF" not in stage
@@ -1324,57 +1349,57 @@ def test_premerge_unit_stage_builds_no_model_plugins_or_native_wheel() -> None:
 
 
 def test_premerge_unit_container_is_unprivileged_offline_and_cpu_only() -> None:
-    start = (REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh").read_text()
+    start = _ci_source("container.py", "environment.py")
     workflow = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
     unit_tests = workflow.split("\n  unit-tests:", maxsplit=1)[1].split(
         "\n  model-proof:", maxsplit=1
     )[0]
 
     for option in (
-        "--network none",
+        '"--network"',
+        '"none"',
         "--read-only",
-        "--tmpfs /tmp:rw,exec,nosuid,nodev,size=16g",
-        "--cap-drop ALL",
-        "--security-opt no-new-privileges",
-        '--user "$(id -u):$(id -g)"',
-        "--ipc private",
-        "-e HOME=/tmp",
-        "-e TMPDIR=/work/tmp",
-        "-e PIP_NO_INDEX=1",
-        "-e TRTMC_CI_SCRATCH_DIR=/work",
-        "-e NVIDIA_VISIBLE_DEVICES=void",
-        "-e CUDA_VISIBLE_DEVICES=",
-        "--runtime runc",
-        'workspace_mount+=":ro"',
-        'extra_mounts+=(-v "$scratch_host:/work")',
+        "/tmp:rw,exec,nosuid,nodev,size=16g",
+        "--cap-drop",
+        "--security-opt",
+        "no-new-privileges",
+        'f"{os.getuid()}:{os.getgid()}"',
+        "--ipc",
+        "HOME=/tmp",
+        "TMPDIR=/work/tmp",
+        "PIP_NO_INDEX=1",
+        "TRTMC_CI_SCRATCH_DIR=/work",
+        "NVIDIA_VISIBLE_DEVICES=void",
+        "CUDA_VISIBLE_DEVICES=",
+        "--runtime",
+        'f"{mount}:ro"',
+        'f"{scratch}:/work"',
     ):
         assert option in start
-    assert 'if [ "$hardened" = "true" ]' in start
-    assert 'if [ "$hardened" != "true" ]' in start
-    assert 'compgen -G "/dev/nvidia*"' in start
+    assert "if self.config.hardened" in start
+    assert "if not self.config.hardened" in start
+    assert "Path('/dev').glob('nvidia*')" in start
     assert "Hardened unit scratch must be inside RUNNER_TEMP" in start
     assert "Hardened unit scratch must not be a symlink" in start
     assert 'TRTMC_CI_HARDENED: "true"' in unit_tests
     assert "--gpus" not in unit_tests
     assert "/workspace/users/yifeif:/workspace/users/yifeif" not in unit_tests
-    assert 'workspace="${TRTMC_CI_WORKSPACE:-${GITHUB_WORKSPACE:-}}"' in start
-    assert 'workspace_mount="$workspace:$workspace"' in start
-    hardened_allowlist = start.split('if [ "$hardened" = "true" ]; then', maxsplit=2)[2]
-    hardened_allowlist = hardened_allowlist.split('env_args+=', maxsplit=1)[0]
-    assert "HF_TOKEN" not in hardened_allowlist
-    assert "HUGGING_FACE_HUB_TOKEN" not in hardened_allowlist
+    assert 'env.get("TRTMC_CI_WORKSPACE")' in start
+    assert 'env.get("GITHUB_WORKSPACE", "")' in start
+    assert 'mount = f"{self.config.workspace}:{self.config.workspace}"' in start
+    common = start.split("COMMON_ENVIRONMENT =", maxsplit=1)[1].split(
+        "TRUSTED_ENVIRONMENT =", maxsplit=1
+    )[0]
+    assert "TRTMC_PREMERGE_UNIT_SCOPE" in common
+    assert "HF_TOKEN" not in common
+    assert "HUGGING_FACE_HUB_TOKEN" not in common
 
-    stage = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
-    hardened_exec = stage.split(
-        'if [ "${TRTMC_CI_HARDENED:-false}" = "true" ]; then', maxsplit=1
-    )[1].split("\nfi", maxsplit=1)[0]
-    assert "TRTMC_PREMERGE_UNIT_SCOPE" in hardened_exec
-    assert "HF_TOKEN" not in hardened_exec
-    assert "HUGGING_FACE_HUB_TOKEN" not in hardened_exec
+    stage = _ci_source("stage.py")
+    assert "COMMON_ENVIRONMENT if self.config.hardened else TRUSTED_ENVIRONMENT" in stage
 
 
 def test_unowned_gpu_only_builder_suites_are_excluded_from_cpu_units() -> None:
-    stage = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    stage = _ci_source("quality.py")
     for relative in (
         "tests/builder/test_flashinfer_benchmark.py",
         "tests/builder/test_tvm_ffi_plugin.py",
@@ -1382,16 +1407,16 @@ def test_unowned_gpu_only_builder_suites_are_excluded_from_cpu_units() -> None:
         assert f"--ignore={relative}" in stage
 
     ffi_architecture = (REPO_ROOT / "tests/builder/test_ffi_architecture.py").read_text()
-    flashinfer_section = ffi_architecture.split(
-        "class TestFlashInferKernelSetup:", maxsplit=1
-    )[1].split("class TestEngineBuilderKernelArtifacts:", maxsplit=1)[0]
+    flashinfer_section = ffi_architecture.split("class TestFlashInferKernelSetup:", maxsplit=1)[
+        1
+    ].split("class TestEngineBuilderKernelArtifacts:", maxsplit=1)[0]
     assert flashinfer_section.count("@pytest.mark.gpu") == 3
     assert flashinfer_section.count("@pytest.mark.trt") == 3
 
 
 def test_model_proof_runs_one_isolated_model_with_unique_complete_evidence() -> None:
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
-    runner = (REPO_ROOT / ".github/scripts/run-model-proof.sh").read_text()
+    runner = _ci_source("model_proof.py", "model_proof_inner.py")
 
     assert "TRTMC_CI_IMAGE:" in proof
     assert "vars.TRTMC_MANYLINUX_CI_IMAGE" in proof
@@ -1401,9 +1426,9 @@ def test_model_proof_runs_one_isolated_model_with_unique_complete_evidence() -> 
         "'/tmp/trtmc-ci-docker-image.lock' }}"
     ) in proof
     assert "Ensure CI Docker image" in proof
-    assert "bash .github/scripts/ensure-ci-docker-image.sh" in proof
+    assert "python3 -m tools.ci image ensure" in proof
     assert proof.count("actions/checkout@v4") == 1
-    assert proof.count("bash .github/scripts/ensure-ci-docker-image.sh") == 1
+    assert proof.count("python3 -m tools.ci image ensure") == 1
     assert "TRTMC_HF_CACHE:" in proof
     assert "TRTMC_HF_HUB_CACHE:" in proof
     assert "TRTMC_HF_MODULES_CACHE:" not in proof
@@ -1412,9 +1437,9 @@ def test_model_proof_runs_one_isolated_model_with_unique_complete_evidence() -> 
     assert "vars.TRTMC_MODEL_PROOF_SLOTS_PER_GPU || '4'" in proof
     assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR:" in proof
     assert "/tmp/trtmc-model-proof-gpu-locks" in proof
-    assert "bash .github/scripts/run-model-proof.sh" in proof
+    assert "python3 -m tools.ci model-proof" in proof
     assert "run-model-proof-batch.sh" not in proof
-    assert "env -u TRTMC_GPU_ID bash .github/scripts/run-model-proof.sh" in proof
+    assert "env -u TRTMC_GPU_ID python3 -m tools.ci model-proof" in proof
     assert '--model "$MODEL"' in proof
     assert '--revision "$REVISION"' in proof
     assert '--suite "$SUITE"' in proof
@@ -1429,32 +1454,32 @@ def test_model_proof_runs_one_isolated_model_with_unique_complete_evidence() -> 
     assert "dst=/src,readonly" in runner
     assert "dst=/hf-cache/hub,readonly" in runner
     assert "dst=/hf-cache/modules" not in runner
-    assert "-e HF_MODULES_CACHE=/work/hf-modules" in runner
-    assert "--network none" in runner
+    assert '"HF_MODULES_CACHE": "/work/hf-modules"' in runner
+    assert '"--network"' in runner and '"none"' in runner
     assert "--read-only" in runner
     assert "proof.json" in runner
 
 
 def test_model_proof_keeps_long_lived_scratch_out_of_runner_temp() -> None:
     text = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
-    bootstrap = text.split(
-        "      - name: Bootstrap model HTML before checkout", maxsplit=1
-    )[1].split("      - name: Check model proof disk headroom", maxsplit=1)[0]
-    disk = text.split("      - name: Check model proof disk headroom", maxsplit=1)[
+    bootstrap = text.split("      - name: Bootstrap model HTML before checkout", maxsplit=1)[
         1
-    ].split("      - name: Check out exact source revision", maxsplit=1)[0]
-    checkout = text.split("      - name: Check out exact source revision", maxsplit=1)[
-        1
-    ].split("      - name: Log in to GitHub Container Registry", maxsplit=1)[0]
+    ].split("      - name: Check model proof disk headroom", maxsplit=1)[0]
+    disk = text.split("      - name: Check model proof disk headroom", maxsplit=1)[1].split(
+        "      - name: Check out exact source revision", maxsplit=1
+    )[0]
+    checkout = text.split("      - name: Check out exact source revision", maxsplit=1)[1].split(
+        "      - name: Log in to GitHub Container Registry", maxsplit=1
+    )[0]
     run_proof = text.split("      - name: Run isolated model proof", maxsplit=1)[1].split(
         "      - name: Reconcile model proof containers", maxsplit=1
     )[0]
-    finalize = text.split("      - name: Finalize model proof fallback", maxsplit=1)[
-        1
-    ].split("      - name: Upload isolated model proof artifact", maxsplit=1)[0]
-    upload = text.split("      - name: Upload isolated model proof artifact", maxsplit=1)[
-        1
-    ].split("      - name: Enforce isolated model certification", maxsplit=1)[0]
+    finalize = text.split("      - name: Finalize model proof fallback", maxsplit=1)[1].split(
+        "      - name: Upload isolated model proof artifact", maxsplit=1
+    )[0]
+    upload = text.split("      - name: Upload isolated model proof artifact", maxsplit=1)[1].split(
+        "      - name: Enforce isolated model certification", maxsplit=1
+    )[0]
     cleanup = text.split("      - name: Clean model proof scratch space", maxsplit=1)[1]
     durable = (
         "${{ github.workspace }}/model-proof-output-${{ github.run_id }}-"
@@ -1481,13 +1506,13 @@ def test_model_proof_keeps_long_lived_scratch_out_of_runner_temp() -> None:
 
 
 def test_package_stage_builds_py310_and_py312_wheels() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert "TRTMC_PACKAGE_PYTHON_TAGS:-py310 py312" in text
-    assert 'WHEEL_PYVER="$tag"' in text
-    assert 'python -m build --wheel --outdir "$PWD/dist"' in text
-    assert "build-dir=$package_build_root/$tag" in text
+    text = _ci_source("package.py", "pipeline.py")
+    assert '"TRTMC_PACKAGE_PYTHON_TAGS", "py310 py312"' in text
+    assert '"WHEEL_PYVER": tag' in text
+    assert '"build"' in text and '"--wheel"' in text and '"--outdir"' in text
+    assert 'f"build-dir={tag_root}"' in text
     assert "manylinux_2_39_aarch64" in text
-    assert "wheel-model-smoke)" in text
+    assert '"wheel-model-smoke":' in text
     assert "Model smoke test from trtmc pip package" in text
 
 
@@ -1514,9 +1539,10 @@ def test_package_smoke_default_is_model_owned() -> None:
 def test_package_smoke_ci_surface_has_no_model_owned_names() -> None:
     shared_paths = (
         REPO_ROOT / ".github" / "workflows" / "nightly.yml",
-        REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh",
-        REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh",
-        REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh",
+        REPO_ROOT / "tools" / "ci" / "stage.py",
+        REPO_ROOT / "tools" / "ci" / "container.py",
+        REPO_ROOT / "tools" / "ci" / "package.py",
+        REPO_ROOT / "tools" / "ci" / "pipeline.py",
     )
     config_path, data = _single_default_model_config("package_smoke.json")
     family = config_path.parent.name
@@ -1545,44 +1571,43 @@ def test_package_smoke_ci_surface_has_no_model_owned_names() -> None:
 
 
 def test_package_stage_requires_manylinux_aarch64_wheels() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert "TRTMC_PACKAGE_WHEEL_ARCH:-manylinux_2_39_aarch64" in text
-    assert 'EXPECTED_PLATFORM = os.environ.get("TRTMC_PACKAGE_WHEEL_ARCH"' in text
+    text = _ci_source("package.py")
+    assert '"TRTMC_PACKAGE_WHEEL_ARCH", "manylinux_2_39_aarch64"' in text
+    assert "self.platform = platform" in text
     assert "native wheel must not contain .data/purelib entries" in text
     assert ".data/scripts/trtmc" in text
     assert "native trtmc must be installed directly, not via console_scripts" in text
     assert '"auditwheel>=6.2"' in text
     assert 'sys.executable, "-m", "auditwheel", "show", wheel' in text
-    assert "*-${py_tag}-none-${wheel_arch}.whl" in text
-    assert "validate_manylinux_build_environment" in text
-    assert "build_glibc=" in text
+    assert 'f"*-{tag}-none-{platform}.whl"' in text
+    assert "_validate_build_platform" in text
+    assert "build_glibc" in text
 
 
 def test_package_stage_uses_conan_py_build_inputs() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert "CONAN_PY_BUILD_PROFILE_AUTODETECT=1" in text
-    assert 'TRTMC_TRT_INCLUDE_DIR="$trt_include"' in text
-    assert 'TRTMC_TRT_LIBRARY="$trt_library"' in text
-    assert 'TRTMC_CUDA_INCLUDE_DIR="$cuda_include"' in text
-    assert 'TRTMC_CUDART_LIBRARY="$cudart_library"' in text
+    text = _ci_source("package.py")
+    assert '"CONAN_PY_BUILD_PROFILE_AUTODETECT": "1"' in text
+    assert '"TRTMC_TRT_INCLUDE_DIR": trt_include' in text
+    assert '"TRTMC_TRT_LIBRARY": trt_library' in text
+    assert '"TRTMC_CUDA_INCLUDE_DIR": cuda_include' in text
+    assert '"TRTMC_CUDART_LIBRARY": cudart' in text
 
 
 def test_impact_stage_reuses_cached_json_for_summary() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert 'tools/test_impact.py "${impact_args[@]}" --json > impact.json' in text
-    assert "ImpactResult(**json.load(f))" in text
-    assert 'tools/test_impact.py "${impact_args[@]}" --verbose' not in text
+    text = _ci_source("quality.py")
+    assert 'arguments.append("--json")' in text
+    assert "write_text(result.stdout" in text
+    assert "ImpactResult(**impact)" in text
+    assert '"--verbose"' not in text
 
 
 def test_python_builder_fallback_is_per_tier() -> None:
-    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert "builder_fallback = 'builder' in fallback" in script
-    assert "tools_fallback = 'tools' in fallback" in script
-    assert "if not (builder_fallback and tools_fallback):" in script
-    assert "add(['tests/builder/'])" in script
-    assert "add(['tests/tools/'])" in script
-    assert "Path('tests/e2e_harness').glob('test_*.py')" in script
-    assert "fallback.intersection({'builder', 'tools'})" not in script
+    script = _ci_source("coverage.py")
+    assert 'if {"builder", "tools"}.issubset(fallback)' in script
+    assert '["tests/builder/"] if "builder" in fallback' in script
+    assert 'if "tools" in fallback' in script
+    assert 'add(["tests/tools/"])' in script
+    assert 'glob("test_*.py")' in script
 
 
 def test_release_wheel_build_disables_libtorch_linkage() -> None:
@@ -1610,91 +1635,89 @@ def test_model_plugins_are_staged_for_installed_trtmc() -> None:
 def test_release_wheel_stages_core_runtime_and_uses_origin_rpath() -> None:
     cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
     conanfile = (REPO_ROOT / "conanfile.py").read_text()
-    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    script = _ci_source("package.py")
     pyproject = (REPO_ROOT / "pyproject.toml").read_text()
 
-    assert 'set_target_properties(trtmc PROPERTIES' in cmake
-    assert 'BUILD_RPATH_USE_ORIGIN TRUE' in cmake
+    assert "set_target_properties(trtmc PROPERTIES" in cmake
+    assert "BUILD_RPATH_USE_ORIGIN TRUE" in cmake
     assert 'INSTALL_RPATH "\\$ORIGIN"' in cmake
     assert '"libtrtmc_core.so*"' in conanfile
     assert "for destination in (package_bin, wheel_data_scripts):" in conanfile
     assert "TRTMC core DSO was not staged beside the wheel script" in conanfile
-    assert 'apache-tvm-ffi==0.1.12' in pyproject
-    assert "script_core_entries" in script
-    assert "grep -Fq '$ORIGIN'" in script
+    assert "apache-tvm-ffi==0.1.12" in pyproject
+    assert "script_cores" in script
+    assert 'if "$ORIGIN" not in dynamic' in script
     assert "installed trtmc RUNPATH leaks the CI build directory" in script
 
 
 def test_ci_source_build_defaults_to_packaged_libtorch_mode() -> None:
     conanfile = (REPO_ROOT / "conanfile.py").read_text()
-    wrapper = (REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh").read_text()
+    wrapper = _ci_source("environment.py")
     coverage = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
     assert 'toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False' in conanfile
     assert (
         'TRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF}"' in coverage
     )
     assert '-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL}"' in coverage
-    assert "-e TRTMC_ENABLE_LIBTORCH_MULTINOMIAL" in wrapper
+    assert "TRTMC_ENABLE_LIBTORCH_MULTINOMIAL" in wrapper
 
 
 def test_ci_cpp_test_build_reuses_wheel_conan_tree() -> None:
-    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert "TRTMC_CONAN_ENABLE_TEST_TARGETS=1" in script
-    assert 'TRTMC_CONAN_BUILD_TARGETS="$targets"' in script
-    assert 'conan build . -of "$TRTMC_REUSE_CONAN_OUT_DIR"' in script
-    assert 'ctest --test-dir "$TRTMC_REUSE_CMAKE_BUILD_DIR"' in script
-    assert "wheel_build_metadata_file" in script
+    script = _ci_source("quality.py", "package.py")
+    assert '"TRTMC_CONAN_ENABLE_TEST_TARGETS": "1"' in script
+    assert '"TRTMC_CONAN_BUILD_TARGETS": "\\n".join(targets)' in script
+    assert '"conan", "build", ".", "-of", metadata["conan_out_dir"]' in script
+    assert 'arguments = ["ctest", "--test-dir", build_dir]' in script
+    assert "build_metadata" in script
 
 
 def test_selective_e2e_builds_and_runs_single_family_source_projections() -> None:
-    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    selective = script.split("run_selective_e2e() {", maxsplit=1)[1].split(
-        "\nrun_full_e2e() {", maxsplit=1
-    )[0]
-    group_runner = script.split("run_isolated_e2e_group() {", maxsplit=1)[1].split(
-        "\nrun_selective_e2e() {", maxsplit=1
-    )[0]
+    selective = _ci_source("e2e.py")
+    group_runner = _ci_source("isolation.py")
+    script = selective + group_runner
 
-    assert "tools/model_plugin_isolation.py plan" in group_runner
+    assert '"tools/model_plugin_isolation.py"' in group_runner
+    assert '"plan"' in group_runner
     assert "tools/model_plugin_isolation.py" in selective
-    assert "run_model_owned_isolation_e2e" in selective
+    assert "IsolatedModelRunner" in selective
     assert "impact-models" in selective
     assert "e2e_isolation_models.txt" in selective
-    assert './scripts/run_e2e_parallel.sh "${standard_args[@]}"' in selective
-    assert "--exclude-ci-tier nightly_only" in selective
-    assert "--exclude-ci-tier multi_device" in selective
-    assert 'if [ "$standard_rc" -ne 0 ]; then' in selective
-    assert "Skipping strict model-owned isolation" in selective
-    assert 'prepare_model_plugin_dir "$full_model_plugin_dir"' in selective
-    assert "schedule_args=(" in group_runner
-    assert "run_isolated_gpu_queue" in group_runner
-    assert "queue_pids" in group_runner
-    assert "tools/model_plugin_isolation.py stage-source" in group_runner
-    assert "configure_isolated_model_build" in group_runner
+    assert "E2EParallelRunner" in selective
+    assert '"--exclude-ci-tier"' in selective
+    assert '"nightly_only"' in selective
+    assert '"multi_device"' in selective
+    assert "if standard_rc" in selective
+    assert "strict model-owned isolation E2E" in selective
+    assert "_prepare_plugins" in selective
+    assert '"tools/model_plugin_isolation.py"' in group_runner
+    assert '"schedule"' in group_runner
+    assert "_run_queue" in group_runner
+    assert "concurrent.futures" in group_runner
+    assert '"stage-source"' in group_runner
+    assert "def _configure" in group_runner
     assert "CMAKE_TOOLCHAIN_FILE" in script
     assert "FETCHCONTENT_SOURCE_DIR_NLOHMANN_JSON" in script
-    assert '--target trtmc trtmc_backend_trt "$model_target"' in group_runner
-    assert 'PYTHONPATH="$source_dir/python:$source_dir' in group_runner
-    assert 'LD_LIBRARY_PATH="$isolated_library_path"' in group_runner
-    assert '--trtmc-binary "$build_dir/trtmc"' in group_runner
-    assert '--engine-dir "$engine_dir"' in group_runner
-    assert '--model-plugin-dir "$model_plugin_dir"' in group_runner
-    assert 'CUDA_VISIBLE_DEVICES="$gpu_id"' in group_runner
-    assert '--rootdir "$source_dir"' in group_runner
-    assert '--e2e-models-file "$models_file"' in group_runner
-    assert "--e2e-exclude-ci-tier nightly_only" in group_runner
-    assert "${SELECTIVE_E2E_GROUP_TIMEOUT:-90m}" in group_runner
-    assert '"${model_filter_args[@]}"' in group_runner
-    assert "scripts/run_e2e_parallel.sh" not in group_runner
+    assert 'str(group["runtime_plugin"]["target"])' in group_runner
+    assert '"PYTHONPATH": f"{source / \'python\'}:{source}"' in group_runner
+    assert '"LD_LIBRARY_PATH": ":".join(library_path)' in group_runner
+    assert '"--trtmc-binary"' in group_runner and 'build / "trtmc"' in group_runner
+    assert '"--engine-dir"' in group_runner and "engines" in group_runner
+    assert '"--model-plugin-dir"' in group_runner and "plugins" in group_runner
+    assert '"CUDA_VISIBLE_DEVICES": str(gpu)' in group_runner
+    assert '"--rootdir"' in group_runner and "source" in group_runner
+    assert '"--e2e-models-file"' in group_runner and "models" in group_runner
+    assert '"--e2e-exclude-ci-tier"' in group_runner and '"nightly_only"' in group_runner
+    assert '"SELECTIVE_E2E_GROUP_TIMEOUT", "90m"' in group_runner
+    assert "for model in selected" in group_runner
     assert "verify-results" in group_runner
     assert "expected exactly 1" in group_runner
     assert "prepare_model_plugin_dir" not in group_runner
 
 
 def test_full_e2e_stages_all_runtime_plugins_from_reusable_build() -> None:
-    script = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    assert 'prepare_model_plugin_dir "$model_plugin_dir" --all' in script
-    assert '--model-plugin-dir "$model_plugin_dir"' in script
+    script = _ci_source("e2e.py")
+    assert 'self._prepare_plugins(plugins, ["--all"])' in script
+    assert '"--model-plugin-dir"' in script
 
 
 def test_cpp_coverage_builds_excluded_test_target() -> None:
@@ -1724,24 +1747,24 @@ def test_root_pyproject_configures_conan_py_build_wheel() -> None:
 
 
 def test_wheel_model_smoke_checks_py312_wheel_only() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
-    smoke_block = text.split("run_wheel_model_smoke() {", maxsplit=1)[1].split(
-        "\n}",
-        maxsplit=1,
+    text = _ci_source("package.py")
+    smoke_block = text.split("def model_smoke", maxsplit=1)[1].split(
+        "def _clean_venv_smoke", maxsplit=1
     )[0]
-    assert "select_wheel_by_tag py312 dist" in smoke_block
+    assert 'self.select_wheel("py312")' in smoke_block
     assert "sys.version_info[:2] != (3, 12)" in smoke_block
     assert "TRTMC_WHEEL_SMOKE_PYTHON" not in smoke_block
     assert "select_compatible_wheel" not in smoke_block
-    assert 'PATH="$smoke_venv/bin:$PATH"' not in smoke_block
-    assert '"$smoke_venv/bin/trtmc" build "$model_id"' in smoke_block
-    assert 'b"\\x7fELF"' in smoke_block
+    assert '"PATH"' not in smoke_block
+    assert 'trtmc,\n                "build"' in smoke_block
+    assert "InstalledWheelValidator.require_elf(trtmc)" in smoke_block
 
 
 def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> None:
-    text = (REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh").read_text()
+    text = _ci_source("e2e.py")
     zero_model_block = text.split(
-        'echo "No E2E models affected by this change -- skipping E2E tests"',
+        'print("No E2E models affected by this change -- skipping E2E tests")',
         maxsplit=1,
-    )[1].split("fi", maxsplit=1)[0]
-    assert "mkdir -p e2e_artifacts/artifacts" in zero_model_block
+    )[1].split("return", maxsplit=1)[0]
+    assert '"e2e_artifacts/artifacts"' in zero_model_block
+    assert "mkdir(parents=True, exist_ok=True)" in zero_model_block

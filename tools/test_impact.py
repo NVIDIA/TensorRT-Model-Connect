@@ -1671,7 +1671,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="e2e_runner_script",
             matcher=_path_in(
                 {
-                    "scripts/run_e2e_parallel.sh",
+                    "tools/ci/e2e_scheduler.py",
                     "scripts/schedule_e2e.py",
                     "scripts/hf_cache_download_worker.py",
                     "scripts/warm_hf_cache.py",
@@ -1679,6 +1679,13 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             ),
             resolver=_match_result("e2e_runner_script", _all_models, ["tools"]),
             covered_by=("TestNoImpact.test_e2e_runner_scripts_trigger_all_models",),
+        ),
+        ClassificationRule(
+            priority=401,
+            name="ci_orchestration",
+            matcher=_path_startswith("tools/ci/"),
+            resolver=_match_result("ci_orchestration", _all_models, ["tools"]),
+            covered_by=("TestNoImpact.test_ci_orchestration_triggers_all_models",),
         ),
         ClassificationRule(
             priority=405,
@@ -1967,7 +1974,7 @@ _EXPLICIT_TOOLS_TEST_TARGETS = {
     "scripts/reporting/vlm_assessment.py": (
         "tests/tools/test_generate_report.py",
     ),
-    "scripts/run_e2e_parallel.sh": (
+    "tools/ci/e2e_scheduler.py": (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_schedule_e2e.py",
     ),

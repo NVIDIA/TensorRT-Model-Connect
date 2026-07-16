@@ -132,8 +132,8 @@ def _make_repo(
     _write(repo, "tests/builder/test_checkpoint_mapper.py", "# unrelated test suite\n")
     _write(repo, "tests/builder/test_debug_runner.py", "# unrelated test suite\n")
     _write(repo, "tests/runtime_strategy_matrix.yaml", "strategies: []\n")
-    _write(repo, ".github/scripts/run-model-proof.sh", "#!/usr/bin/env bash\n")
-    os.chmod(repo / ".github/scripts/run-model-proof.sh", 0o755)
+    for source in sorted((REPO_ROOT / "tools/ci").glob("*.py")):
+        _write(repo, f"tools/ci/{source.name}", f"# projected CI module: {source.name}\n")
     _write(
         repo,
         ".github/scripts/write-model-proof-fallback-report.py",
@@ -251,9 +251,7 @@ def test_validate_rejects_multi_gpu_case_outside_multi_device_tier(tmp_path: Pat
     repo, _ = _make_repo(tmp_path)
     manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["build_args"] = {
-        "parallel": {"mode": "tensor_parallel", "tp_size": 4}
-    }
+    manifest["build_args"] = {"parallel": {"mode": "tensor_parallel", "tp_size": 4}}
     manifest["distributed_runtime"] = {"enabled": True, "world_size": 4}
     manifest["testcases"] = [{"name": "model_a-tp4", "ci_tier": "nightly_only"}]
     manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
@@ -318,9 +316,7 @@ def test_nightly_matrix_schedules_exclusive_then_shared_and_longest_first(
                 {"name": "model_d-slow", "ci_tier": "l0_only"},
             ]
         elif model in {"model_c", "model_f"}:
-            manifest["testcases"] = [
-                {"name": f"{model}-nightly", "ci_tier": "nightly_only"}
-            ]
+            manifest["testcases"] = [{"name": f"{model}-nightly", "ci_tier": "nightly_only"}]
         else:
             manifest["testcases"] = [{"name": f"{model}-case", "ci_tier": "l0_only"}]
         if model in {"model_d", "model_e", "model_f"}:
@@ -411,9 +407,7 @@ def test_impact_allows_head_to_migrate_legacy_multi_gpu_tier(tmp_path: Path) -> 
     repo, _ = _make_repo(tmp_path)
     manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["build_args"] = {
-        "parallel": {"mode": "tensor_parallel", "tp_size": 4}
-    }
+    manifest["build_args"] = {"parallel": {"mode": "tensor_parallel", "tp_size": 4}}
     manifest["distributed_runtime"] = {"enabled": True, "world_size": 4}
     manifest["testcases"] = [{"name": "model_a-tp4", "ci_tier": "nightly_only"}]
     manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
@@ -907,9 +901,7 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     assert not (output / "src/runtime/models/model_b").exists()
     assert not (output / "tests/e2e/models/model_b").exists()
     assert not (output / "tests/cpp/models/model_b").exists()
-    assert (
-        output / "tests/cpp/models/model_a/test_model_a.cpp"
-    ).is_file()
+    assert (output / "tests/cpp/models/model_a/test_model_a.cpp").is_file()
     assert (output / "src/runtime/core/core.cpp").is_file()
     assert (output / "python/tensorrt_model_connect/families/__init__.py").is_file()
     assert (output / "tests/__init__.py").is_file()
@@ -928,8 +920,8 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
     ):
         assert not (output / unrelated_path).exists()
     assert (output / "tests/runtime_strategy_matrix.yaml").is_file()
-    assert (output / ".github/scripts/run-model-proof.sh").is_file()
-    assert os.access(output / ".github/scripts/run-model-proof.sh", os.X_OK)
+    assert (output / "tools/ci/__main__.py").is_file()
+    assert (output / "tools/ci/model_proof.py").is_file()
     fallback = output / ".github/scripts/write-model-proof-fallback-report.py"
     assert fallback.is_file()
     assert not os.access(fallback, os.X_OK)
@@ -950,6 +942,9 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         "tools/task_eval.py",
         "tools/test_impact.py",
         "tools/tool_helpers.py",
+        "tools/ci/__init__.py",
+        "tools/ci/__main__.py",
+        "tools/ci/model_proof.py",
     ):
         assert (output / report_path).is_file()
     assert (output / "tests/task_eval/validation_suites.yaml").is_file()

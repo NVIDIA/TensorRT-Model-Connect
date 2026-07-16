@@ -49,7 +49,6 @@ MODEL_ROOT_PLATFORM_FILES = frozenset(
 PLATFORM_PROJECTION_EXACT = frozenset(
     {
         ".clang-format",
-        ".github/scripts/run-model-proof.sh",
         ".github/scripts/write-model-proof-fallback-report.py",
         "CMakeLists.txt",
         "Dockerfile",
@@ -104,6 +103,7 @@ PLATFORM_PROJECTION_PREFIXES = (
     "tests/e2e/",
     "tests/e2e_harness/",
     "third_party/",
+    "tools/ci/",
 )
 
 LEGAL_OR_DOC_EXACT = frozenset(

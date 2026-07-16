@@ -736,9 +736,9 @@ SHARED_VALIDATE_DIT_TOOL = REPO_ROOT / "tools" / "validate_dit.py"
 SHARED_GITHUB_CI_FILES = (
     REPO_ROOT / ".github" / "workflows" / "nightly.yml",
     REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml",
-    REPO_ROOT / ".github" / "scripts" / "run-gha-stage.sh",
-    REPO_ROOT / ".github" / "scripts" / "start-gha-container.sh",
-    REPO_ROOT / ".github" / "scripts" / "run-trtmc-ci.sh",
+    REPO_ROOT / "tools" / "ci" / "stage.py",
+    REPO_ROOT / "tools" / "ci" / "container.py",
+    REPO_ROOT / "tools" / "ci" / "pipeline.py",
 )
 DIFFUSION_VLM_SIMILARITY_TOOL = REPO_ROOT / "tools" / "evaluate_diffusion_vlm_similarity.py"
 MODEL_OWNED_DIFF_VL_HANDLERS = (
@@ -9392,8 +9392,6 @@ def test_lazy_family_packages_preserve_plugin_instance_api() -> None:
         if "_plugin = None" not in source:
             continue
         if guard not in source:
-            violations.append(
-                (init_path, 0, "lazy package does not preserve plugin instance")
-            )
+            violations.append((init_path, 0, "lazy package does not preserve plugin instance"))
 
     assert not violations, _format_violations(violations)

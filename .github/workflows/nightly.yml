@@ -195,7 +195,7 @@ jobs:
         run: python scripts/check_family_coverage.py
 
       - name: Check source quality
-        run: bash .github/scripts/run-trtmc-ci.sh source-quality
+        run: python3 -m tools.ci pipeline source-quality
 
   unit-tests:
     name: 3 / Source-only unit / C++ and Python
@@ -247,19 +247,19 @@ jobs:
         id: ci_image
         timeout-minutes: 90
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
-        run: bash .github/scripts/ensure-ci-docker-image.sh
+        run: python3 -m tools.ci image ensure
 
       - name: Start clean source-only unit container
         timeout-minutes: 5
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         env:
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
-        run: bash .github/scripts/start-gha-container.sh
+        run: python3 -m tools.ci container start
 
       - name: Run source-only unit tests
         timeout-minutes: 60
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
-        run: bash .github/scripts/run-gha-stage.sh premerge-unit
+        run: python3 -m tools.ci stage premerge-unit
 
       - name: Clean source-only unit container
         if: ${{ always() }}
@@ -323,14 +323,14 @@ jobs:
         id: ci_image
         timeout-minutes: 90
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
-        run: bash .github/scripts/ensure-ci-docker-image.sh
+        run: python3 -m tools.ci image ensure
 
       - name: Start cache-warm container
         timeout-minutes: 5
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         env:
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
-        run: bash .github/scripts/start-gha-container.sh
+        run: python3 -m tools.ci container start
 
       - name: Strictly warm every active single-GPU nightly model
         timeout-minutes: 120
@@ -339,7 +339,11 @@ jobs:
           docker exec \
             -w "$TRTMC_CI_WORKSPACE" \
             "$TRTMC_CI_CONTAINER_NAME" \
-            bash -lc 'env -u HF_HUB_OFFLINE python -u scripts/warm_hf_cache.py --exclude-ci-tier multi_device --strict --fail-fast --attempt-timeout-seconds 600'
+            env -u HF_HUB_OFFLINE python -u scripts/warm_hf_cache.py \
+              --exclude-ci-tier multi_device \
+              --strict \
+              --fail-fast \
+              --attempt-timeout-seconds 600
 
       - name: Clean cache-warm container
         if: ${{ always() }}
@@ -404,32 +408,32 @@ jobs:
         id: ci_image
         timeout-minutes: 90
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
-        run: bash .github/scripts/ensure-ci-docker-image.sh
+        run: python3 -m tools.ci image ensure
 
       - name: Start package container
         timeout-minutes: 5
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         env:
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
-        run: bash .github/scripts/start-gha-container.sh
+        run: python3 -m tools.ci container start
 
       - name: Build trtmc pip package
         id: package_build
         timeout-minutes: 60
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
-        run: bash .github/scripts/run-gha-stage.sh package
+        run: python3 -m tools.ci stage package
 
       - name: Python package coverage
         if: ${{ always() && steps.package_build.outcome == 'success' }}
         timeout-minutes: 60
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
-        run: bash .github/scripts/run-gha-stage.sh python-builder
+        run: python3 -m tools.ci stage python-builder
 
       - name: C++ platform coverage
         if: ${{ always() }}
         timeout-minutes: 60
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
-        run: bash .github/scripts/run-gha-stage.sh cpp-coverage
+        run: python3 -m tools.ci stage cpp-coverage
 
       - name: Upload trtmc pip package artifact
         if: ${{ always() && steps.package_build.outcome == 'success' }}
@@ -608,14 +612,14 @@ jobs:
         id: ci_image
         timeout-minutes: 90
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
-        run: bash .github/scripts/ensure-ci-docker-image.sh
+        run: python3 -m tools.ci image ensure
 
       - name: Start diffusion-assessment container
         timeout-minutes: 5
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         env:
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
-        run: bash .github/scripts/start-gha-container.sh
+        run: python3 -m tools.ci container start
 
       - name: Run diffusion VLM semantic gate
         timeout-minutes: 270

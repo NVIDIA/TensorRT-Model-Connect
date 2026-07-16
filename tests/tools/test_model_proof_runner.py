@@ -20,11 +20,17 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tools.ci.model_proof_selection import ModelProofSelector
+from tools.ci.context import CiContext
+from tools.ci.model_proof import ModelProofRequest, ModelReferenceCache
+from tools.ci.process import CiError
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RUNNER = REPO_ROOT / ".github" / "scripts" / "run-model-proof.sh"
+RUNNER = REPO_ROOT / "tools" / "ci" / "model_proof.py"
+RUNNER_COMMAND = [sys.executable, "-m", "tools.ci", "model-proof"]
 MODEL_CI = REPO_ROOT / "tools" / "model_ci.py"
-IMAGE_ENSURE = REPO_ROOT / ".github" / "scripts" / "ensure-ci-docker-image.sh"
+IMAGE_ENSURE = REPO_ROOT / "tools" / "ci" / "docker_image.py"
 PROOF_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "model-proof.yml"
 FALLBACK_WRITER = REPO_ROOT / ".github" / "scripts" / "write-model-proof-fallback-report.py"
 PLUGIN_CMAKE = REPO_ROOT / "cmake" / "trtmc_pipeline_plugins.cmake"
@@ -60,7 +66,7 @@ def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
         '      record="${FAKE_ORPHAN_CONTAINER_RECORD:-}"\n'
         "    fi\n"
         '    if [ -n "$record" ]; then\n'
-        '      printf \'%s\\n\' "$record"\n'
+        "      printf '%s\\n' \"$record\"\n"
         "    fi\n"
         "    exit 0\n"
         "    ;;\n"
@@ -155,8 +161,7 @@ def _fake_proof_environment(
 def _run_fake_proof(env: dict[str, str], output: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -238,20 +243,13 @@ def _write_sana_reference_config(path: Path) -> None:
     )
 
 
-def _prepare_reference_program() -> str:
-    text = RUNNER.read_text(encoding="utf-8")
-    function = text.split("prepare_private_model_reference_cache() {", maxsplit=1)[1]
-    function = (
-        "prepare_private_model_reference_cache() {"
-        + function.split("\n\nrun_host() {", maxsplit=1)[0]
-    )
-    return (
-        "set -euo pipefail\n"
-        'model="sana_wm"\n'
-        'die() { echo "ERROR: $*" >&2; exit 1; }\n'
-        f"{function}\n"
-        'prepare_private_model_reference_cache "$1" "$2" "$3" "$4"\n'
-    )
+def _sana_reference_contract() -> dict[str, str]:
+    return {
+        "repository": "https://github.com/NVlabs/Sana.git",
+        "revision": SANA_REFERENCE_REVISION,
+        "relative_path": SANA_REFERENCE_RELATIVE_PATH,
+        "entrypoint": SANA_REFERENCE_ENTRYPOINT,
+    }
 
 
 def _proof_gpu_ids(docker_log: Path) -> list[str]:
@@ -279,12 +277,6 @@ def _lock_is_busy(path: Path) -> bool:
             return True
         fcntl.flock(stream, fcntl.LOCK_UN)
     return False
-
-
-def _selection_program() -> str:
-    text = RUNNER.read_text(encoding="utf-8")
-    marker = "> \"$config_file\" <<'PY'\n"
-    return text.split(marker, maxsplit=1)[1].split("\nPY\n", maxsplit=1)[0]
 
 
 def _workflow_singleton_gate_program() -> str:
@@ -346,23 +338,18 @@ def _run_test_selection(
     ):
         env.pop(name, None)
     env.update(lease_env or {})
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            _selection_program(),
-            family,
-            suite,
-            revision,
-            str(source),
-            str(selection_path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=env,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
+    lease = None
+    if lease_env:
+        slots = [int(item) for item in lease_env["TRTMC_MODEL_PROOF_GPU_SLOT_IDS"].split(",")]
+        capacity = int(lease_env["TRTMC_MODEL_PROOF_SLOTS_PER_GPU"])
+        resource = lease_env["TRTMC_MODEL_PROOF_RESOURCE_CLASS"]
+        lease = {
+            "gpu_id": lease_env["TRTMC_MODEL_PROOF_GPU_ID"],
+            "gpu_slot_ids": slots,
+            "slots_per_gpu": capacity,
+            "resource_class": resource,
+        }
+    ModelProofSelector(family, suite, revision, source).select(selection_path, lease)
     return json.loads(selection_path.read_text(encoding="utf-8"))
 
 
@@ -431,7 +418,7 @@ def test_cmake_model_proof_rejects_the_wrong_runtime_model(tmp_path: Path) -> No
 
 def test_runner_rejects_an_unknown_suite_before_starting_docker() -> None:
     result = subprocess.run(
-        ["bash", str(RUNNER), "--model", "alpha", "--suite", "everything"],
+        [*RUNNER_COMMAND, "--model", "alpha", "--suite", "everything"],
         capture_output=True,
         text=True,
         check=False,
@@ -514,13 +501,14 @@ def test_sana_selection_declares_its_pinned_model_reference_cache(
 
 
 def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
-    runner = RUNNER.read_text(encoding="utf-8")
+    selector = (REPO_ROOT / "tools/ci/model_proof_selection.py").read_text(encoding="utf-8")
+    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
 
-    assert "for test in python_tests:" in runner
-    assert 'print(f"python_test={test.relative_to(root)}")' in runner
-    assert "sed -n 's/^python_test=//p'" in runner
-    assert 'python_tests+=("/src/$python_test")' in runner
-    assert 'find "$python_test_dir" -maxdepth 1' not in runner
+    assert '"python_tests": [' in selector
+    assert "for path in sorted(set(python_tests))" in selector
+    assert 'payload["python_tests"]' in inner
+    assert "self.source / path" in inner
+    assert 'glob("test_*.py")' in selector
 
 
 @pytest.mark.parametrize(
@@ -624,10 +612,7 @@ def test_flux_nightly_model_proof_reserves_an_exclusive_gpu(tmp_path: Path) -> N
     assert selection["gpu_resource_class"] == "exclusive_gpu"
     assert selection["gpu_slot_ids"] == [0, 1, 2, 3]
     assert selection["gpu_slot"] is None
-    assert {
-        case["name"]: case["gpu_resource_class"]
-        for case in selection["e2e_cases"]
-    } == {
+    assert {case["name"]: case["gpu_resource_class"] for case in selection["e2e_cases"]} == {
         "flux-2-dev": "exclusive_gpu",
         "flux-2-dev-fp8": "shared",
         "flux-schnell": "shared",
@@ -651,10 +636,7 @@ def test_llama_nightly_model_proof_reserves_an_exclusive_gpu(tmp_path: Path) -> 
     assert selection["gpu_resource_class"] == "exclusive_gpu"
     assert selection["gpu_slot_ids"] == [0, 1, 2, 3]
     assert selection["gpu_slot"] is None
-    assert {
-        case["name"]: case["gpu_resource_class"]
-        for case in selection["e2e_cases"]
-    } == {
+    assert {case["name"]: case["gpu_resource_class"] for case in selection["e2e_cases"]} == {
         "falcon3-1b": "exclusive_gpu",
         "minitron-4b-depth": "shared",
         "minitron-4b-width": "shared",
@@ -707,9 +689,7 @@ def test_nightly_inventory_exactly_matches_every_model_proof_selection(
     selected_cases_by_model = {}
     for model in inventory["affected_models"]:
         selection = _run_test_selection(tmp_path, model, "nightly")
-        selected_cases_by_model[model] = [
-            case["name"] for case in selection["e2e_cases"]
-        ]
+        selected_cases_by_model[model] = [case["name"] for case in selection["e2e_cases"]]
 
     assert inventory["expected_cases_by_model"] == selected_cases_by_model
     assert inventory["expected_result_count"] == sum(
@@ -719,48 +699,47 @@ def test_nightly_inventory_exactly_matches_every_model_proof_selection(
 
 def test_runner_declares_the_hermetic_container_boundary() -> None:
     text = RUNNER.read_text(encoding="utf-8")
-    warm = text.split("local -a cache_check_docker_args=(", maxsplit=1)[1].split(
-        "local -a docker_args=(", maxsplit=1
+    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
+    warm = text.split("def _prepare_hf_cache(", maxsplit=1)[1].split(
+        "def _validated_cache_evidence", maxsplit=1
     )[0]
-    proof = text.split("local -a docker_args=(", maxsplit=1)[1].split("set +e", maxsplit=1)[0]
+    proof = text.split("def _run_proof_container(", maxsplit=1)[1].split(
+        "def _proof_environment", maxsplit=1
+    )[0]
 
     for contract in (
-        "--read-only",
-        "--network none",
-        "--cap-drop ALL",
+        '"--read-only"',
+        '"--network"',
+        '"none"',
+        '"--cap-drop"',
+        '"ALL"',
         "dst=/src,readonly",
-        "TMPDIR=/work/tmp",
-        "TORCHINDUCTOR_CACHE_DIR=/work/torch-cache",
-        "TRTMC_MODEL_PLUGIN_STRICT=1",
-        "scratch build produced ${#built_dsos[@]} model DSOs; expected exactly one",
-        "staged plugin directory contains ${#staged_dsos[@]} model DSOs; expected exactly one",
-        "staged plugin DSO does not byte-match the scratch-built DSO",
-        "staged plugin DSO SHA-256 does not match the scratch-built DSO",
+        '"TMPDIR": "/work/tmp"',
+        '"TORCHINDUCTOR_CACHE_DIR": "/work/torch-cache"',
+        '"TRTMC_MODEL_PLUGIN_STRICT": "1"',
     ):
         assert contract in text
-    assert "--network none" in warm
+    assert "scratch build produced" in inner
+    assert "staged plugin DSO does not byte-match" in inner
+    assert '"--network"' in warm and '"none"' in warm
     assert "dst=/hf-cache/hub,readonly" in warm
     assert "dst=/hf-cache/modules" not in warm
-    assert "-e HF_HOME=/tmp/hf-home" in warm
-    assert "-e HF_MODULES_CACHE=/tmp/hf-modules" in warm
-    assert 'dst=/artifacts"' in warm
+    assert '"HF_HOME=/tmp/hf-home"' in warm
+    assert '"HF_MODULES_CACHE=/tmp/hf-modules"' in warm
+    assert "dst=/artifacts" in warm
     assert "dst=/artifacts,readonly" not in warm
     assert "-e HF_TOKEN" not in warm
     assert "-e HUGGING_FACE_HUB_TOKEN" not in warm
-    assert "--network none" in proof
-    assert "-e TMPDIR=/work/tmp" in proof
-    assert "-e TMPDIR=/work/tmp" not in warm
-    assert '--mount "type=bind,src=$hf_private_hub,dst=/hf-cache/hub"' in proof
-    assert "src=$hf_private_hub,dst=/hf-cache/hub,readonly" not in proof
+    assert '"--network"' in proof and '"none"' in proof
+    assert 'f"type=bind,src={private_hub},dst=/hf-cache/hub"' in proof
+    assert "src={private_hub},dst=/hf-cache/hub,readonly" not in proof
     assert "dst=/hf-cache/hub/$hf_repo_folder" not in text
-    assert "src=$hf_hub_cache,dst=/hf-cache/hub" not in proof
     assert "dst=/hf-cache/modules" not in proof
-    assert "-e HF_HOME=/work/hf-home" in proof
-    assert "-e HF_MODULES_CACHE=/work/hf-modules" in proof
-    assert "-e TRANSFORMERS_CACHE=/hf-cache/hub" in proof
-    assert "cp -a --reflink=always --no-preserve=ownership --" in text
-    assert "chmod -R u+rwX --" in text
-    assert "-e TRTMC_STORAGE_ROOT=/work/reference-private" in proof
+    assert '"HF_HOME": "/work/hf-home"' in text
+    assert '"HF_MODULES_CACHE": "/work/hf-modules"' in text
+    assert '"TRANSFORMERS_CACHE": "/hf-cache/hub"' in text
+    assert '"--reflink=always"' in text
+    assert '"TRTMC_STORAGE_ROOT"] = "/work/reference-private"' in text
     assert "TRTMC_MODEL_REFERENCE_CACHE_ROOT" not in proof
     assert "src=$reference_cache_root" not in proof
     assert "src=$reference_source" not in proof
@@ -770,26 +749,27 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
 
 def test_runner_warms_the_exact_shared_selection_before_the_proof() -> None:
     text = RUNNER.read_text(encoding="utf-8")
-    host = text.split("run_host() {", maxsplit=1)[1]
-    warm = host.split("local -a cache_check_docker_args=(", maxsplit=1)[1].split(
-        "local -a docker_args=(", maxsplit=1
+    host = text.split("def _run_host(self)", maxsplit=1)[1]
+    warm = host.split("def _prepare_hf_cache(", maxsplit=1)[1].split(
+        "def _validated_cache_evidence", maxsplit=1
     )[0]
 
-    assert host.count("write_model_proof_selection") == 1
-    assert "sed -n 's/^e2e_model=//p' \"$host_config_file\"" in host
+    assert host.count("ModelProofSelector(") == 1
+    assert "selection.e2e_models" in host
     assert "cache-check-models.txt" in warm
     assert "scripts/warm_hf_cache.py" in warm
-    assert "--models-file /artifacts/cache-check-models.txt --local-only --strict" in warm
-    assert "--emit-cache-repos /artifacts/hf-cache-repos.json" in warm
-    assert host.index("scripts/warm_hf_cache.py") < host.index("local -a docker_args=(")
-    assert 'die "offline HF cache readiness check failed' in warm
+    assert '"--models-file"' in warm and '"/artifacts/cache-check-models.txt"' in warm
+    assert '"--local-only"' in warm and '"--strict"' in warm
+    assert '"--emit-cache-repos"' in warm and '"/artifacts/hf-cache-repos.json"' in warm
+    assert host.index("_prepare_hf_cache") < host.index("_run_proof_container")
+    assert "offline HF cache readiness check failed" in warm
 
 
 def test_runner_keeps_local_fallback_and_workflow_uses_runner_cache_paths() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "${HF_HOME:-$HOME/.cache/huggingface}" in runner
+    assert 'self.context.env.get("HF_HOME", str(Path.home() / ".cache/huggingface"))' in runner
     assert "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || " in workflow
     assert "TRTMC_HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || " in workflow
     assert "format('{0}/hub', vars.TRTMC_HF_HOME || " in workflow
@@ -798,7 +778,7 @@ def test_runner_keeps_local_fallback_and_workflow_uses_runner_cache_paths() -> N
         in workflow
     )
     assert "TRTMC_HF_MODULES_CACHE:" not in workflow
-    assert "${TRTMC_HF_HUB_CACHE:-$hf_cache_root/hub}" in runner
+    assert 'self.context.env.get("TRTMC_HF_HUB_CACHE"' in runner
     assert "TRTMC_HF_MODULES_CACHE" not in runner
 
 
@@ -817,28 +797,20 @@ def test_hf_token_is_not_exposed_to_pull_request_model_proof_code() -> None:
 
 def test_runner_removes_only_its_container_without_masking_exit_status() -> None:
     text = RUNNER.read_text(encoding="utf-8")
-    cleanup = text.split("cleanup_proof_container() {", maxsplit=1)[1].split("\n}\n", maxsplit=1)[0]
+    cleanup = text.split("def _cleanup(self)", maxsplit=1)[1].split("def _signal", maxsplit=1)[0]
 
-    assert 'local rc="$1"' in cleanup
-    assert "trap - EXIT" in cleanup
-    assert "trap '' INT TERM" in cleanup
-    assert 'docker rm -f "$proof_container_name"' in cleanup
-    assert cleanup.index('docker rm -f "$proof_container_name"') < cleanup.index(
-        "release_proof_gpu_lease"
-    )
-    assert 'exit "$rc"' in cleanup
-    assert "artifacts" not in cleanup
-    assert 'proof_container_name="$container_name"' in text
-    assert "trap 'cleanup_proof_container \"$?\"' EXIT" in text
-    assert "trap 'cleanup_proof_container 130' INT" in text
-    assert "trap 'cleanup_proof_container 143' TERM" in text
+    assert '["docker", "rm", "-f", self.container_name]' in cleanup
+    assert cleanup.index('["docker", "rm"') < cleanup.index("self.lease.release()")
+    assert "self.lease.release()" in cleanup
+    assert "for number in (signal.SIGINT, signal.SIGTERM)" in text
+    assert "raise SystemExit(130 if number == signal.SIGINT else 143)" in text
 
 
 def test_workflow_reconciles_exact_job_containers_after_a_cancelled_proof() -> None:
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    reconciliation = workflow.split(
-        "- name: Reconcile model proof containers", maxsplit=1
-    )[1].split("- name: Finalize model proof fallback", maxsplit=1)[0]
+    reconciliation = workflow.split("- name: Reconcile model proof containers", maxsplit=1)[
+        1
+    ].split("- name: Finalize model proof fallback", maxsplit=1)[0]
 
     assert "if: ${{ always() && steps.checkout.outcome == 'success' }}" in reconciliation
     assert "--cleanup-containers" in reconciliation
@@ -886,7 +858,7 @@ def test_cleanup_mode_removes_only_exact_labeled_job_containers(tmp_path: Path) 
         'case "${1:-}" in\n'
         "  ps)\n"
         '    if [ -e "$FAKE_CONTAINER_STATE" ]; then\n'
-        f'      printf \'%s\\n\' "{container_id} 4242 3 convbert"\n'
+        f"      printf '%s\\n' \"{container_id} 4242 3 convbert\"\n"
         "    fi\n"
         "    ;;\n"
         "  rm)\n"
@@ -915,8 +887,7 @@ def test_cleanup_mode_removes_only_exact_labeled_job_containers(tmp_path: Path) 
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--cleanup-containers",
             "--model",
             "convbert",
@@ -1077,16 +1048,19 @@ def test_orphan_reclamation_rejects_a_failed_remove_when_full_id_remains(
 
 
 def test_model_proof_serializes_image_setup_and_uses_the_verified_image_id() -> None:
-    ensure = IMAGE_ENSURE.read_text(encoding="utf-8")
+    ensure = IMAGE_ENSURE.read_text(encoding="utf-8") + (
+        REPO_ROOT / "tools/ci/process.py"
+    ).read_text(encoding="utf-8")
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
 
     for contract in (
         "TRTMC_CI_IMAGE_LOCK_FILE",
-        'flock -w "$lock_timeout" 9',
-        "docker image inspect --format '{{.Id}}'",
-        'printf \'image_ref=%s\\n\' "$resolved_ref" >> "$GITHUB_OUTPUT"',
-        'mkdir -p "$(dirname "$GITHUB_OUTPUT")"',
-        "verification_stamp",
+        "class WorkflowImageLock",
+        "fcntl.flock",
+        '"{{.Id}}"',
+        'self.github.output("image_ref", image_id)',
+        "path.parent.mkdir(parents=True, exist_ok=True)",
+        "_verification_stamp",
     ):
         assert contract in ensure
     assert "id: ci_image" in workflow
@@ -1103,10 +1077,7 @@ def test_model_proof_job_budget_reserves_singleton_finalization() -> None:
         "- name: Finalize model proof fallback", maxsplit=1
     )[0]
 
-    assert (
-        "timeout-minutes: ${{ inputs.suite == 'nightly' && 480 || 300 }}"
-        in job_configuration
-    )
+    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 480 || 300 }}" in job_configuration
     assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 360 || 150 }}" in proof
     assert "inputs.suite == 'nightly' && '5400' || '3600'" in job_configuration
     assert "inputs.suite == 'nightly' && '600' || '360'" in job_configuration
@@ -1117,12 +1088,14 @@ def test_model_proof_job_budget_reserves_singleton_finalization() -> None:
     nightly_proof_minutes = 360
     finalization_margin_minutes = 30
     lease_minutes = 5400 // 60
-    sana_build_minutes = json.loads(
-        (
-            REPO_ROOT
-            / "tests/e2e/models/sana_wm/manifests/sana-wm-bidirectional.json"
-        ).read_text(encoding="utf-8")
-    )["build_timeout_s"] // 60
+    sana_build_minutes = (
+        json.loads(
+            (REPO_ROOT / "tests/e2e/models/sana_wm/manifests/sana-wm-bidirectional.json").read_text(
+                encoding="utf-8"
+            )
+        )["build_timeout_s"]
+        // 60
+    )
     e2e_and_report_margin_minutes = 150
     assert nightly_proof_minutes >= (
         lease_minutes + sana_build_minutes + e2e_and_report_margin_minutes
@@ -1289,8 +1262,8 @@ def test_model_proof_resolves_durable_workspace_after_runner_assignment() -> Non
     assert 'printf \'%s\\n\' "$proof_rc" > "$MODEL_PROOF_OUTPUT_DIR/proof-exit-code.txt"' in proof
     assert "GITHUB_OUTPUT" not in proof
     assert "steps.proof.outputs.exit_code" not in finalize
-    assert 'proof_exit_code=1' in finalize
-    assert 'proof-exit-code.txt' in finalize
+    assert "proof_exit_code=1" in finalize
+    assert "proof-exit-code.txt" in finalize
     assert '--exit-code "$proof_exit_code"' in finalize
 
 
@@ -1338,30 +1311,31 @@ def test_model_proof_uploads_before_singleton_gate_and_cleanup() -> None:
 
 def test_model_proof_always_generates_a_strict_self_contained_html_report() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
+    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
 
     for contract in (
-        "trap 'finalize_model_report \"$?\"' EXIT",
-        "/src/scripts/generate_e2e_report.py",
-        "--artifacts-dir /artifacts/e2e",
-        "--output /artifacts/model-proof-report.html",
-        "--project-dir /src",
-        "--proof-status /artifacts/model-proof-status.json",
-        "--proof-json /artifacts/proof.json",
-        "--selection-json /artifacts/selection.json",
-        "--strict-evidence",
-        "--max-embed-bytes 33554432",
-        "--junitxml=/artifacts/e2e/junit.xml",
-        "generate_host_fallback_report",
-        'proof_artifacts_dir="$artifacts_dir"',
-        'die "model proof did not emit model-proof-report.html"',
+        "report_rc = self._finalize_report(validation_rc)",
+        'self.source / "scripts/generate_e2e_report.py"',
+        '"--artifacts-dir"',
+        'self.artifacts / "e2e"',
+        'self.artifacts / "model-proof-report.html"',
+        '"--project-dir"',
+        "self.source",
+        'self.artifacts / "model-proof-status.json"',
+        'self.artifacts / "proof.json"',
+        'self.artifacts / "selection.json"',
+        '"--strict-evidence"',
+        '"--max-embed-bytes"',
+        '"33554432"',
+        "f\"--junitxml={self.artifacts / 'e2e/junit.xml'}\"",
     ):
-        assert contract in runner
+        assert contract in inner
 
-    assert 'if [ "$validation_rc" -eq 0 ] && [ "$report_rc" -ne 0 ]; then' in runner
-    assert 'exit "$validation_rc"' in runner
-    assert 'payload["validation_exit_code"] = rc' in runner
-    assert 'payload["report_exit_code"] = report_rc' in runner
+    assert "self._fallback_report()" in runner
+    assert 'raise CiError(f"model proof did not emit {name}")' in runner
+    assert 'self.payload["validation_exit_code"] = returncode' in inner
+    assert 'self.payload["report_exit_code"] = report_rc' in inner
     assert "Upload isolated model proof artifact" in workflow
     assert "Bootstrap model HTML before checkout" in workflow
     assert "Finalize model proof fallback" in workflow
@@ -1390,34 +1364,37 @@ def test_model_proof_fallback_step_has_valid_shell_heredocs() -> None:
 
 
 def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None:
-    runner = RUNNER.read_text(encoding="utf-8")
+    runner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
 
     for contract in (
-        "TRTMC_ENGINE_BUILD_GUARD_DIR=/artifacts/engine-builds",
-        'TRTMC_ENGINE_BUILD_REVISION="$revision"',
-        "model_plugin_isolation.py verify-builds",
-        "--ledger-dir /artifacts/engine-builds",
-        '--source-revision "$revision"',
-        "--report /artifacts/engine-build-verification.json",
-        "update_proof_step engine_build_budget passed",
-        '"engine_builds_per_model": build_verification["builds_per_model"]',
-        '"engine_build_count": len(build_verification["records"])',
+        '"TRTMC_ENGINE_BUILD_GUARD_DIR": str(self.artifacts / "engine-builds")',
+        '"TRTMC_ENGINE_BUILD_REVISION": self.request.revision',
+        '"verify-builds"',
+        '"--ledger-dir"',
+        'self.artifacts / "engine-builds"',
+        '"--source-revision"',
+        "self.request.revision",
+        'self.artifacts / "engine-build-verification.json"',
+        'self.status.step("engine_build_budget", "passed")',
+        '"engine_builds_per_model": verification["builds_per_model"]',
+        '"engine_build_count": len(verification["records"])',
     ):
         assert contract in runner
 
-    assert runner.index("model_plugin_isolation.py verify-results") < runner.index(
-        "model_plugin_isolation.py verify-builds"
+    assert runner.index('"verify-results"') < runner.index('"verify-builds"')
+    assert runner.index('"verify-results"') < runner.index(
+        'self.status.step("e2e_reference", "passed")'
     )
-    assert runner.index("model_plugin_isolation.py verify-results") < runner.index(
-        'update_proof_step e2e_reference passed'
-    )
-    assert '"$py" -m pytest "$e2e_test" -v -rs' in runner
+    assert "self._python()" in runner
+    assert '"pytest"' in runner
+    assert 'self.source / str(payload["e2e_test"])' in runner
 
 
 def test_model_proof_report_assets_are_inside_the_positive_projection() -> None:
     model_ci = (REPO_ROOT / "tools" / "model_ci.py").read_text(encoding="utf-8")
 
-    assert '"scripts/",' in model_ci
+    assert '"scripts/generate_e2e_report.py"' in model_ci
+    assert '"tools/ci/",' in model_ci
     for path in (
         REPO_ROOT / "scripts" / "generate_e2e_report.py",
         REPO_ROOT / "scripts" / "generate_e2e_report_assets" / "e2e_report.css",
@@ -1480,8 +1457,7 @@ def test_host_projection_failure_preserves_error_and_html(tmp_path: Path) -> Non
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "model-that-does-not-exist",
             "--revision",
@@ -1534,8 +1510,7 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -1569,59 +1544,62 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
 
 def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -> None:
     text = RUNNER.read_text(encoding="utf-8")
-    host = text.split("run_host() {", maxsplit=1)[1]
-    cache_check = host.split("local -a cache_check_docker_args=(", maxsplit=1)[1].split(
-        "set +e", maxsplit=1
+    host = text.split("def _prepare_hf_cache(", maxsplit=1)[1]
+    cache_check = host.split("result = self._run_logged", maxsplit=1)[0]
+    proof = text.split("def _run_proof_container(", maxsplit=1)[1].split(
+        "def _proof_environment", maxsplit=1
     )[0]
-    proof = host.split("local -a docker_args=(", maxsplit=1)[1].split("set +e", maxsplit=1)[0]
 
-    assert '[ -d "$hf_hub_cache" ]' not in host
+    assert "hub.is_dir()" not in cache_check
     assert "HF Hub cache directory does not exist" not in host
-    assert '[ "$hf_hub_cache" != "/" ]' in host
+    assert 'hub in {Path("/"), self.context.repository}' in host
     assert "hf_modules_cache" not in host
-    assert '--mount "type=bind,src=$hf_hub_cache,dst=/hf-cache/hub,readonly"' in cache_check
+    assert 'f"type=bind,src={hub},dst=/hf-cache/hub,readonly"' in cache_check
     assert "dst=/hf-cache/modules" not in cache_check
-    assert '--mount "type=bind,src=$hf_private_hub,dst=/hf-cache/hub"' in proof
-    assert "src=$hf_private_hub,dst=/hf-cache/hub,readonly" not in proof
+    assert 'f"type=bind,src={private_hub},dst=/hf-cache/hub"' in proof
+    assert "src={private_hub},dst=/hf-cache/hub,readonly" not in proof
     assert "hf_repo_mount_args" not in host
-    assert "src=$hf_hub_cache,dst=/hf-cache/hub" not in proof
+    assert "src={hub},dst=/hf-cache/hub" not in proof
     assert "dst=/hf-cache/modules" not in proof
-    assert "cp -a --reflink=always --no-preserve=ownership --" in host
+    assert '"--reflink=always"' in text
 
 
 def test_selected_hf_cache_reflink_helper_has_a_minimal_mount_and_capability_boundary() -> None:
     text = RUNNER.read_text(encoding="utf-8")
-    helper = text.split("local -a cache_copy_docker_args=(", maxsplit=1)[1].split(
-        "select_proof_gpu", maxsplit=1
-    )[0]
+    helper = text.split("copy = [", maxsplit=1)[1].split("if self.context.run(copy", maxsplit=1)[0]
 
     for contract in (
-        "--read-only",
-        "--network none",
-        "--cap-drop ALL",
-        "--cap-add DAC_OVERRIDE",
-        "--cap-add CHOWN",
-        "--security-opt no-new-privileges",
-        "--pids-limit 32",
-        "--user 0:0",
-        "type=bind,src=$hf_repo_source,dst=/selected-hf-repo,readonly",
-        "type=bind,src=$hf_repo_destination,dst=/private-hf-repo",
-        "--entrypoint /bin/bash",
-        "cp -a --reflink=always --no-preserve=ownership --",
-        'chown -hR -- "$runner_owner" /private-hf-repo',
+        '"--read-only"',
+        '"--network"',
+        '"none"',
+        '"--cap-drop"',
+        '"ALL"',
+        '"--cap-add"',
+        '"DAC_OVERRIDE"',
+        '"CHOWN"',
+        '"--security-opt"',
+        '"no-new-privileges"',
+        '"--pids-limit"',
+        '"32"',
+        '"--user"',
+        '"0:0"',
+        "dst=/selected-hf-repo,readonly",
+        "dst=/private-hf-repo",
+        '"--entrypoint"',
+        '"/usr/bin/python3"',
     ):
         assert contract in helper
-    assert helper.count("--cap-add") == 2
+    assert helper.count('"--cap-add"') == 2
     assert "dst=/selected-hf-repo,readonly" in helper
     assert "dst=/private-hf-repo,readonly" not in helper
-    assert "src=$hf_hub_cache" not in helper
-    assert "src=$hf_private_hub" not in helper
-    assert "src=$projection_dir" not in helper
-    assert "src=$artifacts_dir" not in helper
+    assert "src={hub}" not in helper
+    assert "src={private_hub}" not in helper
+    assert "src={projection}" not in helper
+    assert "src={self.artifacts_dir}" not in helper
     assert "--gpus" not in helper
     assert "HF_TOKEN" not in helper
     assert "/var/run/docker.sock" not in helper
-    assert "if ! cp -a" not in helper
+    assert "CACHE_COPY_PROGRAM" in helper
 
 
 def test_sana_reference_cache_is_copied_to_selected_private_view(
@@ -1646,25 +1624,9 @@ def test_sana_reference_cache_is_copied_to_selected_private_view(
         }
     )
 
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            _prepare_reference_program(),
-            "--",
-            str(config),
-            str(work_dir),
-            str(artifacts),
-            str(REPO_ROOT),
-        ],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+    ModelReferenceCache(CiContext(REPO_ROOT, env), ModelProofRequest("sana_wm")).prepare(
+        _sana_reference_contract(), work_dir, artifacts
     )
-
-    assert result.returncode == 0, result.stdout + result.stderr
     private_root = work_dir / "reference-private"
     private_reference = private_root / SANA_REFERENCE_RELATIVE_PATH
     assert (private_reference / SANA_REFERENCE_ENTRYPOINT).is_file()
@@ -1703,26 +1665,10 @@ def test_sana_reference_cache_missing_checkout_fails_before_docker(
     env = os.environ.copy()
     env["TRTMC_MODEL_REFERENCE_CACHE_ROOT"] = str(cache_root)
 
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            _prepare_reference_program(),
-            "--",
-            str(config),
-            str(work_dir),
-            str(artifacts),
-            str(REPO_ROOT),
-        ],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert "selected model reference cache is unavailable" in result.stderr
+    with pytest.raises(CiError, match="selected model reference cache is unavailable"):
+        ModelReferenceCache(CiContext(REPO_ROOT, env), ModelProofRequest("sana_wm")).prepare(
+            _sana_reference_contract(), work_dir, artifacts
+        )
 
 
 def test_sana_reference_cache_wrong_revision_fails_before_docker(
@@ -1748,29 +1694,16 @@ def test_sana_reference_cache_wrong_revision_fails_before_docker(
         }
     )
 
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            _prepare_reference_program(),
-            "--",
-            str(config),
-            str(work_dir),
-            str(artifacts),
-            str(REPO_ROOT),
-        ],
-        cwd=REPO_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode != 0
-    assert (
-        "selected model reference cache revision mismatch: "
-        f"expected {SANA_REFERENCE_REVISION}, found {wrong_revision}"
-    ) in result.stderr
+    with pytest.raises(
+        CiError,
+        match=(
+            "selected model reference cache revision mismatch: "
+            f"expected {SANA_REFERENCE_REVISION}, found {wrong_revision}"
+        ),
+    ):
+        ModelReferenceCache(CiContext(REPO_ROOT, env), ModelProofRequest("sana_wm")).prepare(
+            _sana_reference_contract(), work_dir, artifacts
+        )
 
 
 def test_distinct_explicit_hf_cache_paths_reach_both_containers(
@@ -1794,8 +1727,7 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -1864,8 +1796,7 @@ def test_selected_hf_cache_with_unreadable_file_is_delegated_to_root_helper(
     try:
         result = subprocess.run(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 "convbert",
                 "--revision",
@@ -1913,8 +1844,7 @@ def test_selected_hf_cache_fails_closed_when_reflink_is_unavailable(
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -1932,7 +1862,7 @@ def test_selected_hf_cache_fails_closed_when_reflink_is_unavailable(
     assert result.returncode != 0
     assert "selected Hugging Face cache repository could not be reflinked" in result.stderr
     docker_text = docker_log.read_text(encoding="utf-8")
-    assert "cp -a --reflink=always --no-preserve=ownership --" in docker_text
+    assert '"cp", "-a", "--reflink=always", "--no-preserve=ownership"' in docker_text
     docker_runs = [line for line in docker_text.splitlines() if line.startswith("run ")]
     assert len(docker_runs) == 2
     assert "warm_hf_cache.py" in docker_runs[0]
@@ -1952,8 +1882,7 @@ def test_selected_hf_cache_evidence_rejects_path_escape_before_proof(
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -2009,8 +1938,7 @@ def test_docker_bind_mount_fails_closed_when_host_cache_source_is_absent(
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -2052,8 +1980,7 @@ def test_explicit_runner_gpu_id_still_acquires_a_slot_lease(tmp_path: Path) -> N
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -2108,8 +2035,7 @@ def test_explicit_runner_gpu_id_cannot_bypass_a_busy_slot(tmp_path: Path) -> Non
         fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         result = subprocess.run(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 "convbert",
                 "--revision",
@@ -2153,8 +2079,7 @@ def test_model_proof_cannot_bypass_an_exclusive_whole_machine_lock(
         fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         result = subprocess.run(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 "convbert",
                 "--revision",
@@ -2183,8 +2108,7 @@ def test_explicit_runner_gpu_must_be_in_the_configured_allowlist(tmp_path: Path)
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -2226,8 +2150,7 @@ def test_four_shared_proofs_use_unique_slots_on_one_gpu(
         )
         process = subprocess.Popen(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 "convbert",
                 "--revision",
@@ -2292,8 +2215,7 @@ def test_shared_slot_allocator_spreads_across_gpus_before_using_second_slots(
         )
         process = subprocess.Popen(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 "convbert",
                 "--revision",
@@ -2340,8 +2262,7 @@ def test_automatic_gpu_lease_rejects_invalid_id_configuration(
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -2406,8 +2327,7 @@ def test_gpu_lease_rejects_invalid_numeric_configuration(
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -2437,8 +2357,7 @@ def test_expected_resource_class_must_match_projected_e2e_manifest(
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -2482,8 +2401,7 @@ def test_fifth_shared_proof_times_out_when_all_four_slots_are_busy(
             fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         result = subprocess.run(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 "convbert",
                 "--revision",
@@ -2534,8 +2452,7 @@ def test_poll_interval_cannot_sleep_past_the_lease_timeout(tmp_path: Path) -> No
         fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         process = subprocess.Popen(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 "convbert",
                 "--revision",
@@ -2598,15 +2515,12 @@ def test_gpu_admission_queue_prunes_a_stale_ticket(tmp_path: Path) -> None:
     lock_dir.mkdir()
     stale_ticket = lock_dir / "admission-global-00000000000000000001.lock"
     stale_ticket.write_text("pid=999999 model=stale\n", encoding="utf-8")
-    stale_handoff = (
-        lock_dir / "admission-global-00000000000000000000.lock.handoff.999999"
-    )
+    stale_handoff = lock_dir / "admission-global-00000000000000000000.lock.handoff.999999"
     stale_handoff.write_text("pid=999999 model=stale-handoff\n", encoding="utf-8")
 
     result = subprocess.run(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -2648,8 +2562,7 @@ def test_gpu_allocator_mutex_contention_obeys_lease_timeout(
         fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         process = subprocess.Popen(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 "convbert",
                 "--revision",
@@ -2709,8 +2622,7 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
     )
     first = subprocess.Popen(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             "convbert",
             "--revision",
@@ -2752,8 +2664,7 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
 
         exclusive = subprocess.Popen(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 "flux",
                 "--revision",
@@ -2791,8 +2702,7 @@ def test_exclusive_gpu_reservation_drains_existing_shared_and_blocks_new_shared(
         )
         blocked = subprocess.run(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 "convbert",
                 "--revision",
@@ -2865,8 +2775,7 @@ def test_oldest_exclusive_waiter_takes_the_first_idle_gpu(
             env["TRTMC_GPU_ID"] = explicit_gpu
         process = subprocess.Popen(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 model,
                 "--revision",
@@ -3011,8 +2920,7 @@ def test_gpu_admission_ticket_queue_prevents_younger_requests_overtaking_shared_
         env["FAKE_PROOF_RELEASE_FILE"] = str(release_file)
         process = subprocess.Popen(
             [
-                "bash",
-                str(RUNNER),
+                *RUNNER_COMMAND,
                 "--model",
                 model,
                 "--revision",
@@ -3172,8 +3080,7 @@ def _start_proof_case(
     env["FAKE_PROOF_RELEASE_FILE"] = str(release_file)
     process = subprocess.Popen(
         [
-            "bash",
-            str(RUNNER),
+            *RUNNER_COMMAND,
             "--model",
             model,
             "--revision",
@@ -3506,40 +3413,43 @@ def _proof_gpu_ids_if_present(docker_log: Path) -> list[str]:
 
 def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     text = RUNNER.read_text(encoding="utf-8")
+    allocator = (REPO_ROOT / "tools/ci/gpu_lease.py").read_text(encoding="utf-8")
+    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
-    host = text.split("run_host() {", maxsplit=1)[1]
-    warm = host.split("local -a cache_check_docker_args=(", maxsplit=1)[1].split(
-        "local -a docker_args=(", maxsplit=1
+    host = text.split("def _run_host(self)", maxsplit=1)[1]
+    warm = text.split("def _prepare_hf_cache(", maxsplit=1)[1].split(
+        "def _validated_cache_evidence", maxsplit=1
     )[0]
-    proof = host.split("local -a docker_args=(", maxsplit=1)[1].split("set +e", maxsplit=1)[0]
+    proof = text.split("def _run_proof_container(", maxsplit=1)[1].split(
+        "def _proof_environment", maxsplit=1
+    )[0]
 
-    assert host.index("warm_hf_cache.py") < host.index("select_proof_gpu")
+    assert host.index("_prepare_hf_cache") < host.index("GpuLease(")
     assert "--gpus" not in warm
     assert "TRTMC_MODEL_PROOF_GPU_ID" not in warm
-    assert '--gpus "device=$gpu_id"' in proof
-    assert '-e "TRTMC_MODEL_PROOF_GPU_ID=$gpu_id"' in proof
-    assert '-e "TRTMC_MODEL_PROOF_GPU_SLOT_IDS=$gpu_slot_ids"' in proof
-    assert '-e "TRTMC_MODEL_PROOF_SLOTS_PER_GPU=$proof_gpu_slots_per_gpu"' in proof
-    assert '-e "TRTMC_MODEL_PROOF_RESOURCE_CLASS=$proof_gpu_resource_class"' in proof
-    assert "TRTMC_MODEL_PROOF_SLOTS_PER_GPU:-4" in text
-    assert "gpu-$gpu_id-slot-$slot.lock" in text
-    assert "gpu-$gpu_id-reservation.lock" in text
-    assert "TRTMC_GPU_ID must be present in TRTMC_MODEL_PROOF_GPU_IDS" in text
-    assert '"gpu_id": gpu_id' in text
-    assert '"gpu_slot": gpu_slots[0] if resource_class == "shared" else None' in text
-    assert '"gpu_slots": gpu_slots' in text
-    assert '"gpu_slot_ids": gpu_slots' in text
-    assert '"slots_per_gpu": int(slots_per_gpu_text)' in text
-    assert '"gpu_slots_per_device": int(slots_per_gpu_text)' in text
-    assert '"resource_class": resource_class' in text
-    assert '"gpu_resource_class": resource_class' in text
-    assert '"gpu_lease_evidence": "gpu-lease.json"' in text
+    assert '"--gpus"' in proof and 'f"device={self.lease.gpu_id}"' in proof
+    assert '"TRTMC_MODEL_PROOF_GPU_ID": str(self.lease.gpu_id)' in text
+    assert '"TRTMC_MODEL_PROOF_GPU_SLOT_IDS": slots' in text
+    assert '"TRTMC_MODEL_PROOF_SLOTS_PER_GPU": str(self.lease.slots_per_gpu)' in text
+    assert '"TRTMC_MODEL_PROOF_RESOURCE_CLASS": self.lease.resource_class' in text
+    assert '"TRTMC_MODEL_PROOF_SLOTS_PER_GPU"' in allocator and '"4"' in allocator
+    assert 'f"gpu-{gpu}-slot-{slot}.lock"' in allocator
+    assert 'f"gpu-{gpu}-reservation.lock"' in allocator
+    assert "TRTMC_GPU_ID must be present in TRTMC_MODEL_PROOF_GPU_IDS" in allocator
+    assert '"gpu_id": str(self.gpu_id)' in allocator
+    assert '"gpu_slot": self.slot_ids[0] if self.resource_class == "shared" else None' in allocator
+    assert '"gpu_slots": self.slot_ids' in allocator
+    assert '"gpu_slot_ids": self.slot_ids' in allocator
+    assert '"slots_per_gpu": self.slots_per_gpu' in allocator
+    assert '"gpu_slots_per_device": self.slots_per_gpu' in allocator
+    assert '"resource_class": self.resource_class' in allocator
+    assert '"gpu_resource_class": self.resource_class' in allocator
+    assert '"gpu_lease_evidence": "gpu-lease.json"' in inner
     assert (
         "TRTMC_MODEL_PROOF_GPU_IDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_IDS || '0,1,2,3' }}" in workflow
     )
     assert (
         "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: "
         "${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || "
-        "(inputs.suite == 'nightly' && '5400' || '3600') }}"
-        in workflow
+        "(inputs.suite == 'nightly' && '5400' || '3600') }}" in workflow
     )

@@ -964,8 +964,7 @@ class TestFamilyPlugin:
     def test_family_resource(self, imap, relative_path):
         """Every resource under a public family folder belongs only to that family."""
         match = test_impact.classify_file(
-            "python/tensorrt_model_connect/families/decoder_family/"
-            + relative_path,
+            "python/tensorrt_model_connect/families/decoder_family/" + relative_path,
             imap,
         )
 
@@ -1365,7 +1364,7 @@ class TestNoImpact:
     @pytest.mark.parametrize(
         "path",
         [
-            "scripts/run_e2e_parallel.sh",
+            "tools/ci/e2e_scheduler.py",
             "scripts/schedule_e2e.py",
             "scripts/hf_cache_download_worker.py",
             "scripts/warm_hf_cache.py",
@@ -1375,6 +1374,13 @@ class TestNoImpact:
         """E2E runner changes must not skip E2E validation."""
         match = test_impact.classify_file(path, imap)
         assert match.rule == "e2e_runner_script"
+        assert match.models == imap.all_model_names
+        assert match.unit_tiers == ["tools"]
+
+    def test_ci_orchestration_triggers_all_models(self, imap):
+        """CI orchestration changes must validate every model-facing path."""
+        match = test_impact.classify_file("tools/ci/pipeline.py", imap)
+        assert match.rule == "ci_orchestration"
         assert match.models == imap.all_model_names
         assert match.unit_tiers == ["tools"]
 
@@ -1541,10 +1547,7 @@ class TestE2EDataFiles:
 
     def test_declared_model_asset_maps_to_declaring_model(self, mock_repo):
         """Explicit model_assets entries select only the declaring model."""
-        manifest = (
-            mock_repo
-            / "tests/e2e/models/decoder_family/manifests/decoder-assets.json"
-        )
+        manifest = mock_repo / "tests/e2e/models/decoder_family/manifests/decoder-assets.json"
         manifest.parent.mkdir(parents=True, exist_ok=True)
         _write_json(
             manifest,
@@ -1553,12 +1556,8 @@ class TestE2EDataFiles:
                 "family": "decoder_family",
                 "runtime_strategy": "decoder_family_decoder_kv_cache",
                 "task_strategy": "text_generation_causal",
-                "prompt_file": (
-                    "tests/e2e/models/decoder_family/assets/prompt.txt"
-                ),
-                "model_assets": [
-                    "tests/e2e/models/decoder_family/assets/intrinsics.npy"
-                ],
+                "prompt_file": ("tests/e2e/models/decoder_family/assets/prompt.txt"),
+                "model_assets": ["tests/e2e/models/decoder_family/assets/intrinsics.npy"],
             },
         )
         imap = test_impact.build_impact_map(mock_repo)
@@ -1746,9 +1745,7 @@ class TestUnitTiers:
 
     def test_nightly_artifact_selector_tool(self, imap):
         """Retry artifact selection runs its tooling contracts, not model E2E."""
-        match = test_impact.classify_file(
-            "tools/select_latest_attempt_artifact.py", imap
-        )
+        match = test_impact.classify_file("tools/select_latest_attempt_artifact.py", imap)
 
         assert match.rule == "nightly_artifact_selector_tool"
         assert match.models == []
@@ -2157,9 +2154,7 @@ diff --git a/pyproject.toml b/pyproject.toml
 +task-eval = ["rouge-score>=0.1.2", "sacrebleu>=2.4"]
 """
         broad = test_impact.classify_file("pyproject.toml", imap)
-        refined = test_impact.maybe_refine_match_with_diff(
-            "pyproject.toml", broad, diff, imap
-        )
+        refined = test_impact.maybe_refine_match_with_diff("pyproject.toml", broad, diff, imap)
 
         assert refined.rule == "catch_all"
         assert refined.models == imap.all_model_names
@@ -3091,12 +3086,12 @@ class TestValidation:
         imap = test_impact.build_impact_map(real_root)
 
         result = test_impact.analyze_impact(
-            ["src/runtime/models/flux/pipeline.cpp"], imap, e2e_suite="l0")
+            ["src/runtime/models/flux/pipeline.cpp"], imap, e2e_suite="l0"
+        )
 
         assert "flux-schnell-l0-batch2" in result.e2e_models
         assert (
-            "tests/e2e/models/flux/test_flux_e2e.py::"
-            "test_model_e2e[flux-schnell-l0-batch2]"
+            "tests/e2e/models/flux/test_flux_e2e.py::test_model_e2e[flux-schnell-l0-batch2]"
         ) in result.e2e_test_ids
 
 
@@ -3319,7 +3314,7 @@ class TestCoverageMapIntegration:
     def test_e2e_runner_selects_explicit_tools_tests(self, imap, coverage_map):
         """Shell runner edits select tests that Python coverage cannot discover."""
         result = test_impact.analyze_impact(
-            ["scripts/run_e2e_parallel.sh"],
+            ["tools/ci/e2e_scheduler.py"],
             imap,
             coverage_map=coverage_map,
         )
@@ -3337,7 +3332,10 @@ class TestCoverageMapIntegration:
         ["scripts/hf_cache_download_worker.py", "scripts/warm_hf_cache.py"],
     )
     def test_hf_cache_scripts_select_focused_tools_tests(
-        self, imap, coverage_map, path,
+        self,
+        imap,
+        coverage_map,
+        path,
     ):
         result = test_impact.analyze_impact(
             [path],
@@ -3365,9 +3363,7 @@ class TestCoverageMapIntegration:
         assert result.fallback_tiers == []
 
     @pytest.mark.parametrize("coverage_map", [None, {}])
-    def test_nightly_artifact_selector_selects_focused_tools_tests(
-        self, imap, coverage_map
-    ):
+    def test_nightly_artifact_selector_selects_focused_tools_tests(self, imap, coverage_map):
         result = test_impact.analyze_impact(
             ["tools/select_latest_attempt_artifact.py"],
             imap,
@@ -3394,7 +3390,10 @@ class TestCoverageMapIntegration:
         ],
     )
     def test_e2e_report_selects_its_explicit_tools_tests(
-        self, imap, coverage_map, path,
+        self,
+        imap,
+        coverage_map,
+        path,
     ):
         """Report edits select report tests without scheduling model E2E."""
         result = test_impact.analyze_impact(
@@ -3424,7 +3423,7 @@ class TestCoverageMapIntegration:
     def test_github_ci_config_selects_tools_tier(self, imap):
         """CI config edits must not be classified as unit-test no-impact."""
         result = test_impact.analyze_impact(
-            [".github/scripts/run-trtmc-ci.sh"],
+            [".github/workflows/trtmc-ci.yml"],
             imap,
             coverage_map={},
         )
