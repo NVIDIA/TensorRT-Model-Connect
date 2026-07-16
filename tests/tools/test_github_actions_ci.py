@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -81,7 +82,7 @@ def test_ci_orchestration_uses_the_class_based_python_entrypoint() -> None:
 
 def test_ci_modules_have_minimal_role_comments_and_a_complete_tutorial() -> None:
     ci_directory = REPO_ROOT / "tools" / "ci"
-    modules = sorted(path for path in ci_directory.glob("*.py") if path.name != "__init__.py")
+    modules = sorted(ci_directory.glob("*.py"))
     for module in modules:
         docstring = ast.get_docstring(ast.parse(module.read_text(encoding="utf-8")))
         assert docstring, f"{module.name} has no module documentation"
@@ -90,11 +91,24 @@ def test_ci_modules_have_minimal_role_comments_and_a_complete_tutorial() -> None
     readme = (ci_directory / "README.md").read_text(encoding="utf-8")
     missing_modules = [module.name for module in modules if f"`{module.name}`" not in readme]
     assert missing_modules == []
+    contracts = readme.split("## Component contracts", 1)[1].split(
+        "## Data passed between stages", 1
+    )[0]
+    for module in modules:
+        match = re.search(
+            rf"^### `{re.escape(module.name)}`$(.*?)(?=^### `|^## |\Z)",
+            contracts,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        assert match, f"{module.name} has no component contract"
+        for field in ("Functionality / units", "Inputs", "Outputs", "Boundary"):
+            assert f"**{field}:**" in match.group(1), f"{module.name} has no {field} contract"
     for section in (
         "## The system at a glance",
         "## Pre-merge, step by step",
         "## What nightly adds",
         "## Module map",
+        "## Component contracts",
         "## Making a CI change",
         "## Reading a failure",
     ):
