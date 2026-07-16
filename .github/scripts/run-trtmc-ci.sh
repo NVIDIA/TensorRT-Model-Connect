@@ -406,6 +406,12 @@ check_cyclomatic_complexity() {
   python tools/check_cyclomatic_complexity.py src --exclude src/cli --max-ccn "${CCM_MAX_CCN:-10}" --top 20
 }
 
+run_model_architecture_contracts() {
+  run_with_timeout "${ARCHITECTURE_CONTRACT_TIMEOUT:-3m}" \
+    python -m pytest tests/tools/test_model_plugin_encapsulation_static.py \
+      -q -p no:cacheprovider
+}
+
 lint_changed_files() {
   if ! command -v ruff >/dev/null 2>&1 || ! command -v clang-format >/dev/null 2>&1; then
     python -m pip install --disable-pip-version-check --quiet ruff clang-format
@@ -1982,6 +1988,7 @@ run_stage() {
     source-quality)
       run_step "Check cyclomatic complexity" check_cyclomatic_complexity
       run_step "Lint changed files" lint_changed_files
+      run_step "Check model architecture contracts" run_model_architecture_contracts
       ;;
     cpp-unit)
       run_step "Setup TensorRT-Model-Connect source checks" setup_source_check_environment

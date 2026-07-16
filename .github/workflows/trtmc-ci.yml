@@ -241,7 +241,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install source quality tools
-        run: python -m pip install --disable-pip-version-check --quiet lizard ruff clang-format
+        run: python -m pip install --disable-pip-version-check --quiet lizard ruff clang-format pytest
 
       - name: Check source quality
         run: bash .github/scripts/run-trtmc-ci.sh source-quality

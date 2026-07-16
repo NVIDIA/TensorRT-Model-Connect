@@ -640,7 +640,7 @@ def test_premerge_ci_requires_gpu_free_source_quality() -> None:
     assert "ref: ${{ needs.legal.outputs.tested_sha }}" in source_quality
     assert "fetch-depth: 0" in source_quality
     assert "actions/setup-python@v5" in source_quality
-    assert "pip install --disable-pip-version-check --quiet lizard ruff clang-format" in source_quality
+    assert "pip install --disable-pip-version-check --quiet lizard ruff clang-format pytest" in source_quality
     assert "bash .github/scripts/run-trtmc-ci.sh source-quality" in source_quality
     assert "self-hosted" not in source_quality
     assert "docker" not in source_quality.lower()
@@ -648,6 +648,17 @@ def test_premerge_ci_requires_gpu_free_source_quality() -> None:
 
     assert 'run_step "Check cyclomatic complexity" check_cyclomatic_complexity' in source_quality_stage
     assert 'run_step "Lint changed files" lint_changed_files' in source_quality_stage
+    assert (
+        'run_step "Check model architecture contracts" run_model_architecture_contracts'
+        in source_quality_stage
+    )
+
+    architecture_contract = stage.split(
+        "run_model_architecture_contracts()", maxsplit=1
+    )[1].split("\n}", maxsplit=1)[0]
+    assert "python -m pytest" in architecture_contract
+    assert "tests/tools/test_model_plugin_encapsulation_static.py" in architecture_contract
+    assert "-q -p no:cacheprovider" in architecture_contract
 
     assert "- source-quality" in required
     assert "SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}" in required
@@ -828,6 +839,7 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
 
     assert "- legal" in source_quality and "- inventory" in source_quality
     assert "Check family coverage" in source_quality
+    assert "pip install --disable-pip-version-check --quiet lizard ruff clang-format pytest" in source_quality
     assert "run-trtmc-ci.sh source-quality" in source_quality
     assert "- legal" in unit_tests and "- inventory" in unit_tests
     assert "run-gha-stage.sh premerge-unit" in unit_tests
