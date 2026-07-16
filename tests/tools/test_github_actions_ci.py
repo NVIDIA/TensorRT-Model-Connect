@@ -1779,7 +1779,7 @@ def test_cpp_coverage_engine_runs_tools_directly_without_shell(tmp_path: Path, m
 
     class Context:
         repository = tmp_path
-        env = {"PATH": os.environ["PATH"]}
+        env = {"PATH": os.environ["PATH"], "BUILD_DIR": "relative-build"}
 
         @staticmethod
         def executable(name: str) -> str:
@@ -1813,7 +1813,7 @@ def test_cpp_coverage_engine_runs_tools_directly_without_shell(tmp_path: Path, m
     assert [
         "cmake",
         "--build",
-        str(tmp_path / "build-cov"),
+        str(tmp_path / "relative-build"),
         "--target",
         "trtmc_platform_cpp_tests",
         "--parallel",
@@ -1821,7 +1821,7 @@ def test_cpp_coverage_engine_runs_tools_directly_without_shell(tmp_path: Path, m
     assert [
         "ctest",
         "--test-dir",
-        str(tmp_path / "build-cov"),
+        str(tmp_path / "relative-build"),
         "--output-on-failure",
         "-L",
         "platform",

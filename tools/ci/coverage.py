@@ -44,16 +44,14 @@ class CppCoverageEngine:
                 "Installed gcovr does not support --fail-under-function; install a newer gcovr"
             )
 
-        build_dir = Path(self._value("BUILD_DIR", str(self.repository / "build-cov")))
+        build_dir = self._path("BUILD_DIR", self.repository / "build-cov")
         self.report_root.mkdir(parents=True, exist_ok=True)
         build_dir.mkdir(parents=True, exist_ok=True)
         paths = {
-            "xml": Path(self._value("COBERTURA_XML", str(self.report_root / "cpp-cobertura.xml"))),
-            "html": Path(self._value("HTML_REPORT", str(self.report_root / "cpp-coverage.html"))),
-            "summary": Path(
-                self._value("SUMMARY_TXT", str(self.report_root / "cpp-coverage-summary.txt"))
-            ),
-            "gate": Path(self._value("GATE_LOG", str(self.report_root / "cpp-gate.log"))),
+            "xml": self._path("COBERTURA_XML", self.report_root / "cpp-cobertura.xml"),
+            "html": self._path("HTML_REPORT", self.report_root / "cpp-coverage.html"),
+            "summary": self._path("SUMMARY_TXT", self.report_root / "cpp-coverage-summary.txt"),
+            "gate": self._path("GATE_LOG", self.report_root / "cpp-gate.log"),
         }
         filters = self._words("GCOVR_FILTERS") or [
             str(self.repository / "src"),
@@ -196,6 +194,10 @@ class CppCoverageEngine:
     def _value(self, name: str, default: str) -> str:
         return self.context.env.get(name) or default
 
+    def _path(self, name: str, default: Path) -> Path:
+        path = Path(self.context.env.get(name) or default)
+        return path if path.is_absolute() else self.repository / path
+
     def _run(self, command: list[str | Path], *, limit: str | None) -> None:
         self.context.run(command, limit=limit, updates={"LC_ALL": "C"})
 
@@ -242,14 +244,10 @@ class PythonCoverageEngine:
                 raise CiError(f"{module} is required for Python coverage")
 
         self.report_root.mkdir(parents=True, exist_ok=True)
-        html = Path(self.context.env.get("HTML_DIR") or self.report_root / "python-html")
+        html = self._path("HTML_DIR", self.report_root / "python-html")
         html.mkdir(parents=True, exist_ok=True)
-        xml = Path(
-            self.context.env.get("COBERTURA_XML") or self.report_root / "python-cobertura.xml"
-        )
-        summary = Path(
-            self.context.env.get("SUMMARY_TXT") or self.report_root / "python-coverage.txt"
-        )
+        xml = self._path("COBERTURA_XML", self.report_root / "python-cobertura.xml")
+        summary = self._path("SUMMARY_TXT", self.report_root / "python-coverage.txt")
         targets = shlex.split(self.context.env.get("PYTHON_TEST_TARGETS", "")) or [
             "tests/builder",
             "tests/tools",
@@ -316,9 +314,12 @@ class PythonCoverageEngine:
             "PYTHONHASHSEED": self.context.env.get("PYTHONHASHSEED", "0"),
             "LC_ALL": "C",
             "PYTHONPATH": pythonpath,
-            "COVERAGE_FILE": self.context.env.get("COVERAGE_FILE")
-            or str(self.report_root / ".coverage"),
+            "COVERAGE_FILE": str(self._path("COVERAGE_FILE", self.report_root / ".coverage")),
         }
+
+    def _path(self, name: str, default: Path) -> Path:
+        path = Path(self.context.env.get(name) or default)
+        return path if path.is_absolute() else self.repository / path
 
 
 class CoverageRunner:
@@ -326,7 +327,7 @@ class CoverageRunner:
 
     def __init__(self, context: CiContext):
         self.context = context
-        self.directory = Path(context.env.get("REPORT_ROOT") or context.repository / "coverage")
+        self.directory = self._report_directory("REPORT_ROOT", context.repository / "coverage")
 
     def python_builder_tests(self) -> None:
         self.context.run(
@@ -524,16 +525,18 @@ class CoverageRunner:
         combined_root = self.directory
         try:
             print("[coverage-all] Running Python coverage gate...")
-            self.directory = Path(
-                self.context.env.get("PYTHON_REPORT_ROOT") or combined_root / "python"
-            )
+            self.directory = self._report_directory("PYTHON_REPORT_ROOT", combined_root / "python")
             self.python_report(python_args or ["-v", "--ignore=tests/builder/test_cli.py"])
             print("[coverage-all] Running C++ coverage gates...")
-            self.directory = Path(self.context.env.get("CPP_REPORT_ROOT") or combined_root / "cpp")
+            self.directory = self._report_directory("CPP_REPORT_ROOT", combined_root / "cpp")
             self.cpp_report(cpp_args)
         finally:
             self.directory = combined_root
         print(f"[coverage-all] Completed. Combined report root: {combined_root}")
+
+    def _report_directory(self, name: str, default: Path) -> Path:
+        path = Path(self.context.env.get(name) or default)
+        return path if path.is_absolute() else self.context.repository / path
 
     def map(self) -> None:
         if self.context.env.get("RUN_COVERAGE_MAP", "false") != "true":
