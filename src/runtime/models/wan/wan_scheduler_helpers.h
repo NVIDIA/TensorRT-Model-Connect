@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -90,7 +91,7 @@ inline void fill_dynamic_shift_schedule(FlowMatchEulerPlan& plan, int32_t num_st
     plan.dynamic_mu = compute_dynamic_mu(config, num_steps);
 
     const double sigma_max = 1.0;
-    const double sigma_min = 1.0 / static_cast<double>(std::max(num_steps, 1));
+    const double sigma_min = 1.0 / N;
     const double exp_mu = std::exp(plan.dynamic_mu);
 
     for (int32_t i = 0; i < num_steps; ++i) {
@@ -215,6 +216,161 @@ struct FlowMatchEulerState {
             output[i] = static_cast<float>(static_cast<double>(sample[i]) +
                                            dt * static_cast<double>(velocity[i]));
         }
+    }
+};
+
+// Wan2.1 checkpoints use UniPC order 2 with flow-prediction sigmas.  This is
+// the specialized BH2 predictor/corrector needed by that checkpoint, rather
+// than a general-purpose UniPC implementation.
+struct UniPCFlowState {
+    std::vector<float> sigmas;
+    std::vector<float> timesteps;
+    int32_t num_train_timesteps{1000};
+    float flow_shift{3.0F};
+    bool lower_order_final{true};
+
+    std::vector<float> older_model_output;
+    std::vector<float> previous_model_output;
+    std::vector<float> last_sample;
+    int32_t lower_order_nums{0};
+    int32_t previous_order{0};
+
+    void set_timesteps(int32_t num_steps) {
+        sigmas.assign(static_cast<std::size_t>(std::max(num_steps, 0)) + 1, 0.0F);
+        timesteps.assign(static_cast<std::size_t>(std::max(num_steps, 0)), 0.0F);
+        older_model_output.clear();
+        previous_model_output.clear();
+        last_sample.clear();
+        lower_order_nums = 0;
+        previous_order = 0;
+        if (num_steps <= 0) {
+            return;
+        }
+
+        // Diffusers uses linspace(1, 1/N, num_steps + 1)[:-1], applies
+        // flow_shift, nudges sigma[0] below one, then truncates timesteps to
+        // int64 before passing them to the transformer.
+        const double N = static_cast<double>(num_train_timesteps);
+        for (int32_t i = 0; i < num_steps; ++i) {
+            const double frac = static_cast<double>(i) / static_cast<double>(num_steps);
+            const double raw_sigma = 1.0 + frac * (1.0 / N - 1.0);
+            double sigma = static_cast<double>(flow_shift) * raw_sigma /
+                           (1.0 + (static_cast<double>(flow_shift) - 1.0) * raw_sigma);
+            if (i == 0 && std::abs(sigma - 1.0) < 1e-6) {
+                sigma -= 1e-6;
+            }
+            sigmas[static_cast<std::size_t>(i)] = static_cast<float>(sigma);
+            timesteps[static_cast<std::size_t>(i)] =
+                static_cast<float>(static_cast<int64_t>(sigma * N));
+        }
+    }
+
+    static float flow_lambda(float sigma) {
+        if (sigma <= 0.0F) {
+            return std::numeric_limits<float>::infinity();
+        }
+        return std::log1p(-sigma) - std::log(sigma);
+    }
+
+    void apply_corrector(const std::vector<float>& model_output, std::vector<float>& corrected,
+                         std::size_t count, int32_t step_index) const {
+        const float sigma_t = sigmas[static_cast<std::size_t>(step_index)];
+        const float sigma_s0 = sigmas[static_cast<std::size_t>(step_index - 1)];
+        const float alpha_t = 1.0F - sigma_t;
+        const float h = flow_lambda(sigma_t) - flow_lambda(sigma_s0);
+        const float hh = -h;
+        const float h_phi_1 = std::expm1(hh);
+        const float B_h = h_phi_1;
+        const float base_sample_coeff = sigma_t / sigma_s0;
+        const float base_model_coeff = -alpha_t * h_phi_1;
+        const float correction_coeff = -alpha_t * B_h;
+
+        float older_rho = 0.0F;
+        float current_rho = 0.5F;
+        float older_rk = 1.0F;
+        if (previous_order == 2) {
+            const float lambda_si = flow_lambda(sigmas[static_cast<std::size_t>(step_index - 2)]);
+            const float lambda_s0 = flow_lambda(sigma_s0);
+            older_rk = (lambda_si - lambda_s0) / h;
+
+            float h_phi_k = h_phi_1 / hh - 1.0F;
+            const float b0 = h_phi_k / B_h;
+            h_phi_k = h_phi_k / hh - 0.5F;
+            const float b1 = 2.0F * h_phi_k / B_h;
+            older_rho = (b0 - b1) / (1.0F - older_rk);
+            current_rho = b0 - older_rho;
+        }
+
+        corrected.resize(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            float residual = current_rho * (model_output[i] - previous_model_output[i]);
+            if (previous_order == 2) {
+                residual +=
+                    older_rho * ((older_model_output[i] - previous_model_output[i]) / older_rk);
+            }
+            corrected[i] = base_sample_coeff * last_sample[i] +
+                           base_model_coeff * previous_model_output[i] +
+                           correction_coeff * residual;
+        }
+    }
+
+    void apply_predictor(const float* sample, float* output, std::size_t count, int32_t step_index,
+                         int32_t order) const {
+        const float sigma_s0 = sigmas[static_cast<std::size_t>(step_index)];
+        const float sigma_t = sigmas[static_cast<std::size_t>(step_index + 1)];
+        if (sigma_t == 0.0F) {
+            std::copy(previous_model_output.begin(), previous_model_output.end(), output);
+            return;
+        }
+
+        const float alpha_t = 1.0F - sigma_t;
+        const float h = flow_lambda(sigma_t) - flow_lambda(sigma_s0);
+        const float h_phi_1 = std::expm1(-h);
+        const float B_h = h_phi_1;
+        const float sample_coeff = sigma_t / sigma_s0;
+        const float model_coeff = -alpha_t * h_phi_1;
+        const float residual_coeff = -alpha_t * B_h * 0.5F;
+
+        float rk = 1.0F;
+        if (order == 2) {
+            const float lambda_si = flow_lambda(sigmas[static_cast<std::size_t>(step_index - 1)]);
+            rk = (lambda_si - flow_lambda(sigma_s0)) / h;
+        }
+        for (std::size_t i = 0; i < count; ++i) {
+            float value = sample_coeff * sample[i] + model_coeff * previous_model_output[i];
+            if (order == 2) {
+                value += residual_coeff * ((older_model_output[i] - previous_model_output[i]) / rk);
+            }
+            output[i] = value;
+        }
+    }
+
+    void step(const float* velocity, const float* sample, float* output, std::size_t count,
+              int32_t step_index) {
+        const float sigma = sigmas[static_cast<std::size_t>(step_index)];
+        std::vector<float> model_output(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            model_output[i] = sample[i] - sigma * velocity[i];
+        }
+
+        std::vector<float> corrected;
+        const float* predictor_sample = sample;
+        if (step_index > 0 && !last_sample.empty()) {
+            apply_corrector(model_output, corrected, count, step_index);
+            predictor_sample = corrected.data();
+        }
+
+        older_model_output = std::move(previous_model_output);
+        previous_model_output = std::move(model_output);
+
+        int32_t order = std::min(2, lower_order_nums + 1);
+        if (lower_order_final) {
+            order = std::min(order, static_cast<int32_t>(timesteps.size()) - step_index);
+        }
+        last_sample.assign(predictor_sample, predictor_sample + count);
+        apply_predictor(predictor_sample, output, count, step_index, order);
+        lower_order_nums = std::min(lower_order_nums + 1, 2);
+        previous_order = order;
     }
 };
 

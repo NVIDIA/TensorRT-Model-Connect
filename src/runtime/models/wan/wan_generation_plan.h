@@ -62,6 +62,7 @@ struct WanGenerationPlan {
     float guidance_scale{0.0F};
     WanLayout layout;
     bool use_ddim{false};
+    bool use_unipc{false};
     std::size_t latent_count{0};
     wan_scheduler::FlowMatchEulerConfig flow_match_config;
 };
@@ -76,6 +77,7 @@ inline WanGenerationPlan make_wan_generation_plan(const WanDiffusionConfig& conf
         wan_scheduler::resolve_requested_guidance(requested_guidance, config.guidance_scale);
     plan.layout = make_wan_layout(config);
     plan.use_ddim = should_use_wan_ddim(config.scheduler);
+    plan.use_unipc = config.scheduler == "unipc_multistep";
     plan.latent_count =
         static_cast<std::size_t>(plan.layout.z_dim) * static_cast<std::size_t>(plan.layout.t_lat) *
         static_cast<std::size_t>(plan.layout.h_lat) * static_cast<std::size_t>(plan.layout.w_lat);
@@ -105,6 +107,16 @@ make_wan_flow_match_scheduler(const WanGenerationPlan& plan) {
     scheduler.image_seq_len = plan.flow_match_config.image_seq_len;
     scheduler.use_empirical_mu = plan.flow_match_config.use_empirical_mu;
     scheduler.use_zero_sigma_min = plan.flow_match_config.use_zero_sigma_min;
+    scheduler.set_timesteps(plan.num_inference_steps);
+    return scheduler;
+}
+
+inline wan_scheduler::UniPCFlowState make_wan_unipc_scheduler(const WanDiffusionConfig& config,
+                                                              const WanGenerationPlan& plan) {
+    wan_scheduler::UniPCFlowState scheduler;
+    scheduler.num_train_timesteps = plan.flow_match_config.num_train_timesteps;
+    scheduler.flow_shift = config.flow_shift;
+    scheduler.lower_order_final = config.unipc_lower_order_final;
     scheduler.set_timesteps(plan.num_inference_steps);
     return scheduler;
 }

@@ -16,12 +16,14 @@ struct WanDiffusionConfig {
     int32_t num_inference_steps{50};
     float guidance_scale{5.0F};
     float flow_shift{1.0F};
+    bool unipc_lower_order_final{true};
     bool use_dynamic_shifting{false};
     float base_shift{0.5F};
     float max_shift{1.15F};
     int32_t base_image_seq_len{256};
     int32_t max_image_seq_len{4096};
     float shift_terminal{0.0F};
+    bool tokenizer_add_special_tokens{false};
 
     int32_t video_height{0};
     int32_t video_width{0};

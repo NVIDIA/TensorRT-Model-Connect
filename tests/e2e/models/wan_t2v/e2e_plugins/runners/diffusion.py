@@ -25,8 +25,15 @@ import time
 from pathlib import Path
 
 from .. import save_full_stderr, _case_artifact_dir
-from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
-from ..parity import ensure_initial_latents, uses_shared_initial_latents
+from ..contracts import (
+    E2ECase,
+    RunContext,
+    StageOutput,
+    StageSpec,
+    ensure_initial_latents,
+    normalize_wan_prompt,
+    uses_shared_initial_latents,
+)
 from ._runtime_common import (
     _distributed_runtime_config,
     _ensure_distributed_runtime_env,
@@ -192,10 +199,12 @@ class DiffusionMediaRunner:
         """Run T5 text encoding stage via debug_diffusion_pipeline subprocess."""
         bundle_path = _resolve_bundle_path(case, ctx)
         model_ref = _resolve_cached_model_ref(case.hf_id)
-        max_length = int(case.inputs.get("text_max_length", 512))
+        max_length = int(case.inputs.get("text_max_length", 226))
 
         # Run as a subprocess that loads the TRT T5 engine and encodes text
-        prompt_text = case.inputs.get("prompt", "A cat sitting on a beach")
+        prompt_text = normalize_wan_prompt(
+            case.inputs.get("prompt", "A cat sitting on a beach")
+        )
         script_code = textwrap.dedent(f"""\
             import sys
             sys.path.insert(0, {str(TOOLS_DIR)!r})
@@ -288,6 +297,7 @@ class DiffusionMediaRunner:
         bundle_path = _resolve_bundle_path(case, ctx)
         binary = ctx.binary_path
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
+        runtime_prompt = normalize_wan_prompt(prompt)
         num_steps = case.inputs.get("num_inference_steps", 30)
         ld_path = _build_ld_library_path(ctx)
         initial_latents = (
@@ -299,7 +309,7 @@ class DiffusionMediaRunner:
         with tempfile.TemporaryDirectory(prefix="trtmc_frames_") as frame_dir:
             cmd = [
                 binary, "generate-video", bundle_path,
-                "--prompt", prompt,
+                "--prompt", runtime_prompt,
                 "--num-steps", str(num_steps),
             ]
             guidance_scale = case.inputs.get("guidance_scale")

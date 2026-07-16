@@ -9,6 +9,9 @@
     "max_cache_length": 256
   },
   "precision": "fp16",
+  "fp32_layers": [
+    24
+  ],
   "testcases": [
     {
       "name": "wan21-t2v-1.3b-l0",
@@ -24,6 +27,7 @@
       "video_height": 384,
       "video_width": 672,
       "num_inference_steps": 15,
+      "text_max_length": 226,
       "stages": [
         {
           "name": "end_to_end",

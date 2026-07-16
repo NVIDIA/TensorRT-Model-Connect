@@ -17,6 +17,7 @@ WanDiffusionConfig make_diffusion_config(const std::string& json);
 struct DiffusionParts {
     LoadedModule denoiser;
     LoadedModule vae;
+    LoadedModule vae_first_frame;
     LoadedModule vision;
     LoadedModule vae_encoder;
     std::vector<LoadedModule> text_encoders;

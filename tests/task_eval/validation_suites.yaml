@@ -873,10 +873,14 @@ suites:
       min_trt_hf_image_clip_cosine: 0.85
     family_profiles:
       ltx_video:
+        generation:
+          text_max_length: 128
         gates:
           psnr: 5.0
           ssim: 0.1
       wan_t2v:
+        generation:
+          text_max_length: 226
         gates:
           psnr: 2.0
           ssim: -1.0

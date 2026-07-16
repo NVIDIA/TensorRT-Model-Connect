@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstddef>
 #include <iostream>
+#include <vector>
 
 namespace {
 
@@ -73,6 +74,15 @@ void test_wan_flow_match_scheduler_builds_when_not_using_ddim() {
     config.scheduler = "flow_match_euler";
     config.num_inference_steps = 12;
     config.flow_shift = 1.35F;
+    config.video_num_frames = 5;
+    config.video_height = 64;
+    config.video_width = 64;
+    config.scale_factor_temporal = 4;
+    config.scale_factor_spatial = 8;
+    config.z_dim = 16;
+    config.dit_dim = 1536;
+    config.text_seq_len = 226;
+    config.patch_size = {1, 2, 2};
 
     const auto plan = trtmc::diffusion::make_wan_generation_plan(config, 8, 3.0F);
     check(!plan.use_ddim, "wan flow-match plan keeps native scheduler");
@@ -84,11 +94,62 @@ void test_wan_flow_match_scheduler_builds_when_not_using_ddim() {
     check_close(scheduler.shift, 1.35F, 1e-6F, "wan flow-match scheduler forwards shift");
 }
 
+void test_wan_unipc_flow_scheduler_matches_diffusers_order_two_reference() {
+    trtmc::WanDiffusionConfig config;
+    config.scheduler = "unipc_multistep";
+    config.num_inference_steps = 3;
+    config.flow_shift = 3.0F;
+    config.video_num_frames = 5;
+    config.video_height = 64;
+    config.video_width = 64;
+    config.scale_factor_temporal = 4;
+    config.scale_factor_spatial = 8;
+    config.z_dim = 16;
+    config.dit_dim = 1536;
+    config.text_seq_len = 226;
+    config.patch_size = {1, 2, 2};
+
+    const auto plan = trtmc::diffusion::make_wan_generation_plan(config, -1, -1.0F);
+    check(plan.use_unipc, "wan plan selects checkpoint UniPC scheduler");
+    auto scheduler = trtmc::diffusion::make_wan_unipc_scheduler(config, plan);
+
+    check(scheduler.timesteps.size() == 3, "wan UniPC timestep count matches request");
+    check_close(scheduler.timesteps[0], 999.0F, 1e-6F,
+                "wan UniPC nudges and truncates first timestep like Diffusers");
+    check_close(scheduler.timesteps[1], 857.0F, 1e-6F,
+                "wan UniPC shifted middle timestep matches Diffusers");
+    check_close(scheduler.timesteps[2], 600.0F, 1e-6F,
+                "wan UniPC final model timestep matches Diffusers");
+    check_close(scheduler.sigmas[1], 0.8573265075683594F, 1e-7F,
+                "wan UniPC shifted sigma matches Diffusers");
+
+    std::vector<float> sample = {0.25F, -0.5F};
+    const std::vector<std::vector<float>> velocities = {
+        {0.1F, -0.2F},
+        {0.3F, 0.4F},
+        {-0.1F, 0.2F},
+    };
+    const std::vector<std::vector<float>> expected = {
+        {0.235732764005661F, -0.471465528011322F},
+        {0.147221013903618F, -0.608697295188904F},
+        {0.207292959094048F, -0.728841185569763F},
+    };
+    for (int32_t step = 0; step < 3; ++step) {
+        scheduler.step(velocities[static_cast<std::size_t>(step)].data(), sample.data(),
+                       sample.data(), sample.size(), step);
+        check_close(sample[0], expected[static_cast<std::size_t>(step)][0], 2e-6F,
+                    "wan UniPC first value matches Diffusers");
+        check_close(sample[1], expected[static_cast<std::size_t>(step)][1], 2e-6F,
+                    "wan UniPC second value matches Diffusers");
+    }
+}
+
 } // namespace
 
 int main() {
     test_wan_generation_plan_derives_layout_and_scheduler_mode();
     test_wan_flow_match_scheduler_builds_when_not_using_ddim();
+    test_wan_unipc_flow_scheduler_matches_diffusers_order_two_reference();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " wan generation plan test(s) failed\n";

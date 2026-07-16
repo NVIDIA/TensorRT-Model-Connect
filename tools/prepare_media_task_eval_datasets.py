@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
@@ -11,7 +10,6 @@ judges. Relative asset paths in the output are resolved by ``tools/task_eval.py`
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import re
@@ -420,32 +418,21 @@ def prepare_sana_wm(source_root: Path, output_root: Path, limit: int = 10) -> Pa
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--vbench-info", type=Path)
-    parser.add_argument("--gedit-source", default="")
-    parser.add_argument("--sana-wm-root", type=Path)
-    parser.add_argument("--limit", type=int, default=10)
-    return parser
-
-
-def main() -> int:
-    args = build_parser().parse_args()
+def prepare_media_datasets(
+    *,
+    output_root: Path,
+    vbench_info: Path | None = None,
+    gedit_source: str = "",
+    sana_wm_root: Path | None = None,
+    limit: int = 10,
+) -> list[Path]:
     outputs: list[Path] = []
-    if args.vbench_info:
-        outputs.append(prepare_vbench(args.vbench_info, args.output_root, args.limit))
-    if args.gedit_source:
-        outputs.append(prepare_gedit(args.gedit_source, args.output_root, args.limit))
-    if args.sana_wm_root:
-        outputs.append(prepare_sana_wm(args.sana_wm_root, args.output_root, args.limit))
+    if vbench_info:
+        outputs.append(prepare_vbench(vbench_info, output_root, limit))
+    if gedit_source:
+        outputs.append(prepare_gedit(gedit_source, output_root, limit))
+    if sana_wm_root:
+        outputs.append(prepare_sana_wm(sana_wm_root, output_root, limit))
     if not outputs:
         raise ValueError("Pass at least one media benchmark source")
-    for output in outputs:
-        payload = json.loads(output.read_text(encoding="utf-8"))
-        print(f"{output}: {payload['request_count']} requests")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    return outputs

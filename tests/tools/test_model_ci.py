@@ -154,7 +154,6 @@ def _make_repo(
     _write(repo, "tools/model_plugin_isolation.py", "# proof verifier\n")
     _write(repo, "tools/test_impact.py", "# shared impact analyzer\n")
     _write(repo, "tools/task_eval.py", "# task-eval runner\n")
-    _write(repo, "tools/task_eval_ci.py", "# task-eval CI gate\n")
     _write(repo, "tests/task_eval/validation_suites.yaml", "suites: []\n")
     _write(repo, "tests/tools/test_task_eval.py", "# task-eval unit tests\n")
     _write(repo, "tools/tool_helpers.py", "# shared tool helpers\n")
@@ -627,6 +626,11 @@ def test_task_eval_only_pr_runs_units_without_model_proofs(tmp_path: Path) -> No
         "tools/prepare_elf_task_eval_datasets.py",
         "# ELF task-eval dataset preparation\n",
     )
+    _write(
+        repo,
+        "tools/prepare_media_task_eval_datasets.py",
+        "# media task-eval dataset preparation\n",
+    )
     _write(repo, "tools/test_impact.py", "# task-eval impact refinement\n")
     head = _commit(repo, "add task-eval coverage")
 
@@ -943,10 +947,12 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         "tools/diff_vl.py",
         "tools/diffusion_helpers.py",
         "tools/model_plugin_isolation.py",
+        "tools/task_eval.py",
         "tools/test_impact.py",
         "tools/tool_helpers.py",
     ):
         assert (output / report_path).is_file()
+    assert (output / "tests/task_eval/validation_suites.yaml").is_file()
     for unrelated_tool in (
         "scripts/repro_trt_fp8_mha.py",
         "tools/diff_t5.py",

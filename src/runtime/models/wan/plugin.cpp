@@ -70,7 +70,8 @@ class WanPlugin final : public IPipelinePlugin {
         return std::make_unique<WanPipeline>(
             std::move(te_module), std::move(parts.denoiser.module), std::move(parts.vae.module),
             std::move(parts.config), std::move(parts.weights), std::move(parts.tokenizer),
-            ctx.bundle.info.model_id, tp_group.owner, tp_group.rank, tp_group.tp_size);
+            ctx.bundle.info.model_id, tp_group.owner, tp_group.rank, tp_group.tp_size,
+            std::move(parts.vae_first_frame.module));
     }
 };
 

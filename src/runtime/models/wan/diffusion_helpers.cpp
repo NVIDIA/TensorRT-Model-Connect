@@ -104,12 +104,15 @@ WanDiffusionConfig make_diffusion_config(const std::string& json) {
     dc.num_inference_steps = extract_json_int(json, "num_inference_steps", 50);
     dc.guidance_scale = extract_json_float(json, "guidance_scale", 5.0F);
     dc.flow_shift = extract_json_float(json, "flow_shift", 1.0F);
+    dc.unipc_lower_order_final = extract_json_int(json, "unipc_lower_order_final", 1) != 0;
     dc.use_dynamic_shifting = extract_json_int(json, "use_dynamic_shifting", 0) != 0;
     dc.base_shift = extract_json_float(json, "base_shift", 0.5F);
     dc.max_shift = extract_json_float(json, "max_shift", 1.15F);
     dc.base_image_seq_len = extract_json_int(json, "base_image_seq_len", 256);
     dc.max_image_seq_len = extract_json_int(json, "max_image_seq_len", 4096);
     dc.shift_terminal = extract_json_float(json, "shift_terminal", 0.0F);
+    dc.tokenizer_add_special_tokens =
+        extract_json_int(json, "tokenizer_add_special_tokens", 0) != 0;
     dc.video_height = extract_json_int(json, "video_height", 480);
     dc.video_width = extract_json_int(json, "video_width", 832);
     dc.video_num_frames = extract_json_int(json, "video_num_frames", 81);
@@ -149,6 +152,9 @@ DiffusionParts load_diffusion_parts(IBackend* backend, const BundleFile& bundle,
                                   denoiser_section_name.c_str(), effective_denoiser_options);
     parts.vae = load_trt_module_from_plan(backend, find_section(bundle, "vae_decoder_plan"),
                                           "vae_decoder_plan", options);
+    parts.vae_first_frame =
+        try_load_trt_module_from_plan(backend, find_section(bundle, "vae_decoder_first_frame_plan"),
+                                      "vae_decoder_first_frame_plan", options);
     parts.vision = try_load_trt_module_from_plan(
         backend, find_section(bundle, "vision_engine_plan"), "vision_engine_plan", options);
     parts.vae_encoder = try_load_trt_module_from_plan(

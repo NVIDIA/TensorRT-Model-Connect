@@ -7,6 +7,7 @@
 
 #include "runtime/models/wan/wan_generation_plan.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -26,6 +27,28 @@ struct WanTextConditioning {
     std::vector<float> text_projected;
     std::vector<float> null_text;
 };
+
+inline bool wan_conditioning_values_are_finite(const std::vector<float>& values) {
+    return std::all_of(values.begin(), values.end(),
+                       [](float value) { return std::isfinite(value); });
+}
+
+inline std::vector<int32_t> normalize_wan_t5_token_ids(std::vector<int32_t> ids, int32_t max_len,
+                                                       bool native_special_frame = true) {
+    constexpr int32_t kT5NativePrefixTokenId = 2;
+    constexpr int32_t kT5EosTokenId = 1;
+    if (native_special_frame && !ids.empty() && ids.front() == kT5NativePrefixTokenId)
+        ids.erase(ids.begin());
+    if (ids.empty() || ids.back() != kT5EosTokenId)
+        ids.push_back(kT5EosTokenId);
+    if (max_len <= 0)
+        return {};
+    if (static_cast<int32_t>(ids.size()) > max_len) {
+        ids.resize(static_cast<std::size_t>(max_len));
+        ids.back() = kT5EosTokenId;
+    }
+    return ids;
+}
 
 inline WanConditioningInputs make_wan_conditioning_inputs(const WanDiffusionConfig& config,
                                                           const WanLayout& layout,
@@ -58,12 +81,28 @@ bool build_wan_text_conditioning(const std::vector<int32_t>& input_ids,
     std::vector<float> text_embeddings;
     if (!run_t5_encoder(input_ids, text_embeddings, error))
         return false;
+    if (!wan_conditioning_values_are_finite(text_embeddings)) {
+        error = "Wan prompt T5 embeddings contain non-finite values";
+        return false;
+    }
     project_text(text_embeddings, seq_len, conditioning.text_projected);
+    if (!wan_conditioning_values_are_finite(conditioning.text_projected)) {
+        error = "Wan projected prompt conditioning contains non-finite values";
+        return false;
+    }
 
     std::vector<float> null_embeddings;
     if (!run_t5_encoder(inputs.null_ids, null_embeddings, error))
         return false;
+    if (!wan_conditioning_values_are_finite(null_embeddings)) {
+        error = "Wan null-prompt T5 embeddings contain non-finite values";
+        return false;
+    }
     project_text(null_embeddings, seq_len, conditioning.null_text);
+    if (!wan_conditioning_values_are_finite(conditioning.null_text)) {
+        error = "Wan projected null-prompt conditioning contains non-finite values";
+        return false;
+    }
     return true;
 }
 

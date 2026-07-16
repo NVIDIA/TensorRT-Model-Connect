@@ -27,7 +27,8 @@ class WanPipeline final : public IPipeline {
                 std::unique_ptr<TrtModule> vae, WanDiffusionConfig config,
                 WanPreprocessorWeights weights, std::shared_ptr<ITokenizer> tokenizer,
                 std::string model_id_str, std::shared_ptr<void> distributed_owner = {},
-                int32_t tensor_parallel_rank = 0, int32_t tensor_parallel_size = 1);
+                int32_t tensor_parallel_rank = 0, int32_t tensor_parallel_size = 1,
+                std::unique_ptr<TrtModule> vae_first_frame = nullptr);
 
     ~WanPipeline() override;
 
@@ -59,16 +60,19 @@ class WanPipeline final : public IPipeline {
     bool decode_vae_3d(const std::vector<float>& latents, int32_t c, int32_t t, int32_t h,
                        int32_t w, WanVideoResult& result);
 
-    int32_t query_vae_output_temporal_dim() const;
+    static int32_t query_vae_output_temporal_dim(const TrtModule& module);
+    bool has_first_frame_vae() const;
     void init_vae_caches();
     void zero_vae_caches();
     void decode_vae_single_frame(const std::vector<float>& latents, int32_t c, int32_t t_lat,
                                  int32_t h_lat, int32_t w_lat, int32_t t,
-                                 std::size_t out_frame_floats, std::vector<float>& all_raw_frames);
+                                 std::size_t out_frame_floats, TrtModule& module,
+                                 std::vector<float>& all_raw_frames);
 
     bool run_wan_text_conditioning(const std::vector<int32_t>& input_ids, int32_t seq_len,
                                    std::vector<float>& text_projected,
                                    std::vector<float>& null_text, std::string& error);
+    std::vector<int32_t> tokenize_wan_prompt(const std::string& prompt) const;
     bool run_wan_vae_decode(int32_t z_dim, int32_t t_lat, int32_t h_lat, int32_t w_lat,
                             std::vector<float>& latents, WanVideoResult& result);
     ImageResult finish_wan_generation(int32_t z_dim, int32_t t_lat, int32_t h_lat, int32_t w_lat,
@@ -81,6 +85,7 @@ class WanPipeline final : public IPipeline {
     std::unique_ptr<TrtModule> text_encoder_;
     std::unique_ptr<TrtModule> denoiser_;
     std::unique_ptr<TrtModule> vae_;
+    std::unique_ptr<TrtModule> vae_first_frame_;
     WanDiffusionConfig config_;
     WanPreprocessorWeights weights_;
     std::shared_ptr<ITokenizer> tokenizer_;

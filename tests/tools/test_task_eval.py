@@ -4,15 +4,23 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import struct
 import sys
+import types
 import wave
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
+import numpy as np
 import pytest
+from PIL import Image
 
+from tools import prepare_media_task_eval_datasets as prepare_media
 from tools import task_eval
 
 
@@ -539,6 +547,11 @@ def test_default_suites_include_media_generation_gap_models() -> None:
     assert video["generation"]["use_shared_initial_latents"] is True
     assert video["gates"]["min_trt_hf_image_clip_cosine"] == 0.85
     assert video["gates"]["require_matching_initial_latents"] == 1
+    models = {model["name"]: model for model in task_eval.load_manifest_records()}
+    ltx = task_eval.resolve_suite_for_model(video, models["ltx-video-l0"])
+    wan = task_eval.resolve_suite_for_model(video, models["wan21-t2v-1.3b-l0"])
+    assert ltx["generation"]["text_max_length"] == 128
+    assert wan["generation"]["text_max_length"] == 226
 
     image_edit = task_eval.suite_by_id(suites, "gedit_bench_image_edit")
     assert image_edit["default_model_names"] == image_edit["selectors"]["model_names"]
@@ -5370,3 +5383,352 @@ def test_metric_gates_fail_on_missing_or_out_of_range_metrics() -> None:
         "min_corpus_bleu",
         "max_generation_ppl",
     ]
+
+
+def _ci_suite(*, digest: str = "a" * 64) -> dict:
+    return {
+        "id": "ci_suite",
+        "default_model_names": ["chronos", "timesfm"],
+        "dataset": {
+            "default_path": "/missing/ETTh1.csv",
+            "source": "https://example.com/ETTh1.csv",
+            "sha256": digest,
+        },
+        "ci": {
+            "eligible": True,
+            "lane": "nightly",
+            "limit": 10,
+            "sample_seed": 20260715,
+        },
+    }
+
+
+def test_real_etth1_suite_is_nightly_ci_eligible() -> None:
+    suite = task_eval.suite_by_id(task_eval.load_suites(), "etth1_time_series_parity")
+
+    ci = task_eval.validate_ci_suite(suite, "nightly")
+
+    assert ci["limit"] == 10
+    assert ci["sample_seed"] == 20260715
+    assert len(suite["default_model_names"]) == 5
+
+
+def test_validate_ci_suite_rejects_wrong_lane() -> None:
+    with pytest.raises(ValueError, match="belongs to lane"):
+        task_eval.validate_ci_suite(_ci_suite(), "premerge")
+
+
+def test_ensure_ci_dataset_downloads_and_verifies_pinned_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    content = b"date,OT\n2026-01-01,1.0\n"
+    digest = hashlib.sha256(content).hexdigest()
+    monkeypatch.setattr(
+        task_eval.urllib.request,
+        "urlopen",
+        lambda _source, timeout: io.BytesIO(content),
+    )
+
+    dataset = task_eval.ensure_ci_dataset(
+        _ci_suite(digest=digest), explicit_path=None, cache_root=tmp_path / "cache"
+    )
+
+    assert dataset.read_bytes() == content
+    assert task_eval._sha256_file(dataset) == digest
+
+
+def test_ensure_ci_dataset_rejects_explicit_checksum_mismatch(tmp_path: Path) -> None:
+    dataset = tmp_path / "ETTh1.csv"
+    dataset.write_text("wrong", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="wrong checksum"):
+        task_eval.ensure_ci_dataset(
+            _ci_suite(), explicit_path=dataset, cache_root=tmp_path / "cache"
+        )
+
+
+def test_configure_ci_eval_uses_suite_models_limit_seed_and_dataset(tmp_path: Path) -> None:
+    dataset = tmp_path / "ETTh1.csv"
+    dataset.write_text("date,OT\n2026-01-01,1.0\n", encoding="utf-8")
+    digest = hashlib.sha256(dataset.read_bytes()).hexdigest()
+    args = argparse.Namespace(
+        ci_lane="nightly",
+        model=[],
+        limit=0,
+        sample_seed=None,
+        single_device_only=False,
+        local_files_only=False,
+        waive_platform="",
+        engine_dir=str(tmp_path / "engines"),
+        dataset=str(dataset),
+        dataset_cache_root=str(tmp_path / "cache"),
+    )
+
+    expected_models = task_eval.configure_ci_eval(args, _ci_suite(digest=digest))
+
+    assert expected_models == ["chronos", "timesfm"]
+    assert args.model == ["chronos", "timesfm"]
+    assert args.limit == 10
+    assert args.sample_seed == 20260715
+    assert args.single_device_only is True
+    assert args.local_files_only is True
+    assert args.waive_platform == "GB300"
+
+
+def test_configure_ci_eval_allows_a_fail_closed_model_subset(tmp_path: Path) -> None:
+    dataset = tmp_path / "ETTh1.csv"
+    dataset.write_text("date,OT\n2026-01-01,1.0\n", encoding="utf-8")
+    args = argparse.Namespace(
+        ci_lane="nightly",
+        model=["timesfm"],
+        limit=0,
+        sample_seed=None,
+        single_device_only=False,
+        local_files_only=False,
+        waive_platform="",
+        engine_dir=str(tmp_path / "engines"),
+        dataset=str(dataset),
+        dataset_cache_root=str(tmp_path / "cache"),
+    )
+
+    expected_models = task_eval.configure_ci_eval(
+        args,
+        _ci_suite(digest=hashlib.sha256(dataset.read_bytes()).hexdigest()),
+    )
+
+    assert expected_models == ["timesfm"]
+    assert args.model == ["timesfm"]
+
+
+def test_validate_eval_summary_fails_closed_on_failed_model() -> None:
+    passed, results = task_eval.validate_eval_summary(
+        {
+            "results": [
+                {"model": "chronos", "status": "passed"},
+                {"model": "timesfm", "status": "failed"},
+            ]
+        },
+        ["chronos", "timesfm"],
+    )
+
+    assert passed is False
+    assert len(results) == 2
+
+
+def test_public_ci_artifacts_omit_private_runner_paths(tmp_path: Path) -> None:
+    work_root = tmp_path / "private-work"
+    numeric = work_root / "ci_suite" / "chronos" / "summary.json"
+    numeric.parent.mkdir(parents=True)
+    numeric.write_text(
+        '{"status":"passed","cases":[],"private_path":"/private/numeric"}\n',
+        encoding="utf-8",
+    )
+    results = [
+        {
+            "suite": "ci_suite",
+            "model": "chronos",
+            "status": "passed",
+            "sample_agreement_rate": 1.0,
+            "work_dir": "/private/runner/work",
+            "bundle": "/private/runner/engine.trtfb",
+        },
+        {"model": "timesfm", "status": "failed", "error": "/private/error"},
+    ]
+    artifact_dir = tmp_path / "public"
+
+    task_eval.write_public_ci_artifacts(
+        suite=_ci_suite(),
+        expected_models=["chronos", "timesfm"],
+        results=results,
+        work_root=work_root,
+        artifact_dir=artifact_dir,
+    )
+
+    public = (artifact_dir / "eval_summary.json").read_text(encoding="utf-8")
+    assert "/private" not in public
+    assert "work_dir" not in public
+    assert "bundle" not in public
+    numeric_public = artifact_dir / "models" / "chronos" / "summary.json"
+    assert "/private" not in numeric_public.read_text(encoding="utf-8")
+
+
+def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> None:
+    source = tmp_path / "VBench_full_info.json"
+    source.write_text(
+        json.dumps(
+            [
+                {
+                    "prompt_en": f"official prompt {index}",
+                    "dimension": [dimension],
+                }
+                for index, dimension in enumerate(prepare_media.VBENCH_DIMENSIONS)
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    output = prepare_media.prepare_vbench(source, tmp_path / "out")
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["request_count"] == 10
+    assert [row["category"] for row in payload["requests"]] == list(
+        prepare_media.VBENCH_DIMENSIONS
+    )
+    assert len({row["prompt"] for row in payload["requests"]}) == 10
+    assert payload["source_info_sha256"]
+    assert payload["license"] == "Apache-2.0"
+
+
+def test_prepare_gedit_writes_task_diverse_static_condition_images(tmp_path: Path) -> None:
+    rows = [
+        {
+            "key": f"sample/{index}",
+            "instruction": f"edit instruction {index}",
+            "instruction_language": "en",
+            "task_type": f"task_{index}",
+            "input_image": Image.new("RGB", (40 + index, 30), (index, 20, 30)),
+            "Intersection_exist": index % 2 == 0,
+        }
+        for index in range(10)
+    ]
+
+    output = prepare_media.prepare_gedit_rows(rows, tmp_path / "GEdit-Bench")
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["request_count"] == 10
+    assert len({row["category"] for row in payload["requests"]}) == 10
+    first = payload["requests"][0]
+    condition = output.parent / first["image"]
+    assert Image.open(condition).size == (1024, 1024)
+    assert first["condition_image_sha256"]
+    assert payload["license"] == "MIT"
+    assert payload["source_revision"] == prepare_media.GEDIT_REVISION
+
+
+def test_prepare_gedit_loads_local_hf_arrow_checkout(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    source = tmp_path / "gedit-source"
+    source.mkdir()
+    arrow = source / "data-00000-of-00001.arrow"
+    arrow.touch()
+    rows = [
+        {
+            "key": f"sample-{index}",
+            "instruction": f"edit instruction {index}",
+            "instruction_language": "en",
+            "task_type": f"task_{index}",
+            "input_image": Image.new("RGB", (8, 8)),
+        }
+        for index in range(10)
+    ]
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def fake_load_dataset(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        calls.append((args, kwargs))
+        return rows
+
+    fake_datasets = types.ModuleType("datasets")
+    fake_datasets.load_dataset = fake_load_dataset  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    output = prepare_media.prepare_gedit(str(source), tmp_path / "out")
+
+    assert output.is_file()
+    assert calls == [
+        (("arrow",), {"data_files": [str(arrow.resolve())], "split": "train"})
+    ]
+
+
+def test_prepare_gedit_streams_local_arrow_without_datasets(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    pa = pytest.importorskip("pyarrow")
+    source = tmp_path / "gedit-source"
+    source.mkdir()
+    arrow = source / "data-00000-of-00001.arrow"
+    rows = []
+    for index in range(10):
+        encoded = BytesIO()
+        Image.new("RGB", (8, 8), (index, 20, 30)).save(encoded, format="PNG")
+        rows.append(
+            {
+                "key": f"sample-{index}",
+                "instruction": f"edit instruction {index}",
+                "instruction_language": "en",
+                "task_type": f"task_{index}",
+                "input_image": {"bytes": encoded.getvalue(), "path": None},
+            }
+        )
+    table = pa.Table.from_pylist(rows)
+    with pa.OSFile(str(arrow), "wb") as sink:
+        with pa.ipc.new_stream(sink, table.schema) as writer:
+            writer.write_table(table)
+    monkeypatch.setitem(sys.modules, "datasets", None)
+
+    output = prepare_media.prepare_gedit(str(source), tmp_path / "out")
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["request_count"] == 10
+    assert len(list((output.parent / "images").glob("*.png"))) == 10
+
+
+def _write_sana_split(root: Path, split: str, color_offset: int) -> None:
+    manifest = root / split / "sanawm_export_v2" / "run_manifest.jsonl"
+    manifest.parent.mkdir(parents=True)
+    rows = []
+    categories = ("game_style", "indoor", "outdoor_city", "outdoor_nature")
+    for index in range(12):
+        category = categories[index % len(categories)]
+        scene_id = f"{category}_{index // len(categories) + 1:03d}"
+        image = root / "images" / f"{scene_id}.png"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (8, 6), (index, color_offset, 20)).save(image)
+        camera = root / split / "sanawm_export_v2" / f"{scene_id}.npz"
+        intrinsics = np.repeat(np.eye(3, dtype=np.float32)[None, :, :], 961, axis=0)
+        intrinsics[:, 0, 0] = 800 + index
+        intrinsics[:, 1, 1] = 810 + index
+        intrinsics[:, 0, 2] = 640
+        intrinsics[:, 1, 2] = 352
+        np.savez(
+            camera,
+            c2w=np.zeros((961, 4, 4), dtype=np.float32),
+            intrinsics=intrinsics,
+        )
+        rows.append(
+            {
+                "id": scene_id,
+                "image_path": f"images/{scene_id}.png",
+                "camera_path": f"{split}/sanawm_export_v2/{scene_id}.npz",
+                "prompt": f"official scene prompt {scene_id}",
+            }
+        )
+    manifest.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def test_prepare_sana_wm_uses_official_scene_assets_with_supported_actions(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    for offset, split in enumerate(prepare_media.SANA_WM_SPLITS):
+        _write_sana_split(source, split, offset * 5)
+
+    output = prepare_media.prepare_sana_wm(source, tmp_path / "out")
+    payload = json.loads(output.read_text(encoding="utf-8"))
+
+    assert payload["request_count"] == 10
+    assert len({row["source_scene_id"] for row in payload["requests"]}) == 10
+    assert "not arbitrary official c2w files" in payload["control_limitation"]
+    assert payload["license"] == "CC-BY-4.0"
+    assert payload["source_revision"] == prepare_media.SANA_WM_REVISION
+    assert set(payload["source_manifest_sha256"]) == set(prepare_media.SANA_WM_SPLITS)
+    first = payload["requests"][0]
+    assert (output.parent / first["image"]).is_file()
+    assert (output.parent / first["prompt_file"]).is_file()
+    intrinsics = np.load(output.parent / first["camera_intrinsics_file"])
+    assert intrinsics.shape == (3, 3)
+    for action in (row["action"] for row in payload["requests"]):
+        assert sum(int(segment.rsplit("-", 1)[1]) for segment in action.split(",")) == 320

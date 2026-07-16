@@ -14,8 +14,14 @@ import time
 from pathlib import Path
 
 from .. import _case_artifact_dir
-from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
-from ..parity import ensure_initial_latents, uses_shared_initial_latents
+from ..contracts import (
+    E2ECase,
+    RunContext,
+    StageOutput,
+    StageSpec,
+    ensure_initial_latents,
+    uses_shared_initial_latents,
+)
 
 logger = logging.getLogger(__name__)
 

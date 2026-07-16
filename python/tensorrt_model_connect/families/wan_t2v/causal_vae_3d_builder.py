@@ -201,6 +201,7 @@ def build_causal_vae_3d_engine(
     num_groups: int = 32,
     eps: float = 1e-6,
     precision: str = "fp32",
+    first_frame_only: bool = False,
     verbose: bool = False,
 ) -> bytes:
     """Build causal 3D VAE decoder TRT engine plan.
@@ -208,8 +209,11 @@ def build_causal_vae_3d_engine(
     Full causal decoder with 32 cache I/O tensors. Processes one latent frame
     at a time; temporal expansion happens via pixel-shuffle inside the graph.
 
-    Output temporal dim = scale_factor_temporal (4 for Wan2.1). The caller
-    trims extra frames from frame-0 to get the correct total count.
+    The regular engine outputs ``scale_factor_temporal`` frames (4 for
+    Wan2.1).  ``first_frame_only`` builds the companion first-frame engine,
+    which mirrors Diffusers by bypassing temporal upsampling and outputs one
+    frame.  Its temporal-upsample cache slots remain empty for the regular
+    engine's first call.
     """
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
@@ -358,23 +362,30 @@ def build_causal_vae_3d_engine(
             tc_in_ch = tc_w.shape[1]   # Input channels to time_conv
             tc_out_ch = tc_w.shape[0]  # Output channels (= 2 * tc_in_ch)
             tc_cache = _add_cache_input(tc_in_ch, 2, cur_h, cur_w)
-            x, tc_cache_out = graph_ops.add_causal_conv3d(
-                network, x, tc_cache,
-                weight=tc_w,
-                bias=weights[f"{tc_prefix}.bias"],
-                out_channels=tc_out_ch,
-                kernel_size=(3, 1, 1),
-                padding_hw=(0, 0),
-                dtype=work_np_dtype,
-            )
-            _set_cache_output(cache_idx - 1, tc_cache_out)
+            if first_frame_only:
+                # Diffusers records a sentinel on the first chunk and skips
+                # both time_conv and pixel shuffle. Preserve the zero cache so
+                # the regular engine also takes its no-history branch next.
+                _set_cache_output(cache_idx - 1, tc_cache)
+                print("[vae-3d]   temporal first-frame bypass", file=sys.stderr)
+            else:
+                x, tc_cache_out = graph_ops.add_causal_conv3d(
+                    network, x, tc_cache,
+                    weight=tc_w,
+                    bias=weights[f"{tc_prefix}.bias"],
+                    out_channels=tc_out_ch,
+                    kernel_size=(3, 1, 1),
+                    padding_hw=(0, 0),
+                    dtype=work_np_dtype,
+                )
+                _set_cache_output(cache_idx - 1, tc_cache_out)
 
-            # Pixel shuffle: [1, 2C, T, H, W] -> [1, C, 2T, H, W]
-            x = graph_ops.add_temporal_pixel_shuffle(network, x, factor=2)
-            prev_ch = tc_in_ch  # After pixel shuffle, channels = tc_in_ch
-            cur_t *= 2
-            print(f"[vae-3d]   temporal 2x -> {tc_in_ch}ch, T={cur_t}",
-                  file=sys.stderr)
+                # Pixel shuffle: [1, 2C, T, H, W] -> [1, C, 2T, H, W]
+                x = graph_ops.add_temporal_pixel_shuffle(network, x, factor=2)
+                prev_ch = tc_in_ch  # After pixel shuffle, channels = tc_in_ch
+                cur_t *= 2
+                print(f"[vae-3d]   temporal 2x -> {tc_in_ch}ch, T={cur_t}",
+                      file=sys.stderr)
 
         if has_spatial:
             # Spatial 2x upsample: nearest + Conv3D(1,3,3)

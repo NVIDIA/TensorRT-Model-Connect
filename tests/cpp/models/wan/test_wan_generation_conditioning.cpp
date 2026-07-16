@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -44,13 +45,27 @@ void test_conditioning_inputs_build_mask_and_null_ids() {
     const auto inputs = trtmc::diffusion::make_wan_conditioning_inputs(config, layout, {11, 0, 13});
 
     check(inputs.null_ids.size() == 5, "wan conditioning builds null ids for sequence length");
-    check(inputs.null_ids[0] == 1, "wan conditioning seeds null prompt BOS token");
+    check(inputs.null_ids[0] == 1, "wan conditioning seeds null prompt EOS token");
     check(inputs.encoder_attn_mask.size() == 5,
           "wan conditioning builds attention mask when rope is off");
     check(inputs.encoder_attn_mask[0] == 0.0F, "wan conditioning keeps first token unmasked");
     check(inputs.encoder_attn_mask[1] == -10000.0F, "wan conditioning masks zero token positions");
     check(inputs.encoder_attn_mask[2] == 0.0F,
           "wan conditioning keeps active token positions unmasked");
+}
+
+void test_wan_t5_token_framing_matches_hf() {
+    const auto legacy = trtmc::diffusion::normalize_wan_t5_token_ids({2, 289, 3735, 1}, 8, true);
+    check(legacy == std::vector<int32_t>({289, 3735, 1}),
+          "wan token framing removes native-only prefix");
+
+    const auto unframed = trtmc::diffusion::normalize_wan_t5_token_ids({289, 3735}, 8, false);
+    check(unframed == std::vector<int32_t>({289, 3735, 1}), "wan token framing appends HF EOS");
+
+    const auto truncated =
+        trtmc::diffusion::normalize_wan_t5_token_ids({2, 10, 11, 12, 13, 1}, 4, true);
+    check(truncated == std::vector<int32_t>({10, 11, 12, 1}),
+          "wan token framing preserves EOS when truncating");
 }
 
 void test_text_conditioning_uses_both_prompt_and_null_prompt() {
@@ -141,6 +156,28 @@ void test_text_conditioning_propagates_encoder_failures() {
     check(error == "null encode failed", "wan text conditioning preserves null encoder error");
 }
 
+void test_text_conditioning_rejects_non_finite_embeddings() {
+    trtmc::diffusion::WanConditioningInputs inputs;
+    inputs.null_ids = {1, 0};
+    std::string error;
+    trtmc::diffusion::WanTextConditioning conditioning;
+
+    const bool ok = trtmc::diffusion::build_wan_text_conditioning(
+        {7, 8}, inputs, 2, error,
+        [](const std::vector<int32_t>&, std::vector<float>& embeddings, std::string&) {
+            embeddings = {1.0F, std::numeric_limits<float>::quiet_NaN()};
+            return true;
+        },
+        [](const std::vector<float>& embeddings, int32_t, std::vector<float>& projected) {
+            projected = embeddings;
+        },
+        conditioning);
+
+    check(!ok, "wan text conditioning rejects non-finite T5 embeddings");
+    check(error.find("non-finite") != std::string::npos,
+          "wan text conditioning explains non-finite T5 failure");
+}
+
 void test_initial_latents_are_deterministic_by_seed() {
     const auto a = trtmc::diffusion::make_wan_initial_latents(6, 42U);
     const auto b = trtmc::diffusion::make_wan_initial_latents(6, 42U);
@@ -188,9 +225,11 @@ void test_initial_latents_honor_requested_seed() {
 
 int main() {
     test_conditioning_inputs_build_mask_and_null_ids();
+    test_wan_t5_token_framing_matches_hf();
     test_text_conditioning_uses_both_prompt_and_null_prompt();
     test_conditioning_inputs_skip_attention_mask_when_rope_enabled();
     test_text_conditioning_propagates_encoder_failures();
+    test_text_conditioning_rejects_non_finite_embeddings();
     test_initial_latents_are_deterministic_by_seed();
     test_initial_latents_handle_odd_sizes();
     test_initial_latents_honor_caller_bytes_and_size();

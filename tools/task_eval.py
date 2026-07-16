@@ -22,6 +22,8 @@ import traceback
 import subprocess
 import sys
 import time
+import urllib.parse
+import urllib.request
 import warnings
 from collections import Counter, defaultdict
 from itertools import product
@@ -112,6 +114,260 @@ def suite_by_id(suites: list[dict[str, Any]], suite_id: str) -> dict[str, Any]:
             return suite
     known = ", ".join(sorted(s["id"] for s in suites))
     raise ValueError(f"Unknown suite {suite_id!r}. Known suites: {known}")
+
+
+def validate_ci_suite(suite: dict[str, Any], lane: str) -> dict[str, Any]:
+    ci = suite.get("ci", {})
+    if not isinstance(ci, dict) or ci.get("eligible") is not True:
+        raise ValueError(f"Task-eval suite {suite['id']!r} is not CI-eligible")
+    if str(ci.get("lane", "")) != lane:
+        raise ValueError(
+            f"Task-eval suite {suite['id']!r} belongs to lane "
+            f"{ci.get('lane')!r}, not {lane!r}"
+        )
+    if int(ci.get("limit", 0) or 0) <= 0:
+        raise ValueError(f"Task-eval suite {suite['id']!r} must define a positive CI limit")
+    if not isinstance(ci.get("sample_seed"), int):
+        raise ValueError(f"Task-eval suite {suite['id']!r} must define an integer CI sample seed")
+    models = suite.get("default_model_names", [])
+    if not isinstance(models, list) or not models or not all(isinstance(item, str) for item in models):
+        raise ValueError(f"Task-eval suite {suite['id']!r} has no default CI models")
+    return ci
+
+
+def _verified_ci_dataset(path: Path, expected_sha256: str) -> Path | None:
+    if path.is_file() and _sha256_file(path) == expected_sha256:
+        return path
+    return None
+
+
+def ensure_ci_dataset(
+    suite: dict[str, Any], *, explicit_path: Path | None, cache_root: Path
+) -> Path:
+    dataset = suite.get("dataset", {})
+    if not isinstance(dataset, dict):
+        raise ValueError("CI task-eval dataset configuration must be a mapping")
+    expected_sha256 = str(dataset.get("sha256", ""))
+    if len(expected_sha256) != 64:
+        raise ValueError("CI task-eval dataset must define a SHA-256 digest")
+
+    candidates = [explicit_path] if explicit_path is not None else []
+    if dataset.get("default_path"):
+        candidates.append(Path(str(dataset["default_path"])))
+    for candidate in candidates:
+        verified = _verified_ci_dataset(candidate, expected_sha256)
+        if verified is not None:
+            return verified
+    if explicit_path is not None:
+        raise ValueError("Explicit CI task-eval dataset is missing or has the wrong checksum")
+
+    source = str(dataset.get("source", ""))
+    parsed = urllib.parse.urlparse(source)
+    if parsed.scheme != "https":
+        raise ValueError("CI task-eval dataset source must use HTTPS")
+    filename = Path(parsed.path).name
+    if not filename:
+        raise ValueError("CI task-eval dataset source has no filename")
+    destination = cache_root / str(suite["id"]) / filename
+    verified = _verified_ci_dataset(destination, expected_sha256)
+    if verified is not None:
+        return verified
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    try:
+        with urllib.request.urlopen(source, timeout=60) as response, temporary.open("wb") as stream:
+            shutil.copyfileobj(response, stream)
+        if _sha256_file(temporary) != expected_sha256:
+            raise ValueError("Downloaded CI task-eval dataset has the wrong checksum")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def validate_eval_summary(
+    summary: dict[str, Any], expected_models: list[str]
+) -> tuple[bool, list[dict[str, Any]]]:
+    raw_results = summary.get("results", [])
+    if not isinstance(raw_results, list):
+        return False, []
+    results = [result for result in raw_results if isinstance(result, dict)]
+    actual_models = [str(result.get("model", "")) for result in results]
+    complete = len(results) == len(expected_models) and sorted(actual_models) == sorted(expected_models)
+    return complete and all(result.get("status") == "passed" for result in results), results
+
+
+def _public_ci_result(result: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "suite",
+        "model",
+        "hf_id",
+        "status",
+        "mode",
+        "valid_count",
+        "passed_count",
+        "sample_agreement_rate",
+        "prediction_agreement_rate",
+        "mean_relative_l2",
+        "max_relative_l2",
+        "max_absolute_error",
+        "error_type",
+    )
+    return {key: result[key] for key in keys if key in result}
+
+
+def _public_time_series_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    summary_keys = (
+        "status",
+        "sample_count",
+        "valid_count",
+        "passed_count",
+        "sample_agreement_rate",
+        "mean_relative_l2",
+        "max_relative_l2",
+        "max_absolute_error",
+    )
+    case_keys = (
+        "sample_id",
+        "output_numel",
+        "hf_output_shape",
+        "trtfb_output_shape",
+        "relative_l2",
+        "max_absolute_error",
+        "passed",
+    )
+    gate_keys = ("max_relative_l2", "max_absolute_error", "min_sample_agreement_rate")
+    public = {key: summary[key] for key in summary_keys if key in summary}
+    gates = summary.get("gates", {})
+    if isinstance(gates, dict):
+        public["gates"] = {key: gates[key] for key in gate_keys if key in gates}
+    cases = summary.get("cases", [])
+    if isinstance(cases, list):
+        public["cases"] = [
+            {key: case[key] for key in case_keys if key in case}
+            for case in cases
+            if isinstance(case, dict)
+        ]
+    return public
+
+
+def _ci_metric(value: Any) -> str:
+    return f"{float(value):.6e}" if isinstance(value, (int, float)) else "n/a"
+
+
+def write_public_ci_artifacts(
+    *,
+    suite: dict[str, Any],
+    expected_models: list[str],
+    results: list[dict[str, Any]],
+    work_root: Path,
+    artifact_dir: Path,
+) -> None:
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    passed, _ = validate_eval_summary({"results": results}, expected_models)
+    payload = {
+        "suite": suite["id"],
+        "ci": suite["ci"],
+        "models": [_public_ci_result(result) for result in results],
+        "passed": passed,
+        "counts": {
+            "expected": len(expected_models),
+            "reported": len(results),
+            "passed": sum(result.get("status") == "passed" for result in results),
+            "failed": sum(result.get("status") == "failed" for result in results),
+            "skipped": sum(result.get("status") == "skipped" for result in results),
+        },
+    }
+    (artifact_dir / "eval_summary.json").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+    lines = [
+        f"# {suite['id']} task-eval CI",
+        "",
+        f"- Passed: `{str(passed).lower()}`",
+        f"- Models: `{len(results)}/{len(expected_models)}`",
+        "",
+        "| Model | Status | Agreement | Max relative-L2 | Max absolute error |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for result in results:
+        lines.append(
+            "| {model} | {status} | {agreement} | {relative} | {absolute} |".format(
+                model=result.get("model", "unknown"),
+                status=result.get("status", "unknown"),
+                agreement=_ci_metric(result.get("sample_agreement_rate")),
+                relative=_ci_metric(result.get("max_relative_l2")),
+                absolute=_ci_metric(result.get("max_absolute_error")),
+            )
+        )
+        model_name = str(result.get("model", ""))
+        numeric_summary = work_root / str(suite["id"]) / model_name / "summary.json"
+        if numeric_summary.is_file():
+            destination = artifact_dir / "models" / model_name / "summary.json"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            raw_summary = json.loads(numeric_summary.read_text(encoding="utf-8"))
+            if not isinstance(raw_summary, dict):
+                raise ValueError(f"Invalid time-series summary for {model_name!r}")
+            destination.write_text(
+                json.dumps(_public_time_series_summary(raw_summary), indent=2, ensure_ascii=False)
+                + "\n",
+                encoding="utf-8",
+            )
+    report = "\n".join(lines) + "\n"
+    (artifact_dir / "summary.md").write_text(report, encoding="utf-8")
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as stream:
+            stream.write(report)
+
+
+def configure_ci_eval(args: argparse.Namespace, suite: dict[str, Any]) -> list[str]:
+    ci = validate_ci_suite(suite, args.ci_lane)
+    default_models = list(suite["default_model_names"])
+    requested_models = list(dict.fromkeys(args.model))
+    unknown_models = sorted(set(requested_models) - set(default_models))
+    if unknown_models:
+        raise ValueError(f"CI task-eval model selection is not allowlisted: {unknown_models}")
+    expected_models = requested_models or default_models
+    if args.limit not in {0, int(ci["limit"])}:
+        raise ValueError("CI task-eval limit must match the suite CI profile")
+    if args.sample_seed not in {None, int(ci["sample_seed"])}:
+        raise ValueError("CI task-eval sample seed must match the suite CI profile")
+    args.model = expected_models
+    args.limit = int(ci["limit"])
+    args.sample_seed = int(ci["sample_seed"])
+    args.single_device_only = True
+    args.local_files_only = True
+    if not args.waive_platform:
+        args.waive_platform = "GB300"
+    if not args.engine_dir:
+        args.engine_dir = os.environ.get("ENGINE_DIR", "")
+    if not args.engine_dir:
+        raise ValueError("CI task-eval requires --engine-dir")
+    explicit_dataset = Path(args.dataset) if args.dataset else None
+    args.dataset = str(
+        ensure_ci_dataset(
+            suite,
+            explicit_path=explicit_dataset,
+            cache_root=Path(args.dataset_cache_root),
+        )
+    )
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    return expected_models
+
+
+def cmd_prepare_ci_dataset(args: argparse.Namespace) -> int:
+    suite = suite_by_id(load_suites(Path(args.suites)), args.suite)
+    validate_ci_suite(suite, args.ci_lane)
+    dataset = ensure_ci_dataset(
+        suite,
+        explicit_path=Path(args.dataset) if args.dataset else None,
+        cache_root=Path(args.dataset_cache_root),
+    )
+    print(dataset.resolve())
+    return 0
 
 
 def _deep_merge_mappings(*values: Any) -> dict[str, Any]:
@@ -9162,6 +9418,8 @@ def eval_one_model(
     else:
         engine_dir = Path(args.engine_dir or (work_root / "_bundles"))
         bundle_path = engine_dir / str(model["bundle"])
+    if getattr(args, "require_prebuilt_bundles", False) and not bundle_path.is_file():
+        raise FileNotFoundError(f"Required prebuilt task-eval bundle is missing: {bundle_path}")
 
     max_prompt_len = None
     if (
@@ -10200,6 +10458,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--local-files-only", action="store_true")
     p.add_argument("--output")
 
+    p = sub.add_parser("prepare-media")
+    p.add_argument("--output-root", type=Path, required=True)
+    p.add_argument("--vbench-info", type=Path)
+    p.add_argument("--gedit-source", default="")
+    p.add_argument("--sana-wm-root", type=Path)
+    p.add_argument("--limit", type=int, default=10)
+
+    p = sub.add_parser("prepare-ci-dataset")
+    p.add_argument("--suites", default=str(DEFAULT_SUITES))
+    p.add_argument("--suite", required=True)
+    p.add_argument("--ci-lane", required=True)
+    p.add_argument("--dataset")
+    p.add_argument("--dataset-cache-root", required=True)
+
     p = sub.add_parser("score")
     p.add_argument("--answers")
     p.add_argument("--predictions")
@@ -10245,6 +10517,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--work-root", default="/tmp/trtmc-task-eval")
     p.add_argument("--engine-dir", default="")
     p.add_argument(
+        "--ci-lane",
+        default="",
+        help="Run the suite's fail-closed CI profile for this lane.",
+    )
+    p.add_argument("--dataset-cache-root", default=".ci/task-eval-data")
+    p.add_argument("--artifact-dir", default="")
+    p.add_argument(
         "--bundle", default="", help="Prebuilt bundle path; only valid with one --model."
     )
     p.add_argument(
@@ -10258,6 +10537,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample-seed", type=int)
     p.add_argument("--force-hf", action="store_true", help="Regenerate HF reference outputs.")
     p.add_argument("--force-build", action="store_true", help="Rebuild the .trtfb bundle.")
+    p.add_argument(
+        "--require-prebuilt-bundles",
+        action="store_true",
+        help="Fail instead of building when a selected bundle is missing.",
+    )
     p.add_argument(
         "--fail-fast",
         action="store_true",
@@ -10639,9 +10923,31 @@ def cmd_eval_worker(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_prepare_media(args: argparse.Namespace) -> int:
+    from tools.prepare_media_task_eval_datasets import prepare_media_datasets
+
+    outputs = prepare_media_datasets(
+        output_root=args.output_root,
+        vbench_info=args.vbench_info,
+        gedit_source=args.gedit_source,
+        sana_wm_root=args.sana_wm_root,
+        limit=args.limit,
+    )
+    for output in outputs:
+        payload = json.loads(output.read_text(encoding="utf-8"))
+        print(f"{output}: {payload['request_count']} requests")
+    return 0
+
+
 def cmd_eval(args: argparse.Namespace) -> int:
     suites = load_suites(Path(args.suites))
     suite = suite_by_id(suites, args.suite)
+    ci_lane = str(getattr(args, "ci_lane", ""))
+    expected_models = (
+        configure_ci_eval(args, suite)
+        if ci_lane
+        else list(suite.get("default_model_names", []))
+    )
     dataset_kind = suite.get("dataset", {}).get("kind", "")
     if dataset_kind not in {
         "mmlu_five_shot_json",
@@ -10758,6 +11064,18 @@ def cmd_eval(args: argparse.Namespace) -> int:
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"[task_eval] summary={summary_path}")
+    artifact_dir = str(getattr(args, "artifact_dir", ""))
+    if artifact_dir:
+        write_public_ci_artifacts(
+            suite=suite,
+            expected_models=expected_models,
+            results=results,
+            work_root=Path(args.work_root),
+            artifact_dir=Path(artifact_dir),
+        )
+    if ci_lane:
+        passed, _ = validate_eval_summary(out, expected_models)
+        return 0 if passed else 1
     return 0
 
 
@@ -10769,6 +11087,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_plan(args)
     if args.cmd == "prepare":
         return cmd_prepare(args)
+    if args.cmd == "prepare-media":
+        return cmd_prepare_media(args)
+    if args.cmd == "prepare-ci-dataset":
+        return cmd_prepare_ci_dataset(args)
     if args.cmd == "run-hf":
         run_hf_reference(args)
         return 0

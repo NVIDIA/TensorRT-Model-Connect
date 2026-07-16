@@ -17,8 +17,15 @@ import time
 from pathlib import Path
 
 from .. import _case_artifact_dir
-from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
-from ..parity import ensure_initial_latents, uses_shared_initial_latents
+from ..contracts import (
+    E2ECase,
+    RunContext,
+    StageOutput,
+    StageSpec,
+    ensure_initial_latents,
+    normalize_wan_prompt,
+    uses_shared_initial_latents,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +101,9 @@ class HfDiffusersReference:
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
         model_ref = _resolve_cached_model_ref(case.hf_id)
-        prompt = case.inputs.get("prompt", "A cat sitting on a beach")
+        prompt = normalize_wan_prompt(
+            case.inputs.get("prompt", "A cat sitting on a beach")
+        )
         python = ctx.reference_python_path() or sys.executable
         artifacts_dir = ctx.artifacts_dir or tempfile.gettempdir()
         model_dir = _case_artifact_dir(artifacts_dir, case.name) if ctx.artifacts_dir else artifacts_dir
@@ -123,7 +132,7 @@ if shared is not None and embed is not None and shared.weight.shape == embed.wei
         pipe.text_encoder.encoder.embed_tokens = pipe.text_encoder.shared
 tokens = pipe.tokenizer(
     {prompt!r}, return_tensors="pt", padding="max_length",
-    max_length={int(case.inputs.get("text_max_length", 512))}, truncation=True)
+    max_length={int(case.inputs.get("text_max_length", 226))}, truncation=True)
 with torch.no_grad():
     t5_out = pipe.text_encoder(
         input_ids=tokens.input_ids,
@@ -157,12 +166,17 @@ print(f"mean={{float(t5_out.mean()):.6f}}")
         self, case: E2ECase, stage: StageSpec, ctx: RunContext
     ) -> StageOutput:
         model_ref = _resolve_cached_model_ref(case.hf_id)
+        # WanPipeline applies Diffusers ``prompt_clean`` internally. Passing
+        # the original prompt avoids cleaning nested entities twice; the TRT
+        # runner performs the equivalent single normalization before native
+        # tokenization.
         prompt = case.inputs.get("prompt", "A cat sitting on a beach")
         num_steps = case.inputs.get("num_inference_steps", 30)
         video_height = case.inputs.get("video_height", 480)
         video_width = case.inputs.get("video_width", 832)
         video_num_frames = case.inputs.get("video_num_frames", 17)
         guidance_scale = float(case.inputs.get("guidance_scale", 5.0))
+        text_max_length = int(case.inputs.get("text_max_length", 226))
         python = ctx.reference_python_path() or sys.executable
         initial_latents = (
             ensure_initial_latents(case, ctx)
@@ -222,6 +236,7 @@ pipe.to("cuda")
 {latent_setup}
 output = pipe(
     prompt={prompt!r},
+    max_sequence_length={text_max_length},
     num_inference_steps={num_steps},
     height={video_height},
     width={video_width},

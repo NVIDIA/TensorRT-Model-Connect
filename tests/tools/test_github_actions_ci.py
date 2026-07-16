@@ -1189,6 +1189,28 @@ def test_github_workflows_write_e2e_markdown_summary() -> None:
     assert '>> "$GITHUB_STEP_SUMMARY"' in premerge
 
 
+def test_etth1_model_proofs_use_the_single_task_eval_entry_point() -> None:
+    stage = (REPO_ROOT / ".github" / "scripts" / "run-model-proof.sh").read_text()
+    task_eval = (REPO_ROOT / "tools" / "task_eval.py").read_text()
+
+    assert "/src/tools/task_eval.py prepare-ci-dataset" in stage
+    assert "/src/tools/task_eval.py eval" in stage
+    assert "task_eval_ci.py" not in stage
+    assert "--suite etth1_time_series_parity" in stage
+    assert "--ci-lane nightly" in stage
+    assert "--engine-dir /work/engines" in stage
+    assert "--model-plugin-dir /work/model-plugins" in stage
+    assert "--require-prebuilt-bundles" in stage
+    assert "ETTh1 task-eval requires a GB300 GPU" in stage
+    assert "--network none" in stage
+    assert "validate_eval_summary" in task_eval
+    assert 'result.get("status") == "passed"' in task_eval
+    assert "return complete and all" in task_eval
+    assert '"work_dir"' not in task_eval.split("def _public_ci_result", maxsplit=1)[1].split(
+        ")", maxsplit=1
+    )[0]
+
+
 def test_nightly_validates_the_installed_wheel_without_a_second_model_build() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]

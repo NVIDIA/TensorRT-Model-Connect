@@ -90,7 +90,7 @@ inline void fill_dynamic_shift_schedule(FlowMatchEulerPlan& plan, int32_t num_st
     plan.dynamic_mu = compute_dynamic_mu(config, num_steps);
 
     const double sigma_max = 1.0;
-    const double sigma_min = 1.0 / static_cast<double>(std::max(num_steps, 1));
+    const double sigma_min = 1.0 / N;
     const double exp_mu = std::exp(plan.dynamic_mu);
 
     for (int32_t i = 0; i < num_steps; ++i) {

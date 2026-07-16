@@ -43,6 +43,15 @@ def _check_cuda(status):
     return status
 
 
+def _build_t5_attention_mask(
+    padded_ids: np.ndarray, mask_dtype: np.dtype,
+) -> np.ndarray:
+    """Build the mask expected by the bundled Wan T5 encoder graph."""
+    if np.issubdtype(mask_dtype, np.integer):
+        return (padded_ids != 0).astype(mask_dtype)
+    return np.where(padded_ids != 0, 0.0, -1.0e9).astype(mask_dtype)
+
+
 class DiffusionRunner:
     """Generic diffusion pipeline runner with TRT engines.
 
@@ -211,11 +220,7 @@ class DiffusionRunner:
         # Match the engine's expected attention-mask dtype/semantics.
         ids_flat = padded_ids.flatten()
         mask_dtype = trt.nptype(te_engine.get_tensor_dtype("attention_mask"))
-        if np.issubdtype(mask_dtype, np.integer):
-            attn_mask = (padded_ids != 0).astype(mask_dtype)
-        else:
-            attn_mask = np.where(ids_flat != 0, 1.0, 0.0).astype(mask_dtype)
-            attn_mask = attn_mask.reshape(padded_ids.shape)
+        attn_mask = _build_t5_attention_mask(padded_ids, mask_dtype)
 
         # Run first (primary) text encoder
         results = self._run_engine(te_names[0], {
@@ -374,6 +379,7 @@ class DiffusionRunner:
         vae_engine = self._engines.get("vae_decoder")
         if vae_engine is None:
             raise RuntimeError("No VAE decoder engine in bundle")
+        has_first_frame_engine = "vae_decoder_first_frame" in self._engines
 
         # Enumerate cache inputs
         cache_states = {}
@@ -392,7 +398,12 @@ class DiffusionRunner:
             inputs.update(cache_states)
 
             # Run VAE
-            results = self._run_engine("vae_decoder", inputs)
+            engine_name = (
+                "vae_decoder_first_frame"
+                if t == 0 and has_first_frame_engine
+                else "vae_decoder"
+            )
+            results = self._run_engine(engine_name, inputs)
 
             # Extract frame and updated caches
             frame = results["video_frame"]
@@ -407,15 +418,13 @@ class DiffusionRunner:
         # Stack frames along temporal dim
         video = np.concatenate(frames, axis=2)
 
-        # Trim extra frames from frame-0's temporal upsample.
-        # The TRT engine always runs temporal pixel-shuffle (even for frame 0
-        # with zero caches), producing scale_factor_temporal output frames per
-        # input frame. HF skips pixel-shuffle for frame 0, producing only 1.
-        # Trim the first (scale_factor_temporal - 1) frames to match HF.
-        sft = self.config.get("scale_factor_temporal", 1)
-        trim = sft - 1
-        if trim > 0 and video.shape[2] > trim:
-            video = video[:, :, trim:, :, :]
+        if not has_first_frame_engine:
+            # Legacy bundles always run temporal pixel-shuffle for frame 0.
+            # Preserve their historical best-effort trim behavior.
+            sft = self.config.get("scale_factor_temporal", 1)
+            trim = sft - 1
+            if trim > 0 and video.shape[2] > trim:
+                video = video[:, :, trim:, :, :]
 
         # Clamp to [0, 1]
         video = np.clip((video + 1.0) / 2.0, 0.0, 1.0)

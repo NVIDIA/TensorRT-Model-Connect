@@ -78,6 +78,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "tests/builder/family_plugin_tester.py",
         "tests/e2e_partition.py",
         "tests/runtime_strategy_matrix.yaml",
+        "tests/task_eval/validation_suites.yaml",
         "tests/test_e2e.py",
         "tests/test_e2e_selection.py",
         "tests/test_tvm_ffi_e2e.py",
@@ -86,6 +87,7 @@ PLATFORM_PROJECTION_EXACT = frozenset(
         "tools/diff_vl.py",
         "tools/diffusion_helpers.py",
         "tools/model_plugin_isolation.py",
+        "tools/task_eval.py",
         "tools/test_impact.py",
         "tools/tool_helpers.py",
         *MODEL_ROOT_PLATFORM_FILES,
@@ -132,14 +134,15 @@ UNIT_TEST_ONLY_EXACT = frozenset(
     }
 )
 # Task-eval and the selective impact analyzer are certified by the complete
-# source-only tools suite. Representative model proofs do not execute these
-# entrypoints, so treating them as broad model impact would add GPU work
-# without validating the changed behavior.
+# source-only tools suite. Selective premerge proofs do not execute these
+# entrypoints; the all-model nightly separately consumes task-eval where
+# applicable, so treating a tool-only change as broad premerge model impact
+# would add GPU work without validating the changed behavior.
 FULL_UNIT_TEST_ONLY_EXACT = frozenset(
     {
         "tools/elf_hf_reference.py",
         "tools/prepare_elf_task_eval_datasets.py",
-        "tools/task_eval_ci.py",
+        "tools/prepare_media_task_eval_datasets.py",
         "tools/task_eval.py",
         "tools/test_impact.py",
     }

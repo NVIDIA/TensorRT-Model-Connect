@@ -1003,6 +1003,7 @@ payload = {
         "e2e_reference": {"status": "pending", "evidence": "e2e/junit.xml, e2e/*/result.json"},
         "engine_build_budget": {"status": "pending", "evidence": "engine-builds/*.json, engine-build-verification.json"},
         "result_verification": {"status": "pending", "evidence": "e2e-verification.json"},
+        "task_eval": {"status": "pending", "evidence": "task-eval/eval_summary.json"},
         "html_report": {"status": "pending", "evidence": "model-proof-report.html"},
     },
 }
@@ -1991,6 +1992,57 @@ PY
   update_proof_step engine_build_budget passed \
     "engine-builds/*.json, engine-build-verification.json"
 
+  local -a task_eval_models=()
+  if [ "$suite" = nightly ]; then
+    case "$runtime_model" in
+      chronos_bolt) task_eval_models=(chronos-bolt-tiny-official) ;;
+      patchtsmixer) task_eval_models=(patchtsmixer-granite-official) ;;
+      patchtst)
+        task_eval_models=(
+          patchtst-etth1-regression-distribution
+          patchtst-granite-official
+        )
+        ;;
+      timesfm) task_eval_models=(timesfm-2.0-500m-official) ;;
+    esac
+  fi
+  if [ "${#task_eval_models[@]}" -gt 0 ]; then
+    nvidia-smi --query-gpu=name --format=csv,noheader \
+      | grep -qi 'GB300' || die "ETTh1 task-eval requires a GB300 GPU"
+    local task_eval_dataset=/task-eval-data/etth1_time_series_parity/ETTh1.csv
+    [ -f "$task_eval_dataset" ] || die "verified ETTh1 task-eval dataset is missing"
+    local -a task_eval_model_args=()
+    local task_eval_model
+    for task_eval_model in "${task_eval_models[@]}"; do
+      task_eval_model_args+=(--model "$task_eval_model")
+    done
+    update_proof_step task_eval running \
+      "task-eval/eval_summary.json, task-eval/models/*/summary.json"
+    PYTHONPATH=/src/python:/src \
+      PYTHONNOUSERSITE=1 \
+      PYTHONDONTWRITEBYTECODE=1 \
+      TRTMC_MODEL_PLUGIN_STRICT=1 \
+      TRTMC_MODEL_PLUGIN_DIR=/work/model-plugins \
+      LD_LIBRARY_PATH="$ld_library_path" \
+      "$py" /src/tools/task_eval.py eval \
+        --suite etth1_time_series_parity \
+        --ci-lane nightly \
+        --dataset "$task_eval_dataset" \
+        --dataset-cache-root /work/task-eval-data \
+        --work-root /work/task-eval \
+        --artifact-dir /artifacts/task-eval \
+        --engine-dir /work/engines \
+        --model-plugin-dir /work/model-plugins \
+        --trtmc-binary /work/build/trtmc \
+        --hf-python "$py" \
+        --require-prebuilt-bundles \
+        "${task_eval_model_args[@]}"
+    update_proof_step task_eval passed \
+      "task-eval/eval_summary.json, task-eval/models/*/summary.json"
+  else
+    update_proof_step task_eval skipped "not an ETTh1 time-series nightly model"
+  fi
+
   "$py" - "$model" "$revision" "$runtime_model" "$runtime_library" \
     "$TRTMC_MODEL_PROOF_GPU_ID" "$TRTMC_MODEL_PROOF_GPU_SLOT_IDS" \
     "$TRTMC_MODEL_PROOF_SLOTS_PER_GPU" "$TRTMC_MODEL_PROOF_RESOURCE_CLASS" \
@@ -2284,8 +2336,9 @@ PY
   local host_config_file="$work_dir/model-proof-config-host.txt"
   write_model_proof_selection \
     "$projection_dir" "$artifacts_dir/selection.json" "$host_config_file"
-  local model_reference_revision
+  local model_reference_revision runtime_model
   model_reference_revision="$(sed -n 's/^model_reference_revision=//p' "$host_config_file")"
+  runtime_model="$(sed -n 's/^runtime_model=//p' "$host_config_file")"
   prepare_private_model_reference_cache \
     "$host_config_file" "$work_dir" "$artifacts_dir" "$repo_root"
   local -a cache_check_models=()
@@ -2315,6 +2368,55 @@ PY
   [[ "$build_jobs" =~ ^[1-9][0-9]*$ ]] || \
     die "TRTMC_MODEL_PROOF_BUILD_JOBS must be a positive integer"
 
+  local container_name="trtmc-model-proof-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$model"
+  container_name="${container_name//_/-}"
+  local -a job_identity_labels=(
+    --label com.nvidia.trtmc.model-proof.job=1
+    --label "com.nvidia.trtmc.model-proof.run-id=${GITHUB_RUN_ID:-local}"
+    --label "com.nvidia.trtmc.model-proof.run-attempt=${GITHUB_RUN_ATTEMPT:-0}"
+    --label "com.nvidia.trtmc.model-proof.model=$model"
+  )
+
+  local task_eval_dataset_dir=""
+  if [ "$suite" = nightly ]; then
+    case "$runtime_model" in
+      chronos_bolt|patchtsmixer|patchtst|timesfm)
+        task_eval_dataset_dir="$work_dir/task-eval-data"
+        mkdir -p "$task_eval_dataset_dir"
+        local dataset_container_name="${container_name}-task-eval-data"
+        proof_container_name="$dataset_container_name"
+        docker rm -f "$dataset_container_name" >/dev/null 2>&1 || true
+        set +e
+        docker run --rm \
+          --name "$dataset_container_name" \
+          "${job_identity_labels[@]}" \
+          --read-only \
+          --cap-drop ALL \
+          --security-opt no-new-privileges \
+          --pids-limit 64 \
+          --user "$(id -u):$(id -g)" \
+          --mount "type=bind,src=$projection_dir,dst=/src,readonly" \
+          --mount "type=bind,src=$task_eval_dataset_dir,dst=/task-eval-data" \
+          --tmpfs /tmp:rw,exec,nosuid,nodev,size=256m \
+          --workdir /src \
+          -e HOME=/tmp \
+          -e PYTHONDONTWRITEBYTECODE=1 \
+          "$image" \
+          /opt/venv/bin/python /src/tools/task_eval.py prepare-ci-dataset \
+            --suite etth1_time_series_parity \
+            --ci-lane nightly \
+            --dataset-cache-root /task-eval-data \
+          2>&1 | tee "$artifacts_dir/task-eval-dataset.log"
+        local dataset_rc="${PIPESTATUS[0]}"
+        set -e
+        [ "$dataset_rc" -eq 0 ] || \
+          die "verified ETTh1 dataset preparation failed (exit $dataset_rc)"
+        [ -f "$task_eval_dataset_dir/etth1_time_series_parity/ETTh1.csv" ] || \
+          die "verified ETTh1 dataset preparation produced no dataset"
+        ;;
+    esac
+  fi
+
   local hf_cache_root="${TRTMC_HF_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}}"
   local hf_hub_cache="${TRTMC_HF_HUB_CACHE:-$hf_cache_root/hub}"
   hf_hub_cache="$(python3 - "$hf_hub_cache" <<'PY'
@@ -2334,14 +2436,6 @@ PY
   # network-disabled strict cache check below proves readability. Global
   # dynamic-module caches are deliberately never exposed to either container.
 
-  local container_name="trtmc-model-proof-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}-$model"
-  container_name="${container_name//_/-}"
-  local -a job_identity_labels=(
-    --label com.nvidia.trtmc.model-proof.job=1
-    --label "com.nvidia.trtmc.model-proof.run-id=${GITHUB_RUN_ID:-local}"
-    --label "com.nvidia.trtmc.model-proof.run-attempt=${GITHUB_RUN_ATTEMPT:-0}"
-    --label "com.nvidia.trtmc.model-proof.model=$model"
-  )
   local cache_check_container_name="${container_name}-cache-check"
   proof_container_name="$cache_check_container_name"
   docker rm -f "$cache_check_container_name" >/dev/null 2>&1 || true
@@ -2614,6 +2708,11 @@ PY
     -e HF_MODULES_CACHE=/work/hf-modules
     -e TRANSFORMERS_CACHE=/hf-cache/hub
   )
+  if [ -n "$task_eval_dataset_dir" ]; then
+    docker_args+=(
+      --mount "type=bind,src=$task_eval_dataset_dir,dst=/task-eval-data,readonly"
+    )
+  fi
   if [ -n "$model_reference_revision" ]; then
     docker_args+=(
       -e TRTMC_STORAGE_ROOT=/work/reference-private

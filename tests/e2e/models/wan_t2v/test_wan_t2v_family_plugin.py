@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import struct
+import subprocess
 import sys
 import types
 
@@ -25,6 +26,14 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 try:
     from tensorrt_model_connect.config import ModelConfig
     import tensorrt_model_connect.families.wan_t2v as wan_mod
+    from tensorrt_model_connect.families.wan_t2v import diffusion_runner as py_diffusion_runner
+    from tests.e2e.models.wan_t2v.e2e_plugins.contracts import (
+        ensure_initial_latents,
+        normalize_wan_prompt,
+    )
+    from tests.e2e.models.wan_t2v.e2e_plugins.references import hf_diffusers
+    from tests.e2e.models.wan_t2v.e2e_plugins.runners import diffusion
+    from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -105,6 +114,68 @@ def test_load_weights_requires_diffusers_model_index(tmp_path) -> None:
         wan_mod.plugin.load_weights(str(bad_dir), _cfg())
 
 
+def test_load_weights_preserves_checkpoint_scheduler_config(tmp_path) -> None:
+    """The bundle scheduler must inherit the checkpoint's Diffusers config."""
+    model_dir = tmp_path / "wan"
+    scheduler_dir = model_dir / "scheduler"
+    scheduler_dir.mkdir(parents=True)
+    (model_dir / "model_index.json").write_text("{}")
+    (scheduler_dir / "scheduler_config.json").write_text(
+        json.dumps(
+            {
+                "_class_name": "UniPCMultistepScheduler",
+                "num_train_timesteps": 1000,
+                "flow_shift": 3.0,
+                "solver_order": 2,
+                "solver_type": "bh2",
+                "prediction_type": "flow_prediction",
+                "use_flow_sigmas": True,
+                "lower_order_final": True,
+                "use_dynamic_shifting": False,
+            }
+        )
+    )
+    config = _cfg()
+
+    wan_mod.plugin.load_weights(str(model_dir), config)
+    diffusion = wan_mod.plugin.get_diffusion_config(config)
+
+    assert diffusion["scheduler"] == "unipc_multistep"
+    assert diffusion["flow_shift"] == pytest.approx(3.0)
+    assert diffusion["unipc_lower_order_final"] == 1
+    assert diffusion["use_dynamic_shifting"] == 0
+
+
+def test_wan_scheduler_fallback_is_flow_match_euler() -> None:
+    """A config without scheduler metadata keeps the generic Wan fallback."""
+    diffusion = wan_mod.plugin.get_diffusion_config(_cfg())
+
+    assert diffusion["scheduler"] == "flow_match_euler"
+    assert diffusion["flow_shift"] == pytest.approx(1.0)
+
+
+def test_wan_rejects_unsupported_unipc_variant() -> None:
+    config = _cfg(
+        _scheduler_config={
+            "_class_name": "UniPCMultistepScheduler",
+            "solver_order": 3,
+        }
+    )
+
+    with pytest.raises(ValueError, match="order-2 BH2 UniPC"):
+        wan_mod.plugin.get_diffusion_config(config)
+
+
+def test_wan_runtime_owns_t5_special_token_framing(tmp_path) -> None:
+    tokenizer_dir = tmp_path / "tokenizer"
+    tokenizer_dir.mkdir()
+
+    assert wan_mod.plugin.diffusion_tokenizer_add_special_tokens(
+        tmp_path,
+        detect_tokenizer_add_special_tokens=lambda _path: True,
+    ) is False
+
+
 def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch) -> None:
     """Intent: verify build_components orchestration and computed num_patches.
 
@@ -134,7 +205,10 @@ def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch)
         return {"vae.weight": np.array([3], dtype=np.float32)}
 
     def build_causal_vae_3d_engine(weights, **kwargs):
-        calls["build_causal_vae_3d_engine"] = {"weights": weights, **kwargs}
+        call = {"weights": weights, **kwargs}
+        calls.setdefault("build_causal_vae_3d_engine", []).append(call)
+        if kwargs.get("first_frame_only"):
+            return b"vae-first-frame-plan"
         return b"vae-plan"
 
     monkeypatch.setitem(
@@ -172,7 +246,12 @@ def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch)
         lambda dit_weights: b"wan-preproc",
     )
 
-    cfg = _cfg(video_height=64, video_width=80, video_num_frames=9)
+    cfg = _cfg(
+        video_height=64,
+        video_width=80,
+        video_num_frames=9,
+        _fp32_layers=[24],
+    )
     weights = {
         "_text_encoder_dir": "/model/text_encoder",
         "_transformer_dir": "/model/transformer",
@@ -185,13 +264,39 @@ def test_build_components_calls_all_subbuilders(monkeypatch: pytest.MonkeyPatch)
     assert out["text_encoders"] == [("t5", b"t5-plan")]
     assert out["denoiser"] == b"dit-plan"
     assert out["vae_decoder"] == b"vae-plan"
+    assert out["vae_decoder_first_frame"] == b"vae-first-frame-plan"
     assert out["preprocessor_weights"] == b"wan-preproc"
 
     # Preconditions ensure 64x80 and 9 frames.
     # Postcondition: num_patches = 60 using Wan's latent+patching math.
-    assert calls["load_t5_weights"]["precision"] == "fp16"
+    assert calls["load_t5_weights"]["precision"] == "fp32"
+    assert calls["build_t5_encoder_engine"]["precision"] == "fp32"
     assert calls["build_standard_dit_engine"]["num_patches"] == 60
     assert calls["build_standard_dit_engine"]["context_dim"] == wan_mod.plugin._DIT_DIM
+    assert calls["build_standard_dit_engine"]["precision"] == "fp16"
+    vae_calls = calls["build_causal_vae_3d_engine"]
+    assert len(vae_calls) == 2
+    assert vae_calls[0]["precision"] == "fp16"
+    assert vae_calls[0].get("first_frame_only") is None
+    assert vae_calls[1]["precision"] == "fp16"
+    assert vae_calls[1]["first_frame_only"] is True
+
+
+def test_build_components_rejects_partial_t5_fp32_selectors() -> None:
+    """Wan currently supports the complete-T5 selector, not partial layers."""
+    weights = {
+        "_text_encoder_dir": "/model/text_encoder",
+        "_transformer_dir": "/model/transformer",
+        "_vae_dir": "/model/vae",
+    }
+
+    with pytest.raises(ValueError, match="supports only selector 24"):
+        wan_mod.plugin.build_components(
+            "/model",
+            _cfg(_fp32_layers=[0, 23]),
+            weights,
+            precision="fp16",
+        )
 
 
 def test_build_components_tensor_parallel_builds_rank_denoisers(
@@ -234,7 +339,10 @@ def test_build_components_tensor_parallel_builds_rank_denoisers(
         return {"vae.weight": np.array([3], dtype=np.float32)}
 
     def build_causal_vae_3d_engine(weights, **kwargs):
-        calls["build_causal_vae_3d_engine"] = {"weights": weights, **kwargs}
+        call = {"weights": weights, **kwargs}
+        calls.setdefault("build_causal_vae_3d_engine", []).append(call)
+        if kwargs.get("first_frame_only"):
+            return b"vae-first-frame-plan"
         return b"vae-plan"
 
     monkeypatch.setitem(
@@ -301,6 +409,9 @@ def test_build_components_tensor_parallel_builds_rank_denoisers(
     }
     assert "denoiser" not in out
     assert out["vae_decoder"] == b"vae-plan"
+    assert out["vae_decoder_first_frame"] == b"vae-first-frame-plan"
+    assert [call.get("first_frame_only", False)
+            for call in calls["build_causal_vae_3d_engine"]] == [False, True]
     assert calls["dit_ranks"] == [0, 1, 2, 3]
 
 
@@ -354,3 +465,169 @@ def test_serialize_preprocessor_weights_transforms_patch_weight() -> None:
         nbytes = int(np.prod(info["shape"])) * 4
         max_end = max(max_end, info["offset"] + nbytes)
     assert len(payload) == max_end
+
+
+def _parity_case(seed: int = 42) -> E2ECase:
+    return E2ECase(
+        name="vbench_000001",
+        hf_id="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        family="wan_t2v",
+        runtime_strategy="diffusion_wan",
+        bundle="wan21-t2v-1.3b-l0.trtfb",
+        inputs={
+            "prompt": "A red robot walks through a garden",
+            "video_num_frames": 5,
+            "video_height": 384,
+            "video_width": 672,
+            "num_inference_steps": 1,
+            "seed": seed,
+            "use_shared_initial_latents": True,
+        },
+    )
+
+
+def test_hf_and_trtmc_resolve_the_same_initial_latent(tmp_path) -> None:
+    case = _parity_case(seed=43)
+    hf_ctx = RunContext(case=case, artifacts_dir=str(tmp_path / "hf_artifacts"))
+    trt_ctx = RunContext(case=case, artifacts_dir=str(tmp_path / "trtfb_artifacts"))
+
+    hf = ensure_initial_latents(case, hf_ctx)
+    trt = ensure_initial_latents(case, trt_ctx)
+
+    assert hf.path == trt.path
+    assert hf.sha256 == trt.sha256
+    assert hf.shape == (1, 16, 2, 48, 84)
+    assert hf.path.stat().st_size == 4 * 16 * 2 * 48 * 84
+
+
+def test_wan_prompt_normalization_matches_diffusers_cleaning() -> None:
+    assert normalize_wan_prompt("  A&amp;B\u00a0\n  moves  ") == "A&B moves"
+
+
+def test_python_t5_diagnostic_uses_additive_attention_mask() -> None:
+    input_ids = np.asarray([[289, 3735, 1, 0, 0]], dtype=np.int32)
+
+    mask = py_diffusion_runner._build_t5_attention_mask(input_ids, np.float32)
+
+    np.testing.assert_array_equal(
+        mask,
+        np.asarray([[0.0, 0.0, 0.0, -1.0e9, -1.0e9]], dtype=np.float32),
+    )
+
+
+def test_trtmc_runner_consumes_and_reports_shared_initial_latent(
+    tmp_path, monkeypatch
+) -> None:
+    case = _parity_case(seed=44)
+    binary = tmp_path / "trtmc"
+    binary.write_text("", encoding="utf-8")
+    ctx = RunContext(
+        case=case,
+        artifacts_dir=str(tmp_path / "trtfb_artifacts"),
+        binary_path=str(binary),
+        engine_dir=str(tmp_path),
+    )
+    monkeypatch.setattr(
+        diffusion.subprocess,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+    )
+
+    output = diffusion.DiffusionMediaRunner().run_stage(
+        case, StageSpec(name="end_to_end"), ctx
+    )
+
+    command = output.metadata["command"]
+    latent_path = command[command.index("--initial-latents-raw") + 1]
+    assert "shared_initial_latents" in latent_path
+    assert output.data["initial_latents_sha256"]
+
+
+def test_trtmc_runner_normalizes_prompt_before_tokenization(
+    tmp_path, monkeypatch
+) -> None:
+    case = _parity_case()
+    case.inputs["prompt"] = "  A&amp;B\u00a0\n  moves  "
+    ctx = RunContext(
+        case=case,
+        artifacts_dir=str(tmp_path / "trtfb_artifacts"),
+        binary_path=str(tmp_path / "trtmc"),
+        engine_dir=str(tmp_path),
+    )
+    monkeypatch.setattr(
+        diffusion.subprocess,
+        "run",
+        lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+    )
+
+    output = diffusion.DiffusionMediaRunner().run_stage(
+        case, StageSpec(name="end_to_end"), ctx
+    )
+
+    command = output.metadata["command"]
+    assert command[command.index("--prompt") + 1] == "A&B moves"
+    assert output.data["prompt"] == case.inputs["prompt"]
+
+
+def test_hf_reference_consumes_and_reports_shared_initial_latent(
+    tmp_path, monkeypatch
+) -> None:
+    case = _parity_case(seed=44)
+    ctx = RunContext(
+        case=case,
+        artifacts_dir=str(tmp_path / "hf_artifacts"),
+        reference_python="/opt/venv/bin/python",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(hf_diffusers, "_resolve_cached_model_ref", lambda _id: "/model")
+    monkeypatch.setattr(hf_diffusers.subprocess, "run", fake_run)
+
+    output = hf_diffusers.HfDiffusersReference().run_stage(
+        case, StageSpec(name="end_to_end"), ctx
+    )
+
+    script = captured["cmd"][2]
+    assert "latents=initial_latents" in script
+    assert "shared_initial_latents" in script
+    assert "max_sequence_length=226" in script
+    assert "prompt='A red robot walks through a garden'" in script
+    assert output.data["initial_latents_sha256"]
+
+
+def test_hf_full_pipeline_leaves_prompt_cleaning_to_diffusers(
+    tmp_path, monkeypatch
+) -> None:
+    case = _parity_case()
+    case.inputs["prompt"] = "A&amp;amp;amp;B"
+    ctx = RunContext(
+        case=case,
+        artifacts_dir=str(tmp_path / "hf_artifacts"),
+        reference_python="/opt/venv/bin/python",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(hf_diffusers, "_resolve_cached_model_ref", lambda _id: "/model")
+    monkeypatch.setattr(
+        hf_diffusers,
+        "normalize_wan_prompt",
+        lambda _prompt: (_ for _ in ()).throw(
+            AssertionError("full WanPipeline reference must clean its own prompt")
+        ),
+    )
+    monkeypatch.setattr(hf_diffusers.subprocess, "run", fake_run)
+
+    hf_diffusers.HfDiffusersReference().run_stage(
+        case, StageSpec(name="end_to_end"), ctx
+    )
+
+    script = captured["cmd"][2]
+    assert "prompt='A&amp;amp;amp;B'" in script

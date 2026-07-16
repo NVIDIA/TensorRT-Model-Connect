@@ -8,6 +8,9 @@ Composes shared builders: T5 encoder + standard DiT + causal 3D VAE.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from .config import ModelConfig
 from .checkpoint_mapper import WeightDict
 
@@ -51,8 +54,6 @@ class WanT2VPlugin:
         self, model_dir: str, config: ModelConfig,
     ) -> WeightDict:
         """Load weights from all three subdirectories."""
-        from pathlib import Path
-
         model_path = Path(model_dir)
         weights = WeightDict()
 
@@ -65,6 +66,12 @@ class WanT2VPlugin:
         else:
             raise ValueError(
                 f"Expected diffusers format with model_index.json in {model_dir}")
+
+        scheduler_path = model_path / "scheduler" / "scheduler_config.json"
+        if scheduler_path.exists():
+            scheduler_config = json.loads(scheduler_path.read_text())
+            weights["_scheduler_config"] = scheduler_config
+            config.raw["_scheduler_config"] = scheduler_config
 
         return weights
 
@@ -122,6 +129,22 @@ class WanT2VPlugin:
         pt, ph, pw = self._PATCH_SIZE
         num_patches = (t_lat // pt) * (h_lat // ph) * (w_lat // pw)
 
+        requested_fp32_layers = frozenset(
+            int(layer) for layer in config.raw.get("_fp32_layers", ()))
+        unsupported_fp32_layers = sorted(
+            layer for layer in requested_fp32_layers
+            if layer != self._T5_NUM_LAYERS)
+        if unsupported_fp32_layers:
+            raise ValueError(
+                "Wan T2V fp32_layers supports only selector "
+                f"{self._T5_NUM_LAYERS}, which selects the complete T5 "
+                f"encoder; unsupported selectors: {unsupported_fp32_layers}")
+        t5_precision = (
+            "fp32"
+            if self._T5_NUM_LAYERS in requested_fp32_layers
+            else precision
+        )
+
         # 1. T5 text encoder
         import sys
         print("[wan-t2v] Loading T5 encoder weights ...", file=sys.stderr)
@@ -134,7 +157,7 @@ class WanT2VPlugin:
                 d_ff=self._T5_D_FF,
                 num_layers=self._T5_NUM_LAYERS,
                 vocab_size=self._T5_VOCAB_SIZE,
-                precision=precision,
+                precision=t5_precision,
             )
         with timed_trt_compile(build_timing, "t5_encoder"):
             t5_plan = build_t5_encoder_engine(
@@ -146,7 +169,7 @@ class WanT2VPlugin:
                 num_layers=self._T5_NUM_LAYERS,
                 vocab_size=self._T5_VOCAB_SIZE,
                 max_seq_len=self._T5_MAX_SEQ_LEN,
-                precision=precision,
+                precision=t5_precision,
                 verbose=verbose,
             )
 
@@ -217,19 +240,26 @@ class WanT2VPlugin:
                 num_res_blocks=self._VAE_NUM_RES_BLOCKS,
                 norm_type="l2_channel_norm",
             )
+        vae_build_options = {
+            "z_dim": self._VAE_Z_DIM,
+            "base_dim": self._VAE_BASE_DIM,
+            "dim_mult": self._VAE_DIM_MULT,
+            "num_res_blocks": self._VAE_NUM_RES_BLOCKS,
+            "temporal_upsample": self._VAE_TEMPORAL_UPSAMPLE,
+            "h_lat": h_lat,
+            "w_lat": w_lat,
+            "norm_type": "l2_channel_norm",
+            "precision": precision,
+            "verbose": verbose,
+        }
         with timed_trt_compile(build_timing, "vae_decoder"):
             vae_plan = build_causal_vae_3d_engine(
-                vae_weights,
-                z_dim=self._VAE_Z_DIM,
-                base_dim=self._VAE_BASE_DIM,
-                dim_mult=self._VAE_DIM_MULT,
-                num_res_blocks=self._VAE_NUM_RES_BLOCKS,
-                temporal_upsample=self._VAE_TEMPORAL_UPSAMPLE,
-                h_lat=h_lat,
-                w_lat=w_lat,
-                norm_type="l2_channel_norm",
-                precision=precision,
-                verbose=verbose,
+                vae_weights, **vae_build_options,
+            )
+        with timed_trt_compile(build_timing, "vae_decoder_first_frame"):
+            vae_first_frame_plan = build_causal_vae_3d_engine(
+                vae_weights, **vae_build_options,
+                first_frame_only=True,
             )
 
         # 4. Extract preprocessor weights for C++ runtime
@@ -240,6 +270,7 @@ class WanT2VPlugin:
         out = {
             "text_encoders": [("t5", t5_plan)],
             "vae_decoder": vae_plan,
+            "vae_decoder_first_frame": vae_first_frame_plan,
             "preprocessor_weights": preprocessor_weights,
         }
         if parallel.enabled:
@@ -267,6 +298,10 @@ class WanT2VPlugin:
         else:
             sections.append(("denoiser_plan", components["denoiser"]))
         sections.append(("vae_decoder_plan", components["vae_decoder"]))
+        sections.append((
+            "vae_decoder_first_frame_plan",
+            components["vae_decoder_first_frame"],
+        ))
         sections.append(("preprocessor_weights", components["preprocessor_weights"]))
         return sections
 
@@ -278,14 +313,11 @@ class WanT2VPlugin:
     def diffusion_tokenizer_add_special_tokens(
         self, model_dir_path, *, detect_tokenizer_add_special_tokens,
     ) -> bool:
-        from pathlib import Path
-
-        model_dir = Path(model_dir_path)
-        for tok_subdir in ("tokenizer_2", "tokenizer"):
-            tok_dir = model_dir / tok_subdir
-            if tok_dir.is_dir():
-                return bool(detect_tokenizer_add_special_tokens(tok_dir))
-        return bool(detect_tokenizer_add_special_tokens(model_dir))
+        del model_dir_path, detect_tokenizer_add_special_tokens
+        # Wan's HF T5 tokenizer appends EOS without a BOS token. The native
+        # tokenizer.json special frame adds an extra leading token, so runtime
+        # owns the exact T5 framing instead.
+        return False
 
     def diffusion_tokenizer_bundle_sections(
         self, model_dir_path, *, ensure_tokenizer_json,
@@ -333,6 +365,26 @@ class WanT2VPlugin:
         """Return diffusion pipeline configuration."""
         from .causal_vae_3d_builder import count_vae_caches
 
+        scheduler_cfg = config.raw.get("_scheduler_config", {})
+        scheduler_class = str(scheduler_cfg.get("_class_name", ""))
+        scheduler_name = (
+            "unipc_multistep"
+            if scheduler_class == "UniPCMultistepScheduler"
+            else "flow_match_euler"
+        )
+        if scheduler_name == "unipc_multistep":
+            supported = (
+                int(scheduler_cfg.get("solver_order", 2)) == 2
+                and str(scheduler_cfg.get("solver_type", "bh2")) == "bh2"
+                and str(scheduler_cfg.get("prediction_type", "flow_prediction"))
+                == "flow_prediction"
+                and bool(scheduler_cfg.get("use_flow_sigmas", True))
+            )
+            if not supported:
+                raise ValueError(
+                    "Wan T2V supports only order-2 BH2 UniPC flow prediction"
+                )
+
         # Must match the dimensions used in build_components() for TRT
         video_height = config.raw.get("video_height", 480)
         video_width = config.raw.get("video_width", 832)
@@ -340,10 +392,27 @@ class WanT2VPlugin:
 
         return {
             "diffusion_backend_type": "wan_3d",
-            "scheduler": "flow_match_euler",
+            "scheduler": scheduler_name,
             "num_inference_steps": config.raw.get("num_inference_steps", 50),
             "guidance_scale": 5.0,
-            "flow_shift": 3.0,
+            "flow_shift": float(
+                scheduler_cfg.get("flow_shift", scheduler_cfg.get("shift", 1.0))
+            ),
+            "unipc_lower_order_final": int(
+                bool(scheduler_cfg.get("lower_order_final", True))
+            ),
+            "use_dynamic_shifting": int(
+                bool(scheduler_cfg.get("use_dynamic_shifting", False))
+            ),
+            "base_shift": float(scheduler_cfg.get("base_shift", 0.5)),
+            "max_shift": float(scheduler_cfg.get("max_shift", 1.15)),
+            "base_image_seq_len": int(
+                scheduler_cfg.get("base_image_seq_len", 256)
+            ),
+            "max_image_seq_len": int(
+                scheduler_cfg.get("max_image_seq_len", 4096)
+            ),
+            "shift_terminal": float(scheduler_cfg.get("shift_terminal") or 0.0),
             "video_height": video_height,
             "video_width": video_width,
             "video_num_frames": video_num_frames,

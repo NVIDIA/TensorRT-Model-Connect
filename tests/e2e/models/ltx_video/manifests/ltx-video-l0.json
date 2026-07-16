@@ -27,6 +27,7 @@
       "video_height": 256,
       "video_width": 256,
       "num_inference_steps": 30,
+      "text_max_length": 128,
       "guidance_scale": 3.0,
       "seed": 42,
       "stages": [

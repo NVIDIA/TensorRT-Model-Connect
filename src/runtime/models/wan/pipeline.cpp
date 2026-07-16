@@ -27,6 +27,7 @@ namespace {
 
 using diffusion::WanLayout;
 using diffusion::wan_scheduler::FlowMatchEulerState;
+using diffusion::wan_scheduler::UniPCFlowState;
 
 // ---------------------------------------------------------------------------
 // DDIM Scheduler (epsilon-prediction models like PixArt)
@@ -195,25 +196,72 @@ void extract_wan_latent_frame(const std::vector<float>& latents, int32_t c, int3
     }
 }
 
-void compose_wan_vae_video_frames(const std::vector<float>& all_raw_frames, int32_t t_lat,
-                                  int32_t t_out_per_frame, int32_t h_out, int32_t w_out,
-                                  int32_t scale_factor_temporal, int32_t max_video_frames,
-                                  WanVideoResult& result) {
+void initialize_wan_video_result(int32_t num_frames, int32_t h_out, int32_t w_out,
+                                 WanVideoResult& result) {
+    result.num_frames = num_frames;
+    result.height = h_out;
+    result.width = w_out;
+    result.frames.resize(static_cast<std::size_t>(num_frames) * static_cast<std::size_t>(h_out) *
+                         static_cast<std::size_t>(w_out) * 3);
+}
+
+void copy_wan_vae_output_frame(const float* raw_base, int32_t chunk_t, int32_t sub_t,
+                               int32_t final_t, int32_t h_out, int32_t w_out,
+                               WanVideoResult& result) {
+    const auto per_frame_spatial =
+        static_cast<std::size_t>(h_out) * static_cast<std::size_t>(w_out);
+    for (int32_t fh = 0; fh < h_out; ++fh) {
+        for (int32_t fw = 0; fw < w_out; ++fw) {
+            for (int32_t fc = 0; fc < 3; ++fc) {
+                const auto s_idx = static_cast<std::size_t>(fc) *
+                                       static_cast<std::size_t>(chunk_t) * per_frame_spatial +
+                                   static_cast<std::size_t>(sub_t) * per_frame_spatial +
+                                   static_cast<std::size_t>(fh) * static_cast<std::size_t>(w_out) +
+                                   static_cast<std::size_t>(fw);
+                const auto d_idx =
+                    static_cast<std::size_t>(final_t) * per_frame_spatial * 3 +
+                    static_cast<std::size_t>(fh) * static_cast<std::size_t>(w_out) * 3 +
+                    static_cast<std::size_t>(fw) * 3 + static_cast<std::size_t>(fc);
+                result.frames[d_idx] = clamp_unit((raw_base[s_idx] + 1.0F) * 0.5F);
+            }
+        }
+    }
+}
+
+void compose_wan_vae_first_frame_chunks(const std::vector<float>& all_raw_frames, int32_t t_lat,
+                                        int32_t t_out_per_frame, int32_t first_t_out, int32_t h_out,
+                                        int32_t w_out, int32_t max_video_frames,
+                                        WanVideoResult& result) {
+    const int32_t total_out_frames = first_t_out + std::max(t_lat - 1, 0) * t_out_per_frame;
+    initialize_wan_video_result(std::min(total_out_frames, max_video_frames), h_out, w_out, result);
+    const auto per_frame_spatial =
+        static_cast<std::size_t>(h_out) * static_cast<std::size_t>(w_out);
+    std::size_t raw_offset = 0;
+    int32_t final_t = 0;
+    for (int32_t input_t = 0; input_t < t_lat && final_t < result.num_frames; ++input_t) {
+        const int32_t chunk_t = (input_t == 0) ? first_t_out : t_out_per_frame;
+        const float* raw_base = all_raw_frames.data() + raw_offset;
+        for (int32_t sub_t = 0; sub_t < chunk_t && final_t < result.num_frames;
+             ++sub_t, ++final_t) {
+            copy_wan_vae_output_frame(raw_base, chunk_t, sub_t, final_t, h_out, w_out, result);
+        }
+        raw_offset +=
+            static_cast<std::size_t>(3) * static_cast<std::size_t>(chunk_t) * per_frame_spatial;
+    }
+}
+
+void compose_wan_vae_uniform_chunks(const std::vector<float>& all_raw_frames, int32_t t_lat,
+                                    int32_t t_out_per_frame, int32_t h_out, int32_t w_out,
+                                    int32_t scale_factor_temporal, int32_t max_video_frames,
+                                    WanVideoResult& result) {
     const int32_t total_out_frames = t_lat * t_out_per_frame;
     const int32_t trim = scale_factor_temporal - 1;
     const int32_t t_final = total_out_frames - trim;
-
-    result.num_frames = std::min(t_final, max_video_frames);
-    result.height = h_out;
-    result.width = w_out;
-    result.frames.resize(static_cast<std::size_t>(result.num_frames) *
-                         static_cast<std::size_t>(h_out) * static_cast<std::size_t>(w_out) * 3);
-
+    initialize_wan_video_result(std::min(t_final, max_video_frames), h_out, w_out, result);
     const auto per_frame_spatial =
         static_cast<std::size_t>(h_out) * static_cast<std::size_t>(w_out);
     const auto out_frame_floats =
         static_cast<std::size_t>(3) * static_cast<std::size_t>(t_out_per_frame) * per_frame_spatial;
-
     for (int32_t input_t = 0; input_t < t_lat; ++input_t) {
         const float* raw_base =
             all_raw_frames.data() + static_cast<std::size_t>(input_t) * out_frame_floats;
@@ -223,26 +271,23 @@ void compose_wan_vae_video_frames(const std::vector<float>& all_raw_frames, int3
             if (global_t < trim || final_t >= result.num_frames) {
                 continue;
             }
-            for (int32_t fh = 0; fh < h_out; ++fh) {
-                for (int32_t fw = 0; fw < w_out; ++fw) {
-                    for (int32_t fc = 0; fc < 3; ++fc) {
-                        const auto s_idx =
-                            static_cast<std::size_t>(fc) *
-                                static_cast<std::size_t>(t_out_per_frame) * per_frame_spatial +
-                            static_cast<std::size_t>(sub_t) * per_frame_spatial +
-                            static_cast<std::size_t>(fh) * static_cast<std::size_t>(w_out) +
-                            static_cast<std::size_t>(fw);
-                        const auto d_idx =
-                            static_cast<std::size_t>(final_t) * static_cast<std::size_t>(h_out) *
-                                static_cast<std::size_t>(w_out) * 3 +
-                            static_cast<std::size_t>(fh) * static_cast<std::size_t>(w_out) * 3 +
-                            static_cast<std::size_t>(fw) * 3 + static_cast<std::size_t>(fc);
-                        result.frames[d_idx] = clamp_unit((raw_base[s_idx] + 1.0F) * 0.5F);
-                    }
-                }
-            }
+            copy_wan_vae_output_frame(raw_base, t_out_per_frame, sub_t, final_t, h_out, w_out,
+                                      result);
         }
     }
+}
+
+void compose_wan_vae_video_frames(const std::vector<float>& all_raw_frames, int32_t t_lat,
+                                  int32_t t_out_per_frame, int32_t first_t_out, int32_t h_out,
+                                  int32_t w_out, int32_t scale_factor_temporal,
+                                  int32_t max_video_frames, WanVideoResult& result) {
+    if (first_t_out != t_out_per_frame) {
+        compose_wan_vae_first_frame_chunks(all_raw_frames, t_lat, t_out_per_frame, first_t_out,
+                                           h_out, w_out, max_video_frames, result);
+        return;
+    }
+    compose_wan_vae_uniform_chunks(all_raw_frames, t_lat, t_out_per_frame, h_out, w_out,
+                                   scale_factor_temporal, max_video_frames, result);
 }
 
 // ---------------------------------------------------------------------------
@@ -373,13 +418,18 @@ void maybe_truncate_wan_output(std::vector<float>& denoiser_output, int32_t num_
 // Scheduler step dispatch
 // ---------------------------------------------------------------------------
 
-void apply_wan_scheduler_step(bool use_ddim, DDIMState& ddim_scheduler,
-                              FlowMatchEulerState& fm_scheduler,
+void apply_wan_scheduler_step(bool use_ddim, bool use_unipc, DDIMState& ddim_scheduler,
+                              UniPCFlowState& unipc_scheduler, FlowMatchEulerState& fm_scheduler,
                               const std::vector<float>& noise_pred_spatial,
                               std::vector<float>& latents, std::size_t latent_count, int32_t step) {
     if (use_ddim) {
         ddim_scheduler.step(noise_pred_spatial.data(), latents.data(), latents.data(), latent_count,
                             step);
+        return;
+    }
+    if (use_unipc) {
+        unipc_scheduler.step(noise_pred_spatial.data(), latents.data(), latents.data(),
+                             latent_count, step);
         return;
     }
     fm_scheduler.step(noise_pred_spatial.data(), latents.data(), latents.data(), latent_count,
@@ -419,16 +469,15 @@ void log_wan_layout(const WanLayout& layout) {
 
 template <typename ComputeTembFn, typename PatchifyFn, typename EmbedHiddenFn,
           typename UnpatchifyFn, typename RunDenoiserFn>
-bool run_wan_denoising_loop(int32_t num_inference_steps, bool use_ddim, float guidance_scale,
-                            const WanLayout& layout, const std::vector<float>& step_timesteps,
-                            const std::vector<float>& pos_embed_2d,
-                            const std::vector<float>& text_projected,
-                            const std::vector<float>& null_text,
-                            const std::vector<float>& encoder_attn_mask, DDIMState& ddim_scheduler,
-                            FlowMatchEulerState& fm_scheduler, std::vector<float>& latents,
-                            std::string& error, ComputeTembFn&& compute_temb, PatchifyFn&& patchify,
-                            EmbedHiddenFn&& embed_hidden, UnpatchifyFn&& unpatchify,
-                            RunDenoiserFn&& run_denoiser) {
+bool run_wan_denoising_loop(
+    int32_t num_inference_steps, bool use_ddim, bool use_unipc, float guidance_scale,
+    const WanLayout& layout, const std::vector<float>& step_timesteps,
+    const std::vector<float>& pos_embed_2d, const std::vector<float>& text_projected,
+    const std::vector<float>& null_text, const std::vector<float>& encoder_attn_mask,
+    DDIMState& ddim_scheduler, UniPCFlowState& unipc_scheduler, FlowMatchEulerState& fm_scheduler,
+    std::vector<float>& latents, std::string& error, ComputeTembFn&& compute_temb,
+    PatchifyFn&& patchify, EmbedHiddenFn&& embed_hidden, UnpatchifyFn&& unpatchify,
+    RunDenoiserFn&& run_denoiser) {
     std::vector<float> patches;
     return wan_denoising::run_wan_video_denoising_steps(
         num_inference_steps, step_timesteps, latents, error, compute_temb,
@@ -453,8 +502,9 @@ bool run_wan_denoising_loop(int32_t num_inference_steps, bool use_ddim, float gu
         },
         [&](const std::vector<float>& noise_pred_spatial, std::vector<float>& current_latents,
             int32_t step) {
-            apply_wan_scheduler_step(use_ddim, ddim_scheduler, fm_scheduler, noise_pred_spatial,
-                                     current_latents, current_latents.size(), step);
+            apply_wan_scheduler_step(use_ddim, use_unipc, ddim_scheduler, unipc_scheduler,
+                                     fm_scheduler, noise_pred_spatial, current_latents,
+                                     current_latents.size(), step);
         },
         [&](int32_t step, float timestep, const std::vector<float>& current_latents) {
             maybe_log_wan_step(step, num_inference_steps, timestep, current_latents);
@@ -491,7 +541,7 @@ ImageResult video_to_image(const WanVideoResult& vr, int32_t default_h, int32_t 
     out.height = (vr.height > 0) ? vr.height : default_h;
     out.width = (vr.width > 0) ? vr.width : default_w;
     out.channels = 3;
-    out.num_frames = (vr.num_frames > 0) ? vr.num_frames : 1;
+    out.num_frames = vr.num_frames;
     return out;
 }
 
@@ -506,10 +556,11 @@ WanPipeline::WanPipeline(std::unique_ptr<TrtModule> text_encoder,
                          WanDiffusionConfig config, WanPreprocessorWeights weights,
                          std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
                          std::shared_ptr<void> distributed_owner, int32_t tensor_parallel_rank,
-                         int32_t tensor_parallel_size)
+                         int32_t tensor_parallel_size, std::unique_ptr<TrtModule> vae_first_frame)
     : distributed_owner_(std::move(distributed_owner)), tensor_parallel_rank_(tensor_parallel_rank),
       tensor_parallel_size_(tensor_parallel_size), text_encoder_(std::move(text_encoder)),
-      denoiser_(std::move(denoiser)), vae_(std::move(vae)), config_(std::move(config)),
+      denoiser_(std::move(denoiser)), vae_(std::move(vae)),
+      vae_first_frame_(std::move(vae_first_frame)), config_(std::move(config)),
       weights_(std::move(weights)), tokenizer_(std::move(tokenizer)),
       model_id_(std::move(model_id_str)) {}
 
@@ -910,14 +961,18 @@ bool WanPipeline::decode_vae_2d(const std::vector<float>& latents, int32_t c, in
 // VAE 3D helpers (extracted from decode_vae_3d for cyclomatic complexity)
 // ---------------------------------------------------------------------------
 
-int32_t WanPipeline::query_vae_output_temporal_dim() const {
-    auto out_infos = vae_->output_info();
+int32_t WanPipeline::query_vae_output_temporal_dim(const TrtModule& module) {
+    auto out_infos = module.output_info();
     for (const auto& info : out_infos) {
         if (info.name == "video_frame" && info.shape.size() >= 3) {
             return std::max(static_cast<int32_t>(info.shape[2]), 1);
         }
     }
     return 1;
+}
+
+bool WanPipeline::has_first_frame_vae() const {
+    return vae_first_frame_ && vae_first_frame_->ok();
 }
 
 void WanPipeline::init_vae_caches() {
@@ -957,6 +1012,10 @@ void WanPipeline::init_vae_caches() {
         // Bind external device memory to VAE module's cache tensors
         vae_->bind_external(cache_in_name, vae_cache_in_.back().data());
         vae_->bind_external(cache_out_name, vae_cache_out_.back().data());
+        if (vae_first_frame_ && vae_first_frame_->ok()) {
+            vae_first_frame_->bind_external(cache_in_name, vae_cache_in_.back().data());
+            vae_first_frame_->bind_external(cache_out_name, vae_cache_out_.back().data());
+        }
     }
 
     vae_caches_initialized_ = true;
@@ -984,7 +1043,7 @@ void WanPipeline::zero_vae_caches() {
 
 void WanPipeline::decode_vae_single_frame(const std::vector<float>& latents, int32_t c,
                                           int32_t t_lat, int32_t h_lat, int32_t w_lat, int32_t t,
-                                          std::size_t out_frame_floats,
+                                          std::size_t out_frame_floats, TrtModule& module,
                                           std::vector<float>& all_raw_frames) {
     // Extract single latent frame [c, h, w] from [c, t, h, w]
     std::vector<float> frame_buf;
@@ -998,7 +1057,7 @@ void WanPipeline::decode_vae_single_frame(const std::vector<float>& latents, int
         {1, static_cast<int64_t>(c), static_cast<int64_t>(h_lat), static_cast<int64_t>(w_lat)},
         DType::kFloat32};
 
-    TensorMap outputs = vae_->forward(inputs);
+    TensorMap outputs = module.forward(inputs);
 
     // Copy output frame to host
     auto* frame_data = static_cast<float*>(outputs["video_frame"].data);
@@ -1033,11 +1092,13 @@ bool WanPipeline::decode_vae_3d(const std::vector<float>& latents, int32_t c, in
 
     const int32_t h_out = config_.video_height;
     const int32_t w_out = config_.video_width;
-    const int32_t vae_output_t = query_vae_output_temporal_dim();
+    const int32_t vae_output_t = query_vae_output_temporal_dim(*vae_);
+    const bool has_first_frame_engine = has_first_frame_vae();
+    const int32_t first_vae_output_t =
+        has_first_frame_engine ? query_vae_output_temporal_dim(*vae_first_frame_) : vae_output_t;
 
-    const auto out_frame_floats = static_cast<std::size_t>(3) *
-                                  static_cast<std::size_t>(vae_output_t) *
-                                  static_cast<std::size_t>(h_out) * static_cast<std::size_t>(w_out);
+    const auto output_spatial = static_cast<std::size_t>(3) * static_cast<std::size_t>(h_out) *
+                                static_cast<std::size_t>(w_out);
 
     // Initialize VAE caches on first call
     if (!vae_caches_initialized_ && config_.num_vae_caches > 0) {
@@ -1049,15 +1110,22 @@ bool WanPipeline::decode_vae_3d(const std::vector<float>& latents, int32_t c, in
 
     // Decode each latent frame
     std::vector<float> all_raw_frames;
-    all_raw_frames.reserve(static_cast<std::size_t>(t_lat) * out_frame_floats);
+    all_raw_frames.reserve((static_cast<std::size_t>(first_vae_output_t) +
+                            static_cast<std::size_t>(std::max(t_lat - 1, 0) * vae_output_t)) *
+                           output_spatial);
 
     for (int32_t t = 0; t < t_lat; ++t) {
-        decode_vae_single_frame(latents, c, t_lat, h_lat, w_lat, t, out_frame_floats,
+        const bool use_first_frame_engine = (t == 0 && has_first_frame_engine);
+        TrtModule& module = use_first_frame_engine ? *vae_first_frame_ : *vae_;
+        const int32_t chunk_t = use_first_frame_engine ? first_vae_output_t : vae_output_t;
+        decode_vae_single_frame(latents, c, t_lat, h_lat, w_lat, t,
+                                static_cast<std::size_t>(chunk_t) * output_spatial, module,
                                 all_raw_frames);
     }
 
-    compose_wan_vae_video_frames(all_raw_frames, t_lat, vae_output_t, h_out, w_out,
-                                 config_.scale_factor_temporal, config_.video_num_frames, result);
+    compose_wan_vae_video_frames(all_raw_frames, t_lat, vae_output_t, first_vae_output_t, h_out,
+                                 w_out, config_.scale_factor_temporal, config_.video_num_frames,
+                                 result);
     return true;
 }
 
@@ -1138,12 +1206,17 @@ ImageResult WanPipeline::finish_wan_generation(int32_t z_dim, int32_t t_lat, int
 // Main generation pipeline
 // ---------------------------------------------------------------------------
 
+std::vector<int32_t> WanPipeline::tokenize_wan_prompt(const std::string& prompt) const {
+    if (!tokenizer_) {
+        return {};
+    }
+    return diffusion::normalize_wan_t5_token_ids(tokenizer_->encode(prompt), config_.text_seq_len,
+                                                 config_.tokenizer_add_special_tokens);
+}
+
 ImageResult WanPipeline::generate_image(const std::string& prompt, const GenerateConfig& cfg) {
     // Tokenize prompt
-    std::vector<int32_t> input_ids;
-    if (tokenizer_) {
-        input_ids = tokenizer_->encode(prompt);
-    }
+    const std::vector<int32_t> input_ids = tokenize_wan_prompt(prompt);
 
     const int32_t requested_steps = (cfg.num_steps > 0) ? cfg.num_steps : -1;
     const float requested_guidance = (cfg.guidance_scale >= 0.0f) ? cfg.guidance_scale : -1.0f;
@@ -1193,12 +1266,16 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
 
     // Set up scheduler
     FlowMatchEulerState fm_scheduler;
+    UniPCFlowState unipc_scheduler;
     DDIMState ddim_scheduler;
     std::vector<float> step_timesteps;
     if (plan.use_ddim) {
         ddim_scheduler.num_train_timesteps = 1000;
         ddim_scheduler.set_timesteps(plan.num_inference_steps);
         step_timesteps = ddim_scheduler.timesteps;
+    } else if (plan.use_unipc) {
+        unipc_scheduler = diffusion::make_wan_unipc_scheduler(config_, plan);
+        step_timesteps = unipc_scheduler.timesteps;
     } else {
         fm_scheduler = diffusion::make_wan_flow_match_scheduler(plan);
         step_timesteps = fm_scheduler.timesteps;
@@ -1234,11 +1311,12 @@ ImageResult WanPipeline::generate_image(const std::string& prompt, const Generat
         };
 
     // Run denoising loop
-    if (!run_wan_denoising_loop(plan.num_inference_steps, plan.use_ddim, plan.guidance_scale,
-                                layout, step_timesteps, pos_embed_2d, text_projected, null_text,
-                                conditioning_inputs.encoder_attn_mask, ddim_scheduler, fm_scheduler,
-                                latents, error, compute_temb, patchify_fn, embed_hidden,
-                                unpatchify_fn, run_denoiser_fn)) {
+    if (!run_wan_denoising_loop(plan.num_inference_steps, plan.use_ddim, plan.use_unipc,
+                                plan.guidance_scale, layout, step_timesteps, pos_embed_2d,
+                                text_projected, null_text, conditioning_inputs.encoder_attn_mask,
+                                ddim_scheduler, unipc_scheduler, fm_scheduler, latents, error,
+                                compute_temb, patchify_fn, embed_hidden, unpatchify_fn,
+                                run_denoiser_fn)) {
         std::cerr << "[diffusion] Denoiser failed: " << error << "\n";
         return video_to_image(result, config_.video_height, config_.video_width);
     }
