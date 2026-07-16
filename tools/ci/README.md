@@ -345,17 +345,21 @@ the producing class remains the source of truth for optional evidence fields.
 
 ### `coverage.py`
 
-- **Functionality / units:** `CoverageRunner` selects impacted Python tests,
-  invokes C++ or Python coverage engines, enforces reviewed line/function/branch
-  thresholds, and optionally generates the coverage map.
+- **Functionality / units:** `CoverageRunner` selects impacted tests and exposes
+  the public coverage commands. `CppCoverageEngine` configures, builds, tests,
+  and runs `gcovr`; `PythonCoverageEngine` runs pytest through `coverage.py`.
+  All three enforce the reviewed line/function/branch thresholds in Python.
 - **Inputs:** `impact.json`, event/environment threshold values, selected test
-  paths, and optional trailing CTest arguments for `cpp_report`.
+  paths, and optional trailing pytest or CTest arguments. The standalone
+  commands are `python3 -m tools.ci coverage python [pytest args...]`,
+  `coverage cpp [ctest args...]`, and `coverage all`.
 - **Outputs:** Files under `coverage/`: `python-cobertura.xml`,
   `python-coverage.txt`, `python-html/`, `cpp-cobertura.xml`,
   `cpp-coverage-summary.txt`, and `cpp-coverage.html`. Map generation writes
   and validates `coverage_map.json`.
-- **Boundary:** It owns coverage collection and numeric gates, not ordinary unit
-  selection policy or model E2E correctness.
+- **Boundary:** It owns coverage collection, external compiler/test tool calls,
+  report generation, and numeric gates. No coverage behavior is delegated to a
+  shell script; ordinary unit policy and model E2E correctness remain outside.
 
 ### `package.py`
 

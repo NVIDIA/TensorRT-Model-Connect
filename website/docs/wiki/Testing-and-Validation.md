@@ -848,17 +848,18 @@ GPU scheduling, and the combined HTML report.
 
 ## Coverage
 
-Coverage is configured in `pyproject.toml` and enforced by dedicated scripts.
+Coverage is configured in `pyproject.toml` and enforced by the class-based CI
+module.
 
 ```bash
 # Python gates (line and branch coverage must be 100%)
-tools/coverage/python_coverage.sh -v --ignore=tests/builder/test_cli.py
+python3 -m tools.ci coverage python -v --ignore=tests/builder/test_cli.py
 
 # C++ gate (line/function/branch coverage must each be 100%)
-tools/coverage/cpp_coverage.sh
+python3 -m tools.ci coverage cpp
 
 # Combined local run
-tools/coverage/run_coverage_all.sh
+python3 -m tools.ci coverage all
 ```
 
 Configuration:
@@ -871,9 +872,8 @@ CI integration (GitHub Actions):
   `coverage/python-cobertura.xml`.
 - `python3 -m tools.ci stage cpp-coverage` runs the selected C++ coverage scope and emits
   `coverage/cpp-cobertura.xml`.
-- `tools/ci/coverage.py` owns artifact validation and the configured CI thresholds.
-- The lower-level `tools/coverage/*.sh` programs remain local coverage engines; CI orchestration
-  and policy are implemented in Python.
+- `tools/ci/coverage.py` owns test execution, report generation, artifact validation, and the
+  configured CI thresholds. It does not delegate coverage work to shell scripts.
 
 Note:
 - Python function coverage is not natively reported by `coverage.py`; Python gates therefore enforce line + branch.

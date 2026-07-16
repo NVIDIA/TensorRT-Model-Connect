@@ -34,7 +34,7 @@ class CiCommand:
         pipeline.add_argument("name", help="Pipeline stage name")
         commands.add_parser("e2e", help="Run the parallel E2E scheduler")
         coverage = commands.add_parser("coverage", help="Run a standalone coverage wrapper")
-        coverage.add_argument("language", choices=("cpp", "python"))
+        coverage.add_argument("language", choices=("all", "cpp", "python"))
         proof = commands.add_parser("model-proof", help="Run one hermetic model certification")
         proof.add_argument("--model", required=True)
         proof.add_argument("--suite", default="premerge")
@@ -78,10 +78,12 @@ class CiCommand:
             coverage_runner = CoverageRunner(CiContext(env=dict(os.environ)))
             if arguments.language == "cpp":
                 coverage_runner.cpp_report(remaining)
+            elif arguments.language == "python":
+                coverage_runner.python_report(remaining or None)
             else:
                 if remaining:
-                    self.parser.error(f"unrecognized Python coverage arguments: {remaining}")
-                coverage_runner.python_report()
+                    self.parser.error(f"unrecognized combined coverage arguments: {remaining}")
+                coverage_runner.all_reports()
             return 0
         if arguments.command == "model-proof":
             from .context import CiContext

@@ -49,6 +49,9 @@ def test_ci_orchestration_uses_the_class_based_python_entrypoint() -> None:
         "scripts/run_e2e_parallel.sh",
         "tools/coverage_ci/run_cpp_coverage.sh",
         "tools/coverage_ci/run_python_coverage.sh",
+        "tools/coverage/cpp_coverage.sh",
+        "tools/coverage/python_coverage.sh",
+        "tools/coverage/run_coverage_all.sh",
     )
     assert not [path for path in legacy_scripts if (REPO_ROOT / path).exists()]
 
@@ -1175,12 +1178,11 @@ def test_nightly_preserves_python_and_cpp_coverage_without_rebuilding_the_wheel(
     assert "Upload nightly coverage artifacts" in package
     assert "trtmc-nightly-coverage-${{ github.run_id }}" in package
 
-    ci_script = _ci_source("coverage.py")
-    coverage_script = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
-    assert 'build_target, ctest_args = "trtmc_platform_cpp_tests", ["-L", "platform"]' in ci_script
-    assert '"bash", "tools/coverage/cpp_coverage.sh", *ctest_args' in ci_script
-    assert '--target "${CPP_COVERAGE_BUILD_TARGET}"' in coverage_script
-    assert 'if [[ "${CPP_COVERAGE_BUILD_TARGET}" == "trtmc_cpp_tests" ]]; then' in coverage_script
+    coverage = _ci_source("coverage.py")
+    assert 'build_target, ctest_args = "trtmc_platform_cpp_tests", ["-L", "platform"]' in coverage
+    assert "class CppCoverageEngine" in coverage
+    assert '["cmake", "--build", build_dir, "--target", build_target, *parallel]' in coverage
+    assert 'if build_target == "trtmc_cpp_tests":' in coverage
 
 
 def test_nightly_long_jobs_reserve_finalization_time() -> None:
@@ -1690,12 +1692,10 @@ def test_release_wheel_stages_core_runtime_and_uses_origin_rpath() -> None:
 def test_ci_source_build_defaults_to_packaged_libtorch_mode() -> None:
     conanfile = (REPO_ROOT / "conanfile.py").read_text()
     wrapper = _ci_source("environment.py")
-    coverage = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
+    coverage = _ci_source("coverage.py")
     assert 'toolchain.cache_variables["TRTMC_ENABLE_LIBTORCH_MULTINOMIAL"] = False' in conanfile
-    assert (
-        'TRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL:-OFF}"' in coverage
-    )
-    assert '-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL="${TRTMC_ENABLE_LIBTORCH_MULTINOMIAL}"' in coverage
+    assert "self._value('TRTMC_ENABLE_LIBTORCH_MULTINOMIAL', 'OFF')" in coverage
+    assert '"-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL="' in coverage
     assert "TRTMC_ENABLE_LIBTORCH_MULTINOMIAL" in wrapper
 
 
@@ -1758,17 +1758,114 @@ def test_full_e2e_stages_all_runtime_plugins_from_reusable_build() -> None:
 
 
 def test_cpp_coverage_builds_excluded_test_target() -> None:
-    coverage = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
-    assert 'CPP_COVERAGE_BUILD_TARGET="${CPP_COVERAGE_BUILD_TARGET:-trtmc_cpp_tests}"' in coverage
-    assert '--target "${CPP_COVERAGE_BUILD_TARGET}"' in coverage
-    assert '(cd "${BUILD_DIR}" && gcovr "$@" "${BUILD_DIR}")' in coverage
+    coverage = _ci_source("coverage.py")
+    assert '"CPP_COVERAGE_BUILD_TARGET", "trtmc_cpp_tests"' in coverage
+    assert '["cmake", "--build", build_dir, "--target", build_target, *parallel]' in coverage
+    assert "CommandRunner(cwd=build_dir" in coverage
 
 
 def test_cpp_coverage_gate_excludes_model_owned_runtime_plugins() -> None:
-    coverage = (REPO_ROOT / "tools" / "coverage" / "cpp_coverage.sh").read_text()
-    assert "GCOVR_EXCLUDES" in coverage
-    assert '"${REPO_ROOT}/src/runtime/models"' in coverage
-    assert 'gcovr_base+=(--exclude "${exclude}")' in coverage
+    coverage = _ci_source("coverage.py")
+    assert 'self._words("GCOVR_EXCLUDES")' in coverage
+    assert 'str(self.repository / "src/runtime/models")' in coverage
+    assert 'gcovr_base.extend(("--exclude", value))' in coverage
+
+
+def test_cpp_coverage_engine_runs_tools_directly_without_shell(tmp_path: Path, monkeypatch) -> None:
+    from tools.ci.coverage import CppCoverageEngine
+
+    commands: list[list[str]] = []
+    gcovr_commands: list[list[str]] = []
+
+    class Context:
+        repository = tmp_path
+        env = {"PATH": os.environ["PATH"]}
+
+        @staticmethod
+        def executable(name: str) -> str:
+            return name
+
+        @staticmethod
+        def output(command: list[str]) -> str:
+            assert command == ["gcovr", "--help"]
+            return "--fail-under-function"
+
+        @staticmethod
+        def run(command, **_kwargs):
+            commands.append([str(item) for item in command])
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+    def fake_gcovr(_runner, command, **_kwargs):
+        rendered = [str(item) for item in command]
+        gcovr_commands.append(rendered)
+        stdout = "lines: 100.0%\nfunctions: 100.0%\nbranches: 100.0%\n"
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    monkeypatch.setattr("tools.ci.coverage.CommandRunner.run", fake_gcovr)
+    report = tmp_path / "reports"
+    result = CppCoverageEngine(Context(), report).run(
+        ["-L", "platform"],
+        build_target="trtmc_platform_cpp_tests",
+        limit=None,
+    )
+
+    assert result == 0
+    assert [
+        "cmake",
+        "--build",
+        str(tmp_path / "build-cov"),
+        "--target",
+        "trtmc_platform_cpp_tests",
+        "--parallel",
+    ] in commands
+    assert [
+        "ctest",
+        "--test-dir",
+        str(tmp_path / "build-cov"),
+        "--output-on-failure",
+        "-L",
+        "platform",
+    ] in commands
+    assert all(command[0] != "bash" for command in commands + gcovr_commands)
+    assert (report / "cpp-coverage-summary.txt").is_file()
+
+
+def test_python_coverage_engine_runs_coverage_directly(tmp_path: Path) -> None:
+    from tools.ci.coverage import PythonCoverageEngine
+
+    commands: list[list[str]] = []
+
+    class Context:
+        repository = tmp_path
+        env = {"PATH": os.environ["PATH"]}
+
+        @staticmethod
+        def executable(name: str) -> str:
+            return name
+
+        @staticmethod
+        def run(command, **_kwargs):
+            rendered = [str(item) for item in command]
+            commands.append(rendered)
+            stdout = ""
+            if rendered[2:4] == ["coverage", "report"]:
+                stdout = "TOTAL 10 0 100%\n"
+            if rendered[2:4] == ["coverage", "xml"]:
+                destination = Path(rendered[rendered.index("-o") + 1])
+                destination.write_text(
+                    '<coverage line-rate="1.0" branch-rate="1.0"/>\n',
+                    encoding="utf-8",
+                )
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    report = tmp_path / "reports"
+    PythonCoverageEngine(Context(), report).run(["-q"])
+
+    coverage_run = next(command for command in commands if command[2:4] == ["coverage", "run"])
+    assert coverage_run[-3:] == ["tests/builder", "tests/tools", "-q"]
+    assert all(command[0] != "bash" for command in commands)
+    assert (report / "python-cobertura.xml").is_file()
+    assert (report / "python-coverage.txt").read_text() == "TOTAL 10 0 100%\n"
 
 
 def test_root_pyproject_configures_conan_py_build_wheel() -> None:
