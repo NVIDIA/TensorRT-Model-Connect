@@ -1567,6 +1567,7 @@ def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -
 def test_selected_hf_cache_reflink_helper_has_a_minimal_mount_and_capability_boundary() -> None:
     text = RUNNER.read_text(encoding="utf-8")
     helper = text.split("copy = [", maxsplit=1)[1].split("if self.context.run(copy", maxsplit=1)[0]
+    program = text.split('CACHE_COPY_PROGRAM = r"""', maxsplit=1)[1].split('"""', maxsplit=1)[0]
 
     for contract in (
         '"--read-only"',
@@ -1600,6 +1601,8 @@ def test_selected_hf_cache_reflink_helper_has_a_minimal_mount_and_capability_bou
     assert "HF_TOKEN" not in helper
     assert "/var/run/docker.sock" not in helper
     assert "CACHE_COPY_PROGRAM" in helper
+    assert "os.chown(destination, 0, 0)" in program
+    assert program.index("os.chown(destination, 0, 0)") < program.index('"--reflink=always"')
 
 
 def test_sana_reference_cache_is_copied_to_selected_private_view(

@@ -30,6 +30,10 @@ import sys
 
 source, destination, uid, gid = sys.argv[1:]
 try:
+    # The destination is a bind mount created by the unprivileged runner.
+    # Own its root while cp preserves directory metadata, then return the
+    # complete private cache view to the runner below.
+    os.chown(destination, 0, 0)
     subprocess.run(
         ["cp", "-a", "--reflink=always", "--no-preserve=ownership", "--", source + "/.", destination + "/"],
         check=True,
