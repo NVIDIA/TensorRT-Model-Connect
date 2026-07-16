@@ -49,6 +49,45 @@ def _strip_mpirun_tags(text: str) -> str:
     return "\n".join(lines)
 
 
+def _save_segmentation_visualization(
+    class_map,
+    *,
+    image_path: str,
+    visualization_path: str,
+) -> str:
+    """Save a deterministic, input-sized color view of a class-ID map."""
+    from PIL import Image
+    import numpy as np
+
+    class_ids = np.asarray(class_map, dtype=np.int32)
+    if class_ids.ndim != 2 or class_ids.size == 0:
+        raise ValueError("SegFormer class map must be a non-empty 2D array")
+    if int(class_ids.min()) < 0 or int(class_ids.max()) > 255:
+        raise ValueError("SegFormer class IDs must fit in an 8-bit image")
+
+    with Image.open(image_path) as input_image:
+        target_size = input_image.size
+    resampling = getattr(Image, "Resampling", Image)
+    resized = Image.fromarray(class_ids.astype(np.uint8)).resize(
+        target_size,
+        resample=resampling.NEAREST,
+    )
+    resized_ids = np.asarray(resized, dtype=np.uint8)
+
+    # Match the HF reference visualization exactly: the same fixed seed and
+    # class-ID-indexed palette make side-by-side colors directly comparable.
+    random_state = np.random.RandomState(42)
+    palette = random_state.randint(
+        0,
+        255,
+        (int(resized_ids.max()) + 1, 3),
+        dtype=np.uint8,
+    )
+    palette[0] = [0, 0, 0]
+    Image.fromarray(palette[resized_ids]).save(visualization_path)
+    return visualization_path
+
+
 class SegmentationRunner:
     """TRT inference runner for semantic segmentation models."""
 
@@ -153,14 +192,24 @@ class SegmentationRunner:
             )
         elapsed = time.monotonic() - t0
 
-        # Parse class map from output image
+        # Parse the raw class map and create a report-only visualization. Keep
+        # the raw map for numerical comparison, but expose only the colorized,
+        # input-sized image through the report artifact contract.
         class_map = None
+        visualization_path = None
         if result.returncode == 0 and os.path.isfile(output_path):
             try:
                 from PIL import Image
                 import numpy as np
                 class_img = np.array(Image.open(output_path).convert("L"))
                 class_map = class_img.astype(np.int32)
+                visualization_path = _save_segmentation_visualization(
+                    class_map,
+                    image_path=str(image_path),
+                    visualization_path=str(
+                        Path(output_path).with_name("seg_output_viz.png")
+                    ),
+                )
             except Exception as e:
                 logger.warning("Failed to load segmentation output: %s", e)
 
@@ -176,14 +225,17 @@ class SegmentationRunner:
         if stderr_log:
             seg_meta["stderr_log"] = stderr_log
 
+        data = {
+            "class_map": class_map,
+            "class_map_path": output_path,
+            "image_path": str(image_path),
+        }
+        if visualization_path:
+            data["viz_path"] = visualization_path
+
         return StageOutput(
             stage_name="full_inference",
-            data={
-                "class_map": class_map,
-                "output_path": output_path,
-                "segmentation_map_path": output_path,
-                "image_path": str(image_path),
-            },
+            data=data,
             timing_s=elapsed,
             metadata=seg_meta,
         )

@@ -201,10 +201,21 @@ class SegformerSegmentationPlugin:
             ref_img = ref_img.resize((trt_arr.shape[1], trt_arr.shape[0]), Image.NEAREST)
             ref_arr = np.array(ref_img, dtype=np.int32)
 
+        required_thresholds = ("mIoU", "pixel_accuracy")
+        missing_thresholds = [
+            name for name in required_thresholds if name not in threshold.metrics
+        ]
+        if missing_thresholds:
+            return make_error(
+                "full_inference",
+                "Missing required SegFormer threshold(s): "
+                + ", ".join(missing_thresholds),
+            )
+
         miou = _compute_iou(trt_arr, ref_arr)
         pixel_acc = _pixel_accuracy(trt_arr, ref_arr)
-        miou_threshold = threshold.metrics.get("contract_miou_threshold", 0.5)
-        pixel_threshold = threshold.metrics.get("contract_pixel_accuracy", 0.85)
+        miou_threshold = float(threshold.metrics["mIoU"])
+        pixel_threshold = float(threshold.metrics["pixel_accuracy"])
         metrics = {
             "mIoU": MetricResult(
                 value=miou,
