@@ -61,6 +61,20 @@ def _require_trt_runtime() -> None:
         raise ImportError("cuda-python is required for VL debug runner execution")
 
 
+def _profile_min_shape(engine: Any, name: str, profile_index: int) -> tuple[int, ...]:
+    """Resolve a concrete single-step shape for a possibly dynamic tensor."""
+    declared = tuple(int(dim) for dim in engine.get_tensor_shape(name))
+    if all(dim >= 0 for dim in declared):
+        return declared
+    profile_shapes = engine.get_tensor_profile_shape(name, profile_index)
+    if not profile_shapes:
+        raise RuntimeError(f"Missing optimization profile shape for {name!r}")
+    resolved = tuple(int(dim) for dim in profile_shapes[0])
+    if any(dim < 0 for dim in resolved):
+        raise RuntimeError(f"Invalid optimization profile shape for {name!r}: {resolved}")
+    return resolved
+
+
 class TrtRunner:
     """Device-resident TRT inference runner for debugging and diff testing.
 
@@ -104,17 +118,19 @@ class TrtRunner:
         # decode profile (profile 1, Sq=1). For per-step decode runs the
         # debug_runner must select the decode profile and call
         # set_input_shape on every dynamic input before each execute. We
-        # detect dual-profile via num_optimization_profiles > 1 and the
-        # presence of -1 dims on token_id / position_id / attention_mask.
-        self._dynamic_inputs: list[str] = []
+        # detect dual-profile via num_optimization_profiles > 1 and resolve
+        # every dynamic input from the selected profile's minimum shape.
+        self._dynamic_input_shapes: dict[str, tuple[int, ...]] = {}
         self._is_dual_profile = self.engine.num_optimization_profiles > 1
-        for input_name in ("token_id", "position_id", "attention_mask"):
-            try:
-                shape = tuple(self.engine.get_tensor_shape(input_name))
-            except Exception:
+        self._profile_index = 1 if self._is_dual_profile else 0
+        for index in range(self.engine.num_io_tensors):
+            input_name = self.engine.get_tensor_name(index)
+            if self.engine.get_tensor_mode(input_name) != trt.TensorIOMode.INPUT:
                 continue
-            if any(d < 0 for d in shape):
-                self._dynamic_inputs.append(input_name)
+            shape = tuple(self.engine.get_tensor_shape(input_name))
+            if any(dim < 0 for dim in shape):
+                self._dynamic_input_shapes[input_name] = _profile_min_shape(
+                    self.engine, input_name, self._profile_index)
         if self._is_dual_profile:
             # Profile 1 = decode (Sq=1). step() always runs single-token, so
             # we lock the context to that profile once and never switch.
@@ -213,14 +229,18 @@ class TrtRunner:
             name = self.engine.get_tensor_name(i)
             if name == "input_embed":
                 self._has_embed_input = True
-                embed_shape = tuple(self.engine.get_tensor_shape(name))
+                embed_shape = _profile_min_shape(
+                    self.engine, name, self._profile_index)
                 embed_bytes = int(np.prod(embed_shape)) * 4
                 self._h_input_embed = np.zeros(embed_shape, dtype=np.float32)
                 err, self._d_input_embed = cudart.cudaMalloc(embed_bytes)
                 _check_cuda(err)
             elif name == "use_input_embed":
-                self._h_use_input_embed = np.zeros((1,), dtype=np.float32)
-                err, self._d_use_input_embed = cudart.cudaMalloc(4)
+                selector_shape = _profile_min_shape(
+                    self.engine, name, self._profile_index)
+                self._h_use_input_embed = np.zeros(selector_shape, dtype=np.float32)
+                err, self._d_use_input_embed = cudart.cudaMalloc(
+                    self._h_use_input_embed.nbytes)
                 _check_cuda(err)
 
         # DeepStack inputs (auto-detected from engine bindings)
@@ -233,15 +253,19 @@ class TrtRunner:
             name = self.engine.get_tensor_name(i)
             if name.startswith("deepstack_embed_"):
                 self._deepstack_names.append(name)
-                shape = tuple(self.engine.get_tensor_shape(name))
+                shape = _profile_min_shape(
+                    self.engine, name, self._profile_index)
                 nbytes = int(np.prod(shape)) * 4
                 self._h_deepstack[name] = np.zeros(shape, dtype=np.float32)
                 err, d_ptr = cudart.cudaMalloc(nbytes)
                 _check_cuda(err)
                 self._d_deepstack[name] = d_ptr
             elif name == "deepstack_active":
-                self._h_deepstack_active = np.zeros((1,), dtype=np.float32)
-                err, self._d_deepstack_active = cudart.cudaMalloc(4)
+                active_shape = _profile_min_shape(
+                    self.engine, name, self._profile_index)
+                self._h_deepstack_active = np.zeros(active_shape, dtype=np.float32)
+                err, self._d_deepstack_active = cudart.cudaMalloc(
+                    self._h_deepstack_active.nbytes)
                 _check_cuda(err)
 
         # Debug output device/host buffers
@@ -331,7 +355,7 @@ class TrtRunner:
                 self._h_input_embed.nbytes, H2D, stream)
             cudart.cudaMemcpyAsync(
                 self._d_use_input_embed, self._h_use_input_embed.ctypes.data,
-                4, H2D, stream)
+                self._h_use_input_embed.nbytes, H2D, stream)
 
         # DeepStack H2D transfers
         if self._deepstack_names:
@@ -350,7 +374,7 @@ class TrtRunner:
                 cudart.cudaMemcpyAsync(
                     self._d_deepstack_active,
                     self._h_deepstack_active.ctypes.data,
-                    4, H2D, stream)
+                    self._h_deepstack_active.nbytes, H2D, stream)
 
         # Set tensor addresses
         self.context.set_tensor_address("token_id", self._d_token_id)
@@ -379,15 +403,11 @@ class TrtRunner:
         for name in self._debug_output_names:
             self.context.set_tensor_address(name, self._d_debug[name])
 
-        # Dual-profile engines need explicit shapes for the dynamic
-        # inputs every step. step() is single-token decode, so all three
-        # shapes are fixed: Sq=1 and K = max_cache_length + 1.
-        if self._dynamic_inputs:
-            for name in self._dynamic_inputs:
-                if name == "attention_mask":
-                    self.context.set_input_shape(name, (1, attention_window))
-                else:
-                    self.context.set_input_shape(name, (1,))
+        # Dynamic inputs use the selected profile's minimum shapes. Both the
+        # prefill and decode profiles have Sq=1 minima, so this covers token,
+        # mask, image embedding, selector, and DeepStack inputs uniformly.
+        for name, shape in self._dynamic_input_shapes.items():
+            self.context.set_input_shape(name, shape)
 
         # Execute
         self.context.execute_async_v3(stream)
@@ -481,24 +501,16 @@ class TrtRunner:
     def __del__(self):
         if cudart is None:
             return
-        if not hasattr(self, "_d_token_id"):
-            return
-        bufs = [self._d_token_id, self._d_position_id, self._d_mask,
-                self._d_logits]
-        bufs.extend(self._d_cache_k)
-        bufs.extend(self._d_cache_v)
-        bufs.extend(self._d_present_k)
-        bufs.extend(self._d_present_v)
-        if self._d_input_embed:
-            bufs.append(self._d_input_embed)
-        if self._d_use_input_embed:
-            bufs.append(self._d_use_input_embed)
-        for d_ptr in self._d_deepstack.values():
-            bufs.append(d_ptr)
-        if self._d_deepstack_active:
-            bufs.append(self._d_deepstack_active)
-        for d_ptr in self._d_debug.values():
-            bufs.append(d_ptr)
+        bufs = []
+        for name in ("_d_token_id", "_d_position_id", "_d_mask", "_d_logits",
+                     "_d_input_embed", "_d_use_input_embed", "_d_deepstack_active"):
+            d_ptr = getattr(self, name, 0)
+            if d_ptr:
+                bufs.append(d_ptr)
+        for name in ("_d_cache_k", "_d_cache_v", "_d_present_k", "_d_present_v"):
+            bufs.extend(getattr(self, name, []))
+        bufs.extend(getattr(self, "_d_deepstack", {}).values())
+        bufs.extend(getattr(self, "_d_debug", {}).values())
         for d_ptr in bufs:
             cudart.cudaFree(d_ptr)
         if hasattr(self, "stream"):
