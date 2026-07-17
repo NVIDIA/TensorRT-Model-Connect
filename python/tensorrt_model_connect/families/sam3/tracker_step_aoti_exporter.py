@@ -441,33 +441,154 @@ def _make_decoder_module(torch: Any, model: Any, *, batch_size: int, device: Any
             self.mask_decoder = model.mask_decoder
             self.object_pointer_proj = model.object_pointer_proj
             self.register_buffer(
+                "not_a_point",
+                model.prompt_encoder.not_a_point_embed.weight.detach().clone().contiguous(),
+                persistent=True,
+            )
+            self.register_buffer(
+                "no_mask",
+                model.prompt_encoder.no_mask_embed.weight.detach().clone().contiguous(),
+                persistent=True,
+            )
+            self.register_buffer(
                 "no_object_pointer",
                 model.no_object_pointer.detach().clone().contiguous(),
                 persistent=True,
             )
             with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                points = torch.zeros(batch_size, 1, 1, 2, dtype=torch.float32, device=device)
-                labels = -torch.ones(batch_size, 1, 1, dtype=torch.int32, device=device)
-                sparse, dense = model.prompt_encoder(
-                    input_points=points,
-                    input_labels=labels,
-                    input_boxes=None,
-                    input_masks=None,
-                )
-                image_position = model.get_image_wide_positional_embeddings().repeat(
-                    batch_size, 1, 1, 1
-                )
-            self.register_buffer(
-                "sparse_prompt", sparse.detach().clone().contiguous(), persistent=True
-            )
-            self.register_buffer(
-                "dense_prompt", dense.detach().clone().contiguous(), persistent=True
-            )
+                image_position = model.get_image_wide_positional_embeddings()
             self.register_buffer(
                 "image_position",
-                image_position.detach().clone().contiguous(),
+                image_position.detach().clone().to(torch.bfloat16).contiguous(),
                 persistent=True,
             )
+
+        @staticmethod
+        def _attention(module, query, key, value):
+            batch, query_length, _ = query.shape
+            key_length = key.shape[1]
+            heads = module.num_attention_heads
+            head_dim = module.head_dim
+            query = module.q_proj(query).reshape(batch, query_length, heads, head_dim)
+            key = module.k_proj(key).reshape(batch, key_length, heads, head_dim)
+            value = module.v_proj(value).reshape(batch, key_length, heads, head_dim)
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+            attended = torch.nn.functional.scaled_dot_product_attention(
+                query, key, value, dropout_p=0.0
+            )
+            attended = attended.transpose(1, 2).reshape(batch, query_length, heads * head_dim)
+            return module.o_proj(attended)
+
+        @staticmethod
+        def _layer_norm_2d(module, value):
+            # The original tracker uses a channels-first reduction.  Calling
+            # nn.LayerNorm through NHWC changes the reduction/fusion selected
+            # by Inductor enough to move recurrent binary masks near zero.
+            mean = value.mean(1, keepdim=True)
+            centered = value - mean
+            variance = centered.pow(2).mean(1, keepdim=True)
+            normalized = centered / torch.sqrt(variance + module.eps)
+            return (
+                module.weight[:, None, None] * normalized
+                + module.bias[:, None, None]
+            )
+
+        def _two_way_transformer(self, image, image_position, points):
+            transformer = self.mask_decoder.transformer
+            keys = image.flatten(2).permute(0, 2, 1)
+            key_position = image_position.flatten(2).permute(0, 2, 1)
+            queries = points
+            for layer in transformer.layers:
+                if layer.skip_first_layer_pe:
+                    queries = self._attention(
+                        layer.self_attn, queries, queries, queries
+                    )
+                else:
+                    positioned = queries + points
+                    queries = queries + self._attention(
+                        layer.self_attn, positioned, positioned, queries
+                    )
+                queries = layer.layer_norm1(queries)
+
+                positioned_queries = queries + points
+                positioned_keys = keys + key_position
+                queries = queries + self._attention(
+                    layer.cross_attn_token_to_image,
+                    positioned_queries,
+                    positioned_keys,
+                    keys,
+                )
+                queries = layer.layer_norm2(queries)
+                queries = layer.layer_norm3(queries + layer.mlp(queries))
+
+                positioned_queries = queries + points
+                positioned_keys = keys + key_position
+                keys = keys + self._attention(
+                    layer.cross_attn_image_to_token,
+                    positioned_keys,
+                    positioned_queries,
+                    queries,
+                )
+                keys = layer.layer_norm4(keys)
+
+            attended = self._attention(
+                transformer.final_attn_token_to_image,
+                queries + points,
+                keys + key_position,
+                keys,
+            )
+            queries = transformer.layer_norm_final_attn(queries + attended)
+            return queries, keys
+
+        def _decode(self, conditioned, high0, high1):
+            decoder = self.mask_decoder
+            batch = self.batch_size
+            output_tokens = torch.cat(
+                (
+                    decoder.obj_score_token.weight,
+                    decoder.iou_token.weight,
+                    decoder.mask_tokens.weight,
+                ),
+                dim=0,
+            ).unsqueeze(0).expand(batch, -1, -1)
+            sparse = self.not_a_point.reshape(1, 1, 256).expand(batch, 2, 256)
+            points = torch.cat((output_tokens, sparse), dim=1)
+            dense = self.no_mask.reshape(1, 256, 1, 1).expand(
+                batch, 256, 72, 72
+            )
+            image_position = torch.repeat_interleave(
+                self.image_position, batch, dim=0
+            )
+            points, image = self._two_way_transformer(
+                conditioned + dense, image_position, points
+            )
+            iou_token = points[:, 1]
+            mask_tokens = points[:, 2 : 2 + decoder.num_mask_tokens]
+
+            image = image.transpose(1, 2).reshape(batch, 256, 72, 72)
+            upscaled = decoder.upscale_conv1(image) + high1
+            upscaled = decoder.activation(
+                self._layer_norm_2d(decoder.upscale_layer_norm, upscaled)
+            )
+            upscaled = decoder.activation(decoder.upscale_conv2(upscaled) + high0)
+            hyper = torch.stack(
+                tuple(
+                    module(mask_tokens[:, index])
+                    for index, module in enumerate(decoder.output_hypernetworks_mlps)
+                ),
+                dim=1,
+            )
+            channels = upscaled.shape[1]
+            masks = hyper @ upscaled.reshape(batch, channels, -1)
+            masks = masks.reshape(batch, decoder.num_mask_tokens, 288, 288)
+            ious = decoder.iou_prediction_head(iou_token)
+            scores = decoder.pred_obj_score_head(points[:, 0])
+            # The recurrent path always requests multimask output.  Token zero
+            # is the single-mask proposal and the remaining three correspond
+            # one-for-one with the IoU-selected recurrent candidates.
+            return masks[:, 1:], ious[:, 1:], mask_tokens[:, 1:], scores
 
         def forward(self, tracker_feature_0, tracker_feature_1, conditioned_features):
             batch = self.batch_size
@@ -480,17 +601,9 @@ def _make_decoder_module(torch: Any, model: Any, *, batch_size: int, device: Any
                 high0 = tracker_feature_0.to(torch.bfloat16).expand(batch, -1, -1, -1).contiguous()
                 high1 = tracker_feature_1.to(torch.bfloat16).expand(batch, -1, -1, -1).contiguous()
                 conditioned = conditioned_features.float().contiguous()
-                raw_masks, raw_ious, raw_tokens, raw_scores = self.mask_decoder(
-                    image_embeddings=conditioned,
-                    image_positional_embeddings=self.image_position.contiguous(),
-                    sparse_prompt_embeddings=self.sparse_prompt.contiguous(),
-                    dense_prompt_embeddings=self.dense_prompt.contiguous(),
-                    multimask_output=True,
-                    high_resolution_features=[high0, high1],
+                masks, ious, tokens, raw_scores = self._decode(
+                    conditioned, high0, high1
                 )
-                masks = raw_masks.squeeze(1)
-                ious = raw_ious.squeeze(1)
-                tokens = raw_tokens.squeeze(1)
                 scores = raw_scores.reshape(batch, 1)
                 appearing = scores > 0
                 masks = torch.where(appearing[:, :, None, None], masks, _NO_OBJECT_SCORE)

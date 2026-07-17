@@ -814,6 +814,7 @@ class FakeSam3TrackerModule : public trtmc::TrtModule {
         if (on_forward)
             on_forward();
         std::size_t batch_size = 1;
+        float emitted_object_score_logit = object_score_logit_;
         std::vector<float> downloaded_device_memory;
         std::vector<float> downloaded_device_position;
         if (memory_only_) {
@@ -958,6 +959,10 @@ class FakeSam3TrackerModule : public trtmc::TrtModule {
             last_detector_mask.assign(detector_mask_values,
                                       detector_mask_values + detector_mask.numel());
             detector_masks_history.push_back(last_detector_mask);
+            const bool object_appearing =
+                std::any_of(last_detector_mask.begin(), last_detector_mask.end(),
+                            [](float value) { return value > 0.0F; });
+            emitted_object_score_logit = object_appearing ? 10.0F : -10.0F;
         }
 
         pred_masks_.clear();
@@ -985,7 +990,7 @@ class FakeSam3TrackerModule : public trtmc::TrtModule {
         if (recurrent_)
             recurrent_items_ += batch_size;
         object_pointer_.assign(batch_size * 256, pointer_value);
-        object_score_.assign(batch_size, object_score_logit_);
+        object_score_.assign(batch_size, emitted_object_score_logit);
         memory_.clear();
         if (memory_only_) {
             for (std::size_t batch = 0; batch < batch_size; ++batch) {
@@ -1847,6 +1852,9 @@ void test_frame_zero_prompt_and_propagation_follow_meta_schedule() {
               fixture.memory->calls == 0 && fixture.memory_batch2->calls == 0 &&
               fixture.hard_memory->calls == 0 && fixture.hard_memory_batch2->calls == 1,
           "sam3 prompt returns detector masks after finishing frame-zero hard memory");
+    check(std::all_of(prompt_snapshot.tracker_scores.begin(), prompt_snapshot.tracker_scores.end(),
+                      [](float score) { return close(score, 0.7758035F); }),
+          "sam3 prompt reports detector probabilities for newly created tracks");
 
     const std::array<trtmc::Sam3VideoFrameView, 2> views{
         {{pixels.data(), 2, 2}, {pixels.data(), 2, 2}}};
@@ -1879,6 +1887,10 @@ void test_frame_zero_prompt_and_propagation_follow_meta_schedule() {
               propagated.front().masks == propagated_frame_zero_masks &&
               propagated.front().masks != prompt_snapshot.masks,
           "sam3 continuation emits Meta's consolidated tracker-mask frame-zero result");
+    check(std::all_of(propagated.front().tracker_scores.begin(),
+                      propagated.front().tracker_scores.end(),
+                      [](float score) { return close(score, 0.9999546F); }),
+          "sam3 propagated frame zero reports Meta's mask-input tracker probabilities");
     check(
         fixture.memory->calls == 0 && fixture.memory_batch2->calls == 2 &&
             fixture.hard_memory_batch2->calls == 1 &&
@@ -1900,6 +1912,37 @@ void test_frame_zero_prompt_and_propagation_follow_meta_schedule() {
                 std::vector<float>({10.0F, 10.0F}) &&
             fixture.step_batch2->last_memory_frame_values == std::vector<float>({17.375F, 18.375F}),
         "sam3 propagation replaces hard frame-zero memory with soft memory consumed by frame one");
+}
+
+void test_frame_zero_soft_mask_cleanup_feeds_output_and_memory() {
+    auto fixture = make_video_fixture(2, false, false, 2.0F, [](trtmc::Sam3Config& config) {
+        config.fill_hole_area = 1;
+        config.max_tracked_objects = 1;
+    });
+    fixture.core->cleanup_probe_detection_masks = true;
+
+    std::vector<float> pixels(12, 0.5F);
+    auto session = fixture.pipeline->create_sam3_video_session("person");
+    auto prompt = session->accept_prompt_frame(pixels.data(), 2, 2);
+    check(prompt.object_ids == std::vector<int32_t>({0}) &&
+              prompt.masks == std::vector<float>({1.0F, 1.0F, 1.0F, 1.0F}) &&
+              prompt.tracker_scores.size() == 1 && close(prompt.tracker_scores.front(), 0.7758035F),
+          "sam3 prompt cleanup remains independent from its detector tracker score");
+
+    const trtmc::Sam3VideoFrameView view{pixels.data(), 2, 2};
+    const auto propagated = session->propagate_borrowed_continuation(std::move(prompt), &view, 1);
+    check(propagated.size() == 1 && propagated.front().object_ids == std::vector<int32_t>({0}) &&
+              propagated.front().masks == std::vector<float>({1.0F, 1.0F, 1.0F, 1.0F}) &&
+              propagated.front().tracker_scores.size() == 1 &&
+              close(propagated.front().tracker_scores.front(), 0.9999546F),
+          "sam3 frame-zero propagation cleans its consolidated soft mask and reports the "
+          "mask-input score");
+    check(fixture.memory->calls == 1 && fixture.memory_batch2 == nullptr &&
+              fixture.memory->final_masks_history == std::vector<std::vector<float>>({
+                                                         {1024.0F, 1024.0F, 1024.0F, 0.1F},
+                                                     }) &&
+              fixture.memory->memory_scores_history == std::vector<float>({10.0F}),
+          "sam3 frame-zero soft memory consumes the same cleaned mask emitted to the user");
 }
 
 void test_frame_zero_zero_detections_is_stable() {
@@ -2182,8 +2225,9 @@ void test_parallel_tracker_init_and_cleanup_overlap() {
               blocked.sibling->calls == 1 &&
               overlapped.front().object_ids == std::vector<int32_t>({0, 1}) &&
               overlapped.front().masks ==
-                  std::vector<float>({1.0F, 1.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F}),
-          "sam3 consolidated new-detection cleanup remains exact while both init lanes overlap");
+                  std::vector<float>({1.0F, 1.0F, 1.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F}),
+          "sam3 frame-zero cleanup fills holes before equal-score ownership while init lanes "
+          "overlap");
 }
 
 void test_conditioning_and_pointer_history() {
@@ -2438,6 +2482,7 @@ int main() {
     test_prompt_then_borrowed_tail_is_strictly_ordered();
     test_recurrent_tracker_bfloat16_state();
     test_frame_zero_prompt_and_propagation_follow_meta_schedule();
+    test_frame_zero_soft_mask_cleanup_feeds_output_and_memory();
     test_frame_zero_zero_detections_is_stable();
     test_late_new_track_uses_uncleaned_hard_memory();
     test_recurrent_tracker_uses_b2_pairs_and_b1_odd_tail();

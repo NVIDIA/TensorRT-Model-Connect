@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import inspect
 import json
+import textwrap
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -114,6 +116,17 @@ def _model_dir(tmp_path: Path) -> Path:
     return model_dir
 
 
+def _decoder_function_source(name: str) -> str:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(exporter._make_decoder_module)))
+    matches = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == name
+    ]
+    assert len(matches) == 1
+    return ast.unparse(matches[0])
+
+
 def test_encoder_export_contract_uses_non_singleton_seed_and_full_dynamic_bounds() -> None:
     dimensions = []
 
@@ -159,6 +172,57 @@ def test_decoder_consumes_preprojected_features_at_meta_bf16_boundary() -> None:
     assert "tracker_feature_1.to(torch.bfloat16)" in source
     assert "self.mask_decoder.conv_s0(" not in source
     assert "self.mask_decoder.conv_s1(" not in source
+
+
+def test_exact_decoder_attention_keeps_rank_three_token_boundary() -> None:
+    source = _decoder_function_source("_attention")
+
+    assert "batch, query_length, _ = query.shape" in source
+    assert "key_length = key.shape[1]" in source
+    assert "module.q_proj(query).reshape(batch, query_length, heads, head_dim)" in source
+    assert "module.k_proj(key).reshape(batch, key_length, heads, head_dim)" in source
+    assert "module.v_proj(value).reshape(batch, key_length, heads, head_dim)" in source
+    assert "scaled_dot_product_attention(query, key, value, dropout_p=0.0)" in source
+    assert "reshape(batch, query_length, heads * head_dim)" in source
+    assert "return module.o_proj(attended)" in source
+    assert "unsqueeze" not in source
+
+
+def test_exact_decoder_uses_manual_channels_first_layer_norm() -> None:
+    layer_norm_source = _decoder_function_source("_layer_norm_2d")
+    decode_source = _decoder_function_source("_decode")
+
+    assert "mean = value.mean(1, keepdim=True)" in layer_norm_source
+    assert "variance = centered.pow(2).mean(1, keepdim=True)" in layer_norm_source
+    assert "module.weight[:, None, None] * normalized" in layer_norm_source
+    assert "module.bias[:, None, None]" in layer_norm_source
+    assert "permute" not in layer_norm_source
+    assert "self._layer_norm_2d(decoder.upscale_layer_norm, upscaled)" in decode_source
+    assert "decoder.upscale_layer_norm(upscaled)" not in decode_source
+
+
+def test_exact_decoder_preserves_meta_output_token_order() -> None:
+    source = _decoder_function_source("_decode")
+
+    object_score = source.index("decoder.obj_score_token.weight")
+    iou = source.index("decoder.iou_token.weight")
+    masks = source.index("decoder.mask_tokens.weight")
+    assert object_score < iou < masks
+    assert "iou_token = points[:, 1]" in source
+    assert "mask_tokens = points[:, 2:2 + decoder.num_mask_tokens]" in source
+    assert "return (masks[:, 1:], ious[:, 1:], mask_tokens[:, 1:], scores)" in source
+
+
+def test_exact_decoder_does_not_call_hf_rank_four_mask_decoder() -> None:
+    source = _decoder_function_source("forward")
+
+    assert "self._decode(conditioned, high0, high1)" in source
+    assert "self.mask_decoder(" not in source
+    assert "image_embeddings=" not in source
+    assert "image_positional_embeddings=" not in source
+    assert "sparse_prompt_embeddings=" not in source
+    assert "dense_prompt_embeddings=" not in source
+    assert "high_resolution_features=" not in source
 
 
 def test_encoder_rounds_current_frame_inputs_at_meta_bf16_boundary() -> None:
@@ -365,8 +429,11 @@ def test_exporter_has_no_external_graph_or_environment_configuration() -> None:
     assert "os.environ" not in source
     assert "os.getenv" not in source
     assert "getenv(" not in source
+    assert "trtmc_sam3" not in source
     assert "_single_frame_forward" not in source
     assert "meta-sam3" not in source
     assert "sam3.pt" not in source
+    assert "spec_from_file_location" not in source
+    assert "runpy." not in source
     assert "apply_rotary_pos_emb_2d" not in source
     assert "view_as_complex" not in source

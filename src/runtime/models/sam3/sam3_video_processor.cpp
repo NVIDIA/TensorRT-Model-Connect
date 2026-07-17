@@ -485,6 +485,7 @@ struct TrackState {
     // The first propagate call emits frame zero again and replaces its hard point-prompt memory
     // with a soft memory encoded from these logits before frame one may consume the state.
     std::vector<float> pending_frame_zero_soft_mask;
+    std::optional<float> pending_frame_zero_object_score_logit;
     std::vector<int32_t> unmatched_frame_indices;
     std::vector<TrackerFrameRecord> records;
 };
@@ -2821,7 +2822,7 @@ class Sam3VideoProcessorState {
         // Meta's propagate_in_video includes the already-consolidated prompt frame. Dense update
         // planning re-encodes that frame with soft-mask semantics and overwrites its conditioning
         // memory before frame one is allowed to consume it.
-        auto propagated_frame_zero = make_frame_zero_propagation_result(prompt_result);
+        auto propagated_frame_zero = prepare_frame_zero_propagation_result(prompt_result);
         refresh_frame_zero_conditioning_memories();
         std::vector<Sam3VideoFrameResult> results;
         results.reserve(static_cast<std::size_t>(total_frames));
@@ -4142,7 +4143,7 @@ class Sam3VideoProcessorState {
     }
 
     Sam3VideoFrameResult
-    make_frame_zero_propagation_result(const Sam3VideoFrameResult& prompt_result) const {
+    prepare_frame_zero_propagation_result(const Sam3VideoFrameResult& prompt_result) {
         if (prompt_result.frame_idx != 0 || prompt_result.height <= 0 || prompt_result.width <= 0) {
             throw std::invalid_argument(
                 "SAM3 frame-zero propagation received an invalid prompt result");
@@ -4150,13 +4151,21 @@ class Sam3VideoProcessorState {
         const auto mask_values =
             static_cast<std::size_t>(config_.low_res_mask_size) * config_.low_res_mask_size;
         std::map<int32_t, std::vector<float>> masks;
-        for (const auto& [object_id, track] : tracks_) {
+        for (auto& [object_id, track] : tracks_) {
             if (track.first_frame_idx != 0)
                 continue;
             if (track.pending_frame_zero_soft_mask.size() != mask_values) {
                 throw std::runtime_error(
                     "SAM3 frame-zero tracker state has no consolidated propagation mask");
             }
+            if (!track.pending_frame_zero_object_score_logit.has_value()) {
+                throw std::runtime_error(
+                    "SAM3 frame-zero tracker state has no mask-input object score");
+            }
+            fill_small_components(track.pending_frame_zero_soft_mask, config_.low_res_mask_size,
+                                  config_.low_res_mask_size, config_.fill_hole_area,
+                                  mask_cleanup_workspace_);
+            track.tracker_score = sigmoid(*track.pending_frame_zero_object_score_logit);
             masks.emplace(object_id, track.pending_frame_zero_soft_mask);
         }
 
@@ -4254,6 +4263,7 @@ class Sam3VideoProcessorState {
             record.memory_position = std::move(replacement.memory.position);
             record.device_memory = std::move(replacement.memory.device);
             track.pending_frame_zero_soft_mask.clear();
+            track.pending_frame_zero_object_score_logit.reset();
         }
     }
 
@@ -5169,8 +5179,10 @@ class Sam3VideoProcessorState {
         track.tracker_score = detection.score;
         track.keep_alive = config_.initial_tracker_keep_alive;
         track.records.reserve(static_cast<std::size_t>(config_.max_pointer_inputs));
-        if (frame_idx == 0)
+        if (frame_idx == 0) {
             track.pending_frame_zero_soft_mask = std::move(conditioning_mask);
+            track.pending_frame_zero_object_score_logit = initialized.object_score_logit;
+        }
         current_masks[track.object_id] = std::move(output_mask);
         add_record(track, frame_idx, true, std::move(initialized));
         const int32_t object_id = track.object_id;
