@@ -51,6 +51,10 @@ from .checkpoint_mapper import (
 )
 from . import graph_ops
 from . import graph_blocks
+from .prefill_config import (
+    MAX_SEQUENCE_PREFILL_LENGTH,
+    sequence_prefill_profile_lengths,
+)
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
@@ -291,7 +295,8 @@ class DeepSeekOCRPlugin:
         head_dim = attention_size // num_heads
         kv_attention_size = graph_blocks.infer_kv_attention_size(
             weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
-        opt_prefill_length = min(64, max_cache_length)
+        opt_prefill_length, max_prefill_length = sequence_prefill_profile_lengths(
+            max_cache_length)
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
         elif precision == "fp32":
@@ -362,7 +367,7 @@ class DeepSeekOCRPlugin:
                 "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
             trt_config.add_optimization_profile(profile)
 
-        _add_profile(opt_prefill_length, max_cache_length)
+        _add_profile(opt_prefill_length, max_prefill_length)
         _add_profile(1, 1, fixed=True)
 
         if work_trt_dtype != trt.float32:
@@ -612,6 +617,7 @@ class DeepSeekOCRPlugin:
             "image_token_id": config.raw.get("image_token_id", 128815),
             "fixed_image_size": 768,
             "num_image_pad_tokens": 145,  # 144 projected + 1 view_separator
+            "prefill_max_length": MAX_SEQUENCE_PREFILL_LENGTH,
             "vision_output_dim": hidden,
             "preprocessor_type": "simple_chw",
             "image_mean": [0.5, 0.5, 0.5],

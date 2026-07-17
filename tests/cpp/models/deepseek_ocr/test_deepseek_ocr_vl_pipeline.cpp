@@ -760,6 +760,51 @@ static void test_vl_sequence_prefill_uses_one_text_launch() {
     cudaStreamDestroy(stream);
 }
 
+static void test_vl_sequence_prefill_over_limit_uses_compatibility_path() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto decode_stats = std::make_shared<CountingTextStats>();
+    auto prefill_stats = std::make_shared<CountingTextStats>();
+    auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream);
+    auto prefill = std::make_unique<CountingTextModule>(prefill_stats, true, stream);
+    auto vision = std::make_unique<FakeSequenceVisionModule>();
+    auto cache = std::make_unique<trtmc::DeepseekOcrKvCache>(1, 8, 4, stream);
+
+    trtmc::DeepseekOcrConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 2;
+    cfg.image_token_id = 1;
+    cfg.vision_output_dim = 4;
+    cfg.num_layers = 1;
+    cfg.prefill_max_length = 2;
+
+    trtmc::DeepseekOcrPreprocessConfig vl_pp;
+    vl_pp.preprocessor_type = "simple_chw";
+    vl_pp.fixed_image_size = 4;
+    vl_pp.in_channels = 3;
+
+    auto tokenizer = std::make_shared<VLFixedTokenizer>();
+    trtmc::DeepseekOcrPipeline pipeline(std::move(decoder), std::move(vision), std::move(cache),
+                                        cfg, vl_pp, stream, tokenizer, "", nullptr,
+                                        std::move(prefill));
+
+    float pixels[2 * 2 * 3] = {0.5F, 0.5F, 0.5F, 0.4F, 0.4F, 0.4F,
+                               0.3F, 0.3F, 0.3F, 0.2F, 0.2F, 0.2F};
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 1;
+    gen_cfg.eos_token_id = 2;
+    auto result = pipeline.generate("test", pixels, 2, 2, gen_cfg);
+
+    check(result.token_ids == std::vector<int32_t>{2},
+          "sequence prefill limit: output remains correct");
+    check(prefill_stats->calls == 0, "sequence prefill limit: prefill launch skipped");
+    check(decode_stats->calls == 3,
+          "sequence prefill limit: token-by-token compatibility path used");
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_vl_generate_with_tokenizer() {
     // Covers the string-based generate(const string&, cfg) method
     auto engine = build_mock_decoder();
@@ -809,6 +854,7 @@ int main() {
     test_vl_generate_with_vision_encoder();
     test_vl_generate_with_embed_decoder();
     test_vl_sequence_prefill_uses_one_text_launch();
+    test_vl_sequence_prefill_over_limit_uses_compatibility_path();
     test_vl_generate_with_tokenizer();
     if (failures > 0)
         std::cerr << failures << " FAILED\n";

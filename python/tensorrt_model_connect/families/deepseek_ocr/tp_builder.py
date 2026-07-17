@@ -12,6 +12,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
+from .prefill_config import sequence_prefill_profile_lengths
 from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
 from .standard_decoder_builder import _apply_norm
 
@@ -380,7 +381,7 @@ def build_deepseek_ocr_tp_engine(
     attention_size = int(rank_weights["_attention_size"])
     kv_attention_size = int(rank_weights["_kv_attention_size"])
     head_dim = attention_size // num_heads
-    opt_prefill_length = min(64, max_cache_length)
+    opt_prefill_length, max_prefill_length = sequence_prefill_profile_lengths(max_cache_length)
 
     n_routed_experts = int(rank_weights["_n_routed_experts"])
     num_experts_per_tok = int(rank_weights["_num_experts_per_tok"])
@@ -437,7 +438,7 @@ def build_deepseek_ocr_tp_engine(
             "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
         trt_config.add_optimization_profile(profile)
 
-    _add_profile(opt_prefill_length, max_cache_length)
+    _add_profile(opt_prefill_length, max_prefill_length)
     _add_profile(1, 1, fixed=True)
 
     embedding_table = graph_ops.add_constant(

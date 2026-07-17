@@ -178,7 +178,8 @@ class VLPlugin final : public IPipelinePlugin {
         vlc.vision_output_dim = extract_json_int(ctx.config_json, "vision_output_dim", 0);
         vlc.has_position_input = loaded.decode->has_input("position_id");
         vlc.num_layers = ctx.config.num_layers;
-        vlc.prefill_max_length = ctx.config.max_cache_length;
+        vlc.prefill_max_length =
+            extract_json_int(ctx.config_json, "prefill_max_length", ctx.config.max_cache_length);
         vlc.present_k_pattern = ctx.config.io_map.present_k_pattern;
         vlc.present_v_pattern = ctx.config.io_map.present_v_pattern;
 
