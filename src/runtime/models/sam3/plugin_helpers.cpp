@@ -12,7 +12,6 @@
 #include <array>
 #include <chrono>
 #include <cstring>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -20,10 +19,6 @@
 #include <stdexcept>
 #include <string_view>
 #include <utility>
-
-#if TRTMC_HAS_TVM_FFI
-#include "plugins/tvm_ffi_module_loader.h"
-#endif
 
 namespace trtmc {
 
@@ -445,7 +440,13 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle
 
 std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(const BundleFile& bundle) {
     const bool add_special = detect_add_special_tokens(bundle);
-    const auto special_frame = detect_requested_tokenizer_special_frame(bundle, add_special);
+    // The generic bundle header records what AutoTokenizer.encode() reported
+    // at build time.  SAM3's text tower has a stricter, model-owned CLIP
+    // contract: an explicit prefix/suffix frame in config.json is
+    // authoritative even if that generic header bit is false.  This also
+    // makes builds independent of whether Transformers was importable while
+    // the bundle was produced.
+    const auto special_frame = detect_tokenizer_special_frame(bundle);
     if (!uses_sam3_clip_tokenizer_contract(bundle) || (add_special && !special_frame.present))
         return try_create_native_tokenizer(bundle, add_special);
 
@@ -612,94 +613,6 @@ std::unique_ptr<ITokenizer> create_clip_tokenizer_from_bundle(const BundleFile& 
         std::cerr << "[trtmc] WARNING: CLIP tokenizer failed: " << e.what() << std::endl;
     }
     return nullptr;
-}
-
-// ─── FFI kernel loading ───
-
-#if TRTMC_HAS_TVM_FFI
-
-namespace {
-
-// Write a bundle section to a temporary .so file, returning the path.
-std::string write_kernel_so_to_temp(const std::string& global_name, const char* data,
-                                    std::size_t size) {
-    std::string safe_name = global_name;
-    for (auto& c : safe_name) {
-        if (c == '.')
-            c = '_';
-    }
-    std::string tmp_path = "/tmp/trtmc_kernel_" + safe_name + ".so";
-    std::ofstream ofs(tmp_path, std::ios::binary);
-    ofs.write(data, static_cast<std::streamsize>(size));
-    return tmp_path;
-}
-
-// Load a single kernel entry from the manifest and register it via TVM-FFI.
-void load_single_kernel(const BundleFile& bundle, const std::string& obj) {
-    std::string global_name = extract_json_string(obj, "global_name", "");
-    std::string func_name = extract_json_string(obj, "func_name", "run");
-    std::string section_name = extract_json_string(obj, "section", "");
-
-    if (global_name.empty() || section_name.empty())
-        return;
-
-    const auto* so_sec = find_section(bundle, section_name);
-    if (!so_sec || so_sec->empty()) {
-        std::cerr << "[ffi] Kernel .so section not found: " << section_name << '\n';
-        return;
-    }
-
-    std::string tmp_path = write_kernel_so_to_temp(global_name, so_sec->data(), so_sec->size());
-    if (load_tvm_ffi_module_func(tmp_path, func_name, global_name)) {
-        std::cerr << "[ffi] Loaded kernel: " << global_name << '\n';
-    } else {
-        std::cerr << "[ffi] Failed to load kernel: " << global_name << " from " << section_name
-                  << '\n';
-    }
-}
-
-// Find the "kernels" JSON array bounds within the manifest string.
-// Returns {start_after_bracket, closing_bracket} or {npos, npos}.
-std::pair<std::size_t, std::size_t> find_kernels_array_bounds(const std::string& s) {
-    auto pos = s.find("\"kernels\"");
-    if (pos == std::string::npos)
-        return {std::string::npos, std::string::npos};
-    auto arr_start = s.find('[', pos);
-    if (arr_start == std::string::npos)
-        return {std::string::npos, std::string::npos};
-    auto arr_end = s.find(']', arr_start);
-    return {arr_start + 1, arr_end};
-}
-
-} // namespace
-
-#endif // TRTMC_HAS_TVM_FFI
-
-void load_ffi_kernels_from_bundle(const BundleFile& bundle) {
-#if TRTMC_HAS_TVM_FFI
-    const auto* manifest_sec = find_section(bundle, "kernel_manifest.json");
-    if (!manifest_sec)
-        return;
-
-    std::string manifest_str(manifest_sec->begin(), manifest_sec->end());
-    auto [cur, arr_end] = find_kernels_array_bounds(manifest_str);
-    if (cur == std::string::npos || arr_end == std::string::npos)
-        return;
-
-    while (cur < arr_end) {
-        auto obj_start = manifest_str.find('{', cur);
-        if (obj_start == std::string::npos || obj_start >= arr_end)
-            break;
-        auto obj_end = manifest_str.find('}', obj_start);
-        if (obj_end == std::string::npos)
-            break;
-
-        load_single_kernel(bundle, manifest_str.substr(obj_start, obj_end - obj_start + 1));
-        cur = obj_end + 1;
-    }
-#else
-    (void)bundle;
-#endif
 }
 
 } // namespace trtmc

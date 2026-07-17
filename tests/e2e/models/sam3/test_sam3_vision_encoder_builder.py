@@ -30,10 +30,8 @@ def test_sam3_vision_builder_exposes_only_the_selected_graph() -> None:
     }
     assert removed_experiments.isdisjoint(parameters)
 
-    source = inspect.getsource(
-        vision_encoder_builder.build_sam3_vision_encoder_engine
-    )
-    assert '(-1, 3, image_size, image_size)' in source
+    source = inspect.getsource(vision_encoder_builder.build_sam3_vision_encoder_engine)
+    assert "(-1, 3, image_size, image_size)" in source
     assert "_add_exact_batch1_profile" in source
     assert "_add_attention_with_rope_batched" in source
     assert "axis=1" in source
@@ -127,8 +125,6 @@ def test_sam3_vision_keeps_selected_mlp_and_tracker_neck() -> None:
     assert "fp16_chain" not in mlp_source
     assert "fp16_accum" not in mlp_source
 
-    build_source = inspect.getsource(
-        vision_encoder_builder.build_sam3_vision_encoder_engine
-    )
+    build_source = inspect.getsource(vision_encoder_builder.build_sam3_vision_encoder_engine)
     assert "_add_tracker_fpn_level" in build_source
     assert "sam3_tracker_position_2" in build_source

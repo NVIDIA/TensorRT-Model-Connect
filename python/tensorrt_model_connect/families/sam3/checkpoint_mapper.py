@@ -102,7 +102,8 @@ def load_standard_weights(
         embedding_key = f"{model_prefix}.embed_tokens.weight"
     embedding = _load_tensor(readers, embedding_key)
     assert embedding.shape == (vocab, hidden), (
-        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+    )
     weights["embedding"] = embedding.astype(target_dtype)
 
     def _load_layer(layer_idx: int) -> tuple[int, WeightDict, int, int]:
@@ -111,26 +112,32 @@ def load_standard_weights(
 
         # Norms
         input_norm = _load_tensor(
-            readers, _layer_key(layer_idx, "input_layernorm.weight", model_prefix))
+            readers, _layer_key(layer_idx, "input_layernorm.weight", model_prefix)
+        )
         post_norm = _load_tensor(
-            readers,
-            _layer_key(layer_idx, "post_attention_layernorm.weight", model_prefix))
+            readers, _layer_key(layer_idx, "post_attention_layernorm.weight", model_prefix)
+        )
         layer[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
         layer[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
         # Q/K/V/O projections
         q_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.q_proj.weight", model_prefix))
+            readers, _layer_key(layer_idx, "self_attn.q_proj.weight", model_prefix)
+        )
         k_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.k_proj.weight", model_prefix))
+            readers, _layer_key(layer_idx, "self_attn.k_proj.weight", model_prefix)
+        )
         v_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.v_proj.weight", model_prefix))
+            readers, _layer_key(layer_idx, "self_attn.v_proj.weight", model_prefix)
+        )
         o_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.o_proj.weight", model_prefix))
+            readers, _layer_key(layer_idx, "self_attn.o_proj.weight", model_prefix)
+        )
 
         q_hidden = q_raw.shape[0]
         gate_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.gate_proj.weight", model_prefix))
+            readers, _layer_key(layer_idx, "mlp.gate_proj.weight", model_prefix)
+        )
         layer_mlp_size = gate_raw.shape[0]
 
         # Transpose all projections [out, in] -> [in, out]
@@ -149,39 +156,33 @@ def load_standard_weights(
         k_bias_key = _layer_key(layer_idx, "self_attn.k_proj.bias", model_prefix)
         v_bias_key = _layer_key(layer_idx, "self_attn.v_proj.bias", model_prefix)
         if _has_tensor(readers, q_bias_key):
-            layer[f"{prefix}.q_bias"] = _load_tensor(
-                readers, q_bias_key).astype(target_dtype)
+            layer[f"{prefix}.q_bias"] = _load_tensor(readers, q_bias_key).astype(target_dtype)
         if _has_tensor(readers, k_bias_key):
-            layer[f"{prefix}.k_bias"] = _load_tensor(
-                readers, k_bias_key).astype(target_dtype)
+            layer[f"{prefix}.k_bias"] = _load_tensor(readers, k_bias_key).astype(target_dtype)
         if _has_tensor(readers, v_bias_key):
-            layer[f"{prefix}.v_bias"] = _load_tensor(
-                readers, v_bias_key).astype(target_dtype)
+            layer[f"{prefix}.v_bias"] = _load_tensor(readers, v_bias_key).astype(target_dtype)
 
         # Optional per-head q/k norm (Qwen3 style)
         q_norm_key = _layer_key(layer_idx, "self_attn.q_norm.weight", model_prefix)
         k_norm_key = _layer_key(layer_idx, "self_attn.k_norm.weight", model_prefix)
         if _has_tensor(readers, q_norm_key):
             layer[f"{prefix}.q_norm"] = _repeat_head_norm(
-                _load_tensor(readers, q_norm_key).astype(np.float32),
-                num_heads)
+                _load_tensor(readers, q_norm_key).astype(np.float32), num_heads
+            )
         if _has_tensor(readers, k_norm_key):
             layer[f"{prefix}.k_norm"] = _repeat_head_norm(
-                _load_tensor(readers, k_norm_key).astype(np.float32),
-                num_kv_heads)
+                _load_tensor(readers, k_norm_key).astype(np.float32), num_kv_heads
+            )
 
         # MLP projections
-        up_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.up_proj.weight", model_prefix))
+        up_raw = _load_tensor(readers, _layer_key(layer_idx, "mlp.up_proj.weight", model_prefix))
         down_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.down_proj.weight", model_prefix))
+            readers, _layer_key(layer_idx, "mlp.down_proj.weight", model_prefix)
+        )
 
-        layer[f"{prefix}.w_gate"] = _transpose_2d(
-            gate_raw, "gate_proj", precision=precision)
-        layer[f"{prefix}.w_up"] = _transpose_2d(
-            up_raw, "up_proj", precision=precision)
-        layer[f"{prefix}.w_down"] = _transpose_2d(
-            down_raw, "down_proj", precision=precision)
+        layer[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj", precision=precision)
+        layer[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj", precision=precision)
+        layer[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj", precision=precision)
 
         return layer_idx, layer, q_hidden, layer_mlp_size
 
@@ -212,19 +213,18 @@ def load_standard_weights(
     if final_norm_key is None:
         final_norm_key = f"{model_prefix}.norm.weight"
     if _has_tensor(readers, final_norm_key):
-        weights["final_norm"] = _load_tensor(
-            readers, final_norm_key).astype(np.float32)
+        weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
     else:
         weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
     # LM head
     if _has_tensor(readers, lm_head_key):
         weights["w_out"] = _transpose_2d(
-            _load_tensor(readers, lm_head_key), "lm_head", precision=precision)
+            _load_tensor(readers, lm_head_key), "lm_head", precision=precision
+        )
     else:
         # Tied embeddings
-        weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied",
-                                         precision=precision)
+        weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied", precision=precision)
 
     weights["_attention_size"] = attention_size  # type: ignore[assignment]
     weights["_kv_attention_size"] = kv_attention_size  # type: ignore[assignment]
@@ -237,14 +237,6 @@ def load_standard_weights(
 # Safetensors I/O helpers
 # ---------------------------------------------------------------------------
 
-def _detect_framework() -> str:
-    """Use 'torch' if available (handles BF16 natively), else 'numpy'."""
-    try:
-        import torch  # noqa: F401
-        return "torch"
-    except ImportError:
-        return "numpy"
-
 
 class _TorchBinReader:
     """Adapter that wraps a pytorch .bin state dict with the safetensors reader
@@ -252,6 +244,7 @@ class _TorchBinReader:
 
     def __init__(self, path: Path):
         import torch
+
         self._state = torch.load(str(path), map_location="cpu", weights_only=True)
 
     def keys(self) -> list[str]:
@@ -276,7 +269,11 @@ class _ReaderCollection(list):
 
 def _open_safetensors(model_dir: Path) -> list:
     """Open all safetensor shards (or pytorch .bin) in a model directory."""
-    fw = _detect_framework()
+    # SAM3's supported/default checkpoint contract is safetensors.  Always
+    # request NumPy arrays so the ordinary TensorRT build path never probes or
+    # imports PyTorch merely because it happens to be installed.  The legacy
+    # ``pytorch_model.bin`` fallback below remains explicitly Torch-specific.
+    fw = "numpy"
     single = model_dir / "model.safetensors"
     if single.exists():
         return _ReaderCollection([safe_open(str(single), framework=fw)])
@@ -284,17 +281,14 @@ def _open_safetensors(model_dir: Path) -> list:
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.exists():
         import json
+
         index = json.loads(index_path.read_text())
         weight_map = index.get("weight_map", {})
         shard_files = sorted(set(weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework=fw)
-            for shard in shard_files
+            shard: safe_open(str(model_dir / shard), framework=fw) for shard in shard_files
         }
-        tensor_map = {
-            name: readers_by_file[shard]
-            for name, shard in weight_map.items()
-        }
+        tensor_map = {name: readers_by_file[shard] for name, shard in weight_map.items()}
         return _ReaderCollection(
             [readers_by_file[shard] for shard in shard_files],
             tensor_map=tensor_map,
@@ -308,17 +302,14 @@ def _open_safetensors(model_dir: Path) -> list:
     diff_index = model_dir / "diffusion_pytorch_model.safetensors.index.json"
     if diff_index.exists():
         import json
+
         index = json.loads(diff_index.read_text())
         weight_map = index.get("weight_map", {})
         shard_files = sorted(set(weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework=fw)
-            for shard in shard_files
+            shard: safe_open(str(model_dir / shard), framework=fw) for shard in shard_files
         }
-        tensor_map = {
-            name: readers_by_file[shard]
-            for name, shard in weight_map.items()
-        }
+        tensor_map = {name: readers_by_file[shard] for name, shard in weight_map.items()}
         return _ReaderCollection(
             [readers_by_file[shard] for shard in shard_files],
             tensor_map=tensor_map,
@@ -330,7 +321,8 @@ def _open_safetensors(model_dir: Path) -> list:
         return _ReaderCollection([_TorchBinReader(bin_single)])
 
     raise FileNotFoundError(
-        f"No model.safetensors, index.json, or pytorch_model.bin in {model_dir}")
+        f"No model.safetensors, index.json, or pytorch_model.bin in {model_dir}"
+    )
 
 
 def _has_tensor(readers: list, name: str) -> bool:

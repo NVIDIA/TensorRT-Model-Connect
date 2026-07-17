@@ -536,15 +536,9 @@ def _self_attention(
     rope: _RopeConstants,
     batch_size: int,
 ) -> trt.ITensor:
-    query = _bf16_linear(
-        network, queries, weights, f"{prefix}.q_proj", _HIDDEN_SIZE, _HIDDEN_SIZE
-    )
-    key = _bf16_linear(
-        network, queries, weights, f"{prefix}.k_proj", _HIDDEN_SIZE, _HIDDEN_SIZE
-    )
-    value = _bf16_linear(
-        network, queries, weights, f"{prefix}.v_proj", _HIDDEN_SIZE, _HIDDEN_SIZE
-    )
+    query = _bf16_linear(network, queries, weights, f"{prefix}.q_proj", _HIDDEN_SIZE, _HIDDEN_SIZE)
+    key = _bf16_linear(network, queries, weights, f"{prefix}.k_proj", _HIDDEN_SIZE, _HIDDEN_SIZE)
+    value = _bf16_linear(network, queries, weights, f"{prefix}.v_proj", _HIDDEN_SIZE, _HIDDEN_SIZE)
     query = _shuffle(network, query, (batch_size, _NUM_HEADS, _SPATIAL_TOKENS, _HEAD_DIM))
     key = _shuffle(network, key, (batch_size, _NUM_HEADS, _SPATIAL_TOKENS, _HEAD_DIM))
     value = _shuffle(network, value, (batch_size, _NUM_HEADS, _SPATIAL_TOKENS, _HEAD_DIM))
@@ -572,9 +566,7 @@ def _cross_attention(
     rope: _RopeConstants,
     batch_size: int,
 ) -> trt.ITensor:
-    query = _bf16_linear(
-        network, queries, weights, f"{prefix}.q_proj", _HIDDEN_SIZE, _HIDDEN_SIZE
-    )
+    query = _bf16_linear(network, queries, weights, f"{prefix}.q_proj", _HIDDEN_SIZE, _HIDDEN_SIZE)
 
     spatial_key_input = _fp32_sum(
         network,

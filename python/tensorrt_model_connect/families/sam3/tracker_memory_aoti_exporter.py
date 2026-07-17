@@ -3,16 +3,20 @@
 
 """Export SAM3's fixed memory-update graphs as target-specific AOTI packages.
 
-The exporter uses only the Apache-licensed Transformers 5.2 SAM3 tracker
-implementation and the local Hugging Face checkpoint.  It emits the four
-fixed graphs used by the streaming tracker: soft/hard mask policy crossed
-with object batch B1/B2.  No ONNX graph or reference-model source is involved.
+The exporter uses the Apache-licensed Transformers 5.2 modules and local
+Hugging Face checkpoint as its only source of tracker weights.  It executes
+those leaf convolution and linear parameters in the numerical order used by
+the original tracker: explicit channels-first LayerNorm reductions and a
+fixed FP32 sine position encoding.  It emits four developer-only Golden graphs:
+soft/hard mask policy crossed with object batch B1/B2.  Production SAM3 bundles
+contain the equivalent native TensorRT plans and never package or load these
+AOTI artifacts.  No ONNX graph or reference-model package is imported.
 
-The wrapper intentionally owns the soft-mask preparation around Transformers'
-``Sam3TrackerVideoMemoryEncoder``.  Hard packages instead receive binary masks
-whose ownership was resolved globally at Meta's 1008px tracker grid.  The
-graphs reproduce the BF16 memory boundary and publish values back as lossless
-FP32 carriers.
+The wrapper intentionally owns the authoritative video soft-mask preparation:
+288px logits are resized directly to 1152px before sigmoid.  Hard packages
+instead receive binary masks whose ownership was resolved globally at the
+1008px tracker grid.  The graphs reproduce the BF16 memory boundary and
+publish values back as lossless FP32 carriers.
 """
 
 from __future__ import annotations
@@ -416,7 +420,9 @@ def _load_tracker_model(dependencies: _Dependencies, model_dir: Path, device: An
     expected_config = {
         "memory_encoder_hidden_size": _FEATURE_CHANNELS,
         "memory_encoder_output_channels": _MEMORY_CHANNELS,
+        "mask_downsampler_hidden_act": "gelu",
         "mask_downsampler_total_stride": 16,
+        "memory_fuser_hidden_act": "gelu",
         "memory_fuser_num_layers": 2,
         "sigmoid_scale_for_mem_enc": _SIGMOID_SCALE,
         "sigmoid_bias_for_mem_enc": _SIGMOID_BIAS,
@@ -476,6 +482,88 @@ def _prepare_memory_mask(
     return mask
 
 
+def _meta_layer_norm_2d(torch: Any, value: Any, layer_norm: Any) -> Any:
+    """Apply the tracker's explicit channels-first LayerNorm reduction."""
+
+    mean = value.mean(1, keepdim=True)
+    variance = (value - mean).pow(2).mean(1, keepdim=True)
+    normalized = (value - mean) / torch.sqrt(variance + layer_norm.eps)
+    return layer_norm.weight[:, None, None] * normalized + layer_norm.bias[:, None, None]
+
+
+def _conv2d_from_leaf(functional: Any, value: Any, convolution: Any) -> Any:
+    """Execute one Transformers convolution leaf without its wrapper module."""
+
+    return functional.conv2d(
+        value,
+        convolution.weight,
+        convolution.bias,
+        convolution.stride,
+        convolution.padding,
+        convolution.dilation,
+        convolution.groups,
+    )
+
+
+def _linear_from_leaf(functional: Any, value: Any, linear: Any) -> Any:
+    """Execute one Transformers linear leaf without its wrapper module."""
+
+    return functional.linear(value, linear.weight, linear.bias)
+
+
+def _fixed_meta_position_encoding(torch: Any, *, device: Any) -> Any:
+    """Build the literal fixed 72x72 FP32 memory position encoding."""
+
+    position_features = _MEMORY_CHANNELS // 2
+    y_embed = (
+        torch.arange(1, _FEATURE_SIZE + 1, dtype=torch.float32, device=device)
+        .view(1, -1, 1)
+        .repeat(1, 1, _FEATURE_SIZE)
+    )
+    x_embed = (
+        torch.arange(1, _FEATURE_SIZE + 1, dtype=torch.float32, device=device)
+        .view(1, 1, -1)
+        .repeat(1, _FEATURE_SIZE, 1)
+    )
+    scale = 2 * math.pi
+    epsilon = 1e-6
+    y_embed = y_embed / (y_embed[:, -1:, :] + epsilon) * scale
+    x_embed = x_embed / (x_embed[:, :, -1:] + epsilon) * scale
+
+    dimensions = torch.arange(position_features, dtype=torch.float32, device=device)
+    denominator = 10000 ** (2 * (dimensions // 2) / position_features)
+    position_x = x_embed[:, :, :, None] / denominator
+    position_y = y_embed[:, :, :, None] / denominator
+    position_x = torch.stack(
+        (position_x[:, :, :, 0::2].sin(), position_x[:, :, :, 1::2].cos()),
+        dim=4,
+    ).flatten(3)
+    position_y = torch.stack(
+        (position_y[:, :, :, 0::2].sin(), position_y[:, :, :, 1::2].cos()),
+        dim=4,
+    ).flatten(3)
+    return torch.cat((position_y, position_x), dim=3).permute(0, 3, 1, 2).contiguous()
+
+
+def _round_bfloat16_carrier(torch: Any, value: Any) -> Any:
+    """Round FP32 values to BF16 while retaining the public FP32 carrier.
+
+    AOTInductor can fold ``value.to(bfloat16).float()`` back to ``value`` when
+    the package output is constrained to FP32.  Reproduce IEEE round-to-nearest
+    ties-to-even on the FP32 bit pattern so the recurrent boundary survives
+    compilation.  Tracker state is finite by contract; special values are
+    preserved defensively and rejected by package validation.
+    """
+
+    value = value.float().contiguous()
+    bits = value.view(torch.int32)
+    absolute = torch.bitwise_and(bits, 0x7FFFFFFF)
+    finite = absolute < 0x7F800000
+    least_significant = torch.bitwise_and(torch.bitwise_right_shift(bits, 16), 1)
+    rounded = torch.bitwise_and(bits + 0x7FFF + least_significant, -0x10000)
+    return torch.where(finite, rounded, bits).view(torch.float32)
+
+
 def _make_memory_module(
     torch: Any,
     model: Any,
@@ -486,8 +574,49 @@ def _make_memory_module(
     class _FixedMemoryEncoder(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.memory_encoder = model.memory_encoder
+            memory_encoder = model.memory_encoder
+            self.mask_downsampler_layers = memory_encoder.mask_downsampler.layers
+            self.mask_downsampler_final = memory_encoder.mask_downsampler.final_conv
+            self.feature_projection = memory_encoder.feature_projection
+            self.fuser_layers = memory_encoder.memory_fuser.layers
+            self.output_projection = memory_encoder.projection
             self.occlusion_embedding = model.occlusion_spatial_embedding_parameter
+            self.register_buffer(
+                "fixed_position",
+                _fixed_meta_position_encoding(
+                    torch,
+                    device=self.output_projection.weight.device,
+                ),
+                persistent=True,
+            )
+
+        def _encode_memory(self, vision_features, mask):
+            functional = torch.nn.functional
+            mask_features = mask
+            for layer in self.mask_downsampler_layers:
+                mask_features = _conv2d_from_leaf(functional, mask_features, layer.conv)
+                mask_features = _meta_layer_norm_2d(torch, mask_features, layer.layer_norm)
+                mask_features = functional.gelu(mask_features, approximate="none")
+            mask_features = _conv2d_from_leaf(
+                functional,
+                mask_features,
+                self.mask_downsampler_final,
+            )
+
+            memory = _conv2d_from_leaf(functional, vision_features, self.feature_projection)
+            memory = memory + mask_features
+            for layer in self.fuser_layers:
+                residual = memory
+                memory = _conv2d_from_leaf(functional, memory, layer.depthwise_conv)
+                memory = _meta_layer_norm_2d(torch, memory, layer.layer_norm)
+                memory = memory.permute(0, 2, 3, 1)
+                memory = _linear_from_leaf(functional, memory, layer.pointwise_conv1)
+                memory = functional.gelu(memory, approximate="none")
+                memory = _linear_from_leaf(functional, memory, layer.pointwise_conv2)
+                memory = layer.scale * memory
+                memory = memory.permute(0, 3, 1, 2)
+                memory = residual + memory
+            return _conv2d_from_leaf(functional, memory, self.output_projection)
 
         def forward(
             self,
@@ -505,25 +634,25 @@ def _make_memory_module(
                     hard_mask=hard_mask,
                 )
                 expanded_features = vision_features.expand(batch_size, -1, -1, -1)
-                memory, position = self.memory_encoder(expanded_features, mask)
-                memory = memory.clone()
-                position = position.to(memory.dtype).clone()
+                memory = self._encode_memory(expanded_features, mask).clone()
+                position = (
+                    self.fixed_position.expand(batch_size, -1, -1, -1).to(memory.dtype).clone()
+                )
 
                 appearing = (object_score_logits > 0).float().reshape(batch_size, 1, 1, 1)
                 memory += (1.0 - appearing) * self.occlusion_embedding[..., None, None].expand_as(
                     memory
                 )
 
-                memory = memory.to(torch.bfloat16).flatten(2).transpose(1, 2)
-                position = position.to(torch.bfloat16).flatten(2).transpose(1, 2)
+                memory = _round_bfloat16_carrier(torch, memory).flatten(2).transpose(1, 2)
+                position = _round_bfloat16_carrier(torch, position).flatten(2).transpose(1, 2)
                 if batch_size == 1:
                     memory = memory.transpose(0, 1)
                     position = position.transpose(0, 1)
 
                 # TensorRT's recurrent state remains an FP32 public carrier;
-                # these casts are lossless because both tensors were rounded
-                # through the BF16 state boundary immediately above.
-                return torch.stack((memory.float(), position.float()), dim=0).contiguous()
+                # both planes already contain only BF16-representable values.
+                return torch.stack((memory, position), dim=0).contiguous()
 
     return _FixedMemoryEncoder().eval()
 
@@ -666,6 +795,10 @@ def _validate_package(
             raise RuntimeError(
                 f"SAM3 memory {policy} B{batch_size} returned {tuple(actual.shape)}/{actual.dtype}"
             )
+        if not bool((actual == actual.to(torch.bfloat16).float()).all()):
+            raise RuntimeError(
+                f"SAM3 memory {policy} B{batch_size} did not preserve its BF16 state boundary"
+            )
         metrics = _numerical_metrics(torch, actual, expected)
         plane_metrics = {
             "memory": _numerical_metrics(torch, actual[0], expected[0]),
@@ -805,7 +938,7 @@ def _publish_staged_packages(
         "mask_policy": _manifest_mask_policy(),
         "packages": records,
         "package_validation": {
-            "reference": "same Transformers module eager execution before cache publication",
+            "reference": "same reconstructed module eager execution before cache publication",
             "minimum_cosine": _SMOKE_MINIMUM_COSINE,
             "maximum_relative_l2": _SMOKE_MAXIMUM_RELATIVE_L2,
             "cases": list(validation),
@@ -926,7 +1059,7 @@ def _validate_cached_directory(
         )
         if (
             validation["reference"]
-            != "same Transformers module eager execution before cache publication"
+            != "same reconstructed module eager execution before cache publication"
             or float(validation["minimum_cosine"]) != _SMOKE_MINIMUM_COSINE
             or float(validation["maximum_relative_l2"]) != _SMOKE_MAXIMUM_RELATIVE_L2
             or actual_cases != expected_cases

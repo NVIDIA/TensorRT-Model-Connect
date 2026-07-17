@@ -10,8 +10,9 @@ contract, but mirrors the upstream compilation boundary internally:
 * a static recurrent mask decoder for each supported object batch (B1/B2).
 
 The encoder and decoder remain separate AOTI packages so their layout boundary
-is explicit.  The runtime can register one pipeline global per batch whose
-identity commits to both package hashes.
+is explicit.  These packages are developer-only Golden oracles for numerical
+comparison with the production TensorRT plans.  They are never included in a
+SAM3 bundle or loaded by the Model Connect runtime.
 """
 
 from __future__ import annotations
@@ -49,7 +50,8 @@ _MEMORY_BOUNDS = (1, 10)
 _POINTER_BOUNDS = (1, 19)
 _REPRESENTATIVE_MEMORY_COUNT = 4
 _REPRESENTATIVE_POINTER_COUNT = 3
-_SPATIAL_SIZE = 72 * 72
+_FEATURE_SIZE = 72
+_SPATIAL_SIZE = _FEATURE_SIZE * _FEATURE_SIZE
 _MASK_SIZE = 288 * 288
 _POINTER_WIDTH = 256
 _PACKED_WIDTH = _MASK_SIZE + _POINTER_WIDTH + 2
@@ -316,6 +318,7 @@ def _load_tracker_model(dependencies: _Dependencies, model_dir: Path, device: An
             f"missing={missing}, unexpected={unexpected}, mismatched={mismatched}, errors={errors}"
         )
     required = (
+        "config",
         "memory_attention",
         "mask_decoder",
         "prompt_encoder",
@@ -328,6 +331,39 @@ def _load_tracker_model(dependencies: _Dependencies, model_dir: Path, device: An
     absent = tuple(name for name in required if not hasattr(model, name))
     if absent:
         raise RuntimeError(f"SAM3 tracker model is missing required modules: {absent}")
+
+    expected_model_values = {
+        "hidden_dim": 256,
+        "mem_dim": 64,
+        "num_maskmem": 7,
+    }
+    expected_config = {
+        "memory_attention_hidden_size": 256,
+        "memory_attention_num_attention_heads": 1,
+        "memory_attention_num_layers": 4,
+        "memory_attention_feed_forward_hidden_size": 2048,
+        "memory_attention_feed_forward_hidden_act": "relu",
+        "memory_attention_downsample_rate": 1,
+        "memory_attention_rope_feat_sizes": (_FEATURE_SIZE, _FEATURE_SIZE),
+        "memory_attention_rope_theta": 10000,
+    }
+    mismatched_model_values = {
+        name: (getattr(model, name, None), expected)
+        for name, expected in expected_model_values.items()
+        if getattr(model, name, None) != expected
+    }
+    mismatched_config = {}
+    for name, expected in expected_config.items():
+        actual = getattr(model.config, name, None)
+        normalized = tuple(actual) if isinstance(actual, (list, tuple)) else actual
+        if normalized != expected:
+            mismatched_config[name] = (actual, expected)
+    if mismatched_model_values or mismatched_config:
+        raise RuntimeError(
+            "SAM3 recurrent tracker configuration is unsupported: "
+            f"model={mismatched_model_values}, config={mismatched_config}"
+        )
+
     model = model.eval().to(device)
     for parameter in model.parameters():
         parameter.requires_grad_(False)
@@ -342,9 +378,38 @@ def _make_encoder_module(torch: Any, model: Any, *, batch_size: int) -> Any:
             self.hidden_dim = int(model.hidden_dim)
             self.mem_dim = int(model.mem_dim)
             self.num_maskmem = int(model.num_maskmem)
-            self.memory_attention = model.memory_attention
+            self.memory_attention_layers = model.memory_attention.layers
+            self.memory_attention_norm = model.memory_attention.layer_norm
             self.temporal_projection = model.temporal_positional_encoding_projection_layer
             self.memory_temporal_position = model.memory_temporal_positional_encoding
+            attention = self.memory_attention_layers[0].self_attn
+            head_dim = int(attention.head_dim)
+            rope_theta = float(model.config.memory_attention_rope_theta)
+            rope_dimensions = torch.arange(
+                0,
+                head_dim,
+                4,
+                dtype=torch.float32,
+                device=model.memory_temporal_positional_encoding.device,
+            )[: head_dim // 4]
+            inverse_frequency = 1.0 / (rope_theta ** (rope_dimensions / head_dim))
+            positions = torch.arange(
+                _SPATIAL_SIZE,
+                dtype=torch.float32,
+                device=model.memory_temporal_positional_encoding.device,
+            )
+            x_positions = torch.remainder(positions, _FEATURE_SIZE)
+            y_positions = torch.div(positions, _FEATURE_SIZE, rounding_mode="floor")
+            x_angles = torch.outer(x_positions, inverse_frequency)
+            y_angles = torch.outer(y_positions, inverse_frequency)
+            rope_frequencies = torch.cat(
+                (
+                    torch.polar(torch.ones_like(x_angles), x_angles),
+                    torch.polar(torch.ones_like(y_angles), y_angles),
+                ),
+                dim=-1,
+            )
+            self.register_buffer("rope_frequencies", rope_frequencies, persistent=True)
             pointer_dimension = self.hidden_dim // 2
             dimensions = torch.arange(
                 pointer_dimension,
@@ -355,6 +420,113 @@ def _make_encoder_module(torch: Any, model: Any, *, batch_size: int) -> Any:
                 2.0 * torch.div(dimensions, 2, rounding_mode="floor") / pointer_dimension
             )
             self.register_buffer("pointer_denominator", denominator, persistent=True)
+
+        def _apply_complex_rope(
+            self,
+            query,
+            key,
+            *,
+            excluded_key_tokens,
+            repeat_key_frequencies,
+        ):
+            # Meta deliberately keeps the complex axial-RoPE implementation in
+            # its compiled tracker.  Transformers' real cos/sin rewrite is
+            # algebraically similar but documents a numerical delta, which is
+            # enough to perturb a recurrent state over multiple frames.
+            rotary_key_tokens = key.shape[-2] - excluded_key_tokens
+            rotary_key = key[..., :rotary_key_tokens, :]
+            unrotated_key = key[..., rotary_key_tokens:, :]
+            query_complex = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
+            key_complex = torch.view_as_complex(
+                rotary_key.float().reshape(*rotary_key.shape[:-1], -1, 2)
+            )
+            query_frequencies = self.rope_frequencies.view(
+                1, 1, _SPATIAL_SIZE, query_complex.shape[-1]
+            )
+            query = torch.view_as_real(query_complex * query_frequencies).flatten(3).to(query.dtype)
+            if repeat_key_frequencies:
+                repeats = key_complex.shape[-2] // query_complex.shape[-2]
+                key_frequencies = query_frequencies.repeat(1, 1, repeats, 1)
+            else:
+                key_frequencies = query_frequencies
+            rotary_key = (
+                torch.view_as_real(key_complex * key_frequencies).flatten(3).to(rotary_key.dtype)
+            )
+            return query, torch.cat((rotary_key, unrotated_key), dim=-2)
+
+        def _attention(
+            self,
+            module,
+            query,
+            key,
+            value,
+            *,
+            excluded_key_tokens,
+            repeat_key_frequencies,
+        ):
+            batch, query_length, _ = query.shape
+            key_length = key.shape[1]
+            heads = int(module.num_attention_heads)
+            head_dim = int(module.head_dim)
+            query = module.q_proj(query).reshape(batch, query_length, heads, head_dim)
+            key = module.k_proj(key).reshape(batch, key_length, heads, head_dim)
+            value = module.v_proj(value).reshape(batch, key_length, heads, head_dim)
+            query = query.transpose(1, 2)
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+            query, key = self._apply_complex_rope(
+                query,
+                key,
+                excluded_key_tokens=excluded_key_tokens,
+                repeat_key_frequencies=repeat_key_frequencies,
+            )
+            attended = torch.nn.functional.scaled_dot_product_attention(
+                query, key, value, dropout_p=0.0
+            )
+            attended = attended.transpose(1, 2).reshape(batch, query_length, heads * head_dim)
+            return module.o_proj(attended)
+
+        def _encode_attention(
+            self,
+            current,
+            current_position,
+            prompt,
+            prompt_position,
+            pointer_tokens,
+        ):
+            current = current + 0.1 * current_position
+            current = current.transpose(0, 1)
+            prompt = prompt.transpose(0, 1)
+            prompt_position = prompt_position.transpose(0, 1)
+            for layer in self.memory_attention_layers:
+                normalized = layer.layer_norm1(current)
+                attended = self._attention(
+                    layer.self_attn,
+                    normalized,
+                    normalized,
+                    normalized,
+                    excluded_key_tokens=0,
+                    repeat_key_frequencies=False,
+                )
+                current = current + layer.dropout1(attended)
+
+                normalized = layer.layer_norm2(current)
+                attended = self._attention(
+                    layer.cross_attn_image,
+                    normalized,
+                    prompt + prompt_position,
+                    prompt,
+                    excluded_key_tokens=pointer_tokens,
+                    repeat_key_frequencies=True,
+                )
+                current = current + layer.dropout2(attended)
+
+                normalized = layer.layer_norm3(current)
+                feed_forward = layer.linear2(
+                    layer.dropout(layer.activation(layer.linear1(normalized)))
+                )
+                current = current + layer.dropout3(feed_forward)
+            return self.memory_attention_norm(current)
 
         def forward(
             self,
@@ -417,17 +589,17 @@ def _make_encoder_module(torch: Any, model: Any, *, batch_size: int) -> Any:
                 )
 
                 prompt = torch.cat((spatial_memory, pointer_memory), dim=0).contiguous()
-                prompt_position = torch.cat(
-                    (spatial_position, pointer_position), dim=0
-                ).contiguous()
-                encoded = self.memory_attention(
-                    current_vision_features=current,
-                    memory=prompt,
-                    current_vision_position_embeddings=current_position,
-                    memory_posision_embeddings=prompt_position,
-                    num_object_pointer_tokens=pointer_count * 4,
+                prompt_position = (
+                    torch.cat((spatial_position, pointer_position), dim=0).float().contiguous()
                 )
-                conditioned = encoded.squeeze(0).permute(0, 2, 1).reshape(batch, 256, 72, 72)
+                encoded = self._encode_attention(
+                    current,
+                    current_position,
+                    prompt,
+                    prompt_position,
+                    pointer_count * 4,
+                )
+                conditioned = encoded.permute(0, 2, 1).reshape(batch, 256, 72, 72)
                 return conditioned.float().contiguous().clone()
 
     return _DynamicMemoryEncoder().eval()
@@ -490,10 +662,7 @@ def _make_decoder_module(torch: Any, model: Any, *, batch_size: int, device: Any
             centered = value - mean
             variance = centered.pow(2).mean(1, keepdim=True)
             normalized = centered / torch.sqrt(variance + module.eps)
-            return (
-                module.weight[:, None, None] * normalized
-                + module.bias[:, None, None]
-            )
+            return module.weight[:, None, None] * normalized + module.bias[:, None, None]
 
         def _two_way_transformer(self, image, image_position, points):
             transformer = self.mask_decoder.transformer
@@ -502,9 +671,7 @@ def _make_decoder_module(torch: Any, model: Any, *, batch_size: int, device: Any
             queries = points
             for layer in transformer.layers:
                 if layer.skip_first_layer_pe:
-                    queries = self._attention(
-                        layer.self_attn, queries, queries, queries
-                    )
+                    queries = self._attention(layer.self_attn, queries, queries, queries)
                 else:
                     positioned = queries + points
                     queries = queries + self._attention(
@@ -545,33 +712,29 @@ def _make_decoder_module(torch: Any, model: Any, *, batch_size: int, device: Any
         def _decode(self, conditioned, high0, high1):
             decoder = self.mask_decoder
             batch = self.batch_size
-            output_tokens = torch.cat(
-                (
-                    decoder.obj_score_token.weight,
-                    decoder.iou_token.weight,
-                    decoder.mask_tokens.weight,
-                ),
-                dim=0,
-            ).unsqueeze(0).expand(batch, -1, -1)
+            output_tokens = (
+                torch.cat(
+                    (
+                        decoder.obj_score_token.weight,
+                        decoder.iou_token.weight,
+                        decoder.mask_tokens.weight,
+                    ),
+                    dim=0,
+                )
+                .unsqueeze(0)
+                .expand(batch, -1, -1)
+            )
             sparse = self.not_a_point.reshape(1, 1, 256).expand(batch, 2, 256)
             points = torch.cat((output_tokens, sparse), dim=1)
-            dense = self.no_mask.reshape(1, 256, 1, 1).expand(
-                batch, 256, 72, 72
-            )
-            image_position = torch.repeat_interleave(
-                self.image_position, batch, dim=0
-            )
-            points, image = self._two_way_transformer(
-                conditioned + dense, image_position, points
-            )
+            dense = self.no_mask.reshape(1, 256, 1, 1).expand(batch, 256, 72, 72)
+            image_position = torch.repeat_interleave(self.image_position, batch, dim=0)
+            points, image = self._two_way_transformer(conditioned + dense, image_position, points)
             iou_token = points[:, 1]
             mask_tokens = points[:, 2 : 2 + decoder.num_mask_tokens]
 
             image = image.transpose(1, 2).reshape(batch, 256, 72, 72)
             upscaled = decoder.upscale_conv1(image) + high1
-            upscaled = decoder.activation(
-                self._layer_norm_2d(decoder.upscale_layer_norm, upscaled)
-            )
+            upscaled = decoder.activation(self._layer_norm_2d(decoder.upscale_layer_norm, upscaled))
             upscaled = decoder.activation(decoder.upscale_conv2(upscaled) + high0)
             hyper = torch.stack(
                 tuple(
@@ -601,9 +764,7 @@ def _make_decoder_module(torch: Any, model: Any, *, batch_size: int, device: Any
                 high0 = tracker_feature_0.to(torch.bfloat16).expand(batch, -1, -1, -1).contiguous()
                 high1 = tracker_feature_1.to(torch.bfloat16).expand(batch, -1, -1, -1).contiguous()
                 conditioned = conditioned_features.float().contiguous()
-                masks, ious, tokens, raw_scores = self._decode(
-                    conditioned, high0, high1
-                )
+                masks, ious, tokens, raw_scores = self._decode(conditioned, high0, high1)
                 scores = raw_scores.reshape(batch, 1)
                 appearing = scores > 0
                 masks = torch.where(appearing[:, :, None, None], masks, _NO_OBJECT_SCORE)

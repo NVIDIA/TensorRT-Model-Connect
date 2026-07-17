@@ -7,7 +7,6 @@
 
 #include "plugin_helpers.h"
 #include "runtime/models/sam3/sam3_pipeline.h"
-#include "runtime/models/sam3/sam3_tracker_step_runtime.h"
 #include "runtime/models/sam3/sam3_video_c_api.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
@@ -256,12 +255,6 @@ Sam3TrackerStepModules load_sam3_tracker_step_modules(const PipelineContext& ctx
     if (!video_tracking_supported)
         return {};
 
-    // The model-owned DSO registers both FFI plugin creators, the two split
-    // tracker-step functions, and all four fixed tracker-memory functions.
-    // This must complete before TensorRT sees any serialized step or memory
-    // plugin layer; the memory plans are deserialized below only after this
-    // helper returns.
-    load_sam3_tracker_step_runtime(ctx.bundle);
     auto batch1 = load_trt_module_from_plan(
         ctx.backend, find_section(ctx.bundle, "sam3_tracker_step_engine_plan"),
         "sam3 tracker_step_engine", options);
@@ -276,8 +269,6 @@ Sam3TrackerStepModules load_sam3_tracker_step_modules(const PipelineContext& ctx
 class Sam3Plugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
-        load_ffi_kernels_from_bundle(ctx.bundle);
-
         ModuleCreateOptions opts;
         opts.runtime_cache_path = ctx.runtime_cache_path.c_str();
         // CUDA graphs regressed the qualified SAM3 L4 path and rebinding
@@ -417,9 +408,10 @@ int32_t trtmc_sam3_video_propagate(void* opaque, int32_t* object_counts,
             views.reserve(predictor.frames.size());
             for (const auto& frame : predictor.frames)
                 views.push_back({frame.pixels, frame.height, frame.width});
-            auto results = predictor.session->propagate_borrowed_continuation(
-                std::move(*predictor.prompt_result), views.data(), views.size());
+            auto prompt_result = std::move(*predictor.prompt_result);
             predictor.prompt_result.reset();
+            auto results = predictor.session->propagate_borrowed_continuation(
+                std::move(prompt_result), views.data(), views.size());
             if (results.size() != predictor.frames.size()) {
                 throw std::runtime_error(
                     "stateful offline continuation returned the wrong frame count");

@@ -584,67 +584,24 @@ class Sam3Plugin:
             )
         }
         if cfg["video_tracking_supported"]:
-            from .hard_mask_resize_aoti_exporter import export_sam3_hard_mask_resize_aoti
-            from .hard_mask_resize_ffi_builder import HardMaskResizePlanSpec
-            from .native_plugin_builder import prepare_tracker_step_runtime
             from .tracker_builder import build_sam3_tracker_engines
-            from .tracker_memory_aoti_exporter import export_sam3_tracker_memory_aoti
-            from .tracker_memory_ffi_builder import TrackerMemoryPlanSpec
-            from .tracker_step_aoti_exporter import export_sam3_tracker_split_aoti
-            from .tracker_step_ffi_builder import TrackerStepPlanSpec
 
-            split_artifacts = export_sam3_tracker_split_aoti(model_dir)
-            memory_artifacts = export_sam3_tracker_memory_aoti(model_dir)
-            resize_artifacts = export_sam3_hard_mask_resize_aoti()
-            runtime_artifacts = prepare_tracker_step_runtime(
-                split_artifacts,
-                memory_artifacts,
-                resize_artifacts,
-                verbose=verbose,
-            )
-            step_plan_spec = TrackerStepPlanSpec(
-                plugin_library=runtime_artifacts.plugin_library,
-                global_name_b1=split_artifacts.pipeline_global(1),
-                global_name_b2=split_artifacts.pipeline_global(2),
-            )
-            memory_plan_spec = TrackerMemoryPlanSpec(
-                plugin_library=runtime_artifacts.plugin_library,
-                soft_global_b1=memory_artifacts.package(
-                    batch_size=1, hard_mask=False
-                ).package_global,
-                soft_global_b2=memory_artifacts.package(
-                    batch_size=2, hard_mask=False
-                ).package_global,
-                hard_global_b1=memory_artifacts.package(
-                    batch_size=1, hard_mask=True
-                ).package_global,
-                hard_global_b2=memory_artifacts.package(
-                    batch_size=2, hard_mask=True
-                ).package_global,
-            )
-            resize_plan_spec = HardMaskResizePlanSpec(
-                plugin_library=runtime_artifacts.plugin_library,
-                global_name_b1=resize_artifacts.package(1).package_global,
-                global_name_b2=resize_artifacts.package(2).package_global,
-            )
-            tracker_plans = build_sam3_tracker_engines(
-                model_dir,
-                step_plan_spec=step_plan_spec,
-                memory_plan_spec=memory_plan_spec,
-                resize_plan_spec=resize_plan_spec,
-                verbose=verbose,
-            )
+            tracker_plans = build_sam3_tracker_engines(model_dir, verbose=verbose)
             plans.update(tracker_plans)
-            for section, payload in runtime_artifacts.bundle_sections:
-                if section in plans:
-                    raise RuntimeError(f"Duplicate SAM3 bundle section {section}")
-                plans[section] = payload
         return plans
 
     def get_segmentation_config(self, config: ModelConfig) -> dict:
         cfg = config.raw.get("_sam3_config", _resolve_sam3_config(config.raw))
         return {
             "prompted_segmentation_variant": cfg["variant"],
+            # SAM3 uses the CLIP text contract even when the source tokenizer's
+            # generic ``encode()`` metadata does not advertise a post-processor.
+            # Keep the model-owned BOS/EOS frame explicit in the bundle so a
+            # build made without importing Transformers still produces the
+            # exact prompt tokens expected by the text and detector engines.
+            "tokenizer_add_special_tokens": 1,
+            "tokenizer_special_prefix_ids": [cfg["text_bos_token_id"]],
+            "tokenizer_special_suffix_ids": [cfg["text_eos_token_id"]],
             "sam3_text_max_position_embeddings": cfg["text_max_position_embeddings"],
             "sam3_text_hidden_size": cfg["text_hidden_size"],
             "sam3_text_projection_dim": int(

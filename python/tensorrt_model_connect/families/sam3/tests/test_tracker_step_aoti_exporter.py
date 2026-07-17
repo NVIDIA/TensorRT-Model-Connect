@@ -84,6 +84,19 @@ class _FakeModel:
             "get_image_wide_positional_embeddings",
         ):
             setattr(self, name, object())
+        self.hidden_dim = 256
+        self.mem_dim = 64
+        self.num_maskmem = 7
+        self.config = SimpleNamespace(
+            memory_attention_hidden_size=256,
+            memory_attention_num_attention_heads=1,
+            memory_attention_num_layers=4,
+            memory_attention_feed_forward_hidden_size=2048,
+            memory_attention_feed_forward_hidden_act="relu",
+            memory_attention_downsample_rate=1,
+            memory_attention_rope_feat_sizes=[72, 72],
+            memory_attention_rope_theta=10000,
+        )
         self.target = None
 
     def eval(self):
@@ -119,9 +132,7 @@ def _model_dir(tmp_path: Path) -> Path:
 def _decoder_function_source(name: str) -> str:
     tree = ast.parse(textwrap.dedent(inspect.getsource(exporter._make_decoder_module)))
     matches = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == name
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name
     ]
     assert len(matches) == 1
     return ast.unparse(matches[0])
@@ -232,6 +243,130 @@ def test_encoder_rounds_current_frame_inputs_at_meta_bf16_boundary() -> None:
     assert "tracker_position_2.to(torch.bfloat16)" in source
 
 
+def test_encoder_uses_meta_complex_axial_rope_instead_of_hf_approximation() -> None:
+    source = inspect.getsource(exporter._make_encoder_module)
+
+    assert "torch.polar" in source
+    assert "torch.view_as_complex" in source
+    assert "torch.view_as_real" in source
+    assert "rotary_key_tokens = key.shape[-2] - excluded_key_tokens" in source
+    assert "key_frequencies = query_frequencies.repeat(1, 1, repeats, 1)" in source
+    assert "self.memory_attention(" not in source
+    assert "apply_rotary_pos_emb_2d" not in source
+
+
+@pytest.mark.parametrize(
+    ("batch_size", "memory_count", "excluded_key_tokens"),
+    [(1, 1, 4), (2, 2, 8)],
+)
+def test_complex_axial_rope_matches_literal_meta_b1_b2(
+    batch_size: int,
+    memory_count: int,
+    excluded_key_tokens: int,
+) -> None:
+    torch = pytest.importorskip("torch")
+
+    class _Attention(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.head_dim = 256
+
+    class _Layer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.self_attn = _Attention()
+
+    class _MemoryAttention(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.layers = torch.nn.ModuleList([_Layer()])
+            self.layer_norm = torch.nn.Identity()
+
+    class _Model(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.hidden_dim = 256
+            self.mem_dim = 64
+            self.num_maskmem = 7
+            self.config = SimpleNamespace(memory_attention_rope_theta=10000)
+            self.memory_attention = _MemoryAttention()
+            self.temporal_positional_encoding_projection_layer = torch.nn.Identity()
+            self.register_buffer(
+                "memory_temporal_positional_encoding",
+                torch.zeros(7, 1, 1, 64),
+            )
+
+    module = exporter._make_encoder_module(torch, _Model(), batch_size=batch_size)
+    generator = torch.Generator().manual_seed(20260717)
+    query = torch.randn(batch_size, 1, exporter._SPATIAL_SIZE, 256, generator=generator)
+    rotary_key_tokens = memory_count * exporter._SPATIAL_SIZE
+    key = torch.randn(
+        batch_size,
+        1,
+        rotary_key_tokens + excluded_key_tokens,
+        256,
+        generator=generator,
+    )
+
+    actual_query, actual_key = module._apply_complex_rope(
+        query,
+        key,
+        excluded_key_tokens=excluded_key_tokens,
+        repeat_key_frequencies=True,
+    )
+
+    head_dim = query.shape[-1]
+    dimensions = torch.arange(0, head_dim, 4)[: head_dim // 4].float()
+    inverse_frequency = 1.0 / (10000 ** (dimensions / head_dim))
+    positions = torch.arange(exporter._SPATIAL_SIZE, dtype=torch.float32)
+    x_positions = torch.remainder(positions, exporter._FEATURE_SIZE)
+    y_positions = torch.div(positions, exporter._FEATURE_SIZE, rounding_mode="floor")
+    x_angles = torch.outer(x_positions, inverse_frequency)
+    y_angles = torch.outer(y_positions, inverse_frequency)
+    frequencies = torch.cat(
+        (
+            torch.polar(torch.ones_like(x_angles), x_angles),
+            torch.polar(torch.ones_like(y_angles), y_angles),
+        ),
+        dim=-1,
+    ).view(1, 1, exporter._SPATIAL_SIZE, -1)
+
+    query_complex = torch.view_as_complex(query.float().reshape(*query.shape[:-1], -1, 2))
+    expected_query = torch.view_as_real(query_complex * frequencies).flatten(3)
+    rotary_key = key[..., :rotary_key_tokens, :]
+    key_complex = torch.view_as_complex(rotary_key.float().reshape(*rotary_key.shape[:-1], -1, 2))
+    repeated_frequencies = frequencies.repeat(1, 1, memory_count, 1)
+    expected_rotary_key = torch.view_as_real(key_complex * repeated_frequencies).flatten(3)
+    expected_key = torch.cat((expected_rotary_key, key[..., rotary_key_tokens:, :]), dim=-2)
+
+    torch.testing.assert_close(actual_query, expected_query, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(actual_key, expected_key, rtol=0.0, atol=0.0)
+    assert torch.equal(
+        actual_key[..., -excluded_key_tokens:, :], key[..., -excluded_key_tokens:, :]
+    )
+
+
+def test_encoder_preserves_meta_pre_norm_attention_and_feed_forward_order() -> None:
+    source = inspect.getsource(exporter._make_encoder_module)
+
+    self_attention = source.index("normalized = layer.layer_norm1(current)")
+    self_residual = source.index("current = current + layer.dropout1(attended)")
+    cross_attention = source.index("normalized = layer.layer_norm2(current)")
+    cross_residual = source.index("current = current + layer.dropout2(attended)")
+    feed_forward = source.index("normalized = layer.layer_norm3(current)")
+    feed_forward_residual = source.index("current = current + layer.dropout3(feed_forward)")
+    final_norm = source.index("return self.memory_attention_norm(current)")
+    assert (
+        self_attention
+        < self_residual
+        < cross_attention
+        < cross_residual
+        < feed_forward
+        < feed_forward_residual
+        < final_norm
+    )
+
+
 def test_default_local_model_loading_allows_only_removed_vision_weights() -> None:
     calls = []
     model = _FakeModel()
@@ -286,6 +421,41 @@ def test_model_loading_fails_closed_on_missing_tracker_key() -> None:
         "5.2.0",
     )
     with pytest.raises(RuntimeError, match="did not load exactly"):
+        exporter._load_tracker_model(dependencies, Path("/models/sam3"), "cuda:0")
+
+
+@pytest.mark.parametrize(
+    ("owner", "name", "incompatible"),
+    [
+        ("model", "hidden_dim", 128),
+        ("model", "mem_dim", 32),
+        ("model", "num_maskmem", 8),
+        ("config", "memory_attention_hidden_size", 128),
+        ("config", "memory_attention_num_attention_heads", 2),
+        ("config", "memory_attention_num_layers", 3),
+        ("config", "memory_attention_feed_forward_hidden_size", 1024),
+        ("config", "memory_attention_feed_forward_hidden_act", "gelu"),
+        ("config", "memory_attention_downsample_rate", 2),
+        ("config", "memory_attention_rope_feat_sizes", [64, 64]),
+        ("config", "memory_attention_rope_theta", 1000),
+    ],
+)
+def test_model_loading_fails_closed_on_incompatible_recurrent_config(
+    owner: str,
+    name: str,
+    incompatible: object,
+) -> None:
+    model = _FakeModel()
+    target = model if owner == "model" else model.config
+    setattr(target, name, incompatible)
+
+    class ModelClass:
+        @classmethod
+        def from_pretrained(cls, model_dir, **kwargs):  # noqa: ARG003
+            return model, {"missing_keys": [], "unexpected_keys": []}
+
+    dependencies = exporter._Dependencies(_FakeTorch(), ModelClass, "5.2.0")
+    with pytest.raises(RuntimeError, match="configuration is unsupported"):
         exporter._load_tracker_model(dependencies, Path("/models/sam3"), "cuda:0")
 
 
@@ -436,4 +606,4 @@ def test_exporter_has_no_external_graph_or_environment_configuration() -> None:
     assert "spec_from_file_location" not in source
     assert "runpy." not in source
     assert "apply_rotary_pos_emb_2d" not in source
-    assert "view_as_complex" not in source
+    assert "torch.view_as_complex" in source

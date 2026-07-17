@@ -5,8 +5,9 @@
 
 Meta consolidates prompt masks only after resizing every object row from the
 tracker's 288 grid to the 1008 image grid with ``torch.interpolate``.  These
-small B1/B2 packages keep that exact PyTorch kernel available to the native
-runtime without introducing ONNX or a runtime Python dependency.
+small B1/B2 packages are developer-only Golden oracles.  Production bundles
+contain equivalent native TensorRT resize plans and never package or load the
+AOTI artifacts.
 """
 
 from __future__ import annotations
@@ -59,7 +60,12 @@ class HardMaskResizeAotiPackage:
 
 @dataclass(frozen=True)
 class HardMaskResizeAotiArtifacts:
-    """Bundle-ready B1/B2 PyTorch resize packages."""
+    """Developer-only B1/B2 PyTorch Golden packages.
+
+    ``bundle_sections`` describes the reference package layout for Golden
+    validation tooling.  Production ``trtmc build sam3`` never consumes these
+    sections; it emits the equivalent native TensorRT resize plans instead.
+    """
 
     cache_directory: Path
     packages: tuple[HardMaskResizeAotiPackage, ...]

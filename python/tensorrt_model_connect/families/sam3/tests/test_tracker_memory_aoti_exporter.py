@@ -76,7 +76,9 @@ class _FakeModel:
         self.config = SimpleNamespace(
             memory_encoder_hidden_size=256,
             memory_encoder_output_channels=64,
+            mask_downsampler_hidden_act="gelu",
             mask_downsampler_total_stride=16,
+            memory_fuser_hidden_act="gelu",
             memory_fuser_num_layers=2,
             sigmoid_scale_for_mem_enc=20.0,
             sigmoid_bias_for_mem_enc=-10.0,
@@ -205,6 +207,117 @@ def test_mask_policy_keeps_soft_preparation_and_consumes_owned_hard_mask() -> No
     assert "antialias=True" in source
 
 
+def test_memory_program_uses_meta_reductions_with_transformers_leaf_weights() -> None:
+    layer_norm_source = inspect.getsource(exporter._meta_layer_norm_2d)
+    module_source = inspect.getsource(exporter._make_memory_module)
+
+    assert "value.mean(1, keepdim=True)" in layer_norm_source
+    assert "(value - mean).pow(2).mean(1, keepdim=True)" in layer_norm_source
+    assert "torch.sqrt(variance + layer_norm.eps)" in layer_norm_source
+    assert "layer_norm.weight[:, None, None]" in layer_norm_source
+    assert "_conv2d_from_leaf" in module_source
+    assert "_linear_from_leaf" in module_source
+    assert 'functional.gelu(memory, approximate="none")' in module_source
+    assert "memory = layer.scale * memory" in module_source
+    assert "self.memory_encoder(" not in module_source
+
+
+def test_meta_layer_norm_2d_matches_literal_channels_first_program() -> None:
+    torch = pytest.importorskip("torch")
+    layer_norm = torch.nn.LayerNorm(4, eps=1e-6)
+    with torch.no_grad():
+        layer_norm.weight.copy_(torch.tensor([0.5, 1.0, 1.5, 2.0]))
+        layer_norm.bias.copy_(torch.tensor([-0.25, 0.0, 0.25, 0.5]))
+    value = torch.tensor(
+        [
+            [
+                [[1.0, -2.0], [3.0, 4.0]],
+                [[-1.0, 0.5], [2.0, -3.0]],
+                [[2.0, 1.5], [-4.0, 0.0]],
+                [[0.5, 3.0], [1.0, -1.0]],
+            ]
+        ]
+    )
+
+    mean = value.mean(1, keepdim=True)
+    variance = (value - mean).pow(2).mean(1, keepdim=True)
+    expected = (value - mean) / torch.sqrt(variance + layer_norm.eps)
+    expected = layer_norm.weight[:, None, None] * expected + layer_norm.bias[:, None, None]
+
+    actual = exporter._meta_layer_norm_2d(torch, value, layer_norm)
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_bfloat16_carrier_rounding_matches_torch_cast_exactly() -> None:
+    torch = pytest.importorskip("torch")
+    ordinary = torch.tensor(
+        [
+            -1024.125,
+            -3.1415927,
+            -0.001234567,
+            -0.0,
+            0.0,
+            0.001234567,
+            1.0001,
+            3.1415927,
+            1024.125,
+        ],
+        dtype=torch.float32,
+    )
+    edge_bits = torch.tensor(
+        [
+            0x00000001,  # smallest FP32 subnormal
+            0x007FFFFF,  # largest FP32 subnormal
+            0x3F808000,  # exact tie with an even lower BF16 mantissa
+            0x3F818000,  # exact tie with an odd lower BF16 mantissa
+            0x7F7FFFFF,  # largest finite FP32 value; rounds to BF16 infinity
+        ],
+        dtype=torch.int32,
+    ).view(torch.float32)
+    values = torch.cat((ordinary, edge_bits))
+
+    expected = values.to(torch.bfloat16).float()
+    actual = exporter._round_bfloat16_carrier(torch, values)
+    assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
+
+
+def test_package_validation_enforces_bfloat16_recurrent_state_boundary() -> None:
+    source = inspect.getsource(exporter._validate_package)
+    module_source = inspect.getsource(exporter._make_memory_module)
+
+    assert "actual == actual.to(torch.bfloat16).float()" in source
+    assert "did not preserve its BF16 state boundary" in source
+    assert "_round_bfloat16_carrier(torch, memory)" in module_source
+    assert "_round_bfloat16_carrier(torch, position)" in module_source
+
+
+def test_fixed_memory_position_is_literal_fp32_meta_encoding() -> None:
+    torch = pytest.importorskip("torch")
+    actual = exporter._fixed_meta_position_encoding(torch, device=torch.device("cpu"))
+
+    position_features = exporter._MEMORY_CHANNELS // 2
+    height = exporter._FEATURE_SIZE
+    y_embed = torch.arange(1, height + 1, dtype=torch.float32).view(1, -1, 1).repeat(1, 1, height)
+    x_embed = torch.arange(1, height + 1, dtype=torch.float32).view(1, 1, -1).repeat(1, height, 1)
+    y_embed = y_embed / (y_embed[:, -1:, :] + 1e-6) * (2 * exporter.math.pi)
+    x_embed = x_embed / (x_embed[:, :, -1:] + 1e-6) * (2 * exporter.math.pi)
+    dimensions = torch.arange(position_features, dtype=torch.float32)
+    denominator = 10000 ** (2 * (dimensions // 2) / position_features)
+    position_x = x_embed[:, :, :, None] / denominator
+    position_y = y_embed[:, :, :, None] / denominator
+    position_x = torch.stack(
+        (position_x[:, :, :, 0::2].sin(), position_x[:, :, :, 1::2].cos()), dim=4
+    ).flatten(3)
+    position_y = torch.stack(
+        (position_y[:, :, :, 0::2].sin(), position_y[:, :, :, 1::2].cos()), dim=4
+    ).flatten(3)
+    expected = torch.cat((position_y, position_x), dim=3).permute(0, 3, 1, 2).contiguous()
+
+    assert actual.shape == (1, 64, 72, 72)
+    assert actual.dtype == torch.float32
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
 def test_hard_module_accepts_common_suppression_input_but_uses_hard_policy_only() -> None:
     module_source = inspect.getsource(exporter._make_memory_module)
     mask_source = inspect.getsource(exporter._prepare_memory_mask)
@@ -212,9 +325,7 @@ def test_hard_module_accepts_common_suppression_input_but_uses_hard_policy_only(
     assert "suppress_area_shrinkage" in module_source
     hard_branch = mask_source.split("if hard_mask:", maxsplit=1)[1].split("else:", maxsplit=1)[0]
     assert "suppress_area_shrinkage" not in hard_branch
-    assert "return torch.stack((memory.float(), position.float()), dim=0).contiguous()" in (
-        module_source
-    )
+    assert "return torch.stack((memory, position), dim=0).contiguous()" in module_source
 
 
 def test_exporter_uses_only_transformers_tracker_modules_and_no_onnx() -> None:
@@ -222,6 +333,7 @@ def test_exporter_uses_only_transformers_tracker_modules_and_no_onnx() -> None:
 
     assert "transformers.models.sam3_tracker_video.modeling_sam3_tracker_video" in source
     assert "model.memory_encoder" in source
+    assert "_fixed_meta_position_encoding" in source
     assert "import onnx" not in source
     assert "from sam3." not in source
     assert "import sam3." not in source
@@ -285,9 +397,20 @@ def test_model_loading_fails_closed_on_non_vision_key(
         exporter._load_tracker_model(dependencies, Path("/models/sam3"), "cuda:0")
 
 
-def test_model_loading_fails_closed_on_incompatible_memory_config() -> None:
+@pytest.mark.parametrize(
+    ("name", "incompatible"),
+    [
+        ("mask_downsampler_hidden_act", "relu"),
+        ("mask_downsampler_total_stride", 8),
+        ("memory_fuser_hidden_act", "relu"),
+    ],
+)
+def test_model_loading_fails_closed_on_incompatible_memory_config(
+    name: str,
+    incompatible: object,
+) -> None:
     model = _FakeModel()
-    model.config.mask_downsampler_total_stride = 8
+    setattr(model.config, name, incompatible)
 
     class ModelClass:
         @classmethod

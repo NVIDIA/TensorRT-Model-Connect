@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 
 import numpy as np
 
@@ -37,6 +38,20 @@ _SPATIAL_LAYER_NORM_EPS = 1e-6
 _WEIGHT_PREFIX = "tracker_model."
 
 WeightMap = Mapping[str, np.ndarray]
+
+
+class DecoderPrecisionPolicy(Enum):
+    """Supported precision schedules for the two tracker decoder phases.
+
+    Both fixed-shape TensorRT decoders keep FP32 graph boundaries.  The B2
+    recurrent builder separately enables TensorRT TF32 tactics; this is the
+    qualified L4 path and avoids the accuracy and latency regression from an
+    unsupported SM89 BF16 transposed convolution.  Keeping phase identity in a
+    closed enum prevents an unqualified mixed schedule from being selected.
+    """
+
+    INIT_FP32 = "init_fp32"
+    RECURRENT_TRT_FP32 = "recurrent_trt_fp32"
 
 
 @dataclass(frozen=True)
@@ -127,6 +142,50 @@ def _constant(network, shape: tuple[int, ...], values, *, dtype=np.float32):
     )
 
 
+def _cast(network, tensor, dtype):
+    """Cast ``tensor`` only when the requested precision differs."""
+
+    if tensor.dtype == dtype:
+        return tensor
+    return network.add_cast(tensor, dtype).get_output(0)
+
+
+def _learned_dtype(precision_policy: DecoderPrecisionPolicy):
+    """Return the learned-op dtype for a reviewed decoder precision policy."""
+
+    trt = _trt()
+    if precision_policy in (
+        DecoderPrecisionPolicy.INIT_FP32,
+        DecoderPrecisionPolicy.RECURRENT_TRT_FP32,
+    ):
+        return trt.float32
+    raise TypeError(
+        f"SAM3 decoder precision_policy must be a DecoderPrecisionPolicy, got {precision_policy!r}"
+    )
+
+
+def _precision_constant(
+    network,
+    shape: tuple[int, ...],
+    values,
+    *,
+    precision_policy: DecoderPrecisionPolicy,
+):
+    _learned_dtype(precision_policy)
+    return _constant(network, shape, values)
+
+
+def _fp32_sum(network, lhs, rhs):
+    """Reproduce PyTorch's FP32 residual/promotion boundary."""
+
+    trt = _trt()
+    return network.add_elementwise(
+        _cast(network, lhs, trt.float32),
+        _cast(network, rhs, trt.float32),
+        trt.ElementWiseOperation.SUM,
+    ).get_output(0)
+
+
 def _linear(
     network,
     inp,
@@ -135,8 +194,18 @@ def _linear(
     input_width: int,
     output_width: int,
     *,
+    precision_policy: DecoderPrecisionPolicy,
     weight_prefix: str,
 ):
+    """Run a Linear under the phase-specific learned-op precision schedule.
+
+    The qualified fixed-shape plans retain FP32 operands and publication.
+    TensorRT may select TF32 tactics for the B2 recurrent network where its
+    builder config explicitly permits them.
+    """
+
+    if _learned_dtype(precision_policy) != _trt().float32:
+        raise TypeError("SAM3 qualified decoder Linear requires FP32 graph boundaries")
     graph_ops = _graph_ops()
     checkpoint_weight = _weight(
         weights,
@@ -170,6 +239,7 @@ def _layer_norm(
     epsilon: float = _TRANSFORMER_LAYER_NORM_EPS,
     weight_prefix: str,
 ):
+    inp = _cast(network, inp, _trt().float32)
     return _graph_ops().add_layer_norm_native(
         network,
         inp,
@@ -230,6 +300,7 @@ def _feed_forward(
     hidden_width: int,
     output_width: int,
     *,
+    precision_policy: DecoderPrecisionPolicy,
     weight_prefix: str,
 ):
     trt = _trt()
@@ -240,6 +311,7 @@ def _feed_forward(
         f"{prefix}.proj_in",
         input_width,
         hidden_width,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
     out = network.add_activation(out, trt.ActivationType.RELU).get_output(0)
@@ -250,6 +322,7 @@ def _feed_forward(
         f"{prefix}.layers.0",
         hidden_width,
         hidden_width,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
     out = network.add_activation(out, trt.ActivationType.RELU).get_output(0)
@@ -260,6 +333,7 @@ def _feed_forward(
         f"{prefix}.proj_out",
         hidden_width,
         output_width,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
 
@@ -270,6 +344,7 @@ def _decoder_mlp(
     weights: WeightMap,
     prefix: str,
     *,
+    precision_policy: DecoderPrecisionPolicy,
     weight_prefix: str,
 ):
     trt = _trt()
@@ -280,6 +355,7 @@ def _decoder_mlp(
         f"{prefix}.proj_in",
         _HIDDEN_SIZE,
         2048,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
     out = network.add_activation(out, trt.ActivationType.RELU).get_output(0)
@@ -290,6 +366,7 @@ def _decoder_mlp(
         f"{prefix}.proj_out",
         2048,
         _HIDDEN_SIZE,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
 
@@ -335,10 +412,9 @@ def _attention(
     query_length: int,
     key_length: int,
     internal_width: int,
-    fp16_attention: bool,
+    precision_policy: DecoderPrecisionPolicy,
     weight_prefix: str,
 ):
-    trt = _trt()
     graph_ops = _graph_ops()
     head_dim = internal_width // _NUM_HEADS
     query_projected = _linear(
@@ -348,6 +424,7 @@ def _attention(
         f"{prefix}.q_proj",
         _HIDDEN_SIZE,
         internal_width,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
     key_projected = _linear(
@@ -357,6 +434,7 @@ def _attention(
         f"{prefix}.k_proj",
         _HIDDEN_SIZE,
         internal_width,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
     value_projected = _linear(
@@ -366,13 +444,9 @@ def _attention(
         f"{prefix}.v_proj",
         _HIDDEN_SIZE,
         internal_width,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
-    output_dtype = query_projected.dtype
-    if fp16_attention:
-        query_projected = network.add_cast(query_projected, trt.float16).get_output(0)
-        key_projected = network.add_cast(key_projected, trt.float16).get_output(0)
-        value_projected = network.add_cast(value_projected, trt.float16).get_output(0)
     query_heads = _reshape_batched_rows_to_heads(
         network,
         query_projected,
@@ -405,8 +479,6 @@ def _attention(
         sequence_length=query_length,
         width=internal_width,
     )
-    if context.dtype != output_dtype:
-        context = network.add_cast(context, output_dtype).get_output(0)
     return _linear(
         network,
         context,
@@ -414,6 +486,7 @@ def _attention(
         f"{prefix}.o_proj",
         internal_width,
         _HIDDEN_SIZE,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
 
@@ -470,9 +543,11 @@ def _add_deconvolution(
     input_channels: int,
     output_channels: int,
     *,
+    precision_policy: DecoderPrecisionPolicy,
     weight_prefix: str,
 ):
     trt = _trt()
+    inp = _cast(network, inp, _learned_dtype(precision_policy))
     weight = _weight(
         weights,
         f"{prefix}.weight",
@@ -734,10 +809,9 @@ def _two_way_transformer(
     weights: WeightMap,
     *,
     object_batch: int,
-    fp16_attention: bool,
+    precision_policy: DecoderPrecisionPolicy,
     weight_prefix: str,
 ):
-    trt = _trt()
     queries = point_embeddings
     keys = image_embeddings
     for layer_index in range(2):
@@ -754,15 +828,11 @@ def _two_way_transformer(
                 query_length=8,
                 key_length=8,
                 internal_width=_HIDDEN_SIZE,
-                fp16_attention=fp16_attention,
+                precision_policy=precision_policy,
                 weight_prefix=weight_prefix,
             )
         else:
-            self_attention_input = network.add_elementwise(
-                queries,
-                point_embeddings,
-                trt.ElementWiseOperation.SUM,
-            ).get_output(0)
+            self_attention_input = _fp32_sum(network, queries, point_embeddings)
             self_attention = _attention(
                 network,
                 self_attention_input,
@@ -774,14 +844,10 @@ def _two_way_transformer(
                 query_length=8,
                 key_length=8,
                 internal_width=_HIDDEN_SIZE,
-                fp16_attention=fp16_attention,
+                precision_policy=precision_policy,
                 weight_prefix=weight_prefix,
             )
-            queries = network.add_elementwise(
-                queries,
-                self_attention,
-                trt.ElementWiseOperation.SUM,
-            ).get_output(0)
+            queries = _fp32_sum(network, queries, self_attention)
         queries = _layer_norm(
             network,
             queries,
@@ -791,16 +857,8 @@ def _two_way_transformer(
             weight_prefix=weight_prefix,
         )
 
-        token_query = network.add_elementwise(
-            queries,
-            point_embeddings,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0)
-        image_key = network.add_elementwise(
-            keys,
-            image_position_embeddings,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0)
+        token_query = _fp32_sum(network, queries, point_embeddings)
+        image_key = _fp32_sum(network, keys, image_position_embeddings)
         cross_attention = _attention(
             network,
             token_query,
@@ -812,14 +870,10 @@ def _two_way_transformer(
             query_length=8,
             key_length=_IMAGE_TOKENS,
             internal_width=_HIDDEN_SIZE // 2,
-            fp16_attention=fp16_attention,
+            precision_policy=precision_policy,
             weight_prefix=weight_prefix,
         )
-        queries = network.add_elementwise(
-            queries,
-            cross_attention,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0)
+        queries = _fp32_sum(network, queries, cross_attention)
         queries = _layer_norm(
             network,
             queries,
@@ -834,13 +888,10 @@ def _two_way_transformer(
             queries,
             weights,
             f"{prefix}.mlp",
+            precision_policy=precision_policy,
             weight_prefix=weight_prefix,
         )
-        queries = network.add_elementwise(
-            queries,
-            mlp_out,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0)
+        queries = _fp32_sum(network, queries, mlp_out)
         queries = _layer_norm(
             network,
             queries,
@@ -850,16 +901,8 @@ def _two_way_transformer(
             weight_prefix=weight_prefix,
         )
 
-        token_key = network.add_elementwise(
-            queries,
-            point_embeddings,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0)
-        image_query = network.add_elementwise(
-            keys,
-            image_position_embeddings,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0)
+        token_key = _fp32_sum(network, queries, point_embeddings)
+        image_query = _fp32_sum(network, keys, image_position_embeddings)
         image_attention = _attention(
             network,
             image_query,
@@ -871,14 +914,10 @@ def _two_way_transformer(
             query_length=_IMAGE_TOKENS,
             key_length=8,
             internal_width=_HIDDEN_SIZE // 2,
-            fp16_attention=fp16_attention,
+            precision_policy=precision_policy,
             weight_prefix=weight_prefix,
         )
-        keys = network.add_elementwise(
-            keys,
-            image_attention,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0)
+        keys = _fp32_sum(network, keys, image_attention)
         keys = _layer_norm(
             network,
             keys,
@@ -888,16 +927,8 @@ def _two_way_transformer(
             weight_prefix=weight_prefix,
         )
 
-    final_query = network.add_elementwise(
-        queries,
-        point_embeddings,
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
-    final_key = network.add_elementwise(
-        keys,
-        image_position_embeddings,
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
+    final_query = _fp32_sum(network, queries, point_embeddings)
+    final_key = _fp32_sum(network, keys, image_position_embeddings)
     final_attention = _attention(
         network,
         final_query,
@@ -909,14 +940,10 @@ def _two_way_transformer(
         query_length=8,
         key_length=_IMAGE_TOKENS,
         internal_width=_HIDDEN_SIZE // 2,
-        fp16_attention=fp16_attention,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
-    queries = network.add_elementwise(
-        queries,
-        final_attention,
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
+    queries = _fp32_sum(network, queries, final_attention)
     queries = _layer_norm(
         network,
         queries,
@@ -938,7 +965,7 @@ def add_mask_decoder(
     *,
     object_batch: int,
     sparse_prompt_embeddings=None,
-    fp16_attention: bool = False,
+    precision_policy: DecoderPrecisionPolicy,
     weight_prefix: str = _WEIGHT_PREFIX,
 ) -> DecoderOutputs:
     """Build the SAM3 mask decoder and return its three tracker candidates.
@@ -946,15 +973,37 @@ def add_mask_decoder(
     ``feature_0`` and ``feature_1`` are the frame-level, pre-projected
     high-resolution maps.  They may have batch one for the two-object path.
     ``image_features`` and the prompt tensors must have ``object_batch``.
+    ``precision_policy`` is deliberately required: callers must identify the
+    initialization or recurrent fixed-shape phase explicitly.
     """
 
     _validate_object_batch(object_batch)
     trt = _trt()
     graph_ops = _graph_ops()
-    feature_0 = _match_object_batch(network, feature_0, object_batch)
-    feature_1 = _match_object_batch(network, feature_1, object_batch)
-    image_features = _match_object_batch(network, image_features, object_batch)
-    dense_prompt_embeddings = _match_object_batch(network, dense_prompt_embeddings, object_batch)
+    learned_dtype = _learned_dtype(precision_policy)
+    # Meta rounds the preprojected high-resolution maps only for recurrent
+    # autocast.  The conditioned image map and dense prompt stay FP32 in both
+    # schedules so their explicit residual has the same promotion boundary.
+    feature_0 = _cast(
+        network,
+        _match_object_batch(network, feature_0, object_batch),
+        learned_dtype,
+    )
+    feature_1 = _cast(
+        network,
+        _match_object_batch(network, feature_1, object_batch),
+        learned_dtype,
+    )
+    image_features = _cast(
+        network,
+        _match_object_batch(network, image_features, object_batch),
+        trt.float32,
+    )
+    dense_prompt_embeddings = _cast(
+        network,
+        _match_object_batch(network, dense_prompt_embeddings, object_batch),
+        trt.float32,
+    )
     if sparse_prompt_embeddings is None:
         sparse_prompt_embeddings = add_empty_prompt_embeddings(
             network,
@@ -992,11 +1041,7 @@ def add_mask_decoder(
     point_concat.axis = 1
     point_embeddings = point_concat.get_output(0)
 
-    image_features = network.add_elementwise(
-        image_features,
-        dense_prompt_embeddings,
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
+    image_features = _fp32_sum(network, image_features, dense_prompt_embeddings)
     image_rows = _nchw_to_rows(
         network,
         image_features,
@@ -1007,10 +1052,11 @@ def add_mask_decoder(
     )
     image_position = make_image_position_embedding(weights, weight_prefix=weight_prefix)
     image_position = np.tile(image_position, (object_batch, 1, 1, 1))
-    image_position_tensor = _constant(
+    image_position_tensor = _precision_constant(
         network,
         image_position.shape,
         image_position,
+        precision_policy=precision_policy,
     )
     image_position_rows = _nchw_to_rows(
         network,
@@ -1027,7 +1073,7 @@ def add_mask_decoder(
         image_position_rows,
         weights,
         object_batch=object_batch,
-        fp16_attention=fp16_attention,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
 
@@ -1065,6 +1111,7 @@ def add_mask_decoder(
         "mask_decoder.upscale_conv1",
         _HIDDEN_SIZE,
         64,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
     upscaled = network.add_elementwise(
@@ -1091,6 +1138,7 @@ def add_mask_decoder(
         "mask_decoder.upscale_conv2",
         64,
         32,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
     upscaled = network.add_elementwise(
@@ -1117,6 +1165,7 @@ def add_mask_decoder(
                 _HIDDEN_SIZE,
                 _HIDDEN_SIZE,
                 32,
+                precision_policy=precision_policy,
                 weight_prefix=weight_prefix,
             )
         )
@@ -1151,6 +1200,7 @@ def add_mask_decoder(
         _HIDDEN_SIZE,
         _HIDDEN_SIZE,
         _NUM_MASK_TOKENS,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
     # Meta constructs the SAM3 mask decoder with
@@ -1159,9 +1209,7 @@ def add_mask_decoder(
     # preserving the mask-candidate ordering, this value feeds the runtime's
     # temporal-memory quality gate, so leaving it unbounded changes recurrent
     # state selection even when the same mask wins the argmax.
-    iou_scores = network.add_activation(
-        iou_scores, trt.ActivationType.SIGMOID
-    ).get_output(0)
+    iou_scores = network.add_activation(iou_scores, trt.ActivationType.SIGMOID).get_output(0)
     iou_scores_shape = network.add_shuffle(iou_scores)
     iou_scores_shape.reshape_dims = (object_batch, _NUM_MASK_TOKENS)
     object_score = _feed_forward(
@@ -1172,6 +1220,7 @@ def add_mask_decoder(
         _HIDDEN_SIZE,
         _HIDDEN_SIZE,
         1,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
     object_score_shape = network.add_shuffle(object_score)
@@ -1226,7 +1275,11 @@ def add_multimask_selection(
 
     _validate_object_batch(object_batch)
     trt = _trt()
-    zero_score = _constant(network, (1, 1), np.zeros((1, 1), dtype=np.float32))
+    zero_score = _cast(
+        network,
+        _constant(network, (1, 1), np.zeros((1, 1), dtype=np.float32)),
+        decoder_outputs.object_score_logits.dtype,
+    )
     object_appearing = network.add_elementwise(
         decoder_outputs.object_score_logits,
         zero_score,
@@ -1234,10 +1287,14 @@ def add_multimask_selection(
     ).get_output(0)
     appearing_for_masks = network.add_shuffle(object_appearing)
     appearing_for_masks.reshape_dims = (object_batch, 1, 1, 1)
-    no_object_masks = _constant(
+    no_object_masks = _cast(
         network,
-        (1, 1, 1, 1),
-        np.full((1, 1, 1, 1), -1024.0, dtype=np.float32),
+        _constant(
+            network,
+            (1, 1, 1, 1),
+            np.full((1, 1, 1, 1), -1024.0, dtype=np.float32),
+        ),
+        decoder_outputs.masks.dtype,
     )
     visible_masks = network.add_select(
         appearing_for_masks.get_output(0),
@@ -1263,9 +1320,9 @@ def add_multimask_selection(
         candidates,
         trt.ElementWiseOperation.EQUAL,
     ).get_output(0)
-    selector_float = network.add_cast(selector, visible_masks.dtype).get_output(0)
+    mask_selector_values = _cast(network, selector, visible_masks.dtype)
 
-    mask_selector = network.add_shuffle(selector_float)
+    mask_selector = network.add_shuffle(mask_selector_values)
     mask_selector.reshape_dims = (object_batch, _NUM_MULTIMASKS, 1, 1)
     selected_masks = network.add_elementwise(
         visible_masks,
@@ -1279,7 +1336,8 @@ def add_multimask_selection(
         keep_dims=True,
     ).get_output(0)
 
-    token_selector = network.add_shuffle(selector_float)
+    token_selector_values = _cast(network, selector, decoder_outputs.mask_tokens.dtype)
+    token_selector = network.add_shuffle(token_selector_values)
     token_selector.reshape_dims = (object_batch, _NUM_MULTIMASKS, 1)
     selected_token = network.add_elementwise(
         decoder_outputs.mask_tokens,
@@ -1293,9 +1351,10 @@ def add_multimask_selection(
         keep_dims=False,
     ).get_output(0)
 
+    iou_selector = _cast(network, selector, decoder_outputs.iou_scores.dtype)
     selected_iou = network.add_elementwise(
         decoder_outputs.iou_scores,
-        selector_float,
+        iou_selector,
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
     selected_iou = network.add_reduce(
@@ -1319,6 +1378,7 @@ def add_object_pointer_projection(
     weights: WeightMap,
     *,
     object_batch: int,
+    precision_policy: DecoderPrecisionPolicy,
     weight_prefix: str = _WEIGHT_PREFIX,
 ):
     """Project selected SAM tokens and apply the learned no-object pointer."""
@@ -1333,9 +1393,14 @@ def add_object_pointer_projection(
         _HIDDEN_SIZE,
         _HIDDEN_SIZE,
         _HIDDEN_SIZE,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
-    zero = _constant(network, (1, 1), np.zeros((1, 1), dtype=np.float32))
+    zero = _cast(
+        network,
+        _constant(network, (1, 1), np.zeros((1, 1), dtype=np.float32)),
+        object_score_logits.dtype,
+    )
     appearing = network.add_elementwise(
         object_score_logits,
         zero,
@@ -1352,7 +1417,13 @@ def add_object_pointer_projection(
         (1, _HIDDEN_SIZE),
         no_object_pointer,
     )
-    return network.add_select(appearing, pointer, no_object_pointer).get_output(0)
+    # ``no_object_pointer`` is a persistent FP32 buffer in Meta.  Keep both
+    # learned projection phases on the same external FP32 carrier.
+    return network.add_select(
+        appearing,
+        _cast(network, pointer, trt.float32),
+        no_object_pointer,
+    ).get_output(0)
 
 
 def add_tracker_step_head(
@@ -1363,11 +1434,11 @@ def add_tracker_step_head(
     weights: WeightMap,
     *,
     object_batch: int,
-    fp16_attention: bool = False,
     weight_prefix: str = _WEIGHT_PREFIX,
 ) -> TrackerStepHeadOutputs:
-    """Build the recurrent frame's no-prompt mask decoder and pointer head."""
+    """Build the recurrent frame with the qualified TensorRT FP32 policy."""
 
+    precision_policy = DecoderPrecisionPolicy.RECURRENT_TRT_FP32
     dense_prompt = add_no_mask_dense_embeddings(
         network,
         weights,
@@ -1382,7 +1453,7 @@ def add_tracker_step_head(
         dense_prompt,
         weights,
         object_batch=object_batch,
-        fp16_attention=fp16_attention,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
     selected = add_multimask_selection(network, decoder_outputs, object_batch=object_batch)
@@ -1392,13 +1463,25 @@ def add_tracker_step_head(
         selected.object_score_logits,
         weights,
         object_batch=object_batch,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
-    return TrackerStepHeadOutputs(
+    outputs = TrackerStepHeadOutputs(
         pred_masks=selected.mask,
         object_pointer=pointer,
         object_score_logits=selected.object_score_logits,
         selected_iou=selected.iou_score,
+    )
+    # Runtime bindings stay FP32 for a stable C++ carrier contract.
+    return TrackerStepHeadOutputs(
+        pred_masks=_cast(network, outputs.pred_masks, _trt().float32),
+        object_pointer=_cast(network, outputs.object_pointer, _trt().float32),
+        object_score_logits=_cast(
+            network,
+            outputs.object_score_logits,
+            _trt().float32,
+        ),
+        selected_iou=_cast(network, outputs.selected_iou, _trt().float32),
     )
 
 
@@ -1419,11 +1502,15 @@ def add_tracker_init_head(
     thresholds at zero.  Thresholding the detector grid itself (and especially
     using 0.5 as the cutoff) changes the mask prompt and causes the recurrent
     tracker to diverge immediately after the prompt frame.
+
+    Initialization intentionally uses its own fixed FP32 decoder policy so the
+    two engine phases remain explicit and independently qualified.
     """
 
     trt = _trt()
     graph_ops = _graph_ops()
     object_batch = 1
+    precision_policy = DecoderPrecisionPolicy.INIT_FP32
     resized_detector_logits = _add_bilinear_resize(
         network,
         detector_mask,
@@ -1495,6 +1582,7 @@ def add_tracker_init_head(
         dense_prompt,
         weights,
         object_batch=object_batch,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
     selected = add_multimask_selection(network, decoder_outputs, object_batch=1)
@@ -1504,6 +1592,7 @@ def add_tracker_init_head(
         selected.object_score_logits,
         weights,
         object_batch=1,
+        precision_policy=precision_policy,
         weight_prefix=weight_prefix,
     )
 

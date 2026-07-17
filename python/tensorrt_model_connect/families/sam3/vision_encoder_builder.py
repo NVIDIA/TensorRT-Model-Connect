@@ -571,9 +571,7 @@ def _add_sam3_vision_mlp(
         intermediate_size,
         weights[f"{prefix}.mlp.fc1.weight"],
     )
-    mlp = graph_ops.add_bias_sum(
-        network, mlp, intermediate_size, weights[f"{prefix}.mlp.fc1.bias"]
-    )
+    mlp = graph_ops.add_bias_sum(network, mlp, intermediate_size, weights[f"{prefix}.mlp.fc1.bias"])
     mlp = network.add_cast(mlp, trt.float32).get_output(0)
     mlp = _add_sam3_vision_activation(network, mlp, hidden_act)
     mlp = _add_fp16_matmul_island(
@@ -583,9 +581,7 @@ def _add_sam3_vision_mlp(
         hidden_size,
         weights[f"{prefix}.mlp.fc2.weight"],
     )
-    return graph_ops.add_bias_sum(
-        network, mlp, hidden_size, weights[f"{prefix}.mlp.fc2.bias"]
-    )
+    return graph_ops.add_bias_sum(network, mlp, hidden_size, weights[f"{prefix}.mlp.fc2.bias"])
 
 
 def build_sam3_vision_encoder_engine(

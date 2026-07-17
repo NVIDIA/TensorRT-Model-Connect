@@ -129,6 +129,20 @@ void test_sam3_clip_tokenizer_matches_meta_segmentation() {
           "sam3 CLIP tokenizer matches Meta contraction segmentation");
 }
 
+void test_sam3_clip_explicit_frame_overrides_generic_header() {
+    auto bundle = make_sam3_clip_tokenizer_bundle();
+    // Reproduce a lightweight/offline build where generic tokenizer probing
+    // reported no automatic special tokens.  The SAM3-owned explicit CLIP
+    // frame must still win.
+    bundle.info.tokenizer_add_special_tokens_present = true;
+    bundle.info.tokenizer_add_special_tokens = false;
+
+    auto tokenizer = trtmc::create_tokenizer_from_bundle(bundle);
+    check(tokenizer != nullptr, "sam3 creates CLIP tokenizer with a false generic header bit");
+    check(tokenizer->encode("a b") == std::vector<int32_t>({10, 0, 1, 11}),
+          "sam3 explicit CLIP BOS/EOS frame overrides generic tokenizer metadata");
+}
+
 void test_clip_non_removed_split_keeps_standalone_space_token() {
     auto bundle = make_sam3_clip_tokenizer_bundle();
     auto& tokenizer_data = bundle.sections.back().data;
@@ -2464,6 +2478,7 @@ void test_recurrent_pool_survives_serial_sessions() {
 
 int main() {
     test_sam3_clip_tokenizer_matches_meta_segmentation();
+    test_sam3_clip_explicit_frame_overrides_generic_header();
     test_clip_non_removed_split_keeps_standalone_space_token();
 #ifdef TRTMC_HAS_CUDA_KERNELS
     test_bfloat16_round_copy_supports_exact_alias();

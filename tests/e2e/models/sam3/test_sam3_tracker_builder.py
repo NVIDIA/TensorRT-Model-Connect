@@ -14,12 +14,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from tensorrt_model_connect.families.sam3 import (
-    tracker_builder,
-    tracker_memory_ffi_builder,
-    tracker_step_ffi_builder,
-    tracker_weights,
-)
+from tensorrt_model_connect.families.sam3 import tracker_builder, tracker_weights
 
 
 def test_sam3_tracker_step_profiles_cover_native_memory_bounds() -> None:
@@ -241,7 +236,62 @@ def test_sam3_tracker_init_pointer_uses_meta_single_mask_token() -> None:
     assert "selected.mask_token" not in init_source
 
 
-def test_sam3_tracker_step_ffi_preserves_meta_selected_iou_output() -> None:
+def test_sam3_tracker_decoder_precision_policy_is_explicit_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tensorrt_model_connect.families.sam3 import tracker_decoder_builder
+
+    fake_trt = SimpleNamespace(float32="fp32")
+    monkeypatch.setattr(tracker_decoder_builder, "_trt", lambda: fake_trt)
+
+    policy = tracker_decoder_builder.DecoderPrecisionPolicy
+    assert tracker_decoder_builder._learned_dtype(policy.INIT_FP32) == "fp32"
+    assert tracker_decoder_builder._learned_dtype(policy.RECURRENT_TRT_FP32) == "fp32"
+    with pytest.raises(TypeError, match="must be a DecoderPrecisionPolicy"):
+        tracker_decoder_builder._learned_dtype("bf16")
+
+    required_policy_helpers = (
+        tracker_decoder_builder._linear,
+        tracker_decoder_builder._attention,
+        tracker_decoder_builder._feed_forward,
+        tracker_decoder_builder._decoder_mlp,
+        tracker_decoder_builder._two_way_transformer,
+        tracker_decoder_builder._add_deconvolution,
+        tracker_decoder_builder.add_mask_decoder,
+        tracker_decoder_builder.add_object_pointer_projection,
+    )
+    for helper in required_policy_helpers:
+        parameter = inspect.signature(helper).parameters["precision_policy"]
+        assert parameter.default is inspect.Parameter.empty
+
+    deconvolution_source = inspect.getsource(tracker_decoder_builder._add_deconvolution)
+    assert "network.add_deconvolution_nd(" in deconvolution_source
+    assert "kernel=trt.Weights(weight)" in deconvolution_source
+    assert "bias=trt.Weights(bias)" in deconvolution_source
+    assert "network.add_matrix_multiply(" not in deconvolution_source
+    assert "_cast(network, _cast(network, inp" not in deconvolution_source
+
+
+def test_sam3_tracker_heads_select_phase_specific_decoder_precision() -> None:
+    from tensorrt_model_connect.families.sam3 import tracker_decoder_builder
+
+    init_source = inspect.getsource(tracker_decoder_builder.add_tracker_init_head)
+    assert "precision_policy = DecoderPrecisionPolicy.INIT_FP32" in init_source
+    assert init_source.count("precision_policy=precision_policy") == 2
+
+    step_source = inspect.getsource(tracker_decoder_builder.add_tracker_step_head)
+    assert "precision_policy = DecoderPrecisionPolicy.RECURRENT_TRT_FP32" in step_source
+    assert step_source.count("precision_policy=precision_policy") == 2
+
+    decoder_source = inspect.getsource(tracker_decoder_builder.add_mask_decoder)
+    assert "learned_dtype = _learned_dtype(precision_policy)" in decoder_source
+    assert "trt.float32" in decoder_source
+    assert "_precision_constant(" in decoder_source
+    assert "precision_policy=precision_policy" in decoder_source
+    assert "fp16_attention" not in decoder_source
+
+
+def test_sam3_tracker_step_plan_preserves_meta_selected_iou_output() -> None:
     from tensorrt_model_connect.families.sam3 import tracker_decoder_builder
 
     decoder_source = inspect.getsource(tracker_decoder_builder.add_mask_decoder)
@@ -258,9 +308,9 @@ def test_sam3_tracker_step_ffi_preserves_meta_selected_iou_output() -> None:
     head_source = inspect.getsource(tracker_decoder_builder.add_tracker_step_head)
     assert "selected_iou=selected.iou_score" in head_source
 
-    output_source = inspect.getsource(tracker_step_ffi_builder._add_output_contract)
-    assert "offset=_PACKED_WIDTH - 1" in output_source
-    assert '"selected_iou"' in output_source
+    build_source = inspect.getsource(tracker_builder._build_step)
+    assert "selected_iou = head.selected_iou" in build_source
+    assert '_mark(network, selected_iou, "selected_iou")' in build_source
 
 
 def test_sam3_tracker_init_defers_recurrent_memory_until_global_frame_zero_policy() -> None:
@@ -272,19 +322,14 @@ def test_sam3_tracker_init_defers_recurrent_memory_until_global_frame_zero_polic
 
 
 def test_sam3_tracker_hard_memory_plan_has_fixed_b1_b2_contract() -> None:
-    memory_plan_source = inspect.getsource(
-        tracker_memory_ffi_builder._build_tracker_memory_ffi_plan
-    )
+    memory_plan_source = inspect.getsource(tracker_builder._build_hard_memory)
     assert '"tracker_feature_2"' in memory_plan_source
-    assert 'mask_name = "owned_tracker_mask" if hard_mask else "final_mask"' in memory_plan_source
-    assert "mask_size = 1008 if hard_mask else 288" in memory_plan_source
-    assert "(batch_size, 1, mask_size, mask_size)" in memory_plan_source
+    assert '"owned_tracker_mask"' in memory_plan_source
+    assert "(batch_size, 1, 1008, 1008)" in memory_plan_source
     assert '"object_score_logits"' in memory_plan_source
-    assert "if hard_mask" in memory_plan_source
-
-    output_source = inspect.getsource(tracker_memory_ffi_builder._add_output_contract)
-    assert '"new_memory_features"' in output_source
-    assert '"new_memory_position"' in output_source
+    assert "hard_mask=True" in memory_plan_source
+    assert '_mark(network, outputs.memory, "new_memory_features")' in memory_plan_source
+    assert '_mark(network, outputs.position, "new_memory_position")' in memory_plan_source
 
 
 def test_sam3_tracker_hard_memory_matches_meta_geometry_order() -> None:
@@ -353,13 +398,11 @@ def test_sam3_tracker_soft_memory_matches_meta_geometry_order() -> None:
     assert "ElementWiseOperation.MIN" in suppression_source
     assert "network.add_select(reject, clamped, high_res_mask_logits)" in suppression_source
 
-    memory_plan_source = inspect.getsource(
-        tracker_memory_ffi_builder._build_tracker_memory_ffi_plan
-    )
+    memory_plan_source = inspect.getsource(tracker_builder._build_memory)
     assert '"suppress_area_shrinkage"' in memory_plan_source
     assert "trt.int32" in memory_plan_source
     assert "(batch_size, 1)" in memory_plan_source
-    assert "_constant_zero_suppression" in memory_plan_source
+    assert "hard_mask=False" in memory_plan_source
 
     public_source = functions["add_tracker_memory_encoder"]
     assert public_source is not None
@@ -367,7 +410,7 @@ def test_sam3_tracker_soft_memory_matches_meta_geometry_order() -> None:
     assert "suppress_area_shrinkage" in public_source
 
 
-def test_sam3_tracker_memory_default_uses_only_fixed_aoti_wrappers() -> None:
+def test_sam3_tracker_memory_default_uses_direct_tensorrt_network_api() -> None:
     memory_path = Path(tracker_builder.__file__).with_name("tracker_memory_builder.py")
     module_source = memory_path.read_text(encoding="utf-8")
     tree = ast.parse(module_source, filename=str(memory_path))
@@ -388,12 +431,14 @@ def test_sam3_tracker_memory_default_uses_only_fixed_aoti_wrappers() -> None:
 
     build_source = inspect.getsource(tracker_builder.build_sam3_tracker_engines)
     assert "compute_precision" not in build_source
-    assert "build_sam3_tracker_memory_ffi_plans" in build_source
-    assert "memory_plan_spec" in build_source
-    assert "_build_memory(" not in build_source
-    assert "_build_hard_memory(" not in build_source
-    assert not hasattr(tracker_builder, "_build_memory")
-    assert not hasattr(tracker_builder, "_build_hard_memory")
+    assert "_build_memory(" in build_source
+    assert "_build_hard_memory(" in build_source
+    assert "build_sam3_tracker_memory_ffi_plans" not in build_source
+    assert "memory_plan_spec" not in build_source
+    assert "aoti" not in build_source.lower()
+    assert "tvm" not in build_source.lower()
+    assert hasattr(tracker_builder, "_build_memory")
+    assert hasattr(tracker_builder, "_build_hard_memory")
 
 
 def test_sam3_tracker_memory_native_bf16_ops_keep_fp32_abi() -> None:
@@ -593,6 +638,10 @@ def test_sam3_tracker_attention_keeps_fp32_norm_rope_and_bf16_residual() -> None
     assert "_bf16_linear(" in pointer_source
     assert "_cast(network, projected_position, trt.float32)" not in pointer_source
 
+    cross_attention_source = functions["_cross_attention"]
+    assert cross_attention_source is not None
+    assert "pointer_key_input = _bf16_sum(" in cross_attention_source
+
     public_source = functions["add_tracker_recurrent_conditioning"]
     assert public_source is not None
     assert public_source.count("_bf16_sum(") == 4
@@ -605,143 +654,145 @@ def test_sam3_tracker_attention_keeps_fp32_norm_rope_and_bf16_residual() -> None
     assert "os.environ" not in module_source
 
 
-def test_sam3_tracker_builder_has_only_required_b1_b2_plans() -> None:
+def test_sam3_tracker_builder_has_only_required_direct_b1_b2_plans() -> None:
     parameters = inspect.signature(tracker_builder.build_sam3_tracker_engines).parameters
-    assert "fp16_engines" not in parameters
-    assert "fp16_ops" not in parameters
-    assert parameters["step_plan_spec"].default is None
-    assert parameters["memory_plan_spec"].default is None
+    assert tuple(parameters) == ("model_dir", "verbose")
+    assert parameters["verbose"].default is False
 
     source = inspect.getsource(tracker_builder.build_sam3_tracker_engines)
-    assert "TRACKER_INIT_SECTION" in source
-    assert "build_sam3_tracker_step_ffi_plans" in source
-    assert "build_sam3_tracker_memory_ffi_plans" in source
-    assert "native recurrent fallback is not supported" in source
-    assert "direct TensorRT memory fallback is not supported" in source
-    assert "_build_step(" not in source
-    assert "_build_memory(" not in source
-    assert "_build_hard_memory(" not in source
-    ffi_source = inspect.getsource(tracker_step_ffi_builder.build_sam3_tracker_step_ffi_plans)
-    assert "TRACKER_STEP_SECTION" in ffi_source
-    assert "TRACKER_STEP_BATCH2_SECTION" in ffi_source
-    memory_ffi_source = inspect.getsource(
-        tracker_memory_ffi_builder.build_sam3_tracker_memory_ffi_plans
-    )
     for section in (
+        "TRACKER_INIT_SECTION",
+        "TRACKER_STEP_SECTION",
+        "TRACKER_STEP_BATCH2_SECTION",
         "TRACKER_MEMORY_SECTION",
         "TRACKER_MEMORY_BATCH2_SECTION",
         "TRACKER_HARD_MEMORY_SECTION",
         "TRACKER_HARD_MEMORY_BATCH2_SECTION",
+        "HARD_MASK_RESIZE_SECTION",
+        "HARD_MASK_RESIZE_BATCH2_SECTION",
     ):
-        assert section in memory_ffi_source
+        assert section in source
+
+    assert source.count("_build_init(") == 1
+    assert source.count("_build_step(") == 2
+    assert source.count("_build_memory(") == 2
+    assert source.count("_build_hard_memory(") == 2
+    assert source.count("_build_hard_mask_resize(") == 2
+    assert source.count("batch_size=1") == 4
+    assert source.count("batch_size=2") == 4
+    for forbidden in ("ffi", "aoti", ".pt2", "libtorch", "tvm"):
+        assert forbidden not in source.lower()
 
 
-def test_sam3_tracker_step_plan_spec_is_content_addressed() -> None:
-    valid_b1 = "trtmc.sam3.tracker_step.b1.split_aoti." + "1" * 20
-    valid_b2 = "trtmc.sam3.tracker_step.b2.split_aoti." + "2" * 20
-    tracker_step_ffi_builder._validate_global_name(valid_b1, batch_size=1)
-    tracker_step_ffi_builder._validate_global_name(valid_b2, batch_size=2)
+def test_sam3_production_build_path_has_no_aoti_or_bridge_modules() -> None:
+    family_dir = Path(tracker_builder.__file__).resolve().parent
+    plugin_source = (family_dir / "plugin.py").read_text(encoding="utf-8")
+    build_start = plugin_source.index("    def build_extra_engines(")
+    build_end = plugin_source.index("\n    def get_segmentation_config", build_start)
+    build_source = plugin_source[build_start:build_end]
 
-    with pytest.raises(ValueError, match="B1 split AOTI pipeline"):
-        tracker_step_ffi_builder._validate_global_name(
-            "trtmc.sam3.tracker_step.b1.aoti",
-            batch_size=1,
-        )
-    with pytest.raises(ValueError, match="B2 split AOTI pipeline"):
-        tracker_step_ffi_builder._validate_global_name(valid_b1, batch_size=2)
+    assert "build_sam3_tracker_engines" in build_source
+    for forbidden in ("aoti", ".pt2", "libtorch", "tvm", "ffi", "native_plugin"):
+        assert forbidden not in build_source.lower()
 
+    for removed_module in (
+        "hard_mask_resize_ffi_builder.py",
+        "native_plugin_builder.py",
+        "tracker_memory_ffi_builder.py",
+        "tracker_step_ffi_builder.py",
+    ):
+        assert not (family_dir / removed_module).exists()
 
-def test_sam3_tracker_step_uses_tensorrt_11_creator_api() -> None:
-    calls: list[tuple[str, str, str]] = []
-    creator = object()
-
-    class _Registry:
-        def get_creator(self, plugin_type: str, version: str, namespace: str):
-            calls.append((plugin_type, version, namespace))
-            return creator
-
-    trt = SimpleNamespace(get_plugin_registry=lambda: _Registry())
-
-    assert tracker_step_ffi_builder._plugin_creator(trt) is creator
-    assert calls == [("Sam3TrackerStepFfi", "2", "")]
+    repository_root = Path(__file__).resolve().parents[4]
+    runtime_dir = repository_root / "src/runtime/models/sam3"
+    assert not (runtime_dir / "sam3_tracker_step_runtime.cpp").exists()
+    assert not (runtime_dir / "sam3_tracker_step_runtime.h").exists()
 
 
-def test_sam3_tracker_build_fails_closed_without_exported_step_spec(tmp_path: Path) -> None:
-    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(RuntimeError, match="content-addressed B1/B2 split"):
-        tracker_builder.build_sam3_tracker_engines(str(tmp_path))
-
-
-def test_sam3_tracker_step_ffi_loads_dso_before_building_b1_b2(
+def test_sam3_tracker_build_needs_no_exported_runtime_spec(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from tensorrt_model_connect.families.sam3 import native_plugin_builder
-
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    weights = object()
     events: list[tuple[object, ...]] = []
-    plugin_path = Path("/tmp/libtrtmc_sam3_tracker_step_native_plugin.so")
-    global_b1 = "trtmc.sam3.tracker_step.b1.split_aoti." + "a" * 20
-    global_b2 = "trtmc.sam3.tracker_step.b2.split_aoti." + "b" * 20
-    spec = tracker_step_ffi_builder.TrackerStepPlanSpec(
-        plugin_library=plugin_path,
-        global_name_b1=global_b1,
-        global_name_b2=global_b2,
+
+    monkeypatch.setattr(tracker_builder, "_read_model_config", lambda _: {})
+    monkeypatch.setattr(tracker_builder, "_validate_video_policy", lambda _: None)
+    monkeypatch.setattr(tracker_builder, "load_tracker_weights", lambda _: weights)
+    monkeypatch.setattr(
+        tracker_builder,
+        "_build_init",
+        lambda actual_weights, *, verbose: (
+            events.append(("init", actual_weights, verbose)) or b"init"
+        ),
     )
+
+    def _build_fixed_batch(
+        kind: str,
+        actual_weights: object,
+        *,
+        batch_size: int,
+        verbose: bool,
+    ) -> bytes:
+        events.append((kind, actual_weights, batch_size, verbose))
+        return f"{kind}-b{batch_size}".encode()
 
     monkeypatch.setattr(
-        native_plugin_builder,
-        "load_native_plugin",
-        lambda path: events.append(("load", path)),
+        tracker_builder,
+        "_build_step",
+        lambda actual_weights, *, batch_size, verbose: _build_fixed_batch(
+            "step", actual_weights, batch_size=batch_size, verbose=verbose
+        ),
     )
-
-    def _fake_build(global_name: str, *, batch_size: int, verbose: bool) -> bytes:
-        events.append(("build", global_name, batch_size, verbose))
-        return f"plan-b{batch_size}".encode()
-
     monkeypatch.setattr(
-        tracker_step_ffi_builder,
-        "_build_tracker_step_ffi_plan",
-        _fake_build,
+        tracker_builder,
+        "_build_memory",
+        lambda actual_weights, *, batch_size, verbose: _build_fixed_batch(
+            "memory", actual_weights, batch_size=batch_size, verbose=verbose
+        ),
     )
-    plans = tracker_step_ffi_builder.build_sam3_tracker_step_ffi_plans(spec, verbose=True)
+    monkeypatch.setattr(
+        tracker_builder,
+        "_build_hard_memory",
+        lambda actual_weights, *, batch_size, verbose: _build_fixed_batch(
+            "hard-memory", actual_weights, batch_size=batch_size, verbose=verbose
+        ),
+    )
+
+    def _build_resize(*, batch_size: int, verbose: bool) -> bytes:
+        events.append(("hard-resize", batch_size, verbose))
+        return f"hard-resize-b{batch_size}".encode()
+
+    monkeypatch.setattr(tracker_builder, "_build_hard_mask_resize", _build_resize)
+
+    plans = tracker_builder.build_sam3_tracker_engines(str(tmp_path), verbose=True)
 
     assert events == [
-        ("load", plugin_path),
-        ("build", global_b1, 1, True),
-        ("build", global_b2, 2, True),
+        ("init", weights, True),
+        ("step", weights, 1, True),
+        ("step", weights, 2, True),
+        ("memory", weights, 1, True),
+        ("memory", weights, 2, True),
+        ("hard-memory", weights, 1, True),
+        ("hard-memory", weights, 2, True),
+        ("hard-resize", 1, True),
+        ("hard-resize", 2, True),
     ]
     assert plans == {
-        tracker_builder.TRACKER_STEP_SECTION: b"plan-b1",
-        tracker_builder.TRACKER_STEP_BATCH2_SECTION: b"plan-b2",
+        tracker_builder.TRACKER_INIT_SECTION: b"init",
+        tracker_builder.TRACKER_STEP_SECTION: b"step-b1",
+        tracker_builder.TRACKER_STEP_BATCH2_SECTION: b"step-b2",
+        tracker_builder.TRACKER_MEMORY_SECTION: b"memory-b1",
+        tracker_builder.TRACKER_MEMORY_BATCH2_SECTION: b"memory-b2",
+        tracker_builder.TRACKER_HARD_MEMORY_SECTION: b"hard-memory-b1",
+        tracker_builder.TRACKER_HARD_MEMORY_BATCH2_SECTION: b"hard-memory-b2",
+        tracker_builder.HARD_MASK_RESIZE_SECTION: b"hard-resize-b1",
+        tracker_builder.HARD_MASK_RESIZE_BATCH2_SECTION: b"hard-resize-b2",
     }
 
 
-def test_sam3_tracker_step_ffi_plan_has_exact_runtime_abi() -> None:
-    build_source = inspect.getsource(tracker_step_ffi_builder._build_tracker_step_ffi_plan)
-    expected_inputs = (
-        "tracker_feature_0",
-        "tracker_feature_1",
-        "tracker_feature_2",
-        "tracker_position_2",
-        "memory_features",
-        "memory_position",
-        "memory_temporal_offsets",
-        "object_pointers",
-        "object_pointer_temporal_offsets",
-        "max_object_pointers_to_use",
-    )
-    assert all(f'"{name}"' in build_source for name in expected_inputs)
-    assert "network.add_plugin_v2" in build_source
-    assert "tracker_builder._add_step_profile" in build_source
-
-    output_source = inspect.getsource(tracker_step_ffi_builder._add_output_contract)
-    for output in ("pred_masks", "object_pointer", "object_score_logits", "selected_iou"):
-        assert f'"{output}"' in output_source
-    assert "(batch_size, 1, _MASK_SIZE, _MASK_SIZE)" in output_source
-    assert "(batch_size, 1, _POINTER_VALUES)" in output_source
-    assert output_source.count("(batch_size, 1, 1)") == 2
-
-
-def test_sam3_runtime_loads_tracker_bridge_before_required_step_plans() -> None:
+def test_sam3_runtime_loads_required_step_plans_without_external_bridge() -> None:
     repository_root = Path(__file__).resolve().parents[4]
     plugin_path = repository_root / "src/runtime/models/sam3/plugin.cpp"
     source = plugin_path.read_text(encoding="utf-8")
@@ -749,13 +800,26 @@ def test_sam3_runtime_loads_tracker_bridge_before_required_step_plans() -> None:
     helper_end = source.index("\n}\n\n} // namespace", helper_start)
     helper = source[helper_start:helper_end]
 
-    runtime_load = helper.index("load_sam3_tracker_step_runtime(ctx.bundle)")
     b1_load = helper.index('find_section(ctx.bundle, "sam3_tracker_step_engine_plan")')
     b2_load = helper.index('find_section(ctx.bundle, "sam3_tracker_step_batch2_engine_plan")')
-    assert runtime_load < b1_load < b2_load
+    assert b1_load < b2_load
     assert helper.count("load_trt_module_from_plan(") == 2
     assert "extract_optional_module" not in helper
     assert "if (!video_tracking_supported)" in helper
+    for forbidden in ("aoti", ".pt2", "libtorch", "torch", "tvm", "ffi", "dlopen"):
+        assert forbidden not in helper.lower()
+
+    plugin_helpers_path = repository_root / "src/runtime/models/sam3/plugin_helpers.cpp"
+    production_loader_source = source + plugin_helpers_path.read_text(encoding="utf-8")
+    for forbidden in (
+        "load_sam3_tracker_step_runtime",
+        "load_ffi_kernels_from_bundle",
+        "sam3_tracker_aoti",
+        ".pt2",
+        "libtorch",
+        "libtvm_ffi",
+    ):
+        assert forbidden not in production_loader_source
 
 
 def test_sam3_runtime_requires_all_memory_plans_only_for_video_bundles() -> None:
