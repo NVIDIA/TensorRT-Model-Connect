@@ -79,12 +79,12 @@ SegmentResult SegmentPipeline::segment(const float* pixels, int32_t height, int3
         const auto logits_size = static_cast<std::size_t>(num_classes) * out_h * out_w;
         const std::vector<float> logits(data, data + logits_size);
         const SegformerLogitsShape logits_shape{num_classes, out_h, out_w};
-        const auto status =
-            compute_segformer_class_map_from_logits(logits, logits_shape, result.mask);
+        const auto status = compute_segformer_class_map_from_logits(logits, logits_shape, height,
+                                                                    width, result.mask);
         if (status != SegformerPostprocessStatus::kOk)
             throw std::runtime_error("SegmentPipeline: invalid SegFormer logits shape");
-        result.height = out_h;
-        result.width = out_w;
+        result.height = height;
+        result.width = width;
     } else {
         auto n = out_tensor->numel();
         result.height = height;

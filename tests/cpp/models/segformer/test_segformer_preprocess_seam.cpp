@@ -51,6 +51,18 @@ trtmc::runtime::adapters::io::DecodedImage make_two_pixel_image() {
     return image;
 }
 
+trtmc::runtime::adapters::io::DecodedImage make_rectangular_processor_fixture() {
+    trtmc::runtime::adapters::io::DecodedImage image;
+    image.width = 4;
+    image.height = 2;
+    image.channels = 3;
+    image.pixels = {
+        0,   10, 20,  64,  74, 84, 192, 202, 212, 255, 245, 235,
+        255, 0,  128, 192, 32, 96, 64,  224, 48,  0,   255, 16,
+    };
+    return image;
+}
+
 void test_segformer_preprocess_normalizes_decoded_image() {
     trtmc::SegformerPreprocessConfig config;
     config.input_image_h = 1;
@@ -94,7 +106,36 @@ void test_segformer_preprocess_uses_bilinear_resize() {
     const auto pixel_values = trtmc::preprocess_segformer_image(pixels.data(), 2, 2, config);
     check(pixel_values.size() == 27, "segformer bilinear resize size");
     if (pixel_values.size() == 27) {
-        check_close(pixel_values[4], 0.5F, 1e-6F, "segformer bilinear resize blends center pixel");
+        check_close(pixel_values[4], 128.0F / 255.0F, 1e-6F,
+                    "segformer bilinear resize blends center pixel");
+    }
+}
+
+void test_segformer_preprocess_matches_hf_processor_bilinear_golden() {
+    trtmc::SegformerPreprocessConfig config;
+    config.input_image_h = 3;
+    config.input_image_w = 3;
+    config.image_mean = {0.0F, 0.0F, 0.0F};
+    config.image_std = {1.0F, 1.0F, 1.0F};
+
+    // Golden output from the pinned SegformerImageProcessor bilinear resize
+    // contract. The source is rectangular so one axis shrinks while the other
+    // grows, exercising the antialias and half-pixel sampling behavior that
+    // the end-to-end vehicle fixture depends on.
+    const std::vector<float> expected_u8 = {
+        19,  128, 236, 128, 128, 128, 236, 128, 19,  29,  138, 232, 20, 133,
+        239, 10,  128, 246, 39,  148, 228, 79,  110, 127, 118, 72,  26,
+    };
+
+    const auto pixel_values =
+        trtmc::preprocess_segformer_image(make_rectangular_processor_fixture(), config);
+    check(pixel_values.size() == expected_u8.size(), "segformer HF bilinear golden size");
+    if (pixel_values.size() != expected_u8.size()) {
+        return;
+    }
+    for (std::size_t i = 0; i < expected_u8.size(); ++i) {
+        check_close(pixel_values[i], expected_u8[i] / 255.0F, 1e-6F,
+                    "segformer HF bilinear golden value");
     }
 }
 
@@ -104,6 +145,7 @@ int main() {
     test_segformer_preprocess_normalizes_decoded_image();
     test_segformer_preprocess_rejects_empty_image();
     test_segformer_preprocess_uses_bilinear_resize();
+    test_segformer_preprocess_matches_hf_processor_bilinear_golden();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " SegFormer preprocess seam test(s) failed\n";

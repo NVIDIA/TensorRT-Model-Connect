@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,8 +38,8 @@ def test_contract_consumes_declared_segmentation_thresholds() -> None:
     thresholds = ThresholdProfile(
         task_strategy="segmentation",
         metrics={
-            "mIoU": 0.60,
-            "pixel_accuracy": 0.85,
+            "mIoU": 0.94,
+            "pixel_accuracy": 0.99,
             # Legacy names must not weaken the declared acceptance criteria.
             "contract_miou_threshold": 0.10,
             "contract_pixel_accuracy": 0.10,
@@ -48,8 +49,8 @@ def test_contract_consumes_declared_segmentation_thresholds() -> None:
     result = SegformerSegmentationPlugin().verify(_output(trt), _output(ref), None, thresholds)
 
     assert result.status == "failed"
-    assert result.metrics["mIoU"].threshold == 0.60
-    assert result.metrics["pixel_accuracy"].threshold == 0.85
+    assert result.metrics["mIoU"].threshold == 0.94
+    assert result.metrics["pixel_accuracy"].threshold == 0.99
     assert not result.metrics["mIoU"].passed
     assert not result.metrics["pixel_accuracy"].passed
 
@@ -67,6 +68,32 @@ def test_contract_requires_both_declared_thresholds() -> None:
 
     assert result.status == "error"
     assert "mIoU" in result.message
+
+
+def test_contract_rejects_mask_shape_mismatch() -> None:
+    thresholds = ThresholdProfile(
+        task_strategy="segmentation",
+        metrics={"mIoU": 0.94, "pixel_accuracy": 0.99},
+    )
+
+    result = SegformerSegmentationPlugin().verify(
+        _output(np.zeros((128, 128), dtype=np.int32)),
+        _output(np.zeros((382, 640), dtype=np.int32)),
+        None,
+        thresholds,
+    )
+
+    assert result.status == "error"
+    assert "shape mismatch" in result.message
+
+
+def test_single_gpu_thresholds_reject_the_reproduced_regression() -> None:
+    threshold_path = Path(__file__).parent / "thresholds" / "segformer-b0-ade.json"
+    thresholds = json.loads(threshold_path.read_text())["threshold_overrides"]
+
+    assert thresholds["mIoU"] == 0.94
+    assert thresholds["pixel_accuracy"] == 0.99
+    assert thresholds["min_pixel_agreement"] == 0.99
 
 
 def test_trt_visualization_matches_hf_palette_and_input_size(

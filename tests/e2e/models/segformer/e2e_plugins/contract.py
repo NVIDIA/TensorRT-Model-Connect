@@ -190,16 +190,10 @@ class SegformerSegmentationPlugin:
         trt_arr = np.asarray(trt_mask, dtype=np.int32)
         ref_arr = np.asarray(ref_mask, dtype=np.int32)
         if trt_arr.shape != ref_arr.shape:
-            try:
-                from PIL import Image
-            except ImportError:
-                return make_error(
-                    "full_inference",
-                    f"Shape mismatch {trt_arr.shape} vs {ref_arr.shape} and PIL unavailable",
-                )
-            ref_img = Image.fromarray(ref_arr.astype(np.uint8))
-            ref_img = ref_img.resize((trt_arr.shape[1], trt_arr.shape[0]), Image.NEAREST)
-            ref_arr = np.array(ref_img, dtype=np.int32)
+            return make_error(
+                "full_inference",
+                f"Segmentation shape mismatch: TRT {trt_arr.shape} vs reference {ref_arr.shape}",
+            )
 
         required_thresholds = ("mIoU", "pixel_accuracy")
         missing_thresholds = [

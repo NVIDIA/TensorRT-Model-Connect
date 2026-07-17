@@ -194,11 +194,11 @@ static void test_segment_with_class_output() {
                                                          engine->createExecutionContext(), stream);
     trtmc::SegmentPipeline pipeline(std::move(module), make_test_preprocess_config());
 
-    float img[3 * 4 * 4] = {0};
-    auto result = pipeline.segment(img, 4, 4);
-    check(result.mask.size() == 16, "segment 2d: mask has 16 entries");
-    check(result.height == 4, "segment 2d: height = 4");
-    check(result.width == 4, "segment 2d: width = 4");
+    float img[3 * 2 * 3] = {0};
+    auto result = pipeline.segment(img, 2, 3);
+    check(result.mask.size() == 6, "segment 2d: mask matches source image size");
+    check(result.height == 2, "segment 2d: height matches source image");
+    check(result.width == 3, "segment 2d: width matches source image");
 
     cudaStreamDestroy(stream);
 }
