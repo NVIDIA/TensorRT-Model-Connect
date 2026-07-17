@@ -169,6 +169,7 @@ def add_attention_block(
     interleaved_rope: bool = False,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
 
@@ -222,11 +223,13 @@ def add_attention_block(
     q_norm = weights.get(f"{prefix}.q_norm")
     if q_norm is not None:
         q = graph_ops.add_rms_norm_per_head(
-            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype)
+            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype,
+            sequence_length=sequence_length)
     k_norm = weights.get(f"{prefix}.k_norm")
     if k_norm is not None:
         k = graph_ops.add_rms_norm_per_head(
-            network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype)
+            network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype,
+            sequence_length=sequence_length)
 
     # ------------------------------------------------------------------ #
     # RoPE via native IRotaryEmbeddingLayer                              #
@@ -243,35 +246,40 @@ def add_attention_block(
         q = graph_ops.add_apply_rope_native(
             network, q, num_heads, head_dim,
             cos_half_tensor, sin_half_tensor, position_id,
-            rope_dim, interleaved_rope)
+            rope_dim, interleaved_rope, sequence_length=sequence_length)
         k = graph_ops.add_apply_rope_native(
             network, k, num_kv_heads, head_dim,
             cos_half_tensor, sin_half_tensor, position_id,
-            rope_dim, interleaved_rope)
+            rope_dim, interleaved_rope, sequence_length=sequence_length)
 
     # Save present K/V (before concatenation, this is the raw projection output)
     present_k = k
     present_v = v
 
     # Reshape current K, V for concatenation
-    k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, kv_attention_size)
-    v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, kv_attention_size)
+    current_k = k
+    current_v = v
+    if sequence_length is not None:
+        k_reshape = network.add_shuffle(k)
+        k_reshape.reshape_dims = (sequence_length, kv_attention_size)
+        v_reshape = network.add_shuffle(v)
+        v_reshape.reshape_dims = (sequence_length, kv_attention_size)
+        current_k = k_reshape.get_output(0)
+        current_v = v_reshape.get_output(0)
 
     # Concatenate with cache
     all_k = network.add_concatenation(
-        [cache_k, k_reshape.get_output(0)])
+        [cache_k, current_k])
     all_k.axis = 0
     all_v = network.add_concatenation(
-        [cache_v, v_reshape.get_output(0)])
+        [cache_v, current_v])
     all_v.axis = 0
 
     # ------------------------------------------------------------------ #
     # Attention core — native IAttention or FFI kernel                    #
     # ------------------------------------------------------------------ #
     if use_native_attention:
-        kv_seq = None if dynamic_kv_cache else attention_window
+        kv_seq = None if dynamic_kv_cache or sequence_length is None else attention_window
         if alibi_slopes_tensor is not None:
             if alibi_indices_tensor is None:
                 raise ValueError("ALiBi attention requires cache position indices")
@@ -296,7 +304,7 @@ def add_attention_block(
             num_heads=num_heads,
             head_dim=head_dim,
             num_kv_heads=num_kv_heads,
-            q_seq=1,
+            q_seq=sequence_length,
             kv_seq=kv_seq,
             causal=False,
             mask=mask_4d,

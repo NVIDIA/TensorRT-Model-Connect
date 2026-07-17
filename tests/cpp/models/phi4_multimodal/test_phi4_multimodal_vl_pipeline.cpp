@@ -41,8 +41,10 @@
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 static int failures = 0;
@@ -54,6 +56,130 @@ static void check(bool c, const char* n) {
 }
 
 static trtmc::TrtLogger g_logger;
+
+struct CountingTextStats {
+    int32_t calls{0};
+    std::unordered_map<std::string, std::vector<int64_t>> shapes;
+    std::unordered_map<std::string, std::vector<float>> float_values;
+};
+
+class CountingTextModule final : public trtmc::ITrtModule {
+  public:
+    CountingTextModule(std::shared_ptr<CountingTextStats> stats, bool prefill, cudaStream_t stream)
+        : stats_(std::move(stats)), prefill_(prefill), stream_(stream),
+          present_k_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
+                             : trtmc::DeviceTensor{}),
+          present_v_(prefill ? trtmc::DeviceTensor::zeros({8, 4}, trtmc::DType::kFloat32, stream)
+                             : trtmc::DeviceTensor{}) {}
+
+    trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
+        ++stats_->calls;
+        stats_->shapes.clear();
+        stats_->float_values.clear();
+        for (const auto& [name, tensor] : inputs) {
+            stats_->shapes[name] = tensor.shape;
+            if (tensor.dtype == trtmc::DType::kFloat32) {
+                const auto* begin = static_cast<const float*>(tensor.data);
+                stats_->float_values[name] =
+                    std::vector<float>(begin, begin + static_cast<std::ptrdiff_t>(tensor.numel()));
+            }
+        }
+        return {{"logits", trtmc::Tensor{logits_.data(), {1, 4}, trtmc::DType::kFloat32}}};
+    }
+    trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
+    void forward_device_async(const trtmc::DeviceTensorMap&) override {}
+    void forward_async(const trtmc::TensorMap& inputs) override { (void)forward(inputs); }
+    void sync() override {}
+    cudaStream_t stream() const override { return stream_; }
+    void enable_cuda_graph() override {}
+    bool cuda_graph_active() const override { return false; }
+    int32_t profile_idx() const override { return prefill_ ? 0 : 1; }
+    std::vector<trtmc::TensorInfo> input_info() const override { return {}; }
+    std::vector<trtmc::TensorInfo> output_info() const override { return {}; }
+    bool has_input(const std::string& name) const override {
+        return name == "token_id" || name == "position_id" || name == "attention_mask" ||
+               name == "input_embed" || name == "use_input_embed" || name == "deepstack_active" ||
+               name == "deepstack_embed_0" || name == "cache_k_0" || name == "cache_v_0";
+    }
+    bool has_output(const std::string& name) const override {
+        return name == "logits" || name == "present_k_0" || name == "present_v_0";
+    }
+    trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
+    std::vector<int64_t> tensor_shape(const std::string& name) const override {
+        if (name == "cache_k_0" || name == "cache_v_0")
+            return {8, 4};
+        return {};
+    }
+    std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
+                                             trtmc::ProfileShapeSelector) const override {
+        return {};
+    }
+    int32_t optimization_profile_count() const override { return prefill_ ? 2 : 1; }
+    void* device_ptr(const std::string& name) const override {
+        if (name == "present_k_0")
+            return const_cast<void*>(present_k_.data());
+        if (name == "present_v_0")
+            return const_cast<void*>(present_v_.data());
+        return nullptr;
+    }
+    void bind_external(const std::string&, void*) override {}
+    int32_t input_rank(const std::string& name) const override {
+        return name == "token_id" || name == "position_id" ? 1 : 2;
+    }
+    bool input_is_dynamic(const std::string&) const override { return prefill_; }
+    bool ok() const override { return !prefill_ || (present_k_.ok() && present_v_.ok()); }
+    void keep_alive(std::shared_ptr<void>) override {}
+
+  private:
+    std::shared_ptr<CountingTextStats> stats_;
+    bool prefill_{false};
+    cudaStream_t stream_{nullptr};
+    mutable trtmc::DeviceTensor present_k_;
+    mutable trtmc::DeviceTensor present_v_;
+    std::vector<float> logits_{0.1F, 0.2F, 0.9F, 0.3F};
+};
+
+class FakeSequenceVisionModule final : public trtmc::ITrtModule {
+  public:
+    trtmc::TensorMap forward(const trtmc::TensorMap&) override {
+        return {{"image_features", trtmc::Tensor{features_.data(), {1, 4}, trtmc::DType::kFloat32}},
+                {"deepstack_features_0",
+                 trtmc::Tensor{deepstack_.data(), {1, 4}, trtmc::DType::kFloat32}}};
+    }
+    trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
+    void forward_device_async(const trtmc::DeviceTensorMap&) override {}
+    void forward_async(const trtmc::TensorMap&) override {}
+    void sync() override {}
+    cudaStream_t stream() const override { return nullptr; }
+    void enable_cuda_graph() override {}
+    bool cuda_graph_active() const override { return false; }
+    int32_t profile_idx() const override { return 0; }
+    std::vector<trtmc::TensorInfo> input_info() const override {
+        return {{"pixel_values", {3, 4, 4}, trtmc::DType::kFloat32, true}};
+    }
+    std::vector<trtmc::TensorInfo> output_info() const override {
+        return {{"image_features", {1, 4}, trtmc::DType::kFloat32, false}};
+    }
+    bool has_input(const std::string& name) const override { return name == "pixel_values"; }
+    bool has_output(const std::string& name) const override {
+        return name == "image_features" || name == "deepstack_features_0";
+    }
+    trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
+    std::vector<int64_t> tensor_shape(const std::string&) const override { return {}; }
+    std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
+                                             trtmc::ProfileShapeSelector) const override {
+        return {};
+    }
+    int32_t optimization_profile_count() const override { return 1; }
+    void* device_ptr(const std::string&) const override { return nullptr; }
+    void bind_external(const std::string&, void*) override {}
+    bool ok() const override { return true; }
+    void keep_alive(std::shared_ptr<void>) override {}
+
+  private:
+    std::vector<float> features_{10.0F, 11.0F, 12.0F, 13.0F};
+    std::vector<float> deepstack_{20.0F, 21.0F, 22.0F, 23.0F};
+};
 
 // ---------------------------------------------------------------------------
 // Inline FixedTokenizer for string-based generate() tests
@@ -577,6 +703,63 @@ static void test_vl_generate_with_embed_decoder() {
     cudaStreamDestroy(stream);
 }
 
+static void test_vl_sequence_prefill_uses_one_text_launch() {
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto decode_stats = std::make_shared<CountingTextStats>();
+    auto prefill_stats = std::make_shared<CountingTextStats>();
+    auto decoder = std::make_unique<CountingTextModule>(decode_stats, false, stream);
+    auto prefill = std::make_unique<CountingTextModule>(prefill_stats, true, stream);
+    auto vision = std::make_unique<FakeSequenceVisionModule>();
+    auto cache = std::make_unique<trtmc::Phi4MultimodalKvCache>(1, 8, 4, stream);
+
+    trtmc::Phi4MultimodalConfig cfg;
+    cfg.vocab_size = 4;
+    cfg.id_eos = 2;
+    cfg.image_token_id = 1;
+    cfg.vision_output_dim = 4;
+    cfg.num_layers = 1;
+    cfg.prefill_max_length = 8;
+
+    trtmc::Phi4MultimodalPreprocessConfig vl_pp;
+    vl_pp.preprocessor_type = "simple_chw";
+    vl_pp.fixed_image_size = 4;
+    vl_pp.in_channels = 3;
+
+    auto tokenizer = std::make_shared<VLFixedTokenizer>();
+    trtmc::Phi4MultimodalPipeline pipeline(std::move(decoder), std::move(vision), std::move(cache),
+                                           cfg, vl_pp, stream, tokenizer, "", nullptr,
+                                           std::move(prefill));
+
+    float pixels[2 * 2 * 3] = {0.5F, 0.5F, 0.5F, 0.4F, 0.4F, 0.4F,
+                               0.3F, 0.3F, 0.3F, 0.2F, 0.2F, 0.2F};
+    trtmc::GenerateConfig gen_cfg;
+    gen_cfg.max_new_tokens = 1;
+    gen_cfg.eos_token_id = 2;
+    auto result = pipeline.generate("test", pixels, 2, 2, gen_cfg);
+
+    check(result.token_ids == std::vector<int32_t>{2}, "sequence prefill: output remains correct");
+    check(prefill_stats->calls == 1, "sequence prefill: one prefill launch");
+    check(decode_stats->calls == 0, "sequence prefill: no prompt-linear decode launches");
+    check(prefill_stats->shapes["token_id"] == std::vector<int64_t>{3},
+          "sequence prefill: token shape");
+    check(prefill_stats->shapes["input_embed"] == std::vector<int64_t>({3, 4}),
+          "sequence prefill: input embed shape");
+    check(prefill_stats->shapes["use_input_embed"] == std::vector<int64_t>({3, 1}),
+          "sequence prefill: embed selector shape");
+    check(prefill_stats->shapes["deepstack_embed_0"] == std::vector<int64_t>({3, 4}),
+          "sequence prefill: deepstack embed shape");
+    check(prefill_stats->shapes["deepstack_active"] == std::vector<int64_t>({3, 1}),
+          "sequence prefill: deepstack selector shape");
+    check(prefill_stats->float_values["use_input_embed"] == std::vector<float>({1.0F, 0.0F, 0.0F}),
+          "sequence prefill: image embedding selected by position");
+    check(prefill_stats->float_values["deepstack_active"] == std::vector<float>({1.0F, 0.0F, 0.0F}),
+          "sequence prefill: deepstack selected by position");
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_vl_generate_with_tokenizer() {
     // Covers the string-based generate(const string&, cfg) method
     auto engine = build_mock_decoder();
@@ -625,6 +808,7 @@ int main() {
     test_vl_generate_with_image_no_encoder();
     test_vl_generate_with_vision_encoder();
     test_vl_generate_with_embed_decoder();
+    test_vl_sequence_prefill_uses_one_text_launch();
     test_vl_generate_with_tokenizer();
     if (failures > 0)
         std::cerr << failures << " FAILED\n";

@@ -6,6 +6,7 @@
 #include "runtime/models/internvl/pipeline.h"
 
 #include "runtime/models/internvl/image_preprocessor.h"
+#include "runtime/models/internvl/tensor_names.h"
 
 #include <algorithm>
 #include <cstring>
@@ -14,27 +15,41 @@
 
 namespace trtmc {
 
+namespace {
+
+void validate_pipeline_components(const TrtModule* text_decoder,
+                                  const InternvlInferenceState* state, const TrtModule* prefill) {
+    if (text_decoder == nullptr || !text_decoder->ok())
+        throw std::runtime_error("InternVlPipeline: invalid text decoder");
+    if (state == nullptr || !state->ok())
+        throw std::runtime_error("InternVlPipeline: invalid inference state");
+    if (prefill != nullptr && !prefill->ok())
+        throw std::runtime_error("InternVlPipeline: invalid prefill decoder");
+}
+
+void sync_vision_config(InternVlConfig& config, const InternVlPreprocessConfig& preprocess) {
+    if (config.image_token_id < 0 && preprocess.image_token_id >= 0)
+        config.image_token_id = preprocess.image_token_id;
+    if (config.vision_output_dim <= 0 && preprocess.vision_output_dim > 0)
+        config.vision_output_dim = preprocess.vision_output_dim;
+}
+
+} // namespace
+
 InternVlPipeline::InternVlPipeline(std::unique_ptr<TrtModule> text_decoder,
                                    std::unique_ptr<TrtModule> vision_encoder,
                                    std::unique_ptr<InternvlInferenceState> state,
                                    InternVlConfig config, InternVlPreprocessConfig vl_preprocess,
                                    cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
                                    std::string model_id_str,
-                                   std::unique_ptr<InternVlISampler> sampler)
-    : text_decoder_(std::move(text_decoder)), vision_encoder_(std::move(vision_encoder)),
-      state_(std::move(state)), config_(config), vl_preprocess_(std::move(vl_preprocess)),
-      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      sampler_(std::move(sampler)) {
-    if (!text_decoder_ || !text_decoder_->ok())
-        throw std::runtime_error("InternVlPipeline: invalid text decoder");
-    if (!state_ || !state_->ok())
-        throw std::runtime_error("InternVlPipeline: invalid inference state");
-
-    // Sync image_token_id from InternVlPreprocessConfig if not set in InternVlConfig
-    if (config_.image_token_id < 0 && vl_preprocess_.image_token_id >= 0)
-        config_.image_token_id = vl_preprocess_.image_token_id;
-    if (config_.vision_output_dim <= 0 && vl_preprocess_.vision_output_dim > 0)
-        config_.vision_output_dim = vl_preprocess_.vision_output_dim;
+                                   std::unique_ptr<InternVlISampler> sampler,
+                                   std::unique_ptr<TrtModule> prefill)
+    : text_decoder_(std::move(text_decoder)), prefill_(std::move(prefill)),
+      vision_encoder_(std::move(vision_encoder)), state_(std::move(state)), config_(config),
+      vl_preprocess_(std::move(vl_preprocess)), stream_(stream), tokenizer_(std::move(tokenizer)),
+      model_id_(std::move(model_id_str)), sampler_(std::move(sampler)) {
+    validate_pipeline_components(text_decoder_.get(), state_.get(), prefill_.get());
+    sync_vision_config(config_, vl_preprocess_);
 }
 
 TextResult InternVlPipeline::generate(const std::string& prompt, const GenerateConfig& cfg) {
@@ -94,6 +109,193 @@ select_deepstack_feature_pointers(const std::vector<std::vector<float>>& deepsta
                              : nullptr);
     }
     return embeds;
+}
+
+struct VlSequenceEmbeddingInputs {
+    std::vector<float> input_embed;
+    std::vector<float> use_input_embed;
+    std::vector<std::vector<float>> deepstack_embed;
+    std::vector<float> deepstack_active;
+};
+
+VlSequenceEmbeddingInputs
+build_vl_sequence_embedding_inputs(const std::vector<int32_t>& input_ids, int32_t image_token_id,
+                                   const std::vector<float>& image_features,
+                                   const std::vector<std::vector<float>>& deepstack_features,
+                                   int32_t num_features, int32_t feature_dim) {
+    const auto sq = input_ids.size();
+    VlSequenceEmbeddingInputs result;
+    result.input_embed.assign(sq * static_cast<std::size_t>(feature_dim), 0.0F);
+    result.use_input_embed.assign(sq, 0.0F);
+    result.deepstack_active.assign(sq, 0.0F);
+    result.deepstack_embed.resize(deepstack_features.size());
+    for (auto& level : result.deepstack_embed)
+        level.assign(sq * static_cast<std::size_t>(feature_dim), 0.0F);
+
+    int32_t feature_index = 0;
+    for (std::size_t token_index = 0; token_index < sq; ++token_index) {
+        if (input_ids[token_index] != image_token_id || feature_index >= num_features)
+            continue;
+        const auto source_offset = static_cast<std::size_t>(feature_index) * feature_dim;
+        const auto target_offset = token_index * static_cast<std::size_t>(feature_dim);
+        std::copy_n(image_features.data() + source_offset, feature_dim,
+                    result.input_embed.data() + target_offset);
+        result.use_input_embed[token_index] = 1.0F;
+
+        for (std::size_t level_index = 0; level_index < deepstack_features.size(); ++level_index) {
+            const auto& source = deepstack_features[level_index];
+            if (source_offset + static_cast<std::size_t>(feature_dim) > source.size())
+                continue;
+            std::copy_n(source.data() + source_offset, feature_dim,
+                        result.deepstack_embed[level_index].data() + target_offset);
+            result.deepstack_active[token_index] = 1.0F;
+        }
+        ++feature_index;
+    }
+    return result;
+}
+
+bool gather_vl_prefill_kv_pointers(TrtModule& prefill, const InternVlConfig& config,
+                                   std::vector<const void*>& present_k,
+                                   std::vector<const void*>& present_v) {
+    present_k.resize(static_cast<std::size_t>(config.num_layers));
+    present_v.resize(static_cast<std::size_t>(config.num_layers));
+    for (int32_t layer = 0; layer < config.num_layers; ++layer) {
+        const auto index = static_cast<std::size_t>(layer);
+        present_k[index] =
+            prefill.device_ptr(internvl_expand_layer_name(config.present_k_pattern, layer));
+        present_v[index] =
+            prefill.device_ptr(internvl_expand_layer_name(config.present_v_pattern, layer));
+        if (present_k[index] == nullptr || present_v[index] == nullptr)
+            return false;
+    }
+    return true;
+}
+
+InternvlKvCache* eligible_vl_prefill_cache(TrtModule* prefill, InternvlInferenceState* state,
+                                           const InternVlConfig& config, int32_t sequence_length,
+                                           int32_t feature_dim) {
+    if (prefill == nullptr)
+        return nullptr;
+    if (sequence_length <= 0 || feature_dim <= 0 || config.num_layers <= 0)
+        return nullptr;
+    if (!prefill->has_input("input_embed"))
+        return nullptr;
+    if (config.prefill_max_length > 0 && sequence_length > config.prefill_max_length)
+        return nullptr;
+    return dynamic_cast<InternvlKvCache*>(state);
+}
+
+bool valid_vl_features(const std::vector<float>& image_features, int32_t num_features,
+                       int32_t feature_dim) {
+    if (num_features < 0)
+        return false;
+    const auto required =
+        static_cast<std::size_t>(num_features) * static_cast<std::size_t>(feature_dim);
+    return image_features.size() >= required;
+}
+
+void add_vl_prefill_base_inputs(TensorMap& inputs, InternvlInferenceState& state,
+                                const std::vector<int32_t>& input_ids,
+                                VlSequenceEmbeddingInputs& embedding_inputs, int32_t feature_dim) {
+    const auto sequence_length = static_cast<int32_t>(input_ids.size());
+    inputs["token_id"] =
+        Tensor{const_cast<int32_t*>(input_ids.data()), {sequence_length}, DType::kInt32};
+    state.prepare_step(inputs, sequence_length);
+    inputs["input_embed"] = Tensor{
+        embedding_inputs.input_embed.data(), {sequence_length, feature_dim}, DType::kFloat32};
+    inputs["use_input_embed"] =
+        Tensor{embedding_inputs.use_input_embed.data(), {sequence_length, 1}, DType::kFloat32};
+}
+
+bool add_vl_prefill_deepstack_inputs(TrtModule& prefill, TensorMap& inputs,
+                                     VlSequenceEmbeddingInputs& embedding_inputs,
+                                     int32_t sequence_length, int32_t feature_dim) {
+    if (!prefill.has_input("deepstack_active"))
+        return true;
+    inputs["deepstack_active"] =
+        Tensor{embedding_inputs.deepstack_active.data(), {sequence_length, 1}, DType::kFloat32};
+    for (std::size_t level = 0;; ++level) {
+        const auto name = "deepstack_embed_" + std::to_string(level);
+        if (!prefill.has_input(name))
+            break;
+        if (level >= embedding_inputs.deepstack_embed.size())
+            return false;
+        inputs[name] = Tensor{embedding_inputs.deepstack_embed[level].data(),
+                              {sequence_length, feature_dim},
+                              DType::kFloat32};
+    }
+    return true;
+}
+
+bool copy_last_prefill_logits(const TensorMap& outputs, int32_t vocab_size,
+                              std::vector<float>& logits) {
+    const auto logits_it = outputs.find("logits");
+    if (logits_it == outputs.end())
+        return false;
+    const auto size = static_cast<std::size_t>(vocab_size);
+    if (logits_it->second.numel() < size)
+        return false;
+    const auto offset = logits_it->second.numel() - size;
+    logits.resize(size);
+    std::memcpy(logits.data(), static_cast<const float*>(logits_it->second.data) + offset,
+                size * sizeof(float));
+    return true;
+}
+
+int32_t resolve_input_embed_dim(const TrtModule& decoder, int32_t configured_dim) {
+    if (configured_dim > 0)
+        return configured_dim;
+    const auto declared_shape = decoder.tensor_shape("input_embed");
+    if (!declared_shape.empty())
+        return static_cast<int32_t>(declared_shape.back());
+    throw std::runtime_error("InternVlPipeline: invalid input embedding dimension");
+}
+
+std::vector<int64_t> selector_shape(const TrtModule& decoder, const std::string& name) {
+    return decoder.input_rank(name) == 2 ? std::vector<int64_t>{1, 1} : std::vector<int64_t>{1};
+}
+
+void add_text_step_deepstack_inputs(TrtModule& decoder, TensorMap& inputs, int32_t embed_dim,
+                                    const std::vector<const float*>& deepstack_embeds,
+                                    float& deepstack_active, std::vector<float>& zero_deepstack) {
+    if (!decoder.has_input("deepstack_active"))
+        return;
+    inputs["deepstack_active"] =
+        Tensor{&deepstack_active, selector_shape(decoder, "deepstack_active"), DType::kFloat32};
+    for (std::size_t index = 0;; ++index) {
+        const auto name = "deepstack_embed_" + std::to_string(index);
+        if (!decoder.has_input(name))
+            break;
+        const float* embed = index < deepstack_embeds.size() ? deepstack_embeds[index] : nullptr;
+        if (embed == nullptr) {
+            if (zero_deepstack.empty())
+                zero_deepstack.resize(static_cast<std::size_t>(embed_dim), 0.0F);
+            embed = zero_deepstack.data();
+        }
+        inputs[name] = Tensor{const_cast<float*>(embed), {1, embed_dim}, DType::kFloat32};
+    }
+}
+
+void add_text_step_embedding_inputs(TrtModule& decoder, const InternVlConfig& config,
+                                    TensorMap& inputs, const float* input_embed,
+                                    float& use_input_embed,
+                                    const std::vector<const float*>& deepstack_embeds,
+                                    float& deepstack_active, std::vector<float>& zero_embed,
+                                    std::vector<float>& zero_deepstack) {
+    if (!decoder.has_input("input_embed"))
+        return;
+    const int32_t embed_dim = resolve_input_embed_dim(decoder, config.vision_output_dim);
+    if (input_embed == nullptr) {
+        zero_embed.resize(static_cast<std::size_t>(embed_dim), 0.0F);
+        input_embed = zero_embed.data();
+    }
+    inputs["input_embed"] =
+        Tensor{const_cast<float*>(input_embed), {1, embed_dim}, DType::kFloat32};
+    inputs["use_input_embed"] =
+        Tensor{&use_input_embed, selector_shape(decoder, "use_input_embed"), DType::kFloat32};
+    add_text_step_deepstack_inputs(decoder, inputs, embed_dim, deepstack_embeds, deepstack_active,
+                                   zero_deepstack);
 }
 
 Tensor make_pixel_values_tensor(const InternVlPreprocessedImage& preprocessed,
@@ -223,6 +425,10 @@ std::vector<int32_t> InternVlPipeline::generate_from_ids(const std::vector<int32
     active_sampler->reset();
 
     state_->reset();
+    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
+    text_decoder_->reset_execution_context();
+    if (prefill_)
+        prefill_->reset_execution_context();
     state_->bind_to(*text_decoder_);
 
     std::vector<float> logits;
@@ -263,18 +469,59 @@ std::vector<int32_t> InternVlPipeline::generate_vl_from_ids(
     active_sampler->reset();
 
     state_->reset();
+    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
+    text_decoder_->reset_execution_context();
+    if (prefill_)
+        prefill_->reset_execution_context();
     state_->bind_to(*text_decoder_);
 
     std::vector<float> logits;
-    int32_t feature_index = 0;
-
-    for (const auto& tid : input_ids)
-        run_vl_prefill_token(tid, image_features, deepstack_features, num_features, feature_dim,
-                             feature_index, logits);
+    if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,
+                                feature_dim, logits)) {
+        int32_t feature_index = 0;
+        for (const auto& tid : input_ids)
+            run_vl_prefill_token(tid, image_features, deepstack_features, num_features, feature_dim,
+                                 feature_index, logits);
+    }
+    state_->mark_prefill_complete();
 
     std::vector<int32_t> output = input_ids;
     run_vl_decode_loop(active_sampler, params, output, logits, max_new_tokens);
     return output;
+}
+
+bool InternVlPipeline::run_vl_prefill_batched(
+    const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
+    const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
+    int32_t feature_dim, std::vector<float>& logits) {
+    const auto sq = static_cast<int32_t>(input_ids.size());
+    auto* kv_cache =
+        eligible_vl_prefill_cache(prefill_.get(), state_.get(), config_, sq, feature_dim);
+    if (kv_cache == nullptr)
+        return false;
+    if (!valid_vl_features(image_features, num_features, feature_dim))
+        return false;
+
+    kv_cache->bind_cache_inputs(*prefill_);
+    auto embedding_inputs =
+        build_vl_sequence_embedding_inputs(input_ids, config_.image_token_id, image_features,
+                                           deepstack_features, num_features, feature_dim);
+
+    TensorMap inputs;
+    add_vl_prefill_base_inputs(inputs, *state_, input_ids, embedding_inputs, feature_dim);
+    if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, sq, feature_dim))
+        return false;
+
+    auto outputs = prefill_->forward(inputs);
+    if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
+        return false;
+
+    std::vector<const void*> present_k;
+    std::vector<const void*> present_v;
+    if (!gather_vl_prefill_kv_pointers(*prefill_, config_, present_k, present_v))
+        return false;
+    kv_cache->write_prefill_kv(present_k, present_v, sq);
+    return true;
 }
 
 void InternVlPipeline::run_vl_prefill_token(
@@ -311,27 +558,7 @@ void InternVlPipeline::run_vl_decode_loop(InternVlISampler* sampler,
 }
 
 void InternVlPipeline::run_text_step(int32_t token_id, std::vector<float>& logits) {
-    TensorMap inputs;
-
-    Tensor token_t;
-    token_t.data = &token_id;
-    token_t.shape = {1};
-    token_t.dtype = DType::kInt32;
-    inputs["token_id"] = token_t;
-
-    state_->prepare_step(inputs);
-
-    auto outputs = text_decoder_->forward(inputs);
-
-    auto it = outputs.find("logits");
-    if (it == outputs.end())
-        throw std::runtime_error("InternVlPipeline: no 'logits' output");
-
-    auto n = it->second.numel();
-    logits.resize(static_cast<std::size_t>(n));
-    std::memcpy(logits.data(), it->second.data, n * sizeof(float));
-
-    state_->advance();
+    run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, logits);
 }
 
 void InternVlPipeline::run_text_step_with_embed(int32_t token_id, const float* input_embed,
@@ -339,11 +566,6 @@ void InternVlPipeline::run_text_step_with_embed(int32_t token_id, const float* i
                                                 const std::vector<const float*>& deepstack_embeds,
                                                 float deepstack_active,
                                                 std::vector<float>& logits) {
-    if (!text_decoder_->has_input("input_embed")) {
-        run_text_step(token_id, logits);
-        return;
-    }
-
     TensorMap inputs;
 
     Tensor token_t;
@@ -354,56 +576,10 @@ void InternVlPipeline::run_text_step_with_embed(int32_t token_id, const float* i
 
     state_->prepare_step(inputs);
 
-    // use_input_embed scalar: 1.0 = use input_embed, 0.0 = use token embedding
-    Tensor use_embed_t;
-    use_embed_t.data = &use_input_embed;
-    use_embed_t.shape = {1};
-    use_embed_t.dtype = DType::kFloat32;
-    inputs["use_input_embed"] = use_embed_t;
-
-    // Provide the input embedding vector
-    int32_t embed_dim = config_.vision_output_dim;
     std::vector<float> zero_embed;
-    if (input_embed == nullptr) {
-        zero_embed.resize(static_cast<std::size_t>(embed_dim), 0.0F);
-        input_embed = zero_embed.data();
-    }
-
-    Tensor embed_t;
-    embed_t.data = const_cast<float*>(input_embed);
-    embed_t.shape = {static_cast<int64_t>(embed_dim)};
-    embed_t.dtype = DType::kFloat32;
-    inputs["input_embed"] = embed_t;
-
-    // DeepStack: if the engine has deepstack inputs, provide inactive zeros.
-    if (text_decoder_->has_input("deepstack_active")) {
-        Tensor ds_active_t;
-        ds_active_t.data = &deepstack_active;
-        ds_active_t.shape = {1};
-        ds_active_t.dtype = DType::kFloat32;
-        inputs["deepstack_active"] = ds_active_t;
-
-        std::vector<float> zero_deepstack;
-        for (std::size_t i = 0;; ++i) {
-            const std::string name = "deepstack_embed_" + std::to_string(i);
-            if (!text_decoder_->has_input(name))
-                break;
-
-            const float* deepstack_embed =
-                i < deepstack_embeds.size() ? deepstack_embeds[i] : nullptr;
-            if (deepstack_embed == nullptr) {
-                if (zero_deepstack.empty())
-                    zero_deepstack.resize(static_cast<std::size_t>(embed_dim), 0.0F);
-                deepstack_embed = zero_deepstack.data();
-            }
-
-            Tensor ds_embed_t;
-            ds_embed_t.data = const_cast<float*>(deepstack_embed);
-            ds_embed_t.shape = {1, static_cast<int64_t>(embed_dim)};
-            ds_embed_t.dtype = DType::kFloat32;
-            inputs[name] = ds_embed_t;
-        }
-    }
+    std::vector<float> zero_deepstack;
+    add_text_step_embedding_inputs(*text_decoder_, config_, inputs, input_embed, use_input_embed,
+                                   deepstack_embeds, deepstack_active, zero_embed, zero_deepstack);
 
     auto outputs = text_decoder_->forward(inputs);
 

@@ -9,7 +9,7 @@ Shared test code is limited to filesystem and serialization helpers.
 
 from __future__ import annotations
 
-
+import importlib
 
 from tests.builder.family_plugin_test_support import (
     ModelConfig,
@@ -17,6 +17,24 @@ from tests.builder.family_plugin_test_support import (
     _write_config,
     _write_safetensors,
 )
+
+
+def test_locateanything_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.locateanything.default_decoder")
+    calls: dict[str, object] = {}
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls["build"] = (config, weights, max_cache_length, kwargs)
+        return b"locateanything-dual-profile-plan"
+
+    monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
+    config = type("Config", (), {"raw": {"_decoder_engine_role": "decode"}})()
+    result = module.build_standard_decoder_engine(
+        config, {}, 31, precision="fp16", embed_input=True)
+
+    assert result == b"locateanything-dual-profile-plan"
+    assert calls["build"][3]["embed_input"] is True
 
 
 class TestLocateAnythingPlugin:

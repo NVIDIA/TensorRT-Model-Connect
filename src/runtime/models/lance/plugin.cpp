@@ -92,14 +92,19 @@ LanceKvCacheNames build_kv_cache_names(const BaseConfig& config) {
     return kv_names;
 }
 
-LoadedModule load_text_module(const PipelineContext& ctx, TextModuleRuntime& runtime,
-                              const std::shared_ptr<LanceCudaStream>& stream) {
+DualProfileModules load_text_modules(const PipelineContext& ctx, TextModuleRuntime& runtime,
+                                     const std::shared_ptr<LanceCudaStream>& stream) {
     auto loaded =
-        load_trt_module_from_plan(ctx.backend, find_section(ctx.bundle, runtime.engine_section),
+        load_dual_profile_modules(ctx.backend, find_section(ctx.bundle, runtime.engine_section),
                                   runtime.engine_section.c_str(), runtime.options);
-    loaded.module->keep_alive(stream);
-    if (runtime.tp_group.owner)
-        loaded.module->keep_alive(runtime.tp_group.owner);
+    loaded.decode->keep_alive(stream);
+    if (loaded.prefill)
+        loaded.prefill->keep_alive(stream);
+    if (runtime.tp_group.owner) {
+        loaded.decode->keep_alive(runtime.tp_group.owner);
+        if (loaded.prefill)
+            loaded.prefill->keep_alive(runtime.tp_group.owner);
+    }
     return loaded;
 }
 
@@ -152,12 +157,12 @@ class VLPlugin final : public IPipelinePlugin {
 
         LanceKvCacheNames kv_names = build_kv_cache_names(ctx.config);
 
-        auto loaded = load_text_module(ctx, text_runtime, shared_stream);
+        auto loaded = load_text_modules(ctx, text_runtime, shared_stream);
 
-        cudaStream_t stream = loaded.module->stream();
+        cudaStream_t stream = loaded.decode->stream();
         const std::string cache_k_name =
             kv_names.cache_k.empty() ? std::string("cache_k_0") : kv_names.cache_k.front();
-        int32_t kv_dim = decoder_cache_row_width(*loaded.module, cache_k_name, ctx.config);
+        int32_t kv_dim = decoder_cache_row_width(*loaded.decode, cache_k_name, ctx.config);
         DType cache_dtype = cache_dtype_from_precision(ctx.config.precision);
         std::unique_ptr<LanceInferenceState> state =
             std::make_unique<LanceKvCache>(ctx.config.num_layers, ctx.config.max_cache_length,
@@ -171,7 +176,11 @@ class VLPlugin final : public IPipelinePlugin {
         vlc.id_eos = ctx.config.id_eos;
         vlc.image_token_id = extract_json_int(ctx.config_json, "image_token_id", -1);
         vlc.vision_output_dim = extract_json_int(ctx.config_json, "vision_output_dim", 0);
-        vlc.has_position_input = loaded.module->has_input("position_id");
+        vlc.has_position_input = loaded.decode->has_input("position_id");
+        vlc.num_layers = ctx.config.num_layers;
+        vlc.prefill_max_length = ctx.config.max_cache_length;
+        vlc.present_k_pattern = ctx.config.io_map.present_k_pattern;
+        vlc.present_v_pattern = ctx.config.io_map.present_v_pattern;
 
         bool has_vision_engine = extract_json_int(ctx.config_json, "has_vision_engine", 0) != 0;
 
@@ -186,9 +195,10 @@ class VLPlugin final : public IPipelinePlugin {
             bundle_section_text(ctx.bundle, "preprocessor_config.json");
         auto vl_preprocess = lance_parse_preprocess_config(config_text, preproc_text);
 
-        return std::make_unique<LancePipeline>(std::move(loaded.module), std::move(vision_module),
+        return std::make_unique<LancePipeline>(std::move(loaded.decode), std::move(vision_module),
                                                std::move(state), vlc, vl_preprocess, stream,
-                                               std::move(tokenizer), ctx.bundle.info.model_id);
+                                               std::move(tokenizer), ctx.bundle.info.model_id,
+                                               nullptr, std::move(loaded.prefill));
     }
 };
 

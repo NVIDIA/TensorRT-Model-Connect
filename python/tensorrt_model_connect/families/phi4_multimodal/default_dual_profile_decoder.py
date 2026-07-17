@@ -161,6 +161,7 @@ def build_dual_profile_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
+    embed_input: bool = False,
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
     profile_mode: str = "dual_profile",
@@ -246,6 +247,13 @@ def build_dual_profile_decoder_engine(
     token_id = network.add_input("token_id", trt.int32, (-1,))
     position_id = network.add_input("position_id", trt.int32, (-1,))
     attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
+    input_embed_tensor = None
+    use_input_embed_tensor = None
+    if embed_input:
+        input_embed_tensor = network.add_input(
+            "input_embed", trt.float32, (-1, hidden))
+        use_input_embed_tensor = network.add_input(
+            "use_input_embed", trt.float32, (-1, 1))
 
     cache_shape: tuple[int, int]
     if multi_bucket_decode:
@@ -285,6 +293,11 @@ def build_dual_profile_decoder_engine(
             (min_sq, max_cache_length + min_sq),
             (opt_sq, max_cache_length + opt_sq),
             (max_sq, max_cache_length + max_sq))
+        if embed_input:
+            prof.set_shape(
+                "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
+            prof.set_shape(
+                "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
         if multi_bucket_decode:
             cmn = cache_rows_min if cache_rows_min is not None else 1
             cop = cache_rows_opt if cache_rows_opt is not None else max_cache_length
@@ -350,12 +363,32 @@ def build_dual_profile_decoder_engine(
     if position_type == "rope":
         kmax = max_cache_length + max_prefill_length
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
+        rope_frequency_factors = None
+        rope_attention_factor = 1.0
+        rope_scaling = config.raw.get("rope_scaling") or {}
+        if rope_scaling.get("type") == "longrope":
+            original_max = int(config.raw.get(
+                "original_max_position_embeddings",
+                config.raw.get("max_position_embeddings", kmax)))
+            max_positions = int(config.raw.get(
+                "max_position_embeddings", original_max))
+            extension_factor = max_positions / max(original_max, 1)
+            rope_attention_factor = float(rope_scaling.get(
+                "attention_factor",
+                1.0 if extension_factor <= 1.0 else np.sqrt(
+                    1.0 + np.log(extension_factor) / np.log(original_max))))
+            factor_key = "long_factor" if kmax > original_max else "short_factor"
+            rope_frequency_factors = rope_scaling.get(factor_key)
         cos_half_np = graph_ops.make_rope_table_half_dim(
             kmax, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope)
+            partial_rotary_factor, interleaved=interleaved_rope,
+            frequency_factors=rope_frequency_factors,
+            attention_factor=rope_attention_factor)
         sin_half_np = graph_ops.make_rope_table_half_dim(
             kmax, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope)
+            partial_rotary_factor, interleaved=interleaved_rope,
+            frequency_factors=rope_frequency_factors,
+            attention_factor=rope_attention_factor)
         cos_half_table = _const_in_work_dtype(
             network, cos_half_np.shape, cos_half_np,
             work_np_dtype, work_trt_dtype)
@@ -408,6 +441,28 @@ def build_dual_profile_decoder_engine(
     # ---- Embedding -------------------------------------------------------
     emb = network.add_gather(embedding_table, token_id, 0)
     hidden_state = emb.get_output(0)  # (Sq, hidden)
+
+    if input_embed_tensor is not None and use_input_embed_tensor is not None:
+        token_embed = hidden_state
+        if token_embed.dtype != work_trt_dtype:
+            token_embed = network.add_cast(token_embed, work_trt_dtype).get_output(0)
+        input_embed = input_embed_tensor
+        if input_embed.dtype != work_trt_dtype:
+            input_embed = network.add_cast(input_embed, work_trt_dtype).get_output(0)
+        embed_selector = use_input_embed_tensor
+        if embed_selector.dtype != work_trt_dtype:
+            embed_selector = network.add_cast(embed_selector, work_trt_dtype).get_output(0)
+        one = _const_in_work_dtype(
+            network, (1, 1), np.array([[1.0]], dtype=work_np_dtype),
+            work_np_dtype, work_trt_dtype)
+        inverse_selector = network.add_elementwise(
+            one, embed_selector, trt.ElementWiseOperation.SUB).get_output(0)
+        token_part = network.add_elementwise(
+            inverse_selector, token_embed, trt.ElementWiseOperation.PROD).get_output(0)
+        embed_part = network.add_elementwise(
+            embed_selector, input_embed, trt.ElementWiseOperation.PROD).get_output(0)
+        hidden_state = network.add_elementwise(
+            token_part, embed_part, trt.ElementWiseOperation.SUM).get_output(0)
 
     if position_type == "learned" and position_embed_table is not None:
         pos_gather = network.add_gather(position_embed_table, position_id, 0)
@@ -518,7 +573,8 @@ def build_dual_profile_decoder_engine(
             num_heads=num_heads, head_dim=head_dim,
             num_kv_heads=num_kv_heads,
             q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
-            scale=attn_scale, tag=f"{prefix}.attn")
+            scale=attn_scale, tag=f"{prefix}.attn",
+            explicit_attention=bool(weights.get("_explicit_attention", False)))
 
         attn_out = matmul(context, attention_size, hidden,
                           weights[f"{prefix}.w_o"], f"{prefix}.w_o")

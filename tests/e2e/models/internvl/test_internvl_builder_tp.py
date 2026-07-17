@@ -19,6 +19,26 @@ from tensorrt_model_connect.parallel_config import ParallelConfig
 
 class _Config:
     model_type = "internvl_chat"
+    raw = {}
+
+
+def test_internvl_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.internvl.default_decoder")
+    calls: dict[str, object] = {}
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls["build"] = (config, weights, max_cache_length, kwargs)
+        return b"internvl-dual-profile-plan"
+
+    monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
+    config = _Config()
+    config.raw = {"_decoder_engine_role": "decode"}
+    result = module.build_standard_decoder_engine(
+        config, {}, 31, precision="fp16", embed_input=True)
+
+    assert result == b"internvl-dual-profile-plan"
+    assert calls["build"][3]["embed_input"] is True
 
 
 def test_internvl_tp_builder_rejects_single_device_mode() -> None:

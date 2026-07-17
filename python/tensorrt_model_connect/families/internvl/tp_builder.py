@@ -308,6 +308,10 @@ def build_dual_profile_tp_decoder_engine(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
+    multi_device_preview = getattr(
+        trt.PreviewFeature, "MULTIDEVICE_RUNTIME_10_16", None)
+    if multi_device_preview is not None:
+        trt_config.set_preview_feature(multi_device_preview, True)
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
@@ -324,9 +328,9 @@ def build_dual_profile_tp_decoder_engine(
     use_input_embed_tensor = None
     if embed_input:
         input_embed_tensor = network.add_input(
-            "input_embed", work_trt_dtype, (1, hidden))
+            "input_embed", trt.float32, (-1, hidden))
         use_input_embed_tensor = network.add_input(
-            "use_input_embed", trt.float32, (1,))
+            "use_input_embed", trt.float32, (-1, 1))
 
     cache_shape: tuple[int, int]
     if multi_bucket_decode:
@@ -366,6 +370,11 @@ def build_dual_profile_tp_decoder_engine(
             (min_sq, max_cache_length + min_sq),
             (opt_sq, max_cache_length + opt_sq),
             (max_sq, max_cache_length + max_sq))
+        if embed_input:
+            prof.set_shape(
+                "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
+            prof.set_shape(
+                "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
         if multi_bucket_decode:
             cmn = cache_rows_min if cache_rows_min is not None else 1
             cop = cache_rows_opt if cache_rows_opt is not None else max_cache_length
@@ -465,22 +474,25 @@ def build_dual_profile_tp_decoder_engine(
     hidden_state = emb.get_output(0)  # (Sq, hidden)
 
     if embed_input and input_embed_tensor is not None and use_input_embed_tensor is not None:
-        flag_broadcast = network.add_shuffle(use_input_embed_tensor)
-        flag_broadcast.reshape_dims = (1, 1)
-        flag_for_math = flag_broadcast.get_output(0)
-        if work_trt_dtype != trt.float32:
-            flag_for_math = network.add_cast(flag_for_math, work_trt_dtype).get_output(0)
-        one_const = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=work_np_dtype),
-            dtype=work_np_dtype)
+        token_embed = hidden_state
+        if token_embed.dtype != work_trt_dtype:
+            token_embed = network.add_cast(token_embed, work_trt_dtype).get_output(0)
+        input_embed = input_embed_tensor
+        if input_embed.dtype != work_trt_dtype:
+            input_embed = network.add_cast(input_embed, work_trt_dtype).get_output(0)
+        embed_selector = use_input_embed_tensor
+        if embed_selector.dtype != work_trt_dtype:
+            embed_selector = network.add_cast(embed_selector, work_trt_dtype).get_output(0)
+        one_const = _const_in_work_dtype(
+            network, (1, 1), np.array([[1.0]], dtype=work_np_dtype),
+            work_np_dtype, work_trt_dtype)
         inv_flag = network.add_elementwise(
-            one_const, flag_for_math,
-            trt.ElementWiseOperation.SUB)
+            one_const, embed_selector, trt.ElementWiseOperation.SUB)
         tok_part = network.add_elementwise(
-            inv_flag.get_output(0), hidden_state,
+            inv_flag.get_output(0), token_embed,
             trt.ElementWiseOperation.PROD)
         embed_part = network.add_elementwise(
-            flag_for_math, input_embed_tensor,
+            embed_selector, input_embed,
             trt.ElementWiseOperation.PROD)
         hidden_state_sum = network.add_elementwise(
             tok_part.get_output(0), embed_part.get_output(0),

@@ -291,7 +291,7 @@ class DeepSeekOCRPlugin:
         head_dim = attention_size // num_heads
         kv_attention_size = graph_blocks.infer_kv_attention_size(
             weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
-        attention_window = max_cache_length + 1
+        opt_prefill_length = min(64, max_cache_length)
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
         elif precision == "fp32":
@@ -323,16 +323,16 @@ class DeepSeekOCRPlugin:
         # -----------------------------------------------------------
         # Inputs
         # -----------------------------------------------------------
-        token_id = network.add_input("token_id", trt.int32, (1,))
-        position_id = network.add_input("position_id", trt.int32, (1,))
+        token_id = network.add_input("token_id", trt.int32, (-1,))
+        position_id = network.add_input("position_id", trt.int32, (-1,))
         attention_mask = network.add_input(
-            "attention_mask", trt.float32, (1, attention_window))
+            "attention_mask", trt.float32, (-1, -1))
 
         # VL embed_input: allow vision features to override embedding
         input_embed_tensor = network.add_input(
-            "input_embed", trt.float32, (1, hidden))
+            "input_embed", trt.float32, (-1, hidden))
         use_input_embed_tensor = network.add_input(
-            "use_input_embed", trt.float32, (1,))
+            "use_input_embed", trt.float32, (-1, 1))
 
         cache_k_inputs = []
         cache_v_inputs = []
@@ -345,6 +345,26 @@ class DeepSeekOCRPlugin:
                 trt.float32, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
+
+        def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False) -> None:
+            profile = builder.create_optimization_profile()
+            min_sq = opt_sq if fixed else 1
+            profile.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
+            profile.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+            profile.set_shape(
+                "attention_mask",
+                (min_sq, max_cache_length + min_sq),
+                (opt_sq, max_cache_length + opt_sq),
+                (max_sq, max_cache_length + max_sq))
+            profile.set_shape(
+                "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
+            profile.set_shape(
+                "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
+            trt_config.add_optimization_profile(profile)
+
+        _add_profile(opt_prefill_length, max_cache_length)
+        _add_profile(1, 1, fixed=True)
+
         if work_trt_dtype != trt.float32:
             attention_mask = network.add_cast(
                 attention_mask, work_trt_dtype).get_output(0)
@@ -369,9 +389,9 @@ class DeepSeekOCRPlugin:
 
         graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
         cos_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, True)
+            max_cache_length * 2, head_dim, config.rope_theta, True)
         sin_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, False)
+            max_cache_length * 2, head_dim, config.rope_theta, False)
         cos_half_tensor = graph_ops.add_constant(
             network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
         sin_half_tensor = graph_ops.add_constant(
@@ -395,19 +415,17 @@ class DeepSeekOCRPlugin:
         token_embed = gather.get_output(0)
 
         # Conditional: (1 - flag) * token_embed + flag * input_embed
-        flag_broadcast = network.add_shuffle(use_input_embed_tensor)
-        flag_broadcast.reshape_dims = (1, 1)
         one_const = graph_ops.add_constant(
             network, (1, 1), np.array([1.0], dtype=io_np_dtype),
             dtype=io_np_dtype)
         inv_flag = network.add_elementwise(
-            one_const, flag_broadcast.get_output(0),
+            one_const, use_input_embed_tensor,
             trt.ElementWiseOperation.SUB)
         tok_part = network.add_elementwise(
             inv_flag.get_output(0), token_embed,
             trt.ElementWiseOperation.PROD)
         embed_part = network.add_elementwise(
-            flag_broadcast.get_output(0), input_embed_tensor,
+            use_input_embed_tensor, input_embed_tensor,
             trt.ElementWiseOperation.PROD)
         hidden_sum = network.add_elementwise(
             tok_part.get_output(0), embed_part.get_output(0),
@@ -465,6 +483,7 @@ class DeepSeekOCRPlugin:
                 norm_topk_prob=norm_topk_prob,
                 routed_scaling_factor=routed_scaling_factor,
                 dtype=layer_np_dtype,
+                sequence_length=None,
             )
 
             hidden_state = result["hidden"]
@@ -492,10 +511,22 @@ class DeepSeekOCRPlugin:
                 None, io_eps_tensor, "rmsnorm", dtype=io_np_dtype)
 
         # -----------------------------------------------------------
-        # LM head (logits)
+        # LM head (last prompt row only)
         # -----------------------------------------------------------
+        hidden_shape = network.add_shape(hidden_state).get_output(0)
+        one_hidden = graph_ops.add_constant(
+            network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
+        last_start = network.add_elementwise(
+            hidden_shape, one_hidden, trt.ElementWiseOperation.SUB).get_output(0)
+        last_size = graph_ops.add_constant(
+            network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
+        last_slice = network.add_slice(
+            hidden_state, start=(0, 0), shape=(0, 0), stride=(1, 1))
+        last_slice.set_input(1, last_start)
+        last_slice.set_input(2, last_size)
+        last_hidden = last_slice.get_output(0)
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_out"],
+            network, last_hidden, hidden, vocab, weights["w_out"],
             dtype=io_np_dtype)
         b_out = np.zeros(vocab, dtype=np.float32)
         logits = graph_ops.add_bias_sum(
@@ -666,8 +697,8 @@ def _add_moe_with_shared_experts(
     topk = network.add_topk(
         sm.get_output(0), trt.TopKOperation.MAX,
         num_experts_per_tok, 1 << 1)
-    top_values = topk.get_output(0)   # [1, top_k]
-    top_indices = topk.get_output(1)  # [1, top_k]
+    top_values = topk.get_output(0)   # [Sq, top_k]
+    top_indices = topk.get_output(1)  # [Sq, top_k]
 
     # 4. Weight normalization (matches HF MoEGate):
     #    norm_topk_prob=True  -> renormalize: values / sum(values)
@@ -688,8 +719,11 @@ def _add_moe_with_shared_experts(
     else:
         final_weights = top_values
 
-    # 5. Compute ALL routed expert outputs and stack
-    expert_outputs = []
+    # 5. Compute every routed expert and derive its per-row gate from the
+    # dynamic [Sq, top_k] routing result. This keeps the same dense expert
+    # evaluation strategy as the legacy Sq=1 graph while supporting sequence
+    # prefill without assuming a fixed first dimension.
+    result = None
     for e in range(n_routed_experts):
         exp_out = _add_swiglu_expert(
             network, inp, hidden_size, moe_intermediate,
@@ -698,30 +732,18 @@ def _add_moe_with_shared_experts(
             weights[f"{prefix}.expert.{e}.w_down"],
             dtype=dtype,
         )
-        expert_outputs.append(exp_out)
-
-    stacked = network.add_concatenation(expert_outputs)
-    stacked.axis = 0
-    stacked_out = stacked.get_output(0)  # [n_routed_experts, hidden_size]
-
-    # 6. Gather selected experts, scale, and sum
-    result = None
-    for k in range(num_experts_per_tok):
-        idx_slice = network.add_slice(
-            top_indices, start=(0, k), shape=(1, 1), stride=(1, 1))
-        idx_flat = network.add_shuffle(idx_slice.get_output(0))
-        idx_flat.reshape_dims = (1,)
-
-        w_slice = network.add_slice(
-            final_weights,
-            start=(0, k), shape=(1, 1), stride=(1, 1))
-
-        expert_out = network.add_gather(
-            stacked_out, idx_flat.get_output(0), 0)
-
+        expert_index = graph_ops.add_constant(
+            network, (1, 1), np.array([[e]], dtype=np.int32), dtype=np.int32)
+        selected = network.add_elementwise(
+            top_indices, expert_index, trt.ElementWiseOperation.EQUAL).get_output(0)
+        selected = network.add_cast(selected, final_weights.dtype).get_output(0)
+        selected_weights = network.add_elementwise(
+            final_weights, selected, trt.ElementWiseOperation.PROD).get_output(0)
+        expert_weight = network.add_reduce(
+            selected_weights, trt.ReduceOperation.SUM, 1 << 1,
+            keep_dims=True).get_output(0)
         scaled_expert = network.add_elementwise(
-            expert_out.get_output(0), w_slice.get_output(0),
-            trt.ElementWiseOperation.PROD)
+            exp_out, expert_weight, trt.ElementWiseOperation.PROD)
 
         if result is None:
             result = scaled_expert.get_output(0)
@@ -780,9 +802,9 @@ def _add_decoder_layer(
     norm_topk_prob: bool = False,
     routed_scaling_factor: float = 1.0,
     dtype=np.float32,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
     """One decoder layer: standard MHA + (dense MLP or MoE with shared experts)."""
-    attention_window = max_cache_length + 1
 
     # Pre-attention RMSNorm
     norm1 = _apply_norm(
@@ -803,34 +825,38 @@ def _add_decoder_layer(
 
     q = graph_ops.add_apply_rope_native(
         network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        position_id, head_dim, sequence_length=sequence_length)
     k = graph_ops.add_apply_rope_native(
         network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        position_id, head_dim, sequence_length=sequence_length)
 
     # Save present K/V
     present_k = k
     present_v = v
 
-    # Reshape for cache concatenation
-    k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, kv_attention_size)
-    v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, kv_attention_size)
+    current_k = k
+    current_v = v
+    if sequence_length is not None:
+        k_reshape = network.add_shuffle(k)
+        k_reshape.reshape_dims = (sequence_length, kv_attention_size)
+        current_k = k_reshape.get_output(0)
+        v_reshape = network.add_shuffle(v)
+        v_reshape.reshape_dims = (sequence_length, kv_attention_size)
+        current_v = v_reshape.get_output(0)
 
     # Concatenate with cache
     all_k = network.add_concatenation(
-        [cache_k, k_reshape.get_output(0)])
+        [cache_k, current_k])
     all_k.axis = 0
     all_v = network.add_concatenation(
-        [cache_v, v_reshape.get_output(0)])
+        [cache_v, current_v])
     all_v.axis = 0
 
     mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
     context_flat = graph_ops.add_attention_from_rows(
         network, q, all_k.get_output(0), all_v.get_output(0),
         num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
-        q_seq=1, kv_seq=attention_window,
+        q_seq=sequence_length, kv_seq=None if sequence_length is None else max_cache_length + 1,
         mask=mask_4d,
         fp32_accumulation=dtype != np.float32)
 

@@ -17,6 +17,7 @@ Postconditions: Plugin correctly splits fused weights and produces expected per-
 
 from __future__ import annotations
 
+import importlib
 import json
 from pathlib import Path
 
@@ -35,6 +36,27 @@ except (ImportError, ModuleNotFoundError):
 # ---- helpers ----
 
 RNG = np.random.RandomState(42)
+
+
+def test_phi4_multimodal_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.phi4_multimodal.default_decoder")
+    calls: dict[str, object] = {}
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls["build"] = (config, weights, max_cache_length, kwargs)
+        return b"phi4-multimodal-dual-profile-plan"
+
+    monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
+    config = type("Config", (), {"raw": {"_decoder_engine_role": "decode"}})()
+    result = module.build_standard_decoder_engine(
+        config, {}, 31, precision="fp16", embed_input=True,
+        partial_rotary_factor=0.75)
+
+    assert result == b"phi4-multimodal-dual-profile-plan"
+    kwargs = calls["build"][3]
+    assert kwargs["embed_input"] is True
+    assert kwargs["partial_rotary_factor"] == 0.75
 
 
 def _rand(*shape: int) -> np.ndarray:

@@ -89,7 +89,7 @@ def build_standard_decoder_engine(
             rotated-half (LLaMA/Qwen) where (d, d+half) share frequencies.
         scale_attn_weights: Whether to scale attention scores by 1/sqrt(head_dim).
             Most models use this (True, default). GPT-Neo does NOT scale (False).
-        embed_input: If True, add input_embed [1, hidden] and use_input_embed [1]
+        embed_input: If True, add input_embed [Sq, hidden] and use_input_embed [Sq, 1]
             engine inputs. When use_input_embed==1, the decoder uses input_embed
             directly instead of the embedding lookup. Used for VL models where
             the vision encoder provides fused embeddings during prefill.
@@ -115,7 +115,6 @@ def build_standard_decoder_engine(
     # The legacy single-profile graph below stays in place for paths the
     # dual-profile builder does not yet cover:
     #
-    #   - embed_input=True             (VL prefill replacement, Bark sub-engines)
     #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
     #   - hidden_state_output=True     (speech / Bark hidden output)
     #   - config.raw.dynamic_kv_cache  (TriAttention multi-bucket decode)
@@ -125,8 +124,7 @@ def build_standard_decoder_engine(
     # supported user-facing flag.
     requested_fp32_layers = tuple(config.raw.get("_fp32_layers", ()))
     _dual_profile_disabled_for = (
-        embed_input
-        or debug_layer_outputs
+        debug_layer_outputs
         or hidden_state_output
         or bool(requested_fp32_layers)
         or bool(config.raw.get("dynamic_kv_cache", False))
@@ -136,7 +134,13 @@ def build_standard_decoder_engine(
         raise NotImplementedError(
             "split prefill engine is not supported for this standard decoder "
             "configuration")
-    if not _dual_profile_disabled_for and decoder_engine_role in ("dual_profile", "prefill"):
+    # Phi-4 Multimodal is packaged as one decoder engine, so the global split
+    # fallback reaches this family with role="decode". Keep that engine
+    # dual-profile when vision embeddings are enabled.
+    vl_single_engine_fallback = embed_input and decoder_engine_role == "decode"
+    if not _dual_profile_disabled_for and (
+        decoder_engine_role in ("dual_profile", "prefill") or vl_single_engine_fallback
+    ):
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
             precision=precision,
@@ -149,6 +153,7 @@ def build_standard_decoder_engine(
             interleaved_rope=interleaved_rope,
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
+            embed_input=embed_input,
             verbose=verbose,
             profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
         )

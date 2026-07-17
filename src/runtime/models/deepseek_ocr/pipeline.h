@@ -31,6 +31,10 @@ struct DeepseekOcrConfig {
     int32_t image_token_id{-1};
     int32_t vision_output_dim{0};
     bool has_position_input{true};
+    int32_t num_layers{0};
+    int32_t prefill_max_length{0};
+    std::string present_k_pattern{"present_k_{i}"};
+    std::string present_v_pattern{"present_v_{i}"};
 };
 
 class DeepseekOcrPipeline final : public IPipeline {
@@ -41,7 +45,8 @@ class DeepseekOcrPipeline final : public IPipeline {
                         DeepseekOcrPreprocessConfig vl_preprocess, cudaStream_t stream,
                         std::shared_ptr<ITokenizer> tokenizer = nullptr,
                         std::string model_id_str = "",
-                        std::unique_ptr<DeepseekOcrISampler> sampler = nullptr);
+                        std::unique_ptr<DeepseekOcrISampler> sampler = nullptr,
+                        std::unique_ptr<TrtModule> prefill = nullptr);
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
 
@@ -65,6 +70,7 @@ class DeepseekOcrPipeline final : public IPipeline {
 
   private:
     std::unique_ptr<TrtModule> text_decoder_;
+    std::unique_ptr<TrtModule> prefill_;
     std::unique_ptr<TrtModule> vision_encoder_;
     std::unique_ptr<DeepseekOcrInferenceState> state_;
     DeepseekOcrConfig config_;
@@ -90,6 +96,12 @@ class DeepseekOcrPipeline final : public IPipeline {
                               const std::vector<std::vector<float>>& deepstack_features,
                               int32_t num_features, int32_t feature_dim, int32_t& feature_index,
                               std::vector<float>& logits);
+
+    bool run_vl_prefill_batched(const std::vector<int32_t>& input_ids,
+                                const std::vector<float>& image_features,
+                                const std::vector<std::vector<float>>& deepstack_features,
+                                int32_t num_features, int32_t feature_dim,
+                                std::vector<float>& logits);
 
     void run_vl_decode_loop(DeepseekOcrISampler* sampler, const DeepseekOcrSamplingParams& params,
                             std::vector<int32_t>& output, std::vector<float>& logits,
