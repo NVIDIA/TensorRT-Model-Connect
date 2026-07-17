@@ -2630,6 +2630,46 @@ def add_apply_rope_native_from_full_cache(
         sequence_length=sequence_length)
 
 
+def _add_decomposed_attention_core(
+    network: trt.INetworkDefinition,
+    q_4d: trt.ITensor,
+    k_4d: trt.ITensor,
+    v_4d: trt.ITensor,
+    *,
+    mask: trt.ITensor | None,
+    scale: float | None,
+    fp32_accumulation: bool,
+) -> trt.ITensor:
+    """Scaled dot-product attention using primitive TensorRT layers."""
+    output_dtype = q_4d.dtype
+    if fp32_accumulation and output_dtype != trt.float32:
+        q_4d = network.add_cast(q_4d, trt.float32).get_output(0)
+        k_4d = network.add_cast(k_4d, trt.float32).get_output(0)
+        v_4d = network.add_cast(v_4d, trt.float32).get_output(0)
+        if mask is not None and mask.dtype != trt.float32:
+            mask = network.add_cast(mask, trt.float32).get_output(0)
+
+    if scale is None:
+        head_dim = q_4d.shape[-1]
+        scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+    scale_t = _scalar_constant_for_trt_dtype(
+        network, (1, 1, 1, 1), scale, q_4d.dtype)
+    q_scaled = network.add_elementwise(
+        q_4d, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+    scores = network.add_matrix_multiply(
+        q_scaled, trt.MatrixOperation.NONE,
+        k_4d, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    if mask is not None:
+        scores = network.add_elementwise(
+            scores, mask, trt.ElementWiseOperation.SUM).get_output(0)
+    probs = network.add_softmax(scores)
+    probs.axes = 1 << 3
+    context = network.add_matrix_multiply(
+        probs.get_output(0), trt.MatrixOperation.NONE,
+        v_4d, trt.MatrixOperation.NONE).get_output(0)
+    return _cast_back_to_trt_dtype(network, context, output_dtype)
+
+
 def add_attention_core(
     network: trt.INetworkDefinition,
     q_4d: trt.ITensor,
@@ -2877,6 +2917,14 @@ def add_attention_from_rows(
         tag=None if tag is None else tag + ".v")
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
+    # TensorRT 11.2 can segfault while compiling masked IAttention with
+    # head_dim=128 and dynamic or multi-row queries. Decompose that shape.
+    decompose_masked_attention = (
+        (q_seq != 1 or kv_seq is None)
+        and mask is not None
+        and head_dim == 128
+        and not causal
+    )
     if logit_softcap is not None and float(logit_softcap) > 0.0:
         if causal:
             raise NotImplementedError(
@@ -2885,6 +2933,16 @@ def add_attention_from_rows(
             network, q_4d, k_4d, v_4d,
             num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
             mask=mask, scale=scale, logit_softcap=float(logit_softcap))
+    elif decompose_masked_attention:
+        k_4d = _repeat_kv_heads_4d(
+            network, k_4d, num_heads=num_heads, num_kv_heads=kv_heads,
+            head_dim=head_dim)
+        v_4d = _repeat_kv_heads_4d(
+            network, v_4d, num_heads=num_heads, num_kv_heads=kv_heads,
+            head_dim=head_dim)
+        ctx_4d = _add_decomposed_attention_core(
+            network, q_4d, k_4d, v_4d, mask=mask, scale=scale,
+            fp32_accumulation=fp32_accumulation)
     else:
         ctx_4d = add_attention_core(
             network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,
