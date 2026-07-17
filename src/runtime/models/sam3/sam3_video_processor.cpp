@@ -2019,6 +2019,73 @@ std::vector<float> resize_float_mask_bilinear(const std::vector<float>& source,
     return output;
 }
 
+struct GlobalHardMaskOwnership {
+    int32_t height{0};
+    int32_t width{0};
+    std::size_t object_count{0};
+    std::vector<float> winning_logits;
+    std::vector<std::uint32_t> winning_indices;
+};
+
+void update_global_hard_mask_owners(std::size_t object_index, const std::vector<float>& resized,
+                                    GlobalHardMaskOwnership& ownership) {
+    if (object_index >= ownership.object_count ||
+        resized.size() != ownership.winning_indices.size()) {
+        throw std::invalid_argument("SAM3 resized hard mask has invalid geometry");
+    }
+    if (object_index == 0) {
+        ownership.winning_logits = resized;
+        return;
+    }
+    if (ownership.winning_logits.size() != resized.size())
+        throw std::invalid_argument("SAM3 hard-memory ownership is incomplete");
+    parallel_for_host_ranges(resized.size(), [&](std::size_t begin, std::size_t end) {
+        for (std::size_t pixel = begin; pixel < end; ++pixel) {
+            // Meta uses torch.argmax over the object axis. A strict comparison
+            // preserves the first row for equal logits.
+            if (resized[pixel] > ownership.winning_logits[pixel]) {
+                ownership.winning_logits[pixel] = resized[pixel];
+                ownership.winning_indices[pixel] = static_cast<std::uint32_t>(object_index);
+            }
+        }
+    });
+}
+
+GlobalHardMaskOwnership make_global_hard_mask_ownership(std::size_t object_count,
+                                                        int32_t tracker_image_size) {
+    GlobalHardMaskOwnership ownership;
+    ownership.height = tracker_image_size;
+    ownership.width = tracker_image_size;
+    ownership.object_count = object_count;
+    if (object_count == 0)
+        return ownership;
+    if (tracker_image_size <= 0 ||
+        object_count > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
+        throw std::invalid_argument("SAM3 hard-memory ownership received invalid geometry");
+    }
+    const auto area = static_cast<std::size_t>(tracker_image_size) * tracker_image_size;
+    ownership.winning_indices.assign(area, 0U);
+    return ownership;
+}
+
+std::vector<float> materialize_owned_hard_mask(const GlobalHardMaskOwnership& ownership,
+                                               std::size_t object_index) {
+    if (object_index >= ownership.object_count || ownership.winning_logits.empty() ||
+        ownership.winning_logits.size() != ownership.winning_indices.size()) {
+        throw std::invalid_argument("SAM3 hard-memory ownership is incomplete");
+    }
+    std::vector<float> mask(ownership.winning_logits.size(), 0.0F);
+    parallel_for_host_ranges(mask.size(), [&](std::size_t begin, std::size_t end) {
+        for (std::size_t pixel = begin; pixel < end; ++pixel) {
+            mask[pixel] = ownership.winning_indices[pixel] == object_index &&
+                                  ownership.winning_logits[pixel] > 0.0F
+                              ? 1.0F
+                              : 0.0F;
+        }
+    });
+    return mask;
+}
+
 struct FloatMaskResizeAxisEntry {
     int32_t first{0};
     std::vector<float> weights;
@@ -2685,7 +2752,9 @@ class Sam3VideoProcessorState {
                             std::shared_ptr<Sam3VideoVisionWorkspace> vision_workspace,
                             TrtModule* tracker_step_batch2_engine,
                             TrtModule* tracker_memory_batch2_engine,
-                            TrtModule* parallel_tracker_init_engine)
+                            TrtModule* parallel_tracker_init_engine,
+                            TrtModule* hard_mask_resize_engine,
+                            TrtModule* hard_mask_resize_batch2_engine)
         : vision_encoder_(vision_encoder), core_engine_(core_engine),
           tracker_init_engine_(tracker_init_engine),
           parallel_tracker_init_engine_(parallel_tracker_init_engine),
@@ -2695,6 +2764,8 @@ class Sam3VideoProcessorState {
           tracker_memory_batch2_engine_(tracker_memory_batch2_engine),
           tracker_hard_memory_engine_(tracker_hard_memory_engine),
           tracker_hard_memory_batch2_engine_(tracker_hard_memory_batch2_engine),
+          hard_mask_resize_engine_(hard_mask_resize_engine),
+          hard_mask_resize_batch2_engine_(hard_mask_resize_batch2_engine),
           config_(std::move(config)), text_input_(std::move(text_input)),
           vision_workspace_(std::move(vision_workspace)) {
         if (vision_workspace_ == nullptr)
@@ -2853,6 +2924,8 @@ class Sam3VideoProcessorState {
         sync_noexcept(tracker_memory_batch2_engine_);
         sync_noexcept(&tracker_hard_memory_engine_);
         sync_noexcept(&tracker_hard_memory_batch2_engine_);
+        sync_noexcept(hard_mask_resize_engine_);
+        sync_noexcept(hard_mask_resize_batch2_engine_);
     }
 
 #ifdef TRTMC_HAS_CUDA_KERNELS
@@ -3752,17 +3825,30 @@ class Sam3VideoProcessorState {
         return memory_batch2_input_scratch_.data();
     }
 
+    static std::size_t memory_mask_values(int32_t height, int32_t width) {
+        if (height <= 0 || width <= 0)
+            throw std::invalid_argument("SAM3 memory encoder received invalid mask geometry");
+        const auto h = static_cast<std::size_t>(height);
+        const auto w = static_cast<std::size_t>(width);
+        if (h > std::numeric_limits<std::size_t>::max() / w)
+            throw std::overflow_error("SAM3 memory encoder mask geometry overflow");
+        return h * w;
+    }
+
     EncodedMemory encode_memory(const Sam3FrameFeatures& features,
                                 const std::vector<float>& mask_values, float object_score_logit,
-                                TrtModule& memory_engine, const char* mask_input_name,
-                                bool device_resident, const char* producer,
+                                int32_t mask_height, int32_t mask_width, TrtModule& memory_engine,
+                                const char* mask_input_name, bool device_resident,
+                                const char* producer,
                                 const int32_t* suppress_area_shrinkage = nullptr) {
 #ifndef TRTMC_HAS_CUDA_KERNELS
         (void)device_resident;
 #endif
+        if (mask_values.size() != memory_mask_values(mask_height, mask_width))
+            throw std::runtime_error("SAM3 memory encoder received an unexpected mask size");
         Tensor mask;
         mask.data = const_cast<float*>(mask_values.data());
-        mask.shape = {1, 1, features.mask_height, features.mask_width};
+        mask.shape = {1, 1, mask_height, mask_width};
         mask.dtype = DType::kFloat32;
         Tensor score;
         score.data = &object_score_logit;
@@ -3811,16 +3897,17 @@ class Sam3VideoProcessorState {
     EncodedMemory encode_final_memory(const Sam3FrameFeatures& features,
                                       const std::vector<float>& final_mask,
                                       float object_score_logit, int32_t suppress_area_shrinkage) {
-        return encode_memory(features, final_mask, object_score_logit, tracker_memory_engine_,
-                             "final_mask", device_resident_recurrent_memory_,
-                             "tracker memory engine", &suppress_area_shrinkage);
+        return encode_memory(features, final_mask, object_score_logit, features.mask_height,
+                             features.mask_width, tracker_memory_engine_, "final_mask",
+                             device_resident_recurrent_memory_, "tracker memory engine",
+                             &suppress_area_shrinkage);
     }
 
     EncodedMemory encode_hard_memory(const Sam3FrameFeatures& features,
-                                     const std::vector<float>& carved_low_res_mask,
+                                     const std::vector<float>& owned_tracker_mask,
                                      float object_score_logit) {
-        return encode_memory(features, carved_low_res_mask, object_score_logit,
-                             tracker_hard_memory_engine_, "carved_low_res_mask",
+        return encode_memory(features, owned_tracker_mask, object_score_logit, config_.image_size,
+                             config_.image_size, tracker_hard_memory_engine_, "owned_tracker_mask",
                              device_resident_hard_memory_, "tracker hard memory engine");
     }
 
@@ -3828,12 +3915,12 @@ class Sam3VideoProcessorState {
         const Sam3FrameFeatures& features,
         const std::array<const std::vector<float>*, kTrackerStepBatch2Size>& final_masks,
         const std::array<float, kTrackerStepBatch2Size>& object_score_logits,
-        std::size_t mask_values, const char* mask_input_name,
+        std::size_t mask_values, int32_t mask_height, int32_t mask_width,
+        const char* mask_input_name,
         const std::array<int32_t, kTrackerStepBatch2Size>* suppress_area_shrinkage = nullptr) {
         Tensor mask;
         mask.data = pack_final_memory_masks_batch2(final_masks, mask_values);
-        mask.shape = {static_cast<int64_t>(kTrackerStepBatch2Size), 1, features.mask_height,
-                      features.mask_width};
+        mask.shape = {static_cast<int64_t>(kTrackerStepBatch2Size), 1, mask_height, mask_width};
         mask.dtype = DType::kFloat32;
         Tensor score;
         score.data = const_cast<float*>(object_score_logits.data());
@@ -3936,18 +4023,19 @@ class Sam3VideoProcessorState {
         const std::array<const std::vector<float>*, kTrackerStepBatch2Size>& final_masks,
         const std::array<float, kTrackerStepBatch2Size>& object_score_logits,
         TrtModule& memory_engine, const char* mask_input_name, bool device_resident,
-        const char* producer,
+        const char* producer, int32_t mask_height, int32_t mask_width,
         const std::array<int32_t, kTrackerStepBatch2Size>* suppress_area_shrinkage = nullptr) {
 #ifndef TRTMC_HAS_CUDA_KERNELS
         (void)device_resident;
 #endif
         const auto mask_values = final_masks.front()->size();
-        if (mask_values == 0 || final_masks.back()->size() != mask_values) {
+        if (mask_values != memory_mask_values(mask_height, mask_width) ||
+            final_masks.back()->size() != mask_values) {
             throw std::runtime_error("SAM3 batch2 memory encoder received invalid masks");
         }
         const auto inputs =
             batch2_memory_inputs(features, final_masks, object_score_logits, mask_values,
-                                 mask_input_name, suppress_area_shrinkage);
+                                 mask_height, mask_width, mask_input_name, suppress_area_shrinkage);
 
         // The pipeline-owned pinned input may be overwritten by the next
         // serialized fresh session only after this call returns. The device
@@ -3972,20 +4060,20 @@ class Sam3VideoProcessorState {
         const std::array<int32_t, kTrackerStepBatch2Size>& suppress_area_shrinkage) {
         if (tracker_memory_batch2_engine_ == nullptr)
             throw std::runtime_error("SAM3 batch2 memory encoder is unavailable");
-        return encode_memories_batch2(features, final_masks, object_score_logits,
-                                      *tracker_memory_batch2_engine_, "final_mask",
-                                      device_resident_batch2_memory_,
-                                      "batch2 tracker memory engine", &suppress_area_shrinkage);
+        return encode_memories_batch2(
+            features, final_masks, object_score_logits, *tracker_memory_batch2_engine_,
+            "final_mask", device_resident_batch2_memory_, "batch2 tracker memory engine",
+            features.mask_height, features.mask_width, &suppress_area_shrinkage);
     }
 
     std::array<EncodedMemory, kTrackerStepBatch2Size> encode_hard_memories_batch2(
         const Sam3FrameFeatures& features,
-        const std::array<const std::vector<float>*, kTrackerStepBatch2Size>& carved_masks,
+        const std::array<const std::vector<float>*, kTrackerStepBatch2Size>& owned_masks,
         const std::array<float, kTrackerStepBatch2Size>& object_score_logits) {
-        return encode_memories_batch2(features, carved_masks, object_score_logits,
-                                      tracker_hard_memory_batch2_engine_, "carved_low_res_mask",
-                                      device_resident_hard_batch2_memory_,
-                                      "batch2 tracker hard memory engine");
+        return encode_memories_batch2(
+            features, owned_masks, object_score_logits, tracker_hard_memory_batch2_engine_,
+            "owned_tracker_mask", device_resident_hard_batch2_memory_,
+            "batch2 tracker hard memory engine", config_.image_size, config_.image_size);
     }
 
     Sam3FrameFeatures restore_frame_zero_tracker_feature_2() {
@@ -4663,27 +4751,6 @@ class Sam3VideoProcessorState {
         });
     }
 
-    static void
-    compact_fully_occluded_result_objects(Sam3VideoFrameResult& result,
-                                          const std::vector<std::uint32_t>& pixel_owners) {
-        constexpr auto kNoOwner = std::numeric_limits<std::uint32_t>::max();
-        std::vector<std::uint8_t> visible(result.object_ids.size(), 0U);
-        for (const auto owner : pixel_owners) {
-            if (owner == kNoOwner)
-                continue;
-            if (owner >= visible.size())
-                throw std::logic_error("SAM3 fused result overlap owner is invalid");
-            visible[owner] = 1U;
-        }
-
-        std::unordered_set<int32_t> hidden;
-        for (std::size_t index = 0; index < visible.size(); ++index) {
-            if (visible[index] == 0U)
-                hidden.insert(result.object_ids[index]);
-        }
-        filter_result_objects(result, hidden);
-    }
-
     Sam3VideoFrameResult finish_result(DeferredFrameResult deferred) const {
         Sam3VideoFrameResult result;
         result.frame_idx = deferred.frame_idx;
@@ -4726,15 +4793,11 @@ class Sam3VideoProcessorState {
         // group. This session has one text prompt, so all visible objects share
         // a group. Strict comparison preserves torch.argmax's first-object tie
         // behavior (object IDs are accumulated in ascending order).
-        if (pixel_owners.empty()) {
+        if (pixel_owners.empty())
             resolve_result_mask_overlaps(result);
-        } else {
-            // A later, higher-score row can take the last visible pixel from
-            // an object whose metadata was already appended. Compact those
-            // fully occluded rows after ownership is final so IDs, scores,
-            // masks, and boxes remain aligned.
-            compact_fully_occluded_result_objects(result, pixel_owners);
-        }
+        // Meta drops masks that are empty before ownership, but retains rows
+        // that lose their final pixel during non-overlap resolution. Their
+        // mask becomes all-zero while scores and the pre-overlap box remain.
         return result;
     }
 
@@ -5017,6 +5080,14 @@ class Sam3VideoProcessorState {
         return reconditioned;
     }
 
+    std::unordered_set<int32_t>
+    reconditioned_cohort_ids(const std::unordered_set<int32_t>& reconditioned) const {
+        std::unordered_set<int32_t> cohorts;
+        for (const int32_t object_id : reconditioned)
+            cohorts.insert(tracks_.at(object_id).cohort_id);
+        return cohorts;
+    }
+
     void
     update_existing_track_memories(const Sam3FrameFeatures& features, int32_t frame_idx,
                                    const std::vector<int32_t>& object_ids,
@@ -5028,6 +5099,7 @@ class Sam3VideoProcessorState {
         if (shrink_memory.size() != object_ids.size())
             throw std::runtime_error("SAM3 video memory-area policy returned the wrong size");
         const auto cohort_scores = cohort_effective_iou_scores(object_ids, propagated);
+        const auto conditioning_cohorts = reconditioned_cohort_ids(reconditioned);
         const auto add_memory_record = [&](std::size_t index, EncodedMemory memory) {
             const int32_t object_id = object_ids[index];
             const auto& track = tracks_.at(object_id);
@@ -5035,8 +5107,9 @@ class Sam3VideoProcessorState {
             output.memory_features = std::move(memory.features);
             output.memory_position = std::move(memory.position);
             output.device_memory = std::move(memory.device);
-            add_record(tracks_.at(object_id), frame_idx, reconditioned.count(object_id) != 0,
-                       std::move(output), cohort_scores.at(track.cohort_id));
+            add_record(tracks_.at(object_id), frame_idx,
+                       conditioning_cohorts.count(track.cohort_id) != 0, std::move(output),
+                       cohort_scores.at(track.cohort_id));
         };
 
         std::size_t index = 0;
@@ -5209,25 +5282,134 @@ class Sam3VideoProcessorState {
         output.device_memory = std::move(memory.device);
     }
 
+    static std::vector<std::vector<float>> copy_resized_hard_mask_output(const TensorMap& outputs,
+                                                                         std::size_t batch_size,
+                                                                         int32_t tracker_image_size,
+                                                                         const char* producer) {
+        const auto output = outputs.find("resized_tracker_mask");
+        if (tracker_image_size <= 0)
+            throw std::runtime_error(std::string(producer) + " has invalid geometry");
+        const auto image_size = static_cast<std::size_t>(tracker_image_size);
+        if (image_size > std::numeric_limits<std::size_t>::max() / image_size)
+            throw std::overflow_error(std::string(producer) + " size overflow");
+        const auto expected_area = image_size * image_size;
+        if (batch_size > std::numeric_limits<std::size_t>::max() / expected_area)
+            throw std::overflow_error(std::string(producer) + " batch size overflow");
+        const auto expected_values = batch_size * expected_area;
+        if (output == outputs.end() || output->second.dtype != DType::kFloat32 ||
+            output->second.data == nullptr ||
+            output->second.shape != std::vector<int64_t>{static_cast<int64_t>(batch_size), 1,
+                                                         tracker_image_size, tracker_image_size} ||
+            output->second.numel() != expected_values) {
+            throw std::runtime_error(std::string(producer) + " returned an invalid output");
+        }
+        const auto* values = static_cast<const float*>(output->second.data);
+        std::vector<std::vector<float>> result(batch_size);
+        for (std::size_t batch = 0; batch < batch_size; ++batch) {
+            result[batch].assign(values + batch * expected_area,
+                                 values + (batch + 1) * expected_area);
+        }
+        return result;
+    }
+
+    void validate_hard_mask_resize_geometry(int32_t source_height, int32_t source_width) const {
+        if (hard_mask_resize_engine_ == nullptr || hard_mask_resize_batch2_engine_ == nullptr)
+            throw std::runtime_error("SAM3 hard-mask resize B1/B2 engines are required");
+        if (source_height <= 0 || source_width <= 0 || config_.image_size <= 0)
+            throw std::runtime_error("SAM3 hard-mask resize received invalid geometry");
+    }
+
+    std::vector<std::vector<float>>
+    resize_prepared_hard_mask_pair(const std::vector<PreparedNewTrackMasks>& prepared,
+                                   std::size_t index, int32_t source_height, int32_t source_width,
+                                   std::size_t source_area) {
+        hard_mask_resize_batch2_input_scratch_.resize(kTrackerStepBatch2Size * source_area);
+        for (std::size_t batch = 0; batch < kTrackerStepBatch2Size; ++batch) {
+            const auto& source = prepared[index + batch].tracker_mask;
+            if (source.size() != source_area)
+                throw std::runtime_error("SAM3 hard-mask resize received an invalid B2 row");
+            std::copy(source.begin(), source.end(),
+                      hard_mask_resize_batch2_input_scratch_.begin() +
+                          static_cast<std::ptrdiff_t>(batch * source_area));
+        }
+        Tensor input;
+        input.data = hard_mask_resize_batch2_input_scratch_.data();
+        input.shape = {2, 1, source_height, source_width};
+        input.dtype = DType::kFloat32;
+        return copy_resized_hard_mask_output(
+            hard_mask_resize_batch2_engine_->forward({{"tracker_mask", input}}), 2,
+            config_.image_size, "SAM3 hard-mask resize B2 engine");
+    }
+
+    std::vector<float> resize_prepared_hard_mask(const PreparedNewTrackMasks& prepared,
+                                                 int32_t source_height, int32_t source_width,
+                                                 std::size_t source_area) {
+        const auto& source = prepared.tracker_mask;
+        if (source.size() != source_area)
+            throw std::runtime_error("SAM3 hard-mask resize received an invalid B1 row");
+        Tensor input;
+        input.data = const_cast<float*>(source.data());
+        input.shape = {1, 1, source_height, source_width};
+        input.dtype = DType::kFloat32;
+        auto batch = copy_resized_hard_mask_output(
+            hard_mask_resize_engine_->forward({{"tracker_mask", input}}), 1, config_.image_size,
+            "SAM3 hard-mask resize B1 engine");
+        return std::move(batch.front());
+    }
+
+    GlobalHardMaskOwnership
+    select_prepared_hard_mask_owners_exact(const std::vector<PreparedNewTrackMasks>& prepared,
+                                           int32_t source_height, int32_t source_width) {
+        validate_hard_mask_resize_geometry(source_height, source_width);
+        const auto source_area =
+            static_cast<std::size_t>(source_height) * static_cast<std::size_t>(source_width);
+        auto ownership = make_global_hard_mask_ownership(prepared.size(), config_.image_size);
+        std::size_t index = 0;
+        for (; index + kTrackerStepBatch2Size <= prepared.size(); index += kTrackerStepBatch2Size) {
+            auto batch = resize_prepared_hard_mask_pair(prepared, index, source_height,
+                                                        source_width, source_area);
+            for (std::size_t row = 0; row < kTrackerStepBatch2Size; ++row)
+                update_global_hard_mask_owners(index + row, batch[row], ownership);
+        }
+        for (; index < prepared.size(); ++index) {
+            auto resized = resize_prepared_hard_mask(prepared[index], source_height, source_width,
+                                                     source_area);
+            update_global_hard_mask_owners(index, resized, ownership);
+        }
+        return ownership;
+    }
+
     void encode_prepared_new_track_hard_memories(const Sam3FrameFeatures& features,
                                                  const std::vector<PreparedNewTrackMasks>& prepared,
                                                  std::vector<TrackerNeuralOutput>& initialized) {
+        if (initialized.size() != prepared.size())
+            throw std::logic_error("SAM3 hard-memory initialization count mismatch");
+        if (prepared.empty())
+            return;
+        // Meta consolidates every object in the tracker state, performs one
+        // object-axis argmax at the 1008 tracker grid, and only then slices
+        // rows for memory encoding. Build that ownership map once so the B1
+        // tail competes with all preceding B2 rows.
+        const auto ownership = select_prepared_hard_mask_owners_exact(
+            prepared, features.mask_height, features.mask_width);
         std::size_t index = 0;
         for (; index + kTrackerStepBatch2Size <= prepared.size(); index += kTrackerStepBatch2Size) {
+            std::array<std::vector<float>, kTrackerStepBatch2Size> owned_masks{};
             std::array<const std::vector<float>*, kTrackerStepBatch2Size> masks{};
             std::array<float, kTrackerStepBatch2Size> scores{};
             scores.fill(10.0F);
             for (std::size_t batch = 0; batch < kTrackerStepBatch2Size; ++batch) {
-                masks[batch] = &prepared[index + batch].tracker_mask;
+                owned_masks[batch] = materialize_owned_hard_mask(ownership, index + batch);
+                masks[batch] = &owned_masks[batch];
             }
             auto memories = encode_hard_memories_batch2(features, masks, scores);
             for (std::size_t batch = 0; batch < kTrackerStepBatch2Size; ++batch)
                 attach_encoded_memory(initialized[index + batch], std::move(memories[batch]));
         }
         for (; index < prepared.size(); ++index) {
-            attach_encoded_memory(
-                initialized[index],
-                encode_hard_memory(features, prepared[index].tracker_mask, 10.0F));
+            auto owned_mask = materialize_owned_hard_mask(ownership, index);
+            attach_encoded_memory(initialized[index],
+                                  encode_hard_memory(features, owned_mask, 10.0F));
         }
     }
 
@@ -5354,6 +5536,8 @@ class Sam3VideoProcessorState {
     TrtModule* tracker_memory_batch2_engine_{nullptr};
     TrtModule& tracker_hard_memory_engine_;
     TrtModule& tracker_hard_memory_batch2_engine_;
+    TrtModule* hard_mask_resize_engine_{nullptr};
+    TrtModule* hard_mask_resize_batch2_engine_{nullptr};
     Sam3Config config_;
     Sam3VideoTextInput text_input_;
     std::map<int32_t, TrackState> tracks_;
@@ -5380,6 +5564,7 @@ class Sam3VideoProcessorState {
     std::vector<float> pointers_scratch_;
     std::vector<int32_t> pointer_offsets_scratch_;
     std::vector<float> memory_batch2_input_scratch_;
+    std::vector<float> hard_mask_resize_batch2_input_scratch_;
     // The vision plan's externally-bound feature outputs are shared by every session. Preserve
     // frame zero per session so another prompt cannot overwrite the feature needed by Meta's
     // propagation-time soft-memory transition.
@@ -5423,12 +5608,14 @@ Sam3VideoFrameProcessor make_sam3_video_frame_processor(
     Sam3VideoTextInput text_input, std::shared_ptr<Sam3VideoVisionWorkspace> vision_workspace,
     TrtModule& tracker_hard_memory_engine, TrtModule& tracker_hard_memory_batch2_engine,
     TrtModule* tracker_step_batch2_engine, TrtModule* tracker_memory_batch2_engine,
-    TrtModule* parallel_tracker_init_engine) {
+    TrtModule* parallel_tracker_init_engine, TrtModule* hard_mask_resize_engine,
+    TrtModule* hard_mask_resize_batch2_engine) {
     auto state = std::make_shared<Sam3VideoProcessorState>(
         vision_encoder, core_engine, tracker_init_engine, tracker_step_engine,
         tracker_memory_engine, tracker_hard_memory_engine, tracker_hard_memory_batch2_engine,
         std::move(config), std::move(text_input), std::move(vision_workspace),
-        tracker_step_batch2_engine, tracker_memory_batch2_engine, parallel_tracker_init_engine);
+        tracker_step_batch2_engine, tracker_memory_batch2_engine, parallel_tracker_init_engine,
+        hard_mask_resize_engine, hard_mask_resize_batch2_engine);
     Sam3VideoFrameProcessor processor;
     processor.accept_prompt = [state](const Sam3VideoFrame& frame) {
         return state->accept_prompt(frame);

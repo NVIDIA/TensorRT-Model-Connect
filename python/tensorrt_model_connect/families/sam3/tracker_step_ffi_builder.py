@@ -20,7 +20,7 @@ _MASK_VALUES = _MASK_SIZE * _MASK_SIZE
 _POINTER_VALUES = 256
 _PACKED_WIDTH = _MASK_VALUES + _POINTER_VALUES + 1 + 1
 _PLUGIN_NAME = "Sam3TrackerStepFfi"
-_PLUGIN_VERSION = "1"
+_PLUGIN_VERSION = "2"
 _GLOBAL_PATTERN = re.compile(r"trtmc\.sam3\.tracker_step\.b([12])\.split_aoti\.([0-9a-f]{20})\Z")
 
 

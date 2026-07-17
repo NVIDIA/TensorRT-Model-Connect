@@ -8,10 +8,11 @@ implementation and the local Hugging Face checkpoint.  It emits the four
 fixed graphs used by the streaming tracker: soft/hard mask policy crossed
 with object batch B1/B2.  No ONNX graph or reference-model source is involved.
 
-The wrapper intentionally owns the mask preparation around Transformers'
-``Sam3TrackerVideoMemoryEncoder``.  The public inputs are the existing FP32
-TensorRT carriers, while the graph reproduces the BF16 memory boundary and
-publishes values back as lossless FP32 carriers.
+The wrapper intentionally owns the soft-mask preparation around Transformers'
+``Sam3TrackerVideoMemoryEncoder``.  Hard packages instead receive binary masks
+whose ownership was resolved globally at Meta's 1008px tracker grid.  The
+graphs reproduce the BF16 memory boundary and publish values back as lossless
+FP32 carriers.
 """
 
 from __future__ import annotations
@@ -73,19 +74,46 @@ class MemoryTensorAbi:
     shape: tuple[int | str, ...]
 
 
+@dataclass(frozen=True)
+class MemoryPolicyInputAbi:
+    """Fixed package inputs for one SAM3 memory mask policy."""
+
+    policy: Literal["soft", "hard"]
+    tensors: tuple[MemoryTensorAbi, ...]
+
+
+def _policy_input_abi(policy: Literal["soft", "hard"]) -> MemoryPolicyInputAbi:
+    mask = (
+        MemoryTensorAbi(
+            "owned_tracker_mask",
+            "float32",
+            ("B", 1, _TRACKER_IMAGE_SIZE, _TRACKER_IMAGE_SIZE),
+        )
+        if policy == "hard"
+        else MemoryTensorAbi(
+            "final_mask",
+            "float32",
+            ("B", 1, _LOW_RES_MASK_SIZE, _LOW_RES_MASK_SIZE),
+        )
+    )
+    return MemoryPolicyInputAbi(
+        policy,
+        (
+            MemoryTensorAbi(
+                "tracker_feature_2",
+                "float32",
+                (1, _FEATURE_CHANNELS, _FEATURE_SIZE, _FEATURE_SIZE),
+            ),
+            mask,
+            MemoryTensorAbi("object_score_logits", "float32", ("B", 1)),
+            MemoryTensorAbi("suppress_area_shrinkage", "int32", ("B", 1)),
+        ),
+    )
+
+
 TRACKER_MEMORY_INPUT_ABI = (
-    MemoryTensorAbi(
-        "tracker_feature_2",
-        "float32",
-        (1, _FEATURE_CHANNELS, _FEATURE_SIZE, _FEATURE_SIZE),
-    ),
-    MemoryTensorAbi(
-        "mask_logits",
-        "float32",
-        ("B", 1, _LOW_RES_MASK_SIZE, _LOW_RES_MASK_SIZE),
-    ),
-    MemoryTensorAbi("object_score_logits", "float32", ("B", 1)),
-    MemoryTensorAbi("suppress_area_shrinkage", "int32", ("B", 1)),
+    _policy_input_abi("soft"),
+    _policy_input_abi("hard"),
 )
 
 
@@ -122,7 +150,7 @@ class Sam3TrackerMemoryAotiArtifacts:
     cache_directory: Path
     packages: tuple[MemoryAotiPackage, ...]
     producer_abi: MemoryAotiProducerAbi
-    input_abi: tuple[MemoryTensorAbi, ...]
+    input_abi: tuple[MemoryPolicyInputAbi, ...]
     manifest_bytes: bytes
     bundle_sections: tuple[tuple[str, bytes], ...]
 
@@ -273,32 +301,16 @@ def _output_shape(batch_size: int) -> tuple[int, ...]:
 def _variant_contract(policy: str, batch_size: int) -> dict[str, Any]:
     if policy not in {"soft", "hard"} or batch_size not in {1, 2}:
         raise ValueError(f"Unsupported SAM3 memory package {policy!r} B{batch_size}")
+    input_abi = next(value.tensors for value in TRACKER_MEMORY_INPUT_ABI if value.policy == policy)
+    inputs = []
+    for tensor in input_abi:
+        shape = [batch_size if value == "B" else value for value in tensor.shape]
+        inputs.append({"name": tensor.name, "dtype": tensor.dtype, "shape": shape})
     return {
         "policy": policy,
         "batch_size": batch_size,
         "fixed_shape": True,
-        "inputs": [
-            {
-                "name": "tracker_feature_2",
-                "dtype": "float32",
-                "shape": [1, _FEATURE_CHANNELS, _FEATURE_SIZE, _FEATURE_SIZE],
-            },
-            {
-                "name": "mask_logits",
-                "dtype": "float32",
-                "shape": [batch_size, 1, _LOW_RES_MASK_SIZE, _LOW_RES_MASK_SIZE],
-            },
-            {
-                "name": "object_score_logits",
-                "dtype": "float32",
-                "shape": [batch_size, 1],
-            },
-            {
-                "name": "suppress_area_shrinkage",
-                "dtype": "int32",
-                "shape": [batch_size, 1],
-            },
-        ],
+        "inputs": inputs,
         "outputs": [
             {
                 "name": "packed_memory_and_position",
@@ -313,8 +325,8 @@ def _manifest_mask_policy() -> dict[str, Any]:
     return {
         "soft": ("288 bilinear 1152, clamp rejected rows to <=-10, sigmoid, scale 20, bias -10"),
         "hard": (
-            "288 bilinear 1008, B2 non-overlap, threshold, scale 20, "
-            "bias -10, antialiased bilinear 1152; suppression input ignored"
+            "globally owned binary FP32 1008, scale 20, bias -10, "
+            "antialiased bilinear 1152; suppression input ignored"
         ),
         "b1_layout": [2, _SPATIAL_TOKENS, 1, _MEMORY_CHANNELS],
         "b2_layout": [2, 2, _SPATIAL_TOKENS, _MEMORY_CHANNELS],
@@ -328,7 +340,7 @@ def _cache_key(
     producer: MemoryAotiProducerAbi,
 ) -> str:
     contract = {
-        "schema_version": 1,
+        "schema_version": 2,
         "model_sha256": model_digest,
         "exporter_sha256": exporter_digest,
         "producer": asdict(producer),
@@ -338,7 +350,8 @@ def _cache_key(
         "mask_policy": {
             "soft_resize": _MEMORY_MASK_SIZE,
             "soft_area_shrinkage": "clamp rejected 1152-grid logits to <= -10",
-            "hard_overlap_grid": _TRACKER_IMAGE_SIZE,
+            "hard_input": "globally owned binary FP32 mask",
+            "hard_input_grid": _TRACKER_IMAGE_SIZE,
             "hard_area_shrinkage": "fourth input accepted and ignored",
             "memory_grid": _MEMORY_MASK_SIZE,
             "sigmoid_scale": _SIGMOID_SCALE,
@@ -424,7 +437,7 @@ def _load_tracker_model(dependencies: _Dependencies, model_dir: Path, device: An
 
 def _prepare_memory_mask(
     torch: Any,
-    mask_logits: Any,
+    memory_mask: Any,
     suppress_area_shrinkage: Any,
     *,
     batch_size: int,
@@ -432,28 +445,10 @@ def _prepare_memory_mask(
 ) -> Any:
     functional = torch.nn.functional
     if hard_mask:
-        tracker_logits = functional.interpolate(
-            mask_logits.float(),
-            size=(_TRACKER_IMAGE_SIZE, _TRACKER_IMAGE_SIZE),
-            mode="bilinear",
-            align_corners=False,
-        )
-        if batch_size == 2:
-            winners = torch.argmax(tracker_logits, dim=0, keepdim=True)
-            object_indices = torch.arange(
-                batch_size,
-                device=tracker_logits.device,
-            )[:, None, None, None]
-            keep = winners == object_indices
-            tracker_logits = torch.where(
-                keep,
-                tracker_logits,
-                torch.clamp(tracker_logits, max=-10.0),
-            )
-        mask = (tracker_logits > 0).float()
+        mask = memory_mask.float()
     else:
         resized_logits = functional.interpolate(
-            mask_logits.float(),
+            memory_mask.float(),
             size=(_MEMORY_MASK_SIZE, _MEMORY_MASK_SIZE),
             mode="bilinear",
             align_corners=False,
@@ -497,14 +492,14 @@ def _make_memory_module(
         def forward(
             self,
             vision_features,
-            mask_logits,
+            memory_mask,
             object_score_logits,
             suppress_area_shrinkage,
         ):
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 mask = _prepare_memory_mask(
                     torch,
-                    mask_logits,
+                    memory_mask,
                     suppress_area_shrinkage,
                     batch_size=batch_size,
                     hard_mask=hard_mask,
@@ -548,27 +543,22 @@ def _example_inputs(
         dtype=torch.float32,
         device=device,
     )
-    if hard_mask and batch_size == 2:
-        # Correlated rows guarantee that the smoke run exercises overlapping
-        # positive regions and both winner identities at the 1008px grid.
-        shared = torch.randn(
-            1,
-            1,
-            _LOW_RES_MASK_SIZE,
-            _LOW_RES_MASK_SIZE,
-            dtype=torch.float32,
+    if hard_mask:
+        # The runtime resolves ownership once across the complete object axis.
+        # Exercise the package with mutually exclusive binary tracker-grid rows.
+        owners = torch.randint(
+            0,
+            batch_size + 1,
+            (1, 1, _TRACKER_IMAGE_SIZE, _TRACKER_IMAGE_SIZE),
+            dtype=torch.int64,
             device=device,
         )
-        horizontal = torch.linspace(
-            -1.0,
-            1.0,
-            _LOW_RES_MASK_SIZE,
-            dtype=torch.float32,
-            device=device,
-        ).reshape(1, 1, 1, _LOW_RES_MASK_SIZE)
-        mask_logits = torch.cat((shared + horizontal, shared - horizontal), dim=0)
+        memory_mask = torch.cat(
+            tuple((owners == object_index + 1).float() for object_index in range(batch_size)),
+            dim=0,
+        )
     else:
-        mask_logits = torch.randn(
+        memory_mask = torch.randn(
             batch_size,
             1,
             _LOW_RES_MASK_SIZE,
@@ -593,7 +583,7 @@ def _example_inputs(
             dtype=torch.int32,
             device=device,
         )
-    return feature, mask_logits.contiguous(), scores, suppress_area_shrinkage
+    return feature, memory_mask.contiguous(), scores, suppress_area_shrinkage
 
 
 def _compile_one_package(
@@ -798,7 +788,7 @@ def _publish_staged_packages(
         )
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": "fixed_memory_encoder_soft_hard_b1_b2",
         "artifact_format": "torch.aot_inductor.package.pt2",
         "implementation": {
@@ -846,7 +836,7 @@ def _validate_cached_directory(
     try:
         manifest = json.loads(manifest_path.read_bytes())
         if (
-            manifest["schema_version"] != 1
+            manifest["schema_version"] != 2
             or manifest["scope"] != "fixed_memory_encoder_soft_hard_b1_b2"
             or manifest["artifact_format"] != "torch.aot_inductor.package.pt2"
             or manifest["implementation"]
@@ -1073,6 +1063,7 @@ def export_sam3_tracker_memory_aoti(
 __all__ = [
     "MemoryAotiPackage",
     "MemoryAotiProducerAbi",
+    "MemoryPolicyInputAbi",
     "MemoryTensorAbi",
     "Sam3TrackerMemoryAotiArtifacts",
     "TRACKER_MEMORY_AOTI_MANIFEST_SECTION",

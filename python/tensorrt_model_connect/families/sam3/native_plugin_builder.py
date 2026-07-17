@@ -16,8 +16,10 @@ import fcntl
 import hashlib
 import importlib
 import json
+import math
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -29,12 +31,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .hard_mask_resize_aoti_exporter import HardMaskResizeAotiArtifacts
     from .tracker_memory_aoti_exporter import Sam3TrackerMemoryAotiArtifacts
     from .tracker_step_aoti_exporter import Sam3TrackerSplitAotiArtifacts
 
 
 _PLUGIN_NAME = "libtrtmc_sam3_tracker_step_native_plugin.so"
-_PLUGIN_VERSION = "1"
+_PLUGIN_VERSION = "2"
 TRACKER_STEP_NATIVE_PLUGIN_SECTION = "sam3_tracker_step_native_plugin_so"
 TRACKER_STEP_RUNTIME_MANIFEST_SECTION = "sam3_tracker_step_runtime_manifest.json"
 TRACKER_STEP_RUNTIME_SCOPE = "meta_split_dynamic_encoder_static_decoder"
@@ -347,13 +350,33 @@ def _validate_memory_artifacts(
         )
 
     expected_abi = (
-        ("tracker_feature_2", "float32", (1, 256, 72, 72)),
-        ("mask_logits", "float32", ("B", 1, 288, 288)),
-        ("object_score_logits", "float32", ("B", 1)),
-        ("suppress_area_shrinkage", "int32", ("B", 1)),
+        (
+            "soft",
+            (
+                ("tracker_feature_2", "float32", (1, 256, 72, 72)),
+                ("final_mask", "float32", ("B", 1, 288, 288)),
+                ("object_score_logits", "float32", ("B", 1)),
+                ("suppress_area_shrinkage", "int32", ("B", 1)),
+            ),
+        ),
+        (
+            "hard",
+            (
+                ("tracker_feature_2", "float32", (1, 256, 72, 72)),
+                ("owned_tracker_mask", "float32", ("B", 1, 1008, 1008)),
+                ("object_score_logits", "float32", ("B", 1)),
+                ("suppress_area_shrinkage", "int32", ("B", 1)),
+            ),
+        ),
     )
     actual_abi = tuple(
-        (tensor.name, tensor.dtype, tuple(tensor.shape)) for tensor in artifacts.input_abi
+        (
+            policy_abi.policy,
+            tuple(
+                (tensor.name, tensor.dtype, tuple(tensor.shape)) for tensor in policy_abi.tensors
+            ),
+        )
+        for policy_abi in artifacts.input_abi
     )
     if actual_abi != expected_abi:
         raise RuntimeError("SAM3 tracker-memory AOTI input ABI mismatch")
@@ -377,7 +400,7 @@ def _validate_memory_artifacts(
     except (TypeError, ValueError, json.JSONDecodeError) as error:
         raise RuntimeError("SAM3 tracker-memory AOTI manifest is invalid") from error
     if (
-        manifest.get("schema_version") != 1
+        manifest.get("schema_version") != 2
         or manifest.get("scope") != "fixed_memory_encoder_soft_hard_b1_b2"
         or manifest.get("artifact_format") != "torch.aot_inductor.package.pt2"
         or manifest.get("implementation")
@@ -391,8 +414,14 @@ def _validate_memory_artifacts(
         or manifest.get("producer") != json.loads(json.dumps(asdict(producer)))
         or manifest.get("input_abi")
         != [
-            {"name": name, "dtype": dtype, "shape": list(shape)}
-            for name, dtype, shape in expected_abi
+            {
+                "policy": policy,
+                "tensors": [
+                    {"name": name, "dtype": dtype, "shape": list(shape)}
+                    for name, dtype, shape in tensors
+                ],
+            }
+            for policy, tensors in expected_abi
         ]
     ):
         raise RuntimeError("SAM3 tracker-memory AOTI manifest contract mismatch")
@@ -400,27 +429,14 @@ def _validate_memory_artifacts(
     if not isinstance(manifest_packages, list) or len(manifest_packages) != 4:
         raise RuntimeError("SAM3 tracker-memory AOTI manifest requires four packages")
     for record, package in zip(manifest_packages, artifacts.packages, strict=True):
+        policy_abi = dict(expected_abi)[package.policy]
         expected_inputs = [
             {
-                "name": "tracker_feature_2",
-                "dtype": "float32",
-                "shape": [1, 256, 72, 72],
-            },
-            {
-                "name": "mask_logits",
-                "dtype": "float32",
-                "shape": [package.batch_size, 1, 288, 288],
-            },
-            {
-                "name": "object_score_logits",
-                "dtype": "float32",
-                "shape": [package.batch_size, 1],
-            },
-            {
-                "name": "suppress_area_shrinkage",
-                "dtype": "int32",
-                "shape": [package.batch_size, 1],
-            },
+                "name": name,
+                "dtype": dtype,
+                "shape": [package.batch_size if value == "B" else value for value in shape],
+            }
+            for name, dtype, shape in policy_abi
         ]
         expected_output_shape = [2, 5184, 1, 64] if package.batch_size == 1 else [2, 2, 5184, 64]
         if (
@@ -453,6 +469,128 @@ def _validate_memory_artifacts(
     if artifacts.bundle_sections[0][1] != artifacts.manifest_bytes:
         raise RuntimeError("SAM3 tracker-memory AOTI manifest section mismatch")
     return packages
+
+
+def _validate_resize_artifacts(
+    artifacts: HardMaskResizeAotiArtifacts,
+    split_artifacts: Sam3TrackerSplitAotiArtifacts,
+    inputs: _BuildInputs,
+    *,
+    aoti_abi_version: int,
+) -> None:
+    producer = artifacts.producer_abi
+    split_producer = split_artifacts.producer_abi
+    shared_fields = (
+        "torch_version",
+        "transformers_version",
+        "cuda_version",
+        "compute_capability",
+        "host_architecture",
+        "torch_cxx11_abi",
+    )
+    if any(
+        getattr(producer, field) != getattr(split_producer, field) for field in shared_fields
+    ) or (
+        producer.torch_version != inputs.torch_version
+        or producer.host_architecture != inputs.host_architecture
+        or producer.torch_cxx11_abi != inputs.torch_cxx11_abi
+        or producer.torch_aoti_abi_version != aoti_abi_version
+    ):
+        raise RuntimeError("SAM3 hard-mask resize/step AOTI producer ABI mismatch")
+    if tuple(package.batch_size for package in artifacts.packages) != (1, 2):
+        raise RuntimeError("SAM3 hard-mask resize artifacts do not contain canonical B1/B2")
+    for package in artifacts.packages:
+        if not package.path.is_file() or _sha256_bytes(package.path.read_bytes()) != package.sha256:
+            raise RuntimeError(f"SAM3 hard-mask resize package hash mismatch: {package.section}")
+        expected_section = f"sam3_hard_mask_resize_b{package.batch_size}.pt2"
+        expected_global = (
+            f"trtmc.sam3.tracker_memory.resize.b{package.batch_size}.fixed.{package.sha256[:20]}"
+        )
+        if package.section != expected_section or package.package_global != expected_global:
+            raise RuntimeError("SAM3 hard-mask resize content address mismatch")
+    try:
+        manifest = json.loads(artifacts.manifest_bytes)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("SAM3 hard-mask resize AOTI manifest is invalid") from error
+    expected_input = [{"name": "tracker_mask", "dtype": "float32", "shape": ["B", 1, 288, 288]}]
+    expected_output = [
+        {
+            "name": "resized_tracker_mask",
+            "dtype": "float32",
+            "shape": ["B", 1, 1008, 1008],
+        }
+    ]
+    if (
+        len(manifest) != 11
+        or manifest.get("schema_version") != 1
+        or manifest.get("scope") != "torch_bilinear_288_to_1008_b1_b2"
+        or manifest.get("artifact_format") != "torch.aot_inductor.package.pt2"
+        or manifest.get("implementation")
+        != {
+            "library": "torch",
+            "operator": "torch.nn.functional.interpolate",
+            "mode": "bilinear",
+            "align_corners": False,
+            "source_size": 288,
+            "target_size": 1008,
+        }
+        or manifest.get("producer") != json.loads(json.dumps(asdict(producer)))
+        or manifest.get("host_architecture") != producer.host_architecture
+        or not isinstance(manifest.get("exporter_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", manifest["exporter_sha256"]) is None
+        or manifest.get("input_abi") != expected_input
+        or manifest.get("output_abi") != expected_output
+    ):
+        raise RuntimeError("SAM3 hard-mask resize AOTI manifest contract mismatch")
+    records = manifest.get("packages")
+    if not isinstance(records, list) or len(records) != 2:
+        raise RuntimeError("SAM3 hard-mask resize AOTI manifest requires B1/B2 packages")
+    for record, package in zip(records, artifacts.packages, strict=True):
+        if record != {
+            "batch_size": package.batch_size,
+            "filename": f"sam3_hard_mask_resize_b{package.batch_size}_{package.sha256}.pt2",
+            "section": package.section,
+            "sha256": package.sha256,
+            "package_global": package.package_global,
+        }:
+            raise RuntimeError("SAM3 hard-mask resize package manifest mismatch")
+    validation = manifest.get("package_validation")
+    if (
+        not isinstance(validation, dict)
+        or validation.get("reference") != "same torch.interpolate eager execution"
+        or not math.isfinite(float(validation.get("maximum_absolute_error", -1.0)))
+        or float(validation.get("maximum_absolute_error", -1.0)) != 2.0e-5
+        or not isinstance(validation.get("cases"), list)
+        or len(validation["cases"]) != 2
+        or {
+            (int(case.get("batch_size", 0)), bool(case.get("passed", False)))
+            for case in validation["cases"]
+        }
+        != {(1, True), (2, True)}
+        or any(
+            not math.isfinite(float(case.get("maximum_absolute_error", float("inf"))))
+            or float(case.get("maximum_absolute_error", float("inf"))) > 2.0e-5
+            for case in validation["cases"]
+        )
+    ):
+        raise RuntimeError("SAM3 hard-mask resize package validation mismatch")
+    section_names = [name for name, _ in artifacts.bundle_sections]
+    expected_sections = [
+        "sam3_hard_mask_resize_aoti_manifest.json",
+        *(package.section for package in artifacts.packages),
+    ]
+    if (
+        section_names != expected_sections
+        or len(set(section_names)) != len(section_names)
+        or artifacts.bundle_sections[0][1] != artifacts.manifest_bytes
+        or any(
+            payload != package.path.read_bytes()
+            for (_, payload), package in zip(
+                artifacts.bundle_sections[1:], artifacts.packages, strict=True
+            )
+        )
+    ):
+        raise RuntimeError("SAM3 hard-mask resize bundle sections are incomplete")
 
 
 def _aoti_abi_version(library: ctypes.CDLL) -> int:
@@ -530,9 +668,39 @@ def _register_memory_packages(
             )
 
 
+def _register_resize_packages(
+    library: ctypes.CDLL,
+    artifacts: HardMaskResizeAotiArtifacts,
+) -> None:
+    register = library.trtmc_sam3_tracker_memory_register_package
+    register.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_int32,
+    ]
+    register.restype = ctypes.c_int
+    for package in artifacts.packages:
+        status = int(
+            register(
+                package.package_global.encode("utf-8"),
+                str(package.path).encode("utf-8"),
+                package.sha256.encode("ascii"),
+                b"resize",
+                package.batch_size,
+            )
+        )
+        if status != 0:
+            raise RuntimeError(
+                f"SAM3 hard-mask resize B{package.batch_size} registration failed ({status})"
+            )
+
+
 def _assemble_runtime_artifacts(
     split_artifacts: Sam3TrackerSplitAotiArtifacts,
     memory_artifacts: Sam3TrackerMemoryAotiArtifacts,
+    resize_artifacts: HardMaskResizeAotiArtifacts,
     plugin_library: Path,
     inputs: _BuildInputs,
     *,
@@ -541,6 +709,12 @@ def _assemble_runtime_artifacts(
     packages = _validate_split_artifacts(split_artifacts, inputs)
     _validate_memory_artifacts(
         memory_artifacts,
+        split_artifacts,
+        inputs,
+        aoti_abi_version=aoti_abi_version,
+    )
+    _validate_resize_artifacts(
+        resize_artifacts,
         split_artifacts,
         inputs,
         aoti_abi_version=aoti_abi_version,
@@ -597,7 +771,12 @@ def _assemble_runtime_artifacts(
     }
     runtime_manifest = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
     existing_names = [
-        name for name, _ in (*split_artifacts.bundle_sections, *memory_artifacts.bundle_sections)
+        name
+        for name, _ in (
+            *split_artifacts.bundle_sections,
+            *memory_artifacts.bundle_sections,
+            *resize_artifacts.bundle_sections,
+        )
     ]
     if len(set(existing_names)) != len(existing_names) or {
         TRACKER_STEP_NATIVE_PLUGIN_SECTION,
@@ -607,6 +786,7 @@ def _assemble_runtime_artifacts(
     bundle_sections = (
         *split_artifacts.bundle_sections,
         *memory_artifacts.bundle_sections,
+        *resize_artifacts.bundle_sections,
         (TRACKER_STEP_NATIVE_PLUGIN_SECTION, plugin_bytes),
         (TRACKER_STEP_RUNTIME_MANIFEST_SECTION, runtime_manifest),
     )
@@ -620,6 +800,7 @@ def _assemble_runtime_artifacts(
 def prepare_tracker_step_runtime(
     split_artifacts: Sam3TrackerSplitAotiArtifacts,
     memory_artifacts: Sam3TrackerMemoryAotiArtifacts,
+    resize_artifacts: HardMaskResizeAotiArtifacts,
     *,
     verbose: bool = False,
 ) -> TrackerStepRuntimeArtifacts:
@@ -631,12 +812,14 @@ def prepare_tracker_step_runtime(
     runtime = _assemble_runtime_artifacts(
         split_artifacts,
         memory_artifacts,
+        resize_artifacts,
         plugin_library,
         inputs,
         aoti_abi_version=_aoti_abi_version(library),
     )
     _register_split_pipelines(library, split_artifacts)
     _register_memory_packages(library, memory_artifacts)
+    _register_resize_packages(library, resize_artifacts)
     return runtime
 
 

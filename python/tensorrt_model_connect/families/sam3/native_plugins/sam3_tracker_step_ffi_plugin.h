@@ -50,7 +50,7 @@ class TrackerStepFfiPlugin final : public nvinfer1::IPluginV2DynamicExt {
                     void* const* outputs, void* workspace, cudaStream_t stream) noexcept override;
 
     static constexpr const char* kPluginName = "Sam3TrackerStepFfi";
-    static constexpr const char* kPluginVersion = "1";
+    static constexpr const char* kPluginVersion = "2";
     static constexpr int32_t kInputCount = 10;
     static constexpr int32_t kOutputCount = 1;
     static constexpr int32_t kPackedWidth = 288 * 288 + 256 + 1 + 1;

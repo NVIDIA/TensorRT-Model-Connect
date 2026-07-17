@@ -202,12 +202,12 @@ Sam3TrackerStepPackageSpec parse_package(const nlohmann::json& object) {
 
 nlohmann::json expected_memory_input_abi() {
     return nlohmann::json::parse(
-        R"([{"name":"tracker_feature_2","dtype":"float32","shape":[1,256,72,72]},{"name":"mask_logits","dtype":"float32","shape":["B",1,288,288]},{"name":"object_score_logits","dtype":"float32","shape":["B",1]},{"name":"suppress_area_shrinkage","dtype":"int32","shape":["B",1]}])");
+        R"([{"policy":"soft","tensors":[{"name":"tracker_feature_2","dtype":"float32","shape":[1,256,72,72]},{"name":"final_mask","dtype":"float32","shape":["B",1,288,288]},{"name":"object_score_logits","dtype":"float32","shape":["B",1]},{"name":"suppress_area_shrinkage","dtype":"int32","shape":["B",1]}]},{"policy":"hard","tensors":[{"name":"tracker_feature_2","dtype":"float32","shape":[1,256,72,72]},{"name":"owned_tracker_mask","dtype":"float32","shape":["B",1,1008,1008]},{"name":"object_score_logits","dtype":"float32","shape":["B",1]},{"name":"suppress_area_shrinkage","dtype":"int32","shape":["B",1]}]}])");
 }
 
 nlohmann::json expected_memory_mask_policy() {
     return nlohmann::json::parse(
-        R"({"soft":"288 bilinear 1152, clamp rejected rows to <=-10, sigmoid, scale 20, bias -10","hard":"288 bilinear 1008, B2 non-overlap, threshold, scale 20, bias -10, antialiased bilinear 1152; suppression input ignored","b1_layout":[2,5184,1,64],"b2_layout":[2,2,5184,64],"stored_precision":"bfloat16 rounded then promoted to float32 carrier"})");
+        R"({"soft":"288 bilinear 1152, clamp rejected rows to <=-10, sigmoid, scale 20, bias -10","hard":"globally owned binary FP32 1008, scale 20, bias -10, antialiased bilinear 1152; suppression input ignored","b1_layout":[2,5184,1,64],"b2_layout":[2,2,5184,64],"stored_precision":"bfloat16 rounded then promoted to float32 carrier"})");
 }
 
 nlohmann::json expected_memory_implementation() {
@@ -272,8 +272,13 @@ void validate_memory_tensor_contract(const nlohmann::json& object, std::string_v
     if (!object.is_object() || object.size() != 10 || object.at("fixed_shape") != true)
         throw std::runtime_error("SAM3 tracker-memory package contract is incomplete");
     const auto expected_inputs = nlohmann::json::parse(
-        R"([{"name":"tracker_feature_2","dtype":"float32","shape":[1,256,72,72]},{"name":"mask_logits","dtype":"float32","shape":[1,1,288,288]},{"name":"object_score_logits","dtype":"float32","shape":[1,1]},{"name":"suppress_area_shrinkage","dtype":"int32","shape":[1,1]}])");
+        R"([{"name":"tracker_feature_2","dtype":"float32","shape":[1,256,72,72]},{"name":"final_mask","dtype":"float32","shape":[1,1,288,288]},{"name":"object_score_logits","dtype":"float32","shape":[1,1]},{"name":"suppress_area_shrinkage","dtype":"int32","shape":[1,1]}])");
     auto inputs = expected_inputs;
+    if (policy == "hard") {
+        inputs.at(1).at("name") = "owned_tracker_mask";
+        inputs.at(1).at("shape").at(2) = 1008;
+        inputs.at(1).at("shape").at(3) = 1008;
+    }
     inputs.at(1).at("shape").at(0) = batch_size;
     inputs.at(2).at("shape").at(0) = batch_size;
     inputs.at(3).at("shape").at(0) = batch_size;
@@ -300,6 +305,68 @@ Sam3TrackerMemoryPackageSpec parse_memory_package(const nlohmann::json& object) 
     validate_memory_package_global(package);
     validate_memory_package_filename(object, package);
     validate_memory_tensor_contract(object, package.policy, package.batch_size);
+    return package;
+}
+
+nlohmann::json expected_resize_implementation() {
+    return nlohmann::json::parse(
+        R"({"library":"torch","operator":"torch.nn.functional.interpolate","mode":"bilinear","align_corners":false,"source_size":288,"target_size":1008})");
+}
+
+nlohmann::json expected_resize_input_abi() {
+    return nlohmann::json::parse(
+        R"([{"name":"tracker_mask","dtype":"float32","shape":["B",1,288,288]}])");
+}
+
+nlohmann::json expected_resize_output_abi() {
+    return nlohmann::json::parse(
+        R"([{"name":"resized_tracker_mask","dtype":"float32","shape":["B",1,1008,1008]}])");
+}
+
+std::string expected_resize_section(int32_t batch_size) {
+    return "sam3_hard_mask_resize_b" + std::to_string(batch_size) + ".pt2";
+}
+
+void validate_resize_package_contract(const Sam3HardMaskResizePackageSpec& package) {
+    if (!is_supported_tracker_batch(package.batch_size) || !is_sha256(package.sha256) ||
+        !is_safe_global_name(package.package_global) || !is_safe_section_name(package.section) ||
+        package.section != expected_resize_section(package.batch_size)) {
+        throw std::runtime_error("SAM3 hard-mask resize package has an invalid contract");
+    }
+}
+
+void validate_resize_package_global(const Sam3HardMaskResizePackageSpec& package) {
+    const std::string prefix =
+        "trtmc.sam3.tracker_memory.resize.b" + std::to_string(package.batch_size) + ".fixed.";
+    constexpr std::size_t kGlobalDigestCharacters = 20;
+    if (!starts_with(package.package_global, prefix) ||
+        package.package_global.size() != prefix.size() + kGlobalDigestCharacters ||
+        package.package_global.substr(prefix.size()) !=
+            package.sha256.substr(0, kGlobalDigestCharacters)) {
+        throw std::runtime_error("SAM3 hard-mask resize global does not match its content");
+    }
+}
+
+void validate_resize_package_filename(const nlohmann::json& object,
+                                      const Sam3HardMaskResizePackageSpec& package) {
+    const std::string expected_filename = "sam3_hard_mask_resize_b" +
+                                          std::to_string(package.batch_size) + "_" +
+                                          package.sha256 + ".pt2";
+    if (object.at("filename").get<std::string>() != expected_filename)
+        throw std::runtime_error("SAM3 hard-mask resize filename is not content-addressed");
+}
+
+Sam3HardMaskResizePackageSpec parse_resize_package(const nlohmann::json& object) {
+    if (!object.is_object() || object.size() != 5)
+        throw std::runtime_error("SAM3 hard-mask resize package contract is incomplete");
+    Sam3HardMaskResizePackageSpec package;
+    package.package_global = object.at("package_global").get<std::string>();
+    package.section = object.at("section").get<std::string>();
+    package.sha256 = object.at("sha256").get<std::string>();
+    package.batch_size = object.at("batch_size").get<int32_t>();
+    validate_resize_package_contract(package);
+    validate_resize_package_global(package);
+    validate_resize_package_filename(object, package);
     return package;
 }
 
@@ -361,7 +428,7 @@ Sam3TrackerStepPipelineSpec parse_pipeline(const nlohmann::json& object) {
 void validate_plugin_manifest_fields(const Sam3TrackerStepRuntimeManifest& manifest) {
     if (manifest.schema_version != 1 || manifest.step_scope != kSam3TrackerStepScope ||
         manifest.plugin_section != kSam3TrackerStepNativePluginSection ||
-        manifest.plugin_type != "Sam3TrackerStepFfi" || manifest.plugin_version != "1" ||
+        manifest.plugin_type != "Sam3TrackerStepFfi" || manifest.plugin_version != "2" ||
         !is_sha256(manifest.plugin_sha256))
         throw std::runtime_error("SAM3 tracker-step plugin manifest is incompatible");
 }
@@ -679,6 +746,7 @@ int32_t validate_runtime_device(const Sam3TrackerStepRuntimeManifest& manifest) 
 void materialize_runtime_artifacts(const BundleFile& bundle,
                                    const Sam3TrackerStepRuntimeManifest& manifest,
                                    const Sam3TrackerMemoryAotiManifest& memory_manifest,
+                                   const Sam3HardMaskResizeAotiManifest& resize_manifest,
                                    const std::filesystem::path& cache_directory) {
     std::filesystem::create_directories(cache_directory);
     if (std::filesystem::symlink_status(cache_directory).type() !=
@@ -693,6 +761,9 @@ void materialize_runtime_artifacts(const BundleFile& bundle,
         write_artifact(cache_directory / package.section, require_section(bundle, package.section),
                        package.sha256);
     for (const auto& package : memory_manifest.packages)
+        write_artifact(cache_directory / package.section, require_section(bundle, package.section),
+                       package.sha256);
+    for (const auto& package : resize_manifest.packages)
         write_artifact(cache_directory / package.section, require_section(bundle, package.section),
                        package.sha256);
 }
@@ -883,7 +954,7 @@ void validate_memory_manifest_contract(const nlohmann::json& parsed) {
 }
 
 void validate_memory_manifest_identity(const Sam3TrackerMemoryAotiManifest& manifest) {
-    if (manifest.schema_version != 1)
+    if (manifest.schema_version != 2)
         throw std::runtime_error("SAM3 tracker-memory AOTI manifest is incompatible");
     if (manifest.scope != kSam3TrackerMemoryScope)
         throw std::runtime_error("SAM3 tracker-memory AOTI manifest is incompatible");
@@ -962,8 +1033,129 @@ void parse_memory_packages(const BundleFile& bundle, const nlohmann::json& parse
             "SAM3 tracker-memory runtime requires exactly soft/hard B1/B2 packages");
 }
 
+bool has_valid_resize_producer(const Sam3HardMaskResizeAotiManifest& resize) {
+    return is_known_version(resize.torch_version) &&
+           is_known_version(resize.transformers_version) && is_known_version(resize.cuda_version) &&
+           !resize.host_architecture.empty() && resize.aoti_abi_version != 0 &&
+           resize.compute_capability_major > 0 && resize.compute_capability_minor >= 0;
+}
+
+bool resize_producer_matches_step(const Sam3HardMaskResizeAotiManifest& resize,
+                                  const Sam3TrackerStepRuntimeManifest& step) {
+    return resize.torch_version == step.torch_version &&
+           resize.transformers_version == step.transformers_version &&
+           resize.cuda_version == step.cuda_version &&
+           resize.host_architecture == step.host_architecture &&
+           resize.torch_cxx11_abi == step.torch_cxx11_abi &&
+           resize.aoti_abi_version == step.aoti_abi_version &&
+           resize.compute_capability_major == step.compute_capability_major &&
+           resize.compute_capability_minor == step.compute_capability_minor;
+}
+
+void validate_resize_producer_matches_step(const Sam3HardMaskResizeAotiManifest& resize,
+                                           const Sam3TrackerStepRuntimeManifest& step) {
+    if (!has_valid_resize_producer(resize) || !resize_producer_matches_step(resize, step)) {
+        throw std::runtime_error("SAM3 hard-mask resize/step producer ABI mismatch");
+    }
+}
+
+void validate_resize_manifest_contract(const nlohmann::json& parsed) {
+    if (!parsed.is_object() || parsed.size() != 11 ||
+        parsed.at("implementation") != expected_resize_implementation() ||
+        parsed.at("input_abi") != expected_resize_input_abi() ||
+        parsed.at("output_abi") != expected_resize_output_abi()) {
+        throw std::runtime_error("SAM3 hard-mask resize AOTI manifest contract mismatch");
+    }
+}
+
+Sam3HardMaskResizeAotiManifest
+parse_resize_manifest_header(const nlohmann::json& parsed,
+                             const Sam3TrackerStepRuntimeManifest& step_manifest) {
+    Sam3HardMaskResizeAotiManifest manifest;
+    manifest.schema_version = parsed.at("schema_version").get<int32_t>();
+    manifest.scope = parsed.at("scope").get<std::string>();
+    manifest.artifact_format = parsed.at("artifact_format").get<std::string>();
+    manifest.exporter_sha256 = parsed.at("exporter_sha256").get<std::string>();
+    if (manifest.schema_version != 1 || manifest.scope != kSam3HardMaskResizeScope ||
+        manifest.artifact_format != "torch.aot_inductor.package.pt2" ||
+        !is_sha256(manifest.exporter_sha256)) {
+        throw std::runtime_error("SAM3 hard-mask resize AOTI manifest is incompatible");
+    }
+    const auto& producer = parsed.at("producer");
+    if (!producer.is_object() || producer.size() != 7)
+        throw std::runtime_error("SAM3 hard-mask resize producer ABI is incomplete");
+    manifest.torch_version = producer.at("torch_version").get<std::string>();
+    manifest.transformers_version = producer.at("transformers_version").get<std::string>();
+    manifest.cuda_version = producer.at("cuda_version").get<std::string>();
+    manifest.host_architecture = producer.at("host_architecture").get<std::string>();
+    manifest.torch_cxx11_abi = producer.at("torch_cxx11_abi").get<bool>();
+    manifest.aoti_abi_version = producer.at("torch_aoti_abi_version").get<uint64_t>();
+    assign_compute_capability(producer, "compute_capability", manifest.compute_capability_major,
+                              manifest.compute_capability_minor,
+                              "SAM3 hard-mask resize compute capability is incomplete");
+    if (parsed.at("host_architecture").get<std::string>() != manifest.host_architecture)
+        throw std::runtime_error("SAM3 hard-mask resize host architecture is inconsistent");
+    validate_resize_producer_matches_step(manifest, step_manifest);
+    return manifest;
+}
+
+void parse_resize_packages(const BundleFile& bundle, const nlohmann::json& parsed,
+                           Sam3HardMaskResizeAotiManifest& manifest) {
+    const auto& packages = parsed.at("packages");
+    if (!packages.is_array() || packages.size() != manifest.packages.size())
+        throw std::runtime_error("SAM3 hard-mask resize runtime requires B1/B2 packages");
+    std::unordered_set<int32_t> batches;
+    std::unordered_set<std::string> globals;
+    std::unordered_set<std::string> sections;
+    for (std::size_t index = 0; index < manifest.packages.size(); ++index) {
+        manifest.packages[index] = parse_resize_package(packages.at(index));
+        const auto& package = manifest.packages[index];
+        if (!batches.insert(package.batch_size).second ||
+            !globals.insert(package.package_global).second ||
+            !sections.insert(package.section).second) {
+            throw std::runtime_error("SAM3 hard-mask resize package entries must be unique");
+        }
+        require_sha(require_section(bundle, package.section), package.sha256, package.section);
+    }
+    if (batches != std::unordered_set<int32_t>{1, 2})
+        throw std::runtime_error("SAM3 hard-mask resize runtime requires exactly B1/B2 packages");
+}
+
+void validate_resize_validation_header(const nlohmann::json& validation,
+                                       double maximum_absolute_error) {
+    if (!validation.is_object() || validation.size() != 3 ||
+        validation.at("reference").get<std::string>() != "same torch.interpolate eager execution" ||
+        validation.at("maximum_absolute_error").get<double>() != maximum_absolute_error) {
+        throw std::runtime_error("SAM3 hard-mask resize validation contract mismatch");
+    }
+}
+
+void validate_resize_validation_case(const nlohmann::json& value, double maximum_absolute_error,
+                                     std::unordered_set<int32_t>& batches) {
+    if (!value.is_object() || value.size() != 3 || !value.at("passed").get<bool>())
+        throw std::runtime_error("SAM3 hard-mask resize validation case failed");
+    const int32_t batch_size = value.at("batch_size").get<int32_t>();
+    const double error = value.at("maximum_absolute_error").get<double>();
+    if (!is_supported_tracker_batch(batch_size) || !batches.insert(batch_size).second ||
+        !std::isfinite(error) || error > maximum_absolute_error) {
+        throw std::runtime_error("SAM3 hard-mask resize validation case failed");
+    }
+}
+
+void validate_resize_package_validation(const nlohmann::json& validation) {
+    constexpr double kMaximumAbsoluteError = 2.0e-5;
+    validate_resize_validation_header(validation, kMaximumAbsoluteError);
+    const auto& cases = validation.at("cases");
+    if (!cases.is_array() || cases.size() != 2)
+        throw std::runtime_error("SAM3 hard-mask resize validation is incomplete");
+    std::unordered_set<int32_t> batches;
+    for (const auto& value : cases)
+        validate_resize_validation_case(value, kMaximumAbsoluteError, batches);
+}
+
 void register_runtime_packages(void* library, const Sam3TrackerStepRuntimeManifest& manifest,
                                const Sam3TrackerMemoryAotiManifest& memory_manifest,
+                               const Sam3HardMaskResizeAotiManifest& resize_manifest,
                                const std::filesystem::path& cache_directory) {
     const auto api = load_native_plugin_api(library);
     validate_native_plugin_api(api, manifest);
@@ -973,6 +1165,14 @@ void register_runtime_packages(void* library, const Sam3TrackerStepRuntimeManife
                                         package.sha256.c_str(), package.policy.c_str(),
                                         package.batch_size) != 0)
             throw std::runtime_error("SAM3 tracker-memory AOTI package registration failed");
+    }
+    for (const auto& package : resize_manifest.packages) {
+        const auto package_path = cache_directory / package.section;
+        if (api.register_memory_package(package.package_global.c_str(), package_path.c_str(),
+                                        package.sha256.c_str(), "resize",
+                                        package.batch_size) != 0) {
+            throw std::runtime_error("SAM3 hard-mask resize AOTI package registration failed");
+        }
     }
     for (const auto& pipeline : manifest.pipelines) {
         const auto& encoder = find_package(manifest, pipeline.batch_size, "encoder");
@@ -1023,16 +1223,34 @@ validate_sam3_tracker_memory_aoti_manifest(const BundleFile& bundle,
     return manifest;
 }
 
+Sam3HardMaskResizeAotiManifest
+validate_sam3_hard_mask_resize_aoti_manifest(const BundleFile& bundle,
+                                             const Sam3TrackerStepRuntimeManifest& step_manifest) {
+    const auto& manifest_bytes = require_section(bundle, kSam3HardMaskResizeAotiManifestSection);
+    const auto parsed = nlohmann::json::parse(manifest_bytes.begin(), manifest_bytes.end());
+    validate_resize_manifest_contract(parsed);
+    auto manifest = parse_resize_manifest_header(parsed, step_manifest);
+    parse_resize_packages(bundle, parsed, manifest);
+    validate_resize_package_validation(parsed.at("package_validation"));
+    return manifest;
+}
+
 void load_sam3_tracker_step_runtime(const BundleFile& bundle) {
     const auto manifest = validate_sam3_tracker_step_runtime_manifest(bundle);
     const auto memory_manifest = validate_sam3_tracker_memory_aoti_manifest(bundle, manifest);
+    const auto resize_manifest = validate_sam3_hard_mask_resize_aoti_manifest(bundle, manifest);
     const auto& manifest_bytes = require_section(bundle, kSam3TrackerStepRuntimeManifestSection);
     const auto& memory_manifest_bytes =
         require_section(bundle, kSam3TrackerMemoryAotiManifestSection);
+    const auto& resize_manifest_bytes =
+        require_section(bundle, kSam3HardMaskResizeAotiManifestSection);
     std::vector<char> combined_manifest_bytes(manifest_bytes.begin(), manifest_bytes.end());
     combined_manifest_bytes.push_back('\0');
     combined_manifest_bytes.insert(combined_manifest_bytes.end(), memory_manifest_bytes.begin(),
                                    memory_manifest_bytes.end());
+    combined_manifest_bytes.push_back('\0');
+    combined_manifest_bytes.insert(combined_manifest_bytes.end(), resize_manifest_bytes.begin(),
+                                   resize_manifest_bytes.end());
     const std::string manifest_sha = sam3_tracker_step_sha256_hex(combined_manifest_bytes);
     const int32_t device_id = validate_runtime_device(manifest);
     const std::string load_key = manifest_sha + ":cuda:" + std::to_string(device_id);
@@ -1042,10 +1260,11 @@ void load_sam3_tracker_step_runtime(const BundleFile& bundle) {
         return;
 
     const auto cache_directory = artifact_cache_directory(manifest_sha);
-    materialize_runtime_artifacts(bundle, manifest, memory_manifest, cache_directory);
+    materialize_runtime_artifacts(bundle, manifest, memory_manifest, resize_manifest,
+                                  cache_directory);
     const auto plugin_path = cache_directory / "libtrtmc_sam3_tracker_step_native_plugin.so";
     void* library = open_native_plugin(plugin_path);
-    register_runtime_packages(library, manifest, memory_manifest, cache_directory);
+    register_runtime_packages(library, manifest, memory_manifest, resize_manifest, cache_directory);
     loaded_plugins_by_manifest_and_device.emplace(load_key, library);
 }
 

@@ -146,6 +146,11 @@ struct Sam3TrackerMemoryModules {
     std::unique_ptr<ITrtModule> hard_batch2;
 };
 
+struct Sam3HardMaskResizeModules {
+    std::unique_ptr<ITrtModule> batch1;
+    std::unique_ptr<ITrtModule> batch2;
+};
+
 std::vector<std::unique_ptr<ITrtModule>>
 load_sam3_parallel_modules(IBackend& backend, const std::vector<char>& plan, const char* label,
                            const ModuleCreateOptions& options, std::size_t count) {
@@ -230,6 +235,21 @@ Sam3TrackerMemoryModules load_sam3_tracker_memory_modules(const PipelineContext&
             std::move(hard_batch1.module), std::move(hard_batch2.module)};
 }
 
+Sam3HardMaskResizeModules load_sam3_hard_mask_resize_modules(const PipelineContext& ctx,
+                                                             const ModuleCreateOptions& options,
+                                                             bool video_tracking_supported) {
+    if (!video_tracking_supported)
+        return {};
+
+    auto batch1 = load_trt_module_from_plan(
+        ctx.backend, find_section(ctx.bundle, "sam3_hard_mask_resize_engine_plan"),
+        "sam3 hard_mask_resize_engine", options);
+    auto batch2 = load_trt_module_from_plan(
+        ctx.backend, find_section(ctx.bundle, "sam3_hard_mask_resize_batch2_engine_plan"),
+        "sam3 hard_mask_resize_batch2_engine", options);
+    return {std::move(batch1.module), std::move(batch2.module)};
+}
+
 Sam3TrackerStepModules load_sam3_tracker_step_modules(const PipelineContext& ctx,
                                                       const ModuleCreateOptions& options,
                                                       bool video_tracking_supported) {
@@ -281,6 +301,8 @@ class Sam3Plugin final : public IPipelinePlugin {
             load_sam3_tracker_step_modules(ctx, opts, video_tracking_supported);
         auto tracker_memory_engines =
             load_sam3_tracker_memory_modules(ctx, opts, video_tracking_supported);
+        auto hard_mask_resize_engines =
+            load_sam3_hard_mask_resize_modules(ctx, opts, video_tracking_supported);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
         return std::make_unique<Sam3Pipeline>(
             std::move(text_encoder.module), std::move(vision_encoder.module),
@@ -290,7 +312,8 @@ class Sam3Plugin final : public IPipelinePlugin {
             std::move(tracker_step_engines.batch2), std::move(tracker_memory_engines.soft_batch2),
             std::move(tracker_init_engines.parallel_sibling),
             std::move(tracker_memory_engines.hard_batch1),
-            std::move(tracker_memory_engines.hard_batch2));
+            std::move(tracker_memory_engines.hard_batch2),
+            std::move(hard_mask_resize_engines.batch1), std::move(hard_mask_resize_engines.batch2));
     }
 };
 

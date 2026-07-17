@@ -22,6 +22,8 @@ using Plugin = trtmc::sam3::TrackerMemoryFfiPlugin;
 
 struct ShapeContext {
     int32_t batch_size;
+    bool hard_mask;
+    bool resize{false};
 };
 
 void check(bool condition, const char* message) {
@@ -38,14 +40,55 @@ std::vector<int64_t> output_shape(int32_t batch_size) {
 }
 
 std::array<std::vector<int64_t>, Plugin::kInputCount + Plugin::kOutputCount>
-expected_shapes(int32_t batch_size) {
+expected_shapes(int32_t batch_size, bool hard_mask) {
+    const int64_t mask_size = hard_mask ? 1008 : 288;
     return {
         std::vector<int64_t>{1, 256, 72, 72},
-        std::vector<int64_t>{batch_size, 1, 288, 288},
+        std::vector<int64_t>{batch_size, 1, mask_size, mask_size},
         std::vector<int64_t>{batch_size, 1},
         std::vector<int64_t>{batch_size, 1},
         output_shape(batch_size),
     };
+}
+
+std::array<std::vector<int64_t>, Plugin::kInputCount + Plugin::kOutputCount>
+resize_shapes(int32_t batch_size) {
+    return {
+        std::vector<int64_t>{1},
+        std::vector<int64_t>{batch_size, 1, 288, 288},
+        std::vector<int64_t>{1},
+        std::vector<int64_t>{1},
+        std::vector<int64_t>{batch_size, 1, 1008, 1008},
+    };
+}
+
+bool callback_dimensions_match(const DLTensor& tensor, const std::vector<int64_t>& expected_shape) {
+    for (int32_t dimension = 0; dimension < tensor.ndim; ++dimension) {
+        if (tensor.shape[dimension] != expected_shape[static_cast<std::size_t>(dimension)])
+            return false;
+    }
+    return true;
+}
+
+bool callback_dtype_matches(const DLTensor& tensor, std::size_t index) {
+    const auto expected_code = index == 3 ? kDLInt : kDLFloat;
+    return tensor.dtype.code == expected_code && tensor.dtype.bits == 32 && tensor.dtype.lanes == 1;
+}
+
+int validate_callback_tensor(const TVMFFIAny& argument, const std::vector<int64_t>& expected_shape,
+                             std::size_t index) {
+    if (argument.type_index != kTVMFFIDLTensorPtr)
+        return -2;
+    const auto* tensor = static_cast<const DLTensor*>(argument.v_ptr);
+    if (tensor == nullptr || tensor->shape == nullptr ||
+        tensor->ndim != static_cast<int32_t>(expected_shape.size())) {
+        return -3;
+    }
+    if (!callback_dimensions_match(*tensor, expected_shape))
+        return -4;
+    if (!callback_dtype_matches(*tensor, index))
+        return -5;
+    return 0;
 }
 
 int shape_callback(void* self, const TVMFFIAny* arguments, int32_t argument_count,
@@ -53,24 +96,13 @@ int shape_callback(void* self, const TVMFFIAny* arguments, int32_t argument_coun
     if (self == nullptr || arguments == nullptr || result == nullptr ||
         argument_count != Plugin::kInputCount + Plugin::kOutputCount + 1)
         return -1;
-    const auto batch_size = static_cast<const ShapeContext*>(self)->batch_size;
-    const auto shapes = expected_shapes(batch_size);
+    const auto& context = *static_cast<const ShapeContext*>(self);
+    const auto shapes = context.resize ? resize_shapes(context.batch_size)
+                                       : expected_shapes(context.batch_size, context.hard_mask);
     for (std::size_t index = 0; index < shapes.size(); ++index) {
-        if (arguments[index].type_index != kTVMFFIDLTensorPtr)
-            return -2;
-        const auto* tensor = static_cast<const DLTensor*>(arguments[index].v_ptr);
-        if (tensor == nullptr || tensor->shape == nullptr ||
-            tensor->ndim != static_cast<int32_t>(shapes[index].size()))
-            return -3;
-        for (int32_t dimension = 0; dimension < tensor->ndim; ++dimension) {
-            if (tensor->shape[dimension] != shapes[index][static_cast<std::size_t>(dimension)])
-                return -4;
-        }
-        const bool integer = index == 3;
-        const auto expected_code = integer ? kDLInt : kDLFloat;
-        if (tensor->dtype.code != expected_code || tensor->dtype.bits != 32 ||
-            tensor->dtype.lanes != 1)
-            return -5;
+        const int status = validate_callback_tensor(arguments[index], shapes[index], index);
+        if (status != 0)
+            return status;
     }
     const auto stream_index = shapes.size();
     if (arguments[stream_index].type_index != kTVMFFIOpaquePtr)
@@ -105,12 +137,23 @@ nvinfer1::PluginTensorDesc make_descriptor(nvinfer1::DataType type,
     return descriptor;
 }
 
-std::array<nvinfer1::PluginTensorDesc, Plugin::kInputCount> make_actual_inputs(int32_t batch_size) {
+std::array<nvinfer1::PluginTensorDesc, Plugin::kInputCount> make_actual_inputs(int32_t batch_size,
+                                                                               bool hard_mask) {
+    const int64_t mask_size = hard_mask ? 1008 : 288;
     return {
         make_descriptor(nvinfer1::DataType::kFLOAT, {1, 256, 72, 72}),
-        make_descriptor(nvinfer1::DataType::kFLOAT, {batch_size, 1, 288, 288}),
+        make_descriptor(nvinfer1::DataType::kFLOAT, {batch_size, 1, mask_size, mask_size}),
         make_descriptor(nvinfer1::DataType::kFLOAT, {batch_size, 1}),
         make_descriptor(nvinfer1::DataType::kINT32, {batch_size, 1}),
+    };
+}
+
+std::array<nvinfer1::PluginTensorDesc, Plugin::kInputCount> make_resize_inputs(int32_t batch_size) {
+    return {
+        make_descriptor(nvinfer1::DataType::kFLOAT, {1}),
+        make_descriptor(nvinfer1::DataType::kFLOAT, {batch_size, 1, 288, 288}),
+        make_descriptor(nvinfer1::DataType::kFLOAT, {1}),
+        make_descriptor(nvinfer1::DataType::kINT32, {1}),
     };
 }
 
@@ -136,11 +179,13 @@ void register_callback(const char* global_name, ShapeContext* context,
     check(status == 0, "register TVM-FFI memory callback");
 }
 
-void exercise_plugin(const char* global_name, int32_t batch_size, cudaStream_t stream,
-                     void* storage) {
-    auto actual_inputs = make_actual_inputs(batch_size);
-    const auto actual_output =
-        make_descriptor(nvinfer1::DataType::kFLOAT, output_shape(batch_size));
+void exercise_plugin(const char* global_name, int32_t batch_size, bool hard_mask,
+                     cudaStream_t stream, void* storage, bool resize = false) {
+    auto actual_inputs =
+        resize ? make_resize_inputs(batch_size) : make_actual_inputs(batch_size, hard_mask);
+    const auto actual_output = make_descriptor(
+        nvinfer1::DataType::kFLOAT,
+        resize ? std::vector<int64_t>{batch_size, 1, 1008, 1008} : output_shape(batch_size));
     auto dynamic_inputs = make_dynamic_inputs(actual_inputs);
     nvinfer1::DynamicPluginTensorDesc dynamic_output{};
     dynamic_output.desc = actual_output;
@@ -167,6 +212,11 @@ void exercise_plugin(const char* global_name, int32_t batch_size, cudaStream_t s
     check(plugin.enqueue(invalid_inputs.data(), &actual_output, inputs.data(), outputs.data(),
                          nullptr, stream) != 0,
           "memory plugin rejects a non-INT32 suppression tensor");
+    auto wrong_policy_inputs =
+        resize ? make_actual_inputs(batch_size, false) : make_actual_inputs(batch_size, !hard_mask);
+    check(plugin.enqueue(wrong_policy_inputs.data(), &actual_output, inputs.data(), outputs.data(),
+                         nullptr, stream) != 0,
+          "memory plugin rejects the other mask policy's spatial grid");
     plugin.terminate();
 }
 
@@ -176,12 +226,16 @@ int main() {
     constexpr const char* kSoftB1 = "trtmc.sam3.tracker_memory.soft.b1.fixed.0123456789abcdef0123";
     constexpr const char* kHardB2 = "trtmc.sam3.tracker_memory.hard.b2.fixed.123456789abcdef01234";
     constexpr const char* kErrorB2 = "trtmc.sam3.tracker_memory.soft.b2.fixed.abcdef0123456789abcd";
+    constexpr const char* kResizeB1 =
+        "trtmc.sam3.tracker_memory.resize.b1.fixed.23456789abcdef012345";
     check(cudaSetDevice(0) == cudaSuccess, "select CUDA device");
-    ShapeContext b1{1};
-    ShapeContext b2{2};
+    ShapeContext b1{1, false};
+    ShapeContext b2{2, true};
+    ShapeContext resize_b1{1, false, true};
     register_callback(kSoftB1, &b1, shape_callback);
     register_callback(kHardB2, &b2, shape_callback);
     register_callback(kErrorB2, nullptr, error_callback);
+    register_callback(kResizeB1, &resize_b1, shape_callback);
 
     cudaStream_t previous_stream = nullptr;
     cudaStream_t execution_stream = nullptr;
@@ -194,14 +248,17 @@ int main() {
 
     void* storage = nullptr;
     check(cudaMalloc(&storage, 1) == cudaSuccess, "allocate memory callback test storage");
-    exercise_plugin(kSoftB1, 1, execution_stream, storage);
+    exercise_plugin(kSoftB1, 1, false, execution_stream, storage);
     check(TVMFFIEnvGetStream(kDLCUDA, 0) == reinterpret_cast<TVMFFIStreamHandle>(previous_stream),
           "B1 plugin restores the prior TVM-FFI stream");
-    exercise_plugin(kHardB2, 2, execution_stream, storage);
+    exercise_plugin(kHardB2, 2, true, execution_stream, storage);
     check(TVMFFIEnvGetStream(kDLCUDA, 0) == reinterpret_cast<TVMFFIStreamHandle>(previous_stream),
           "B2 plugin restores the prior TVM-FFI stream");
+    exercise_plugin(kResizeB1, 1, false, execution_stream, storage, true);
+    check(TVMFFIEnvGetStream(kDLCUDA, 0) == reinterpret_cast<TVMFFIStreamHandle>(previous_stream),
+          "resize plugin restores the prior TVM-FFI stream");
 
-    auto error_inputs = make_actual_inputs(2);
+    auto error_inputs = make_actual_inputs(2, false);
     const auto error_output = make_descriptor(nvinfer1::DataType::kFLOAT, output_shape(2));
     auto dynamic_inputs = make_dynamic_inputs(error_inputs);
     nvinfer1::DynamicPluginTensorDesc dynamic_output{};

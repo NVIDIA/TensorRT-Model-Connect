@@ -584,6 +584,8 @@ class Sam3Plugin:
             )
         }
         if cfg["video_tracking_supported"]:
+            from .hard_mask_resize_aoti_exporter import export_sam3_hard_mask_resize_aoti
+            from .hard_mask_resize_ffi_builder import HardMaskResizePlanSpec
             from .native_plugin_builder import prepare_tracker_step_runtime
             from .tracker_builder import build_sam3_tracker_engines
             from .tracker_memory_aoti_exporter import export_sam3_tracker_memory_aoti
@@ -593,9 +595,11 @@ class Sam3Plugin:
 
             split_artifacts = export_sam3_tracker_split_aoti(model_dir)
             memory_artifacts = export_sam3_tracker_memory_aoti(model_dir)
+            resize_artifacts = export_sam3_hard_mask_resize_aoti()
             runtime_artifacts = prepare_tracker_step_runtime(
                 split_artifacts,
                 memory_artifacts,
+                resize_artifacts,
                 verbose=verbose,
             )
             step_plan_spec = TrackerStepPlanSpec(
@@ -618,10 +622,16 @@ class Sam3Plugin:
                     batch_size=2, hard_mask=True
                 ).package_global,
             )
+            resize_plan_spec = HardMaskResizePlanSpec(
+                plugin_library=runtime_artifacts.plugin_library,
+                global_name_b1=resize_artifacts.package(1).package_global,
+                global_name_b2=resize_artifacts.package(2).package_global,
+            )
             tracker_plans = build_sam3_tracker_engines(
                 model_dir,
                 step_plan_spec=step_plan_spec,
                 memory_plan_spec=memory_plan_spec,
+                resize_plan_spec=resize_plan_spec,
                 verbose=verbose,
             )
             plans.update(tracker_plans)

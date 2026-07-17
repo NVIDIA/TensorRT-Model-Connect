@@ -37,6 +37,20 @@ bool is_lower_hex(std::string_view value) {
     });
 }
 
+bool is_supported_policy(std::string_view policy) {
+    if (policy != "resize")
+        return policy == "soft" || policy == "hard";
+    return true;
+}
+
+std::string batch_suffix(int32_t batch_size) {
+    if (batch_size == 1)
+        return ".b1";
+    if (batch_size == 2)
+        return ".b2";
+    return {};
+}
+
 bool valid_content_addressed_name(std::string_view name, int32_t batch_size) {
     constexpr std::string_view kPrefix = "trtmc.sam3.tracker_memory.";
     constexpr std::string_view kMiddle = ".fixed.";
@@ -47,15 +61,25 @@ bool valid_content_addressed_name(std::string_view name, int32_t batch_size) {
     if (policy_end == std::string_view::npos)
         return false;
     const auto policy = name.substr(kPrefix.size(), policy_end - kPrefix.size());
-    if (policy != "soft" && policy != "hard")
+    if (!is_supported_policy(policy))
         return false;
-    const std::string batch = batch_size == 1 ? ".b1" : batch_size == 2 ? ".b2" : "";
+    const std::string batch = batch_suffix(batch_size);
     if (batch.empty())
         return false;
     const std::string prefix =
         std::string(kPrefix) + std::string(policy) + batch + std::string(kMiddle);
     return name.starts_with(prefix) && name.size() == prefix.size() + kDigestCharacters &&
            is_lower_hex(name.substr(prefix.size()));
+}
+
+bool is_hard_memory_kernel(std::string_view name) {
+    constexpr std::string_view kHardPrefix = "trtmc.sam3.tracker_memory.hard.";
+    return name.starts_with(kHardPrefix);
+}
+
+bool is_resize_kernel(std::string_view name) {
+    constexpr std::string_view kResizePrefix = "trtmc.sam3.tracker_memory.resize.";
+    return name.starts_with(kResizePrefix);
 }
 
 bool exact_dimensions(const nvinfer1::Dims& dims, std::initializer_list<int64_t> expected) {
@@ -79,14 +103,37 @@ bool output_dimensions_valid(const nvinfer1::Dims& dims, int32_t batch_size) {
     return false;
 }
 
-bool descriptor_shapes_valid(const nvinfer1::PluginTensorDesc* inputs,
-                             const nvinfer1::PluginTensorDesc* outputs, int32_t batch_size) {
-    return inputs != nullptr && outputs != nullptr &&
-           exact_dimensions(inputs[0].dims, {1, 256, 72, 72}) &&
+bool resize_output_dimensions_valid(const nvinfer1::Dims& dims, int32_t batch_size) {
+    return exact_dimensions(dims, {batch_size, 1, 1008, 1008});
+}
+
+bool resize_descriptor_shapes_valid(const nvinfer1::PluginTensorDesc* inputs,
+                                    const nvinfer1::PluginTensorDesc* outputs, int32_t batch_size) {
+    return exact_dimensions(inputs[0].dims, {1}) &&
            exact_dimensions(inputs[1].dims, {batch_size, 1, 288, 288}) &&
+           exact_dimensions(inputs[2].dims, {1}) && exact_dimensions(inputs[3].dims, {1}) &&
+           resize_output_dimensions_valid(outputs[0].dims, batch_size);
+}
+
+bool memory_descriptor_shapes_valid(const nvinfer1::PluginTensorDesc* inputs,
+                                    const nvinfer1::PluginTensorDesc* outputs, int32_t batch_size,
+                                    bool hard_mask) {
+    const int32_t mask_size = hard_mask ? 1008 : 288;
+    return exact_dimensions(inputs[0].dims, {1, 256, 72, 72}) &&
+           exact_dimensions(inputs[1].dims, {batch_size, 1, mask_size, mask_size}) &&
            exact_dimensions(inputs[2].dims, {batch_size, 1}) &&
            exact_dimensions(inputs[3].dims, {batch_size, 1}) &&
            output_dimensions_valid(outputs[0].dims, batch_size);
+}
+
+bool descriptor_shapes_valid(const nvinfer1::PluginTensorDesc* inputs,
+                             const nvinfer1::PluginTensorDesc* outputs, int32_t batch_size,
+                             bool hard_mask, bool resize) {
+    if (inputs == nullptr || outputs == nullptr)
+        return false;
+    if (resize)
+        return resize_descriptor_shapes_valid(inputs, outputs, batch_size);
+    return memory_descriptor_shapes_valid(inputs, outputs, batch_size, hard_mask);
 }
 
 bool descriptor_types_valid(const nvinfer1::PluginTensorDesc* inputs,
@@ -105,7 +152,8 @@ bool descriptor_types_valid(const nvinfer1::PluginTensorDesc* inputs,
 bool dynamic_descriptor_contract_valid(const nvinfer1::DynamicPluginTensorDesc* inputs,
                                        int32_t input_count,
                                        const nvinfer1::DynamicPluginTensorDesc* outputs,
-                                       int32_t output_count, int32_t batch_size) {
+                                       int32_t output_count, int32_t batch_size, bool hard_mask,
+                                       bool resize) {
     if (inputs == nullptr || outputs == nullptr ||
         input_count != TrackerMemoryFfiPlugin::kInputCount ||
         output_count != TrackerMemoryFfiPlugin::kOutputCount)
@@ -120,10 +168,12 @@ bool dynamic_descriptor_contract_valid(const nvinfer1::DynamicPluginTensorDesc* 
         minima[static_cast<std::size_t>(index)].dims = inputs[index].min;
         maxima[static_cast<std::size_t>(index)].dims = inputs[index].max;
     }
-    return descriptor_shapes_valid(descriptors.data(), &outputs[0].desc, batch_size) &&
+    return descriptor_shapes_valid(descriptors.data(), &outputs[0].desc, batch_size, hard_mask,
+                                   resize) &&
            descriptor_types_valid(descriptors.data(), &outputs[0].desc) &&
-           descriptor_shapes_valid(minima.data(), &outputs[0].desc, batch_size) &&
-           descriptor_shapes_valid(maxima.data(), &outputs[0].desc, batch_size);
+           descriptor_shapes_valid(minima.data(), &outputs[0].desc, batch_size, hard_mask,
+                                   resize) &&
+           descriptor_shapes_valid(maxima.data(), &outputs[0].desc, batch_size, hard_mask, resize);
 }
 
 DLDataType to_dl_dtype(nvinfer1::DataType type) {
@@ -298,6 +348,13 @@ TrackerMemoryFfiPlugin::getOutputDimensions(int32_t, nvinfer1::DimsExprs const*,
                                             nvinfer1::IExprBuilder& builder) noexcept {
     nvinfer1::DimsExprs output;
     output.nbDims = 4;
+    if (is_resize_kernel(kernel_name_)) {
+        output.d[0] = builder.constant(batch_size_);
+        output.d[1] = builder.constant(1);
+        output.d[2] = builder.constant(1008);
+        output.d[3] = builder.constant(1008);
+        return output;
+    }
     output.d[0] = builder.constant(2);
     if (batch_size_ == 1) {
         output.d[1] = builder.constant(kSpatialTokens);
@@ -330,7 +387,9 @@ void TrackerMemoryFfiPlugin::configurePlugin(nvinfer1::DynamicPluginTensorDesc c
                                              nvinfer1::DynamicPluginTensorDesc const* outputs,
                                              int32_t output_count) noexcept {
     configuration_valid_.store(
-        dynamic_descriptor_contract_valid(inputs, input_count, outputs, output_count, batch_size_),
+        dynamic_descriptor_contract_valid(inputs, input_count, outputs, output_count, batch_size_,
+                                          is_hard_memory_kernel(kernel_name_),
+                                          is_resize_kernel(kernel_name_)),
         std::memory_order_release);
     configuration_checked_.store(true, std::memory_order_release);
 }
@@ -380,7 +439,9 @@ int32_t TrackerMemoryFfiPlugin::enqueue(nvinfer1::PluginTensorDesc const* input_
         return fail("invalid plugin contract or null TensorRT descriptor/storage");
     if (cached_function_ == nullptr)
         return fail("TVM-FFI global was not resolved during initialization");
-    if (!descriptor_shapes_valid(input_desc, output_desc, batch_size_))
+    if (!descriptor_shapes_valid(input_desc, output_desc, batch_size_,
+                                 is_hard_memory_kernel(kernel_name_),
+                                 is_resize_kernel(kernel_name_)))
         return fail("runtime tensor shapes violate the tracker-memory contract");
     if (!descriptor_types_valid(input_desc, output_desc))
         return fail("runtime tensor dtypes or formats violate the tracker-memory contract");

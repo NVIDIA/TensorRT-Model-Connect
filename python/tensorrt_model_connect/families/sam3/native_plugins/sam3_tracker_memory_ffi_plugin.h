@@ -50,7 +50,7 @@ class TrackerMemoryFfiPlugin final : public nvinfer1::IPluginV2DynamicExt {
                     void* const* outputs, void* workspace, cudaStream_t stream) noexcept override;
 
     static constexpr const char* kPluginName = "Sam3TrackerMemoryFfi";
-    static constexpr const char* kPluginVersion = "1";
+    static constexpr const char* kPluginVersion = "2";
     static constexpr int32_t kInputCount = 4;
     static constexpr int32_t kOutputCount = 1;
     static constexpr int32_t kSpatialTokens = 72 * 72;

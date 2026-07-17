@@ -22,6 +22,9 @@ inline constexpr const char* kSam3TrackerStepScope = "meta_split_dynamic_encoder
 inline constexpr const char* kSam3TrackerMemoryAotiManifestSection =
     "sam3_tracker_memory_aoti_manifest.json";
 inline constexpr const char* kSam3TrackerMemoryScope = "fixed_memory_encoder_soft_hard_b1_b2";
+inline constexpr const char* kSam3HardMaskResizeAotiManifestSection =
+    "sam3_hard_mask_resize_aoti_manifest.json";
+inline constexpr const char* kSam3HardMaskResizeScope = "torch_bilinear_288_to_1008_b1_b2";
 
 struct Sam3TrackerStepPackageSpec {
     std::string stage;
@@ -85,6 +88,29 @@ struct Sam3TrackerMemoryAotiManifest {
     std::array<Sam3TrackerMemoryPackageSpec, 4> packages;
 };
 
+struct Sam3HardMaskResizePackageSpec {
+    std::string package_global;
+    std::string section;
+    std::string sha256;
+    int32_t batch_size{0};
+};
+
+struct Sam3HardMaskResizeAotiManifest {
+    int32_t schema_version{0};
+    std::string scope;
+    std::string artifact_format;
+    std::string exporter_sha256;
+    std::string torch_version;
+    std::string transformers_version;
+    std::string cuda_version;
+    std::string host_architecture;
+    bool torch_cxx11_abi{false};
+    uint64_t aoti_abi_version{0};
+    int32_t compute_capability_major{0};
+    int32_t compute_capability_minor{0};
+    std::array<Sam3HardMaskResizePackageSpec, 2> packages;
+};
+
 // Parse and fully validate the content contract, including every artifact
 // SHA-256. This function is side-effect-free and is used by CPU unit tests.
 Sam3TrackerStepRuntimeManifest
@@ -97,8 +123,12 @@ Sam3TrackerMemoryAotiManifest
 validate_sam3_tracker_memory_aoti_manifest(const BundleFile& bundle,
                                            const Sam3TrackerStepRuntimeManifest& step_manifest);
 
+Sam3HardMaskResizeAotiManifest
+validate_sam3_hard_mask_resize_aoti_manifest(const BundleFile& bundle,
+                                             const Sam3TrackerStepRuntimeManifest& step_manifest);
+
 // Extract, ABI-check, load, and register the model-owned native plugin and
-// all eight AOTI packages, register the four memory functions, and register
+// all ten AOTI packages, register the memory and resize functions, and register
 // both split pipelines. Must run before TensorRT deserializes any step or
 // memory wrapper plan.
 // Repeated loads of the same content-addressed manifest are idempotent.

@@ -51,7 +51,9 @@ class Sam3Pipeline final : public IPipeline {
                  std::unique_ptr<TrtModule> tracker_memory_batch2_engine = nullptr,
                  std::unique_ptr<TrtModule> parallel_tracker_init_engine = nullptr,
                  std::unique_ptr<TrtModule> tracker_hard_memory_engine = nullptr,
-                 std::unique_ptr<TrtModule> tracker_hard_memory_batch2_engine = nullptr);
+                 std::unique_ptr<TrtModule> tracker_hard_memory_batch2_engine = nullptr,
+                 std::unique_ptr<TrtModule> hard_mask_resize_engine = nullptr,
+                 std::unique_ptr<TrtModule> hard_mask_resize_batch2_engine = nullptr);
 
     PromptedSegmentationResult segment_prompted(const float* image_pixels, int32_t image_height,
                                                 int32_t image_width, float point_x = 0.5F,
@@ -82,6 +84,8 @@ class Sam3Pipeline final : public IPipeline {
     std::unique_ptr<TrtModule> tracker_memory_batch2_engine_;
     std::unique_ptr<TrtModule> tracker_hard_memory_engine_;
     std::unique_ptr<TrtModule> tracker_hard_memory_batch2_engine_;
+    std::unique_ptr<TrtModule> hard_mask_resize_engine_;
+    std::unique_ptr<TrtModule> hard_mask_resize_batch2_engine_;
     std::shared_ptr<Sam3VideoVisionWorkspace> video_vision_workspace_;
     std::shared_ptr<std::mutex> execution_mutex_{std::make_shared<std::mutex>()};
     std::shared_ptr<ITokenizer> tokenizer_;

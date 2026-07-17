@@ -276,8 +276,9 @@ def test_sam3_tracker_hard_memory_plan_has_fixed_b1_b2_contract() -> None:
         tracker_memory_ffi_builder._build_tracker_memory_ffi_plan
     )
     assert '"tracker_feature_2"' in memory_plan_source
-    assert 'mask_name = "carved_low_res_mask" if hard_mask else "final_mask"' in memory_plan_source
-    assert "(batch_size, 1, 288, 288)" in memory_plan_source
+    assert 'mask_name = "owned_tracker_mask" if hard_mask else "final_mask"' in memory_plan_source
+    assert "mask_size = 1008 if hard_mask else 288" in memory_plan_source
+    assert "(batch_size, 1, mask_size, mask_size)" in memory_plan_source
     assert '"object_score_logits"' in memory_plan_source
     assert "if hard_mask" in memory_plan_source
 
@@ -662,7 +663,7 @@ def test_sam3_tracker_step_uses_tensorrt_11_creator_api() -> None:
     trt = SimpleNamespace(get_plugin_registry=lambda: _Registry())
 
     assert tracker_step_ffi_builder._plugin_creator(trt) is creator
-    assert calls == [("Sam3TrackerStepFfi", "1", "")]
+    assert calls == [("Sam3TrackerStepFfi", "2", "")]
 
 
 def test_sam3_tracker_build_fails_closed_without_exported_step_spec(tmp_path: Path) -> None:
@@ -762,7 +763,7 @@ def test_sam3_runtime_requires_all_memory_plans_only_for_video_bundles() -> None
     plugin_path = repository_root / "src/runtime/models/sam3/plugin.cpp"
     source = plugin_path.read_text(encoding="utf-8")
     helper_start = source.index("Sam3TrackerMemoryModules load_sam3_tracker_memory_modules")
-    helper_end = source.index("\n}\n\nSam3TrackerStepModules", helper_start)
+    helper_end = source.index("\n}\n\nSam3HardMaskResizeModules", helper_start)
     helper = source[helper_start:helper_end]
 
     assert "if (!video_tracking_supported)" in helper
@@ -775,6 +776,18 @@ def test_sam3_runtime_requires_all_memory_plans_only_for_video_bundles() -> None
         "sam3_tracker_hard_memory_batch2_engine_plan",
     ):
         assert f'find_section(ctx.bundle, "{section}")' in helper
+
+    resize_start = source.index("Sam3HardMaskResizeModules load_sam3_hard_mask_resize_modules")
+    resize_end = source.index("\n}\n\nSam3TrackerStepModules", resize_start)
+    resize_helper = source[resize_start:resize_end]
+    assert "if (!video_tracking_supported)" in resize_helper
+    assert resize_helper.count("load_trt_module_from_plan(") == 2
+    assert "extract_optional_module" not in resize_helper
+    for section in (
+        "sam3_hard_mask_resize_engine_plan",
+        "sam3_hard_mask_resize_batch2_engine_plan",
+    ):
+        assert f'find_section(ctx.bundle, "{section}")' in resize_helper
 
     create_start = source.index("std::unique_ptr<IPipeline> create")
     create_end = source.index("\n    }\n};", create_start)
@@ -807,7 +820,7 @@ def _call_attribute_names(tree: ast.AST) -> set[str]:
 
 
 def test_sam3_production_has_no_exchange_graph_path() -> None:
-    """Forbid ONNX and limit AOTI to the two SAM3-owned exporters."""
+    """Forbid ONNX and limit AOTI to the three SAM3-owned exporters."""
 
     forbidden_import_roots = {
         "onnx",
@@ -826,6 +839,7 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
 
     for path, source in _sam3_production_sources().items():
         is_tracker_aoti_exporter = path.name in {
+            "hard_mask_resize_aoti_exporter.py",
             "tracker_step_aoti_exporter.py",
             "tracker_memory_aoti_exporter.py",
         }
@@ -833,6 +847,7 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
             {
                 "export_sam3_tracker_split_aoti",
                 "export_sam3_tracker_memory_aoti",
+                "export_sam3_hard_mask_resize_aoti",
             }
             if path.name == "plugin.py"
             else set()

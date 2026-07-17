@@ -20,7 +20,7 @@ TRACKER_HARD_MEMORY_BATCH2_SECTION = "sam3_tracker_hard_memory_batch2_engine_pla
 _SPATIAL_TOKENS = 72 * 72
 _MEMORY_CHANNELS = 64
 _PLUGIN_NAME = "Sam3TrackerMemoryFfi"
-_PLUGIN_VERSION = "1"
+_PLUGIN_VERSION = "2"
 _GLOBAL_PATTERN = re.compile(
     r"trtmc\.sam3\.tracker_memory\.(soft|hard)\.b([12])\.fixed\.([0-9a-f]{20})\Z"
 )
@@ -150,12 +150,13 @@ def _build_tracker_memory_ffi_plan(
         trt.float32,
         (1, 256, 72, 72),
     )
-    mask_name = "carved_low_res_mask" if hard_mask else "final_mask"
+    mask_name = "owned_tracker_mask" if hard_mask else "final_mask"
+    mask_size = 1008 if hard_mask else 288
     mask = tracker_builder._input(
         network,
         mask_name,
         trt.float32,
-        (batch_size, 1, 288, 288),
+        (batch_size, 1, mask_size, mask_size),
     )
     score = tracker_builder._input(
         network,

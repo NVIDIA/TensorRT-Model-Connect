@@ -766,7 +766,7 @@ class FakeSam3CoreModule final : public trtmc::TrtModule {
     std::shared_ptr<void> keep_alive_;
 };
 
-class FakeSam3TrackerModule final : public trtmc::TrtModule {
+class FakeSam3TrackerModule : public trtmc::TrtModule {
   public:
     explicit FakeSam3TrackerModule(bool recurrent, bool memory_only = false,
                                    float object_score_logit = 2.0F, bool device_recurrent = false,
@@ -817,7 +817,7 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
         std::vector<float> downloaded_device_memory;
         std::vector<float> downloaded_device_position;
         if (memory_only_) {
-            const char* mask_name = hard_memory_ ? "carved_low_res_mask" : "final_mask";
+            const char* mask_name = hard_memory_ ? "owned_tracker_mask" : "final_mask";
             const auto suppression = inputs.find("suppress_area_shrinkage");
             if (hard_memory_ && suppression != inputs.end())
                 throw std::runtime_error("SAM3 hard memory received a soft suppression flag");
@@ -1212,6 +1212,61 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
     std::shared_ptr<void> keep_alive_;
 };
 
+class FakeSam3HardMaskResizeModule final : public FakeSam3TrackerModule {
+  public:
+    explicit FakeSam3HardMaskResizeModule(std::size_t expected_batch)
+        : FakeSam3TrackerModule(false), expected_batch_(expected_batch) {}
+
+    trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
+        const auto found = inputs.find("tracker_mask");
+        if (found == inputs.end() || found->second.dtype != trtmc::DType::kFloat32 ||
+            found->second.data == nullptr || found->second.shape.size() != 4 ||
+            found->second.shape[0] != static_cast<int64_t>(expected_batch_) ||
+            found->second.shape[1] != 1) {
+            throw std::runtime_error("invalid fake SAM3 hard-mask resize input");
+        }
+        const auto source_height = static_cast<std::size_t>(found->second.shape[2]);
+        const auto source_width = static_cast<std::size_t>(found->second.shape[3]);
+        constexpr std::size_t output_size = 4;
+        const auto* source = static_cast<const float*>(found->second.data);
+        const auto output_values = expected_batch_ * output_size * output_size;
+        if (!scripted_output.empty()) {
+            if (scripted_output.size() != output_values)
+                throw std::runtime_error("invalid scripted SAM3 hard-mask resize output");
+            output_ = scripted_output;
+        } else {
+            output_.assign(output_values, 0.0F);
+            for (std::size_t batch = 0; batch < expected_batch_; ++batch) {
+                for (std::size_t y = 0; y < output_size; ++y) {
+                    for (std::size_t x = 0; x < output_size; ++x) {
+                        const auto source_y =
+                            std::min(y * source_height / output_size, source_height - 1);
+                        const auto source_x =
+                            std::min(x * source_width / output_size, source_width - 1);
+                        output_[(batch * output_size + y) * output_size + x] =
+                            source[(batch * source_height + source_y) * source_width + source_x];
+                    }
+                }
+            }
+        }
+        ++calls;
+        batch_sizes.push_back(expected_batch_);
+        trtmc::Tensor output;
+        output.data = output_.data();
+        output.shape = {static_cast<int64_t>(expected_batch_), 1, 4, 4};
+        output.dtype = trtmc::DType::kFloat32;
+        return {{"resized_tracker_mask", output}};
+    }
+
+    int32_t calls{0};
+    std::vector<std::size_t> batch_sizes;
+    std::vector<float> scripted_output;
+
+  private:
+    std::size_t expected_batch_{0};
+    std::vector<float> output_;
+};
+
 trtmc::Sam3Config make_config() {
     trtmc::Sam3Config cfg;
     cfg.text_max_position_embeddings = 4;
@@ -1293,6 +1348,8 @@ make_parallel_tracker_init_fixture(const std::shared_ptr<ParallelTrackerInitSche
         std::make_unique<FakeSam3TrackerModule>(false, true, 2.0F, false, false, 1, true);
     auto hard_memory_batch2 =
         std::make_unique<FakeSam3TrackerModule>(false, true, 2.0F, false, false, 2, true);
+    auto hard_mask_resize = std::make_unique<FakeSam3HardMaskResizeModule>(1);
+    auto hard_mask_resize_batch2 = std::make_unique<FakeSam3HardMaskResizeModule>(2);
     auto tokenizer = std::make_shared<FakeTokenizer>();
     auto config = make_config();
     config.fill_hole_area = fill_hole_area;
@@ -1302,7 +1359,8 @@ make_parallel_tracker_init_fixture(const std::shared_ptr<ParallelTrackerInitSche
     auto pipeline = std::make_unique<trtmc::Sam3Pipeline>(
         std::move(text), std::move(vision), std::move(core), tokenizer, config, "facebook/sam3",
         std::move(init), std::move(step), std::move(memory), nullptr, nullptr, std::move(sibling),
-        std::move(hard_memory), std::move(hard_memory_batch2));
+        std::move(hard_memory), std::move(hard_memory_batch2), std::move(hard_mask_resize),
+        std::move(hard_mask_resize_batch2));
     return {std::move(pipeline), vision_ptr, init_ptr, sibling_ptr};
 }
 
@@ -1457,11 +1515,14 @@ struct VideoFixture {
     FakeSam3TrackerModule* memory_batch2{nullptr};
     FakeSam3TrackerModule* hard_memory{nullptr};
     FakeSam3TrackerModule* hard_memory_batch2{nullptr};
+    FakeSam3HardMaskResizeModule* hard_mask_resize{nullptr};
+    FakeSam3HardMaskResizeModule* hard_mask_resize_batch2{nullptr};
 };
 
 VideoFixture make_video_fixture(std::size_t detections = 1, bool batch2 = false,
                                 bool device_recurrent = false, float tracker_logit = 2.0F,
-                                const std::function<void(trtmc::Sam3Config&)>& configure = {}) {
+                                const std::function<void(trtmc::Sam3Config&)>& configure = {},
+                                bool exact_hard_mask_resize = true) {
     auto text = std::make_unique<FakeSam3TextModule>();
     auto vision = std::make_unique<FakeDeviceSam3VisionModule>();
     auto* vision_ptr = vision.get();
@@ -1484,6 +1545,16 @@ VideoFixture make_video_fixture(std::size_t detections = 1, bool batch2 = false,
     auto hard_memory_batch2 = std::make_unique<FakeSam3TrackerModule>(
         false, true, 2.0F, device_recurrent, device_recurrent, 2, true);
     auto* hard_memory_batch2_ptr = hard_memory_batch2.get();
+    std::unique_ptr<FakeSam3HardMaskResizeModule> hard_mask_resize;
+    std::unique_ptr<FakeSam3HardMaskResizeModule> hard_mask_resize_batch2;
+    FakeSam3HardMaskResizeModule* hard_mask_resize_ptr = nullptr;
+    FakeSam3HardMaskResizeModule* hard_mask_resize_batch2_ptr = nullptr;
+    if (exact_hard_mask_resize) {
+        hard_mask_resize = std::make_unique<FakeSam3HardMaskResizeModule>(1);
+        hard_mask_resize_batch2 = std::make_unique<FakeSam3HardMaskResizeModule>(2);
+        hard_mask_resize_ptr = hard_mask_resize.get();
+        hard_mask_resize_batch2_ptr = hard_mask_resize_batch2.get();
+    }
 
     std::unique_ptr<FakeSam3TrackerModule> step_batch2;
     std::unique_ptr<FakeSam3TrackerModule> memory_batch2;
@@ -1511,7 +1582,8 @@ VideoFixture make_video_fixture(std::size_t detections = 1, bool batch2 = false,
         std::move(text), std::move(vision), std::move(core), std::make_shared<FakeTokenizer>(),
         config, "facebook/sam3", std::move(init), std::move(step), std::move(memory),
         std::move(step_batch2), std::move(memory_batch2), nullptr, std::move(hard_memory),
-        std::move(hard_memory_batch2));
+        std::move(hard_memory_batch2), std::move(hard_mask_resize),
+        std::move(hard_mask_resize_batch2));
     return {std::move(pipeline),
             vision_ptr,
             core_ptr,
@@ -1521,7 +1593,9 @@ VideoFixture make_video_fixture(std::size_t detections = 1, bool batch2 = false,
             memory_ptr,
             memory_batch2_ptr,
             hard_memory_ptr,
-            hard_memory_batch2_ptr};
+            hard_memory_batch2_ptr,
+            hard_mask_resize_ptr,
+            hard_mask_resize_batch2_ptr};
 }
 
 std::vector<trtmc::Sam3VideoFrameResult> run_video(trtmc::Sam3Pipeline& pipeline,
@@ -1790,6 +1864,14 @@ void test_frame_zero_prompt_and_propagation_follow_meta_schedule() {
         1024.0F,
         -1024.0F,
     };
+    const std::vector<float> first_hard_memory{
+        1.0F, 1.0F, 0.0F, 0.0F, 1.0F, 1.0F, 0.0F, 0.0F,
+        0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F,
+    };
+    const std::vector<float> second_hard_memory{
+        0.0F, 0.0F, 1.0F, 1.0F, 0.0F, 0.0F, 1.0F, 1.0F,
+        1.0F, 1.0F, 0.0F, 0.0F, 1.0F, 1.0F, 0.0F, 0.0F,
+    };
     const std::vector<float> propagated_frame_zero_masks{
         1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 0.0F,
     };
@@ -1813,7 +1895,7 @@ void test_frame_zero_prompt_and_propagation_follow_meta_schedule() {
                 std::vector<float>({10.0F, 10.0F}) &&
             fixture.hard_memory_batch2->memory_batch_sizes == std::vector<std::size_t>({2}) &&
             fixture.hard_memory_batch2->final_masks_history ==
-                std::vector<std::vector<float>>({first_memory, second_memory}) &&
+                std::vector<std::vector<float>>({first_hard_memory, second_hard_memory}) &&
             fixture.hard_memory_batch2->memory_scores_history ==
                 std::vector<float>({10.0F, 10.0F}) &&
             fixture.step_batch2->last_memory_frame_values == std::vector<float>({17.375F, 18.375F}),
@@ -1853,9 +1935,10 @@ void test_late_new_track_uses_uncleaned_hard_memory() {
               fixture.hard_memory->calls == 2 && fixture.hard_memory_batch2->calls == 0,
           "sam3 frame-zero and late singletons use hard memory while recurrent updates stay soft");
     check(fixture.hard_memory->final_masks_history.back() ==
-                  std::vector<float>({1024.0F, 1024.0F, 1024.0F, -1024.0F}) &&
+                  std::vector<float>({1.0F, 1.0F, 1.0F, 1.0F, 1.0F, 1.0F, 1.0F, 1.0F, 1.0F, 1.0F,
+                                      0.0F, 0.0F, 1.0F, 1.0F, 0.0F, 0.0F}) &&
               fixture.hard_memory->memory_scores_history == std::vector<float>({10.0F, 10.0F}),
-          "sam3 hard memory receives the uncleaned carved logits and present-object score");
+          "sam3 hard memory receives Meta's owned 1008-grid mask and present-object score");
 }
 
 void test_recurrent_tracker_uses_b2_pairs_and_b1_odd_tail() {
@@ -1888,7 +1971,7 @@ void test_recurrent_tracker_uses_b2_pairs_and_b1_odd_tail() {
               "sam3 recurrent B2 features and positions are BF16-rounded in FP32 carriers");
     }
     {
-        auto fixture = make_video_fixture(3, true);
+        auto fixture = make_video_fixture(3, true, false, 2.0F, {}, true);
         fixture.core->detections_first_frame_only = true;
         const auto results = run_video(*fixture.pipeline, 2);
         check(results[0].object_ids == std::vector<int32_t>({0, 1, 2}) &&
@@ -1906,7 +1989,53 @@ void test_recurrent_tracker_uses_b2_pairs_and_b1_odd_tail() {
               "sam3 odd memory row soft-refreshes and updates its B1 tail");
         check(fixture.hard_memory->calls == 1,
               "sam3 odd memory row uses one hard frame-zero B1 tail");
+        check(fixture.hard_mask_resize_batch2->calls == 1 && fixture.hard_mask_resize->calls == 1 &&
+                  fixture.hard_mask_resize_batch2->batch_sizes == std::vector<std::size_t>({2}) &&
+                  fixture.hard_mask_resize->batch_sizes == std::vector<std::size_t>({1}),
+              "sam3 hard-mask resize executes one B2 chunk followed by its B1 tail");
+        const std::array<const std::vector<float>*, 3> hard_masks{
+            &fixture.hard_memory_batch2->final_masks_history[0],
+            &fixture.hard_memory_batch2->final_masks_history[1],
+            &fixture.hard_memory->final_masks_history[0],
+        };
+        bool globally_owned =
+            std::all_of(hard_masks.begin(), hard_masks.end(), [](const auto* mask) {
+                return mask->size() == 16 &&
+                       std::all_of(mask->begin(), mask->end(),
+                                   [](float value) { return value == 0.0F || value == 1.0F; });
+            });
+        for (std::size_t pixel = 0; pixel < 16 && globally_owned; ++pixel) {
+            const auto claims = static_cast<int32_t>((*hard_masks[0])[pixel]) +
+                                static_cast<int32_t>((*hard_masks[1])[pixel]) +
+                                static_cast<int32_t>((*hard_masks[2])[pixel]);
+            globally_owned = claims <= 1;
+        }
+        check(globally_owned && std::count(hard_masks[2]->begin(), hard_masks[2]->end(), 1.0F) > 0,
+              "sam3 B1 hard-memory tail participates in the same 1008-grid ownership as B2");
     }
+}
+
+void test_hard_mask_resize_stream_preserves_stable_global_ownership() {
+    auto fixture = make_video_fixture(3, true);
+    fixture.hard_mask_resize_batch2->scripted_output.assign(32, 1.0F);
+    fixture.hard_mask_resize_batch2->scripted_output[16 + 1] = 2.0F;
+    fixture.hard_mask_resize->scripted_output.assign(16, 1.0F);
+    fixture.hard_mask_resize->scripted_output[2] = 3.0F;
+
+    const auto results = run_video(*fixture.pipeline, 1);
+    std::vector<float> expected_first(16, 1.0F);
+    expected_first[1] = 0.0F;
+    expected_first[2] = 0.0F;
+    std::vector<float> expected_second(16, 0.0F);
+    expected_second[1] = 1.0F;
+    std::vector<float> expected_tail(16, 0.0F);
+    expected_tail[2] = 1.0F;
+    check(results.size() == 1 && results.front().object_ids == std::vector<int32_t>({0, 1, 2}) &&
+              fixture.hard_memory_batch2->final_masks_history ==
+                  std::vector<std::vector<float>>({expected_first, expected_second}) &&
+              fixture.hard_memory->final_masks_history ==
+                  std::vector<std::vector<float>>({expected_tail}),
+          "sam3 streamed hard-mask ownership keeps strict first-row ties across B2 and B1");
 }
 
 void test_recurrent_area_policy_uses_high_resolution_global_geometry() {
@@ -2189,6 +2318,31 @@ void test_reconditioning_uses_raw_tracker_logit() {
           "clears singleton history, and preserves probability metadata");
 }
 
+void test_reconditioning_promotes_the_full_appearance_cohort() {
+    auto fixture = make_video_fixture(2, true, false, 2.0F, [](trtmc::Sam3Config& config) {
+        config.high_confidence_threshold = 0.7F;
+        config.hotstart_unmatch_threshold = 100;
+        config.hotstart_duplicate_threshold = 100;
+    });
+    fixture.core->second_detection_first_frame_only = true;
+    fixture.init->pointer_value = 0.75F;
+    const std::vector<float> first_mask{3.0F, 1.0F, -1.0F, -3.0F};
+    const std::vector<float> second_mask{-3.0F, 1.0F, 3.0F, -1.0F};
+    for (std::size_t frame = 1; frame < 18; ++frame) {
+        fixture.step_batch2->recurrent_masks_by_item.push_back(first_mask);
+        fixture.step_batch2->recurrent_masks_by_item.push_back(second_mask);
+    }
+
+    const auto results = run_video(*fixture.pipeline, 18);
+    check(results.size() == 18 && fixture.init->calls == 3,
+          "sam3 periodic reconditioning refreshes only the matched cohort row");
+    check(fixture.step->calls == 0 && fixture.step_batch2->calls == 17,
+          "sam3 reconditioned cohort retains one shared recurrent batch signature");
+    check(fixture.memory_batch2->final_masks_history.at(32) == first_mask,
+          "sam3 periodic reconditioning refreshes only the matched row while promoting its "
+          "full appearance cohort to conditioning history");
+}
+
 trtmc::Sam3VideoFrameResult run_overlap_case(bool tie_scores, bool three_overlap = false,
                                              bool empty_first = false) {
     auto fixture = make_video_fixture(three_overlap ? 3 : 2);
@@ -2209,12 +2363,13 @@ void test_association_overlap_and_stable_ties() {
     check(tied.masks == std::vector<float>({1.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F}),
           "sam3 frame-zero detector overlap uses stable first-object ties");
     const auto displaced = run_overlap_case(false, true);
-    check(displaced.object_ids == std::vector<int32_t>({1, 2}) &&
-              displaced.masks ==
-                  std::vector<float>({0.0F, 1.0F, 0.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F}) &&
-              displaced.detection_scores.size() == 2 && displaced.tracker_scores.size() == 2 &&
-              displaced.boxes.size() == 8,
-          "sam3 frame-zero overlap removes fully covered lower-score objects");
+    check(displaced.object_ids == std::vector<int32_t>({0, 1, 2}) &&
+              displaced.masks == std::vector<float>({0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
+                                                     1.0F, 0.0F, 1.0F, 0.0F}) &&
+              displaced.detection_scores.size() == 3 && displaced.tracker_scores.size() == 3 &&
+              displaced.boxes == std::vector<float>({0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F,
+                                                     0.0F, 0.0F, 0.0F, 1.0F}),
+          "sam3 frame-zero overlap retains fully covered rows with their pre-overlap box");
     const auto compacted = run_overlap_case(false, false, true);
     check(compacted.object_ids == std::vector<int32_t>({1}) &&
               compacted.masks == std::vector<float>({0.0F, 1.0F, 1.0F, 0.0F}),
@@ -2286,6 +2441,7 @@ int main() {
     test_frame_zero_zero_detections_is_stable();
     test_late_new_track_uses_uncleaned_hard_memory();
     test_recurrent_tracker_uses_b2_pairs_and_b1_odd_tail();
+    test_hard_mask_resize_stream_preserves_stable_global_ownership();
     test_device_recurrent_memory_rounds_features_and_positions();
     test_parallel_mask_cleanup_preserves_full_results();
     test_parallel_tracker_init_and_cleanup_overlap();
@@ -2296,6 +2452,7 @@ int main() {
     test_memory_quality_keeps_later_appearance_cohort_independent();
     test_memory_quality_recomputes_after_cohort_member_removal();
     test_reconditioning_uses_raw_tracker_logit();
+    test_reconditioning_promotes_the_full_appearance_cohort();
     test_association_overlap_and_stable_ties();
     test_recent_occlusion_and_hotstart_policy();
     test_recurrent_pool_survives_serial_sessions();

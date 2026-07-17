@@ -59,7 +59,7 @@ def test_memory_plugin_uses_tensorrt_11_creator_api() -> None:
 
     trt = SimpleNamespace(get_plugin_registry=lambda: _Registry())
     assert tracker_memory_ffi_builder._plugin_creator(trt) is creator
-    assert calls == [("Sam3TrackerMemoryFfi", "1", "")]
+    assert calls == [("Sam3TrackerMemoryFfi", "2", "")]
 
 
 def test_memory_plans_load_dso_then_build_canonical_soft_hard_b1_b2(
@@ -126,13 +126,14 @@ def test_memory_wrapper_preserves_runtime_io_and_fixed_plugin_contract() -> None
     for name in (
         "tracker_feature_2",
         "final_mask",
-        "carved_low_res_mask",
+        "owned_tracker_mask",
         "object_score_logits",
         "suppress_area_shrinkage",
     ):
         assert f'"{name}"' in build_source
     assert "(1, 256, 72, 72)" in build_source
-    assert "(batch_size, 1, 288, 288)" in build_source
+    assert "mask_size = 1008 if hard_mask else 288" in build_source
+    assert "(batch_size, 1, mask_size, mask_size)" in build_source
     assert "(batch_size, 1)" in build_source
     assert "_constant_zero_suppression" in build_source
     assert "[feature, mask, score, suppression]" in build_source

@@ -44,6 +44,7 @@ Sam3VideoFrameProcessor make_sam3_video_frame_processor(
     Sam3VideoTextInput text_input, std::shared_ptr<Sam3VideoVisionWorkspace> vision_workspace,
     TrtModule& tracker_hard_memory_engine, TrtModule& tracker_hard_memory_batch2_engine,
     TrtModule* tracker_step_batch2_engine, TrtModule* tracker_memory_batch2_engine,
-    TrtModule* parallel_tracker_init_engine);
+    TrtModule* parallel_tracker_init_engine, TrtModule* hard_mask_resize_engine = nullptr,
+    TrtModule* hard_mask_resize_batch2_engine = nullptr);
 
 } // namespace trtmc

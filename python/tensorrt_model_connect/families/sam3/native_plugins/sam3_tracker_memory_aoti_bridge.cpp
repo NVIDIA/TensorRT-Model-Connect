@@ -116,7 +116,7 @@ class CudaDeviceScope {
 };
 
 bool valid_policy(std::string_view policy) {
-    return policy == "soft" || policy == "hard";
+    return policy == "soft" || policy == "hard" || policy == "resize";
 }
 
 bool valid_content_addressed_name(std::string_view name, std::string_view policy,
@@ -183,6 +183,10 @@ bool output_shape_matches(const DLTensor& tensor, int32_t batch_size) {
     return false;
 }
 
+bool resize_output_shape_matches(const DLTensor& tensor, int32_t batch_size) {
+    return exact_shape(tensor, {batch_size, 1, 1008, 1008});
+}
+
 bool dtype_is(const DLTensor& tensor, uint8_t code, uint8_t bits) {
     return tensor.dtype.code == code && tensor.dtype.bits == bits && tensor.dtype.lanes == 1;
 }
@@ -199,22 +203,43 @@ bool has_contiguous_strides(const DLTensor& tensor) {
     return true;
 }
 
-void validate_tensor_contract(const std::array<DLTensor*, kTensorArgumentCount>& tensors,
-                              int32_t batch_size) {
-    for (int32_t index = 0; index < kTensorArgumentCount; ++index) {
-        if (tensors[index]->data == nullptr || tensors[index]->ndim <= 0 ||
-            tensors[index]->shape == nullptr || !has_contiguous_strides(*tensors[index]))
-            throw std::runtime_error("SAM3 tracker-memory tensor storage violates its contract");
-        const bool integer_input = index == 3;
-        const bool valid_dtype = integer_input ? dtype_is(*tensors[index], kDLInt, 32)
-                                               : dtype_is(*tensors[index], kDLFloat, 32);
-        if (!valid_dtype)
-            throw std::runtime_error("SAM3 tracker-memory tensor dtype violates its contract");
+void validate_tensor_storage_and_dtype(const DLTensor& tensor, int32_t index) {
+    if (tensor.data == nullptr || tensor.ndim <= 0 || tensor.shape == nullptr ||
+        !has_contiguous_strides(tensor)) {
+        throw std::runtime_error("SAM3 tracker-memory tensor storage violates its contract");
     }
-    if (!exact_shape(*tensors[0], {1, 256, 72, 72}) ||
-        !exact_shape(*tensors[1], {batch_size, 1, 288, 288}) ||
-        !exact_shape(*tensors[2], {batch_size, 1}) || !exact_shape(*tensors[3], {batch_size, 1}) ||
-        !output_shape_matches(*tensors[4], batch_size))
+    const bool valid_dtype =
+        index == 3 ? dtype_is(tensor, kDLInt, 32) : dtype_is(tensor, kDLFloat, 32);
+    if (!valid_dtype)
+        throw std::runtime_error("SAM3 tracker-memory tensor dtype violates its contract");
+}
+
+bool resize_tensor_shapes_match(const std::array<DLTensor*, kTensorArgumentCount>& tensors,
+                                int32_t batch_size) {
+    return exact_shape(*tensors[0], {1}) && exact_shape(*tensors[1], {batch_size, 1, 288, 288}) &&
+           exact_shape(*tensors[2], {1}) && exact_shape(*tensors[3], {1}) &&
+           resize_output_shape_matches(*tensors[4], batch_size);
+}
+
+bool memory_tensor_shapes_match(const std::array<DLTensor*, kTensorArgumentCount>& tensors,
+                                int32_t batch_size, int32_t mask_size) {
+    return exact_shape(*tensors[0], {1, 256, 72, 72}) &&
+           exact_shape(*tensors[1], {batch_size, 1, mask_size, mask_size}) &&
+           exact_shape(*tensors[2], {batch_size, 1}) && exact_shape(*tensors[3], {batch_size, 1}) &&
+           output_shape_matches(*tensors[4], batch_size);
+}
+
+void validate_tensor_contract(const std::array<DLTensor*, kTensorArgumentCount>& tensors,
+                              int32_t batch_size, std::string_view policy) {
+    for (int32_t index = 0; index < kTensorArgumentCount; ++index)
+        validate_tensor_storage_and_dtype(*tensors[static_cast<std::size_t>(index)], index);
+    if (policy == "resize") {
+        if (!resize_tensor_shapes_match(tensors, batch_size))
+            throw std::runtime_error("SAM3 hard-mask resize tensor shape violates its contract");
+        return;
+    }
+    const int32_t mask_size = policy == "hard" ? 1008 : 288;
+    if (!memory_tensor_shapes_match(tensors, batch_size, mask_size))
         throw std::runtime_error("SAM3 tracker-memory tensor shape violates its contract");
 }
 
@@ -257,6 +282,34 @@ void copy_packed_output(const at::Tensor& source, DLTensor& destination, int32_t
         throw std::runtime_error("SAM3 memory AOTI packed output copy failed");
 }
 
+void validate_resize_destination(const DLTensor& destination) {
+    if (destination.device.device_type != kDLCUDA || destination.dtype.code != kDLFloat ||
+        destination.dtype.bits != 32 || destination.dtype.lanes != 1)
+        throw std::runtime_error("SAM3 hard-mask resize destination must be CUDA FP32");
+}
+
+void validate_resize_source(const at::Tensor& source, const DLTensor& destination,
+                            int32_t batch_size, int64_t expected_numel) {
+    if (!source.is_cuda() || source.scalar_type() != at::kFloat || !source.is_contiguous() ||
+        source.get_device() != destination.device.device_id || source.numel() != expected_numel ||
+        tensor_numel(destination) != expected_numel ||
+        source.sizes().vec() != std::vector<int64_t>{batch_size, 1, 1008, 1008}) {
+        throw std::runtime_error("SAM3 hard-mask resize output violates the TensorRT contract");
+    }
+}
+
+void copy_resize_output(const at::Tensor& source, DLTensor& destination, int32_t batch_size,
+                        cudaStream_t stream) {
+    validate_resize_destination(destination);
+    const int64_t expected_numel = static_cast<int64_t>(batch_size) * 1008 * 1008;
+    validate_resize_source(source, destination, batch_size, expected_numel);
+    auto* destination_data = static_cast<std::byte*>(destination.data) + destination.byte_offset;
+    const auto bytes = static_cast<std::size_t>(expected_numel) * sizeof(float);
+    if (cudaMemcpyAsync(destination_data, source.const_data_ptr(), bytes, cudaMemcpyDeviceToDevice,
+                        stream) != cudaSuccess)
+        throw std::runtime_error("SAM3 hard-mask resize output copy failed");
+}
+
 cudaStream_t validate_stream_argument(const TVMFFIAny& argument, int32_t device_id) {
     if (argument.type_index != kTVMFFIOpaquePtr)
         throw std::runtime_error("SAM3 tracker memory is missing its TensorRT stream argument");
@@ -267,36 +320,66 @@ cudaStream_t validate_stream_argument(const TVMFFIAny& argument, int32_t device_
     return stream;
 }
 
+std::array<DLTensor*, kTensorArgumentCount> collect_tensor_arguments(const TVMFFIAny* arguments) {
+    std::array<DLTensor*, kTensorArgumentCount> tensors{};
+    for (int32_t index = 0; index < kTensorArgumentCount; ++index) {
+        tensors[static_cast<std::size_t>(index)] = dl_tensor(arguments[index]);
+        if (tensors[static_cast<std::size_t>(index)] == nullptr)
+            throw std::runtime_error("SAM3 tracker-memory argument is not a DLTensor");
+    }
+    return tensors;
+}
+
+int32_t validate_shared_cuda_device(const std::array<DLTensor*, kTensorArgumentCount>& tensors) {
+    const int32_t device_id = tensors.front()->device.device_id;
+    for (const auto* tensor : tensors) {
+        if (tensor->device.device_type != kDLCUDA || tensor->device.device_id != device_id)
+            throw std::runtime_error("SAM3 tracker-memory tensors must share one CUDA device");
+    }
+    return device_id;
+}
+
+std::vector<at::Tensor>
+wrap_package_inputs(const Entry& entry,
+                    const std::array<DLTensor*, kTensorArgumentCount>& tensors) {
+    std::vector<at::Tensor> wrapped_inputs;
+    if (entry.policy == "resize") {
+        wrapped_inputs.push_back(wrap_tensor(*tensors[1]));
+        return wrapped_inputs;
+    }
+    wrapped_inputs.reserve(kInputCount);
+    for (int32_t index = 0; index < kInputCount; ++index)
+        wrapped_inputs.push_back(wrap_tensor(*tensors[static_cast<std::size_t>(index)]));
+    return wrapped_inputs;
+}
+
+void copy_package_output(const Entry& entry, const at::Tensor& source, DLTensor& destination,
+                         cudaStream_t stream) {
+    if (entry.policy == "resize") {
+        copy_resize_output(source, destination, entry.batch_size, stream);
+        return;
+    }
+    copy_packed_output(source, destination, entry.batch_size, stream);
+}
+
 int tracker_memory_callback(void* self, const TVMFFIAny* arguments, int32_t argument_count,
                             TVMFFIAny* result) {
     try {
         if (arguments == nullptr || result == nullptr || argument_count != kArgumentCount)
             throw std::runtime_error("SAM3 tracker-memory callback received an invalid ABI");
-        std::array<DLTensor*, kTensorArgumentCount> tensors{};
-        for (int32_t index = 0; index < kTensorArgumentCount; ++index) {
-            tensors[static_cast<std::size_t>(index)] = dl_tensor(arguments[index]);
-            if (tensors[static_cast<std::size_t>(index)] == nullptr)
-                throw std::runtime_error("SAM3 tracker-memory argument is not a DLTensor");
-        }
-        const int32_t device_id = tensors.front()->device.device_id;
-        for (const auto* tensor : tensors) {
-            if (tensor->device.device_type != kDLCUDA || tensor->device.device_id != device_id)
-                throw std::runtime_error("SAM3 tracker-memory tensors must share one CUDA device");
-        }
+        const auto tensors = collect_tensor_arguments(arguments);
+        const int32_t device_id = validate_shared_cuda_device(tensors);
         auto& entry = *static_cast<Entry*>(self);
-        validate_tensor_contract(tensors, entry.batch_size);
+        validate_tensor_contract(tensors, entry.batch_size, entry.policy);
         CudaDeviceScope device_scope(device_id);
         const auto stream = validate_stream_argument(arguments[kTensorArgumentCount], device_id);
 
-        std::vector<at::Tensor> wrapped_inputs;
-        wrapped_inputs.reserve(kInputCount);
-        for (int32_t index = 0; index < kInputCount; ++index)
-            wrapped_inputs.push_back(wrap_tensor(*tensors[static_cast<std::size_t>(index)]));
+        auto wrapped_inputs = wrap_package_inputs(entry, tensors);
         auto outputs =
             entry.loader_for_device(device_id).run(wrapped_inputs, reinterpret_cast<void*>(stream));
         if (outputs.size() != 1)
             throw std::runtime_error("SAM3 tracker-memory AOTI package returned the wrong arity");
-        copy_packed_output(outputs.front(), *tensors.back(), entry.batch_size, stream);
+        copy_package_output(entry, outputs.front(), *tensors.back(), stream);
 
         device_scope.restore();
         result->type_index = kTVMFFINone;

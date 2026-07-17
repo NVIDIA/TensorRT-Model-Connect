@@ -130,12 +130,29 @@ def _passing_case(policy: str, batch_size: int, hard_mask: bool) -> dict[str, ob
     }
 
 
-def test_fixed_tensor_contract_is_one_four_input_abi_for_all_variants() -> None:
-    assert [(value.name, value.dtype) for value in exporter.TRACKER_MEMORY_INPUT_ABI] == [
-        ("tracker_feature_2", "float32"),
-        ("mask_logits", "float32"),
-        ("object_score_logits", "float32"),
-        ("suppress_area_shrinkage", "int32"),
+def test_fixed_tensor_contract_separates_soft_and_global_hard_mask_abis() -> None:
+    assert [
+        (policy_abi.policy, [(value.name, value.dtype) for value in policy_abi.tensors])
+        for policy_abi in exporter.TRACKER_MEMORY_INPUT_ABI
+    ] == [
+        (
+            "soft",
+            [
+                ("tracker_feature_2", "float32"),
+                ("final_mask", "float32"),
+                ("object_score_logits", "float32"),
+                ("suppress_area_shrinkage", "int32"),
+            ],
+        ),
+        (
+            "hard",
+            [
+                ("tracker_feature_2", "float32"),
+                ("owned_tracker_mask", "float32"),
+                ("object_score_logits", "float32"),
+                ("suppress_area_shrinkage", "int32"),
+            ],
+        ),
     ]
     assert [
         (policy, batch_size, hard_mask)
@@ -155,6 +172,14 @@ def test_fixed_tensor_contract_is_one_four_input_abi_for_all_variants() -> None:
             "float32",
             "int32",
         ]
+        expected_mask = (
+            [batch_size, 1, 1008, 1008] if policy == "hard" else [batch_size, 1, 288, 288]
+        )
+        assert contract["inputs"][1] == {
+            "name": "owned_tracker_mask" if policy == "hard" else "final_mask",
+            "dtype": "float32",
+            "shape": expected_mask,
+        }
         assert contract["outputs"] == [
             {
                 "name": "packed_memory_and_position",
@@ -164,13 +189,14 @@ def test_fixed_tensor_contract_is_one_four_input_abi_for_all_variants() -> None:
         ]
 
 
-def test_mask_policy_matches_soft_suppression_and_hard_b2_overlap_order() -> None:
+def test_mask_policy_keeps_soft_preparation_and_consumes_owned_hard_mask() -> None:
     source = inspect.getsource(exporter._prepare_memory_mask)
+    hard_branch = source.split("if hard_mask:", maxsplit=1)[1].split("else:", maxsplit=1)[0]
 
-    assert "size=(_TRACKER_IMAGE_SIZE, _TRACKER_IMAGE_SIZE)" in source
-    assert "torch.argmax(tracker_logits, dim=0, keepdim=True)" in source
-    assert "torch.clamp(tracker_logits, max=-10.0)" in source
-    assert "mask = (tracker_logits > 0).float()" in source
+    assert "mask = memory_mask.float()" in hard_branch
+    assert "interpolate" not in hard_branch
+    assert "argmax" not in source
+    assert "tracker_logits" not in source
     assert "size=(_MEMORY_MASK_SIZE, _MEMORY_MASK_SIZE)" in source
     assert "suppress_area_shrinkage.reshape(batch_size, 1, 1, 1) > 0" in source
     assert "torch.clamp(resized_logits, max=-10.0)" in source
@@ -321,6 +347,12 @@ def test_export_builds_four_content_addressed_packages_and_reuses_valid_cache(
         "sam3_tracker_memory_hard_b2.pt2",
     ]
     manifest = json.loads(artifact.manifest_bytes)
+    assert manifest["schema_version"] == 2
+    assert manifest["input_abi"][1]["tensors"][1] == {
+        "name": "owned_tracker_mask",
+        "dtype": "float32",
+        "shape": ["B", 1, 1008, 1008],
+    }
     assert manifest["implementation"]["source_import_policy"] == "transformers-only"
     assert manifest["exporter_sha256"] == "a" * 64
     assert manifest["producer"]["torch_aoti_abi_version"] == 147492887796383744

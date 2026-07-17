@@ -23,6 +23,7 @@ from tensorrt_model_connect import trt_compat
 from .tracker_weights import TrackerWeights, load_tracker_weights
 
 if TYPE_CHECKING:
+    from .hard_mask_resize_ffi_builder import HardMaskResizePlanSpec
     from .tracker_memory_ffi_builder import TrackerMemoryPlanSpec
     from .tracker_step_ffi_builder import TrackerStepPlanSpec
 
@@ -34,6 +35,8 @@ TRACKER_MEMORY_SECTION = "sam3_tracker_memory_engine_plan"
 TRACKER_MEMORY_BATCH2_SECTION = "sam3_tracker_memory_batch2_engine_plan"
 TRACKER_HARD_MEMORY_SECTION = "sam3_tracker_hard_memory_engine_plan"
 TRACKER_HARD_MEMORY_BATCH2_SECTION = "sam3_tracker_hard_memory_batch2_engine_plan"
+HARD_MASK_RESIZE_SECTION = "sam3_hard_mask_resize_engine_plan"
+HARD_MASK_RESIZE_BATCH2_SECTION = "sam3_hard_mask_resize_batch2_engine_plan"
 
 # Meta selects at most four temporally closest conditioning pointers and then
 # appends up to fifteen quality-filtered non-conditioning pointers.
@@ -451,10 +454,15 @@ def build_sam3_tracker_engines(
     *,
     step_plan_spec: TrackerStepPlanSpec | None = None,
     memory_plan_spec: TrackerMemoryPlanSpec | None = None,
+    resize_plan_spec: HardMaskResizePlanSpec | None = None,
     verbose: bool = False,
 ) -> dict[str, bytes]:
     """Build tracker init plus fixed step and memory AOTI wrapper plans."""
 
+    from .hard_mask_resize_ffi_builder import (
+        HardMaskResizePlanSpec,
+        build_sam3_hard_mask_resize_ffi_plans,
+    )
     from .tracker_memory_ffi_builder import (
         TrackerMemoryPlanSpec,
         build_sam3_tracker_memory_ffi_plans,
@@ -481,6 +489,12 @@ def build_sam3_tracker_engines(
         )
     if not isinstance(memory_plan_spec, TrackerMemoryPlanSpec):
         raise TypeError("memory_plan_spec must be a TrackerMemoryPlanSpec")
+    if resize_plan_spec is None:
+        raise RuntimeError(
+            "SAM3 tracker build requires exported content-addressed B1/B2 hard-mask resize packages"
+        )
+    if not isinstance(resize_plan_spec, HardMaskResizePlanSpec):
+        raise TypeError("resize_plan_spec must be a HardMaskResizePlanSpec")
     _read_model_config(str(resolved))
     _validate_video_policy(str(resolved))
     if verbose:
@@ -488,9 +502,11 @@ def build_sam3_tracker_engines(
     weights = load_tracker_weights(resolved)
     step_plans = build_sam3_tracker_step_ffi_plans(step_plan_spec, verbose=verbose)
     memory_plans = build_sam3_tracker_memory_ffi_plans(memory_plan_spec, verbose=verbose)
+    resize_plans = build_sam3_hard_mask_resize_ffi_plans(resize_plan_spec, verbose=verbose)
     plans = {
         TRACKER_INIT_SECTION: _build_init(weights, verbose=verbose),
     }
     plans.update(step_plans)
     plans.update(memory_plans)
+    plans.update(resize_plans)
     return plans

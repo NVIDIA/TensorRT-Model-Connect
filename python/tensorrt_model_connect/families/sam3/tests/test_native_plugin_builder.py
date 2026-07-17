@@ -6,12 +6,13 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
 
 from tensorrt_model_connect.families.sam3 import (
+    hard_mask_resize_aoti_exporter,
     native_plugin_builder,
     tracker_memory_aoti_exporter,
     tracker_step_aoti_exporter,
@@ -219,9 +220,14 @@ def _memory_artifacts(
                         "shape": [1, 256, 72, 72],
                     },
                     {
-                        "name": "mask_logits",
+                        "name": "owned_tracker_mask" if hard_mask else "final_mask",
                         "dtype": "float32",
-                        "shape": [batch_size, 1, 288, 288],
+                        "shape": [
+                            batch_size,
+                            1,
+                            1008 if hard_mask else 288,
+                            1008 if hard_mask else 288,
+                        ],
                     },
                     {
                         "name": "object_score_logits",
@@ -258,7 +264,7 @@ def _memory_artifacts(
         torch_aoti_abi_version=7,
     )
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "scope": "fixed_memory_encoder_soft_hard_b1_b2",
         "artifact_format": "torch.aot_inductor.package.pt2",
         "implementation": {
@@ -278,8 +284,14 @@ def _memory_artifacts(
             "torch_aoti_abi_version": 7,
         },
         "input_abi": [
-            {"name": tensor.name, "dtype": tensor.dtype, "shape": list(tensor.shape)}
-            for tensor in tracker_memory_aoti_exporter.TRACKER_MEMORY_INPUT_ABI
+            {
+                "policy": policy_abi.policy,
+                "tensors": [
+                    {"name": tensor.name, "dtype": tensor.dtype, "shape": list(tensor.shape)}
+                    for tensor in policy_abi.tensors
+                ],
+            }
+            for policy_abi in tracker_memory_aoti_exporter.TRACKER_MEMORY_INPUT_ABI
         ],
         "packages": records,
     }
@@ -301,6 +313,97 @@ def _memory_artifacts(
     )
 
 
+def _resize_artifacts(tmp_path: Path) -> hard_mask_resize_aoti_exporter.HardMaskResizeAotiArtifacts:
+    packages = []
+    records = []
+    for batch_size in (1, 2):
+        section = f"sam3_hard_mask_resize_b{batch_size}.pt2"
+        path = tmp_path / section
+        payload = f"resize-b{batch_size}".encode()
+        path.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        packages.append(
+            hard_mask_resize_aoti_exporter.HardMaskResizeAotiPackage(
+                batch_size=batch_size,
+                path=path,
+                section=section,
+                sha256=digest,
+                package_global=(
+                    f"trtmc.sam3.tracker_memory.resize.b{batch_size}.fixed.{digest[:20]}"
+                ),
+            )
+        )
+        records.append(
+            {
+                "batch_size": batch_size,
+                "filename": f"sam3_hard_mask_resize_b{batch_size}_{digest}.pt2",
+                "section": section,
+                "sha256": digest,
+                "package_global": (
+                    f"trtmc.sam3.tracker_memory.resize.b{batch_size}.fixed.{digest[:20]}"
+                ),
+            }
+        )
+    producer = tracker_memory_aoti_exporter.MemoryAotiProducerAbi(
+        torch_version="2.9.0",
+        transformers_version="5.2.0",
+        cuda_version="12.8",
+        compute_capability=(8, 9),
+        host_architecture="x86_64",
+        torch_cxx11_abi=False,
+        torch_aoti_abi_version=7,
+    )
+    manifest = json.dumps(
+        {
+            "schema_version": 1,
+            "scope": "torch_bilinear_288_to_1008_b1_b2",
+            "artifact_format": "torch.aot_inductor.package.pt2",
+            "implementation": {
+                "library": "torch",
+                "operator": "torch.nn.functional.interpolate",
+                "mode": "bilinear",
+                "align_corners": False,
+                "source_size": 288,
+                "target_size": 1008,
+            },
+            "producer": asdict(producer),
+            "host_architecture": producer.host_architecture,
+            "exporter_sha256": "a" * 64,
+            "input_abi": [
+                {"name": "tracker_mask", "dtype": "float32", "shape": ["B", 1, 288, 288]}
+            ],
+            "output_abi": [
+                {
+                    "name": "resized_tracker_mask",
+                    "dtype": "float32",
+                    "shape": ["B", 1, 1008, 1008],
+                }
+            ],
+            "packages": records,
+            "package_validation": {
+                "reference": "same torch.interpolate eager execution",
+                "maximum_absolute_error": 2.0e-5,
+                "cases": [
+                    {"batch_size": 1, "maximum_absolute_error": 1.0e-6, "passed": True},
+                    {"batch_size": 2, "maximum_absolute_error": 1.0e-6, "passed": True},
+                ],
+            },
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hard_mask_resize_aoti_exporter.HardMaskResizeAotiArtifacts(
+        cache_directory=tmp_path,
+        packages=tuple(packages),
+        producer_abi=producer,
+        manifest_bytes=manifest,
+        bundle_sections=(
+            (hard_mask_resize_aoti_exporter.HARD_MASK_RESIZE_AOTI_MANIFEST_SECTION, manifest),
+            *((package.section, package.path.read_bytes()) for package in packages),
+        ),
+    )
+
+
 def test_runtime_manifest_binds_plugin_and_both_split_packages_per_batch(
     tmp_path: Path,
 ) -> None:
@@ -311,6 +414,7 @@ def test_runtime_manifest_binds_plugin_and_both_split_packages_per_batch(
     runtime = native_plugin_builder._assemble_runtime_artifacts(
         split,
         _memory_artifacts(tmp_path),
+        _resize_artifacts(tmp_path),
         plugin,
         _inputs(),
         aoti_abi_version=7,
@@ -341,14 +445,24 @@ def test_runtime_manifest_rejects_tampered_package_or_pipeline(tmp_path: Path) -
     split.packages[0].path.write_bytes(b"tampered")
     with pytest.raises(RuntimeError, match="package hash mismatch"):
         native_plugin_builder._assemble_runtime_artifacts(
-            split, _memory_artifacts(tmp_path), plugin, _inputs(), aoti_abi_version=7
+            split,
+            _memory_artifacts(tmp_path),
+            _resize_artifacts(tmp_path),
+            plugin,
+            _inputs(),
+            aoti_abi_version=7,
         )
 
     split = _split_artifacts(tmp_path)
     mismatched = replace(split, pipeline_global_b1=split.pipeline_global_b2)
     with pytest.raises(RuntimeError, match="does not bind both packages"):
         native_plugin_builder._assemble_runtime_artifacts(
-            mismatched, _memory_artifacts(tmp_path), plugin, _inputs(), aoti_abi_version=7
+            mismatched,
+            _memory_artifacts(tmp_path),
+            _resize_artifacts(tmp_path),
+            plugin,
+            _inputs(),
+            aoti_abi_version=7,
         )
 
 
@@ -447,6 +561,61 @@ def test_build_time_registration_binds_all_four_memory_packages(tmp_path: Path) 
     ]
 
 
+def test_build_time_registration_binds_b1_b2_resize_packages(tmp_path: Path) -> None:
+    resize = _resize_artifacts(tmp_path)
+
+    class _Register:
+        def __init__(self) -> None:
+            self.calls = []
+            self.argtypes = None
+            self.restype = None
+
+        def __call__(self, global_name, path, digest, policy, batch_size):
+            self.calls.append((global_name, path, digest, policy, batch_size))
+            return 0
+
+    register = _Register()
+    library = type("Library", (), {"trtmc_sam3_tracker_memory_register_package": register})()
+    native_plugin_builder._register_resize_packages(library, resize)
+    assert register.calls == [
+        (
+            package.package_global.encode(),
+            str(package.path).encode(),
+            package.sha256.encode(),
+            b"resize",
+            package.batch_size,
+        )
+        for package in resize.packages
+    ]
+
+
+def test_resize_artifacts_reject_non_finite_validation_error(tmp_path: Path) -> None:
+    split = _split_artifacts(tmp_path)
+    resize = _resize_artifacts(tmp_path)
+    plugin = tmp_path / native_plugin_builder._PLUGIN_NAME
+    plugin.write_bytes(b"native-plugin")
+    manifest = json.loads(resize.manifest_bytes)
+    manifest["package_validation"]["cases"][0]["maximum_absolute_error"] = float("nan")
+    manifest_bytes = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    resize = replace(
+        resize,
+        manifest_bytes=manifest_bytes,
+        bundle_sections=(
+            (resize.bundle_sections[0][0], manifest_bytes),
+            *resize.bundle_sections[1:],
+        ),
+    )
+    with pytest.raises(RuntimeError, match="package validation mismatch"):
+        native_plugin_builder._assemble_runtime_artifacts(
+            split,
+            _memory_artifacts(tmp_path),
+            resize,
+            plugin,
+            _inputs(),
+            aoti_abi_version=7,
+        )
+
+
 def test_memory_artifacts_fail_closed_on_hash_and_step_abi_mismatch(tmp_path: Path) -> None:
     split = _split_artifacts(tmp_path)
     memory = _memory_artifacts(tmp_path)
@@ -458,6 +627,7 @@ def test_memory_artifacts_fail_closed_on_hash_and_step_abi_mismatch(tmp_path: Pa
         native_plugin_builder._assemble_runtime_artifacts(
             split,
             memory,
+            _resize_artifacts(tmp_path),
             plugin,
             _inputs(),
             aoti_abi_version=7,
@@ -472,6 +642,7 @@ def test_memory_artifacts_fail_closed_on_hash_and_step_abi_mismatch(tmp_path: Pa
         native_plugin_builder._assemble_runtime_artifacts(
             split,
             mismatched_memory,
+            _resize_artifacts(tmp_path),
             plugin,
             _inputs(),
             aoti_abi_version=7,

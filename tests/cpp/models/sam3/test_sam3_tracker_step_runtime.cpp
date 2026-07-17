@@ -82,6 +82,41 @@ std::string memory_global(std::string_view policy, int32_t batch_size,
            ".fixed." + package_sha.substr(0, 20);
 }
 
+std::string resize_global(int32_t batch_size, const std::string& package_sha) {
+    return "trtmc.sam3.tracker_memory.resize.b" + std::to_string(batch_size) + ".fixed." +
+           package_sha.substr(0, 20);
+}
+
+std::string make_resize_manifest(const std::string& b1_sha, const std::string& b2_sha) {
+    std::ostringstream stream;
+    const auto write_package = [&](int32_t batch_size, const std::string& package_sha) {
+        stream << R"({"batch_size":)" << batch_size << R"(,"filename":"sam3_hard_mask_resize_b)"
+               << batch_size << '_' << package_sha << R"(.pt2","section":"sam3_hard_mask_resize_b)"
+               << batch_size << R"(.pt2","sha256":")" << package_sha << R"(","package_global":")"
+               << resize_global(batch_size, package_sha) << R"("})";
+    };
+    stream
+        << R"({"schema_version":1,"scope":"torch_bilinear_288_to_1008_b1_b2",)"
+        << R"("artifact_format":"torch.aot_inductor.package.pt2",)"
+        << R"("implementation":{"library":"torch","operator":"torch.nn.functional.interpolate",)"
+        << R"("mode":"bilinear","align_corners":false,"source_size":288,"target_size":1008},)"
+        << R"("producer":{"torch_version":"2.9.0","transformers_version":"5.2.0",)"
+        << R"("cuda_version":"12.8","compute_capability":[8,9],"host_architecture":"x86_64",)"
+        << R"("torch_cxx11_abi":false,"torch_aoti_abi_version":7},)"
+        << R"("host_architecture":"x86_64","exporter_sha256":")" << sha256("resize-exporter")
+        << R"(","input_abi":[{"name":"tracker_mask","dtype":"float32","shape":["B",1,288,288]}],)"
+        << R"("output_abi":[{"name":"resized_tracker_mask","dtype":"float32","shape":["B",1,1008,1008]}],)"
+        << R"("packages":[)";
+    write_package(1, b1_sha);
+    stream << ',';
+    write_package(2, b2_sha);
+    stream << R"(],"package_validation":{"reference":"same torch.interpolate eager execution",)"
+           << R"("maximum_absolute_error":0.00002,"cases":[)"
+           << R"({"batch_size":1,"maximum_absolute_error":0.000001,"passed":true},)"
+           << R"({"batch_size":2,"maximum_absolute_error":0.000001,"passed":true}]}})";
+    return stream.str();
+}
+
 std::string make_memory_manifest(const std::string& soft_b1_sha, const std::string& hard_b1_sha,
                                  const std::string& soft_b2_sha, const std::string& hard_b2_sha) {
     std::ostringstream stream;
@@ -90,8 +125,10 @@ std::string make_memory_manifest(const std::string& soft_b1_sha, const std::stri
         stream << R"({"policy":")" << policy << R"(","batch_size":)" << batch_size
                << R"(,"fixed_shape":true,"inputs":[)"
                << R"({"name":"tracker_feature_2","dtype":"float32","shape":[1,256,72,72]},)"
-               << R"({"name":"mask_logits","dtype":"float32","shape":[)" << batch_size
-               << R"(,1,288,288]},)"
+               << R"({"name":")" << (policy == "hard" ? "owned_tracker_mask" : "final_mask")
+               << R"(","dtype":"float32","shape":[)" << batch_size << R"(,1,)"
+               << (policy == "hard" ? 1008 : 288) << ',' << (policy == "hard" ? 1008 : 288)
+               << R"(]},)"
                << R"({"name":"object_score_logits","dtype":"float32","shape":[)" << batch_size
                << R"(,1]},)"
                << R"({"name":"suppress_area_shrinkage","dtype":"int32","shape":[)" << batch_size
@@ -117,7 +154,7 @@ std::string make_memory_manifest(const std::string& soft_b1_sha, const std::stri
             << R"("passed":true})";
     };
     stream
-        << R"({"schema_version":1,"scope":"fixed_memory_encoder_soft_hard_b1_b2",)"
+        << R"({"schema_version":2,"scope":"fixed_memory_encoder_soft_hard_b1_b2",)"
         << R"("artifact_format":"torch.aot_inductor.package.pt2",)"
         << R"("implementation":{"library":"transformers","model_class":"Sam3TrackerVideoModel",)"
         << R"("module":"Sam3TrackerVideoMemoryEncoder","license":"Apache-2.0",)"
@@ -126,12 +163,18 @@ std::string make_memory_manifest(const std::string& soft_b1_sha, const std::stri
         << R"(","producer":{"torch_version":"2.9.0","transformers_version":"5.2.0",)"
         << R"("cuda_version":"12.8","compute_capability":[8,9],"host_architecture":"x86_64",)"
         << R"("torch_cxx11_abi":false,"torch_aoti_abi_version":7},"input_abi":[)"
+        << R"({"policy":"soft","tensors":[)"
         << R"({"name":"tracker_feature_2","dtype":"float32","shape":[1,256,72,72]},)"
-        << R"({"name":"mask_logits","dtype":"float32","shape":["B",1,288,288]},)"
+        << R"({"name":"final_mask","dtype":"float32","shape":["B",1,288,288]},)"
         << R"({"name":"object_score_logits","dtype":"float32","shape":["B",1]},)"
-        << R"({"name":"suppress_area_shrinkage","dtype":"int32","shape":["B",1]}],)"
+        << R"({"name":"suppress_area_shrinkage","dtype":"int32","shape":["B",1]}]},)"
+        << R"({"policy":"hard","tensors":[)"
+        << R"({"name":"tracker_feature_2","dtype":"float32","shape":[1,256,72,72]},)"
+        << R"({"name":"owned_tracker_mask","dtype":"float32","shape":["B",1,1008,1008]},)"
+        << R"({"name":"object_score_logits","dtype":"float32","shape":["B",1]},)"
+        << R"({"name":"suppress_area_shrinkage","dtype":"int32","shape":["B",1]}]}],)"
         << R"("mask_policy":{"soft":"288 bilinear 1152, clamp rejected rows to <=-10, sigmoid, scale 20, bias -10",)"
-        << R"("hard":"288 bilinear 1008, B2 non-overlap, threshold, scale 20, bias -10, antialiased bilinear 1152; suppression input ignored",)"
+        << R"("hard":"globally owned binary FP32 1008, scale 20, bias -10, antialiased bilinear 1152; suppression input ignored",)"
         << R"("b1_layout":[2,5184,1,64],"b2_layout":[2,2,5184,64],)"
         << R"("stored_precision":"bfloat16 rounded then promoted to float32 carrier"},"packages":[)";
     write_package("soft", 1, soft_b1_sha);
@@ -167,7 +210,7 @@ make_manifest(const std::string& plugin_sha, const std::string& encoder_b1_sha,
     stream << R"({"schema_version":1,"step_scope":"meta_split_dynamic_encoder_static_decoder",)"
               R"("plugin":{"section":")"
            << trtmc::kSam3TrackerStepNativePluginSection << R"(","sha256":")" << plugin_sha
-           << R"(","type":"Sam3TrackerStepFfi","version":"1"},"producer":{)"
+           << R"(","type":"Sam3TrackerStepFfi","version":"2"},"producer":{)"
               R"("torch_version":"2.9.0","transformers_version":"5.2.0",)"
               R"("tvm_ffi_version":"0.1.6","tensorrt_version":"11.2.0",)"
               R"("cuda_version":"12.8","host_architecture":"x86_64",)"
@@ -207,6 +250,8 @@ trtmc::BundleFile make_valid_bundle() {
     constexpr std::string_view memory_hard_b1 = "aoti-memory-hard-b1";
     constexpr std::string_view memory_soft_b2 = "aoti-memory-soft-b2";
     constexpr std::string_view memory_hard_b2 = "aoti-memory-hard-b2";
+    constexpr std::string_view resize_b1 = "aoti-resize-b1";
+    constexpr std::string_view resize_b2 = "aoti-resize-b2";
     trtmc::BundleFile bundle;
     add_section(bundle, trtmc::kSam3TrackerStepNativePluginSection, std::string(plugin));
     add_section(bundle, "sam3_tracker_encoder_b1_dynamic.pt2", std::string(encoder_b1));
@@ -217,9 +262,13 @@ trtmc::BundleFile make_valid_bundle() {
     add_section(bundle, "sam3_tracker_memory_hard_b1.pt2", std::string(memory_hard_b1));
     add_section(bundle, "sam3_tracker_memory_soft_b2.pt2", std::string(memory_soft_b2));
     add_section(bundle, "sam3_tracker_memory_hard_b2.pt2", std::string(memory_hard_b2));
+    add_section(bundle, "sam3_hard_mask_resize_b1.pt2", std::string(resize_b1));
+    add_section(bundle, "sam3_hard_mask_resize_b2.pt2", std::string(resize_b2));
     add_section(bundle, trtmc::kSam3TrackerMemoryAotiManifestSection,
                 make_memory_manifest(sha256(memory_soft_b1), sha256(memory_hard_b1),
                                      sha256(memory_soft_b2), sha256(memory_hard_b2)));
+    add_section(bundle, trtmc::kSam3HardMaskResizeAotiManifestSection,
+                make_resize_manifest(sha256(resize_b1), sha256(resize_b2)));
     add_section(bundle, trtmc::kSam3TrackerStepRuntimeManifestSection,
                 make_manifest(sha256(plugin), sha256(encoder_b1), sha256(decoder_b1),
                               sha256(encoder_b2), sha256(decoder_b2)));
@@ -282,13 +331,33 @@ void test_valid_manifest() {
               manifest.pipelines[1].batch_size == 2,
           "SAM3 tracker-step manifest requires four packages and two pipelines");
     const auto memory = trtmc::validate_sam3_tracker_memory_aoti_manifest(bundle, manifest);
-    check(memory.schema_version == 1 && memory.scope == trtmc::kSam3TrackerMemoryScope &&
+    check(memory.schema_version == 2 && memory.scope == trtmc::kSam3TrackerMemoryScope &&
               memory.packages.size() == 4,
           "SAM3 tracker-memory manifest requires fixed soft/hard B1/B2 packages");
     check(memory.torch_version == manifest.torch_version &&
               memory.aoti_abi_version == manifest.aoti_abi_version &&
               memory.compute_capability_major == manifest.compute_capability_major,
           "SAM3 tracker-memory producer ABI is bound to the step packages");
+    const auto resize = trtmc::validate_sam3_hard_mask_resize_aoti_manifest(bundle, manifest);
+    check(resize.schema_version == 1 && resize.scope == trtmc::kSam3HardMaskResizeScope &&
+              resize.packages[0].batch_size == 1 && resize.packages[1].batch_size == 2,
+          "SAM3 hard-mask resize manifest requires fixed B1/B2 packages");
+}
+
+void test_missing_resize_manifest_fails_closed() {
+    auto bundle = make_valid_bundle();
+    replace_section(bundle, trtmc::kSam3HardMaskResizeAotiManifestSection, "");
+    const auto step = trtmc::validate_sam3_tracker_step_runtime_manifest(bundle);
+    check_throws([&] { trtmc::validate_sam3_hard_mask_resize_aoti_manifest(bundle, step); },
+                 "SAM3 tracker runtime rejects a missing resize manifest");
+}
+
+void test_resize_artifact_hash_mismatch_fails_closed() {
+    auto bundle = make_valid_bundle();
+    replace_section(bundle, "sam3_hard_mask_resize_b1.pt2", "tampered-resize");
+    const auto step = trtmc::validate_sam3_tracker_step_runtime_manifest(bundle);
+    check_throws([&] { trtmc::validate_sam3_hard_mask_resize_aoti_manifest(bundle, step); },
+                 "SAM3 tracker runtime rejects a resize artifact hash mismatch");
 }
 
 void test_missing_memory_manifest_fails_closed() {
@@ -337,6 +406,19 @@ void test_memory_tensor_contract_mismatch_fails_closed() {
     const auto step = trtmc::validate_sam3_tracker_step_runtime_manifest(bundle);
     check_throws([&] { trtmc::validate_sam3_tracker_memory_aoti_manifest(bundle, step); },
                  "SAM3 tracker runtime rejects a memory tensor contract mismatch");
+}
+
+void test_hard_memory_requires_global_tracker_grid() {
+    auto bundle = make_valid_bundle();
+    std::string manifest = section_contents(bundle, trtmc::kSam3TrackerMemoryAotiManifestSection);
+    const auto marker = manifest.find("[1,1,1008,1008]");
+    check(marker != std::string::npos,
+          "SAM3 synthetic memory manifest contains the hard tracker-grid contract");
+    manifest.replace(marker, std::string("[1,1,1008,1008]").size(), "[1,1,288,288]");
+    replace_section(bundle, trtmc::kSam3TrackerMemoryAotiManifestSection, std::move(manifest));
+    const auto step = trtmc::validate_sam3_tracker_step_runtime_manifest(bundle);
+    check_throws([&] { trtmc::validate_sam3_tracker_memory_aoti_manifest(bundle, step); },
+                 "SAM3 tracker runtime rejects a per-chunk hard-mask grid");
 }
 
 void test_memory_producer_mismatch_fails_closed() {
@@ -458,10 +540,13 @@ void test_unknown_build_abi_fails_closed() {
 int main() {
     test_sha256_known_answer();
     test_valid_manifest();
+    test_missing_resize_manifest_fails_closed();
+    test_resize_artifact_hash_mismatch_fails_closed();
     test_missing_memory_manifest_fails_closed();
     test_memory_artifact_hash_mismatch_fails_closed();
     test_memory_global_hash_mismatch_fails_closed();
     test_memory_tensor_contract_mismatch_fails_closed();
+    test_hard_memory_requires_global_tracker_grid();
     test_memory_producer_mismatch_fails_closed();
     test_artifact_hash_mismatch_fails_closed();
     test_duplicate_stage_batch_fails_closed();
