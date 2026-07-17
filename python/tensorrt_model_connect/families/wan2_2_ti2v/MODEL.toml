@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "wan2_2_ti2v"
+plugin = "wan2_2_ti2v"
+module = "plugin"
+aliases = [
+  "ti2v",
+  "ti2v-5b",
+  "wan2.2-ti2v-5b",
+  "wan2_2_ti2v",
+  "wan2_2_ti2v_5b",
+  "wanmodel",
+  "wanpipeline",
+]
+prefixes = [
+  "wan2_2_ti2v",
+  "wan2.2-ti2v",
+]
+diffusion_pipeline_classes = [
+  "WanModel",
+  "WanPipeline",
+]
+hf_allow_patterns = [
+  "config.json",
+  "configuration.json",
+  "diffusion_pytorch_model*.safetensors",
+  "diffusion_pytorch_model.safetensors.index.json",
+  "Wan2.2_VAE.pth",
+  "models_t5_umt5-xxl-enc-bf16.pth",
+  "google/umt5-xxl/**",
+]
+
+# The builder owns this exact source-bound section set. Python/PyTorch are
+# checkpoint conversion dependencies only and are never bundled for runtime.
+runtime_implementation = "native_cpp_cuda_tensorrt"
+bundle_required_sections = [
+  "wan2_2_umt5_cuda_plugin_so",
+  "wan2_2_dit_cuda_plugin_so",
+  "wan2_2_vae_cuda_plugin_so",
+  "text_encoder_0_plan",
+  "denoiser_plan",
+  "vae_decoder_plan",
+  "vae_decoder_first_frame_plan",
+  "tokenizer.json",
+  "config.json",
+]
+runtime_dependencies = ["trtmc_core", "cuda", "tensorrt", "cudnn"]
+forbidden_runtime_dependencies = ["python", "pytorch", "libpython", "libtorch"]

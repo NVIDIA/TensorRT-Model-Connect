@@ -37,6 +37,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -58,8 +59,11 @@ void check(bool condition, const char* test_name) {
 // per-sample-seed plumbing).
 class FakeImagePipeline final : public trtmc::IPipeline {
   public:
+    std::vector<int32_t> observed_seeds;
+
     trtmc::ImageResult generate_image(const std::string& prompt,
                                       const trtmc::GenerateConfig& cfg) override {
+        observed_seeds.push_back(cfg.seed);
         trtmc::ImageResult r;
         r.height = 4;
         r.width = 4;
@@ -94,6 +98,40 @@ void test_invalid_args_return_invalid_arg() {
           "null handle returns TRTMC_ERR_INVALID_ARG");
     check(trtmc_generate_batch(&pipe, prompts, 2, seeds, 3, 4, 7.5F, out) == TRTMC_ERR_INVALID_ARG,
           "num_prompts != num_seeds returns TRTMC_ERR_INVALID_ARG");
+}
+
+void test_default_batch_seed_boundaries_fail_closed() {
+    FakeImagePipeline pipe;
+    const char* prompt[] = {"boundary"};
+    trtmc_image_result_t out[1]{};
+
+    std::uint32_t max_signed_seed[] = {
+        static_cast<std::uint32_t>(std::numeric_limits<int32_t>::max())};
+    int rc = trtmc_generate_batch(&pipe, prompt, 1, max_signed_seed, 1, 4, 7.5F, out);
+    check(rc == TRTMC_OK, "INT32_MAX seed is accepted by default batch implementation");
+    check(pipe.observed_seeds.size() == 1 &&
+              pipe.observed_seeds.front() == std::numeric_limits<int32_t>::max(),
+          "INT32_MAX seed reaches GenerateConfig unchanged");
+    trtmc_image_result_free(&out[0]);
+
+    pipe.observed_seeds.clear();
+    std::uint32_t above_signed_seed[] = {
+        static_cast<std::uint32_t>(std::numeric_limits<int32_t>::max()) + 1U};
+    rc = trtmc_generate_batch(&pipe, prompt, 1, above_signed_seed, 1, 4, 7.5F, out);
+    check(rc == TRTMC_ERR_INVALID_ARG,
+          "INT32_MAX+1 seed is rejected by default batch implementation");
+    check(pipe.observed_seeds.empty(),
+          "out-of-range seed is rejected before generate_image is called");
+    check(std::strstr(trtmc_last_error(), "exceeds INT32_MAX") != nullptr,
+          "out-of-range seed reports the representability limit");
+
+    const char* prompts[] = {"first", "second"};
+    std::uint32_t mixed_seeds[] = {
+        7U, static_cast<std::uint32_t>(std::numeric_limits<int32_t>::max()) + 1U};
+    trtmc_image_result_t mixed_out[2]{};
+    rc = trtmc_generate_batch(&pipe, prompts, 2, mixed_seeds, 2, 4, 7.5F, mixed_out);
+    check(rc == TRTMC_ERR_INVALID_ARG, "mixed seed batch rejects an out-of-range later seed");
+    check(pipe.observed_seeds.empty(), "mixed seed batch is validated before producing results");
 }
 
 // -- Happy path -----------------------------------------------------------
@@ -148,6 +186,7 @@ void test_image_result_free_null_safe() {
 int main() {
     test_invalid_args_return_invalid_arg();
     test_batch_fills_results_and_propagates_seeds();
+    test_default_batch_seed_boundaries_fail_closed();
     test_image_result_free_null_safe();
 
     if (failures > 0) {

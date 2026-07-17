@@ -46,27 +46,29 @@ def _make_ctx(tmp_path: Path) -> RunContext:
 def _write_runtime_matrix(tmp_path: Path) -> Path:
     matrix = tmp_path / "runtime_strategy_matrix.json"
     matrix.write_text(
-        json.dumps({
-            "new_runtime_guard_strategies": ["unit_new_runtime"],
-            "runtime_strategies": {
-                "unit_new_runtime": {
-                    "task_strategy": "text_generation_causal",
-                    "performance_mode": "decode",
+        json.dumps(
+            {
+                "new_runtime_guard_strategies": ["unit_new_runtime"],
+                "runtime_strategies": {
+                    "unit_new_runtime": {
+                        "task_strategy": "text_generation_causal",
+                        "performance_mode": "decode",
+                    },
+                    "unit_diffusion_runtime": {
+                        "task_strategy": "diffusion_media_generation",
+                        "performance_mode": "diffusion",
+                    },
+                    "unit_enc_dec_runtime": {
+                        "task_strategy": "speech_to_text",
+                        "performance_mode": "enc_dec",
+                    },
+                    "unit_multistage_runtime": {
+                        "task_strategy": "text_to_audio",
+                        "performance_mode": "multi_stage",
+                    },
                 },
-                "unit_diffusion_runtime": {
-                    "task_strategy": "diffusion_media_generation",
-                    "performance_mode": "diffusion",
-                },
-                "unit_enc_dec_runtime": {
-                    "task_strategy": "speech_to_text",
-                    "performance_mode": "enc_dec",
-                },
-                "unit_multistage_runtime": {
-                    "task_strategy": "text_to_audio",
-                    "performance_mode": "multi_stage",
-                },
-            },
-        }),
+            }
+        ),
         encoding="utf-8",
     )
     return matrix
@@ -189,7 +191,9 @@ def test_runtime_guard_skips_unknown_strategies(tmp_path: Path) -> None:
     assert _validate_trt_runtime_path(case, ctx, output) is None
 
 
-def test_runtime_guard_ignores_nonzero_cli_parse_errors_without_runtime_markers(tmp_path: Path) -> None:
+def test_runtime_guard_ignores_nonzero_cli_parse_errors_without_runtime_markers(
+    tmp_path: Path,
+) -> None:
     case = _make_case("unit_prompted_segmentation")
     ctx = _make_ctx(tmp_path)
     output = StageOutput(
@@ -198,6 +202,22 @@ def test_runtime_guard_ignores_nonzero_cli_parse_errors_without_runtime_markers(
             "command": [ctx.binary_path, "segment", "/tmp/model.trtfb"],
             "returncode": 1,
             "stderr": "Error: Unknown flag: --point",
+        },
+    )
+
+    assert _validate_trt_runtime_path(case, ctx, output) is None
+
+
+def test_runtime_guard_ignores_non_inference_inspect_probe(tmp_path: Path) -> None:
+    case = _make_case("qwen_decoder_kv_cache")
+    ctx = _make_ctx(tmp_path)
+    output = StageOutput(
+        stage_name="bundle_contract",
+        metadata={
+            "command": [ctx.binary_path, "inspect", "/tmp/model.trtfb"],
+            "returncode": 0,
+            "stdout": "Runtime strategy: qwen_decoder_kv_cache",
+            "stderr": "[trtmc] --config/--set accepted but no config schemas are registered yet",
         },
     )
 

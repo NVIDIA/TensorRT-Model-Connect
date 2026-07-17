@@ -36,6 +36,8 @@ class ProofStatus:
         "cpp_tests": "cpp-tests.log",
         "python_tests": "python-model-tests.xml",
         "e2e_reference": "e2e/junit.xml, e2e/*/result.json",
+        "e2e_snapshot_regression": "e2e/junit.xml, e2e/*/result.json",
+        "e2e_functional_invariant": "e2e/junit.xml, e2e/*/result.json",
         "engine_build_budget": "engine-builds/*.json, engine-build-verification.json",
         "result_verification": "e2e-verification.json",
         "task_eval": "task-eval/eval_summary.json",
@@ -396,6 +398,8 @@ class ModelProofInnerPipeline:
                 )
             },
             "e2e_cases": self.selection.e2e_cases,
+            "e2e_proof_kinds": verification["e2e_proof_kinds"],
+            "e2e_reference_passed": verification["e2e_reference_passed"],
             "engine_builds_per_model": verification["builds_per_model"],
             "engine_build_count": len(verification["records"]),
             "engine_build_verification": "engine-build-verification.json",
@@ -447,6 +451,38 @@ class ModelProofInnerPipeline:
         dependencies = set(re.findall(r"libtrtmc_model_[^\] ]*\.so", dynamic)) - {runtime_library}
         if dependencies:
             raise CiError(f"model DSO links a sibling model DSO: {sorted(dependencies)}")
+        if runtime_model == "wan2_2_ti2v":
+            runtime_objects = {
+                "cli": self.work / "build" / "trtmc",
+                "core": self.work / "build" / "libtrtmc_core.so",
+                "tensorrt_backend": self.work / "build" / "libtrtmc_backend_trt.so",
+                "model_dso": dsos[0],
+            }
+            missing = [label for label, path in runtime_objects.items() if not path.is_file()]
+            if missing:
+                raise CiError(f"Wan2.2 native dependency audit is missing: {missing}")
+            dependency_evidence = []
+            forbidden = []
+            for label, path in runtime_objects.items():
+                object_dynamic = self.context.output(["readelf", "-d", path])
+                needed = [
+                    line.strip() for line in object_dynamic.splitlines() if "(NEEDED)" in line
+                ]
+                dependency_evidence.append(f"[{label}] {path}\n" + "\n".join(needed))
+                forbidden.extend(
+                    f"{label}: {line}"
+                    for line in needed
+                    if re.search(r"(?:python|torch|c10)", line, re.IGNORECASE)
+                )
+            (self.artifacts / "wan2_2-native-dependencies.txt").write_text(
+                "\n\n".join(dependency_evidence) + "\n", encoding="utf-8"
+            )
+            if forbidden:
+                raise CiError(
+                    "Wan2.2 native runtime links forbidden Python/PyTorch dependencies: "
+                    + "; ".join(forbidden)
+                )
+            self.status.fact("wan2_2_python_free_runtime", "true")
         plugin_dir = self.work / "model-plugins" / runtime_model
         plugin_dir.mkdir(parents=True)
         staged = plugin_dir / runtime_library
@@ -535,7 +571,6 @@ class ModelProofInnerPipeline:
         filters = [item for name in self.selection.e2e_models for item in ("--e2e-model", name)] + [
             item for name in self.selection.e2e_cases for item in ("--e2e-testcase", name)
         ]
-        self.status.step("e2e_reference", "running")
         self.status.step("engine_build_budget", "running")
         environment = {
             "PYTHONPATH": f"{self.source / 'python'}:{self.source}",
@@ -588,13 +623,65 @@ class ModelProofInnerPipeline:
                 self.source,
                 "--models-file",
                 models_file,
+                *[
+                    item
+                    for case in self.selection.payload["e2e_cases"]
+                    for item in (
+                        "--result-case",
+                        f"{case['model']}={case['name']}",
+                    )
+                ],
                 "--artifacts-dir",
                 self.artifacts / "e2e",
                 "--report",
                 self.artifacts / "e2e-verification.json",
             ]
         )
-        self.status.step("e2e_reference", "passed")
+        e2e_verification = json.loads(
+            (self.artifacts / "e2e-verification.json").read_text(encoding="utf-8")
+        )
+        if e2e_verification.get("passed") is not True:
+            raise CiError("E2E result verification did not pass")
+        proof_kinds = e2e_verification.get("proof_kinds")
+        allowed_proof_kinds = {
+            "reference",
+            "snapshot_regression",
+            "functional_invariant",
+        }
+        if (
+            not isinstance(proof_kinds, list)
+            or not proof_kinds
+            or any(
+                not isinstance(kind, str) or kind not in allowed_proof_kinds for kind in proof_kinds
+            )
+        ):
+            raise CiError(f"E2E result verification has invalid proof_kinds: {proof_kinds!r}")
+        proof_kinds = sorted(set(proof_kinds))
+        e2e_reference_passed = proof_kinds == ["reference"]
+        self.status.fact("e2e_proof_kinds", proof_kinds)
+        self.status.fact("e2e_reference_passed", e2e_reference_passed)
+        self.status.step(
+            "e2e_reference",
+            "passed" if e2e_reference_passed else "skipped",
+            (
+                "e2e-verification.json (all selected cases use L1/L2 reference oracles)"
+                if e2e_reference_passed
+                else "not claimed: selected proof is not exclusively L1/L2 reference"
+            ),
+        )
+        for proof_kind, step_name in (
+            ("snapshot_regression", "e2e_snapshot_regression"),
+            ("functional_invariant", "e2e_functional_invariant"),
+        ):
+            self.status.step(
+                step_name,
+                "passed" if proof_kind in proof_kinds else "skipped",
+                (
+                    "e2e-verification.json"
+                    if proof_kind in proof_kinds
+                    else f"no selected {proof_kind} oracle"
+                ),
+            )
         self.status.step("result_verification", "passed")
         self.context.run(
             [
@@ -617,6 +704,8 @@ class ModelProofInnerPipeline:
         )
         if verification.get("passed") is not True:
             raise CiError("engine build verification did not pass")
+        verification["e2e_proof_kinds"] = proof_kinds
+        verification["e2e_reference_passed"] = e2e_reference_passed
         return verification
 
     def _finalize_report(self, validation_rc: int) -> int:

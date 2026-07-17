@@ -461,6 +461,14 @@ def test_every_owned_e2e_family_has_one_premerge_case(tmp_path: Path) -> None:
         assert selection["e2e_cases"][0]["ci_tier"] != "nightly_only", family
 
 
+def test_wan22_premerge_selects_standalone_l0_manifest(tmp_path: Path) -> None:
+    selection = _run_test_selection(tmp_path, "wan2_2_ti2v", "premerge")
+
+    assert [case["name"] for case in selection["e2e_cases"]] == ["wan22-ti2v-5b-l0"]
+    assert selection["e2e_cases"][0]["model"] == "wan22-ti2v-5b-l0"
+    assert selection["e2e_cases"][0]["ci_tier"] == "l0_only"
+
+
 @pytest.mark.parametrize(
     ("family", "expected_family_tests"),
     (
@@ -564,6 +572,28 @@ def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
     assert '"TRTMC_BINARY": str(self.work / "build/trtmc")' in inner
 
 
+def test_wan_model_proof_rejects_python_or_pytorch_runtime_dependencies() -> None:
+    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
+    cmake = (REPO_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+
+    for contract in (
+        'runtime_model == "wan2_2_ti2v"',
+        '"cli": self.work / "build" / "trtmc"',
+        '"core": self.work / "build" / "libtrtmc_core.so"',
+        '"tensorrt_backend": self.work / "build" / "libtrtmc_backend_trt.so"',
+        're.search(r"(?:python|torch|c10)"',
+        'self.artifacts / "wan2_2-native-dependencies.txt"',
+        'self.status.fact("wan2_2_python_free_runtime", "true")',
+        '"-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF"',
+    ):
+        assert contract in inner
+
+    assert (
+        'option(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL "Enable optional libtorch-backed multinomial '
+        'sampler" ON)'
+    ) in cmake
+
+
 @pytest.mark.parametrize(
     ("family", "expected_resource"),
     (
@@ -632,6 +662,7 @@ def test_inner_selection_records_the_leased_gpu_evidence(tmp_path: Path) -> None
                 "canary-1b-v2-asr-probe08",
             },
         ),
+        ("wan2_2_ti2v", {"wan22-ti2v-5b"}),
     ),
 )
 def test_nightly_selects_production_single_gpu_cases_without_redundant_l0(
@@ -1130,16 +1161,16 @@ def test_model_proof_job_budget_reserves_singleton_finalization() -> None:
         "- name: Finalize model proof fallback", maxsplit=1
     )[0]
 
-    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 540 || 300 }}" in job_configuration
-    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 360 || 150 }}" in proof
+    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 600 || 300 }}" in job_configuration
+    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 420 || 150 }}" in proof
     assert "inputs.suite == 'nightly' && '5400' || '3600'" in job_configuration
     assert "inputs.suite == 'nightly' && '600' || '360'" in job_configuration
     assert "inputs.expected_count" not in workflow
 
-    nightly_job_minutes = 540
+    nightly_job_minutes = 600
     disk_headroom_wait_minutes = 3600 // 60
     image_minutes = 90
-    nightly_proof_minutes = 360
+    nightly_proof_minutes = 420
     finalization_margin_minutes = 30
     lease_minutes = 5400 // 60
     sana_build_minutes = (
@@ -1160,7 +1191,7 @@ def test_model_proof_job_budget_reserves_singleton_finalization() -> None:
         + nightly_proof_minutes
         + finalization_margin_minutes
     )
-    assert nightly_proof_minutes <= 360
+    assert nightly_proof_minutes <= 420
 
 
 def test_model_proof_uses_a_dedicated_self_hosted_checkout() -> None:
@@ -1620,8 +1651,11 @@ def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None
 
     assert runner.index('"verify-results"') < runner.index('"verify-builds"')
     assert runner.index('"verify-results"') < runner.index(
-        'self.status.step("e2e_reference", "passed")'
+        'e2e_reference_passed = proof_kinds == ["reference"]'
     )
+    assert '"functional_invariant", "e2e_functional_invariant"' in runner
+    assert '"snapshot_regression", "e2e_snapshot_regression"' in runner
+    assert "f\"{case['model']}={case['name']}\"" in runner
     assert "self._python()" in runner
     assert '"pytest"' in runner
     assert 'self.source / str(payload["e2e_test"])' in runner

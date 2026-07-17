@@ -62,7 +62,8 @@
     "patchtst_trt",
     "patchtsmixer_trt",
     "timesfm_trt",
-    "chronos_bolt_trt"
+    "chronos_bolt_trt",
+    "diffusion_wan2_2_ti2v"
   ],
   "runtime_strategies": {
     "qwen_decoder_kv_cache": {
@@ -556,6 +557,17 @@
       "comparator_class": "diffusion.DiffusionComparator",
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_wan'].",
+      "performance_mode": "diffusion"
+    },
+    "diffusion_wan2_2_ti2v": {
+      "task_strategy": "diffusion_media_generation",
+      "cli_commands": [
+        "generate-video"
+      ],
+      "runner_class": "diffusion.DiffusionMediaRunner",
+      "comparator_class": "diffusion.DiffusionComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['diffusion_wan2_2_ti2v'].",
       "performance_mode": "diffusion"
     },
     "diffusion_zimage": {

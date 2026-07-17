@@ -140,6 +140,122 @@ static void test_read_valid_bundle() {
     trtmc_test::remove_all_safe(tmp);
 }
 
+static void test_read_single_bundle_section() {
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "single.trtfb").string();
+    const std::string json = R"({
+  "sections": {
+    "first": {"offset": 0, "size": 4},
+    "target": {"offset": 4, "size": 3},
+    "last": {"offset": 7, "size": 2}
+  }
+})";
+    write_bundle_with_sections(path, json, {{'s', 'k', 'i', 'p'}, {'T', 'R', 'T'}, {'x', 'x'}});
+
+    check(trtmc::ReadBundleSection(path, "target") == std::vector<char>({'T', 'R', 'T'}),
+          "single-section read seeks to the requested payload");
+
+    bool missing_threw = false;
+    try {
+        (void)trtmc::ReadBundleSection(path, "missing");
+    } catch (const std::runtime_error& error) {
+        missing_threw = std::string(error.what()).find("was not found") != std::string::npos;
+    }
+    check(missing_threw, "single-section read rejects a missing name");
+    trtmc_test::remove_all_safe(tmp);
+}
+
+static void test_read_single_bundle_section_validates_bounds() {
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "out_of_bounds.trtfb").string();
+    const std::string json = R"({
+  "sections": {
+    "target": {"offset": 2, "size": 8}
+  }
+})";
+    write_bundle_with_sections(path, json, {{'x', 'y', 'z'}});
+
+    bool bounds_threw = false;
+    try {
+        (void)trtmc::ReadBundleSection(path, "target");
+    } catch (const std::runtime_error& error) {
+        bounds_threw = std::string(error.what()).find("outside file bounds") != std::string::npos;
+    }
+    check(bounds_threw, "single-section read rejects a truncated payload");
+    trtmc_test::remove_all_safe(tmp);
+}
+
+static bool section_metadata_is_rejected(const std::filesystem::path& path,
+                                         const std::string& fields) {
+    const std::string json = "{\"sections\":{\"target\":{" + fields + "}}}";
+    write_bundle_with_sections(path.string(), json, {{'x', 'y', 'z'}});
+    try {
+        (void)trtmc::ReadBundleSection(path.string(), "target");
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
+
+static void test_read_single_bundle_section_rejects_invalid_numbers() {
+    const auto tmp = make_temp_dir();
+    const auto path = tmp / "invalid_numbers.trtfb";
+
+    check(section_metadata_is_rejected(path, "\"size\":1"),
+          "single-section read rejects missing offset");
+    check(section_metadata_is_rejected(path, "\"offset\":0"),
+          "single-section read rejects missing size");
+    check(section_metadata_is_rejected(path, "\"offset\":-1,\"size\":1"),
+          "single-section read rejects negative offset");
+    check(section_metadata_is_rejected(path, "\"offset\":0,\"size\":-1"),
+          "single-section read rejects negative size");
+    check(section_metadata_is_rejected(path, "\"offset\":\"bad\",\"size\":1"),
+          "single-section read rejects malformed offset");
+    check(section_metadata_is_rejected(path, "\"offset\":0,\"size\":1.5"),
+          "single-section read rejects malformed size");
+    check(section_metadata_is_rejected(path, "\"offset\":18446744073709551616,\"size\":1"),
+          "single-section read rejects overflowing offset");
+    check(section_metadata_is_rejected(path, "\"offset\":0,\"size\":18446744073709551616"),
+          "single-section read rejects overflowing size");
+
+    trtmc_test::remove_all_safe(tmp);
+}
+
+static void test_pinned_section_reader_survives_path_replacement() {
+    const auto tmp = make_temp_dir();
+    const auto path = tmp / "staged.trtfb";
+    const auto pinned_path = tmp / "staged.original.trtfb";
+    const std::string json = R"({
+  "sections": {
+    "eager": {"offset": 0, "size": 3},
+    "lazy": {"offset": 3, "size": 4}
+  }
+})";
+    write_bundle_with_sections(path.string(), json, {{'O', 'L', 'D'}, {'L', 'A', 'Z', 'Y'}});
+    trtmc::BundleSectionReader reader(path.string());
+    const auto materialized = trtmc::ReadBundleFile(reader);
+    check(materialized.sections.size() == 2, "shared reader materializes every section");
+    if (materialized.sections.size() == 2) {
+        check(materialized.sections[0].data == std::vector<char>({'O', 'L', 'D'}),
+              "shared reader materializes eager bytes from original bundle");
+        check(materialized.sections[1].data == std::vector<char>({'L', 'A', 'Z', 'Y'}),
+              "shared reader materializes lazy bytes from original bundle");
+    }
+
+    std::filesystem::rename(path, pinned_path);
+    write_bundle_with_sections(path.string(), json, {{'N', 'E', 'W'}, {'F', 'I', 'L', 'E'}});
+    check(reader.read("lazy") == std::vector<char>({'L', 'A', 'Z', 'Y'}),
+          "pinned reader is not redirected by path replacement");
+    check(trtmc::ReadBundleSection(path.string(), "lazy") ==
+              std::vector<char>({'F', 'I', 'L', 'E'}),
+          "new readers observe the replacement bundle");
+
+    std::filesystem::remove(pinned_path);
+    check(reader.read("lazy") == std::vector<char>({'L', 'A', 'Z', 'Y'}),
+          "pinned reader survives unlink of its original file");
+    trtmc_test::remove_all_safe(tmp);
+}
+
 static void test_magic_validation() {
     const auto tmp = make_temp_dir();
     const auto path = (tmp / "bad.trtfb").string();
@@ -349,6 +465,10 @@ static void test_sha256_known_vectors() {
 
 int main() {
     test_read_valid_bundle();
+    test_read_single_bundle_section();
+    test_read_single_bundle_section_validates_bounds();
+    test_read_single_bundle_section_rejects_invalid_numbers();
+    test_pinned_section_reader_survives_path_replacement();
     test_magic_validation();
     test_empty_sections();
     test_is_bundle_valid();

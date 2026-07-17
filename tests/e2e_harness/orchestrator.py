@@ -668,6 +668,12 @@ def _validate_trt_runtime_path(
     binary_name = Path(ctx.binary_path).name if ctx.binary_path else ""
     relevant_stderr: list[str] = []
     for command_argv, stderr_texts, returncode in payloads:
+        # Inspection/configuration probes intentionally do not instantiate a
+        # pipeline and therefore cannot emit a runtime backend marker.  They
+        # remain useful L0 bundle/plugin checks, but are outside this guard's
+        # inference-path contract.
+        if len(command_argv) > 1 and command_argv[1] == "inspect":
+            continue
         executable = command_argv[0] if command_argv else ""
         executable_name = Path(executable).name if executable else ""
         command_names = {Path(part).name for part in command_argv if part}

@@ -272,6 +272,41 @@ def test_auto_select_build_backend_prefers_raw_trt(tmp_path, monkeypatch):
     assert resolved == str(model_dir)
 
 
+def test_native_diffusion_config_without_model_index_uses_claimed_family(
+    tmp_path, monkeypatch
+):
+    """Official native checkpoints route through their diffusion family.
+
+    Wan2.2-TI2V-5B has ``_class_name=WanModel`` in ``config.json`` and no
+    ``model_index.json``. Both public CLI discovery passes must retain the
+    claimed family so profile resolution and build dispatch agree.
+    """
+    model_dir = tmp_path / "Wan2.2-TI2V-5B"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps({"_class_name": "WanModel", "model_type": "ti2v"}),
+        encoding="utf-8",
+    )
+
+    import tensorrt_model_connect.engine_builder as engine_builder
+
+    plugin = types.SimpleNamespace(
+        name="wan2_2_ti2v",
+        pipeline_classes=("WanModel", "WanPipeline"),
+    )
+    monkeypatch.setattr(engine_builder, "_resolve_model", lambda _model_ref: str(model_dir))
+    monkeypatch.setattr(engine_builder, "find_plugin", lambda _config: plugin)
+    monkeypatch.setattr(engine_builder, "find_diffusion_plugin", lambda _class_name: plugin)
+
+    method, resolved = cli._auto_select_build_backend(str(model_dir))
+    metadata_ref, family = cli._resolve_build_model_metadata(str(model_dir), method)
+
+    assert method == "trt"
+    assert resolved == str(model_dir)
+    assert metadata_ref == str(model_dir)
+    assert family == "wan2_2_ti2v"
+
+
 def test_auto_select_build_backend_errors_for_unsupported_native_model(tmp_path, monkeypatch):
     """Intent: auto backend selection should fail clearly when native TRT is unsupported.
     Preconditions: a local config has no native raw or diffusion plugin.

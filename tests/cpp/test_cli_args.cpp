@@ -16,6 +16,7 @@
 // =============================================================================
 
 #include "cli/args.h"
+#include "cli/video_generation_config.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -149,6 +150,44 @@ void test_diffusion_flags() {
     check(args.diffusion_width == 768, "diffusion width");
     check(args.cfg_scale > 7.49F && args.cfg_scale < 7.51F, "diffusion cfg scale");
     check(args.initial_latents_raw == "latents.raw", "diffusion latents");
+
+    auto video_args = parse({"trtmc", "generate-video", "bundle.trtfb", "--prompt", "paint",
+                             "--negative-prompt", "motion blur", "--num-steps", "50", "--height",
+                             "704", "--width", "1280", "--cfg-scale", "5", "--seed", "42"});
+    const auto video_config = trtmc::cli::make_video_generate_config(video_args);
+    check(video_config.negative_prompt == "motion blur", "generate-video forwards negative prompt");
+    check(video_config.num_steps == 50, "generate-video forwards steps");
+    check(video_config.height == 704 && video_config.width == 1280,
+          "generate-video forwards geometry");
+    check(video_config.guidance_scale == 5.0F, "generate-video forwards CFG alias");
+    check(video_config.seed == 42, "generate-video forwards seed");
+}
+
+void test_invalid_diffusion_numbers_fail_closed() {
+    const auto invalid_seed =
+        parse({"trtmc", "generate-video", "bundle.trtfb", "--seed", "garbage"});
+    check(invalid_seed.parse_error, "non-integer diffusion seed fails");
+    check_message_contains(invalid_seed.error_message, "--seed expects", "seed error message");
+
+    const auto negative_seed = parse({"trtmc", "generate-video", "bundle.trtfb", "--seed", "-2"});
+    check(negative_seed.parse_error, "seed below unset sentinel fails");
+
+    const auto invalid_steps =
+        parse({"trtmc", "generate-video", "bundle.trtfb", "--num-steps", "garbage"});
+    check(invalid_steps.parse_error, "non-integer diffusion steps fail");
+
+    const auto zero_steps = parse({"trtmc", "generate-video", "bundle.trtfb", "--num-steps", "0"});
+    check(zero_steps.parse_error, "zero diffusion steps fail");
+
+    const auto nan_cfg = parse({"trtmc", "generate-video", "bundle.trtfb", "--cfg-scale", "nan"});
+    check(nan_cfg.parse_error, "non-finite CFG fails");
+
+    const auto invalid_height = parse({"trtmc", "generate-video", "bundle.trtfb", "--height", "0"});
+    check(invalid_height.parse_error, "non-positive diffusion height fails");
+
+    const auto invalid_width =
+        parse({"trtmc", "generate-video", "bundle.trtfb", "--width", "invalid"});
+    check(invalid_width.parse_error, "non-integer diffusion width fails");
 }
 
 void test_detect_parses_contract_flags() {
@@ -359,6 +398,22 @@ void test_seed_csv_populates_seed_list() {
           "seed list values");
 }
 
+void test_seed_csv_uint32_boundaries() {
+    auto max_seed = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "x", "--num-images", "2",
+                           "--seed", "4294967295,0"});
+    check(!max_seed.parse_error, "UINT32_MAX CSV seed parses cleanly");
+    check(max_seed.seed_list.size() == 2 && max_seed.seed_list[0] == 4294967295ULL,
+          "UINT32_MAX CSV seed is preserved");
+
+    auto overflow = parse({"trtmc", "run", "bundle.trtfb", "--prompt", "x", "--num-images", "2",
+                           "--seed", "4294967296,0"});
+    check(overflow.parse_error, "UINT32_MAX+1 CSV seed fails closed");
+
+    auto negative = parse(
+        {"trtmc", "run", "bundle.trtfb", "--prompt", "x", "--num-images", "2", "--seed", "-1,0"});
+    check(negative.parse_error, "negative CSV seed fails closed");
+}
+
 void test_prompt_and_prompts_file_mutually_exclusive() {
     auto args =
         parse({"trtmc", "run", "bundle.trtfb", "--prompt", "hi", "--prompts-file", "prompts.txt"});
@@ -388,6 +443,7 @@ int main() {
     test_build_forwards_args_verbatim();
     test_run_parses_common_flags();
     test_diffusion_flags();
+    test_invalid_diffusion_numbers_fail_closed();
     test_detect_parses_contract_flags();
     test_inspect_and_config_flags();
     test_audio_and_solve_flags();
@@ -402,6 +458,7 @@ int main() {
     test_unexpected_positional_fails();
     test_num_images_zero_fails();
     test_seed_csv_populates_seed_list();
+    test_seed_csv_uint32_boundaries();
     test_prompt_and_prompts_file_mutually_exclusive();
     test_prompts_file_is_run_input_source();
     test_initial_latents_are_run_input_source();

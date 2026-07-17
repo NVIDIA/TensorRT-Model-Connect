@@ -9,13 +9,78 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
 
 namespace trtmc {
+
+namespace {
+
+[[noreturn]] void throw_cuda_failure(cudaError_t status, const std::string& operation) {
+    throw std::runtime_error("[trt_module] " + operation +
+                             " failed: " + cudaGetErrorString(status));
+}
+
+void require_cuda_success(cudaError_t status, const std::string& operation) {
+    if (status != cudaSuccess)
+        throw_cuda_failure(status, operation);
+}
+
+void validate_external_device_pointer(const ModuleExternalBinding& binding) {
+    int current_device = 0;
+    require_cuda_success(cudaGetDevice(&current_device), "querying the current CUDA device");
+
+    cudaPointerAttributes attributes{};
+    const cudaError_t status = cudaPointerGetAttributes(&attributes, binding.device_ptr);
+    if (status != cudaSuccess) {
+        // cudaPointerGetAttributes records invalid host/unregistered pointers in
+        // CUDA's per-thread last-error slot on runtimes that return an error.
+        (void)cudaGetLastError();
+        throw std::invalid_argument("[trt_module] External buffer for '" + binding.tensor_name +
+                                    "' is not CUDA device-accessible");
+    }
+
+#if CUDART_VERSION >= 10000
+    if (attributes.type == cudaMemoryTypeManaged)
+        return;
+    if (attributes.type == cudaMemoryTypeHost) {
+        int integrated = 0;
+        int can_map_host_memory = 0;
+        require_cuda_success(
+            cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, current_device),
+            "querying integrated-device capability");
+        require_cuda_success(cudaDeviceGetAttribute(&can_map_host_memory,
+                                                    cudaDevAttrCanMapHostMemory, current_device),
+                             "querying mapped-host capability");
+        // A registered/pinned CPU address is not enough. TensorRT receives the
+        // exact CUDA alias returned for a mapped allocation, and host-backed
+        // bindings are accepted only on an integrated GPU where this avoids
+        // consuming the cudaMalloc pool rather than introducing PCIe I/O.
+        if (integrated != 0 && can_map_host_memory != 0 && attributes.devicePointer != nullptr &&
+            attributes.devicePointer == binding.device_ptr) {
+            return;
+        }
+        throw std::invalid_argument("[trt_module] External buffer for '" + binding.tensor_name +
+                                    "' is not mapped host memory on the current integrated CUDA "
+                                    "device");
+    }
+    if (attributes.type != cudaMemoryTypeDevice || attributes.device != current_device) {
+#else
+    if (attributes.isManaged)
+        return;
+    if (attributes.memoryType != cudaMemoryTypeDevice || attributes.device != current_device) {
+#endif
+        throw std::invalid_argument("[trt_module] External buffer for '" + binding.tensor_name +
+                                    "' is not device memory on the current CUDA device");
+    }
+}
+
+} // namespace
 
 // --- DType conversion ---
 
@@ -32,7 +97,7 @@ DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
     case nvinfer1::DataType::kINT8:
         return DType::kInt8;
     default:
-        return DType::kFloat32;
+        return DType::kUnsupported;
     }
 }
 
@@ -40,38 +105,170 @@ DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
 
 TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
                              cudaStream_t stream, int32_t profile_idx,
-                             void* distributed_communicator)
+                             void* distributed_communicator,
+                             const std::vector<ModuleExternalBinding>& external_bindings)
     : engine_(engine), ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
       distributed_communicator_(distributed_communicator),
       cuda_graph_(std::make_unique<CudaGraphExec>()) {
-    if (!ctx_)
-        return;
-    if (!attach_distributed_communicator()) {
-        delete ctx_;
-        ctx_ = nullptr;
-        return;
-    }
-    if (profile_idx_ > 0) {
-        if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
-            std::cerr << "[trt_module] Failed to set optimization profile " << profile_idx_ << "\n";
+    if (!engine_ || !ctx_) {
+        if (ctx_) {
             delete ctx_;
             ctx_ = nullptr;
-            return;
         }
-        cudaStreamSynchronize(stream_);
+        return;
     }
-    allocate_buffers(engine);
+
+    try {
+        validate_initial_external_bindings(engine, external_bindings);
+        if (!attach_distributed_communicator())
+            throw std::runtime_error("[trt_module] Failed to attach distributed communicator");
+        if (profile_idx_ > 0) {
+            if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
+                throw std::runtime_error("[trt_module] Failed to set optimization profile " +
+                                         std::to_string(profile_idx_));
+            }
+            require_cuda_success(cudaStreamSynchronize(stream_),
+                                 "synchronizing optimization profile selection");
+        }
+        allocate_buffers(engine);
+    } catch (const std::exception& error) {
+        std::cerr << "[trt_module] Module initialization failed: " << error.what() << '\n';
+        free_buffers();
+        delete ctx_;
+        ctx_ = nullptr;
+    } catch (...) {
+        std::cerr << "[trt_module] Module initialization failed with an unknown error\n";
+        free_buffers();
+        delete ctx_;
+        ctx_ = nullptr;
+    }
+}
+
+void TrtModuleImpl::validate_initial_external_bindings(
+    nvinfer1::ICudaEngine* engine, const std::vector<ModuleExternalBinding>& external_bindings) {
+    initial_external_bindings_.clear();
+    initial_external_bindings_.reserve(external_bindings.size());
+    std::size_t prebound_bytes = 0;
+    for (const auto& binding : external_bindings) {
+        if (binding.tensor_name.empty())
+            throw std::invalid_argument("[trt_module] Cannot prebind an unnamed tensor");
+        if (!binding.device_ptr) {
+            throw std::invalid_argument("[trt_module] Cannot prebind null external buffer for '" +
+                                        binding.tensor_name + "'");
+        }
+
+        bool found = false;
+        for (int32_t index = 0; index < engine->getNbIOTensors(); ++index) {
+            const char* name = engine->getIOTensorName(index);
+            if (name != nullptr && binding.tensor_name == name) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw std::invalid_argument("[trt_module] Cannot prebind unknown tensor '" +
+                                        binding.tensor_name + "'");
+        }
+        const auto tensor_shape = engine->getTensorShape(binding.tensor_name.c_str());
+        if (dims_are_dynamic(tensor_shape)) {
+            throw std::invalid_argument("[trt_module] Cannot prebind dynamic tensor '" +
+                                        binding.tensor_name +
+                                        "'; construction-time prebinding is static-only");
+        }
+        std::vector<int64_t> static_shape;
+        const auto required_bytes = compute_alloc_bytes(
+            tensor_shape, from_trt_dtype(engine->getTensorDataType(binding.tensor_name.c_str())),
+            static_shape);
+        if (binding.capacity_bytes < required_bytes) {
+            throw std::invalid_argument("[trt_module] External buffer for '" + binding.tensor_name +
+                                        "' provides " + std::to_string(binding.capacity_bytes) +
+                                        " bytes, but the static tensor requires " +
+                                        std::to_string(required_bytes));
+        }
+        validate_external_device_pointer(binding);
+        const bool inserted =
+            initial_external_bindings_.emplace(binding.tensor_name, binding.device_ptr).second;
+        if (!inserted) {
+            throw std::invalid_argument("[trt_module] Duplicate prebinding for tensor '" +
+                                        binding.tensor_name + "'");
+        }
+        if (prebound_bytes <= std::numeric_limits<std::size_t>::max() - required_bytes)
+            prebound_bytes += required_bytes;
+    }
+    if (!external_bindings.empty()) {
+        std::cerr << "[trt_module] Prebound " << external_bindings.size() << " static I/O buffers ("
+                  << prebound_bytes
+                  << " bytes); backend-owned I/O allocation is skipped, engine/context memory is "
+                     "unchanged\n";
+    }
 }
 
 void TrtModuleImpl::bind_external(const std::string& name, void* ptr,
                                   const std::vector<int64_t>& shape) {
-    bind_external(name, ptr);
-    if (shape.empty())
+    if (shape.empty()) {
+        bind_external(name, ptr);
         return;
+    }
+
+    require_ready("binding shaped external buffer");
     auto it = buffers_.find(name);
     if (it == buffers_.end())
+        throw std::invalid_argument("[trt_module] Cannot bind unknown tensor '" + name + "'");
+    if (!ptr)
+        throw std::invalid_argument("[trt_module] Cannot bind null external buffer for '" + name +
+                                    "'");
+    validate_external_device_pointer(ModuleExternalBinding{name, ptr, 0});
+
+    auto& entry = it->second;
+    if (!entry.is_input)
+        throw std::invalid_argument("[trt_module] Cannot set a shape for output '" + name + "'");
+    if (entry.d_ptr == ptr) {
+        if (!entry.is_external) {
+            throw std::invalid_argument(
+                "[trt_module] Cannot reclassify an owned buffer as external for '" + name + "'");
+        }
+        try {
+            update_dynamic_shape(name, entry, shape);
+        } catch (...) {
+            const auto failure = std::current_exception();
+            try {
+                rebind_buffer_to_context(name, entry);
+            } catch (...) {
+                delete ctx_;
+                ctx_ = nullptr;
+            }
+            std::rethrow_exception(failure);
+        }
         return;
-    update_dynamic_shape(name, it->second, shape);
+    }
+
+    // Bind the prospective address before changing either the tracked buffer
+    // or its shape. If TensorRT rejects the shape, restore both context
+    // bindings from the unchanged entry and leave ownership untouched.
+    BufferEntry replacement = entry;
+    replacement.d_ptr = ptr;
+    replacement.is_external = true;
+    bind_tensor_address(name, replacement);
+    try {
+        update_dynamic_shape(name, entry, shape);
+    } catch (...) {
+        const auto failure = std::current_exception();
+        try {
+            rebind_buffer_to_context(name, entry);
+        } catch (...) {
+            delete ctx_;
+            ctx_ = nullptr;
+        }
+        std::rethrow_exception(failure);
+    }
+
+    void* const old_owned_ptr = entry.is_external ? nullptr : entry.d_ptr;
+    entry.d_ptr = ptr;
+    entry.is_external = true;
+    if (old_owned_ptr) {
+        require_cuda_success(cudaFree(old_owned_ptr),
+                             "releasing replaced buffer for '" + name + "'");
+    }
 }
 
 int32_t TrtModuleImpl::input_rank(const std::string& name) const {
@@ -87,6 +284,7 @@ bool TrtModuleImpl::input_is_dynamic(const std::string& name) const {
 }
 
 void TrtModuleImpl::recreate_context_with_profile() {
+    require_ready("resetting the execution context");
     delete ctx_;
     ctx_ = engine_->createExecutionContext();
     if (!ctx_)
@@ -102,7 +300,8 @@ void TrtModuleImpl::recreate_context_with_profile() {
             ctx_ = nullptr;
             throw std::runtime_error("[trt_module] Failed to reset optimization profile");
         }
-        cudaStreamSynchronize(stream_);
+        require_cuda_success(cudaStreamSynchronize(stream_),
+                             "synchronizing optimization profile reset");
     }
 }
 
@@ -120,16 +319,17 @@ bool TrtModuleImpl::attach_distributed_communicator() {
 #endif
 }
 
-bool TrtModuleImpl::bind_tensor_address(const std::string& name, const BufferEntry& entry) {
-    if (!ctx_ || !entry.d_ptr)
-        return false;
+void TrtModuleImpl::bind_tensor_address(const std::string& name, const BufferEntry& entry) {
+    require_ready("binding tensor address");
+    if (!entry.d_ptr)
+        throw std::invalid_argument("[trt_module] Cannot bind null tensor address for '" + name +
+                                    "'");
     const bool ok = entry.is_input ? ctx_->setInputTensorAddress(name.c_str(), entry.d_ptr)
                                    : ctx_->setOutputTensorAddress(name.c_str(), entry.d_ptr);
-    if (!ok) {
-        std::cerr << "[trt_module] Failed to bind " << (entry.is_input ? "input" : "output")
-                  << " tensor address for '" << name << "'\n";
-    }
-    return ok;
+    if (!ok)
+        throw std::runtime_error("[trt_module] Failed to bind " +
+                                 std::string(entry.is_input ? "input" : "output") +
+                                 " tensor address for '" + name + "'");
 }
 
 void TrtModuleImpl::rebind_buffer_to_context(const std::string& name, const BufferEntry& entry) {
@@ -144,17 +344,24 @@ void TrtModuleImpl::rebind_buffer_to_context(const std::string& name, const Buff
     dims.nbDims = static_cast<int32_t>(entry.shape.size());
     for (int32_t d = 0; d < dims.nbDims; ++d)
         dims.d[d] = entry.shape[d];
-    ctx_->setInputShape(name.c_str(), dims);
+    if (!ctx_->setInputShape(name.c_str(), dims))
+        throw std::runtime_error("[trt_module] Failed to restore input shape for '" + name + "'");
 }
 
 void TrtModuleImpl::reset_execution_context() {
     if (engine_ == nullptr)
         return;
-    recreate_context_with_profile();
-    if (use_cuda_graph_ && cuda_graph_)
-        cuda_graph_->reset();
-    for (auto& [name, entry] : buffers_)
-        rebind_buffer_to_context(name, entry);
+    try {
+        recreate_context_with_profile();
+        if (use_cuda_graph_ && cuda_graph_)
+            cuda_graph_->reset();
+        for (auto& [name, entry] : buffers_)
+            rebind_buffer_to_context(name, entry);
+    } catch (...) {
+        delete ctx_;
+        ctx_ = nullptr;
+        throw;
+    }
 }
 
 TrtModuleImpl::~TrtModuleImpl() {
@@ -190,32 +397,55 @@ std::vector<int64_t> TrtModuleImpl::dims_to_shape(const nvinfer1::Dims& dims) {
 
 void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& entry,
                                          const std::vector<int64_t>& new_shape) {
-    // Skip static inputs: TRT rejects setInputShape on them even when the
-    // engine as a whole advertises dynamic shapes via optimization profiles.
-    if (!has_dynamic_shapes_ || !entry.is_dynamic || new_shape == entry.shape)
+    if (!entry.is_input)
+        throw std::invalid_argument("[trt_module] Cannot set a shape for output '" + name + "'");
+    if (!entry.is_dynamic) {
+        if (new_shape != entry.shape) {
+            throw std::invalid_argument("[trt_module] Static input shape mismatch for '" + name +
+                                        "'");
+        }
+        return;
+    }
+    nvinfer1::Dims dims;
+    const auto max_rank = sizeof(dims.d) / sizeof(dims.d[0]);
+    if (new_shape.empty() || new_shape.size() > max_rank)
+        throw std::invalid_argument("[trt_module] Invalid input rank for '" + name + "'");
+    for (const int64_t dimension : new_shape) {
+        if (dimension <= 0 || dimension > std::numeric_limits<int32_t>::max())
+            throw std::invalid_argument("[trt_module] Invalid input dimension for '" + name + "'");
+    }
+    if (new_shape == entry.shape)
         return;
     // Any captured CUDA graph was baked against the OLD shape; force a
     // re-capture on the next enqueue so the new shape actually takes.
     if (use_cuda_graph_ && cuda_graph_)
         cuda_graph_->reset();
-    nvinfer1::Dims dims;
     dims.nbDims = static_cast<int32_t>(new_shape.size());
     for (int32_t d = 0; d < dims.nbDims; ++d)
         dims.d[d] = new_shape[d];
-    ctx_->setInputShape(name.c_str(), dims);
+    if (!ctx_->setInputShape(name.c_str(), dims))
+        throw std::invalid_argument("[trt_module] TensorRT rejected input shape for '" + name +
+                                    "'");
     entry.shape = new_shape;
 }
 
 std::size_t TrtModuleImpl::compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,
                                                std::vector<int64_t>& shape_out) {
+    if (dims.nbDims < 0)
+        throw std::runtime_error("[trt_module] TensorRT returned an invalid tensor rank");
     shape_out.clear();
     std::size_t n = 1;
     for (int32_t d = 0; d < dims.nbDims; ++d) {
-        int64_t dim = std::max(static_cast<int64_t>(dims.d[d]), int64_t{1});
+        const int64_t dim = std::max(static_cast<int64_t>(dims.d[d]), int64_t{1});
+        if (n > std::numeric_limits<std::size_t>::max() / static_cast<std::size_t>(dim))
+            throw std::overflow_error("[trt_module] Tensor allocation size overflow");
         shape_out.push_back(dim);
         n *= static_cast<std::size_t>(dim);
     }
-    return n * dtype_size(dtype);
+    const auto element_size = dtype_size(dtype);
+    if (element_size == 0 || n > std::numeric_limits<std::size_t>::max() / element_size)
+        throw std::overflow_error("[trt_module] Tensor allocation byte size overflow");
+    return n * element_size;
 }
 
 void TrtModuleImpl::detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io) {
@@ -243,7 +473,10 @@ void TrtModuleImpl::set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int3
             continue;
         if (dims_are_dynamic(engine->getTensorShape(name.c_str()))) {
             auto dims = engine->getProfileShape(name.c_str(), profile_idx_, selector);
-            ctx_->setInputShape(name.c_str(), dims);
+            if (!ctx_->setInputShape(name.c_str(), dims)) {
+                throw std::runtime_error("[trt_module] Failed to set profile shape for input '" +
+                                         name + "'");
+            }
         }
     }
 }
@@ -275,21 +508,47 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     entry.is_dynamic = is_dynamic;
     entry.shape = is_dynamic ? dims_to_shape(init_dims) : shape;
 
-    if (nbytes > 0) {
-        auto err = cudaMalloc(&entry.d_ptr, nbytes);
-        if (err != cudaSuccess)
+    const auto external = initial_external_bindings_.find(name);
+    if (external != initial_external_bindings_.end()) {
+        entry.d_ptr = external->second;
+        entry.is_external = true;
+    } else if (nbytes > 0) {
+        require_cuda_success(cudaMalloc(&entry.d_ptr, nbytes), "allocating input '" + name + "'");
+        const auto memset_status = cudaMemsetAsync(entry.d_ptr, 0, nbytes, stream_);
+        if (memset_status != cudaSuccess) {
+            (void)cudaFree(entry.d_ptr);
             entry.d_ptr = nullptr;
-        else
-            cudaMemsetAsync(entry.d_ptr, 0, nbytes, stream_);
+            throw_cuda_failure(memset_status, "initializing input '" + name + "'");
+        }
     }
 
-    if (entry.d_ptr)
-        bind_tensor_address(name, entry);
+    if (entry.d_ptr) {
+        try {
+            bind_tensor_address(name, entry);
+        } catch (...) {
+            if (!entry.is_external)
+                (void)cudaFree(entry.d_ptr);
+            entry.d_ptr = nullptr;
+            throw;
+        }
+    }
 
-    if (is_dynamic)
-        ctx_->setInputShape(name.c_str(), init_dims);
+    if (is_dynamic && !ctx_->setInputShape(name.c_str(), init_dims)) {
+        if (!entry.is_external)
+            (void)cudaFree(entry.d_ptr);
+        entry.d_ptr = nullptr;
+        throw std::runtime_error("[trt_module] Failed to initialize dynamic input shape for '" +
+                                 name + "'");
+    }
 
-    buffers_[name] = std::move(entry);
+    try {
+        buffers_[name] = std::move(entry);
+    } catch (...) {
+        if (!entry.is_external)
+            (void)cudaFree(entry.d_ptr);
+        entry.d_ptr = nullptr;
+        throw;
+    }
 }
 
 void TrtModuleImpl::allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
@@ -331,21 +590,42 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
         entry.nbytes = nbytes;
         entry.is_input = false;
 
-        if (nbytes > 0) {
-            auto err = cudaMalloc(&entry.d_ptr, nbytes);
-            if (err != cudaSuccess)
+        const auto external = initial_external_bindings_.find(name);
+        if (external != initial_external_bindings_.end()) {
+            entry.d_ptr = external->second;
+            entry.is_external = true;
+        } else if (nbytes > 0) {
+            require_cuda_success(cudaMalloc(&entry.d_ptr, nbytes),
+                                 "allocating output '" + name + "'");
+            const auto memset_status = cudaMemsetAsync(entry.d_ptr, 0, nbytes, stream_);
+            if (memset_status != cudaSuccess) {
+                (void)cudaFree(entry.d_ptr);
                 entry.d_ptr = nullptr;
-            else
-                cudaMemsetAsync(entry.d_ptr, 0, nbytes, stream_);
+                throw_cuda_failure(memset_status, "initializing output '" + name + "'");
+            }
         }
 
-        if (entry.d_ptr)
-            bind_tensor_address(name, entry);
+        if (entry.d_ptr) {
+            try {
+                bind_tensor_address(name, entry);
+            } catch (...) {
+                if (!entry.is_external)
+                    (void)cudaFree(entry.d_ptr);
+                entry.d_ptr = nullptr;
+                throw;
+            }
+        }
 
-        if (nbytes > 0)
+        try {
+            buffers_[name] = std::move(entry);
+        } catch (...) {
+            if (!entry.is_external)
+                (void)cudaFree(entry.d_ptr);
+            entry.d_ptr = nullptr;
+            throw;
+        }
+        if (nbytes > 0 && external == initial_external_bindings_.end())
             host_output_staging_[name].resize(nbytes);
-
-        buffers_[name] = std::move(entry);
     }
 }
 
@@ -370,7 +650,8 @@ void TrtModuleImpl::allocate_buffers(nvinfer1::ICudaEngine* engine) {
     if (has_dynamic_shapes_ && num_profiles > 0)
         set_dynamic_input_shapes(engine, num_io, nvinfer1::OptProfileSelector::kOPT);
 
-    cudaStreamSynchronize(stream_);
+    require_cuda_success(cudaStreamSynchronize(stream_), "synchronizing buffer initialization");
+    initial_external_bindings_.clear();
 }
 
 void TrtModuleImpl::free_buffers() {
@@ -381,8 +662,23 @@ void TrtModuleImpl::free_buffers() {
         entry.d_ptr = nullptr;
     }
     buffers_.clear();
+    initial_external_bindings_.clear();
     host_output_staging_.clear();
     output_device_tensors_.clear();
+}
+
+void TrtModuleImpl::require_ready(const char* operation) const {
+    if (ctx_ == nullptr)
+        throw std::runtime_error(std::string("[trt_module] Cannot continue while ") + operation +
+                                 ": module is not initialized");
+}
+
+void TrtModuleImpl::require_all_host_inputs(const TensorMap& inputs) const {
+    require_ready("validating host inputs");
+    for (const auto& [name, entry] : buffers_) {
+        if (entry.is_input && !entry.is_external && inputs.find(name) == inputs.end())
+            throw std::invalid_argument("[trt_module] Missing required input '" + name + "'");
+    }
 }
 
 // --- Forward pass (CPU → GPU → CPU) ---
@@ -401,22 +697,28 @@ TensorMap TrtModuleImpl::forward(const TensorMap& inputs) {
 
         std::vector<int64_t> runtime_shape = entry.shape;
         std::size_t runtime_nbytes = entry.nbytes;
-        if (has_dynamic_shapes_ && ctx_ != nullptr) {
+        if (has_dynamic_shapes_) {
             std::vector<int64_t> inferred_shape;
             runtime_nbytes = compute_alloc_bytes(ctx_->getTensorShape(name.c_str()), entry.dtype,
                                                  inferred_shape);
-            if (runtime_nbytes <= entry.nbytes) {
-                runtime_shape = std::move(inferred_shape);
-            } else {
-                runtime_nbytes = entry.nbytes;
-            }
+            if (runtime_nbytes > entry.nbytes)
+                throw std::runtime_error("[trt_module] Runtime output exceeds allocation for '" +
+                                         name + "'");
+            runtime_shape = std::move(inferred_shape);
         }
 
-        auto& staging = host_output_staging_[name];
-        cudaMemcpy(staging.data(), entry.d_ptr, runtime_nbytes, cudaMemcpyDeviceToHost);
+        if (!entry.d_ptr)
+            throw std::runtime_error("[trt_module] Output '" + name + "' has no device buffer");
+        auto staging = host_output_staging_.find(name);
+        if (staging == host_output_staging_.end() || staging->second.size() < runtime_nbytes)
+            throw std::runtime_error("[trt_module] Output staging is unavailable for '" + name +
+                                     "'");
+        require_cuda_success(
+            cudaMemcpy(staging->second.data(), entry.d_ptr, runtime_nbytes, cudaMemcpyDeviceToHost),
+            "copying output '" + name + "' from device");
 
         Tensor t;
-        t.data = staging.data();
+        t.data = staging->second.data();
         t.shape = std::move(runtime_shape);
         t.dtype = entry.dtype;
         outputs[name] = t;
@@ -432,21 +734,30 @@ void TrtModuleImpl::enable_cuda_graph() {
 }
 
 void TrtModuleImpl::forward_async(const TensorMap& inputs) {
+    require_all_host_inputs(inputs);
     // Upload inputs H2D, updating shapes for dynamic engines
     for (const auto& [name, tensor] : inputs) {
         auto it = buffers_.find(name);
         if (it == buffers_.end())
-            continue;
+            throw std::invalid_argument("[trt_module] Unknown input '" + name + "'");
         auto& entry = it->second;
-        if (!entry.is_input || !entry.d_ptr)
-            continue;
+        if (!entry.is_input)
+            throw std::invalid_argument("[trt_module] Tensor '" + name + "' is not an input");
+        if (!entry.d_ptr)
+            throw std::runtime_error("[trt_module] Input '" + name + "' has no device buffer");
+        if (!tensor.data)
+            throw std::invalid_argument("[trt_module] Input '" + name + "' has null host data");
+        if (tensor.dtype != entry.dtype)
+            throw std::invalid_argument("[trt_module] Input dtype mismatch for '" + name + "'");
 
         update_dynamic_shape(name, entry, tensor.shape);
 
-        auto copy_bytes = std::min(tensor.nbytes(), entry.nbytes);
-        if (copy_bytes > 0 && tensor.data) {
-            cudaMemcpyAsync(entry.d_ptr, tensor.data, copy_bytes, cudaMemcpyHostToDevice, stream_);
-        }
+        const auto copy_bytes = tensor.nbytes();
+        if (copy_bytes == 0 || copy_bytes > entry.nbytes)
+            throw std::invalid_argument("[trt_module] Input byte size mismatch for '" + name + "'");
+        require_cuda_success(
+            cudaMemcpyAsync(entry.d_ptr, tensor.data, copy_bytes, cudaMemcpyHostToDevice, stream_),
+            "copying input '" + name + "' to device");
     }
 
     execute_enqueue();
@@ -485,31 +796,55 @@ void TrtModuleImpl::finish_timing_event(TimingEvent event) {
 }
 
 void TrtModuleImpl::record_timed_enqueue() {
+    require_ready("enqueueing inference");
     TimingEvent timing_event;
     const bool timing_ok = begin_timing_event(timing_event);
-    if (use_cuda_graph_ && cuda_graph_->ready()) {
-        cuda_graph_->launch(stream_);
-        if (timing_ok)
-            finish_timing_event(timing_event);
-        return;
-    }
-    if (use_cuda_graph_) {
-        cuda_graph_->begin_capture(stream_);
-        ctx_->enqueueV3(stream_);
-        if (!cuda_graph_->end_capture(stream_)) {
-            std::cerr << "[cuda_graph] Capture failed, disabling CUDA Graphs\n";
-            use_cuda_graph_ = false;
-            ctx_->enqueueV3(stream_);
+    auto discard_timing_event = [&timing_event]() {
+        if (timing_event.start)
+            cudaEventDestroy(timing_event.start);
+        if (timing_event.stop)
+            cudaEventDestroy(timing_event.stop);
+        timing_event.start = nullptr;
+        timing_event.stop = nullptr;
+    };
+    auto enqueue = [this]() {
+        if (!ctx_->enqueueV3(stream_))
+            throw std::runtime_error("[trt_module] TensorRT enqueueV3 failed");
+    };
+
+    try {
+        if (use_cuda_graph_ && cuda_graph_->ready()) {
+            if (!cuda_graph_->launch(stream_))
+                throw std::runtime_error("[trt_module] CUDA graph launch failed");
+        } else if (use_cuda_graph_) {
+            if (!cuda_graph_->begin_capture(stream_)) {
+                std::cerr << "[cuda_graph] Capture start failed, disabling CUDA Graphs\n";
+                use_cuda_graph_ = false;
+                enqueue();
+            } else {
+                if (!ctx_->enqueueV3(stream_)) {
+                    (void)cuda_graph_->end_capture(stream_);
+                    cuda_graph_->reset();
+                    throw std::runtime_error("[trt_module] TensorRT enqueueV3 failed during CUDA "
+                                             "graph capture");
+                }
+                if (!cuda_graph_->end_capture(stream_)) {
+                    std::cerr << "[cuda_graph] Capture failed, disabling CUDA Graphs\n";
+                    use_cuda_graph_ = false;
+                    enqueue();
+                } else if (!cuda_graph_->launch(stream_)) {
+                    throw std::runtime_error("[trt_module] CUDA graph launch failed");
+                }
+            }
         } else {
-            cuda_graph_->launch(stream_);
+            enqueue();
         }
         if (timing_ok)
             finish_timing_event(timing_event);
-        return;
+    } catch (...) {
+        discard_timing_event();
+        throw;
     }
-    ctx_->enqueueV3(stream_);
-    if (timing_ok)
-        finish_timing_event(timing_event);
 }
 
 void TrtModuleImpl::flush_timing_events() {
@@ -540,29 +875,48 @@ void TrtModuleImpl::flush_timing_events() {
 }
 
 void TrtModuleImpl::sync() {
-    cudaStreamSynchronize(stream_);
+    require_ready("synchronizing inference");
+    require_cuda_success(cudaStreamSynchronize(stream_), "synchronizing inference stream");
 }
 
 // --- Forward device async (GPU → GPU, no sync) ---
 
 void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
+    require_ready("validating device inputs");
     // D2D copy input DeviceTensors into our buffers
+    //
+    // An omitted entry is intentional in this API: performance-sensitive
+    // callers may populate an internal input through device_ptr() or bind it
+    // externally, then enqueue with an empty map. Supplied entries are still
+    // validated strictly below.
     for (const auto& [name, dt_ptr] : inputs) {
         auto it = buffers_.find(name);
-        if (it == buffers_.end() || !dt_ptr)
-            continue;
+        if (it == buffers_.end())
+            throw std::invalid_argument("[trt_module] Unknown device input '" + name + "'");
+        if (!dt_ptr)
+            throw std::invalid_argument("[trt_module] Device input '" + name + "' is null");
         auto& entry = it->second;
-        if (!entry.is_input || !entry.d_ptr)
-            continue;
+        if (!entry.is_input)
+            throw std::invalid_argument("[trt_module] Tensor '" + name + "' is not an input");
+        if (!entry.d_ptr)
+            throw std::runtime_error("[trt_module] Device input '" + name +
+                                     "' has no destination buffer");
+        if (!dt_ptr->data())
+            throw std::invalid_argument("[trt_module] Device input '" + name + "' has null data");
+        if (dt_ptr->dtype() != entry.dtype)
+            throw std::invalid_argument("[trt_module] Device input dtype mismatch for '" + name +
+                                        "'");
 
         update_dynamic_shape(name, entry, dt_ptr->shape());
 
+        const auto copy_bytes = dt_ptr->nbytes();
+        if (copy_bytes == 0 || copy_bytes > entry.nbytes)
+            throw std::invalid_argument("[trt_module] Device input byte size mismatch for '" +
+                                        name + "'");
         if (dt_ptr->data() != entry.d_ptr) {
-            auto copy_bytes = std::min(dt_ptr->nbytes(), entry.nbytes);
-            if (copy_bytes > 0) {
-                cudaMemcpyAsync(entry.d_ptr, dt_ptr->data(), copy_bytes, cudaMemcpyDeviceToDevice,
-                                stream_);
-            }
+            require_cuda_success(cudaMemcpyAsync(entry.d_ptr, dt_ptr->data(), copy_bytes,
+                                                 cudaMemcpyDeviceToDevice, stream_),
+                                 "copying device input '" + name + "'");
         }
     }
 
@@ -574,7 +928,7 @@ void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
 
 DeviceTensorMap TrtModuleImpl::forward_device(const DeviceTensorMap& inputs) {
     forward_device_async(inputs);
-    cudaStreamSynchronize(stream_);
+    sync();
 
     // Return non-owning DeviceTensor* pointers to our internal output buffers.
     // The output_device_tensors_ map is lazily populated on first call.
@@ -639,7 +993,7 @@ bool TrtModuleImpl::has_output(const std::string& name) const {
 DType TrtModuleImpl::tensor_dtype(const std::string& name) const {
     auto it = buffers_.find(name);
     if (it == buffers_.end())
-        return DType::kFloat32;
+        return DType::kUnsupported;
     return it->second.dtype;
 }
 
@@ -693,24 +1047,53 @@ void* TrtModuleImpl::device_ptr(const std::string& name) const {
     return it->second.d_ptr;
 }
 
+bool TrtModuleImpl::owns_device_buffer(const std::string& name) const {
+    const auto it = buffers_.find(name);
+    return it != buffers_.end() && it->second.d_ptr != nullptr && !it->second.is_external;
+}
+
+bool TrtModuleImpl::has_host_output_staging(const std::string& name) const {
+    return host_output_staging_.find(name) != host_output_staging_.end();
+}
+
 void TrtModuleImpl::bind_external(const std::string& name, void* external_device_ptr) {
+    require_ready("binding external buffer");
     auto it = buffers_.find(name);
     if (it == buffers_.end())
-        return;
+        throw std::invalid_argument("[trt_module] Cannot bind unknown tensor '" + name + "'");
+    if (!external_device_ptr)
+        throw std::invalid_argument("[trt_module] Cannot bind null external buffer for '" + name +
+                                    "'");
+    validate_external_device_pointer(ModuleExternalBinding{name, external_device_ptr, 0});
 
     auto& entry = it->second;
-
-    // Free our own buffer if we allocated it
-    if (entry.d_ptr && !entry.is_external) {
-        cudaFree(entry.d_ptr);
+    if (entry.d_ptr == external_device_ptr) {
+        if (entry.is_external)
+            return;
+        throw std::invalid_argument(
+            "[trt_module] Cannot reclassify an owned buffer as external for '" + name + "'");
     }
 
+    BufferEntry replacement = entry;
+    replacement.d_ptr = external_device_ptr;
+    replacement.is_external = true;
+    bind_tensor_address(name, replacement);
+
+    void* const old_owned_ptr = entry.is_external ? nullptr : entry.d_ptr;
     entry.d_ptr = external_device_ptr;
     entry.is_external = true;
 
-    // Update execution context binding
-    if (ctx_ && external_device_ptr)
-        bind_tensor_address(name, entry);
+    // Externally-bound outputs intentionally remain on device (KV caches and
+    // recurrent diffusion state are the common cases).  Their host staging
+    // allocation is therefore dead memory and can be very large; release it
+    // when the binding becomes external instead of retaining a second copy
+    // for the lifetime of the module.
+    if (!entry.is_input)
+        host_output_staging_.erase(name);
+
+    if (old_owned_ptr)
+        require_cuda_success(cudaFree(old_owned_ptr),
+                             "releasing replaced buffer for '" + name + "'");
 }
 
 } // namespace trtmc

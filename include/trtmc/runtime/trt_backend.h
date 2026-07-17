@@ -20,6 +20,23 @@
 
 namespace trtmc {
 
+// Increment whenever the IBackend vtable or any type passed through that
+// vtable changes layout. BackendLoader validates this before constructing an
+// IBackend, and the factory/destroy symbol names carry the same version so both
+// old-core/new-backend and new-core/old-backend installations fail closed.
+inline constexpr std::uint32_t kTrtmcBackendApiAbiVersion = 1;
+
+// A caller-owned device allocation that should replace a backend-owned I/O
+// allocation while a module is constructed. The allocation must remain valid
+// for the module lifetime. Prebinding does not reduce memory consumed while
+// deserializing an engine or creating its execution context; both happen before
+// the module binds I/O addresses.
+struct ModuleExternalBinding {
+    std::string tensor_name;
+    void* device_ptr{nullptr};
+    std::size_t capacity_bytes{0};
+};
+
 // Options for module creation. RTX-specific fields are silently ignored
 // by the standard TRT backend.
 struct ModuleCreateOptions {
@@ -29,6 +46,10 @@ struct ModuleCreateOptions {
     int32_t optimization_profile{0};         // profile selected for this execution context
     void* distributed_communicator{nullptr}; // TensorRT 11.0+ NCCL communicator, optional
     std::shared_ptr<void> distributed_owner; // keeps communicator alive
+    // Static engine I/O to bind before backend-owned I/O buffers or host output
+    // staging are allocated. Empty preserves the historical behavior. A single
+    // binding set cannot be shared by multiple simultaneously-live profiles.
+    std::vector<ModuleExternalBinding> external_bindings;
 };
 
 // Two modules created from a single engine, one per optimization profile.
@@ -95,6 +116,7 @@ class IBackend {
 
 // C ABI exported by each DSO. The main binary resolves these via dlsym.
 extern "C" {
-trtmc::IBackend* trtmc_create_backend();
-void trtmc_destroy_backend(trtmc::IBackend* backend);
+std::uint32_t trtmc_backend_api_abi_version();
+trtmc::IBackend* trtmc_create_backend_v1();
+void trtmc_destroy_backend_v1(trtmc::IBackend* backend);
 }

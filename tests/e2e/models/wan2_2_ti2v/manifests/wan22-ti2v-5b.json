@@ -1,0 +1,53 @@
+{
+  "name": "wan22-ti2v-5b",
+  "hf_id": "Wan-AI/Wan2.2-TI2V-5B",
+  "bundle": "wan22-ti2v-5b.trtfb",
+  "family": "wan2_2_ti2v",
+  "runtime_strategy": "diffusion_wan2_2_ti2v",
+  "task_strategy": "diffusion_media_generation",
+  "precision": "bf16",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_timeout_s": 7200,
+  "build_args": {
+    "max_cache_length": 512
+  },
+  "testcases": [
+    {
+      "name": "wan22-ti2v-5b",
+      "trace_id": "IT-E2E-WAN22-TI2V-5B-01",
+      "model_type": "wan2_2_ti2v",
+      "ci_tier": "nightly_only",
+      "l0_replacement": "wan22-ti2v-5b-l0",
+      "l0_replacement_reason": "Premerge proves the same source-built bundle, strict model DSO, and public native CLI without paying for the 121-frame generation.",
+      "runtime_timeout_s": 14400,
+      "reference_backend": "invariant_only",
+      "oracle_level": "L4_invariants",
+      "user_contract": "diffusion_video",
+      "description": "Wan2.2 TI2V-5B official maximum 720p text-to-video generation contract",
+      "test_type": "diffusion",
+      "test_prompt": "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage",
+      "video_num_frames": 121,
+      "video_height": 704,
+      "video_width": 1280,
+      "num_inference_steps": 50,
+      "text_max_length": 512,
+      "guidance_scale": 5.0,
+      "flow_shift": 5.0,
+      "fps": 24,
+      "seed": 42,
+      "stages": [
+        {
+          "name": "end_to_end",
+          "required": true
+        }
+      ],
+      "skip_text_comparison": true,
+      "metadata": {
+        "contract_config": {
+          "video_mode": true
+        }
+      },
+      "notes": "Nightly native TensorRT plus C++ functional coverage for the exact official Wan-AI/Wan2.2-TI2V-5B profile: 1280x704, 121 frames, 50 UniPC steps, CFG 5, flow shift 5, 24 FPS, seed 42, and a fixed 512-token UMT5 engine. The public runtime command is Python-free. This L4 contract intentionally does not claim numerical or visual parity; promotion still requires the separate source-bound official-Wan tensor and video comparison."
+    }
+  ]
+}

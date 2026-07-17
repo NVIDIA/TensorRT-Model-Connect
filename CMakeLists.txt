@@ -411,6 +411,19 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
         COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-nonnull>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-free-nonheap-object>"
     )
   endforeach()
+  # The official Wan2.2 UniPC path evaluates CFG and scheduler expressions as
+  # separate eager CUDA operations.  Contracting those source-level FP32
+  # boundaries into host FMA instructions changes the denoising trajectory.
+  # Keep this precision constraint local to the family-owned orchestration
+  # translation unit; TensorRT engines and all other model plugins retain the
+  # repository-wide optimization policy.
+  if(_trtmc_model STREQUAL "wan2_2_ti2v")
+    set_source_files_properties(
+      "${PROJECT_SOURCE_DIR}/src/runtime/models/wan2_2_ti2v/pipeline.cpp"
+      PROPERTIES
+        COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-ffp-contract=off>"
+    )
+  endif()
   add_library(trtmc_model_${_trtmc_model} SHARED
     ${_trtmc_model_sources}
     ${_trtmc_model_cuda_sources}
@@ -801,12 +814,54 @@ endfunction()
 
 # Bundle / format
 trtmc_add_test(test_bundle_format)
+trtmc_add_test(test_bundle_materialization)
+target_link_libraries(test_bundle_materialization PRIVATE nlohmann_json::nlohmann_json)
 trtmc_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtmc_add_test(test_bundle_view)
 trtmc_add_test(test_pipeline_registry)
 trtmc_add_test(test_model_plugin_loader MODEL_OWNED)
 add_dependencies(test_model_plugin_loader trtmc_model_plugins)
 trtmc_add_test(test_backend_loader)
+add_library(trtmc_test_backend_missing_api_abi SHARED EXCLUDE_FROM_ALL
+  tests/cpp/support/fake_backend_missing_api_abi.cpp
+)
+add_library(trtmc_test_backend_wrong_api_abi SHARED EXCLUDE_FROM_ALL
+  tests/cpp/support/fake_backend_wrong_api_abi.cpp
+)
+add_library(trtmc_test_backend_api_abi_v1 SHARED EXCLUDE_FROM_ALL
+  tests/cpp/support/fake_backend_api_abi_v1.cpp
+)
+target_include_directories(trtmc_test_backend_api_abi_v1 PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+target_include_directories(trtmc_test_backend_api_abi_v1 SYSTEM PRIVATE
+  ${TRTMC_CUDA_INCLUDE_DIR}
+)
+set_target_properties(
+  trtmc_test_backend_missing_api_abi
+  trtmc_test_backend_wrong_api_abi
+  trtmc_test_backend_api_abi_v1
+  PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test_backends"
+)
+set_target_properties(trtmc_test_backend_missing_api_abi PROPERTIES
+  OUTPUT_NAME "trtmc_backend_test_missing_api_abi"
+)
+set_target_properties(trtmc_test_backend_wrong_api_abi PROPERTIES
+  OUTPUT_NAME "trtmc_backend_test_wrong_api_abi"
+)
+set_target_properties(trtmc_test_backend_api_abi_v1 PROPERTIES
+  OUTPUT_NAME "trtmc_backend_test_api_abi_v1"
+)
+add_dependencies(test_backend_loader
+  trtmc_test_backend_missing_api_abi
+  trtmc_test_backend_wrong_api_abi
+  trtmc_test_backend_api_abi_v1
+)
+target_compile_definitions(test_backend_loader PRIVATE
+  TRTMC_TEST_BACKEND_DIR="$<TARGET_FILE_DIR:trtmc_test_backend_missing_api_abi>"
+  TRTMC_TEST_BACKEND_V1_PATH="$<TARGET_FILE:trtmc_test_backend_api_abi_v1>"
+)
 trtmc_add_test(test_trt_version)
 
 trtmc_add_test(test_optimized_runtime_host)

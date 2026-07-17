@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <charconv>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -20,7 +22,7 @@ namespace trtmc {
 
 namespace {
 
-using BundleSectionLocation = std::pair<std::size_t, std::size_t>;
+using BundleSectionLocation = std::pair<std::uint64_t, std::uint64_t>;
 using BundleSectionEntry = std::pair<std::string, BundleSectionLocation>;
 using BundleSectionTable = std::vector<BundleSectionEntry>;
 
@@ -51,28 +53,49 @@ std::size_t find_matching_object_end(const std::string& json, std::size_t brace_
     return pos;
 }
 
-int64_t parse_int64_field(const std::string& inner, const std::string& key) {
+std::uint64_t parse_section_size_field(const std::string& inner, const std::string& key) {
     const std::string needle = "\"" + key + "\"";
     const auto key_pos = inner.find(needle);
-    if (key_pos == std::string::npos) {
-        return 0;
-    }
+    if (key_pos == std::string::npos)
+        throw std::runtime_error("Bundle section is missing '" + key + "'");
 
-    const auto colon = inner.find(':', key_pos + needle.size());
-    if (colon == std::string::npos) {
-        return 0;
+    std::size_t colon = key_pos + needle.size();
+    while (colon < inner.size() && std::isspace(static_cast<unsigned char>(inner[colon])) != 0) {
+        ++colon;
     }
+    if (colon == inner.size() || inner[colon] != ':')
+        throw std::runtime_error("Bundle section has malformed '" + key + "'");
 
-    const auto start = inner.find_first_of("-0123456789", colon + 1);
-    if (start == std::string::npos) {
-        return 0;
+    std::size_t start = colon + 1;
+    while (start < inner.size() && std::isspace(static_cast<unsigned char>(inner[start])) != 0) {
+        ++start;
     }
+    if (start == inner.size())
+        throw std::runtime_error("Bundle section has malformed '" + key + "'");
+    if (inner[start] == '-')
+        throw std::runtime_error("Bundle section has negative '" + key + "'");
+    if (!std::isdigit(static_cast<unsigned char>(inner[start])))
+        throw std::runtime_error("Bundle section has malformed '" + key + "'");
 
-    try {
-        return std::stoll(inner.substr(start));
-    } catch (...) {
-        return 0;
+    std::size_t end = start;
+    while (end < inner.size() && std::isdigit(static_cast<unsigned char>(inner[end])) != 0)
+        ++end;
+    if (inner[start] == '0' && end != start + 1)
+        throw std::runtime_error("Bundle section has malformed '" + key + "'");
+
+    std::uint64_t value = 0;
+    const auto result = std::from_chars(inner.data() + start, inner.data() + end, value);
+    if (result.ec == std::errc::result_out_of_range)
+        throw std::runtime_error("Bundle section has overflowing '" + key + "'");
+    if (result.ec != std::errc{} || result.ptr != inner.data() + end)
+        throw std::runtime_error("Bundle section has malformed '" + key + "'");
+
+    while (end < inner.size() && std::isspace(static_cast<unsigned char>(inner[end])) != 0)
+        ++end;
+    if (end == inner.size() || (inner[end] != ',' && inner[end] != '}')) {
+        throw std::runtime_error("Bundle section has malformed '" + key + "'");
     }
+    return value;
 }
 
 bool parse_section_entry(const std::string& sections_json, std::size_t& search_pos,
@@ -98,10 +121,9 @@ bool parse_section_entry(const std::string& sections_json, std::size_t& search_p
     const std::string section_name =
         sections_json.substr(quote_start + 1, quote_end - quote_start - 1);
     const std::string inner = sections_json.substr(inner_brace, inner_brace_end - inner_brace + 1);
-    const int64_t offset_val = parse_int64_field(inner, "offset");
-    const int64_t size_val = parse_int64_field(inner, "size");
-    entry = {section_name,
-             {static_cast<std::size_t>(offset_val), static_cast<std::size_t>(size_val)}};
+    const std::uint64_t offset_val = parse_section_size_field(inner, "offset");
+    const std::uint64_t size_val = parse_section_size_field(inner, "size");
+    entry = {section_name, {offset_val, size_val}};
 
     search_pos = inner_brace_end + 1;
     return true;
@@ -170,8 +192,7 @@ BundleInfo BundleInfoFromJson(const std::string& json, BundleSectionTable& secti
     info.sections.reserve(sections_out.size());
     for (const auto& [name, offset_size] : sections_out) {
         const auto& [offset, size] = offset_size;
-        info.sections.push_back(BundleSectionInfo{name, static_cast<std::uint64_t>(offset),
-                                                  static_cast<std::uint64_t>(size)});
+        info.sections.push_back(BundleSectionInfo{name, offset, size});
     }
 
     return info;
@@ -237,59 +258,158 @@ std::ifstream open_bundle_section(const std::string& path, const BundleSectionIn
 } // namespace
 
 BundleFile ReadBundleFile(const std::string& path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        throw std::runtime_error("Failed to open bundle file: " + path);
+    BundleSectionReader reader(path);
+    return ReadBundleFile(reader);
+}
+
+BundleFile ReadBundleFile(BundleSectionReader& reader) {
+    return reader.read_all();
+}
+
+BundleSectionReader::BundleSectionReader(const std::string& path)
+    : path_(path), stream_(path, std::ios::binary) {
+    if (!stream_) {
+        throw std::runtime_error("Failed to open bundle file: " + path_);
     }
 
     unsigned char magic[8];
-    in.read(reinterpret_cast<char*>(magic), sizeof(magic));
-    if (!in || std::memcmp(magic, kBundleMagic, sizeof(kBundleMagic)) != 0) {
-        throw std::runtime_error("Invalid bundle magic in: " + path);
+    stream_.read(reinterpret_cast<char*>(magic), sizeof(magic));
+    if (!stream_ || std::memcmp(magic, kBundleMagic, sizeof(kBundleMagic)) != 0) {
+        throw std::runtime_error("Invalid bundle magic in: " + path_);
     }
 
-    const uint64_t header_length = read_u64_le(in);
+    const uint64_t header_length = read_u64_le(stream_);
     if (header_length > 100 * 1024 * 1024) {
-        throw std::runtime_error("Bundle header too large: " + path);
+        throw std::runtime_error("Bundle header too large: " + path_);
     }
 
     std::string header_json(static_cast<std::size_t>(header_length), '\0');
-    in.read(header_json.data(), static_cast<std::streamsize>(header_length));
-    if (!in) {
-        throw std::runtime_error("Failed to read bundle header: " + path);
+    stream_.read(header_json.data(), static_cast<std::streamsize>(header_length));
+    if (!stream_) {
+        throw std::runtime_error("Failed to read bundle header: " + path_);
     }
 
     BundleSectionTable section_table;
-    BundleFile bundle;
-    bundle.info = BundleInfoFromJson(header_json, section_table);
+    info_ = BundleInfoFromJson(header_json, section_table);
+    data_start_ = static_cast<std::uint64_t>(kBundleHeaderOffset) + header_length;
 
-    in.seekg(0, std::ios::end);
-    const auto file_end = in.tellg();
-    if (file_end < 0)
-        throw std::runtime_error("Failed to determine bundle size: " + path);
-    const std::uint64_t file_size = static_cast<std::uint64_t>(file_end);
-    const std::uint64_t data_start = kBundleHeaderOffset + header_length;
+    stream_.seekg(0, std::ios::end);
+    const auto end_position = stream_.tellg();
+    if (end_position < 0) {
+        throw std::runtime_error("Failed to determine bundle size: " + path_);
+    }
+    file_size_ = static_cast<std::uint64_t>(end_position);
+    if (data_start_ > file_size_)
+        throw std::runtime_error("Bundle data starts outside file bounds in: " + path_);
+}
 
-    for (const auto& [name, offset_size] : section_table) {
-        const auto& [offset, size] = offset_size;
-        BundleSection section;
-        section.name = name;
-        const BundleSectionInfo section_info{name, offset, size};
-        const std::uint64_t file_offset =
-            checked_section_file_offset(section_info, data_start, file_size, path);
-        section.data.resize(static_cast<std::size_t>(size));
-
-        in.seekg(static_cast<std::streamoff>(file_offset));
-        if (!section.data.empty())
-            in.read(section.data.data(), static_cast<std::streamsize>(section.data.size()));
-        if (!in) {
-            throw std::runtime_error("Failed to read bundle section '" + name + "' from: " + path);
-        }
-
-        bundle.sections.push_back(std::move(section));
+std::vector<char> BundleSectionReader::read(const std::string& name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto section =
+        std::find_if(info_.sections.begin(), info_.sections.end(),
+                     [&name](const BundleSectionInfo& entry) { return entry.name == name; });
+    if (section == info_.sections.end()) {
+        throw std::runtime_error("Bundle section '" + name + "' was not found in: " + path_);
     }
 
+    return read_locked(*section);
+}
+
+void BundleSectionReader::for_each_chunk(
+    const std::string& name, std::size_t chunk_size,
+    const std::function<void(const char*, std::size_t)>& visitor) {
+    if (chunk_size == 0)
+        throw std::invalid_argument("Bundle section chunk size must be non-zero");
+    if (!visitor)
+        throw std::invalid_argument("Bundle section chunk visitor must be callable");
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto section =
+        std::find_if(info_.sections.begin(), info_.sections.end(),
+                     [&name](const BundleSectionInfo& entry) { return entry.name == name; });
+    if (section == info_.sections.end()) {
+        throw std::runtime_error("Bundle section '" + name + "' was not found in: " + path_);
+    }
+
+    const auto section_offset = section->offset;
+    const auto section_size = section->size;
+    if (section_offset > file_size_ - data_start_ ||
+        section_size > file_size_ - data_start_ - section_offset) {
+        throw std::runtime_error("Bundle section '" + section->name +
+                                 "' is outside file bounds in: " + path_);
+    }
+
+    const std::size_t buffer_size = static_cast<std::size_t>(
+        std::min<std::uint64_t>(section_size, static_cast<std::uint64_t>(chunk_size)));
+    std::vector<char> buffer(buffer_size);
+    std::uint64_t consumed = 0;
+    stream_.clear();
+    stream_.seekg(static_cast<std::streamoff>(data_start_ + section_offset), std::ios::beg);
+    if (!stream_) {
+        throw std::runtime_error("Failed to seek bundle section '" + section->name +
+                                 "' in: " + path_);
+    }
+    while (consumed < section_size) {
+        const std::size_t requested = static_cast<std::size_t>(std::min<std::uint64_t>(
+            section_size - consumed, static_cast<std::uint64_t>(buffer.size())));
+        stream_.read(buffer.data(), static_cast<std::streamsize>(requested));
+        if (!stream_ || stream_.gcount() != static_cast<std::streamsize>(requested)) {
+            throw std::runtime_error("Failed to read complete bundle section '" + section->name +
+                                     "' from: " + path_);
+        }
+        visitor(buffer.data(), requested);
+        consumed += requested;
+    }
+}
+
+BundleFile BundleSectionReader::read_all() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    BundleFile bundle;
+    bundle.info = info_;
+    bundle.sections.reserve(info_.sections.size());
+    for (const auto& section_info : info_.sections) {
+        BundleSection section;
+        section.name = section_info.name;
+        section.data = read_locked(section_info);
+        bundle.sections.push_back(std::move(section));
+    }
     return bundle;
+}
+
+std::vector<char> BundleSectionReader::read_locked(const BundleSectionInfo& section) {
+    const auto section_offset = section.offset;
+    const auto section_size = section.size;
+    if (section_offset > file_size_ - data_start_ ||
+        section_size > file_size_ - data_start_ - section_offset) {
+        throw std::runtime_error("Bundle section '" + section.name +
+                                 "' is outside file bounds in: " + path_);
+    }
+    if (section_size > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()) ||
+        section_size > static_cast<std::uint64_t>(std::vector<char>().max_size())) {
+        throw std::runtime_error("Bundle section '" + section.name +
+                                 "' is too large to read from: " + path_);
+    }
+
+    std::vector<char> data(static_cast<std::size_t>(section_size));
+    stream_.clear();
+    stream_.seekg(static_cast<std::streamoff>(data_start_ + section_offset), std::ios::beg);
+    if (!stream_) {
+        throw std::runtime_error("Failed to seek bundle section '" + section.name +
+                                 "' in: " + path_);
+    }
+    if (!data.empty()) {
+        stream_.read(data.data(), static_cast<std::streamsize>(data.size()));
+        if (!stream_ || stream_.gcount() != static_cast<std::streamsize>(data.size())) {
+            throw std::runtime_error("Failed to read complete bundle section '" + section.name +
+                                     "' from: " + path_);
+        }
+    }
+    return data;
+}
+
+std::vector<char> ReadBundleSection(const std::string& path, const std::string& name) {
+    BundleSectionReader reader(path);
+    return reader.read(name);
 }
 
 BundleInfo ReadBundleHeader(const std::string& path) {

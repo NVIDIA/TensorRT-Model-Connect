@@ -572,6 +572,7 @@ def _passing_result(model_name: str) -> dict[str, object]:
         "case_name": model_name,
         "status": "pass",
         "failure_type": None,
+        "oracle_level": "L1_external_reference",
         "stages": {
             "full_inference": {
                 "status": "passed",
@@ -617,7 +618,175 @@ def test_verify_results_accepts_complete_passing_result(tmp_path: Path) -> None:
     )
 
     assert "PASS decoder-small" in result.stdout
-    assert json.loads(report_path.read_text(encoding="utf-8"))["passed"] is True
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["passed"] is True
+    assert report["proof_kinds"] == ["reference"]
+    assert report["e2e_reference_passed"] is True
+    assert report["functional_invariant_passed"] is False
+
+
+@pytest.mark.parametrize(
+    ("oracle_level", "proof_kind", "proof_flag"),
+    [
+        ("L2_internal_reference", "reference", "e2e_reference_passed"),
+        ("L3_snapshot_regression", "snapshot_regression", "snapshot_regression_passed"),
+        ("L4_invariants", "functional_invariant", "functional_invariant_passed"),
+    ],
+)
+def test_verify_results_classifies_oracle_without_overclaiming_reference_parity(
+    tmp_path: Path,
+    oracle_level: str,
+    proof_kind: str,
+    proof_flag: str,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    result_data = _passing_result("decoder-small")
+    result_data["oracle_level"] = oracle_level
+    _write_result(artifacts_dir, "decoder-small", result_data)
+    report_path = tmp_path / "verification.json"
+
+    _run(
+        "verify-results",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        "decoder-small",
+        "--artifacts-dir",
+        str(artifacts_dir),
+        "--report",
+        str(report_path),
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["proof_kinds"] == [proof_kind]
+    assert report[proof_flag] is True
+    assert report["e2e_reference_passed"] is (proof_kind == "reference")
+
+
+@pytest.mark.parametrize("oracle_level", [None, "", "L5_visual_vibes"])
+def test_verify_results_rejects_missing_or_unknown_oracle_level(
+    tmp_path: Path,
+    oracle_level: str | None,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    result_data = _passing_result("decoder-small")
+    if oracle_level is None:
+        result_data.pop("oracle_level")
+    else:
+        result_data["oracle_level"] = oracle_level
+    _write_result(artifacts_dir, "decoder-small", result_data)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "verify-results",
+            "--repo-root",
+            str(repo_root),
+            "--model",
+            "decoder-small",
+            "--artifacts-dir",
+            str(artifacts_dir),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "oracle_level is" in result.stderr
+
+
+def test_verify_results_can_verify_explicit_selected_child_case(tmp_path: Path) -> None:
+    repo_root = _make_repo(tmp_path)
+    manifest_path = (
+        repo_root
+        / "tests"
+        / "e2e"
+        / "models"
+        / "decoder_family"
+        / "manifests"
+        / "decoder-small.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["testcases"] = [
+        {"name": "decoder-small", "ci_tier": "nightly_only"},
+        {"name": "decoder-small-l0", "ci_tier": "l0_only"},
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    artifacts_dir = tmp_path / "artifacts"
+    result_data = _passing_result("decoder-small-l0")
+    result_data["oracle_level"] = "L4_invariants"
+    _write_result(artifacts_dir, "decoder-small-l0", result_data)
+    report_path = tmp_path / "verification.json"
+
+    _run(
+        "verify-results",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        "decoder-small",
+        "--result-case",
+        "decoder-small=decoder-small-l0",
+        "--artifacts-dir",
+        str(artifacts_dir),
+        "--report",
+        str(report_path),
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["selected_result_cases"] == [
+        {"model": "decoder-small", "case": "decoder-small-l0"}
+    ]
+    assert report["proof_kinds"] == ["functional_invariant"]
+
+
+def test_verify_results_ci_tier_filter_selects_the_executed_l0_child(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    manifest_path = (
+        repo_root
+        / "tests"
+        / "e2e"
+        / "models"
+        / "decoder_family"
+        / "manifests"
+        / "decoder-small.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["testcases"] = [
+        {"name": "decoder-small", "ci_tier": "nightly_only"},
+        {"name": "decoder-small-l0", "ci_tier": "l0_only"},
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    artifacts_dir = tmp_path / "artifacts"
+    result_data = _passing_result("decoder-small-l0")
+    result_data["oracle_level"] = "L4_invariants"
+    _write_result(artifacts_dir, "decoder-small-l0", result_data)
+    report_path = tmp_path / "verification.json"
+
+    _run(
+        "verify-results",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        "decoder-small",
+        "--exclude-ci-tier",
+        "nightly_only",
+        "--artifacts-dir",
+        str(artifacts_dir),
+        "--report",
+        str(report_path),
+    )
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["selected_result_cases"] == [
+        {"model": "decoder-small", "case": "decoder-small-l0"}
+    ]
+    assert report["functional_invariant_passed"] is True
 
 
 def test_verify_results_accepts_advisory_metric_failure_in_passing_stage(
@@ -692,16 +861,12 @@ def test_verify_results_rejects_invalid_optional_stage_execution(
     repo_root = _make_repo(tmp_path)
     artifacts_dir = tmp_path / "artifacts"
     result_data = _passing_result("decoder-small")
-    result_data["case_config"] = {
-        "stages": [{"name": "advisory_probe", "required": required}]
-    }
+    result_data["case_config"] = {"stages": [{"name": "advisory_probe", "required": required}]}
     result_data["stages"]["advisory_probe"] = {
         "status": stage_status,
         "metrics": {},
     }
-    result_data["stage_outputs"]["advisory_probe"] = {
-        "metadata": {"returncode": returncode}
-    }
+    result_data["stage_outputs"]["advisory_probe"] = {"metadata": {"returncode": returncode}}
     _write_result(artifacts_dir, "decoder-small", result_data)
 
     result = subprocess.run(

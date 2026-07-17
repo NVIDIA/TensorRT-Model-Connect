@@ -117,12 +117,16 @@ def _write_part(
             "dso_isolation",
             "cpp_tests",
             "e2e_reference",
+            "e2e_snapshot_regression",
+            "e2e_functional_invariant",
             "engine_build_budget",
             "result_verification",
             "html_report",
         )
     }
     steps["python_tests"] = {"status": "skipped", "evidence": "none"}
+    steps["e2e_snapshot_regression"] = {"status": "skipped", "evidence": "none"}
+    steps["e2e_functional_invariant"] = {"status": "skipped", "evidence": "none"}
     status = {
         "schema_version": 1,
         "report_kind": "model_proof",
@@ -132,6 +136,8 @@ def _write_part(
         "outcome": "passed",
         "exit_code": 0,
         "validation_exit_code": 0,
+        "e2e_proof_kinds": ["reference"],
+        "e2e_reference_passed": True,
         "report_exit_code": 0,
         "gpu_id": "1",
         "steps": steps,
@@ -156,6 +162,8 @@ def _write_part(
         "gpu_id": "1",
         "network": "disabled",
         "plugin_search": "strict",
+        "e2e_proof_kinds": ["reference"],
+        "e2e_reference_passed": True,
         **gpu_fields,
     }
     selection = {
@@ -197,9 +205,7 @@ def _write_part(
 def _append_result_case(root: Path, owner: str, case: str) -> None:
     case_dir = root / "e2e" / case
     case_dir.mkdir()
-    (case_dir / "result.json").write_text(
-        json.dumps(_result(case, owner)), encoding="utf-8"
-    )
+    (case_dir / "result.json").write_text(json.dumps(_result(case, owner)), encoding="utf-8")
 
     selection_path = root / "selection.json"
     selection = json.loads(selection_path.read_text(encoding="utf-8"))
@@ -400,9 +406,7 @@ def test_result_count_under_inventory_fails_closed(tmp_path: Path) -> None:
 
 
 def test_result_count_over_inventory_fails_closed(tmp_path: Path) -> None:
-    root = _write_part(
-        tmp_path / "parts", "alpha", "alpha-case", suite="nightly"
-    )
+    root = _write_part(tmp_path / "parts", "alpha", "alpha-case", suite="nightly")
     _append_result_case(root, "alpha", "zeta-alpha-case")
 
     rc, output, status_path = _run(
@@ -497,17 +501,12 @@ def test_nightly_diffusion_report_requires_current_complete_vlm_provenance(
 
     assert rc != 0
     assert status["outcome"] == "failed"
-    assert any(
-        "diffusion assessment source_revision" in issue
-        for issue in status["issues"]
-    )
+    assert any("diffusion assessment source_revision" in issue for issue in status["issues"])
 
 
 def test_combined_report_rebases_isolated_src_input_media(tmp_path: Path) -> None:
     parts = tmp_path / "parts"
-    audio_root = _write_part(
-        parts, "audio-owner", "audio-case", strategy="speech_to_text"
-    )
+    audio_root = _write_part(parts, "audio-owner", "audio-case", strategy="speech_to_text")
     visual_root = _write_part(
         parts,
         "visual-owner",

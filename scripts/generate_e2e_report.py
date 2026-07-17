@@ -2784,13 +2784,29 @@ def _proof_context(
 ) -> Dict[str, Any]:
     context = dict(status)
     for key in (
-        "model", "source_revision", "suite", "runtime_model",
-        "runtime_library", "runtime_library_sha256", "sibling_model_count",
-        "model_dso_count", "staged_runtime_library_sha256",
-        "staged_model_dso_count", "engine_builds_per_model", "engine_build_count",
-        "engine_build_verification", "gpu_id", "gpu_resource_class",
-        "gpu_slot_ids", "gpu_slots_per_device", "gpu_lease_evidence",
-        "network", "plugin_search", "passed",
+        "model",
+        "source_revision",
+        "suite",
+        "runtime_model",
+        "runtime_library",
+        "runtime_library_sha256",
+        "sibling_model_count",
+        "model_dso_count",
+        "staged_runtime_library_sha256",
+        "staged_model_dso_count",
+        "engine_builds_per_model",
+        "engine_build_count",
+        "engine_build_verification",
+        "gpu_id",
+        "gpu_resource_class",
+        "gpu_slot_ids",
+        "gpu_slots_per_device",
+        "gpu_lease_evidence",
+        "network",
+        "plugin_search",
+        "passed",
+        "e2e_proof_kinds",
+        "e2e_reference_passed",
     ):
         if key in proof:
             context[key] = proof[key]
@@ -2881,10 +2897,7 @@ def validate_proof_context(
     valid_slot_ids = (
         isinstance(slot_ids, list)
         and bool(slot_ids)
-        and all(
-            isinstance(slot, int) and not isinstance(slot, bool)
-            for slot in slot_ids
-        )
+        and all(isinstance(slot, int) and not isinstance(slot, bool) for slot in slot_ids)
         and len(slot_ids) == len(set(slot_ids))
         and isinstance(slots_per_device, int)
         and not isinstance(slots_per_device, bool)
@@ -2894,14 +2907,14 @@ def validate_proof_context(
         issues.append("Final proof JSON has no valid unique GPU slot IDs")
     elif resource_class == "shared" and len(slot_ids) != 1:
         issues.append("Shared GPU proof must hold exactly one GPU slot")
-    elif resource_class == "exclusive_gpu" and sorted(slot_ids) != list(
-        range(slots_per_device)
-    ):
+    elif resource_class == "exclusive_gpu" and sorted(slot_ids) != list(range(slots_per_device)):
         issues.append("Exclusive GPU proof must hold every slot on its GPU")
     if lease_evidence != "gpu-lease.json":
         issues.append("Final proof JSON does not identify GPU lease evidence")
     for field in (
-        "gpu_resource_class", "gpu_slot_ids", "gpu_slots_per_device",
+        "gpu_resource_class",
+        "gpu_slot_ids",
+        "gpu_slots_per_device",
         "gpu_lease_evidence",
     ):
         if proof.get(field) != status.get(field):
@@ -2919,7 +2932,48 @@ def validate_proof_context(
     if not selection.get("e2e_test") or not selection.get("e2e_cases"):
         issues.append("Test selection does not identify an E2E test and case")
 
-    for name, step in (status.get("steps") or {}).items():
+    proof_kinds = proof.get("e2e_proof_kinds")
+    allowed_proof_kinds = {
+        "reference",
+        "snapshot_regression",
+        "functional_invariant",
+    }
+    if (
+        not isinstance(proof_kinds, list)
+        or not proof_kinds
+        or any(not isinstance(kind, str) or kind not in allowed_proof_kinds for kind in proof_kinds)
+    ):
+        issues.append("Final proof JSON has no valid E2E proof-kind classification")
+        proof_kinds = []
+    else:
+        proof_kinds = sorted(set(proof_kinds))
+    if status.get("e2e_proof_kinds") != proof_kinds:
+        issues.append("E2E proof kinds do not match model-proof status")
+
+    reference_passed = proof_kinds == ["reference"]
+    if proof.get("e2e_reference_passed") is not reference_passed:
+        issues.append("Final proof JSON has an inconsistent E2E reference claim")
+    if status.get("e2e_reference_passed") is not reference_passed:
+        issues.append("Model-proof status has an inconsistent E2E reference claim")
+    proof_steps = {
+        "e2e_reference": reference_passed,
+        "e2e_snapshot_regression": "snapshot_regression" in proof_kinds,
+        "e2e_functional_invariant": "functional_invariant" in proof_kinds,
+    }
+    status_steps = status.get("steps") or {}
+    if not isinstance(status_steps, dict):
+        issues.append("Model-proof status steps are not an object")
+        status_steps = {}
+    for step_name, claimed in proof_steps.items():
+        step = status_steps.get(step_name)
+        expected_status = "passed" if claimed else "skipped"
+        if not isinstance(step, dict) or step.get("status") != expected_status:
+            issues.append(
+                f"Validation step {step_name} must be {expected_status} for "
+                f"proof kinds {proof_kinds}"
+            )
+
+    for name, step in status_steps.items():
         if name == "html_report" or not isinstance(step, dict):
             continue
         if step.get("status") not in {"passed", "skipped"}:
@@ -2978,8 +3032,10 @@ def render_proof_section(context: Dict[str, Any]) -> str:
         ("Model ownership ID", context.get("model")),
         ("Pinned source revision", context.get("source_revision")),
         ("Suite", context.get("suite")),
-        ("Final outcome", context.get("outcome") or (
-            "passed" if context.get("passed") else "incomplete")),
+        (
+            "Final outcome",
+            context.get("outcome") or ("passed" if context.get("passed") else "incomplete"),
+        ),
         ("Runtime model", context.get("runtime_model")),
         ("Runtime library", context.get("runtime_library")),
         ("Runtime library SHA-256", context.get("runtime_library_sha256")),
@@ -2997,6 +3053,8 @@ def render_proof_section(context: Dict[str, Any]) -> str:
         ("GPU lease evidence", context.get("gpu_lease_evidence")),
         ("Container network", context.get("network")),
         ("Plugin search", context.get("plugin_search")),
+        ("E2E proof kind", context.get("e2e_proof_kinds")),
+        ("E2E reference parity claimed", context.get("e2e_reference_passed")),
     )
     for label, value in fields:
         if value is None or value == "":

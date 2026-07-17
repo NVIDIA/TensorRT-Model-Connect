@@ -254,14 +254,18 @@ def _resolve_build_model_metadata(model_ref: str, method_name: str) -> tuple[str
     """Return (resolved_model_ref, family_name) for the selected build backend."""
     del method_name
     from .config import ModelConfig
-    from .engine_builder import _resolve_model, find_diffusion_plugin, find_plugin
+    from .engine_builder import (
+        _resolve_diffusion_entrypoint,
+        _resolve_model,
+        find_plugin,
+    )
 
     resolved_model_ref = _resolve_model(model_ref)
     model_dir = Path(resolved_model_ref)
 
-    if (model_dir / "model_index.json").exists():
-        model_index = json.loads((model_dir / "model_index.json").read_text())
-        plugin = find_diffusion_plugin(str(model_index.get("_class_name", "") or ""))
+    diffusion_entrypoint = _resolve_diffusion_entrypoint(model_dir)
+    if diffusion_entrypoint is not None:
+        _pipeline_config, plugin = diffusion_entrypoint
         return resolved_model_ref, getattr(plugin, "name", "")
 
     config = ModelConfig.from_dir(model_dir)
@@ -324,18 +328,15 @@ def _auto_select_build_backend(model_ref: str) -> tuple[str, str]:
          exists for the model.
     """
     from .config import ModelConfig
-    from .engine_builder import _resolve_model, find_plugin, find_diffusion_plugin
+    from .engine_builder import _resolve_diffusion_entrypoint, _resolve_model, find_plugin
 
     resolved_model_ref = _resolve_model(model_ref)
     model_dir = Path(resolved_model_ref)
 
-    if (model_dir / "model_index.json").exists():
-        model_index = json.loads((model_dir / "model_index.json").read_text())
-        pipeline_class = str(model_index.get("_class_name", "") or "")
-        raw_supported = (
-            find_diffusion_plugin(pipeline_class) is not None
-            or find_plugin(pipeline_class.lower()) is not None
-        )
+    diffusion_entrypoint = _resolve_diffusion_entrypoint(model_dir)
+    if diffusion_entrypoint is not None:
+        _pipeline_config, plugin = diffusion_entrypoint
+        raw_supported = plugin is not None
     else:
         config = ModelConfig.from_dir(model_dir)
         raw_plugin = find_plugin(config)

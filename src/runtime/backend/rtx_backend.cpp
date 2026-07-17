@@ -97,7 +97,8 @@ class RtxBackend final : public IBackend {
             throw;
         }
 
-        auto module = std::make_unique<TrtModuleImpl>(engine, ctx, stream_setup.stream);
+        auto module = std::make_unique<TrtModuleImpl>(engine, ctx, stream_setup.stream, 0, nullptr,
+                                                      options.external_bindings);
         if (!module->ok()) {
             delete engine;
             throw std::runtime_error("[trtmc] TrtModuleImpl creation failed (RTX)");
@@ -123,6 +124,11 @@ class RtxBackend final : public IBackend {
         StreamSetup stream_setup = resolve_stream(options.stream);
 
         const int32_t nprofiles = engine->getNbOptimizationProfiles();
+        if (!options.external_bindings.empty() && nprofiles > 1) {
+            throw std::invalid_argument(
+                "[trtmc] One external binding set cannot be shared by multiple live RTX "
+                "profile modules; use create_module or provide a per-profile binding API");
+        }
         auto make_ctx_module = [&](int32_t profile_idx) -> std::unique_ptr<ITrtModule> {
             return create_profile_module(engine, stream_setup, options, profile_idx);
         };
@@ -149,6 +155,16 @@ class RtxBackend final : public IBackend {
 
         StreamSetup stream_setup = resolve_stream(options.stream);
         const int32_t nprofiles = engine->getNbOptimizationProfiles();
+        int32_t requested_profile_count = 0;
+        for (const int32_t profile_idx : profile_indices) {
+            if (profile_idx >= 0 && profile_idx < nprofiles)
+                ++requested_profile_count;
+        }
+        if (!options.external_bindings.empty() && requested_profile_count > 1) {
+            throw std::invalid_argument(
+                "[trtmc] One external binding set cannot be shared by multiple live RTX "
+                "profile modules; use create_module or provide a per-profile binding API");
+        }
         BackendProfileModules out;
         out.modules.reserve(profile_indices.size());
         for (int32_t profile_idx : profile_indices) {
@@ -208,8 +224,8 @@ class RtxBackend final : public IBackend {
         if (!ctx)
             throw std::runtime_error("[trtmc] Failed to create RTX execution context");
 
-        auto mod =
-            std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream_setup.stream, profile_idx);
+        auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream_setup.stream,
+                                                   profile_idx, nullptr, options.external_bindings);
         if (!mod->ok())
             throw std::runtime_error("[trtmc] TrtModuleImpl creation failed (RTX)");
         mod->keep_alive(engine);
@@ -257,7 +273,7 @@ class RtxBackend final : public IBackend {
 
 } // namespace trtmc
 
-extern "C" trtmc::IBackend* trtmc_create_backend() {
+extern "C" trtmc::IBackend* trtmc_create_backend_v1() {
     try {
         return new trtmc::RtxBackend();
     } catch (const std::exception& e) {
@@ -266,6 +282,10 @@ extern "C" trtmc::IBackend* trtmc_create_backend() {
     }
 }
 
-extern "C" void trtmc_destroy_backend(trtmc::IBackend* b) {
+extern "C" std::uint32_t trtmc_backend_api_abi_version() {
+    return trtmc::kTrtmcBackendApiAbiVersion;
+}
+
+extern "C" void trtmc_destroy_backend_v1(trtmc::IBackend* b) {
     delete b;
 }

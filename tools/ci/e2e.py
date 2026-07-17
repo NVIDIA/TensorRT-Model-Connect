@@ -158,7 +158,7 @@ class E2ERunner:
             "--model-plugin-dir",
             str(plugins),
             "--timeout",
-            self.context.env.get("FULL_E2E_TIMEOUT", "6h"),
+            self.context.env.get("FULL_E2E_TIMEOUT", "7h"),
         ]
         if self.context.env.get("REBUILD_ENGINES", "true") == "true":
             arguments.append("--rebuild-engines")

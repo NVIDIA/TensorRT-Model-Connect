@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -22,19 +23,28 @@ enum class DType {
     kBFloat16,
     kInt32,
     kInt8,
+    // TensorRT exposes additional data types that the runtime does not yet
+    // implement. Preserve that state instead of pretending such tensors are
+    // FP32; any attempt to size or execute one must fail closed.
+    kUnsupported,
 };
 
-inline std::size_t dtype_size(DType dt)
-{
-    switch (dt)
-    {
-    case DType::kFloat32: return 4;
-    case DType::kFloat16: return 2;
-    case DType::kBFloat16: return 2;
-    case DType::kInt32: return 4;
-    case DType::kInt8: return 1;
+inline std::size_t dtype_size(DType dt) {
+    switch (dt) {
+    case DType::kFloat32:
+        return 4;
+    case DType::kFloat16:
+        return 2;
+    case DType::kBFloat16:
+        return 2;
+    case DType::kInt32:
+        return 4;
+    case DType::kInt8:
+        return 1;
+    case DType::kUnsupported:
+        throw std::invalid_argument("Cannot compute the size of an unsupported tensor dtype");
     }
-    return 0;
+    throw std::invalid_argument("Cannot compute the size of an unknown tensor dtype");
 }
 
 // CPU-side tensor reference (non-owning). Like a numpy array view.
@@ -43,11 +53,12 @@ struct Tensor {
     std::vector<int64_t> shape;
     DType dtype{DType::kFloat32};
 
-    std::size_t numel() const
-    {
-        if (shape.empty()) return 0;
+    std::size_t numel() const {
+        if (shape.empty())
+            return 0;
         std::size_t n = 1;
-        for (auto s : shape) n *= static_cast<std::size_t>(s);
+        for (auto s : shape)
+            n *= static_cast<std::size_t>(s);
         return n;
     }
 

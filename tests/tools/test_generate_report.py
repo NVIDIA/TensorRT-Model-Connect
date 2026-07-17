@@ -2100,6 +2100,8 @@ class TestEvidenceCompleteness:
             "gpu_lease_evidence": "gpu-lease.json",
             "network": "disabled",
             "plugin_search": "strict",
+            "e2e_proof_kinds": ["functional_invariant"],
+            "e2e_reference_passed": False,
             "steps": {"scratch_build": {"status": "passed", "evidence": "build.log"}},
             "selection": {
                 "runtime_tests": ["test_alpha"],
@@ -2118,6 +2120,8 @@ class TestEvidenceCompleteness:
         assert "Full bundle builds per model" in rendered
         assert "Staged runtime library SHA-256" in rendered
         assert "Model DSOs staged" in rendered
+        assert "E2E proof kind" in rendered
+        assert "functional_invariant" in rendered
         assert ">2<" in rendered
         assert "test_alpha" in rendered
         assert "test_alpha_unit.py" in rendered
@@ -2129,12 +2133,19 @@ class TestEvidenceCompleteness:
         steps = {
             name: {"status": "passed"}
             for name in (
-                "projection_validation", "configure", "scratch_build",
-                "dso_isolation", "cpp_tests", "e2e_reference",
-                "engine_build_budget", "result_verification",
+                "projection_validation",
+                "configure",
+                "scratch_build",
+                "dso_isolation",
+                "cpp_tests",
+                "e2e_reference",
+                "engine_build_budget",
+                "result_verification",
             )
         }
         steps["python_tests"] = {"status": "skipped"}
+        steps["e2e_snapshot_regression"] = {"status": "skipped"}
+        steps["e2e_functional_invariant"] = {"status": "skipped"}
         steps["html_report"] = {"status": "running"}
         status = {
             "model": "alpha",
@@ -2146,6 +2157,8 @@ class TestEvidenceCompleteness:
             "gpu_slots_per_device": 4,
             "gpu_lease_evidence": "gpu-lease.json",
             "validation_exit_code": 0,
+            "e2e_proof_kinds": ["reference"],
+            "e2e_reference_passed": True,
             "steps": steps,
         }
         proof = {
@@ -2169,6 +2182,8 @@ class TestEvidenceCompleteness:
             "gpu_lease_evidence": "gpu-lease.json",
             "network": "disabled",
             "plugin_search": "strict",
+            "e2e_proof_kinds": ["reference"],
+            "e2e_reference_passed": True,
         }
         selection = {
             "requested_model": "alpha",
@@ -2183,16 +2198,26 @@ class TestEvidenceCompleteness:
 
         assert mod.validate_proof_context(status, proof, selection) == []
         proof["runtime_library_sha256"] = "invalid"
-        assert "SHA-256" in " ".join(
-            mod.validate_proof_context(status, proof, selection))
+        assert "SHA-256" in " ".join(mod.validate_proof_context(status, proof, selection))
         proof["runtime_library_sha256"] = "b" * 64
         proof["staged_runtime_library_sha256"] = "c" * 64
-        assert "does not match" in " ".join(
-            mod.validate_proof_context(status, proof, selection))
+        assert "does not match" in " ".join(mod.validate_proof_context(status, proof, selection))
         proof["staged_runtime_library_sha256"] = "b" * 64
         proof["staged_model_dso_count"] = 2
-        assert "staged model DSO" in " ".join(
-            mod.validate_proof_context(status, proof, selection))
+        assert "staged model DSO" in " ".join(mod.validate_proof_context(status, proof, selection))
+
+        proof["staged_model_dso_count"] = 1
+        proof["e2e_proof_kinds"] = ["functional_invariant"]
+        proof["e2e_reference_passed"] = False
+        status["e2e_proof_kinds"] = ["functional_invariant"]
+        status["e2e_reference_passed"] = False
+        status["steps"]["e2e_reference"] = {"status": "skipped"}
+        status["steps"]["e2e_functional_invariant"] = {"status": "passed"}
+        assert mod.validate_proof_context(status, proof, selection) == []
+
+        status["steps"]["e2e_reference"] = {"status": "passed"}
+        issues = mod.validate_proof_context(status, proof, selection)
+        assert any("e2e_reference must be skipped" in issue for issue in issues)
 
     def test_proof_diagnostics_embed_bounded_log_and_junit_failure(self, tmp_path):
         mod = _import_report()

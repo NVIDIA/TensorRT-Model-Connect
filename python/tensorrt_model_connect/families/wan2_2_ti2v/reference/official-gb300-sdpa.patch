@@ -1,0 +1,31 @@
+diff --git a/wan/modules/model.py b/wan/modules/model.py
+index 393d15a..49b739e 100644
+--- a/wan/modules/model.py
++++ b/wan/modules/model.py
+@@ -6,7 +6,7 @@ import torch.nn as nn
+ from diffusers.configuration_utils import ConfigMixin, register_to_config
+ from diffusers.models.modeling_utils import ModelMixin
+ 
+-from .attention import flash_attention
++from .attention import attention
+ 
+ __all__ = ['WanModel']
+ 
+@@ -142,7 +142,7 @@ class WanSelfAttention(nn.Module):
+ 
+         q, k, v = qkv_fn(x)
+ 
+-        x = flash_attention(
++        x = attention(
+             q=rope_apply(q, grid_sizes, freqs),
+             k=rope_apply(k, grid_sizes, freqs),
+             v=v,
+@@ -172,7 +172,7 @@ class WanCrossAttention(WanSelfAttention):
+         v = self.v(context).view(b, -1, n, d)
+ 
+         # compute attention
+-        x = flash_attention(q, k, v, k_lens=context_lens)
++        x = attention(q, k, v, k_lens=context_lens)
+ 
+         # output
+         x = x.flatten(2)

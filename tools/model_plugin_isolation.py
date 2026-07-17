@@ -32,6 +32,7 @@ class E2EManifest:
     bundle: str = ""
     result_case: str = ""
     ci_tier: str = ""
+    result_cases: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,13 @@ _MODEL_OWNED_IMPACT_RULES = frozenset(
         "cpp_runtime_model",
     }
 )
+
+_ORACLE_PROOF_KINDS = {
+    "L1_external_reference": "reference",
+    "L2_internal_reference": "reference",
+    "L3_snapshot_regression": "snapshot_regression",
+    "L4_invariants": "functional_invariant",
+}
 
 
 def _read_text(path: Path) -> str:
@@ -105,19 +113,25 @@ def discover_e2e_manifests(repo_root: Path) -> dict[str, E2EManifest]:
             for testcase in testcases
             if isinstance(testcase, dict) and testcase.get("name")
         ]
+        runnable_result_cases = tuple(
+            (
+                str(testcase.get("name") or ""),
+                str(testcase.get("ci_tier") or raw.get("ci_tier") or ""),
+            )
+            for testcase in testcases
+            if isinstance(testcase, dict)
+            and testcase.get("name")
+            and not testcase.get("skip")
+            and not testcase.get("skip_reason")
+        )
         result_case = (
-            name
-            if name in testcase_names
-            else testcase_names[0]
-            if testcase_names
-            else name
+            name if name in testcase_names else testcase_names[0] if testcase_names else name
         )
         result_testcase = next(
             (
                 testcase
                 for testcase in testcases
-                if isinstance(testcase, dict)
-                and str(testcase.get("name") or "") == result_case
+                if isinstance(testcase, dict) and str(testcase.get("name") or "") == result_case
             ),
             {},
         )
@@ -129,9 +143,8 @@ def discover_e2e_manifests(repo_root: Path) -> dict[str, E2EManifest]:
                 path=path,
                 bundle=str(raw.get("bundle") or f"{name}.trtfb"),
                 result_case=result_case,
-                ci_tier=str(
-                    result_testcase.get("ci_tier") or raw.get("ci_tier") or ""
-                ),
+                ci_tier=str(result_testcase.get("ci_tier") or raw.get("ci_tier") or ""),
+                result_cases=runnable_result_cases,
             )
     return manifests
 
@@ -668,7 +681,10 @@ def _verify_model_result(
     if not result_path.is_file():
         return {
             "model": model_name,
+            "result_case": result_case,
             "result_path": str(result_path),
+            "oracle_level": "",
+            "proof_kind": "invalid",
             "passed": False,
             "errors": ["result.json is missing"],
         }
@@ -677,7 +693,10 @@ def _verify_model_result(
     except (OSError, json.JSONDecodeError) as exc:
         return {
             "model": model_name,
+            "result_case": result_case,
             "result_path": str(result_path),
+            "oracle_level": "",
+            "proof_kind": "invalid",
             "passed": False,
             "errors": [f"result.json could not be read: {exc}"],
         }
@@ -692,6 +711,17 @@ def _verify_model_result(
     if result.get("failure_type") not in (None, ""):
         errors.append(f"failure_type is {result.get('failure_type')!r}")
 
+    oracle_level = result.get("oracle_level")
+    proof_kind = (
+        _ORACLE_PROOF_KINDS.get(oracle_level, "invalid")
+        if isinstance(oracle_level, str)
+        else "invalid"
+    )
+    if proof_kind == "invalid":
+        errors.append(
+            f"oracle_level is {oracle_level!r}, expected one of {sorted(_ORACLE_PROOF_KINDS)}"
+        )
+
     optional_stage_names = _optional_stage_names(result)
     stages = result.get("stages")
     if not isinstance(stages, dict) or not stages:
@@ -702,13 +732,9 @@ def _verify_model_result(
                 errors.append(f"stage {stage_name!r} is not an object")
                 continue
             stage_status = stage.get("status")
-            optional_skip = (
-                stage_name in optional_stage_names and stage_status == "skipped"
-            )
+            optional_skip = stage_name in optional_stage_names and stage_status == "skipped"
             if stage_status != "passed" and not optional_skip:
-                errors.append(
-                    f"stage {stage_name!r} status is {stage_status!r}, expected 'passed'"
-                )
+                errors.append(f"stage {stage_name!r} status is {stage_status!r}, expected 'passed'")
             metrics = stage.get("metrics", {})
             if not isinstance(metrics, dict):
                 errors.append(f"stage {stage_name!r} metrics is not an object")
@@ -729,10 +755,74 @@ def _verify_model_result(
     errors = list(dict.fromkeys(errors))
     return {
         "model": model_name,
+        "result_case": result_case,
         "result_path": str(result_path),
+        "oracle_level": oracle_level if isinstance(oracle_level, str) else "",
+        "proof_kind": proof_kind,
         "passed": not errors,
         "errors": errors,
     }
+
+
+def _selected_result_cases(
+    args: argparse.Namespace,
+    model_names: set[str],
+    manifests: dict[str, E2EManifest],
+) -> list[tuple[str, str]]:
+    requested = list(getattr(args, "result_case", []) or [])
+    if not requested:
+        excluded_ci_tiers = set(getattr(args, "exclude_ci_tier", []) or [])
+        selected_cases: list[tuple[str, str]] = []
+        for model_name in sorted(model_names):
+            manifest = manifests[model_name]
+            if excluded_ci_tiers and manifest.result_cases:
+                result_cases = [
+                    case_name
+                    for case_name, ci_tier in manifest.result_cases
+                    if ci_tier not in excluded_ci_tiers
+                ]
+            elif excluded_ci_tiers and manifest.ci_tier in excluded_ci_tiers:
+                result_cases = []
+            else:
+                result_cases = [manifest.result_case]
+            if not result_cases:
+                raise SystemExit(
+                    f"No E2E result cases remain for {model_name!r} after CI-tier exclusions"
+                )
+            selected_cases.extend((model_name, case_name) for case_name in result_cases)
+        return selected_cases
+
+    selected: dict[str, list[str]] = {model_name: [] for model_name in model_names}
+    for value in requested:
+        model_name, separator, result_case = str(value).partition("=")
+        if not separator or not model_name or not result_case:
+            raise SystemExit("--result-case must use MODEL=CASE")
+        if model_name not in model_names:
+            raise SystemExit(f"--result-case selects {model_name!r}, which is not a selected model")
+        manifest = manifests[model_name]
+        declared_cases = {case_name for case_name, _ci_tier in manifest.result_cases} or {
+            manifest.result_case
+        }
+        if result_case not in declared_cases:
+            raise SystemExit(
+                f"--result-case {result_case!r} is not declared by model {model_name!r}"
+            )
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", result_case):
+            raise SystemExit(f"--result-case has an unsafe case name: {result_case!r}")
+        if result_case not in selected[model_name]:
+            selected[model_name].append(result_case)
+
+    missing = sorted(model_name for model_name, cases in selected.items() if not cases)
+    if missing:
+        raise SystemExit(
+            "--result-case must identify at least one case for every selected model: "
+            + ", ".join(missing)
+        )
+    return [
+        (model_name, result_case)
+        for model_name in sorted(selected)
+        for result_case in selected[model_name]
+    ]
 
 
 def command_verify_results(args: argparse.Namespace) -> int:
@@ -749,19 +839,28 @@ def command_verify_results(args: argparse.Namespace) -> int:
             "No E2E manifest found for selected model(s): " + ", ".join(missing_models)
         )
 
+    selected_result_cases = _selected_result_cases(args, model_names, manifests)
     results = [
-        _verify_model_result(
-            model_name,
-            manifests[model_name].result_case,
-            artifacts_dir,
-        )
-        for model_name in sorted(model_names)
+        _verify_model_result(model_name, result_case, artifacts_dir)
+        for model_name, result_case in selected_result_cases
     ]
+    proof_kinds = sorted(
+        {str(result["proof_kind"]) for result in results if result["proof_kind"] != "invalid"}
+    )
+    passed = all(bool(result["passed"]) for result in results)
     report = {
         "schema_version": 1,
         "artifacts_dir": str(artifacts_dir),
         "selected_models": sorted(model_names),
-        "passed": all(bool(result["passed"]) for result in results),
+        "selected_result_cases": [
+            {"model": model_name, "case": result_case}
+            for model_name, result_case in selected_result_cases
+        ],
+        "proof_kinds": proof_kinds,
+        "e2e_reference_passed": passed and proof_kinds == ["reference"],
+        "snapshot_regression_passed": passed and "snapshot_regression" in proof_kinds,
+        "functional_invariant_passed": passed and "functional_invariant" in proof_kinds,
+        "passed": passed,
         "results": results,
     }
     if args.report is not None:
@@ -772,7 +871,7 @@ def command_verify_results(args: argparse.Namespace) -> int:
 
     for result in results:
         status = "PASS" if result["passed"] else "FAIL"
-        print(f"{status} {result['model']}")
+        print(f"{status} {result['model']}[{result['result_case']}]")
         for error in result["errors"]:
             print(f"  {error}", file=sys.stderr)
     return 0 if report["passed"] else 1
@@ -1019,6 +1118,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_selection_options(verify_results)
     verify_results.add_argument("--artifacts-dir", type=Path, required=True)
     verify_results.add_argument("--report", type=Path)
+    verify_results.add_argument(
+        "--result-case",
+        action="append",
+        default=[],
+        metavar="MODEL=CASE",
+        help="Verify an explicitly selected testcase artifact instead of the canonical case",
+    )
+    verify_results.add_argument(
+        "--exclude-ci-tier",
+        action="append",
+        default=[],
+        help="When no explicit result case is given, omit testcase artifacts in this CI tier",
+    )
     verify_results.set_defaults(func=command_verify_results)
 
     verify_builds = subparsers.add_parser(

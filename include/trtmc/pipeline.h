@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -83,7 +84,9 @@ struct TranscriptionRequest {
 };
 
 struct ImageResult {
-    std::vector<float> pixels; // [C, H, W] float32 in [0,1]
+    // Interleaved float32 pixels in [0,1]: [H, W, C] for one image and
+    // [T, H, W, C] when num_frames > 1.
+    std::vector<float> pixels;
     int32_t height{0};
     int32_t width{0};
     int32_t channels{3};
@@ -282,7 +285,10 @@ class IPipeline {
     // Default implementation is a sequential ``generate_image`` loop with
     // ``cfg.seed`` overridden per sample. Pipelines that can actually batch
     // override this for the speed win; pipelines that can't get correctness
-    // for free without an override.
+    // for free without an override. Because GenerateConfig::seed uses -1 as
+    // its unset sentinel, this fallback accepts seeds through INT32_MAX only;
+    // implementations that override this method may support the full uint32_t
+    // range directly.
     virtual std::vector<ImageResult>
     generate_image_batch(const std::vector<std::string>& prompts,
                          const std::vector<std::uint32_t>& per_sample_seeds,
@@ -290,6 +296,16 @@ class IPipeline {
         if (prompts.size() != per_sample_seeds.size()) {
             throw std::invalid_argument(
                 "generate_image_batch: prompts.size() must equal per_sample_seeds.size()");
+        }
+        constexpr auto max_generate_config_seed =
+            static_cast<std::uint32_t>(std::numeric_limits<int32_t>::max());
+        for (std::size_t i = 0; i < per_sample_seeds.size(); ++i) {
+            if (per_sample_seeds[i] > max_generate_config_seed) {
+                throw std::invalid_argument(
+                    "generate_image_batch: per_sample_seeds[" + std::to_string(i) +
+                    "] exceeds INT32_MAX; the default sequential implementation cannot "
+                    "represent it in GenerateConfig::seed");
+            }
         }
         std::vector<ImageResult> out;
         out.reserve(prompts.size());
@@ -554,7 +570,8 @@ struct TrtmcPipelineOptions {
 // buffer of N entries) and is responsible for releasing the per-result
 // `pixels` buffer via trtmc_image_result_free.
 struct trtmc_image_result_t {
-    float* pixels;            // malloc'd [C*H*W] float32 in [0,1]. nullptr on error.
+    // malloc'd interleaved [H,W,C] or [T,H,W,C] float32 in [0,1]. nullptr on error.
+    float* pixels;
     int32_t height;           // image height in pixels
     int32_t width;            // image width in pixels
     int32_t channels;         // number of channels (typically 3)

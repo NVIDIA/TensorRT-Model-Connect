@@ -9,6 +9,7 @@
 
 #include "trtmc/runtime/trt_backend.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@ struct BackendLoadMetadata {
     std::string requested_name;
     std::string dso_name;
     std::string backend_name;
+    std::uint32_t backend_api_abi{0};
     std::string trt_abi;
     std::string trt_runtime_version;
 };

@@ -1,0 +1,37 @@
+{
+  "name": "wan22-ti2v-5b-l0",
+  "hf_id": "Wan-AI/Wan2.2-TI2V-5B",
+  "bundle": "wan22-ti2v-5b-l0.trtfb",
+  "family": "wan2_2_ti2v",
+  "runtime_strategy": "diffusion_wan2_2_ti2v",
+  "task_strategy": "diffusion_media_generation",
+  "precision": "bf16",
+  "e2e_parallel_resource": "exclusive_gpu",
+  "build_timeout_s": 7200,
+  "build_args": {
+    "max_cache_length": 512
+  },
+  "testcases": [
+    {
+      "name": "wan22-ti2v-5b-l0",
+      "trace_id": "IT-E2E-WAN22-TI2V-5B-L0-01",
+      "model_type": "wan2_2_ti2v",
+      "ci_tier": "l0_only",
+      "runtime_timeout_s": 120,
+      "reference_backend": "invariant_only",
+      "oracle_level": "L4_invariants",
+      "user_contract": "diffusion_video",
+      "description": "Wan2.2 TI2V-5B source-bound bundle and native plugin inspection smoke",
+      "test_type": "diffusion",
+      "test_prompt": "Wan2.2 TI2V native bundle inspection smoke",
+      "stages": [
+        {
+          "name": "bundle_contract",
+          "required": true
+        }
+      ],
+      "skip_text_comparison": true,
+      "notes": "Premerge L0 builds the source-bound bundle and invokes the public native trtmc inspect command while strict-loading the explicitly staged Wan2.2 model DSO. It verifies the runtime strategy and all required bundle sections; it does not run generation or claim accuracy parity."
+    }
+  ]
+}

@@ -106,9 +106,10 @@ inline bool has_run_input_source(const CliArgs& args) {
 }
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text);
-// Parse a CSV of unsigned-64 integers (e.g. "0,1,2"). Returns nullopt when
-// any token fails to parse. Empty string returns an empty vector wrapped
-// in an optional (caller should treat empty CSV the same as no flag).
+// Parse a CSV of unsigned integers in the uint32_t range (e.g. "0,1,2").
+// Returns nullopt when any token fails to parse or exceeds UINT32_MAX. Empty
+// string returns an empty vector wrapped in an optional (caller should treat
+// empty CSV the same as no flag).
 std::optional<std::vector<std::uint64_t>> parse_seed_csv(const std::string& text);
 // Read one prompt per line from `path`. On failure returns an empty vector
 // and writes a human-readable message to `error`. Trailing newlines and

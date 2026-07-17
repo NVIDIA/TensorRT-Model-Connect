@@ -9,7 +9,7 @@
 // Compiled inside backend DSOs only (libtrtmc_backend_trt.so / _rtx.so).
 
 #include "runtime/backend/trt_logger.h"
-#include "trtmc/runtime/trt_module.h"
+#include "trtmc/runtime/trt_backend.h"
 
 #include <NvInfer.h>
 #include <cstddef>
@@ -29,7 +29,8 @@ class TrtModuleImpl final : public ITrtModule {
     // The engine must outlive this module (caller manages lifetime via keep_alive).
     TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
                   cudaStream_t stream, int32_t profile_idx = 0,
-                  void* distributed_communicator = nullptr);
+                  void* distributed_communicator = nullptr,
+                  const std::vector<ModuleExternalBinding>& external_bindings = {});
     ~TrtModuleImpl() override;
 
     TrtModuleImpl(const TrtModuleImpl&) = delete;
@@ -65,6 +66,10 @@ class TrtModuleImpl final : public ITrtModule {
     bool ok() const override { return ctx_ != nullptr; }
     void keep_alive(std::shared_ptr<void> resource) override;
 
+    // Internal diagnostics used by focused backend tests.
+    bool owns_device_buffer(const std::string& name) const;
+    bool has_host_output_staging(const std::string& name) const;
+
   private:
     struct BufferEntry {
         void* d_ptr{nullptr};
@@ -89,6 +94,7 @@ class TrtModuleImpl final : public ITrtModule {
     bool use_cuda_graph_{false};
     std::unique_ptr<CudaGraphExec> cuda_graph_;
     std::vector<std::shared_ptr<void>> keep_alive_;
+    std::unordered_map<std::string, void*> initial_external_bindings_;
     std::unordered_map<std::string, BufferEntry> buffers_;
     std::unordered_map<std::string, std::vector<uint8_t>> host_output_staging_;
     std::unordered_map<std::string, DeviceTensor> output_device_tensors_;
@@ -96,6 +102,9 @@ class TrtModuleImpl final : public ITrtModule {
     std::vector<TimingEvent> timing_events_;
 
     void allocate_buffers(nvinfer1::ICudaEngine* engine);
+    void
+    validate_initial_external_bindings(nvinfer1::ICudaEngine* engine,
+                                       const std::vector<ModuleExternalBinding>& external_bindings);
     void free_buffers();
     void detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io);
     void allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
@@ -112,7 +121,9 @@ class TrtModuleImpl final : public ITrtModule {
     bool begin_timing_event(TimingEvent& event);
     void finish_timing_event(TimingEvent event);
     void record_timed_enqueue();
-    bool bind_tensor_address(const std::string& name, const BufferEntry& entry);
+    void bind_tensor_address(const std::string& name, const BufferEntry& entry);
+    void require_ready(const char* operation) const;
+    void require_all_host_inputs(const TensorMap& inputs) const;
     void recreate_context_with_profile();
     void rebind_buffer_to_context(const std::string& name, const BufferEntry& entry);
     bool attach_distributed_communicator();

@@ -28,8 +28,8 @@ sha256 = "dfedfff91c3de652969fc0a5919ada367c2f3709f435c6c0275044b2c39d9f2e"
 path = "tests/runtime_strategy_matrix.yaml"
 reason = "JSON-formatted test data is consumed by strict JSON parsers; comments would change parse behavior."
 license = "Apache-2.0"
-source = "https://github.com/NVIDIA/TensorRT-Model-Connect/blob/c6462c95d2acec3e329398775006f6e4995a3954/tests/runtime_strategy_matrix.yaml"
-sha256 = "0ef45969c39ffae1bc760860f84a9cc0b9bb296cd6e45e7ad5a5dcf0aff15236"
+source = "https://github.com/NVIDIA/TensorRT-Model-Connect/blob/wan-2.2-support/tests/runtime_strategy_matrix.yaml"
+sha256 = "eba2d7c5a5e32b9ae07fcc0ad5b04538d35c85bd8a0d017ee9e2fb9d863c6224"
 
 [[exceptions]]
 path = "tests/e2e/models/bark/data/timing_cache/bark-small-gb300-trt11.2-fp16.cache"
@@ -37,3 +37,647 @@ reason = "Generated TensorRT timing-cache test data is binary and cannot carry a
 license = "Apache-2.0"
 source = "https://github.com/NVIDIA/TensorRT-Model-Connect/actions/runs/29229851009"
 sha256 = "c07a25e04c06374b847092c1d3accacb482c25da96276e13a9e8775e6aba78ca"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/LICENSE.txt"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/LICENSE.txt"
+sha256 = "3fc4b473a2c08768a8066bf7e4a58a1185060f3ad674f2ca9e2011bca4adf2ce"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_backend_base.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_backend_base.h"
+sha256 = "0bf3036d10bd80835ef4ccbc851072ab9e40ae93fb22d9dabd56c619f0852e9d"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend.h"
+sha256 = "08e1f6a68cd3dc8ed8e4ea0339df75fceb7b84a19abd903d845163318f499289"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/backend/backend_descriptor.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/backend/backend_descriptor.h"
+sha256 = "5b0e290b865734bd0cae0603aac85b9832c451241089b12893ec631603a37608"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/backend/device_properties.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/backend/device_properties.h"
+sha256 = "41683dff34af5f009ea4f8b3ae4f8382b0b79aaeb99ca8f984bf56ccdef8315b"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/backend/execution_helpers.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/backend/execution_helpers.h"
+sha256 = "a2c870dedc31198be2dbabf261ddee582fa9d72666a0c20ca4c4e9f94c204ce5"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/backend/kernel_cache.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/backend/kernel_cache.h"
+sha256 = "e846ace1c1b1a524e0a9504d0aecc3496238ae052495ba87d403f06c3dfcf9ba"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/backend/plan_helpers.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/backend/plan_helpers.h"
+sha256 = "c2ab3aa8cf694cd467b72a199f6a5a6f382baea7fd4fbd049f2a264c6963be44"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/context.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/context.h"
+sha256 = "8d1b2f15d4f78df6edbd8938be982f5c9490fdb69961de6b06c94778b337545b"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/cudnn_interface.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/cudnn_interface.h"
+sha256 = "5c01fb7acfe520cbfd6321c43398eb6d21896d6f9fc2d10ca0122276fcef9ffe"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/experimental/attention_utils.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/experimental/attention_utils.h"
+sha256 = "d2de920f069678e0f7eef056f5e34c2ba707b874cfea645b7cce2ca7b9f642f9"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/experimental/nvrtc_shim.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/experimental/nvrtc_shim.h"
+sha256 = "b707cad498c1d9efe0d6f79e5555284d5c52061c2170498c39730f8bf685803b"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/experimental/oss_engine_interface.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/experimental/oss_engine_interface.h"
+sha256 = "73053db1e9d055dc43bc404a2c9c74815cd4cf11367ea33d6a3fa13f00dae880"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/experimental/sm100_rms_norm_silu_engine.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/experimental/sm100_rms_norm_silu_engine.h"
+sha256 = "74136b15ba3794416aeb93a5920993a53d413ac9e0882d6249ac264f2512c217"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/experimental/sm100_rms_norm_silu_knobs.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/experimental/sm100_rms_norm_silu_knobs.h"
+sha256 = "e23cf98e36e9662c634ee849103d4a9dba91a97019361f2c74265bc4df04a696"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/experimental/sm100_sdpa_prefill_engine.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/experimental/sm100_sdpa_prefill_engine.h"
+sha256 = "3e9a95f47d6713b775eb324235057882b760a9bf0e6d64103c90f3082ff251a2"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/experimental/sm90_sdpa_prefill_engine.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/experimental/sm90_sdpa_prefill_engine.h"
+sha256 = "2e85177decb6b4d335abbc1d5c432fc53a5eb47403c5e78dbb930143987df6c1"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/generated/rms_norm_silu/sm100/ln_fwd_silu_kernel.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/generated/rms_norm_silu/sm100/ln_fwd_silu_kernel.h"
+sha256 = "8fcf7aee7e3d78bb3fd073575da6d222fd080f51f573fd544ad226e514dee426"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/generated/rms_norm_silu/sm100/ln_headers.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/generated/rms_norm_silu/sm100/ln_headers.h"
+sha256 = "7bb76e9c24f272a1c278d312446cabe45c0754b9bfa596b749432b0a1dd20531"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/generated/sdpa/sm100/prefill/full_seqlens/d128_fprop_kernel.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/generated/sdpa/sm100/prefill/full_seqlens/d128_fprop_kernel.h"
+sha256 = "2f90571971a75110e6dc924013a424b0dbcab2bdfee5f5dc43841dd1bba3918a"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/generated/sdpa/sm100/prefill/full_seqlens/d64_fprop_kernel.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/generated/sdpa/sm100/prefill/full_seqlens/d64_fprop_kernel.h"
+sha256 = "9e388baf08f644870a16df4bc61b1e4791f7ab88bcbbcb4cdf2406fed85fa3cb"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/generated/sdpa/sm90/prefill/full_seqlens/d128_fprop_kernel.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/generated/sdpa/sm90/prefill/full_seqlens/d128_fprop_kernel.h"
+sha256 = "c83f65a8fe438f0c77ad4f19e4e3d951eae3ee56e82c8e3ccbd1690c3ede174e"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/generated/sdpa/sm90/prefill/full_seqlens/d64_fprop_kernel.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/generated/sdpa/sm90/prefill/full_seqlens/d64_fprop_kernel.h"
+sha256 = "f87c6a92edc12733c21ff00e48695d55879a9d8a8a7d14a4611502607828d51d"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/graph_helpers.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/graph_helpers.h"
+sha256 = "a04807688417d60e946866374c2780ba79dcbc76b8ca75b6c8ea18735bd7c106"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/graph_interface.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/graph_interface.h"
+sha256 = "382affd0cc00cf2e72755685a87e938ed9acab8639bb786b801966ef4a72e1cf"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/graph_properties.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/graph_properties.h"
+sha256 = "04b8fa42a548dc7afc926783b7c5a4eb7e26a870b72fb135e4eab773c8cefb3b"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/knobs.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/knobs.h"
+sha256 = "58af40d4fcaa2fe36fd4872da53fb623cd4c27f30a9230930b0ad5bd8c1ac061"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/adaptive_layernorm.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/adaptive_layernorm.h"
+sha256 = "f59af9a28acccc5f50a28a215d87b7cfe48e96339133d6df559a6b35d3e0b017"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/batchnorm.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/batchnorm.h"
+sha256 = "0022d231fc10e4bef6165294feda923df452890289c06e70850fa54937d59d52"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/batchnorm_inference.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/batchnorm_inference.h"
+sha256 = "4ea9a83b07a82dbbd0f35e2570f43fd5da22cdcf11c2d7ed3dff3d50f9a00150"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/block_scale_dequantize.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/block_scale_dequantize.h"
+sha256 = "b5befee76e116483a16fcf4ff32248025f2a5718009355c7f46a047e39e2d4b0"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/block_scale_quantize.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/block_scale_quantize.h"
+sha256 = "1e180afe2bb171d526006a0dacf51445d190b8624d2b6dc5ff46b7206f01f67c"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/bn_finalize.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/bn_finalize.h"
+sha256 = "0a8cbd1d60b589a3f264e87a5c8f81752ac7d1aac93e5818dfd17bb1c5832ccb"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/concatenate.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/concatenate.h"
+sha256 = "9440825ca0660fb888fb38249ba91ecc931859d7375aec97bb62088e65f168dc"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/conv_dgrad.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/conv_dgrad.h"
+sha256 = "5f7ca3d8dc21c0a47aeb12e4472dd30f8f6faba84e999d0601e0f179fa721eaf"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/conv_fprop.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/conv_fprop.h"
+sha256 = "7e448a6af276cc2a511a20a683d426c282866818d9c58823cca6de82cb0322f6"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/conv_wgrad.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/conv_wgrad.h"
+sha256 = "a7268e6fa66285d535771e3272e0e8b41befa9cf88f503fd5c2febcb789eddbe"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/dbn.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/dbn.h"
+sha256 = "166a0658e9fea97bac86efcc8cb1d0b970fe2f16b9fad615b05122b79a6bf80a"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/dbn_weight.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/dbn_weight.h"
+sha256 = "a26f4c78a601e4ee8bf130b7080d8c9fedd4a69e52c5467702f9630fc6317ace"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/diagonal_band_mask.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/diagonal_band_mask.h"
+sha256 = "a69b32941fc8656495b680a9e40fa1ad417d541a2a8a4706df9bbf3f8113deb2"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/dln.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/dln.h"
+sha256 = "0620685fb73a761800604dc6ac63efb4731a4287f49e80b30f433dbc612eb213"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/genstats.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/genstats.h"
+sha256 = "b161bb26751544f3d966b1185da03a3d52932c36814d0635db366eeafec6269e"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/instancenorm.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/instancenorm.h"
+sha256 = "48a34efa87559d11a24c388399eef7f234e335a343df1b2219ba662b78f3fa47"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/layernorm.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/layernorm.h"
+sha256 = "a2a240773d7ce7bb4d45bffe6f2241e52ec49a543aaf29d5a4bfe1426a500fde"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/matmul.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/matmul.h"
+sha256 = "44d0393885c0658574744e1403b995a0868c139892d0b0b06e2c7420f1953174"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/matmul_fp8.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/matmul_fp8.h"
+sha256 = "b40f214d1925016dcb0e75a40c5145cdd41d7a6cf03f98591a1e5b9e500e22d4"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/moe_grouped_matmul.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/moe_grouped_matmul.h"
+sha256 = "414535d2e2ed06669ed75df585c2e99d0127f79328e7a6cc05388a6e6e0f2016"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/moe_grouped_matmul_bwd.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/moe_grouped_matmul_bwd.h"
+sha256 = "cf0b4108d259c6019efdb4744d9c98380d47f65d711bac85ed1a61bbf6e8eb5a"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/paged_cache_load.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/paged_cache_load.h"
+sha256 = "18f9235ba88f30e253b1e00db8598730874806e03bfe3cb8ba984a56db14b8a8"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/pointwise.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/pointwise.h"
+sha256 = "90bba92be0b358023973025f3a2a1558fcc45f8bbf4a3dc167152784eeaacc50"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/reduction.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/reduction.h"
+sha256 = "f1b5b0afb02ce6880a45cce9c4ef0c316a0da09d0aa341442d4c48845adb3237"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/resample.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/resample.h"
+sha256 = "8fbd8c69922a4733e39d411f221d76a264299c311507f48a9eeb45d4e5982f25"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/reshape.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/reshape.h"
+sha256 = "11402377f75c052069d499ccd9dba4c1dab5703a678c5cd2330f0a5429999038"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/rmsnorm.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/rmsnorm.h"
+sha256 = "77320a419c6d148dd8e17bc9a4112d425ce7d5270233aa86530c95a99887e41f"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/rng.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/rng.h"
+sha256 = "332815702cd5f9b09bf746978f6a7b28ebfcc11fa9acf86bafaf01d57a304bba"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/scaled_dot_product_flash_attention.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/scaled_dot_product_flash_attention.h"
+sha256 = "7f6a292f78710ca823fe7a90bea81395ab6bd60be7370a314119ad5b7d0eb4d6"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/sdpa_fp8_bwd.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/sdpa_fp8_bwd.h"
+sha256 = "4a2dbf5ac3a6a1aefbbf5806bf7a48f672f6c883e73a26236cf823562d75acfc"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/sdpa_support_surface.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/sdpa_support_surface.h"
+sha256 = "1b93ce0fbab8c759aca764b7e717a605cb9796397a0556523dbf56aa6dd6e47d"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/slice.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/slice.h"
+sha256 = "422e82a1be680ff6245e405b606b3384ebd6964eb76bffdff21dcb415b109aa4"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node/softmax.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node/softmax.h"
+sha256 = "d0bc1fd5a80c9a95b8866ceb81b7ef4872c168191a25812cf17681cc308f50e9"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/node_interface.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/node_interface.h"
+sha256 = "6d8eb15915c1dbc4dd45fa9f023b8a5122c5ba746e3413b7a98aa117bf346fb0"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/plans.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/plans.h"
+sha256 = "2e2ea4fc3398bf5efda895314924db3ce18e876fcee16a14e51c8f376b873f8c"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/thirdparty/nlohmann/LICENSE.MIT"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/thirdparty/nlohmann/LICENSE.MIT"
+sha256 = "86b998c792894ccb911a1cb7994f7a9652894e7a094c0b5e45be2f553f45cf14"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/thirdparty/nlohmann/json.hpp"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/thirdparty/nlohmann/json.hpp"
+sha256 = "21efa2f26ffa8b14b87f67ff8371fde142f237dae48bdb1efb5ffc3b364afc4d"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/utils/attn_score_modifiers.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/utils/attn_score_modifiers.h"
+sha256 = "cc544294819aec339f5f4cb591314282996399939cd5d4fa56c10e04cb4e1dbd"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend/utils/serialize.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend/utils/serialize.h"
+sha256 = "66e274b9a510ce938f8d933e9e4eefb12646547ae497a10ca12be773aac27855"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_ConvDesc.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_ConvDesc.h"
+sha256 = "2c73f25149a964950de190f9e8e541a9d1e7bba27875ae108ee428a3390782fc"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_Engine.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_Engine.h"
+sha256 = "7357d95e00a3de32d43ebd7e728026d3bf652a60f9c30a4affcd6d4f2f93413c"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_EngineConfig.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_EngineConfig.h"
+sha256 = "5620a2bed62fa3a2062e6687785bb2890854e928c8f220e2937088f7c3397a78"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_EngineConfigGenerator.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_EngineConfigGenerator.h"
+sha256 = "8552f99c2ae05aa64dcc0617e257ad9c3adcf0f622635a83a8c023262f5a21f4"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_EngineFallbackList.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_EngineFallbackList.h"
+sha256 = "9337d79b1f24224f52c844cfe50b916068db91f5bfe6b85b4fe61578eb4561d6"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_Errata.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_Errata.h"
+sha256 = "7eec818011e4eace4d24453c850b827e4af6c637d58401e08b1708a50e7bf3d5"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_ExecutionPlan.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_ExecutionPlan.h"
+sha256 = "152bbd554aebfa9648509c58a374a1e755c012fad44e233ccd4e1692d5ec7c29"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_ExecutionPlanCache.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_ExecutionPlanCache.h"
+sha256 = "b4276725fcb4cf43fbf24c3660a88ac6c78d04291acd04a9d1e3156bba690078"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_Filters.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_Filters.h"
+sha256 = "40883b22f6eaf5040c2d02f1b0bb3eb2abf8d26915d58375e5e95261a42b528b"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_Heuristics.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_Heuristics.h"
+sha256 = "6b399b10d51d0e9c633e5b3a1cc6f441dee3089a59dc4800d136c8e564b0ff8e"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_Logging.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_Logging.h"
+sha256 = "ade751b7d893dd6289eb0feba5903e20d42f1df4a053ef00b9b210c665f05e64"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_MatMulDesc.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_MatMulDesc.h"
+sha256 = "527df7fb3f3bacd1ea8a41e07a6309b4449a8670a145bf573f83c133f879c5e3"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_Operation.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_Operation.h"
+sha256 = "0a992d543b79ff548be0098da979de782fb03bd44ae9c6f7453938d942d7ced1"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_OperationGraph.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_OperationGraph.h"
+sha256 = "f01b473e02e45c49f0dfabbfe360e0ca85773293a83f91b5aed4b18bea137552"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_PointWiseDesc.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_PointWiseDesc.h"
+sha256 = "2ffa66ef4e4551da9ef35eb461049f280ff936105e9db910e2cbeed8dc9ed2ac"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_ReductionDesc.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_ReductionDesc.h"
+sha256 = "7341ba8b60a26cd3bed8e2dee4661f776db34e749dfcff050ea55d04f7f720ec"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_Reorder_Tensor.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_Reorder_Tensor.h"
+sha256 = "e0c92c79506627c3acc006730b73d42471ecd149856b0a7f5d4c808b5e670984"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_Resample.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_Resample.h"
+sha256 = "1037e9071f1a9ca69e94ce5205210389fcee8ddbc3358324bfe53eb35231d98a"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_Rng.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_Rng.h"
+sha256 = "b703b6cb6d558adc138ac1463ee6cc5ba6ac28c843306b129c1c2ca925768eee"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_Tensor.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_Tensor.h"
+sha256 = "646ffded2cd3fe405789642afed36b92940056c21704ad9971d00bc327207e25"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_VariantPack.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_VariantPack.h"
+sha256 = "e33727c51e0f300e2bb92f6a3bf4fa8946cf004a8a269ff691e2113662c83cc6"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_find_plan.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_find_plan.h"
+sha256 = "a27bbfaa5352f9be32891faf2c7095a0b1ea950cdda9588e84fcc47cdbae4e30"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_get_plan.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_get_plan.h"
+sha256 = "132c91f44afe387ba73b887dece4c20098fe1cd7ea32756d8739ff1256cd7f71"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_shim.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_shim.h"
+sha256 = "c7de3eb5a9dd3b881907c5ba1fe27d8247372900a4763d308f714faa1f5a6233"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_utils.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_utils.h"
+sha256 = "37572c4a651626853055230bcb898fc788dce90521bf22dfc59f9a4579776723"
+
+[[exceptions]]
+path = "python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/cudnn_frontend_version.h"
+reason = "Vendored cuDNN frontend v1.22.1 source snapshot; preserve the upstream MIT-licensed bytes unchanged."
+license = "MIT"
+source = "https://github.com/NVIDIA/cudnn-frontend/blob/a91f0e04dcea10515f0f776fc5a89535e316a9c8/include/cudnn_frontend_version.h"
+sha256 = "0570ba5be314b51e2f788790115819b54d9e954d376eeea8a7f14a8a8f884e06"

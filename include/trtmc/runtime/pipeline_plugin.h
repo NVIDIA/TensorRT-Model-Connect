@@ -22,6 +22,7 @@ namespace trtmc {
 // Forward declaration — defined in src/bundle/bundle_format.h (internal).
 // PipelineContext holds a const reference, so no full definition needed here.
 struct BundleFile;
+class BundleSectionReader;
 class IBackend;
 
 // Tensor I/O name mapping — read from the bundle's config.json "io_map" object.
@@ -83,6 +84,9 @@ struct PipelineContext {
     // namespace via ctx.runtime_config->get<T>("ns", "field"). The bundle
     // the pointer refers to is owned by the factory and outlives create().
     const ::trtmc::config::ConfigBundle* runtime_config{nullptr};
+    // The exact open file used to materialize `bundle`. Staged plugins retain
+    // this reader so later lazy loads cannot be redirected by path replacement.
+    std::shared_ptr<BundleSectionReader> bundle_reader;
 };
 
 // Plugin interface. Each plugin registers itself with the PipelineRegistry

@@ -171,3 +171,7 @@ class Sha256 {
 };
 
 } // namespace trtmc::internal
+
+namespace trtmc::detail {
+using Sha256 = ::trtmc::internal::Sha256;
+} // namespace trtmc::detail

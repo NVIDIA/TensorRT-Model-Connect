@@ -22,12 +22,14 @@
 //                        [--task transcribe|translate] [--timestamps]
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
+//                        [--negative-prompt "text"] [--height N] [--width N]
 //   trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]
 //   trtmc detect          <bundle.trtfb> --image PATH [--output-json PATH]
 //   trtmc inspect         <bundle.trtfb> [--list-engines]
 //   trtmc version
 
 #include "cli/args.h"
+#include "cli/video_generation_config.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -126,6 +128,9 @@ normalize_explicit_image_batch_seeds(const std::vector<std::uint64_t>& explicit_
     std::vector<std::uint32_t> out;
     out.reserve(static_cast<std::size_t>(count));
     for (auto v : explicit_list) {
+        if (v > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("explicit image batch seeds must not exceed UINT32_MAX");
+        }
         out.push_back(static_cast<std::uint32_t>(v));
     }
     return out;
@@ -708,10 +713,7 @@ int cmd_generate_video(const CliArgs& args) {
 
     auto pipeline = trtmc::load(args.bundle_path, make_load_options(args));
 
-    trtmc::GenerateConfig cfg;
-    cfg.num_steps = args.num_steps;
-    cfg.guidance_scale = args.guidance_scale;
-    cfg.seed = args.seed;
+    auto cfg = trtmc::cli::make_video_generate_config(args);
     if (!args.initial_latents_raw.empty()) {
         std::string error;
         auto latents = read_float32_raw_file(args.initial_latents_raw, error);

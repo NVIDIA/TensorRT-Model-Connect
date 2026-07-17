@@ -26,6 +26,7 @@ namespace {
 namespace fs = std::filesystem;
 
 using RegisterModelPluginFn = void (*)(PipelineRegistry*);
+using ModelPluginApiAbiFn = std::uint32_t (*)();
 using ModelPluginIdFn = const char* (*)();
 
 struct ModelPluginCandidate {
@@ -166,6 +167,28 @@ void close_model_plugin_candidate(ModelPluginCandidate& candidate) {
     candidate.handle = nullptr;
 }
 
+bool model_plugin_api_abi_matches(const fs::path& candidate, void* handle,
+                                  std::vector<std::string>& errors) {
+    dlerror();
+    auto* abi_sym = dlsym(handle, "trtmc_model_plugin_api_abi_version");
+    const char* abi_err = dlerror();
+    if (abi_err != nullptr || abi_sym == nullptr) {
+        errors.push_back(candidate.string() +
+                         ": missing trtmc_model_plugin_api_abi_version; rebuild the model "
+                         "plugin from the same TensorRT-Model-Connect source revision");
+        return false;
+    }
+
+    const auto actual = reinterpret_cast<ModelPluginApiAbiFn>(abi_sym)();
+    if (actual == kTrtmcModelPluginApiAbiVersion)
+        return true;
+
+    errors.push_back(candidate.string() + ": model plugin API ABI " + std::to_string(actual) +
+                     " is incompatible with runtime ABI " +
+                     std::to_string(kTrtmcModelPluginApiAbiVersion));
+    return false;
+}
+
 bool model_plugin_id_matches(const fs::path& candidate, void* handle, const std::string& model_id,
                              std::vector<std::string>& errors) {
     dlerror();
@@ -197,6 +220,10 @@ std::optional<ModelPluginCandidate> open_model_plugin_candidate(const fs::path& 
     }
 
     ModelPluginCandidate candidate{path, handle, nullptr};
+    if (!model_plugin_api_abi_matches(path, handle, errors)) {
+        close_model_plugin_candidate(candidate);
+        return std::nullopt;
+    }
     if (!model_plugin_id_matches(path, handle, model_id, errors)) {
         close_model_plugin_candidate(candidate);
         return std::nullopt;

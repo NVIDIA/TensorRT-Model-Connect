@@ -135,7 +135,9 @@ std::optional<std::vector<std::uint64_t>> parse_seed_csv(const std::string& text
             std::size_t consumed = 0;
             const std::string slice = token.substr(begin, end - begin);
             const unsigned long long value = std::stoull(slice, &consumed, 10);
-            if (consumed != slice.size())
+            const bool has_negative_sign = !slice.empty() && slice.front() == '-';
+            if (consumed != slice.size() || has_negative_sign ||
+                value > std::numeric_limits<std::uint32_t>::max())
                 return false;
             out.push_back(static_cast<std::uint64_t>(value));
         } catch (...) {
@@ -214,7 +216,8 @@ void print_usage() {
            "                       Loads bundle once, reads prompts from stdin, streams PCM to "
            "stdout.\n"
            "  trtmc generate-video  <bundle.trtfb> --prompt \"text\" --output DIR [--num-steps N] "
-           "[--guidance-scale S] [--initial-latents-raw PATH]\n"
+           "[--guidance-scale S] [--negative-prompt \"text\"] [--height N] [--width N] "
+           "[--initial-latents-raw PATH]\n"
            "  trtmc embed           <bundle.trtfb> --prompt \"text\" [--hf-python PATH]\n"
            "  trtmc rerank          <bundle.trtfb> --prompt \"query\" --document \"text\" "
            "[--hf-python PATH]\n"
@@ -422,7 +425,14 @@ CliArgs parse_args(int argc, char** argv) {
                 }
                 args.seed_list = std::move(*parsed);
             } else {
-                args.seed = std::atoi(value.c_str());
+                int parsed = 0;
+                if (!parse_strict_int(value.c_str(), parsed) || parsed < -1) {
+                    args.parse_error = true;
+                    args.error_message =
+                        "--seed expects an integer >= -1 or a CSV of unsigned integers";
+                    return args;
+                }
+                args.seed = parsed;
             }
             continue;
         }
@@ -503,11 +513,23 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if ((arg == "--num-steps" || arg == "--num-inference-steps") && need_value(arg)) {
-            args.num_steps = std::atoi(argv[++i]);
+            auto value = parse_int_value(arg, "an integer > 0");
+            if (!value || *value <= 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer > 0";
+                return args;
+            }
+            args.num_steps = *value;
             continue;
         }
         if (arg == "--guidance-scale" && need_value(arg)) {
-            args.guidance_scale = static_cast<float>(std::atof(argv[++i]));
+            auto value = parse_float_value(arg, "a finite number >= 0");
+            if (!value || *value < 0.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number >= 0";
+                return args;
+            }
+            args.guidance_scale = *value;
             continue;
         }
         if (arg == "--sde-gamma" && need_value(arg)) {
@@ -519,11 +541,23 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--height" && need_value(arg)) {
-            args.diffusion_height = std::atoi(argv[++i]);
+            auto value = parse_int_value(arg, "an integer > 0");
+            if (!value || *value <= 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer > 0";
+                return args;
+            }
+            args.diffusion_height = *value;
             continue;
         }
         if (arg == "--width" && need_value(arg)) {
-            args.diffusion_width = std::atoi(argv[++i]);
+            auto value = parse_int_value(arg, "an integer > 0");
+            if (!value || *value <= 0) {
+                args.parse_error = true;
+                args.error_message = arg + " expects an integer > 0";
+                return args;
+            }
+            args.diffusion_width = *value;
             continue;
         }
         if ((arg == "--threshold" || arg == "--score-threshold") && need_value(arg)) {
@@ -535,7 +569,13 @@ CliArgs parse_args(int argc, char** argv) {
             continue;
         }
         if (arg == "--cfg-scale" && need_value(arg)) {
-            args.cfg_scale = static_cast<float>(std::atof(argv[++i]));
+            auto value = parse_float_value(arg, "a finite number >= 0");
+            if (!value || *value < 0.0F) {
+                args.parse_error = true;
+                args.error_message = arg + " expects a finite number >= 0";
+                return args;
+            }
+            args.cfg_scale = *value;
             continue;
         }
         if (arg == "--greedy") {

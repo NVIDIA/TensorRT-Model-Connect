@@ -24,6 +24,9 @@ namespace {
 
 namespace fs = std::filesystem;
 
+using CreateBackendFn = IBackend* (*)();
+using DestroyBackendFn = void (*)(IBackend*);
+
 std::string exe_dir() {
     char buf[4096];
     ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -38,12 +41,16 @@ std::string exe_dir() {
 struct CachedBackend {
     void* dl_handle{nullptr};
     IBackend* backend{nullptr};
+    DestroyBackendFn destroy{nullptr};
     BackendLoadMetadata metadata;
 };
 
 std::mutex g_mu;
 std::unordered_map<std::string, CachedBackend> g_cache;
 std::unordered_map<std::string, void*> g_preloaded_dependencies;
+
+constexpr const char* kBackendCreateSymbol = "trtmc_create_backend_v1";
+constexpr const char* kBackendDestroySymbol = "trtmc_destroy_backend_v1";
 
 void cleanup_backends();
 
@@ -58,10 +65,8 @@ void register_cleanup_once() {
 void cleanup_backends() {
     for (auto& [name, entry] : g_cache) {
         if (entry.backend) {
-            auto destroy = reinterpret_cast<void (*)(IBackend*)>(
-                dlsym(entry.dl_handle, "trtmc_destroy_backend"));
-            if (destroy)
-                destroy(entry.backend);
+            if (entry.destroy)
+                entry.destroy(entry.backend);
             entry.backend = nullptr;
         }
         if (entry.dl_handle) {
@@ -179,28 +184,69 @@ const char* optional_string_symbol(void* handle, const char* symbol) {
     return value ? value : "";
 }
 
+std::uint32_t require_backend_api_abi(void* handle, const std::string& dso_name) {
+    dlerror();
+    auto version_fn =
+        reinterpret_cast<std::uint32_t (*)()>(dlsym(handle, "trtmc_backend_api_abi_version"));
+    const char* symbol_error = dlerror();
+    if (!version_fn || symbol_error != nullptr) {
+        dlclose(handle);
+        throw std::runtime_error(
+            dso_name + " is incompatible: missing required trtmc_backend_api_abi_version symbol; "
+                       "rebuild the core and backend DSOs from the same source revision");
+    }
+
+    const std::uint32_t version = version_fn();
+    if (version != kTrtmcBackendApiAbiVersion) {
+        dlclose(handle);
+        throw std::runtime_error(
+            dso_name + " has TRTMC backend API ABI " + std::to_string(version) +
+            ", but this runtime requires " + std::to_string(kTrtmcBackendApiAbiVersion) +
+            "; rebuild the core and backend DSOs from the same source revision");
+    }
+    return version;
+}
+
 CachedBackend create_backend(const std::string& requested_name, const std::string& dso_name,
                              void* handle) {
-    auto create_fn = reinterpret_cast<IBackend* (*)()>(dlsym(handle, "trtmc_create_backend"));
-    if (!create_fn) {
+    // Validate the C++ interface/layout contract before calling the factory or
+    // any virtual method on the object returned by this independently loaded
+    // DSO. TensorRT's ABI tag is a separate compatibility dimension.
+    const std::uint32_t backend_api_abi = require_backend_api_abi(handle, dso_name);
+
+    dlerror();
+    auto create_fn = reinterpret_cast<CreateBackendFn>(dlsym(handle, kBackendCreateSymbol));
+    const char* create_error = dlerror();
+    if (!create_fn || create_error != nullptr) {
         dlclose(handle);
-        throw std::runtime_error(dso_name + " loaded but missing trtmc_create_backend symbol");
+        throw std::runtime_error(dso_name + " loaded but missing " + kBackendCreateSymbol +
+                                 " symbol");
+    }
+
+    dlerror();
+    auto destroy_fn = reinterpret_cast<DestroyBackendFn>(dlsym(handle, kBackendDestroySymbol));
+    const char* destroy_error = dlerror();
+    if (!destroy_fn || destroy_error != nullptr) {
+        dlclose(handle);
+        throw std::runtime_error(dso_name + " loaded but missing " + kBackendDestroySymbol +
+                                 " symbol");
     }
 
     IBackend* backend = create_fn();
     if (!backend) {
         dlclose(handle);
-        throw std::runtime_error(dso_name + ": trtmc_create_backend() returned nullptr");
+        throw std::runtime_error(dso_name + ": " + kBackendCreateSymbol + "() returned nullptr");
     }
 
     BackendLoadMetadata metadata;
     metadata.requested_name = requested_name;
     metadata.dso_name = dso_name;
     metadata.backend_name = backend->name() ? backend->name() : "";
+    metadata.backend_api_abi = backend_api_abi;
     metadata.trt_abi = optional_string_symbol(handle, "trtmc_backend_abi");
     metadata.trt_runtime_version = optional_string_symbol(handle, "trtmc_backend_runtime_version");
 
-    return CachedBackend{handle, backend, std::move(metadata)};
+    return CachedBackend{handle, backend, destroy_fn, std::move(metadata)};
 }
 
 std::string backend_dso_name(const std::string& backend_name) {

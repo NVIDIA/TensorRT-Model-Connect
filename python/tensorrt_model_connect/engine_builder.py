@@ -486,6 +486,50 @@ def _is_hf_model_dir(path: Path) -> bool:
     return (path / "config.json").exists() or (path / "model_index.json").exists()
 
 
+def _resolve_diffusion_entrypoint(model_dir_path: Path) -> tuple[dict, object | None] | None:
+    """Resolve a diffusion-style entrypoint and its native family plugin.
+
+    Diffusers repositories use ``model_index.json``.  Some official native
+    checkpoints, including Wan2.2-TI2V-5B, instead put ``_class_name`` in the
+    root ``config.json``.  Treat the latter as a component build only when a
+    registered diffusion family actually claims that class; ordinary
+    Transformers configs therefore keep the legacy single-engine path.
+
+    A ``model_index.json`` remains authoritative even when its plugin is not
+    installed so callers preserve the existing, diffusion-specific error.
+    """
+    model_index_path = model_dir_path / "model_index.json"
+    if model_index_path.is_file():
+        raw = json.loads(model_index_path.read_text())
+        if not isinstance(raw, dict):
+            raise ValueError(f"Diffusion model index must be a JSON object: {model_index_path}")
+        pipeline_class = str(raw.get("_class_name", "") or "")
+        plugin = find_diffusion_plugin(pipeline_class)
+        if plugin is None:
+            plugin = find_plugin(pipeline_class.lower())
+        return raw, plugin
+
+    config_path = model_dir_path / "config.json"
+    if not config_path.is_file():
+        return None
+    raw = json.loads(config_path.read_text())
+    if not isinstance(raw, dict):
+        raise ValueError(f"Model config must be a JSON object: {config_path}")
+    pipeline_class = raw.get("_class_name")
+    if not isinstance(pipeline_class, str) or not pipeline_class:
+        return None
+
+    # Prefer the model_type/config match for native checkpoints.  This avoids
+    # ambiguity when multiple generations claim a common pipeline alias.
+    plugin = find_plugin(ModelConfig.from_json(json.dumps(raw)))
+    claimed_classes = getattr(plugin, "pipeline_classes", ()) if plugin is not None else ()
+    if pipeline_class not in claimed_classes:
+        plugin = find_diffusion_plugin(pipeline_class)
+    if plugin is None:
+        return None
+    return raw, plugin
+
+
 def _is_family_model_dir(path: Path) -> bool:
     """Return True when a family-owned config adapter can parse the directory."""
     return path.is_dir() and resolve_config_from_model_dir(path) is not None
@@ -762,10 +806,13 @@ def build_bundle(
     build_timing["output_path"] = str(output_path)
     _write_build_timing(build_timing)
 
-    # Detect diffusers format (model_index.json present)
-    is_diffusers = (model_dir_path / "model_index.json").exists()
+    # Detect both conventional diffusers repositories and official native
+    # diffusion checkpoints whose root config declares a claimed
+    # ``_class_name`` (Wan2.2-TI2V-5B).
+    diffusion_entrypoint = _resolve_diffusion_entrypoint(model_dir_path)
 
-    if is_diffusers:
+    if diffusion_entrypoint is not None:
+        diffusion_config, diffusion_plugin = diffusion_entrypoint
         fp8_scales = getattr(build_bundle, '_fp8_scales', None)
         save_fp8_scales = getattr(build_bundle, '_save_fp8_scales', None)
         _build_diffusion_bundle(
@@ -777,7 +824,9 @@ def build_bundle(
             diffusion_overrides=diffusion_overrides,
             build_timing=build_timing,
             parallel_config=parallel,
-            max_batch_size=max_batch_size)
+            max_batch_size=max_batch_size,
+            pipeline_config=diffusion_config,
+            diffusion_plugin=diffusion_plugin)
         return
 
     # 1. Parse config
@@ -1367,21 +1416,27 @@ def _build_diffusion_bundle(
     build_timing: dict | None = None,
     parallel_config: ParallelConfig | None = None,
     max_batch_size: int = 1,
+    pipeline_config: dict | None = None,
+    diffusion_plugin=None,
 ) -> None:
-    """Build a diffusion model bundle from a diffusers-format directory."""
+    """Build a diffusion bundle from a diffusers or claimed native entrypoint."""
     if build_timing is None:
         build_timing = _new_build_timing()
     parallel = normalize_parallel_config(parallel_config)
-    # Parse model_index.json to determine pipeline type
-    model_index = json.loads(
-        (model_dir_path / "model_index.json").read_text())
-    pipeline_class = model_index.get("_class_name", "")
+    if pipeline_config is None:
+        resolved_entrypoint = _resolve_diffusion_entrypoint(model_dir_path)
+        if resolved_entrypoint is None:
+            raise ValueError(f"No diffusion entrypoint found in {model_dir_path}")
+        pipeline_config, resolved_plugin = resolved_entrypoint
+        if diffusion_plugin is None:
+            diffusion_plugin = resolved_plugin
+    pipeline_class = pipeline_config.get("_class_name", "")
 
     print(f"[trtmc build] Diffusion pipeline: {pipeline_class}",
           file=sys.stderr)
 
     # Auto-discover plugin from pipeline_classes attribute
-    plugin = find_diffusion_plugin(pipeline_class)
+    plugin = diffusion_plugin or find_diffusion_plugin(pipeline_class)
     if plugin is None:
         # Fallback: try model_type-based lookup with lowercased pipeline class
         plugin = find_plugin(pipeline_class.lower())
@@ -1395,7 +1450,7 @@ def _build_diffusion_bundle(
     if parallel.enabled:
         require_tensorrt_11_for_tensor_parallel(
             parallel, feature="Diffusion tensor-parallel builds")
-    config = ModelConfig(model_type=model_type, raw=model_index)
+    config = ModelConfig(model_type=model_type, raw=pipeline_config)
     config.raw["max_cache_length"] = max_cache_length
     config.raw["_fp32_layers"] = sorted(set(fp32_layers or ()))
     if diffusion_overrides:
