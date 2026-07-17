@@ -32,6 +32,7 @@ std::vector<float> preprocess_sam3_image(const float* hwc_pixels, int32_t height
 std::shared_ptr<Sam3VideoVisionWorkspace> make_sam3_video_vision_workspace(
     TrtModule& vision_encoder, TrtModule& core_engine, TrtModule& tracker_init_engine,
     TrtModule& tracker_step_engine, TrtModule& tracker_memory_engine,
+    TrtModule& tracker_hard_memory_engine, TrtModule& tracker_hard_memory_batch2_engine,
     TrtModule* tracker_step_batch2_engine, TrtModule* tracker_memory_batch2_engine,
     TrtModule* parallel_tracker_init_engine);
 
@@ -41,6 +42,7 @@ Sam3VideoFrameProcessor make_sam3_video_frame_processor(
     TrtModule& vision_encoder, TrtModule& core_engine, TrtModule& tracker_init_engine,
     TrtModule& tracker_step_engine, TrtModule& tracker_memory_engine, Sam3Config config,
     Sam3VideoTextInput text_input, std::shared_ptr<Sam3VideoVisionWorkspace> vision_workspace,
+    TrtModule& tracker_hard_memory_engine, TrtModule& tracker_hard_memory_batch2_engine,
     TrtModule* tracker_step_batch2_engine, TrtModule* tracker_memory_batch2_engine,
     TrtModule* parallel_tracker_init_engine);
 

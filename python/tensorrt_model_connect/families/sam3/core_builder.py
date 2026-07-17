@@ -105,19 +105,28 @@ def _attention(
     q_seq: int,
     kv_seq: int,
     mask=None,
+    reduced_precision: str | None = "fp16",
 ):
     graph_ops = _graph_ops()
     head_dim = hidden_size // num_heads
     q = _linear(network, query, weights, f"{prefix}.q_proj", hidden_size, hidden_size)
     k = _linear(network, key, weights, f"{prefix}.k_proj", hidden_size, hidden_size)
     v = _linear(network, value, weights, f"{prefix}.v_proj", hidden_size, hidden_size)
-    # Keep projections and residuals in FP32, but expose the attention core as a
-    # narrow FP16 island so TensorRT can select fused Blackwell MHA tactics.
-    q = network.add_cast(q, _trt().float16).get_output(0)
-    k = network.add_cast(k, _trt().float16).get_output(0)
-    v = network.add_cast(v, _trt().float16).get_output(0)
-    if mask is not None:
-        mask = network.add_cast(mask, _trt().float16).get_output(0)
+    # The optimized detector attention uses narrow reduced-precision islands.
+    # Meta's video predictor runs under BF16 autocast, so the image-conditioned
+    # geometry CLS uses BF16 rather than the FP16 islands retained elsewhere.
+    if reduced_precision is not None:
+        reduced_dtype = {
+            "bf16": _trt().bfloat16,
+            "fp16": _trt().float16,
+        }.get(reduced_precision)
+        if reduced_dtype is None:
+            raise ValueError(f"unsupported SAM3 attention precision {reduced_precision!r}")
+        q = network.add_cast(q, reduced_dtype).get_output(0)
+        k = network.add_cast(k, reduced_dtype).get_output(0)
+        v = network.add_cast(v, reduced_dtype).get_output(0)
+        if mask is not None:
+            mask = network.add_cast(mask, reduced_dtype).get_output(0)
     ctx = graph_ops.add_attention_from_rows(
         network,
         q,
@@ -409,6 +418,137 @@ def _weighted_text_pool(
     return network.add_elementwise(total, count, trt.ElementWiseOperation.DIV).get_output(0)
 
 
+def _empty_geometry_prompt(
+    network,
+    vision_features,
+    vision_position,
+    weights: WeightDict,
+    *,
+    hidden_size: int,
+    vision_seq_len: int,
+    num_layers: int,
+    num_heads: int,
+    intermediate_size: int,
+    hidden_act: str,
+    layer_norm_eps: float,
+    dtype=np.float32,
+):
+    """Encode Meta SAM3's always-present empty-geometry CLS prompt."""
+    geometry = _const(
+        network,
+        (1, hidden_size),
+        weights["geometry_encoder.cls_embed.weight"],
+        dtype=dtype,
+    )
+    geometry = _linear(
+        network,
+        geometry,
+        weights,
+        "geometry_encoder.final_proj",
+        hidden_size,
+        hidden_size,
+    )
+    geometry = _layer_norm(
+        network,
+        geometry,
+        weights,
+        "geometry_encoder.prompt_layer_norm",
+        hidden_size,
+        layer_norm_eps,
+    )
+    vision_with_position = network.add_elementwise(
+        vision_features,
+        vision_position,
+        _trt().ElementWiseOperation.SUM,
+    ).get_output(0)
+
+    for layer_idx in range(num_layers):
+        prefix = f"geometry_encoder.layers.{layer_idx}"
+
+        residual = geometry
+        normed = _layer_norm(
+            network,
+            geometry,
+            weights,
+            f"{prefix}.layer_norm1",
+            hidden_size,
+            layer_norm_eps,
+        )
+        attended = _attention(
+            network,
+            normed,
+            normed,
+            normed,
+            weights,
+            f"{prefix}.self_attn",
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            q_seq=1,
+            kv_seq=1,
+            reduced_precision="bf16",
+        )
+        geometry = network.add_elementwise(
+            residual, attended, _trt().ElementWiseOperation.SUM
+        ).get_output(0)
+
+        residual = geometry
+        normed = _layer_norm(
+            network,
+            geometry,
+            weights,
+            f"{prefix}.layer_norm2",
+            hidden_size,
+            layer_norm_eps,
+        )
+        attended = _attention(
+            network,
+            normed,
+            vision_with_position,
+            vision_features,
+            weights,
+            f"{prefix}.cross_attn",
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            q_seq=1,
+            kv_seq=vision_seq_len,
+            reduced_precision="bf16",
+        )
+        geometry = network.add_elementwise(
+            residual, attended, _trt().ElementWiseOperation.SUM
+        ).get_output(0)
+
+        residual = geometry
+        normed = _layer_norm(
+            network,
+            geometry,
+            weights,
+            f"{prefix}.layer_norm3",
+            hidden_size,
+            layer_norm_eps,
+        )
+        mlp = _sam3_mlp(
+            network,
+            normed,
+            weights,
+            f"{prefix}.mlp",
+            hidden_size,
+            intermediate_size,
+            hidden_act,
+        )
+        geometry = network.add_elementwise(
+            residual, mlp, _trt().ElementWiseOperation.SUM
+        ).get_output(0)
+
+    return _layer_norm(
+        network,
+        geometry,
+        weights,
+        "geometry_encoder.output_layer_norm",
+        hidden_size,
+        layer_norm_eps,
+    )
+
+
 def build_sam3_core_engine(
     weights: WeightDict,
     *,
@@ -423,12 +563,17 @@ def build_sam3_core_engine(
     detr_decoder_layers: int,
     detr_decoder_heads: int,
     detr_decoder_intermediate_size: int,
+    geometry_encoder_layers: int,
+    geometry_encoder_heads: int,
+    geometry_encoder_intermediate_size: int,
     mask_num_heads: int,
     mask_num_upsampling_stages: int,
     layer_norm_eps: float,
     precision: str = "fp32",
     encoder_hidden_act: str = "relu",
     decoder_hidden_act: str = "relu",
+    geometry_encoder_hidden_act: str = "relu",
+    geometry_encoder_layer_norm_eps: float = 1e-5,
     verbose: bool = False,
 ) -> bytes:
     """Build the SAM3 text-prompt core engine with TensorRT APIs."""
@@ -478,12 +623,46 @@ def build_sam3_core_engine(
         ]
 
     text_features = _text_rows(network, text_features_in, text_seq_len, hidden_size)
-    text_mask = _text_padding_mask(network, text_mask_in, text_seq_len, dtype=work_np_dtype)
 
     enc_h, enc_w = fpn_shapes[2]
     seq_len = enc_h * enc_w
     vision_features = _flatten_nchw(network, fpn_hidden[2], hidden_size, enc_h, enc_w)
     vision_pos = _flatten_nchw(network, fpn_position[2], hidden_size, enc_h, enc_w)
+
+    geometry_features = _empty_geometry_prompt(
+        network,
+        vision_features,
+        vision_pos,
+        weights,
+        hidden_size=hidden_size,
+        vision_seq_len=seq_len,
+        num_layers=geometry_encoder_layers,
+        num_heads=geometry_encoder_heads,
+        intermediate_size=geometry_encoder_intermediate_size,
+        hidden_act=geometry_encoder_hidden_act,
+        layer_norm_eps=geometry_encoder_layer_norm_eps,
+        dtype=work_np_dtype,
+    )
+    prompt_concat = network.add_concatenation([text_features, geometry_features])
+    prompt_concat.axis = 0
+    text_features = prompt_concat.get_output(0)
+    prompt_seq_len = text_seq_len + 1
+
+    geometry_attention_mask = _const(
+        network,
+        (1, 1),
+        np.ones((1, 1), dtype=np.int32),
+        dtype=np.int32,
+    )
+    prompt_mask_concat = network.add_concatenation([text_mask_in, geometry_attention_mask])
+    prompt_mask_concat.axis = 1
+    prompt_attention_mask = prompt_mask_concat.get_output(0)
+    text_mask = _text_padding_mask(
+        network,
+        prompt_attention_mask,
+        prompt_seq_len,
+        dtype=work_np_dtype,
+    )
 
     encoder_hidden = vision_features
     for layer_idx in range(detr_encoder_layers):
@@ -525,7 +704,7 @@ def build_sam3_core_engine(
             hidden_size=hidden_size,
             num_heads=detr_encoder_heads,
             q_seq=seq_len,
-            kv_seq=text_seq_len,
+            kv_seq=prompt_seq_len,
             mask=text_mask,
         )
         encoder_hidden = network.add_elementwise(
@@ -629,7 +808,7 @@ def build_sam3_core_engine(
             hidden_size=hidden_size,
             num_heads=detr_decoder_heads,
             q_seq=num_queries + 1,
-            kv_seq=text_seq_len,
+            kv_seq=prompt_seq_len,
             mask=text_mask,
         )
         decoder_hidden = network.add_elementwise(
@@ -786,8 +965,8 @@ def build_sam3_core_engine(
     pooled_text = _weighted_text_pool(
         network,
         text_features,
-        text_mask_in,
-        text_seq_len=text_seq_len,
+        prompt_attention_mask,
+        text_seq_len=prompt_seq_len,
         hidden_size=hidden_size,
         dtype=work_np_dtype,
     )
@@ -834,7 +1013,7 @@ def build_sam3_core_engine(
         hidden_size=hidden_size,
         num_heads=mask_num_heads,
         q_seq=seq_len,
-        kv_seq=text_seq_len,
+        kv_seq=prompt_seq_len,
         mask=text_mask,
     )
     encoder_for_masks = network.add_elementwise(

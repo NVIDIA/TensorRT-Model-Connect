@@ -13,7 +13,8 @@
 namespace trtmc {
 
 // One output-coordinate row in a flattened quantized antialias resize plan.
-// Entries and their signed 16-bit weights are copied to caller-owned device
+// Entries and their Pillow-compatible signed 22-bit fixed-point coefficients
+// (stored as int32) are copied to caller-owned device
 // buffers before sam3_cuda_preprocess_image is launched.
 struct Sam3CudaResizeAxisEntry {
     std::int32_t first;
@@ -26,11 +27,11 @@ static_assert(std::is_trivial_v<Sam3CudaResizeAxisEntry> &&
 
 // Reproduce SAM3's native uint8 image preprocessing entirely on one CUDA
 // stream. input_hwc, both scratch buffers, resize plans, output_chw, and
-// nonfinite_status are device pointers. scaled_mean and scaled_stddev are
-// host arrays with exactly three elements; their values are copied into the
-// kernel arguments before this function returns. output_offset is measured in
+// normalization_lut and nonfinite_status are device pointers. output_offset is measured in
 // float elements, so callers can write one lane directly into a batched engine
-// input.
+// input. normalization_lut is a device-resident [3, 256] FP32 table whose
+// values reproduce Meta's FP16 image normalization operation order while the
+// TensorRT binding remains FP32.
 //
 // The caller must initialize nonfinite_status to zero on stream. The kernels
 // atomically set bit 0 for any non-finite source value and bit 1 for an invalid
@@ -45,13 +46,12 @@ bool sam3_cuda_preprocess_image(
     const float* input_hwc, std::int32_t input_height, std::int32_t input_width,
     std::uint8_t* quantized_hwc, std::uint8_t* horizontal_hwc,
     const Sam3CudaResizeAxisEntry* horizontal_entries, std::int32_t horizontal_entry_count,
-    const std::int16_t* horizontal_weights, std::int32_t horizontal_weight_count,
+    const std::int32_t* horizontal_weights, std::int32_t horizontal_weight_count,
     unsigned int horizontal_precision, const Sam3CudaResizeAxisEntry* vertical_entries,
-    std::int32_t vertical_entry_count, const std::int16_t* vertical_weights,
+    std::int32_t vertical_entry_count, const std::int32_t* vertical_weights,
     std::int32_t vertical_weight_count, unsigned int vertical_precision, float* output_chw,
     std::size_t output_offset, std::int32_t output_height, std::int32_t output_width,
-    const float* scaled_mean, const float* scaled_stddev, int* nonfinite_status,
-    cudaStream_t stream);
+    const float* normalization_lut, int* nonfinite_status, cudaStream_t stream);
 
 // Round FP32 values to the exact BF16-representable FP32 values used by the
 // native SAM3 recurrent memory cache. Exact in-place operation

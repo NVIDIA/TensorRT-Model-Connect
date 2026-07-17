@@ -103,8 +103,6 @@ Sam3Config make_sam3_config(const std::string& json) {
         extract_json_int(json, "sam3_min_tracker_keep_alive", cfg.min_tracker_keep_alive);
     cfg.decrease_keep_alive_for_empty_masks = extract_json_bool(
         json, "sam3_decrease_keep_alive_for_empty_masks", cfg.decrease_keep_alive_for_empty_masks);
-    cfg.recondition_on_tracker_masks = extract_json_bool(json, "sam3_recondition_on_tracker_masks",
-                                                         cfg.recondition_on_tracker_masks);
     cfg.recondition_every_nth_frame =
         extract_json_int(json, "sam3_recondition_every_nth_frame", cfg.recondition_every_nth_frame);
     cfg.fill_hole_area = extract_json_int(json, "sam3_fill_hole_area", cfg.fill_hole_area);
@@ -233,6 +231,12 @@ class Sam3Plugin final : public IPipelinePlugin {
         auto tracker_memory_batch2_engine = extract_optional_module(
             ctx.backend, find_section(ctx.bundle, "sam3_tracker_memory_batch2_engine_plan"),
             "sam3 tracker_memory_batch2_engine", opts);
+        auto tracker_hard_memory_engine = extract_optional_module(
+            ctx.backend, find_section(ctx.bundle, "sam3_tracker_hard_memory_engine_plan"),
+            "sam3 tracker_hard_memory_engine", opts);
+        auto tracker_hard_memory_batch2_engine = extract_optional_module(
+            ctx.backend, find_section(ctx.bundle, "sam3_tracker_hard_memory_batch2_engine_plan"),
+            "sam3 tracker_hard_memory_batch2_engine", opts);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
         return std::make_unique<Sam3Pipeline>(
             std::move(text_encoder.module), std::move(vision_encoder.module),
@@ -240,7 +244,8 @@ class Sam3Plugin final : public IPipelinePlugin {
             ctx.bundle.info.model_id, std::move(tracker_init_engines.canonical),
             std::move(tracker_step_engine), std::move(tracker_memory_engine),
             std::move(tracker_step_batch2_engine), std::move(tracker_memory_batch2_engine),
-            std::move(tracker_init_engines.parallel_sibling));
+            std::move(tracker_init_engines.parallel_sibling), std::move(tracker_hard_memory_engine),
+            std::move(tracker_hard_memory_batch2_engine));
     }
 };
 

@@ -3,7 +3,7 @@
 
 """Build the stateful SAM3 video tracker with TensorRT Network API layers.
 
-The detector and vision plans own the shared frame backbone. These five
+The detector and vision plans own the shared frame backbone. These seven
 tracker plans own the learned initialization, recurrent conditioning, mask
 decoding, pointer projection, and spatial-memory encoding operations. Session
 history, object identity, association, and memory policy remain in the native
@@ -28,15 +28,14 @@ TRACKER_STEP_SECTION = "sam3_tracker_step_engine_plan"
 TRACKER_STEP_BATCH2_SECTION = "sam3_tracker_step_batch2_engine_plan"
 TRACKER_MEMORY_SECTION = "sam3_tracker_memory_engine_plan"
 TRACKER_MEMORY_BATCH2_SECTION = "sam3_tracker_memory_batch2_engine_plan"
+TRACKER_HARD_MEMORY_SECTION = "sam3_tracker_hard_memory_engine_plan"
+TRACKER_HARD_MEMORY_BATCH2_SECTION = "sam3_tracker_hard_memory_batch2_engine_plan"
 
-# A 1024-frame session with frame-16 detector reconditioning can retain 64
-# conditioning pointers. Native gathering then appends up to 15 recent
-# non-conditioning pointers.
+# Meta selects at most four temporally closest conditioning pointers and then
+# appends up to fifteen quality-filtered non-conditioning pointers.
 SAM3_TRACKER_MAX_VIDEO_FRAMES = 1024
 SAM3_TRACKER_RECONDITION_CADENCE = 16
-SAM3_TRACKER_MAX_CONDITIONING_POINTERS = (
-    SAM3_TRACKER_MAX_VIDEO_FRAMES + SAM3_TRACKER_RECONDITION_CADENCE - 1
-) // SAM3_TRACKER_RECONDITION_CADENCE
+SAM3_TRACKER_MAX_CONDITIONING_POINTERS = 4
 SAM3_TRACKER_MAX_POINTER_INPUTS = SAM3_TRACKER_MAX_CONDITIONING_POINTERS + 15
 
 _SPATIAL_TOKENS = 72 * 72
@@ -429,7 +428,6 @@ def _serialize(builder, network, config, *, kind: str, verbose: bool) -> bytes:
 
 def _build_init(weights: TrackerWeights, *, verbose: bool) -> bytes:
     from .tracker_decoder_builder import add_tracker_init_head
-    from .tracker_memory_builder import add_tracker_memory_encoder
 
     trt, builder, network, config = _new_network(enable_tf32=False, verbose=verbose)
     feature_0 = _input(network, "tracker_feature_0", trt.float32, _FEATURE_SHAPES[0])
@@ -437,22 +435,10 @@ def _build_init(weights: TrackerWeights, *, verbose: bool) -> bytes:
     feature_2 = _input(network, "tracker_feature_2", trt.float32, _FEATURE_SHAPES[2])
     detector_mask = _input(network, "detector_mask", trt.float32, _DETECTOR_MASK_SHAPE)
     head = add_tracker_init_head(network, feature_0, feature_1, feature_2, detector_mask, weights)
-    memory = add_tracker_memory_encoder(
-        network,
-        feature_2,
-        head.high_res_masks,
-        head.object_score_logits,
-        weights,
-        batch_size=1,
-        hard_mask=True,
-    )
     pointer = _reshape(network, head.object_pointer, (1, 1, 256))
     score = _reshape(network, head.object_score_logits, (1, 1, 1))
-    _mark(network, head.pred_masks, "pred_masks")
     _mark(network, pointer, "object_pointer")
     _mark(network, score, "object_score_logits")
-    _mark(network, memory.memory, "memory_features")
-    _mark(network, memory.position, "memory_position")
     return _serialize(builder, network, config, kind="init", verbose=verbose)
 
 
@@ -512,12 +498,15 @@ def _build_step(weights: TrackerWeights, *, batch_size: int, verbose: bool) -> b
     )
     pointer = head.object_pointer
     score = head.object_score_logits
+    selected_iou = head.selected_iou
     if batch_size == 1:
         pointer = _reshape(network, pointer, (1, 1, 256))
         score = _reshape(network, score, (1, 1, 1))
+        selected_iou = _reshape(network, selected_iou, (1, 1, 1))
     _mark(network, head.pred_masks, "pred_masks")
     _mark(network, pointer, "object_pointer")
     _mark(network, score, "object_score_logits")
+    _mark(network, selected_iou, "selected_iou")
     _add_step_profile(builder, config, network, batch_size=batch_size)
     kind = "batch2 step" if batch_size == 2 else "step"
     return _serialize(builder, network, config, kind=kind, verbose=verbose)
@@ -530,6 +519,12 @@ def _build_memory(weights: TrackerWeights, *, batch_size: int, verbose: bool) ->
     feature = _input(network, "tracker_feature_2", trt.float32, _FEATURE_SHAPES[2])
     final_mask = _input(network, "final_mask", trt.float32, (batch_size, 1, 288, 288))
     score = _input(network, "object_score_logits", trt.float32, (batch_size, 1))
+    suppress_area_shrinkage = _input(
+        network,
+        "suppress_area_shrinkage",
+        trt.int32,
+        (batch_size, 1),
+    )
     outputs = add_tracker_memory_encoder(
         network,
         feature,
@@ -538,10 +533,40 @@ def _build_memory(weights: TrackerWeights, *, batch_size: int, verbose: bool) ->
         weights,
         batch_size=batch_size,
         hard_mask=False,
+        suppress_area_shrinkage=suppress_area_shrinkage,
     )
     _mark(network, outputs.memory, "new_memory_features")
     _mark(network, outputs.position, "new_memory_position")
     kind = "batch2 memory" if batch_size == 2 else "memory"
+    return _serialize(builder, network, config, kind=kind, verbose=verbose)
+
+
+def _build_hard_memory(weights: TrackerWeights, *, batch_size: int, verbose: bool) -> bytes:
+    """Build Meta's fixed-shape new-object conditioning memory plan."""
+
+    from .tracker_memory_builder import add_tracker_memory_encoder
+
+    trt, builder, network, config = _new_network(enable_tf32=False, verbose=verbose)
+    feature = _input(network, "tracker_feature_2", trt.float32, _FEATURE_SHAPES[2])
+    carved_mask = _input(
+        network,
+        "carved_low_res_mask",
+        trt.float32,
+        (batch_size, 1, 288, 288),
+    )
+    score = _input(network, "object_score_logits", trt.float32, (batch_size, 1))
+    outputs = add_tracker_memory_encoder(
+        network,
+        feature,
+        carved_mask,
+        score,
+        weights,
+        batch_size=batch_size,
+        hard_mask=True,
+    )
+    _mark(network, outputs.memory, "new_memory_features")
+    _mark(network, outputs.position, "new_memory_position")
+    kind = "batch2 hard conditioning memory" if batch_size == 2 else "hard conditioning memory"
     return _serialize(builder, network, config, kind=kind, verbose=verbose)
 
 
@@ -550,7 +575,7 @@ def build_sam3_tracker_engines(
     *,
     verbose: bool = False,
 ) -> dict[str, bytes]:
-    """Build the five fixed-policy SAM3 tracker plans directly in TensorRT."""
+    """Build the seven fixed-policy SAM3 tracker plans directly in TensorRT."""
 
     resolved = Path(model_dir)
     if not (resolved / "config.json").is_file():
@@ -566,4 +591,14 @@ def build_sam3_tracker_engines(
         TRACKER_STEP_BATCH2_SECTION: _build_step(weights, batch_size=2, verbose=verbose),
         TRACKER_MEMORY_SECTION: _build_memory(weights, batch_size=1, verbose=verbose),
         TRACKER_MEMORY_BATCH2_SECTION: _build_memory(weights, batch_size=2, verbose=verbose),
+        TRACKER_HARD_MEMORY_SECTION: _build_hard_memory(
+            weights,
+            batch_size=1,
+            verbose=verbose,
+        ),
+        TRACKER_HARD_MEMORY_BATCH2_SECTION: _build_hard_memory(
+            weights,
+            batch_size=2,
+            verbose=verbose,
+        ),
     }

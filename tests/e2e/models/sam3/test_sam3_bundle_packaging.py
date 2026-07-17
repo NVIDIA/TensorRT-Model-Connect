@@ -53,6 +53,8 @@ def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(tmp_path):
                 "sam3_tracker_step_batch2_engine_plan": b"SAM3_TRACKER_STEP_BATCH2_PLAN",
                 "sam3_tracker_memory_engine_plan": b"SAM3_TRACKER_MEMORY_PLAN",
                 "sam3_tracker_memory_batch2_engine_plan": b"SAM3_TRACKER_MEMORY_BATCH2_PLAN",
+                "sam3_tracker_hard_memory_engine_plan": b"SAM3_TRACKER_HARD_MEMORY_PLAN",
+                "sam3_tracker_hard_memory_batch2_engine_plan": b"SAM3_TRACKER_HARD_MEMORY_BATCH2_PLAN",
             }
 
         def get_segmentation_config(self, config):
@@ -86,9 +88,7 @@ def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(tmp_path):
                 with patch(
                     "tensorrt_model_connect.engine_builder._ensure_tokenizer_json"
                 ) as mock_ensure:
-                    with patch(
-                        "tensorrt_model_connect.engine_builder.write_bundle"
-                    ) as mock_write:
+                    with patch("tensorrt_model_connect.engine_builder.write_bundle") as mock_write:
                         build_bundle(str(model_dir), output_path)
 
     mock_ensure.assert_called_once_with(model_dir, plugin=plugin)
@@ -102,8 +102,12 @@ def test_sam3_prompted_segmentation_packages_all_plans_and_tokenizer(tmp_path):
     assert section_map["sam3_tracker_step_batch2_engine_plan"] == b"SAM3_TRACKER_STEP_BATCH2_PLAN"
     assert section_map["sam3_tracker_memory_engine_plan"] == b"SAM3_TRACKER_MEMORY_PLAN"
     assert (
-        section_map["sam3_tracker_memory_batch2_engine_plan"]
-        == b"SAM3_TRACKER_MEMORY_BATCH2_PLAN"
+        section_map["sam3_tracker_memory_batch2_engine_plan"] == b"SAM3_TRACKER_MEMORY_BATCH2_PLAN"
+    )
+    assert section_map["sam3_tracker_hard_memory_engine_plan"] == b"SAM3_TRACKER_HARD_MEMORY_PLAN"
+    assert (
+        section_map["sam3_tracker_hard_memory_batch2_engine_plan"]
+        == b"SAM3_TRACKER_HARD_MEMORY_BATCH2_PLAN"
     )
     assert "sam3_core_batch5_engine_plan" not in section_map
 

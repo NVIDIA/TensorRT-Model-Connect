@@ -79,7 +79,41 @@ def _weight(weights: Mapping[str, np.ndarray], key: str) -> np.ndarray:
     return np.ascontiguousarray(np.asarray(value), dtype=np.float32)
 
 
-def _linear(
+def _cast(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    dtype: trt.DataType,
+) -> trt.ITensor:
+    if inp.dtype == dtype:
+        return inp
+    return network.add_cast(inp, dtype).get_output(0)
+
+
+def _fp32_sum(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    rhs: trt.ITensor,
+) -> trt.ITensor:
+    """Add position or residual tensors at Meta's FP32 boundary."""
+
+    lhs = _cast(network, lhs, trt.float32)
+    rhs = _cast(network, rhs, trt.float32)
+    return network.add_elementwise(lhs, rhs, trt.ElementWiseOperation.SUM).get_output(0)
+
+
+def _bf16_sum(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    rhs: trt.ITensor,
+) -> trt.ITensor:
+    """Round Meta's recurrent residual stream at its BF16 boundary."""
+
+    lhs = _cast(network, lhs, trt.bfloat16)
+    rhs = _cast(network, rhs, trt.bfloat16)
+    return network.add_elementwise(lhs, rhs, trt.ElementWiseOperation.SUM).get_output(0)
+
+
+def _bf16_linear(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     weights: Mapping[str, np.ndarray],
@@ -99,6 +133,7 @@ def _linear(
             f"SAM3 tracker projection {prefix!r} bias must have shape "
             f"{(out_size,)}, got {raw_bias.shape}"
         )
+    inp = _cast(network, inp, trt.bfloat16)
     output = add_matmul_rhs_constant(
         network,
         inp,
@@ -129,6 +164,7 @@ def _layer_norm(
             f"SAM3 tracker normalization {prefix!r} must have {_HIDDEN_SIZE} "
             f"channels; got gamma={gamma.shape}, beta={beta.shape}"
         )
+    inp = _cast(network, inp, trt.float32)
     return add_layer_norm_native(
         network,
         inp,
@@ -291,11 +327,11 @@ def _prepare_spatial_memory(
     position_by_frame = memory_position
     spatial_values = _shuffle(network, memory_features, (batch_size, -1, _MEMORY_SIZE))
 
-    position_by_frame = network.add_elementwise(
+    position_by_frame = _fp32_sum(
+        network,
         position_by_frame,
         temporal_position,
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
+    )
     spatial_position = _shuffle(network, position_by_frame, (batch_size, -1, _MEMORY_SIZE))
     return spatial_values, spatial_position
 
@@ -344,7 +380,7 @@ def _prepare_pointer_memory(
     cosine = network.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
     position = network.add_concatenation([sine, cosine])
     position.axis = 2
-    projected_position = _linear(
+    projected_position = _bf16_linear(
         network,
         position.get_output(0),
         weights,
@@ -352,7 +388,6 @@ def _prepare_pointer_memory(
         _HIDDEN_SIZE,
         _MEMORY_SIZE,
     )
-
     pointer_values = _shuffle(
         network,
         object_pointers,
@@ -460,6 +495,9 @@ def _apply_axial_rope(
     inp: trt.ITensor,
     constants: _RopeConstants,
 ) -> trt.ITensor:
+    # TorchInductor promotes the BF16 Q/K projections for complex RoPE and
+    # casts the rotated tensors back only at the FlashAttention boundary.
+    inp = _cast(network, inp, trt.float32)
     rotated = network.add_gather(inp, constants.rotated_indices, axis=3).get_output(0)
     rotated = network.add_elementwise(
         rotated, constants.rotated_sign, trt.ElementWiseOperation.PROD
@@ -480,12 +518,13 @@ def _attention_context(
     value: trt.ITensor,
     batch_size: int,
 ) -> trt.ITensor:
-    query = network.add_cast(query, trt.float16).get_output(0)
-    key = network.add_cast(key, trt.float16).get_output(0)
-    value = network.add_cast(value, trt.float16).get_output(0)
+    # L4's TensorRT fused-attention tactic is faster and more accurate for
+    # this head shape in FP16, while the surrounding GEMMs/residual stream
+    # retain Meta's BF16 contract.
+    query = _cast(network, query, trt.float16)
+    key = _cast(network, key, trt.float16)
+    value = _cast(network, value, trt.float16)
     context = add_attention_core(network, query, key, value)
-    if context.dtype != trt.float32:
-        context = network.add_cast(context, trt.float32).get_output(0)
     return _shuffle(network, context, (batch_size, _SPATIAL_TOKENS, _HIDDEN_SIZE))
 
 
@@ -497,9 +536,15 @@ def _self_attention(
     rope: _RopeConstants,
     batch_size: int,
 ) -> trt.ITensor:
-    query = _linear(network, queries, weights, f"{prefix}.q_proj", _HIDDEN_SIZE, _HIDDEN_SIZE)
-    key = _linear(network, queries, weights, f"{prefix}.k_proj", _HIDDEN_SIZE, _HIDDEN_SIZE)
-    value = _linear(network, queries, weights, f"{prefix}.v_proj", _HIDDEN_SIZE, _HIDDEN_SIZE)
+    query = _bf16_linear(
+        network, queries, weights, f"{prefix}.q_proj", _HIDDEN_SIZE, _HIDDEN_SIZE
+    )
+    key = _bf16_linear(
+        network, queries, weights, f"{prefix}.k_proj", _HIDDEN_SIZE, _HIDDEN_SIZE
+    )
+    value = _bf16_linear(
+        network, queries, weights, f"{prefix}.v_proj", _HIDDEN_SIZE, _HIDDEN_SIZE
+    )
     query = _shuffle(network, query, (batch_size, _NUM_HEADS, _SPATIAL_TOKENS, _HEAD_DIM))
     key = _shuffle(network, key, (batch_size, _NUM_HEADS, _SPATIAL_TOKENS, _HEAD_DIM))
     value = _shuffle(network, value, (batch_size, _NUM_HEADS, _SPATIAL_TOKENS, _HEAD_DIM))
@@ -512,7 +557,10 @@ def _self_attention(
         value,
         batch_size,
     )
-    return _linear(network, context, weights, f"{prefix}.o_proj", _HIDDEN_SIZE, _HIDDEN_SIZE)
+    projected = _bf16_linear(
+        network, context, weights, f"{prefix}.o_proj", _HIDDEN_SIZE, _HIDDEN_SIZE
+    )
+    return projected
 
 
 def _cross_attention(
@@ -524,19 +572,21 @@ def _cross_attention(
     rope: _RopeConstants,
     batch_size: int,
 ) -> trt.ITensor:
-    query = _linear(network, queries, weights, f"{prefix}.q_proj", _HIDDEN_SIZE, _HIDDEN_SIZE)
+    query = _bf16_linear(
+        network, queries, weights, f"{prefix}.q_proj", _HIDDEN_SIZE, _HIDDEN_SIZE
+    )
 
-    spatial_key_input = network.add_elementwise(
+    spatial_key_input = _fp32_sum(
+        network,
         memory.spatial_values,
         memory.spatial_position,
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
-    pointer_key_input = network.add_elementwise(
+    )
+    pointer_key_input = _bf16_sum(
+        network,
         memory.pointer_values,
         memory.pointer_position,
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
-    spatial_key = _linear(
+    )
+    spatial_key = _bf16_linear(
         network,
         spatial_key_input,
         weights,
@@ -544,7 +594,7 @@ def _cross_attention(
         _MEMORY_SIZE,
         _HIDDEN_SIZE,
     )
-    pointer_key = _linear(
+    pointer_key = _bf16_linear(
         network,
         pointer_key_input,
         weights,
@@ -555,7 +605,7 @@ def _cross_attention(
 
     values = network.add_concatenation([memory.spatial_values, memory.pointer_values])
     values.axis = 1
-    value = _linear(
+    value = _bf16_linear(
         network,
         values.get_output(0),
         weights,
@@ -572,6 +622,7 @@ def _cross_attention(
         (batch_size, -1, _SPATIAL_TOKENS, _HEAD_DIM),
     )
     spatial_key = _apply_axial_rope(network, spatial_key, rope)
+    spatial_key = _cast(network, spatial_key, trt.bfloat16)
     spatial_key = _shuffle(network, spatial_key, (batch_size, _NUM_HEADS, -1, _HEAD_DIM))
     pointer_key = _shuffle(network, pointer_key, (batch_size, _NUM_HEADS, -1, _HEAD_DIM))
     key = network.add_concatenation([spatial_key, pointer_key])
@@ -585,7 +636,10 @@ def _cross_attention(
         value,
         batch_size,
     )
-    return _linear(network, context, weights, f"{prefix}.o_proj", _HIDDEN_SIZE, _HIDDEN_SIZE)
+    projected = _bf16_linear(
+        network, context, weights, f"{prefix}.o_proj", _HIDDEN_SIZE, _HIDDEN_SIZE
+    )
+    return projected
 
 
 def _feed_forward(
@@ -594,9 +648,14 @@ def _feed_forward(
     weights: Mapping[str, np.ndarray],
     prefix: str,
 ) -> trt.ITensor:
-    hidden = _linear(network, inp, weights, f"{prefix}.linear1", _HIDDEN_SIZE, _FEED_FORWARD_SIZE)
+    hidden = _bf16_linear(
+        network, inp, weights, f"{prefix}.linear1", _HIDDEN_SIZE, _FEED_FORWARD_SIZE
+    )
     hidden = network.add_activation(hidden, trt.ActivationType.RELU).get_output(0)
-    return _linear(network, hidden, weights, f"{prefix}.linear2", _FEED_FORWARD_SIZE, _HIDDEN_SIZE)
+    output = _bf16_linear(
+        network, hidden, weights, f"{prefix}.linear2", _FEED_FORWARD_SIZE, _HIDDEN_SIZE
+    )
+    return output
 
 
 def _features_to_tokens(
@@ -634,9 +693,11 @@ def add_tracker_recurrent_conditioning(
 ) -> trt.ITensor:
     """Add SAM3's recurrent memory attention and return ``[B, 256, 72, 72]``.
 
-    Both fixed-batch graphs keep projections, rotation, normalization,
-    residuals, and output projections in FP32. Each native TensorRT attention
-    core receives FP16 Q/K/V and immediately returns its context to FP32.
+    Both fixed-batch graphs use the precision schedule emitted by Meta's
+    compiled tracker: projection and feed-forward GEMMs plus native TensorRT
+    learned GEMMs and the recurrent residual stream run in BF16, fused
+    attention uses the measured L4 FP16 tactic, and spatial memory-position
+    adds, RoPE math, LayerNorm, and the engine output boundary remain FP32.
 
     Dynamic input layouts match the existing tracker engine contract:
 
@@ -678,10 +739,13 @@ def add_tracker_recurrent_conditioning(
         np.full((1, 1, 1), _POSITION_SCALE, dtype=np.float32),
         dtype=np.float32,
     )
+    output = _cast(network, output, trt.bfloat16)
+    position = _cast(network, position, trt.bfloat16)
+    position_scale = _cast(network, position_scale, trt.bfloat16)
     position = network.add_elementwise(
         position, position_scale, trt.ElementWiseOperation.PROD
     ).get_output(0)
-    output = network.add_elementwise(output, position, trt.ElementWiseOperation.SUM).get_output(0)
+    output = _bf16_sum(network, output, position)
 
     for layer_index in range(_NUM_LAYERS):
         prefix = f"{_MEMORY_ATTENTION_PREFIX}.layers.{layer_index}"
@@ -694,9 +758,7 @@ def add_tracker_recurrent_conditioning(
             rope,
             batch_size,
         )
-        output = network.add_elementwise(
-            output, self_attention, trt.ElementWiseOperation.SUM
-        ).get_output(0)
+        output = _bf16_sum(network, output, self_attention)
 
         normalized = _layer_norm(network, output, weights, f"{prefix}.layer_norm2")
         cross_attention = _cross_attention(
@@ -708,15 +770,11 @@ def add_tracker_recurrent_conditioning(
             rope,
             batch_size,
         )
-        output = network.add_elementwise(
-            output, cross_attention, trt.ElementWiseOperation.SUM
-        ).get_output(0)
+        output = _bf16_sum(network, output, cross_attention)
 
         normalized = _layer_norm(network, output, weights, f"{prefix}.layer_norm3")
         feed_forward = _feed_forward(network, normalized, weights, prefix)
-        output = network.add_elementwise(
-            output, feed_forward, trt.ElementWiseOperation.SUM
-        ).get_output(0)
+        output = _bf16_sum(network, output, feed_forward)
 
     output = _layer_norm(network, output, weights, f"{_MEMORY_ATTENTION_PREFIX}.layer_norm")
     return _tokens_to_features(network, output, batch_size)

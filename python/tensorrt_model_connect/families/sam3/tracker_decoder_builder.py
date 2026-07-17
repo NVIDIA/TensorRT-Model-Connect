@@ -27,6 +27,7 @@ _IMAGE_GRID = 72
 _IMAGE_TOKENS = _IMAGE_GRID * _IMAGE_GRID
 _LOW_RESOLUTION = 288
 _IMAGE_SIZE = 1008
+_MASK_INPUT_SIZE = _LOW_RESOLUTION * 4
 _NUM_HEADS = 8
 _NUM_OUTPUT_TOKENS = 6
 _NUM_MASK_TOKENS = 4
@@ -45,6 +46,7 @@ class DecoderOutputs:
     masks: object
     iou_scores: object
     mask_tokens: object
+    single_mask_token: object
     object_score_logits: object
 
 
@@ -65,6 +67,7 @@ class TrackerStepHeadOutputs:
     pred_masks: object
     object_pointer: object
     object_score_logits: object
+    selected_iou: object
 
 
 @dataclass(frozen=True)
@@ -1150,7 +1153,15 @@ def add_mask_decoder(
         _NUM_MASK_TOKENS,
         weight_prefix=weight_prefix,
     )
-    iou_scores = network.add_activation(iou_scores, trt.ActivationType.SIGMOID).get_output(0)
+    # Meta constructs the SAM3 mask decoder with
+    # ``iou_prediction_use_sigmoid=True``.  The recurrent TorchInductor graph
+    # consequently publishes probabilities, not raw IoU logits.  Besides
+    # preserving the mask-candidate ordering, this value feeds the runtime's
+    # temporal-memory quality gate, so leaving it unbounded changes recurrent
+    # state selection even when the same mask wins the argmax.
+    iou_scores = network.add_activation(
+        iou_scores, trt.ActivationType.SIGMOID
+    ).get_output(0)
     iou_scores_shape = network.add_shuffle(iou_scores)
     iou_scores_shape.reshape_dims = (object_batch, _NUM_MASK_TOKENS)
     object_score = _feed_forward(
@@ -1184,10 +1195,23 @@ def add_mask_decoder(
         (object_batch, _NUM_MULTIMASKS, _HIDDEN_SIZE),
         (1, 1, 1),
     ).get_output(0)
+    # Meta's decoder keeps token 0 as the object-memory token whenever
+    # ``multimask_output`` is false.  The selected visible mask may still come
+    # from tokens 1--3 through dynamic stability fallback, so the pointer token
+    # and the mask-selection token are intentionally not always the same.
+    single_token = network.add_slice(
+        mask_tokens,
+        (0, 0, 0),
+        (object_batch, 1, _HIDDEN_SIZE),
+        (1, 1, 1),
+    ).get_output(0)
+    single_token = network.add_shuffle(single_token)
+    single_token.reshape_dims = (object_batch, _HIDDEN_SIZE)
     return DecoderOutputs(
         masks=multimasks,
         iou_scores=multiiou,
         mask_tokens=multitokens,
+        single_mask_token=single_token.get_output(0),
         object_score_logits=object_score_shape.get_output(0),
     )
 
@@ -1374,6 +1398,7 @@ def add_tracker_step_head(
         pred_masks=selected.mask,
         object_pointer=pointer,
         object_score_logits=selected.object_score_logits,
+        selected_iou=selected.iou_score,
     )
 
 
@@ -1387,23 +1412,37 @@ def add_tracker_init_head(
     *,
     weight_prefix: str = _WEIGHT_PREFIX,
 ) -> TrackerInitHeadOutputs:
-    """Build the official mask-input initialization and pointer path."""
+    """Build Meta SAM3's detector-mask initialization and pointer path.
+
+    The detector emits signed logits on a 288x288 grid.  Meta first resizes
+    those logits to the tracker's 1152x1152 mask-input grid and only then
+    thresholds at zero.  Thresholding the detector grid itself (and especially
+    using 0.5 as the cutoff) changes the mask prompt and causes the recurrent
+    tracker to diverge immediately after the prompt frame.
+    """
 
     trt = _trt()
     graph_ops = _graph_ops()
     object_batch = 1
-    resized_detector_mask = _add_bilinear_resize(
+    resized_detector_logits = _add_bilinear_resize(
         network,
         detector_mask,
         object_batch=object_batch,
         channels=1,
-        target_height=_IMAGE_SIZE,
-        target_width=_IMAGE_SIZE,
+        target_height=_MASK_INPUT_SIZE,
+        target_width=_MASK_INPUT_SIZE,
     )
+    zero = _constant(network, (1, 1, 1, 1), np.array([0.0], dtype=np.float32))
+    positive = network.add_elementwise(
+        resized_detector_logits,
+        zero,
+        trt.ElementWiseOperation.GREATER,
+    ).get_output(0)
+    mask_input = network.add_cast(positive, detector_mask.dtype).get_output(0)
     scale = _constant(network, (1, 1, 1, 1), np.array([20.0], dtype=np.float32))
     bias = _constant(network, (1, 1, 1, 1), np.array([-10.0], dtype=np.float32))
     high_res_mask = network.add_elementwise(
-        resized_detector_mask,
+        mask_input,
         scale,
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
@@ -1416,13 +1455,13 @@ def add_tracker_init_head(
         network,
         high_res_mask,
         object_batch=object_batch,
-        input_size=_IMAGE_SIZE,
+        input_size=_MASK_INPUT_SIZE,
         output_size=_LOW_RESOLUTION,
     )
 
     downsampled_prompt = graph_ops.add_conv2d(
         network,
-        resized_detector_mask,
+        mask_input,
         _weight(
             weights,
             "mask_downsample.weight",
@@ -1439,14 +1478,8 @@ def add_tracker_init_head(
         (4, 4),
         stride=(4, 4),
     )
-    downsampled_prompt = _add_bilinear_resize(
-        network,
-        downsampled_prompt,
-        object_batch=object_batch,
-        channels=1,
-        target_height=_LOW_RESOLUTION,
-        target_width=_LOW_RESOLUTION,
-    )
+    # 1152 / 4 is exactly the 288x288 prompt-encoder input.  Meta does not
+    # insert an additional resize between mask_downsample and PromptEncoder.
     dense_prompt = add_mask_prompt_encoder(
         network,
         downsampled_prompt,
@@ -1467,7 +1500,7 @@ def add_tracker_init_head(
     selected = add_multimask_selection(network, decoder_outputs, object_batch=1)
     decoder_pointer = add_object_pointer_projection(
         network,
-        selected.mask_token,
+        decoder_outputs.single_mask_token,
         selected.object_score_logits,
         weights,
         object_batch=1,
@@ -1475,7 +1508,7 @@ def add_tracker_init_head(
     )
 
     mask_max = network.add_reduce(
-        detector_mask,
+        mask_input,
         trt.ReduceOperation.MAX,
         (1 << 1) | (1 << 2) | (1 << 3),
         keep_dims=False,

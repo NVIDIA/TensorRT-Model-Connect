@@ -289,17 +289,44 @@ void validate_optional_engine(const std::unique_ptr<TrtModule>& engine, const ch
 void require_complete_video_tracker_plan_set(
     const std::unique_ptr<TrtModule>& tracker_init_engine,
     const std::unique_ptr<TrtModule>& tracker_step_engine,
-    const std::unique_ptr<TrtModule>& tracker_memory_engine) {
-    if (!tracker_init_engine && !tracker_step_engine && !tracker_memory_engine) {
+    const std::unique_ptr<TrtModule>& tracker_memory_engine,
+    const std::unique_ptr<TrtModule>& tracker_hard_memory_engine,
+    const std::unique_ptr<TrtModule>& tracker_hard_memory_batch2_engine) {
+    const std::array<bool, 5> available = {
+        tracker_init_engine != nullptr, tracker_step_engine != nullptr,
+        tracker_memory_engine != nullptr, tracker_hard_memory_engine != nullptr,
+        tracker_hard_memory_batch2_engine != nullptr};
+    if (std::none_of(available.begin(), available.end(), [](bool value) { return value; })) {
         throw std::runtime_error(
             "Sam3Pipeline: this legacy bundle does not include SAM3 video tracker plans; "
-            "rebuild it with the SAM3 tracker init, step, and memory plans");
+            "rebuild it with the complete SAM3 tracker plan set");
     }
-    if (!tracker_init_engine || !tracker_step_engine || !tracker_memory_engine) {
+    if (!std::all_of(available.begin(), available.end(), [](bool value) { return value; })) {
         throw std::runtime_error(
             "Sam3Pipeline: incomplete SAM3 video bundle; sam3_tracker_init_engine_plan, "
-            "sam3_tracker_step_engine_plan, and sam3_tracker_memory_engine_plan are required");
+            "sam3_tracker_step_engine_plan, sam3_tracker_memory_engine_plan, "
+            "sam3_tracker_hard_memory_engine_plan, and "
+            "sam3_tracker_hard_memory_batch2_engine_plan are required");
     }
+}
+
+bool has_device_video_pipeline(
+    const std::unique_ptr<TrtModule>& vision_encoder, const std::unique_ptr<TrtModule>& core_engine,
+    const std::unique_ptr<TrtModule>& tracker_init_engine,
+    const std::unique_ptr<TrtModule>& tracker_step_engine,
+    const std::unique_ptr<TrtModule>& tracker_memory_engine,
+    const std::unique_ptr<TrtModule>& tracker_hard_memory_engine,
+    const std::unique_ptr<TrtModule>& tracker_hard_memory_batch2_engine) {
+    const std::array<bool, 7> available = {
+        vision_encoder != nullptr,
+        core_engine != nullptr,
+        tracker_init_engine != nullptr,
+        tracker_step_engine != nullptr,
+        tracker_memory_engine != nullptr,
+        tracker_hard_memory_engine != nullptr,
+        tracker_hard_memory_batch2_engine != nullptr,
+    };
+    return std::all_of(available.begin(), available.end(), [](bool value) { return value; });
 }
 
 } // namespace
@@ -326,7 +353,9 @@ Sam3Pipeline::Sam3Pipeline(std::unique_ptr<TrtModule> text_encoder,
                            std::unique_ptr<TrtModule> tracker_memory_engine,
                            std::unique_ptr<TrtModule> tracker_step_batch2_engine,
                            std::unique_ptr<TrtModule> tracker_memory_batch2_engine,
-                           std::unique_ptr<TrtModule> parallel_tracker_init_engine)
+                           std::unique_ptr<TrtModule> parallel_tracker_init_engine,
+                           std::unique_ptr<TrtModule> tracker_hard_memory_engine,
+                           std::unique_ptr<TrtModule> tracker_hard_memory_batch2_engine)
     : text_encoder_(std::move(text_encoder)), vision_encoder_(std::move(vision_encoder)),
       core_engine_(std::move(core_engine)), tracker_init_engine_(std::move(tracker_init_engine)),
       parallel_tracker_init_engine_(std::move(parallel_tracker_init_engine)),
@@ -334,6 +363,8 @@ Sam3Pipeline::Sam3Pipeline(std::unique_ptr<TrtModule> text_encoder,
       tracker_step_batch2_engine_(std::move(tracker_step_batch2_engine)),
       tracker_memory_engine_(std::move(tracker_memory_engine)),
       tracker_memory_batch2_engine_(std::move(tracker_memory_batch2_engine)),
+      tracker_hard_memory_engine_(std::move(tracker_hard_memory_engine)),
+      tracker_hard_memory_batch2_engine_(std::move(tracker_hard_memory_batch2_engine)),
       tokenizer_(std::move(tokenizer)), config_(std::move(config)),
       model_id_(std::move(model_id_str)) {
     validate_required_engine(text_encoder_, "Sam3Pipeline: invalid text_encoder");
@@ -351,15 +382,22 @@ Sam3Pipeline::Sam3Pipeline(std::unique_ptr<TrtModule> text_encoder,
                              "Sam3Pipeline: invalid sam3_tracker_memory_engine_plan");
     validate_optional_engine(tracker_memory_batch2_engine_,
                              "Sam3Pipeline: invalid sam3_tracker_memory_batch2_engine_plan");
+    validate_optional_engine(tracker_hard_memory_engine_,
+                             "Sam3Pipeline: invalid sam3_tracker_hard_memory_engine_plan");
+    validate_optional_engine(tracker_hard_memory_batch2_engine_,
+                             "Sam3Pipeline: invalid sam3_tracker_hard_memory_batch2_engine_plan");
     if (!tokenizer_)
         throw std::runtime_error("Sam3Pipeline: tokenizer is required for text-prompt PCS");
     if (config_.text_max_position_embeddings <= 0)
         throw std::runtime_error("Sam3Pipeline: invalid text max position embeddings");
-    if (vision_encoder_ && core_engine_ && tracker_init_engine_ && tracker_step_engine_ &&
-        tracker_memory_engine_) {
+    if (has_device_video_pipeline(vision_encoder_, core_engine_, tracker_init_engine_,
+                                  tracker_step_engine_, tracker_memory_engine_,
+                                  tracker_hard_memory_engine_,
+                                  tracker_hard_memory_batch2_engine_)) {
         video_vision_workspace_ = make_sam3_video_vision_workspace(
             *vision_encoder_, *core_engine_, *tracker_init_engine_, *tracker_step_engine_,
-            *tracker_memory_engine_, tracker_step_batch2_engine_.get(),
+            *tracker_memory_engine_, *tracker_hard_memory_engine_,
+            *tracker_hard_memory_batch2_engine_, tracker_step_batch2_engine_.get(),
             tracker_memory_batch2_engine_.get(), parallel_tracker_init_engine_.get());
         if (!video_vision_workspace_)
             throw std::runtime_error("Sam3Pipeline: SAM3 video device bindings are incompatible");
@@ -438,7 +476,8 @@ std::unique_ptr<Sam3VideoSegmentationSession>
 Sam3Pipeline::create_sam3_video_session(const std::string& text_prompt) {
     std::lock_guard<std::mutex> execution_lock(*execution_mutex_);
     require_complete_video_tracker_plan_set(tracker_init_engine_, tracker_step_engine_,
-                                            tracker_memory_engine_);
+                                            tracker_memory_engine_, tracker_hard_memory_engine_,
+                                            tracker_hard_memory_batch2_engine_);
     if (!vision_encoder_ || !core_engine_ || !video_vision_workspace_)
         throw std::runtime_error("Sam3Pipeline: SAM3 video plans are incomplete");
     auto text = encode_text_prompt(text_prompt);
@@ -449,6 +488,7 @@ Sam3Pipeline::create_sam3_video_session(const std::string& text_prompt) {
     auto processor = make_sam3_video_frame_processor(
         *vision_encoder_, *core_engine_, *tracker_init_engine_, *tracker_step_engine_,
         *tracker_memory_engine_, config_, std::move(text_input), video_vision_workspace_,
+        *tracker_hard_memory_engine_, *tracker_hard_memory_batch2_engine_,
         tracker_step_batch2_engine_.get(), tracker_memory_batch2_engine_.get(),
         parallel_tracker_init_engine_.get());
     processor = serialize_video_processor(std::move(processor), execution_mutex_);

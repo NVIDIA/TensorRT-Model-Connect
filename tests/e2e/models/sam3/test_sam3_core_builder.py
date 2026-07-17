@@ -15,6 +15,52 @@ import pytest
 from tensorrt_model_connect.families.sam3 import core_builder
 
 
+def test_sam3_core_appends_meta_empty_geometry_prompt() -> None:
+    source = textwrap.dedent(inspect.getsource(core_builder.build_sam3_core_engine))
+
+    assert "geometry_features = _empty_geometry_prompt(" in source
+    assert "[text_features, geometry_features]" in source
+    assert "prompt_seq_len = text_seq_len + 1" in source
+    assert "[text_mask_in, geometry_attention_mask]" in source
+    assert source.count("kv_seq=prompt_seq_len") == 3
+    assert "text_seq_len=prompt_seq_len" in source
+    assert 'reduced_precision="bf16"' not in source
+
+
+def test_sam3_empty_geometry_prompt_matches_meta_layer_order() -> None:
+    source = textwrap.dedent(inspect.getsource(core_builder._empty_geometry_prompt))
+    function = ast.parse(source).body[0]
+    assert isinstance(function, ast.FunctionDef)
+
+    layer_norm_prefixes = [
+        ast.unparse(node.args[3])
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_layer_norm"
+    ]
+    assert "'geometry_encoder.prompt_layer_norm'" in layer_norm_prefixes
+    assert "f'{prefix}.layer_norm1'" in layer_norm_prefixes
+    assert "f'{prefix}.layer_norm2'" in layer_norm_prefixes
+    assert "f'{prefix}.layer_norm3'" in layer_norm_prefixes
+    assert "'geometry_encoder.output_layer_norm'" in layer_norm_prefixes
+
+    attention_calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_attention"
+    ]
+    assert len(attention_calls) == 2
+    assert ast.unparse(attention_calls[0].args[2]) == "normed"
+    assert ast.unparse(attention_calls[1].args[2]) == "vision_with_position"
+    assert ast.unparse(attention_calls[1].args[3]) == "vision_features"
+    for call in attention_calls:
+        keywords = {keyword.arg: ast.unparse(keyword.value) for keyword in call.keywords}
+        assert keywords["reduced_precision"] == "'bf16'"
+
+
 def test_sam3_core_encoder_alone_uses_fp16_mlp_island() -> None:
     source = textwrap.dedent(inspect.getsource(core_builder.build_sam3_core_engine))
     function = ast.parse(source).body[0]

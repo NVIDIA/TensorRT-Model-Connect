@@ -79,6 +79,101 @@ void test_bfloat16_round_copy_supports_exact_alias() {
         check(actual[index] == bfloat16_reference_bits(input_bits[index]),
               "sam3 BF16 alias matches round-to-nearest-even");
 }
+
+void test_cuda_preprocess_matches_cpu_meta_pillow() {
+    constexpr int32_t input_size = 2;
+    constexpr int32_t output_size = 4;
+    constexpr unsigned int precision = 22;
+    const std::array<trtmc::Sam3CudaResizeAxisEntry, output_size> entries{{
+        {0, 0, 1},
+        {0, 1, 2},
+        {0, 3, 2},
+        {1, 5, 1},
+    }};
+    const std::array<int32_t, 6> weights{
+        4194304, 3145728, 1048576, 1048576, 3145728, 4194304,
+    };
+    const std::array<uint8_t, 12> source_u8{
+        0, 10, 20, 100, 110, 120, 200, 210, 220, 255, 250, 240,
+    };
+    std::array<float, source_u8.size()> source{};
+    for (std::size_t index = 0; index < source.size(); ++index)
+        source[index] = static_cast<float>(source_u8[index]) / 255.0F;
+
+    trtmc::Sam3Config config;
+    config.image_size = output_size;
+    config.image_mean = {0.5F, 0.5F, 0.5F};
+    config.image_std = {0.5F, 0.5F, 0.5F};
+    const auto expected =
+        trtmc::preprocess_sam3_image(source.data(), input_size, input_size, config);
+
+    std::array<float, 3U * 256U> normalization_lut{};
+    for (std::size_t value = 0; value < 256U; ++value) {
+        const float pixel = static_cast<float>(value) / 255.0F;
+        const std::array<float, 3> one_pixel{pixel, pixel, pixel};
+        trtmc::Sam3Config one_pixel_config = config;
+        one_pixel_config.image_size = 1;
+        const auto normalized =
+            trtmc::preprocess_sam3_image(one_pixel.data(), 1, 1, one_pixel_config);
+        for (std::size_t channel = 0; channel < 3U; ++channel)
+            normalization_lut[channel * 256U + value] = normalized[channel];
+    }
+
+    float* device_source = nullptr;
+    uint8_t* device_quantized = nullptr;
+    uint8_t* device_horizontal = nullptr;
+    trtmc::Sam3CudaResizeAxisEntry* device_entries = nullptr;
+    int32_t* device_weights = nullptr;
+    float* device_lut = nullptr;
+    float* device_output = nullptr;
+    int* device_status = nullptr;
+    check(
+        cudaMalloc(reinterpret_cast<void**>(&device_source), sizeof(source)) == cudaSuccess &&
+            cudaMalloc(reinterpret_cast<void**>(&device_quantized), source.size()) == cudaSuccess &&
+            cudaMalloc(reinterpret_cast<void**>(&device_horizontal),
+                       input_size * output_size * 3U) == cudaSuccess &&
+            cudaMalloc(reinterpret_cast<void**>(&device_entries), sizeof(entries)) == cudaSuccess &&
+            cudaMalloc(reinterpret_cast<void**>(&device_weights), sizeof(weights)) == cudaSuccess &&
+            cudaMalloc(reinterpret_cast<void**>(&device_lut), sizeof(normalization_lut)) ==
+                cudaSuccess &&
+            cudaMalloc(reinterpret_cast<void**>(&device_output), expected.size() * sizeof(float)) ==
+                cudaSuccess &&
+            cudaMalloc(reinterpret_cast<void**>(&device_status), sizeof(int)) == cudaSuccess,
+        "sam3 CUDA Meta preprocessing allocates test buffers");
+    check(cudaMemcpy(device_source, source.data(), sizeof(source), cudaMemcpyHostToDevice) ==
+                  cudaSuccess &&
+              cudaMemcpy(device_entries, entries.data(), sizeof(entries), cudaMemcpyHostToDevice) ==
+                  cudaSuccess &&
+              cudaMemcpy(device_weights, weights.data(), sizeof(weights), cudaMemcpyHostToDevice) ==
+                  cudaSuccess &&
+              cudaMemcpy(device_lut, normalization_lut.data(), sizeof(normalization_lut),
+                         cudaMemcpyHostToDevice) == cudaSuccess &&
+              cudaMemset(device_status, 0, sizeof(int)) == cudaSuccess,
+          "sam3 CUDA Meta preprocessing uploads test data");
+
+    check(trtmc::sam3_cuda_preprocess_image(
+              device_source, input_size, input_size, device_quantized, device_horizontal,
+              device_entries, output_size, device_weights, weights.size(), precision,
+              device_entries, output_size, device_weights, weights.size(), precision, device_output,
+              0, output_size, output_size, device_lut, device_status, nullptr),
+          "sam3 CUDA Meta preprocessing accepts fixed-22 int32 plans");
+    std::vector<float> actual(expected.size());
+    int status = -1;
+    check(cudaMemcpy(actual.data(), device_output, actual.size() * sizeof(float),
+                     cudaMemcpyDeviceToHost) == cudaSuccess &&
+              cudaMemcpy(&status, device_status, sizeof(status), cudaMemcpyDeviceToHost) ==
+                  cudaSuccess,
+          "sam3 CUDA Meta preprocessing downloads output");
+    check(status == 0 && actual == expected,
+          "sam3 CUDA fixed-22 resize and FP16 LUT are bit-exact with the CPU Meta path");
+
+    check(cudaFree(device_status) == cudaSuccess && cudaFree(device_output) == cudaSuccess &&
+              cudaFree(device_lut) == cudaSuccess && cudaFree(device_weights) == cudaSuccess &&
+              cudaFree(device_entries) == cudaSuccess &&
+              cudaFree(device_horizontal) == cudaSuccess &&
+              cudaFree(device_quantized) == cudaSuccess && cudaFree(device_source) == cudaSuccess,
+          "sam3 CUDA Meta preprocessing releases test buffers");
+}
 #endif
 
 class FakeTokenizer final : public trtmc::ITokenizer {
@@ -180,8 +275,8 @@ class FakeSam3VisionModule final : public trtmc::TrtModule {
         last_input_address = pixels;
         saw_shape = image_it->second.shape == std::vector<int64_t>({1, 3, 4, 4});
         last_pixels.assign(pixels, pixels + 3 * 4 * 4);
-        saw_normalized_pixels = close(pixels[0], -1.0219197F) && close(pixels[16], 0.2051821F) &&
-                                close(pixels[32], 1.5245316F);
+        saw_normalized_pixels = close(pixels[0], -0.498046875F) && close(pixels[16], 0.00390625F) &&
+                                close(pixels[32], 0.498046875F);
 
         trtmc::TensorMap out;
         for (int32_t level = 0; level < 3; ++level) {
@@ -433,7 +528,19 @@ class FakeSam3CoreModule final : public trtmc::TrtModule {
             // change its final logit from -2.0 to +0.1. Query one keeps a
             // foreground pixel at that location so the public overlap result
             // distinguishes correct cleanup from a skipped cleanup.
-            pred_masks_ = {2.0F, 2.0F, 2.0F, -2.0F, -2.0F, -2.0F, -2.0F, 2.0F};
+            pred_masks_ = three_detections
+                              ? std::vector<float>{
+                                    2.0F,  2.0F,  2.0F,  -2.0F,
+                                    -2.0F, -2.0F, -2.0F, 2.0F,
+                                    -2.0F, -2.0F, 2.0F,  -2.0F,
+                                }
+                              : std::vector<float>{
+                                    2.0F, 2.0F, 2.0F, -2.0F,
+                                    -2.0F, -2.0F, -2.0F, 2.0F,
+                                };
+        }
+        if (late_hard_conditioning_probe) {
+            pred_masks_ = {-2.0F, -2.0F, -2.0F, 2.0F, 2.0F, 2.0F, 2.0F, -2.0F};
         }
         if (three_overlap_detections) {
             pred_masks_ = {2.0F,  -2.0F, -2.0F, -2.0F, 2.0F, 2.0F,
@@ -455,11 +562,15 @@ class FakeSam3CoreModule final : public trtmc::TrtModule {
         pred_logits_ = three_detections       ? std::vector<float>{2.0F, 2.0F, 2.0F}
                        : tie_detection_scores ? std::vector<float>{2.0F, 2.0F}
                                               : std::vector<float>{0.0F, 2.0F};
+        if (cleanup_probe_detection_masks && three_detections)
+            pred_logits_ = {0.0F, 1.0F, 2.0F};
         if (three_overlap_detections)
             pred_logits_ = {0.0F, 1.0F, 2.0F};
         if (detections_first_frame_only && calls > 1)
             std::fill(pred_logits_.begin(), pred_logits_.end(), -20.0F);
         if (second_detection_first_frame_only && calls > 1)
+            pred_logits_[1] = -20.0F;
+        if (late_hard_conditioning_probe && calls == 1)
             pred_logits_[1] = -20.0F;
         presence_logits_ = {2.0F};
         trtmc::Tensor masks;
@@ -544,6 +655,7 @@ class FakeSam3CoreModule final : public trtmc::TrtModule {
     bool second_detection_first_frame_only{false};
     bool threshold_boundary_detection_mask{false};
     bool cleanup_probe_detection_masks{false};
+    bool late_hard_conditioning_probe{false};
     int32_t calls{0};
 
   private:
@@ -559,9 +671,11 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
   public:
     explicit FakeSam3TrackerModule(bool recurrent, bool memory_only = false,
                                    float object_score_logit = 2.0F, bool device_recurrent = false,
-                                   bool own_stream = false, std::size_t device_batch_size = 1)
+                                   bool own_stream = false, std::size_t device_batch_size = 1,
+                                   bool hard_memory = false)
         : recurrent_(recurrent), memory_only_(memory_only), object_score_logit_(object_score_logit),
-          device_recurrent_(device_recurrent), device_batch_size_(device_batch_size) {
+          device_recurrent_(device_recurrent), device_batch_size_(device_batch_size),
+          hard_memory_(hard_memory) {
         if (own_stream && cudaStreamCreate(&owned_stream_) != cudaSuccess) {
             throw std::runtime_error("fake SAM3 tracker stream creation failed");
         }
@@ -574,10 +688,11 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
                 allocate_device_tensor("pred_masks", device_batch_size_ * 4);
                 allocate_device_tensor("object_pointer", device_batch_size_ * 256);
                 allocate_device_tensor("object_score_logits", device_batch_size_);
+                allocate_device_tensor("selected_iou", device_batch_size_);
             }
             if (memory_only_) {
-                allocate_device_tensor("new_memory_features", 4 * 64);
-                allocate_device_tensor("new_memory_position", 4 * 64);
+                allocate_device_tensor("new_memory_features", device_batch_size_ * 4 * 64);
+                allocate_device_tensor("new_memory_position", device_batch_size_ * 4 * 64);
             }
         } catch (...) {
             release_device_tensors();
@@ -601,11 +716,27 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
             on_forward();
         std::size_t batch_size = 1;
         std::vector<float> downloaded_device_memory;
+        std::vector<float> downloaded_device_position;
         if (memory_only_) {
-            saw_features = inputs.count("tracker_feature_2") == 1 &&
-                           inputs.count("final_mask") == 1 &&
-                           inputs.count("object_score_logits") == 1;
-            const auto& final_mask = inputs.at("final_mask");
+            const char* mask_name = hard_memory_ ? "carved_low_res_mask" : "final_mask";
+            const auto suppression = inputs.find("suppress_area_shrinkage");
+            if (hard_memory_ && suppression != inputs.end())
+                throw std::runtime_error("SAM3 hard memory received a soft suppression flag");
+            if (!hard_memory_ && suppression == inputs.end())
+                throw std::runtime_error("SAM3 soft memory is missing its suppression flag");
+            saw_features = inputs.count("tracker_feature_2") == 1 && inputs.count(mask_name) == 1 &&
+                           inputs.count("object_score_logits") == 1 &&
+                           (hard_memory_ || suppression != inputs.end());
+            const auto bound_feature = bound_inputs_.find("tracker_feature_2");
+            if (bound_feature != bound_inputs_.end()) {
+                float marker = 0.0F;
+                if (cudaMemcpy(&marker, bound_feature->second, sizeof(marker),
+                               cudaMemcpyDeviceToHost) != cudaSuccess) {
+                    throw std::runtime_error("fake SAM3 memory feature marker download failed");
+                }
+                vision_feature_markers.push_back(marker);
+            }
+            const auto& final_mask = inputs.at(mask_name);
             const auto* final_mask_values = static_cast<const float*>(final_mask.data);
             final_mask_input_addresses.push_back(final_mask_values);
             batch_size = final_mask.shape.size() == 4
@@ -617,12 +748,16 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
             const auto item_values = final_mask.numel() / batch_size;
             const auto* score_values =
                 static_cast<const float*>(inputs.at("object_score_logits").data);
+            const auto* suppression_values =
+                hard_memory_ ? nullptr : static_cast<const int32_t*>(suppression->second.data);
             for (std::size_t batch = 0; batch < batch_size; ++batch) {
                 last_final_mask.assign(final_mask_values + batch * item_values,
                                        final_mask_values + (batch + 1) * item_values);
                 last_memory_score = score_values[batch];
                 final_masks_history.push_back(last_final_mask);
                 memory_scores_history.push_back(last_memory_score);
+                if (suppression_values != nullptr)
+                    memory_suppressions_history.push_back(suppression_values[batch]);
             }
         } else if (recurrent_) {
             saw_features =
@@ -635,12 +770,13 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
             }
             const auto memory_offset = inputs.find("memory_temporal_offsets");
             const auto memory = inputs.find("memory_features");
+            const auto memory_position = inputs.find("memory_position");
             const auto pointers = inputs.find("object_pointers");
             const auto pointer_offset = inputs.find("object_pointer_temporal_offsets");
             const auto max_pointers = inputs.find("max_object_pointers_to_use");
-            if (memory == inputs.end() || memory_offset == inputs.end() ||
-                pointers == inputs.end() || pointer_offset == inputs.end() ||
-                max_pointers == inputs.end()) {
+            if (memory == inputs.end() || memory_position == inputs.end() ||
+                memory_offset == inputs.end() || pointers == inputs.end() ||
+                pointer_offset == inputs.end() || max_pointers == inputs.end()) {
                 throw std::runtime_error("missing SAM3 recurrent policy inputs");
             }
             const bool batch_leading_layout =
@@ -652,6 +788,7 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
             const auto expected_batch = static_cast<int64_t>(device_batch_size_);
             const bool matching_dimensions =
                 memory->second.shape.front() == expected_batch &&
+                memory_position->second.shape == memory->second.shape &&
                 memory_offset->second.shape.front() == expected_batch &&
                 pointers->second.shape.front() == expected_batch &&
                 pointer_offset->second.shape.front() == expected_batch &&
@@ -669,6 +806,7 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
             last_memory_offsets.assign(memory_values,
                                        memory_values + memory_offset->second.numel());
             const float* memory_features = static_cast<const float*>(memory->second.data);
+            const float* memory_positions = static_cast<const float*>(memory_position->second.data);
             if (memory_features == nullptr) {
                 saw_device_memory_input = true;
                 downloaded_device_memory.resize(memory->second.numel());
@@ -680,15 +818,36 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
                 }
                 memory_features = downloaded_device_memory.data();
             }
+            if (memory_positions == nullptr) {
+                saw_device_position_input = true;
+                downloaded_device_position.resize(memory_position->second.numel());
+                if (cudaMemcpy(downloaded_device_position.data(),
+                               device_tensors_.at("memory_position"),
+                               downloaded_device_position.size() * sizeof(float),
+                               cudaMemcpyDeviceToHost) != cudaSuccess) {
+                    throw std::runtime_error("fake SAM3 device memory position download failed");
+                }
+                memory_positions = downloaded_device_position.data();
+            }
             last_memory_value = *memory_features;
+            last_memory_position_value = *memory_positions;
             last_memory_frame_values.clear();
+            last_memory_position_frame_values.clear();
             const std::size_t frame_count = memory_offset->second.numel();
             const std::size_t values_per_frame = memory->second.numel() / frame_count;
-            for (std::size_t frame = 0; frame < frame_count; ++frame)
+            for (std::size_t frame = 0; frame < frame_count; ++frame) {
                 last_memory_frame_values.push_back(memory_features[frame * values_per_frame]);
+                last_memory_position_frame_values.push_back(
+                    memory_positions[frame * values_per_frame]);
+            }
             const auto* pointer_values = static_cast<const int32_t*>(pointer_offset->second.data);
             last_pointer_offsets.assign(pointer_values,
                                         pointer_values + pointer_offset->second.numel());
+            const auto* pointer_features = static_cast<const float*>(pointers->second.data);
+            last_pointer_frame_values.clear();
+            const std::size_t pointer_count = pointers->second.numel() / 256U;
+            for (std::size_t pointer = 0; pointer < pointer_count; ++pointer)
+                last_pointer_frame_values.push_back(pointer_features[pointer * 256U]);
             last_max_pointers = *static_cast<const int32_t*>(max_pointers->second.data);
         } else {
             saw_features =
@@ -702,9 +861,14 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
         }
 
         pred_masks_.clear();
+        selected_iou_.clear();
         for (std::size_t batch = 0; batch < batch_size; ++batch) {
             const std::size_t logical_call = recurrent_items_ + batch + 1;
             std::vector<float> item_mask{-2.0F, 2.0F, 2.0F, -2.0F};
+            if (recurrent_ && !recurrent_mask_override.empty())
+                item_mask = recurrent_mask_override;
+            if (recurrent_ && logical_call <= recurrent_masks_by_item.size())
+                item_mask = recurrent_masks_by_item[logical_call - 1];
             if (recurrent_ && contained_pair_masks) {
                 item_mask = logical_call % 2 == 1 ? std::vector<float>{2.0F, -2.0F, -2.0F, -2.0F}
                                                   : std::vector<float>{3.0F, 3.0F, 3.0F, 3.0F};
@@ -713,21 +877,26 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
                 item_mask = {-2.0F, -2.0F, -2.0F, -2.0F};
             }
             pred_masks_.insert(pred_masks_.end(), item_mask.begin(), item_mask.end());
+            const float selected_iou = logical_call <= scripted_selected_ious.size()
+                                           ? scripted_selected_ious[logical_call - 1]
+                                           : 1.0F;
+            selected_iou_.push_back(selected_iou);
         }
         if (recurrent_)
             recurrent_items_ += batch_size;
-        object_pointer_.assign(batch_size * 256, 0.25F);
+        object_pointer_.assign(batch_size * 256, pointer_value);
         object_score_.assign(batch_size, object_score_logit_);
         memory_.clear();
         if (memory_only_) {
             for (std::size_t batch = 0; batch < batch_size; ++batch) {
                 memory_.insert(memory_.end(), 4 * 64,
-                               static_cast<float>(calls) + static_cast<float>(batch) + 0.3333F);
+                               memory_value_base + static_cast<float>(calls) +
+                                   static_cast<float>(batch) + 0.3333F);
             }
         } else {
             memory_.assign(4 * 64, 0.125F);
         }
-        memory_position_.assign(batch_size * 4 * 64, 0.5F);
+        memory_position_.assign(batch_size * 4 * 64, 0.6667F);
 
         trtmc::Tensor mask;
         mask.data = pred_masks_.data();
@@ -741,6 +910,10 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
         score.data = object_score_.data();
         score.shape = {static_cast<int64_t>(batch_size), 1, 1};
         score.dtype = trtmc::DType::kFloat32;
+        trtmc::Tensor selected_iou;
+        selected_iou.data = selected_iou_.data();
+        selected_iou.shape = {static_cast<int64_t>(batch_size), 1, 1};
+        selected_iou.dtype = trtmc::DType::kFloat32;
         trtmc::Tensor memory;
         memory.data = memory_.data();
         memory.shape = batch_size == 1
@@ -756,6 +929,8 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
         if (!memory_only_) {
             outputs = {
                 {"pred_masks", mask}, {"object_pointer", pointer}, {"object_score_logits", score}};
+            if (recurrent_)
+                outputs["selected_iou"] = selected_iou;
         }
         if (memory_only_) {
             outputs["new_memory_features"] = memory;
@@ -806,8 +981,11 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
                  name == "max_object_pointers_to_use"));
     }
     bool has_output(const std::string& name) const override {
+        if (recurrent_ && name == "selected_iou")
+            return true;
         return name == "pred_masks" || name == "object_pointer" || name == "object_score_logits" ||
-                       name == "new_memory_features" || name == "new_memory_position"
+                       name == "selected_iou" || name == "new_memory_features" ||
+                       name == "new_memory_position"
                    ? device_tensors_.count(name) != 0
                    : false;
     }
@@ -817,13 +995,16 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
     std::vector<int64_t> tensor_shape(const std::string& name) const override {
         if (name == "memory_features" || name == "memory_position")
             return {static_cast<int64_t>(device_batch_size_), 1, 4, 64};
-        if (name == "new_memory_features" || name == "new_memory_position")
-            return {4, 1, 64};
+        if (name == "new_memory_features" || name == "new_memory_position") {
+            if (device_batch_size_ == 1)
+                return {4, 1, 64};
+            return {static_cast<int64_t>(device_batch_size_), 4, 64};
+        }
         if (name == "pred_masks")
             return {static_cast<int64_t>(device_batch_size_), 1, 2, 2};
         if (name == "object_pointer")
             return {static_cast<int64_t>(device_batch_size_), 1, 256};
-        if (name == "object_score_logits")
+        if (name == "object_score_logits" || name == "selected_iou")
             return {static_cast<int64_t>(device_batch_size_), 1, 1};
         return is_vision_input(name) ? std::vector<int64_t>{1, 1, 1, 1} : std::vector<int64_t>{};
     }
@@ -856,20 +1037,31 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
     std::vector<int64_t> last_pointer_offset_shape;
     std::vector<int32_t> last_memory_offsets;
     std::vector<int32_t> last_pointer_offsets;
+    std::vector<float> last_pointer_frame_values;
     int32_t last_max_pointers{0};
     float last_memory_value{0.0F};
     std::vector<float> last_memory_frame_values;
+    float last_memory_position_value{0.0F};
+    std::vector<float> last_memory_position_frame_values;
     std::vector<float> last_final_mask;
     std::vector<std::vector<float>> final_masks_history;
     std::vector<const float*> final_mask_input_addresses;
     std::vector<float> last_detector_mask;
     std::vector<std::vector<float>> detector_masks_history;
     std::vector<float> memory_scores_history;
+    std::vector<int32_t> memory_suppressions_history;
     std::vector<std::size_t> memory_batch_sizes;
+    std::vector<float> vision_feature_markers;
+    float memory_value_base{0.0F};
     float last_memory_score{0.0F};
     bool scripted_occlusion{false};
     bool contained_pair_masks{false};
+    std::vector<float> recurrent_mask_override;
+    std::vector<std::vector<float>> recurrent_masks_by_item;
+    std::vector<float> scripted_selected_ious;
+    float pointer_value{0.25F};
     bool saw_device_memory_input{false};
+    bool saw_device_position_input{false};
     int32_t async_calls{0};
     int32_t sync_calls{0};
     std::function<void()> on_forward;
@@ -905,10 +1097,12 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
     float object_score_logit_{2.0F};
     bool device_recurrent_{false};
     std::size_t device_batch_size_{1};
+    bool hard_memory_{false};
     std::size_t recurrent_items_{0};
     std::vector<float> pred_masks_;
     std::vector<float> object_pointer_;
     std::vector<float> object_score_;
+    std::vector<float> selected_iou_;
     std::vector<float> memory_;
     std::vector<float> memory_position_;
     std::unordered_map<std::string, void*> bound_inputs_;
@@ -994,6 +1188,10 @@ make_parallel_tracker_init_fixture(const std::shared_ptr<ParallelTrackerInitSche
     }
     auto step = std::make_unique<FakeSam3TrackerModule>(true);
     auto memory = std::make_unique<FakeSam3TrackerModule>(false, true);
+    auto hard_memory =
+        std::make_unique<FakeSam3TrackerModule>(false, true, 2.0F, false, false, 1, true);
+    auto hard_memory_batch2 =
+        std::make_unique<FakeSam3TrackerModule>(false, true, 2.0F, false, false, 2, true);
     auto tokenizer = std::make_shared<FakeTokenizer>();
     auto config = make_config();
     config.fill_hole_area = fill_hole_area;
@@ -1002,7 +1200,8 @@ make_parallel_tracker_init_fixture(const std::shared_ptr<ParallelTrackerInitSche
     config.detection_nms_threshold = 0.0F;
     auto pipeline = std::make_unique<trtmc::Sam3Pipeline>(
         std::move(text), std::move(vision), std::move(core), tokenizer, config, "facebook/sam3",
-        std::move(init), std::move(step), std::move(memory), nullptr, nullptr, std::move(sibling));
+        std::move(init), std::move(step), std::move(memory), nullptr, nullptr, std::move(sibling),
+        std::move(hard_memory), std::move(hard_memory_batch2));
     return {std::move(pipeline), vision_ptr, init_ptr, sibling_ptr};
 }
 
@@ -1027,11 +1226,11 @@ std::uint64_t float_bit_hash(const std::vector<float>& values) {
     return hash;
 }
 
-void test_preprocess_matches_native_uint8_antialiased_resize() {
-    // Oracles were produced through the pinned release environment's actual
-    // Sam3ImageProcessorFast (facebook/sam3 revision 3c879f3), torch
-    // 2.12.0+cu130 and torchvision 0.27.0 on aarch64. They cover resize,
-    // rescale, and normalization in CHW order, not a hand-written surrogate.
+void test_preprocess_matches_customer_meta_pillow_resize() {
+    // Oracles were produced through the customer Meta image-folder loader in
+    // the pinned L4 environment. They cover Pillow's fixed-22 bilinear uint8
+    // resize followed by Meta's FP16 ToTensor/subtract/divide order, expanded
+    // to the runtime's FP32 TensorRT input in CHW order.
     trtmc::Sam3Config config;
     config.image_size = 1008;
     config.image_mean = {0.5F, 0.5F, 0.5F};
@@ -1052,8 +1251,8 @@ void test_preprocess_matches_native_uint8_antialiased_resize() {
         }
         const auto output = trtmc::preprocess_sam3_image(pixels.data(), height, width, config);
         const auto output_hash = float_bit_hash(output);
-        check(output_hash == 0xc62246a4f256d20dULL,
-              "sam3 96x128 preprocessing is bit-exact with native torchvision oracle");
+        check(output_hash == 0x099ca8c2a291e783ULL,
+              "sam3 96x128 preprocessing is bit-exact with customer Meta/Pillow oracle");
     }
 
     {
@@ -1075,8 +1274,8 @@ void test_preprocess_matches_native_uint8_antialiased_resize() {
         }
         const auto output = trtmc::preprocess_sam3_image(pixels.data(), height, width, config);
         const auto output_hash = float_bit_hash(output);
-        check(output_hash == 0x8f733fa08ddf2663ULL,
-              "sam3 high-frequency downsample is bit-exact with native antialias oracle");
+        check(output_hash == 0x92ddbd5d8ae52783ULL,
+              "sam3 high-frequency downsample is bit-exact with customer Meta/Pillow oracle");
     }
 
     {
@@ -1093,8 +1292,8 @@ void test_preprocess_matches_native_uint8_antialiased_resize() {
             }
         }
         const auto output = trtmc::preprocess_sam3_image(pixels.data(), height, width, config);
-        check(float_bit_hash(output) == 0xd2c5efe13ee2985aULL,
-              "sam3 odd non-integer downsample is bit-exact with native antialias oracle");
+        check(float_bit_hash(output) == 0xb640d1d167f10783ULL,
+              "sam3 odd downsample is bit-exact with customer Meta/Pillow oracle");
     }
 }
 
@@ -1102,7 +1301,7 @@ void test_preprocess_uses_explicit_fma_at_uint8_half_steps() {
     trtmc::Sam3Config config;
     config.image_size = 16;
     config.image_mean = {0.0F, 0.0F, 0.0F};
-    config.image_std = {1.0F / 255.0F, 1.0F / 255.0F, 1.0F / 255.0F};
+    config.image_std = {1.0F, 1.0F, 1.0F};
     constexpr int32_t size = 16;
     std::vector<float> pixels(static_cast<std::size_t>(size * size * 3));
     for (std::size_t index = 0; index < pixels.size(); ++index) {
@@ -1133,11 +1332,15 @@ void test_preprocess_uses_explicit_fma_at_uint8_half_steps() {
     for (std::size_t pixel = 0; exact && pixel < plane; ++pixel) {
         for (std::size_t channel = 0; channel < 3U; ++channel) {
             const float source = pixels[pixel * 3U + channel];
-            const auto expected = static_cast<float>(
+            const auto quantized = static_cast<float>(
                 std::clamp(static_cast<int>(
                                std::floor(std::fma(std::clamp(source, 0.0F, 1.0F), 255.0F, 0.5F))),
                            0, 255));
-            exact = output[channel * plane + pixel] == expected;
+            // FP16 storage changes the normalized value, but by much less
+            // than half the distance between adjacent uint8 buckets. This
+            // tight comparison therefore still pins the selected bucket.
+            const float expected = quantized / 255.0F;
+            exact = std::fabs(output[channel * plane + pixel] - expected) < 1.0e-3F;
         }
     }
     check(exact, "sam3 uint8 quantization pins fused multiply-add at adversarial half steps");
@@ -1151,6 +1354,8 @@ struct VideoFixture {
     FakeSam3TrackerModule* step_batch2{nullptr};
     FakeSam3TrackerModule* memory{nullptr};
     FakeSam3TrackerModule* memory_batch2{nullptr};
+    FakeSam3TrackerModule* hard_memory{nullptr};
+    FakeSam3TrackerModule* hard_memory_batch2{nullptr};
 };
 
 VideoFixture make_video_fixture(std::size_t detections = 1, bool batch2 = false,
@@ -1172,6 +1377,12 @@ VideoFixture make_video_fixture(std::size_t detections = 1, bool batch2 = false,
     auto memory = std::make_unique<FakeSam3TrackerModule>(false, true, 2.0F, device_recurrent,
                                                           device_recurrent);
     auto* memory_ptr = memory.get();
+    auto hard_memory = std::make_unique<FakeSam3TrackerModule>(false, true, 2.0F, device_recurrent,
+                                                               device_recurrent, 1, true);
+    auto* hard_memory_ptr = hard_memory.get();
+    auto hard_memory_batch2 = std::make_unique<FakeSam3TrackerModule>(
+        false, true, 2.0F, device_recurrent, device_recurrent, 2, true);
+    auto* hard_memory_batch2_ptr = hard_memory_batch2.get();
 
     std::unique_ptr<FakeSam3TrackerModule> step_batch2;
     std::unique_ptr<FakeSam3TrackerModule> memory_batch2;
@@ -1198,9 +1409,18 @@ VideoFixture make_video_fixture(std::size_t detections = 1, bool batch2 = false,
     auto pipeline = std::make_unique<trtmc::Sam3Pipeline>(
         std::move(text), std::move(vision), std::move(core), std::make_shared<FakeTokenizer>(),
         config, "facebook/sam3", std::move(init), std::move(step), std::move(memory),
-        std::move(step_batch2), std::move(memory_batch2));
-    return {std::move(pipeline), vision_ptr, core_ptr,         init_ptr, step_ptr,
-            step_batch2_ptr,     memory_ptr, memory_batch2_ptr};
+        std::move(step_batch2), std::move(memory_batch2), nullptr, std::move(hard_memory),
+        std::move(hard_memory_batch2));
+    return {std::move(pipeline),
+            vision_ptr,
+            core_ptr,
+            init_ptr,
+            step_ptr,
+            step_batch2_ptr,
+            memory_ptr,
+            memory_batch2_ptr,
+            hard_memory_ptr,
+            hard_memory_batch2_ptr};
 }
 
 std::vector<trtmc::Sam3VideoFrameResult> run_video(trtmc::Sam3Pipeline& pipeline,
@@ -1220,7 +1440,27 @@ std::vector<trtmc::Sam3VideoFrameResult> run_video(trtmc::Sam3Pipeline& pipeline
     return session->propagate_borrowed_continuation(std::move(prompt), views.data(), views.size());
 }
 
-void test_b1_device_binding_and_snapshot() {
+void test_video_bundle_requires_both_hard_memory_plans() {
+    auto hard_memory =
+        std::make_unique<FakeSam3TrackerModule>(false, true, 2.0F, false, false, 1, true);
+    trtmc::Sam3Pipeline pipeline(
+        std::make_unique<FakeSam3TextModule>(), std::make_unique<FakeDeviceSam3VisionModule>(),
+        std::make_unique<FakeSam3CoreModule>(), std::make_shared<FakeTokenizer>(), make_config(),
+        "facebook/sam3", std::make_unique<FakeSam3TrackerModule>(false),
+        std::make_unique<FakeSam3TrackerModule>(true),
+        std::make_unique<FakeSam3TrackerModule>(false, true), nullptr, nullptr, nullptr,
+        std::move(hard_memory));
+    bool rejected = false;
+    try {
+        (void)pipeline.create_sam3_video_session("person");
+    } catch (const std::runtime_error& error) {
+        rejected = std::string(error.what()).find("sam3_tracker_hard_memory_batch2_engine_plan") !=
+                   std::string::npos;
+    }
+    check(rejected, "sam3 video refuses a bundle missing the hard B2 memory plan");
+}
+
+void test_b1_device_binding_and_prompt_memory() {
     auto fixture = make_video_fixture(2, true);
     for (int32_t level = 0; level < 3; ++level) {
         const auto suffix = std::to_string(level);
@@ -1239,14 +1479,77 @@ void test_b1_device_binding_and_snapshot() {
               fixture.memory->device_ptr("tracker_feature_2") ==
                   fixture.vision->device_ptr("sam3_tracker_feature_2") &&
               fixture.memory_batch2->device_ptr("tracker_feature_2") ==
+                  fixture.vision->device_ptr("sam3_tracker_feature_2") &&
+              fixture.hard_memory->device_ptr("tracker_feature_2") ==
+                  fixture.vision->device_ptr("sam3_tracker_feature_2") &&
+              fixture.hard_memory_batch2->device_ptr("tracker_feature_2") ==
                   fixture.vision->device_ptr("sam3_tracker_feature_2"),
-          "sam3 B1 workspace binds recurrent position and B1/B2 memory consumers");
+          "sam3 B1 workspace binds recurrent position and soft/hard memory consumers");
 
     auto session = fixture.pipeline->create_sam3_video_session("person");
     std::vector<float> pixels(12, 0.5F);
     (void)session->accept_prompt_frame(pixels.data(), 2, 2);
-    check(fixture.vision->calls == 1 && fixture.vision->sync_calls == 0,
-          "sam3 vision snapshot uses its completion fence without redundant module sync");
+    check(fixture.vision->calls == 1 && fixture.vision->sync_calls == 0 &&
+              fixture.hard_memory_batch2->calls == 1,
+          "sam3 prompt finishes hard memory after the vision completion fence");
+}
+
+#ifdef TRTMC_HAS_CUDA_KERNELS
+void test_prompt_only_session_cleanup_restores_cuda_device() {
+    int32_t device_count = 0;
+    if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count < 2)
+        return;
+
+    int32_t original_device = 0;
+    check(cudaGetDevice(&original_device) == cudaSuccess,
+          "sam3 prompt-only cleanup queries the caller CUDA device");
+    check(cudaSetDevice(0) == cudaSuccess,
+          "sam3 prompt-only cleanup selects its owning CUDA device");
+    {
+        auto fixture = make_video_fixture();
+        auto session = fixture.pipeline->create_sam3_video_session("person");
+        std::vector<float> pixels(12, 0.5F);
+        (void)session->accept_prompt_frame(pixels.data(), 2, 2);
+        check(cudaSetDevice(1) == cudaSuccess && cudaGetLastError() == cudaSuccess,
+              "sam3 prompt-only cleanup selects a different caller CUDA device");
+        session.reset();
+        int32_t current_device = 0;
+        check(cudaGetDevice(&current_device) == cudaSuccess && current_device == 1 &&
+                  cudaGetLastError() == cudaSuccess,
+              "sam3 prompt-only cleanup frees on its owner and restores the caller device");
+        check(cudaSetDevice(0) == cudaSuccess,
+              "sam3 prompt-only cleanup restores the fixture CUDA device before teardown");
+    }
+    check(cudaSetDevice(original_device) == cudaSuccess,
+          "sam3 prompt-only cleanup restores the test CUDA device");
+}
+#endif
+
+void test_interleaved_sessions_finish_frame_zero_memory_before_return() {
+    auto fixture = make_video_fixture();
+    auto first = fixture.pipeline->create_sam3_video_session("first");
+    auto second = fixture.pipeline->create_sam3_video_session("second");
+    std::vector<float> first_pixels(12, 0.25F);
+    std::vector<float> second_pixels(12, 0.75F);
+    auto first_prompt = first->accept_prompt_frame(first_pixels.data(), 2, 2);
+    auto second_prompt = second->accept_prompt_frame(second_pixels.data(), 2, 2);
+
+    const std::array<trtmc::Sam3VideoFrameView, 1> first_frames{
+        trtmc::Sam3VideoFrameView{first_pixels.data(), 2, 2}};
+    const std::array<trtmc::Sam3VideoFrameView, 1> second_frames{
+        trtmc::Sam3VideoFrameView{second_pixels.data(), 2, 2}};
+    const auto first_results = first->propagate_borrowed_continuation(
+        std::move(first_prompt), first_frames.data(), first_frames.size());
+    const auto second_results = second->propagate_borrowed_continuation(
+        std::move(second_prompt), second_frames.data(), second_frames.size());
+
+    check(first_results.size() == 1 && second_results.size() == 1 &&
+              fixture.hard_memory->vision_feature_markers == std::vector<float>({150.0F, 250.0F}) &&
+              fixture.memory->vision_feature_markers == std::vector<float>({150.0F, 250.0F}),
+          "sam3 interleaved prompts retain their own frame-zero feature for soft refresh");
+    check(fixture.hard_memory->device_ptr("tracker_feature_2") ==
+              fixture.vision->device_ptr("sam3_tracker_feature_2"),
+          "sam3 frame-zero hard memory preserves the canonical external binding");
 }
 
 void test_image_pcs_runs_native_preprocess_and_full_result() {
@@ -1267,7 +1570,8 @@ void test_image_pcs_runs_native_preprocess_and_full_result() {
     const auto result = pipeline.segment_prompted_text(pixels.data(), 2, 4, "ear");
     check(text_ptr->saw_expected_ids, "sam3 image PCS encodes the text prompt");
     check(vision_ptr->saw_shape, "sam3 image PCS sends the exact B1 vision shape");
-    check(vision_ptr->saw_normalized_pixels, "sam3 image PCS applies native image preprocessing");
+    check(vision_ptr->saw_normalized_pixels,
+          "sam3 image PCS applies customer Meta image preprocessing");
     check(core_ptr->saw_text_shape && core_ptr->saw_mask,
           "sam3 image PCS passes the projected prompt to the core");
     check(core_ptr->saw_vision_inputs, "sam3 image PCS passes all FPN features to the core");
@@ -1329,35 +1633,162 @@ void test_prompt_then_borrowed_tail_is_strictly_ordered() {
 }
 
 void test_recurrent_tracker_bfloat16_state() {
+    constexpr float rounded_first_feature = 1.3359375F;
+    constexpr float rounded_second_feature = 2.328125F;
+    constexpr float rounded_position = 0.66796875F;
     auto fixture = make_video_fixture();
     fixture.core->threshold_boundary_detection_mask = true;
     const auto results = run_video(*fixture.pipeline, 3);
     check(results.size() == 3 && results[0].object_ids == std::vector<int32_t>({0}) &&
               results[1].object_ids == std::vector<int32_t>({0}) && fixture.init->calls == 1 &&
-              fixture.step->calls == 2 && fixture.memory->calls == 2,
+              fixture.step->calls == 2 && fixture.hard_memory->calls == 1 &&
+              fixture.memory->calls == 3,
           "sam3 recurrent B1 path initializes once and advances in temporal order");
-    check(fixture.step->last_memory_frame_values.size() == 2 &&
-              !close(fixture.step->last_memory_frame_values[1], 1.3333F),
-          "sam3 recurrent memory is BF16-rounded before its next use");
+    check(
+        fixture.step->last_memory_frame_values ==
+                std::vector<float>({rounded_first_feature, rounded_second_feature}) &&
+            fixture.step->last_memory_position_frame_values.size() == 2 &&
+            std::all_of(fixture.step->last_memory_position_frame_values.begin(),
+                        fixture.step->last_memory_position_frame_values.end(),
+                        [rounded_position](float value) { return close(value, rounded_position); }),
+        "sam3 recurrent B1 features and positions are BF16-rounded in FP32 carriers");
     check(results[1].tracker_scores.size() == 1 && close(results[1].tracker_scores[0], 0.880797F),
           "sam3 recurrent result reports the tracker probability");
 }
 
+void test_frame_zero_prompt_and_propagation_follow_meta_schedule() {
+    auto fixture = make_video_fixture(2, true);
+    fixture.core->detections_first_frame_only = true;
+    fixture.memory_batch2->memory_value_base = 16.0F;
+    fixture.hard_memory_batch2->memory_value_base = 64.0F;
+    std::vector<float> pixels(12, 0.5F);
+    auto session = fixture.pipeline->create_sam3_video_session("person");
+    auto prompt = session->accept_prompt_frame(pixels.data(), 2, 2);
+    const auto prompt_snapshot = prompt;
+
+    check(prompt_snapshot.object_ids == std::vector<int32_t>({0, 1}) &&
+              prompt_snapshot.masks ==
+                  std::vector<float>({1.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F}) &&
+              fixture.memory->calls == 0 && fixture.memory_batch2->calls == 0 &&
+              fixture.hard_memory->calls == 0 && fixture.hard_memory_batch2->calls == 1,
+          "sam3 prompt returns detector masks after finishing frame-zero hard memory");
+
+    const std::array<trtmc::Sam3VideoFrameView, 2> views{
+        {{pixels.data(), 2, 2}, {pixels.data(), 2, 2}}};
+    const auto propagated =
+        session->propagate_borrowed_continuation(std::move(prompt), views.data(), views.size());
+    const std::vector<float> first_memory{
+        1024.0F,
+        -1024.0F,
+        -1024.0F,
+        -1024.0F,
+    };
+    const std::vector<float> second_memory{
+        -1024.0F,
+        1024.0F,
+        1024.0F,
+        -1024.0F,
+    };
+    const std::vector<float> propagated_frame_zero_masks{
+        1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 1.0F, 0.0F,
+    };
+    check(propagated.size() == 2 && propagated.front().object_ids == std::vector<int32_t>({0, 1}) &&
+              propagated.front().masks == propagated_frame_zero_masks &&
+              propagated.front().masks != prompt_snapshot.masks,
+          "sam3 continuation emits Meta's consolidated tracker-mask frame-zero result");
+    check(
+        fixture.memory->calls == 0 && fixture.memory_batch2->calls == 2 &&
+            fixture.hard_memory_batch2->calls == 1 &&
+            fixture.memory_batch2->memory_batch_sizes == std::vector<std::size_t>({2, 2}) &&
+            std::vector<std::vector<float>>(fixture.memory_batch2->final_masks_history.begin(),
+                                            fixture.memory_batch2->final_masks_history.begin() +
+                                                2) ==
+                std::vector<std::vector<float>>({first_memory, second_memory}) &&
+            std::vector<int32_t>(fixture.memory_batch2->memory_suppressions_history.begin(),
+                                 fixture.memory_batch2->memory_suppressions_history.begin() + 2) ==
+                std::vector<int32_t>({0, 0}) &&
+            std::vector<float>(fixture.memory_batch2->memory_scores_history.begin(),
+                               fixture.memory_batch2->memory_scores_history.begin() + 2) ==
+                std::vector<float>({10.0F, 10.0F}) &&
+            fixture.hard_memory_batch2->memory_batch_sizes == std::vector<std::size_t>({2}) &&
+            fixture.hard_memory_batch2->final_masks_history ==
+                std::vector<std::vector<float>>({first_memory, second_memory}) &&
+            fixture.hard_memory_batch2->memory_scores_history ==
+                std::vector<float>({10.0F, 10.0F}) &&
+            fixture.step_batch2->last_memory_frame_values == std::vector<float>({17.375F, 18.375F}),
+        "sam3 propagation replaces hard frame-zero memory with soft memory consumed by frame one");
+}
+
+void test_frame_zero_zero_detections_is_stable() {
+    auto fixture = make_video_fixture(1, false, false, 2.0F, [](trtmc::Sam3Config& config) {
+        config.detection_threshold = 1.0F;
+    });
+    std::vector<float> pixels(12, 0.5F);
+    auto session = fixture.pipeline->create_sam3_video_session("person");
+    auto prompt = session->accept_prompt_frame(pixels.data(), 2, 2);
+    check(prompt.object_ids.empty() && prompt.masks.empty() && fixture.init->calls == 0 &&
+              fixture.memory->calls == 0 && fixture.hard_memory->calls == 0,
+          "sam3 empty prompt creates no tracker or memory work");
+    const std::array<trtmc::Sam3VideoFrameView, 1> views{{{pixels.data(), 2, 2}}};
+    const auto propagated =
+        session->propagate_borrowed_continuation(std::move(prompt), views.data(), views.size());
+    check(propagated.size() == 1 && propagated.front().object_ids.empty() &&
+              propagated.front().masks.empty() && fixture.init->calls == 0 &&
+              fixture.memory->calls == 0 && fixture.hard_memory->calls == 0,
+          "sam3 empty propagated frame zero remains empty without memory work");
+}
+
+void test_late_new_track_uses_uncleaned_hard_memory() {
+    auto fixture = make_video_fixture(2, false, false, 2.0F,
+                                      [](trtmc::Sam3Config& config) { config.fill_hole_area = 1; });
+    fixture.core->late_hard_conditioning_probe = true;
+    fixture.step->recurrent_mask_override = {-2.0F, -2.0F, -2.0F, 2.0F};
+
+    const auto results = run_video(*fixture.pipeline, 2);
+    check(results.size() == 2 && results[0].object_ids == std::vector<int32_t>({0}) &&
+              results[1].object_ids == std::vector<int32_t>({0, 1}),
+          "sam3 hard-memory probe introduces its second object after frame zero");
+    check(fixture.memory->calls == 2 && fixture.memory_batch2 == nullptr &&
+              fixture.hard_memory->calls == 2 && fixture.hard_memory_batch2->calls == 0,
+          "sam3 frame-zero and late singletons use hard memory while recurrent updates stay soft");
+    check(fixture.hard_memory->final_masks_history.back() ==
+                  std::vector<float>({1024.0F, 1024.0F, 1024.0F, -1024.0F}) &&
+              fixture.hard_memory->memory_scores_history == std::vector<float>({10.0F, 10.0F}),
+          "sam3 hard memory receives the uncleaned carved logits and present-object score");
+}
+
 void test_recurrent_tracker_uses_b2_and_odd_tail() {
     {
+        constexpr float rounded_first_feature = 1.3359375F;
+        constexpr float rounded_second_feature = 2.328125F;
+        constexpr float rounded_position = 0.66796875F;
         auto fixture = make_video_fixture(2, true);
+        // Keep both logical rows visible so this test isolates equal-history
+        // engine grouping rather than final-result overlap compaction.
+        fixture.step->recurrent_masks_by_item = {
+            {2.0F, -2.0F, -2.0F, -2.0F},
+            {-2.0F, 2.0F, 2.0F, -2.0F},
+        };
+        fixture.step_batch2->recurrent_masks_by_item = fixture.step->recurrent_masks_by_item;
         const auto results = run_video(*fixture.pipeline, 2);
         check(results[0].object_ids == std::vector<int32_t>({0, 1}) &&
                   results[1].object_ids == std::vector<int32_t>({0, 1}) &&
                   fixture.step->calls == 0 && fixture.step_batch2->calls == 1 &&
                   fixture.step_batch2->batch_sizes == std::vector<std::size_t>({2}),
               "sam3 equal-history pair uses only the fixed B2 recurrent engine");
-        check(fixture.memory->calls == 0 && fixture.memory_batch2->calls == 1 &&
-                  fixture.memory_batch2->memory_batch_sizes == std::vector<std::size_t>({2}),
-              "sam3 paired state update uses the fixed B2 memory engine");
+        check(fixture.memory->calls == 0 && fixture.memory_batch2->calls == 2 &&
+                  fixture.memory_batch2->memory_batch_sizes == std::vector<std::size_t>({2, 2}) &&
+                  fixture.hard_memory_batch2->calls == 1,
+              "sam3 paired prompt uses hard B2 then soft-refreshes before recurrent update");
+        check(fixture.step_batch2->last_memory_frame_values ==
+                      std::vector<float>({rounded_first_feature, rounded_second_feature}) &&
+                  fixture.step_batch2->last_memory_position_frame_values ==
+                      std::vector<float>({rounded_position, rounded_position}),
+              "sam3 recurrent B2 features and positions are BF16-rounded in FP32 carriers");
     }
     {
         auto fixture = make_video_fixture(3, true);
+        fixture.core->detections_first_frame_only = true;
         const auto results = run_video(*fixture.pipeline, 2);
         check(results[0].object_ids == std::vector<int32_t>({0, 1, 2}) &&
                   std::is_sorted(results[1].object_ids.begin(), results[1].object_ids.end()) &&
@@ -1368,23 +1799,130 @@ void test_recurrent_tracker_uses_b2_and_odd_tail() {
             unique.emplace(id, true);
         check(unique.size() == results[1].object_ids.size(),
               "sam3 padded B2 tail creates no duplicate logical track");
-        check(fixture.memory_batch2->calls == 1 && fixture.memory->calls == 1,
-              "sam3 odd memory row commits one B2 pair and one singleton tail");
+        check(fixture.memory_batch2->calls == 2 && fixture.hard_memory_batch2->calls == 1,
+              "sam3 odd memory row soft-refreshes and updates its B2 rows");
+        check(fixture.memory->calls == 2,
+              "sam3 odd memory row soft-refreshes and updates its B1 tail");
+        check(fixture.hard_memory->calls == 1,
+              "sam3 odd memory row uses one hard frame-zero B1 tail");
+    }
+}
+
+void test_recurrent_area_policy_uses_high_resolution_global_geometry() {
+    auto fixture = make_video_fixture(2, true);
+    fixture.core->detections_first_frame_only = true;
+    const std::vector<float> first_mask{-4.0F, -4.0F, -4.0F, 1.0F};
+    const std::vector<float> second_mask{-4.0F, -4.0F, -2.0F, 1.0F};
+    fixture.step_batch2->recurrent_masks_by_item = {first_mask, second_mask};
+
+    const auto results = run_video(*fixture.pipeline, 2);
+    check(results.size() == 2 && fixture.memory_batch2->calls == 2 && fixture.memory->calls == 0,
+          "sam3 high-resolution area-policy probe refreshes then updates B2 memory");
+    check(std::vector<std::vector<float>>(fixture.memory_batch2->final_masks_history.end() - 2,
+                                          fixture.memory_batch2->final_masks_history.end()) ==
+                  std::vector<std::vector<float>>({first_mask, second_mask}) &&
+              std::vector<int32_t>(fixture.memory_batch2->memory_suppressions_history.end() - 2,
+                                   fixture.memory_batch2->memory_suppressions_history.end()) ==
+                  std::vector<int32_t>({0, 0}) &&
+              std::vector<float>(fixture.memory_batch2->memory_scores_history.end() - 2,
+                                 fixture.memory_batch2->memory_scores_history.end()) ==
+                  std::vector<float>({10.0F, 10.0F}),
+          "sam3 area policy retains the second object from its 8x8 ratio rather than its "
+          "2x2 ratio and sends original overlapping logits to TensorRT");
+    check(fixture.hard_memory_batch2->memory_suppressions_history.empty(),
+          "sam3 hard conditioning remains independent from recurrent area shrinkage");
+}
+
+void test_recurrent_area_policy_is_global_across_b2_and_b1_tail() {
+    auto fixture = make_video_fixture(3, true);
+    fixture.core->detections_first_frame_only = true;
+    const std::vector<float> winner(4, 3.0F);
+    const std::vector<float> empty(4, -2.0F);
+    const std::vector<float> global_loser(4, 2.0F);
+    fixture.step_batch2->recurrent_masks_by_item = {
+        winner,
+        empty,
+        global_loser,
+        global_loser,
+    };
+
+    const auto results = run_video(*fixture.pipeline, 2);
+    check(results.size() == 2 && fixture.memory_batch2->calls == 2 && fixture.memory->calls == 2,
+          "sam3 three-object area-policy probe refreshes and updates B2 plus B1 memory");
+    check(std::vector<int32_t>(fixture.memory_batch2->memory_suppressions_history.end() - 2,
+                               fixture.memory_batch2->memory_suppressions_history.end()) ==
+                  std::vector<int32_t>({0, 1}) &&
+              std::vector<float>(fixture.memory_batch2->memory_scores_history.end() - 2,
+                                 fixture.memory_batch2->memory_scores_history.end()) ==
+                  std::vector<float>({10.0F, -10.0F}) &&
+              fixture.memory->memory_suppressions_history.back() == 1 &&
+              fixture.memory->memory_scores_history.back() == -10.0F &&
+              fixture.memory->final_masks_history.back() == global_loser,
+          "sam3 B1 tail carries the suppression decision made against all three objects");
+}
+
+void test_recurrent_area_policy_suppresses_empty_singleton_after_resize() {
+    auto fixture = make_video_fixture();
+    fixture.core->detections_first_frame_only = true;
+    const std::vector<float> empty(4, -2.0F);
+    fixture.step->recurrent_mask_override = empty;
+
+    const auto results = run_video(*fixture.pipeline, 2);
+    check(results.size() == 2 && fixture.memory->calls == 2 &&
+              fixture.memory->memory_suppressions_history.back() == 1 &&
+              fixture.memory->memory_scores_history.back() == -10.0F &&
+              fixture.memory->final_masks_history.back() == empty,
+          "sam3 empty singleton is rejected while its original low-resolution logits remain "
+          "the soft-plan input");
+}
+
+void test_device_recurrent_memory_rounds_features_and_positions() {
+    constexpr float rounded_first_feature = 1.3359375F;
+    constexpr float rounded_second_feature = 2.328125F;
+    constexpr float rounded_position = 0.66796875F;
+    {
+        auto fixture = make_video_fixture(1, false, true);
+        (void)run_video(*fixture.pipeline, 2);
+        check(fixture.step->saw_device_memory_input && fixture.step->saw_device_position_input &&
+                  close(fixture.step->last_memory_value, rounded_first_feature) &&
+                  close(fixture.step->last_memory_position_value, rounded_position),
+              "sam3 device B1 features and positions are BF16-rounded in FP32 carriers");
+    }
+    {
+        auto fixture = make_video_fixture(2, true, true);
+        (void)run_video(*fixture.pipeline, 2);
+        check(fixture.step_batch2->saw_device_memory_input &&
+                  fixture.step_batch2->saw_device_position_input &&
+                  fixture.step_batch2->last_memory_frame_values ==
+                      std::vector<float>({rounded_first_feature, rounded_second_feature}) &&
+                  fixture.step_batch2->last_memory_position_frame_values ==
+                      std::vector<float>({rounded_position, rounded_position}),
+              "sam3 device B2 features and positions are BF16-rounded in FP32 carriers");
     }
 }
 
 void test_parallel_mask_cleanup_preserves_full_results() {
     const auto enable_cleanup = [](trtmc::Sam3Config& config) { config.fill_hole_area = 1; };
+    const std::vector<std::vector<float>> visible_recurrent_masks{
+        {2.0F, -2.0F, -2.0F, -2.0F}, {-2.0F, 2.0F, -2.0F, -2.0F}, {-2.0F, -2.0F, 2.0F, 2.0F},
+        {2.0F, -2.0F, -2.0F, -2.0F}, {-2.0F, 2.0F, -2.0F, -2.0F}, {-2.0F, -2.0F, 2.0F, 2.0F},
+    };
     auto first = make_video_fixture(3, false, false, 2.0F, enable_cleanup);
     first.core->detections_first_frame_only = true;
     first.core->cleanup_probe_detection_masks = true;
+    first.step->recurrent_masks_by_item = visible_recurrent_masks;
     const auto reference = run_video(*first.pipeline, 3, 2, 3);
     auto second = make_video_fixture(3, false, false, 2.0F, enable_cleanup);
     second.core->detections_first_frame_only = true;
     second.core->cleanup_probe_detection_masks = true;
+    second.step->recurrent_masks_by_item = visible_recurrent_masks;
     const auto repeated = run_video(*second.pipeline, 3, 2, 3);
-    check(reference.size() == 3 && reference.front().object_ids.size() == 3 &&
-              repeated.size() == reference.size(),
+    const auto all_rows_visible = [](const auto& results) {
+        return std::all_of(results.begin(), results.end(),
+                           [](const auto& frame) { return frame.object_ids.size() == 3; });
+    };
+    check(reference.size() == 3 && repeated.size() == reference.size() &&
+              all_rows_visible(reference) && all_rows_visible(repeated),
           "sam3 parallel cleanup handles every active tracker row");
     for (std::size_t index = 0; index < reference.size(); ++index)
         check(same_video_result(reference[index], repeated[index]),
@@ -1411,9 +1949,10 @@ void test_parallel_tracker_init_and_cleanup_overlap() {
     const auto overlapped = future.get();
     check(both_started && result_waits_for_init && blocked.init->calls == 1 &&
               blocked.sibling->calls == 1 &&
+              overlapped.front().object_ids == std::vector<int32_t>({0, 1}) &&
               overlapped.front().masks ==
-                  std::vector<float>({1.0F, 1.0F, 1.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F}),
-          "sam3 new-detection cleanup remains exact while both init lanes overlap");
+                  std::vector<float>({1.0F, 1.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F}),
+          "sam3 consolidated new-detection cleanup remains exact while both init lanes overlap");
 }
 
 void test_conditioning_and_pointer_history() {
@@ -1431,24 +1970,65 @@ void test_conditioning_and_pointer_history() {
 
     auto pointers = make_video_fixture(1, false, false, 2.0F, configure);
     const auto pointer_results = run_video(*pointers.pipeline, 1024);
-    check(pointer_results.size() == 1024 && pointers.step->last_pointer_offsets.size() == 78 &&
-              pointers.step->last_pointer_offsets.front() == 1023 &&
-              pointers.step->last_pointer_offsets[63] == 15 &&
-              pointers.step->last_pointer_offsets[64] == 1 &&
+    check(pointer_results.size() == 1024 && pointers.step->last_pointer_offsets.size() == 18 &&
+              pointers.step->last_pointer_offsets[0] == 15 &&
+              pointers.step->last_pointer_offsets[3] == 63 &&
+              pointers.step->last_pointer_offsets[4] == 1 &&
               pointers.step->last_pointer_offsets.back() == 14 &&
               pointers.step->last_max_pointers == 16,
-          "sam3 P79 policy retains all conditioning pointers then the recent window");
+          "sam3 P19 profile preserves Meta's four conditioning and fourteen normal valid "
+          "pointers");
+}
+
+void test_pointer_history_matches_meta_five_frame_boundary() {
+    const auto expected = std::array<std::vector<int32_t>, 4>{
+        std::vector<int32_t>{1},
+        std::vector<int32_t>{2},
+        std::vector<int32_t>{3, 1},
+        std::vector<int32_t>{4, 1, 2},
+    };
+    for (std::size_t recurrent_frame = 1; recurrent_frame <= expected.size(); ++recurrent_frame) {
+        auto fixture = make_video_fixture();
+        const auto results = run_video(*fixture.pipeline, recurrent_frame + 1);
+        check(results.size() == recurrent_frame + 1 &&
+                  fixture.step->last_pointer_offsets == expected[recurrent_frame - 1],
+              "sam3 five-frame pointer history matches the captured Meta tracker boundary");
+    }
+}
+
+void test_memory_quality_selection_uses_meta_ordinal_slots() {
+    auto fixture = make_video_fixture();
+    fixture.step->scripted_selected_ious = {1.0F, 0.0F, 1.0F, 0.0F, 1.0F, 1.0F, 0.0F, 1.0F};
+    const auto results = run_video(*fixture.pipeline, 9);
+    check(results.size() == 9 &&
+              fixture.step->last_memory_offsets == std::vector<int32_t>({0, 5, 4, 3, 2, 1}) &&
+              fixture.step->last_pointer_offsets == std::vector<int32_t>({8, 1, 2, 3, 4}),
+          "sam3 filters low-effective-IoU memories, keeps t-1, and uses ordinal slots");
 }
 
 void test_reconditioning_uses_raw_tracker_logit() {
     auto fixture = make_video_fixture(1, false, false, 0.8F, [](trtmc::Sam3Config& config) {
         config.high_confidence_threshold = 0.7F;
     });
+    fixture.init->pointer_value = 0.75F;
+    fixture.step->recurrent_mask_override = {-1.0F, 3.0F, 3.0F, -1.0F};
     const auto results = run_video(*fixture.pipeline, 18);
-    check(fixture.step->last_memory_offsets == std::vector<int32_t>({0, 0, 6, 5, 4, 3, 2}) &&
+    const auto refreshed_pointer_count =
+        static_cast<std::size_t>(std::count(fixture.step->last_pointer_frame_values.begin(),
+                                            fixture.step->last_pointer_frame_values.end(), 0.75F));
+    const auto& frame_sixteen_memory = fixture.memory->final_masks_history.at(16);
+    const bool cleared_nearby_memory =
+        std::none_of(fixture.step->last_memory_frame_values.begin(),
+                     fixture.step->last_memory_frame_values.end(),
+                     [](float value) { return value > 10.0F && value < 17.0F; });
+    check(fixture.init->calls == 2 && refreshed_pointer_count == 2 &&
+              frame_sixteen_memory == std::vector<float>({-1.0F, 3.0F, 3.0F, -1.0F}) &&
+              cleared_nearby_memory &&
+              fixture.step->last_memory_offsets == std::vector<int32_t>({0, 0, 6, 5, 4, 3, 2}) &&
               results.back().tracker_scores.size() == 1 &&
               close(results.back().tracker_scores[0], 0.689974F),
-          "sam3 raw tracker logit drives reconditioning while metadata remains probability");
+          "sam3 periodic reconditioning refreshes the pointer, keeps tracker-mask memory, "
+          "clears singleton history, and preserves probability metadata");
 }
 
 trtmc::Sam3VideoFrameResult run_overlap_case(bool tie_scores, bool three_overlap = false,
@@ -1457,7 +2037,9 @@ trtmc::Sam3VideoFrameResult run_overlap_case(bool tie_scores, bool three_overlap
     fixture.core->three_overlap_detections = three_overlap;
     fixture.core->empty_first_detection_mask = empty_first;
     fixture.core->tie_detection_scores = tie_scores;
-    return run_video(*fixture.pipeline, 1).front();
+    std::vector<float> pixels(12, 0.5F);
+    auto session = fixture.pipeline->create_sam3_video_session("person");
+    return session->accept_prompt_frame(pixels.data(), 2, 2);
 }
 
 void test_association_overlap_and_stable_ties() {
@@ -1467,12 +2049,14 @@ void test_association_overlap_and_stable_ties() {
           "sam3 overlap assigns shared pixels to the higher tracker score");
     const auto tied = run_overlap_case(true);
     check(tied.masks == std::vector<float>({1.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F}),
-          "sam3 equal tracker scores use stable object-ID order");
+          "sam3 frame-zero detector overlap uses stable first-object ties");
     const auto displaced = run_overlap_case(false, true);
-    check(displaced.object_ids == std::vector<int32_t>({0, 1, 2}) &&
-              displaced.masks == std::vector<float>({0.0F, 0.0F, 0.0F, 0.0F, 0.0F, 1.0F, 0.0F, 0.0F,
-                                                     1.0F, 0.0F, 1.0F, 0.0F}),
-          "sam3 later scores displace ownership without dropping object metadata");
+    check(displaced.object_ids == std::vector<int32_t>({1, 2}) &&
+              displaced.masks ==
+                  std::vector<float>({0.0F, 1.0F, 0.0F, 0.0F, 1.0F, 0.0F, 1.0F, 0.0F}) &&
+              displaced.detection_scores.size() == 2 && displaced.tracker_scores.size() == 2 &&
+              displaced.boxes.size() == 8,
+          "sam3 frame-zero overlap removes fully covered lower-score objects");
     const auto compacted = run_overlap_case(false, false, true);
     check(compacted.object_ids == std::vector<int32_t>({1}) &&
               compacted.masks == std::vector<float>({0.0F, 1.0F, 1.0F, 0.0F}),
@@ -1499,11 +2083,14 @@ void test_recent_occlusion_and_hotstart_policy() {
               hotstart_results[1].removed_object_ids == std::vector<int32_t>({1}) &&
               hotstart_results[2].removed_object_ids == std::vector<int32_t>({1}),
           "sam3 hotstart removes duplicates after frame policy and retains removal history");
-    check(hotstart.memory->calls == 3 && hotstart.memory->final_masks_history.size() == 3 &&
-              hotstart.memory->final_masks_history[0] ==
-                  std::vector<float>({-10.0F, -10.0F, -10.0F, -10.0F}) &&
-              close(hotstart.memory->memory_scores_history[0], -10.0F),
-          "sam3 hotstart memory update sees the soon-removed track before erasure");
+    check(hotstart.hard_memory->calls == 0 && hotstart.hard_memory_batch2->calls == 1 &&
+              hotstart.memory->calls == 5 && hotstart.memory->final_masks_history.size() == 5 &&
+              hotstart.memory->final_masks_history[2] ==
+                  std::vector<float>({2.0F, -2.0F, -2.0F, -2.0F}) &&
+              hotstart.memory->memory_suppressions_history[2] == 1 &&
+              close(hotstart.memory->memory_scores_history[2], -10.0F),
+          "sam3 hotstart memory update passes the soon-removed track's original mask plus its "
+          "high-resolution suppression decision before erasure");
 }
 
 void test_recurrent_pool_survives_serial_sessions() {
@@ -1511,7 +2098,8 @@ void test_recurrent_pool_survives_serial_sessions() {
     const auto first = run_video(*fixture.pipeline, 2);
     const auto second = run_video(*fixture.pipeline, 2, 2, 2, 0.25F);
     check(first.size() == 2 && second.size() == 2 && fixture.step->async_calls == 2 &&
-              fixture.step->saw_device_memory_input && fixture.memory->async_calls == 2,
+              fixture.step->saw_device_memory_input && fixture.hard_memory->async_calls == 2 &&
+              fixture.memory->async_calls == 4,
           "sam3 pipeline recurrent pool supports serial sessions on device-resident state");
 }
 
@@ -1520,17 +2108,30 @@ void test_recurrent_pool_survives_serial_sessions() {
 int main() {
 #ifdef TRTMC_HAS_CUDA_KERNELS
     test_bfloat16_round_copy_supports_exact_alias();
+    test_cuda_preprocess_matches_cpu_meta_pillow();
+    test_prompt_only_session_cleanup_restores_cuda_device();
 #endif
-    test_preprocess_matches_native_uint8_antialiased_resize();
+    test_preprocess_matches_customer_meta_pillow_resize();
     test_preprocess_uses_explicit_fma_at_uint8_half_steps();
-    test_b1_device_binding_and_snapshot();
+    test_recurrent_area_policy_uses_high_resolution_global_geometry();
+    test_recurrent_area_policy_is_global_across_b2_and_b1_tail();
+    test_recurrent_area_policy_suppresses_empty_singleton_after_resize();
+    test_video_bundle_requires_both_hard_memory_plans();
+    test_b1_device_binding_and_prompt_memory();
+    test_interleaved_sessions_finish_frame_zero_memory_before_return();
     test_image_pcs_runs_native_preprocess_and_full_result();
     test_prompt_then_borrowed_tail_is_strictly_ordered();
     test_recurrent_tracker_bfloat16_state();
+    test_frame_zero_prompt_and_propagation_follow_meta_schedule();
+    test_frame_zero_zero_detections_is_stable();
+    test_late_new_track_uses_uncleaned_hard_memory();
     test_recurrent_tracker_uses_b2_and_odd_tail();
+    test_device_recurrent_memory_rounds_features_and_positions();
     test_parallel_mask_cleanup_preserves_full_results();
     test_parallel_tracker_init_and_cleanup_overlap();
     test_conditioning_and_pointer_history();
+    test_pointer_history_matches_meta_five_frame_boundary();
+    test_memory_quality_selection_uses_meta_ordinal_slots();
     test_reconditioning_uses_raw_tracker_logit();
     test_association_overlap_and_stable_ties();
     test_recent_occlusion_and_hotstart_policy();

@@ -15,7 +15,8 @@ namespace {
 
 constexpr int32_t kBlockSize = 256;
 constexpr int32_t kChannels = 3;
-constexpr unsigned int kMaxResizePrecision = 22;
+constexpr unsigned int kPillowResizePrecision = 22;
+constexpr std::size_t kUint8Values = 256;
 
 bool checked_hwc_elements(int32_t height, int32_t width, std::size_t& elements) {
     if (height <= 0 || width <= 0)
@@ -44,12 +45,12 @@ unsigned int grid_size(std::size_t elements) {
 }
 
 bool valid_resize_plan(bool identity, const Sam3CudaResizeAxisEntry* entries, int32_t entry_count,
-                       const int16_t* weights, int32_t weight_count, unsigned int precision,
+                       const int32_t* weights, int32_t weight_count, unsigned int precision,
                        int32_t expected_entry_count) {
     if (identity)
         return true;
     return entries != nullptr && entry_count == expected_entry_count && weights != nullptr &&
-           weight_count > 0 && precision > 0U && precision <= kMaxResizePrecision;
+           weight_count > 0 && precision == kPillowResizePrecision;
 }
 
 __device__ uint8_t clamp_uint8(int32_t value) {
@@ -65,7 +66,7 @@ __device__ bool valid_axis_entry(const Sam3CudaResizeAxisEntry& entry, int32_t i
 }
 
 __device__ uint8_t apply_uint8_resize_weights(const uint8_t* values, std::size_t stride,
-                                              const int16_t* weights, int32_t weight_count,
+                                              const int32_t* weights, int32_t weight_count,
                                               unsigned int precision) {
     int32_t accumulated = 1 << (precision - 1U);
     for (int32_t index = 0; index < weight_count; ++index)
@@ -95,7 +96,7 @@ __global__ void horizontal_resize_hwc_kernel(const uint8_t* quantized_hwc, int32
                                              int32_t input_width, uint8_t* horizontal_hwc,
                                              int32_t output_width,
                                              const Sam3CudaResizeAxisEntry* horizontal_entries,
-                                             const int16_t* horizontal_weights,
+                                             const int32_t* horizontal_weights,
                                              int32_t horizontal_weight_count,
                                              unsigned int horizontal_precision,
                                              std::size_t output_elements, int* status) {
@@ -129,37 +130,32 @@ __global__ void horizontal_resize_hwc_kernel(const uint8_t* quantized_hwc, int32
 
 __device__ void store_normalized_chw(uint8_t value, std::size_t output_pixel,
                                      std::size_t output_plane, std::size_t channel,
-                                     float scaled_mean, float scaled_stddev, float* output_chw,
+                                     const float* normalization_lut, float* output_chw,
                                      std::size_t output_offset) {
-    const float centered = __fsub_rn(static_cast<float>(value), scaled_mean);
     output_chw[output_offset + channel * output_plane + output_pixel] =
-        __fdiv_rn(centered, scaled_stddev);
+        normalization_lut[channel * kUint8Values + static_cast<std::size_t>(value)];
 }
 
 __global__ void normalize_hwc_to_chw_kernel(const uint8_t* input_hwc, float* output_chw,
                                             std::size_t output_offset, std::size_t output_plane,
-                                            std::size_t output_elements, float mean0, float mean1,
-                                            float mean2, float stddev0, float stddev1,
-                                            float stddev2) {
+                                            std::size_t output_elements,
+                                            const float* normalization_lut) {
     const auto index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= output_elements)
         return;
 
     const auto output_pixel = index / kChannels;
     const auto channel = index % kChannels;
-    const float mean = channel == 0U ? mean0 : (channel == 1U ? mean1 : mean2);
-    const float stddev = channel == 0U ? stddev0 : (channel == 1U ? stddev1 : stddev2);
-    store_normalized_chw(input_hwc[index], output_pixel, output_plane, channel, mean, stddev,
+    store_normalized_chw(input_hwc[index], output_pixel, output_plane, channel, normalization_lut,
                          output_chw, output_offset);
 }
 
 __global__ void vertical_resize_normalize_kernel(
     const uint8_t* input_hwc, int32_t input_height, int32_t input_width, float* output_chw,
     std::size_t output_offset, int32_t output_height,
-    const Sam3CudaResizeAxisEntry* vertical_entries, const int16_t* vertical_weights,
+    const Sam3CudaResizeAxisEntry* vertical_entries, const int32_t* vertical_weights,
     int32_t vertical_weight_count, unsigned int vertical_precision, std::size_t output_plane,
-    std::size_t output_elements, float mean0, float mean1, float mean2, float stddev0,
-    float stddev1, float stddev2, int* status) {
+    std::size_t output_elements, const float* normalization_lut, int* status) {
     const auto index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (index >= output_elements)
         return;
@@ -185,9 +181,7 @@ __global__ void vertical_resize_normalize_kernel(
         atomicOr(status, 2);
     }
 
-    const float mean = channel == 0U ? mean0 : (channel == 1U ? mean1 : mean2);
-    const float stddev = channel == 0U ? stddev0 : (channel == 1U ? stddev1 : stddev2);
-    store_normalized_chw(value, output_pixel, output_plane, channel, mean, stddev, output_chw,
+    store_normalized_chw(value, output_pixel, output_plane, channel, normalization_lut, output_chw,
                          output_offset);
 }
 
@@ -213,20 +207,19 @@ __global__ void round_bfloat16_copy_kernel(const float* source, float* destinati
 bool sam3_cuda_preprocess_image(const float* input_hwc, int32_t input_height, int32_t input_width,
                                 uint8_t* quantized_hwc, uint8_t* horizontal_hwc,
                                 const Sam3CudaResizeAxisEntry* horizontal_entries,
-                                int32_t horizontal_entry_count, const int16_t* horizontal_weights,
+                                int32_t horizontal_entry_count, const int32_t* horizontal_weights,
                                 int32_t horizontal_weight_count, unsigned int horizontal_precision,
                                 const Sam3CudaResizeAxisEntry* vertical_entries,
-                                int32_t vertical_entry_count, const int16_t* vertical_weights,
+                                int32_t vertical_entry_count, const int32_t* vertical_weights,
                                 int32_t vertical_weight_count, unsigned int vertical_precision,
                                 float* output_chw, std::size_t output_offset, int32_t output_height,
-                                int32_t output_width, const float* scaled_mean,
-                                const float* scaled_stddev, int* nonfinite_status,
-                                cudaStream_t stream) {
+                                int32_t output_width, const float* normalization_lut,
+                                int* nonfinite_status, cudaStream_t stream) {
     std::size_t input_elements = 0;
     std::size_t horizontal_elements = 0;
     std::size_t output_elements = 0;
     if (input_hwc == nullptr || quantized_hwc == nullptr || output_chw == nullptr ||
-        scaled_mean == nullptr || scaled_stddev == nullptr || nonfinite_status == nullptr ||
+        normalization_lut == nullptr || nonfinite_status == nullptr ||
         !checked_hwc_elements(input_height, input_width, input_elements) ||
         !checked_hwc_elements(input_height, output_width, horizontal_elements) ||
         !checked_hwc_elements(output_height, output_width, output_elements) ||
@@ -251,13 +244,6 @@ bool sam3_cuda_preprocess_image(const float* input_hwc, int32_t input_height, in
     const auto output_plane = output_elements / channels;
     if (output_offset > std::numeric_limits<std::size_t>::max() - output_elements)
         return false;
-    for (int32_t channel = 0; channel < kChannels; ++channel) {
-        if (!std::isfinite(scaled_mean[channel]) || !std::isfinite(scaled_stddev[channel]) ||
-            scaled_stddev[channel] == 0.0F) {
-            return false;
-        }
-    }
-
     quantize_hwc_kernel<<<grid_size(input_elements), kBlockSize, 0, stream>>>(
         input_hwc, quantized_hwc, input_elements, nonfinite_status);
 
@@ -273,14 +259,12 @@ bool sam3_cuda_preprocess_image(const float* input_hwc, int32_t input_height, in
     if (vertical_identity) {
         normalize_hwc_to_chw_kernel<<<grid_size(output_elements), kBlockSize, 0, stream>>>(
             vertical_input, output_chw, output_offset, output_plane, output_elements,
-            scaled_mean[0], scaled_mean[1], scaled_mean[2], scaled_stddev[0], scaled_stddev[1],
-            scaled_stddev[2]);
+            normalization_lut);
     } else {
         vertical_resize_normalize_kernel<<<grid_size(output_elements), kBlockSize, 0, stream>>>(
             vertical_input, input_height, output_width, output_chw, output_offset, output_height,
             vertical_entries, vertical_weights, vertical_weight_count, vertical_precision,
-            output_plane, output_elements, scaled_mean[0], scaled_mean[1], scaled_mean[2],
-            scaled_stddev[0], scaled_stddev[1], scaled_stddev[2], nonfinite_status);
+            output_plane, output_elements, normalization_lut, nonfinite_status);
     }
     return true;
 }

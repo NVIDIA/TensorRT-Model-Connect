@@ -230,6 +230,20 @@ def _sam3_core_tensors(prefix: str = "detector_model.") -> dict[str, np.ndarray]
     queries = 7
     heads = 2
     tensors: dict[str, np.ndarray] = {}
+
+    tensors[f"{prefix}geometry_encoder.cls_embed.weight"] = _rand(1, hidden)
+    _linear_tensors(tensors, f"{prefix}geometry_encoder.final_proj", hidden, hidden)
+    _norm_tensors(tensors, f"{prefix}geometry_encoder.prompt_layer_norm", hidden)
+    for layer_idx in range(3):
+        base = f"{prefix}geometry_encoder.layers.{layer_idx}"
+        for norm in ("layer_norm1", "layer_norm2", "layer_norm3"):
+            _norm_tensors(tensors, f"{base}.{norm}", hidden)
+        _attention_tensors(tensors, f"{base}.self_attn", hidden)
+        _attention_tensors(tensors, f"{base}.cross_attn", hidden)
+        _linear_tensors(tensors, f"{base}.mlp.fc1", hidden, intermediate)
+        _linear_tensors(tensors, f"{base}.mlp.fc2", intermediate, hidden)
+    _norm_tensors(tensors, f"{prefix}geometry_encoder.output_layer_norm", hidden)
+
     for layer_idx in range(2):
         base = f"{prefix}detr_encoder.layers.{layer_idx}"
         for norm in ("layer_norm1", "layer_norm2", "layer_norm3"):
@@ -348,7 +362,7 @@ def test_sam3_segmentation_config_marks_text_prompt_variant(tmp_path: Path) -> N
     assert seg_cfg["input_image_h"] == 28
 
 
-def test_sam3_segmentation_config_falls_back_to_source_processor_defaults(
+def test_sam3_segmentation_config_falls_back_to_meta_processor_defaults(
     tmp_path: Path,
 ) -> None:
     from tensorrt_model_connect.families.sam3 import plugin
@@ -360,8 +374,8 @@ def test_sam3_segmentation_config_falls_back_to_source_processor_defaults(
 
     seg_cfg = plugin.get_segmentation_config(config)
 
-    assert seg_cfg["image_mean"] == [0.485, 0.456, 0.406]
-    assert seg_cfg["image_std"] == [0.229, 0.224, 0.225]
+    assert seg_cfg["image_mean"] == [0.5, 0.5, 0.5]
+    assert seg_cfg["image_std"] == [0.5, 0.5, 0.5]
 
 
 def test_sam3_build_engine_delegates_to_text_encoder_builder(tmp_path: Path, monkeypatch) -> None:
@@ -385,8 +399,7 @@ def test_sam3_build_engine_delegates_to_text_encoder_builder(tmp_path: Path, mon
         fake_module,
     )
 
-    plan = plugin.build_engine(
-        config, weights, max_cache_length=1, precision="fp16")
+    plan = plugin.build_engine(config, weights, max_cache_length=1, precision="fp16")
 
     assert plan == b"sam3-text-plan"
     assert calls[0]["hidden_size"] == 8
@@ -418,8 +431,7 @@ def test_sam3_build_vision_engine_delegates_to_vision_builder(tmp_path: Path, mo
         fake_module,
     )
 
-    plan = plugin.build_vision_engine(
-        str(tmp_path), config, weights, precision="fp16")
+    plan = plugin.build_vision_engine(str(tmp_path), config, weights, precision="fp16")
 
     assert plan == b"sam3-vision-plan"
     assert calls[0]["kwargs"]["image_size"] == 28
@@ -456,8 +468,7 @@ def test_sam3_build_extra_engines_delegates_to_core_builder(tmp_path: Path, monk
         fake_module,
     )
 
-    plans = plugin.build_extra_engines(
-        config, weights, max_cache_length=1, precision="fp16")
+    plans = plugin.build_extra_engines(config, weights, max_cache_length=1, precision="fp16")
 
     assert plans == {"sam3_core_engine_plan": b"sam3-core-plan"}
     assert calls[0]["kwargs"]["text_seq_len"] == 5
@@ -466,7 +477,14 @@ def test_sam3_build_extra_engines_delegates_to_core_builder(tmp_path: Path, monk
     assert calls[0]["kwargs"]["num_queries"] == 7
     assert calls[0]["kwargs"]["detr_encoder_heads"] == 2
     assert calls[0]["kwargs"]["detr_decoder_intermediate_size"] == 8
+    assert calls[0]["kwargs"]["geometry_encoder_layers"] == 3
+    assert calls[0]["kwargs"]["geometry_encoder_heads"] == 2
+    assert calls[0]["kwargs"]["geometry_encoder_intermediate_size"] == 8
+    assert calls[0]["kwargs"]["geometry_encoder_layer_norm_eps"] == pytest.approx(1e-5)
     assert calls[0]["kwargs"]["precision"] == "fp16"
+    assert "geometry_encoder.cls_embed.weight" in calls[0]["keys"]
+    assert "geometry_encoder.layers.2.cross_attn.k_proj.weight" in calls[0]["keys"]
+    assert "geometry_encoder.output_layer_norm.bias" in calls[0]["keys"]
     assert "detr_encoder.layers.0.self_attn.q_proj.weight" in calls[0]["keys"]
     assert "detr_decoder.layers.2.vision_cross_attn.o_proj.bias" in calls[0]["keys"]
     assert "mask_decoder.instance_projection.weight" in calls[0]["keys"]
@@ -503,6 +521,8 @@ def test_sam3_video_build_packages_all_tracker_plans(tmp_path: Path, monkeypatch
             "sam3_tracker_step_batch2_engine_plan": b"sam3-tracker-step-batch2-plan",
             "sam3_tracker_memory_engine_plan": b"sam3-tracker-memory-plan",
             "sam3_tracker_memory_batch2_engine_plan": b"sam3-tracker-memory-batch2-plan",
+            "sam3_tracker_hard_memory_engine_plan": b"sam3-tracker-hard-memory-plan",
+            "sam3_tracker_hard_memory_batch2_engine_plan": b"sam3-tracker-hard-memory-batch2-plan",
         }
 
     fake_tracker = types.SimpleNamespace(build_sam3_tracker_engines=_fake_tracker_build)
@@ -526,6 +546,8 @@ def test_sam3_video_build_packages_all_tracker_plans(tmp_path: Path, monkeypatch
         "sam3_tracker_step_batch2_engine_plan": b"sam3-tracker-step-batch2-plan",
         "sam3_tracker_memory_engine_plan": b"sam3-tracker-memory-plan",
         "sam3_tracker_memory_batch2_engine_plan": b"sam3-tracker-memory-batch2-plan",
+        "sam3_tracker_hard_memory_engine_plan": b"sam3-tracker-hard-memory-plan",
+        "sam3_tracker_hard_memory_batch2_engine_plan": b"sam3-tracker-hard-memory-batch2-plan",
     }
     assert tracker_calls == [(str(tmp_path), True)]
     assert plugin.get_segmentation_config(config)["sam3_video_tracking_supported"] is True
@@ -550,5 +572,5 @@ def test_sam3_video_build_packages_all_tracker_plans(tmp_path: Path, monkeypatch
     assert tracking_config["sam3_max_conditioning_frames"] == 4
     assert tracking_config["sam3_max_object_pointers"] == 16
     assert tracking_config["sam3_max_video_frames"] == 1024
-    assert tracking_config["sam3_max_conditioning_pointers"] == 64
-    assert tracking_config["sam3_max_pointer_inputs"] == 79
+    assert tracking_config["sam3_max_conditioning_pointers"] == 4
+    assert tracking_config["sam3_max_pointer_inputs"] == 19

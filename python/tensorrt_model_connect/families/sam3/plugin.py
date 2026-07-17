@@ -117,7 +117,6 @@ def _resolve_sam3_config(raw: dict) -> dict:
         "decrease_keep_alive_for_empty_masks": bool(
             raw.get("decrease_trk_keep_alive_for_empty_masklets", False)
         ),
-        "recondition_on_tracker_masks": bool(raw.get("recondition_on_trk_masks", False)),
         "recondition_every_nth_frame": int(raw.get("recondition_every_nth_frame", 16)),
         "high_confidence_threshold": float(raw.get("high_conf_thresh", 0.8)),
         "high_iou_threshold": float(raw.get("high_iou_thresh", 0.8)),
@@ -175,6 +174,17 @@ def _resolve_sam3_config(raw: dict) -> dict:
         "detr_decoder_intermediate_size": int(detr_decoder.get("intermediate_size", 2048)),
         "detr_decoder_layer_norm_eps": float(detr_decoder.get("layer_norm_eps", 1e-6)),
         "detr_decoder_hidden_act": str(detr_decoder.get("hidden_act", "relu")),
+        # Meta SAM3's text-only path still runs an empty geometry prompt
+        # through a fixed three-layer encoder before concatenating its CLS
+        # token with the text sequence. The public HF config omits this
+        # component even though its weights are present in the checkpoint.
+        "geometry_encoder_layers": 3,
+        "geometry_encoder_num_heads": int(detr_encoder.get("num_attention_heads", 8)),
+        "geometry_encoder_intermediate_size": int(
+            detr_encoder.get("intermediate_size", 2048)
+        ),
+        "geometry_encoder_hidden_act": "relu",
+        "geometry_encoder_layer_norm_eps": 1e-5,
         "low_res_mask_size": int(raw.get("low_res_mask_size", 288)),
         "mask_hidden_size": int(mask_decoder.get("hidden_size", 256)),
         "mask_num_heads": int(mask_decoder.get("num_attention_heads", 8)),
@@ -369,6 +379,21 @@ def _load_sam3_core_weights(model_dir: str, cfg: dict) -> WeightDict:
         for layer_idx in range(1, num_layers + 1):
             load_linear(f"{dst}.layer{layer_idx}", f"{suffix}.layer{layer_idx}")
 
+    weights["geometry_encoder.cls_embed.weight"] = load(
+        "geometry_encoder.cls_embed.weight"
+    )
+    load_linear("geometry_encoder.final_proj", "geometry_encoder.final_proj")
+    load_norm("geometry_encoder.prompt_layer_norm", "geometry_encoder.prompt_layer_norm")
+    for layer_idx in range(cfg["geometry_encoder_layers"]):
+        src = f"geometry_encoder.layers.{layer_idx}"
+        dst = f"geometry_encoder.layers.{layer_idx}"
+        for norm in ("layer_norm1", "layer_norm2", "layer_norm3"):
+            load_norm(f"{dst}.{norm}", f"{src}.{norm}")
+        load_attention(f"{dst}.self_attn", f"{src}.self_attn")
+        load_attention(f"{dst}.cross_attn", f"{src}.cross_attn")
+        load_sam3_mlp(f"{dst}.mlp", f"{src}.mlp")
+    load_norm("geometry_encoder.output_layer_norm", "geometry_encoder.output_layer_norm")
+
     for layer_idx in range(cfg["detr_encoder_layers"]):
         src = f"detr_encoder.layers.{layer_idx}"
         dst = f"detr_encoder.layers.{layer_idx}"
@@ -543,12 +568,21 @@ class Sam3Plugin:
             "detr_decoder_layers": cfg["detr_decoder_layers"],
             "detr_decoder_heads": cfg["detr_decoder_num_heads"],
             "detr_decoder_intermediate_size": cfg["detr_decoder_intermediate_size"],
+            "geometry_encoder_layers": cfg["geometry_encoder_layers"],
+            "geometry_encoder_heads": cfg["geometry_encoder_num_heads"],
+            "geometry_encoder_intermediate_size": cfg[
+                "geometry_encoder_intermediate_size"
+            ],
             "mask_num_heads": cfg["mask_num_heads"],
             "mask_num_upsampling_stages": cfg["mask_num_upsampling_stages"],
             "layer_norm_eps": cfg["core_layer_norm_eps"],
             "precision": precision,
             "encoder_hidden_act": cfg["detr_encoder_hidden_act"],
             "decoder_hidden_act": cfg["detr_decoder_hidden_act"],
+            "geometry_encoder_hidden_act": cfg["geometry_encoder_hidden_act"],
+            "geometry_encoder_layer_norm_eps": cfg[
+                "geometry_encoder_layer_norm_eps"
+            ],
             "verbose": verbose,
         }
         plans = {
@@ -611,7 +645,6 @@ class Sam3Plugin:
             "sam3_max_tracker_keep_alive": cfg["max_tracker_keep_alive"],
             "sam3_min_tracker_keep_alive": cfg["min_tracker_keep_alive"],
             "sam3_decrease_keep_alive_for_empty_masks": cfg["decrease_keep_alive_for_empty_masks"],
-            "sam3_recondition_on_tracker_masks": cfg["recondition_on_tracker_masks"],
             "sam3_recondition_every_nth_frame": cfg["recondition_every_nth_frame"],
             "sam3_high_confidence_threshold": cfg["high_confidence_threshold"],
             "sam3_high_iou_threshold": cfg["high_iou_threshold"],
@@ -626,8 +659,8 @@ class Sam3Plugin:
             "sam3_max_pointer_inputs": cfg["max_pointer_inputs"],
             "input_image_h": cfg["vision_image_size"],
             "input_image_w": cfg["vision_image_size"],
-            "image_mean": cfg.get("processor_image_mean", [0.485, 0.456, 0.406]),
-            "image_std": cfg.get("processor_image_std", [0.229, 0.224, 0.225]),
+            "image_mean": cfg.get("processor_image_mean", [0.5, 0.5, 0.5]),
+            "image_std": cfg.get("processor_image_std", [0.5, 0.5, 0.5]),
         }
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
