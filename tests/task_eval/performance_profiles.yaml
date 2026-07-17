@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+version: 1
+
+profiles:
+  etth1_process_e2e_observation_v1: &etth1_process_e2e
+    description: >
+      Non-blocking HF/TRTFB process-level timing on deterministic ETTh1
+      windows. Each observation includes process startup and model/runtime load;
+      it is not a warm-session latency profile.
+    mode: observation
+    supported_suite_ids:
+      - etth1_time_series_parity
+    supported_dataset_kinds:
+      - time_series_csv
+    backends:
+      - hf
+      - trtfb
+    environment:
+      compatibility_class: gb300-dedicated
+      gpu_name_pattern: GB300
+      exclusive_gpu: true
+      max_background_gpu_utilization_pct: 5
+    scenario:
+      scope: process_e2e
+      synchronization: process_exit
+      warmup_iterations: 1
+      measured_iterations: 5
+      process_repetitions: 3
+      concurrency: 1
+      quantile_method: nearest_rank
+      require_output_match: true
+    metrics:
+      required:
+        - name: request_latency_ms.p50
+          direction: lower
+          max_regression_fraction: 0.05
+        - name: request_latency_ms.p95
+          direction: lower
+          max_regression_fraction: 0.10
+        - name: throughput_units_per_second
+          direction: higher
+          max_regression_fraction: 0.05
+        - name: error_rate
+          direction: lower
+          absolute_max: 0.0
+      optional:
+        - name: peak_device_memory_mb
+          direction: lower
+
+  etth1_process_e2e_blocking_v1:
+    <<: *etth1_process_e2e
+    description: >
+      Blocking form of the ETTh1 process-level profile. It remains unusable
+      until a run from this exact profile is explicitly reviewed and approved
+      as a comparable baseline.
+    mode: blocking
