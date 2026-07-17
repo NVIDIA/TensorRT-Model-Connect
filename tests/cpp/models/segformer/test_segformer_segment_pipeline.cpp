@@ -24,8 +24,11 @@
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 static int failures = 0;
 
@@ -37,6 +40,77 @@ static void check(bool condition, const char* name) {
 }
 
 static trtmc::TrtLogger g_logger;
+
+class CountingTrtModule final : public trtmc::ITrtModule {
+  public:
+    explicit CountingTrtModule(std::unique_ptr<trtmc::ITrtModule> delegate)
+        : delegate_(std::move(delegate)) {}
+
+    trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
+        ++host_forward_calls;
+        return delegate_->forward(inputs);
+    }
+    trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap& inputs) override {
+        return delegate_->forward_device(inputs);
+    }
+    void forward_device_async(const trtmc::DeviceTensorMap& inputs) override {
+        delegate_->forward_device_async(inputs);
+    }
+    void forward_async(const trtmc::TensorMap& inputs) override {
+        ++async_forward_calls;
+        delegate_->forward_async(inputs);
+    }
+    void sync() override { delegate_->sync(); }
+    cudaStream_t stream() const override { return delegate_->stream(); }
+    void enable_cuda_graph() override { delegate_->enable_cuda_graph(); }
+    bool cuda_graph_active() const override { return delegate_->cuda_graph_active(); }
+    int32_t profile_idx() const override { return delegate_->profile_idx(); }
+    std::vector<trtmc::TensorInfo> input_info() const override { return delegate_->input_info(); }
+    std::vector<trtmc::TensorInfo> output_info() const override { return delegate_->output_info(); }
+    bool has_input(const std::string& name) const override { return delegate_->has_input(name); }
+    bool has_output(const std::string& name) const override { return delegate_->has_output(name); }
+    trtmc::DType tensor_dtype(const std::string& name) const override {
+        return delegate_->tensor_dtype(name);
+    }
+    std::vector<int64_t> tensor_shape(const std::string& name) const override {
+        return delegate_->tensor_shape(name);
+    }
+    std::vector<int64_t> input_profile_shape(const std::string& name, int32_t profile_idx,
+                                             trtmc::ProfileShapeSelector selector) const override {
+        return delegate_->input_profile_shape(name, profile_idx, selector);
+    }
+    int32_t optimization_profile_count() const override {
+        return delegate_->optimization_profile_count();
+    }
+    void* device_ptr(const std::string& name) const override { return delegate_->device_ptr(name); }
+    void bind_external(const std::string& name, void* ptr) override {
+        delegate_->bind_external(name, ptr);
+    }
+    void bind_external(const std::string& name, void* ptr,
+                       const std::vector<int64_t>& shape) override {
+        delegate_->bind_external(name, ptr, shape);
+    }
+    int32_t input_rank(const std::string& name) const override {
+        return delegate_->input_rank(name);
+    }
+    bool input_is_dynamic(const std::string& name) const override {
+        return delegate_->input_is_dynamic(name);
+    }
+    void reset_execution_context() override { delegate_->reset_execution_context(); }
+    void set_timing_label(std::string label) override {
+        delegate_->set_timing_label(std::move(label));
+    }
+    bool ok() const override { return delegate_->ok(); }
+    void keep_alive(std::shared_ptr<void> resource) override {
+        delegate_->keep_alive(std::move(resource));
+    }
+
+    int32_t host_forward_calls{0};
+    int32_t async_forward_calls{0};
+
+  private:
+    std::unique_ptr<trtmc::ITrtModule> delegate_;
+};
 
 static trtmc::SegformerPreprocessConfig make_test_preprocess_config() {
     trtmc::SegformerPreprocessConfig config;
@@ -101,7 +175,7 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine_mask_outp
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
-// Mock: pixel_values[3,4,4] float -> logits[1,2,4,4] float.
+// Mock: pixel_values[3,4,4] float -> logits[1,2,2,2] float.
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine_4d() {
     auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
@@ -111,11 +185,12 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine_4d() {
     auto* pv =
         n->addInput("pixel_values", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{3, {3, 4, 4}});
 
-    float cv[32];
-    for (int i = 0; i < 32; ++i)
-        cv[i] = static_cast<float>(i % 2);
-    auto* cst = n->addConstant(nvinfer1::Dims{4, {1, 2, 4, 4}},
-                               nvinfer1::Weights{nvinfer1::DataType::kFLOAT, cv, 32});
+    const float cv[8] = {
+        1.0F, 0.0F, 0.0F, 1.0F, // class 0
+        0.0F, 1.0F, 1.0F, 0.0F, // class 1
+    };
+    auto* cst = n->addConstant(nvinfer1::Dims{4, {1, 2, 2, 2}},
+                               nvinfer1::Weights{nvinfer1::DataType::kFLOAT, cv, 8});
     cst->getOutput(0)->setName("logits");
     n->markOutput(*cst->getOutput(0));
 
@@ -223,15 +298,21 @@ static void test_segment_4d_output() {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
-    auto module = std::make_unique<trtmc::TrtModuleImpl>(engine.get(),
-                                                         engine->createExecutionContext(), stream);
+    auto delegate = std::make_unique<trtmc::TrtModuleImpl>(
+        engine.get(), engine->createExecutionContext(), stream);
+    auto module = std::make_unique<CountingTrtModule>(std::move(delegate));
+    auto* counting_module = module.get();
     trtmc::SegmentPipeline pipeline(std::move(module), make_test_preprocess_config());
 
-    float img[3 * 4 * 4] = {0};
-    auto result = pipeline.segment(img, 4, 4);
-    check(result.mask.size() == 16, "segment 4d: mask has 16 entries");
-    check(result.height == 4, "segment 4d: height = 4");
-    check(result.width == 4, "segment 4d: width = 4");
+    float img[3 * 3 * 3] = {0};
+    auto result = pipeline.segment(img, 3, 3);
+    const std::vector<int32_t> expected_mask{0, 0, 1, 0, 0, 0, 1, 0, 0};
+    check(result.mask == expected_mask, "segment 4d: GPU bilinear class map matches golden");
+    check(result.height == 3, "segment 4d: height = 3");
+    check(result.width == 3, "segment 4d: width = 3");
+    check(counting_module->host_forward_calls == 0, "segment 4d: avoids host logits forward path");
+    check(counting_module->async_forward_calls == 1,
+          "segment 4d: uses device-resident async forward path");
 
     cudaStreamDestroy(stream);
 }

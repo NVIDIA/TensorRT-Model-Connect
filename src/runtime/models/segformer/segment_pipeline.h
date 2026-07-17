@@ -10,6 +10,7 @@
 
 #include "runtime/models/segformer/segformer_preprocess_seam.h"
 #include "trtmc/pipeline.h"
+#include "trtmc/runtime/device_tensor.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
@@ -31,7 +32,11 @@ class SegmentPipeline final : public IPipeline {
     const char* pipeline_type() const override { return "SegmentPipeline"; }
 
   private:
+    bool try_segment_logits_on_device(const Tensor& input, int32_t target_h, int32_t target_w,
+                                      SegmentResult& result);
+
     std::unique_ptr<TrtModule> model_;
+    DeviceTensor device_class_map_;
     SegformerPreprocessConfig preprocess_config_;
     std::string model_id_;
 };
