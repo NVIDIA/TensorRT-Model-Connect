@@ -491,12 +491,50 @@ void copy_deepstack_outputs(const TensorMap& outputs,
     }
 }
 
+int32_t merged_grid_extent(int32_t configured_extent, int32_t fallback_extent, int32_t patch_size,
+                           int32_t merge_size) {
+    if (patch_size <= 0 || merge_size <= 0)
+        return 0;
+    const int32_t extent = configured_extent > 0 ? configured_extent : fallback_extent;
+    return extent / (patch_size * merge_size);
+}
+
+bool add_mrope_prefill_input(TrtModule& prefill, const std::vector<int32_t>& input_ids,
+                             const QwenVlMropePositions* mrope, int32_t sequence_length,
+                             std::vector<int32_t>& positions, TensorMap& inputs) {
+    if (!prefill.has_input("mrope_position_ids"))
+        return true;
+    if (mrope == nullptr || mrope->token_positions.size() != input_ids.size())
+        return false;
+    positions.resize(static_cast<std::size_t>(3 * sequence_length));
+    for (int32_t token_index = 0; token_index < sequence_length; ++token_index) {
+        for (int32_t axis = 0; axis < 3; ++axis) {
+            positions[static_cast<std::size_t>(axis * sequence_length + token_index)] =
+                mrope->token_positions[static_cast<std::size_t>(token_index)]
+                                      [static_cast<std::size_t>(axis)];
+        }
+    }
+    inputs["mrope_position_ids"] = Tensor{positions.data(), {3, sequence_length}, DType::kInt32};
+    return true;
+}
+
 } // namespace
 
 std::pair<int32_t, int32_t> QwenVlPipeline::resolve_gen_limits(const GenerateConfig& cfg) const {
     int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
     return {max_new, eos};
+}
+
+QwenVlISampler* QwenVlPipeline::prepare_sampler(const QwenVlSamplingParams& params,
+                                                std::unique_ptr<QwenVlISampler>& local_sampler) {
+    QwenVlISampler* active_sampler = sampler_.get();
+    if (!active_sampler) {
+        local_sampler = create_qwen_vl_sampler(params);
+        active_sampler = local_sampler.get();
+    }
+    active_sampler->reset();
+    return active_sampler;
 }
 
 TextResult QwenVlPipeline::generate(const std::string& prompt, const float* image_pixels,
@@ -553,14 +591,8 @@ std::vector<int32_t> QwenVlPipeline::generate_from_ids(const std::vector<int32_t
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
 
-    // Create a per-call sampler if none was injected at construction time.
-    QwenVlISampler* active_sampler = sampler_.get();
     std::unique_ptr<QwenVlISampler> local_sampler;
-    if (!active_sampler) {
-        local_sampler = create_qwen_vl_sampler(params);
-        active_sampler = local_sampler.get();
-    }
-    active_sampler->reset();
+    QwenVlISampler* active_sampler = prepare_sampler(params, local_sampler);
 
     state_->reset();
     state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
@@ -597,14 +629,8 @@ std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
 
-    // Create a per-call sampler if none was injected at construction time.
-    QwenVlISampler* active_sampler = sampler_.get();
     std::unique_ptr<QwenVlISampler> local_sampler;
-    if (!active_sampler) {
-        local_sampler = create_qwen_vl_sampler(params);
-        active_sampler = local_sampler.get();
-    }
-    active_sampler->reset();
+    QwenVlISampler* active_sampler = prepare_sampler(params, local_sampler);
 
     state_->reset();
     state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
@@ -615,17 +641,11 @@ std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
 
     std::vector<float> logits;
     const int32_t grid_h =
-        vl_preprocess_.patch_size > 0 && vl_preprocess_.merge_size > 0
-            ? (vl_preprocess_.fixed_image_height > 0 ? vl_preprocess_.fixed_image_height
-                                                     : vl_preprocess_.fixed_image_size) /
-                  (vl_preprocess_.patch_size * vl_preprocess_.merge_size)
-            : 0;
+        merged_grid_extent(vl_preprocess_.fixed_image_height, vl_preprocess_.fixed_image_size,
+                           vl_preprocess_.patch_size, vl_preprocess_.merge_size);
     const int32_t grid_w =
-        vl_preprocess_.patch_size > 0 && vl_preprocess_.merge_size > 0
-            ? (vl_preprocess_.fixed_image_width > 0 ? vl_preprocess_.fixed_image_width
-                                                    : vl_preprocess_.fixed_image_size) /
-                  (vl_preprocess_.patch_size * vl_preprocess_.merge_size)
-            : 0;
+        merged_grid_extent(vl_preprocess_.fixed_image_width, vl_preprocess_.fixed_image_size,
+                           vl_preprocess_.patch_size, vl_preprocess_.merge_size);
     const bool use_mrope = text_decoder_->has_input("mrope_position_ids");
     const auto mrope = use_mrope ? qwen_vl_build_mrope_positions(input_ids, config_.image_token_id,
                                                                  num_features, grid_h, grid_w)
@@ -668,19 +688,8 @@ bool QwenVlPipeline::run_vl_prefill_batched(
     TensorMap inputs;
     add_vl_prefill_base_inputs(inputs, *state_, input_ids, embedding_inputs, feature_dim);
     std::vector<int32_t> mrope_positions;
-    if (prefill_->has_input("mrope_position_ids")) {
-        if (mrope == nullptr || mrope->token_positions.size() != input_ids.size())
-            return false;
-        mrope_positions.resize(static_cast<std::size_t>(3 * sq));
-        for (int32_t token_index = 0; token_index < sq; ++token_index) {
-            for (int32_t axis = 0; axis < 3; ++axis) {
-                mrope_positions[static_cast<std::size_t>(axis * sq + token_index)] =
-                    mrope->token_positions[static_cast<std::size_t>(token_index)]
-                                          [static_cast<std::size_t>(axis)];
-            }
-        }
-        inputs["mrope_position_ids"] = Tensor{mrope_positions.data(), {3, sq}, DType::kInt32};
-    }
+    if (!add_mrope_prefill_input(*prefill_, input_ids, mrope, sq, mrope_positions, inputs))
+        return false;
     if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, sq, feature_dim))
         return false;
 

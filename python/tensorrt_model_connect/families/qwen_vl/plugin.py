@@ -155,12 +155,6 @@ class QwenVLPlugin:
                 verbose=verbose,
                 debug_layer_outputs=debug_layer_outputs,
                 parallel_config=parallel)
-        # TRT 11's fused IAttention builder currently fails for the long
-        # single-token decoder profiles needed by full-resolution Qwen2.5-VL
-        # image prompts. Keep native attention for smaller profiles and use
-        # the mathematically equivalent decomposed QK/softmax/V graph when the
-        # cache exceeds the validated native-attention range.
-        config.raw["_force_decomposed_attention"] = max_cache_length > 384
         return build_standard_decoder_engine(
             config, weights, max_cache_length, precision=precision, verbose=verbose,
             quant_ctx=quant_ctx, embed_input=True,

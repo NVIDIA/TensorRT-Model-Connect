@@ -171,8 +171,6 @@ def build_standard_decoder_engine(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
     dynamic_kv_cache = bool(config.raw.get("dynamic_kv_cache", False))
-    force_decomposed_attention = bool(
-        config.raw.get("_force_decomposed_attention", False))
     rope_scaling = config.raw.get("rope_scaling") or {}
     raw_mrope_section = (
         rope_scaling.get("mrope_section")
@@ -476,7 +474,6 @@ def build_standard_decoder_engine(
             mrope_section=mrope_section,
             ffi_attention_kernel=ffi_attention_kernel,
             dynamic_kv_cache=dynamic_kv_cache,
-            force_decomposed_attention=force_decomposed_attention,
             lora_config=lora_config,
         )
 
@@ -612,7 +609,6 @@ def _add_decoder_layer(
     mrope_section: tuple[int, int, int] | None = None,
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
-    force_decomposed_attention: bool = False,
     lora_config: DynamicLoraConfig | None = None,
     eps: float | None = None,
 ) -> dict[str, trt.ITensor]:
@@ -642,7 +638,6 @@ def _add_decoder_layer(
         mrope_section=mrope_section,
         ffi_attention_kernel=ffi_attention_kernel,
         dynamic_kv_cache=dynamic_kv_cache,
-        force_decomposed_attention=force_decomposed_attention,
         lora_config=lora_config,
     )
     attn_out = attn["attn_out"]

@@ -28,10 +28,47 @@ void validate_static_input(const TensorInfo& info) {
     }
 }
 
+void validate_adapter_tensor(const std::unordered_map<std::string, TensorInfo>& expected,
+                             const std::string& name, const DeviceTensor* tensor) {
+    if (expected.find(name) == expected.end())
+        throw std::invalid_argument("Unknown adapter tensor '" + name + "'");
+    if (tensor == nullptr || !tensor->ok())
+        throw std::invalid_argument("Invalid adapter tensor '" + name + "'");
+}
+
+void validate_bound_tensor(const TensorInfo& expected, const DeviceTensorMap& adapter_tensors) {
+    const auto it = adapter_tensors.find(expected.name);
+    if (it == adapter_tensors.end())
+        return;
+    const DeviceTensor& tensor = *it->second;
+    if (tensor.shape() != expected.shape || tensor.dtype() != expected.dtype) {
+        throw std::invalid_argument("Shape or dtype mismatch for adapter tensor '" + expected.name +
+                                    "'");
+    }
+}
+
+void validate_host_tensor(const std::unordered_map<std::string, TensorInfo>& contract,
+                          const std::string& name, const Tensor& host) {
+    const auto expected = contract.find(name);
+    if (expected == contract.end())
+        throw std::invalid_argument("Qwen-VL LoRA cache: unknown adapter tensor '" + name + "'");
+    if (host.data == nullptr || host.shape != expected->second.shape ||
+        host.dtype != expected->second.dtype) {
+        throw std::invalid_argument("Qwen-VL LoRA cache: shape or dtype mismatch for tensor '" +
+                                    name + "'");
+    }
+}
+
+DeviceTensor upload_tensor(const Tensor& host, cudaStream_t stream, const std::string& name) {
+    DeviceTensor device(host.shape, host.dtype, stream);
+    if (!device.ok() || !device.copy_from_host(host.data))
+        throw std::runtime_error("Qwen-VL LoRA cache: failed to upload tensor '" + name + "'");
+    return device;
+}
+
 } // namespace
 
-LoraInputBindings::LoraInputBindings(TrtModule& module,
-                                           std::vector<TensorInfo> input_contract)
+LoraInputBindings::LoraInputBindings(TrtModule& module, std::vector<TensorInfo> input_contract)
     : module_(module) {
     std::unordered_set<std::string> names;
     names.reserve(input_contract.size());
@@ -69,26 +106,14 @@ std::vector<TensorInfo> LoraInputBindings::input_info() const {
 }
 
 void LoraInputBindings::bind(const DeviceTensorMap& adapter_tensors) {
-    std::unordered_set<std::string> expected;
+    std::unordered_map<std::string, TensorInfo> expected;
     expected.reserve(entries_.size());
     for (const auto& entry : entries_)
-        expected.insert(entry.info.name);
-    for (const auto& [name, tensor] : adapter_tensors) {
-        if (expected.find(name) == expected.end())
-            throw std::invalid_argument("Unknown adapter tensor '" + name + "'");
-        if (tensor == nullptr || !tensor->ok())
-            throw std::invalid_argument("Invalid adapter tensor '" + name + "'");
-    }
-    for (const auto& entry : entries_) {
-        const auto it = adapter_tensors.find(entry.info.name);
-        if (it == adapter_tensors.end())
-            continue;
-        const DeviceTensor& tensor = *it->second;
-        if (tensor.shape() != entry.info.shape || tensor.dtype() != entry.info.dtype) {
-            throw std::invalid_argument("Shape or dtype mismatch for adapter tensor '" +
-                                        entry.info.name + "'");
-        }
-    }
+        expected.emplace(entry.info.name, entry.info);
+    for (const auto& [name, tensor] : adapter_tensors)
+        validate_adapter_tensor(expected, name, tensor);
+    for (const auto& entry : entries_)
+        validate_bound_tensor(entry.info, adapter_tensors);
 
     // Tensor addresses are execution-context state. Do not replace them while
     // a previous enqueue on this module can still read the old addresses.
@@ -122,8 +147,8 @@ DeviceTensorMap LoraDeviceWeights::device_view() {
     return view;
 }
 
-LoraAdapterCache::LoraAdapterCache(std::vector<TensorInfo> input_contract, cudaStream_t upload_stream,
-                           std::size_t capacity)
+LoraAdapterCache::LoraAdapterCache(std::vector<TensorInfo> input_contract,
+                                   cudaStream_t upload_stream, std::size_t capacity)
     : upload_stream_(upload_stream), capacity_(capacity) {
     if (capacity_ == 0)
         throw std::invalid_argument("Qwen-VL LoRA cache: capacity must be positive");
@@ -136,7 +161,8 @@ LoraAdapterCache::LoraAdapterCache(std::vector<TensorInfo> input_contract, cudaS
     }
 }
 
-void LoraAdapterCache::register_adapter(const std::string& adapter_id, const TensorMap& host_tensors) {
+void LoraAdapterCache::register_adapter(const std::string& adapter_id,
+                                        const TensorMap& host_tensors) {
     if (contract_.empty())
         throw std::runtime_error("Qwen-VL LoRA cache: engine has no adapter inputs");
     if (adapter_id.empty())
@@ -146,18 +172,8 @@ void LoraAdapterCache::register_adapter(const std::string& adapter_id, const Ten
 
     auto weights = std::make_shared<LoraDeviceWeights>();
     for (const auto& [name, host] : host_tensors) {
-        const auto expected = contract_.find(name);
-        if (expected == contract_.end())
-            throw std::invalid_argument("Qwen-VL LoRA cache: unknown adapter tensor '" + name + "'");
-        if (host.data == nullptr || host.shape != expected->second.shape ||
-            host.dtype != expected->second.dtype) {
-            throw std::invalid_argument("Qwen-VL LoRA cache: shape or dtype mismatch for tensor '" +
-                                        name + "'");
-        }
-        DeviceTensor device(host.shape, host.dtype, upload_stream_);
-        if (!device.ok() || !device.copy_from_host(host.data))
-            throw std::runtime_error("Qwen-VL LoRA cache: failed to upload tensor '" + name + "'");
-        weights->tensors_.emplace(name, std::move(device));
+        validate_host_tensor(contract_, name, host);
+        weights->tensors_.emplace(name, upload_tensor(host, upload_stream_, name));
     }
     if (cudaStreamSynchronize(upload_stream_) != cudaSuccess)
         throw std::runtime_error("Qwen-VL LoRA cache: adapter upload synchronization failed");

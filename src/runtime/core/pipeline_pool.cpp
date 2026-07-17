@@ -45,6 +45,19 @@ bool contains_adapter(IPipeline& pipeline, const std::string& adapter_id) {
     return std::find(ids.begin(), ids.end(), adapter_id) != ids.end();
 }
 
+void rollback_loaded_adapters(const std::vector<IPipeline*>& loaded,
+                              const std::string& adapter_id) noexcept {
+    for (auto iterator = loaded.rbegin(); iterator != loaded.rend(); ++iterator) {
+        try {
+            if (contains_adapter(**iterator, adapter_id))
+                (*iterator)->unload_lora_adapter(adapter_id);
+        } catch (...) {
+            // Preserve the original load failure. A later explicit unload can
+            // clean up a plugin that also failed rollback.
+        }
+    }
+}
+
 } // namespace
 
 class PipelinePool::MaintenanceGuard {
@@ -189,15 +202,7 @@ void PipelinePool::load_lora_adapter(const std::string& adapter_id,
             loaded.push_back(slot.pipeline.get());
         }
     } catch (...) {
-        for (auto iterator = loaded.rbegin(); iterator != loaded.rend(); ++iterator) {
-            try {
-                if (contains_adapter(**iterator, adapter_id))
-                    (*iterator)->unload_lora_adapter(adapter_id);
-            } catch (...) {
-                // Preserve the original load failure. A later explicit unload
-                // can clean up a plugin that also failed rollback.
-            }
-        }
+        rollback_loaded_adapters(loaded, adapter_id);
         throw;
     }
 }

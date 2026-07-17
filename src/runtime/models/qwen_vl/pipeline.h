@@ -116,6 +116,9 @@ class QwenVlPipeline final : public IPipeline {
 
     std::pair<int32_t, int32_t> resolve_gen_limits(const GenerateConfig& cfg) const;
 
+    QwenVlISampler* prepare_sampler(const QwenVlSamplingParams& params,
+                                    std::unique_ptr<QwenVlISampler>& local_sampler);
+
     void run_vl_prefill_token(int32_t token_id, const std::vector<float>& image_features,
                               const std::vector<std::vector<float>>& deepstack_features,
                               int32_t num_features, int32_t feature_dim, int32_t& feature_index,

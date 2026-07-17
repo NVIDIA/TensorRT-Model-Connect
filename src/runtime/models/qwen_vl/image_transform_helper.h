@@ -114,11 +114,28 @@ inline void copy_merge_group_chw(const std::vector<float>& input_chw,
     }
 }
 
+inline bool valid_transform_dimensions(const ImageTransformParams& params) {
+    return params.target_height > 0 && params.target_width > 0 && params.channels > 0;
+}
+
+inline bool valid_merge_parameters(const ImageTransformParams& params) {
+    if (params.patch_size <= 0 || params.merge_size <= 0 || params.temporal_patch_size <= 0)
+        return false;
+    return true;
+}
+
+inline bool valid_merge_grid(const ImageTransformParams& params, int32_t grid_h, int32_t grid_w) {
+    if (params.target_height % params.patch_size != 0 ||
+        params.target_width % params.patch_size != 0)
+        return false;
+    return grid_h % params.merge_size == 0 && grid_w % params.merge_size == 0;
+}
+
 inline bool transform_chw_layout(const std::vector<float>& input_chw,
                                  const ImageTransformParams& params, std::vector<float>& out_values,
                                  int32_t& out_channels) {
     out_channels = 0;
-    if (params.target_height <= 0 || params.target_width <= 0 || params.channels <= 0) {
+    if (!valid_transform_dimensions(params)) {
         return false;
     }
 
@@ -135,17 +152,11 @@ inline bool transform_chw_layout(const std::vector<float>& input_chw,
         return true;
     }
 
-    if (params.patch_size <= 0 || params.merge_size <= 0 || params.temporal_patch_size <= 0) {
+    if (!valid_merge_parameters(params))
         return false;
-    }
-
-    if (params.target_height % params.patch_size != 0 ||
-        params.target_width % params.patch_size != 0) {
-        return false;
-    }
     const int32_t grid_h = params.target_height / params.patch_size;
     const int32_t grid_w = params.target_width / params.patch_size;
-    if (grid_h % params.merge_size != 0 || grid_w % params.merge_size != 0) {
+    if (!valid_merge_grid(params, grid_h, grid_w)) {
         return false;
     }
     const int32_t merge_h = grid_h / params.merge_size;

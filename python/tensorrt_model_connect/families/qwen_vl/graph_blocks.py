@@ -187,7 +187,6 @@ def add_attention_block(
     ffi_attention_kernel: str | None = None,
     dynamic_kv_cache: bool = False,
     sequence_length: int | None = 1,
-    force_decomposed_attention: bool = False,
     lora_config: DynamicLoraConfig | None = None,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
@@ -341,7 +340,6 @@ def add_attention_block(
             causal=False,
             mask=mask_4d,
             scale=attention_scale,
-            force_decomposed_attention=force_decomposed_attention,
         )
     elif ffi_attention_kernel is not None:
         if num_kv_heads != num_heads:

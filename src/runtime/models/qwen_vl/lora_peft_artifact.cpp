@@ -124,56 +124,141 @@ bool config_nonempty(const json& config, const char* key) {
     return config.contains(key) && !config.at(key).is_null() && !config.at(key).empty();
 }
 
-PeftLoraConfig parse_config(const json& config) {
+void validate_lora_mode(const json& config) {
+    if (config.value("peft_type", std::string("LORA")) != "LORA")
+        throw std::runtime_error("PEFT LoRA: adapter peft_type must be LORA");
+    if (config_flag(config, "use_dora"))
+        throw std::runtime_error("PEFT LoRA: DoRA is not supported");
+    if (config_flag(config, "use_rslora"))
+        throw std::runtime_error("PEFT LoRA: rsLoRA is not supported");
+    if (config_flag(config, "use_qalora"))
+        throw std::runtime_error("PEFT LoRA: QALoRA is not supported");
+}
+
+void validate_lora_options(const json& config) {
+    if (config.value("fan_in_fan_out", false))
+        throw std::runtime_error("PEFT LoRA: fan_in_fan_out is not supported");
+    if (config.value("bias", std::string("none")) != "none" || config.value("lora_bias", false))
+        throw std::runtime_error("PEFT LoRA: adapted bias tensors are not supported");
+    if (config_nonempty(config, "modules_to_save"))
+        throw std::runtime_error("PEFT LoRA: modules_to_save is not supported");
+    if (config_nonempty(config, "rank_pattern") || config_nonempty(config, "alpha_pattern"))
+        throw std::runtime_error("PEFT LoRA: per-module rank/alpha patterns are not supported");
+}
+
+std::vector<std::string> parse_target_modules(const json& config) {
+    if (!config.contains("target_modules") || config.at("target_modules").is_null())
+        return {};
+    const auto& targets = config.at("target_modules");
+    if (targets.is_string())
+        return {targets.get<std::string>()};
+    if (!targets.is_array())
+        throw std::runtime_error("PEFT LoRA: target_modules must be a string or array");
+    std::vector<std::string> parsed;
+    for (const auto& target : targets)
+        parsed.push_back(target.get<std::string>());
+    return parsed;
+}
+
+std::vector<std::string> deduplicate_targets(std::vector<std::string> targets) {
+    std::unordered_set<std::string> unique;
+    std::vector<std::string> deduplicated;
+    deduplicated.reserve(targets.size());
+    for (auto& target : targets) {
+        if (target.empty())
+            throw std::runtime_error("PEFT LoRA: target_modules contains an empty name");
+        if (unique.insert(target).second)
+            deduplicated.push_back(std::move(target));
+    }
+    return deduplicated;
+}
+
+PeftLoraConfig parse_config_body(const json& config) {
     if (!config.is_object())
         throw std::runtime_error("PEFT LoRA: adapter_config.json must contain an object");
+    validate_lora_mode(config);
+    validate_lora_options(config);
+    PeftLoraConfig parsed;
+    parsed.rank = config.value("r", 0);
+    if (parsed.rank <= 0)
+        throw std::runtime_error("PEFT LoRA: adapter rank must be positive");
+    parsed.alpha = config.value("lora_alpha", static_cast<double>(parsed.rank));
+    parsed.target_modules = deduplicate_targets(parse_target_modules(config));
+    return parsed;
+}
+
+PeftLoraConfig parse_config(const json& config) {
     try {
-        if (config.value("peft_type", std::string("LORA")) != "LORA")
-            throw std::runtime_error("PEFT LoRA: adapter peft_type must be LORA");
-        if (config_flag(config, "use_dora") || config_flag(config, "use_rslora") ||
-            config_flag(config, "use_qalora"))
-            throw std::runtime_error("PEFT LoRA: DoRA, rsLoRA, and QALoRA are not supported");
-        if (config.value("fan_in_fan_out", false))
-            throw std::runtime_error("PEFT LoRA: fan_in_fan_out is not supported");
-        if (config.value("bias", std::string("none")) != "none" || config.value("lora_bias", false))
-            throw std::runtime_error("PEFT LoRA: adapted bias tensors are not supported");
-        if (config_nonempty(config, "modules_to_save") || config_nonempty(config, "rank_pattern") ||
-            config_nonempty(config, "alpha_pattern"))
-            throw std::runtime_error(
-                "PEFT LoRA: modules_to_save and per-module rank/alpha patterns are not supported");
-
-        PeftLoraConfig parsed;
-        parsed.rank = config.value("r", 0);
-        if (parsed.rank <= 0)
-            throw std::runtime_error("PEFT LoRA: adapter rank must be positive");
-        parsed.alpha = config.value("lora_alpha", static_cast<double>(parsed.rank));
-
-        if (!config.contains("target_modules") || config.at("target_modules").is_null()) {
-            return parsed;
-        }
-        const auto& targets = config.at("target_modules");
-        if (targets.is_string()) {
-            parsed.target_modules.push_back(targets.get<std::string>());
-        } else if (targets.is_array()) {
-            for (const auto& target : targets)
-                parsed.target_modules.push_back(target.get<std::string>());
-        } else {
-            throw std::runtime_error("PEFT LoRA: target_modules must be a string or array");
-        }
-        std::unordered_set<std::string> unique;
-        std::vector<std::string> deduplicated;
-        deduplicated.reserve(parsed.target_modules.size());
-        for (auto& target : parsed.target_modules) {
-            if (target.empty())
-                throw std::runtime_error("PEFT LoRA: target_modules contains an empty name");
-            if (unique.insert(target).second)
-                deduplicated.push_back(std::move(target));
-        }
-        parsed.target_modules = std::move(deduplicated);
-        return parsed;
+        return parse_config_body(config);
     } catch (const json::exception& exc) {
         throw std::runtime_error(std::string("PEFT LoRA: invalid adapter config: ") + exc.what());
     }
+}
+
+json parse_safetensors_header(const std::vector<uint8_t>& bytes, std::size_t& data_begin) {
+    if (bytes.size() < sizeof(uint64_t))
+        throw std::runtime_error("PEFT LoRA: safetensors file is too small");
+    const uint64_t header_size_u64 = read_u64_le(bytes.data());
+    if (header_size_u64 > std::numeric_limits<std::size_t>::max() - sizeof(uint64_t))
+        throw std::runtime_error("PEFT LoRA: safetensors header size overflows");
+    const auto header_size = static_cast<std::size_t>(header_size_u64);
+    data_begin = sizeof(uint64_t) + header_size;
+    if (data_begin > bytes.size())
+        throw std::runtime_error("PEFT LoRA: truncated safetensors header");
+    try {
+        const auto* begin = reinterpret_cast<const char*>(bytes.data() + sizeof(uint64_t));
+        auto header = json::parse(begin, begin + header_size);
+        if (!header.is_object())
+            throw std::runtime_error("PEFT LoRA: safetensors header must be an object");
+        return header;
+    } catch (const json::exception& exc) {
+        throw std::runtime_error(std::string("PEFT LoRA: invalid safetensors header: ") +
+                                 exc.what());
+    }
+}
+
+void validate_tensor_fields(const json& value, const std::string& name) {
+    if (!value.is_object() || !value.contains("dtype") || !value.contains("shape") ||
+        !value.contains("data_offsets"))
+        throw std::runtime_error("PEFT LoRA: malformed tensor header for " + name);
+}
+
+std::vector<std::size_t> parse_tensor_offsets(const json& value, std::size_t data_size,
+                                              const std::string& name) {
+    const auto offsets = value.at("data_offsets").get<std::vector<std::size_t>>();
+    if (offsets.size() != 2 || offsets[0] > offsets[1] || offsets[1] > data_size)
+        throw std::runtime_error("PEFT LoRA: invalid data offsets for " + name);
+    return offsets;
+}
+
+void validate_tensor_byte_size(const PeftTensorInfo& info,
+                               const std::vector<std::size_t>& offsets) {
+    if (info.element_count > std::numeric_limits<std::size_t>::max() / dtype_size(info.dtype))
+        throw std::runtime_error("PEFT LoRA: byte size overflows for " + info.name);
+    const std::size_t expected_bytes = info.element_count * dtype_size(info.dtype);
+    if (offsets[1] - offsets[0] != expected_bytes)
+        throw std::runtime_error("PEFT LoRA: byte size mismatch for " + info.name);
+}
+
+struct ParsedTensorEntry {
+    PeftTensorInfo info;
+    std::size_t begin{0};
+    std::size_t end{0};
+};
+
+ParsedTensorEntry parse_tensor_entry(const std::string& name, const json& value,
+                                     std::size_t data_size) {
+    validate_tensor_fields(value, name);
+    ParsedTensorEntry parsed;
+    parsed.info.name = name;
+    parsed.info.dtype = parse_dtype(value.at("dtype").get<std::string>());
+    parsed.info.shape = value.at("shape").get<std::vector<int64_t>>();
+    parsed.info.element_count = checked_numel(parsed.info.shape, name);
+    const auto offsets = parse_tensor_offsets(value, data_size, name);
+    validate_tensor_byte_size(parsed.info, offsets);
+    parsed.begin = offsets[0];
+    parsed.end = offsets[1];
+    return parsed;
 }
 
 } // namespace
@@ -207,57 +292,18 @@ PeftLoraArtifact PeftLoraArtifact::load(const std::string& adapter_dir) {
     auto impl = std::make_unique<Impl>();
     impl->config = parse_config(read_json_file(root / "adapter_config.json"));
     impl->bytes = read_binary_file(root / "adapter_model.safetensors");
-    if (impl->bytes.size() < sizeof(uint64_t))
-        throw std::runtime_error("PEFT LoRA: safetensors file is too small");
-
-    const uint64_t header_size_u64 = read_u64_le(impl->bytes.data());
-    if (header_size_u64 > std::numeric_limits<std::size_t>::max() - sizeof(uint64_t))
-        throw std::runtime_error("PEFT LoRA: safetensors header size overflows");
-    const auto header_size = static_cast<std::size_t>(header_size_u64);
-    impl->data_begin = sizeof(uint64_t) + header_size;
-    if (impl->data_begin > impl->bytes.size())
-        throw std::runtime_error("PEFT LoRA: truncated safetensors header");
-
-    json header;
-    try {
-        const auto* begin = reinterpret_cast<const char*>(impl->bytes.data() + sizeof(uint64_t));
-        header = json::parse(begin, begin + header_size);
-    } catch (const json::exception& exc) {
-        throw std::runtime_error(std::string("PEFT LoRA: invalid safetensors header: ") +
-                                 exc.what());
-    }
-    if (!header.is_object())
-        throw std::runtime_error("PEFT LoRA: safetensors header must be an object");
+    const auto header = parse_safetensors_header(impl->bytes, impl->data_begin);
 
     impl->tensor_infos.reserve(header.size());
     try {
         for (auto item = header.begin(); item != header.end(); ++item) {
             if (item.key() == "__metadata__")
                 continue;
-            const auto& value = item.value();
-            if (!value.is_object() || !value.contains("dtype") || !value.contains("shape") ||
-                !value.contains("data_offsets"))
-                throw std::runtime_error("PEFT LoRA: malformed tensor header for " + item.key());
-
-            PeftTensorInfo info;
-            info.name = item.key();
-            info.dtype = parse_dtype(value.at("dtype").get<std::string>());
-            info.shape = value.at("shape").get<std::vector<int64_t>>();
-            info.element_count = checked_numel(info.shape, info.name);
-            const auto offsets = value.at("data_offsets").get<std::vector<std::size_t>>();
-            if (offsets.size() != 2 || offsets[0] > offsets[1] ||
-                offsets[1] > impl->bytes.size() - impl->data_begin)
-                throw std::runtime_error("PEFT LoRA: invalid data offsets for " + info.name);
-            if (info.element_count >
-                std::numeric_limits<std::size_t>::max() / dtype_size(info.dtype))
-                throw std::runtime_error("PEFT LoRA: byte size overflows for " + info.name);
-            const std::size_t expected_bytes = info.element_count * dtype_size(info.dtype);
-            if (offsets[1] - offsets[0] != expected_bytes)
-                throw std::runtime_error("PEFT LoRA: byte size mismatch for " + info.name);
-
+            auto parsed =
+                parse_tensor_entry(item.key(), item.value(), impl->bytes.size() - impl->data_begin);
             const std::size_t info_index = impl->tensor_infos.size();
-            impl->tensor_infos.push_back(std::move(info));
-            impl->entries.emplace(item.key(), Impl::Entry{info_index, offsets[0], offsets[1]});
+            impl->tensor_infos.push_back(std::move(parsed.info));
+            impl->entries.emplace(item.key(), Impl::Entry{info_index, parsed.begin, parsed.end});
         }
     } catch (const json::exception& exc) {
         throw std::runtime_error(std::string("PEFT LoRA: malformed safetensors header: ") +

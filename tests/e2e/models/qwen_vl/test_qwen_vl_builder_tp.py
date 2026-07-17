@@ -98,7 +98,6 @@ def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) ->
     assert kwargs["precision"] == "bf16"
     assert kwargs["embed_input"] is True
     assert kwargs["verbose"] is True
-    assert calls["build"][0].raw["_force_decomposed_attention"] is False
 
 
 def test_qwen25_vl_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:

@@ -141,6 +141,41 @@ bool append_utf8(uint32_t codepoint, std::string& out) {
     return true;
 }
 
+bool append_simple_escape(char escaped, std::string& out) {
+    constexpr std::string_view escape_codes = "\"\\/bfnrt";
+    constexpr std::string_view escape_values = "\"\\/\b\f\n\r\t";
+    const auto index = escape_codes.find(escaped);
+    if (index == std::string_view::npos)
+        return false;
+    out.push_back(escape_values[index]);
+    return true;
+}
+
+bool append_unicode_escape(const std::string& text, std::size_t& pos, std::string& out) {
+    uint32_t codepoint = 0;
+    if (!parse_hex_quad(text, pos, codepoint))
+        return false;
+    pos += 4;
+    if (codepoint < 0xD800U || codepoint > 0xDBFFU)
+        return append_utf8(codepoint, out);
+    if (pos + 6 > text.size() || text[pos] != '\\' || text[pos + 1] != 'u')
+        return false;
+    uint32_t low = 0;
+    if (!parse_hex_quad(text, pos + 2, low) || low < 0xDC00U || low > 0xDFFFU)
+        return false;
+    pos += 6;
+    codepoint = 0x10000U + ((codepoint - 0xD800U) << 10U) + (low - 0xDC00U);
+    return append_utf8(codepoint, out);
+}
+
+bool append_escape(const std::string& text, std::size_t& pos, std::string& out) {
+    if (pos >= text.size())
+        return false;
+    const char escaped = text[pos++];
+    return escaped == 'u' ? append_unicode_escape(text, pos, out)
+                          : append_simple_escape(escaped, out);
+}
+
 bool read_quoted_token(const std::string& text, std::size_t& pos, std::string& out) {
     if (pos >= text.size() || text[pos] != '"') {
         return false;
@@ -158,52 +193,8 @@ bool read_quoted_token(const std::string& text, std::size_t& pos, std::string& o
             out.push_back(c);
             continue;
         }
-        if (pos >= text.size())
+        if (!append_escape(text, pos, out))
             return false;
-
-        const char escaped = text[pos++];
-        switch (escaped) {
-        case '"':
-        case '\\':
-        case '/':
-            out.push_back(escaped);
-            break;
-        case 'b':
-            out.push_back('\b');
-            break;
-        case 'f':
-            out.push_back('\f');
-            break;
-        case 'n':
-            out.push_back('\n');
-            break;
-        case 'r':
-            out.push_back('\r');
-            break;
-        case 't':
-            out.push_back('\t');
-            break;
-        case 'u': {
-            uint32_t codepoint = 0;
-            if (!parse_hex_quad(text, pos, codepoint))
-                return false;
-            pos += 4;
-            if (codepoint >= 0xD800U && codepoint <= 0xDBFFU) {
-                if (pos + 6 > text.size() || text[pos] != '\\' || text[pos + 1] != 'u')
-                    return false;
-                uint32_t low = 0;
-                if (!parse_hex_quad(text, pos + 2, low) || low < 0xDC00U || low > 0xDFFFU)
-                    return false;
-                pos += 6;
-                codepoint = 0x10000U + ((codepoint - 0xD800U) << 10U) + (low - 0xDC00U);
-            }
-            if (!append_utf8(codepoint, out))
-                return false;
-            break;
-        }
-        default:
-            return false;
-        }
     }
     return false;
 }

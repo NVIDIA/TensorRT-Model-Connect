@@ -150,6 +150,118 @@ QwenVlHostLoraAdapter::Buffer make_buffer(const TensorInfo& info) {
     return output;
 }
 
+using ExpectedInputs = std::unordered_map<std::string, TensorInfo>;
+using PeftPairs = std::map<std::pair<int, std::string>, PeftPair>;
+
+ExpectedInputs index_engine_inputs(const std::vector<TensorInfo>& engine_inputs) {
+    ExpectedInputs expected;
+    expected.reserve(engine_inputs.size());
+    for (const auto& info : engine_inputs)
+        expected.emplace(info.name, info);
+    return expected;
+}
+
+PeftPairs collect_peft_pairs(const qwen_vl::PeftLoraArtifact& artifact,
+                             const std::set<std::string>& targets) {
+    const std::regex weight_pattern(
+        R"(.*layers\.([0-9]+)\.(self_attn|mlp)\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)\.lora_([AB])(?:\.[^.]+)?\.weight$)");
+    PeftPairs pairs;
+    for (const auto& tensor : artifact.tensors()) {
+        std::smatch match;
+        if (!std::regex_match(tensor.name, match, weight_pattern))
+            continue;
+        const std::string module = match[3].str();
+        if (targets.find(module) == targets.end())
+            continue;
+        auto& pair = pairs[{std::stoi(match[1].str()), module}];
+        (match[4].str() == "A" ? pair.a : pair.b) = &tensor;
+    }
+    return pairs;
+}
+
+std::string pair_label(int layer, const std::string& module) {
+    return "layer " + std::to_string(layer) + " " + module;
+}
+
+void validate_peft_pair(const PeftPair& pair, int rank, const std::string& label) {
+    if (pair.a == nullptr || pair.b == nullptr)
+        throw std::runtime_error("Qwen-VL LoRA: incomplete A/B pair for " + label);
+    if (pair.a->shape.size() != 2 || pair.b->shape.size() != 2 || pair.a->shape[0] != rank ||
+        pair.b->shape[1] != rank)
+        throw std::runtime_error("Qwen-VL LoRA: rank or shape mismatch for " + label);
+}
+
+struct RuntimePair {
+    std::string a_name;
+    std::string b_name;
+    const TensorInfo* a{nullptr};
+    const TensorInfo* b{nullptr};
+};
+
+RuntimePair find_runtime_pair(const ExpectedInputs& expected, int layer,
+                              const std::string& module) {
+    RuntimePair pair;
+    pair.a_name = runtime_input_name('A', layer, module);
+    pair.b_name = runtime_input_name('B', layer, module);
+    const auto a_it = expected.find(pair.a_name);
+    const auto b_it = expected.find(pair.b_name);
+    if (a_it == expected.end() || b_it == expected.end()) {
+        throw std::runtime_error("Qwen-VL LoRA: adapter targets " + module + " at layer " +
+                                 std::to_string(layer) +
+                                 " but the engine was not built with matching inputs");
+    }
+    pair.a = &a_it->second;
+    pair.b = &b_it->second;
+    return pair;
+}
+
+void validate_runtime_shapes(const RuntimePair& runtime, const PeftPair& peft, int rank,
+                             const std::string& label) {
+    const auto& a = *runtime.a;
+    const auto& b = *runtime.b;
+    if (a.shape.size() != 2 || b.shape.size() != 2)
+        throw std::runtime_error("Qwen-VL LoRA: invalid engine input ranks for " + label);
+    if (a.shape[0] != peft.a->shape[1] || b.shape[1] != peft.b->shape[0])
+        throw std::runtime_error(
+            "Qwen-VL LoRA: adapter dimensions do not match engine inputs for " + label);
+    if (a.shape[1] != b.shape[0] || rank > a.shape[1])
+        throw std::runtime_error("Qwen-VL LoRA: adapter rank exceeds engine capacity for " + label);
+    if (a.dtype != b.dtype)
+        throw std::runtime_error("Qwen-VL LoRA: engine A/B input dtypes differ for " + label);
+}
+
+QwenVlHostLoraAdapter::Buffer copy_a_weights(const qwen_vl::PeftLoraArtifact& artifact,
+                                             const PeftPair& pair, const TensorInfo& info,
+                                             int rank) {
+    auto output = make_buffer(info);
+    const std::size_t input_size = static_cast<std::size_t>(pair.a->shape[1]);
+    const std::size_t max_rank = static_cast<std::size_t>(info.shape[1]);
+    for (std::size_t input = 0; input < input_size; ++input) {
+        for (int r = 0; r < rank; ++r) {
+            const float value =
+                artifact.read_float(pair.a->name, static_cast<std::size_t>(r) * input_size + input);
+            write_scalar(output.bytes, output.dtype, input * max_rank + r, value);
+        }
+    }
+    return output;
+}
+
+QwenVlHostLoraAdapter::Buffer copy_b_weights(const qwen_vl::PeftLoraArtifact& artifact,
+                                             const PeftPair& pair, const TensorInfo& info, int rank,
+                                             float scale) {
+    auto output = make_buffer(info);
+    const std::size_t output_size = static_cast<std::size_t>(pair.b->shape[0]);
+    for (int r = 0; r < rank; ++r) {
+        for (std::size_t index = 0; index < output_size; ++index) {
+            const float value = artifact.read_float(
+                pair.b->name, index * static_cast<std::size_t>(rank) + static_cast<std::size_t>(r));
+            write_scalar(output.bytes, output.dtype,
+                         static_cast<std::size_t>(r) * output_size + index, value * scale);
+        }
+    }
+    return output;
+}
+
 } // namespace
 
 TensorMap QwenVlHostLoraAdapter::tensor_views() {
@@ -167,29 +279,11 @@ QwenVlHostLoraAdapter qwen_vl_load_peft_lora_adapter(const std::string& adapter_
     const float scale = static_cast<float>(artifact.config().scale());
     const auto targets = parse_target_modules(artifact.config());
 
-    std::unordered_map<std::string, TensorInfo> expected;
-    expected.reserve(engine_inputs.size());
-    for (const auto& info : engine_inputs)
-        expected.emplace(info.name, info);
+    const auto expected = index_engine_inputs(engine_inputs);
     if (expected.empty())
         throw std::runtime_error("Qwen-VL LoRA: engine has no dynamic LoRA inputs");
 
-    const std::regex weight_pattern(
-        R"(.*layers\.([0-9]+)\.(self_attn|mlp)\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)\.lora_([AB])(?:\.[^.]+)?\.weight$)");
-    std::map<std::pair<int, std::string>, PeftPair> pairs;
-    for (const auto& tensor : artifact.tensors()) {
-        std::smatch match;
-        if (!std::regex_match(tensor.name, match, weight_pattern))
-            continue;
-        const std::string module = match[3].str();
-        if (targets.find(module) == targets.end())
-            continue;
-        auto& pair = pairs[{std::stoi(match[1].str()), module}];
-        if (match[4].str() == "A")
-            pair.a = &tensor;
-        else
-            pair.b = &tensor;
-    }
+    const auto pairs = collect_peft_pairs(artifact, targets);
     if (pairs.empty())
         throw std::runtime_error("Qwen-VL LoRA: no supported decoder LoRA tensors were found");
 
@@ -197,56 +291,13 @@ QwenVlHostLoraAdapter qwen_vl_load_peft_lora_adapter(const std::string& adapter_
     for (const auto& [key, pair] : pairs) {
         const int layer = key.first;
         const std::string& module = key.second;
-        if (pair.a == nullptr || pair.b == nullptr)
-            throw std::runtime_error("Qwen-VL LoRA: incomplete A/B pair for layer " +
-                                     std::to_string(layer) + " " + module);
-        if (pair.a->shape.size() != 2 || pair.b->shape.size() != 2 || pair.a->shape[0] != rank ||
-            pair.b->shape[1] != rank)
-            throw std::runtime_error("Qwen-VL LoRA: rank or shape mismatch for layer " +
-                                     std::to_string(layer) + " " + module);
-
-        const std::string a_name = runtime_input_name('A', layer, module);
-        const std::string b_name = runtime_input_name('B', layer, module);
-        const auto a_it = expected.find(a_name);
-        const auto b_it = expected.find(b_name);
-        if (a_it == expected.end() || b_it == expected.end())
-            throw std::runtime_error("Qwen-VL LoRA: adapter targets " + module + " at layer " +
-                                     std::to_string(layer) +
-                                     " but the engine was not built with matching inputs");
-        const TensorInfo& a_info = a_it->second;
-        const TensorInfo& b_info = b_it->second;
-        if (a_info.shape.size() != 2 || b_info.shape.size() != 2 ||
-            a_info.shape[0] != pair.a->shape[1] || b_info.shape[1] != pair.b->shape[0] ||
-            a_info.shape[1] != b_info.shape[0] || rank > a_info.shape[1])
-            throw std::runtime_error(
-                "Qwen-VL LoRA: adapter dimensions do not match engine inputs for " + module +
-                " at layer " + std::to_string(layer));
-        if (a_info.dtype != b_info.dtype)
-            throw std::runtime_error("Qwen-VL LoRA: engine A/B input dtypes differ for " + module);
-
-        auto a_output = make_buffer(a_info);
-        auto b_output = make_buffer(b_info);
-        const std::size_t input_size = static_cast<std::size_t>(pair.a->shape[1]);
-        const std::size_t output_size = static_cast<std::size_t>(pair.b->shape[0]);
-        const std::size_t max_rank = static_cast<std::size_t>(a_info.shape[1]);
-        for (std::size_t input = 0; input < input_size; ++input) {
-            for (int r = 0; r < rank; ++r) {
-                const float value = artifact.read_float(
-                    pair.a->name, static_cast<std::size_t>(r) * input_size + input);
-                write_scalar(a_output.bytes, a_output.dtype, input * max_rank + r, value);
-            }
-        }
-        for (int r = 0; r < rank; ++r) {
-            for (std::size_t output = 0; output < output_size; ++output) {
-                const float value =
-                    artifact.read_float(pair.b->name, output * static_cast<std::size_t>(rank) +
-                                                          static_cast<std::size_t>(r));
-                write_scalar(b_output.bytes, b_output.dtype,
-                             static_cast<std::size_t>(r) * output_size + output, value * scale);
-            }
-        }
-        adapter.buffers.emplace(a_name, std::move(a_output));
-        adapter.buffers.emplace(b_name, std::move(b_output));
+        const auto label = pair_label(layer, module);
+        validate_peft_pair(pair, rank, label);
+        const auto runtime = find_runtime_pair(expected, layer, module);
+        validate_runtime_shapes(runtime, pair, rank, label);
+        adapter.buffers.emplace(runtime.a_name, copy_a_weights(artifact, pair, *runtime.a, rank));
+        adapter.buffers.emplace(runtime.b_name,
+                                copy_b_weights(artifact, pair, *runtime.b, rank, scale));
     }
     return adapter;
 }

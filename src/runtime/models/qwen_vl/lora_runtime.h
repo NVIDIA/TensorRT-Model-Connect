@@ -63,7 +63,7 @@ class LoraDeviceWeights {
 class LoraAdapterCache {
   public:
     LoraAdapterCache(std::vector<TensorInfo> input_contract, cudaStream_t upload_stream,
-                 std::size_t capacity = 4);
+                     std::size_t capacity = 4);
 
     void register_adapter(const std::string& adapter_id, const TensorMap& host_tensors);
     void unregister_adapter(const std::string& adapter_id);
