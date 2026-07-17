@@ -220,6 +220,53 @@ std::string expected_memory_section(std::string_view policy, int32_t batch_size)
            ".pt2";
 }
 
+bool is_memory_policy(std::string_view policy) {
+    return policy == "soft" || policy == "hard";
+}
+
+bool is_supported_tracker_batch(int32_t batch_size) {
+    return batch_size == 1 || batch_size == 2;
+}
+
+void validate_memory_package_contract(const Sam3TrackerMemoryPackageSpec& package) {
+    if (!is_memory_policy(package.policy))
+        throw std::runtime_error("SAM3 tracker-memory package has an invalid contract");
+    if (!is_supported_tracker_batch(package.batch_size))
+        throw std::runtime_error("SAM3 tracker-memory package has an invalid contract");
+    if (package.hard_mask != (package.policy == "hard"))
+        throw std::runtime_error("SAM3 tracker-memory package has an invalid contract");
+    if (package.section != expected_memory_section(package.policy, package.batch_size))
+        throw std::runtime_error("SAM3 tracker-memory package has an invalid contract");
+    if (!is_safe_section_name(package.section))
+        throw std::runtime_error("SAM3 tracker-memory package has an invalid contract");
+    if (!is_safe_global_name(package.package_global))
+        throw std::runtime_error("SAM3 tracker-memory package has an invalid contract");
+    if (!is_sha256(package.sha256))
+        throw std::runtime_error("SAM3 tracker-memory package has an invalid contract");
+}
+
+void validate_memory_package_global(const Sam3TrackerMemoryPackageSpec& package) {
+    const std::string prefix = "trtmc.sam3.tracker_memory." + package.policy + ".b" +
+                               std::to_string(package.batch_size) + ".fixed.";
+    constexpr std::size_t kGlobalDigestCharacters = 20;
+    if (!starts_with(package.package_global, prefix))
+        throw std::runtime_error("SAM3 tracker-memory package global does not match its content");
+    if (package.package_global.size() != prefix.size() + kGlobalDigestCharacters)
+        throw std::runtime_error("SAM3 tracker-memory package global does not match its content");
+    if (package.package_global.substr(prefix.size()) !=
+        package.sha256.substr(0, kGlobalDigestCharacters))
+        throw std::runtime_error("SAM3 tracker-memory package global does not match its content");
+}
+
+void validate_memory_package_filename(const nlohmann::json& object,
+                                      const Sam3TrackerMemoryPackageSpec& package) {
+    const std::string expected_filename = "sam3_tracker_memory_" + package.policy + "_b" +
+                                          std::to_string(package.batch_size) + "_" +
+                                          package.sha256 + ".pt2";
+    if (object.at("filename").get<std::string>() != expected_filename)
+        throw std::runtime_error("SAM3 tracker-memory package filename is not content-addressed");
+}
+
 void validate_memory_tensor_contract(const nlohmann::json& object, std::string_view policy,
                                      int32_t batch_size) {
     if (!object.is_object() || object.size() != 10 || object.at("fixed_shape") != true)
@@ -249,26 +296,9 @@ Sam3TrackerMemoryPackageSpec parse_memory_package(const nlohmann::json& object) 
     package.sha256 = object.at("sha256").get<std::string>();
     package.batch_size = object.at("batch_size").get<int32_t>();
     package.hard_mask = object.at("hard_mask").get<bool>();
-    if ((package.policy != "soft" && package.policy != "hard") ||
-        (package.batch_size != 1 && package.batch_size != 2) ||
-        package.hard_mask != (package.policy == "hard") ||
-        package.section != expected_memory_section(package.policy, package.batch_size) ||
-        !is_safe_section_name(package.section) || !is_safe_global_name(package.package_global) ||
-        !is_sha256(package.sha256))
-        throw std::runtime_error("SAM3 tracker-memory package has an invalid contract");
-    const std::string prefix = "trtmc.sam3.tracker_memory." + package.policy + ".b" +
-                               std::to_string(package.batch_size) + ".fixed.";
-    constexpr std::size_t kGlobalDigestCharacters = 20;
-    if (!starts_with(package.package_global, prefix) ||
-        package.package_global.size() != prefix.size() + kGlobalDigestCharacters ||
-        package.package_global.substr(prefix.size()) !=
-            package.sha256.substr(0, kGlobalDigestCharacters))
-        throw std::runtime_error("SAM3 tracker-memory package global does not match its content");
-    const std::string expected_filename = "sam3_tracker_memory_" + package.policy + "_b" +
-                                          std::to_string(package.batch_size) + "_" +
-                                          package.sha256 + ".pt2";
-    if (object.at("filename").get<std::string>() != expected_filename)
-        throw std::runtime_error("SAM3 tracker-memory package filename is not content-addressed");
+    validate_memory_package_contract(package);
+    validate_memory_package_global(package);
+    validate_memory_package_filename(object, package);
     validate_memory_tensor_contract(object, package.policy, package.batch_size);
     return package;
 }
@@ -350,50 +380,115 @@ bool valid_memory_metrics(const nlohmann::json& metrics, double minimum_cosine,
            relative_l2 <= maximum_relative_l2;
 }
 
-void validate_memory_package_validation(const nlohmann::json& validation) {
-    constexpr double kMinimumCosine = 0.999;
-    constexpr double kMaximumRelativeL2 = 0.02;
+constexpr double kMinimumMemoryValidationCosine = 0.999;
+constexpr double kMaximumMemoryValidationRelativeL2 = 0.02;
+
+void validate_memory_validation_contract(const nlohmann::json& validation) {
     if (validation.at("reference").get<std::string>() !=
-            "same Transformers module eager execution before cache publication" ||
-        validation.at("minimum_cosine").get<double>() != kMinimumCosine ||
-        validation.at("maximum_relative_l2").get<double>() != kMaximumRelativeL2)
+        "same Transformers module eager execution before cache publication")
         throw std::runtime_error("SAM3 tracker-memory package validation contract mismatch");
+    if (validation.at("minimum_cosine").get<double>() != kMinimumMemoryValidationCosine)
+        throw std::runtime_error("SAM3 tracker-memory package validation contract mismatch");
+    if (validation.at("maximum_relative_l2").get<double>() != kMaximumMemoryValidationRelativeL2)
+        throw std::runtime_error("SAM3 tracker-memory package validation contract mismatch");
+}
+
+void validate_memory_validation_case_identity(const nlohmann::json& value,
+                                              std::unordered_set<std::string>& variants) {
+    const std::string policy = value.at("policy").get<std::string>();
+    const int32_t batch_size = value.at("batch_size").get<int32_t>();
+    if (!is_memory_policy(policy))
+        throw std::runtime_error("SAM3 tracker-memory package validation case failed");
+    if (!is_supported_tracker_batch(batch_size))
+        throw std::runtime_error("SAM3 tracker-memory package validation case failed");
+    if (value.at("hard_mask").get<bool>() != (policy == "hard"))
+        throw std::runtime_error("SAM3 tracker-memory package validation case failed");
+    if (!value.at("passed").get<bool>())
+        throw std::runtime_error("SAM3 tracker-memory package validation case failed");
+    if (!variants.insert(policy + ":" + std::to_string(batch_size)).second)
+        throw std::runtime_error("SAM3 tracker-memory package validation case failed");
+    if (!valid_memory_metrics(value, kMinimumMemoryValidationCosine,
+                              kMaximumMemoryValidationRelativeL2))
+        throw std::runtime_error("SAM3 tracker-memory package validation case failed");
+}
+
+void validate_memory_validation_case_planes(const nlohmann::json& planes) {
+    if (!planes.is_object())
+        throw std::runtime_error("SAM3 tracker-memory plane validation case failed");
+    if (planes.size() != 2)
+        throw std::runtime_error("SAM3 tracker-memory plane validation case failed");
+    if (!planes.contains("memory"))
+        throw std::runtime_error("SAM3 tracker-memory plane validation case failed");
+    if (!planes.contains("position"))
+        throw std::runtime_error("SAM3 tracker-memory plane validation case failed");
+    if (!valid_memory_metrics(planes.at("memory"), kMinimumMemoryValidationCosine,
+                              kMaximumMemoryValidationRelativeL2))
+        throw std::runtime_error("SAM3 tracker-memory plane validation case failed");
+    if (!valid_memory_metrics(planes.at("position"), kMinimumMemoryValidationCosine,
+                              kMaximumMemoryValidationRelativeL2))
+        throw std::runtime_error("SAM3 tracker-memory plane validation case failed");
+}
+
+void validate_memory_package_validation(const nlohmann::json& validation) {
+    validate_memory_validation_contract(validation);
     const auto& cases = validation.at("cases");
-    if (!cases.is_array() || cases.size() != 4)
+    if (!cases.is_array())
+        throw std::runtime_error("SAM3 tracker-memory package validation is incomplete");
+    if (cases.size() != 4)
         throw std::runtime_error("SAM3 tracker-memory package validation is incomplete");
     std::unordered_set<std::string> variants;
     for (const auto& value : cases) {
-        const std::string policy = value.at("policy").get<std::string>();
-        const int32_t batch_size = value.at("batch_size").get<int32_t>();
-        if ((policy != "soft" && policy != "hard") || (batch_size != 1 && batch_size != 2) ||
-            value.at("hard_mask").get<bool>() != (policy == "hard") ||
-            !value.at("passed").get<bool>() ||
-            !variants.insert(policy + ":" + std::to_string(batch_size)).second ||
-            !valid_memory_metrics(value, kMinimumCosine, kMaximumRelativeL2))
-            throw std::runtime_error("SAM3 tracker-memory package validation case failed");
-        const auto& planes = value.at("planes");
-        if (!planes.is_object() || planes.size() != 2 || !planes.contains("memory") ||
-            !planes.contains("position") ||
-            !valid_memory_metrics(planes.at("memory"), kMinimumCosine, kMaximumRelativeL2) ||
-            !valid_memory_metrics(planes.at("position"), kMinimumCosine, kMaximumRelativeL2))
-            throw std::runtime_error("SAM3 tracker-memory plane validation case failed");
+        validate_memory_validation_case_identity(value, variants);
+        validate_memory_validation_case_planes(value.at("planes"));
     }
+}
+
+void validate_memory_producer_fields(const Sam3TrackerMemoryAotiManifest& memory) {
+    if (!is_known_version(memory.torch_version))
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (!is_known_version(memory.transformers_version))
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (!is_known_version(memory.cuda_version))
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (memory.host_architecture.empty())
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (memory.aoti_abi_version == 0)
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (memory.compute_capability_major <= 0)
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (memory.compute_capability_minor < 0)
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+}
+
+void validate_memory_producer_versions(const Sam3TrackerMemoryAotiManifest& memory,
+                                       const Sam3TrackerStepRuntimeManifest& step) {
+    if (memory.torch_version != step.torch_version)
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (memory.transformers_version != step.transformers_version)
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (memory.cuda_version != step.cuda_version)
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (memory.host_architecture != step.host_architecture)
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+}
+
+void validate_memory_producer_abi(const Sam3TrackerMemoryAotiManifest& memory,
+                                  const Sam3TrackerStepRuntimeManifest& step) {
+    if (memory.torch_cxx11_abi != step.torch_cxx11_abi)
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (memory.aoti_abi_version != step.aoti_abi_version)
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (memory.compute_capability_major != step.compute_capability_major)
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    if (memory.compute_capability_minor != step.compute_capability_minor)
+        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
 }
 
 void validate_memory_producer_matches_step(const Sam3TrackerMemoryAotiManifest& memory,
                                            const Sam3TrackerStepRuntimeManifest& step) {
-    if (!is_known_version(memory.torch_version) || !is_known_version(memory.transformers_version) ||
-        !is_known_version(memory.cuda_version) || memory.host_architecture.empty() ||
-        memory.aoti_abi_version == 0 || memory.compute_capability_major <= 0 ||
-        memory.compute_capability_minor < 0 || memory.torch_version != step.torch_version ||
-        memory.transformers_version != step.transformers_version ||
-        memory.cuda_version != step.cuda_version ||
-        memory.host_architecture != step.host_architecture ||
-        memory.torch_cxx11_abi != step.torch_cxx11_abi ||
-        memory.aoti_abi_version != step.aoti_abi_version ||
-        memory.compute_capability_major != step.compute_capability_major ||
-        memory.compute_capability_minor != step.compute_capability_minor)
-        throw std::runtime_error("SAM3 tracker-memory/step producer ABI mismatch");
+    validate_memory_producer_fields(memory);
+    validate_memory_producer_versions(memory, step);
+    validate_memory_producer_abi(memory, step);
 }
 
 void validate_producer_manifest_fields(const Sam3TrackerStepRuntimeManifest& manifest) {
@@ -670,6 +765,203 @@ const Sam3TrackerStepPackageSpec& find_package(const Sam3TrackerStepRuntimeManif
     return *match;
 }
 
+void assign_compute_capability(const nlohmann::json& producer, std::string_view key, int32_t& major,
+                               int32_t& minor, const char* error_message) {
+    const auto capability = producer.at(key).get<std::vector<int32_t>>();
+    if (capability.size() != 2)
+        throw std::runtime_error(error_message);
+    major = capability[0];
+    minor = capability[1];
+}
+
+Sam3TrackerStepRuntimeManifest parse_step_manifest_header(const nlohmann::json& parsed) {
+    Sam3TrackerStepRuntimeManifest manifest;
+    manifest.schema_version = parsed.at("schema_version").get<int32_t>();
+    manifest.step_scope = parsed.at("step_scope").get<std::string>();
+    const auto& plugin = parsed.at("plugin");
+    manifest.plugin_section = plugin.at("section").get<std::string>();
+    manifest.plugin_sha256 = plugin.at("sha256").get<std::string>();
+    manifest.plugin_type = plugin.at("type").get<std::string>();
+    manifest.plugin_version = plugin.at("version").get<std::string>();
+    const auto& producer = parsed.at("producer");
+    manifest.torch_version = producer.at("torch_version").get<std::string>();
+    manifest.transformers_version = producer.at("transformers_version").get<std::string>();
+    manifest.tvm_ffi_version = producer.at("tvm_ffi_version").get<std::string>();
+    manifest.tensorrt_version = producer.at("tensorrt_version").get<std::string>();
+    manifest.cuda_version = producer.at("cuda_version").get<std::string>();
+    manifest.host_architecture = producer.at("host_architecture").get<std::string>();
+    manifest.torch_cxx11_abi = producer.at("torch_cxx11_abi").get<bool>();
+    manifest.aoti_abi_version = producer.at("aoti_abi_version").get<uint64_t>();
+    assign_compute_capability(producer, "compute_capability", manifest.compute_capability_major,
+                              manifest.compute_capability_minor,
+                              "SAM3 tracker-step compute capability must have two components");
+    validate_manifest_fields(manifest);
+    return manifest;
+}
+
+void validate_step_package_uniqueness(const Sam3TrackerStepPackageSpec& package,
+                                      std::unordered_set<std::string>& stage_batches,
+                                      std::unordered_set<std::string>& package_globals,
+                                      std::unordered_set<std::string>& sections) {
+    const std::string stage_batch = package.stage + ":" + std::to_string(package.batch_size);
+    if (!stage_batches.insert(stage_batch).second)
+        throw std::runtime_error("SAM3 tracker-step package entries must be unique");
+    if (!package_globals.insert(package.package_global).second)
+        throw std::runtime_error("SAM3 tracker-step package entries must be unique");
+    if (!sections.insert(package.section).second)
+        throw std::runtime_error("SAM3 tracker-step package entries must be unique");
+}
+
+void parse_step_packages(const BundleFile& bundle, const nlohmann::json& parsed,
+                         Sam3TrackerStepRuntimeManifest& manifest) {
+    const auto& packages = parsed.at("packages");
+    if (!packages.is_array())
+        throw std::runtime_error(
+            "SAM3 tracker-step runtime requires encoder/decoder packages for B1 and B2");
+    if (packages.size() != manifest.packages.size())
+        throw std::runtime_error(
+            "SAM3 tracker-step runtime requires encoder/decoder packages for B1 and B2");
+    std::unordered_set<std::string> stage_batches;
+    std::unordered_set<std::string> package_globals;
+    std::unordered_set<std::string> sections;
+    for (std::size_t index = 0; index < manifest.packages.size(); ++index) {
+        manifest.packages[index] = parse_package(packages.at(index));
+        const auto& package = manifest.packages[index];
+        validate_step_package_uniqueness(package, stage_batches, package_globals, sections);
+        require_sha(require_section(bundle, package.section), package.sha256, package.section);
+    }
+}
+
+void validate_step_pipeline_uniqueness(const Sam3TrackerStepPipelineSpec& pipeline,
+                                       std::unordered_set<int32_t>& pipeline_batches,
+                                       std::unordered_set<std::string>& pipeline_globals) {
+    if (!pipeline_batches.insert(pipeline.batch_size).second)
+        throw std::runtime_error("SAM3 tracker-step pipeline entries must be unique");
+    if (!pipeline_globals.insert(pipeline.global_name).second)
+        throw std::runtime_error("SAM3 tracker-step pipeline entries must be unique");
+}
+
+void validate_step_pipeline_packages(const Sam3TrackerStepRuntimeManifest& manifest,
+                                     const Sam3TrackerStepPipelineSpec& pipeline) {
+    const auto& encoder = find_package(manifest, pipeline.batch_size, "encoder");
+    const auto& decoder = find_package(manifest, pipeline.batch_size, "decoder");
+    if (pipeline.encoder_sha256 != encoder.sha256)
+        throw std::runtime_error(
+            "SAM3 tracker-step pipeline does not reference its batch packages");
+    if (pipeline.decoder_sha256 != decoder.sha256)
+        throw std::runtime_error(
+            "SAM3 tracker-step pipeline does not reference its batch packages");
+}
+
+void parse_step_pipelines(const nlohmann::json& parsed, Sam3TrackerStepRuntimeManifest& manifest) {
+    const auto& pipelines = parsed.at("pipelines");
+    if (!pipelines.is_array())
+        throw std::runtime_error("SAM3 tracker-step runtime requires B1 and B2 pipelines");
+    if (pipelines.size() != manifest.pipelines.size())
+        throw std::runtime_error("SAM3 tracker-step runtime requires B1 and B2 pipelines");
+    std::unordered_set<int32_t> pipeline_batches;
+    std::unordered_set<std::string> pipeline_globals;
+    for (std::size_t index = 0; index < manifest.pipelines.size(); ++index) {
+        manifest.pipelines[index] = parse_pipeline(pipelines.at(index));
+        const auto& pipeline = manifest.pipelines[index];
+        validate_step_pipeline_uniqueness(pipeline, pipeline_batches, pipeline_globals);
+        validate_step_pipeline_packages(manifest, pipeline);
+    }
+}
+
+void validate_memory_manifest_contract(const nlohmann::json& parsed) {
+    if (!parsed.is_object())
+        throw std::runtime_error("SAM3 tracker-memory AOTI manifest contract mismatch");
+    if (parsed.size() != 11)
+        throw std::runtime_error("SAM3 tracker-memory AOTI manifest contract mismatch");
+    if (parsed.at("implementation") != expected_memory_implementation())
+        throw std::runtime_error("SAM3 tracker-memory AOTI manifest contract mismatch");
+    if (parsed.at("input_abi") != expected_memory_input_abi())
+        throw std::runtime_error("SAM3 tracker-memory AOTI manifest contract mismatch");
+    if (parsed.at("mask_policy") != expected_memory_mask_policy())
+        throw std::runtime_error("SAM3 tracker-memory AOTI manifest contract mismatch");
+}
+
+void validate_memory_manifest_identity(const Sam3TrackerMemoryAotiManifest& manifest) {
+    if (manifest.schema_version != 1)
+        throw std::runtime_error("SAM3 tracker-memory AOTI manifest is incompatible");
+    if (manifest.scope != kSam3TrackerMemoryScope)
+        throw std::runtime_error("SAM3 tracker-memory AOTI manifest is incompatible");
+    if (manifest.artifact_format != "torch.aot_inductor.package.pt2")
+        throw std::runtime_error("SAM3 tracker-memory AOTI manifest is incompatible");
+    if (!is_sha256(manifest.model_sha256))
+        throw std::runtime_error("SAM3 tracker-memory AOTI manifest is incompatible");
+    if (!is_sha256(manifest.exporter_sha256))
+        throw std::runtime_error("SAM3 tracker-memory AOTI manifest is incompatible");
+}
+
+void parse_memory_manifest_producer(const nlohmann::json& producer,
+                                    Sam3TrackerMemoryAotiManifest& manifest) {
+    if (!producer.is_object())
+        throw std::runtime_error("SAM3 tracker-memory producer ABI is incomplete");
+    if (producer.size() != 7)
+        throw std::runtime_error("SAM3 tracker-memory producer ABI is incomplete");
+    manifest.torch_version = producer.at("torch_version").get<std::string>();
+    manifest.transformers_version = producer.at("transformers_version").get<std::string>();
+    manifest.cuda_version = producer.at("cuda_version").get<std::string>();
+    manifest.host_architecture = producer.at("host_architecture").get<std::string>();
+    manifest.torch_cxx11_abi = producer.at("torch_cxx11_abi").get<bool>();
+    manifest.aoti_abi_version = producer.at("torch_aoti_abi_version").get<uint64_t>();
+    assign_compute_capability(producer, "compute_capability", manifest.compute_capability_major,
+                              manifest.compute_capability_minor,
+                              "SAM3 tracker-memory compute capability is incomplete");
+}
+
+Sam3TrackerMemoryAotiManifest
+parse_memory_manifest_header(const nlohmann::json& parsed,
+                             const Sam3TrackerStepRuntimeManifest& step_manifest) {
+    Sam3TrackerMemoryAotiManifest manifest;
+    manifest.schema_version = parsed.at("schema_version").get<int32_t>();
+    manifest.scope = parsed.at("scope").get<std::string>();
+    manifest.artifact_format = parsed.at("artifact_format").get<std::string>();
+    manifest.model_sha256 = parsed.at("model_sha256").get<std::string>();
+    manifest.exporter_sha256 = parsed.at("exporter_sha256").get<std::string>();
+    validate_memory_manifest_identity(manifest);
+    parse_memory_manifest_producer(parsed.at("producer"), manifest);
+    validate_memory_producer_matches_step(manifest, step_manifest);
+    return manifest;
+}
+
+void validate_memory_package_uniqueness(const Sam3TrackerMemoryPackageSpec& package,
+                                        std::unordered_set<std::string>& variants,
+                                        std::unordered_set<std::string>& globals,
+                                        std::unordered_set<std::string>& sections) {
+    const std::string variant = package.policy + ":" + std::to_string(package.batch_size);
+    if (!variants.insert(variant).second)
+        throw std::runtime_error("SAM3 tracker-memory package entries must be unique");
+    if (!globals.insert(package.package_global).second)
+        throw std::runtime_error("SAM3 tracker-memory package entries must be unique");
+    if (!sections.insert(package.section).second)
+        throw std::runtime_error("SAM3 tracker-memory package entries must be unique");
+}
+
+void parse_memory_packages(const BundleFile& bundle, const nlohmann::json& parsed,
+                           Sam3TrackerMemoryAotiManifest& manifest) {
+    const auto& packages = parsed.at("packages");
+    if (!packages.is_array())
+        throw std::runtime_error("SAM3 tracker-memory runtime requires soft/hard B1/B2 packages");
+    if (packages.size() != manifest.packages.size())
+        throw std::runtime_error("SAM3 tracker-memory runtime requires soft/hard B1/B2 packages");
+    std::unordered_set<std::string> variants;
+    std::unordered_set<std::string> globals;
+    std::unordered_set<std::string> sections;
+    for (std::size_t index = 0; index < manifest.packages.size(); ++index) {
+        manifest.packages[index] = parse_memory_package(packages.at(index));
+        const auto& package = manifest.packages[index];
+        validate_memory_package_uniqueness(package, variants, globals, sections);
+        require_sha(require_section(bundle, package.section), package.sha256, package.section);
+    }
+    const std::unordered_set<std::string> expected_variants{"soft:1", "hard:1", "soft:2", "hard:2"};
+    if (variants != expected_variants)
+        throw std::runtime_error(
+            "SAM3 tracker-memory runtime requires exactly soft/hard B1/B2 packages");
+}
+
 void register_runtime_packages(void* library, const Sam3TrackerStepRuntimeManifest& manifest,
                                const Sam3TrackerMemoryAotiManifest& memory_manifest,
                                const std::filesystem::path& cache_directory) {
@@ -711,65 +1003,9 @@ Sam3TrackerStepRuntimeManifest
 validate_sam3_tracker_step_runtime_manifest(const BundleFile& bundle) {
     const auto& manifest_bytes = require_section(bundle, kSam3TrackerStepRuntimeManifestSection);
     const auto parsed = nlohmann::json::parse(manifest_bytes.begin(), manifest_bytes.end());
-    Sam3TrackerStepRuntimeManifest manifest;
-    manifest.schema_version = parsed.at("schema_version").get<int32_t>();
-    manifest.step_scope = parsed.at("step_scope").get<std::string>();
-    const auto& plugin = parsed.at("plugin");
-    manifest.plugin_section = plugin.at("section").get<std::string>();
-    manifest.plugin_sha256 = plugin.at("sha256").get<std::string>();
-    manifest.plugin_type = plugin.at("type").get<std::string>();
-    manifest.plugin_version = plugin.at("version").get<std::string>();
-    const auto& producer = parsed.at("producer");
-    manifest.torch_version = producer.at("torch_version").get<std::string>();
-    manifest.transformers_version = producer.at("transformers_version").get<std::string>();
-    manifest.tvm_ffi_version = producer.at("tvm_ffi_version").get<std::string>();
-    manifest.tensorrt_version = producer.at("tensorrt_version").get<std::string>();
-    manifest.cuda_version = producer.at("cuda_version").get<std::string>();
-    manifest.host_architecture = producer.at("host_architecture").get<std::string>();
-    manifest.torch_cxx11_abi = producer.at("torch_cxx11_abi").get<bool>();
-    manifest.aoti_abi_version = producer.at("aoti_abi_version").get<uint64_t>();
-    const auto capability = producer.at("compute_capability").get<std::vector<int32_t>>();
-    if (capability.size() != 2)
-        throw std::runtime_error("SAM3 tracker-step compute capability must have two components");
-    manifest.compute_capability_major = capability[0];
-    manifest.compute_capability_minor = capability[1];
-    validate_manifest_fields(manifest);
-
-    const auto packages = parsed.at("packages");
-    if (!packages.is_array() || packages.size() != manifest.packages.size())
-        throw std::runtime_error(
-            "SAM3 tracker-step runtime requires encoder/decoder packages for B1 and B2");
-    std::unordered_set<std::string> stage_batches;
-    std::unordered_set<std::string> package_globals;
-    std::unordered_set<std::string> sections;
-    for (std::size_t index = 0; index < manifest.packages.size(); ++index) {
-        manifest.packages[index] = parse_package(packages.at(index));
-        const auto& package = manifest.packages[index];
-        const std::string stage_batch = package.stage + ":" + std::to_string(package.batch_size);
-        if (!stage_batches.insert(stage_batch).second ||
-            !package_globals.insert(package.package_global).second ||
-            !sections.insert(package.section).second)
-            throw std::runtime_error("SAM3 tracker-step package entries must be unique");
-        require_sha(require_section(bundle, package.section), package.sha256, package.section);
-    }
-
-    const auto pipelines = parsed.at("pipelines");
-    if (!pipelines.is_array() || pipelines.size() != manifest.pipelines.size())
-        throw std::runtime_error("SAM3 tracker-step runtime requires B1 and B2 pipelines");
-    std::unordered_set<int32_t> pipeline_batches;
-    std::unordered_set<std::string> pipeline_globals;
-    for (std::size_t index = 0; index < manifest.pipelines.size(); ++index) {
-        manifest.pipelines[index] = parse_pipeline(pipelines.at(index));
-        const auto& pipeline = manifest.pipelines[index];
-        if (!pipeline_batches.insert(pipeline.batch_size).second ||
-            !pipeline_globals.insert(pipeline.global_name).second)
-            throw std::runtime_error("SAM3 tracker-step pipeline entries must be unique");
-        const auto& encoder = find_package(manifest, pipeline.batch_size, "encoder");
-        const auto& decoder = find_package(manifest, pipeline.batch_size, "decoder");
-        if (pipeline.encoder_sha256 != encoder.sha256 || pipeline.decoder_sha256 != decoder.sha256)
-            throw std::runtime_error(
-                "SAM3 tracker-step pipeline does not reference its batch packages");
-    }
+    auto manifest = parse_step_manifest_header(parsed);
+    parse_step_packages(bundle, parsed, manifest);
+    parse_step_pipelines(parsed, manifest);
     require_sha(require_section(bundle, manifest.plugin_section), manifest.plugin_sha256,
                 manifest.plugin_section);
     return manifest;
@@ -780,58 +1016,9 @@ validate_sam3_tracker_memory_aoti_manifest(const BundleFile& bundle,
                                            const Sam3TrackerStepRuntimeManifest& step_manifest) {
     const auto& manifest_bytes = require_section(bundle, kSam3TrackerMemoryAotiManifestSection);
     const auto parsed = nlohmann::json::parse(manifest_bytes.begin(), manifest_bytes.end());
-    if (!parsed.is_object() || parsed.size() != 11 ||
-        parsed.at("implementation") != expected_memory_implementation() ||
-        parsed.at("input_abi") != expected_memory_input_abi() ||
-        parsed.at("mask_policy") != expected_memory_mask_policy())
-        throw std::runtime_error("SAM3 tracker-memory AOTI manifest contract mismatch");
-
-    Sam3TrackerMemoryAotiManifest manifest;
-    manifest.schema_version = parsed.at("schema_version").get<int32_t>();
-    manifest.scope = parsed.at("scope").get<std::string>();
-    manifest.artifact_format = parsed.at("artifact_format").get<std::string>();
-    manifest.model_sha256 = parsed.at("model_sha256").get<std::string>();
-    manifest.exporter_sha256 = parsed.at("exporter_sha256").get<std::string>();
-    if (manifest.schema_version != 1 || manifest.scope != kSam3TrackerMemoryScope ||
-        manifest.artifact_format != "torch.aot_inductor.package.pt2" ||
-        !is_sha256(manifest.model_sha256) || !is_sha256(manifest.exporter_sha256))
-        throw std::runtime_error("SAM3 tracker-memory AOTI manifest is incompatible");
-
-    const auto& producer = parsed.at("producer");
-    if (!producer.is_object() || producer.size() != 7)
-        throw std::runtime_error("SAM3 tracker-memory producer ABI is incomplete");
-    manifest.torch_version = producer.at("torch_version").get<std::string>();
-    manifest.transformers_version = producer.at("transformers_version").get<std::string>();
-    manifest.cuda_version = producer.at("cuda_version").get<std::string>();
-    manifest.host_architecture = producer.at("host_architecture").get<std::string>();
-    manifest.torch_cxx11_abi = producer.at("torch_cxx11_abi").get<bool>();
-    manifest.aoti_abi_version = producer.at("torch_aoti_abi_version").get<uint64_t>();
-    const auto capability = producer.at("compute_capability").get<std::vector<int32_t>>();
-    if (capability.size() != 2)
-        throw std::runtime_error("SAM3 tracker-memory compute capability is incomplete");
-    manifest.compute_capability_major = capability[0];
-    manifest.compute_capability_minor = capability[1];
-    validate_memory_producer_matches_step(manifest, step_manifest);
-
-    const auto& packages = parsed.at("packages");
-    if (!packages.is_array() || packages.size() != manifest.packages.size())
-        throw std::runtime_error("SAM3 tracker-memory runtime requires soft/hard B1/B2 packages");
-    std::unordered_set<std::string> variants;
-    std::unordered_set<std::string> globals;
-    std::unordered_set<std::string> sections;
-    for (std::size_t index = 0; index < manifest.packages.size(); ++index) {
-        manifest.packages[index] = parse_memory_package(packages.at(index));
-        const auto& package = manifest.packages[index];
-        const std::string variant = package.policy + ":" + std::to_string(package.batch_size);
-        if (!variants.insert(variant).second || !globals.insert(package.package_global).second ||
-            !sections.insert(package.section).second)
-            throw std::runtime_error("SAM3 tracker-memory package entries must be unique");
-        require_sha(require_section(bundle, package.section), package.sha256, package.section);
-    }
-    const std::unordered_set<std::string> expected_variants{"soft:1", "hard:1", "soft:2", "hard:2"};
-    if (variants != expected_variants)
-        throw std::runtime_error(
-            "SAM3 tracker-memory runtime requires exactly soft/hard B1/B2 packages");
+    validate_memory_manifest_contract(parsed);
+    auto manifest = parse_memory_manifest_header(parsed, step_manifest);
+    parse_memory_packages(bundle, parsed, manifest);
     validate_memory_package_validation(parsed.at("package_validation"));
     return manifest;
 }
