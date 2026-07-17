@@ -161,6 +161,7 @@ def build_dual_profile_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
+    embed_input: bool = False,
     verbose: bool = False,
     dynamic_kv_profile_rows: list[int] | None = None,
     profile_mode: str = "dual_profile",
@@ -246,6 +247,13 @@ def build_dual_profile_decoder_engine(
     token_id = network.add_input("token_id", trt.int32, (-1,))
     position_id = network.add_input("position_id", trt.int32, (-1,))
     attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
+    input_embed_tensor = None
+    use_input_embed_tensor = None
+    if embed_input:
+        input_embed_tensor = network.add_input(
+            "input_embed", trt.float32, (-1, hidden))
+        use_input_embed_tensor = network.add_input(
+            "use_input_embed", trt.float32, (-1, 1))
 
     cache_shape: tuple[int, int]
     if multi_bucket_decode:
@@ -285,6 +293,11 @@ def build_dual_profile_decoder_engine(
             (min_sq, max_cache_length + min_sq),
             (opt_sq, max_cache_length + opt_sq),
             (max_sq, max_cache_length + max_sq))
+        if embed_input:
+            prof.set_shape(
+                "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
+            prof.set_shape(
+                "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
         if multi_bucket_decode:
             cmn = cache_rows_min if cache_rows_min is not None else 1
             cop = cache_rows_opt if cache_rows_opt is not None else max_cache_length
@@ -408,6 +421,28 @@ def build_dual_profile_decoder_engine(
     # ---- Embedding -------------------------------------------------------
     emb = network.add_gather(embedding_table, token_id, 0)
     hidden_state = emb.get_output(0)  # (Sq, hidden)
+
+    if input_embed_tensor is not None and use_input_embed_tensor is not None:
+        token_embed = hidden_state
+        if token_embed.dtype != work_trt_dtype:
+            token_embed = network.add_cast(token_embed, work_trt_dtype).get_output(0)
+        input_embed = input_embed_tensor
+        if input_embed.dtype != work_trt_dtype:
+            input_embed = network.add_cast(input_embed, work_trt_dtype).get_output(0)
+        embed_selector = use_input_embed_tensor
+        if embed_selector.dtype != work_trt_dtype:
+            embed_selector = network.add_cast(embed_selector, work_trt_dtype).get_output(0)
+        one = _const_in_work_dtype(
+            network, (1, 1), np.array([[1.0]], dtype=work_np_dtype),
+            work_np_dtype, work_trt_dtype)
+        inverse_selector = network.add_elementwise(
+            one, embed_selector, trt.ElementWiseOperation.SUB).get_output(0)
+        token_part = network.add_elementwise(
+            inverse_selector, token_embed, trt.ElementWiseOperation.PROD).get_output(0)
+        embed_part = network.add_elementwise(
+            embed_selector, input_embed, trt.ElementWiseOperation.PROD).get_output(0)
+        hidden_state = network.add_elementwise(
+            token_part, embed_part, trt.ElementWiseOperation.SUM).get_output(0)
 
     if position_type == "learned" and position_embed_table is not None:
         pos_gather = network.add_gather(position_embed_table, position_id, 0)

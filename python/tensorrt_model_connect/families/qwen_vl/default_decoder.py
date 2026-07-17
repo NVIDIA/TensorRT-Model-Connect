@@ -115,7 +115,6 @@ def build_standard_decoder_engine(
     # The legacy single-profile graph below stays in place for paths the
     # dual-profile builder does not yet cover:
     #
-    #   - embed_input=True             (VL prefill replacement, Bark sub-engines)
     #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
     #   - hidden_state_output=True     (speech / Bark hidden output)
     #   - config.raw.dynamic_kv_cache  (TriAttention multi-bucket decode)
@@ -124,8 +123,7 @@ def build_standard_decoder_engine(
     # bisects against the legacy graph). It is *not* intended as a
     # supported user-facing flag.
     _dual_profile_disabled_for = (
-        embed_input
-        or debug_layer_outputs
+        debug_layer_outputs
         or hidden_state_output
         or bool(config.raw.get("dynamic_kv_cache", False))
         or _os.environ.get("TRTMC_NO_DUAL_PROFILE") == "1"
@@ -134,7 +132,14 @@ def build_standard_decoder_engine(
         raise NotImplementedError(
             "split prefill engine is not supported for this standard decoder "
             "configuration")
-    if not _dual_profile_disabled_for and decoder_engine_role in ("dual_profile", "prefill"):
+    # Qwen-VL is not packaged as a split decoder bundle. The engine builder
+    # therefore reaches this family with role="decode" when its global split
+    # default falls back to one engine. Keep VL's one engine dual-profile so
+    # the runtime still receives a sequence-prefill context.
+    vl_single_engine_fallback = embed_input and decoder_engine_role == "decode"
+    if not _dual_profile_disabled_for and (
+        decoder_engine_role in ("dual_profile", "prefill") or vl_single_engine_fallback
+    ):
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
             precision=precision,
@@ -147,6 +152,7 @@ def build_standard_decoder_engine(
             interleaved_rope=interleaved_rope,
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
+            embed_input=embed_input,
             verbose=verbose,
             profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
         )

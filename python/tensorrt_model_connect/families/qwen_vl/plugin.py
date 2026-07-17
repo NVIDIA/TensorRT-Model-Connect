@@ -359,8 +359,8 @@ def _build_qwen3_vl_decoder(
     at the first N layers (where N = deepstack_num_levels).
 
     Extra engine inputs (when deepstack_num_levels > 0):
-      - deepstack_embed_0..N: [1, hidden] per-level embeddings
-      - deepstack_active: [1] flag (1.0 during VL prefill, 0.0 during decode)
+      - deepstack_embed_0..N: [Sq, hidden] per-level embeddings
+      - deepstack_active: [Sq, 1] per-position selector
     """
     from .standard_decoder_builder import _mark_debug_output
 
@@ -388,6 +388,7 @@ def _build_qwen3_vl_decoder(
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
+    opt_prefill_length = min(64, max_cache_length)
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -396,14 +397,14 @@ def _build_qwen3_vl_decoder(
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     # --- Inputs ---
-    token_id = network.add_input("token_id", trt.int32, (1,))
-    position_id = network.add_input("position_id", trt.int32, (1,))
+    token_id = network.add_input("token_id", trt.int32, (-1,))
+    position_id = network.add_input("position_id", trt.int32, (-1,))
     attention_mask = network.add_input(
-        "attention_mask", trt.float32, (1, attention_window))
+        "attention_mask", trt.float32, (-1, -1))
 
     # VL embed_input
-    input_embed_tensor = network.add_input("input_embed", trt.float32, (1, hidden))
-    use_input_embed_tensor = network.add_input("use_input_embed", trt.float32, (1,))
+    input_embed_tensor = network.add_input("input_embed", trt.float32, (-1, hidden))
+    use_input_embed_tensor = network.add_input("use_input_embed", trt.float32, (-1, 1))
 
     # DeepStack inputs
     ds_embed_inputs = []
@@ -411,10 +412,10 @@ def _build_qwen3_vl_decoder(
     if deepstack_num_levels > 0:
         for i in range(deepstack_num_levels):
             ds_in = network.add_input(
-                f"deepstack_embed_{i}", trt.float32, (1, hidden))
+                f"deepstack_embed_{i}", trt.float32, (-1, hidden))
             ds_embed_inputs.append(ds_in)
         ds_active_tensor = network.add_input(
-            "deepstack_active", trt.float32, (1,))
+            "deepstack_active", trt.float32, (-1, 1))
 
     # KV cache inputs
     cache_k_inputs = []
@@ -428,6 +429,34 @@ def _build_qwen3_vl_decoder(
             trt.float32, (max_cache_length, kv_attention_size))
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
+
+    def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False) -> None:
+        profile = builder.create_optimization_profile()
+        min_sq = opt_sq if fixed else 1
+        profile.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
+        profile.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+        profile.set_shape(
+            "attention_mask",
+            (min_sq, max_cache_length + min_sq),
+            (opt_sq, max_cache_length + opt_sq),
+            (max_sq, max_cache_length + max_sq))
+        profile.set_shape(
+            "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
+        profile.set_shape(
+            "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
+        for level in range(deepstack_num_levels):
+            profile.set_shape(
+                f"deepstack_embed_{level}",
+                (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
+        if deepstack_num_levels > 0:
+            profile.set_shape(
+                "deepstack_active", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
+        trt_config.add_optimization_profile(profile)
+
+    decoder_engine_role = str(config.raw.get("_decoder_engine_role", "dual_profile"))
+    _add_profile(opt_prefill_length, max_cache_length)
+    if decoder_engine_role != "prefill":
+        _add_profile(1, 1, fixed=True)
 
     fp32_attention_mask = attention_mask
     fp32_ds_embed_inputs = list(ds_embed_inputs)
@@ -491,19 +520,17 @@ def _build_qwen3_vl_decoder(
     token_embed = gather.get_output(0)
 
     # Conditional: (1 - flag) * token_embed + flag * input_embed
-    flag_broadcast = network.add_shuffle(use_input_embed_tensor)
-    flag_broadcast.reshape_dims = (1, 1)
     one_const = graph_ops.add_constant(
         network, (1, 1), np.array([1.0], dtype=work_np_dtype),
         dtype=work_np_dtype)
     inv_flag = network.add_elementwise(
-        one_const, flag_broadcast.get_output(0),
+        one_const, use_input_embed_tensor,
         trt.ElementWiseOperation.SUB)
     tok_part = network.add_elementwise(
         inv_flag.get_output(0), token_embed,
         trt.ElementWiseOperation.PROD)
     embed_part = network.add_elementwise(
-        flag_broadcast.get_output(0), input_embed_tensor,
+        use_input_embed_tensor, input_embed_tensor,
         trt.ElementWiseOperation.PROD)
     hidden_sum = network.add_elementwise(
         tok_part.get_output(0), embed_part.get_output(0),
@@ -558,6 +585,7 @@ def _build_qwen3_vl_decoder(
             rotary_embedding_dim=head_dim,
             dtype=layer_np_dtype,
             quant_ctx=quant_ctx,
+            sequence_length=None,
         )
 
         attn_out = attn["attn_out"]
@@ -578,10 +606,8 @@ def _build_qwen3_vl_decoder(
                 fp32_ds_embed_inputs[layer_idx]
                 if layer_is_fp32 else ds_embed_inputs[layer_idx])
             assert layer_ds_active is not None
-            ds_active_broadcast = network.add_shuffle(layer_ds_active)
-            ds_active_broadcast.reshape_dims = (1, 1)
             ds_scaled = network.add_elementwise(
-                layer_ds_embed, ds_active_broadcast.get_output(0),
+                layer_ds_embed, layer_ds_active,
                 trt.ElementWiseOperation.PROD)
             post_attn_ds = network.add_elementwise(
                 post_attn, ds_scaled.get_output(0),
@@ -620,9 +646,20 @@ def _build_qwen3_vl_decoder(
             network, hidden_state, hidden, final_norm, None,
             eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
-    # --- LM head ---
+    # --- LM head (last prompt row only) ---
+    hidden_shape = network.add_shape(hidden_state).get_output(0)
+    one_hidden = graph_ops.add_constant(
+        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
+    last_start = network.add_elementwise(
+        hidden_shape, one_hidden, trt.ElementWiseOperation.SUB).get_output(0)
+    last_size = graph_ops.add_constant(
+        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
+    last_slice = network.add_slice(hidden_state, start=(0, 0), shape=(0, 0), stride=(1, 1))
+    last_slice.set_input(1, last_start)
+    last_slice.set_input(2, last_size)
+    last_hidden = last_slice.get_output(0)
     logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, vocab, weights["w_out"],
+        network, last_hidden, hidden, vocab, weights["w_out"],
         dtype=work_np_dtype)
     b_out = np.zeros(vocab, dtype=work_np_dtype)
     logits = graph_ops.add_bias_sum(

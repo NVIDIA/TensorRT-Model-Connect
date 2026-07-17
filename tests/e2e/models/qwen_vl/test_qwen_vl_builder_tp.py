@@ -100,6 +100,25 @@ def test_qwen25_vl_plugin_forwards_precision_to_standard_builder(monkeypatch) ->
     assert kwargs["verbose"] is True
 
 
+def test_qwen25_vl_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen_vl.default_decoder")
+    calls: dict[str, object] = {}
+
+    def fake_build(config, weights, max_cache_length, **kwargs):
+        calls["build"] = (config, weights, max_cache_length, kwargs)
+        return b"qwen-vl-dual-profile-plan"
+
+    monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
+    config = _config(qwen3=False)
+    config.raw["_decoder_engine_role"] = "decode"
+    result = module.build_standard_decoder_engine(
+        config, {}, 31, precision="fp16", embed_input=True)
+
+    assert result == b"qwen-vl-dual-profile-plan"
+    assert calls["build"][3]["embed_input"] is True
+
+
 def test_qwen3_vl_vision_component_can_stay_fp32(monkeypatch) -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.qwen_vl.plugin")
