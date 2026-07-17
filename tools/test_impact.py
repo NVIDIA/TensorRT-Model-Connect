@@ -154,6 +154,28 @@ _BROAD_FALLBACK_RULES = {
 # that can reserve all GPUs for tensor-parallel E2E cases.
 _DEFAULT_EXCLUDED_CI_TIERS = frozenset({"multi_device"})
 _FALLBACK_ALLOWLIST = Path("tools/test_impact_fallback_allowlist.txt")
+_OPTIMIZED_RUNTIME_FRAMEWORK_PREFIX = "python/tensorrt_model_connect/optimized_runtime/"
+_OPTIMIZED_RUNTIME_CPP_FRAMEWORK_PATHS = frozenset(
+    {
+        "src/runtime/providers/optimized_runtime_factory.h",
+        "src/runtime/providers/optimized_runtime_host.cpp",
+        "src/runtime/providers/optimized_runtime_host.h",
+    }
+)
+_OPTIMIZED_RUNTIME_BUILDER_CONTRACT_TESTS = frozenset(
+    {
+        "tests/builder/test_optimized_runtime_capsules.py",
+        "tests/builder/test_optimized_runtime_orchestrator.py",
+        "tests/builder/test_optimized_runtime_public_routing.py",
+    }
+)
+_OPTIMIZED_RUNTIME_CPP_CONTRACT_TESTS = frozenset(
+    {
+        "test_optimized_runtime_host",
+        "test_optimized_runtime_bundle_contract",
+        "test_optimized_runtime_inspect_cli",
+    }
+)
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -1290,9 +1312,7 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="e2e_model_owned_test",
             # A public E2E family directory is an ownership boundary for every
             # file type; more specific manifest and asset rules run first.
-            matcher=_regex_rule(
-                r"tests/e2e/models/([^/]+)/.+$"
-            ),
+            matcher=_regex_rule(r"tests/e2e/models/([^/]+)/.+$"),
             resolver=_match_result("e2e_model_owned_test", _family_models),
             covered_by=(
                 "TestSafetyNet.test_e2e_model_owned_test_self",
@@ -1355,6 +1375,34 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=(
                 "TestFamilyPlugin.test_family_base_all_models",
                 "TestFamilyPlugin.test_family_init_all_models",
+            ),
+        ),
+        ClassificationRule(
+            priority=50,
+            name="optimized_runtime_framework",
+            matcher=_path_startswith(_OPTIMIZED_RUNTIME_FRAMEWORK_PREFIX),
+            resolver=_match_result(
+                "optimized_runtime_framework",
+                _no_models,
+                ["builder"],
+                False,
+            ),
+            covered_by=(
+                "TestOptimizedRuntimeFramework.test_shared_framework_has_no_model_e2e_fanout",
+            ),
+        ),
+        ClassificationRule(
+            priority=55,
+            name="optimized_runtime_cpp_framework",
+            matcher=_path_in(set(_OPTIMIZED_RUNTIME_CPP_FRAMEWORK_PATHS)),
+            resolver=_match_result(
+                "optimized_runtime_cpp_framework",
+                _no_models,
+                ["cpp"],
+                True,
+            ),
+            covered_by=(
+                "TestOptimizedRuntimeFramework.test_shared_cpp_framework_has_no_model_e2e_fanout",
             ),
         ),
         ClassificationRule(
@@ -1792,15 +1840,20 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ClassificationRule(
             priority=449,
             name="e2e_report_tool",
-            matcher=_path_in({
-                "scripts/generate_e2e_report.py",
-                "scripts/generate_e2e_report_assets/e2e_report.css",
-                "scripts/generate_e2e_report_assets/e2e_report.js",
-                "scripts/reporting/__init__.py",
-                "scripts/reporting/vlm_assessment.py",
-            }),
+            matcher=_path_in(
+                {
+                    "scripts/generate_e2e_report.py",
+                    "scripts/generate_e2e_report_assets/e2e_report.css",
+                    "scripts/generate_e2e_report_assets/e2e_report.js",
+                    "scripts/reporting/__init__.py",
+                    "scripts/reporting/vlm_assessment.py",
+                }
+            ),
             resolver=_match_result(
-                "e2e_report_tool", _no_models, ["tools"], False,
+                "e2e_report_tool",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestUnitTiers.test_e2e_report_tools",),
         ),
@@ -1844,7 +1897,10 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="nightly_artifact_selector_tool",
             matcher=_path_equals("tools/select_latest_attempt_artifact.py"),
             resolver=_match_result(
-                "nightly_artifact_selector_tool", _no_models, ["tools"], False,
+                "nightly_artifact_selector_tool",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestUnitTiers.test_nightly_artifact_selector_tool",),
         ),
@@ -1853,19 +1909,24 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             name="model_ci_tool",
             matcher=_path_equals("tools/model_ci.py"),
             resolver=_match_result(
-                "model_ci_tool", _no_models, ["tools"], False,
+                "model_ci_tool",
+                _no_models,
+                ["tools"],
+                False,
             ),
             covered_by=("TestUnitTiers.test_model_ci_tool",),
         ),
         ClassificationRule(
             priority=486,
             name="task_eval_tool",
-            matcher=_path_in({
-                "tools/task_eval.py",
-                "tools/elf_hf_reference.py",
-                "tools/prepare_elf_task_eval_datasets.py",
-                "tools/prepare_media_task_eval_datasets.py",
-            }),
+            matcher=_path_in(
+                {
+                    "tools/task_eval.py",
+                    "tools/elf_hf_reference.py",
+                    "tools/prepare_elf_task_eval_datasets.py",
+                    "tools/prepare_media_task_eval_datasets.py",
+                }
+            ),
             resolver=_match_result("task_eval_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_task_eval_tool_triggers_tools_tier",),
         ),
@@ -1952,42 +2013,71 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
     return sorted(builder_tests), sorted(tools_tests)
 
 
+def _optimized_runtime_shared_builder_test_targets(changed_files: List[str]) -> List[str]:
+    if any(
+        raw_path.replace("\\", "/").strip("/").startswith(_OPTIMIZED_RUNTIME_FRAMEWORK_PREFIX)
+        for raw_path in changed_files
+    ):
+        return sorted(_OPTIMIZED_RUNTIME_BUILDER_CONTRACT_TESTS)
+    return []
+
+
+def _optimized_runtime_shared_cpp_test_targets(changed_files: List[str]) -> List[str]:
+    if any(
+        raw_path.replace("\\", "/").strip("/") in _OPTIMIZED_RUNTIME_CPP_FRAMEWORK_PATHS
+        for raw_path in changed_files
+    ):
+        return sorted(_OPTIMIZED_RUNTIME_CPP_CONTRACT_TESTS)
+    return []
+
+
+def _drop_optimized_runtime_contract_fallbacks(
+    fallback_files: Dict[str, List[str]],
+    fallback_tiers: List[str],
+) -> List[str]:
+    """Replace broad unit-tier misses with the bounded shared contracts."""
+
+    remaining = set(fallback_tiers)
+    for tier, paths in fallback_files.items():
+        normalized = [path.replace("\\", "/").strip("/") for path in paths]
+        if not normalized:
+            continue
+        if tier == "builder" and all(
+            path.startswith(_OPTIMIZED_RUNTIME_FRAMEWORK_PREFIX) for path in normalized
+        ):
+            remaining.discard(tier)
+        elif tier == "cpp" and all(
+            path in _OPTIMIZED_RUNTIME_CPP_FRAMEWORK_PATHS for path in normalized
+        ):
+            remaining.discard(tier)
+    return sorted(remaining)
+
+
+_OPTIMIZED_RUNTIME_PACKAGING_TEST = "tests/tools/test_optimized_runtime_packaging.py"
+
+
 _EXPLICIT_TOOLS_TEST_TARGETS = {
+    "_pyproject_backend.py": (_OPTIMIZED_RUNTIME_PACKAGING_TEST,),
+    "conanfile.py": (_OPTIMIZED_RUNTIME_PACKAGING_TEST,),
+    "src/runtime/providers/optimized_runtime_factory.h": (_OPTIMIZED_RUNTIME_PACKAGING_TEST,),
+    "pyproject.toml": (_OPTIMIZED_RUNTIME_PACKAGING_TEST,),
     "tools/select_latest_attempt_artifact.py": (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_select_latest_attempt_artifact.py",
     ),
-    "tools/model_ci.py": (
-        "tests/tools/test_model_ci.py",
-    ),
-    "scripts/generate_e2e_report.py": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/generate_e2e_report_assets/e2e_report.css": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/generate_e2e_report_assets/e2e_report.js": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/reporting/__init__.py": (
-        "tests/tools/test_generate_report.py",
-    ),
-    "scripts/reporting/vlm_assessment.py": (
-        "tests/tools/test_generate_report.py",
-    ),
+    "tools/model_ci.py": ("tests/tools/test_model_ci.py",),
+    "scripts/generate_e2e_report.py": ("tests/tools/test_generate_report.py",),
+    "scripts/generate_e2e_report_assets/e2e_report.css": ("tests/tools/test_generate_report.py",),
+    "scripts/generate_e2e_report_assets/e2e_report.js": ("tests/tools/test_generate_report.py",),
+    "scripts/reporting/__init__.py": ("tests/tools/test_generate_report.py",),
+    "scripts/reporting/vlm_assessment.py": ("tests/tools/test_generate_report.py",),
     "tools/ci/e2e_scheduler.py": (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_schedule_e2e.py",
     ),
-    "tools/ci/e2e_schedule.py": (
-        "tests/tools/test_schedule_e2e.py",
-    ),
-    "scripts/hf_cache_download_worker.py": (
-        "tests/tools/test_warm_hf_cache_static.py",
-    ),
-    "scripts/warm_hf_cache.py": (
-        "tests/tools/test_warm_hf_cache_static.py",
-    ),
+    "tools/ci/e2e_schedule.py": ("tests/tools/test_schedule_e2e.py",),
+    "scripts/hf_cache_download_worker.py": ("tests/tools/test_warm_hf_cache_static.py",),
+    "scripts/warm_hf_cache.py": ("tests/tools/test_warm_hf_cache_static.py",),
     "tests/e2e_harness/model_runner.py": ("tests/tools/test_model_e2e_runner.py",),
 }
 
@@ -1998,15 +2088,18 @@ def _explicit_tools_test_targets(changed_files: List[str]) -> List[str]:
     for raw_path in changed_files:
         path = raw_path.replace("\\", "/").strip("/")
         tests.update(_EXPLICIT_TOOLS_TEST_TARGETS.get(path, ()))
+        if path.startswith(_OPTIMIZED_RUNTIME_FRAMEWORK_PREFIX):
+            tests.add(_OPTIMIZED_RUNTIME_PACKAGING_TEST)
     return sorted(tests)
 
 
 def _is_model_owned_python_unit_test(path: str) -> bool:
     """Return True for model-owned pytest files that are safe as unit targets."""
     normalized = path.replace("\\", "/").strip("/")
-    if not re.match(r"^tests/e2e/models/[^/]+/test_[^/]+\.py$", normalized):
+    if not re.match(r"^tests/e2e/models/[^/]+/(?:.+/)?test_[^/]+\.py$", normalized):
         return False
-    return not Path(normalized).name.endswith("_e2e.py")
+    parts = Path(normalized).parts
+    return not (len(parts) == 5 and parts[-1].endswith("_e2e.py"))
 
 
 def _repo_relative(path: Path, repo_root: Path) -> str:
@@ -2034,8 +2127,8 @@ def _model_owned_python_test_targets(
     for family in _model_families_for_models(models, imap):
         model_test_dir = repo_root / "tests" / "e2e" / "models" / family
         if model_test_dir.is_dir():
-            for test_path in sorted(model_test_dir.glob("test_*.py")):
-                if test_path.name.endswith("_e2e.py"):
+            for test_path in sorted(model_test_dir.rglob("test_*.py")):
+                if test_path.parent == model_test_dir and test_path.name.endswith("_e2e.py"):
                     continue
                 targets.add(_repo_relative(test_path, repo_root))
 
@@ -2043,7 +2136,7 @@ def _model_owned_python_test_targets(
             repo_root / "python" / "tensorrt_model_connect" / "families" / family / "tests"
         )
         if family_package_tests.is_dir():
-            for test_path in sorted(family_package_tests.glob("test_*.py")):
+            for test_path in sorted(family_package_tests.rglob("test_*.py")):
                 targets.add(_repo_relative(test_path, repo_root))
 
     return sorted(targets)
@@ -2242,8 +2335,17 @@ def analyze_impact(
             builder_tests = sorted(set(builder_tests).union(model_builder_tests))
         if model_cpp_tests:
             cpp_tests = sorted(set(cpp_tests).union(model_cpp_tests))
+        fallback_tiers = _drop_optimized_runtime_contract_fallbacks(
+            getattr(sel, "fallback_files", {}),
+            fallback_tiers,
+        )
 
     direct_builder_tests, direct_tools_tests = _direct_python_test_targets(changed_files)
+    direct_builder_tests = sorted(
+        set(direct_builder_tests).union(
+            _optimized_runtime_shared_builder_test_targets(changed_files)
+        )
+    )
     direct_tools_tests = sorted(
         set(direct_tools_tests).union(_explicit_tools_test_targets(changed_files))
     )
@@ -2251,6 +2353,9 @@ def analyze_impact(
         builder_tests = sorted(set(builder_tests).union(direct_builder_tests))
     if direct_tools_tests:
         tools_tests = sorted(set(tools_tests).union(direct_tools_tests))
+    cpp_tests = sorted(
+        set(cpp_tests).union(_optimized_runtime_shared_cpp_test_targets(changed_files))
+    )
 
     return ImpactResult(
         e2e_models=e2e_models,

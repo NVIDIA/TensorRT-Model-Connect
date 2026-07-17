@@ -93,6 +93,7 @@ STYLE_BY_SUFFIX: Mapping[str, HeaderStyle] = {
     ".hxx": NATIVE_STYLE,
     ".cu": NATIVE_STYLE,
     ".cuh": NATIVE_STYLE,
+    ".map": NATIVE_STYLE,
     ".proto": NATIVE_STYLE,
     # Web sources whose grammars accept C-style block comments.
     ".js": NATIVE_STYLE,

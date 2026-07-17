@@ -13,7 +13,10 @@ Postconditions: Bundle magic bytes, header JSON, section offsets/sizes, and payl
 
 from __future__ import annotations
 
+import inspect
 import json
+import os
+import stat
 import struct
 
 import numpy as np
@@ -24,6 +27,7 @@ from tensorrt_model_connect.bundle_writer import (
     BUNDLE_MAGIC,
     BundleInfo,
     BundleSection,
+    _bundle_section_from_file,
     write_bundle,
 )
 
@@ -34,6 +38,11 @@ class TestBundleMagic:
     def test_magic_bytes(self):
         assert BUNDLE_MAGIC == b"TRTFB\x00\x01\x00"
         assert len(BUNDLE_MAGIC) == 8
+
+
+def test_bundle_section_public_constructor_remains_name_and_bytes_only():
+    assert tuple(inspect.signature(BundleSection).parameters) == ("name", "data")
+    assert not hasattr(BundleSection, "from_file")
 
 
 class TestWriteBundle:
@@ -65,6 +74,25 @@ class TestWriteBundle:
         assert header["num_layers"] == 12
         assert header["max_cache_length"] == 256
         assert sdata["engine_plan"] == data
+
+    def test_atomic_publish_preserves_normal_create_permissions(self, tmp_path):
+        destination = tmp_path / "permissions.trtfb"
+        previous_umask = os.umask(0o022)
+        try:
+            write_bundle(destination, BundleInfo(model_id="permissions"), [])
+        finally:
+            os.umask(previous_umask)
+
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o644
+
+    def test_atomic_replace_preserves_existing_permissions(self, tmp_path):
+        destination = tmp_path / "existing-permissions.trtfb"
+        destination.write_bytes(b"old")
+        destination.chmod(0o640)
+
+        write_bundle(destination, BundleInfo(model_id="permissions"), [])
+
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o640
 
     def test_multi_section(self, tmp_path):
         info = BundleInfo(model_id="multi")
@@ -136,6 +164,75 @@ class TestWriteBundle:
         _, sdata = self._read_bundle(out_path)
         assert sdata["engine_plan"] == binary_data
 
+    def test_file_backed_section_is_streamed(self, tmp_path, monkeypatch):
+        source = tmp_path / "llm.engine"
+        payload = b"edge-engine" * 131072
+        source.write_bytes(payload)
+        monkeypatch.setattr(
+            type(source),
+            "read_bytes",
+            lambda _self: (_ for _ in ()).throw(
+                AssertionError("file-backed sections must not call read_bytes")
+            ),
+        )
+
+        out_path = tmp_path / "file-backed.trtfb"
+        write_bundle(
+            out_path,
+            BundleInfo(model_id="edge"),
+            [_bundle_section_from_file("edge/artifacts/llm.engine", source)],
+        )
+
+        header, sections = self._read_bundle(str(out_path))
+        assert header["sections"]["edge/artifacts/llm.engine"]["size"] == len(payload)
+        assert sections["edge/artifacts/llm.engine"] == payload
+
+    def test_duplicate_section_names_are_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="duplicate bundle section"):
+            write_bundle(
+                tmp_path / "duplicate.trtfb",
+                BundleInfo(model_id="duplicate"),
+                [BundleSection("same", b"a"), BundleSection("same", b"b")],
+            )
+
+    def test_file_backed_digest_mismatch_is_not_published(self, tmp_path):
+        source = tmp_path / "mutable.engine"
+        source.write_bytes(b"engine")
+        destination = tmp_path / "must-not-exist.trtfb"
+
+        with pytest.raises(RuntimeError, match="changed after validation"):
+            write_bundle(
+                destination,
+                BundleInfo(model_id="edge"),
+                [
+                    _bundle_section_from_file(
+                        "edge/llm.engine",
+                        source,
+                        expected_sha256="0" * 64,
+                    )
+                ],
+            )
+
+        assert not destination.exists()
+        assert not list(tmp_path.glob(f".{destination.name}.tmp.*"))
+
+    def test_oversized_header_is_rejected_before_publication(self, tmp_path, monkeypatch):
+        import tensorrt_model_connect.bundle_writer as bundle_writer
+
+        destination = tmp_path / "existing.trtfb"
+        destination.write_bytes(b"previous-bundle")
+        monkeypatch.setattr(bundle_writer, "_MAX_BUNDLE_HEADER_SIZE", 32)
+
+        with pytest.raises(ValueError, match="100 MiB runtime limit"):
+            write_bundle(
+                destination,
+                BundleInfo(model_id="header-too-large"),
+                [BundleSection("engine_plan", b"engine")],
+            )
+
+        assert destination.read_bytes() == b"previous-bundle"
+        assert not list(tmp_path.glob(f".{destination.name}.tmp.*"))
+
     def test_all_info_fields(self, tmp_path):
         info = BundleInfo(
             model_id="full-test",
@@ -170,16 +267,16 @@ def _read_bundle_from_bytes(data: bytes) -> tuple[dict, dict[str, bytes]]:
         raise ValueError("File too short to contain magic bytes")
     magic = data[:8]
     if magic != BUNDLE_MAGIC:
-        raise ValueError(
-            f"Bad magic bytes: {magic!r}, expected {BUNDLE_MAGIC!r}")
+        raise ValueError(f"Bad magic bytes: {magic!r}, expected {BUNDLE_MAGIC!r}")
     if len(data) < 16:
         raise ValueError("File too short to contain header length")
     header_len = struct.unpack("<Q", data[8:16])[0]
     if len(data) < 16 + header_len:
         raise ValueError(
             f"File truncated: header declares {header_len} bytes but only "
-            f"{len(data) - 16} bytes remain after the 16-byte preamble")
-    header = json.loads(data[16:16 + header_len].decode("utf-8"))
+            f"{len(data) - 16} bytes remain after the 16-byte preamble"
+        )
+    header = json.loads(data[16 : 16 + header_len].decode("utf-8"))
 
     sections_data: dict[str, bytes] = {}
     data_start = 16 + header_len
@@ -189,7 +286,8 @@ def _read_bundle_from_bytes(data: bytes) -> tuple[dict, dict[str, bytes]]:
         if sec_end > len(data):
             raise ValueError(
                 f"Section {name!r} extends beyond file: needs byte "
-                f"{sec_end} but file is {len(data)} bytes")
+                f"{sec_end} but file is {len(data)} bytes"
+            )
         sections_data[name] = data[sec_start:sec_end]
 
     return header, sections_data
@@ -309,7 +407,8 @@ def test_max_batch_size_roundtrip_and_back_compat(tmp_path):
     new bundles serialize it, legacy bundles omit it.
     """
     new = BundleInfo(
-        model_id="batched-model", family="batched_family",
+        model_id="batched-model",
+        family="batched_family",
         max_batch_size={"dit": 4, "text_encoder": 8, "vae": 1},
     )
     new_path = str(tmp_path / "new.trtfb")

@@ -521,6 +521,7 @@ class ModelProofInnerPipeline:
                 "PYTHONPATH": f"{self.source / 'python'}:{self.source}",
                 "PYTHONNOUSERSITE": "1",
                 "PYTHONDONTWRITEBYTECODE": "1",
+                "TRTMC_BINARY": str(self.work / "build/trtmc"),
             },
         )
         self.status.step("python_tests", "passed")

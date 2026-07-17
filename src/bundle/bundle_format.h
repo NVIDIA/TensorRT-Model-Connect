@@ -16,6 +16,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,20 @@ BundleFile ReadBundleFile(const std::string& path);
 
 // Read just the header metadata (no section data loaded).
 BundleInfo ReadBundleHeader(const std::string& path);
+
+// Read one section identified by header metadata. Only the requested bytes are
+// read; other bundle payloads are never materialized. The section metadata must
+// come from ReadBundleHeader(path).
+std::vector<char> ReadBundleSection(const std::string& path, const BundleSectionInfo& section);
+
+// Copy one section to an output stream in bounded-size chunks. This is the
+// preferred path for model-sized payloads that must not be buffered in memory.
+void CopyBundleSection(const std::string& path, const BundleSectionInfo& section,
+                       std::ostream& output);
+
+// Look up and read one named section without materializing any other section.
+// Throws std::runtime_error when the section is absent or outside the file.
+std::vector<char> ReadBundleSection(const std::string& path, const std::string& section_name);
 
 // Check magic bytes without reading full file.
 bool HasBundleMagic(const std::string& path);

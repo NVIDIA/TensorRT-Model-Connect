@@ -135,6 +135,10 @@ class TestMainParser:
         assert exc_info.value.code == 0
         assert captured["args"].trust_remote_code is True
         assert captured["args"].build_timing_json == str(tmp_path / "timing.json")
+        assert captured["args"]._explicit_public_options == frozenset(
+            {"max_cache_length", "trust_remote_code", "build_timing_json", "output"}
+        )
+        assert "decoder_engine_layout" not in captured["args"]._explicit_public_options
 
 
 class TestInspectArgs:
@@ -299,10 +303,8 @@ class TestCmdBuildMocked:
             captured_kwargs["precision"] = precision
             captured_kwargs["verbose"] = verbose
 
-        # _cmd_build does a lazy `from .engine_builder import build` at call
-        # time, so we patch the attribute on the engine_builder module.
-        original_build = eb.build
-        eb.build = mock_build
+        original_build = eb._build_native_impl
+        eb._build_native_impl = mock_build
         try:
             args = argparse.Namespace(
                 model="/path/to/model",
@@ -314,7 +316,11 @@ class TestCmdBuildMocked:
                 verbose=True,
                 _skip_profile_resolution=True,
             )
-            result = _cmd_build(args)
+            with patch(
+                "tensorrt_model_connect.optimized_runtime.orchestrator.try_build_optimized_runtime",
+                return_value=None,
+            ):
+                result = _cmd_build(args)
             assert result == 0
             assert captured_kwargs["model_id_or_path"] == "/path/to/model"
             assert captured_kwargs["output_path"] == str(
@@ -322,7 +328,7 @@ class TestCmdBuildMocked:
             assert captured_kwargs["max_cache_length"] == 512
             assert captured_kwargs["verbose"] is True
         finally:
-            eb.build = original_build
+            eb._build_native_impl = original_build
 
     def test_verbose_flag_propagated(self, tmp_path):
         """Verify verbose=True is forwarded to engine_builder.build()."""
@@ -335,8 +341,8 @@ class TestCmdBuildMocked:
                        precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False, **kwargs):
             received_verbose.append(verbose)
 
-        original_build = eb.build
-        eb.build = mock_build
+        original_build = eb._build_native_impl
+        eb._build_native_impl = mock_build
         try:
             args = argparse.Namespace(
                 model="some-model", output=str(tmp_path / "out.trtfb"),
@@ -351,7 +357,7 @@ class TestCmdBuildMocked:
             _cmd_build(args)
             assert received_verbose == [False]
         finally:
-            eb.build = original_build
+            eb._build_native_impl = original_build
 
     def test_max_cache_length_propagated(self, tmp_path):
         """Verify max_cache_length value is forwarded to engine_builder.build()."""
@@ -364,8 +370,8 @@ class TestCmdBuildMocked:
                        precision="fp32", quantize=None, quant_scales=None, quant_calibration_samples=512, verbose=False, **kwargs):
             received_cache.append(max_cache_length)
 
-        original_build = eb.build
-        eb.build = mock_build
+        original_build = eb._build_native_impl
+        eb._build_native_impl = mock_build
         try:
             for cache_len in [128, 1024, 4096]:
                 args = argparse.Namespace(
@@ -381,7 +387,7 @@ class TestCmdBuildMocked:
                 _cmd_build(args)
             assert received_cache == [128, 1024, 4096]
         finally:
-            eb.build = original_build
+            eb._build_native_impl = original_build
 
     def test_dynamic_kv_cache_propagated(self, tmp_path):
         """Verify dynamic_kv_cache is forwarded to engine_builder.build()."""
@@ -396,8 +402,8 @@ class TestCmdBuildMocked:
                        verbose=False, **kwargs):
             received.append(dynamic_kv_cache)
 
-        original_build = eb.build
-        eb.build = mock_build
+        original_build = eb._build_native_impl
+        eb._build_native_impl = mock_build
         try:
             args = argparse.Namespace(
                 model="some-model",
@@ -415,7 +421,7 @@ class TestCmdBuildMocked:
             _cmd_build(args)
             assert received == [True]
         finally:
-            eb.build = original_build
+            eb._build_native_impl = original_build
 
     def test_dynamic_kv_profile_rows_propagated(self, tmp_path):
         """Verify explicit dynamic-KV profile rows are forwarded to build()."""
@@ -428,8 +434,8 @@ class TestCmdBuildMocked:
                        dynamic_kv_profile_rows_override=None, **kwargs):
             received.append(dynamic_kv_profile_rows_override)
 
-        original_build = eb.build
-        eb.build = mock_build
+        original_build = eb._build_native_impl
+        eb._build_native_impl = mock_build
         try:
             args = argparse.Namespace(
                 model="some-model",
@@ -460,7 +466,7 @@ class TestCmdBuildMocked:
             _cmd_build(args)
             assert received == [[32, 64, 128]]
         finally:
-            eb.build = original_build
+            eb._build_native_impl = original_build
 
     def test_decoder_engine_layout_propagated(self, tmp_path):
         """Verify --decoder-engine-layout is forwarded to engine_builder.build()."""
@@ -473,8 +479,8 @@ class TestCmdBuildMocked:
                        decoder_engine_layout="split", **kwargs):
             received.append(decoder_engine_layout)
 
-        original_build = eb.build
-        eb.build = mock_build
+        original_build = eb._build_native_impl
+        eb._build_native_impl = mock_build
         try:
             args = argparse.Namespace(
                 model="some-model",
@@ -506,7 +512,7 @@ class TestCmdBuildMocked:
             _cmd_build(args)
             assert received == ["dual_profile"]
         finally:
-            eb.build = original_build
+            eb._build_native_impl = original_build
 
     def test_build_exception_returns_1(self, tmp_path):
         """When engine_builder.build() raises, _cmd_build returns 1."""
@@ -516,8 +522,8 @@ class TestCmdBuildMocked:
         def mock_build(*args, **kwargs):
             raise RuntimeError("TRT build failed: out of memory")
 
-        original_build = eb.build
-        eb.build = mock_build
+        original_build = eb._build_native_impl
+        eb._build_native_impl = mock_build
         try:
             args = argparse.Namespace(
                 model="some-model",
@@ -530,7 +536,7 @@ class TestCmdBuildMocked:
             result = _cmd_build(args)
             assert result == 1
         finally:
-            eb.build = original_build
+            eb._build_native_impl = original_build
 
     def test_build_reexecs_into_declared_python_profile(self, monkeypatch, tmp_path):
         """Families with declared profiles should re-exec into that Python profile."""

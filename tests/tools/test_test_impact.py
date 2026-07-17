@@ -889,6 +889,106 @@ class TestDeclarativeClassificationRules:
 # ---------------------------------------------------------------------------
 
 
+class TestOptimizedRuntimeFramework:
+    @pytest.mark.parametrize(
+        ("path", "expected_rule", "expected_tier", "rebuild"),
+        (
+            (
+                "python/tensorrt_model_connect/families/decoder_family/optimized_adapter/adapter.py",
+                "family_package",
+                "builder",
+                False,
+            ),
+            (
+                "src/runtime/models/decoder_family/optimized_adapter/adapter.cpp",
+                "cpp_runtime_model",
+                "cpp",
+                True,
+            ),
+            (
+                "tests/e2e/models/decoder_family/optimized_adapter/test_contract.py",
+                "e2e_model_owned_test",
+                None,
+                False,
+            ),
+        ),
+    )
+    def test_adapter_subtrees_use_existing_model_family_ownership(
+        self,
+        imap,
+        path,
+        expected_rule,
+        expected_tier,
+        rebuild,
+    ):
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == expected_rule
+        assert sorted(match.models) == ["decoder-large", "decoder-small"]
+        assert "decoder-peer" not in match.models
+        assert match.rebuild_cpp is rebuild
+        if expected_tier is not None:
+            assert expected_tier in match.unit_tiers
+
+    def test_shared_framework_has_no_model_e2e_fanout(self, imap):
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/optimized_runtime/orchestrator.py",
+            imap,
+        )
+
+        assert match.rule == "optimized_runtime_framework"
+        assert match.models == []
+        assert match.unit_tiers == ["builder"]
+        assert match.rebuild_cpp is False
+
+    def test_shared_cpp_framework_has_no_model_e2e_fanout(self, imap):
+        match = test_impact.classify_file(
+            "src/runtime/providers/optimized_runtime_host.cpp",
+            imap,
+        )
+
+        assert match.rule == "optimized_runtime_cpp_framework"
+        assert match.models == []
+        assert match.unit_tiers == ["cpp"]
+        assert match.rebuild_cpp is True
+
+    @pytest.mark.parametrize(
+        ("path", "expected_builder_tests", "expected_cpp_tests"),
+        (
+            (
+                "python/tensorrt_model_connect/optimized_runtime/orchestrator.py",
+                [
+                    "tests/builder/test_optimized_runtime_capsules.py",
+                    "tests/builder/test_optimized_runtime_orchestrator.py",
+                    "tests/builder/test_optimized_runtime_public_routing.py",
+                ],
+                [],
+            ),
+            (
+                "src/runtime/providers/optimized_runtime_host.cpp",
+                [],
+                [
+                    "test_optimized_runtime_bundle_contract",
+                    "test_optimized_runtime_host",
+                    "test_optimized_runtime_inspect_cli",
+                ],
+            ),
+        ),
+    )
+    def test_shared_surfaces_select_only_bounded_contracts(
+        self,
+        imap,
+        path,
+        expected_builder_tests,
+        expected_cpp_tests,
+    ):
+        result = test_impact.analyze_impact([path], imap)
+
+        assert result.e2e_models == []
+        assert result.builder_tests == expected_builder_tests
+        assert result.cpp_tests == expected_cpp_tests
+
+
 class TestFamilyPlugin:
     def test_family_only_change(self, imap):
         """families/decoder_family/plugin.py -> exactly decoder_family models."""
@@ -1004,9 +1104,16 @@ class TestSharedModules:
         assert result.cap_applied
         assert sorted(result.e2e_models) == sorted(imap.core_models)
 
-    def test_engine_builder_all_models(self, imap):
-        """engine_builder.py -> all models."""
-        match = test_impact.classify_file("python/tensorrt_model_connect/engine_builder.py", imap)
+    @pytest.mark.parametrize(
+        "path",
+        (
+            "python/tensorrt_model_connect/build_cli.py",
+            "python/tensorrt_model_connect/engine_builder.py",
+        ),
+    )
+    def test_public_build_dispatch_remains_an_all_model_boundary(self, imap, path):
+        """Public dispatch changes cover delegated and native fallback builds."""
+        match = test_impact.classify_file(path, imap)
         assert match.rule == "shared_builder_module"
         assert len(match.models) == len(imap.all_model_names)
 
@@ -3240,6 +3347,28 @@ class TestCoverageMapIntegration:
         ]
         assert "builder" not in result.fallback_tiers
 
+    def test_changed_nested_model_owned_unit_test_runs_directly(self, mock_repo):
+        """Nested adapter tests remain direct targets inside one family."""
+        adapter_tests = (
+            mock_repo / "tests" / "e2e" / "models" / "decoder_family" / "optimized_adapter"
+        )
+        adapter_tests.mkdir(parents=True)
+        test_path = adapter_tests / "test_contract.py"
+        test_path.write_text("def test_contract():\n    assert True\n", encoding="utf-8")
+        imap = test_impact.build_impact_map(mock_repo)
+        relative = test_path.relative_to(mock_repo).as_posix()
+
+        result = test_impact.analyze_impact(
+            [relative],
+            imap,
+            coverage_map={},
+            repo_root=mock_repo,
+        )
+
+        assert result.builder_tests == [relative]
+        assert sorted(result.e2e_models) == ["decoder-large", "decoder-small"]
+        assert "builder" not in result.fallback_tiers
+
     def test_no_coverage_map_no_test_lists(self, imap):
         """Without coverage map, test lists are empty and fallback_tiers empty."""
         result = test_impact.analyze_impact(
@@ -3325,9 +3454,7 @@ class TestCoverageMapIntegration:
             ("tools/ci/e2e_schedule.py", ["tests/tools/test_schedule_e2e.py"]),
         ],
     )
-    def test_e2e_runner_selects_explicit_tools_tests(
-        self, imap, coverage_map, path, expected
-    ):
+    def test_e2e_runner_selects_explicit_tools_tests(self, imap, coverage_map, path, expected):
         """E2E scheduler edits select tests that coverage cannot discover."""
         result = test_impact.analyze_impact(
             [path],

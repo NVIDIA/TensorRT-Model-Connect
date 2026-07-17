@@ -173,6 +173,7 @@ add_library(trtmc_core SHARED
   src/runtime/core/cuda_common.cpp
   src/runtime/backend/backend_loader.cpp
   src/runtime/backend/trt_version.cpp
+  src/runtime/providers/optimized_runtime_host.cpp
   src/runtime/core/distributed_runtime.cpp
   src/runtime/core/device_tensor.cpp
   src/runtime/core/pipeline_pool.cpp
@@ -233,7 +234,6 @@ target_compile_definitions(trtmc_core
   PRIVATE
     TRTMC_BINARY_DIR=\"${CMAKE_BINARY_DIR}\"
 )
-
 target_compile_options(trtmc_core
   PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -608,6 +608,11 @@ add_executable(trtmc
 target_link_libraries(trtmc PRIVATE trtmc_core)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_include_directories(trtmc SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
+# Source-built CLIs may import the checkout package, but copied or installed
+# binaries must resolve the package from their deployment environment.
+target_compile_definitions(trtmc PRIVATE
+  TRTMC_BUILD_EXECUTABLE_DIR="$<TARGET_FILE_DIR:trtmc>"
+)
 set_target_properties(trtmc PROPERTIES
   BUILD_RPATH "\$ORIGIN"
   BUILD_RPATH_USE_ORIGIN TRUE
@@ -626,6 +631,63 @@ if(TRTMC_BUILD_TESTS)
 enable_testing()
 add_custom_target(trtmc_cpp_tests)
 add_custom_target(trtmc_platform_cpp_tests)
+
+# Generic capsule test doubles. The good and wrong-identity DSOs intentionally
+# have the same filename in different directories so tests can prove that the
+# embedded DSO's declared identity is validated before its factory is called.
+add_library(trtmc_test_optimized_runtime SHARED EXCLUDE_FROM_ALL
+  tests/cpp/fakes/fake_optimized_runtime_provider.cpp
+)
+target_include_directories(trtmc_test_optimized_runtime PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+)
+set_target_properties(trtmc_test_optimized_runtime PROPERTIES
+  OUTPUT_NAME trtmc_impl_example_optimized_runtime
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/good"
+)
+
+add_library(trtmc_test_wrong_optimized_runtime SHARED EXCLUDE_FROM_ALL
+  tests/cpp/fakes/fake_optimized_runtime_provider.cpp
+)
+target_include_directories(trtmc_test_wrong_optimized_runtime PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+)
+target_compile_definitions(trtmc_test_wrong_optimized_runtime PRIVATE
+  TRTMC_FAKE_OPTIMIZED_IMPLEMENTATION_ID="wrong-example-runtime"
+)
+set_target_properties(trtmc_test_wrong_optimized_runtime PROPERTIES
+  OUTPUT_NAME trtmc_impl_example_optimized_runtime
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/wrong"
+)
+
+add_library(trtmc_test_wrong_optimized_runtime_abi SHARED EXCLUDE_FROM_ALL
+  tests/cpp/fakes/fake_optimized_runtime_provider.cpp
+)
+target_include_directories(trtmc_test_wrong_optimized_runtime_abi PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+)
+target_compile_definitions(trtmc_test_wrong_optimized_runtime_abi PRIVATE
+  TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_VERSION=0
+)
+set_target_properties(trtmc_test_wrong_optimized_runtime_abi PROPERTIES
+  OUTPUT_NAME trtmc_impl_example_optimized_runtime
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/wrong-abi"
+)
+
+add_library(trtmc_test_optimized_embedding SHARED EXCLUDE_FROM_ALL
+  tests/cpp/fakes/fake_optimized_runtime_embedding.cpp
+)
+target_include_directories(trtmc_test_optimized_embedding PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+)
+set_target_properties(trtmc_test_optimized_embedding PROPERTIES
+  OUTPUT_NAME trtmc_impl_example_optimized_embedding
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/embedding"
+)
 
 # --- Test helper function ---
 # Usage:
@@ -750,20 +812,56 @@ trtmc_add_test(test_model_plugin_loader MODEL_OWNED)
 add_dependencies(test_model_plugin_loader trtmc_model_plugins)
 trtmc_add_test(test_backend_loader)
 trtmc_add_test(test_trt_version)
-
+trtmc_add_test(test_optimized_runtime_host)
+add_dependencies(test_optimized_runtime_host
+  trtmc_test_optimized_runtime
+  trtmc_test_wrong_optimized_runtime
+  trtmc_test_wrong_optimized_runtime_abi
+  trtmc_test_optimized_embedding
+)
+target_compile_definitions(test_optimized_runtime_host PRIVATE
+  TRTMC_TEST_OPTIMIZED_PROVIDER_DSO="$<TARGET_FILE:trtmc_test_optimized_runtime>"
+  TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_DSO="$<TARGET_FILE:trtmc_test_wrong_optimized_runtime>"
+  TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_ABI_DSO="$<TARGET_FILE:trtmc_test_wrong_optimized_runtime_abi>"
+  TRTMC_TEST_OPTIMIZED_EMBEDDING_DSO="$<TARGET_FILE:trtmc_test_optimized_embedding>"
+)
+if(_trtmc_python)
+  add_test(
+    NAME test_optimized_runtime_bundle_contract
+    COMMAND ${CMAKE_COMMAND} -E env
+      "PYTHONPATH=${PROJECT_SOURCE_DIR}/python"
+      "${_trtmc_python}"
+      "${PROJECT_SOURCE_DIR}/tests/builder/optimized_runtime_cpp_contract.py"
+      --loader "$<TARGET_FILE:test_optimized_runtime_host>"
+      --provider "$<TARGET_FILE:trtmc_test_optimized_runtime>"
+  )
+  add_custom_target(test_optimized_runtime_bundle_contract
+    DEPENDS test_optimized_runtime_host trtmc_test_optimized_runtime)
+  set_tests_properties(test_optimized_runtime_bundle_contract PROPERTIES LABELS "platform")
+endif()
 # C ABI
 trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
 # This regression drives the qwen runtime strategy and therefore requires a
 # real model plugin even though its source lives beside the shared C ABI tests.
 trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE MODEL_OWNED)
 trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
-
 # Config / parsing
 trtmc_add_test(test_text_parsers)
 trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
+trtmc_add_test(test_optimized_runtime_inspect_cli)
+add_dependencies(test_optimized_runtime_inspect_cli trtmc trtmc_test_optimized_runtime)
+target_compile_definitions(test_optimized_runtime_inspect_cli PRIVATE
+  TRTMC_TEST_CLI="$<TARGET_FILE:trtmc>"
+  TRTMC_TEST_OPTIMIZED_PROVIDER_DSO="$<TARGET_FILE:trtmc_test_optimized_runtime>"
+)
+add_test(NAME test_cli_build_bridge
+  COMMAND $<TARGET_FILE:trtmc> build --help)
+set_tests_properties(test_cli_build_bridge PROPERTIES
+  ENVIRONMENT "PYTHONPATH="
+  LABELS "platform")
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
 trtmc_add_test(test_config_schemas_triattention)

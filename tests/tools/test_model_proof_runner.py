@@ -22,7 +22,11 @@ import yaml
 
 from tools.ci.model_proof_selection import ModelProofSelector
 from tools.ci.context import CiContext
-from tools.ci.model_proof import ModelProofRequest, ModelReferenceCache
+from tools.ci.model_proof import (
+    ModelProofRequest,
+    ModelReferenceCache,
+    OptimizedRuntimeDependencyStager,
+)
 from tools.ci.process import CiError
 
 
@@ -243,6 +247,84 @@ def _write_sana_reference_config(path: Path) -> None:
     )
 
 
+def _write_fake_dependency_git(tmp_path: Path) -> tuple[Path, Path]:
+    fake_bin = tmp_path / "dependency-bin"
+    fake_bin.mkdir()
+    log = tmp_path / "dependency-git.jsonl"
+    git = fake_bin / "git"
+    git.write_text(
+        textwrap.dedent(
+            f"""\
+            #!{sys.executable}
+            import json
+            import os
+            from pathlib import Path
+            import sys
+
+            args = sys.argv[1:]
+            record = {{
+                "args": args,
+                "terminal_prompt": os.environ.get("GIT_TERMINAL_PROMPT"),
+                "file_protocol": os.environ.get("GIT_CONFIG_VALUE_0"),
+                "ext_protocol": os.environ.get("GIT_CONFIG_VALUE_1"),
+                "credential_helper": os.environ.get("GIT_CONFIG_VALUE_2"),
+            }}
+            with Path(os.environ["FAKE_DEPENDENCY_GIT_LOG"]).open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record) + "\\n")
+
+            if args[:2] == ["clone", "--no-checkout"]:
+                destination = Path(args[-1])
+                destination.mkdir(parents=True)
+                (destination / "source-marker.txt").write_text("staged\\n", encoding="utf-8")
+                raise SystemExit(0)
+            if len(args) >= 4 and args[0] == "-C":
+                command = args[2:]
+                if command == ["rev-parse", "HEAD^{{commit}}"]:
+                    print(os.environ["FAKE_DEPENDENCY_REVISION"])
+                elif command == ["config", "--get", "remote.origin.url"]:
+                    print(os.environ["FAKE_DEPENDENCY_SOURCE"])
+                raise SystemExit(0)
+            raise SystemExit(97)
+            """
+        ),
+        encoding="utf-8",
+    )
+    git.chmod(0o755)
+    return fake_bin, log
+
+
+def _write_optimized_dependency_projection(
+    tmp_path: Path,
+    *,
+    source: str = "https://example.com/vendor/runtime.git",
+    commit: str = "a" * 40,
+    source_mode: str = "git",
+) -> tuple[Path, Path, str]:
+    projection = tmp_path / "dependency-projection"
+    work = tmp_path / "dependency-work"
+    family = "fixture_model"
+    adapter = (
+        projection / "python" / "tensorrt_model_connect" / "families" / family / "optimized_adapter"
+    )
+    adapter.mkdir(parents=True)
+    work.mkdir()
+    (adapter / "dependency.lock").write_text(
+        textwrap.dedent(
+            f"""\
+            schema_version = 1
+
+            [downstream]
+            name = "vendor-runtime"
+            source = "{source}"
+            commit = "{commit}"
+            source_mode = "{source_mode}"
+            """
+        ),
+        encoding="utf-8",
+    )
+    return projection, work, family
+
+
 def _sana_reference_contract() -> dict[str, str]:
     return {
         "repository": "https://github.com/NVlabs/Sana.git",
@@ -294,6 +376,7 @@ def _run_test_selection(
     suite: str,
     *,
     lease_env: dict[str, str] | None = None,
+    projection_setup: Callable[[Path, dict[str, object]], None] | None = None,
 ) -> dict:
     source = tmp_path / f"{family}-{suite}"
     e2e_source = REPO_ROOT / "tests" / "e2e" / "models" / family
@@ -317,17 +400,15 @@ def _run_test_selection(
     else:
         family_root.mkdir(parents=True)
     revision = "a" * 40
-    (source / ".trtmc-model-projection.json").write_text(
-        json.dumps(
-            {
-                "revision": revision,
-                "model": family,
-                "runtime_model": "fixture_runtime",
-                "e2e_family": family,
-            }
-        ),
-        encoding="utf-8",
-    )
+    projection: dict[str, object] = {
+        "revision": revision,
+        "model": family,
+        "runtime_model": "fixture_runtime",
+        "e2e_family": family,
+    }
+    if projection_setup is not None:
+        projection_setup(source, projection)
+    (source / ".trtmc-model-projection.json").write_text(json.dumps(projection), encoding="utf-8")
     selection_path = tmp_path / f"{family}-{suite}-selection.json"
     env = os.environ.copy()
     for name in (
@@ -487,6 +568,58 @@ def test_selection_includes_every_owned_python_family_test(
     assert expected_family_tests <= set(selection["python_tests"])
 
 
+def _selection_with_nested_adapter_and_unselected_sibling(
+    tmp_path: Path,
+) -> tuple[dict, str, str]:
+    selected_root = "tests/e2e/models/flux/optimized_adapter"
+    sibling_root = "tests/e2e/models/sibling_model/optimized_adapter"
+
+    def project_adapter_tests(source: Path, _projection: dict[str, object]) -> None:
+        selected_tests = source / selected_root
+        selected_tests.mkdir(parents=True)
+        for name in ("test_capsule.py", "test_runtime_contract.py"):
+            (selected_tests / name).write_text("# projected fixture\n", encoding="utf-8")
+        sibling_tests = source / sibling_root
+        sibling_tests.mkdir(parents=True)
+        (sibling_tests / "test_sibling_capsule.py").write_text(
+            "def test_sibling_capsule(): pass\n", encoding="utf-8"
+        )
+
+    return (
+        _run_test_selection(
+            tmp_path,
+            "flux",
+            "premerge",
+            projection_setup=project_adapter_tests,
+        ),
+        selected_root,
+        sibling_root,
+    )
+
+
+def test_selection_includes_nested_model_owned_adapter_tests(
+    tmp_path: Path,
+) -> None:
+    selection, selected_root, _ = _selection_with_nested_adapter_and_unselected_sibling(tmp_path)
+
+    selected = set(selection["python_tests"])
+    expected_adapter_tests = {
+        f"{selected_root}/{name}" for name in ("test_capsule.py", "test_runtime_contract.py")
+    }
+    assert expected_adapter_tests == {
+        path for path in selected if path.startswith(f"{selected_root}/")
+    }
+    assert expected_adapter_tests
+
+
+def test_selection_excludes_unselected_sibling_model_tests(
+    tmp_path: Path,
+) -> None:
+    selection, _, sibling_root = _selection_with_nested_adapter_and_unselected_sibling(tmp_path)
+
+    assert not any(path.startswith(f"{sibling_root}/") for path in selection["python_tests"])
+
+
 def test_sana_selection_declares_its_pinned_model_reference_cache(
     tmp_path: Path,
 ) -> None:
@@ -509,6 +642,7 @@ def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
     assert 'payload["python_tests"]' in inner
     assert "self.source / path" in inner
     assert 'glob("test_*.py")' in selector
+    assert '"TRTMC_BINARY": str(self.work / "build/trtmc")' in inner
 
 
 @pytest.mark.parametrize(
@@ -743,6 +877,8 @@ def test_runner_declares_the_hermetic_container_boundary() -> None:
     assert "TRTMC_MODEL_REFERENCE_CACHE_ROOT" not in proof
     assert "src=$reference_cache_root" not in proof
     assert "src=$reference_source" not in proof
+    assert "dst=/work/optimized-runtime-dependencies,readonly" in proof
+    assert '"_TRTMC_INTERNAL_OPTIMIZED_RUNTIME_DEPENDENCY_ROOT"' in text
     assert "-e HF_TOKEN" not in proof
     assert "-e HUGGING_FACE_HUB_TOKEN" not in proof
 
@@ -762,6 +898,7 @@ def test_runner_warms_the_exact_shared_selection_before_the_proof() -> None:
     assert '"--local-only"' in warm and '"--strict"' in warm
     assert '"--emit-cache-repos"' in warm and '"/artifacts/hf-cache-repos.json"' in warm
     assert host.index("_prepare_hf_cache") < host.index("_run_proof_container")
+    assert host.index("OptimizedRuntimeDependencyStager") < host.index("GpuLease(")
     assert "offline HF cache readiness check failed" in warm
 
 
@@ -1707,6 +1844,104 @@ def test_sana_reference_cache_wrong_revision_fails_before_docker(
         ModelReferenceCache(CiContext(REPO_ROOT, env), ModelProofRequest("sana_wm")).prepare(
             _sana_reference_contract(), work_dir, artifacts
         )
+
+
+def test_selected_git_dependency_is_staged_at_its_pinned_private_path(
+    tmp_path: Path,
+) -> None:
+    source = "https://example.com/vendor/runtime.git"
+    commit = "a" * 40
+    projection, work, family = _write_optimized_dependency_projection(
+        tmp_path, source=source, commit=commit
+    )
+    fake_bin, log = _write_fake_dependency_git(tmp_path)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "FAKE_DEPENDENCY_GIT_LOG": str(log),
+            "FAKE_DEPENDENCY_REVISION": commit,
+            "FAKE_DEPENDENCY_SOURCE": source,
+        }
+    )
+
+    root = OptimizedRuntimeDependencyStager(CiContext(REPO_ROOT, env)).prepare(
+        projection, work, family
+    )
+
+    expected_root = work / "optimized-runtime-dependencies"
+    destination = expected_root / "vendor-runtime" / commit
+    assert root == expected_root
+    assert (destination / "source-marker.txt").read_text(encoding="utf-8") == "staged\n"
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert [record["args"] for record in records] == [
+        ["clone", "--no-checkout", "--", source, str(destination)],
+        ["-C", str(destination), "checkout", "--detach", "--force", commit],
+        ["-C", str(destination), "submodule", "update", "--init", "--recursive"],
+        ["-C", str(destination), "rev-parse", "HEAD^{commit}"],
+        ["-C", str(destination), "config", "--get", "remote.origin.url"],
+    ]
+    assert {
+        (
+            record["terminal_prompt"],
+            record["file_protocol"],
+            record["ext_protocol"],
+            record["credential_helper"],
+        )
+        for record in records
+    } == {("0", "never", "never", "")}
+
+
+def test_git_dependency_revision_mismatch_fails_closed(tmp_path: Path) -> None:
+    source = "https://example.com/vendor/runtime.git"
+    commit = "a" * 40
+    projection, work, family = _write_optimized_dependency_projection(
+        tmp_path, source=source, commit=commit
+    )
+    fake_bin, log = _write_fake_dependency_git(tmp_path)
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "FAKE_DEPENDENCY_GIT_LOG": str(log),
+            "FAKE_DEPENDENCY_REVISION": "b" * 40,
+            "FAKE_DEPENDENCY_SOURCE": source,
+        }
+    )
+
+    with pytest.raises(CiError, match="optimized runtime dependency revision mismatch"):
+        OptimizedRuntimeDependencyStager(CiContext(REPO_ROOT, env)).prepare(
+            projection, work, family
+        )
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "file:///tmp/runtime.git",
+        "https://user@example.com/runtime.git",
+        "https://example.com/runtime.git?ref=main",
+    ],
+)
+def test_git_dependency_rejects_unsafe_source_before_clone(tmp_path: Path, source: str) -> None:
+    projection, work, family = _write_optimized_dependency_projection(tmp_path, source=source)
+
+    with pytest.raises(CiError, match="optimized runtime Git dependency source is invalid"):
+        OptimizedRuntimeDependencyStager(CiContext(REPO_ROOT)).prepare(projection, work, family)
+
+    assert not (work / "optimized-runtime-dependencies").exists()
+
+
+def test_non_git_dependency_needs_no_offline_staging(tmp_path: Path) -> None:
+    projection, work, family = _write_optimized_dependency_projection(
+        tmp_path, source_mode="preinstalled"
+    )
+
+    assert (
+        OptimizedRuntimeDependencyStager(CiContext(REPO_ROOT)).prepare(projection, work, family)
+        is None
+    )
+    assert not (work / "optimized-runtime-dependencies").exists()
 
 
 def test_distinct_explicit_hf_cache_paths_reach_both_containers(

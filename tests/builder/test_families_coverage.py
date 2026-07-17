@@ -70,6 +70,24 @@ def test_find_diffusion_plugin_returns_none_when_no_plugin_declares_class(monkey
     assert families.find_diffusion_plugin("SyntheticPipeline") is None
 
 
+def test_resolve_diffusion_family_id_uses_metadata_without_importing_plugin(monkeypatch):
+    metadata = types.SimpleNamespace(
+        id="synthetic_family",
+        diffusion_pipeline_classes=frozenset({"SyntheticPipeline"}),
+    )
+    monkeypatch.setattr(families, "_load_family_metadata", lambda: [metadata])
+    monkeypatch.setattr(
+        families,
+        "_load_plugin_from_module",
+        lambda _module: (_ for _ in ()).throw(
+            AssertionError("metadata-only resolution imported a native plugin")
+        ),
+    )
+
+    assert families.resolve_diffusion_family_id("SyntheticPipeline") == "synthetic_family"
+    assert families.resolve_diffusion_family_id("UnknownPipeline") is None
+
+
 def test_family_module_discovery_skips_private_base_import_errors_and_missing_plugin_attr(monkeypatch):
     """Intent: exercise module auto-discovery branches in families.__init__.
     Preconditions: iter_modules yields private/base/error/no-plugin/valid entries under monkeypatched import hooks.

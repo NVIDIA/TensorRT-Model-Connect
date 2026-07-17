@@ -1880,6 +1880,22 @@ def test_root_pyproject_configures_conan_py_build_wheel() -> None:
     assert "[project.scripts]" not in text
 
 
+def test_wheel_stages_model_owned_runtime_adapters_without_building_them() -> None:
+    conanfile = (REPO_ROOT / "conanfile.py").read_text()
+    assert 'families_root.glob("*/*/IMPLEMENTATION.toml")' in conanfile
+    assert "runtime_root / family / adapter" in conanfile
+    assert 'package_module / "families" / family / adapter' in conanfile
+    assert 'packaged_adapter / "runtime"' in conanfile
+    assert 'Path(self.source_folder) / "optimized_runtimes"' not in conanfile
+    assert '"optimized_runtime_factory.h"' in conanfile
+    assert '"pipeline.h"' in conanfile
+    build_block = conanfile.split("def build(self)", maxsplit=1)[1].split(
+        "def package(self)", maxsplit=1
+    )[0]
+    assert "_model_owned_adapters" not in build_block
+    assert "third_party" not in build_block
+
+
 def test_wheel_model_smoke_checks_py312_wheel_only() -> None:
     text = _ci_source("package.py")
     smoke_block = text.split("def model_smoke", maxsplit=1)[1].split(

@@ -201,20 +201,16 @@ std::string build_python_executable() {
 std::string build_pythonpath() {
     std::string pythonpath;
 
-#ifdef TRTMC_SOURCE_DIR
+#if defined(TRTMC_SOURCE_DIR) && defined(TRTMC_BUILD_EXECUTABLE_DIR)
     const auto current_exe = current_executable_path();
     if (!current_exe.empty()) {
-        std::error_code source_ec;
+        std::error_code build_dir_ec;
         std::error_code exe_ec;
-        const auto source_root = std::filesystem::weakly_canonical(TRTMC_SOURCE_DIR, source_ec);
+        const auto build_executable_dir =
+            std::filesystem::weakly_canonical(TRTMC_BUILD_EXECUTABLE_DIR, build_dir_ec);
         const auto exe_path = std::filesystem::weakly_canonical(current_exe, exe_ec);
-        std::error_code rel_ec;
-        const auto rel_exe_path = std::filesystem::relative(exe_path, source_root, rel_ec);
-        const auto first_component =
-            rel_exe_path.empty() ? std::filesystem::path{} : *rel_exe_path.begin();
-        const bool running_from_source_build = !source_ec && !exe_ec && !rel_ec &&
-                                               !rel_exe_path.empty() &&
-                                               first_component.string().rfind("build", 0) == 0;
+        const bool running_from_source_build = !build_dir_ec && !exe_ec && !exe_path.empty() &&
+                                               exe_path.parent_path() == build_executable_dir;
         if (running_from_source_build) {
             const auto source_pkg = std::filesystem::path(TRTMC_SOURCE_DIR) / "python";
             std::error_code ec;

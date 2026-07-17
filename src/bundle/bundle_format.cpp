@@ -8,10 +8,13 @@
 #include "utils/json_helpers.h"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 namespace trtmc {
 
@@ -174,6 +177,63 @@ BundleInfo BundleInfoFromJson(const std::string& json, BundleSectionTable& secti
     return info;
 }
 
+std::uint64_t read_bundle_data_start(std::ifstream& in, const std::string& path,
+                                     std::uint64_t file_size) {
+    unsigned char magic[8];
+    in.read(reinterpret_cast<char*>(magic), sizeof(magic));
+    if (!in || std::memcmp(magic, kBundleMagic, sizeof(kBundleMagic)) != 0)
+        throw std::runtime_error("Invalid bundle magic in: " + path);
+
+    const std::uint64_t header_length = read_u64_le(in);
+    if (header_length > 100 * 1024 * 1024)
+        throw std::runtime_error("Bundle header too large: " + path);
+    if (header_length > std::numeric_limits<std::uint64_t>::max() - kBundleHeaderOffset)
+        throw std::runtime_error("Bundle header offset overflow: " + path);
+
+    const std::uint64_t data_start = kBundleHeaderOffset + header_length;
+    if (data_start > file_size)
+        throw std::runtime_error("Bundle data offset extends outside file: " + path);
+    return data_start;
+}
+
+std::uint64_t checked_section_file_offset(const BundleSectionInfo& section,
+                                          std::uint64_t data_start, std::uint64_t file_size,
+                                          const std::string& path) {
+    if (section.offset > file_size - data_start ||
+        section.size > file_size - data_start - section.offset) {
+        throw std::runtime_error("Bundle section '" + section.name +
+                                 "' extends outside file: " + path);
+    }
+    if (section.size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max()) ||
+        section.size > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max())) {
+        throw std::runtime_error("Bundle section '" + section.name +
+                                 "' is too large to read: " + path);
+    }
+    return data_start + section.offset;
+}
+
+std::ifstream open_bundle_section(const std::string& path, const BundleSectionInfo& section) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in)
+        throw std::runtime_error("Failed to open bundle file: " + path);
+
+    const auto file_end = in.tellg();
+    if (file_end < 0)
+        throw std::runtime_error("Failed to determine bundle size: " + path);
+    const auto file_size = static_cast<std::uint64_t>(file_end);
+    in.seekg(0);
+
+    const std::uint64_t data_start = read_bundle_data_start(in, path, file_size);
+    const std::uint64_t file_offset =
+        checked_section_file_offset(section, data_start, file_size, path);
+    in.seekg(static_cast<std::streamoff>(file_offset));
+    if (!in) {
+        throw std::runtime_error("Failed to seek to bundle section '" + section.name +
+                                 "' in: " + path);
+    }
+    return in;
+}
+
 } // namespace
 
 BundleFile ReadBundleFile(const std::string& path) {
@@ -199,20 +259,29 @@ BundleFile ReadBundleFile(const std::string& path) {
         throw std::runtime_error("Failed to read bundle header: " + path);
     }
 
-    std::vector<std::pair<std::string, std::pair<std::size_t, std::size_t>>> section_table;
+    BundleSectionTable section_table;
     BundleFile bundle;
     bundle.info = BundleInfoFromJson(header_json, section_table);
 
-    const std::size_t data_start = kBundleHeaderOffset + static_cast<std::size_t>(header_length);
+    in.seekg(0, std::ios::end);
+    const auto file_end = in.tellg();
+    if (file_end < 0)
+        throw std::runtime_error("Failed to determine bundle size: " + path);
+    const std::uint64_t file_size = static_cast<std::uint64_t>(file_end);
+    const std::uint64_t data_start = kBundleHeaderOffset + header_length;
 
     for (const auto& [name, offset_size] : section_table) {
         const auto& [offset, size] = offset_size;
         BundleSection section;
         section.name = name;
-        section.data.resize(size);
+        const BundleSectionInfo section_info{name, offset, size};
+        const std::uint64_t file_offset =
+            checked_section_file_offset(section_info, data_start, file_size, path);
+        section.data.resize(static_cast<std::size_t>(size));
 
-        in.seekg(static_cast<std::streamoff>(data_start + offset));
-        in.read(section.data.data(), static_cast<std::streamsize>(size));
+        in.seekg(static_cast<std::streamoff>(file_offset));
+        if (!section.data.empty())
+            in.read(section.data.data(), static_cast<std::streamsize>(section.data.size()));
         if (!in) {
             throw std::runtime_error("Failed to read bundle section '" + name + "' from: " + path);
         }
@@ -246,8 +315,54 @@ BundleInfo ReadBundleHeader(const std::string& path) {
         throw std::runtime_error("Failed to read bundle header: " + path);
     }
 
-    std::vector<std::pair<std::string, std::pair<std::size_t, std::size_t>>> sections_ignored;
+    BundleSectionTable sections_ignored;
     return BundleInfoFromJson(header_json, sections_ignored);
+}
+
+std::vector<char> ReadBundleSection(const std::string& path, const BundleSectionInfo& section) {
+    std::ifstream in = open_bundle_section(path, section);
+    std::vector<char> data(static_cast<std::size_t>(section.size));
+    if (!data.empty()) {
+        in.read(data.data(), static_cast<std::streamsize>(data.size()));
+    }
+    if (!in) {
+        throw std::runtime_error("Failed to read bundle section '" + section.name +
+                                 "' from: " + path);
+    }
+    return data;
+}
+
+void CopyBundleSection(const std::string& path, const BundleSectionInfo& section,
+                       std::ostream& output) {
+    std::ifstream in = open_bundle_section(path, section);
+    std::array<char, 1024 * 1024> buffer{};
+    std::uint64_t remaining = section.size;
+    while (remaining != 0) {
+        const auto chunk_size =
+            static_cast<std::streamsize>(std::min<std::uint64_t>(remaining, buffer.size()));
+        in.read(buffer.data(), chunk_size);
+        if (in.gcount() != chunk_size) {
+            throw std::runtime_error("Failed to read bundle section '" + section.name +
+                                     "' from: " + path);
+        }
+        output.write(buffer.data(), chunk_size);
+        if (!output) {
+            throw std::runtime_error("Failed to write materialized bundle section '" +
+                                     section.name + "'");
+        }
+        remaining -= static_cast<std::uint64_t>(chunk_size);
+    }
+}
+
+std::vector<char> ReadBundleSection(const std::string& path, const std::string& section_name) {
+    const BundleInfo info = ReadBundleHeader(path);
+    const auto it = std::find_if(
+        info.sections.begin(), info.sections.end(),
+        [&](const BundleSectionInfo& section) { return section.name == section_name; });
+    if (it == info.sections.end()) {
+        throw std::runtime_error("Bundle section not found: " + section_name + " in " + path);
+    }
+    return ReadBundleSection(path, *it);
 }
 
 bool HasBundleMagic(const std::string& path) {

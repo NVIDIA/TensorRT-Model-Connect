@@ -102,7 +102,7 @@ PLATFORM_PROJECTION_PREFIXES = (
     "tests/assets/",
     "tests/e2e/",
     "tests/e2e_harness/",
-    "third_party/",
+    "third_party/stb/",
     "tools/ci/",
 )
 
@@ -382,11 +382,7 @@ def _validate_e2e_manifest_device_tiers(
         effective_cases = [defaults]
     for testcase in effective_cases:
         required = _required_gpu_count(testcase, path)
-        if (
-            required > 1
-            and testcase.get("ci_tier") != "multi_device"
-            and not allow_legacy_tier
-        ):
+        if required > 1 and testcase.get("ci_tier") != "multi_device" and not allow_legacy_tier:
             name = testcase.get("name", payload.get("name", "<unnamed>"))
             raise ModelCIError(
                 f"E2E testcase {name!r} requires {required} GPUs but is not "
@@ -834,14 +830,10 @@ def _scheduled_models(
         production_cases = [case for case in cases if case["tier"] != "l0_only"]
         nightly_cases = production_cases or cases
         if not nightly_cases and exclusive_gpu_first:
-            raise ModelCIError(
-                f"model {model!r} has no active single-GPU nightly E2E case"
-            )
+            raise ModelCIError(f"model {model!r} has no active single-GPU nightly E2E case")
         expected_cases = sorted(str(case["name"]) for case in nightly_cases)
         if len(expected_cases) != len(set(expected_cases)):
-            raise ModelCIError(
-                f"model {model!r} has duplicate active nightly E2E case names"
-            )
+            raise ModelCIError(f"model {model!r} has duplicate active nightly E2E case names")
         expected_cases_by_model[model] = expected_cases
         exclusive_gpu[model] = any(
             case["resource_class"] == "exclusive_gpu" for case in nightly_cases
@@ -874,9 +866,7 @@ def _scheduled_models(
         )
         selected_estimate = candidates[0]["estimated_seconds"] if candidates else None
         estimates[model] = (
-            float(selected_estimate)
-            if isinstance(selected_estimate, (int, float))
-            else None
+            float(selected_estimate) if isinstance(selected_estimate, (int, float)) else None
         )
 
     return (
@@ -889,10 +879,7 @@ def _scheduled_models(
                 model,
             ),
         ),
-        {
-            model: expected_cases_by_model[model]
-            for model in sorted(expected_cases_by_model)
-        },
+        {model: expected_cases_by_model[model] for model in sorted(expected_cases_by_model)},
     )
 
 
@@ -997,8 +984,7 @@ def calculate_impact(
             mode = "fallback"
         else:
             raise ModelCIError(
-                "platform or CI/tooling change requires --platform-change-policy "
-                "fallback or all"
+                "platform or CI/tooling change requires --platform-change-policy fallback or all"
             )
     elif affected:
         mode = "models"

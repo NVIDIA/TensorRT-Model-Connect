@@ -9,6 +9,7 @@
 #include "runtime/backend/backend_loader.h"
 #include "runtime/backend/trt_version.h"
 #include "runtime/core/trt_common.h"
+#include "runtime/providers/optimized_runtime_host.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/config/schema_registry.h"
@@ -20,16 +21,20 @@
 #include "utils/data_dir.h"
 #include "utils/json_helpers.h"
 
+#include <cstdint>
 #include <exception>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace trtmc {
 
 namespace {
+
+constexpr std::uint64_t kMaxRuntimeMetadataSectionSize = 16ULL * 1024ULL * 1024ULL;
 
 std::string normalize_legacy_strategy(const std::string& strategy, const std::string& config_text) {
     auto alias = legacy_runtime_strategy_alias_target(strategy, config_text);
@@ -187,80 +192,60 @@ try_resolve_runtime_config(const std::string& config_text, const std::string& bu
     }
 }
 
+const BundleSectionInfo* find_bundle_section(const BundleInfo& info, const std::string& name) {
+    for (const auto& section : info.sections) {
+        if (section.name == name)
+            return &section;
+    }
+    return nullptr;
+}
+
+std::string read_bundle_text_section(const std::string& bundle_path, const BundleInfo& info,
+                                     const std::string& name, bool required) {
+    const auto* section = find_bundle_section(info, name);
+    if (section == nullptr) {
+        if (required)
+            throw std::runtime_error("Bundle missing required section '" + name +
+                                     "': " + bundle_path);
+        return {};
+    }
+    if (section->size > kMaxRuntimeMetadataSectionSize) {
+        throw std::runtime_error("Bundle metadata section '" + name +
+                                 "' exceeds the 16 MiB runtime limit: " + bundle_path);
+    }
+    const auto data = ReadBundleSection(bundle_path, *section);
+    return std::string(data.begin(), data.end());
+}
+
 } // namespace
 
 std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
                                                         const std::string& hf_python,
                                                         const std::string& runtime_cache_path,
                                                         bool cuda_graphs) {
-    BundleFile bundle = ReadBundleFile(bundle_path);
-    if (bundle.sections.empty())
-        throw std::runtime_error("Failed to read bundle: " + bundle_path);
-
-    // Extract config JSON from bundle
-    std::string config_text;
-    for (const auto& section : bundle.sections) {
-        if (section.name == "config.json" && !section.data.empty()) {
-            config_text.assign(section.data.begin(), section.data.end());
-            break;
-        }
-    }
-
-    // Parse runtime_strategy and normalize legacy strings.
-    std::string strategy = resolve_runtime_strategy(config_text);
-
-    auto* plugin = lookup_plugin_or_throw(strategy, {});
-
-    // Load backend DSO based on bundle metadata after strategy ownership is known.
-    std::string backend_name = extract_json_string(config_text, "engine_backend", "trt");
-    IBackend* backend = load_backend_for_bundle(bundle, config_text, bundle_path, backend_name, {});
-
-    // Parse base config and dispatch to plugin
-    BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
-    base_cfg.runtime_strategy = strategy; // use normalized strategy
-    if (!base_cfg.tokenizer_add_special_tokens_present &&
-        bundle.info.tokenizer_add_special_tokens_present) {
-        base_cfg.tokenizer_add_special_tokens = bundle.info.tokenizer_add_special_tokens;
-        base_cfg.tokenizer_add_special_tokens_present = true;
-    }
-
-    // Resolve the layered runtime config (BUNDLE_DEFAULT + SESSION_REQUEST).
-    // Best-effort: a malformed input prints to stderr and falls back to
-    // schema defaults so plugin construction isn't blocked.
-    std::optional<config::ConfigBundle> resolved =
-        try_resolve_runtime_config(config_text, bundle_path, /*config_path=*/"",
-                                   /*set_tokens=*/{});
-
-    PipelineContext ctx{bundle,
-                        base_cfg,
-                        config_text,
-                        hf_python,
-                        bundle_path,
-                        backend,
-                        runtime_cache_path,
-                        cuda_graphs,
-                        /*kv_cache_size_bytes=*/0,
-                        resolved ? &*resolved : nullptr};
-    auto pipeline = plugin->create(ctx);
-
-    std::cerr << "[trtmc] Pipeline loaded (strategy=" << strategy << ", backend=trt_new_runtime)"
-              << std::endl;
-    return pipeline;
+    LoadOptions options;
+    options.hf_python = hf_python;
+    options.runtime_cache_path = runtime_cache_path;
+    options.cuda_graphs = cuda_graphs;
+    return from_bundle(bundle_path, options);
 }
 
 std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundle_path,
                                                         const LoadOptions& options) {
+    // Optimized-runtime dispatch starts from generic bundle metadata only. A
+    // claimed capsule materializes its artifacts and constructs its model-owned
+    // IPipeline before native config parsing, plugins, or backend loading.
+    const BundleInfo header = ReadBundleHeader(bundle_path);
+    if (auto optimized_runtime_pipeline =
+            try_make_optimized_runtime_pipeline(bundle_path, header, options)) {
+        return optimized_runtime_pipeline;
+    }
     BundleFile bundle = ReadBundleFile(bundle_path);
     if (bundle.sections.empty())
         throw std::runtime_error("Failed to read bundle: " + bundle_path);
 
-    std::string config_text;
-    for (const auto& section : bundle.sections) {
-        if (section.name == "config.json" && !section.data.empty()) {
-            config_text.assign(section.data.begin(), section.data.end());
-            break;
-        }
-    }
+    const std::string config_text =
+        read_bundle_text_section(bundle_path, header, "config.json", /*required=*/false);
 
     std::string strategy = resolve_runtime_strategy(config_text);
 
@@ -272,6 +257,11 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
 
     BaseConfig base_cfg = parse_base_config(config_text, bundle.info.max_cache_length);
     base_cfg.runtime_strategy = strategy;
+    if (!base_cfg.tokenizer_add_special_tokens_present &&
+        bundle.info.tokenizer_add_special_tokens_present) {
+        base_cfg.tokenizer_add_special_tokens = bundle.info.tokenizer_add_special_tokens;
+        base_cfg.tokenizer_add_special_tokens_present = true;
+    }
 
     std::optional<config::ConfigBundle> resolved = try_resolve_runtime_config(
         config_text, bundle_path, options.config_path, options.set_tokens);

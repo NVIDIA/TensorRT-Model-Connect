@@ -31,6 +31,36 @@ def _get_version() -> str:
 __version__ = _get_version()
 
 
+_OPTIMIZED_ROUTING_INTERNAL_FIELDS = frozenset({
+    "active_python_profile",
+    "command",
+    "model",
+    "output",
+})
+
+
+def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
+    """Return only public CLI options that the user actually requested.
+
+    The generic router does not interpret these fields. The selected
+    model-owned adapter decides whether and how they map to its runtime.
+    """
+
+    explicit = getattr(args, "_explicit_public_options", None)
+    if explicit is None:
+        # ``_cmd_build`` is private, but unit tests and a few internal callers
+        # invoke it directly. With no parser provenance, forward their fields
+        # opaquely and let a matching model capsule decide what it supports.
+        explicit = vars(args).keys()
+    return {
+        name: value
+        for name, value in vars(args).items()
+        if not name.startswith("_")
+        and name not in _OPTIMIZED_ROUTING_INTERNAL_FIELDS
+        and name in explicit
+    }
+
+
 def _cmd_build(args: argparse.Namespace) -> int:
     if not args.model:
         print("Error: model (HF repo ID or local directory) required",
@@ -39,6 +69,27 @@ def _cmd_build(args: argparse.Namespace) -> int:
     if not args.output:
         print("Error: -o / --output required", file=sys.stderr)
         return 1
+
+    # Optimized dispatch resolves the model family internally and scans only
+    # that family's Builder folder. The current platform remains implicit; no
+    # public API or CLI option is added for runtime selection.
+    try:
+        from .engine_builder import _try_build_optimized_runtime
+
+        optimized = _try_build_optimized_runtime(
+            args.model,
+            args.output,
+            _optimized_cli_public_options(args),
+        )
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        if getattr(args, "verbose", False):
+            import traceback
+
+            traceback.print_exc()
+        return 1
+    if optimized is not None:
+        return 0
 
     build_model_ref = args.model
 
@@ -91,8 +142,10 @@ def _cmd_build(args: argparse.Namespace) -> int:
         trt_compat.configure_backend(rtx=True)
         print("[trtmc build] Using TensorRT-RTX backend", file=sys.stderr)
 
-    # Raw TRT path imports builder modules that bind trt_compat.get_trt().
-    from .engine_builder import build
+    # Delegation was already resolved above. Enter the native builder directly
+    # so a native CLI build does not rediscover and reprobe every installed
+    # optimized-runtime capsule a second time.
+    from .engine_builder import _build_native_impl as build
     from .quantization import canonicalize_quant_format
 
     # FP8 quantization: --fp8-scales (pre-computed) or --fp8 (auto-calibrate)
@@ -665,6 +718,18 @@ def main() -> None:
     if cli_argv and cli_argv[0] not in command_names and cli_argv[0] not in ("--help", "-h"):
         cli_argv = ["build"] + cli_argv
     args = parser.parse_args(cli_argv)
+
+    if args.command == "build":
+        option_destinations = {
+            option: action.dest
+            for action in build_p._actions
+            for option in action.option_strings
+        }
+        args._explicit_public_options = frozenset(
+            option_destinations[token.split("=", 1)[0]]
+            for token in cli_argv[1:]
+            if token.split("=", 1)[0] in option_destinations
+        )
 
     if args.command is None:
         parser.print_help()

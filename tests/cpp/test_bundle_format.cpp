@@ -30,13 +30,16 @@
 
 #include "bundle/bundle_format.h"
 #include "test_helpers.h"
+#include "utils/sha256.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdlib.h>
+#include <streambuf>
 #include <string>
 #include <vector>
 
@@ -295,6 +298,55 @@ static void test_max_batch_size_parse_and_back_compat() {
     trtmc_test::remove_all_safe(tmp);
 }
 
+class TrackingStreamBuffer final : public std::streambuf {
+  public:
+    std::vector<char> data;
+    std::streamsize largest_write{0};
+
+  protected:
+    std::streamsize xsputn(const char* source, std::streamsize count) override {
+        largest_write = std::max(largest_write, count);
+        data.insert(data.end(), source, source + count);
+        return count;
+    }
+};
+
+static void test_copy_section_streams_in_bounded_chunks() {
+    const auto tmp = make_temp_dir();
+    const auto path = (tmp / "streamed.trtfb").string();
+    std::vector<char> payload(3 * 1024 * 1024 + 17, 'E');
+    const std::string header =
+        "{\"model_id\":\"streamed\",\"sections\":{\"edge/llm.engine\":{\"offset\":0,\"size\":" +
+        std::to_string(payload.size()) + "}}}";
+    write_bundle_with_sections(path, header, {payload});
+
+    const auto info = trtmc::ReadBundleHeader(path);
+    check(info.sections.size() == 1, "streamed section metadata parsed");
+    TrackingStreamBuffer buffer;
+    std::ostream output(&buffer);
+    trtmc::CopyBundleSection(path, info.sections.front(), output);
+    check(buffer.data == payload, "streamed section preserves all bytes");
+    check(buffer.largest_write <= 1024 * 1024, "streamed section uses bounded chunks");
+
+    trtmc_test::remove_all_safe(tmp);
+}
+
+static void test_sha256_known_vectors() {
+    trtmc::internal::Sha256 empty;
+    check(empty.hex_digest() == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "SHA-256 empty vector");
+    trtmc::internal::Sha256 abc;
+    abc.update("abc");
+    check(abc.hex_digest() == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          "SHA-256 abc vector");
+    trtmc::internal::Sha256 multi_block_padding;
+    multi_block_padding.update("abcdbcdecdefdefgefghfghighijhijk");
+    multi_block_padding.update("ijkljklmklmnlmnomnopnopq");
+    check(multi_block_padding.hex_digest() ==
+              "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+          "SHA-256 incremental multi-block padding vector");
+}
+
 int main() {
     test_read_valid_bundle();
     test_magic_validation();
@@ -305,6 +357,8 @@ int main() {
     test_tokenizer_add_special_tokens_header();
     test_truncated_bundle_throws();
     test_max_batch_size_parse_and_back_compat();
+    test_copy_section_streams_in_bounded_chunks();
+    test_sha256_known_vectors();
 
     if (failures > 0) {
         std::cerr << failures << " test(s) FAILED\n";

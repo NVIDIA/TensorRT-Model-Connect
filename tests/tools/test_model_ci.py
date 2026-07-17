@@ -403,6 +403,46 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
     assert result["unit_scope"] == "none"
 
 
+@pytest.mark.parametrize(
+    ("path", "content"),
+    (
+        (
+            "python/tensorrt_model_connect/families/model_b/optimized_adapter/adapter.py",
+            'MODEL = "model_b"\n',
+        ),
+        (
+            "src/runtime/models/model_b/optimized_adapter/adapter.cpp",
+            "// model_b optimized runtime adapter\n",
+        ),
+        (
+            "tests/e2e/models/model_b/optimized_adapter/test_contract.py",
+            "def test_contract():\n    assert True\n",
+        ),
+    ),
+)
+def test_model_owned_adapter_change_selects_only_its_family(
+    tmp_path: Path,
+    path: str,
+    content: str,
+) -> None:
+    repo, base = _make_repo(tmp_path)
+    _write(repo, path, content)
+    head = _commit(repo, "add model b adapter file")
+
+    result = _impact(repo, base, head)
+
+    assert result["mode"] == "models"
+    assert result["affected_models"] == ["model_b"]
+    assert result["direct_models"] == ["model_b"]
+    assert result["fallback_models"] == []
+    assert result["matrix"] == {"include": [{"model": "model_b", "selection_kind": "direct"}]}
+    assert {
+        classification["kind"]
+        for change in result["changes"]
+        for classification in change["classifications"]
+    } == {"model"}
+
+
 def test_impact_allows_head_to_migrate_legacy_multi_gpu_tier(tmp_path: Path) -> None:
     repo, _ = _make_repo(tmp_path)
     manifest_path = repo / "tests/e2e/models/model_a/manifests/model_a.json"
@@ -551,6 +591,7 @@ def test_runtime_cli_changes_run_model_fallback(tmp_path: Path, path: str) -> No
     (
         "CMakeLists.txt",
         ".github/workflows/trtmc-ci.yml",
+        "src/runtime/providers/optimized_runtime_host.cpp",
         "tools/model_ci.py",
         "new_platform/implementation.py",
     ),
@@ -960,6 +1001,48 @@ def test_projection_contains_only_selected_model_and_stable_git_blobs(
         item for item in manifest["files"] if item["path"] == copied.relative_to(output).as_posix()
     )
     assert entry["sha256"] == hashlib.sha256(expected).hexdigest()
+
+
+def test_projection_includes_only_the_selected_family_adapter_subtrees(
+    tmp_path: Path,
+) -> None:
+    repo, _ = _make_repo(tmp_path)
+    selected_paths = (
+        "python/tensorrt_model_connect/families/model_b/optimized_adapter/adapter.py",
+        "python/tensorrt_model_connect/families/model_b/optimized_adapter/dependency.lock",
+        "src/runtime/models/model_b/optimized_adapter/adapter.cpp",
+        "tests/e2e/models/model_b/optimized_adapter/test_contract.py",
+    )
+    sibling_paths = tuple(path.replace("model_b", "model_a") for path in selected_paths)
+    for path in selected_paths:
+        _write(repo, path, "# selected model adapter\n")
+    for path in sibling_paths:
+        _write(repo, path, "# sibling model adapter\n")
+    generic_host = "src/runtime/providers/optimized_runtime_host.cpp"
+    _write(repo, generic_host, "// shared provider host\n")
+    revision = _commit(repo, "add model-owned adapters")
+    output = tmp_path / "projection-model-b"
+
+    manifest = json.loads(
+        _run(
+            repo,
+            "project",
+            "--revision",
+            revision,
+            "--model",
+            "model_b",
+            "--output-dir",
+            str(output),
+        ).stdout
+    )
+
+    for path in selected_paths:
+        assert (output / path).is_file()
+    for path in sibling_paths:
+        assert not (output / path).exists()
+    assert (output / generic_host).is_file()
+    assert "optimized_runtime_roots" not in manifest
+    assert "optimized_runtime_files" not in manifest
 
 
 def test_affected_model_projections_include_only_shared_support_and_owned_roots(

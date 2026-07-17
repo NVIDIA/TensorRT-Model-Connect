@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version = 1
+implementation_id = "qwen3-0.6b-fp16.tensorrt-edge-llm.a100-pcie80-sm80"
+runtime_kind = "optimized"
+downstream_runtime = "tensorrt-edge-llm"
+downstream_version = "0.6.1"
+downstream_commit = "2620a9768022f25dff18912db2fb92b2ef264a70"
+
+[model]
+id = "Qwen/Qwen3-0.6B"
+revisions = ["c1899de289a04d12100db370d81485cdf75e47ca"]
+
+[target]
+os = "linux"
+architecture = "x86_64"
+gpu_architecture = "sm80"
+gpu_name = "NVIDIA A100 80GB PCIe"
+platform_kind = "discrete"
+
+[build]
+entrypoint = "adapter.py"
+timeout_seconds = 21600
+
+[runtime]
+library = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm.so"
+abi = 1
+artifact_layout = "directory-tree-v1"
