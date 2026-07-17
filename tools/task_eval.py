@@ -46,13 +46,9 @@ from tests.e2e_harness.registry import (  # noqa: E402
     get_reference,
     get_runner,
 )
-from tools.model_validation import LegacyTaskEvalFacade  # noqa: E402
 
 
 DEFAULT_SUITES = REPO_ROOT / "tests" / "task_eval" / "validation_suites.yaml"
-DEFAULT_PERFORMANCE_PROFILES = (
-    REPO_ROOT / "tests" / "task_eval" / "performance_profiles.yaml"
-)
 DEFAULT_MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
@@ -218,50 +214,7 @@ def _public_ci_result(result: dict[str, Any]) -> dict[str, Any]:
         "max_absolute_error",
         "error_type",
     )
-    public = {key: result[key] for key in keys if key in result}
-    performance = result.get("performance")
-    if isinstance(performance, dict):
-        public["performance"] = _public_performance_result(performance)
-    return public
-
-
-def _public_performance_result(performance: dict[str, Any]) -> dict[str, Any]:
-    environment = performance.get("environment", {})
-    public_environment_keys = (
-        "gpu_name",
-        "driver",
-        "cuda_version",
-        "trt_version",
-        "gpu_utilization_pct",
-        "gpu_temperature_c",
-        "gpu_power_draw_w",
-        "gpu_performance_state",
-        "compatibility_class",
-        "compatible",
-        "reasons",
-    )
-    public = {
-        key: performance[key]
-        for key in (
-            "schema_version",
-            "status",
-            "mode",
-            "profile_id",
-            "profile_digest",
-            "measurement_scope",
-            "workload",
-            "backends",
-            "speedup",
-        )
-        if key in performance
-    }
-    if isinstance(environment, dict):
-        public["environment"] = {
-            key: environment[key]
-            for key in public_environment_keys
-            if key in environment
-        }
-    return public
+    return {key: result[key] for key in keys if key in result}
 
 
 def _public_time_series_summary(summary: dict[str, Any]) -> dict[str, Any]:
@@ -359,19 +312,6 @@ def write_public_ci_artifacts(
                 raise ValueError(f"Invalid time-series summary for {model_name!r}")
             destination.write_text(
                 json.dumps(_public_time_series_summary(raw_summary), indent=2, ensure_ascii=False)
-                + "\n",
-                encoding="utf-8",
-            )
-        performance = result.get("performance")
-        if isinstance(performance, dict):
-            destination = artifact_dir / "models" / model_name / "performance_result.json"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(
-                json.dumps(
-                    _public_performance_result(performance),
-                    indent=2,
-                    ensure_ascii=False,
-                )
                 + "\n",
                 encoding="utf-8",
             )
@@ -6745,35 +6685,6 @@ def run_time_series_trtfb(args: argparse.Namespace) -> None:
     write_predictions(pred_path, responses)
 
 
-def run_time_series_performance_evaluation(
-    *,
-    args: argparse.Namespace,
-    suite: dict[str, Any],
-    model: dict[str, Any],
-    work_dir: Path,
-    bundle_path: Path,
-    correctness_passed: bool,
-    measurement_engine: Any = None,
-    environment: Any = None,
-) -> dict[str, Any]:
-    """Compatibility entry for native ETTh1 Performance Evaluation."""
-
-    from tools.model_validation.time_series_performance import (
-        run_time_series_performance_evaluation as run_native_performance,
-    )
-
-    return run_native_performance(
-        args=args,
-        suite=suite,
-        model=model,
-        work_dir=work_dir,
-        bundle_path=bundle_path,
-        correctness_passed=correctness_passed,
-        measurement_engine=measurement_engine,
-        environment=environment,
-    )
-
-
 def _vision_case_for_request(
     template: Any,
     prompt_row: dict[str, Any],
@@ -8793,14 +8704,109 @@ def compare_time_series_prediction_sets(
     *,
     gates: dict[str, Any],
 ) -> dict[str, Any]:
-    """Compatibility wrapper for the native time-series fidelity reducer."""
-    from tools.model_validation.adapters.time_series import TimeSeriesTaskAdapter
+    """Gate every numeric sample with the model-owned E2E parity metrics."""
+    hf_rows = _task_eval_response_rows(hf_data, "HF")
+    trtfb_rows = _task_eval_response_rows(trtfb_data, "TRTMC")
+    if len(hf_rows) != len(trtfb_rows):
+        raise ValueError(
+            f"Time-series HF/TRTMC prediction count mismatch: {len(hf_rows)} != {len(trtfb_rows)}"
+        )
+    max_relative_l2 = float(gates.get("max_relative_l2", 0.01))
+    max_absolute_error = float(gates.get("max_absolute_error", 0.1))
+    min_sample_agreement_rate = float(gates.get("min_sample_agreement_rate", 1.0))
+    cases: list[dict[str, Any]] = []
+    for index, (hf_row, trtfb_row) in enumerate(zip(hf_rows, trtfb_rows, strict=True)):
+        hf_id = str(hf_row.get("sample_id", index))
+        trtfb_id = str(trtfb_row.get("sample_id", index))
+        if hf_id != trtfb_id:
+            raise ValueError(
+                f"Time-series sample id mismatch at {index}: {hf_id!r} != {trtfb_id!r}"
+            )
+        hf_values = hf_row.get("output_values")
+        trtfb_values = trtfb_row.get("output_values")
+        if not isinstance(hf_values, list) or not isinstance(trtfb_values, list):
+            raise ValueError(f"Time-series prediction {hf_id!r} is missing output_values")
+        if len(hf_values) != len(trtfb_values) or not hf_values:
+            cases.append(
+                {
+                    "sample_id": hf_id,
+                    "passed": False,
+                    "error": (
+                        "output element count mismatch: "
+                        f"HF={len(hf_values)} TRTMC={len(trtfb_values)}"
+                    ),
+                }
+            )
+            continue
+        hf_vector = [float(value) for value in hf_values]
+        trtfb_vector = [float(value) for value in trtfb_values]
+        if not all(math.isfinite(value) for value in hf_vector + trtfb_vector):
+            cases.append(
+                {
+                    "sample_id": hf_id,
+                    "passed": False,
+                    "error": "non-finite output value",
+                }
+            )
+            continue
+        squared_error = sum(
+            (trtfb - hf) ** 2 for hf, trtfb in zip(hf_vector, trtfb_vector, strict=True)
+        )
+        reference_squared_norm = sum(value * value for value in hf_vector)
+        relative_l2 = (
+            math.sqrt(squared_error / reference_squared_norm)
+            if reference_squared_norm >= 1e-24
+            else math.sqrt(squared_error)
+        )
+        absolute_error = max(
+            abs(trtfb - hf) for hf, trtfb in zip(hf_vector, trtfb_vector, strict=True)
+        )
+        cases.append(
+            {
+                "sample_id": hf_id,
+                "output_numel": len(hf_vector),
+                "hf_output_shape": hf_row.get("output_shape", []),
+                "trtfb_output_shape": trtfb_row.get("output_shape", []),
+                "relative_l2": relative_l2,
+                "max_absolute_error": absolute_error,
+                "passed": (relative_l2 <= max_relative_l2 and absolute_error <= max_absolute_error),
+            }
+        )
 
-    return TimeSeriesTaskAdapter().fidelity_metrics(
-        hf_data,
-        trtfb_data,
-        gates=gates,
+    valid_cases = [case for case in cases if "relative_l2" in case]
+    passed_count = sum(bool(case.get("passed")) for case in cases)
+    agreement_rate = passed_count / len(cases) if cases else 0.0
+    status = (
+        "passed"
+        if cases and len(valid_cases) == len(cases) and agreement_rate >= min_sample_agreement_rate
+        else "failed"
     )
+    return {
+        "status": status,
+        "sample_count": len(cases),
+        "valid_count": len(valid_cases),
+        "passed_count": passed_count,
+        "sample_agreement_rate": agreement_rate,
+        "mean_relative_l2": (
+            sum(float(case["relative_l2"]) for case in valid_cases) / len(valid_cases)
+            if valid_cases
+            else float("inf")
+        ),
+        "max_relative_l2": max(
+            (float(case["relative_l2"]) for case in valid_cases),
+            default=float("inf"),
+        ),
+        "max_absolute_error": max(
+            (float(case["max_absolute_error"]) for case in valid_cases),
+            default=float("inf"),
+        ),
+        "gates": {
+            "max_relative_l2": max_relative_l2,
+            "max_absolute_error": max_absolute_error,
+            "min_sample_agreement_rate": min_sample_agreement_rate,
+        },
+        "cases": cases,
+    }
 
 
 def write_time_series_summary_markdown(summary: dict[str, Any], path: Path) -> None:
@@ -9912,41 +9918,6 @@ def eval_one_model(
                     },
                 }
             )
-    performance_profile_id = str(getattr(args, "performance_profile", "") or "")
-    if performance_profile_id:
-        if dataset_kind != "time_series_csv":
-            raise ValueError(
-                f"No native Performance Evaluation adapter for dataset kind {dataset_kind!r}"
-            )
-        fidelity_status = str(result.get("status", "passed"))
-        performance = run_time_series_performance_evaluation(
-            args=args,
-            suite=suite,
-            model=model,
-            work_dir=work_dir,
-            bundle_path=bundle_path,
-            correctness_passed=fidelity_status == "passed",
-        )
-        result["assessments"] = {
-            "task": {
-                "status": "not_run",
-                "reason": "ETTh1 suite currently defines backend fidelity, not a task-quality gate",
-            },
-            "fidelity": {"status": fidelity_status},
-            "performance": {
-                "status": performance["status"],
-                "mode": performance["mode"],
-                "profile_id": performance["profile_id"],
-            },
-        }
-        result["performance"] = performance
-        result["performance_artifact"] = str(
-            work_dir / "performance" / "performance_result.json"
-        )
-        if performance["mode"] == "blocking" and performance["status"] != "passed":
-            result["status"] = "failed"
-            result["performance_gate_status"] = performance["status"]
-
     (work_dir / "eval_result.json").write_text(
         json.dumps(result, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -10553,21 +10524,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dataset-cache-root", default=".ci/task-eval-data")
     p.add_argument("--artifact-dir", default="")
     p.add_argument(
-        "--performance-profile",
-        default="",
-        help="Run a native Performance Evaluation profile after correctness checks.",
-    )
-    p.add_argument(
-        "--performance-profiles",
-        default=str(DEFAULT_PERFORMANCE_PROFILES),
-        help="Versioned Performance Evaluation profile file.",
-    )
-    p.add_argument(
-        "--performance-baseline",
-        default="",
-        help="Optional explicitly approved baseline JSON for blocking comparison.",
-    )
-    p.add_argument(
         "--bundle", default="", help="Prebuilt bundle path; only valid with one --model."
     )
     p.add_argument(
@@ -11026,42 +10982,6 @@ def cmd_eval(args: argparse.Namespace) -> int:
         raise ValueError(f"No models selected for suite {suite['id']}")
     if args.bundle and len(selected) != 1:
         raise ValueError("--bundle can only be used when exactly one model is selected")
-
-    performance_profile_id = str(getattr(args, "performance_profile", "") or "")
-    native_adapter = None
-    if performance_profile_id:
-        from tools.model_validation.adapters import TimeSeriesTaskAdapter
-        from tools.model_validation.performance import load_performance_profile
-
-        performance_profile = load_performance_profile(
-            Path(getattr(args, "performance_profiles", DEFAULT_PERFORMANCE_PROFILES)),
-            performance_profile_id,
-        )
-        performance_profile.validate_target(
-            suite_id=str(suite["id"]),
-            dataset_kind=str(dataset_kind),
-        )
-        if dataset_kind != TimeSeriesTaskAdapter.kind:
-            raise ValueError(
-                f"No native Performance Evaluation adapter for dataset kind {dataset_kind!r}"
-            )
-        native_adapter = TimeSeriesTaskAdapter()
-
-    compatibility_facade = LegacyTaskEvalFacade()
-    compatibility_plan = compatibility_facade.compile_eval_plan(
-        suite=suite,
-        models=selected,
-        model_selectors=getattr(args, "model", ()),
-        dataset_override=getattr(args, "dataset", None),
-        limit=getattr(args, "limit", None),
-        seed=getattr(args, "sample_seed", None),
-        performance_profile_id=performance_profile_id or None,
-        native_adapter=native_adapter,
-    )
-    compatibility_facade.write_plan(
-        compatibility_plan,
-        Path(args.work_root) / suite["id"],
-    )
 
     results = []
     use_workers = should_use_model_workers(args, selected)

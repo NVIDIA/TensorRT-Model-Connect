@@ -233,17 +233,6 @@ def test_default_suites_include_etth1_time_series_parity() -> None:
     assert suite["ci"]["lane"] == "nightly"
     assert suite["ci"]["limit"] == 10
     assert suite["ci"]["sample_seed"] == 20260715
-    assert suite["performance"] == {
-        "opt_in": True,
-        "observation_profile": "etth1_process_e2e_observation_v1",
-        "blocking_profile": "etth1_process_e2e_blocking_v1",
-        "notes": (
-            "These profiles measure process-level E2E latency and are never "
-            "inferred from legacy wall_ms. Nightly parity remains unchanged "
-            "until a profile is explicitly selected; blocking additionally "
-            "requires an approved, comparable baseline.\n"
-        ),
-    }
     expected_gates = {
         "chronos-bolt-tiny-official": (1.0e-06, 8.0e-06),
         "patchtsmixer-granite-official": (5.0e-04, 2.5e-02),
@@ -5542,23 +5531,6 @@ def test_public_ci_artifacts_omit_private_runner_paths(tmp_path: Path) -> None:
             "sample_agreement_rate": 1.0,
             "work_dir": "/private/runner/work",
             "bundle": "/private/runner/engine.trtfb",
-            "performance_artifact": "/private/runner/performance.json",
-            "performance": {
-                "schema_version": 1,
-                "status": "observed",
-                "mode": "observation",
-                "profile_id": "profile",
-                "environment": {
-                    "gpu_name": "NVIDIA GB300",
-                    "hostname": "private-runner",
-                    "compatible": True,
-                },
-                "backends": {
-                    "trtfb": {
-                        "metrics": {"request_latency_ms.p50": 10.0}
-                    }
-                },
-            },
         },
         {"model": "timesfm", "status": "failed", "error": "/private/error"},
     ]
@@ -5576,11 +5548,8 @@ def test_public_ci_artifacts_omit_private_runner_paths(tmp_path: Path) -> None:
     assert "/private" not in public
     assert "work_dir" not in public
     assert "bundle" not in public
-    assert "private-runner" not in public
     numeric_public = artifact_dir / "models" / "chronos" / "summary.json"
     assert "/private" not in numeric_public.read_text(encoding="utf-8")
-    performance_public = artifact_dir / "models" / "chronos" / "performance_result.json"
-    assert "private-runner" not in performance_public.read_text(encoding="utf-8")
 
 
 def test_prepare_vbench_selects_ten_unique_review_dimensions(tmp_path: Path) -> None:
