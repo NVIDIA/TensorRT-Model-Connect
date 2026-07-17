@@ -1650,6 +1650,7 @@ class TestUnitTiers:
         "path",
         [
             "tools/task_eval.py",
+            "tools/model_validation/contracts.py",
             "tools/elf_hf_reference.py",
             "tools/prepare_elf_task_eval_datasets.py",
             "tools/prepare_media_task_eval_datasets.py",
