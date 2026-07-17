@@ -1234,15 +1234,6 @@ suites:
         gates:
           max_relative_l2: 4.0e-03
           max_absolute_error: 7.0e-03
-    performance:
-      opt_in: true
-      observation_profile: etth1_process_e2e_observation_v1
-      blocking_profile: etth1_process_e2e_blocking_v1
-      notes: >
-        These profiles measure process-level E2E latency and are never inferred
-        from legacy wall_ms. Nightly parity remains unchanged until a profile is
-        explicitly selected; blocking additionally requires an approved,
-        comparable baseline.
     ci:
       eligible: true
       lane: nightly
