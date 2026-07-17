@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "runtime/models/sam3/plugin_helpers.h"
 #include "runtime/models/sam3/sam3_pipeline.h"
 #include "runtime/models/sam3/sam3_video_processor.h"
 #ifdef TRTMC_HAS_CUDA_KERNELS
@@ -44,6 +45,104 @@ void check(bool cond, const char* msg) {
 
 bool close(float actual, float expected) {
     return std::fabs(actual - expected) < 1.0e-5F;
+}
+
+trtmc::BundleFile make_sam3_clip_tokenizer_bundle() {
+    static constexpr std::string_view config = R"({
+      "tokenizer_add_special_tokens": true,
+      "tokenizer_special_prefix_ids": [10],
+      "tokenizer_special_suffix_ids": [11]
+    })";
+    static constexpr std::string_view tokenizer_json = R"({
+      "model": {
+        "type": "BPE",
+        "end_of_word_suffix": "</w>",
+        "vocab": {
+          "a</w>": 0,
+          "b</w>": 1,
+          "1</w>": 2,
+          "0</w>": 3,
+          "\u0120": 4,
+          "\u0120</w>": 5,
+          "-</w>": 6,
+          "'": 7,
+          "s</w>": 8,
+          "<|startoftext|>": 10,
+          "<|endoftext|>": 11
+        },
+        "merges": []
+      },
+      "normalizer": {
+        "type": "Sequence",
+        "normalizers": [
+          {"type": "NFC"},
+          {"type": "Replace", "pattern": {"Regex": "\\s+"}, "content": " "},
+          {"type": "Lowercase"}
+        ]
+      },
+      "pre_tokenizer": {
+        "type": "Sequence",
+        "pretokenizers": [
+          {
+            "type": "Split",
+            "pattern": {
+              "Regex": "<\\|startoftext\\|>|<\\|endoftext\\|>|'s|'t|'re|'ve|'m|'ll|'d|[\\p{L}]+|[\\p{N}]|[^\\s\\p{L}\\p{N}]+"
+            },
+            "behavior": "Removed",
+            "invert": true
+          },
+          {
+            "type": "ByteLevel",
+            "add_prefix_space": false,
+            "trim_offsets": true,
+            "use_regex": true
+          }
+        ]
+      }
+    })";
+
+    trtmc::BundleFile bundle;
+    trtmc::BundleSection config_section;
+    config_section.name = "config.json";
+    config_section.data.assign(config.begin(), config.end());
+    bundle.sections.push_back(std::move(config_section));
+    trtmc::BundleSection tokenizer_section;
+    tokenizer_section.name = "tokenizer.json";
+    tokenizer_section.data.assign(tokenizer_json.begin(), tokenizer_json.end());
+    bundle.sections.push_back(std::move(tokenizer_section));
+    return bundle;
+}
+
+void test_sam3_clip_tokenizer_matches_meta_segmentation() {
+    auto bundle = make_sam3_clip_tokenizer_bundle();
+    auto tokenizer = trtmc::create_tokenizer_from_bundle(bundle);
+    check(tokenizer != nullptr, "sam3 creates native CLIP tokenizer");
+    check(tokenizer->encode("a b") == std::vector<int32_t>({10, 0, 1, 11}),
+          "sam3 CLIP tokenizer matches Meta Removed split whitespace semantics");
+    check(tokenizer->encode("A\t  B") == std::vector<int32_t>({10, 0, 1, 11}),
+          "sam3 CLIP tokenizer matches Meta lowercase and whitespace normalization");
+    check(tokenizer->encode("10 b") == std::vector<int32_t>({10, 2, 3, 1, 11}),
+          "sam3 CLIP tokenizer matches Meta single-digit segmentation");
+    check(tokenizer->encode("A-B") == std::vector<int32_t>({10, 0, 6, 1, 11}),
+          "sam3 CLIP tokenizer matches Meta punctuation segmentation");
+    check(tokenizer->encode("A's") == std::vector<int32_t>({10, 0, 7, 8, 11}),
+          "sam3 CLIP tokenizer matches Meta contraction segmentation");
+}
+
+void test_clip_non_removed_split_keeps_standalone_space_token() {
+    auto bundle = make_sam3_clip_tokenizer_bundle();
+    auto& tokenizer_data = bundle.sections.back().data;
+    std::string tokenizer_json(tokenizer_data.begin(), tokenizer_data.end());
+    const auto behavior = tokenizer_json.find("\"behavior\": \"Removed\"");
+    check(behavior != std::string::npos, "sam3 synthetic CLIP tokenizer has Removed behavior");
+    tokenizer_json.replace(behavior, std::strlen("\"behavior\": \"Removed\""),
+                           "\"behavior\": \"Isolated\"");
+    tokenizer_data.assign(tokenizer_json.begin(), tokenizer_json.end());
+
+    auto tokenizer = trtmc::create_tokenizer_from_bundle(bundle);
+    check(tokenizer != nullptr, "sam3 creates non-Removed CLIP tokenizer control");
+    check(tokenizer->encode("a b") == std::vector<int32_t>({10, 0, 4, 1, 11}),
+          "sam3 does not filter whitespace outside the Removed split contract");
 }
 
 #ifdef TRTMC_HAS_CUDA_KERNELS
@@ -2106,6 +2205,8 @@ void test_recurrent_pool_survives_serial_sessions() {
 } // namespace
 
 int main() {
+    test_sam3_clip_tokenizer_matches_meta_segmentation();
+    test_clip_non_removed_split_keeps_standalone_space_token();
 #ifdef TRTMC_HAS_CUDA_KERNELS
     test_bfloat16_round_copy_supports_exact_alias();
     test_cuda_preprocess_matches_cpu_meta_pillow();

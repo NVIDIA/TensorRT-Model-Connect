@@ -8,11 +8,14 @@
 #include "trtmc/runtime/trt_backend.h"
 #include "utils/json_helpers.h"
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -62,6 +65,177 @@ class SpecialFrameTokenizer final : public ITokenizer {
     std::shared_ptr<ITokenizer> mInner;
     std::vector<int32_t> mPrefix;
     std::vector<int32_t> mSuffix;
+};
+
+struct Utf8Unit {
+    char32_t codepoint;
+    std::size_t size;
+};
+
+Utf8Unit decode_utf8_unit(std::string_view text, std::size_t offset) {
+    const auto first = static_cast<unsigned char>(text[offset]);
+    if (first < 0x80)
+        return {first, 1};
+    if ((first & 0xE0U) == 0xC0U && offset + 1 < text.size()) {
+        return {static_cast<char32_t>((first & 0x1FU) << 6U) |
+                    (static_cast<unsigned char>(text[offset + 1]) & 0x3FU),
+                2};
+    }
+    if ((first & 0xF0U) == 0xE0U && offset + 2 < text.size()) {
+        return {static_cast<char32_t>((first & 0x0FU) << 12U) |
+                    static_cast<char32_t>((static_cast<unsigned char>(text[offset + 1]) & 0x3FU)
+                                          << 6U) |
+                    (static_cast<unsigned char>(text[offset + 2]) & 0x3FU),
+                3};
+    }
+    if ((first & 0xF8U) == 0xF0U && offset + 3 < text.size()) {
+        return {static_cast<char32_t>((first & 0x07U) << 18U) |
+                    static_cast<char32_t>((static_cast<unsigned char>(text[offset + 1]) & 0x3FU)
+                                          << 12U) |
+                    static_cast<char32_t>((static_cast<unsigned char>(text[offset + 2]) & 0x3FU)
+                                          << 6U) |
+                    (static_cast<unsigned char>(text[offset + 3]) & 0x3FU),
+                4};
+    }
+    return {0xFFFD, 1};
+}
+
+bool is_clip_whitespace(char32_t codepoint) {
+    static constexpr std::array<char32_t, 13> isolated_whitespace{
+        ' ', '\t', '\n', '\r', 0x0B, 0x0C, 0x85, 0xA0, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000};
+    return (codepoint >= 0x2000 && codepoint <= 0x200A) ||
+           std::find(isolated_whitespace.begin(), isolated_whitespace.end(), codepoint) !=
+               isolated_whitespace.end();
+}
+
+struct UnicodeRange {
+    char32_t first;
+    char32_t last;
+};
+
+bool is_clip_letter(char32_t codepoint) {
+    static constexpr std::array<UnicodeRange, 30> ranges{{
+        {'A', 'Z'},         {'a', 'z'},         {0xB5, 0xB5},     {0xC0, 0xD6},
+        {0xD8, 0xF6},       {0xF8, 0x2AF},      {0x370, 0x481},   {0x48A, 0x52F},
+        {0x531, 0x588},     {0x600, 0x6FF},     {0x900, 0x97F},   {0xE00, 0xE7F},
+        {0x10A0, 0x10C5},   {0x13A0, 0x13F5},   {0x1C90, 0x1CBF}, {0x1D00, 0x1D2B},
+        {0x1D6B, 0x1D77},   {0x1D79, 0x1D9A},   {0x1E00, 0x1F15}, {0x1F18, 0x1F1D},
+        {0x1F20, 0x1F45},   {0x2C00, 0x2C5F},   {0x3040, 0x309F}, {0x30A0, 0x30FF},
+        {0x3400, 0x4DBF},   {0x4E00, 0x9FFF},   {0xAC00, 0xD7AF}, {0xFB00, 0xFDFF},
+        {0x10000, 0x1007F}, {0x20000, 0x2FA1F},
+    }};
+    return std::any_of(ranges.begin(), ranges.end(), [codepoint](const auto& range) {
+        return codepoint >= range.first && codepoint <= range.last;
+    });
+}
+
+bool is_clip_number(char32_t codepoint) {
+    static constexpr std::array<UnicodeRange, 12> ranges{{
+        {'0', '9'},
+        {0x660, 0x669},
+        {0x6F0, 0x6F9},
+        {0x7C0, 0x7C9},
+        {0x966, 0x96F},
+        {0x9E6, 0x9EF},
+        {0xA66, 0xA6F},
+        {0xAE6, 0xAEF},
+        {0xB66, 0xB6F},
+        {0xBE6, 0xBEF},
+        {0xC66, 0xC6F},
+        {0xFF10, 0xFF19},
+    }};
+    return std::any_of(ranges.begin(), ranges.end(), [codepoint](const auto& range) {
+        return codepoint >= range.first && codepoint <= range.last;
+    });
+}
+
+std::size_t clip_contraction_size(std::string_view text, std::size_t offset) {
+    static constexpr std::array<std::string_view, 7> contractions{"'re", "'ve", "'ll", "'s",
+                                                                  "'t",  "'m",  "'d"};
+    for (const auto contraction : contractions) {
+        if (text.substr(offset, contraction.size()) == contraction)
+            return contraction.size();
+    }
+    return 0;
+}
+
+enum class ClipPieceKind { kWhitespace, kLetter, kNumber, kOther };
+
+ClipPieceKind clip_piece_kind(char32_t codepoint) {
+    if (is_clip_whitespace(codepoint))
+        return ClipPieceKind::kWhitespace;
+    if (is_clip_letter(codepoint))
+        return ClipPieceKind::kLetter;
+    if (is_clip_number(codepoint))
+        return ClipPieceKind::kNumber;
+    return ClipPieceKind::kOther;
+}
+
+std::size_t clip_piece_end(std::string_view text, std::size_t offset, ClipPieceKind kind) {
+    auto end = offset + decode_utf8_unit(text, offset).size;
+    if (kind == ClipPieceKind::kNumber)
+        return end;
+    while (end < text.size()) {
+        const auto next = decode_utf8_unit(text, end);
+        if (clip_piece_kind(next.codepoint) != kind || clip_contraction_size(text, end) > 0)
+            break;
+        end += next.size;
+    }
+    return end;
+}
+
+char ascii_lower(unsigned char byte) {
+    return byte >= 'A' && byte <= 'Z' ? static_cast<char>(byte - 'A' + 'a')
+                                      : static_cast<char>(byte);
+}
+
+class Sam3ClipTokenizer final : public ITokenizer {
+  public:
+    explicit Sam3ClipTokenizer(std::shared_ptr<ITokenizer> inner) : mInner(std::move(inner)) {}
+
+    std::vector<int32_t> encode(const std::string& text) const override {
+        std::vector<int32_t> ids;
+        for (std::size_t offset = 0; offset < text.size();) {
+            const auto unit = decode_utf8_unit(text, offset);
+            const auto kind = clip_piece_kind(unit.codepoint);
+            if (kind == ClipPieceKind::kWhitespace) {
+                offset += unit.size;
+                continue;
+            }
+
+            const auto contraction_size = clip_contraction_size(text, offset);
+            if (contraction_size > 0) {
+                append_encoded(text.substr(offset, contraction_size), ids);
+                offset += contraction_size;
+                continue;
+            }
+
+            const auto begin = offset;
+            offset = clip_piece_end(text, offset, kind);
+            auto piece = text.substr(begin, offset - begin);
+            std::transform(piece.begin(), piece.end(), piece.begin(), ascii_lower);
+            append_encoded(piece, ids);
+        }
+        return ids;
+    }
+
+    std::string decode(const std::vector<int32_t>& ids) const override {
+        return mInner->decode(ids);
+    }
+
+    int32_t id_for_token(std::string_view token) const override {
+        return mInner->id_for_token(token);
+    }
+
+    std::string token_for_id(int32_t id) const override { return mInner->token_for_id(id); }
+
+  private:
+    void append_encoded(const std::string& piece, std::vector<int32_t>& ids) const {
+        const auto encoded = mInner->encode(piece);
+        ids.insert(ids.end(), encoded.begin(), encoded.end());
+    }
+
+    std::shared_ptr<ITokenizer> mInner;
 };
 
 struct TokenizerSpecialFrame {
@@ -127,14 +301,14 @@ TokenizerSpecialFrame detect_tokenizer_special_frame(const BundleFile& bundle) {
     return frame;
 }
 
-std::shared_ptr<ITokenizer> apply_tokenizer_special_frame(std::unique_ptr<ITokenizer> tokenizer,
+std::shared_ptr<ITokenizer> apply_tokenizer_special_frame(std::shared_ptr<ITokenizer> tokenizer,
                                                           const TokenizerSpecialFrame& frame) {
     if (!tokenizer)
         return nullptr;
-    std::shared_ptr<ITokenizer> shared(std::move(tokenizer));
     if (!frame.present || (frame.prefix.empty() && frame.suffix.empty()))
-        return shared;
-    return std::make_shared<SpecialFrameTokenizer>(std::move(shared), frame.prefix, frame.suffix);
+        return tokenizer;
+    return std::make_shared<SpecialFrameTokenizer>(std::move(tokenizer), frame.prefix,
+                                                   frame.suffix);
 }
 
 TokenizerSpecialFrame detect_requested_tokenizer_special_frame(const BundleFile& bundle,
@@ -142,6 +316,52 @@ TokenizerSpecialFrame detect_requested_tokenizer_special_frame(const BundleFile&
     if (!add_special_tokens)
         return TokenizerSpecialFrame{};
     return detect_tokenizer_special_frame(bundle);
+}
+
+bool is_sam3_clip_pre_tokenizer(const nlohmann::json& pre_tokenizer) {
+    static constexpr std::string_view split_regex =
+        R"(<\|startoftext\|>|<\|endoftext\|>|'s|'t|'re|'ve|'m|'ll|'d|[\p{L}]+|[\p{N}]|[^\s\p{L}\p{N}]+)";
+    if (pre_tokenizer.value("type", "") != "Sequence" || !pre_tokenizer.contains("pretokenizers") ||
+        pre_tokenizer["pretokenizers"].size() != 2)
+        return false;
+    const auto& split = pre_tokenizer["pretokenizers"][0];
+    const auto& byte_level = pre_tokenizer["pretokenizers"][1];
+    return split.value("type", "") == "Split" && split.value("behavior", "") == "Removed" &&
+           split.value("invert", false) && split.contains("pattern") &&
+           split["pattern"].value("Regex", "") == split_regex &&
+           byte_level.value("type", "") == "ByteLevel" &&
+           !byte_level.value("add_prefix_space", true);
+}
+
+bool is_sam3_clip_normalizer(const nlohmann::json& normalizer) {
+    if (normalizer.value("type", "") != "Sequence" || !normalizer.contains("normalizers") ||
+        normalizer["normalizers"].size() != 3)
+        return false;
+    const auto& parts = normalizer["normalizers"];
+    const auto& replace = parts[1];
+    return parts[0].value("type", "") == "NFC" && replace.value("type", "") == "Replace" &&
+           replace.value("content", "") == " " && replace.contains("pattern") &&
+           replace["pattern"].value("Regex", "") == "\\s+" &&
+           parts[2].value("type", "") == "Lowercase";
+}
+
+bool uses_sam3_clip_tokenizer_contract(const BundleFile& bundle) {
+    auto* tok_data = find_section(bundle, "tokenizer.json");
+    if (!tok_data || tok_data->empty())
+        return false;
+    try {
+        const auto tokenizer = nlohmann::json::parse(tok_data->begin(), tok_data->end());
+        if (!tokenizer.contains("model") || !tokenizer.contains("normalizer") ||
+            !tokenizer.contains("pre_tokenizer"))
+            return false;
+        const auto& model = tokenizer["model"];
+        return model.value("type", "") == "BPE" &&
+               model.value("end_of_word_suffix", "") == "</w>" &&
+               is_sam3_clip_normalizer(tokenizer["normalizer"]) &&
+               is_sam3_clip_pre_tokenizer(tokenizer["pre_tokenizer"]);
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
 }
 
 std::shared_ptr<ITokenizer> try_create_native_tokenizer_kind(TokenizerFactory factory,
@@ -154,7 +374,8 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer_kind(TokenizerFactory fa
         if (!tok)
             return nullptr;
         std::cerr << "[trtmc] Using native " << label << " tokenizer" << std::endl;
-        return apply_tokenizer_special_frame(std::move(tok), frame);
+        std::shared_ptr<ITokenizer> shared(std::move(tok));
+        return apply_tokenizer_special_frame(std::move(shared), frame);
     } catch (...) {
         return nullptr;
     }
@@ -223,8 +444,16 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle
 }
 
 std::shared_ptr<ITokenizer> create_tokenizer_from_bundle(const BundleFile& bundle) {
-    bool add_special = detect_add_special_tokens(bundle);
-    return try_create_native_tokenizer(bundle, add_special);
+    const bool add_special = detect_add_special_tokens(bundle);
+    const auto special_frame = detect_requested_tokenizer_special_frame(bundle, add_special);
+    if (!uses_sam3_clip_tokenizer_contract(bundle) || (add_special && !special_frame.present))
+        return try_create_native_tokenizer(bundle, add_special);
+
+    auto tokenizer = try_create_native_tokenizer(bundle, /*add_special_tokens=*/false);
+    if (!tokenizer)
+        return nullptr;
+    tokenizer = std::make_shared<Sam3ClipTokenizer>(std::move(tokenizer));
+    return apply_tokenizer_special_frame(std::move(tokenizer), special_frame);
 }
 
 // TRT module loading (delegated to IBackend).
