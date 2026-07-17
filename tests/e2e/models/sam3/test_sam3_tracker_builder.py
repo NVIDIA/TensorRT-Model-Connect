@@ -14,7 +14,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from tensorrt_model_connect.families.sam3 import tracker_builder, tracker_weights
+from tensorrt_model_connect.families.sam3 import (
+    tracker_builder,
+    tracker_memory_ffi_builder,
+    tracker_step_ffi_builder,
+    tracker_weights,
+)
 
 
 def test_sam3_tracker_step_profiles_cover_native_memory_bounds() -> None:
@@ -236,7 +241,7 @@ def test_sam3_tracker_init_pointer_uses_meta_single_mask_token() -> None:
     assert "selected.mask_token" not in init_source
 
 
-def test_sam3_tracker_step_exports_meta_sigmoid_selected_iou() -> None:
+def test_sam3_tracker_step_ffi_preserves_meta_selected_iou_output() -> None:
     from tensorrt_model_connect.families.sam3 import tracker_decoder_builder
 
     decoder_source = inspect.getsource(tracker_decoder_builder.add_mask_decoder)
@@ -252,8 +257,10 @@ def test_sam3_tracker_step_exports_meta_sigmoid_selected_iou() -> None:
 
     head_source = inspect.getsource(tracker_decoder_builder.add_tracker_step_head)
     assert "selected_iou=selected.iou_score" in head_source
-    build_source = inspect.getsource(tracker_builder._build_step)
-    assert '_mark(network, selected_iou, "selected_iou")' in build_source
+
+    output_source = inspect.getsource(tracker_step_ffi_builder._add_output_contract)
+    assert "offset=_PACKED_WIDTH - 1" in output_source
+    assert '"selected_iou"' in output_source
 
 
 def test_sam3_tracker_init_defers_recurrent_memory_until_global_frame_zero_policy() -> None:
@@ -263,19 +270,20 @@ def test_sam3_tracker_init_defers_recurrent_memory_until_global_frame_zero_polic
     assert '"memory_position"' not in init_source
     assert '"pred_masks"' not in init_source
 
-    memory_source = inspect.getsource(tracker_builder._build_memory)
-    assert "hard_mask=False" in memory_source
-
 
 def test_sam3_tracker_hard_memory_plan_has_fixed_b1_b2_contract() -> None:
-    hard_memory_source = inspect.getsource(tracker_builder._build_hard_memory)
-    assert '"tracker_feature_2"' in hard_memory_source
-    assert '"carved_low_res_mask"' in hard_memory_source
-    assert "(batch_size, 1, 288, 288)" in hard_memory_source
-    assert '"object_score_logits"' in hard_memory_source
-    assert "hard_mask=True" in hard_memory_source
-    assert '"new_memory_features"' in hard_memory_source
-    assert '"new_memory_position"' in hard_memory_source
+    memory_plan_source = inspect.getsource(
+        tracker_memory_ffi_builder._build_tracker_memory_ffi_plan
+    )
+    assert '"tracker_feature_2"' in memory_plan_source
+    assert 'mask_name = "carved_low_res_mask" if hard_mask else "final_mask"' in memory_plan_source
+    assert "(batch_size, 1, 288, 288)" in memory_plan_source
+    assert '"object_score_logits"' in memory_plan_source
+    assert "if hard_mask" in memory_plan_source
+
+    output_source = inspect.getsource(tracker_memory_ffi_builder._add_output_contract)
+    assert '"new_memory_features"' in output_source
+    assert '"new_memory_position"' in output_source
 
 
 def test_sam3_tracker_hard_memory_matches_meta_geometry_order() -> None:
@@ -344,14 +352,13 @@ def test_sam3_tracker_soft_memory_matches_meta_geometry_order() -> None:
     assert "ElementWiseOperation.MIN" in suppression_source
     assert "network.add_select(reject, clamped, high_res_mask_logits)" in suppression_source
 
-    build_soft_source = inspect.getsource(tracker_builder._build_memory)
-    assert '"suppress_area_shrinkage"' in build_soft_source
-    assert "trt.int32" in build_soft_source
-    assert "(batch_size, 1)" in build_soft_source
-    assert "suppress_area_shrinkage=suppress_area_shrinkage" in build_soft_source
-
-    build_hard_source = inspect.getsource(tracker_builder._build_hard_memory)
-    assert '"suppress_area_shrinkage"' not in build_hard_source
+    memory_plan_source = inspect.getsource(
+        tracker_memory_ffi_builder._build_tracker_memory_ffi_plan
+    )
+    assert '"suppress_area_shrinkage"' in memory_plan_source
+    assert "trt.int32" in memory_plan_source
+    assert "(batch_size, 1)" in memory_plan_source
+    assert "_constant_zero_suppression" in memory_plan_source
 
     public_source = functions["add_tracker_memory_encoder"]
     assert public_source is not None
@@ -359,7 +366,7 @@ def test_sam3_tracker_soft_memory_matches_meta_geometry_order() -> None:
     assert "suppress_area_shrinkage" in public_source
 
 
-def test_sam3_tracker_memory_has_one_default_meta_mixed_bf16_path() -> None:
+def test_sam3_tracker_memory_default_uses_only_fixed_aoti_wrappers() -> None:
     memory_path = Path(tracker_builder.__file__).with_name("tracker_memory_builder.py")
     module_source = memory_path.read_text(encoding="utf-8")
     tree = ast.parse(module_source, filename=str(memory_path))
@@ -380,8 +387,12 @@ def test_sam3_tracker_memory_has_one_default_meta_mixed_bf16_path() -> None:
 
     build_source = inspect.getsource(tracker_builder.build_sam3_tracker_engines)
     assert "compute_precision" not in build_source
-    assert build_source.count("_build_memory(") == 2
-    assert build_source.count("_build_hard_memory(") == 2
+    assert "build_sam3_tracker_memory_ffi_plans" in build_source
+    assert "memory_plan_spec" in build_source
+    assert "_build_memory(" not in build_source
+    assert "_build_hard_memory(" not in build_source
+    assert not hasattr(tracker_builder, "_build_memory")
+    assert not hasattr(tracker_builder, "_build_hard_memory")
 
 
 def test_sam3_tracker_memory_native_bf16_ops_keep_fp32_abi() -> None:
@@ -597,18 +608,180 @@ def test_sam3_tracker_builder_has_only_required_b1_b2_plans() -> None:
     parameters = inspect.signature(tracker_builder.build_sam3_tracker_engines).parameters
     assert "fp16_engines" not in parameters
     assert "fp16_ops" not in parameters
+    assert parameters["step_plan_spec"].default is None
+    assert parameters["memory_plan_spec"].default is None
 
     source = inspect.getsource(tracker_builder.build_sam3_tracker_engines)
+    assert "TRACKER_INIT_SECTION" in source
+    assert "build_sam3_tracker_step_ffi_plans" in source
+    assert "build_sam3_tracker_memory_ffi_plans" in source
+    assert "native recurrent fallback is not supported" in source
+    assert "direct TensorRT memory fallback is not supported" in source
+    assert "_build_step(" not in source
+    assert "_build_memory(" not in source
+    assert "_build_hard_memory(" not in source
+    ffi_source = inspect.getsource(tracker_step_ffi_builder.build_sam3_tracker_step_ffi_plans)
+    assert "TRACKER_STEP_SECTION" in ffi_source
+    assert "TRACKER_STEP_BATCH2_SECTION" in ffi_source
+    memory_ffi_source = inspect.getsource(
+        tracker_memory_ffi_builder.build_sam3_tracker_memory_ffi_plans
+    )
     for section in (
-        "TRACKER_INIT_SECTION",
-        "TRACKER_STEP_SECTION",
-        "TRACKER_STEP_BATCH2_SECTION",
         "TRACKER_MEMORY_SECTION",
         "TRACKER_MEMORY_BATCH2_SECTION",
         "TRACKER_HARD_MEMORY_SECTION",
         "TRACKER_HARD_MEMORY_BATCH2_SECTION",
     ):
-        assert section in source
+        assert section in memory_ffi_source
+
+
+def test_sam3_tracker_step_plan_spec_is_content_addressed() -> None:
+    valid_b1 = "trtmc.sam3.tracker_step.b1.split_aoti." + "1" * 20
+    valid_b2 = "trtmc.sam3.tracker_step.b2.split_aoti." + "2" * 20
+    tracker_step_ffi_builder._validate_global_name(valid_b1, batch_size=1)
+    tracker_step_ffi_builder._validate_global_name(valid_b2, batch_size=2)
+
+    with pytest.raises(ValueError, match="B1 split AOTI pipeline"):
+        tracker_step_ffi_builder._validate_global_name(
+            "trtmc.sam3.tracker_step.b1.aoti",
+            batch_size=1,
+        )
+    with pytest.raises(ValueError, match="B2 split AOTI pipeline"):
+        tracker_step_ffi_builder._validate_global_name(valid_b1, batch_size=2)
+
+
+def test_sam3_tracker_step_uses_tensorrt_11_creator_api() -> None:
+    calls: list[tuple[str, str, str]] = []
+    creator = object()
+
+    class _Registry:
+        def get_creator(self, plugin_type: str, version: str, namespace: str):
+            calls.append((plugin_type, version, namespace))
+            return creator
+
+    trt = SimpleNamespace(get_plugin_registry=lambda: _Registry())
+
+    assert tracker_step_ffi_builder._plugin_creator(trt) is creator
+    assert calls == [("Sam3TrackerStepFfi", "1", "")]
+
+
+def test_sam3_tracker_build_fails_closed_without_exported_step_spec(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="content-addressed B1/B2 split"):
+        tracker_builder.build_sam3_tracker_engines(str(tmp_path))
+
+
+def test_sam3_tracker_step_ffi_loads_dso_before_building_b1_b2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tensorrt_model_connect.families.sam3 import native_plugin_builder
+
+    events: list[tuple[object, ...]] = []
+    plugin_path = Path("/tmp/libtrtmc_sam3_tracker_step_native_plugin.so")
+    global_b1 = "trtmc.sam3.tracker_step.b1.split_aoti." + "a" * 20
+    global_b2 = "trtmc.sam3.tracker_step.b2.split_aoti." + "b" * 20
+    spec = tracker_step_ffi_builder.TrackerStepPlanSpec(
+        plugin_library=plugin_path,
+        global_name_b1=global_b1,
+        global_name_b2=global_b2,
+    )
+
+    monkeypatch.setattr(
+        native_plugin_builder,
+        "load_native_plugin",
+        lambda path: events.append(("load", path)),
+    )
+
+    def _fake_build(global_name: str, *, batch_size: int, verbose: bool) -> bytes:
+        events.append(("build", global_name, batch_size, verbose))
+        return f"plan-b{batch_size}".encode()
+
+    monkeypatch.setattr(
+        tracker_step_ffi_builder,
+        "_build_tracker_step_ffi_plan",
+        _fake_build,
+    )
+    plans = tracker_step_ffi_builder.build_sam3_tracker_step_ffi_plans(spec, verbose=True)
+
+    assert events == [
+        ("load", plugin_path),
+        ("build", global_b1, 1, True),
+        ("build", global_b2, 2, True),
+    ]
+    assert plans == {
+        tracker_builder.TRACKER_STEP_SECTION: b"plan-b1",
+        tracker_builder.TRACKER_STEP_BATCH2_SECTION: b"plan-b2",
+    }
+
+
+def test_sam3_tracker_step_ffi_plan_has_exact_runtime_abi() -> None:
+    build_source = inspect.getsource(tracker_step_ffi_builder._build_tracker_step_ffi_plan)
+    expected_inputs = (
+        "tracker_feature_0",
+        "tracker_feature_1",
+        "tracker_feature_2",
+        "tracker_position_2",
+        "memory_features",
+        "memory_position",
+        "memory_temporal_offsets",
+        "object_pointers",
+        "object_pointer_temporal_offsets",
+        "max_object_pointers_to_use",
+    )
+    assert all(f'"{name}"' in build_source for name in expected_inputs)
+    assert "network.add_plugin_v2" in build_source
+    assert "tracker_builder._add_step_profile" in build_source
+
+    output_source = inspect.getsource(tracker_step_ffi_builder._add_output_contract)
+    for output in ("pred_masks", "object_pointer", "object_score_logits", "selected_iou"):
+        assert f'"{output}"' in output_source
+    assert "(batch_size, 1, _MASK_SIZE, _MASK_SIZE)" in output_source
+    assert "(batch_size, 1, _POINTER_VALUES)" in output_source
+    assert output_source.count("(batch_size, 1, 1)") == 2
+
+
+def test_sam3_runtime_loads_tracker_bridge_before_required_step_plans() -> None:
+    repository_root = Path(__file__).resolve().parents[4]
+    plugin_path = repository_root / "src/runtime/models/sam3/plugin.cpp"
+    source = plugin_path.read_text(encoding="utf-8")
+    helper_start = source.index("Sam3TrackerStepModules load_sam3_tracker_step_modules")
+    helper_end = source.index("\n}\n\n} // namespace", helper_start)
+    helper = source[helper_start:helper_end]
+
+    runtime_load = helper.index("load_sam3_tracker_step_runtime(ctx.bundle)")
+    b1_load = helper.index('find_section(ctx.bundle, "sam3_tracker_step_engine_plan")')
+    b2_load = helper.index('find_section(ctx.bundle, "sam3_tracker_step_batch2_engine_plan")')
+    assert runtime_load < b1_load < b2_load
+    assert helper.count("load_trt_module_from_plan(") == 2
+    assert "extract_optional_module" not in helper
+    assert "if (!video_tracking_supported)" in helper
+
+
+def test_sam3_runtime_requires_all_memory_plans_only_for_video_bundles() -> None:
+    repository_root = Path(__file__).resolve().parents[4]
+    plugin_path = repository_root / "src/runtime/models/sam3/plugin.cpp"
+    source = plugin_path.read_text(encoding="utf-8")
+    helper_start = source.index("Sam3TrackerMemoryModules load_sam3_tracker_memory_modules")
+    helper_end = source.index("\n}\n\nSam3TrackerStepModules", helper_start)
+    helper = source[helper_start:helper_end]
+
+    assert "if (!video_tracking_supported)" in helper
+    assert helper.count("load_trt_module_from_plan(") == 4
+    assert "extract_optional_module" not in helper
+    for section in (
+        "sam3_tracker_memory_engine_plan",
+        "sam3_tracker_memory_batch2_engine_plan",
+        "sam3_tracker_hard_memory_engine_plan",
+        "sam3_tracker_hard_memory_batch2_engine_plan",
+    ):
+        assert f'find_section(ctx.bundle, "{section}")' in helper
+
+    create_start = source.index("std::unique_ptr<IPipeline> create")
+    create_end = source.index("\n    }\n};", create_start)
+    create = source[create_start:create_end]
+    assert create.index("load_sam3_tracker_step_modules") < create.index(
+        "load_sam3_tracker_memory_modules"
+    )
 
 
 def test_sam3_tracker_reviewed_video_bound_derives_pointer_profile() -> None:
@@ -634,7 +807,7 @@ def _call_attribute_names(tree: ast.AST) -> set[str]:
 
 
 def test_sam3_production_has_no_exchange_graph_path() -> None:
-    """The SAM3 contract permits only direct TensorRT graph construction."""
+    """Forbid ONNX and limit AOTI to the two SAM3-owned exporters."""
 
     forbidden_import_roots = {
         "onnx",
@@ -648,11 +821,22 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
         "nvonnxparser",
         "onnxparser",
         "opset",
-        "torch.export",
         "torch.onnx",
     }
 
     for path, source in _sam3_production_sources().items():
+        is_tracker_aoti_exporter = path.name in {
+            "tracker_step_aoti_exporter.py",
+            "tracker_memory_aoti_exporter.py",
+        }
+        allowed_export_symbols = (
+            {
+                "export_sam3_tracker_split_aoti",
+                "export_sam3_tracker_memory_aoti",
+            }
+            if path.name == "plugin.py"
+            else set()
+        )
         tree = ast.parse(source, filename=str(path))
         imports: set[str] = set()
         symbols: set[str] = set()
@@ -678,7 +862,10 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
                 f"{sorted(imports & tracker_framework_roots)}"
             )
         lowered = source.lower()
-        matched_tokens = sorted(token for token in forbidden_source_tokens if token in lowered)
+        path_forbidden_tokens = set(forbidden_source_tokens)
+        if not is_tracker_aoti_exporter:
+            path_forbidden_tokens.add("torch.export")
+        matched_tokens = sorted(token for token in path_forbidden_tokens if token in lowered)
         assert not matched_tokens, (
             f"{path.name} contains a forbidden exchange-graph path: {matched_tokens}"
         )
@@ -688,13 +875,21 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
             if "onnx" in symbol
             or "opset" in symbol
             or "modelproto" in symbol
-            or "export" in symbol
+            or (
+                "export" in symbol
+                and not is_tracker_aoti_exporter
+                and symbol not in allowed_export_symbols
+            )
             or symbol in {"parse", "parse_from_file"}
             or symbol.endswith("parser")
         )
         assert not forbidden_symbols, (
             f"{path.name} defines or calls a graph exporter/parser: {forbidden_symbols}"
         )
+
+        if is_tracker_aoti_exporter:
+            assert "torch.export.export" in source
+            assert "aoti_compile_and_package" in source
 
 
 def test_sam3_tracker_graph_is_built_with_native_tensorrt_api() -> None:

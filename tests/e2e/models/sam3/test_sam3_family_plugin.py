@@ -511,10 +511,47 @@ def test_sam3_video_build_packages_all_tracker_plans(tmp_path: Path, monkeypatch
     fake_core = types.SimpleNamespace(
         build_sam3_core_engine=lambda _weights, **_kwargs: b"sam3-core-plan"
     )
-    tracker_calls: list[tuple[str, bool]] = []
+    tracker_calls: list[tuple[str, object, object, bool]] = []
+    split_artifacts = types.SimpleNamespace(
+        pipeline_global=lambda batch_size: f"pipeline-b{batch_size}"
+    )
+    memory_packages = {
+        (1, False): types.SimpleNamespace(package_global="memory-soft-b1"),
+        (2, False): types.SimpleNamespace(package_global="memory-soft-b2"),
+        (1, True): types.SimpleNamespace(package_global="memory-hard-b1"),
+        (2, True): types.SimpleNamespace(package_global="memory-hard-b2"),
+    }
+    memory_artifacts = types.SimpleNamespace(
+        package=lambda *, batch_size, hard_mask: memory_packages[(batch_size, hard_mask)]
+    )
+    runtime_artifacts = types.SimpleNamespace(
+        plugin_library=tmp_path / "libsam3-tracker-step.so",
+        bundle_sections=(
+            ("sam3_tracker_encoder_b1_dynamic.pt2", b"encoder-b1"),
+            ("sam3_tracker_decoder_b1_static.pt2", b"decoder-b1"),
+            ("sam3_tracker_encoder_b2_dynamic.pt2", b"encoder-b2"),
+            ("sam3_tracker_decoder_b2_static.pt2", b"decoder-b2"),
+            ("sam3_tracker_memory_aoti_manifest.json", b"memory-manifest"),
+            ("sam3_tracker_memory_soft_b1.pt2", b"memory-soft-b1"),
+            ("sam3_tracker_memory_hard_b1.pt2", b"memory-hard-b1"),
+            ("sam3_tracker_memory_soft_b2.pt2", b"memory-soft-b2"),
+            ("sam3_tracker_memory_hard_b2.pt2", b"memory-hard-b2"),
+            ("sam3_tracker_step_native_plugin_so", b"native-plugin"),
+            ("sam3_tracker_step_runtime_manifest.json", b"runtime-manifest"),
+        ),
+    )
+    step_export_calls: list[str] = []
+    memory_export_calls: list[str] = []
+    runtime_calls: list[tuple[object, object, bool]] = []
 
-    def _fake_tracker_build(model_dir: str, *, verbose: bool = False):
-        tracker_calls.append((model_dir, verbose))
+    def _fake_tracker_build(
+        model_dir: str,
+        *,
+        step_plan_spec: object,
+        memory_plan_spec: object,
+        verbose: bool = False,
+    ):
+        tracker_calls.append((model_dir, step_plan_spec, memory_plan_spec, verbose))
         return {
             "sam3_tracker_init_engine_plan": b"sam3-tracker-init-plan",
             "sam3_tracker_step_engine_plan": b"sam3-tracker-step-plan",
@@ -526,6 +563,47 @@ def test_sam3_video_build_packages_all_tracker_plans(tmp_path: Path, monkeypatch
         }
 
     fake_tracker = types.SimpleNamespace(build_sam3_tracker_engines=_fake_tracker_build)
+    fake_exporter = types.SimpleNamespace(
+        export_sam3_tracker_split_aoti=lambda model_dir: (
+            step_export_calls.append(model_dir) or split_artifacts
+        )
+    )
+    fake_memory_exporter = types.SimpleNamespace(
+        export_sam3_tracker_memory_aoti=lambda model_dir: (
+            memory_export_calls.append(model_dir) or memory_artifacts
+        )
+    )
+    fake_native = types.SimpleNamespace(
+        prepare_tracker_step_runtime=lambda step, memory, *, verbose=False: (
+            runtime_calls.append((step, memory, verbose)) or runtime_artifacts
+        )
+    )
+
+    class _PlanSpec:
+        def __init__(self, *, plugin_library, global_name_b1, global_name_b2):
+            self.plugin_library = plugin_library
+            self.global_name_b1 = global_name_b1
+            self.global_name_b2 = global_name_b2
+
+    fake_ffi_builder = types.SimpleNamespace(TrackerStepPlanSpec=_PlanSpec)
+
+    class _MemoryPlanSpec:
+        def __init__(
+            self,
+            *,
+            plugin_library,
+            soft_global_b1,
+            soft_global_b2,
+            hard_global_b1,
+            hard_global_b2,
+        ):
+            self.plugin_library = plugin_library
+            self.soft_global_b1 = soft_global_b1
+            self.soft_global_b2 = soft_global_b2
+            self.hard_global_b1 = hard_global_b1
+            self.hard_global_b2 = hard_global_b2
+
+    fake_memory_ffi_builder = types.SimpleNamespace(TrackerMemoryPlanSpec=_MemoryPlanSpec)
     monkeypatch.setitem(
         sys.modules,
         "tensorrt_model_connect.families.sam3.core_builder",
@@ -535,6 +613,31 @@ def test_sam3_video_build_packages_all_tracker_plans(tmp_path: Path, monkeypatch
         sys.modules,
         "tensorrt_model_connect.families.sam3.tracker_builder",
         fake_tracker,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.sam3.tracker_step_aoti_exporter",
+        fake_exporter,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.sam3.tracker_memory_aoti_exporter",
+        fake_memory_exporter,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.sam3.native_plugin_builder",
+        fake_native,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.sam3.tracker_step_ffi_builder",
+        fake_ffi_builder,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tensorrt_model_connect.families.sam3.tracker_memory_ffi_builder",
+        fake_memory_ffi_builder,
     )
 
     plans = plugin.build_extra_engines(config, weights, max_cache_length=1, verbose=True)
@@ -548,8 +651,33 @@ def test_sam3_video_build_packages_all_tracker_plans(tmp_path: Path, monkeypatch
         "sam3_tracker_memory_batch2_engine_plan": b"sam3-tracker-memory-batch2-plan",
         "sam3_tracker_hard_memory_engine_plan": b"sam3-tracker-hard-memory-plan",
         "sam3_tracker_hard_memory_batch2_engine_plan": b"sam3-tracker-hard-memory-batch2-plan",
+        "sam3_tracker_encoder_b1_dynamic.pt2": b"encoder-b1",
+        "sam3_tracker_decoder_b1_static.pt2": b"decoder-b1",
+        "sam3_tracker_encoder_b2_dynamic.pt2": b"encoder-b2",
+        "sam3_tracker_decoder_b2_static.pt2": b"decoder-b2",
+        "sam3_tracker_memory_aoti_manifest.json": b"memory-manifest",
+        "sam3_tracker_memory_soft_b1.pt2": b"memory-soft-b1",
+        "sam3_tracker_memory_hard_b1.pt2": b"memory-hard-b1",
+        "sam3_tracker_memory_soft_b2.pt2": b"memory-soft-b2",
+        "sam3_tracker_memory_hard_b2.pt2": b"memory-hard-b2",
+        "sam3_tracker_step_native_plugin_so": b"native-plugin",
+        "sam3_tracker_step_runtime_manifest.json": b"runtime-manifest",
     }
-    assert tracker_calls == [(str(tmp_path), True)]
+    assert step_export_calls == [str(tmp_path)]
+    assert memory_export_calls == [str(tmp_path)]
+    assert runtime_calls == [(split_artifacts, memory_artifacts, True)]
+    assert len(tracker_calls) == 1
+    tracker_model_dir, plan_spec, memory_plan_spec, tracker_verbose = tracker_calls[0]
+    assert tracker_model_dir == str(tmp_path)
+    assert tracker_verbose is True
+    assert plan_spec.plugin_library == runtime_artifacts.plugin_library
+    assert plan_spec.global_name_b1 == "pipeline-b1"
+    assert plan_spec.global_name_b2 == "pipeline-b2"
+    assert memory_plan_spec.plugin_library == runtime_artifacts.plugin_library
+    assert memory_plan_spec.soft_global_b1 == "memory-soft-b1"
+    assert memory_plan_spec.soft_global_b2 == "memory-soft-b2"
+    assert memory_plan_spec.hard_global_b1 == "memory-hard-b1"
+    assert memory_plan_spec.hard_global_b2 == "memory-hard-b2"
     assert plugin.get_segmentation_config(config)["sam3_video_tracking_supported"] is True
     tracking_config = plugin.get_segmentation_config(config)
     assert tracking_config["sam3_assoc_iou_threshold"] == 0.1

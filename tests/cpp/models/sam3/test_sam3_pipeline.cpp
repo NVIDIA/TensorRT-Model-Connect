@@ -904,6 +904,7 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
             const auto* memory_values = static_cast<const int32_t*>(memory_offset->second.data);
             last_memory_offsets.assign(memory_values,
                                        memory_values + memory_offset->second.numel());
+            memory_offsets_history.push_back(last_memory_offsets);
             const float* memory_features = static_cast<const float*>(memory->second.data);
             const float* memory_positions = static_cast<const float*>(memory_position->second.data);
             if (memory_features == nullptr) {
@@ -1135,6 +1136,7 @@ class FakeSam3TrackerModule final : public trtmc::TrtModule {
     std::vector<int64_t> last_pointer_shape;
     std::vector<int64_t> last_pointer_offset_shape;
     std::vector<int32_t> last_memory_offsets;
+    std::vector<std::vector<int32_t>> memory_offsets_history;
     std::vector<int32_t> last_pointer_offsets;
     std::vector<float> last_pointer_frame_values;
     int32_t last_max_pointers{0};
@@ -1856,7 +1858,7 @@ void test_late_new_track_uses_uncleaned_hard_memory() {
           "sam3 hard memory receives the uncleaned carved logits and present-object score");
 }
 
-void test_recurrent_tracker_uses_b2_and_odd_tail() {
+void test_recurrent_tracker_uses_b2_pairs_and_b1_odd_tail() {
     {
         constexpr float rounded_first_feature = 1.3359375F;
         constexpr float rounded_second_feature = 2.328125F;
@@ -1891,13 +1893,13 @@ void test_recurrent_tracker_uses_b2_and_odd_tail() {
         const auto results = run_video(*fixture.pipeline, 2);
         check(results[0].object_ids == std::vector<int32_t>({0, 1, 2}) &&
                   std::is_sorted(results[1].object_ids.begin(), results[1].object_ids.end()) &&
-                  fixture.step_batch2->calls == 2 && fixture.step->calls == 0,
-              "sam3 odd recurrent row uses one exact pair and one padded B2 tail");
+                  fixture.step_batch2->calls == 1 && fixture.step->calls == 1,
+              "sam3 odd recurrent row uses one exact B2 pair and one B1 tail");
         std::unordered_map<int32_t, bool> unique;
         for (const auto id : results[1].object_ids)
             unique.emplace(id, true);
         check(unique.size() == results[1].object_ids.size(),
-              "sam3 padded B2 tail creates no duplicate logical track");
+              "sam3 B1 tail preserves one output per logical track");
         check(fixture.memory_batch2->calls == 2 && fixture.hard_memory_batch2->calls == 1,
               "sam3 odd memory row soft-refreshes and updates its B2 rows");
         check(fixture.memory->calls == 2,
@@ -1944,6 +1946,7 @@ void test_recurrent_area_policy_is_global_across_b2_and_b1_tail() {
         global_loser,
         global_loser,
     };
+    fixture.step->recurrent_mask_override = global_loser;
 
     const auto results = run_video(*fixture.pipeline, 2);
     check(results.size() == 2 && fixture.memory_batch2->calls == 2 && fixture.memory->calls == 2,
@@ -2105,6 +2108,62 @@ void test_memory_quality_selection_uses_meta_ordinal_slots() {
           "sam3 filters low-effective-IoU memories, keeps t-1, and uses ordinal slots");
 }
 
+void test_memory_quality_is_shared_within_appearance_cohort() {
+    auto fixture = make_video_fixture(2, true);
+    fixture.core->detections_first_frame_only = true;
+    fixture.step_batch2->recurrent_masks_by_item = {
+        {2.0F, -2.0F, -2.0F, -2.0F}, {-2.0F, 2.0F, 2.0F, -2.0F},  {2.0F, -2.0F, -2.0F, -2.0F},
+        {-2.0F, 2.0F, 2.0F, -2.0F},  {2.0F, -2.0F, -2.0F, -2.0F}, {-2.0F, 2.0F, 2.0F, -2.0F},
+    };
+    // With logit 2, the two row-local effective qualities are 0 and
+    // approximately 0.03046: they straddle the 0.01 threshold, while their
+    // Meta cohort mean (approximately 0.01523) retains the frame for both.
+    fixture.step_batch2->scripted_selected_ious = {0.0F, 0.04F, 1.0F, 1.0F, 1.0F, 1.0F};
+    const auto results = run_video(*fixture.pipeline, 4);
+    check(results.size() == 4 && fixture.step->calls == 0 && fixture.step_batch2->calls == 3 &&
+              fixture.step_batch2->last_memory_offsets == std::vector<int32_t>({0, 2, 1, 0, 2, 1}),
+          "sam3 applies Meta's shared cohort quality before recurrent history selection");
+}
+
+void test_memory_quality_keeps_later_appearance_cohort_independent() {
+    auto fixture = make_video_fixture(2);
+    fixture.core->late_hard_conditioning_probe = true;
+    const std::vector<float> first_mask{-2.0F, -2.0F, -2.0F, 2.0F};
+    const std::vector<float> second_mask{2.0F, 2.0F, 2.0F, -2.0F};
+    fixture.step->recurrent_masks_by_item = {
+        first_mask, first_mask, second_mask, first_mask, second_mask, first_mask, second_mask,
+    };
+    // Frame two gives the older cohort a sub-threshold score and the cohort
+    // introduced on frame one a score above threshold. A global mean would
+    // incorrectly retain frame two for both states.
+    fixture.step->scripted_selected_ious = {0.0F, 0.0F, 0.04F, 1.0F, 1.0F, 1.0F, 1.0F};
+    const auto results = run_video(*fixture.pipeline, 5);
+    const auto history_size = fixture.step->memory_offsets_history.size();
+    check(results.size() == 5 && history_size >= 2 &&
+              fixture.step->memory_offsets_history[history_size - 2] ==
+                  std::vector<int32_t>({0, 1}) &&
+              fixture.step->memory_offsets_history[history_size - 1] ==
+                  std::vector<int32_t>({0, 2, 1}),
+          "sam3 does not average frame quality across separately introduced cohorts");
+}
+
+void test_memory_quality_recomputes_after_cohort_member_removal() {
+    auto fixture = make_video_fixture(2, false, false, 2.0F, [](trtmc::Sam3Config& config) {
+        config.hotstart_duplicate_threshold = 1;
+    });
+    fixture.core->second_detection_first_frame_only = true;
+    fixture.core->tie_detection_scores = true;
+    fixture.step->contained_pair_masks = true;
+    // The frame-one cohort mean passes because the soon-removed second row is
+    // strong. Meta remove_object slices that row from stored outputs and
+    // recomputes the survivor's frame quality, which is zero.
+    fixture.step->scripted_selected_ious = {0.0F, 0.04F, 1.0F, 1.0F};
+    const auto results = run_video(*fixture.pipeline, 4);
+    check(results.size() == 4 && results[1].removed_object_ids == std::vector<int32_t>({1}) &&
+              fixture.step->last_memory_offsets == std::vector<int32_t>({0, 1}),
+          "sam3 recomputes shared historical quality after removing a cohort member");
+}
+
 void test_reconditioning_uses_raw_tracker_logit() {
     auto fixture = make_video_fixture(1, false, false, 0.8F, [](trtmc::Sam3Config& config) {
         config.high_confidence_threshold = 0.7F;
@@ -2226,13 +2285,16 @@ int main() {
     test_frame_zero_prompt_and_propagation_follow_meta_schedule();
     test_frame_zero_zero_detections_is_stable();
     test_late_new_track_uses_uncleaned_hard_memory();
-    test_recurrent_tracker_uses_b2_and_odd_tail();
+    test_recurrent_tracker_uses_b2_pairs_and_b1_odd_tail();
     test_device_recurrent_memory_rounds_features_and_positions();
     test_parallel_mask_cleanup_preserves_full_results();
     test_parallel_tracker_init_and_cleanup_overlap();
     test_conditioning_and_pointer_history();
     test_pointer_history_matches_meta_five_frame_boundary();
     test_memory_quality_selection_uses_meta_ordinal_slots();
+    test_memory_quality_is_shared_within_appearance_cohort();
+    test_memory_quality_keeps_later_appearance_cohort_independent();
+    test_memory_quality_recomputes_after_cohort_member_removal();
     test_reconditioning_uses_raw_tracker_logit();
     test_association_overlap_and_stable_ties();
     test_recent_occlusion_and_hotstart_policy();

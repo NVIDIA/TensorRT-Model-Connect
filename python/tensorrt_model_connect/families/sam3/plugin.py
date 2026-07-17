@@ -180,9 +180,7 @@ def _resolve_sam3_config(raw: dict) -> dict:
         # component even though its weights are present in the checkpoint.
         "geometry_encoder_layers": 3,
         "geometry_encoder_num_heads": int(detr_encoder.get("num_attention_heads", 8)),
-        "geometry_encoder_intermediate_size": int(
-            detr_encoder.get("intermediate_size", 2048)
-        ),
+        "geometry_encoder_intermediate_size": int(detr_encoder.get("intermediate_size", 2048)),
         "geometry_encoder_hidden_act": "relu",
         "geometry_encoder_layer_norm_eps": 1e-5,
         "low_res_mask_size": int(raw.get("low_res_mask_size", 288)),
@@ -379,9 +377,7 @@ def _load_sam3_core_weights(model_dir: str, cfg: dict) -> WeightDict:
         for layer_idx in range(1, num_layers + 1):
             load_linear(f"{dst}.layer{layer_idx}", f"{suffix}.layer{layer_idx}")
 
-    weights["geometry_encoder.cls_embed.weight"] = load(
-        "geometry_encoder.cls_embed.weight"
-    )
+    weights["geometry_encoder.cls_embed.weight"] = load("geometry_encoder.cls_embed.weight")
     load_linear("geometry_encoder.final_proj", "geometry_encoder.final_proj")
     load_norm("geometry_encoder.prompt_layer_norm", "geometry_encoder.prompt_layer_norm")
     for layer_idx in range(cfg["geometry_encoder_layers"]):
@@ -570,9 +566,7 @@ class Sam3Plugin:
             "detr_decoder_intermediate_size": cfg["detr_decoder_intermediate_size"],
             "geometry_encoder_layers": cfg["geometry_encoder_layers"],
             "geometry_encoder_heads": cfg["geometry_encoder_num_heads"],
-            "geometry_encoder_intermediate_size": cfg[
-                "geometry_encoder_intermediate_size"
-            ],
+            "geometry_encoder_intermediate_size": cfg["geometry_encoder_intermediate_size"],
             "mask_num_heads": cfg["mask_num_heads"],
             "mask_num_upsampling_stages": cfg["mask_num_upsampling_stages"],
             "layer_norm_eps": cfg["core_layer_norm_eps"],
@@ -580,9 +574,7 @@ class Sam3Plugin:
             "encoder_hidden_act": cfg["detr_encoder_hidden_act"],
             "decoder_hidden_act": cfg["detr_decoder_hidden_act"],
             "geometry_encoder_hidden_act": cfg["geometry_encoder_hidden_act"],
-            "geometry_encoder_layer_norm_eps": cfg[
-                "geometry_encoder_layer_norm_eps"
-            ],
+            "geometry_encoder_layer_norm_eps": cfg["geometry_encoder_layer_norm_eps"],
             "verbose": verbose,
         }
         plans = {
@@ -592,10 +584,51 @@ class Sam3Plugin:
             )
         }
         if cfg["video_tracking_supported"]:
+            from .native_plugin_builder import prepare_tracker_step_runtime
             from .tracker_builder import build_sam3_tracker_engines
+            from .tracker_memory_aoti_exporter import export_sam3_tracker_memory_aoti
+            from .tracker_memory_ffi_builder import TrackerMemoryPlanSpec
+            from .tracker_step_aoti_exporter import export_sam3_tracker_split_aoti
+            from .tracker_step_ffi_builder import TrackerStepPlanSpec
 
-            tracker_plans = build_sam3_tracker_engines(model_dir, verbose=verbose)
+            split_artifacts = export_sam3_tracker_split_aoti(model_dir)
+            memory_artifacts = export_sam3_tracker_memory_aoti(model_dir)
+            runtime_artifacts = prepare_tracker_step_runtime(
+                split_artifacts,
+                memory_artifacts,
+                verbose=verbose,
+            )
+            step_plan_spec = TrackerStepPlanSpec(
+                plugin_library=runtime_artifacts.plugin_library,
+                global_name_b1=split_artifacts.pipeline_global(1),
+                global_name_b2=split_artifacts.pipeline_global(2),
+            )
+            memory_plan_spec = TrackerMemoryPlanSpec(
+                plugin_library=runtime_artifacts.plugin_library,
+                soft_global_b1=memory_artifacts.package(
+                    batch_size=1, hard_mask=False
+                ).package_global,
+                soft_global_b2=memory_artifacts.package(
+                    batch_size=2, hard_mask=False
+                ).package_global,
+                hard_global_b1=memory_artifacts.package(
+                    batch_size=1, hard_mask=True
+                ).package_global,
+                hard_global_b2=memory_artifacts.package(
+                    batch_size=2, hard_mask=True
+                ).package_global,
+            )
+            tracker_plans = build_sam3_tracker_engines(
+                model_dir,
+                step_plan_spec=step_plan_spec,
+                memory_plan_spec=memory_plan_spec,
+                verbose=verbose,
+            )
             plans.update(tracker_plans)
+            for section, payload in runtime_artifacts.bundle_sections:
+                if section in plans:
+                    raise RuntimeError(f"Duplicate SAM3 bundle section {section}")
+                plans[section] = payload
         return plans
 
     def get_segmentation_config(self, config: ModelConfig) -> dict:

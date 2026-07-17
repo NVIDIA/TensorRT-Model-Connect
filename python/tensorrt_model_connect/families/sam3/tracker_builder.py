@@ -16,11 +16,15 @@ import json
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from tensorrt_model_connect import trt_compat
 
 from .tracker_weights import TrackerWeights, load_tracker_weights
+
+if TYPE_CHECKING:
+    from .tracker_memory_ffi_builder import TrackerMemoryPlanSpec
+    from .tracker_step_ffi_builder import TrackerStepPlanSpec
 
 
 TRACKER_INIT_SECTION = "sam3_tracker_init_engine_plan"
@@ -442,163 +446,51 @@ def _build_init(weights: TrackerWeights, *, verbose: bool) -> bytes:
     return _serialize(builder, network, config, kind="init", verbose=verbose)
 
 
-def _build_step(weights: TrackerWeights, *, batch_size: int, verbose: bool) -> bytes:
-    from .tracker_attention_builder import add_tracker_recurrent_conditioning
-    from .tracker_decoder_builder import add_tracker_step_head
-
-    trt, builder, network, config = _new_network(
-        enable_tf32=batch_size == _BATCH2_OBJECTS,
-        verbose=verbose,
-    )
-    feature_0 = _input(network, "tracker_feature_0", trt.float32, _FEATURE_SHAPES[0])
-    feature_1 = _input(network, "tracker_feature_1", trt.float32, _FEATURE_SHAPES[1])
-    feature_2 = _input(network, "tracker_feature_2", trt.float32, _FEATURE_SHAPES[2])
-    position_2 = _input(network, "tracker_position_2", trt.float32, _POSITION_SHAPE)
-    if batch_size == 1:
-        memory_shape = (1, -1, _SPATIAL_TOKENS, 64)
-        memory_offset_shape = (1, -1)
-        pointer_shape = (1, -1, 256)
-        pointer_offset_shape = (1, -1)
-    else:
-        memory_shape = (2, -1, _SPATIAL_TOKENS, 64)
-        memory_offset_shape = (2, -1)
-        pointer_shape = (2, -1, 256)
-        pointer_offset_shape = (2, -1)
-    memory_features = _input(network, "memory_features", trt.float32, memory_shape)
-    memory_position = _input(network, "memory_position", trt.float32, memory_shape)
-    memory_offsets = _input(network, "memory_temporal_offsets", trt.int32, memory_offset_shape)
-    object_pointers = _input(network, "object_pointers", trt.float32, pointer_shape)
-    pointer_offsets = _input(
-        network,
-        "object_pointer_temporal_offsets",
-        trt.int32,
-        pointer_offset_shape,
-    )
-    max_pointers = _input(network, "max_object_pointers_to_use", trt.int32, (1,))
-    conditioned = add_tracker_recurrent_conditioning(
-        network,
-        feature_2,
-        position_2,
-        memory_features,
-        memory_position,
-        memory_offsets,
-        object_pointers,
-        pointer_offsets,
-        max_pointers,
-        weights,
-        batch_size=batch_size,
-    )
-    head = add_tracker_step_head(
-        network,
-        feature_0,
-        feature_1,
-        conditioned,
-        weights,
-        object_batch=batch_size,
-    )
-    pointer = head.object_pointer
-    score = head.object_score_logits
-    selected_iou = head.selected_iou
-    if batch_size == 1:
-        pointer = _reshape(network, pointer, (1, 1, 256))
-        score = _reshape(network, score, (1, 1, 1))
-        selected_iou = _reshape(network, selected_iou, (1, 1, 1))
-    _mark(network, head.pred_masks, "pred_masks")
-    _mark(network, pointer, "object_pointer")
-    _mark(network, score, "object_score_logits")
-    _mark(network, selected_iou, "selected_iou")
-    _add_step_profile(builder, config, network, batch_size=batch_size)
-    kind = "batch2 step" if batch_size == 2 else "step"
-    return _serialize(builder, network, config, kind=kind, verbose=verbose)
-
-
-def _build_memory(weights: TrackerWeights, *, batch_size: int, verbose: bool) -> bytes:
-    from .tracker_memory_builder import add_tracker_memory_encoder
-
-    trt, builder, network, config = _new_network(enable_tf32=False, verbose=verbose)
-    feature = _input(network, "tracker_feature_2", trt.float32, _FEATURE_SHAPES[2])
-    final_mask = _input(network, "final_mask", trt.float32, (batch_size, 1, 288, 288))
-    score = _input(network, "object_score_logits", trt.float32, (batch_size, 1))
-    suppress_area_shrinkage = _input(
-        network,
-        "suppress_area_shrinkage",
-        trt.int32,
-        (batch_size, 1),
-    )
-    outputs = add_tracker_memory_encoder(
-        network,
-        feature,
-        final_mask,
-        score,
-        weights,
-        batch_size=batch_size,
-        hard_mask=False,
-        suppress_area_shrinkage=suppress_area_shrinkage,
-    )
-    _mark(network, outputs.memory, "new_memory_features")
-    _mark(network, outputs.position, "new_memory_position")
-    kind = "batch2 memory" if batch_size == 2 else "memory"
-    return _serialize(builder, network, config, kind=kind, verbose=verbose)
-
-
-def _build_hard_memory(weights: TrackerWeights, *, batch_size: int, verbose: bool) -> bytes:
-    """Build Meta's fixed-shape new-object conditioning memory plan."""
-
-    from .tracker_memory_builder import add_tracker_memory_encoder
-
-    trt, builder, network, config = _new_network(enable_tf32=False, verbose=verbose)
-    feature = _input(network, "tracker_feature_2", trt.float32, _FEATURE_SHAPES[2])
-    carved_mask = _input(
-        network,
-        "carved_low_res_mask",
-        trt.float32,
-        (batch_size, 1, 288, 288),
-    )
-    score = _input(network, "object_score_logits", trt.float32, (batch_size, 1))
-    outputs = add_tracker_memory_encoder(
-        network,
-        feature,
-        carved_mask,
-        score,
-        weights,
-        batch_size=batch_size,
-        hard_mask=True,
-    )
-    _mark(network, outputs.memory, "new_memory_features")
-    _mark(network, outputs.position, "new_memory_position")
-    kind = "batch2 hard conditioning memory" if batch_size == 2 else "hard conditioning memory"
-    return _serialize(builder, network, config, kind=kind, verbose=verbose)
-
-
 def build_sam3_tracker_engines(
     model_dir: str,
     *,
+    step_plan_spec: TrackerStepPlanSpec | None = None,
+    memory_plan_spec: TrackerMemoryPlanSpec | None = None,
     verbose: bool = False,
 ) -> dict[str, bytes]:
-    """Build the seven fixed-policy SAM3 tracker plans directly in TensorRT."""
+    """Build tracker init plus fixed step and memory AOTI wrapper plans."""
+
+    from .tracker_memory_ffi_builder import (
+        TrackerMemoryPlanSpec,
+        build_sam3_tracker_memory_ffi_plans,
+    )
+    from .tracker_step_ffi_builder import (
+        TrackerStepPlanSpec,
+        build_sam3_tracker_step_ffi_plans,
+    )
 
     resolved = Path(model_dir)
     if not (resolved / "config.json").is_file():
         raise RuntimeError(f"SAM3 tracker build requires a local HF model directory: {model_dir}")
+    if step_plan_spec is None:
+        raise RuntimeError(
+            "SAM3 tracker build requires exported content-addressed B1/B2 split tracker-step "
+            "pipelines; the native recurrent fallback is not supported"
+        )
+    if not isinstance(step_plan_spec, TrackerStepPlanSpec):
+        raise TypeError("step_plan_spec must be a TrackerStepPlanSpec")
+    if memory_plan_spec is None:
+        raise RuntimeError(
+            "SAM3 tracker build requires exported content-addressed soft/hard B1/B2 "
+            "tracker-memory packages; the direct TensorRT memory fallback is not supported"
+        )
+    if not isinstance(memory_plan_spec, TrackerMemoryPlanSpec):
+        raise TypeError("memory_plan_spec must be a TrackerMemoryPlanSpec")
     _read_model_config(str(resolved))
     _validate_video_policy(str(resolved))
     if verbose:
         print("[trtmc build] Loading SAM3 tracker safetensors ...", file=sys.stderr)
     weights = load_tracker_weights(resolved)
-    return {
+    step_plans = build_sam3_tracker_step_ffi_plans(step_plan_spec, verbose=verbose)
+    memory_plans = build_sam3_tracker_memory_ffi_plans(memory_plan_spec, verbose=verbose)
+    plans = {
         TRACKER_INIT_SECTION: _build_init(weights, verbose=verbose),
-        TRACKER_STEP_SECTION: _build_step(weights, batch_size=1, verbose=verbose),
-        TRACKER_STEP_BATCH2_SECTION: _build_step(weights, batch_size=2, verbose=verbose),
-        TRACKER_MEMORY_SECTION: _build_memory(weights, batch_size=1, verbose=verbose),
-        TRACKER_MEMORY_BATCH2_SECTION: _build_memory(weights, batch_size=2, verbose=verbose),
-        TRACKER_HARD_MEMORY_SECTION: _build_hard_memory(
-            weights,
-            batch_size=1,
-            verbose=verbose,
-        ),
-        TRACKER_HARD_MEMORY_BATCH2_SECTION: _build_hard_memory(
-            weights,
-            batch_size=2,
-            verbose=verbose,
-        ),
     }
+    plans.update(step_plans)
+    plans.update(memory_plans)
+    return plans

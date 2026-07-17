@@ -4,6 +4,13 @@
 id = "sam3"
 plugin = "sam3"
 module = "plugin"
+python_profile_specs = [
+  "sam3_tracker|families/sam3/python_profile_requirements/sam3_tracker.lock.txt|families/sam3/python_profile_verify.py|true",
+]
+default_execution_profiles = [
+  "build|sam3_tracker",
+  "runtime|sam3_tracker",
+]
 aliases = [
   "sam3",
   "sam3-video",

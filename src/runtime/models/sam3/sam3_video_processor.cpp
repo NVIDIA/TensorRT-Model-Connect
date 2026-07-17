@@ -448,6 +448,11 @@ struct EncodedMemory {
 struct TrackerFrameRecord {
     int32_t frame_idx{-1};
     bool conditioning{false};
+    // Meta stores one frame output per tracker inference state.  Keep the
+    // row-local term as well as the cohort mean so removing a row can
+    // recompute the surviving state's shared quality without replaying the
+    // tracker head.
+    float individual_effective_iou_score{0.0F};
     float effective_iou_score{0.0F};
     std::vector<float> object_pointer;
     std::vector<float> memory_features;
@@ -466,6 +471,10 @@ std::size_t record_memory_values(const TrackerFrameRecord& record) {
 
 struct TrackState {
     int32_t object_id{-1};
+    // Objects detected together are added to one Meta tracker inference
+    // state. Later detections, even on a nearby frame, belong to a different
+    // state and must not contribute to this cohort's frame-quality mean.
+    int32_t cohort_id{-1};
     int32_t first_frame_idx{-1};
     float detection_score{0.0F};
     float tracker_score{0.0F};
@@ -4321,11 +4330,14 @@ class Sam3VideoProcessorState {
     }
 
     void add_record(TrackState& track, int32_t frame_idx, bool conditioning,
-                    TrackerNeuralOutput output) const {
+                    TrackerNeuralOutput output,
+                    std::optional<float> cohort_effective_iou_score = std::nullopt) const {
         TrackerFrameRecord record;
         record.frame_idx = frame_idx;
         record.conditioning = conditioning;
-        record.effective_iou_score = output.effective_iou_score;
+        record.individual_effective_iou_score = output.effective_iou_score;
+        record.effective_iou_score =
+            cohort_effective_iou_score.value_or(output.effective_iou_score);
         record.object_pointer = std::move(output.object_pointer);
         record.memory_features = std::move(output.memory_features);
         record.memory_position = std::move(output.memory_position);
@@ -4334,6 +4346,74 @@ class Sam3VideoProcessorState {
         if (conditioning)
             ++track.conditioning_records_seen;
         prune_records(track, frame_idx);
+    }
+
+    std::map<int32_t, float>
+    cohort_effective_iou_scores(const std::vector<int32_t>& object_ids,
+                                const std::map<int32_t, TrackerNeuralOutput>& outputs) const {
+        struct ScoreTotal {
+            float sum{0.0F};
+            std::size_t count{0};
+        };
+        std::map<int32_t, ScoreTotal> totals;
+        for (const int32_t object_id : object_ids) {
+            const auto& track = tracks_.at(object_id);
+            const auto output = outputs.find(object_id);
+            if (track.cohort_id < 0 || output == outputs.end()) {
+                throw std::runtime_error(
+                    "SAM3 tracker cohort quality received incomplete recurrent outputs");
+            }
+            auto& total = totals[track.cohort_id];
+            total.sum += output->second.effective_iou_score;
+            ++total.count;
+        }
+
+        // Every live row in a Meta tracker inference state participates in
+        // cal_mem_score's mean. A partial cohort here would silently turn the
+        // shared frame filter back into object-local selection.
+        std::map<int32_t, std::size_t> expected_counts;
+        for (const auto& [_, track] : tracks_) {
+            ++expected_counts[track.cohort_id];
+            const auto total = totals.find(track.cohort_id);
+            if (total == totals.end() || total->second.count == 0)
+                throw std::runtime_error("SAM3 tracker cohort is missing from recurrent outputs");
+        }
+        for (const auto& [cohort_id, expected] : expected_counts) {
+            if (totals.at(cohort_id).count != expected) {
+                throw std::runtime_error(
+                    "SAM3 tracker cohort has a partial recurrent output batch");
+            }
+        }
+
+        std::map<int32_t, float> means;
+        for (const auto& [cohort_id, total] : totals)
+            means.emplace(cohort_id, total.sum / static_cast<float>(total.count));
+        return means;
+    }
+
+    void refresh_surviving_cohort_record_qualities(int32_t cohort_id) {
+        struct ScoreTotal {
+            float sum{0.0F};
+            std::size_t count{0};
+        };
+        std::map<int32_t, ScoreTotal> totals;
+        for (const auto& [_, track] : tracks_) {
+            if (track.cohort_id != cohort_id)
+                continue;
+            for (const auto& record : track.records) {
+                auto& total = totals[record.frame_idx];
+                total.sum += record.individual_effective_iou_score;
+                ++total.count;
+            }
+        }
+        for (auto& [_, track] : tracks_) {
+            if (track.cohort_id != cohort_id)
+                continue;
+            for (auto& record : track.records) {
+                const auto& total = totals.at(record.frame_idx);
+                record.effective_iou_score = total.sum / static_cast<float>(total.count);
+            }
+        }
     }
 
     int32_t object_to_suppress_for_overlap(int32_t lhs_id, int32_t rhs_id,
@@ -4746,9 +4826,9 @@ class Sam3VideoProcessorState {
     std::size_t tracker_step_call_count(const std::vector<TrackerStepGroup>& groups) const {
         std::size_t calls = 0;
         for (const auto& group : groups) {
-            // Batch-2 execution pads an odd final request, so all calls for a
-            // frame stay on one tracker stream. The final event therefore
-            // covers every earlier tracker-step enqueue for this frame.
+            // Use B2 for complete pairs and the fixed B1 engine for an odd
+            // tail. Both engines share the same vision stream, so the final
+            // event still covers every earlier tracker-step enqueue.
             calls +=
                 tracker_step_batch2_engine_ != nullptr
                     ? (group.requests.size() + kTrackerStepBatch2Size - 1) / kTrackerStepBatch2Size
@@ -4792,27 +4872,6 @@ class Sam3VideoProcessorState {
         return begin;
     }
 
-    void execute_padded_batch2_tracker_tail(PropagatedTrackBatch& batch,
-                                            const Sam3FrameFeatures& features,
-                                            const TrackerStepGroup& group, std::size_t begin,
-                                            int32_t frame_idx, bool streaming, int32_t total_frames,
-                                            std::size_t& remaining_step_calls,
-                                            const EngineEnqueueCallback& final_step_enqueued,
-                                            const EngineEnqueueCallback& no_enqueue_callback) {
-        // The fixed batch-two graph owns the native TensorRT IAttention path
-        // and is substantially faster than the FP32 singleton graph on the
-        // measured target GPUs. Tracker rows are independent, so duplicate the
-        // final request, retain its first output, and preserve one logical update.
-        std::vector<TrackerStepRequest> padded{group.requests[begin], group.requests[begin]};
-        const auto& enqueue_callback = tracker_step_enqueue_callback(
-            remaining_step_calls, final_step_enqueued, no_enqueue_callback);
-        auto outputs = propagate_track_requests(
-            features, padded, 0, kTrackerStepBatch2Size, frame_idx, streaming, total_frames,
-            *tracker_step_batch2_engine_, true, enqueue_callback);
-        --remaining_step_calls;
-        batch.outputs.emplace(group.requests[begin].object_id, std::move(outputs.front()));
-    }
-
     void execute_singleton_tracker_slices(PropagatedTrackBatch& batch,
                                           const Sam3FrameFeatures& features,
                                           const TrackerStepGroup& group, std::size_t begin,
@@ -4842,12 +4901,6 @@ class Sam3VideoProcessorState {
             begin = execute_full_batch2_tracker_slices(batch, features, group, frame_idx, streaming,
                                                        total_frames, remaining_step_calls,
                                                        final_step_enqueued, no_enqueue_callback);
-            if (begin < group.requests.size()) {
-                execute_padded_batch2_tracker_tail(batch, features, group, begin, frame_idx,
-                                                   streaming, total_frames, remaining_step_calls,
-                                                   final_step_enqueued, no_enqueue_callback);
-                ++begin;
-            }
         }
         execute_singleton_tracker_slices(batch, features, group, begin, frame_idx, streaming,
                                          total_frames, remaining_step_calls, final_step_enqueued,
@@ -4906,7 +4959,7 @@ class Sam3VideoProcessorState {
     std::size_t tracker_state_size(const TrackState& track) const {
         return static_cast<std::size_t>(
             std::count_if(tracks_.begin(), tracks_.end(), [&](const auto& candidate) {
-                return candidate.second.first_frame_idx == track.first_frame_idx;
+                return candidate.second.cohort_id == track.cohort_id;
             }));
     }
 
@@ -4974,14 +5027,16 @@ class Sam3VideoProcessorState {
                                    const std::unordered_set<int32_t>& reconditioned) {
         if (shrink_memory.size() != object_ids.size())
             throw std::runtime_error("SAM3 video memory-area policy returned the wrong size");
+        const auto cohort_scores = cohort_effective_iou_scores(object_ids, propagated);
         const auto add_memory_record = [&](std::size_t index, EncodedMemory memory) {
             const int32_t object_id = object_ids[index];
+            const auto& track = tracks_.at(object_id);
             auto output = std::move(propagated.at(object_id));
             output.memory_features = std::move(memory.features);
             output.memory_position = std::move(memory.position);
             output.device_memory = std::move(memory.device);
             add_record(tracks_.at(object_id), frame_idx, reconditioned.count(object_id) != 0,
-                       std::move(output));
+                       std::move(output), cohort_scores.at(track.cohort_id));
         };
 
         std::size_t index = 0;
@@ -5016,16 +5071,26 @@ class Sam3VideoProcessorState {
     void remove_hotstart_tracks(const std::vector<int32_t>& removed) {
         for (const int32_t object_id : removed) {
             removed_object_ids_.insert(object_id);
-            tracks_.erase(object_id);
+            const auto track = tracks_.find(object_id);
+            if (track == tracks_.end())
+                continue;
+            const int32_t cohort_id = track->second.cohort_id;
+            tracks_.erase(track);
+            // Meta's remove_object slices every stored frame in this tracker
+            // state and recalculates cal_mem_score over the surviving rows.
+            refresh_surviving_cohort_record_qualities(cohort_id);
         }
     }
 
-    int32_t commit_prepared_new_detection_track(
-        const Detection& detection, int32_t frame_idx, TrackerNeuralOutput initialized,
-        std::vector<float> output_mask, std::vector<float> conditioning_mask,
-        std::map<int32_t, std::vector<float>>& current_masks) {
+    int32_t
+    commit_prepared_new_detection_track(const Detection& detection, int32_t frame_idx,
+                                        int32_t cohort_id, TrackerNeuralOutput initialized,
+                                        std::vector<float> output_mask,
+                                        std::vector<float> conditioning_mask,
+                                        std::map<int32_t, std::vector<float>>& current_masks) {
         TrackState track;
         track.object_id = next_object_id_++;
+        track.cohort_id = cohort_id;
         track.first_frame_idx = frame_idx;
         track.detection_score = detection.score;
         track.tracker_score = detection.score;
@@ -5179,9 +5244,14 @@ class Sam3VideoProcessorState {
         // separately consolidated tracker mask and re-encodes it with soft-memory semantics.
         encode_prepared_new_track_hard_memories(features, prepared, initialized);
 
+        if (prepared.empty())
+            return;
+        if (next_cohort_id_ == std::numeric_limits<int32_t>::max())
+            throw std::overflow_error("SAM3 tracker cohort identifier overflow");
+        const int32_t cohort_id = next_cohort_id_++;
         for (std::size_t index = 0; index < prepared.size(); ++index) {
             commit_prepared_new_detection_track(
-                *prepared[index].detection, frame_idx, std::move(initialized[index]),
+                *prepared[index].detection, frame_idx, cohort_id, std::move(initialized[index]),
                 std::move(prepared[index].prompt_mask), std::move(prepared[index].tracker_mask),
                 current_masks);
         }
@@ -5290,6 +5360,7 @@ class Sam3VideoProcessorState {
     std::unordered_set<int32_t> removed_object_ids_;
     std::map<std::pair<int32_t, int32_t>, std::vector<int32_t>> overlap_frames_;
     int32_t next_object_id_{0};
+    int32_t next_cohort_id_{0};
     std::size_t processed_frames_{0};
     int32_t cuda_device_{0};
     std::shared_ptr<Sam3VideoVisionWorkspace> vision_workspace_;

@@ -7,6 +7,7 @@
 
 #include "plugin_helpers.h"
 #include "runtime/models/sam3/sam3_pipeline.h"
+#include "runtime/models/sam3/sam3_tracker_step_runtime.h"
 #include "runtime/models/sam3/sam3_video_c_api.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "utils/json_helpers.h"
@@ -133,6 +134,18 @@ struct Sam3TrackerInitModules {
     std::unique_ptr<ITrtModule> parallel_sibling;
 };
 
+struct Sam3TrackerStepModules {
+    std::unique_ptr<ITrtModule> batch1;
+    std::unique_ptr<ITrtModule> batch2;
+};
+
+struct Sam3TrackerMemoryModules {
+    std::unique_ptr<ITrtModule> soft_batch1;
+    std::unique_ptr<ITrtModule> soft_batch2;
+    std::unique_ptr<ITrtModule> hard_batch1;
+    std::unique_ptr<ITrtModule> hard_batch2;
+};
+
 std::vector<std::unique_ptr<ITrtModule>>
 load_sam3_parallel_modules(IBackend& backend, const std::vector<char>& plan, const char* label,
                            const ModuleCreateOptions& options, std::size_t count) {
@@ -195,6 +208,49 @@ Sam3TrackerInitModules load_sam3_tracker_init_modules(const PipelineContext& ctx
     return {extract_optional_module(ctx.backend, plan, kLabel, options), nullptr};
 }
 
+Sam3TrackerMemoryModules load_sam3_tracker_memory_modules(const PipelineContext& ctx,
+                                                          const ModuleCreateOptions& options,
+                                                          bool video_tracking_supported) {
+    if (!video_tracking_supported)
+        return {};
+
+    auto soft_batch1 = load_trt_module_from_plan(
+        ctx.backend, find_section(ctx.bundle, "sam3_tracker_memory_engine_plan"),
+        "sam3 tracker_memory_engine", options);
+    auto soft_batch2 = load_trt_module_from_plan(
+        ctx.backend, find_section(ctx.bundle, "sam3_tracker_memory_batch2_engine_plan"),
+        "sam3 tracker_memory_batch2_engine", options);
+    auto hard_batch1 = load_trt_module_from_plan(
+        ctx.backend, find_section(ctx.bundle, "sam3_tracker_hard_memory_engine_plan"),
+        "sam3 tracker_hard_memory_engine", options);
+    auto hard_batch2 = load_trt_module_from_plan(
+        ctx.backend, find_section(ctx.bundle, "sam3_tracker_hard_memory_batch2_engine_plan"),
+        "sam3 tracker_hard_memory_batch2_engine", options);
+    return {std::move(soft_batch1.module), std::move(soft_batch2.module),
+            std::move(hard_batch1.module), std::move(hard_batch2.module)};
+}
+
+Sam3TrackerStepModules load_sam3_tracker_step_modules(const PipelineContext& ctx,
+                                                      const ModuleCreateOptions& options,
+                                                      bool video_tracking_supported) {
+    if (!video_tracking_supported)
+        return {};
+
+    // The model-owned DSO registers both FFI plugin creators, the two split
+    // tracker-step functions, and all four fixed tracker-memory functions.
+    // This must complete before TensorRT sees any serialized step or memory
+    // plugin layer; the memory plans are deserialized below only after this
+    // helper returns.
+    load_sam3_tracker_step_runtime(ctx.bundle);
+    auto batch1 = load_trt_module_from_plan(
+        ctx.backend, find_section(ctx.bundle, "sam3_tracker_step_engine_plan"),
+        "sam3 tracker_step_engine", options);
+    auto batch2 = load_trt_module_from_plan(
+        ctx.backend, find_section(ctx.bundle, "sam3_tracker_step_batch2_engine_plan"),
+        "sam3 tracker_step_batch2_engine", options);
+    return {std::move(batch1.module), std::move(batch2.module)};
+}
+
 } // namespace
 
 class Sam3Plugin final : public IPipelinePlugin {
@@ -210,6 +266,8 @@ class Sam3Plugin final : public IPipelinePlugin {
         opts.cuda_graphs = false;
 
         const auto sam3_config = make_sam3_config(ctx.config_json);
+        const bool video_tracking_supported =
+            extract_json_bool(ctx.config_json, "sam3_video_tracking_supported", false);
         auto text_encoder = load_trt_module_from_plan(
             ctx.backend, find_section(ctx.bundle, "engine_plan"), "sam3 text_encoder", opts);
         auto vision_encoder =
@@ -219,33 +277,20 @@ class Sam3Plugin final : public IPipelinePlugin {
             ctx.backend, find_section(ctx.bundle, "sam3_core_engine_plan"), "sam3 core_engine",
             opts);
         auto tracker_init_engines = load_sam3_tracker_init_modules(ctx, opts);
-        auto tracker_step_engine = extract_optional_module(
-            ctx.backend, find_section(ctx.bundle, "sam3_tracker_step_engine_plan"),
-            "sam3 tracker_step_engine", opts);
-        auto tracker_step_batch2_engine = extract_optional_module(
-            ctx.backend, find_section(ctx.bundle, "sam3_tracker_step_batch2_engine_plan"),
-            "sam3 tracker_step_batch2_engine", opts);
-        auto tracker_memory_engine = extract_optional_module(
-            ctx.backend, find_section(ctx.bundle, "sam3_tracker_memory_engine_plan"),
-            "sam3 tracker_memory_engine", opts);
-        auto tracker_memory_batch2_engine = extract_optional_module(
-            ctx.backend, find_section(ctx.bundle, "sam3_tracker_memory_batch2_engine_plan"),
-            "sam3 tracker_memory_batch2_engine", opts);
-        auto tracker_hard_memory_engine = extract_optional_module(
-            ctx.backend, find_section(ctx.bundle, "sam3_tracker_hard_memory_engine_plan"),
-            "sam3 tracker_hard_memory_engine", opts);
-        auto tracker_hard_memory_batch2_engine = extract_optional_module(
-            ctx.backend, find_section(ctx.bundle, "sam3_tracker_hard_memory_batch2_engine_plan"),
-            "sam3 tracker_hard_memory_batch2_engine", opts);
+        auto tracker_step_engines =
+            load_sam3_tracker_step_modules(ctx, opts, video_tracking_supported);
+        auto tracker_memory_engines =
+            load_sam3_tracker_memory_modules(ctx, opts, video_tracking_supported);
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
         return std::make_unique<Sam3Pipeline>(
             std::move(text_encoder.module), std::move(vision_encoder.module),
             std::move(core_engine.module), std::move(tokenizer), sam3_config,
             ctx.bundle.info.model_id, std::move(tracker_init_engines.canonical),
-            std::move(tracker_step_engine), std::move(tracker_memory_engine),
-            std::move(tracker_step_batch2_engine), std::move(tracker_memory_batch2_engine),
-            std::move(tracker_init_engines.parallel_sibling), std::move(tracker_hard_memory_engine),
-            std::move(tracker_hard_memory_batch2_engine));
+            std::move(tracker_step_engines.batch1), std::move(tracker_memory_engines.soft_batch1),
+            std::move(tracker_step_engines.batch2), std::move(tracker_memory_engines.soft_batch2),
+            std::move(tracker_init_engines.parallel_sibling),
+            std::move(tracker_memory_engines.hard_batch1),
+            std::move(tracker_memory_engines.hard_batch2));
     }
 };
 
