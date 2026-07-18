@@ -109,6 +109,11 @@ class CppCoverageEngine:
             "source_not_found",
             "--gcov-ignore-errors",
             "no_working_dir_found",
+            # GCC can emit invalid negative branch counters (GCC PR 68080).
+            # Keep the report and numeric gates intact while surfacing one
+            # warning for each affected source file.
+            "--gcov-ignore-parse-errors",
+            "negative_hits.warn_once_per_file",
         ]
         for value in filters:
             gcovr_base.extend(("--filter", value))

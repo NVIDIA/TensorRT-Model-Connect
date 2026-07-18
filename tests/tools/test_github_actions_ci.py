@@ -1838,6 +1838,17 @@ def test_cpp_coverage_engine_runs_tools_directly_without_shell(tmp_path: Path, m
         "-L",
         "platform",
     ] in commands
+    assert len(gcovr_commands) == 3
+    assert all(
+        "--gcov-ignore-parse-errors" in command
+        and command[command.index("--gcov-ignore-parse-errors") + 1]
+        == "negative_hits.warn_once_per_file"
+        for command in gcovr_commands
+    )
+    gate = gcovr_commands[-1]
+    assert gate[gate.index("--fail-under-line") + 1] == "100"
+    assert gate[gate.index("--fail-under-function") + 1] == "100"
+    assert gate[gate.index("--fail-under-branch") + 1] == "100"
     assert all(command[0] != "bash" for command in commands + gcovr_commands)
     assert (report / "cpp-coverage-summary.txt").is_file()
 
