@@ -378,43 +378,6 @@ std::shared_ptr<ITokenizer> try_create_native_tokenizer_kind(TokenizerFactory fa
 
 } // namespace
 
-bool is_bpe_tokenizer_json(const BundleFile& bundle) {
-    auto* tok_data = find_section(bundle, "tokenizer.json");
-    if (!tok_data || tok_data->empty())
-        return false;
-    // Quick string search — avoid full JSON parse just for type detection
-    std::string_view json(tok_data->data(), tok_data->size());
-    return json.find("\"type\":\"BPE\"") != std::string_view::npos ||
-           json.find("\"type\": \"BPE\"") != std::string_view::npos;
-}
-
-std::shared_ptr<ITokenizer> try_create_native_bpe(const BundleFile& bundle, bool add_special,
-                                                  bool throw_on_failure) {
-    auto* tok_data = find_section(bundle, "tokenizer.json");
-    if (!tok_data || tok_data->empty())
-        return nullptr;
-    try {
-        auto tok = CreateBpeTokenizer(tok_data->data(), tok_data->size(), add_special);
-        if (tok) {
-            std::cerr << "[trtmc] Using native BPE tokenizer" << std::endl;
-        }
-        return tok;
-    } catch (const std::exception& e) {
-        // "Not a BPE tokenizer" -> non-BPE model (WordPiece, Unigram), allow fallback
-        std::string msg = e.what();
-        bool is_non_bpe = msg.find("Not a BPE") != std::string::npos;
-
-        if (throw_on_failure || (!is_non_bpe && is_bpe_tokenizer_json(bundle))) {
-            // BPE model but native failed -> error, no silent fallback
-            throw std::runtime_error(std::string("Native BPE tokenizer failed for BPE model: ") +
-                                     e.what());
-        }
-        std::cerr << "[trtmc] Native BPE unavailable (" << e.what()
-                  << "), falling back to HF Python" << std::endl;
-    }
-    return nullptr;
-}
-
 std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle,
                                                         bool add_special_tokens) {
     auto* tok_data = find_section(bundle, "tokenizer.json");

@@ -79,6 +79,10 @@ def test_reference_uses_cached_model_ref(monkeypatch, tmp_path) -> None:
     assert "model_ref, trust_remote_code=trust_remote_code" in script
     assert "Sam3Model.from_pretrained(" in script
     assert "model_ref, torch_dtype=torch.float32" in script
+    assert "model.eval()" in script
+    assert "with torch.no_grad():" in script
+    for forbidden in ("torch.compile", "torch.export", "aoti", "onnx"):
+        assert forbidden not in script.lower()
     assert out.data["text_prompt"] == "ear"
     assert out.data["masks_path"].endswith("hf_sam3_masks.npy")
     assert out.metadata["returncode"] == 0

@@ -904,7 +904,7 @@ def _call_attribute_names(tree: ast.AST) -> set[str]:
 
 
 def test_sam3_production_has_no_exchange_graph_path() -> None:
-    """Forbid ONNX and limit AOTI to the three SAM3-owned exporters."""
+    """Forbid exchange graphs and framework exporters in production SAM3."""
 
     forbidden_import_roots = {
         "onnx",
@@ -914,28 +914,19 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
     tracker_framework_roots = {"torch", "transformers"}
     forbidden_source_tokens = {
         ".onnx",
+        ".pt2",
+        "aoti",
+        "libtorch",
         "modelproto",
         "nvonnxparser",
         "onnxparser",
         "opset",
+        "torch.export",
         "torch.onnx",
+        "tvm_ffi",
     }
 
     for path, source in _sam3_production_sources().items():
-        is_tracker_aoti_exporter = path.name in {
-            "hard_mask_resize_aoti_exporter.py",
-            "tracker_step_aoti_exporter.py",
-            "tracker_memory_aoti_exporter.py",
-        }
-        allowed_export_symbols = (
-            {
-                "export_sam3_tracker_split_aoti",
-                "export_sam3_tracker_memory_aoti",
-                "export_sam3_hard_mask_resize_aoti",
-            }
-            if path.name == "plugin.py"
-            else set()
-        )
         tree = ast.parse(source, filename=str(path))
         imports: set[str] = set()
         symbols: set[str] = set()
@@ -957,14 +948,11 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
         )
         if path.name.startswith("tracker"):
             assert not (imports & tracker_framework_roots), (
-                f"{path.name} imports a tracker framework dependency: "
+                f"{path.name} imports a framework dependency: "
                 f"{sorted(imports & tracker_framework_roots)}"
             )
         lowered = source.lower()
-        path_forbidden_tokens = set(forbidden_source_tokens)
-        if not is_tracker_aoti_exporter:
-            path_forbidden_tokens.add("torch.export")
-        matched_tokens = sorted(token for token in path_forbidden_tokens if token in lowered)
+        matched_tokens = sorted(token for token in forbidden_source_tokens if token in lowered)
         assert not matched_tokens, (
             f"{path.name} contains a forbidden exchange-graph path: {matched_tokens}"
         )
@@ -974,11 +962,7 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
             if "onnx" in symbol
             or "opset" in symbol
             or "modelproto" in symbol
-            or (
-                "export" in symbol
-                and not is_tracker_aoti_exporter
-                and symbol not in allowed_export_symbols
-            )
+            or "export" in symbol
             or symbol in {"parse", "parse_from_file"}
             or symbol.endswith("parser")
         )
@@ -986,9 +970,13 @@ def test_sam3_production_has_no_exchange_graph_path() -> None:
             f"{path.name} defines or calls a graph exporter/parser: {forbidden_symbols}"
         )
 
-        if is_tracker_aoti_exporter:
-            assert "torch.export.export" in source
-            assert "aoti_compile_and_package" in source
+    family_dir = Path(tracker_builder.__file__).resolve().parent
+    assert not list(family_dir.glob("*_aoti_exporter.py"))
+
+
+def test_sam3_family_has_no_embedded_test_sources() -> None:
+    family_dir = Path(tracker_builder.__file__).resolve().parent
+    assert not list((family_dir / "tests").rglob("*.py"))
 
 
 def test_sam3_tracker_graph_is_built_with_native_tensorrt_api() -> None:

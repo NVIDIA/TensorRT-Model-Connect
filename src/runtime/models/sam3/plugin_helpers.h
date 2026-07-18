@@ -72,15 +72,6 @@ DualProfileModules load_dual_profile_modules(IBackend* backend, const std::vecto
 // Detect whether the bundle's config requests add_special_tokens for the tokenizer.
 bool detect_add_special_tokens(const BundleFile& bundle);
 
-// Check if the bundle's tokenizer.json describes a BPE model.
-bool is_bpe_tokenizer_json(const BundleFile& bundle);
-
-// Try to create a native C++ BPE tokenizer from the bundle's tokenizer.json.
-// Returns nullptr if the section is absent or the model is non-BPE.
-// If throw_on_failure is true, throws instead of returning nullptr on BPE parse errors.
-std::shared_ptr<ITokenizer> try_create_native_bpe(const BundleFile& bundle, bool add_special,
-                                                  bool throw_on_failure);
-
 // Try to create a native C++ tokenizer from the bundle's tokenizer.json.
 // Attempts: BPE -> WordPiece -> Unigram. Returns nullptr if none match.
 std::shared_ptr<ITokenizer> try_create_native_tokenizer(const BundleFile& bundle,
