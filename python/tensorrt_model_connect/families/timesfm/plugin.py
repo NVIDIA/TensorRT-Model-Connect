@@ -181,6 +181,63 @@ def _rows_from_heads(
     return shuf.get_output(0)
 
 
+def _select_normalization_patch(
+    network: trt.INetworkDefinition,
+    patched_inputs: trt.ITensor,
+    valid: trt.ITensor,
+    *,
+    num_patches: int,
+    patch_length: int,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Match TimesFM's first-sufficient-patch normalization contract."""
+    last_patch = num_patches - 1
+    selected_inputs = network.add_slice(
+        patched_inputs,
+        start=(0, last_patch, 0),
+        shape=(1, 1, patch_length),
+        stride=(1, 1, 1),
+    ).get_output(0)
+    selected_valid = network.add_slice(
+        valid,
+        start=(0, last_patch, 0),
+        shape=(1, 1, patch_length),
+        stride=(1, 1, 1),
+    ).get_output(0)
+
+    # HF selects the first patch with at least three non-padding values and
+    # falls back to the final patch when no patch qualifies. Traverse in
+    # reverse so every earlier eligible patch replaces the current selection.
+    minimum_valid_exclusive = add_scalar(network, (1, 1, 1), 2.0)
+    for patch_index in range(last_patch - 1, -1, -1):
+        patch_inputs = network.add_slice(
+            patched_inputs,
+            start=(0, patch_index, 0),
+            shape=(1, 1, patch_length),
+            stride=(1, 1, 1),
+        ).get_output(0)
+        patch_valid = network.add_slice(
+            valid,
+            start=(0, patch_index, 0),
+            shape=(1, 1, patch_length),
+            stride=(1, 1, 1),
+        ).get_output(0)
+        valid_count = network.add_reduce(
+            patch_valid,
+            trt.ReduceOperation.SUM,
+            1 << 2,
+            keep_dims=True,
+        ).get_output(0)
+        eligible = network.add_elementwise(
+            valid_count,
+            minimum_valid_exclusive,
+            trt.ElementWiseOperation.GREATER,
+        ).get_output(0)
+        selected_inputs = network.add_select(eligible, patch_inputs, selected_inputs).get_output(0)
+        selected_valid = network.add_select(eligible, patch_valid, selected_valid).get_output(0)
+
+    return selected_inputs, selected_valid
+
+
 def _add_padding_mask(
     network: trt.INetworkDefinition,
     patched_pads: trt.ITensor,
@@ -358,30 +415,47 @@ def _build_timesfm_network(
         patched_inputs, valid, trt.ElementWiseOperation.PROD
     ).get_output(0)
 
-    last_values = network.add_slice(
-        patched_inputs, start=(0, num_patches - 1, 0),
-        shape=(1, 1, patch_length), stride=(1, 1, 1)).get_output(0)
-    last_valid = network.add_slice(
-        valid, start=(0, num_patches - 1, 0),
-        shape=(1, 1, patch_length), stride=(1, 1, 1)).get_output(0)
+    normalization_values, normalization_valid = _select_normalization_patch(
+        network,
+        patched_inputs,
+        valid,
+        num_patches=num_patches,
+        patch_length=patch_length,
+    )
     denom = network.add_reduce(
-        last_valid, trt.ReduceOperation.SUM, 1 << 2, keep_dims=True
+        normalization_valid, trt.ReduceOperation.SUM, 1 << 2, keep_dims=True
     ).get_output(0)
     denom = network.add_elementwise(
         denom, add_scalar(network, (1, 1, 1), 1.0), trt.ElementWiseOperation.MAX
     ).get_output(0)
     masked_sum = network.add_reduce(
-        network.add_elementwise(last_values, last_valid, trt.ElementWiseOperation.PROD).get_output(0),
-        trt.ReduceOperation.SUM, 1 << 2, keep_dims=True,
+        network.add_elementwise(
+            normalization_values,
+            normalization_valid,
+            trt.ElementWiseOperation.PROD,
+        ).get_output(0),
+        trt.ReduceOperation.SUM,
+        1 << 2,
+        keep_dims=True,
     ).get_output(0)
     mu = network.add_elementwise(masked_sum, denom, trt.ElementWiseOperation.DIV).get_output(0)
-    centered_last = network.add_elementwise(
-        last_values, mu, trt.ElementWiseOperation.SUB).get_output(0)
-    centered_last = network.add_elementwise(
-        centered_last, last_valid, trt.ElementWiseOperation.PROD).get_output(0)
+    normalization_centered = network.add_elementwise(
+        normalization_values, mu, trt.ElementWiseOperation.SUB
+    ).get_output(0)
+    normalization_centered = network.add_elementwise(
+        normalization_centered,
+        normalization_valid,
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
     var = network.add_reduce(
-        network.add_elementwise(centered_last, centered_last, trt.ElementWiseOperation.PROD).get_output(0),
-        trt.ReduceOperation.SUM, 1 << 2, keep_dims=True,
+        network.add_elementwise(
+            normalization_centered,
+            normalization_centered,
+            trt.ElementWiseOperation.PROD,
+        ).get_output(0),
+        trt.ReduceOperation.SUM,
+        1 << 2,
+        keep_dims=True,
     ).get_output(0)
     var = network.add_elementwise(var, denom, trt.ElementWiseOperation.DIV).get_output(0)
     sigma = network.add_unary(var, trt.UnaryOperation.SQRT).get_output(0)
