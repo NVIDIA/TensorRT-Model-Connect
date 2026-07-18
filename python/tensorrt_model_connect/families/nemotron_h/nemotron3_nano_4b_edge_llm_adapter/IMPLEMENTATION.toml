@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version = 1
+implementation_id = "nemotron3-nano-4b-fp16.tensorrt-edge-llm.a100-pcie80-sm80"
+downstream_runtime = "tensorrt-edge-llm"
+downstream_version = "0.6.1"
+downstream_commit = "2620a9768022f25dff18912db2fb92b2ef264a70"
+
+[model]
+id = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
+revisions = ["dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f"]
+
+[target]
+os = "linux"
+architecture = "x86_64"
+gpu_architecture = "sm80"
+gpu_name = "NVIDIA A100 80GB PCIe"
+platform_kind = "discrete"
+
+[build]
+entrypoint = "adapter.py"
+timeout_seconds = 21600
+
+[runtime]
+library = "libtrtmc_impl_nemotron3_nano_4b_fp16_tensorrt_edge_llm.so"
+abi = 1

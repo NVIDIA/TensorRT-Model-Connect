@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version = 1
+
+[downstream]
+name = "tensorrt-edge-llm"
+source = "https://github.com/NVIDIA/TensorRT-Edge-LLM.git"
+version = "0.6.1"
+tag = "v0.6.1"
+commit = "2620a9768022f25dff18912db2fb92b2ef264a70"
+source_mode = "git"
+
+[tensorrt]
+version = "10.14.1.48"
+
+[cuda]
+version = "12.8"

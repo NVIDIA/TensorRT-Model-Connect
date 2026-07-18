@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version = 1
+profile_id = "nemotron3-nano-4b-fp16--a100-pcie80-sm80"
+operation = "text-generation-v1"
+precision = "fp16"
+quantization = "none"
+max_input_length = 1024
+max_cache_length = 4096
+max_batch_size = 4
+minimum_memory_mib = 80000
+artifact_layout = "edge_engine_directory_v1"
