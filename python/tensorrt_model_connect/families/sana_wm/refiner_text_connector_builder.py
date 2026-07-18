@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from tensorrt_model_connect import trt_compat
+from .builder_lifetime import get_process_trt_logger
 from .checkpoint_mapper import WeightDict
 from .components.ltx_video import ltx_dit_builder as ltx
 
@@ -216,7 +217,7 @@ def build_sana_wm_refiner_text_connector_engine(
     np_dtype = _target_np_dtype(precision)
 
     text_encoder_dim = shape.caption_channels * shape.text_proj_in_factor
-    logger = trt_module.Logger(trt_module.Logger.VERBOSE if verbose else trt_module.Logger.WARNING)
+    logger = get_process_trt_logger(trt_module, verbose=verbose)
     builder = trt_module.Builder(logger)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt_module.MemoryPoolType.WORKSPACE, 16 << 30)
@@ -502,7 +503,7 @@ def _build_exact_sana_wm_refiner_text_connector_engine(
     _EXACT_PLUGIN_FIELD_REFS.clear()
     trt_module = _ensure_trt()
     shape = refiner_text_connector_shape_from_config(raw_config, connector_config)
-    logger = trt_module.Logger(trt_module.Logger.VERBOSE if verbose else trt_module.Logger.WARNING)
+    logger = get_process_trt_logger(trt_module, verbose=verbose)
     builder = trt_module.Builder(logger)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt_module.MemoryPoolType.WORKSPACE, 16 << 30)

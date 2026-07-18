@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
+from ...builder_lifetime import get_process_trt_logger
 from . import graph_ops
 from . import graph_blocks
 
@@ -351,7 +352,7 @@ def build_dual_profile_decoder_engine(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     rotary_embedding_dim = int(head_dim * partial_rotary_factor)
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    logger = get_process_trt_logger(trt, verbose=verbose)
     builder = trt.Builder(logger)
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))

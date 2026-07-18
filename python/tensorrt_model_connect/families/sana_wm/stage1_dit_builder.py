@@ -27,6 +27,7 @@ from .components.gemma.checkpoint_mapper import (
     _load_tensor,
     _open_safetensors,
 )
+from .builder_lifetime import get_process_trt_logger
 from tensorrt_model_connect import trt_compat
 
 _SANA_WM_GDN_PLUGIN_LOAD_ATTEMPTED = False
@@ -9628,7 +9629,7 @@ def build_sana_wm_stage1_dit_engine(
     _BF16_WEIGHT_REFS.clear()
     trt = trt_compat.get_trt()
     trt_dtype = _target_trt_dtype(trt, precision)
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    logger = get_process_trt_logger(trt, verbose=verbose)
     builder = trt.Builder(logger)
     builder_config = builder.create_builder_config()
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)

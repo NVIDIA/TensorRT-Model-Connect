@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
+from ...builder_lifetime import get_process_trt_logger
 from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
@@ -201,7 +202,7 @@ def build_standard_decoder_engine(
     else:
         dynamic_kv_profile_rows = []
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    logger = get_process_trt_logger(trt, verbose=verbose)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()

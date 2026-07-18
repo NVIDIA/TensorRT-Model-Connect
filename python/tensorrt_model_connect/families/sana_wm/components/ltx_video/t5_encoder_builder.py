@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
+from ...builder_lifetime import get_process_trt_logger
 from . import graph_ops
 
 trt = trt_compat.get_trt()
@@ -70,7 +71,7 @@ def build_t5_encoder_engine(
     Returns:
         Serialized TRT engine plan bytes.
     """
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    logger = get_process_trt_logger(trt, verbose=verbose)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()

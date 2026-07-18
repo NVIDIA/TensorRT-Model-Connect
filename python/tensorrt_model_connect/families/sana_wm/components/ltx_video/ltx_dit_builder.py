@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from tensorrt_model_connect import trt_compat
+from ...builder_lifetime import get_process_trt_logger
 from .checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, _open_safetensors
 
 if TYPE_CHECKING:
@@ -174,7 +175,7 @@ def build_ltx_dit_engine(
     trt_dtype = _trt_dtype(precision)
     np_dtype = _target_np_dtype(precision)
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    logger = get_process_trt_logger(trt, verbose=verbose)
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)

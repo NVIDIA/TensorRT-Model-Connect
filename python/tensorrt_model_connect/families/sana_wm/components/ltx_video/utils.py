@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
+from ...builder_lifetime import get_process_trt_logger
 from . import graph_ops
 
 
@@ -34,7 +35,7 @@ def create_builder_context(
     disable_tf32: bool = False,
 ) -> BuilderContext:
     """Create a TensorRT builder, network, and config with common defaults."""
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    logger = get_process_trt_logger(trt, verbose=verbose)
     builder = trt.Builder(logger)
     flags = 0
     if strongly_typed:

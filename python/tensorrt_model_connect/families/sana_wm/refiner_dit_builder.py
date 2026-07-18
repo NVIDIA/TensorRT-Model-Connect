@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from tensorrt_model_connect import trt_compat
+from .builder_lifetime import get_process_trt_logger
 from .checkpoint_mapper import WeightDict
 from .components.ltx_video import ltx_dit_builder as ltx
 
@@ -440,7 +441,7 @@ def build_sana_wm_refiner_dit_engine(
     weight_dtype = _target_np_dtype(precision)
     exact_bf16 = precision == "bf16"
 
-    logger = trt_module.Logger(trt_module.Logger.VERBOSE if verbose else trt_module.Logger.WARNING)
+    logger = get_process_trt_logger(trt_module, verbose=verbose)
     builder = trt_module.Builder(logger)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt_module.MemoryPoolType.WORKSPACE, 64 << 30)
