@@ -6,6 +6,9 @@
   "runtime_strategy": "diffusion_wan",
   "task_strategy": "diffusion_media_generation",
   "precision": "fp16",
+  "fp32_layers": [
+    24
+  ],
   "build_args": {
     "max_cache_length": 256
   },
@@ -28,7 +31,7 @@
       "video_width": 832,
       "num_inference_steps": 30,
       "skip_text_comparison": true,
-      "notes": "Runs the T5 encoder, Wan DiT, and VAE decoder in FP16 and preserves the original FP32 Diffusers video contract. Uses flow matching Euler scheduler with shift=3.0.",
+      "notes": "Runs the T5 encoder in FP32 while keeping the Wan DiT and VAE decoder in FP16, and preserves the original FP32 Diffusers video contract. Uses flow matching Euler scheduler with shift=3.0.",
       "metadata": {
         "contract_config": {
           "use_diffusers": true,
