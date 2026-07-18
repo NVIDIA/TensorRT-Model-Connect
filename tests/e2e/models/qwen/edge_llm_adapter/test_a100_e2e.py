@@ -55,7 +55,7 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
     _require_supported_a100()
     binary_value = os.environ.get("TRTMC_BINARY", "").strip()
     if not binary_value:
-        pytest.skip("TRTMC_BINARY is set by the model CI runtime")
+        pytest.fail("TRTMC_BINARY is required for the A100 EdgeLLM E2E")
     binary = Path(binary_value).resolve(strict=True)
 
     bundle = tmp_path / "qwen3-0.6b-edge.trtfb"

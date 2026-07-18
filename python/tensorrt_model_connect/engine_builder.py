@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import functools
 import importlib
 import inspect
 import json
@@ -1770,8 +1769,6 @@ def _try_build_optimized_runtime(
     return try_build_optimized_runtime(
         resolved_model_ref,
         output_path,
-        target=None,
-        configured_revision=None,
         family_name=selected_family,
         parameters={
             "public_options": {
@@ -1782,36 +1779,6 @@ def _try_build_optimized_runtime(
     )
 
 
-def _route_optimized_build(function):
-    """Route before Python applies defaults so explicit defaults stay observable."""
-
-    public_signature = inspect.signature(function)
-
-    @functools.wraps(function)
-    def routed(*args, **kwargs):
-        bound = public_signature.bind(*args, **kwargs)
-        explicit_options = sorted(
-            set(bound.arguments) - {"model_id_or_path", "output_path"}
-        )
-        bound.apply_defaults()
-        requested_options = {
-            name: bound.arguments[name]
-            for name in explicit_options
-        }
-        if _try_build_optimized_runtime(
-            bound.arguments["model_id_or_path"],
-            bound.arguments["output_path"],
-            requested_options,
-        ) is not None:
-            return None
-        return function(*args, **kwargs)
-
-    routed.__defaults__ = function.__defaults__
-    routed.__kwdefaults__ = function.__kwdefaults__
-    return routed
-
-
-@_route_optimized_build
 def build(
     model_id_or_path: str,
     output_path: str,
@@ -1847,8 +1814,20 @@ def build(
     """Build through a matching model capsule, otherwise use the native path.
 
     This preserves the established public API exactly. Optimized-runtime
-    selection uses the active platform and forwards only explicitly supplied
+    selection uses the active platform and forwards the normalized effective
     public options as opaque data; the model-owned adapter owns all translation.
     """
 
-    _build_native_impl(**locals())
+    build_arguments = dict(locals())
+    public_options = {
+        name: value
+        for name, value in build_arguments.items()
+        if name not in {"model_id_or_path", "output_path"}
+    }
+    if _try_build_optimized_runtime(
+        model_id_or_path,
+        output_path,
+        public_options,
+    ) is not None:
+        return
+    _build_native_impl(**build_arguments)

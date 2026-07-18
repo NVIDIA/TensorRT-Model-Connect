@@ -13,8 +13,8 @@ from pathlib import Path
 from tensorrt_model_connect.optimized_runtime.build_adapter import ProbeResult, run_build
 from tensorrt_model_connect.optimized_runtime.bundle import write_optimized_bundle
 from tensorrt_model_connect.optimized_runtime.manifest import (
-    ImplementationManifest,
     ImplementationRequest,
+    load_implementation_manifest,
 )
 
 
@@ -66,22 +66,34 @@ print(json.dumps({{
             encoding="utf-8",
         )
 
-        manifest = ImplementationManifest(
-            path=capsule / "IMPLEMENTATION.toml",
-            capsule_root=capsule,
-            implementation_id=IMPLEMENTATION_ID,
-            downstream_runtime="test-optimized-runtime",
-            downstream_version="test-runtime-1.0",
-            downstream_commit="test-runtime-commit",
-            model_id=MODEL_ID,
-            model_revisions=("0123456789abcdef",),
-            target={"os": "linux"},
-            build_entrypoint=adapter_path,
-            build_timeout_seconds=30,
-            runtime_library=RUNTIME_LIBRARY,
-            runtime_abi=1,
-            artifact_layout="directory-tree-v1",
+        manifest_path = capsule / "IMPLEMENTATION.toml"
+        manifest_path.write_text(
+            f'''schema_version = 1
+implementation_id = "{IMPLEMENTATION_ID}"
+runtime_kind = "optimized"
+downstream_runtime = "test-optimized-runtime"
+downstream_version = "test-runtime-1.0"
+downstream_commit = "test-runtime-commit"
+
+[model]
+id = "{MODEL_ID}"
+revisions = ["0123456789abcdef"]
+
+[target]
+os = "linux"
+
+[build]
+entrypoint = "builder/adapter.py"
+timeout_seconds = 30
+
+[runtime]
+library = "{RUNTIME_LIBRARY}"
+abi = 1
+artifact_layout = "directory-tree-v1"
+''',
+            encoding="utf-8",
         )
+        manifest = load_implementation_manifest(manifest_path)
         request = ImplementationRequest(
             model_id=MODEL_ID,
             model_revision="0123456789abcdef",

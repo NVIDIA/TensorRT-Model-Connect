@@ -133,6 +133,3 @@ engines
 results.json
 !**/Recording.wav
 worktrees/
-
-# Never package or commit model-adapter-local downstream checkouts.
-python/tensorrt_model_connect/families/*/*/dependencies/

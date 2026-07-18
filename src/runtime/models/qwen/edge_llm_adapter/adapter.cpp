@@ -244,7 +244,7 @@ validate_metadata(const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1
     require_exact_keys(root,
                        {"schema_version", "build_binding", "implementation_id", "profile_id",
                         "operation", "model", "target", "runtime", "artifacts", "limits",
-                        "versions", "metadata", "bundle_info", "bundle_config"},
+                        "versions", "bundle_info", "bundle_config"},
                        "implementation metadata");
     require_int_value(root, "schema_version", 1, "implementation metadata");
     require_string_value(root, "implementation_id", kImplementationId, "implementation metadata");
@@ -325,39 +325,7 @@ validate_metadata(const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1
                          "implementation metadata versions");
     require_string_value(versions, "cuda", kCudaVersion, "implementation metadata versions");
 
-    const auto& metadata = require_object(root, "metadata", "implementation metadata");
-    require_exact_keys(metadata, {"private"}, "implementation metadata metadata");
-    const auto& private_root =
-        require_object(metadata, "private", "implementation metadata metadata");
-    require_exact_keys(private_root, {"tensorrt-edge-llm"}, "implementation metadata private");
-    const auto& edge =
-        require_object(private_root, "tensorrt-edge-llm", "implementation metadata private");
-    require_int_value(edge, "schema_version", 4, "private Edge metadata");
-    require_string_value(edge, "profile_id", kProfileId, "private Edge metadata");
-    require_string_value(edge, "model_id", kModelId, "private Edge metadata");
-
-    const auto& edge_target = require_object(edge, "target", "private Edge metadata");
-    require_string_value(edge_target, "os", "linux", "private Edge target");
-    require_string_value(edge_target, "architecture", "x86_64", "private Edge target");
-    require_string_value(edge_target, "platform_kind", "discrete", "private Edge target");
-    require_string_value(edge_target, "gpu_name", "NVIDIA A100 80GB PCIe", "private Edge target");
-    require_int_value(edge_target, "minimum_gpu_count", 1, "private Edge target");
-    const int32_t minimum_memory =
-        require_int32(edge_target, "minimum_cuda_memory_mib", "private Edge target");
-    if (minimum_memory != kMinimumMemoryMiB)
-        throw std::runtime_error("private Edge target memory requirement does not match profile");
-    const auto& compute =
-        require_object(edge_target, "cuda_compute_capability", "private Edge target");
-    require_int_value(compute, "major", 8, "private Edge target compute capability");
-    require_int_value(compute, "minor", 0, "private Edge target compute capability");
-
-    const auto& edge_versions = require_object(edge, "versions", "private Edge metadata");
-    require_string_value(edge_versions, "model_revision", kModelRevision, "private Edge versions");
-    require_string_value(edge_versions, "edge_llm", kEdgeVersion, "private Edge versions");
-    require_string_value(edge_versions, "edge_llm_commit", kEdgeCommit, "private Edge versions");
-    require_string_value(edge_versions, "tensorrt", kTensorRtVersion, "private Edge versions");
-    require_string_value(edge_versions, "cuda", kCudaVersion, "private Edge versions");
-    return CapsuleMetadata{vocab_size, minimum_memory};
+    return CapsuleMetadata{vocab_size, kMinimumMemoryMiB};
 }
 
 fs::path require_directory(const fs::path& path, const std::string& description) {

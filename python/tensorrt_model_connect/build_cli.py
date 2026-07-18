@@ -40,24 +40,19 @@ _OPTIMIZED_ROUTING_INTERNAL_FIELDS = frozenset({
 
 
 def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
-    """Return only public CLI options that the user actually requested.
+    """Return the effective public CLI options for model-owned policy.
 
     The generic router does not interpret these fields. The selected
     model-owned adapter decides whether and how they map to its runtime.
+    Argparse has already applied the public defaults, so omitted and explicit
+    default-valued options intentionally produce the same request.
     """
 
-    explicit = getattr(args, "_explicit_public_options", None)
-    if explicit is None:
-        # ``_cmd_build`` is private, but unit tests and a few internal callers
-        # invoke it directly. With no parser provenance, forward their fields
-        # opaquely and let a matching model capsule decide what it supports.
-        explicit = vars(args).keys()
     return {
         name: value
         for name, value in vars(args).items()
         if not name.startswith("_")
         and name not in _OPTIMIZED_ROUTING_INTERNAL_FIELDS
-        and name in explicit
     }
 
 
@@ -718,18 +713,6 @@ def main() -> None:
     if cli_argv and cli_argv[0] not in command_names and cli_argv[0] not in ("--help", "-h"):
         cli_argv = ["build"] + cli_argv
     args = parser.parse_args(cli_argv)
-
-    if args.command == "build":
-        option_destinations = {
-            option: action.dest
-            for action in build_p._actions
-            for option in action.option_strings
-        }
-        args._explicit_public_options = frozenset(
-            option_destinations[token.split("=", 1)[0]]
-            for token in cli_argv[1:]
-            if token.split("=", 1)[0] in option_destinations
-        )
 
     if args.command is None:
         parser.print_help()

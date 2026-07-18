@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import os
 import re
@@ -291,50 +290,15 @@ class ImplementationManifest:
         )
 
 
-def normalized_manifest_contract(manifest: ImplementationManifest) -> dict[str, Any]:
-    """Return the canonical manifest semantics carried in build bindings."""
+def manifest_contract_sha256(manifest: ImplementationManifest) -> str:
+    """Hash the exact selected manifest bytes carried in build bindings."""
 
     try:
-        entrypoint = manifest.build_entrypoint.relative_to(manifest.capsule_root).as_posix()
-    except ValueError as exc:  # Defensive; loading a manifest already enforces containment.
+        encoded = manifest.path.read_bytes()
+    except OSError as exc:
         raise ManifestValidationError(
-            f"Build entrypoint is outside capsule {manifest.implementation_id}: "
-            f"{manifest.build_entrypoint}"
+            f"Unable to hash selected manifest {manifest.path}: {exc}"
         ) from exc
-    return {
-        "schema_version": MANIFEST_SCHEMA_VERSION,
-        "implementation_id": manifest.implementation_id,
-        "runtime_kind": "optimized",
-        "downstream_runtime": manifest.downstream_runtime,
-        "downstream_version": manifest.downstream_version,
-        "downstream_commit": manifest.downstream_commit,
-        "model": {
-            "id": manifest.model_id,
-            "revisions": list(manifest.model_revisions),
-        },
-        "target": dict(manifest.target),
-        "build": {
-            "entrypoint": entrypoint,
-            "timeout_seconds": manifest.build_timeout_seconds,
-        },
-        "runtime": {
-            "library": manifest.runtime_library,
-            "abi": manifest.runtime_abi,
-            "artifact_layout": manifest.artifact_layout,
-        },
-    }
-
-
-def manifest_contract_sha256(manifest: ImplementationManifest) -> str:
-    """Hash the normalized contract exactly as the generic build binding does."""
-
-    encoded = json.dumps(
-        normalized_manifest_contract(manifest),
-        allow_nan=False,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -490,28 +454,63 @@ def _reject_duplicate_implementation_ids(
         raise ManifestDiscoveryError(f"Duplicate implementation_id declarations: {details}")
 
 
-def discover_implementations(
-    roots: Iterable[str | Path],
-) -> tuple[ImplementationManifest, ...]:
-    """Strictly discover every implementation below bounded model-family roots."""
-    manifests = tuple(load_implementation_manifest(path) for path in _manifest_paths(roots))
-    _reject_duplicate_implementation_ids(manifests)
-    return manifests
+def _declared_model_id(path: Path) -> str:
+    """Read only the manifest's model index before validating a candidate.
+
+    A model family may contain many independently owned adapters. A syntax
+    error in an adapter for another model must not disable the requested model.
+    The small ``[model]`` table is therefore the discovery index; only an exact
+    model match is subjected to full manifest validation.
+    """
+
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise _fail(path, f"unable to read model index: {exc}") from exc
+    starts = [index for index, line in enumerate(lines) if line.strip() == "[model]"]
+    if len(starts) != 1:
+        raise _fail(path, "manifest must contain exactly one [model] table")
+    start = starts[0]
+    end = next(
+        (
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index].lstrip().startswith("[")
+        ),
+        len(lines),
+    )
+    matches = []
+    for line in lines[start + 1 : end]:
+        match = re.fullmatch(r'\s*id\s*=\s*"([^"\\\r\n]+)"\s*(?:#.*)?', line)
+        if match is not None:
+            matches.append(match.group(1))
+    if len(matches) != 1:
+        raise _fail(
+            path,
+            '[model] must contain exactly one literal id = "..." discovery index',
+        )
+    return _require_string(matches[0], path, "model.id")
 
 
 def discover_implementations_for_model(
     roots: Iterable[str | Path],
     model_id: str,
 ) -> tuple[ImplementationManifest, ...]:
-    """Load exact-model implementations below already selected family roots."""
+    """Load exact-model implementations below already selected family roots.
+
+    Discovery reads only each sibling's ``[model]`` index. Full parsing and
+    strict validation are intentionally limited to the requested model.
+    """
 
     if not isinstance(model_id, str) or not model_id.strip():
         raise ValueError("model_id must be a non-empty string")
-    return tuple(
-        manifest
-        for manifest in discover_implementations(roots)
-        if manifest.matches_model(model_id)
+    manifests = tuple(
+        load_implementation_manifest(path)
+        for path in _manifest_paths(roots)
+        if _declared_model_id(path) == model_id
     )
+    _reject_duplicate_implementation_ids(manifests)
+    return manifests
 
 
 def matching_implementations(
@@ -525,22 +524,3 @@ def matching_implementations(
             key=lambda manifest: (manifest.implementation_id, str(manifest.path)),
         )
     )
-
-
-def select_implementation(
-    manifests: Iterable[ImplementationManifest],
-    request: ImplementationRequest,
-) -> ImplementationManifest | None:
-    """Select one exact implementation or deterministically reject ambiguity."""
-    matches = matching_implementations(manifests, request)
-    if not matches:
-        return None
-    if len(matches) > 1:
-        candidates = ", ".join(
-            f"{manifest.implementation_id} ({manifest.path})" for manifest in matches
-        )
-        raise AmbiguousImplementationError(
-            "Multiple optimized implementations match "
-            f"{request.model_id}@{request.model_revision}: {candidates}"
-        )
-    return matches[0]

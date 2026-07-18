@@ -18,14 +18,11 @@ from tensorrt_model_connect.optimized_runtime.build_adapter import (
     run_probe,
 )
 from tensorrt_model_connect.optimized_runtime.manifest import (
-    AmbiguousImplementationError,
     ImplementationRequest,
     ManifestDiscoveryError,
     ManifestValidationError,
-    discover_implementations,
     discover_implementations_for_model,
     load_implementation_manifest,
-    select_implementation,
 )
 
 
@@ -160,13 +157,15 @@ def _supported_probe() -> ProbeResult:
     )
 
 
-def test_filesystem_discovery_is_recursive_stable_and_uncached(tmp_path: Path) -> None:
+def test_model_scoped_discovery_is_recursive_stable_and_uncached(tmp_path: Path) -> None:
     first = _write_capsule(
         tmp_path / "root-b",
         capsule_name="z-capsule",
         implementation_id="z-runtime",
     )
-    discovered = discover_implementations([tmp_path / "root-b"])
+    discovered = discover_implementations_for_model(
+        [tmp_path / "root-b"], "Example/Optimized-Model"
+    )
     assert [manifest.path for manifest in discovered] == [first.resolve()]
 
     _write_capsule(
@@ -174,7 +173,9 @@ def test_filesystem_discovery_is_recursive_stable_and_uncached(tmp_path: Path) -
         capsule_name="a-capsule",
         implementation_id="a-runtime",
     )
-    discovered = discover_implementations([tmp_path / "root-b", tmp_path / "root-a"])
+    discovered = discover_implementations_for_model(
+        [tmp_path / "root-b", tmp_path / "root-a"], "Example/Optimized-Model"
+    )
     assert [manifest.implementation_id for manifest in discovered] == [
         "a-runtime",
         "z-runtime",
@@ -186,7 +187,7 @@ def test_discovery_rejects_duplicate_implementation_ids(tmp_path: Path) -> None:
     _write_capsule(tmp_path, capsule_name="two", implementation_id="duplicate")
 
     with pytest.raises(ManifestDiscoveryError, match="duplicate.*one.*two"):
-        discover_implementations([tmp_path])
+        discover_implementations_for_model([tmp_path], "Example/Optimized-Model")
 
 
 def test_model_scoped_discovery_filters_valid_family_owned_adapters(tmp_path: Path) -> None:
@@ -206,6 +207,36 @@ def test_model_scoped_discovery_filters_valid_family_owned_adapters(tmp_path: Pa
 
     assert [manifest.path for manifest in discovered] == [requested.resolve()]
     assert unrelated.resolve() not in {manifest.path for manifest in discovered}
+
+
+def test_model_scoped_discovery_ignores_malformed_unrelated_sibling(
+    tmp_path: Path,
+) -> None:
+    requested = _write_capsule(
+        tmp_path,
+        capsule_name="requested",
+        implementation_id="requested-runtime",
+        model_id="Example/Requested-Model",
+    )
+    unrelated = _write_capsule(
+        tmp_path,
+        capsule_name="unrelated",
+        implementation_id="unrelated-runtime",
+        model_id="Example/Unrelated-Model",
+    )
+    unrelated.write_text(
+        unrelated.read_text(encoding="utf-8").replace(
+            'revisions = ["revision-a"]',
+            'revisions = [',
+        ),
+        encoding="utf-8",
+    )
+
+    discovered = discover_implementations_for_model(
+        [tmp_path], "Example/Requested-Model"
+    )
+
+    assert [manifest.path for manifest in discovered] == [requested.resolve()]
 
 
 def test_model_scoped_discovery_fails_closed_for_malformed_candidate(
@@ -330,26 +361,6 @@ def test_target_matching_is_type_strict(tmp_path: Path) -> None:
     assert not manifest.matches_target({"sm": 80, "integrated": 0})
 
 
-def test_selection_rejects_ambiguity_in_deterministic_order(tmp_path: Path) -> None:
-    z_manifest = load_implementation_manifest(
-        _write_capsule(tmp_path, capsule_name="z", implementation_id="z-runtime")
-    )
-    a_manifest = load_implementation_manifest(
-        _write_capsule(tmp_path, capsule_name="a", implementation_id="a-runtime")
-    )
-
-    with pytest.raises(AmbiguousImplementationError) as error:
-        select_implementation([z_manifest, a_manifest], _request())
-
-    message = str(error.value)
-    assert message.index("a-runtime") < message.index("z-runtime")
-
-
-def test_selection_returns_none_when_no_capsule_matches(tmp_path: Path) -> None:
-    manifest = load_implementation_manifest(_write_capsule(tmp_path))
-    assert select_implementation([manifest], _request(revision="other")) is None
-
-
 def test_probe_and_build_use_versioned_json_protocol(tmp_path: Path) -> None:
     manifest = load_implementation_manifest(_write_capsule(tmp_path))
     request = _request()
@@ -469,6 +480,7 @@ pathlib.Path({str(marker)!r}).write_text("invoked", encoding="utf-8")
     ("response", "message"),
     [
         ("not json", "invalid JSON"),
+        ('{"schema_version":1,"supported":NaN}', "non-finite JSON"),
         (
             json.dumps({"schema_version": 1, "supported": True}),
             "profile_id",
@@ -516,6 +528,31 @@ raise SystemExit(23)
 
     with pytest.raises(BuildAdapterError, match="exit code 23: adapter detail"):
         run_probe(manifest, _request())
+
+
+def test_explicit_zero_timeout_is_rejected_instead_of_using_manifest_default(
+    tmp_path: Path,
+) -> None:
+    manifest = load_implementation_manifest(_write_capsule(tmp_path))
+
+    with pytest.raises(ValueError, match="positive integer"):
+        run_probe(manifest, _request(), timeout_seconds=0)
+
+
+def test_build_descriptor_rejects_nonfinite_json(tmp_path: Path) -> None:
+    adapter = _binding_adapter("").replace(
+        '"private": {"opaque": True}',
+        '"private": {"score": float("nan")}',
+    )
+    manifest = load_implementation_manifest(_write_capsule(tmp_path, adapter=adapter))
+
+    with pytest.raises(BuildAdapterError, match="non-finite JSON"):
+        run_build(
+            manifest,
+            _request(),
+            tmp_path / "staging",
+            probe=_supported_probe(),
+        )
 
 
 @pytest.mark.skipif(os.name != "posix", reason="optimized-runtime capsules target Linux")

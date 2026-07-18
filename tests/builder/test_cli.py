@@ -135,10 +135,7 @@ class TestMainParser:
         assert exc_info.value.code == 0
         assert captured["args"].trust_remote_code is True
         assert captured["args"].build_timing_json == str(tmp_path / "timing.json")
-        assert captured["args"]._explicit_public_options == frozenset(
-            {"max_cache_length", "trust_remote_code", "build_timing_json", "output"}
-        )
-        assert "decoder_engine_layout" not in captured["args"]._explicit_public_options
+        assert not hasattr(captured["args"], "_explicit_public_options")
 
 
 class TestInspectArgs:

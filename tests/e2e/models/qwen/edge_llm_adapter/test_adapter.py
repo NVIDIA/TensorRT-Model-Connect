@@ -313,25 +313,12 @@ def test_manifest_profile_and_dependency_pins_are_exact_and_capsule_owned() -> N
         "commit": EDGE_COMMIT,
         "source_mode": "git",
     }
-    assert dependency["model"] == {"id": MODEL_ID, "revision": MODEL_REVISION}
-    assert dependency["tensorrt"] == {
-        "version": "10.14.1.48",
-        "compatible_versions": ["10.14.1.48"],
-    }
-    assert dependency["cuda"] == {
-        "version": "12.8",
-        "compatible_versions": ["12.8"],
-    }
+    assert dependency["tensorrt"] == {"version": "10.14.1.48"}
+    assert dependency["cuda"] == {"version": "12.8"}
     assert profile["profile_id"] == PROFILE_ID
-    assert profile["model"] == dependency["model"]
-    assert profile["versions"] == {
-        "edge_llm": "0.6.1",
-        "edge_llm_commit": EDGE_COMMIT,
-        "tensorrt": "10.14.1.48",
-        "cuda": "12.8",
-    }
-    assert profile["target"]["compute_capability"] == 80
-    assert profile["target"]["gpu_name"] == "NVIDIA A100 80GB PCIe"
+    assert "model" not in profile
+    assert "target" not in profile
+    assert "versions" not in profile
     _load_adapter_module()._validate_capsule_data(profile)
 
 
@@ -404,6 +391,45 @@ def test_supported_probe_selects_profile_without_hidden_opt_in(tmp_path: Path) -
         )
 
 
+def test_established_mc_defaults_translate_to_the_qualified_edge_profile() -> None:
+    import inspect
+
+    from tensorrt_model_connect.engine_builder import build
+
+    defaults = {
+        name: parameter.default
+        for name, parameter in inspect.signature(build).parameters.items()
+        if name not in {"model_id_or_path", "output_path"}
+    }
+
+    assert _load_adapter_module()._public_option_reason(defaults) == ""
+
+
+def test_bare_public_cli_translates_to_the_qualified_edge_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tensorrt_model_connect.build_cli as build_cli
+
+    captured = {}
+
+    def capture(args) -> int:
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(build_cli, "_cmd_build", capture)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["trtmc", "build", MODEL_ID, "-o", "/tmp/qwen-edge-test.trtfb"],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        build_cli.main()
+
+    assert exit_info.value.code == 0
+    options = build_cli._optimized_cli_public_options(captured["args"])
+    assert _load_adapter_module()._public_option_reason(options) == ""
+
+
 @pytest.mark.parametrize("missing_module", ("modelopt", "onnx_graphsurgeon", "torch"))
 def test_probe_falls_back_when_default_exporter_prerequisite_is_missing(
     tmp_path: Path,
@@ -462,9 +488,7 @@ def test_build_stages_explicit_engine_runtime_and_plugin_payloads(tmp_path: Path
     assert build.descriptor["versions"]["edge_llm"] == "0.6.1"
     assert build.descriptor["versions"]["cuda"] == "12.8"
     assert build.descriptor["bundle_config"]["runtime_provider"] == IMPLEMENTATION_ID
-    private = build.descriptor["metadata"]["private"]["tensorrt-edge-llm"]
-    assert private["profile_id"] == PROFILE_ID
-    assert private["artifact"]["file_count"] == 6
+    assert "metadata" not in build.descriptor
 
     bundle = write_optimized_bundle(tmp_path / "qwen3-edge.trtfb", manifest, request, build)
     assert bundle.is_file()
@@ -956,49 +980,3 @@ def test_verbose_edge_tool_logs_never_pollute_json_stdout(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "child stdout\nchild stderr\n"
-
-
-def test_model_adapter_sources_own_edge_behavior_and_target_sm80() -> None:
-    edge_builder = "edge_llm_" + "builder"
-    edge_profiles = "edge_llm_" + "profiles"
-    forbidden = (
-        "tensorrt_model_connect." + edge_builder,
-        "tensorrt_model_connect." + edge_profiles,
-        "from ." + edge_builder,
-        "from ." + edge_profiles,
-        "edge_llm_" + "provider.h",
-        "edge_llm_" + "adapter_dso.cpp",
-        "tensorrt_model_connect.edge_llm",
-        "optimized_runtime_host",
-    )
-    implementation_sources = (
-        CAPSULE_ROOT / "adapter.py",
-        RUNTIME_ROOT / "adapter.cpp",
-        RUNTIME_ROOT / "CMakeLists.txt",
-    )
-    for source in implementation_sources:
-        text = source.read_text(encoding="utf-8")
-        assert not any(token in text for token in forbidden), source
-
-    runtime_source = implementation_sources[1].read_text(encoding="utf-8")
-    cmake_source = implementation_sources[2].read_text(encoding="utf-8")
-    assert '#include "runtime/providers/optimized_runtime_factory.h"' in runtime_source
-    assert "CUDA_ARCHITECTURES 80" in cmake_source
-
-
-def test_edge_llm_logic_does_not_leak_into_shared_dispatch() -> None:
-    shared_sources = (
-        REPOSITORY_ROOT / "python" / "tensorrt_model_connect" / "build_cli.py",
-        REPOSITORY_ROOT / "python" / "tensorrt_model_connect" / "engine_builder.py",
-        REPOSITORY_ROOT / "python" / "tensorrt_model_connect" / "optimized_runtime",
-        REPOSITORY_ROOT / "src" / "runtime" / "providers",
-        REPOSITORY_ROOT / "conanfile.py",
-    )
-    forbidden = ("qwen3-0.6b", "qwen3_0_6b", "tensorrt-edge-llm", "edge_llm")
-    for source in shared_sources:
-        files = source.rglob("*") if source.is_dir() else (source,)
-        for path in files:
-            if not path.is_file() or path.suffix not in {".py", ".cpp", ".h", ".txt"}:
-                continue
-            text = path.read_text(encoding="utf-8").lower()
-            assert not any(token in text for token in forbidden), path

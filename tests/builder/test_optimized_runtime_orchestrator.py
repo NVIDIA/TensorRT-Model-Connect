@@ -25,7 +25,6 @@ from tensorrt_model_connect.optimized_runtime.orchestrator import (
 )
 from tensorrt_model_connect.optimized_runtime.target import (
     TargetResolutionError,
-    normalize_target_descriptor,
 )
 from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC
 
@@ -163,26 +162,6 @@ def _target() -> dict[str, object]:
     }
 
 
-def test_target_descriptor_normalizes_aliases_without_runtime_knowledge() -> None:
-    facts = normalize_target_descriptor(
-        {
-            "schema_version": 1,
-            "target_id": "a100-node",
-            "gpu": {
-                "name": "NVIDIA A100 80GB PCIe",
-                "compute_capability": "8.0",
-                "memory_mib": 81920,
-                "count": 1,
-            },
-            "system": {"os": "GNU/Linux", "arch": "amd64", "kind": "dgpu"},
-        }
-    )
-    assert facts == {
-        **_target(),
-        "target_id": "a100-node",
-    }
-
-
 def test_family_discovery_rejects_nested_adapter_layout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -201,23 +180,6 @@ def test_family_discovery_rejects_nested_adapter_layout(
         discover_family_implementations_for_model("example_family", "Example/Model")
 
 
-def test_target_descriptor_rejects_unknown_facts() -> None:
-    with pytest.raises(TargetResolutionError, match="Unknown target facts"):
-        normalize_target_descriptor(
-            {
-                "schema_version": 1,
-                "gpu": {
-                    "name": "GPU",
-                    "compute_capability": 80,
-                    "memory_mib": 1,
-                    "count": 1,
-                    "vendor_policy": "capsule-specific",
-                },
-                "system": {"os": "linux", "arch": "x86_64", "kind": "discrete"},
-            }
-        )
-
-
 def test_full_generic_build_writes_self_contained_delegated_bundle(
     tmp_path: Path,
 ) -> None:
@@ -227,8 +189,6 @@ def test_full_generic_build_writes_self_contained_delegated_bundle(
     selection = try_build_optimized_runtime(
         "Example/Model",
         output,
-        target="current",
-        configured_revision="",
         parameters={"precision": "fp16", "quantization": "none"},
         manifests=(manifest,),
         current_target_probe=_target,
@@ -292,8 +252,6 @@ def test_current_target_preserves_active_device_ordinal_only_as_launch_context(
     selection = try_build_optimized_runtime(
         "Example/Model",
         output,
-        target="current",
-        configured_revision="",
         parameters={"precision": "fp16", "verify_launch_context": True},
         manifests=(manifest,),
         model_revision_probe=_model_revision,
@@ -308,7 +266,7 @@ def test_current_target_preserves_active_device_ordinal_only_as_launch_context(
     assert b"TRTMC_INTERNAL_OPTIMIZED_RUNTIME_CUDA_DEVICE" not in output.read_bytes()
 
 
-def test_selected_family_fails_closed_for_any_malformed_adapter(
+def test_malformed_unrelated_sibling_does_not_break_requested_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -330,16 +288,17 @@ def test_selected_family_fails_closed_for_any_malformed_adapter(
     _make_invalid_toml(unrelated)
     monkeypatch.setattr(orchestrator, "family_implementation_roots", lambda _family: (root,))
 
-    with pytest.raises(ManifestValidationError, match="invalid TOML"):
-        try_build_optimized_runtime(
-            "Example/Requested-Model",
-            tmp_path / "model.trtfb",
-            target="current",
-            configured_revision="0123456789abcdef0123456789abcdef01234567",
-            family_name="example",
-            parameters={"precision": "fp16"},
-            current_target_probe=_target,
-        )
+    selection = try_build_optimized_runtime(
+        "Example/Requested-Model",
+        tmp_path / "model.trtfb",
+        family_name="example",
+        parameters={"precision": "fp16"},
+        current_target_probe=_target,
+        model_revision_probe=_model_revision,
+    )
+
+    assert selection is not None
+    assert selection.manifest.implementation_id == "requested-runtime"
 
 
 def test_public_native_build_without_an_owning_family_skips_adapter_discovery(
@@ -354,8 +313,6 @@ def test_public_native_build_without_an_owning_family_skips_adapter_discovery(
     selection = try_build_optimized_runtime(
         "Example/Native-Only-Model",
         tmp_path / "native.trtfb",
-        target="current",
-        configured_revision="",
         current_target_probe=lambda: pytest.fail("native-only request resolved a target"),
     )
 
@@ -380,11 +337,10 @@ def test_public_build_fails_closed_for_malformed_model_candidate(
         try_build_optimized_runtime(
             "Example/Requested-Model",
             tmp_path / "model.trtfb",
-            target="current",
-            configured_revision="0123456789abcdef0123456789abcdef01234567",
             family_name="example",
             parameters={"precision": "fp16"},
             current_target_probe=_target,
+            model_revision_probe=_model_revision,
         )
 
 
@@ -394,8 +350,6 @@ def test_unsupported_probe_returns_native_fallback_without_building(tmp_path: Pa
     selection = try_build_optimized_runtime(
         "Example/Model",
         output,
-        target="current",
-        configured_revision="",
         parameters={"precision": "fp8"},
         manifests=(manifest,),
         current_target_probe=_target,
@@ -412,8 +366,6 @@ def test_bare_model_id_does_not_select_a_stale_capsule_revision(tmp_path: Path) 
     selection = try_build_optimized_runtime(
         "Example/Model",
         output,
-        target="current",
-        configured_revision=None,
         parameters={"precision": "fp16"},
         manifests=(manifest,),
         current_target_probe=lambda: pytest.fail("stale profile resolved a target"),
@@ -431,8 +383,6 @@ def test_bare_model_id_revision_lookup_failure_retains_native_path(tmp_path: Pat
     selection = try_build_optimized_runtime(
         "Example/Model",
         output,
-        target="current",
-        configured_revision=None,
         parameters={"precision": "fp16"},
         manifests=(manifest,),
         current_target_probe=lambda: pytest.fail("unresolved model resolved a target"),
@@ -488,8 +438,6 @@ def test_bare_model_id_selects_only_the_resolved_revision_with_multiple_capsules
     selection = try_build_optimized_runtime(
         "Example/Model",
         output,
-        target="current",
-        configured_revision=None,
         parameters={"precision": "fp16"},
         manifests=manifests,
         current_target_probe=_target,
@@ -511,8 +459,6 @@ def test_unavailable_active_target_returns_native_fallback(tmp_path: Path) -> No
     selection = try_build_optimized_runtime(
         "Example/Model",
         output,
-        target=None,
-        configured_revision="",
         parameters={"precision": "fp16"},
         manifests=(manifest,),
         current_target_probe=unavailable_target,

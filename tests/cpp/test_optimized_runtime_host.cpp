@@ -9,7 +9,9 @@
 #include "utils/sha256.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -17,6 +19,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifndef TRTMC_TEST_OPTIMIZED_PROVIDER_DSO
@@ -296,6 +299,60 @@ void test_non_text_pipeline_uses_same_host() {
     check(unsupported, "non-text adapter does not inherit host-side operation behavior");
 }
 
+void test_concurrent_repeated_loads_share_published_cache_and_dso() {
+    trtmc_test::TempDirGuard temporary;
+    const fs::path root(temporary.path());
+    const fs::path bundle = root / "concurrent.trtfb";
+    const fs::path events = root / "events.txt";
+    write_bundle(bundle, text_spec());
+    trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
+    trtmc_test::EnvVarGuard artifact_guard("TRTMC_FAKE_OPTIMIZED_EXPECT_ARTIFACT", kArtifact);
+
+    constexpr std::size_t kWorkers = 8;
+    std::atomic<std::size_t> ready{0};
+    std::atomic<bool> start{false};
+    std::vector<std::unique_ptr<trtmc::IPipeline>> pipelines(kWorkers);
+    std::vector<std::exception_ptr> errors(kWorkers);
+    std::vector<std::thread> workers;
+    workers.reserve(kWorkers);
+    for (std::size_t index = 0; index < kWorkers; ++index) {
+        workers.emplace_back([&, index] {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            try {
+                pipelines[index] = trtmc::load(bundle.string(), load_options(root / "cache"));
+            } catch (...) {
+                errors[index] = std::current_exception();
+            }
+        });
+    }
+    while (ready.load(std::memory_order_acquire) != kWorkers)
+        std::this_thread::yield();
+    start.store(true, std::memory_order_release);
+    for (auto& worker : workers)
+        worker.join();
+
+    check(std::all_of(errors.begin(), errors.end(),
+                      [](const auto& error) { return error == nullptr; }),
+          "concurrent repeated loads all succeed");
+    check(std::all_of(pipelines.begin(), pipelines.end(),
+                      [](const auto& pipeline) { return pipeline != nullptr; }),
+          "concurrent repeated loads return every pipeline");
+    const auto loaded_events = read_lines(events);
+    check(count_line(loaded_events, "dlopen") == 1,
+          "concurrent repeated loads initialize one DSO identity");
+    check(count_line(loaded_events, "create") == kWorkers,
+          "concurrent repeated loads create every requested pipeline");
+
+    pipelines.clear();
+    const auto final_events = read_lines(events);
+    check(count_line(final_events, "destroy") == kWorkers,
+          "concurrent repeated pipelines are all destroyed");
+    check(count_line(final_events, "dlclose") == 0,
+          "deduplicated process-lifetime DSO reference remains loaded");
+}
+
 void test_descriptor_is_strict_and_fail_closed() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
@@ -450,6 +507,7 @@ int main(int argc, char** argv) {
     test_exact_embedded_dso_identity();
     test_toolchain_abi_fails_before_create();
     test_model_owned_text_pipeline_and_eager_load();
+    test_concurrent_repeated_loads_share_published_cache_and_dso();
     test_non_text_pipeline_uses_same_host();
     test_descriptor_is_strict_and_fail_closed();
     test_artifact_integrity_and_cache_tamper_fail_closed();

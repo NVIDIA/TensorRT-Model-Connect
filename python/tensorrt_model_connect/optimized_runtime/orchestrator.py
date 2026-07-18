@@ -23,10 +23,14 @@ from .manifest import (
     ImplementationRequest,
     ManifestDiscoveryError,
     TargetScalar,
-    discover_implementations,
+    discover_implementations_for_model,
     matching_implementations,
 )
-from .target import TargetResolutionError, _probe_current_target_with_device, resolve_target
+from .target import (
+    TargetResolutionError,
+    _probe_current_target_with_device,
+    probe_current_target,
+)
 
 
 @dataclass(frozen=True)
@@ -68,7 +72,7 @@ def discover_family_implementations_for_model(
     roots = family_implementation_roots(family_name)
     if not roots:
         return ()
-    manifests = discover_implementations(roots)
+    manifests = discover_implementations_for_model(roots, model_id)
     family_root = roots[0].resolve()
     for manifest in manifests:
         try:
@@ -83,7 +87,7 @@ def discover_family_implementations_for_model(
                 "<family>/<adapter>/IMPLEMENTATION.toml: "
                 f"{manifest.path}"
             )
-    return tuple(manifest for manifest in manifests if manifest.matches_model(model_id))
+    return manifests
 
 
 def _model_source_identity(model_ref: str) -> tuple[str, str | None]:
@@ -147,20 +151,11 @@ def _probe_model_default_revision(model_id: str) -> str | None:
 def _resolve_revision(
     manifests: Iterable[ImplementationManifest],
     model_id: str,
-    configured_revision: str | None,
     snapshot_revision: str | None,
     model_revision_probe: Callable[[str], str | None],
 ) -> str | None:
-    configured = str(configured_revision or "").strip().lower()
-    if snapshot_revision is not None and configured and snapshot_revision != configured:
-        raise ValueError(
-            "Local Hugging Face snapshot revision does not match the explicit deployment "
-            f"revision: snapshot={snapshot_revision}, deployment={configured}"
-        )
     if snapshot_revision is not None:
         return snapshot_revision
-    if configured:
-        return configured
     revisions = {
         revision
         for manifest in manifests
@@ -174,8 +169,6 @@ def _resolve_revision(
 def make_implementation_request(
     model_ref: str,
     *,
-    target: str | Path | None,
-    configured_revision: str | None,
     parameters: Mapping[str, Any] | None,
     manifests: Sequence[ImplementationManifest],
     current_target_probe=None,
@@ -190,14 +183,13 @@ def make_implementation_request(
     revision = _resolve_revision(
         model_manifests,
         model_id,
-        configured_revision,
         snapshot_revision,
         model_revision_probe or _probe_model_default_revision,
     )
     if revision is None:
         return None
-    target_facts: Mapping[str, TargetScalar] = resolve_target(
-        target, current_probe=current_target_probe
+    target_facts: Mapping[str, TargetScalar] = dict(
+        (current_target_probe or probe_current_target)()
     )
     merged_parameters = dict(parameters or {})
     merged_parameters.setdefault("model_source", model_ref)
@@ -279,8 +271,6 @@ def try_build_optimized_runtime(
     model_ref: str,
     output_path: str | Path,
     *,
-    target: str | Path | None,
-    configured_revision: str | None = None,
     family_name: str | None = None,
     parameters: Mapping[str, Any] | None = None,
     manifests: Sequence[ImplementationManifest] | None = None,
@@ -296,12 +286,11 @@ def try_build_optimized_runtime(
         available = discover_family_implementations_for_model(family_name, model_id)
     else:
         available = tuple(manifests)
-    raw_target = str(target or "current").strip().lower()
     adapter_environment: Mapping[str, str] | None = None
     try:
         effective_current_probe = current_target_probe
         captured_active_device: list[int] = []
-        if raw_target in {"", "current"} and current_target_probe is None:
+        if current_target_probe is None:
             def probe_with_launch_context() -> Mapping[str, TargetScalar]:
                 current_facts, active_device = _probe_current_target_with_device()
                 captured_active_device.append(active_device)
@@ -310,8 +299,6 @@ def try_build_optimized_runtime(
             effective_current_probe = probe_with_launch_context
         request = make_implementation_request(
             model_ref,
-            target=target,
-            configured_revision=configured_revision,
             parameters=parameters,
             manifests=available,
             current_target_probe=effective_current_probe,
@@ -325,9 +312,7 @@ def try_build_optimized_runtime(
         # The unchanged public API implicitly targets the active device. If it
         # cannot be described for optimized-runtime selection, no capsule is
         # selected and the caller must retain the existing native path.
-        if target is None or str(target).strip().lower() in {"", "current"}:
-            return None
-        raise
+        return None
     if request is None:
         return None
     selection = select_delegated_build(

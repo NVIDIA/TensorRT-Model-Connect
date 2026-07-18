@@ -106,16 +106,16 @@ def test_python_build_delegates_before_native_with_explicit_options(
         max_cache_length=4096,
     )
 
-    assert calls == [
-        (
-            "example/model",
-            "model.trtfb",
-            {"max_cache_length": 4096, "precision": "fp16"},
-        )
-    ]
+    assert len(calls) == 1
+    model, output, options = calls[0]
+    assert (model, output) == ("example/model", "model.trtfb")
+    assert options["max_cache_length"] == 4096
+    assert options["precision"] == "fp16"
+    assert options["max_batch_size"] == 1
+    assert options["decoder_engine_layout"] == "split"
 
 
-def test_python_build_distinguishes_omitted_and_explicit_default_options(
+def test_python_build_treats_omitted_and_explicit_defaults_identically(
     monkeypatch,
 ) -> None:
     import tensorrt_model_connect.engine_builder as engine_builder
@@ -142,14 +142,10 @@ def test_python_build_distinguishes_omitted_and_explicit_default_options(
         max_batch_size=1,
     )
 
-    assert calls == [
-        {},
-        {
-            "max_batch_size": 1,
-            "max_cache_length": 256,
-            "precision": "fp32",
-        },
-    ]
+    assert calls[0] == calls[1]
+    assert calls[0]["max_batch_size"] == 1
+    assert calls[0]["max_cache_length"] == 256
+    assert calls[0]["precision"] == "fp32"
 
 
 def test_python_build_preserves_native_call_when_no_capsule_matches(monkeypatch) -> None:
@@ -198,11 +194,16 @@ def test_cli_delegation_uses_existing_options_without_native_discovery(monkeypat
         output="model.trtfb",
         precision="fp16",
         max_cache_length=256,
-        _explicit_public_options=frozenset({"output", "precision"}),
     )
 
     assert build_cli._cmd_build(args) == 0
-    assert calls == [("example/model", "model.trtfb", {"precision": "fp16"})]
+    assert calls == [
+        (
+            "example/model",
+            "model.trtfb",
+            {"max_cache_length": 256, "precision": "fp16"},
+        )
+    ]
 
 
 def test_cli_delegation_preserves_explicit_default_options(monkeypatch) -> None:
@@ -223,9 +224,6 @@ def test_cli_delegation_preserves_explicit_default_options(monkeypatch) -> None:
         precision="fp32",
         max_cache_length=256,
         max_batch_size=1,
-        _explicit_public_options=frozenset(
-            {"output", "precision", "max_cache_length", "max_batch_size"}
-        ),
     )
 
     assert build_cli._cmd_build(args) == 0
@@ -274,7 +272,6 @@ def test_cli_native_fallback_does_not_probe_capsules_twice(monkeypatch) -> None:
         quant_calibration_samples=512,
         verbose=False,
         _skip_profile_resolution=True,
-        _explicit_public_options=frozenset({"output"}),
     )
 
     assert build_cli._cmd_build(args) == 0

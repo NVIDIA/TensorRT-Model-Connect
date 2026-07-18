@@ -157,6 +157,12 @@ shared_builder_module python/tensorrt_model_connect/engine_defs/base.py # shared
 shared_builder_module python/tensorrt_model_connect/fp8_calibrate.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/kernels/__init__.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/kernels/flashinfer_decode.py # shared Python builder surface; broad builder impact is intentional
+shared_builder_module python/tensorrt_model_connect/optimized_runtime/__init__.py # shared delegated-build dispatcher surface; conservative all-model impact is intentional while model-owned adapter edits remain family-only
+shared_builder_module python/tensorrt_model_connect/optimized_runtime/build_adapter.py # shared delegated-build process boundary; conservative all-model impact is intentional while model-owned adapter edits remain family-only
+shared_builder_module python/tensorrt_model_connect/optimized_runtime/bundle.py # shared delegated-bundle writer; conservative all-model impact is intentional while model-owned adapter edits remain family-only
+shared_builder_module python/tensorrt_model_connect/optimized_runtime/manifest.py # shared delegated-build contract parser; conservative all-model impact is intentional while model-owned adapter edits remain family-only
+shared_builder_module python/tensorrt_model_connect/optimized_runtime/orchestrator.py # shared delegated-build dispatcher; conservative all-model impact is intentional while model-owned adapter edits remain family-only
+shared_builder_module python/tensorrt_model_connect/optimized_runtime/target.py # shared deployment-target resolution; conservative all-model impact is intentional while model-owned adapter edits remain family-only
 shared_builder_module python/tensorrt_model_connect/parallel_config.py # shared Python builder surface for tensor-parallel build config and sharding; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/pipeline.py # shared Python builder surface; broad builder impact is intentional
 shared_builder_module python/tensorrt_model_connect/python_profiles.py # shared Python builder surface; broad builder impact is intentional

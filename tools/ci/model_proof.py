@@ -15,10 +15,8 @@ import shutil
 import signal
 import subprocess
 import sys
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
 
 from .context import CiContext
 from .gpu_lease import GpuLease
@@ -171,142 +169,6 @@ class ModelReferenceCache:
         return revision
 
 
-class OptimizedRuntimeDependencyStager:
-    """Stage Git pins owned by the selected model builder before offline proof."""
-
-    _ROOT_NAME = "optimized-runtime-dependencies"
-
-    def __init__(self, context: CiContext):
-        self.context = context
-
-    def prepare(
-        self,
-        projection: Path,
-        work_dir: Path,
-        python_family: str | None,
-    ) -> Path | None:
-        if python_family is None:
-            return None
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", python_family):
-            raise CiError(f"selected Python family is unsafe: {python_family!r}")
-        projection_root = projection.resolve()
-        family_root = projection / "python" / "tensorrt_model_connect" / "families" / python_family
-        if (
-            family_root.is_symlink()
-            or not family_root.is_dir()
-            or not family_root.resolve().is_relative_to(projection_root)
-        ):
-            raise CiError(f"projected Python family is unavailable: {python_family}")
-
-        destination_root = work_dir / self._ROOT_NAME
-        staged: dict[tuple[str, str], str] = {}
-        for lock_path in sorted(family_root.rglob("dependency.lock")):
-            display_path = lock_path.relative_to(projection).as_posix()
-            if (
-                lock_path.is_symlink()
-                or not lock_path.is_file()
-                or not lock_path.resolve().is_relative_to(family_root.resolve())
-            ):
-                raise CiError(f"model-owned dependency lock is unavailable: {display_path}")
-            try:
-                lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
-            except (OSError, tomllib.TOMLDecodeError) as error:
-                raise CiError(f"model-owned dependency lock is invalid: {display_path}") from error
-            downstream = lock.get("downstream")
-            if not isinstance(downstream, dict):
-                raise CiError(f"model-owned dependency lock needs [downstream]: {display_path}")
-            source_mode = downstream.get("source_mode")
-            if source_mode != "git":
-                continue
-            name, source, commit = self._git_pin(downstream, display_path)
-            key = (name, commit)
-            previous_source = staged.get(key)
-            if previous_source is not None:
-                if previous_source != source:
-                    raise CiError(
-                        f"optimized runtime dependency pin collision for {name} at {commit}"
-                    )
-                continue
-            destination = destination_root / name / commit
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            self._clone(source, commit, destination)
-            staged[key] = source
-
-        return destination_root if staged else None
-
-    @staticmethod
-    def _git_pin(downstream: dict[str, object], raw_root: str) -> tuple[str, str, str]:
-        name = downstream.get("name")
-        source = downstream.get("source")
-        commit = downstream.get("commit")
-        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
-            raise CiError(f"optimized runtime Git dependency name is invalid: {raw_root}")
-        if not isinstance(source, str):
-            raise CiError(f"optimized runtime Git dependency source is invalid: {raw_root}")
-        try:
-            parsed = urlsplit(source)
-        except ValueError as error:
-            raise CiError(
-                f"optimized runtime Git dependency source is invalid: {raw_root}"
-            ) from error
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-            or not parsed.path.strip("/")
-            or any(character.isspace() for character in source)
-        ):
-            raise CiError(f"optimized runtime Git dependency source is invalid: {raw_root}")
-        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
-            raise CiError(f"optimized runtime Git dependency commit is invalid: {raw_root}")
-        return name, source, commit
-
-    def _clone(self, source: str, commit: str, destination: Path) -> None:
-        if destination.exists():
-            raise CiError(f"optimized runtime dependency destination already exists: {destination}")
-        git_environment = {
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_CONFIG_COUNT": "3",
-            "GIT_CONFIG_KEY_0": "protocol.file.allow",
-            "GIT_CONFIG_VALUE_0": "never",
-            "GIT_CONFIG_KEY_1": "protocol.ext.allow",
-            "GIT_CONFIG_VALUE_1": "never",
-            "GIT_CONFIG_KEY_2": "credential.helper",
-            "GIT_CONFIG_VALUE_2": "",
-        }
-        self.context.run(
-            ["git", "clone", "--no-checkout", "--", source, destination],
-            updates=git_environment,
-        )
-        self.context.run(
-            ["git", "-C", destination, "checkout", "--detach", "--force", commit],
-            updates=git_environment,
-        )
-        self.context.run(
-            ["git", "-C", destination, "submodule", "update", "--init", "--recursive"],
-            updates=git_environment,
-        )
-        revision = self.context.output(
-            ["git", "-C", destination, "rev-parse", "HEAD^{commit}"],
-            updates=git_environment,
-        )
-        if revision != commit:
-            raise CiError(
-                f"optimized runtime dependency revision mismatch: expected {commit}, found {revision}"
-            )
-        repository = self.context.output(
-            ["git", "-C", destination, "config", "--get", "remote.origin.url"],
-            updates=git_environment,
-        )
-        if repository != source:
-            raise CiError(
-                f"optimized runtime dependency source mismatch: expected {source}, found {repository}"
-            )
-
-
 class ModelProofContainerCleaner:
     """Remove only containers carrying the exact workflow job identity labels."""
 
@@ -418,17 +280,6 @@ class ModelProofRunner:
         ModelReferenceCache(self.context, self.request).prepare(
             selection.reference_cache, work, self.artifacts_dir
         )
-        owners = selection.payload.get("owners")
-        if not isinstance(owners, dict):
-            raise CiError("model proof selection has no owners")
-        python_family = owners.get("python")
-        if python_family is not None and not isinstance(python_family, str):
-            raise CiError("model proof Python owner must be a string or null")
-        optimized_dependency_root = OptimizedRuntimeDependencyStager(self.context).prepare(
-            projection,
-            work,
-            python_family,
-        )
         expected = self.context.env.get("TRTMC_MODEL_PROOF_EXPECTED_RESOURCE_CLASS", "")
         if expected and expected not in {"shared", "exclusive_gpu"}:
             raise CiError(
@@ -477,15 +328,7 @@ class ModelProofRunner:
         (self.artifacts_dir / "gpu-lease.json").write_text(
             json.dumps(lease_evidence, indent=2) + "\n", encoding="utf-8"
         )
-        self._run_proof_container(
-            projection,
-            work,
-            private_hub,
-            image,
-            selection,
-            task_eval_dir,
-            optimized_dependency_root,
-        )
+        self._run_proof_container(projection, work, private_hub, image, selection, task_eval_dir)
         for name in ("proof.json", "model-proof-report.html"):
             if not (self.artifacts_dir / name).is_file():
                 raise CiError(f"model proof did not emit {name}")
@@ -734,7 +577,6 @@ class ModelProofRunner:
         image: str,
         selection: ModelProofSelection,
         task_eval_dir: Path | None,
-        optimized_dependency_root: Path | None,
     ) -> None:
         assert self.lease and self.artifacts_dir is not None and self.lease.gpu_id is not None
         name = self._base_container_name()
@@ -756,15 +598,6 @@ class ModelProofRunner:
                 [
                     "--mount",
                     f"type=bind,src={task_eval_dir},dst=/task-eval-data,readonly",
-                ]
-            )
-        if optimized_dependency_root is not None:
-            mounts.extend(
-                [
-                    "--mount",
-                    "type=bind,"
-                    f"src={optimized_dependency_root},"
-                    "dst=/work/optimized-runtime-dependencies,readonly",
                 ]
             )
         command = [
@@ -802,11 +635,7 @@ class ModelProofRunner:
             "/src",
             "--tmpfs",
             "/tmp:rw,exec,nosuid,nodev,size=4g",
-            *self._proof_environment(
-                slots,
-                bool(selection.reference_cache),
-                optimized_dependency_root is not None,
-            ),
+            *self._proof_environment(slots, bool(selection.reference_cache)),
             image,
             "python3",
             "-m",
@@ -826,9 +655,7 @@ class ModelProofRunner:
         if rc:
             raise CiError(f"isolated model proof failed for {self.request.model} (exit {rc})")
 
-    def _proof_environment(
-        self, slots: str, has_reference: bool, has_optimized_dependencies: bool
-    ) -> list[str]:
+    def _proof_environment(self, slots: str, has_reference: bool) -> list[str]:
         assert self.lease and self.lease.gpu_id is not None
         values = {
             "HOME": "/tmp",
@@ -858,10 +685,6 @@ class ModelProofRunner:
         }
         if has_reference:
             values["TRTMC_STORAGE_ROOT"] = "/work/reference-private"
-        if has_optimized_dependencies:
-            values["_TRTMC_INTERNAL_OPTIMIZED_RUNTIME_DEPENDENCY_ROOT"] = (
-                "/work/optimized-runtime-dependencies"
-            )
         return [item for name, value in values.items() for item in ("-e", f"{name}={value}")]
 
     def _reclaim_orphans(self) -> None:

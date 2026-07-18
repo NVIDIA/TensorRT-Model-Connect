@@ -588,8 +588,8 @@ MaterializedPaths inspect_materialized_tree(const fs::path& root) {
     return paths;
 }
 
-void validate_materialized_tree(const fs::path& root, const ArtifactDescriptor& descriptor,
-                                const EmbeddedArtifacts& embedded) {
+void validate_materialized_tree_layout(const fs::path& root, const ArtifactDescriptor& descriptor,
+                                       const EmbeddedArtifacts& embedded) {
     MaterializedPaths expected;
     expected.directories.insert(descriptor.directories.begin(), descriptor.directories.end());
     for (const auto& file : embedded.files)
@@ -599,6 +599,11 @@ void validate_materialized_tree(const fs::path& root, const ArtifactDescriptor& 
         throw std::runtime_error(
             "Materialized optimized-runtime tree does not exactly match its manifest");
     }
+}
+
+void validate_materialized_tree(const fs::path& root, const ArtifactDescriptor& descriptor,
+                                const EmbeddedArtifacts& embedded) {
+    validate_materialized_tree_layout(root, descriptor, embedded);
     std::vector<Sha256Digest> hashes;
     hashes.reserve(embedded.files.size());
     for (const auto& file : embedded.files) {
@@ -709,17 +714,9 @@ fs::path create_staging_directory(const fs::path& output_root) {
     throw std::runtime_error("Unable to reserve optimized-runtime artifact staging directory");
 }
 
-struct MaterializedArtifacts {
-    fs::path path;
-    // Keep cooperative cache publishers/removers excluded until the exact DSO
-    // is loaded and the downstream runtime has consumed its engine files.
-    std::unique_ptr<FileLock> lock;
-};
-
-MaterializedArtifacts materialize_artifacts(const std::string& bundle_path,
-                                            const BundleInfo& bundle_info,
-                                            const OptimizedRuntimeDescriptor& descriptor,
-                                            const std::string& requested_cache) {
+fs::path materialize_artifacts(const std::string& bundle_path, const BundleInfo& bundle_info,
+                               const OptimizedRuntimeDescriptor& descriptor,
+                               const std::string& requested_cache) {
     const EmbeddedArtifacts embedded = find_embedded_artifacts(bundle_info, descriptor.artifact);
     const bool contains_runtime_library =
         std::any_of(embedded.files.begin(), embedded.files.end(), [&](const auto& file) {
@@ -732,13 +729,12 @@ MaterializedArtifacts materialize_artifacts(const std::string& bundle_path,
     }
     const fs::path output_root = artifact_cache_path(descriptor, requested_cache);
     ensure_directory(output_root.parent_path());
-    auto lock = std::make_unique<FileLock>(output_root.parent_path() /
-                                           ("." + output_root.filename().string() + ".lock"));
+    FileLock lock(output_root.parent_path() / ("." + output_root.filename().string() + ".lock"));
 
     std::error_code error;
     if (fs::exists(output_root, error) && !error) {
         validate_materialized_tree(output_root, descriptor.artifact, embedded);
-        return MaterializedArtifacts{output_root, std::move(lock)};
+        return output_root;
     }
     if (error)
         throw std::runtime_error("Failed to inspect optimized-runtime cache: " + error.message());
@@ -759,13 +755,19 @@ MaterializedArtifacts materialize_artifacts(const std::string& bundle_path,
         throw std::runtime_error("Optimized-runtime artifact tree SHA-256 mismatch: expected " +
                                  descriptor.artifact.tree_sha256 + ", got " + actual_hash);
     }
-    validate_materialized_tree(staging.path(), descriptor.artifact, embedded);
+    // copy_and_hash_artifact already authenticated every byte written to this
+    // private staging tree. Re-check its exact shape without immediately
+    // reading and hashing the full artifact payload a second time.
+    validate_materialized_tree_layout(staging.path(), descriptor.artifact, embedded);
     fs::rename(staging.path(), output_root, error);
     if (error)
         throw std::runtime_error("Failed to publish optimized-runtime artifact tree: " +
                                  error.message());
     staging.release();
-    return MaterializedArtifacts{output_root, std::move(lock)};
+    // The content-addressed tree is now atomically published and validated.
+    // Release the cooperative publication lock before any DSO or downstream
+    // runtime code executes.
+    return output_root;
 }
 
 class DsoHandle {
@@ -931,14 +933,17 @@ std::unique_ptr<IPipeline> create_pipeline(const internal::OptimizedRuntimeFacto
     return pipeline;
 }
 
-void retain_dso_for_process_lifetime(void* dso) {
+bool retain_dso_for_process_lifetime(void* dso) {
     // IPipeline's virtual methods and destructor are implemented by the model-
-    // owned DSO. Intentionally leak the handle registry to avoid both dlclose
-    // and static-destruction-order hazards.
+    // owned DSO. Intentionally leak one reference per dynamic-loader identity
+    // to avoid both premature dlclose and static-destruction-order hazards.
+    // The loader handle is safer than a path identity: repeated dlopen calls
+    // for one loaded object return the same handle, while a replaced file may
+    // be loaded as a distinct object even when its canonical path is unchanged.
     static auto* mutex = new std::mutex;
-    static auto* handles = new std::vector<void*>;
+    static auto* handles = new std::unordered_set<void*>;
     std::lock_guard<std::mutex> lock(*mutex);
-    handles->push_back(dso);
+    return handles->insert(dso).second;
 }
 
 } // namespace
@@ -960,15 +965,15 @@ std::unique_ptr<IPipeline> try_make_optimized_runtime_pipeline(const std::string
     // Private metadata validity and target/profile compatibility belong to the
     // model-owned capsule DSO. The host deliberately treats these bytes as
     // opaque and only owns their bounded transport.
-    MaterializedArtifacts artifacts =
+    const fs::path artifacts =
         materialize_artifacts(bundle_path, bundle_info, descriptor, options.runtime_cache_path);
-    DsoHandle dso(open_provider_dso(artifacts.path, descriptor));
+    DsoHandle dso(open_provider_dso(artifacts, descriptor));
     const internal::OptimizedRuntimeFactoryV1* factory = resolve_factory(dso.get(), descriptor);
     validate_factory(*factory, descriptor);
-    auto pipeline = create_pipeline(*factory, descriptor, bundle_path, artifacts.path,
+    auto pipeline = create_pipeline(*factory, descriptor, bundle_path, artifacts,
                                     implementation_metadata, options);
-    retain_dso_for_process_lifetime(dso.get());
-    (void)dso.release();
+    if (retain_dso_for_process_lifetime(dso.get()))
+        (void)dso.release();
     std::cerr << "[trtmc] Optimized-runtime implementation initialized during load (model="
               << pipeline->model_id() << ", implementation=" << descriptor.implementation_id
               << ", pipeline_type=" << pipeline->pipeline_type() << ")" << std::endl;

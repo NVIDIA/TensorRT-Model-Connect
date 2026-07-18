@@ -163,17 +163,6 @@ def _load_toml(path: Path, description: str) -> dict[str, Any]:
     return value
 
 
-def _canonical_digest(value: Any) -> str:
-    encoded = json.dumps(
-        value,
-        allow_nan=False,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _private_sdk_include_roots(repository_root: Path | None = None) -> tuple[Path, ...]:
     """Resolve the source-tree or base-wheel private SDK for this external pack."""
 
@@ -216,39 +205,15 @@ def _private_sdk_include_roots(repository_root: Path | None = None) -> tuple[Pat
 
 
 def _implementation_manifest_sha256() -> str:
-    """Duplicate the generic normalized manifest contract inside this capsule."""
+    """Bind the adapter and its DSO to the exact selected manifest bytes."""
 
-    implementation = _load_toml(IMPLEMENTATION_PATH, "capsule implementation manifest")
-    model = _require_mapping(implementation.get("model"), "implementation.model")
-    target = _require_mapping(implementation.get("target"), "implementation.target")
-    build = _require_mapping(implementation.get("build"), "implementation.build")
-    runtime = _require_mapping(implementation.get("runtime"), "implementation.runtime")
-    contract = {
-        "schema_version": implementation.get("schema_version"),
-        "implementation_id": implementation.get("implementation_id"),
-        "runtime_kind": implementation.get("runtime_kind"),
-        "downstream_runtime": implementation.get("downstream_runtime"),
-        "downstream_version": implementation.get("downstream_version"),
-        "downstream_commit": implementation.get("downstream_commit"),
-        "model": {
-            "id": model.get("id"),
-            "revisions": list(model.get("revisions", [])),
-        },
-        "target": dict(target),
-        "build": {
-            "entrypoint": build.get("entrypoint"),
-            "timeout_seconds": build.get("timeout_seconds"),
-        },
-        "runtime": {
-            "library": runtime.get("library"),
-            "abi": runtime.get("abi"),
-            "artifact_layout": runtime.get("artifact_layout"),
-        },
-    }
-    return _canonical_digest(contract)
+    try:
+        return hashlib.sha256(IMPLEMENTATION_PATH.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise AdapterError(f"Unable to hash capsule manifest {IMPLEMENTATION_PATH}: {exc}") from exc
 
 
-def _pinned_edge_dependency() -> tuple[str, str, str]:
+def _pinned_edge_dependency() -> tuple[str, str, str, str, str]:
     dependency = _load_toml(DEPENDENCY_PATH, "capsule dependency lock")
     downstream = _require_mapping(dependency.get("downstream"), "dependency.downstream")
     expected = {
@@ -262,20 +227,20 @@ def _pinned_edge_dependency() -> tuple[str, str, str]:
     if dict(downstream) != expected:
         raise AdapterError("Capsule dependency lock does not name the supported Edge-LLM source pin")
     tensorrt = _require_mapping(dependency.get("tensorrt"), "dependency.tensorrt")
-    expected_tensorrt = {
-        "version": _TENSORRT_VERSION_TEXT,
-        "compatible_versions": [_TENSORRT_VERSION_TEXT],
-    }
+    expected_tensorrt = {"version": _TENSORRT_VERSION_TEXT}
     if dict(tensorrt) != expected_tensorrt:
         raise AdapterError("Capsule dependency lock does not name the supported TensorRT release")
     cuda = _require_mapping(dependency.get("cuda"), "dependency.cuda")
-    expected_cuda = {
-        "version": _CUDA_VERSION_TEXT,
-        "compatible_versions": [_CUDA_VERSION_TEXT],
-    }
+    expected_cuda = {"version": _CUDA_VERSION_TEXT}
     if dict(cuda) != expected_cuda:
         raise AdapterError("Capsule dependency lock does not name the supported CUDA toolkit")
-    return _EDGE_LLM_SOURCE, _EDGE_LLM_TAG, _EDGE_LLM_COMMIT
+    return (
+        _EDGE_LLM_SOURCE,
+        _EDGE_LLM_TAG,
+        _EDGE_LLM_COMMIT,
+        _TENSORRT_VERSION_TEXT,
+        _CUDA_VERSION_TEXT,
+    )
 
 
 def _require_mapping(value: Any, description: str) -> Mapping[str, Any]:
@@ -285,9 +250,6 @@ def _require_mapping(value: Any, description: str) -> Mapping[str, Any]:
 
 
 def _validate_capsule_data(profile: Mapping[str, Any]) -> None:
-    model = _require_mapping(profile.get("model"), "profile.model")
-    target = _require_mapping(profile.get("target"), "profile.target")
-    versions = _require_mapping(profile.get("versions"), "profile.versions")
     expected_profile = {
         "schema_version": 1,
         "profile_id": "qwen3-0.6b-fp16--a100-pcie80-sm80",
@@ -305,28 +267,6 @@ def _validate_capsule_data(profile: Mapping[str, Any]) -> None:
             raise AdapterError(
                 f"Capsule profile field {field} must be {expected!r}, got {profile.get(field)!r}"
             )
-    if model != {"id": MODEL_ID, "revision": MODEL_REVISION}:
-        raise AdapterError("Capsule profile model identity does not match its implementation")
-    expected_profile_target = {
-        "id": "a100-pcie80-sm80",
-        "os": "linux",
-        "architecture": "x86_64",
-        "platform_kind": "discrete",
-        "gpu_architecture": "sm80",
-        "compute_capability": 80,
-        "gpu_name": "NVIDIA A100 80GB PCIe",
-    }
-    if target != expected_profile_target:
-        raise AdapterError("Capsule profile target is not the exact A100 PCIe 80GB SM80 target")
-    expected_versions = {
-        "edge_llm": "0.6.1",
-        "edge_llm_commit": "2620a9768022f25dff18912db2fb92b2ef264a70",
-        "tensorrt": "10.14.1.48",
-        "cuda": _CUDA_VERSION_TEXT,
-    }
-    if versions != expected_versions:
-        raise AdapterError("Capsule profile versions do not match dependency.lock")
-
     _pinned_edge_dependency()
 
 
@@ -408,21 +348,6 @@ def _load_request(path: Path) -> dict[str, Any]:
         raise AdapterError(
             "Capsule request contains unsupported parameters: " + ", ".join(unknown_parameters)
         )
-    exact_parameters = {
-        "precision": "fp16",
-        "quantization": "none",
-        "max_input_length": 1024,
-        "max_cache_length": 4096,
-        "max_batch_size": 4,
-    }
-    for field, expected in exact_parameters.items():
-        if parameters.get(field) is not None and (
-            type(parameters[field]) is not type(expected) or parameters[field] != expected
-        ):
-            # Valid but unsupported build choices are reported as an
-            # unsupported probe below, allowing the generic host to choose
-            # the model-local native implementation.
-            continue
     if "model_source" in parameters and not isinstance(parameters["model_source"], str):
         raise AdapterError("Capsule parameter model_source must be a string")
     for field in (
@@ -456,6 +381,7 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
     unsupported_when_set = (
         "build_timing_json",
         "build_timing_path",
+        "config",
         "diffusion_overrides",
         "dynamic_kv_profile_rows",
         "dynamic_kv_profile_rows_override",
@@ -467,6 +393,7 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
         "num_inference_steps",
         "quant_scales",
         "save_fp8_scales",
+        "set_flags",
         "triattention_kv_budget",
         "triattention_stats",
         "triattention_stats_path",
@@ -524,19 +451,24 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
                 f"got {options[field]!r}"
             )
 
-    exact_profile_options = {
-        "fp8": False,
-        "max_batch_size": 4,
-        "max_cache_length": 4096,
-        "method": "auto",
-        "precision": "fp16",
-        "quantize": None,
+    # The established MC defaults describe its native builder, not a portable
+    # Edge engine layout. This adapter translates those defaults to its one
+    # qualified Edge profile. Explicitly spelling a default must be identical
+    # to omitting it, while the profile's exact values remain accepted for
+    # callers that already know them.
+    compatible_profile_options = {
+        "fp8": (False,),
+        "max_batch_size": (1, 4),
+        "max_cache_length": (256, 4096),
+        "method": ("auto",),
+        "precision": ("fp32", "fp16"),
+        "quantize": (None,),
     }
-    for field, expected in exact_profile_options.items():
-        if field in options and options[field] != expected:
+    for field, accepted in compatible_profile_options.items():
+        if field in options and options[field] not in accepted:
             return (
-                f"Qwen Edge-LLM capsule requires public option {field}={expected!r}; "
-                f"got {options[field]!r}"
+                "Qwen Edge-LLM capsule cannot translate public option "
+                f"{field}={options[field]!r}"
             )
 
     parallel = options.get("parallel_config")
@@ -1025,7 +957,7 @@ def _run_capture(command: list[str], description: str) -> str:
 
 
 def _validate_edge_source(source: Path) -> Path:
-    source_url, _, expected_commit = _pinned_edge_dependency()
+    source_url, _, expected_commit, _, _ = _pinned_edge_dependency()
     try:
         resolved = source.expanduser().resolve(strict=True)
     except OSError as exc:
@@ -1110,7 +1042,7 @@ def _validate_edge_source(source: Path) -> Path:
 
 
 def _resolve_edge_source(output: Path, runtime_build: Mapping[str, Any]) -> Path:
-    source_url, expected_tag, expected_commit = _pinned_edge_dependency()
+    source_url, expected_tag, expected_commit, _, _ = _pinned_edge_dependency()
     configured = _runtime_setting(
         runtime_build,
         "edge_llm_source_dir",
@@ -1957,51 +1889,6 @@ def _copy_payload(source: Path, destination: Path) -> None:
     shutil.copymode(source, destination, follow_symlinks=False)
 
 
-def _private_descriptor(
-    request: Mapping[str, Any],
-    profile: Mapping[str, Any],
-    engine_tree: _ArtifactTree,
-    vocab_size: int,
-) -> dict[str, Any]:
-    target = _require_mapping(request["target"], "request.target")
-    return {
-        "schema_version": 4,
-        "profile_id": profile["profile_id"],
-        "model_id": MODEL_ID,
-        "target": {
-            "id": str(target.get("target_id") or "a100-pcie80-sm80"),
-            "os": "linux",
-            "architecture": "x86_64",
-            "platform_kind": "discrete",
-            "cuda_compute_capability": {"major": 8, "minor": 0},
-            "minimum_cuda_memory_mib": 80000,
-            "observed_cuda_memory_mib": int(target.get("gpu_memory_mib", 80000)),
-            "minimum_gpu_count": 1,
-            "gpu_name": "NVIDIA A100 80GB PCIe",
-        },
-        "artifact": {
-            "section_prefix": "engine.dir",
-            "file_count": engine_tree.file_count,
-            "total_size": engine_tree.total_size,
-            "tree_sha256": engine_tree.tree_sha256,
-            "directories": list(engine_tree.directories),
-        },
-        "limits": {
-            "max_input_length": 1024,
-            "max_cache_length": 4096,
-            "max_batch_size": 4,
-            "vocab_size": vocab_size,
-        },
-        "versions": {
-            "model_revision": MODEL_REVISION,
-            "edge_llm": "0.6.1",
-            "edge_llm_commit": "2620a9768022f25dff18912db2fb92b2ef264a70",
-            "tensorrt": "10.14.1.48",
-            "cuda": _CUDA_VERSION_TEXT,
-        },
-    }
-
-
 def _build(
     request: Mapping[str, Any],
     output: Path,
@@ -2029,10 +1916,8 @@ def _build(
         shutil.copytree(engine_source, engine_destination, symlinks=False)
         _copy_payload(runtime_source, artifacts / RUNTIME_LIBRARY)
         _copy_payload(plugin_source, artifacts / EDGE_LLM_PLUGIN)
-        engine_tree = _collect_artifact_tree(engine_destination)
         complete_tree = _collect_artifact_tree(artifacts)
-        private = _private_descriptor(request, profile_data, engine_tree, vocab_size)
-        versions = _require_mapping(profile_data["versions"], "profile.versions")
+        _, _, edge_commit, tensorrt_version, cuda_version = _pinned_edge_dependency()
         descriptor = {
             "schema_version": 1,
             # The generic host owns and validates this opaque selection token.
@@ -2067,16 +1952,15 @@ def _build(
             },
             "versions": {
                 "model_revision": MODEL_REVISION,
-                "edge_llm": versions["edge_llm"],
-                "edge_llm_commit": versions["edge_llm_commit"],
-                "tensorrt": versions["tensorrt"],
-                "cuda": versions["cuda"],
+                "edge_llm": "0.6.1",
+                "edge_llm_commit": edge_commit,
+                "tensorrt": tensorrt_version,
+                "cuda": cuda_version,
             },
-            "metadata": {"private": {"tensorrt-edge-llm": private}},
             "bundle_info": {
                 "model_type": "optimized_runtime",
                 "family": "optimized_runtime",
-                "trt_version": str(versions["tensorrt"]),
+                "trt_version": tensorrt_version,
                 "gpu_name": "NVIDIA A100 80GB PCIe",
                 "vocab_size": vocab_size,
                 "max_cache_length": int(profile_data["max_cache_length"]),

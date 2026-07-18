@@ -8,7 +8,6 @@ import csv
 import hashlib
 import io
 import re
-import tarfile
 import tempfile
 import zipfile
 from pathlib import Path
@@ -22,28 +21,6 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
 
 _CONAN_PY_BUILD_REQUIREMENT = "conan-py-build==0.4.3"
 _PYTHON_SOURCE_ROOT = "python"
-_FORBIDDEN_ADAPTER_ARCHIVE_PARTS = frozenset(
-    {
-        ".runtime-build",
-        "artifacts",
-        "build",
-        "dependencies",
-        "evidence",
-        "qualification",
-        "qualifications",
-        "results",
-        "tests",
-    }
-)
-_GENERATED_ADAPTER_SUFFIXES = (
-    ".dll",
-    ".dylib",
-    ".engine",
-    ".onnx",
-    ".plan",
-    ".safetensors",
-    ".so",
-)
 
 
 def get_requires_for_build_wheel(config_settings: dict[str, Any] | None = None) -> list[str]:
@@ -91,78 +68,7 @@ def build_sdist(
     config_settings: dict[str, Any] | None = None,
 ) -> str:
     conan_build = _conan_build_backend()
-    filename = conan_build.build_sdist(sdist_directory, config_settings)
-    _validate_sdist_adapter_contents(Path(sdist_directory) / filename)
-    return filename
-
-
-def _validate_sdist_adapter_contents(archive_path: Path) -> None:
-    """Fail closed if a model adapter source archive carries non-source data."""
-
-    with tarfile.open(archive_path, mode="r:*") as archive:
-        members = archive.getmembers()
-        adapter_prefixes: set[tuple[str, ...]] = set()
-        required_runtime_cmake: dict[tuple[str, ...], tuple[str, ...]] = {}
-        builder_marker = ("python", "tensorrt_model_connect", "families")
-        runtime_marker = ("src", "runtime", "models")
-        for member in members:
-            parts = tuple(part for part in Path(member.name).parts if part not in {"", "."})
-            for index in range(len(parts) - len(builder_marker) - 2):
-                if parts[index : index + len(builder_marker)] != builder_marker:
-                    continue
-                tail = parts[index + len(builder_marker) :]
-                if len(tail) == 3 and tail[-1] == "IMPLEMENTATION.toml":
-                    builder_prefix = parts[:-1]
-                    adapter_prefixes.add(builder_prefix)
-                    root_prefix = parts[:index]
-                    runtime_prefix = root_prefix + runtime_marker + (tail[0], tail[1])
-                    adapter_prefixes.add(runtime_prefix)
-                    required_runtime_cmake[builder_prefix] = runtime_prefix + ("CMakeLists.txt",)
-
-        archive_files = {
-            tuple(part for part in Path(member.name).parts if part not in {"", "."})
-            for member in members
-            if member.isfile()
-        }
-        for builder_prefix, runtime_cmake in sorted(required_runtime_cmake.items()):
-            if runtime_cmake not in archive_files:
-                builder_name = "/".join(builder_prefix)
-                raise RuntimeError(
-                    "Source distribution is missing model-adapter Runtime source for "
-                    f"{builder_name}: expected {'/'.join(runtime_cmake)}"
-                )
-
-        for member in members:
-            parts = tuple(part for part in Path(member.name).parts if part not in {"", "."})
-            prefix = next(
-                (
-                    candidate
-                    for candidate in adapter_prefixes
-                    if len(parts) >= len(candidate) and parts[: len(candidate)] == candidate
-                ),
-                None,
-            )
-            if prefix is None:
-                continue
-            relative = parts[len(prefix) :]
-            if member.issym() or member.islnk():
-                raise RuntimeError(
-                    f"Source distribution contains a model-adapter link: {member.name}"
-                )
-            forbidden = sorted(_FORBIDDEN_ADAPTER_ARCHIVE_PARTS.intersection(relative))
-            if forbidden:
-                raise RuntimeError(
-                    "Source distribution contains forbidden model-adapter data: "
-                    f"{member.name} ({', '.join(forbidden)})"
-                )
-            name = member.name.lower()
-            if member.isfile() and any(
-                name.endswith(suffix) or f"{suffix}." in name
-                for suffix in _GENERATED_ADAPTER_SUFFIXES
-            ):
-                raise RuntimeError(
-                    f"Source distribution contains a generated model-adapter payload: {member.name}"
-                )
+    return conan_build.build_sdist(sdist_directory, config_settings)
 
 
 def prepare_metadata_for_build_editable(

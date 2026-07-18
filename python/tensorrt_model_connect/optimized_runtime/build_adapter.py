@@ -21,7 +21,6 @@ from .manifest import (
     ImplementationManifest,
     ImplementationRequest,
     manifest_contract_sha256,
-    normalized_manifest_contract,
 )
 
 
@@ -124,9 +123,18 @@ def _canonical_digest(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _manifest_contract(manifest: ImplementationManifest) -> dict[str, Any]:
-    """Return the normalized manifest semantics selected by the generic host."""
-    return normalized_manifest_contract(manifest)
+def _reject_nonfinite_json(value: str) -> None:
+    raise ValueError(f"non-finite JSON value {value!r} is not allowed")
+
+
+def _strict_json_object(raw: str, *, description: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw, parse_constant=_reject_nonfinite_json)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise BuildAdapterError(f"{description} returned invalid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise BuildAdapterError(f"{description} must be a JSON object")
+    return value
 
 
 def _expected_build_binding(
@@ -194,15 +202,10 @@ def validate_build_descriptor(
 
 
 def _decode_response(stdout: str, *, operation: str, implementation_id: str) -> dict[str, Any]:
-    try:
-        value = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise BuildAdapterError(
-            f"{implementation_id} {operation} returned invalid JSON: {exc}"
-        ) from exc
-    if not isinstance(value, dict):
-        raise BuildAdapterError(f"{implementation_id} {operation} response must be a JSON object")
-    return value
+    return _strict_json_object(
+        stdout,
+        description=f"{implementation_id} {operation} response",
+    )
 
 
 def _terminate_adapter_process_group(process: subprocess.Popen[str]) -> None:
@@ -244,7 +247,7 @@ def _run_adapter(
         raise BuildAdapterError(
             f"Request does not match implementation {manifest.implementation_id}"
         )
-    timeout = timeout_seconds or manifest.build_timeout_seconds
+    timeout = manifest.build_timeout_seconds if timeout_seconds is None else timeout_seconds
     if type(timeout) is not int or timeout <= 0:
         raise ValueError("timeout_seconds must be a positive integer")
 
@@ -253,6 +256,7 @@ def _run_adapter(
         request_path.write_text(
             json.dumps(
                 _request_payload(manifest, request, build_binding=build_binding),
+                allow_nan=False,
                 sort_keys=True,
                 separators=(",", ":"),
             ),
@@ -433,11 +437,12 @@ def run_build(
         output, response.get("artifacts"), field="artifacts", kind="directory"
     )
     try:
-        descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        descriptor = _strict_json_object(
+            descriptor_path.read_text(encoding="utf-8"),
+            description="Build descriptor",
+        )
+    except (OSError, UnicodeError) as exc:
         raise BuildAdapterError(f"Invalid build descriptor: {descriptor_path}: {exc}") from exc
-    if not isinstance(descriptor, dict):
-        raise BuildAdapterError("Build descriptor must contain a JSON object")
     validate_build_descriptor(manifest, request, probe, descriptor)
     return BuildArtifact(
         output_directory=output,

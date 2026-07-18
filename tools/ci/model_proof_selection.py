@@ -80,7 +80,9 @@ class ModelProofSelector:
             raise CiError(
                 f"projected model must have exactly one canonical E2E test; found {len(e2e_tests)}"
             )
-        python_tests = [path for path in e2e_dir.rglob("test_*.py") if path not in e2e_tests]
+        python_tests = [
+            path for path in e2e_dir.rglob("test_*.py") if not path.name.endswith("_e2e.py")
+        ]
         python_family = owners["python"]
         if python_family:
             python_tests.extend(

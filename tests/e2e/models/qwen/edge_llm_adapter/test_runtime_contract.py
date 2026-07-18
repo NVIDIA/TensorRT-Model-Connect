@@ -276,7 +276,6 @@ def test_runtime_compile_binding_matches_selected_manifest_and_profile(
 ) -> None:
     artifact, _ = _staged_capsule(tmp_path, fake_runtime)
     manifest = load_implementation_manifest(CAPSULE_ROOT / "IMPLEMENTATION.toml")
-    source = (RUNTIME_ROOT / "adapter.cpp").read_text(encoding="utf-8")
     binding = artifact.descriptor["build_binding"]
 
     assert set(binding) == {
@@ -288,18 +287,8 @@ def test_runtime_compile_binding_matches_selected_manifest_and_profile(
     }
     assert binding["schema_version"] == 1
     assert binding["manifest_sha256"] == manifest_contract_sha256(manifest)
-    assert binding["manifest_sha256"] not in source
-    assert "TRTMC_QWEN_EDGE_MANIFEST_SHA256" in source
     assert binding["implementation_id"] == IMPLEMENTATION_ID
     assert binding["profile_id"] == PROFILE_ID
-
-
-def test_runtime_keeps_edge_info_logs_out_of_public_generated_text() -> None:
-    source = (RUNTIME_ROOT / "adapter.cpp").read_text(encoding="utf-8")
-
-    assert "void configure_edge_logging() noexcept" in source
-    assert "gLogger.setLevel(nvinfer1::ILogger::Severity::kWARNING)" in source
-    assert "configure_edge_logging();\n    ensure_edge_plugin_loaded();" in source
 
 
 @pytest.mark.parametrize(

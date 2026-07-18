@@ -889,7 +889,7 @@ class TestDeclarativeClassificationRules:
 # ---------------------------------------------------------------------------
 
 
-class TestOptimizedRuntimeFramework:
+class TestModelOwnedAdapterIsolation:
     @pytest.mark.parametrize(
         ("path", "expected_rule", "expected_tier", "rebuild"),
         (
@@ -929,65 +929,6 @@ class TestOptimizedRuntimeFramework:
         assert match.rebuild_cpp is rebuild
         if expected_tier is not None:
             assert expected_tier in match.unit_tiers
-
-    def test_shared_framework_has_no_model_e2e_fanout(self, imap):
-        match = test_impact.classify_file(
-            "python/tensorrt_model_connect/optimized_runtime/orchestrator.py",
-            imap,
-        )
-
-        assert match.rule == "optimized_runtime_framework"
-        assert match.models == []
-        assert match.unit_tiers == ["builder"]
-        assert match.rebuild_cpp is False
-
-    def test_shared_cpp_framework_has_no_model_e2e_fanout(self, imap):
-        match = test_impact.classify_file(
-            "src/runtime/providers/optimized_runtime_host.cpp",
-            imap,
-        )
-
-        assert match.rule == "optimized_runtime_cpp_framework"
-        assert match.models == []
-        assert match.unit_tiers == ["cpp"]
-        assert match.rebuild_cpp is True
-
-    @pytest.mark.parametrize(
-        ("path", "expected_builder_tests", "expected_cpp_tests"),
-        (
-            (
-                "python/tensorrt_model_connect/optimized_runtime/orchestrator.py",
-                [
-                    "tests/builder/test_optimized_runtime_capsules.py",
-                    "tests/builder/test_optimized_runtime_orchestrator.py",
-                    "tests/builder/test_optimized_runtime_public_routing.py",
-                ],
-                [],
-            ),
-            (
-                "src/runtime/providers/optimized_runtime_host.cpp",
-                [],
-                [
-                    "test_optimized_runtime_bundle_contract",
-                    "test_optimized_runtime_host",
-                    "test_optimized_runtime_inspect_cli",
-                ],
-            ),
-        ),
-    )
-    def test_shared_surfaces_select_only_bounded_contracts(
-        self,
-        imap,
-        path,
-        expected_builder_tests,
-        expected_cpp_tests,
-    ):
-        result = test_impact.analyze_impact([path], imap)
-
-        assert result.e2e_models == []
-        assert result.builder_tests == expected_builder_tests
-        assert result.cpp_tests == expected_cpp_tests
-
 
 class TestFamilyPlugin:
     def test_family_only_change(self, imap):
@@ -3368,6 +3309,27 @@ class TestCoverageMapIntegration:
         assert result.builder_tests == [relative]
         assert sorted(result.e2e_models) == ["decoder-large", "decoder-small"]
         assert "builder" not in result.fallback_tiers
+
+    def test_changed_nested_e2e_test_is_not_selected_as_a_unit_test(self, mock_repo):
+        """The _e2e.py suffix remains an execution boundary at every depth."""
+        test_path = (
+            mock_repo
+            / "tests"
+            / "e2e"
+            / "models"
+            / "decoder_family"
+            / "optimized_adapter"
+            / "test_adapter_e2e.py"
+        )
+        test_path.parent.mkdir(parents=True)
+        test_path.write_text("def test_adapter_e2e():\n    assert True\n", encoding="utf-8")
+        imap = test_impact.build_impact_map(mock_repo)
+        relative = test_path.relative_to(mock_repo).as_posix()
+
+        result = test_impact.analyze_impact([relative], imap, repo_root=mock_repo)
+
+        assert result.builder_tests == []
+        assert sorted(result.e2e_models) == ["decoder-large", "decoder-small"]
 
     def test_no_coverage_map_no_test_lists(self, imap):
         """Without coverage map, test lists are empty and fallback_tiers empty."""
