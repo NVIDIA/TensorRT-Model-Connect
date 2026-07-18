@@ -18,6 +18,7 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
+from .timing_cache import build_sam3_serialized_network
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
@@ -25,6 +26,37 @@ if TYPE_CHECKING:
 
 def _trt():
     return trt_compat.get_trt()
+
+
+def _timing_cache_graph_profile(
+    *,
+    hidden_size: int,
+    projected_size: int,
+    num_heads: int,
+    intermediate_size: int,
+    num_layers: int,
+    vocab_size: int,
+    max_seq_len: int,
+    eps: float,
+    precision: str,
+    hidden_act: str,
+    has_text_projection_bias: bool,
+) -> dict[str, object]:
+    return {
+        "eps": eps,
+        "has_text_projection_bias": has_text_projection_bias,
+        "hidden_act": hidden_act,
+        "hidden_size": hidden_size,
+        "intermediate_size": intermediate_size,
+        "max_seq_len": max_seq_len,
+        "network_definition": "strongly_typed",
+        "num_heads": num_heads,
+        "num_layers": num_layers,
+        "precision": precision,
+        "projected_size": projected_size,
+        "vocab_size": vocab_size,
+        "workspace_bytes": 4 << 30,
+    }
 
 
 def build_sam3_text_encoder_engine(
@@ -43,7 +75,6 @@ def build_sam3_text_encoder_engine(
     verbose: bool = False,
 ) -> bytes:
     """Build the SAM3 text-prompt encoder plan with TensorRT APIs."""
-    del vocab_size
     trt = _trt()
     head_dim = hidden_size // num_heads
     work_np_dtype = np.float16 if precision == "fp16" else np.float32
@@ -216,7 +247,25 @@ def build_sam3_text_encoder_engine(
             f"layers={num_layers}, seq={max_seq_len}) ...",
             file=sys.stderr,
         )
-    plan = builder.build_serialized_network(network, config)
+    plan = build_sam3_serialized_network(
+        builder,
+        network,
+        config,
+        engine_kind="text-encoder",
+        graph_profile=_timing_cache_graph_profile(
+            hidden_size=hidden_size,
+            projected_size=projected_size,
+            num_heads=num_heads,
+            intermediate_size=intermediate_size,
+            num_layers=num_layers,
+            vocab_size=vocab_size,
+            max_seq_len=max_seq_len,
+            eps=eps,
+            precision=precision,
+            hidden_act=hidden_act,
+            has_text_projection_bias="text_projection.bias" in weights,
+        ),
+    )
     if plan is None:
         raise RuntimeError("TRT engine serialization failed for SAM3 text encoder")
     return bytes(plan)

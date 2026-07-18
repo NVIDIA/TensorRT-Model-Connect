@@ -1,0 +1,128 @@
+{
+  "artifact_type": "sam3_l4_timing_cache_qualification_provenance",
+  "qualified_source_base_commit": "78b4ddac3d17443f9bbd8dc21c37d7c1550bc04d",
+  "qualified_graph_contract": {
+    "algorithm": "sha256-source-graph-profile-v1",
+    "engines": {
+      "core": "9ab98f95e1be5ab592d492c5ab936690ad07d118c7142cfdb74aee663afdc997",
+      "text-encoder": "6509eacf17797ae93c328e401f33e6974e2eaac0f471b88748fdd605697d54b5"
+    }
+  },
+  "qualified_target": {
+    "cuda_driver_version": 13020,
+    "cuda_runtime_version": 13010,
+    "gpu_architecture": "sm89",
+    "gpu_name": "NVIDIA L4",
+    "tensorrt_version": "10.15.1.29"
+  },
+  "raw_caches": {
+    "core": {
+      "sha256": "02ba073ff06da5f06d2f61e4c6998fbc6f0541b015c3ed382039e87d86cbaa05",
+      "size_bytes": 37505,
+      "tactic_count": 276,
+      "tactic_sha256": "b0091651f03bcca652880982c5aac1b3be3968f2831e4d1cbff78b95b2820d4d"
+    },
+    "text-encoder": {
+      "sha256": "3205326a3be239f29aefd5480b6807a8f874de5e83b93f19f659e6846b8f0258",
+      "size_bytes": 19346,
+      "tactic_count": 145,
+      "tactic_sha256": "30f1d96d3c282a00b75f1e6ba1f995859f7e2abee0c7cf40bf59ba364c3155ab"
+    }
+  },
+  "rounds": [
+    {
+      "accuracy_evidence_sha256": "ce7797cbd92bb483b99e9c190fad81648566e769aaf3b147d55d6cb46fbfe652",
+      "accuracy_passed": true,
+      "bundle_sha256": "eefa3a885f8252060910c7afecac64a751d4eca5067972fad2f982d8e701a111",
+      "core_plan_sha256": "91858cba9af46e89d7bee8bea1ac6bd385f4624f1670bb8cca531f0ccc38d85e",
+      "full_propagation_global_iou": 0.9982544373584971,
+      "full_propagation_macro_iou": 0.9982345411251059,
+      "mask_manifest_sha256": "47f47a089fdbb92a26fbc834beb81895d4bee18ee850f563ae96a0f3cf033ed1",
+      "minimum_track_spatiotemporal_iou": 0.9981949458483754,
+      "round": 1,
+      "structural_passed": true,
+      "tactic_evidence_sha256": "6fc4b5790f8cafc13f030e92d780070c90e4bd89624316a54c86babc25188b50",
+      "text_plan_sha256": "8b25b7a40234c79dc7e388578f4cd527ec2ca053c5daeaea6ddfda0a1d2bc582",
+      "tracker_tail_global_iou": 0.998288915977946,
+      "tracker_tail_macro_iou": 0.9982126904575732,
+      "tracking_artifact_sha256": "2becfacfcf0ed0ab3da53f3325d5ac30ecfac177d1205858cc0d4acac756d832"
+    },
+    {
+      "accuracy_evidence_sha256": "3044d2927143932a64f3545c0a9ef5e7ccb74ef1aab24f7a8ea58c7db958f0bd",
+      "accuracy_passed": true,
+      "bundle_sha256": "18439e701be14c37d5e32a4f8ce960eff5294c6f734623e34b4e8f3ddb8cb6c7",
+      "core_plan_sha256": "974a65586c84b4a965d4be81e2b5f52d7b66c447a5ca2929db2eb26fb062a032",
+      "full_propagation_global_iou": 0.9982544373584971,
+      "full_propagation_macro_iou": 0.9982345411251059,
+      "mask_manifest_sha256": "47f47a089fdbb92a26fbc834beb81895d4bee18ee850f563ae96a0f3cf033ed1",
+      "minimum_track_spatiotemporal_iou": 0.9981949458483754,
+      "round": 2,
+      "structural_passed": true,
+      "tactic_evidence_sha256": "3dd6b4a8f13d2b089f1dee7df3a2e067478fdc12fb72e7ca3e29b70ae85be7f9",
+      "text_plan_sha256": "8b25b7a40234c79dc7e388578f4cd527ec2ca053c5daeaea6ddfda0a1d2bc582",
+      "tracker_tail_global_iou": 0.998288915977946,
+      "tracker_tail_macro_iou": 0.9982126904575732,
+      "tracking_artifact_sha256": "82e1a253abe53f4a27b45bb1209f2fd7f99b2842f07b30a35c0e194f5203c22b"
+    },
+    {
+      "accuracy_evidence_sha256": "1f995fc14c606afe84e5bab1ae812feba1c724d193e86a26459a790ad744dc0a",
+      "accuracy_passed": true,
+      "bundle_sha256": "e093072eb58d229607c45d644e69d7388176a61ca2328b6437b631c328f2581d",
+      "core_plan_sha256": "83ffe5d6d15503cf3bfdd358bf648901cd221b2664b41cc91977098ea26191f3",
+      "full_propagation_global_iou": 0.9982544373584971,
+      "full_propagation_macro_iou": 0.9982345411251059,
+      "mask_manifest_sha256": "47f47a089fdbb92a26fbc834beb81895d4bee18ee850f563ae96a0f3cf033ed1",
+      "minimum_track_spatiotemporal_iou": 0.9981949458483754,
+      "round": 3,
+      "structural_passed": true,
+      "tactic_evidence_sha256": "1bf7de3bacfa8112fde654db4338b49020cafd5ba78a9addd948a1eec14fb445",
+      "text_plan_sha256": "8b25b7a40234c79dc7e388578f4cd527ec2ca053c5daeaea6ddfda0a1d2bc582",
+      "tracker_tail_global_iou": 0.998288915977946,
+      "tracker_tail_macro_iou": 0.9982126904575732,
+      "tracking_artifact_sha256": "285e06473beacf838349feef2b7e47dde57fb6b0b8042ae04981bbd16f2ac709"
+    }
+  ],
+  "shared_accuracy_contract": {
+    "candidate_object_frames": 10,
+    "candidate_tracks": 2,
+    "frames": 5,
+    "input_aggregate_sha256": "1a6e35df116f9a75158817134a3bbebdafa281c32594b5a0677267188212712e",
+    "minimum_iou": 0.995,
+    "prompt": "hands",
+    "reference_tracks": 2
+  },
+  "synthesis_evidence": {
+    "allgood_verified_sensitive_tactics": 46,
+    "cache_manifest_sha256": "991a69a9970418ddc665d73917b75e91d1ec50abc00d9c8a2e02937c0f2ebe78",
+    "good_union_coverage_report_sha256": "63492562a744a7430735932af6190cb44785016205c7c1f6a332e38ad9460ef0",
+    "mapped_sensitive_tactics": 46,
+    "sensitive_key_map_sha256": "733a66228b1550b8c89117894e732b0ba8c2e74f43e0a2b531397b4ce0f1efa5",
+    "synthesis_report_sha256": "f2d3e6b09747e74965089234cf3c67c40dfdf774b3c32c4d222afa2626769eb3",
+    "unique_cache_keys": 46
+  },
+  "tactic_reproducibility": {
+    "all_rounds_sensitive_core_good": 22,
+    "all_rounds_sensitive_text_good": 24,
+    "full_fc_record_count": 171,
+    "full_fc_record_difference_count": 0,
+    "tactic_like_token_count": 281,
+    "tactic_like_token_difference_count": 0,
+    "text_plan_byte_identical_across_rounds": true
+  },
+  "additional_prompt_smoke": {
+    "accuracy_summary_sha256": "41676610c69d9724b7771115e769ab9fc849d92e79c0428a8ad975ed835524b4",
+    "expected_negative_controls": {
+      "curb": "not_applicable",
+      "stair": "not_applicable"
+    },
+    "passed": true,
+    "positive_prompts": {
+      "basket": "passed",
+      "hand": "passed",
+      "hand up to the wrist": "passed",
+      "person": "passed"
+    },
+    "suite_receipt_sha256": "dffed76a3285eee7889c4aeb706e44d921e4cd678c8b59e10d79e1636e2cd010"
+  },
+  "schema_version": 1
+}

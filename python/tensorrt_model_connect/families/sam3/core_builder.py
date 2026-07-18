@@ -18,6 +18,7 @@ import sys
 import numpy as np
 
 from .checkpoint_mapper import WeightDict
+from .timing_cache import build_sam3_serialized_network
 
 
 def _trt():
@@ -30,6 +31,59 @@ def _graph_ops():
     from . import graph_ops
 
     return graph_ops
+
+
+def _timing_cache_graph_profile(
+    *,
+    text_seq_len: int,
+    hidden_size: int,
+    fpn_hidden_size: int,
+    fpn_shapes: tuple[tuple[int, int], ...],
+    num_queries: int,
+    detr_encoder_layers: int,
+    detr_encoder_heads: int,
+    detr_encoder_intermediate_size: int,
+    detr_decoder_layers: int,
+    detr_decoder_heads: int,
+    detr_decoder_intermediate_size: int,
+    geometry_encoder_layers: int,
+    geometry_encoder_heads: int,
+    geometry_encoder_intermediate_size: int,
+    mask_num_heads: int,
+    mask_num_upsampling_stages: int,
+    layer_norm_eps: float,
+    precision: str,
+    encoder_hidden_act: str,
+    decoder_hidden_act: str,
+    geometry_encoder_hidden_act: str,
+    geometry_encoder_layer_norm_eps: float,
+) -> dict[str, object]:
+    return {
+        "decoder_hidden_act": decoder_hidden_act,
+        "detr_decoder_heads": detr_decoder_heads,
+        "detr_decoder_intermediate_size": detr_decoder_intermediate_size,
+        "detr_decoder_layers": detr_decoder_layers,
+        "detr_encoder_heads": detr_encoder_heads,
+        "detr_encoder_intermediate_size": detr_encoder_intermediate_size,
+        "detr_encoder_layers": detr_encoder_layers,
+        "encoder_hidden_act": encoder_hidden_act,
+        "fpn_hidden_size": fpn_hidden_size,
+        "fpn_shapes": fpn_shapes,
+        "geometry_encoder_heads": geometry_encoder_heads,
+        "geometry_encoder_hidden_act": geometry_encoder_hidden_act,
+        "geometry_encoder_intermediate_size": geometry_encoder_intermediate_size,
+        "geometry_encoder_layer_norm_eps": geometry_encoder_layer_norm_eps,
+        "geometry_encoder_layers": geometry_encoder_layers,
+        "hidden_size": hidden_size,
+        "layer_norm_eps": layer_norm_eps,
+        "mask_num_heads": mask_num_heads,
+        "mask_num_upsampling_stages": mask_num_upsampling_stages,
+        "network_definition": "strongly_typed",
+        "num_queries": num_queries,
+        "precision": precision,
+        "text_seq_len": text_seq_len,
+        "workspace_bytes": 6 << 30,
+    }
 
 
 def _const(network, shape: tuple[int, ...], values, dtype=np.float32):
@@ -577,7 +631,6 @@ def build_sam3_core_engine(
     verbose: bool = False,
 ) -> bytes:
     """Build the SAM3 text-prompt core engine with TensorRT APIs."""
-    del mask_num_upsampling_stages
     if hidden_size != fpn_hidden_size:
         raise ValueError(
             "SAM3 core builder expects DETR and FPN hidden sizes to match; "
@@ -1106,7 +1159,36 @@ def build_sam3_core_engine(
             f"vision={enc_h}x{enc_w}, mask={mask_h}x{mask_w}) ...",
             file=sys.stderr,
         )
-    plan = builder.build_serialized_network(network, config)
+    plan = build_sam3_serialized_network(
+        builder,
+        network,
+        config,
+        engine_kind="core",
+        graph_profile=_timing_cache_graph_profile(
+            text_seq_len=text_seq_len,
+            hidden_size=hidden_size,
+            fpn_hidden_size=fpn_hidden_size,
+            fpn_shapes=fpn_shapes,
+            num_queries=num_queries,
+            detr_encoder_layers=detr_encoder_layers,
+            detr_encoder_heads=detr_encoder_heads,
+            detr_encoder_intermediate_size=detr_encoder_intermediate_size,
+            detr_decoder_layers=detr_decoder_layers,
+            detr_decoder_heads=detr_decoder_heads,
+            detr_decoder_intermediate_size=detr_decoder_intermediate_size,
+            geometry_encoder_layers=geometry_encoder_layers,
+            geometry_encoder_heads=geometry_encoder_heads,
+            geometry_encoder_intermediate_size=geometry_encoder_intermediate_size,
+            mask_num_heads=mask_num_heads,
+            mask_num_upsampling_stages=mask_num_upsampling_stages,
+            layer_norm_eps=layer_norm_eps,
+            precision=precision,
+            encoder_hidden_act=encoder_hidden_act,
+            decoder_hidden_act=decoder_hidden_act,
+            geometry_encoder_hidden_act=geometry_encoder_hidden_act,
+            geometry_encoder_layer_norm_eps=geometry_encoder_layer_norm_eps,
+        ),
+    )
     if plan is None:
         raise RuntimeError("TRT engine serialization failed for SAM3 core")
     return bytes(plan)

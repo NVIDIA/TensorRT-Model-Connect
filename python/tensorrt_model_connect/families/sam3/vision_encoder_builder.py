@@ -15,9 +15,56 @@ import sys
 import numpy as np
 
 from .checkpoint_mapper import WeightDict
+from .timing_cache import build_sam3_serialized_network
 
 
 _VISION_FP16_GEMMS = frozenset({"qkv", "o_proj", "fc2"})
+
+
+def _timing_cache_graph_profile(
+    *,
+    image_size: int,
+    patch_size: int,
+    pretrain_image_size: int,
+    hidden_size: int,
+    intermediate_size: int,
+    num_layers: int,
+    num_heads: int,
+    window_size: int,
+    global_attn_indexes: list[int],
+    fpn_hidden_size: int,
+    rope_theta: float,
+    eps: float,
+    precision: str,
+    hidden_act: str,
+    has_tracker_neck: bool,
+) -> dict[str, object]:
+    exact_shape = (1, 3, image_size, image_size)
+    return {
+        "eps": eps,
+        "exact_pixel_values_profile": {
+            "max": exact_shape,
+            "min": exact_shape,
+            "opt": exact_shape,
+        },
+        "fp16_gemms": tuple(sorted(_VISION_FP16_GEMMS)),
+        "fpn_hidden_size": fpn_hidden_size,
+        "global_attn_indexes": tuple(global_attn_indexes),
+        "has_tracker_neck": has_tracker_neck,
+        "hidden_act": hidden_act,
+        "hidden_size": hidden_size,
+        "image_size": image_size,
+        "intermediate_size": intermediate_size,
+        "network_definition": "strongly_typed",
+        "num_heads": num_heads,
+        "num_layers": num_layers,
+        "patch_size": patch_size,
+        "precision": precision,
+        "pretrain_image_size": pretrain_image_size,
+        "rope_theta": rope_theta,
+        "window_size": window_size,
+        "workspace_bytes": 4 << 30,
+    }
 
 
 def _add_exact_batch1_profile(builder, config, *, image_size: int) -> None:
@@ -532,8 +579,12 @@ def _add_tracker_fpn_level(
             dtype=dtype,
         )
 
-    cast = network.add_cast(x, trt.float32)
-    out = cast.get_output(0)
+    # Meta's video predictor runs the tracker neck under CUDA BF16 autocast.
+    # Preserve that publish boundary while retaining the existing FP32 engine
+    # ABI consumed by the native TensorRT tracker runtime.
+    rounded = network.add_cast(x, trt.bfloat16).get_output(0)
+    rounded.name = f"sam3_tracker_feature_{level}_bf16_round"
+    out = network.add_cast(rounded, trt.float32).get_output(0)
     out.name = f"sam3_tracker_feature_{level}"
     network.mark_output(out)
     return out
@@ -793,7 +844,29 @@ def build_sam3_vision_encoder_engine(
             f"batch_profile=1, fp16_gemms={','.join(sorted(_VISION_FP16_GEMMS))}) ...",
             file=sys.stderr,
         )
-    plan = builder.build_serialized_network(network, config)
+    plan = build_sam3_serialized_network(
+        builder,
+        network,
+        config,
+        engine_kind="vision-encoder",
+        graph_profile=_timing_cache_graph_profile(
+            image_size=image_size,
+            patch_size=patch_size,
+            pretrain_image_size=pretrain_image_size,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_layers=num_layers,
+            num_heads=num_heads,
+            window_size=window_size,
+            global_attn_indexes=global_attn_indexes,
+            fpn_hidden_size=fpn_hidden_size,
+            rope_theta=rope_theta,
+            eps=eps,
+            precision=precision,
+            hidden_act=hidden_act,
+            has_tracker_neck=has_tracker_neck,
+        ),
+    )
     if plan is None:
         raise RuntimeError("TRT engine serialization failed for SAM3 vision encoder")
     return bytes(plan)
