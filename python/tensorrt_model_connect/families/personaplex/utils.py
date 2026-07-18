@@ -18,6 +18,16 @@ from . import graph_ops
 
 
 trt = trt_compat.get_trt()
+_PROCESS_LOGGER: trt.Logger | None = None
+
+
+def _get_process_logger(*, verbose: bool) -> trt.Logger:
+    """Return the logger that must outlive every TensorRT builder in this process."""
+    global _PROCESS_LOGGER
+    if _PROCESS_LOGGER is None:
+        _PROCESS_LOGGER = trt.Logger(
+            trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    return _PROCESS_LOGGER
 
 
 @dataclass
@@ -60,8 +70,7 @@ def create_builder_context(
 ) -> BuilderContext:
     """Create a TensorRT builder, network, and config with common defaults."""
     context = BuilderContext(
-        logger=trt.Logger(
-            trt.Logger.VERBOSE if verbose else trt.Logger.WARNING),
+        logger=_get_process_logger(verbose=verbose),
         builder=None,
         network=None,
         config=None,

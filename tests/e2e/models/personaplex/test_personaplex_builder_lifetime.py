@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import importlib
 import inspect
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,11 @@ pytest.importorskip(
 
 personaplex_utils = importlib.import_module(
     "tensorrt_model_connect.families.personaplex.utils")
+
+
+@pytest.fixture(autouse=True)
+def _reset_process_logger(monkeypatch) -> None:
+    monkeypatch.setattr(personaplex_utils, "_PROCESS_LOGGER", None)
 
 
 class _TrackedResource:
@@ -51,10 +57,10 @@ def test_builder_context_closes_once_in_tensor_rt_lifetime_order() -> None:
 @pytest.mark.parametrize(
     ("failure_stage", "expected_released"),
     (
-        ("builder", ["logger"]),
-        ("network", ["builder", "logger"]),
-        ("config", ["network", "builder", "logger"]),
-        ("workspace", ["config", "network", "builder", "logger"]),
+        ("builder", []),
+        ("network", ["builder"]),
+        ("config", ["network", "builder"]),
+        ("workspace", ["config", "network", "builder"]),
     ),
 )
 def test_create_builder_context_cleans_up_partial_construction(
@@ -124,6 +130,63 @@ def test_create_builder_context_cleans_up_partial_construction(
     gc.collect()
 
     assert released == expected_released
+
+
+def test_create_builder_context_reuses_process_lifetime_logger(monkeypatch) -> None:
+    builder_loggers: list[weakref.ReferenceType] = []
+
+    class FakeLogger:
+        VERBOSE = 1
+        WARNING = 2
+
+        def __init__(self, _level: int) -> None:
+            pass
+
+    class FakeConfig:
+        def set_memory_pool_limit(self, _pool_type, _workspace_bytes) -> None:
+            pass
+
+    class FakeBuilder:
+        def __init__(self, logger) -> None:
+            builder_loggers.append(weakref.ref(logger))
+
+        def create_network(self, _flags):
+            return object()
+
+        def create_builder_config(self):
+            return FakeConfig()
+
+    fake_trt = SimpleNamespace(
+        Logger=FakeLogger,
+        Builder=FakeBuilder,
+        MemoryPoolType=SimpleNamespace(WORKSPACE=object()),
+    )
+    monkeypatch.setattr(personaplex_utils, "trt", fake_trt)
+    monkeypatch.setattr(
+        personaplex_utils.trt_compat,
+        "network_creation_flags",
+        lambda **_kwargs: 0,
+    )
+
+    first = personaplex_utils.create_builder_context(
+        verbose=False,
+        workspace_bytes=1234,
+    )
+    logger_ref = weakref.ref(first.logger)
+    first.close()
+    gc.collect()
+
+    second = personaplex_utils.create_builder_context(
+        verbose=True,
+        workspace_bytes=1234,
+    )
+
+    assert logger_ref() is not None
+    assert [logger() for logger in builder_loggers] == [logger_ref(), logger_ref()]
+    assert second.logger is logger_ref()
+    second.close()
+    gc.collect()
+    assert logger_ref() is not None
 
 
 def test_builder_context_wrapper_closes_after_an_exception(monkeypatch) -> None:
