@@ -49,11 +49,6 @@ _CUDA_VERSION_TEXT = ".".join(str(component) for component in _CUDA_VERSION)
 _ENGINE_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_ENGINE_DIR"
 _RUNTIME_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_RUNTIME_LIBRARY"
 _PLUGIN_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_PLUGIN_LIBRARY"
-_EXPORT_TOOL_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_EXPORT_TOOL"
-_BUILD_TOOL_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_BUILD_TOOL"
-_WORKSPACE_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_WORKSPACE"
-_EXPORT_DEVICE_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_EXPORT_DEVICE"
-_VERBOSE_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_VERBOSE"
 _EDGE_BUILD_DIR_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_BUILD_DIR"
 _TRT_INCLUDE_ENV = "_TRTMC_INTERNAL_QWEN3_06B_TENSORRT_INCLUDE_DIR"
 _TRT_LIBRARY_ENV = "_TRTMC_INTERNAL_QWEN3_06B_TENSORRT_LIBRARY"
@@ -335,11 +330,6 @@ def _load_request(path: Path) -> dict[str, Any]:
         "engine_dir",
         "runtime_library",
         "runtime_plugin",
-        "export_tool",
-        "build_tool",
-        "workspace",
-        "export_device",
-        "verbose",
         "public_options",
         "runtime_build",
     }
@@ -354,17 +344,11 @@ def _load_request(path: Path) -> dict[str, Any]:
         "engine_dir",
         "runtime_library",
         "runtime_plugin",
-        "export_tool",
-        "build_tool",
-        "workspace",
-        "export_device",
     ):
         if field in parameters and (
             not isinstance(parameters[field], str) or not parameters[field].strip()
         ):
             raise AdapterError(f"Capsule parameter {field} must be a non-empty string")
-    if "verbose" in parameters and type(parameters["verbose"]) is not bool:
-        raise AdapterError("Capsule parameter verbose must be a boolean")
     public_options = parameters.get("public_options", {})
     if not isinstance(public_options, dict):
         raise AdapterError("Capsule parameter public_options must be an object")
@@ -407,7 +391,6 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
 
     unsupported_when_true = (
         "dynamic_kv_cache",
-        "force_native_build",
         "rtx",
         "triattention_disable_mlr",
         "triattention_disable_trig",
@@ -440,7 +423,19 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
         "quantize",
         "verbose",
     }
-    unknown = sorted(set(options) - recognized)
+    def inert(value: Any) -> bool:
+        return (
+            value is None
+            or value is False
+            or value == ""
+            or value == ()
+            or value == []
+            or value == {}
+        )
+
+    unknown = sorted(
+        field for field in set(options) - recognized if not inert(options[field])
+    )
     if unknown:
         return "Qwen Edge-LLM capsule does not recognize public option(s): " + ", ".join(unknown)
 
@@ -451,24 +446,21 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
                 f"got {options[field]!r}"
             )
 
-    # The established MC defaults describe its native builder, not a portable
-    # Edge engine layout. This adapter translates those defaults to its one
-    # qualified Edge profile. Explicitly spelling a default must be identical
-    # to omitting it, while the profile's exact values remain accepted for
-    # callers that already know them.
-    compatible_profile_options = {
+    # A qualified profile owns only the exact request it was validated for.
+    # Never reinterpret an explicit MC request as a different Edge engine.
+    exact_profile_options = {
         "fp8": (False,),
-        "max_batch_size": (1, 4),
-        "max_cache_length": (256, 4096),
+        "max_batch_size": (4,),
+        "max_cache_length": (4096,),
         "method": ("auto",),
-        "precision": ("fp32", "fp16"),
+        "precision": ("fp16",),
         "quantize": (None,),
     }
-    for field, accepted in compatible_profile_options.items():
+    for field, accepted in exact_profile_options.items():
         if field in options and options[field] not in accepted:
             return (
-                "Qwen Edge-LLM capsule cannot translate public option "
-                f"{field}={options[field]!r}"
+                "Qwen Edge-LLM capsule requires public option "
+                f"{field}={accepted[0]!r}; got {options[field]!r}"
             )
 
     parallel = options.get("parallel_config")
@@ -541,70 +533,45 @@ def _require_payload(
     return resolved
 
 
-@dataclass(frozen=True)
-class _ArtifactTree:
-    directories: tuple[str, ...]
-    file_count: int
-    total_size: int
-    tree_sha256: str
-
-
-def _file_size_and_digest(path: Path) -> tuple[int, bytes]:
-    digest = hashlib.sha256()
+def _regular_file_size(path: Path) -> int:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
     except OSError as exc:
-        raise AdapterError(f"Unable to hash capsule artifact {path}: {exc}") from exc
+        raise AdapterError(f"Unable to inspect capsule artifact {path}: {exc}") from exc
     with os.fdopen(descriptor, "rb") as source:
         metadata = os.fstat(source.fileno())
         if not stat.S_ISREG(metadata.st_mode):
             raise AdapterError(f"Capsule artifact is not a regular file: {path}")
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return metadata.st_size, digest.digest()
+    return metadata.st_size
 
 
-def _collect_artifact_tree(root: Path) -> _ArtifactTree:
+def _validate_artifact_tree(root: Path) -> None:
     if root.is_symlink() or not root.is_dir():
         raise AdapterError(f"Capsule artifact root must be a non-symlink directory: {root}")
-    directories: list[str] = []
     files: list[tuple[str, Path]] = []
+    entry_count = 0
     for candidate in sorted(root.rglob("*"), key=lambda path: path.as_posix()):
         relative = candidate.relative_to(root).as_posix()
         if not relative or "\\" in relative or len(relative.encode("utf-8")) > 4096:
             raise AdapterError(f"Unsafe capsule artifact path: {relative!r}")
         if candidate.is_symlink():
             raise AdapterError(f"Capsule artifact trees cannot contain symlinks: {candidate}")
-        if candidate.is_dir():
-            directories.append(relative)
-        elif candidate.is_file():
+        if candidate.is_file():
             files.append((relative, candidate))
-        else:
+        elif not candidate.is_dir():
             raise AdapterError(f"Unsupported capsule artifact entry: {candidate}")
-        if len(directories) + len(files) > _MAX_ARTIFACT_ENTRIES:
+        entry_count += 1
+        if entry_count > _MAX_ARTIFACT_ENTRIES:
             raise AdapterError("Capsule artifact tree exceeds the entry limit")
 
-    digest = hashlib.sha256()
-    for relative in directories:
-        digest.update(b"directory\0")
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
     total_size = 0
-    for relative, path in files:
-        size, content_digest = _file_size_and_digest(path)
-        digest.update(b"file\0")
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(size).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(content_digest)
-        total_size += size
+    for _relative, path in files:
+        total_size += _regular_file_size(path)
         if total_size > _MAX_ARTIFACT_TOTAL_SIZE:
             raise AdapterError("Capsule artifact tree exceeds the size limit")
     if not files:
         raise AdapterError(f"Capsule artifact directory contains no files: {root}")
-    return _ArtifactTree(tuple(directories), len(files), total_size, digest.hexdigest())
 
 
 def _validate_engine_directory(path: Path) -> tuple[Path, int]:
@@ -638,7 +605,7 @@ def _validate_engine_directory(path: Path) -> tuple[Path, int]:
         artifact = engine / filename
         if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size <= 0:
             raise AdapterError(f"Edge-LLM engine is missing required artifact {filename}")
-    _collect_artifact_tree(engine)
+    _validate_artifact_tree(engine)
     return engine, vocab_size
 
 
@@ -782,7 +749,6 @@ def _run_tool(
 
 
 def _build_or_resolve_engine(
-    request: Mapping[str, Any],
     parameters: Mapping[str, Any],
     output: Path,
     dependency: _EdgeDependency | None,
@@ -796,8 +762,7 @@ def _build_or_resolve_engine(
         return engine, vocab_size, None
 
     _probe_build_device()
-    workspace = _parameter_or_environment(parameters, "workspace", _WORKSPACE_ENV)
-    workspace_base = Path(workspace or output / ".edge-build-workspace").expanduser()
+    workspace_base = output / ".edge-build-workspace"
     workspace_base.mkdir(parents=True, exist_ok=True)
     attempt = Path(tempfile.mkdtemp(prefix="qwen3-edge-", dir=workspace_base))
     onnx = attempt / "onnx"
@@ -805,51 +770,29 @@ def _build_or_resolve_engine(
     onnx.mkdir()
     engine.mkdir()
     runtime_build = _validate_runtime_build(parameters)
-    configured_export_tool = _parameter_or_environment(parameters, "export_tool", _EXPORT_TOOL_ENV)
-    export_environment: Mapping[str, str] | None = None
-    if configured_export_tool:
-        export_command = [configured_export_tool]
-    else:
-        if dependency is None:
-            dependency = _resolve_edge_dependency(output, runtime_build)
-        export_script = dependency.source_dir / "tensorrt_edgellm" / "scripts" / "export_llm.py"
-        if not export_script.is_file():
-            raise AdapterError(f"Pinned TensorRT Edge-LLM exporter is missing: {export_script}")
-        export_command = [sys.executable, str(export_script)]
-        environment = os.environ.copy()
-        environment["PYTHONPATH"] = str(dependency.source_dir)
-        environment["PYTHONDONTWRITEBYTECODE"] = "1"
-        environment["PYTHONNOUSERSITE"] = "1"
-        export_environment = environment
-
-    configured_build_tool = _parameter_or_environment(parameters, "build_tool", _BUILD_TOOL_ENV)
-    if configured_build_tool:
-        build_tool = Path(configured_build_tool)
-    else:
-        if dependency is None:
-            dependency = _resolve_edge_dependency(output, runtime_build)
-        build_tool = dependency.build_tool
-    if dependency is not None:
-        _validate_edge_source(dependency.source_dir)
-    export_device = _parameter_or_environment(parameters, "export_device", _EXPORT_DEVICE_ENV)
-    if not export_device:
-        export_device = "cuda"
+    if dependency is None:
+        dependency = _resolve_edge_dependency(output, runtime_build)
+    export_script = dependency.source_dir / "tensorrt_edgellm" / "scripts" / "export_llm.py"
+    if not export_script.is_file():
+        raise AdapterError(f"Pinned TensorRT Edge-LLM exporter is missing: {export_script}")
+    export_environment = os.environ.copy()
+    export_environment["PYTHONPATH"] = str(dependency.source_dir)
+    export_environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    export_environment["PYTHONNOUSERSITE"] = "1"
+    _validate_edge_source(dependency.source_dir)
     model_source = _materialize_model_source(str(parameters.get("model_source") or MODEL_ID))
     public_options = _require_mapping(
         parameters.get("public_options", {}), "request.parameters.public_options"
     )
-    verbose = (
-        bool(parameters.get("verbose", False))
-        or bool(public_options.get("verbose", False))
-        or os.environ.get(_VERBOSE_ENV, "").strip() == "1"
-    )
+    verbose = bool(public_options.get("verbose", False))
     try:
         _run_tool(
             [
-                *export_command,
+                sys.executable,
+                str(export_script),
                 f"--model_dir={model_source}",
                 f"--output_dir={onnx}",
-                f"--device={export_device}",
+                "--device=cuda",
             ],
             verbose=verbose,
             environment=export_environment,
@@ -858,7 +801,7 @@ def _build_or_resolve_engine(
             _validate_edge_source(dependency.source_dir)
         _run_tool(
             [
-                str(build_tool),
+                str(dependency.build_tool),
                 f"--onnxDir={onnx}",
                 f"--engineDir={engine}",
                 "--maxInputLen=1024",
@@ -1598,8 +1541,8 @@ def _resolve_edge_dependency(
     parallel = runtime_build.get("parallel", 2)
 
     configured_build = _runtime_setting(runtime_build, "edge_llm_build_dir", _EDGE_BUILD_DIR_ENV)
-    reusable = [Path(configured_build)] if configured_build else [source / "build"]
-    for candidate in reusable:
+    if configured_build:
+        candidate = Path(configured_build)
         if _edge_build_matches(candidate, source, tensorrt, cuda):
             products = _edge_products(candidate)
             assert products is not None
@@ -1611,8 +1554,6 @@ def _resolve_edge_dependency(
                 tensorrt,
                 cuda,
             )
-
-    if configured_build:
         build_dir = Path(configured_build).expanduser()
         if (build_dir / "CMakeCache.txt").exists():
             raise AdapterError(
@@ -1836,23 +1777,16 @@ def _software_profile_reason(parameters: Mapping[str, Any]) -> str:
     if runtime and plugin and engine:
         return ""
 
-    configured_export_tool = _parameter_or_environment(parameters, "export_tool", _EXPORT_TOOL_ENV)
-    configured_build_tool = _parameter_or_environment(parameters, "build_tool", _BUILD_TOOL_ENV)
-    needs_runtime_build = not (runtime and plugin)
-    needs_default_exporter = not engine and not configured_export_tool
-    needs_edge_build = needs_runtime_build or (not engine and not configured_build_tool)
-
-    required_commands: set[str] = set()
-    if needs_edge_build or needs_default_exporter:
-        required_commands.add("git")
-    if needs_edge_build:
-        required_commands.add("cmake")
-    missing_commands = sorted(command for command in required_commands if shutil.which(command) is None)
+    # Every non-prebuilt path uses the exact pinned Edge-LLM checkout and its
+    # own exporter and engine builder. There is no ambient-tool fallback.
+    missing_commands = sorted(
+        command for command in ("cmake", "git") if shutil.which(command) is None
+    )
     if missing_commands:
         return "Qwen Edge-LLM build prerequisites are unavailable: " + ", ".join(
             missing_commands
         )
-    if needs_default_exporter:
+    if not engine:
         exporter_modules = (
             "PIL",
             "datasets",
@@ -1910,13 +1844,13 @@ def _build(
             output, parameters, manifest_sha256
         )
         engine_source, vocab_size, engine_attempt = _build_or_resolve_engine(
-            request, parameters, output, dependency, plugin_source
+            parameters, output, dependency, plugin_source
         )
         engine_destination = artifacts / "engine.dir"
         shutil.copytree(engine_source, engine_destination, symlinks=False)
         _copy_payload(runtime_source, artifacts / RUNTIME_LIBRARY)
         _copy_payload(plugin_source, artifacts / EDGE_LLM_PLUGIN)
-        complete_tree = _collect_artifact_tree(artifacts)
+        _validate_artifact_tree(artifacts)
         _, _, edge_commit, tensorrt_version, cuda_version = _pinned_edge_dependency()
         descriptor = {
             "schema_version": 1,
@@ -1940,9 +1874,6 @@ def _build(
                 "engine_dir": "engine.dir",
                 "runtime_library": RUNTIME_LIBRARY,
                 "runtime_plugin": EDGE_LLM_PLUGIN,
-                "file_count": complete_tree.file_count,
-                "total_size": complete_tree.total_size,
-                "tree_sha256": complete_tree.tree_sha256,
             },
             "limits": {
                 "max_input_length": int(profile_data["max_input_length"]),
@@ -2023,26 +1954,23 @@ def main(argv: list[str] | None = None) -> int:
         profile = _load_profile()
         _validate_capsule_data(profile)
         if args.operation == "probe":
-            reason = _profile_parameter_reason(
-                _require_mapping(request["parameters"], "request.parameters")
-            )
-            if not reason:
-                reason = _software_profile_reason(
-                    _require_mapping(request["parameters"], "request.parameters")
-                )
-            response = (
-                {
-                    "schema_version": 1,
-                    "supported": True,
-                    "profile_id": profile["profile_id"],
-                }
-                if not reason
-                else {
+            parameters = _require_mapping(request["parameters"], "request.parameters")
+            reason = _profile_parameter_reason(parameters)
+            if reason:
+                response = {
                     "schema_version": 1,
                     "supported": False,
                     "reason": reason,
                 }
-            )
+            else:
+                software_reason = _software_profile_reason(parameters)
+                if software_reason:
+                    raise AdapterError(software_reason)
+                response = {
+                    "schema_version": 1,
+                    "supported": True,
+                    "profile_id": profile["profile_id"],
+                }
         else:
             assert args.output is not None
             response = _build(

@@ -28,7 +28,7 @@ from .families import (
     find_plugin,
     find_diffusion_plugin,
     resolve_config_from_model_dir,
-    resolve_diffusion_family_id,
+    _resolve_diffusion_family_id,
     resolve_family_id,
     resolve_family_model_dir,
     resolve_nemo_archive_model_dir,
@@ -1730,8 +1730,6 @@ def _try_build_optimized_runtime(
     model_id_or_path: str,
     output_path: str | Path,
     public_options: dict,
-    *,
-    family_name: str | None = None,
 ):
     """Try a model-family-owned integration for the current platform.
 
@@ -1743,26 +1741,24 @@ def _try_build_optimized_runtime(
     from .optimized_runtime.orchestrator import try_build_optimized_runtime
 
     resolved_model_ref = model_id_or_path
-    selected_family = str(family_name or "").strip()
-    if not selected_family:
-        try:
-            resolved_model_ref = _resolve_model(model_id_or_path)
-            model_dir = Path(resolved_model_ref)
-            if (model_dir / "model_index.json").exists():
-                model_index = json.loads((model_dir / "model_index.json").read_text())
-                selected_family = str(
-                    resolve_diffusion_family_id(
-                        str(model_index.get("_class_name", "") or "")
-                    )
-                    or ""
+    try:
+        resolved_model_ref = _resolve_model(model_id_or_path)
+        model_dir = Path(resolved_model_ref)
+        if (model_dir / "model_index.json").exists():
+            model_index = json.loads((model_dir / "model_index.json").read_text())
+            selected_family = str(
+                _resolve_diffusion_family_id(
+                    str(model_index.get("_class_name", "") or "")
                 )
-            else:
-                selected_family = str(resolve_family_id(ModelConfig.from_dir(model_dir)) or "")
-        except Exception:
-            # Optimized dispatch is optional. Preserve the native path's exact
-            # model-resolution behavior and diagnostics when family discovery
-            # cannot resolve the request in this environment.
-            return None
+                or ""
+            )
+        else:
+            selected_family = str(resolve_family_id(ModelConfig.from_dir(model_dir)) or "")
+    except Exception:
+        # Optimized dispatch is optional. Preserve the native path's exact
+        # model-resolution behavior and diagnostics when family discovery
+        # cannot resolve the request in this environment.
+        return None
     if not selected_family:
         return None
 

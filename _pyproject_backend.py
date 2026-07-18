@@ -159,7 +159,8 @@ def _project_metadata() -> dict[str, Any]:
 def _write_dist_info(parent: Path) -> Path:
     project = _project_metadata()
     dist_info = (
-        parent / f"{_wheel_distribution_name(project['name'])}-{project['version']}.dist-info"
+        parent
+        / f"{_wheel_distribution_name(project['name'])}-{project['version']}.dist-info"
     )
     dist_info.mkdir(parents=True, exist_ok=True)
     (dist_info / "METADATA").write_text(_metadata_text(project), encoding="utf-8")

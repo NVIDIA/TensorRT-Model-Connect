@@ -234,6 +234,7 @@ target_compile_definitions(trtmc_core
   PRIVATE
     TRTMC_BINARY_DIR=\"${CMAKE_BINARY_DIR}\"
 )
+
 target_compile_options(trtmc_core
   PRIVATE
     "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -608,11 +609,6 @@ add_executable(trtmc
 target_link_libraries(trtmc PRIVATE trtmc_core)
 target_include_directories(trtmc PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_include_directories(trtmc SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/stb)
-# Source-built CLIs may import the checkout package, but copied or installed
-# binaries must resolve the package from their deployment environment.
-target_compile_definitions(trtmc PRIVATE
-  TRTMC_BUILD_EXECUTABLE_DIR="$<TARGET_FILE_DIR:trtmc>"
-)
 set_target_properties(trtmc PROPERTIES
   BUILD_RPATH "\$ORIGIN"
   BUILD_RPATH_USE_ORIGIN TRUE
@@ -812,6 +808,7 @@ trtmc_add_test(test_model_plugin_loader MODEL_OWNED)
 add_dependencies(test_model_plugin_loader trtmc_model_plugins)
 trtmc_add_test(test_backend_loader)
 trtmc_add_test(test_trt_version)
+
 trtmc_add_test(test_optimized_runtime_host)
 add_dependencies(test_optimized_runtime_host
   trtmc_test_optimized_runtime
@@ -845,23 +842,13 @@ trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE)
 # real model plugin even though its source lives beside the shared C ABI tests.
 trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE MODEL_OWNED)
 trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
+
 # Config / parsing
 trtmc_add_test(test_text_parsers)
 trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
-trtmc_add_test(test_optimized_runtime_inspect_cli)
-add_dependencies(test_optimized_runtime_inspect_cli trtmc trtmc_test_optimized_runtime)
-target_compile_definitions(test_optimized_runtime_inspect_cli PRIVATE
-  TRTMC_TEST_CLI="$<TARGET_FILE:trtmc>"
-  TRTMC_TEST_OPTIMIZED_PROVIDER_DSO="$<TARGET_FILE:trtmc_test_optimized_runtime>"
-)
-add_test(NAME test_cli_build_bridge
-  COMMAND $<TARGET_FILE:trtmc> build --help)
-set_tests_properties(test_cli_build_bridge PROPERTIES
-  ENVIRONMENT "PYTHONPATH="
-  LABELS "platform")
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
 trtmc_add_test(test_config_schemas_triattention)

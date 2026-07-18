@@ -40,9 +40,11 @@ def _require_supported_a100() -> None:
     try:
         target, _ = _probe_current_target_with_device()
     except TargetResolutionError as exc:
-        pytest.skip(f"the active CUDA target is unavailable: {exc}")
+        pytest.fail(f"the selected A100 proof could not inspect its CUDA target: {exc}")
     if target["gpu_name"] != "NVIDIA A100 80GB PCIe":
-        pytest.skip("the EdgeLLM profile requires NVIDIA A100 80GB PCIe")
+        pytest.fail(
+            f"the selected A100 proof requires NVIDIA A100 80GB PCIe; found {target['gpu_name']}"
+        )
 
 
 @pytest.mark.e2e
@@ -62,7 +64,22 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
     cache = tmp_path / "runtime-cache"
     output = tmp_path / "generated.jsonl"
 
-    _run([str(binary), "build", _MODEL_ID, "-o", str(bundle)], timeout=21_600)
+    _run(
+        [
+            str(binary),
+            "build",
+            _MODEL_ID,
+            "-o",
+            str(bundle),
+            "--precision",
+            "fp16",
+            "--max-cache-length",
+            "4096",
+            "--max-batch-size",
+            "4",
+        ],
+        timeout=21_600,
+    )
     inspect = _run([str(binary), "inspect", str(bundle)], timeout=60)
     assert "optimized_runtime.json" in inspect.stdout
     assert "optimized_runtime_artifacts/engine.dir/" in inspect.stdout

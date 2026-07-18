@@ -553,10 +553,6 @@ struct CapsuleGenerationRequest {
     bool enable_thinking{true};
 };
 
-int32_t normalize_edge_top_k(int32_t top_k) noexcept {
-    return std::max(top_k, int32_t{0});
-}
-
 bool valid_sampling_numbers(const CapsuleGenerationRequest& request) noexcept {
     return std::isfinite(request.temperature) && request.temperature >= 0.0F &&
            std::isfinite(request.top_p) && request.top_p >= 0.0F && request.top_p <= 1.0F &&
@@ -583,30 +579,24 @@ void validate_sampling_request(const EdgeLlmHandle& handle,
 }
 
 #ifndef TRTMC_QWEN_EDGE_FAKE_RUNTIME
-trt_edgellm::rt::LLMGenerationRequest make_edge_request(const CapsuleGenerationRequest* requests,
-                                                        size_t request_count) {
+trt_edgellm::rt::LLMGenerationRequest make_edge_request(const CapsuleGenerationRequest& request) {
     trt_edgellm::rt::LLMGenerationRequest edge_request;
-    edge_request.requests.reserve(request_count);
-    for (size_t index = 0; index < request_count; ++index) {
-        const auto& request = requests[index];
-        trt_edgellm::rt::LLMGenerationRequest::Request item;
-        trt_edgellm::rt::Message message;
-        message.role = "user";
-        const std::string prompt = request.prompt == nullptr
-                                       ? std::string{}
-                                       : std::string(request.prompt, request.prompt_size);
-        message.contents.push_back({"text", prompt});
-        item.messages.push_back(std::move(message));
-        edge_request.requests.push_back(std::move(item));
-    }
-    const auto& global = requests[0];
-    edge_request.temperature = global.temperature;
-    edge_request.topP = global.top_p;
-    edge_request.topK = global.top_k;
-    edge_request.maxGenerateLength = global.max_new_tokens;
-    edge_request.applyChatTemplate = global.use_chat_template;
+    trt_edgellm::rt::LLMGenerationRequest::Request item;
+    trt_edgellm::rt::Message message;
+    message.role = "user";
+    const std::string prompt = request.prompt == nullptr
+                                   ? std::string{}
+                                   : std::string(request.prompt, request.prompt_size);
+    message.contents.push_back({"text", prompt});
+    item.messages.push_back(std::move(message));
+    edge_request.requests.push_back(std::move(item));
+    edge_request.temperature = request.temperature;
+    edge_request.topP = request.top_p;
+    edge_request.topK = request.top_k;
+    edge_request.maxGenerateLength = request.max_new_tokens;
+    edge_request.applyChatTemplate = request.use_chat_template;
     edge_request.addGenerationPrompt = true;
-    edge_request.enableThinking = global.enable_thinking;
+    edge_request.enableThinking = request.enable_thinking;
     return edge_request;
 }
 #endif
@@ -628,7 +618,7 @@ EdgeLlmResponse execute_one(EdgeLlmHandle& handle, const CapsuleGenerationReques
         result.token_ids.push_back(static_cast<unsigned char>(prompt[index]));
 #else
     CudaDeviceGuard device_guard(handle.device);
-    auto edge_request = make_edge_request(&request, 1);
+    auto edge_request = make_edge_request(request);
     trt_edgellm::rt::LLMGenerationResponse edge_response;
     if (!handle.runtime->handleRequest(edge_request, edge_response, handle.stream))
         throw std::runtime_error("TensorRT Edge-LLM handleRequest returned false");
@@ -660,7 +650,7 @@ bool uses_supported_text_mode(const trtmc::GenerateConfig& config) noexcept {
     const bool supported_mode =
         config.text_generation_mode == "auto" || config.text_generation_mode == "ar";
     return config.eos_token_id == -1 && supported_mode && config.block_length == 0 &&
-           config.confidence_threshold == -1.0F;
+           config.confidence_threshold == -1.0F && config.lora_adapter_id.empty();
 }
 
 bool uses_default_stop_options(const trtmc::GenerateConfig& config) noexcept {
@@ -684,7 +674,7 @@ CapsuleGenerationRequest capsule_request(const std::string& prompt,
                                     prompt.size(),
                                     config.max_new_tokens,
                                     config.temperature,
-                                    normalize_edge_top_k(config.top_k),
+                                    std::max(config.top_k, int32_t{0}),
                                     config.top_p,
                                     config.use_chat_template,
                                     config.enable_thinking};
@@ -695,8 +685,6 @@ class QwenEdgeLlmPipeline final : public trtmc::IPipeline {
     explicit QwenEdgeLlmPipeline(
         const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1& request)
         : handle_(initialize_edge_handle(request)) {}
-
-    int32_t default_max_new_tokens() const override { return 20; }
 
     trtmc::TextResult generate(const std::string& prompt,
                                const trtmc::GenerateConfig& config) override {

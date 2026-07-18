@@ -70,7 +70,6 @@ print(json.dumps({{
         manifest_path.write_text(
             f'''schema_version = 1
 implementation_id = "{IMPLEMENTATION_ID}"
-runtime_kind = "optimized"
 downstream_runtime = "test-optimized-runtime"
 downstream_version = "test-runtime-1.0"
 downstream_commit = "test-runtime-commit"
@@ -89,7 +88,6 @@ timeout_seconds = 30
 [runtime]
 library = "{RUNTIME_LIBRARY}"
 abi = 1
-artifact_layout = "directory-tree-v1"
 ''',
             encoding="utf-8",
         )

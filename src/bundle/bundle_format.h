@@ -52,10 +52,6 @@ std::vector<char> ReadBundleSection(const std::string& path, const BundleSection
 void CopyBundleSection(const std::string& path, const BundleSectionInfo& section,
                        std::ostream& output);
 
-// Look up and read one named section without materializing any other section.
-// Throws std::runtime_error when the section is absent or outside the file.
-std::vector<char> ReadBundleSection(const std::string& path, const std::string& section_name);
-
 // Check magic bytes without reading full file.
 bool HasBundleMagic(const std::string& path);
 

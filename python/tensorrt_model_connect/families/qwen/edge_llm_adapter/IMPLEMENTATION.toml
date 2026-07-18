@@ -3,7 +3,6 @@
 
 schema_version = 1
 implementation_id = "qwen3-0.6b-fp16.tensorrt-edge-llm.a100-pcie80-sm80"
-runtime_kind = "optimized"
 downstream_runtime = "tensorrt-edge-llm"
 downstream_version = "0.6.1"
 downstream_commit = "2620a9768022f25dff18912db2fb92b2ef264a70"
@@ -26,4 +25,3 @@ timeout_seconds = 21600
 [runtime]
 library = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm.so"
 abi = 1
-artifact_layout = "directory-tree-v1"

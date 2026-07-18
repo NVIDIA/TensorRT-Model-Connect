@@ -45,7 +45,7 @@ from tensorrt_model_connect.optimized_runtime.manifest import (  # noqa: E402
 )
 from tensorrt_model_connect.optimized_runtime.orchestrator import (  # noqa: E402
     discover_family_implementations_for_model,
-    family_implementation_roots,
+    family_implementation_root,
 )
 
 
@@ -62,11 +62,32 @@ PROFILE_PATH = CAPSULE_ROOT / "profiles" / "a100-pcie80-sm80-fp16.toml"
 ADAPTER_PATH = CAPSULE_ROOT / "adapter.py"
 
 
+def test_qwen_adapter_package_inventory_is_model_owned() -> None:
+    def source_files(root: Path) -> set[str]:
+        return {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+        }
+
+    assert source_files(CAPSULE_ROOT) | {
+        f"runtime/{relative}" for relative in source_files(RUNTIME_ROOT)
+    } == {
+        "IMPLEMENTATION.toml",
+        "adapter.py",
+        "dependency.lock",
+        "profiles/a100-pcie80-sm80-fp16.toml",
+        "runtime/CMakeLists.txt",
+        "runtime/adapter.cpp",
+        "runtime/exports.map",
+    }
+
+
 def test_source_checkout_discovers_edge_llm_only_from_qwen_builder() -> None:
-    roots = family_implementation_roots("qwen")
+    root = family_implementation_root("qwen")
     discovered = discover_family_implementations_for_model("qwen", MODEL_ID)
 
-    assert roots == (CAPSULE_ROOT.parent,)
+    assert root == CAPSULE_ROOT.parent
     assert [manifest.implementation_id for manifest in discovered] == [IMPLEMENTATION_ID]
 
 
@@ -74,22 +95,6 @@ def test_runtime_source_resolves_from_qwen_runtime_folder_in_a_checkout() -> Non
     adapter = _load_adapter_module()
 
     assert adapter._runtime_source_root() == RUNTIME_ROOT
-
-
-def test_runtime_source_prefers_the_packaged_model_adapter_copy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    adapter = _load_adapter_module()
-    packaged_builder = (
-        tmp_path / "tensorrt_model_connect" / "families" / "qwen" / "edge_llm_adapter"
-    )
-    packaged_runtime = packaged_builder / "runtime"
-    packaged_runtime.mkdir(parents=True)
-    monkeypatch.setattr(adapter, "CAPSULE_ROOT", packaged_builder)
-    monkeypatch.setattr(adapter, "REPOSITORY_ROOT", tmp_path / "no-source-checkout")
-
-    assert adapter._runtime_source_root() == packaged_runtime
 
 
 def test_installed_layout_compiles_the_packaged_qwen_runtime(
@@ -352,12 +357,6 @@ def test_adapter_restores_parent_active_device_for_heterogeneous_visible_gpus(
 
     assert calls == [("set", 1), ("get", 1)]
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-a100"
-    main_source = ADAPTER_PATH.read_text(encoding="utf-8")
-    main_start = main_source.index("def main(")
-    select = main_source.index("_select_parent_active_cuda_device()", main_start)
-    parse = main_source.index("_parse_args(", select)
-    load = main_source.index("_load_request(", parse)
-    assert select < parse < load
 
 
 def test_supported_probe_selects_profile_without_hidden_opt_in(tmp_path: Path) -> None:
@@ -391,7 +390,7 @@ def test_supported_probe_selects_profile_without_hidden_opt_in(tmp_path: Path) -
         )
 
 
-def test_established_mc_defaults_translate_to_the_qualified_edge_profile() -> None:
+def test_established_mc_defaults_do_not_change_the_requested_profile() -> None:
     import inspect
 
     from tensorrt_model_connect.engine_builder import build
@@ -402,10 +401,22 @@ def test_established_mc_defaults_translate_to_the_qualified_edge_profile() -> No
         if name not in {"model_id_or_path", "output_path"}
     }
 
-    assert _load_adapter_module()._public_option_reason(defaults) == ""
+    reason = _load_adapter_module()._public_option_reason(defaults)
+    assert "requires public option max_batch_size=4; got 1" in reason
 
 
-def test_bare_public_cli_translates_to_the_qualified_edge_profile(
+@pytest.mark.parametrize("value", (None, False, "", (), [], {}))
+def test_future_inert_public_option_does_not_couple_to_this_adapter(value) -> None:
+    reason = _load_adapter_module()._public_option_reason({"future_option": value})
+    assert reason == ""
+
+
+def test_future_non_inert_public_option_remains_fail_closed() -> None:
+    reason = _load_adapter_module()._public_option_reason({"future_option": "requested"})
+    assert "does not recognize public option(s): future_option" in reason
+
+
+def test_public_cli_requires_the_exact_qualified_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import tensorrt_model_connect.build_cli as build_cli
@@ -427,11 +438,36 @@ def test_bare_public_cli_translates_to_the_qualified_edge_profile(
 
     assert exit_info.value.code == 0
     options = build_cli._optimized_cli_public_options(captured["args"])
+    reason = _load_adapter_module()._public_option_reason(options)
+    assert "requires public option max_batch_size=4; got 1" in reason
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "trtmc",
+            "build",
+            MODEL_ID,
+            "-o",
+            "/tmp/qwen-edge-test.trtfb",
+            "--precision",
+            "fp16",
+            "--max-cache-length",
+            "4096",
+            "--max-batch-size",
+            "4",
+        ],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        build_cli.main()
+
+    assert exit_info.value.code == 0
+    options = build_cli._optimized_cli_public_options(captured["args"])
     assert _load_adapter_module()._public_option_reason(options) == ""
 
 
 @pytest.mark.parametrize("missing_module", ("modelopt", "onnx_graphsurgeon", "torch"))
-def test_probe_falls_back_when_default_exporter_prerequisite_is_missing(
+def test_qualified_probe_reports_missing_exporter_prerequisite(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -453,13 +489,13 @@ def test_probe_falls_back_when_default_exporter_prerequisite_is_missing(
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert adapter.main(["probe", "--request", str(request_path)]) == 0
-    response = json.loads(capsys.readouterr().out)
-    assert response == {
-        "schema_version": 1,
-        "supported": False,
-        "reason": f"Qwen Edge-LLM build prerequisites are unavailable: {missing_module}",
-    }
+    assert adapter.main(["probe", "--request", str(request_path)]) == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert (
+        f"Qwen Edge-LLM build prerequisites are unavailable: {missing_module}"
+        in captured.err
+    )
 
 
 def test_build_stages_explicit_engine_runtime_and_plugin_payloads(tmp_path: Path) -> None:
@@ -497,7 +533,7 @@ def test_build_stages_explicit_engine_runtime_and_plugin_payloads(tmp_path: Path
     )
 
 
-def test_wrong_tensorrt_probe_falls_back_without_bootstrapping(
+def test_qualified_probe_reports_wrong_tensorrt_without_bootstrapping(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     adapter = _load_adapter_module()
@@ -521,10 +557,10 @@ def test_wrong_tensorrt_probe_falls_back_without_bootstrapping(
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert adapter.main(["probe", "--request", str(request_path)]) == 0
-    response = json.loads(capsys.readouterr().out)
-    assert response["supported"] is False
-    assert "TensorRT 11.2.0.113" in response["reason"]
+    assert adapter.main(["probe", "--request", str(request_path)]) == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "TensorRT 11.2.0.113" in captured.err
 
 
 def test_tensorrt_resolution_requires_one_exact_core_and_parser_installation(
@@ -712,11 +748,12 @@ def test_build_can_compile_the_capsule_runtime_only_after_selection(
         }
     )
 
-    build = _run_build_after_probe(manifest, request, tmp_path / "capsule-output")
+    output = tmp_path / "capsule-output"
+    build = _run_build_after_probe(manifest, request, output)
 
     runtime = build.artifacts_path / RUNTIME_LIBRARY
     assert runtime.read_bytes().startswith(b"\x7fELF")
-    assert not (build.output_directory / ".runtime-build").exists()
+    assert not (output / ".runtime-build").exists()
 
 
 def test_selected_build_builds_only_required_edge_targets(
@@ -887,7 +924,7 @@ def test_engine_export_uses_pinned_dependency_tools_despite_ambient_poison(
 
     monkeypatch.setattr(adapter, "_run_tool", fake_tool)
     engine, _vocab_size, attempt = adapter._build_or_resolve_engine(
-        {}, {}, tmp_path / "output", dependency, plugin
+        {}, tmp_path / "output", dependency, plugin
     )
 
     assert engine.name == "engine.dir"
@@ -954,7 +991,7 @@ def test_engine_build_revalidates_source_after_each_tool(
 
     output = tmp_path / "output"
     with pytest.raises(adapter.AdapterError, match="post-build pinned-source mutation"):
-        adapter._build_or_resolve_engine({}, {}, output, dependency, plugin)
+        adapter._build_or_resolve_engine({}, output, dependency, plugin)
 
     assert len(tool_calls) == 2
     assert validations == [source, source, source]

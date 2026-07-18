@@ -109,9 +109,3 @@ def _probe_current_target_with_device() -> tuple[Mapping[str, TargetScalar], int
         "gpu_name": str(name).strip(),
     }
     return MappingProxyType(facts), device
-
-
-def probe_current_target() -> Mapping[str, TargetScalar]:
-    """Probe the active CUDA device without importing a performance runtime."""
-
-    return _probe_current_target_with_device()[0]

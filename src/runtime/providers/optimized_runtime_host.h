@@ -19,6 +19,8 @@ namespace trtmc {
 // A claimed bundle either initializes its exact runtime DSO successfully or
 // fails closed; it never falls through to another optimized runtime or to the
 // native Model Connect implementation.
+bool is_optimized_runtime_bundle(const BundleInfo& bundle_info);
+
 std::unique_ptr<IPipeline> try_make_optimized_runtime_pipeline(const std::string& bundle_path,
                                                                const BundleInfo& bundle_info,
                                                                const LoadOptions& options);

@@ -223,7 +223,7 @@ def _create_request(artifact, metadata: dict) -> tuple[CreateRequest, bytes]:
 
 
 def _mutable_descriptor(artifact) -> dict:
-    return json.loads(artifact.descriptor_path.read_text(encoding="utf-8"))
+    return json.loads(json.dumps(dict(artifact.descriptor)))
 
 
 def _rejected_create(artifact, metadata: dict) -> bytes:
@@ -376,26 +376,6 @@ def test_runtime_rejects_wrong_cuda_before_plugin_validation(
     )
 
 
-def test_real_runtime_queries_the_loaded_tensorrt_api_before_edge_initialization() -> None:
-    source = (RUNTIME_ROOT / "adapter.cpp").read_text(encoding="utf-8")
-    for function in (
-        "getInferLibMajorVersion()",
-        "getInferLibMinorVersion()",
-        "getInferLibPatchVersion()",
-        "getInferLibBuildVersion()",
-    ):
-        assert function in source
-    check = source.index("require_supported_tensorrt_runtime();")
-    assert check < source.index("    ensure_edge_plugin_loaded();", check)
-    assert check < source.index("std::make_unique<trt_edgellm::rt::LLMInferenceRuntime>")
-    cuda_check = source.index("require_supported_cuda_runtime();", check)
-    assert cuda_check < source.index("    configure_edge_logging();", cuda_check)
-    assert cuda_check < source.index("    ensure_edge_plugin_loaded();", cuda_check)
-    assert cuda_check < source.index(
-        "std::make_unique<trt_edgellm::rt::LLMInferenceRuntime>", cuda_check
-    )
-
-
 def test_fake_runtime_factory_returns_an_ipipeline_that_owns_generation(
     tmp_path: Path, fake_runtime: Path
 ) -> None:
@@ -456,8 +436,7 @@ int main(int argc, char** argv) {
         first.token_ids.size() != 4 || first.prefill_ms != 0.0 || first.decode_ms != 0.0 ||
         second.prefill_ms != 0.0 || second.decode_ms != 0.0 ||
         pipeline->model_id() != std::string("Qwen/Qwen3-0.6B") ||
-        pipeline->pipeline_type() != std::string("QwenTextGenerationPipeline") ||
-        pipeline->default_max_new_tokens() != 20)
+        pipeline->pipeline_type() != std::string("QwenTextGenerationPipeline"))
         return 13;
     config.top_k = -1;
     config.top_p = 0.8F;
@@ -479,6 +458,13 @@ int main(int argc, char** argv) {
     try {
         (void)pipeline->generate("rejected", config);
         return 17;
+    } catch (const std::invalid_argument&) {
+    }
+    config.min_p = 0.0F;
+    config.lora_adapter_id = "unsupported-adapter";
+    try {
+        (void)pipeline->generate("rejected-lora", config);
+        return 18;
     } catch (const std::invalid_argument&) {
     }
     std::cout << first.text << "\n" << second.text << "\n";

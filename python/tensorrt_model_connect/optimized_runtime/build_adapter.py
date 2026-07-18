@@ -57,11 +57,8 @@ class ProbeResult:
 
 @dataclass(frozen=True)
 class BuildArtifact:
-    output_directory: Path
-    descriptor_path: Path
     descriptor: Mapping[str, Any]
     artifacts_path: Path
-    probe: ProbeResult
 
 
 def _adapter_command(manifest: ImplementationManifest) -> list[str]:
@@ -240,16 +237,13 @@ def _run_adapter(
     *,
     output_directory: Path | None = None,
     build_binding: Mapping[str, Any] | None = None,
-    timeout_seconds: int | None = None,
     _adapter_environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     if not manifest.matches(request):
         raise BuildAdapterError(
             f"Request does not match implementation {manifest.implementation_id}"
         )
-    timeout = manifest.build_timeout_seconds if timeout_seconds is None else timeout_seconds
-    if type(timeout) is not int or timeout <= 0:
-        raise ValueError("timeout_seconds must be a positive integer")
+    timeout = manifest.build_timeout_seconds
 
     with tempfile.TemporaryDirectory(prefix="trtmc-optimized-request-") as temp_dir:
         request_path = Path(temp_dir) / "request.json"
@@ -341,7 +335,6 @@ def run_probe(
     manifest: ImplementationManifest,
     request: ImplementationRequest,
     *,
-    timeout_seconds: int | None = None,
     _adapter_environment: Mapping[str, str] | None = None,
 ) -> ProbeResult:
     """Invoke a capsule's side-effect-free ``probe`` operation."""
@@ -349,7 +342,6 @@ def run_probe(
         manifest,
         request,
         "probe",
-        timeout_seconds=timeout_seconds,
         _adapter_environment=_adapter_environment,
     )
     _validate_response_keys(response, _PROBE_KEYS, operation="probe")
@@ -414,7 +406,6 @@ def run_build(
     output_directory: str | Path,
     *,
     probe: ProbeResult,
-    timeout_seconds: int | None = None,
     _adapter_environment: Mapping[str, str] | None = None,
 ) -> BuildArtifact:
     """Invoke ``build`` and bind its output to the selected probe and request."""
@@ -426,7 +417,6 @@ def run_build(
         "build",
         output_directory=output,
         build_binding=build_binding,
-        timeout_seconds=timeout_seconds,
         _adapter_environment=_adapter_environment,
     )
     _validate_response_keys(response, _BUILD_KEYS, operation="build")
@@ -445,9 +435,6 @@ def run_build(
         raise BuildAdapterError(f"Invalid build descriptor: {descriptor_path}: {exc}") from exc
     validate_build_descriptor(manifest, request, probe, descriptor)
     return BuildArtifact(
-        output_directory=output,
-        descriptor_path=descriptor_path,
         descriptor=MappingProxyType(dict(descriptor)),
         artifacts_path=artifacts_path,
-        probe=probe,
     )

@@ -43,12 +43,11 @@ packages = ["python/tensorrt_model_connect"]
 [tool.conan-py-build.sdist]
 include = [
     "python",
-    "third_party/stb",
+    "third_party",
 ]
 exclude = [
     "__pycache__",
     "*.pyc",
-    "dependencies",
     "python/tensorrt_model_connect/build",
     "python/tensorrt_model_connect/*.egg-info",
 ]

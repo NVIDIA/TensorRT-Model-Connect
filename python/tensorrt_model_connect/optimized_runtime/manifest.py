@@ -23,7 +23,6 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
 MANIFEST_NAME = "IMPLEMENTATION.toml"
 MANIFEST_SCHEMA_VERSION = 1
 RUNTIME_ABI_VERSIONS = frozenset({1})
-DIRECTORY_TREE_LAYOUT = "directory-tree-v1"
 
 _IDENTIFIER_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
 _TARGET_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
@@ -31,7 +30,6 @@ _TARGET_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
 _TOP_LEVEL_KEYS = {
     "schema_version",
     "implementation_id",
-    "runtime_kind",
     "downstream_runtime",
     "downstream_version",
     "downstream_commit",
@@ -42,7 +40,7 @@ _TOP_LEVEL_KEYS = {
 }
 _MODEL_KEYS = {"id", "revisions"}
 _BUILD_KEYS = {"entrypoint", "timeout_seconds"}
-_RUNTIME_KEYS = {"library", "abi", "artifact_layout"}
+_RUNTIME_KEYS = {"library", "abi"}
 
 TargetScalar = str | int | float | bool
 RequestValue = (
@@ -267,13 +265,6 @@ class ImplementationManifest:
     build_timeout_seconds: int
     runtime_library: str
     runtime_abi: int
-    artifact_layout: str
-
-    def matches_model(self, model_id: str) -> bool:
-        return self.model_id == model_id
-
-    def matches_revision(self, revision: str) -> bool:
-        return revision in self.model_revisions
 
     def matches_target(self, target: Mapping[str, TargetScalar]) -> bool:
         for key, required in self.target.items():
@@ -284,8 +275,8 @@ class ImplementationManifest:
 
     def matches(self, request: ImplementationRequest) -> bool:
         return (
-            self.matches_model(request.model_id)
-            and self.matches_revision(request.model_revision)
+            self.model_id == request.model_id
+            and request.model_revision in self.model_revisions
             and self.matches_target(request.target)
         )
 
@@ -336,10 +327,6 @@ def load_implementation_manifest(path: str | Path) -> ImplementationManifest:
             resolved_path,
             f"unsupported schema_version {schema_version}; expected {MANIFEST_SCHEMA_VERSION}",
         )
-    runtime_kind = _require_string(raw["runtime_kind"], resolved_path, "runtime_kind")
-    if runtime_kind != "optimized":
-        raise _fail(resolved_path, "runtime_kind must be 'optimized'")
-
     implementation_id = _require_identifier(
         raw["implementation_id"], resolved_path, "implementation_id"
     )
@@ -389,15 +376,6 @@ def load_implementation_manifest(path: str | Path) -> ImplementationManifest:
             "unsupported runtime.abi "
             f"{runtime_abi}; expected one of {sorted(RUNTIME_ABI_VERSIONS)}",
         )
-    artifact_layout = _require_string(
-        runtime["artifact_layout"], resolved_path, "runtime.artifact_layout"
-    )
-    if artifact_layout != DIRECTORY_TREE_LAYOUT:
-        raise _fail(
-            resolved_path,
-            f"unsupported runtime.artifact_layout {artifact_layout!r}",
-        )
-
     return ImplementationManifest(
         path=resolved_path,
         capsule_root=capsule_root,
@@ -412,31 +390,20 @@ def load_implementation_manifest(path: str | Path) -> ImplementationManifest:
         build_timeout_seconds=timeout,
         runtime_library=runtime_library,
         runtime_abi=runtime_abi,
-        artifact_layout=artifact_layout,
     )
 
 
-def _manifest_paths(roots: Iterable[str | Path]) -> tuple[Path, ...]:
-    paths: set[Path] = set()
-    for raw_root in roots:
-        root = Path(raw_root)
-        if root.is_symlink():
-            raise ManifestDiscoveryError(f"Discovery root must not be a symlink: {root}")
-        try:
-            resolved = root.resolve(strict=True)
-        except FileNotFoundError as exc:
-            raise ManifestDiscoveryError(f"Discovery root does not exist: {root}") from exc
-        if resolved.is_file():
-            if resolved.name != MANIFEST_NAME:
-                raise ManifestDiscoveryError(
-                    f"Discovery file must be named {MANIFEST_NAME}: {resolved}"
-                )
-            paths.add(resolved)
-            continue
-        if not resolved.is_dir():
-            raise ManifestDiscoveryError(f"Discovery root is not a directory: {resolved}")
-        paths.update(path for path in resolved.rglob(MANIFEST_NAME))
-    return tuple(sorted(paths, key=lambda path: str(path)))
+def _manifest_paths(root: str | Path) -> tuple[Path, ...]:
+    raw_root = Path(root)
+    if raw_root.is_symlink():
+        raise ManifestDiscoveryError(f"Discovery root must not be a symlink: {raw_root}")
+    try:
+        resolved = raw_root.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise ManifestDiscoveryError(f"Discovery root does not exist: {raw_root}") from exc
+    if not resolved.is_dir():
+        raise ManifestDiscoveryError(f"Discovery root is not a directory: {resolved}")
+    return tuple(sorted(resolved.glob(f"*/{MANIFEST_NAME}"), key=lambda path: str(path)))
 
 
 def _reject_duplicate_implementation_ids(
@@ -454,7 +421,7 @@ def _reject_duplicate_implementation_ids(
         raise ManifestDiscoveryError(f"Duplicate implementation_id declarations: {details}")
 
 
-def _declared_model_id(path: Path) -> str:
+def _declared_model_id(path: Path) -> str | None:
     """Read only the manifest's model index before validating a candidate.
 
     A model family may contain many independently owned adapters. A syntax
@@ -465,11 +432,13 @@ def _declared_model_id(path: Path) -> str:
 
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError) as exc:
-        raise _fail(path, f"unable to read model index: {exc}") from exc
+    except (OSError, UnicodeError):
+        # A capsule that cannot declare its model does not participate in
+        # discovery.  In particular, it must not disable a sibling model.
+        return None
     starts = [index for index, line in enumerate(lines) if line.strip() == "[model]"]
     if len(starts) != 1:
-        raise _fail(path, "manifest must contain exactly one [model] table")
+        return None
     start = starts[0]
     end = next(
         (
@@ -479,21 +448,24 @@ def _declared_model_id(path: Path) -> str:
         ),
         len(lines),
     )
-    matches = []
+    matches: list[str] = []
     for line in lines[start + 1 : end]:
-        match = re.fullmatch(r'\s*id\s*=\s*"([^"\\\r\n]+)"\s*(?:#.*)?', line)
-        if match is not None:
-            matches.append(match.group(1))
-    if len(matches) != 1:
-        raise _fail(
-            path,
-            '[model] must contain exactly one literal id = "..." discovery index',
+        match = re.fullmatch(
+            r'''\s*id\s*=\s*(?:"([^"\\\r\n]+)"|'([^'\r\n]+)')\s*(?:#.*)?''',
+            line,
         )
-    return _require_string(matches[0], path, "model.id")
+        if match is not None:
+            matches.append(match.group(1) or match.group(2))
+    if len(matches) != 1:
+        return None
+    model_id = matches[0]
+    if not model_id or model_id != model_id.strip():
+        return None
+    return model_id
 
 
 def discover_implementations_for_model(
-    roots: Iterable[str | Path],
+    root: str | Path,
     model_id: str,
 ) -> tuple[ImplementationManifest, ...]:
     """Load exact-model implementations below already selected family roots.
@@ -506,21 +478,8 @@ def discover_implementations_for_model(
         raise ValueError("model_id must be a non-empty string")
     manifests = tuple(
         load_implementation_manifest(path)
-        for path in _manifest_paths(roots)
+        for path in _manifest_paths(root)
         if _declared_model_id(path) == model_id
     )
     _reject_duplicate_implementation_ids(manifests)
     return manifests
-
-
-def matching_implementations(
-    manifests: Iterable[ImplementationManifest],
-    request: ImplementationRequest,
-) -> tuple[ImplementationManifest, ...]:
-    """Return exact matches in a stable order independent of discovery order."""
-    return tuple(
-        sorted(
-            (manifest for manifest in manifests if manifest.matches(request)),
-            key=lambda manifest: (manifest.implementation_id, str(manifest.path)),
-        )
-    )

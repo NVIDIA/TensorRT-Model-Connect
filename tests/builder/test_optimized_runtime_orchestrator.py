@@ -13,12 +13,10 @@ import pytest
 from tensorrt_model_connect.optimized_runtime.manifest import (
     AmbiguousImplementationError,
     ImplementationRequest,
-    ManifestDiscoveryError,
     ManifestValidationError,
     load_implementation_manifest,
 )
 from tensorrt_model_connect.optimized_runtime.orchestrator import (
-    _probe_model_default_revision,
     discover_family_implementations_for_model,
     select_delegated_build,
     try_build_optimized_runtime,
@@ -32,8 +30,16 @@ from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC
 _REVISION = "0123456789abcdef0123456789abcdef01234567"
 
 
-def _model_revision(_model_id: str) -> str:
-    return _REVISION
+def _snapshot(
+    root: Path,
+    *,
+    model_id: str = "Example/Model",
+    revision: str = _REVISION,
+) -> Path:
+    organization, name = model_id.split("/", 1)
+    snapshot = root / f"models--{organization}--{name}" / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    return snapshot
 
 
 def _read_bundle(path: Path) -> tuple[dict, dict[str, bytes]]:
@@ -115,7 +121,6 @@ def _capsule(
     manifest.write_text(
         f'''schema_version = 1
 implementation_id = "{implementation_id}"
-runtime_kind = "optimized"
 downstream_runtime = "fake-runtime"
 downstream_version = "1.2.3"
 downstream_commit = "0123456789abcdef"
@@ -136,7 +141,6 @@ timeout_seconds = 30
 [runtime]
 library = "libtrtmc_impl_fake.so"
 abi = 1
-artifact_layout = "directory-tree-v1"
 ''',
         encoding="utf-8",
     )
@@ -162,7 +166,7 @@ def _target() -> dict[str, object]:
     }
 
 
-def test_family_discovery_rejects_nested_adapter_layout(
+def test_family_discovery_ignores_nested_non_adapter_layout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -172,27 +176,35 @@ def test_family_discovery_rejects_nested_adapter_layout(
     _capsule(family_root / "nested", name="runtime")
     monkeypatch.setattr(
         orchestrator,
-        "family_implementation_roots",
-        lambda _family: (family_root,),
+        "family_implementation_root",
+        lambda _family: family_root,
     )
 
-    with pytest.raises(ManifestDiscoveryError, match="<family>/<adapter>"):
-        discover_family_implementations_for_model("example_family", "Example/Model")
+    assert not discover_family_implementations_for_model("example_family", "Example/Model")
 
 
 def test_full_generic_build_writes_self_contained_delegated_bundle(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    manifest = load_implementation_manifest(_capsule(tmp_path / "capsules"))
+    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+
+    family_root = tmp_path / "family"
+    _capsule(family_root)
+    model_source = _snapshot(tmp_path / "cache")
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_current_target_with_device",
+        lambda: (_target(), 0),
+    )
     output = tmp_path / "model.trtfb"
 
     selection = try_build_optimized_runtime(
-        "Example/Model",
+        str(model_source),
         output,
+        family_name="example",
         parameters={"precision": "fp16", "quantization": "none"},
-        manifests=(manifest,),
-        current_target_probe=_target,
-        model_revision_probe=_model_revision,
     )
 
     assert selection is not None
@@ -246,15 +258,19 @@ def test_current_target_preserves_active_device_ordinal_only_as_launch_context(
     monkeypatch.setattr(target_module.platform, "machine", lambda: "x86_64")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-slow,GPU-a100")
     monkeypatch.delenv("TRTMC_INTERNAL_OPTIMIZED_RUNTIME_CUDA_DEVICE", raising=False)
-    manifest = load_implementation_manifest(_capsule(tmp_path / "capsules"))
+    family_root = tmp_path / "family"
+    _capsule(family_root)
+    model_source = _snapshot(tmp_path / "cache")
+    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)
     output = tmp_path / "model.trtfb"
 
     selection = try_build_optimized_runtime(
-        "Example/Model",
+        str(model_source),
         output,
+        family_name="example",
         parameters={"precision": "fp16", "verify_launch_context": True},
-        manifests=(manifest,),
-        model_revision_probe=_model_revision,
     )
 
     assert selection is not None
@@ -286,15 +302,22 @@ def test_malformed_unrelated_sibling_does_not_break_requested_model(
         model_id="Example/Unrelated-Model",
     )
     _make_invalid_toml(unrelated)
-    monkeypatch.setattr(orchestrator, "family_implementation_roots", lambda _family: (root,))
+    model_source = _snapshot(
+        tmp_path / "cache",
+        model_id="Example/Requested-Model",
+    )
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: root)
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_current_target_with_device",
+        lambda: (_target(), 0),
+    )
 
     selection = try_build_optimized_runtime(
-        "Example/Requested-Model",
+        str(model_source),
         tmp_path / "model.trtfb",
         family_name="example",
         parameters={"precision": "fp16"},
-        current_target_probe=_target,
-        model_revision_probe=_model_revision,
     )
 
     assert selection is not None
@@ -303,17 +326,24 @@ def test_malformed_unrelated_sibling_does_not_break_requested_model(
 
 def test_public_native_build_without_an_owning_family_skips_adapter_discovery(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = tmp_path / "capsules"
-    unrelated = _capsule(
-        root,
-        model_id="Example/Unrelated-Model",
+    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+
+    model_source = _snapshot(
+        tmp_path / "cache",
+        model_id="Example/Native-Only-Model",
     )
-    _make_invalid_toml(unrelated)
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_current_target_with_device",
+        lambda: pytest.fail("native-only request resolved a target"),
+    )
     selection = try_build_optimized_runtime(
-        "Example/Native-Only-Model",
+        str(model_source),
         tmp_path / "native.trtfb",
-        current_target_probe=lambda: pytest.fail("native-only request resolved a target"),
+        family_name="example",
     )
 
     assert selection is None
@@ -331,99 +361,75 @@ def test_public_build_fails_closed_for_malformed_model_candidate(
         model_id="Example/Requested-Model",
     )
     _make_invalid_toml(candidate)
-    monkeypatch.setattr(orchestrator, "family_implementation_roots", lambda _family: (root,))
+    model_source = _snapshot(
+        tmp_path / "cache",
+        model_id="Example/Requested-Model",
+    )
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: root)
 
     with pytest.raises(ManifestValidationError, match="invalid TOML"):
         try_build_optimized_runtime(
-            "Example/Requested-Model",
+            str(model_source),
             tmp_path / "model.trtfb",
             family_name="example",
             parameters={"precision": "fp16"},
-            current_target_probe=_target,
-            model_revision_probe=_model_revision,
         )
 
 
-def test_unsupported_probe_returns_native_fallback_without_building(tmp_path: Path) -> None:
-    manifest = load_implementation_manifest(_capsule(tmp_path / "capsules"))
+def test_unsupported_probe_returns_native_fallback_without_building(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+
+    family_root = tmp_path / "family"
+    _capsule(family_root)
+    model_source = _snapshot(tmp_path / "cache")
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_current_target_with_device",
+        lambda: (_target(), 0),
+    )
     output = tmp_path / "model.trtfb"
     selection = try_build_optimized_runtime(
-        "Example/Model",
+        str(model_source),
         output,
+        family_name="example",
         parameters={"precision": "fp8"},
-        manifests=(manifest,),
-        current_target_probe=_target,
-        model_revision_probe=_model_revision,
     )
     assert selection is None
     assert not output.exists()
 
 
-def test_bare_model_id_does_not_select_a_stale_capsule_revision(tmp_path: Path) -> None:
-    manifest = load_implementation_manifest(_capsule(tmp_path / "capsules"))
+def test_non_snapshot_model_source_retains_native_path(tmp_path: Path) -> None:
     output = tmp_path / "native.trtfb"
 
     selection = try_build_optimized_runtime(
         "Example/Model",
         output,
+        family_name="example",
         parameters={"precision": "fp16"},
-        manifests=(manifest,),
-        current_target_probe=lambda: pytest.fail("stale profile resolved a target"),
-        model_revision_probe=lambda _model_id: "f" * 40,
     )
 
     assert selection is None
     assert not output.exists()
 
 
-def test_bare_model_id_revision_lookup_failure_retains_native_path(tmp_path: Path) -> None:
-    manifest = load_implementation_manifest(_capsule(tmp_path / "capsules"))
-    output = tmp_path / "native.trtfb"
-
-    selection = try_build_optimized_runtime(
-        "Example/Model",
-        output,
-        parameters={"precision": "fp16"},
-        manifests=(manifest,),
-        current_target_probe=lambda: pytest.fail("unresolved model resolved a target"),
-        model_revision_probe=lambda _model_id: None,
-    )
-
-    assert selection is None
-    assert not output.exists()
-
-
-def test_bare_model_id_resolves_the_warmed_snapshot_when_offline(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import sys
-    from types import ModuleType
-
-    snapshot = tmp_path / "models--Example--Model" / "snapshots" / _REVISION
-    snapshot.mkdir(parents=True)
-
-    class OfflineApi:
-        def model_info(self, _model_id: str):
-            raise RuntimeError("offline")
-
-    hub = ModuleType("huggingface_hub")
-    hub.HfApi = OfflineApi
-    hub.snapshot_download = lambda _model_id, *, local_files_only: str(snapshot)
-    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
-
-    assert _probe_model_default_revision("Example/Model") == _REVISION
-
-
-def test_bare_model_id_selects_only_the_resolved_revision_with_multiple_capsules(
+def test_snapshot_selects_only_its_exact_revision_with_multiple_capsules(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first_path = _capsule(
-        tmp_path / "capsules",
+    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+
+    family_root = tmp_path / "family"
+    _capsule(
+        family_root,
         name="first",
         implementation_id="first-revision-runtime",
     )
     second_path = _capsule(
-        tmp_path / "capsules",
+        family_root,
         name="second",
         implementation_id="second-revision-runtime",
     )
@@ -432,16 +438,20 @@ def test_bare_model_id_selects_only_the_resolved_revision_with_multiple_capsules
         second_path.read_text(encoding="utf-8").replace(_REVISION, second_revision),
         encoding="utf-8",
     )
-    manifests = tuple(load_implementation_manifest(path) for path in (first_path, second_path))
+    model_source = _snapshot(tmp_path / "cache", revision=second_revision)
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_current_target_with_device",
+        lambda: (_target(), 0),
+    )
     output = tmp_path / "model.trtfb"
 
     selection = try_build_optimized_runtime(
-        "Example/Model",
+        str(model_source),
         output,
+        family_name="example",
         parameters={"precision": "fp16"},
-        manifests=manifests,
-        current_target_probe=_target,
-        model_revision_probe=lambda _model_id: second_revision,
     )
 
     assert selection is not None
@@ -449,20 +459,27 @@ def test_bare_model_id_selects_only_the_resolved_revision_with_multiple_capsules
     assert selection.request.model_revision == second_revision
 
 
-def test_unavailable_active_target_returns_native_fallback(tmp_path: Path) -> None:
-    manifest = load_implementation_manifest(_capsule(tmp_path / "capsules"))
+def test_unavailable_active_target_returns_native_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+
+    family_root = tmp_path / "family"
+    _capsule(family_root)
+    model_source = _snapshot(tmp_path / "cache")
     output = tmp_path / "native.trtfb"
 
-    def unavailable_target() -> dict[str, object]:
+    def unavailable_target() -> tuple[dict[str, object], int]:
         raise TargetResolutionError("CUDA target probing is unavailable")
 
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)
+    monkeypatch.setattr(orchestrator, "_probe_current_target_with_device", unavailable_target)
     selection = try_build_optimized_runtime(
-        "Example/Model",
+        str(model_source),
         output,
+        family_name="example",
         parameters={"precision": "fp16"},
-        manifests=(manifest,),
-        current_target_probe=unavailable_target,
-        model_revision_probe=_model_revision,
     )
 
     assert selection is None

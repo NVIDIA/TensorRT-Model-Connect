@@ -6,6 +6,8 @@
 #include "bundle/bundle_format.h"
 #include "test_helpers.h"
 #include "trtmc/pipeline.h"
+#include "trtmc/runtime/pipeline_factory.h"
+#include "trtmc/runtime/pipeline_pool.h"
 #include "utils/sha256.h"
 
 #include <algorithm>
@@ -279,6 +281,23 @@ void test_model_owned_text_pipeline_and_eager_load() {
     check(materialized, "opaque artifact tree is materialized into runtime cache");
 }
 
+void test_legacy_load_overload_delegates_to_optimized_runtime() {
+    trtmc_test::TempDirGuard temporary;
+    const fs::path root(temporary.path());
+    const fs::path bundle = root / "legacy-load.trtfb";
+    const fs::path events = root / "events.txt";
+    write_bundle(bundle, text_spec());
+    trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
+
+    auto pipeline = trtmc::load(bundle.string(), "", (root / "cache").string(), false);
+    const auto result = pipeline->generate("legacy");
+    check(result.text == "optimized:legacy",
+          "legacy public C++ load overload delegates execution to the model-owned DSO");
+    const auto loaded_events = read_lines(events);
+    check(count_line(loaded_events, "create") == 1,
+          "legacy public C++ load overload initializes the optimized runtime");
+}
+
 void test_non_text_pipeline_uses_same_host() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
@@ -297,6 +316,26 @@ void test_non_text_pipeline_uses_same_host() {
         unsupported = true;
     }
     check(unsupported, "non-text adapter does not inherit host-side operation behavior");
+}
+
+void test_public_pipeline_pool_fails_before_loading_optimized_runtime() {
+    trtmc_test::TempDirGuard temporary;
+    const fs::path root(temporary.path());
+    const fs::path bundle = root / "pool.trtfb";
+    const fs::path events = root / "events.txt";
+    write_bundle(bundle, text_spec());
+    trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
+
+    bool rejected = false;
+    try {
+        (void)trtmc::PipelineFactory::from_bundle_pool(bundle.string(), 2,
+                                                       load_options(root / "cache"));
+    } catch (const std::invalid_argument& error) {
+        rejected =
+            std::string(error.what()).find("delegated runtime owns batching") != std::string::npos;
+    }
+    check(rejected, "public pool API rejects optimized bundles with an ownership explanation");
+    check(read_lines(events).empty(), "pool rejection does not load or initialize the runtime DSO");
 }
 
 void test_concurrent_repeated_loads_share_published_cache_and_dso() {
@@ -507,7 +546,9 @@ int main(int argc, char** argv) {
     test_exact_embedded_dso_identity();
     test_toolchain_abi_fails_before_create();
     test_model_owned_text_pipeline_and_eager_load();
+    test_legacy_load_overload_delegates_to_optimized_runtime();
     test_concurrent_repeated_loads_share_published_cache_and_dso();
+    test_public_pipeline_pool_fails_before_loading_optimized_runtime();
     test_non_text_pipeline_uses_same_host();
     test_descriptor_is_strict_and_fail_closed();
     test_artifact_integrity_and_cache_tamper_fail_closed();

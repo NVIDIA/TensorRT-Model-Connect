@@ -3416,7 +3416,9 @@ class TestCoverageMapIntegration:
             ("tools/ci/e2e_schedule.py", ["tests/tools/test_schedule_e2e.py"]),
         ],
     )
-    def test_e2e_runner_selects_explicit_tools_tests(self, imap, coverage_map, path, expected):
+    def test_e2e_runner_selects_explicit_tools_tests(
+        self, imap, coverage_map, path, expected
+    ):
         """E2E scheduler edits select tests that coverage cannot discover."""
         result = test_impact.analyze_impact(
             [path],

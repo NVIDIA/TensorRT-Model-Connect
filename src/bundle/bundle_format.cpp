@@ -354,17 +354,6 @@ void CopyBundleSection(const std::string& path, const BundleSectionInfo& section
     }
 }
 
-std::vector<char> ReadBundleSection(const std::string& path, const std::string& section_name) {
-    const BundleInfo info = ReadBundleHeader(path);
-    const auto it = std::find_if(
-        info.sections.begin(), info.sections.end(),
-        [&](const BundleSectionInfo& section) { return section.name == section_name; });
-    if (it == info.sections.end()) {
-        throw std::runtime_error("Bundle section not found: " + section_name + " in " + path);
-    }
-    return ReadBundleSection(path, *it);
-}
-
 bool HasBundleMagic(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {

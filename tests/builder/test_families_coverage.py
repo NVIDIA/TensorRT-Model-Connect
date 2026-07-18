@@ -70,7 +70,7 @@ def test_find_diffusion_plugin_returns_none_when_no_plugin_declares_class(monkey
     assert families.find_diffusion_plugin("SyntheticPipeline") is None
 
 
-def test_resolve_diffusion_family_id_uses_metadata_without_importing_plugin(monkeypatch):
+def test_private_diffusion_family_resolution_uses_metadata_without_importing_plugin(monkeypatch):
     metadata = types.SimpleNamespace(
         id="synthetic_family",
         diffusion_pipeline_classes=frozenset({"SyntheticPipeline"}),
@@ -84,8 +84,8 @@ def test_resolve_diffusion_family_id_uses_metadata_without_importing_plugin(monk
         ),
     )
 
-    assert families.resolve_diffusion_family_id("SyntheticPipeline") == "synthetic_family"
-    assert families.resolve_diffusion_family_id("UnknownPipeline") is None
+    assert families._resolve_diffusion_family_id("SyntheticPipeline") == "synthetic_family"
+    assert families._resolve_diffusion_family_id("UnknownPipeline") is None
 
 
 def test_family_module_discovery_skips_private_base_import_errors_and_missing_plugin_attr(monkeypatch):

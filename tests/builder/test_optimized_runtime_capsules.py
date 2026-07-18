@@ -88,6 +88,7 @@ def _write_capsule(
     revisions: tuple[str, ...] = ("revision-a",),
     target: dict[str, object] | None = None,
     adapter: str = _DEFAULT_ADAPTER,
+    timeout_seconds: int = 30,
 ) -> Path:
     capsule = root / capsule_name
     builder_dir = capsule / "builder"
@@ -105,7 +106,6 @@ def _write_capsule(
     manifest.write_text(
         f"""schema_version = 1
 implementation_id = {_toml_value(implementation_id)}
-runtime_kind = "optimized"
 downstream_runtime = "acme-optimized-runtime"
 downstream_version = "1.2.3"
 downstream_commit = "0123456789abcdef"
@@ -119,12 +119,11 @@ revisions = {_toml_value(list(revisions))}
 
 [build]
 entrypoint = "builder/adapter.py"
-timeout_seconds = 30
+timeout_seconds = {timeout_seconds}
 
 [runtime]
 library = "libtrtmc_impl_example_optimized_runtime.so"
 abi = 1
-artifact_layout = "directory-tree-v1"
 """,
         encoding="utf-8",
     )
@@ -157,25 +156,22 @@ def _supported_probe() -> ProbeResult:
     )
 
 
-def test_model_scoped_discovery_is_recursive_stable_and_uncached(tmp_path: Path) -> None:
+def test_model_scoped_discovery_is_stable_and_uncached(tmp_path: Path) -> None:
+    root = tmp_path / "family"
     first = _write_capsule(
-        tmp_path / "root-b",
+        root,
         capsule_name="z-capsule",
         implementation_id="z-runtime",
     )
-    discovered = discover_implementations_for_model(
-        [tmp_path / "root-b"], "Example/Optimized-Model"
-    )
+    discovered = discover_implementations_for_model(root, "Example/Optimized-Model")
     assert [manifest.path for manifest in discovered] == [first.resolve()]
 
     _write_capsule(
-        tmp_path / "root-a",
+        root,
         capsule_name="a-capsule",
         implementation_id="a-runtime",
     )
-    discovered = discover_implementations_for_model(
-        [tmp_path / "root-b", tmp_path / "root-a"], "Example/Optimized-Model"
-    )
+    discovered = discover_implementations_for_model(root, "Example/Optimized-Model")
     assert [manifest.implementation_id for manifest in discovered] == [
         "a-runtime",
         "z-runtime",
@@ -187,7 +183,7 @@ def test_discovery_rejects_duplicate_implementation_ids(tmp_path: Path) -> None:
     _write_capsule(tmp_path, capsule_name="two", implementation_id="duplicate")
 
     with pytest.raises(ManifestDiscoveryError, match="duplicate.*one.*two"):
-        discover_implementations_for_model([tmp_path], "Example/Optimized-Model")
+        discover_implementations_for_model(tmp_path, "Example/Optimized-Model")
 
 
 def test_model_scoped_discovery_filters_valid_family_owned_adapters(tmp_path: Path) -> None:
@@ -203,10 +199,38 @@ def test_model_scoped_discovery_filters_valid_family_owned_adapters(tmp_path: Pa
         implementation_id="unrelated-runtime",
         model_id="Example/Unrelated-Model",
     )
-    discovered = discover_implementations_for_model([tmp_path], "Example/Requested-Model")
+    discovered = discover_implementations_for_model(tmp_path, "Example/Requested-Model")
 
     assert [manifest.path for manifest in discovered] == [requested.resolve()]
     assert unrelated.resolve() not in {manifest.path for manifest in discovered}
+
+
+def test_model_scoped_discovery_accepts_literal_string_indexes(
+    tmp_path: Path,
+) -> None:
+    requested = _write_capsule(
+        tmp_path,
+        capsule_name="requested",
+        implementation_id="requested-runtime",
+        model_id="Example/Requested-Model",
+    )
+    unrelated = _write_capsule(
+        tmp_path,
+        capsule_name="unrelated",
+        implementation_id="unrelated-runtime",
+        model_id="Example/Unrelated-Model",
+    )
+    unrelated.write_text(
+        unrelated.read_text(encoding="utf-8").replace(
+            'id = "Example/Unrelated-Model"',
+            "id = 'Example/Unrelated-Model'",
+        ),
+        encoding="utf-8",
+    )
+
+    discovered = discover_implementations_for_model(tmp_path, "Example/Requested-Model")
+
+    assert [manifest.path for manifest in discovered] == [requested.resolve()]
 
 
 def test_model_scoped_discovery_ignores_malformed_unrelated_sibling(
@@ -232,9 +256,35 @@ def test_model_scoped_discovery_ignores_malformed_unrelated_sibling(
         encoding="utf-8",
     )
 
-    discovered = discover_implementations_for_model(
-        [tmp_path], "Example/Requested-Model"
+    discovered = discover_implementations_for_model(tmp_path, "Example/Requested-Model")
+
+    assert [manifest.path for manifest in discovered] == [requested.resolve()]
+
+
+def test_model_scoped_discovery_ignores_noncanonical_unrelated_model_id(
+    tmp_path: Path,
+) -> None:
+    requested = _write_capsule(
+        tmp_path,
+        capsule_name="requested",
+        implementation_id="requested-runtime",
+        model_id="Example/Requested-Model",
     )
+    unrelated = _write_capsule(
+        tmp_path,
+        capsule_name="unrelated",
+        implementation_id="unrelated-runtime",
+        model_id="Example/Unrelated-Model",
+    )
+    unrelated.write_text(
+        unrelated.read_text(encoding="utf-8").replace(
+            'id = "Example/Unrelated-Model"',
+            'id = " Bad "',
+        ),
+        encoding="utf-8",
+    )
+
+    discovered = discover_implementations_for_model(tmp_path, "Example/Requested-Model")
 
     assert [manifest.path for manifest in discovered] == [requested.resolve()]
 
@@ -254,21 +304,17 @@ def test_model_scoped_discovery_fails_closed_for_malformed_candidate(
     )
 
     with pytest.raises(ManifestValidationError, match="invalid TOML"):
-        discover_implementations_for_model([tmp_path], "Example/Requested-Model")
+        discover_implementations_for_model(tmp_path, "Example/Requested-Model")
 
 
-def test_model_discovery_supports_family_directory_and_direct_manifest(
-    tmp_path: Path,
-) -> None:
+def test_model_discovery_uses_one_family_directory(tmp_path: Path) -> None:
     manifest = _write_capsule(
         tmp_path,
         implementation_id="requested-runtime",
         model_id="Example/Requested-Model",
     )
-    discovered = discover_implementations_for_model([tmp_path], "Example/Requested-Model")
+    discovered = discover_implementations_for_model(tmp_path, "Example/Requested-Model")
     assert [item.path for item in discovered] == [manifest.resolve()]
-    direct = discover_implementations_for_model([manifest], "Example/Requested-Model")
-    assert [item.path for item in direct] == [manifest.resolve()]
 
 
 @pytest.mark.parametrize(
@@ -285,13 +331,6 @@ def test_model_discovery_supports_family_directory_and_direct_manifest(
         (
             lambda text: text.replace("abi = 1", "abi = true"),
             "runtime.abi must be an integer",
-        ),
-        (
-            lambda text: text.replace(
-                'artifact_layout = "directory-tree-v1"',
-                'artifact_layout = "provider-specific-layout"',
-            ),
-            "unsupported runtime.artifact_layout",
         ),
     ],
 )
@@ -530,13 +569,11 @@ raise SystemExit(23)
         run_probe(manifest, _request())
 
 
-def test_explicit_zero_timeout_is_rejected_instead_of_using_manifest_default(
-    tmp_path: Path,
-) -> None:
-    manifest = load_implementation_manifest(_write_capsule(tmp_path))
+def test_manifest_rejects_zero_build_timeout(tmp_path: Path) -> None:
+    path = _write_capsule(tmp_path, timeout_seconds=0)
 
-    with pytest.raises(ValueError, match="positive integer"):
-        run_probe(manifest, _request(), timeout_seconds=0)
+    with pytest.raises(ManifestValidationError, match="between 1 and 86400"):
+        load_implementation_manifest(path)
 
 
 def test_build_descriptor_rejects_nonfinite_json(tmp_path: Path) -> None:
@@ -585,10 +622,12 @@ while not ready.exists():
     time.sleep(0.01)
 time.sleep(60)
 """
-    manifest = load_implementation_manifest(_write_capsule(tmp_path, adapter=adapter))
+    manifest = load_implementation_manifest(
+        _write_capsule(tmp_path, adapter=adapter, timeout_seconds=1)
+    )
 
     with pytest.raises(BuildAdapterError, match="timed out after 1s"):
-        run_probe(manifest, _request(), timeout_seconds=1)
+        run_probe(manifest, _request())
 
     assert ready.is_file()
     assert terminated.read_text(encoding="utf-8") == "terminated"

@@ -723,7 +723,7 @@ def resolve_family_id(model_type: object) -> str | None:
     return metadata[0].id
 
 
-def resolve_diffusion_family_id(pipeline_class: str) -> str | None:
+def _resolve_diffusion_family_id(pipeline_class: str) -> str | None:
     """Return the owning diffusion family without importing its native plugin."""
 
     for metadata in _load_family_metadata():

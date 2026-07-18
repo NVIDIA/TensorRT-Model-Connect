@@ -116,35 +116,7 @@ def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
     return package / "tensorrt_model_connect"
 
 
-def test_package_stages_the_qwen_adapter_as_inert_source(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    recipe_module = _load_conan_recipe(monkeypatch)
-
-    module = _package(recipe_module, REPOSITORY_ROOT, tmp_path)
-
-    adapter = module / "families" / "qwen" / "edge_llm_adapter"
-    assert {
-        path.relative_to(adapter).as_posix()
-        for path in adapter.rglob("*")
-        if path.is_file()
-    } == {
-        "IMPLEMENTATION.toml",
-        "adapter.py",
-        "dependency.lock",
-        "profiles/a100-pcie80-sm80-fp16.toml",
-        "runtime/CMakeLists.txt",
-        "runtime/adapter.cpp",
-        "runtime/exports.map",
-    }
-    sdk = module / "optimized_runtime" / "_sdk" / "include"
-    assert (sdk / "runtime" / "providers" / "optimized_runtime_factory.h").is_file()
-    assert (sdk / "trtmc" / "pipeline.h").is_file()
-    assert (module / "bin" / "trtmc").is_file()
-
-
-def test_package_does_not_parse_or_build_adapter_contents(
+def test_package_stages_a_model_owned_adapter_as_inert_source(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -156,6 +128,9 @@ def test_package_does_not_parse_or_build_adapter_contents(
     runtime.mkdir(parents=True)
     (builder / "IMPLEMENTATION.toml").write_text("not valid TOML [", encoding="utf-8")
     (builder / "adapter.py").write_text("# adapter\n", encoding="utf-8")
+    profile = builder / "profiles" / "profile.toml"
+    profile.parent.mkdir()
+    profile.write_text("profile = true\n", encoding="utf-8")
     dependency = builder / "dependencies" / "vendor" / "libvendor.so"
     dependency.parent.mkdir(parents=True)
     dependency.write_bytes(b"must remain lazy")
@@ -172,6 +147,34 @@ def test_package_does_not_parse_or_build_adapter_contents(
     module = _package(recipe_module, source, tmp_path)
 
     packaged = module / "families" / "model_a" / "runtime_a"
+    assert {
+        path.relative_to(packaged).as_posix() for path in packaged.rglob("*") if path.is_file()
+    } == {
+        "IMPLEMENTATION.toml",
+        "adapter.py",
+        "profiles/profile.toml",
+        "runtime/CMakeLists.txt",
+        "runtime/adapter.cpp",
+    }
     assert (packaged / "IMPLEMENTATION.toml").read_text(encoding="utf-8") == "not valid TOML ["
-    assert (packaged / "runtime" / "adapter.cpp").is_file()
-    assert not (packaged / "dependencies").exists()
+    sdk = module / "optimized_runtime" / "_sdk" / "include"
+    assert (sdk / "runtime" / "providers" / "optimized_runtime_factory.h").is_file()
+    assert (sdk / "trtmc" / "pipeline.h").is_file()
+    assert (module / "bin" / "trtmc").is_file()
+
+
+def test_package_rejects_builder_without_matching_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_module = _load_conan_recipe(monkeypatch)
+    source = tmp_path / "source"
+    builder = source / "python/tensorrt_model_connect/families/model_a/runtime_a"
+    builder.mkdir(parents=True)
+    (builder / "IMPLEMENTATION.toml").write_text("not parsed [", encoding="utf-8")
+
+    with pytest.raises(
+        recipe_module.ConanException,
+        match="model_a/runtime_a has no matching runtime source directory",
+    ):
+        _package(recipe_module, source, tmp_path)

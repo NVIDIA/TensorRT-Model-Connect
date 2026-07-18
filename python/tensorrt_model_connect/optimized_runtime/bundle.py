@@ -21,7 +21,7 @@ from tensorrt_model_connect.bundle_writer import (
     write_bundle,
 )
 
-from .build_adapter import BuildArtifact, validate_build_descriptor
+from .build_adapter import BuildArtifact
 from .manifest import ImplementationManifest, ImplementationRequest
 
 
@@ -198,9 +198,6 @@ def write_optimized_bundle(
 ) -> Path:
     """Write the single generic delegated-bundle format from opaque capsule output."""
 
-    # Revalidate at the packaging boundary so manually constructed or mutated
-    # BuildArtifact objects cannot bypass the probe/manifest/request binding.
-    validate_build_descriptor(manifest, request, build.probe, build.descriptor)
     artifact = collect_artifact_tree(build.artifacts_path)
     runtime_matches = [
         section

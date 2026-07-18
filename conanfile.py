@@ -29,6 +29,7 @@ _ADAPTER_PACKAGE_EXCLUDES = (
     "**/tests/**",
 )
 
+
 def _model_owned_adapters(source_folder: str | Path) -> tuple[tuple[str, str, Path, Path], ...]:
     """Locate model-owned adapter source trees without interpreting their contents."""
 
@@ -43,6 +44,11 @@ def _model_owned_adapters(source_folder: str | Path) -> tuple[tuple[str, str, Pa
         family = builder.parent.name
         adapter = builder.name
         runtime = runtime_root / family / adapter
+        if not runtime.is_dir():
+            raise ConanException(
+                "Model-owned build adapter "
+                f"{family}/{adapter} has no matching runtime source directory: {runtime}"
+            )
         adapters.append((family, adapter, builder, runtime))
     return tuple(adapters)
 

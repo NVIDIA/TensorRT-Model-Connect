@@ -948,10 +948,14 @@ bool retain_dso_for_process_lifetime(void* dso) {
 
 } // namespace
 
+bool is_optimized_runtime_bundle(const BundleInfo& bundle_info) {
+    return find_section(bundle_info, kDescriptorSection) != nullptr;
+}
+
 std::unique_ptr<IPipeline> try_make_optimized_runtime_pipeline(const std::string& bundle_path,
                                                                const BundleInfo& bundle_info,
                                                                const LoadOptions& options) {
-    if (find_section(bundle_info, kDescriptorSection) == nullptr)
+    if (!is_optimized_runtime_bundle(bundle_info))
         return nullptr;
 
     // Presence of optimized_runtime.json claims the generic capsule path. No
