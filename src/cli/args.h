@@ -101,8 +101,8 @@ struct CliArgs {
     std::vector<std::uint64_t> seed_list;
 };
 
-inline bool has_run_prompt_source(const CliArgs& args) {
-    return args.prompt_provided || !args.prompts_file.empty();
+inline bool has_run_input_source(const CliArgs& args) {
+    return args.prompt_provided || !args.prompts_file.empty() || !args.initial_latents_raw.empty();
 }
 
 std::optional<std::uint64_t> parse_byte_size(const std::string& text);

@@ -386,8 +386,9 @@ int cmd_run(const CliArgs& args) {
         std::cerr << "Error: run requires a .trtfb bundle file\n";
         return EXIT_FAILURE;
     }
-    if (!trtmc::cli::has_run_prompt_source(args)) {
-        std::cerr << "Error: run requires bundle + --prompt or --prompts-file\n";
+    if (!trtmc::cli::has_run_input_source(args)) {
+        std::cerr
+            << "Error: run requires bundle + --prompt, --prompts-file, or --initial-latents-raw\n";
         return EXIT_FAILURE;
     }
 

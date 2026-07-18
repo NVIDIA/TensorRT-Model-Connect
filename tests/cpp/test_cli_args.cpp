@@ -258,7 +258,8 @@ void test_missing_value_fails() {
 void test_missing_prompt_is_distinct_from_empty_prompt() {
     auto missing = parse({"trtmc", "run", "bundle.trtfb", "--max-new-tokens", "8"});
     check(missing.parse_error, "missing prompt parse error");
-    check(missing.error_message == "run requires bundle + --prompt or --prompts-file",
+    check(missing.error_message ==
+              "run requires bundle + --prompt, --prompts-file, or --initial-latents-raw",
           "missing prompt message");
     check(!missing.prompt_provided, "missing prompt not provided");
     check(missing.prompt.empty(), "missing prompt text empty");
@@ -366,10 +367,16 @@ void test_prompt_and_prompts_file_mutually_exclusive() {
           "prompt+prompts-file error message");
 }
 
-void test_prompts_file_is_run_prompt_source() {
+void test_prompts_file_is_run_input_source() {
     auto args = parse({"trtmc", "run", "bundle.trtfb", "--prompts-file", "prompts.txt"});
     check(!args.parse_error, "prompts-file run parses cleanly");
-    check(trtmc::cli::has_run_prompt_source(args), "prompts-file satisfies run prompt guard");
+    check(trtmc::cli::has_run_input_source(args), "prompts-file satisfies run input guard");
+}
+
+void test_initial_latents_are_run_input_source() {
+    auto args = parse({"trtmc", "run", "bundle.trtfb", "--initial-latents-raw", "latents.raw"});
+    check(!args.parse_error, "initial latents run parses cleanly");
+    check(trtmc::cli::has_run_input_source(args), "initial latents satisfy run input guard");
 }
 
 } // namespace
@@ -396,7 +403,8 @@ int main() {
     test_num_images_zero_fails();
     test_seed_csv_populates_seed_list();
     test_prompt_and_prompts_file_mutually_exclusive();
-    test_prompts_file_is_run_prompt_source();
+    test_prompts_file_is_run_input_source();
+    test_initial_latents_are_run_input_source();
 
     if (failures) {
         std::cerr << failures << " CLI parser tests failed\n";
