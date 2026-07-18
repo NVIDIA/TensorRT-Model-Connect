@@ -44,22 +44,22 @@ def test_sam3_tracker_step_profiles_cover_native_memory_bounds() -> None:
 def test_sam3_tracker_batch2_step_profiles_use_measured_opt_shapes() -> None:
     assert tracker_builder._step_batch2_profile_shapes("memory_features") == (
         (2, 1, 5184, 64),
-        (2, 7, 5184, 64),
+        (2, 3, 5184, 64),
         (2, 10, 5184, 64),
     )
     assert tracker_builder._step_batch2_profile_shapes("memory_temporal_offsets") == (
         (2, 1),
-        (2, 7),
+        (2, 3),
         (2, 10),
     )
     assert tracker_builder._step_batch2_profile_shapes("object_pointers") == (
         (2, 1, 256),
-        (2, 16, 256),
+        (2, 2, 256),
         (2, 19, 256),
     )
     assert tracker_builder._step_batch2_profile_shapes("object_pointer_temporal_offsets") == (
         (2, 1),
-        (2, 16),
+        (2, 2),
         (2, 19),
     )
     assert tracker_builder._step_batch2_profile_shapes("tracker_feature_2") is None
@@ -303,7 +303,11 @@ def test_sam3_tracker_step_plan_preserves_meta_selected_iou_output() -> None:
 
     selection_source = inspect.getsource(tracker_decoder_builder.add_multimask_selection)
     assert "decoder_outputs.iou_scores" in selection_source
-    assert "selected_iou" in selection_source
+    bf16_round = selection_source.index("_cast(network, decoder_outputs.iou_scores, trt.bfloat16)")
+    fp32_publish = selection_source.index("trt.float32", bf16_round)
+    first_candidate = selection_source.index("best_score = network.add_slice", fp32_publish)
+    assert bf16_round < fp32_publish < first_candidate
+    assert "iou_score=best_score" in selection_source
 
     head_source = inspect.getsource(tracker_decoder_builder.add_tracker_step_head)
     assert "selected_iou=selected.iou_score" in head_source
@@ -311,6 +315,22 @@ def test_sam3_tracker_step_plan_preserves_meta_selected_iou_output() -> None:
     build_source = inspect.getsource(tracker_builder._build_step)
     assert "selected_iou = head.selected_iou" in build_source
     assert '_mark(network, selected_iou, "selected_iou")' in build_source
+
+
+def test_sam3_tracker_multimask_selection_preserves_first_equal_iou_candidate() -> None:
+    from tensorrt_model_connect.families.sam3 import tracker_decoder_builder
+
+    source = inspect.getsource(tracker_decoder_builder.add_multimask_selection)
+    first_candidate = source.index("best_score = network.add_slice")
+    first_index = source.index("np.zeros((1, 1), dtype=np.int32)", first_candidate)
+    scan = source.index("for candidate_index in range(1, _NUM_MULTIMASKS):", first_index)
+    strict_compare = source.index("trt.ElementWiseOperation.GREATER", scan)
+    score_select = source.index("best_score = network.add_select(", strict_compare)
+    index_select = source.index("best_indices = network.add_select(", score_select)
+
+    assert first_candidate < first_index < scan < strict_compare < score_select < index_select
+    assert "TopKOperation" not in source
+    assert "GREATER_OR_EQUAL" not in source
 
 
 def test_sam3_tracker_init_defers_recurrent_memory_until_global_frame_zero_policy() -> None:
@@ -997,6 +1017,20 @@ def test_sam3_tracker_graph_is_built_with_native_tensorrt_api() -> None:
         "SAM3 tracker sources must reconstruct the graph with TensorRT layers; "
         f"found only {sorted(used_native_layers)}"
     )
+
+
+def test_sam3_graph_ops_has_no_external_kernel_bridge() -> None:
+    graph_ops_path = Path(tracker_builder.__file__).with_name("graph_ops.py")
+    source = graph_ops_path.read_text(encoding="utf-8")
+    for forbidden in (
+        "add_decoder_attention_ffi",
+        "add_tvm_ffi_kernel",
+        "TvmFfiKernel",
+        "get_plugin_registry",
+        "add_plugin_v2",
+        "onnx",
+    ):
+        assert forbidden not in source
 
 
 def test_sam3_tracker_video_policy_rejects_unreviewed_cadence(tmp_path) -> None:

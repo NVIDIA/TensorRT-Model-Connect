@@ -50,8 +50,11 @@ _OPT_POINTER_OBJECTS = 4
 _POINTER_RECENT_WINDOW = 16
 _MAX_POINTER_OBJECTS = SAM3_TRACKER_MAX_POINTER_INPUTS
 _BATCH2_OBJECTS = 2
-_BATCH2_OPT_MEMORY_FRAMES = _NUM_MASK_MEMORY_FRAMES
-_BATCH2_OPT_POINTER_OBJECTS = _POINTER_RECENT_WINDOW
+# The common two-object streaming step carries three spatial memories and two
+# object pointers.  Keep the wider min/max bounds for long videos, but tune the
+# B2 engine at the measured representative shape used by the customer harness.
+_BATCH2_OPT_MEMORY_FRAMES = 3
+_BATCH2_OPT_POINTER_OBJECTS = 2
 
 _FEATURE_SHAPES = (
     (1, 32, 288, 288),

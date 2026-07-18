@@ -1302,13 +1302,58 @@ def add_multimask_selection(
         no_object_masks,
     ).get_output(0)
 
-    best = network.add_topk(
-        decoder_outputs.iou_scores,
-        trt.TopKOperation.MAX,
-        1,
-        1 << 1,
+    # Meta publishes the autocast IoU head through a BF16 tensor before the
+    # multimask policy consumes it.  Preserve that boundary explicitly while
+    # keeping the tracker plan ABI in FP32.
+    rounded_iou_scores = _cast(
+        network,
+        _cast(network, decoder_outputs.iou_scores, trt.bfloat16),
+        trt.float32,
     )
-    best_indices = best.get_output(1)
+
+    # torch.max returns the first index when multiple candidates have the same
+    # value.  TensorRT TopK does not promise that tie order, so scan candidates
+    # in temporal order and replace the winner only for a strict improvement.
+    best_score = network.add_slice(
+        rounded_iou_scores,
+        (0, 0),
+        (object_batch, 1),
+        (1, 1),
+    ).get_output(0)
+    best_indices = _constant(
+        network,
+        (1, 1),
+        np.zeros((1, 1), dtype=np.int32),
+        dtype=np.int32,
+    )
+    for candidate_index in range(1, _NUM_MULTIMASKS):
+        candidate_score = network.add_slice(
+            rounded_iou_scores,
+            (0, candidate_index),
+            (object_batch, 1),
+            (1, 1),
+        ).get_output(0)
+        candidate_is_better = network.add_elementwise(
+            candidate_score,
+            best_score,
+            trt.ElementWiseOperation.GREATER,
+        ).get_output(0)
+        best_score = network.add_select(
+            candidate_is_better,
+            candidate_score,
+            best_score,
+        ).get_output(0)
+        candidate_indices = _constant(
+            network,
+            (1, 1),
+            np.full((1, 1), candidate_index, dtype=np.int32),
+            dtype=np.int32,
+        )
+        best_indices = network.add_select(
+            candidate_is_better,
+            candidate_indices,
+            best_indices,
+        ).get_output(0)
     candidates = _constant(
         network,
         (1, _NUM_MULTIMASKS),
@@ -1351,21 +1396,9 @@ def add_multimask_selection(
         keep_dims=False,
     ).get_output(0)
 
-    iou_selector = _cast(network, selector, decoder_outputs.iou_scores.dtype)
-    selected_iou = network.add_elementwise(
-        decoder_outputs.iou_scores,
-        iou_selector,
-        trt.ElementWiseOperation.PROD,
-    ).get_output(0)
-    selected_iou = network.add_reduce(
-        selected_iou,
-        trt.ReduceOperation.SUM,
-        1 << 1,
-        keep_dims=True,
-    ).get_output(0)
     return SelectedMaskOutputs(
         mask=selected_masks,
-        iou_score=selected_iou,
+        iou_score=best_score,
         mask_token=selected_token,
         object_score_logits=decoder_outputs.object_score_logits,
     )

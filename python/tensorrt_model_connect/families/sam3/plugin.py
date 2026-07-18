@@ -22,6 +22,7 @@ from .tracker_builder import (
     SAM3_TRACKER_MAX_POINTER_INPUTS,
     SAM3_TRACKER_MAX_VIDEO_FRAMES,
 )
+from .tokenizer_contract import Sam3TokenizerContractError, validate_sam3_tokenizer_json
 
 
 _TEXT_PREFIXES = (
@@ -30,6 +31,25 @@ _TEXT_PREFIXES = (
     "model.",
     "sam3.",
 )
+
+
+def _require_sam3_tokenizer_json(model_dir: str, *, expected_vocab_size: int) -> None:
+    """Fail before engine construction when the native text runtime is impossible."""
+
+    path = Path(model_dir) / "tokenizer.json"
+    try:
+        payload = path.read_bytes()
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            "SAM3 build requires tokenizer.json in the model directory; "
+            "use a complete Hugging Face snapshot before building TensorRT plans"
+        ) from error
+    except OSError as error:
+        raise RuntimeError(f"Unable to read SAM3 tokenizer.json: {path}") from error
+    try:
+        validate_sam3_tokenizer_json(payload, expected_vocab_size=expected_vocab_size)
+    except Sam3TokenizerContractError as error:
+        raise RuntimeError(f"Invalid SAM3 tokenizer.json at {path}: {error}") from error
 
 
 def _processor_float_list(value, expected: int) -> list[float] | None:
@@ -465,6 +485,7 @@ class Sam3Plugin:
 
     def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
         cfg = _resolve_sam3_config(config.raw)
+        _require_sam3_tokenizer_json(model_dir, expected_vocab_size=cfg["text_vocab_size"])
         cfg.update(_load_sam3_processor_config(model_dir))
         config.raw["_sam3_config"] = cfg
         return _load_sam3_text_weights(model_dir, cfg)

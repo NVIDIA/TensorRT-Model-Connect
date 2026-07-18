@@ -36,6 +36,21 @@ def _rand(*shape: int) -> np.ndarray:
 
 def _write_config(model_dir: Path, config: dict) -> None:
     (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    (model_dir / "tokenizer.json").write_text(
+        json.dumps(
+            {
+                "model": {
+                    "type": "BPE",
+                    "vocab": {
+                        ("token_0token_1" if index == 2 else f"token_{index}"): index
+                        for index in range(17)
+                    },
+                    "merges": ["token_0 token_1"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _write_safetensors(model_dir: Path, tensors: dict[str, np.ndarray]) -> None:
@@ -318,6 +333,33 @@ def test_sam3_matches_sam3_video_not_legacy_sam() -> None:
     assert plugin.requires_tokenizer is True
     assert find_plugin("sam3").name == "sam3"
     assert find_plugin("sam3_video").name == "sam3"
+
+
+@pytest.mark.parametrize(
+    ("tokenizer_payload", "message"),
+    [
+        (None, "requires tokenizer.json"),
+        ("not-json", "not valid UTF-8 JSON"),
+        (json.dumps({"model": {"type": "BPE"}}), "non-empty BPE vocab"),
+    ],
+)
+def test_sam3_load_weights_fails_before_engine_build_for_incomplete_tokenizer(
+    tmp_path: Path,
+    tokenizer_payload: str | None,
+    message: str,
+) -> None:
+    from tensorrt_model_connect.families.sam3 import plugin
+
+    _write_config(tmp_path, _sam3_config())
+    tokenizer_path = tmp_path / "tokenizer.json"
+    if tokenizer_payload is None:
+        tokenizer_path.unlink()
+    else:
+        tokenizer_path.write_text(tokenizer_payload, encoding="utf-8")
+    config = ModelConfig.from_dir(tmp_path)
+
+    with pytest.raises(RuntimeError, match=message):
+        plugin.load_weights(str(tmp_path), config)
 
 
 def test_sam3_load_weights_maps_text_encoder_prefix(tmp_path: Path) -> None:
