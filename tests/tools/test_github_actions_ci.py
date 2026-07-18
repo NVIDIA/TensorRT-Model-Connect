@@ -1279,6 +1279,58 @@ def test_etth1_model_proofs_use_the_single_task_eval_entry_point() -> None:
     )
 
 
+def test_etth1_dataset_preparation_imports_the_projected_python_package(tmp_path: Path) -> None:
+    from tools.ci.task_eval import TaskEvalDatasetPreparer
+
+    projection = tmp_path / "projection"
+    work = tmp_path / "work"
+    artifacts = tmp_path / "artifacts"
+    destination = work / "task-eval-data" / TaskEvalDatasetPreparer.DATASET
+    projection.mkdir()
+    artifacts.mkdir()
+    docker_commands: list[list[str]] = []
+
+    class Commands:
+        @staticmethod
+        def run(command, **_kwargs):
+            rendered = [str(item) for item in command]
+            docker_commands.append(rendered)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("date,HUFL\n", encoding="utf-8")
+            return subprocess.CompletedProcess(rendered, 0, "", "")
+
+    class Context:
+        commands = Commands()
+
+        @staticmethod
+        def run(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+    result = TaskEvalDatasetPreparer(
+        Context(),
+        "nightly",
+        "timesfm",
+        projection,
+        work,
+        artifacts,
+        "ci-image",
+        "dataset-container",
+        [],
+    ).prepare()
+
+    assert result == destination.parents[1]
+    assert len(docker_commands) == 1
+    command = docker_commands[0]
+    image_index = command.index("ci-image")
+    assert command.index("PYTHONPATH=/src/python:/src") < image_index
+    assert command.index("PYTHONNOUSERSITE=1") < image_index
+    assert command[image_index + 1 : image_index + 4] == [
+        "/opt/venv/bin/python",
+        "/src/tools/task_eval.py",
+        "prepare-ci-dataset",
+    ]
+
+
 def test_nightly_validates_the_installed_wheel_without_a_second_model_build() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
