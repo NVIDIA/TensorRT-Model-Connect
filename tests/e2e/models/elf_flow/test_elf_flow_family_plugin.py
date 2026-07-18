@@ -90,6 +90,25 @@ def _find_trtmc_binary() -> Path | None:
     return None
 
 
+def _find_elf_model_plugin_dir(trtmc_binary: Path) -> Path | None:
+    backend_dir = trtmc_binary.parent
+    configured_dir = os.environ.get("TRTMC_MODEL_PLUGIN_DIR")
+    candidates: list[Path] = []
+    if configured_dir:
+        candidates.extend([Path(configured_dir) / "elf_flow", Path(configured_dir)])
+    candidates.extend(
+        [
+            backend_dir / "models" / "elf_flow",
+            backend_dir.parent / "model-plugins" / "elf_flow",
+            backend_dir,
+        ]
+    )
+    for candidate in candidates:
+        if (candidate / "libtrtmc_model_elf_flow.so").is_file():
+            return candidate
+    return None
+
+
 def _tiny_unigram_tokenizer_json(vocab_size: int) -> bytes:
     vocab = [["<unk>", 0.0]]
     vocab.extend([[f"\u2581{chr(ord('A') + idx - 1)}", -float(idx)] for idx in range(1, vocab_size)])
@@ -568,6 +587,9 @@ def test_elf_trtmc_run_generates_text_from_diffusion_decode(tmp_path: Path) -> N
     backend_dir = trtmc_binary.parent
     if not (backend_dir / "libtrtmc_backend_trt.so").exists():
         pytest.skip("trtmc_backend_trt DSO not built next to trtmc")
+    model_plugin_dir = _find_elf_model_plugin_dir(trtmc_binary)
+    if model_plugin_dir is None:
+        pytest.skip("elf_flow model plugin DSO not built")
 
     cfg = _cfg(num_hidden_layers=1)
     tensors = _elf_tensors(layers=1, scale=0.05)
@@ -625,6 +647,9 @@ def test_elf_trtmc_run_generates_text_from_diffusion_decode(tmp_path: Path) -> N
     expected_text = _decode_tiny_unigram(expected_ids, resolved["vocab_size"])
     assert expected_text
 
+    runtime_env = os.environ.copy()
+    runtime_env["TRTMC_MODEL_PLUGIN_STRICT"] = "1"
+    runtime_env.pop("TRTMC_MODEL_PLUGIN_DIR", None)
     result = subprocess.run(
         [
             str(trtmc_binary),
@@ -644,9 +669,12 @@ def test_elf_trtmc_run_generates_text_from_diffusion_decode(tmp_path: Path) -> N
             str(latents_path),
             "--backend-dir",
             str(backend_dir),
+            "--model-plugin-dir",
+            str(model_plugin_dir),
         ],
         capture_output=True,
         text=True,
+        env=runtime_env,
         timeout=120,
         check=False,
     )
