@@ -940,7 +940,7 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
     assert "needs.source-quality.result == 'success'" in model_proof
     assert "needs.cache-warm.result == 'success'" in model_proof
     assert "needs.package.result == 'success'" in model_proof
-    assert "fail-fast: true" in model_proof
+    assert "fail-fast: false" in model_proof
     assert "max-parallel: 16" in model_proof
     assert "matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
@@ -1019,10 +1019,10 @@ def test_nightly_strictly_warms_all_active_non_multi_device_cases() -> None:
         "python -u scripts/warm_hf_cache.py",
         "--exclude-ci-tier multi_device",
         "--strict",
-        "--fail-fast",
         "--attempt-timeout-seconds 600",
     ):
         assert argument in cache
+    assert "--fail-fast" not in cache
     assert 'HF_HUB_DOWNLOAD_TIMEOUT: "60"' in cache
     assert 'HF_HUB_ETAG_TIMEOUT: "30"' in cache
     assert "--exclude-ci-tier l0_only" not in cache
@@ -1553,6 +1553,18 @@ def test_package_stage_builds_py310_and_py312_wheels() -> None:
     assert "manylinux_2_39_aarch64" in text
     assert '"wheel-model-smoke":' in text
     assert "Model smoke test from trtmc pip package" in text
+
+
+def test_package_reuses_conan_cmake_build_directory(tmp_path: Path) -> None:
+    from tools.ci.package import WheelPackageManager
+
+    release = tmp_path / "conan_out" / "build" / "Release"
+    release.mkdir(parents=True)
+    (release / "CMakeCache.txt").touch()
+
+    assert WheelPackageManager(object())._conan_cmake_build_dir(
+        tmp_path / "conan_out"
+    ) == release
 
 
 def test_package_smoke_default_is_model_owned() -> None:

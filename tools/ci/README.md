@@ -132,7 +132,9 @@ The container half, `ModelProofInnerPipeline`, then runs linearly:
 8. Generate `proof.json`, status evidence, logs, and the per-model HTML report.
 
 Failure at any step produces a fallback status and HTML artifact before the job
-fails. The matrix uses fail-fast, so the first failing model cancels its peers.
+fails. The L0 premerge matrix uses fail-fast so the first failing model cancels
+its peers. The nightly matrix and cache warm continue through every model and
+asset so a single run captures the complete failure set.
 
 ### 5. Compose one report
 

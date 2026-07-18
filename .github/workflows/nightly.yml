@@ -342,7 +342,6 @@ jobs:
             env -u HF_HUB_OFFLINE python -u scripts/warm_hf_cache.py \
               --exclude-ci-tier multi_device \
               --strict \
-              --fail-fast \
               --attempt-timeout-seconds 600
 
       - name: Clean cache-warm container
@@ -482,8 +481,9 @@ jobs:
         needs.inventory.outputs.has_models == 'true'
       }}
     strategy:
-      # A failed model invalidates the nightly; stop queued and sibling proofs.
-      fail-fast: true
+      # A failed model invalidates the nightly, but every sibling proof still
+      # runs so one nightly captures the complete failure set.
+      fail-fast: false
       max-parallel: 16
       matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
     permissions:

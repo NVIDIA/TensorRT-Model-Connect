@@ -468,7 +468,7 @@ class WheelPackageManager:
         self.context.executable("patchelf")
 
     def _conan_cmake_build_dir(self, conan_out: Path) -> Path:
-        caches = sorted((conan_out / "build").glob("*/*/CMakeCache.txt"))
+        caches = sorted((conan_out / "build").glob("*/CMakeCache.txt"))
         if len(caches) != 1:
             raise CiError(
                 f"expected exactly one reusable CMakeCache.txt under {conan_out}, "
