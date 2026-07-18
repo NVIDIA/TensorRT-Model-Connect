@@ -22,6 +22,8 @@ def main() -> int:
     parser.add_argument("--latent-height", type=int, default=4)
     parser.add_argument("--latent-width", type=int, default=4)
     parser.add_argument("--num-layers", type=int, default=1)
+    parser.add_argument("--workspace-gib", type=int, default=96)
+    parser.add_argument("--builder-optimization-level", type=int)
     parser.add_argument("--round-residual-bf16", action="store_true")
     parser.add_argument("--emulate-bf16-gemm", action="store_true")
     parser.add_argument("--debug-layers", default="")
@@ -105,6 +107,8 @@ def main() -> int:
         dit_ffn_gated_residual=args.enable_dit_ffn_gated_residual,
         dit_cross_affine_layer_norm=args.enable_dit_cross_affine_layer_norm,
         dit_final_projection=args.enable_dit_final_projection,
+        workspace_size=args.workspace_gib << 30,
+        builder_optimization_level=args.builder_optimization_level,
         verbose=args.verbose,
     )
     args.output.write_bytes(plan)

@@ -330,6 +330,56 @@ def test_final_stage_debugging_is_independent_from_embedding_debugging() -> None
     assert source.count("if debug_embeddings or debug_final_stages:") == 3
 
 
+class _FakeBuilderConfig:
+    def __init__(self) -> None:
+        self.pool_limits = []
+        self.builder_optimization_level = None
+
+    def set_memory_pool_limit(self, pool, size) -> None:
+        self.pool_limits.append((pool, size))
+
+
+class _FakeTrt:
+    class MemoryPoolType:
+        WORKSPACE = "workspace"
+
+
+def test_dit_builder_config_accepts_target_specific_build_limits() -> None:
+    config = _FakeBuilderConfig()
+
+    dit_builder._configure_dit_builder_config(
+        _FakeTrt,
+        config,
+        workspace_size=16 << 30,
+        builder_optimization_level=0,
+    )
+
+    assert config.pool_limits == [("workspace", 16 << 30)]
+    assert config.builder_optimization_level == 0
+
+
+@pytest.mark.parametrize(
+    ("workspace_size", "builder_optimization_level", "message"),
+    [
+        (0, None, "workspace_size"),
+        (16 << 30, -1, "builder_optimization_level"),
+        (16 << 30, 6, "builder_optimization_level"),
+    ],
+)
+def test_dit_builder_config_rejects_invalid_limits(
+    workspace_size: int,
+    builder_optimization_level: int | None,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        dit_builder._configure_dit_builder_config(
+            _FakeTrt,
+            _FakeBuilderConfig(),
+            workspace_size=workspace_size,
+            builder_optimization_level=builder_optimization_level,
+        )
+
+
 def test_cross_k_norm_debugging_exposes_the_plugin_weight_and_boundaries() -> None:
     builder_source = inspect.getsource(dit_builder.build_dit_engine)
     rms_source = inspect.getsource(trt_ops.rms_norm)

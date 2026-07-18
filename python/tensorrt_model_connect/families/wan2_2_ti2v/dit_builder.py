@@ -22,6 +22,24 @@ from . import trt_ops as op
 trt = trt_compat.get_trt()
 
 
+def _configure_dit_builder_config(
+    trt_module,
+    config,
+    *,
+    workspace_size: int,
+    builder_optimization_level: int | None,
+) -> None:
+    """Apply target-specific build limits without changing the DiT graph."""
+
+    if workspace_size <= 0:
+        raise ValueError("workspace_size must be positive")
+    config.set_memory_pool_limit(trt_module.MemoryPoolType.WORKSPACE, workspace_size)
+    if builder_optimization_level is not None:
+        if builder_optimization_level < 0 or builder_optimization_level > 5:
+            raise ValueError("builder_optimization_level must be in [0, 5]")
+        config.builder_optimization_level = builder_optimization_level
+
+
 def _numpy_state(model_dir: str) -> dict[str, np.ndarray]:
     state = convert_transformer_state_dict(load_native_transformer_state_dict(model_dir))
     return {name: tensor.detach().float().cpu().numpy() for name, tensor in state.items()}
@@ -166,6 +184,8 @@ def build_dit_engine(
     dit_ffn_gated_residual: bool = False,
     dit_cross_affine_layer_norm: bool = False,
     dit_final_projection: bool = False,
+    workspace_size: int = 96 << 30,
+    builder_optimization_level: int | None = None,
     verbose: bool = False,
 ) -> bytes:
     cfg = WAN22_TI2V_5B
@@ -210,7 +230,12 @@ def build_dit_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     build_config = builder.create_builder_config()
-    build_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 96 << 30)
+    _configure_dit_builder_config(
+        trt,
+        build_config,
+        workspace_size=workspace_size,
+        builder_optimization_level=builder_optimization_level,
+    )
 
     latent = network.add_input(
         "latents",
