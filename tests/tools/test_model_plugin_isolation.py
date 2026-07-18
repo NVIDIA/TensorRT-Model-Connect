@@ -210,6 +210,104 @@ def test_prepare_copies_only_selected_runtime_plugin(tmp_path: Path) -> None:
     assert result.stdout.splitlines() == [f"trtmc_model_llama {copied}"]
 
 
+def test_prepare_separates_builder_auxiliary_from_single_runtime_owner_dso(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    manifest = repo_root / "src/runtime/models/llama/MODEL.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + 'builder_auxiliary_libraries = ["libtrtmc_model_llama_plugins_trt*.so"]\n',
+        encoding="utf-8",
+    )
+    model_build_dir = tmp_path / "build/models/llama"
+    model_build_dir.mkdir(parents=True)
+    owner = model_build_dir / "libtrtmc_model_llama.so"
+    companion = model_build_dir / "libtrtmc_model_llama_plugins_trt11_2.so"
+    owner.write_bytes(b"owner")
+    companion.write_bytes(b"companion")
+
+    output_dir = tmp_path / "selected-with-auxiliary"
+    builder_auxiliary_dir = tmp_path / "builder-only"
+    result = _run(
+        "prepare",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        "decoder-small",
+        "--build-dir",
+        str(tmp_path / "build"),
+        "--output-dir",
+        str(output_dir),
+        "--builder-auxiliary-dir",
+        str(builder_auxiliary_dir),
+    )
+
+    staged = output_dir / "llama"
+    staged_builder = builder_auxiliary_dir / "llama"
+    assert (staged / owner.name).read_bytes() == b"owner"
+    assert not (staged / companion.name).exists()
+    assert (staged_builder / companion.name).read_bytes() == b"companion"
+    assert result.stdout.splitlines() == [
+        f"trtmc_model_llama {staged / owner.name}",
+        f"trtmc_model_llama builder-auxiliary {staged_builder / companion.name}",
+    ]
+
+    plan_dir = tmp_path / "plan-with-auxiliary"
+    _run(
+        "plan",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        "decoder-small",
+        "--output-dir",
+        str(plan_dir),
+    )
+    plan = json.loads((plan_dir / "plan.json").read_text(encoding="utf-8"))
+    assert plan["groups"][0]["runtime_plugin"]["builder_auxiliary_libraries"] == [
+        "libtrtmc_model_llama_plugins_trt*.so"
+    ]
+
+
+def test_prepare_rejects_undeclared_sibling_dso_with_auxiliary(tmp_path: Path) -> None:
+    repo_root = _make_repo(tmp_path)
+    manifest = repo_root / "src/runtime/models/llama/MODEL.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        + 'builder_auxiliary_libraries = ["libtrtmc_model_llama_plugins_trt*.so"]\n',
+        encoding="utf-8",
+    )
+    model_build_dir = tmp_path / "build/models/llama"
+    model_build_dir.mkdir(parents=True)
+    (model_build_dir / "libtrtmc_model_llama.so").write_bytes(b"owner")
+    (model_build_dir / "libtrtmc_model_llama_plugins_trt11_2.so").write_bytes(b"companion")
+    (model_build_dir / "libtrtmc_model_sibling.so").write_bytes(b"sibling")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(TOOL),
+            "prepare",
+            "--repo-root",
+            str(repo_root),
+            "--model",
+            "decoder-small",
+            "--build-dir",
+            str(tmp_path / "build"),
+            "--output-dir",
+            str(tmp_path / "rejected"),
+            "--builder-auxiliary-dir",
+            str(tmp_path / "builder-only"),
+        ],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "undeclared sibling model DSOs" in result.stderr
+
+
 def _add_projection_fixture_files(repo_root: Path) -> None:
     files = {
         "README.md": "generic root\n",

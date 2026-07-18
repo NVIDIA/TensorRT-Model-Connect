@@ -6748,7 +6748,15 @@ def test_non_diffusion_model_plugins_do_not_carry_diffusion_behavior() -> None:
     Preconditions: only diffusion model families own diffusion runner/reference behavior.
     Postconditions: unused diffusion sidecars in other model folders are inert placeholders.
     """
-    diffusion_families = {"flux", "z_image", "pixart", "ltx_video", "qwen_image", "wan_t2v"}
+    diffusion_families = {
+        "flux",
+        "z_image",
+        "pixart",
+        "ltx_video",
+        "qwen_image",
+        "wan_t2v",
+        "wan2_2_ti2v",
+    }
     forbidden = (
         "class DiffusionMediaRunner",
         "class HfDiffusersReference",
@@ -9033,7 +9041,15 @@ def test_generated_e2e_task_sidecars_are_task_owned() -> None:
         "roberta",
         "xlnet",
     }
-    diffusion_owners = {"flux", "ltx_video", "pixart", "qwen_image", "wan_t2v", "z_image"}
+    diffusion_owners = {
+        "flux",
+        "ltx_video",
+        "pixart",
+        "qwen_image",
+        "wan_t2v",
+        "wan2_2_ti2v",
+        "z_image",
+    }
     simple_sidecars = [
         (
             "runners",

@@ -66,9 +66,9 @@ static void test_backend_factory_symbols_are_versioned() {
           "TRT backend does not export the legacy factory");
 
     dlerror();
-    void* v1_factory = dlsym(RTLD_DEFAULT, "trtmc_create_backend_v1");
-    const char* v1_error = dlerror();
-    check(v1_factory != nullptr && v1_error == nullptr, "TRT backend exports the v1 factory");
+    void* v2_factory = dlsym(RTLD_DEFAULT, "trtmc_create_backend_v2");
+    const char* v2_error = dlerror();
+    check(v2_factory != nullptr && v2_error == nullptr, "TRT backend exports the v2 factory");
 }
 
 template <typename Function>
@@ -984,8 +984,8 @@ static void test_external_bindings_reject_multiple_live_profiles() {
     auto plan = build_two_profile_identity_plan();
     if (!plan)
         return;
-    std::unique_ptr<trtmc::IBackend, void (*)(trtmc::IBackend*)> backend(trtmc_create_backend_v1(),
-                                                                         trtmc_destroy_backend_v1);
+    std::unique_ptr<trtmc::IBackend, void (*)(trtmc::IBackend*)> backend(trtmc_create_backend_v2(),
+                                                                         trtmc_destroy_backend_v2);
     check(backend != nullptr, "backend for profile prebinding policy is available");
     if (!backend)
         return;
@@ -1011,6 +1011,20 @@ static void test_external_bindings_reject_multiple_live_profiles() {
               (void)backend->create_profile_modules(plan->data(), plan->size(), options, {0, 1});
           }),
           "profile-list API rejects one aliased external binding set");
+
+    trtmc::ModuleCreateOptions lane_options = options;
+    lane_options.optimization_profile = 0;
+    bool lane_binding_was_forwarded = false;
+    try {
+        (void)backend->create_context_modules(plan->data(), plan->size(), {lane_options});
+    } catch (const std::runtime_error& error) {
+        // This test engine has dynamic input x, for which initial external
+        // prebinding is intentionally rejected by TrtModuleImpl. Observing
+        // that rejection proves the per-lane binding reached the module.
+        lane_binding_was_forwarded =
+            std::string(error.what()).find("TrtModuleImpl creation failed") != std::string::npos;
+    }
+    check(lane_binding_was_forwarded, "context API forwards the lane external binding");
     cudaFree(external);
 }
 

@@ -79,6 +79,39 @@ class TestResolveModel:
         assert result == str(dl_dir)
         assert called["nemo"] is False
 
+    def test_wan_hf_id_download_uses_family_checkpoint_allowlist(
+        self, tmp_path, monkeypatch
+    ):
+        revision = "1" * 40
+        snapshot = (
+            tmp_path / "hub" / "models--Wan-AI--Wan2.2-TI2V-5B"
+            / "snapshots" / revision
+        )
+        snapshot.mkdir(parents=True)
+        (snapshot / "config.json").write_text(
+            '{"_class_name":"WanModel"}', encoding="utf-8")
+        captured: dict[str, object] = {}
+
+        fake_hf = types.ModuleType("huggingface_hub")
+
+        def fake_snapshot_download(**kwargs):
+            captured.update(kwargs)
+            return str(snapshot)
+
+        fake_hf.snapshot_download = fake_snapshot_download
+        monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+        assert _resolve_model("Wan-AI/Wan2.2-TI2V-5B") == str(snapshot)
+        assert captured["repo_id"] == "Wan-AI/Wan2.2-TI2V-5B"
+        patterns = set(captured["allow_patterns"])
+        assert {
+            "config.json",
+            "diffusion_pytorch_model*.safetensors",
+            "Wan2.2_VAE.pth",
+            "models_t5_umt5-xxl-enc-bf16.pth",
+            "google/umt5-xxl/**",
+        } <= patterns
+
     def test_download_uses_nemo_when_no_hf_config(self, tmp_path, monkeypatch):
         """NeMo fallback remains active for snapshots that are .nemo-only."""
         dl_dir = tmp_path / "dl"
@@ -153,6 +186,35 @@ class TestResolveModel:
             assert (staged / nemo_path.name).resolve() == nemo_path.resolve()
         finally:
             shutil.rmtree(staged)
+
+    def test_hf_snapshot_provenance_uses_immutable_cache_revision(self, tmp_path):
+        from tensorrt_model_connect.engine_builder import (
+            _config_with_source_provenance,
+            _source_provenance,
+        )
+
+        revision = "Ab" * 20
+        snapshot = (
+            tmp_path / "hub" / "models--Wan-AI--Wan2.2-TI2V-5B"
+            / "snapshots" / revision
+        )
+        snapshot.mkdir(parents=True)
+
+        model_id, resolved_revision = _source_provenance(
+            "Wan-AI/Wan2.2-TI2V-5B", snapshot)
+        assert model_id == "Wan-AI/Wan2.2-TI2V-5B"
+        assert resolved_revision == revision.lower()
+
+        config = _config_with_source_provenance(
+            b'{"model_type":"wan2_2_ti2v"}', model_id, resolved_revision)
+        assert b'"source_model_id": "Wan-AI/Wan2.2-TI2V-5B"' in config
+        assert f'"source_revision": "{revision.lower()}"'.encode() in config
+
+    def test_local_checkpoint_does_not_embed_host_path(self, tmp_path):
+        from tensorrt_model_connect.engine_builder import _source_provenance
+
+        (tmp_path / "config.json").write_text('{}', encoding="utf-8")
+        assert _source_provenance(str(tmp_path), tmp_path) == ("", "")
 
 
 class TestFindPlugin:

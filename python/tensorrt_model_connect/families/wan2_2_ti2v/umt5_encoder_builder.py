@@ -721,7 +721,10 @@ def build_umt5_encoder_engine(
     # loaded by the C++ process before deserializing a plan that uses it.
     plugin_library = None
     if source_gelu_plugin is not None:
-        plugin_path = Path(source_gelu_plugin).expanduser().resolve()
+        # Preserve /proc/self/fd/N when the AOT companion is loaded from a
+        # sealed memfd. Resolving it produces an unusable "(deleted)" path and
+        # would reopen the mutable source pathname instead of the pinned ELF.
+        plugin_path = Path(source_gelu_plugin).expanduser()
         if not plugin_path.is_file():
             raise FileNotFoundError(plugin_path)
         plugin_library = ctypes.CDLL(str(plugin_path), mode=ctypes.RTLD_GLOBAL)

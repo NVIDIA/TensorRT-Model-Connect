@@ -144,7 +144,7 @@ def prepare_model_dir(args: argparse.Namespace) -> dict[str, object]:
                 "",
                 "Build example:",
                 f"python -m tensorrt_model_connect.__main__ build {output_dir} "
-                "-o elf.trtfb --method trt",
+                "-o elf.trtfb",
             ]
         )
         + "\n",

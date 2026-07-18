@@ -95,6 +95,8 @@ static void test_read_valid_bundle() {
 
     const std::string json = R"({
   "model_id": "test-model",
+  "source_model_id": "example-org/test-model",
+  "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "model_type": "decoder",
   "family": "generic_text",
   "trt_version": "10.15.0",
@@ -119,6 +121,9 @@ static void test_read_valid_bundle() {
 
     const auto loaded = trtmc::ReadBundleFile(path);
     check(loaded.info.model_id == "test-model", "read model_id");
+    check(loaded.info.source_model_id == "example-org/test-model", "read source_model_id");
+    check(loaded.info.source_revision == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "read source_revision");
     check(loaded.info.model_type == "decoder", "read model_type");
     check(loaded.info.family == "generic_text", "read family");
     check(loaded.info.trt_version == "10.15.0", "read trt_version");
@@ -320,6 +325,8 @@ static void test_inspect_returns_metadata() {
 
     const std::string json = R"({
   "model_id": "inspectable",
+  "source_model_id": "example-org/inspectable",
+  "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "vocab_size": 50000,
   "num_layers": 12,
   "sections": {
@@ -330,6 +337,9 @@ static void test_inspect_returns_metadata() {
 
     const auto info = trtmc::InspectBundle(path);
     check(info.model_id == "inspectable", "inspect model_id");
+    check(info.source_model_id == "example-org/inspectable", "inspect source_model_id");
+    check(info.source_revision == "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "inspect source_revision");
     check(info.vocab_size == 50000, "inspect vocab_size");
     check(info.num_layers == 12, "inspect num_layers");
 
@@ -406,6 +416,8 @@ static void test_max_batch_size_parse_and_back_compat() {
 })",
                                {plan_data});
     const auto loaded_legacy = trtmc::ReadBundleFile(legacy_path);
+    check(loaded_legacy.info.source_model_id.empty() && loaded_legacy.info.source_revision.empty(),
+          "legacy source provenance defaults empty");
     check(loaded_legacy.info.max_batch_size.dit == 1 &&
               loaded_legacy.info.max_batch_size.text_encoder == 1 &&
               loaded_legacy.info.max_batch_size.vae == 1,

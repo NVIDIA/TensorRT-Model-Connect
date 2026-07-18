@@ -156,6 +156,8 @@ void parse_sections_table(const std::string& json, BundleSectionTable& sections_
 BundleInfo BundleInfoFromJson(const std::string& json, BundleSectionTable& sections_out) {
     BundleInfo info;
     info.model_id = extract_json_string(json, "model_id", "");
+    info.source_model_id = extract_json_string(json, "source_model_id", "");
+    info.source_revision = extract_json_string(json, "source_revision", "");
     info.model_type = extract_json_string(json, "model_type", "");
     info.family = extract_json_string(json, "family", "");
     info.precision = extract_json_string(json, "precision", "");

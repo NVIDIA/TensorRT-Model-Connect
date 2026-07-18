@@ -10,9 +10,12 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <unistd.h>
 #include <vector>
 
 static int failures = 0;
@@ -121,6 +124,56 @@ static void test_strict_loading_requires_an_explicit_directory() {
         unsetenv("TRTMC_MODEL_PLUGIN_DIR");
 }
 
+static void test_previous_model_plugin_abi_is_rejected() {
+    const auto* sample = first_index_entry();
+    check(sample != nullptr, "plugin index has entry before ABI rejection check");
+    if (sample == nullptr)
+        return;
+
+    namespace fs = std::filesystem;
+    const fs::path test_root =
+        fs::temp_directory_path() / ("trtmc-model-plugin-v1-" + std::to_string(getpid()));
+    std::error_code cleanup_error;
+    fs::remove_all(test_root, cleanup_error);
+    const fs::path plugin_dir = test_root / sample->model_id;
+    fs::create_directories(plugin_dir);
+    fs::create_symlink(TRTMC_TEST_MODEL_PLUGIN_V1_PATH, plugin_dir / sample->library_name);
+
+    const char* previous_strict = std::getenv("TRTMC_MODEL_PLUGIN_STRICT");
+    const char* previous_dir = std::getenv("TRTMC_MODEL_PLUGIN_DIR");
+    const std::string saved_strict = previous_strict ? previous_strict : "";
+    const std::string saved_dir = previous_dir ? previous_dir : "";
+    const bool had_strict = previous_strict != nullptr;
+    const bool had_dir = previous_dir != nullptr;
+
+    setenv("TRTMC_MODEL_PLUGIN_STRICT", "1", 1);
+    unsetenv("TRTMC_MODEL_PLUGIN_DIR");
+    bool threw = false;
+    try {
+        trtmc::load_model_plugin_for_strategy(sample->runtime_strategy, {test_root.string()});
+    } catch (const std::runtime_error& error) {
+        threw = true;
+        const std::string message = error.what();
+        check(message.find("model plugin API ABI 1") != std::string::npos,
+              "old model plugin ABI is reported");
+        check(
+            message.find("runtime ABI " + std::to_string(trtmc::kTrtmcModelPluginApiAbiVersion)) !=
+                std::string::npos,
+            "required model plugin ABI is reported");
+    }
+    check(threw, "previous model plugin ABI is rejected before registration");
+
+    if (had_strict)
+        setenv("TRTMC_MODEL_PLUGIN_STRICT", saved_strict.c_str(), 1);
+    else
+        unsetenv("TRTMC_MODEL_PLUGIN_STRICT");
+    if (had_dir)
+        setenv("TRTMC_MODEL_PLUGIN_DIR", saved_dir.c_str(), 1);
+    else
+        unsetenv("TRTMC_MODEL_PLUGIN_DIR");
+    fs::remove_all(test_root, cleanup_error);
+}
+
 static void test_load_index_owner_registers_only_that_model() {
     const auto* sample = first_index_entry();
     check(sample != nullptr, "plugin index has entry before load check");
@@ -148,6 +201,7 @@ int main() {
     test_registry_does_not_eager_register_models();
     test_unknown_strategy_reports_clean_error();
     test_strict_loading_requires_an_explicit_directory();
+    test_previous_model_plugin_abi_is_rejected();
     test_load_index_owner_registers_only_that_model();
 
     if (failures > 0) {

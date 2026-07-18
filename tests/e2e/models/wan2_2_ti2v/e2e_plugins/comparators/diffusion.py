@@ -9,9 +9,6 @@ from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, Thr
 
 _REQUIRED_BUNDLE_TOKENS = (
     "Runtime strategy:   diffusion_wan2_2_ti2v",
-    "wan2_2_umt5_cuda_plugin_so",
-    "wan2_2_dit_cuda_plugin_so",
-    "wan2_2_vae_cuda_plugin_so",
     "text_encoder_0_plan",
     "denoiser_plan",
     "vae_decoder_plan",
@@ -34,7 +31,7 @@ def _metric(value: float, threshold: float, operator: str, passed: bool) -> Metr
     return MetricResult(value=value, threshold=threshold, operator=operator, passed=passed)
 
 
-class Wan22TI2VDiffusionComparator:
+class DiffusionComparator:
     @property
     def task_strategy(self) -> str:
         return "diffusion_media_generation"
@@ -135,4 +132,4 @@ class Wan22TI2VDiffusionComparator:
         )
 
 
-plugin = Wan22TI2VDiffusionComparator()
+plugin = DiffusionComparator()

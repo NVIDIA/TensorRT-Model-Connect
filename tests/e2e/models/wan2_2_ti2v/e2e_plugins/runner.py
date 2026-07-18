@@ -3,6 +3,6 @@
 
 """Wan2.2 TI2V-5B model-owned E2E runner plugin."""
 
-from .runners.diffusion import Wan22TI2VDiffusionRunner
+from .runners.diffusion import DiffusionMediaRunner
 
-runner = Wan22TI2VDiffusionRunner()
+runner = DiffusionMediaRunner()

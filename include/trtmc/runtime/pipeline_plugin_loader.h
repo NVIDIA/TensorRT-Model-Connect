@@ -15,7 +15,7 @@ namespace trtmc {
 // Bump whenever the C++ model-plugin boundary changes incompatibly. Every
 // generated model DSO exports this value so the loader can reject stale or
 // mixed-install plugins before calling into them.
-inline constexpr std::uint32_t kTrtmcModelPluginApiAbiVersion = 1U;
+inline constexpr std::uint32_t kTrtmcModelPluginApiAbiVersion = 2U;
 
 struct ModelPluginInfo {
     const char* model_id;

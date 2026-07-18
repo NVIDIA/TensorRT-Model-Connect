@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tensorrt_model_connect.runtime_provider.bundle import OptimizedBundleError
 from tensorrt_model_connect.runtime_provider.manifest import (
     AmbiguousImplementationError,
     ImplementationRequest,
@@ -86,16 +87,18 @@ elif args.operation == "build":
     (artifacts / "engine.dir").mkdir(parents=True)
     (artifacts / "engine.dir" / "engine.plan").write_bytes(b"engine")
     (artifacts / "libtrtmc_impl_fake.so").write_bytes(b"fake-dso")
+    bundle_info = {
+        "family": "fake-optimized-family",
+        "precision": "capsule-defined",
+    }
+    bundle_info.update(request["parameters"].get("bundle_info_overrides", {}))
     descriptor = {
         "schema_version": 1,
         "build_binding": request["build_binding"],
         "bundle_config": {
             "capsule_owned": True,
         },
-        "bundle_info": {
-            "family": "fake-optimized-family",
-            "precision": "capsule-defined",
-        },
+        "bundle_info": bundle_info,
         "private": {"capsule_owns_this": True},
     }
     (output / "descriptor.json").write_text(json.dumps(descriptor), encoding="utf-8")
@@ -214,6 +217,8 @@ def test_full_generic_build_writes_self_contained_delegated_bundle(
     descriptor = json.loads(sections["optimized_runtime.json"])
     private = json.loads(sections["implementation.json"])
     assert header["model_type"] == "optimized_runtime"
+    assert header["source_model_id"] == "Example/Model"
+    assert header["source_revision"] == _REVISION
     assert config == {"capsule_owned": True}
     assert header["family"] == "fake-optimized-family"
     assert header["precision"] == "capsule-defined"
@@ -224,6 +229,43 @@ def test_full_generic_build_writes_self_contained_delegated_bundle(
     assert private["private"] == {"capsule_owns_this": True}
     assert sections["optimized_runtime_artifacts/engine.dir/engine.plan"] == b"engine"
     assert sections["optimized_runtime_artifacts/libtrtmc_impl_fake.so"] == b"fake-dso"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("source_model_id", "Example/Other-Model"),
+        ("source_revision", "abcdef0123456789abcdef0123456789abcdef01"),
+    ),
+)
+def test_capsule_cannot_override_request_source_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+) -> None:
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    family_root = tmp_path / "family"
+    _capsule(family_root)
+    model_source = _snapshot(tmp_path / "cache")
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_current_target_with_device",
+        lambda: (_target(), 0),
+    )
+
+    with pytest.raises(OptimizedBundleError, match=field):
+        try_build_optimized_runtime(
+            str(model_source),
+            tmp_path / "model.trtfb",
+            family_name="example",
+            parameters={
+                "precision": "fp16",
+                "bundle_info_overrides": {field: value},
+            },
+        )
 
 
 def test_current_target_preserves_active_device_ordinal_only_as_launch_context(

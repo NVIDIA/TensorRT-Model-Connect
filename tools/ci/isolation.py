@@ -9,7 +9,9 @@ Boundary: multi-model isolation queues; one hermetic proof is owned by ``model_p
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
+import re
 import shutil
 import subprocess
 import time
@@ -18,6 +20,7 @@ from pathlib import Path
 from .context import CiContext
 from .package import WheelPackageManager
 from .process import CiError
+from tools.model_plugin_isolation import classify_model_libraries
 
 
 class IsolatedModelRunner:
@@ -157,7 +160,13 @@ class IsolatedModelRunner:
         elapsed = int(time.time() - started)
         print(f"PASS isolated group={group_id} gpu={gpu} elapsed={elapsed}s")
         if self.context.env.get("TRTMC_ISOLATION_KEEP_WORKTREES", "0") == "0":
-            for name in ("source", "build", "engines", "model_plugins"):
+            for name in (
+                "source",
+                "build",
+                "engines",
+                "model_plugins",
+                "builder_plugins",
+            ):
                 self.context.remove(manifest.parent / name)
         return True
 
@@ -176,6 +185,7 @@ class IsolatedModelRunner:
         build = group_dir / "build"
         engines = group_dir / "engines"
         plugins = group_dir / "model_plugins"
+        builder_plugins = group_dir / "builder_plugins"
         self._logged(
             [
                 "python3",
@@ -209,11 +219,96 @@ class IsolatedModelRunner:
             ],
             output,
         )
-        dsos = list((build / "models").rglob("libtrtmc_model_*.so"))
-        if len(dsos) != 1:
-            raise CiError(
-                f"isolated build {group['id']} produced {len(dsos)} model DSOs; expected exactly 1"
+        dsos = sorted((build / "models").rglob("libtrtmc_model_*.so"))
+        runtime = group["runtime_plugin"]
+        runtime_library = str(runtime["library"])
+        auxiliary_patterns = [
+            str(pattern)
+            for pattern in runtime.get("builder_auxiliary_libraries", [])
+        ]
+        try:
+            owner_dso, auxiliary_dsos = classify_model_libraries(
+                dsos,
+                owner_library=runtime_library,
+                auxiliary_patterns=auxiliary_patterns,
             )
+        except ValueError as error:
+            raise CiError(
+                f"isolated build {group['id']} produced an invalid model-local DSO layout: {error}"
+            ) from error
+        runtime_model = str(runtime["model_id"])
+        if runtime_model == "wan2_2_ti2v" and len(auxiliary_dsos) != 1:
+            raise CiError(
+                "Wan2.2 isolated build requires exactly one ABI-tagged builder companion DSO"
+            )
+        dso_evidence = {
+            "schema_version": 1,
+            "runtime_model": runtime_model,
+            "model_dso_count": 1,
+            "model_dso": owner_dso.name,
+            "model_dso_sha256": hashlib.sha256(owner_dso.read_bytes()).hexdigest(),
+            "builder_auxiliary_dso_count": len(auxiliary_dsos),
+            "builder_auxiliary_dsos": {
+                path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in auxiliary_dsos
+            },
+            "staged_runtime_auxiliary_dso_count": 0,
+            "runtime_auxiliary_delivery": (
+                "bundle_embedded" if auxiliary_dsos else "none"
+            ),
+            "sibling_model_count": 0,
+        }
+        (audit / "model-dsos.json").write_text(
+            json.dumps(dso_evidence, indent=2) + "\n", encoding="utf-8"
+        )
+        owner_dynamic = self.context.output(["readelf", "-d", owner_dso])
+        model_dependencies = set(
+            re.findall(r"libtrtmc_model_[^\] ]*\.so", owner_dynamic)
+        ) - {runtime_library}
+        if model_dependencies:
+            raise CiError(
+                "runtime owner DSO links a model sibling or builder companion: "
+                f"{sorted(model_dependencies)}"
+            )
+        if runtime_model == "wan2_2_ti2v":
+            runtime_objects = {
+                "cli": build / "trtmc",
+                "core": build / "libtrtmc_core.so",
+                "tensorrt_backend": build / "libtrtmc_backend_trt.so",
+                "model_dso": owner_dso,
+                **{
+                    f"builder_companion_dso_{index}": path
+                    for index, path in enumerate(auxiliary_dsos)
+                },
+            }
+            missing = [label for label, path in runtime_objects.items() if not path.is_file()]
+            if missing:
+                raise CiError(f"Wan2.2 native dependency audit is missing: {missing}")
+            dependency_evidence = []
+            forbidden = []
+            for label, path in runtime_objects.items():
+                dynamic = self.context.output(["readelf", "-d", path])
+                if label.startswith("builder_companion_dso_") and (
+                    "(RPATH)" in dynamic or "(RUNPATH)" in dynamic
+                ):
+                    raise CiError(
+                        "Wan2.2 builder companion must not contain DT_RPATH/DT_RUNPATH: "
+                        f"{path}"
+                    )
+                needed = [line.strip() for line in dynamic.splitlines() if "(NEEDED)" in line]
+                dependency_evidence.append(f"[{label}] {path}\n" + "\n".join(needed))
+                forbidden.extend(
+                    f"{label}: {line}"
+                    for line in needed
+                    if re.search(r"(?:python|torch|c10)", line, re.IGNORECASE)
+                )
+            (audit / "wan2_2-native-dependencies.txt").write_text(
+                "\n\n".join(dependency_evidence) + "\n", encoding="utf-8"
+            )
+            if forbidden:
+                raise CiError(
+                    "Wan2.2 native runtime links forbidden Python/PyTorch dependencies: "
+                    + "; ".join(forbidden)
+                )
         self._logged(
             [
                 "python3",
@@ -227,9 +322,19 @@ class IsolatedModelRunner:
                 build,
                 "--output-dir",
                 plugins,
+                "--builder-auxiliary-dir",
+                builder_plugins,
             ],
             output,
         )
+        staged_runtime_libraries = sorted(
+            (plugins / runtime_model).glob("libtrtmc_model_*.so")
+        )
+        if [path.name for path in staged_runtime_libraries] != [runtime_library]:
+            raise CiError(
+                "runtime isolation directory must contain only its owner DSO; found "
+                f"{[path.name for path in staged_runtime_libraries]}"
+            )
         family = str(group["family"])
         test_files = sorted((source / "tests/e2e/models" / family).glob("test_*_e2e.py"))
         if len(test_files) != 1:
@@ -253,6 +358,17 @@ class IsolatedModelRunner:
                 "LD_LIBRARY_PATH": ":".join(library_path),
             }
         )
+        if auxiliary_dsos:
+            staged_builder_auxiliaries = sorted(
+                (builder_plugins / runtime_model).glob("libtrtmc_model_*.so")
+            )
+            if len(staged_builder_auxiliaries) != len(auxiliary_dsos):
+                raise CiError("builder auxiliary staging count does not match the build")
+            if runtime_model != "wan2_2_ti2v" or len(staged_builder_auxiliaries) != 1:
+                raise CiError("unsupported builder auxiliary DSO selection in isolation E2E")
+            environment["TRTMC_WAN22_PLUGIN_LIBRARY_DEV"] = str(
+                staged_builder_auxiliaries[0]
+            )
         command = [
             "timeout",
             "--kill-after=2m",

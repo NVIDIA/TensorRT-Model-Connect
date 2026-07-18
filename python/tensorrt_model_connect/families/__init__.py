@@ -56,6 +56,10 @@ class _FamilyMetadata:
     debug_runtime_strategies: frozenset[str] = frozenset()
     python_profile_specs: tuple[str, ...] = ()
     default_execution_profiles: tuple[str, ...] = ()
+    default_build_precision: str = ""
+    supported_build_precisions: frozenset[str] = frozenset()
+    build_python_modules: tuple[str, ...] = ()
+    build_dependency_extra: str = ""
 
 
 @dataclass(frozen=True)
@@ -232,6 +236,16 @@ def _load_family_metadata() -> list[_FamilyMetadata]:
             default_execution_profiles=tuple(
                 _metadata_strings(raw.get("default_execution_profiles"))
             ),
+            default_build_precision=raw.get("default_build_precision", "")
+            if isinstance(raw.get("default_build_precision"), str) else "",
+            supported_build_precisions=_metadata_strings(
+                raw.get("supported_build_precisions")
+            ),
+            build_python_modules=tuple(
+                _metadata_strings(raw.get("build_python_modules"))
+            ),
+            build_dependency_extra=raw.get("build_dependency_extra", "")
+            if isinstance(raw.get("build_dependency_extra"), str) else "",
         ))
 
     _METADATA_CACHE = metadata
@@ -465,6 +479,46 @@ def family_default_execution_profiles(family: object) -> dict[str, str]:
         phase, profile = _metadata_pair(spec, "default_execution_profiles")
         defaults[phase] = profile
     return defaults
+
+
+def family_build_precision(family: object, requested: str | None = None) -> str:
+    """Resolve and validate a build precision using family-owned metadata.
+
+    Families may declare both a default and an allowlist.  A caller-supplied
+    value always wins, but it is still checked against the allowlist before
+    checkpoint loading or TensorRT compilation begins.
+    """
+    metadata = _matching_family_metadata(family)
+    meta = metadata[0] if metadata else None
+    precision = str(
+        requested
+        or (meta.default_build_precision if meta is not None else "")
+        or "fp32"
+    ).strip().lower()
+    supported = meta.supported_build_precisions if meta is not None else frozenset()
+    if supported and precision not in supported:
+        choices = ", ".join(sorted(supported))
+        raise ValueError(
+            f"Family {meta.id} does not support build precision {precision!r}; "
+            f"supported precision: {choices}"
+        )
+    return precision
+
+
+def family_build_python_modules(family: object) -> tuple[str, ...]:
+    """Return import modules required only while building a matched family."""
+    metadata = _matching_family_metadata(family)
+    if not metadata:
+        return ()
+    return metadata[0].build_python_modules
+
+
+def family_build_dependency_extra(family: object) -> str:
+    """Return the package extra that installs family-only build modules."""
+    metadata = _matching_family_metadata(family)
+    if not metadata:
+        return ""
+    return metadata[0].build_dependency_extra
 
 
 def family_python_profile_specs() -> dict[str, dict[str, object]]:

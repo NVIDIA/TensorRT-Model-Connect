@@ -227,7 +227,8 @@ class E2ERunner:
 
     def _prepare_plugins(self, output: Path, arguments: list[str]) -> None:
         metadata = self.package.build_metadata()
-        self.context.remove(output)
+        builder_auxiliaries = output.parent / f"{output.name}_builder"
+        self.context.remove(output, builder_auxiliaries)
         output.mkdir(parents=True)
         self.context.run(
             [
@@ -238,9 +239,27 @@ class E2ERunner:
                 metadata["cmake_build_dir"],
                 "--output-dir",
                 output,
+                "--builder-auxiliary-dir",
+                builder_auxiliaries,
                 *arguments,
             ]
         )
+        wan22_companions = sorted(
+            builder_auxiliaries.glob(
+                "wan2_2_ti2v/libtrtmc_model_wan2_2_ti2v_plugins_trt*.so"
+            )
+        )
+        if len(wan22_companions) > 1:
+            raise CiError(
+                "E2E builder staging found multiple Wan2.2 companions: "
+                f"{wan22_companions}"
+            )
+        if wan22_companions:
+            self.context.env["TRTMC_WAN22_PLUGIN_LIBRARY_DEV"] = str(
+                wan22_companions[0]
+            )
+        else:
+            self.context.env.pop("TRTMC_WAN22_PLUGIN_LIBRARY_DEV", None)
 
     def _configure_timing_cache(self) -> None:
         root = self.context.env.get("TRTMC_STORAGE_ROOT", self.context.env.get("ENGINE_DIR", "."))

@@ -21,6 +21,7 @@ from .model_proof import ModelProofRequest
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
 from .process import CiError
 from .task_eval import TaskEvalRunner
+from tools.model_plugin_isolation import classify_model_libraries
 
 
 class ProofStatus:
@@ -326,6 +327,9 @@ class ModelProofInnerPipeline:
         owners = payload["owners"]
         runtime_model = str(owners["runtime"])
         runtime_library = str(payload["runtime_library"])
+        auxiliary_patterns = [
+            str(value) for value in payload.get("builder_auxiliary_libraries", [])
+        ]
         build_jobs = self.context.env.get("TRTMC_MODEL_PROOF_BUILD_JOBS", "2")
         if not build_jobs.isdigit() or int(build_jobs) < 1:
             raise CiError("TRTMC_MODEL_PROOF_BUILD_JOBS must be a positive integer")
@@ -366,12 +370,15 @@ class ModelProofInnerPipeline:
             self.artifacts / "build.log",
         )
         self.status.step("scratch_build", "passed")
-        dso = self._validate_dso(runtime_model, runtime_library)
+        dso, auxiliary_dsos = self._validate_dso(runtime_model, runtime_library, auxiliary_patterns)
         self._run_cpp_tests(payload["runtime_tests"])
         self._run_python_tests(payload)
-        verification = self._run_e2e(payload)
+        verification = self._run_e2e(payload, auxiliary_dsos)
         self._run_task_eval(runtime_model)
         digest = hashlib.sha256(dso.read_bytes()).hexdigest()
+        auxiliary_digests = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in auxiliary_dsos
+        }
         proof = {
             "schema_version": 1,
             "passed": True,
@@ -382,6 +389,13 @@ class ModelProofInnerPipeline:
             "runtime_library_sha256": digest,
             "staged_runtime_library_sha256": digest,
             "staged_model_dso_count": 1,
+            "builder_auxiliary_library_count": len(auxiliary_dsos),
+            "builder_auxiliary_libraries": [path.name for path in auxiliary_dsos],
+            "builder_auxiliary_library_sha256": auxiliary_digests,
+            "staged_runtime_auxiliary_library_count": 0,
+            "runtime_auxiliary_delivery": (
+                "bundle_embedded" if auxiliary_dsos else "none"
+            ),
             **{
                 key: payload[key]
                 for key in (
@@ -435,20 +449,37 @@ class ModelProofInnerPipeline:
         else:
             self.status.step("task_eval", "skipped", "not an ETTh1 time-series nightly model")
 
-    def _validate_dso(self, runtime_model: str, runtime_library: str) -> Path:
+    def _validate_dso(
+        self,
+        runtime_model: str,
+        runtime_library: str,
+        auxiliary_patterns: list[str],
+    ) -> tuple[Path, list[Path]]:
         assert self.status
         self.status.step("dso_isolation", "running")
         dsos = sorted((self.work / "build/models").rglob("libtrtmc_model_*.so"))
         (self.artifacts / "model-dsos.txt").write_text(
             "".join(f"{path}\n" for path in dsos), encoding="utf-8"
         )
-        if len(dsos) != 1 or dsos[0].name != runtime_library:
-            raise CiError(
-                f"scratch build produced {[path.name for path in dsos]}, expected only {runtime_library}"
+        try:
+            owner_dso, auxiliary_dsos = classify_model_libraries(
+                dsos,
+                owner_library=runtime_library,
+                auxiliary_patterns=auxiliary_patterns,
             )
-        dynamic = self.context.output(["readelf", "-d", dsos[0]])
+        except ValueError as error:
+            raise CiError(
+                f"scratch build produced an invalid model-local DSO layout: {error}"
+            ) from error
+        if runtime_model == "wan2_2_ti2v" and len(auxiliary_dsos) != 1:
+            raise CiError(
+                "Wan2.2 model proof requires exactly one ABI-tagged builder companion DSO"
+            )
+        dynamic = self.context.output(["readelf", "-d", owner_dso])
         (self.artifacts / "model-dso.dynamic.txt").write_text(dynamic + "\n", encoding="utf-8")
-        dependencies = set(re.findall(r"libtrtmc_model_[^\] ]*\.so", dynamic)) - {runtime_library}
+        dependencies = set(re.findall(r"libtrtmc_model_[^\] ]*\.so", dynamic)) - {
+            runtime_library
+        }
         if dependencies:
             raise CiError(f"model DSO links a sibling model DSO: {sorted(dependencies)}")
         if runtime_model == "wan2_2_ti2v":
@@ -456,7 +487,11 @@ class ModelProofInnerPipeline:
                 "cli": self.work / "build" / "trtmc",
                 "core": self.work / "build" / "libtrtmc_core.so",
                 "tensorrt_backend": self.work / "build" / "libtrtmc_backend_trt.so",
-                "model_dso": dsos[0],
+                "model_dso": owner_dso,
+                **{
+                    f"builder_companion_dso_{index}": path
+                    for index, path in enumerate(auxiliary_dsos)
+                },
             }
             missing = [label for label, path in runtime_objects.items() if not path.is_file()]
             if missing:
@@ -465,6 +500,13 @@ class ModelProofInnerPipeline:
             forbidden = []
             for label, path in runtime_objects.items():
                 object_dynamic = self.context.output(["readelf", "-d", path])
+                if label.startswith("builder_companion_dso_") and (
+                    "(RPATH)" in object_dynamic or "(RUNPATH)" in object_dynamic
+                ):
+                    raise CiError(
+                        "Wan2.2 builder companion must not contain DT_RPATH/DT_RUNPATH: "
+                        f"{path}"
+                    )
                 needed = [
                     line.strip() for line in object_dynamic.splitlines() if "(NEEDED)" in line
                 ]
@@ -486,10 +528,19 @@ class ModelProofInnerPipeline:
         plugin_dir = self.work / "model-plugins" / runtime_model
         plugin_dir.mkdir(parents=True)
         staged = plugin_dir / runtime_library
-        shutil.copy2(dsos[0], staged)
-        if staged.read_bytes() != dsos[0].read_bytes():
+        shutil.copy2(owner_dso, staged)
+        if staged.read_bytes() != owner_dso.read_bytes():
             raise CiError("staged plugin DSO does not byte-match the scratch-built DSO")
-        digest = hashlib.sha256(dsos[0].read_bytes()).hexdigest()
+        staged_model_libraries = sorted(plugin_dir.glob("libtrtmc_model_*.so"))
+        if staged_model_libraries != [staged]:
+            raise CiError(
+                "runtime plugin staging must contain only the owner DSO; found "
+                f"{[path.name for path in staged_model_libraries]}"
+            )
+        digest = hashlib.sha256(owner_dso.read_bytes()).hexdigest()
+        auxiliary_digests = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in auxiliary_dsos
+        }
         for key, value in {
             "runtime_model": runtime_model,
             "runtime_library": runtime_library,
@@ -497,12 +548,22 @@ class ModelProofInnerPipeline:
             "staged_runtime_library_sha256": digest,
             "sibling_model_count": "0",
             "model_dso_count": "1",
+            "builder_auxiliary_library_count": len(auxiliary_dsos),
+            "builder_auxiliary_library_sha256": auxiliary_digests,
+            "staged_runtime_auxiliary_library_count": 0,
+            "runtime_auxiliary_delivery": (
+                "bundle_embedded" if auxiliary_dsos else "none"
+            ),
             "network": "disabled",
             "plugin_search": "strict",
         }.items():
             self.status.fact(key, value)
-        self.status.step("dso_isolation", "passed", "exactly one DSO; no sibling model DT_NEEDED")
-        return dsos[0]
+        self.status.step(
+            "dso_isolation",
+            "passed",
+            "one runtime owner DSO, no staged companion, and no sibling model DT_NEEDED",
+        )
+        return owner_dso, auxiliary_dsos
 
     def _run_cpp_tests(self, tests: list[str]) -> None:
         assert self.status
@@ -562,7 +623,9 @@ class ModelProofInnerPipeline:
         )
         self.status.step("python_tests", "passed")
 
-    def _run_e2e(self, payload: dict[str, object]) -> dict[str, object]:
+    def _run_e2e(
+        self, payload: dict[str, object], builder_auxiliary_dsos: list[Path]
+    ) -> dict[str, object]:
         assert self.status and self.selection
         models_file = self.work / "e2e-models.txt"
         models_file.write_text(
@@ -582,6 +645,14 @@ class ModelProofInnerPipeline:
             "TRTMC_ENGINE_BUILD_REVISION": self.request.revision,
             "LD_LIBRARY_PATH": f"{self.work / 'build'}:{self.context.env.get('LD_LIBRARY_PATH', '')}",
         }
+        if builder_auxiliary_dsos:
+            if str(payload["owners"]["runtime"]) != "wan2_2_ti2v" or len(
+                builder_auxiliary_dsos
+            ) != 1:
+                raise CiError("unsupported builder auxiliary DSO selection in model proof")
+            environment["TRTMC_WAN22_PLUGIN_LIBRARY_DEV"] = str(
+                builder_auxiliary_dsos[0]
+            )
         self._run_logged(
             [
                 self._python(),

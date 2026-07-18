@@ -24,6 +24,7 @@ from .config import ModelConfig
 from .engine_build_budget import enforce_single_full_bundle_build
 from .families import (
     available_plugin_ids,
+    family_build_precision,
     family_has_capability,
     find_plugin,
     find_diffusion_plugin,
@@ -597,6 +598,53 @@ def _resolve_model(model_id_or_path: str) -> str:
     return local_dir
 
 
+_HF_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
+
+
+def _hf_snapshot_revision(model_dir: str | Path) -> str:
+    """Extract the immutable HF revision from a standard cache snapshot path."""
+    parts = Path(model_dir).parts
+    for index in range(len(parts) - 2, -1, -1):
+        if parts[index] != "snapshots" or index + 1 >= len(parts):
+            continue
+        candidate = parts[index + 1]
+        if _HF_COMMIT_RE.fullmatch(candidate):
+            return candidate.lower()
+    return ""
+
+
+def _source_provenance(
+    model_ref: str, resolved_model_dir: str | Path
+) -> tuple[str, str]:
+    """Return ``(HF model id, resolved revision)`` for a remote model ref.
+
+    Local checkpoints intentionally omit these fields rather than embedding a
+    machine-specific absolute path in a portable bundle.
+    """
+    ref = str(model_ref or "").strip()
+    if not ref or Path(ref).exists():
+        return "", ""
+    return ref, _hf_snapshot_revision(resolved_model_dir)
+
+
+def _config_with_source_provenance(
+    config_data: bytes | bytearray,
+    source_model_id: str,
+    source_revision: str,
+) -> bytes:
+    """Add source provenance to a bundled config while preserving its schema."""
+    if not source_model_id and not source_revision:
+        return bytes(config_data)
+    config = json.loads(bytes(config_data))
+    if not isinstance(config, dict):
+        raise TypeError("Bundled config.json must decode to an object")
+    if source_model_id:
+        config["source_model_id"] = source_model_id
+    if source_revision:
+        config["source_revision"] = source_revision
+    return json.dumps(config, indent=2).encode("utf-8")
+
+
 def _resolve_nemo_archive(nemo_path: Path) -> str:
     """Resolve a .nemo archive through family-owned archive adapters."""
     resolved = resolve_nemo_archive_model_dir(nemo_path)
@@ -749,7 +797,7 @@ def build_bundle(
     decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
-    precision: str = "fp32",
+    precision: str | None = None,
     fp32_layers: list[int] | None = None,
     quantize: str | None = None,
     quant_scales: str | None = None,
@@ -771,6 +819,8 @@ def build_bundle(
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
     max_batch_size: int = 1,
+    source_model_id: str = "",
+    source_revision: str = "",
 ) -> None:
     """Full pipeline: load HF model → build TRT engine → write .trtfb bundle.
 
@@ -803,6 +853,10 @@ def build_bundle(
     t0 = time.monotonic()
     build_timing = _new_build_timing(build_timing_path)
     build_timing["model_dir"] = str(model_dir_path)
+    if source_model_id:
+        build_timing["source_model_id"] = source_model_id
+    if source_revision:
+        build_timing["source_revision"] = source_revision
     build_timing["output_path"] = str(output_path)
     _write_build_timing(build_timing)
 
@@ -813,6 +867,8 @@ def build_bundle(
 
     if diffusion_entrypoint is not None:
         diffusion_config, diffusion_plugin = diffusion_entrypoint
+        precision = family_build_precision(
+            getattr(diffusion_plugin, "name", ""), precision)
         fp8_scales = getattr(build_bundle, '_fp8_scales', None)
         save_fp8_scales = getattr(build_bundle, '_save_fp8_scales', None)
         _build_diffusion_bundle(
@@ -826,7 +882,9 @@ def build_bundle(
             parallel_config=parallel,
             max_batch_size=max_batch_size,
             pipeline_config=diffusion_config,
-            diffusion_plugin=diffusion_plugin)
+            diffusion_plugin=diffusion_plugin,
+            source_model_id=source_model_id,
+            source_revision=source_revision)
         return
 
     # 1. Parse config
@@ -849,6 +907,7 @@ def build_bundle(
             f"Supported: {supported}")
 
     print(f"[trtmc build] Family: {plugin.name}", file=sys.stderr)
+    precision = family_build_precision(plugin.name, precision)
 
     # 3. Load weights
     t1 = time.monotonic()
@@ -1205,7 +1264,9 @@ def build_bundle(
     trt_version = _get_trt_version()
     trt_abi = _trt_abi_from_version(trt_version)
     info = BundleInfo(
-        model_id=model_dir_path.name,
+        model_id=source_model_id or model_dir_path.name,
+        source_model_id=source_model_id,
+        source_revision=source_revision,
         model_type=config.model_type,
         family=plugin.name,
         trt_version=trt_version,
@@ -1277,6 +1338,10 @@ def build_bundle(
         if trt_abi:
             cfg_dict["trt_abi"] = trt_abi
         cfg_dict["precision"] = precision
+        if source_model_id:
+            cfg_dict["source_model_id"] = source_model_id
+        if source_revision:
+            cfg_dict["source_revision"] = source_revision
         if fp32_layers:
             cfg_dict["fp32_layers"] = sorted(set(fp32_layers))
         cfg_dict["tokenizer_add_special_tokens"] = int(
@@ -1418,6 +1483,8 @@ def _build_diffusion_bundle(
     max_batch_size: int = 1,
     pipeline_config: dict | None = None,
     diffusion_plugin=None,
+    source_model_id: str = "",
+    source_revision: str = "",
 ) -> None:
     """Build a diffusion bundle from a diffusers or claimed native entrypoint."""
     if build_timing is None:
@@ -1626,6 +1693,8 @@ def _build_diffusion_bundle(
 
         cfg_data = json.dumps(cfg_dict, indent=2).encode("utf-8")
 
+    cfg_data = _config_with_source_provenance(
+        cfg_data, source_model_id, source_revision)
     sections.append(BundleSection("config.json", cfg_data))
 
     tokenizer_json_t0 = time.monotonic()
@@ -1652,7 +1721,9 @@ def _build_diffusion_bundle(
 
     # Write bundle
     info = BundleInfo(
-        model_id=model_dir_path.name,
+        model_id=source_model_id or model_dir_path.name,
+        source_model_id=source_model_id,
+        source_revision=source_revision,
         model_type=model_type,
         family=plugin.name,
         trt_version=trt_version,
@@ -1684,7 +1755,7 @@ def _build_native_impl(
     decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
-    precision: str = "fp32",
+    precision: str | None = None,
     fp32_layers: list[int] | None = None,
     quantize: str | None = None,
     quant_scales: str | None = None,
@@ -1707,6 +1778,7 @@ def _build_native_impl(
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
     max_batch_size: int = 1,
+    source_model_ref: str | None = None,
 ) -> None:
     """Build a .trtfb bundle from a HuggingFace model ID or local path.
 
@@ -1723,8 +1795,11 @@ def _build_native_impl(
         fp8_scales: Per-layer FP8 scales dict, or ``"auto"`` for auto-calibration.
         save_fp8_scales: Path to save calibrated FP8 scales JSON.
     """
+    original_model_ref = source_model_ref or model_id_or_path
     model_dir = _resolve_model(model_id_or_path)
-    build_bundle._model_id_or_path_orig = model_id_or_path
+    source_model_id, source_revision = _source_provenance(
+        original_model_ref, model_dir)
+    build_bundle._model_id_or_path_orig = original_model_ref
     build_bundle._fp8_scales = fp8_scales
     build_bundle._save_fp8_scales = save_fp8_scales
     build_bundle(model_dir, output_path, max_cache_length,
@@ -1751,7 +1826,9 @@ def _build_native_impl(
                  parallel_config=parallel_config,
                  diffusion_overrides=diffusion_overrides,
                  build_timing_path=build_timing_path,
-                 max_batch_size=max_batch_size)
+                 max_batch_size=max_batch_size,
+                 source_model_id=source_model_id,
+                 source_revision=source_revision)
 
 
 def _optimized_request_value(value):
@@ -1778,6 +1855,48 @@ def _optimized_request_value(value):
     raise TypeError(
         "Build option cannot be represented for an optimized-runtime adapter: "
         f"{type(value).__name__}"
+    )
+
+
+def _public_build_family_hint(model_id_or_path: str) -> str:
+    """Resolve a family default without downloading the checkpoint."""
+
+    model_ref = str(model_id_or_path or "").rstrip("/")
+    if not model_ref:
+        return ""
+    model_path = Path(model_ref).expanduser()
+    if model_path.is_dir():
+        for metadata_name in ("model_index.json", "config.json", "configuration.json"):
+            metadata_path = model_path / metadata_name
+            if not metadata_path.is_file():
+                continue
+            try:
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            pipeline_class = str(metadata.get("_class_name", "") or "")
+            family = _resolve_diffusion_family_id(pipeline_class)
+            if family:
+                return family
+        try:
+            family = resolve_family_id(ModelConfig.from_dir(model_path))
+        except Exception:
+            family = None
+        return str(family or "")
+
+    for candidate in (Path(model_ref).name, model_ref):
+        family = resolve_family_id(candidate)
+        if family:
+            return str(family)
+    return ""
+
+
+def _public_build_precision(model_id_or_path: str, requested: str | None) -> str:
+    """Apply the model-owned precision default at the public API boundary."""
+
+    return family_build_precision(
+        _public_build_family_hint(model_id_or_path),
+        requested,
     )
 
 
@@ -1838,7 +1957,7 @@ def build(
     decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
-    precision: str = "fp32",
+    precision: str | None = None,
     fp32_layers: list[int] | None = None,
     quantize: str | None = None,
     quant_scales: str | None = None,
@@ -1861,6 +1980,7 @@ def build(
     diffusion_overrides: dict | None = None,
     build_timing_path: str | None = None,
     max_batch_size: int = 1,
+    source_model_ref: str | None = None,
 ) -> None:
     """Build through a matching model capsule, otherwise use the native path.
 
@@ -1870,6 +1990,10 @@ def build(
     """
 
     build_arguments = dict(locals())
+    build_arguments["precision"] = _public_build_precision(
+        model_id_or_path,
+        precision,
+    )
     public_options = {
         name: value
         for name, value in build_arguments.items()

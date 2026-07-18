@@ -137,6 +137,34 @@ class TestMainParser:
         assert captured["args"].build_timing_json == str(tmp_path / "timing.json")
         assert not hasattr(captured["args"], "_explicit_public_options")
 
+    @pytest.mark.parametrize("compat_method", ["trt", "auto"])
+    def test_method_is_hidden_but_legacy_alias_is_accepted(
+        self, monkeypatch, capsys, tmp_path, compat_method
+    ):
+        import tensorrt_model_connect.build_cli as cli
+
+        monkeypatch.setattr(sys, "argv", ["trtmc", "build", "--help"])
+        with pytest.raises(SystemExit) as help_exit:
+            cli.main()
+        assert help_exit.value.code == 0
+        assert "--method" not in capsys.readouterr().out
+
+        captured: dict[str, argparse.Namespace] = {}
+        monkeypatch.setattr(
+            cli, "_cmd_build", lambda args: captured.setdefault("args", args) and 0)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "trtmc", "build", "org/model", "-o", str(tmp_path / "out.trtfb"),
+                "--method", compat_method,
+            ],
+        )
+        with pytest.raises(SystemExit) as compat_exit:
+            cli.main()
+        assert compat_exit.value.code == 0
+        assert captured["args"].method == compat_method
+
 
 class TestInspectArgs:
     def test_inspect_parses(self):
@@ -187,6 +215,8 @@ class TestCmdInspect:
         bundle_path = tmp_path / "test.trtfb"
         header = {
             "model_id": "test-model",
+            "source_model_id": "example-org/test-model",
+            "source_revision": "a" * 40,
             "model_type": "example_decoder",
             "family": "example_family",
             "trt_version": "10.0.0",
@@ -217,6 +247,8 @@ class TestCmdInspect:
         captured = capsys.readouterr()
         assert "example_decoder" in captured.out
         assert "test-model" in captured.out
+        assert "example-org/test-model" in captured.out
+        assert "a" * 40 in captured.out
         assert "example_family" in captured.out
         assert "engine_plan" in captured.out
 

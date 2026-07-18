@@ -45,6 +45,10 @@ struct BundleInfo {
     bool tokenizer_add_special_tokens_present{false};
     std::vector<BundleSectionInfo> sections;
     MaxBatchSize max_batch_size{};
+    // Optional immutable Hugging Face source identity. Appended to preserve
+    // offsets of legacy BundleInfo fields used by model DSOs.
+    std::string source_model_id;
+    std::string source_revision;
 };
 
 // Read metadata without loading the engine.

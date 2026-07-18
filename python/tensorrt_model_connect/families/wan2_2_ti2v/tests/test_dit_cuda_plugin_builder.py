@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import inspect
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -18,65 +17,27 @@ from tensorrt_model_connect.families.wan2_2_ti2v import (
 from tensorrt_model_connect.families.wan2_2_ti2v import trt_ops
 
 
-def test_plugin_override_must_exist(tmp_path: Path, monkeypatch) -> None:
-    missing = tmp_path / "missing.so"
-    monkeypatch.setenv(plugin_builder._PLUGIN_ENV, str(missing))
+def test_plugin_builder_resolves_the_packaged_aot_companion(tmp_path: Path, monkeypatch) -> None:
+    library = tmp_path / "libtrtmc_model_wan2_2_ti2v_plugins_trt11_0.so"
+    companion = type("Companion", (), {"load_path": library})()
+    monkeypatch.setattr(
+        plugin_builder,
+        "load_wan22_plugin_companion",
+        lambda **_kwargs: companion,
+    )
 
-    with pytest.raises(FileNotFoundError, match=plugin_builder._PLUGIN_ENV):
-        plugin_builder.ensure_dit_cuda_plugin()
-
-
-def test_plugin_override_is_returned_without_building(tmp_path: Path, monkeypatch) -> None:
-    library = tmp_path / "libwan22_dit_test.so"
-    library.write_bytes(b"test plugin")
-    monkeypatch.setenv(plugin_builder._PLUGIN_ENV, str(library))
-
-    def unexpected_run(*_args, **_kwargs):
-        raise AssertionError("override must not invoke CMake")
-
-    monkeypatch.setattr(plugin_builder.subprocess, "run", unexpected_run)
-    assert plugin_builder.ensure_dit_cuda_plugin() == library.resolve()
+    assert plugin_builder.ensure_dit_cuda_plugin() == library
+    assert "subprocess" not in inspect.getsource(plugin_builder)
 
 
-def test_plugin_build_uses_a_content_addressed_cache(tmp_path: Path, monkeypatch) -> None:
-    calls: list[list[str]] = []
-    monkeypatch.setenv(plugin_builder._BUILD_DIR_ENV, str(tmp_path))
-    monkeypatch.setattr(plugin_builder, "_source_digest", lambda _path: "digest")
+def test_production_cmake_fingerprints_all_nested_plugin_sources() -> None:
+    repo_root = Path(plugin_builder.__file__).resolve().parents[4]
+    cmake = (repo_root / "cmake" / "trtmc_wan22_plugins.cmake").read_text()
 
-    def run(command: list[str], **_kwargs) -> subprocess.CompletedProcess:
-        calls.append(command)
-        if command[1] == "--build":
-            output = Path(command[2]) / "libtrtmc_wan22_dit_cuda_plugin.so"
-            output.write_bytes(b"plugin")
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(plugin_builder.subprocess, "run", run)
-    first = plugin_builder.ensure_dit_cuda_plugin()
-    second = plugin_builder.ensure_dit_cuda_plugin()
-
-    assert first == second
-    assert first.read_bytes() == b"plugin"
-    assert len(calls) == 2
-    assert calls[0][0:2] == ["cmake", "-S"]
-    assert calls[1][0:2] == ["cmake", "--build"]
-
-
-def test_plugin_digest_covers_nested_cpp_and_vendored_headers(tmp_path: Path) -> None:
-    source = tmp_path / "plugin"
-    frontend = source / "third_party" / "cudnn_frontend" / "include"
-    frontend.mkdir(parents=True)
-    (source / "plugin.cpp").write_text("cpp-v1")
-    header = frontend / "cudnn_frontend.h"
-    header.write_text("header-v1")
-    original = plugin_builder._source_digest(source)
-
-    header.write_text("header-v2")
-    after_header = plugin_builder._source_digest(source)
-    (source / "plugin.cpp").write_text("cpp-v2")
-    after_cpp = plugin_builder._source_digest(source)
-
-    assert original != after_header
-    assert after_header != after_cpp
+    assert "file(GLOB_RECURSE" in cmake
+    assert "file(SHA256" in cmake
+    assert "third_party/cudnn_frontend" in cmake
+    assert "plugin_manifest.cpp.in" in cmake
 
 
 def test_plugin_sources_are_cuda_tensorrt_only() -> None:

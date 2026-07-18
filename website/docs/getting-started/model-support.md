@@ -7,7 +7,7 @@ Model support is defined by two source-of-truth surfaces:
 - Python family plugins under `python/tensorrt_model_connect/families/`.
 - E2E manifests under `tests/e2e/models/`.
 
-The current checkout contains 71 Python family plugins, 197 E2E model manifests, and 74 E2E family indexes.
+The current checkout contains 78 Python family plugins, 202 E2E model manifests, and 78 E2E family indexes.
 
 ## Support Levels
 
@@ -33,7 +33,7 @@ The E2E manifests are the most concrete proof because they name the model ID, ru
 | Seq2seq and translation | `t5_text_to_text`, `marian_translation`, `bart_seq2seq_encoder_decoder`, `m2m_100_seq2seq_encoder_decoder` | `t5`, `marian`, `bart`, `m2m_100` |
 | Vision-language and OCR | `vision_language`, `omni_multimodal` | `qwen_vl`, `internvl`, `phi4_multimodal`, `deepseek_ocr`, `qwen3_omni` |
 | Speech and audio | `speech_to_text`, `speech_to_text_rnnt`, `text_to_audio_bark`, `text_to_audio_magpie`, `speech_to_speech` | `whisper`, `canary`, `nemotron_speech_streaming`, `bark`, `magpie_tts`, `personaplex` |
-| Diffusion image/video | `diffusion_flux`, `diffusion_wan`, `diffusion_zimage`, `diffusion_pixart` | `flux`, `wan_t2v`, `z_image`, `pixart` |
+| Diffusion image/video | `diffusion_flux`, `diffusion_wan`, `diffusion_wan2_2_ti2v`, `diffusion_zimage`, `diffusion_pixart` | `flux`, `wan_t2v`, `wan2_2_ti2v`, `z_image`, `pixart` |
 | Segmentation and detection | `segmentation`, `prompted_segmentation`, `object_detection` | `segformer`, `sam` |
 | Operators | `neural_operator` | family-specific numeric operator bundles |
 
@@ -42,15 +42,17 @@ The E2E manifests are the most concrete proof because they name the model ID, ru
 The current Python plugin inventory is:
 
 ```text
-albert, bark, bart, bert, bloom, canary, codegen, convbert, deberta,
-deepseek_ocr, deepseek_v2, distilbert, dpr, eagle_vlm, electra, falcon,
-flux, fnet, gemma, glm, gpt2, gpt_neo, gpt_neox, gpt_oss, granite,
-internlm, internvl, llama, m2m_100, magpie_tts, mamba, marian, mistral,
-mixtral, modernbert, mpnet, nemotron, nemotron_h, nemotron_speech_streaming,
-olmo, olmo2, opt, personaplex, phi, phi4_multimodal, phi_moe, pixart,
-qwen, qwen3_5, qwen3_omni, qwen_moe, qwen_vl, roberta, rwkv, sam,
-segformer, stablelm, starcoder2, t5, wan_t2v, whisper, xglm, xlnet,
-z_image
+albert, bark, bart, bert, bloom, canary, chronos_bolt, codegen, convbert,
+deberta, deepseek_ocr, deepseek_v2, distilbert, dpr, eagle_vlm, electra,
+elf_flow, falcon, flux, fnet, gemma, glm, gpt2, gpt_neo, gpt_neox,
+gpt_oss, granite, internlm, internvl, lance, llama, locateanything,
+ltx_video, m2m_100, magpie_tts, mamba, marian, mistral, mixtral,
+modernbert, mpnet, nemotron, nemotron_h, nemotron_labs_diffusion,
+nemotron_speech_streaming, olmo, olmo2, opt, patchtsmixer, patchtst,
+personaplex, phi, phi4_multimodal, phi_moe, pixart, qwen, qwen3_5,
+qwen3_omni, qwen_image, qwen_moe, qwen_vl, roberta, rwkv, sam, sam3,
+sana_wm, segformer, stablelm, starcoder2, t5, timesfm, timm_vit,
+wan2_2_ti2v, wan_t2v, whisper, xglm, xlnet, z_image
 ```
 
 ## How support is resolved

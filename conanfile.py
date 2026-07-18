@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -11,6 +12,11 @@ from conan import ConanFile
 from conan.errors import ConanException
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.files import copy
+
+
+_WAN22_BUILDER_COMPANION_RE = re.compile(
+    r"^libtrtmc_model_wan2_2_ti2v_plugins_trt[0-9]+_[0-9]+\.so$"
+)
 
 
 def _env_flag(name: str) -> bool:
@@ -82,6 +88,8 @@ class TensorRTModelConnectConan(ConanFile):
             "TRTMC_TRT_LIBRARY",
             "TRTMC_CUDA_INCLUDE_DIR",
             "TRTMC_CUDART_LIBRARY",
+            "TRTMC_WAN22_CUDNN_INCLUDE_DIR",
+            "TRTMC_WAN22_CUDNN_LIBRARY",
         ):
             value = os.environ.get(name)
             if value:
@@ -180,6 +188,11 @@ class TensorRTModelConnectConan(ConanFile):
         script_cores = sorted(wheel_data_scripts.glob("libtrtmc_core.so*"))
         backends = sorted(package_bin.glob("libtrtmc_backend_trt*.so*"))
         model_plugins = sorted(package_bin.glob("libtrtmc_model_*.so*"))
+        wan22_companions = [
+            path
+            for path in model_plugins
+            if _WAN22_BUILDER_COMPANION_RE.fullmatch(path.name)
+        ]
         if not native.is_file():
             raise ConanException("TRTMC native executable was not staged into the wheel package")
         if not installed_script.is_file():
@@ -192,6 +205,11 @@ class TensorRTModelConnectConan(ConanFile):
             raise ConanException("TRTMC TensorRT backend DSO was not staged into the wheel package")
         if not model_plugins:
             raise ConanException("TRTMC model plugin DSOs were not staged into the wheel package")
+        if len(wan22_companions) != 1:
+            raise ConanException(
+                "expected exactly one ABI-tagged Wan2.2 builder companion in the wheel package; "
+                f"found {[path.name for path in wan22_companions]}"
+            )
 
         for executable in (native, installed_script):
             mode = executable.stat().st_mode

@@ -237,6 +237,18 @@ def write_optimized_bundle(
     declared_model = info_values.pop("model_id", request.model_id)
     if declared_model != request.model_id:
         raise OptimizedBundleError("Capsule bundle_info.model_id must match the build request")
+    declared_source_model = info_values.pop("source_model_id", request.model_id)
+    if declared_source_model != request.model_id:
+        raise OptimizedBundleError(
+            "Capsule bundle_info.source_model_id must match the build request"
+        )
+    declared_source_revision = info_values.pop(
+        "source_revision", request.model_revision
+    )
+    if declared_source_revision != request.model_revision:
+        raise OptimizedBundleError(
+            "Capsule bundle_info.source_revision must match the build request"
+        )
     # These neutral values avoid importing any modality, precision, or engine
     # assumptions into the shared packager. Capsules may explicitly override
     # them through bundle_info for display and inspection purposes.
@@ -245,7 +257,12 @@ def write_optimized_bundle(
     info_values.setdefault("precision", "")
     info_values.setdefault("max_cache_length", 0)
     try:
-        info = BundleInfo(model_id=request.model_id, **info_values)
+        info = BundleInfo(
+            model_id=request.model_id,
+            source_model_id=request.model_id,
+            source_revision=request.model_revision,
+            **info_values,
+        )
     except TypeError as exc:
         raise OptimizedBundleError(f"Capsule bundle_info is invalid: {exc}") from exc
 

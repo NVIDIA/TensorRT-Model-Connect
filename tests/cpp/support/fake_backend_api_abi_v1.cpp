@@ -3,41 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "trtmc/runtime/trt_backend.h"
+#include <cstdint>
 
-namespace {
-
-class FakeBackendV1 final : public trtmc::IBackend {
-  public:
-    std::unique_ptr<trtmc::ITrtModule> create_module(const void*, size_t,
-                                                     const trtmc::ModuleCreateOptions&) override {
-        return {};
-    }
-
-    trtmc::BackendDualProfileModules
-    create_dual_profile_modules(const void*, size_t, const trtmc::ModuleCreateOptions&) override {
-        return {};
-    }
-
-    trtmc::BackendProfileModules create_profile_modules(const void*, size_t,
-                                                        const trtmc::ModuleCreateOptions&,
-                                                        const std::vector<int32_t>&) override {
-        return {};
-    }
-
-    const char* name() const override { return "test_api_abi_v1"; }
-};
-
-} // namespace
-
+// Simulates the previously qualified backend ABI v1 without including the
+// current IBackend definition. The v2 loader must reject it before resolving
+// or calling either v1 factory symbol.
 extern "C" std::uint32_t trtmc_backend_api_abi_version() {
-    return trtmc::kTrtmcBackendApiAbiVersion;
+    return 1U;
 }
 
-extern "C" trtmc::IBackend* trtmc_create_backend_v1() {
-    return new FakeBackendV1();
+extern "C" void* trtmc_create_backend_v1() {
+    return nullptr;
 }
 
-extern "C" void trtmc_destroy_backend_v1(trtmc::IBackend* backend) {
-    delete backend;
-}
+extern "C" void trtmc_destroy_backend_v1(void*) {}

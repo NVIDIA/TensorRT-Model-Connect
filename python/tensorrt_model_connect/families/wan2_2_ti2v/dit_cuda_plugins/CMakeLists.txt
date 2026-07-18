@@ -88,8 +88,9 @@ target_compile_options(trtmc_wan22_dit_cuda_plugin PRIVATE
   "$<$<COMPILE_LANGUAGE:CUDA>:-O3;--ftz=false;--prec-div=true;--prec-sqrt=true;--fmad=true>"
 )
 
-# GB300 is SM103 and Jetson Thor is SM110.  Package real cubins for both
-# qualification targets; no runtime NVRTC/Python compilation is required.
+# GB300 is SM103 and Jetson Thor is SM110. Package real cubins for both
+# qualification targets, so Model-Connect plugin source is never compiled at
+# runtime. The cuDNN frontend SDPA path retains its separate NVRTC dependency.
 set_property(TARGET trtmc_wan22_dit_cuda_plugin PROPERTY CUDA_ARCHITECTURES "103;110")
 
 get_filename_component(WAN22_DIT_TRT_LIBRARY_DIR "${WAN22_DIT_TRT_LIBRARY}" DIRECTORY)

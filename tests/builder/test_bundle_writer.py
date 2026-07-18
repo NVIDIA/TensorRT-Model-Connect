@@ -73,6 +73,35 @@ class TestWriteBundle:
         assert header["max_cache_length"] == 256
         assert sdata["engine_plan"] == data
 
+    def test_hf_source_provenance_is_optional_and_round_trips(self, tmp_path):
+        revision = "a" * 40
+        info = BundleInfo(
+            model_id="Wan-AI/Wan2.2-TI2V-5B",
+            source_model_id="Wan-AI/Wan2.2-TI2V-5B",
+            source_revision=revision,
+        )
+        path = str(tmp_path / "wan.trtfb")
+        write_bundle(path, info, [BundleSection("config.json", b"{}")])
+
+        header, _ = self._read_bundle(path)
+        assert header["source_model_id"] == "Wan-AI/Wan2.2-TI2V-5B"
+        assert header["source_revision"] == revision
+
+        legacy_path = str(tmp_path / "legacy.trtfb")
+        write_bundle(
+            legacy_path,
+            BundleInfo(model_id="local-checkpoint"),
+            [BundleSection("config.json", b"{}")],
+        )
+        legacy_header, _ = self._read_bundle(legacy_path)
+        assert "source_model_id" not in legacy_header
+        assert "source_revision" not in legacy_header
+
+        positional = BundleInfo("legacy-id", "legacy-type", "legacy-family")
+        assert positional.model_id == "legacy-id"
+        assert positional.model_type == "legacy-type"
+        assert positional.family == "legacy-family"
+
     def test_multi_section(self, tmp_path):
         info = BundleInfo(model_id="multi")
         section1 = BundleSection("engine_plan", b"ENGINE" * 100)
@@ -165,6 +194,26 @@ class TestWriteBundle:
         header, sections = self._read_bundle(str(out_path))
         assert header["sections"]["edge/artifacts/llm.engine"]["size"] == len(payload)
         assert sections["edge/artifacts/llm.engine"] == payload
+
+    def test_file_backed_section_preserves_hf_source_provenance(self, tmp_path):
+        source = tmp_path / "llm.engine"
+        source.write_bytes(b"engine")
+        revision = "b" * 40
+        destination = tmp_path / "file-backed-provenance.trtfb"
+
+        write_bundle(
+            destination,
+            BundleInfo(
+                model_id="Example/Model",
+                source_model_id="Example/Model",
+                source_revision=revision,
+            ),
+            [_bundle_section_from_file("edge/llm.engine", source)],
+        )
+
+        header, _ = self._read_bundle(str(destination))
+        assert header["source_model_id"] == "Example/Model"
+        assert header["source_revision"] == revision
 
     def test_file_backed_digest_mismatch_is_not_published(self, tmp_path):
         source = tmp_path / "mutable.engine"

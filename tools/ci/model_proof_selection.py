@@ -61,6 +61,9 @@ class ModelProofSelector:
         runtime_library = str(
             runtime.get("runtime_library") or f"libtrtmc_model_{owners['runtime']}.so"
         )
+        builder_auxiliary_libraries = self._builder_auxiliary_libraries(
+            runtime_manifest, runtime, runtime_library
+        )
         runtime_tests = self._runtime_tests(runtime_manifest, runtime)
         e2e_dir = self.source / "tests/e2e/models" / str(owners["e2e"])
         owner_data = tomllib.loads((e2e_dir / "MODEL.toml").read_text(encoding="utf-8"))
@@ -95,6 +98,7 @@ class ModelProofSelector:
             "requested_model": self.model,
             "owners": owners,
             "runtime_library": runtime_library,
+            "builder_auxiliary_libraries": builder_auxiliary_libraries,
             "runtime_tests": runtime_tests,
             "python_family": python_family,
             "python_tests": [
@@ -176,6 +180,28 @@ class ModelProofSelector:
                 raise CiError(f"invalid runtime_tests entry in {path}: {entry!r}")
             tests.append(fields[0])
         return tests
+
+    @staticmethod
+    def _builder_auxiliary_libraries(
+        path: Path, data: dict[str, object], owner_library: str
+    ) -> list[str]:
+        raw = data.get("builder_auxiliary_libraries", [])
+        if not isinstance(raw, list):
+            raise CiError(f"builder_auxiliary_libraries must be a list in {path}")
+        auxiliaries: list[str] = []
+        for value in raw:
+            if (
+                not isinstance(value, str)
+                or value == owner_library
+                or "/" in value
+                or "\\" in value
+                or not re.fullmatch(r"libtrtmc_model_[A-Za-z0-9_.?*+-]+\.so", value)
+            ):
+                raise CiError(f"invalid builder_auxiliary_libraries entry in {path}: {value!r}")
+            if value in auxiliaries:
+                raise CiError(f"duplicate builder_auxiliary_libraries entry in {path}: {value!r}")
+            auxiliaries.append(value)
+        return auxiliaries
 
     def _reference_cache(
         self, owner: dict[str, object], family: str, owner_manifest: Path

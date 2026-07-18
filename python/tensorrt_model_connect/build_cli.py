@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
@@ -65,40 +66,71 @@ def _cmd_build(args: argparse.Namespace) -> int:
         print("Error: -o / --output required", file=sys.stderr)
         return 1
 
+    # A recognizable repository ID gives us a model-owned routing decision
+    # without touching the network. If that family has no optimized capsule
+    # for this exact model, stay on the native path so dependency/precision
+    # preflight runs before a multi-GB checkpoint download.
+    hinted_family = _family_hint_from_model_ref(args.model)
+    probe_optimized_runtime = not hinted_family
+    if hinted_family:
+        try:
+            from .runtime_provider.orchestrator import (
+                discover_family_implementations_for_model,
+            )
+
+            probe_optimized_runtime = bool(
+                discover_family_implementations_for_model(
+                    hinted_family,
+                    args.model,
+                )
+            )
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                import traceback
+
+                traceback.print_exc()
+            return 1
+
     # Optimized dispatch resolves the model family internally and scans only
     # that family's Builder folder. The current platform remains implicit; no
     # public API or CLI option is added for runtime selection.
-    try:
-        from .engine_builder import _try_build_optimized_runtime
+    if probe_optimized_runtime:
+        try:
+            from .engine_builder import _try_build_optimized_runtime
 
-        optimized = _try_build_optimized_runtime(
-            args.model,
-            args.output,
-            _optimized_cli_public_options(args),
-        )
-    except Exception as exc:
-        print(f"Error: {exc}", file=sys.stderr)
-        if getattr(args, "verbose", False):
-            import traceback
+            optimized = _try_build_optimized_runtime(
+                args.model,
+                args.output,
+                _optimized_cli_public_options(args),
+            )
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            if getattr(args, "verbose", False):
+                import traceback
 
-            traceback.print_exc()
-        return 1
-    if optimized is not None:
-        return 0
+                traceback.print_exc()
+            return 1
+        if optimized is not None:
+            return 0
 
     build_model_ref = args.model
 
-    # Backend dispatch: default to auto-selection of the native TRT backend.
-    method_name = getattr(args, 'method', 'auto')
-    if method_name == 'auto':
-        try:
-            method_name, build_model_ref = _auto_select_build_backend(args.model)
-        except Exception as e:
-            print(f"Error: {e}", file=sys.stderr)
-            if args.verbose:
-                import traceback
-                traceback.print_exc()
-            return 1
+    # TensorRT is the only engine backend.  ``--method`` remains a hidden
+    # parser compatibility alias for old scripts, but has no dispatch role.
+    method_name = "trt"
+
+    # A recognizable HF ID lets us fail on missing family build dependencies
+    # before downloading a multi-GB checkpoint.
+    try:
+        if hinted_family:
+            _preflight_family_build_dependencies(hinted_family)
+            args.precision = _resolve_family_build_precision(
+                hinted_family, getattr(args, "precision", None)
+            )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
     if not getattr(args, "_skip_profile_resolution", False):
         try:
@@ -114,6 +146,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
                 traceback.print_exc()
             return 1
 
+        try:
+            _preflight_family_build_dependencies(build_family)
+            args.precision = _resolve_family_build_precision(
+                build_family, getattr(args, "precision", None)
+            )
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
         reexec_rc = _maybe_reexec_build_in_profile(
             args,
             build_model_ref,
@@ -121,6 +162,10 @@ def _cmd_build(args: argparse.Namespace) -> int:
         )
         if reexec_rc is not None:
             return reexec_rc
+    else:
+        # Internal callers that explicitly skip metadata resolution retain the
+        # historical generic default.
+        args.precision = getattr(args, "precision", None) or "fp32"
 
     from .parallel_config import ParallelConfig
 
@@ -183,6 +228,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     try:
         build(
             model_id_or_path=build_model_ref,
+            source_model_ref=args.model,
             output_path=args.output,
             max_cache_length=args.max_cache_length,
             decoder_engine_layout=getattr(args, "decoder_engine_layout", "split"),
@@ -248,6 +294,65 @@ def _resolved_config_values(bundle) -> dict:
         }
         for namespace, fields in bundle.all().items()
     }
+
+
+def _family_hint_from_model_ref(model_ref: str) -> str:
+    """Return a metadata-only family hint without touching the network."""
+    from .families import resolve_family_id
+
+    normalized = str(model_ref or "").rstrip("/")
+    if not normalized:
+        return ""
+    if Path(normalized).exists():
+        return ""
+    for candidate in (Path(normalized).name, normalized):
+        family = resolve_family_id(candidate)
+        if family:
+            return family
+    return ""
+
+
+def _resolve_family_build_precision(
+    family: str, requested: str | None
+) -> str:
+    from .families import family_build_precision
+
+    precision = family_build_precision(family, requested)
+    if requested is None:
+        print(
+            f"[trtmc build] Using {family or 'generic'} default precision: "
+            f"{precision}",
+            file=sys.stderr,
+        )
+    return precision
+
+
+def _preflight_family_build_dependencies(family: str) -> None:
+    """Fail before checkpoint download when a family build module is absent."""
+    from .families import (
+        family_build_dependency_extra,
+        family_build_python_modules,
+    )
+
+    missing = [
+        module
+        for module in family_build_python_modules(family)
+        if importlib.util.find_spec(module) is None
+    ]
+    if not missing:
+        return
+    modules = ", ".join(missing)
+    extra = family_build_dependency_extra(family)
+    install_hint = (
+        f"Install the family build dependencies with "
+        f"'pip install tensorrt-model-connect[{extra}]'."
+        if extra else
+        "Reinstall TensorRT-Model-Connect with this family's build dependencies."
+    )
+    raise RuntimeError(
+        f"Family {family} requires build dependency module(s): {modules}. "
+        f"{install_hint} No checkpoint path or plugin path is required."
+    )
 
 
 def _resolve_build_model_metadata(model_ref: str, method_name: str) -> tuple[str, str]:
@@ -474,6 +579,8 @@ def _cmd_inspect(args: argparse.Namespace) -> int:
 
         fields = [
             ("Model ID", "model_id"),
+            ("Source model ID", "source_model_id"),
+            ("Source revision", "source_revision"),
             ("Model type", "model_type"),
             ("Family", "family"),
             ("TRT version", "trt_version"),
@@ -613,8 +720,8 @@ def main() -> None:
              "B=1 (the runtime slices)."
     )
     build_p.add_argument("--precision", choices=["fp32", "fp16", "bf16"],
-                         default="fp32",
-                         help="Engine precision (default: fp32)")
+                         default=None,
+                         help="Engine precision (default: selected by model family)")
     build_p.add_argument(
         "--fp32-layers",
         type=_parse_layer_indices,
@@ -631,9 +738,8 @@ def main() -> None:
     build_p.add_argument("--quant-calibration-samples",
                          type=int, default=512,
                          help="Number of calibration samples for PTQ (default: 512)")
-    build_p.add_argument("--method", type=str, default="auto",
-                         choices=["auto", "trt"],
-                         help="Engine definition method: auto (default, native TRT) or trt")
+    build_p.add_argument("--method", type=str, default="trt",
+                         choices=["trt", "auto"], help=argparse.SUPPRESS)
     build_p.add_argument("--verbose", action="store_true",
                          help="Verbose TRT builder output")
     build_p.add_argument("--fp8", action="store_true",

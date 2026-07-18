@@ -307,6 +307,101 @@ def test_native_diffusion_config_without_model_index_uses_claimed_family(
     assert family == "wan2_2_ti2v"
 
 
+def test_wan_hf_id_selects_bf16_before_download_and_preserves_source_id(
+    tmp_path, monkeypatch
+):
+    """Wan's model ID is enough to select BF16 and source provenance."""
+    model_dir = tmp_path / "snapshot"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(
+        json.dumps({"_class_name": "WanModel"}), encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        cli,
+        "_resolve_build_model_metadata",
+        lambda model_ref, _method: (str(model_dir), "wan2_2_ti2v"),
+    )
+    monkeypatch.setattr(cli, "_maybe_reexec_build_in_profile", lambda *_args: None)
+    monkeypatch.setattr(cli, "_preflight_family_build_dependencies", lambda _family: None)
+
+    import tensorrt_model_connect.engine_builder as engine_builder
+
+    def fake_build(**kwargs):
+        captured.update(kwargs)
+
+    # The CLI has already completed optimized-runtime routing at this point,
+    # so it enters the native builder directly. Keep the provenance and
+    # family-default assertions on that production seam.
+    monkeypatch.setattr(engine_builder, "_build_native_impl", fake_build)
+    args = argparse.Namespace(
+        model="Wan-AI/Wan2.2-TI2V-5B",
+        output=str(tmp_path / "wan.trtfb"),
+        max_cache_length=512,
+        precision=None,
+        quantize=None,
+        quant_scales=None,
+        quant_calibration_samples=512,
+        verbose=False,
+        _skip_profile_resolution=False,
+    )
+
+    assert cli._cmd_build(args) == 0
+    assert captured["model_id_or_path"] == str(model_dir)
+    assert captured["source_model_ref"] == "Wan-AI/Wan2.2-TI2V-5B"
+    assert captured["precision"] == "bf16"
+
+
+def test_wan_explicit_unsupported_precision_fails_before_download(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setattr(cli, "_preflight_family_build_dependencies", lambda _family: None)
+    monkeypatch.setattr(
+        cli,
+        "_resolve_build_model_metadata",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("checkpoint download must not start")),
+    )
+    args = argparse.Namespace(
+        model="Wan-AI/Wan2.2-TI2V-5B",
+        output=str(tmp_path / "wan.trtfb"),
+        precision="fp32",
+        verbose=False,
+        _skip_profile_resolution=False,
+    )
+
+    assert cli._cmd_build(args) == 1
+    assert "does not support build precision 'fp32'" in capsys.readouterr().err
+
+
+def test_wan_missing_torch_preflight_names_model_extra(monkeypatch):
+    import tensorrt_model_connect.families as families
+
+    monkeypatch.setattr(
+        cli.importlib.util,
+        "find_spec",
+        lambda module: None if module == "torch" else object(),
+    )
+    with pytest.raises(RuntimeError, match=r"tensorrt-model-connect\[wan\]"):
+        cli._preflight_family_build_dependencies("wan2_2_ti2v")
+
+    assert families.family_build_precision("wan2_2_ti2v") == "bf16"
+    assert families.family_build_python_modules("wan2_2_ti2v") == ("torch",)
+    assert families.family_build_dependency_extra("wan2_2_ti2v") == "wan"
+
+
+def test_wan_torch_is_build_extra_not_global_runtime_dependency():
+    import tomllib
+    from pathlib import Path
+
+    pyproject = tomllib.loads(
+        (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text(
+            encoding="utf-8")
+    )
+    assert "torch>=2.0" not in pyproject["project"]["dependencies"]
+    assert pyproject["project"]["optional-dependencies"]["wan"] == ["torch>=2.0"]
+
+
 def test_auto_select_build_backend_errors_for_unsupported_native_model(tmp_path, monkeypatch):
     """Intent: auto backend selection should fail clearly when native TRT is unsupported.
     Preconditions: a local config has no native raw or diffusion plugin.

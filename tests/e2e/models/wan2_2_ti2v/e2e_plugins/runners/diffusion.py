@@ -154,7 +154,7 @@ def _frame_stats(frame_paths: list[Path]) -> dict[str, float | int | bool]:
     }
 
 
-class Wan22TI2VDiffusionRunner:
+class DiffusionMediaRunner:
     """Run only the public Python-free Model-Connect C++ video path."""
 
     @property
@@ -246,4 +246,4 @@ class Wan22TI2VDiffusionRunner:
         )
 
 
-plugin = Wan22TI2VDiffusionRunner()
+plugin = DiffusionMediaRunner()

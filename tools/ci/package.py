@@ -9,11 +9,13 @@ Boundary: package correctness and reuse state; source-only unit tests live elsew
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import importlib.metadata
 import importlib.resources
 import re
 import shutil
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -23,6 +25,68 @@ from .process import CiError
 
 WHEEL_BUILD_STATE = "wheel-build.json"
 WHEEL_INSTALL_STATE = "wheel-installed.json"
+WAN22_BUILDER_COMPANION_RE = re.compile(
+    r"^libtrtmc_model_wan2_2_ti2v_plugins_trt(?P<major>[0-9]+)_"
+    r"(?P<minor>[0-9]+)\.so$"
+)
+TENSORRT_EXACT_REQUIREMENT_RE = re.compile(
+    r"^\s*tensorrt\s*==\s*(?P<major>[0-9]+)\.(?P<minor>[0-9]+)"
+    r"(?:\.[A-Za-z0-9][A-Za-z0-9._+-]*)+\s*(?:;.*)?$",
+    re.IGNORECASE,
+)
+WAN22_WHEEL_ATTRIBUTION_SHA256 = {
+    "tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/"
+    "cudnn_frontend/LICENSE.txt": "3fc4b473a2c08768a8066bf7e4a58a1185060f3ad674f2ca9e2011bca4adf2ce",
+    "tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/"
+    "cudnn_frontend/README.trtmc.md": "713053b50528664de312c63998245f66179ac8fc17e978c0b56120e54d7c8ef0",
+    "tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/"
+    "cudnn_frontend/include/cudnn_frontend/thirdparty/nlohmann/LICENSE.MIT": (
+        "86b998c792894ccb911a1cb7994f7a9652894e7a094c0b5e45be2f553f45cf14"
+    ),
+}
+
+
+def _required_tensorrt_abi(requirements: list[str], *, source: str) -> tuple[int, int]:
+    tensorrt_requirements = [
+        requirement
+        for requirement in requirements
+        if re.match(r"^\s*tensorrt(?:\s|=|<|>|!|~|;|$)", requirement, re.IGNORECASE)
+    ]
+    if len(tensorrt_requirements) != 1:
+        raise CiError(
+            f"{source} must contain exactly one TensorRT dependency; "
+            f"found {tensorrt_requirements}"
+        )
+    match = TENSORRT_EXACT_REQUIREMENT_RE.fullmatch(tensorrt_requirements[0])
+    if match is None:
+        raise CiError(
+            f"{source} TensorRT dependency must be an exact major.minor version pin; "
+            f"found {tensorrt_requirements[0]!r}"
+        )
+    return int(match.group("major")), int(match.group("minor"))
+
+
+def _wan22_companion_abi(name: str, *, source: str) -> tuple[int, int]:
+    match = WAN22_BUILDER_COMPANION_RE.fullmatch(name)
+    if match is None:
+        raise CiError(f"{source} has an invalid Wan2.2 companion name: {name}")
+    return int(match.group("major")), int(match.group("minor"))
+
+
+def _require_matching_wan22_tensorrt_abi(
+    companion_name: str,
+    requirements: list[str],
+    *,
+    source: str,
+) -> None:
+    companion_abi = _wan22_companion_abi(companion_name, source=source)
+    required_abi = _required_tensorrt_abi(requirements, source=source)
+    if companion_abi != required_abi:
+        raise CiError(
+            f"{source} Wan2.2 companion TensorRT ABI does not match its dependency: "
+            f"companion={companion_abi[0]}.{companion_abi[1]}, "
+            f"Requires-Dist tensorrt={required_abi[0]}.{required_abi[1]}"
+        )
 
 
 class InstalledWheelValidator:
@@ -47,21 +111,46 @@ class InstalledWheelValidator:
         native_dir = Path(importlib.resources.files("tensorrt_model_connect").joinpath("bin"))
         native = native_dir / "trtmc"
         backends = sorted(native_dir.glob("libtrtmc_backend_trt*.so*"))
+        wan22_companions = sorted(
+            path
+            for path in native_dir.glob("libtrtmc_model_wan2_2_ti2v_plugins_trt*.so")
+            if WAN22_BUILDER_COMPANION_RE.fullmatch(path.name)
+        )
         if not native.is_file():
             raise CiError(f"packaged native trtmc executable is missing under {native_dir}")
         if not backends:
             raise CiError(f"packaged TensorRT backend DSO is missing under {native_dir}")
+        if len(wan22_companions) != 1:
+            raise CiError(
+                "installed wheel must contain exactly one ABI-tagged Wan2.2 builder companion "
+                f"under {native_dir}; found {[path.name for path in wan22_companions]}"
+            )
+        installed_requirements = importlib.metadata.requires("tensorrt-model-connect") or []
+        _require_matching_wan22_tensorrt_abi(
+            wan22_companions[0].name,
+            installed_requirements,
+            source="installed wheel metadata",
+        )
         print(f"installed_wheel={wheel}")
         print(f"imported_package={package_file}")
         print(f"installed_trtmc={script_path}")
         print(f"packaged_native_trtmc={native}")
         for backend in backends:
             print(f"packaged_backend={backend}")
+        print(f"packaged_wan22_companion={wan22_companions[0]}")
 
     @staticmethod
     def require_elf(path: Path) -> None:
         if not path.is_file() or path.read_bytes()[:4] != b"\x7fELF":
             raise CiError(f"{path} is not the native ELF trtmc executable")
+
+    @staticmethod
+    def require_no_runtime_search_path(path: Path, dynamic: str) -> None:
+        if "(RPATH)" in dynamic or "(RUNPATH)" in dynamic:
+            raise CiError(
+                f"{path} must not contain DT_RPATH/DT_RUNPATH; the embedded Wan2.2 "
+                "companion resolves ABI dependencies explicitly"
+            )
 
 
 class WheelArchiveValidator:
@@ -79,11 +168,29 @@ class WheelArchiveValidator:
         for wheel in wheels:
             self._validate_one(wheel)
 
+    @staticmethod
+    def _require_wan22_attributions(archive: zipfile.ZipFile, wheel: Path) -> None:
+        archive_names = archive.namelist()
+        for name, expected_sha256 in WAN22_WHEEL_ATTRIBUTION_SHA256.items():
+            count = archive_names.count(name)
+            if count != 1:
+                raise CiError(
+                    f"{wheel}: expected exactly one Wan2.2 vendored attribution file "
+                    f"{name}; found {count}"
+                )
+            actual_sha256 = hashlib.sha256(archive.read(name)).hexdigest()
+            if actual_sha256 != expected_sha256:
+                raise CiError(
+                    f"{wheel}: Wan2.2 vendored attribution file {name} has SHA256 "
+                    f"{actual_sha256}; expected {expected_sha256}"
+                )
+
     def _validate_one(self, wheel: Path) -> None:
         if not wheel.name.endswith(f"-{self.platform}.whl"):
             raise CiError(f"{wheel}: expected platform tag {self.platform}")
         with zipfile.ZipFile(wheel) as archive:
             names = set(archive.namelist())
+            self._require_wan22_attributions(archive, wheel)
             if any(".data/purelib/" in name for name in names):
                 raise CiError(f"{wheel}: native wheel must not contain .data/purelib entries")
             binaries = [name for name in names if name.endswith("/bin/trtmc")]
@@ -93,9 +200,22 @@ class WheelArchiveValidator:
             backends = [
                 name for name in names if "/bin/libtrtmc_backend" in name and name.endswith(".so")
             ]
+            wan22_companions = [
+                name
+                for name in names
+                if "/bin/" in name and WAN22_BUILDER_COMPANION_RE.fullmatch(Path(name).name)
+            ]
+            wan22_companion_bytes = (
+                archive.read(wan22_companions[0]) if len(wan22_companions) == 1 else None
+            )
             metadata = archive.read(
                 next(name for name in names if name.endswith(".dist-info/METADATA"))
             ).decode()
+            requirements = [
+                line.split(":", maxsplit=1)[1].strip()
+                for line in metadata.splitlines()
+                if line.lower().startswith("requires-dist:")
+            ]
             wheel_metadata = archive.read(
                 next(name for name in names if name.endswith(".dist-info/WHEEL"))
             ).decode()
@@ -110,6 +230,10 @@ class WheelArchiveValidator:
             ),
             (bool(backends), "packaged native TensorRT backend DSO is missing"),
             (
+                len(wan22_companions) == 1,
+                "expected exactly one ABI-tagged Wan2.2 builder companion",
+            ),
+            (
                 "Requires-Dist: tensorrt==11.2.0.113" in metadata,
                 "pinned TensorRT 11.2.0.113 dependency metadata is missing",
             ),
@@ -122,6 +246,18 @@ class WheelArchiveValidator:
         for passed, message in checks:
             if not passed:
                 raise CiError(f"{wheel}: {message}")
+        if wan22_companion_bytes is None:
+            raise CiError(f"{wheel}: Wan2.2 builder companion bytes are unavailable")
+        _require_matching_wan22_tensorrt_abi(
+            Path(wan22_companions[0]).name,
+            requirements,
+            source=str(wheel),
+        )
+        with tempfile.TemporaryDirectory(prefix="trtmc-wheel-wan22-") as temporary_dir:
+            companion = Path(temporary_dir) / Path(wan22_companions[0]).name
+            companion.write_bytes(wan22_companion_bytes)
+            dynamic = self.context.output(["readelf", "-d", companion])
+            InstalledWheelValidator.require_no_runtime_search_path(companion, dynamic)
         audit = self.context.output([sys.executable, "-m", "auditwheel", "show", wheel])
         print(audit)
         minors = [
@@ -136,7 +272,16 @@ class WheelArchiveValidator:
                 f"manylinux_2_{self.max_glibc_minor}_aarch64 or older"
             )
         print(f"validated wheel={wheel}")
-        for entry in sorted([*binaries, *scripts, *package_cores, *script_cores, *backends]):
+        for entry in sorted(
+            [
+                *binaries,
+                *scripts,
+                *package_cores,
+                *script_cores,
+                *backends,
+                *wan22_companions,
+            ]
+        ):
             print(f"  {entry}")
 
 
@@ -151,11 +296,15 @@ class WheelPackageManager:
         trt_library = self._tensorrt_library()
         cuda_include = self.context.env.get("TRTMC_CUDA_INCLUDE_DIR", "/usr/local/cuda/include")
         cudart = self.context.env.get("TRTMC_CUDART_LIBRARY", "/usr/local/cuda/lib64/libcudart.so")
+        cudnn_include = self._wan22_cudnn_include()
+        cudnn_library = self._wan22_cudnn_library()
         required = {
             "TensorRT include directory": trt_include,
             "TensorRT libnvinfer.so": trt_library,
             "CUDA include directory": cuda_include,
             "CUDA runtime library": cudart,
+            "Wan2.2 cuDNN include directory": cudnn_include,
+            "Wan2.2 libcudnn.so": cudnn_library,
         }
         for label, value in required.items():
             if not value:
@@ -230,6 +379,8 @@ class WheelPackageManager:
                     "TRTMC_TRT_LIBRARY": trt_library,
                     "TRTMC_CUDA_INCLUDE_DIR": cuda_include,
                     "TRTMC_CUDART_LIBRARY": cudart,
+                    "TRTMC_WAN22_CUDNN_INCLUDE_DIR": cudnn_include,
+                    "TRTMC_WAN22_CUDNN_LIBRARY": cudnn_library,
                     "TRTMC_CONAN_ENABLE_TEST_TARGETS": "1",
                     "WHEEL_PYVER": tag,
                     "WHEEL_ABI": "none",
@@ -257,6 +408,8 @@ class WheelPackageManager:
                 "trt_library": trt_library,
                 "cuda_include_dir": cuda_include,
                 "cudart_library": cudart,
+                "wan22_cudnn_include_dir": cudnn_include,
+                "wan22_cudnn_library": cudnn_library,
             },
         )
         print("Reusable wheel build metadata:")
@@ -422,6 +575,21 @@ class WheelPackageManager:
             raise CiError("installed trtmc does not search for DSOs beside itself")
         if "/workspace/" in dynamic:
             raise CiError("installed trtmc RUNPATH leaks the CI build directory")
+        companions = sorted(
+            path
+            for path in (root / "lib").glob(
+                "python*/site-packages/tensorrt_model_connect/bin/"
+                "libtrtmc_model_wan2_2_ti2v_plugins_trt*.so"
+            )
+            if WAN22_BUILDER_COMPANION_RE.fullmatch(path.name)
+        )
+        if len(companions) != 1:
+            raise CiError(
+                "clean wheel smoke requires exactly one installed Wan2.2 builder companion; "
+                f"found {companions}"
+            )
+        companion_dynamic = self.context.output(["readelf", "-d", companions[0]])
+        InstalledWheelValidator.require_no_runtime_search_path(companions[0], companion_dynamic)
         self.context.run([trtmc, "version"])
         self.context.run([trtmc, "--help"], capture_output=True)
         self.context.run([trtmc, "build", "--help"], capture_output=True)
@@ -468,7 +636,13 @@ class WheelPackageManager:
         self.context.executable("patchelf")
 
     def _conan_cmake_build_dir(self, conan_out: Path) -> Path:
-        caches = sorted((conan_out / "build").glob("*/CMakeCache.txt"))
+        build_root = conan_out / "build"
+        caches = sorted(
+            {
+                *build_root.glob("*/CMakeCache.txt"),
+                *build_root.glob("*/*/CMakeCache.txt"),
+            }
+        )
         if len(caches) != 1:
             raise CiError(
                 f"expected exactly one reusable CMakeCache.txt under {conan_out}, "
@@ -503,6 +677,38 @@ class WheelPackageManager:
             Path("/usr/include"),
         )
         return str(next((root for root in roots if (root / "NvInfer.h").is_file()), ""))
+
+    def _wan22_cudnn_include(self) -> str:
+        configured = self.context.env.get("TRTMC_WAN22_CUDNN_INCLUDE_DIR", "")
+        if configured:
+            return configured
+        roots = [
+            *Path("/opt/venv/lib").glob("python*/site-packages/nvidia/cudnn/include"),
+            *Path("/usr/local/lib").glob("python*/dist-packages/nvidia/cudnn/include"),
+            Path("/usr/local/cudnn/include"),
+            Path("/usr/local/cuda/include"),
+            Path("/usr/include"),
+        ]
+        return str(next((root for root in roots if (root / "cudnn.h").is_file()), ""))
+
+    def _wan22_cudnn_library(self) -> str:
+        configured = self.context.env.get("TRTMC_WAN22_CUDNN_LIBRARY", "")
+        if configured:
+            return configured
+        candidates = [
+            *Path("/opt/venv/lib").glob(
+                "python*/site-packages/nvidia/cudnn/lib/libcudnn.so.9"
+            ),
+            *Path("/usr/local/lib").glob(
+                "python*/dist-packages/nvidia/cudnn/lib/libcudnn.so.9"
+            ),
+            Path("/usr/local/cudnn/lib/libcudnn.so.9"),
+            Path("/usr/local/cudnn/lib64/libcudnn.so.9"),
+            Path("/usr/local/cuda/lib64/libcudnn.so.9"),
+            Path("/usr/lib/aarch64-linux-gnu/libcudnn.so.9"),
+            Path("/usr/lib/x86_64-linux-gnu/libcudnn.so.9"),
+        ]
+        return str(next((path for path in candidates if path.is_file()), ""))
 
     def _default_config(self, variable: str, filename: str) -> tuple[Path, dict[str, object]]:
         requested = self.context.env.get(variable, "")

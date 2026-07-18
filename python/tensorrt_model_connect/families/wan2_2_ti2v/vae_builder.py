@@ -308,7 +308,9 @@ def load_vae_cuda_plugin(*, verbose: bool = False) -> Path:
 
     from .vae_cuda_plugin_builder import ensure_vae_cuda_plugin
 
-    path = ensure_vae_cuda_plugin(verbose=verbose).resolve()
+    # The production companion is a sealed /proc/self/fd/N image. Keep that
+    # path verbatim so every builder reuses the exact loaded ELF bytes.
+    path = ensure_vae_cuda_plugin(verbose=verbose)
     if path not in _LOADED_VAE_PLUGIN_HANDLES:
         _LOADED_VAE_PLUGIN_HANDLES[path] = ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
     return path

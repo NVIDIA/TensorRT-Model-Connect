@@ -35,11 +35,27 @@ def _artifact_profile() -> dict:
     return official_artifact_profile()
 
 
+def _plugin_contract() -> dict:
+    return {
+        "schema": 1,
+        "family": "wan2_2_ti2v",
+        "semantic_abi": "wan2_2_ti2v.plugins.v1",
+        "source_digest": "a" * 64,
+        "creator_set": "Wan22DitGelu:1:",
+        "runtime_abi": {
+            "tensorrt_major": 11,
+            "tensorrt_minor": 0,
+            "cuda_major": 13,
+            "cudnn_major": 9,
+        },
+        "cuda_architectures": [103, 110],
+    }
+
+
 def _bundle_components() -> dict:
     components = {
-        "umt5_cuda_plugin": b"wan22-umt5-cuda-plugin",
-        "dit_cuda_plugin": b"wan22-dit-cuda-plugin",
-        "vae_cuda_plugin": b"wan22-vae-cuda-plugin",
+        "plugin_contract": _plugin_contract(),
+        "plugin_library": b"wan22-plugins-aot",
         "text_encoders": [("umt5_xxl", b"wan22-t5-plan")],
         "denoiser": b"wan22-dit-plan",
         "vae_decoder": b"wan22-vae-recurrent-plan",
@@ -47,14 +63,12 @@ def _bundle_components() -> dict:
         "tokenizer_json": b'{"model":{"type":"Unigram"}}',
     }
     section_payloads = {
-        "wan2_2_umt5_cuda_plugin_so": components["umt5_cuda_plugin"],
-        "wan2_2_dit_cuda_plugin_so": components["dit_cuda_plugin"],
-        "wan2_2_vae_cuda_plugin_so": components["vae_cuda_plugin"],
         "text_encoder_0_plan": components["text_encoders"][0][1],
         "denoiser_plan": components["denoiser"],
         "vae_decoder_plan": components["vae_decoder"],
         "vae_decoder_first_frame_plan": components["vae_decoder_first_frame"],
         "tokenizer.json": components["tokenizer_json"],
+        "wan2_2_ti2v_plugins.so": components["plugin_library"],
     }
     sections = {}
     for name, payload in section_payloads.items():
@@ -64,7 +78,21 @@ def _bundle_components() -> dict:
                 {
                     "name": f"checkpoint/{name}",
                     "sha256": hashlib.sha256(f"input:{name}".encode()).hexdigest(),
-                }
+                },
+                {
+                    "name": "plugin/contract.json",
+                    "sha256": hashlib.sha256(
+                        json.dumps(
+                            components["plugin_contract"],
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest(),
+                },
+                {
+                    "name": "plugin/elf",
+                    "sha256": hashlib.sha256(components["plugin_library"]).hexdigest(),
+                },
             ]
             source_document = {
                 "family": "wan2_2_ti2v",
@@ -82,7 +110,7 @@ def _bundle_components() -> dict:
             ).hexdigest()
         sections[name] = entry
     components["artifact_manifest"] = {
-        "schema": "trtmc.wan2_2_ti2v.bundle-artifacts.v2",
+        "schema": "trtmc.wan2_2_ti2v.bundle-artifacts.v4",
         "family": "wan2_2_ti2v",
         "profile": _artifact_profile(),
         "runtime": "native_cpp_cuda_tensorrt",
@@ -221,7 +249,7 @@ def test_load_weights_requires_complete_native_checkpoint(tmp_path) -> None:
         Wan22TI2VPlugin().load_weights(str(model), SimpleNamespace(raw={}))
 
 
-def test_native_bundle_hooks_require_all_four_tensorrt_components(
+def test_native_bundle_hooks_emit_exact_seven_section_contract(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -242,15 +270,15 @@ def test_native_bundle_hooks_require_all_four_tensorrt_components(
         == components
     )
     assert plugin.diffusion_bundle_sections(components) == [
-        ("wan2_2_umt5_cuda_plugin_so", b"wan22-umt5-cuda-plugin"),
-        ("wan2_2_dit_cuda_plugin_so", b"wan22-dit-cuda-plugin"),
-        ("wan2_2_vae_cuda_plugin_so", b"wan22-vae-cuda-plugin"),
         ("text_encoder_0_plan", b"wan22-t5-plan"),
         ("denoiser_plan", b"wan22-dit-plan"),
         ("vae_decoder_plan", b"wan22-vae-recurrent-plan"),
         ("vae_decoder_first_frame_plan", b"wan22-vae-initializer-plan"),
         ("tokenizer.json", b'{"model":{"type":"Unigram"}}'),
+        ("wan2_2_ti2v_plugins.so", b"wan22-plugins-aot"),
     ]
+    assert len(WAN22_MODEL_OWNED_BUNDLE_SECTIONS) == 6
+    assert len(WAN22_REQUIRED_BUNDLE_SECTIONS) == 7
     with pytest.raises(NotImplementedError, match="build_components"):
         plugin.build_engine(_runtime_config(), {}, 256)
 
@@ -291,7 +319,7 @@ def test_public_builder_routes_native_config_to_exact_component_contract(
 
         def diffusion_bundle_config(self, _config, *, components):
             assert set(components["payloads"]) == set(component_sections)
-            return {}
+            return {"_trtmc_wan22_plugin_contract": {"schema": "test"}}
 
         def diffusion_tokenizer_add_special_tokens(self, *_args, **_kwargs):
             return False
@@ -314,27 +342,38 @@ def test_public_builder_routes_native_config_to_exact_component_contract(
     )
 
     output_path = str(tmp_path / "wan22.trtfb")
-    engine_builder.build_bundle(str(model_dir), output_path, precision="bf16")
+    revision = "a" * 40
+    engine_builder.build_bundle(
+        str(model_dir),
+        output_path,
+        source_model_id="Wan-AI/Wan2.2-TI2V-5B",
+        source_revision=revision,
+    )
 
     assert calls == {"build_components": 1, "build_engine": 0}
     assert captured["output"] == output_path
     assert captured["info"].family == "wan2_2_ti2v"
+    assert captured["info"].precision == "bf16"
+    assert captured["info"].model_id == "Wan-AI/Wan2.2-TI2V-5B"
+    assert captured["info"].source_revision == revision
     assert [section.name for section in captured["sections"]] == list(
         WAN22_REQUIRED_BUNDLE_SECTIONS
     )
+    config_section = next(
+        section for section in captured["sections"] if section.name == "config.json")
+    bundled_config = json.loads(config_section.data)
+    assert "_trtmc_wan22_plugin_contract" in bundled_config
+    assert bundled_config["source_model_id"] == "Wan-AI/Wan2.2-TI2V-5B"
+    assert bundled_config["source_revision"] == revision
 
 
-def test_component_builder_packages_and_registers_cuda_plugin(
+def test_component_builder_embeds_selected_aot_companion_in_bundle(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     import tensorrt_model_connect.families.wan2_2_ti2v.trt_builder as trt_builder
 
-    umt5_cuda_plugin = tmp_path / "libtrtmc_wan22_umt5_cuda_plugin.so"
-    dit_cuda_plugin = tmp_path / "libtrtmc_wan22_dit_cuda_plugin.so"
-    vae_cuda_plugin = tmp_path / "libtrtmc_wan22_vae_cuda_plugin.so"
-    umt5_cuda_plugin.write_bytes(b"pure-umt5-cuda-plugin")
-    dit_cuda_plugin.write_bytes(b"pure-dit-cuda-plugin")
-    vae_cuda_plugin.write_bytes(b"pure-vae-cuda-plugin")
+    plugin_companion = tmp_path / "libtrtmc_model_wan2_2_ti2v_plugins_trt11_1.so"
+    plugin_companion.write_bytes(b"qualified-aot-companion")
     (tmp_path / "config.json").write_text(json.dumps(_native_config()))
     (tmp_path / "models_t5_umt5-xxl-enc-bf16.pth").write_bytes(b"official-t5")
     (tmp_path / "Wan2.2_VAE.pth").write_bytes(b"official-vae")
@@ -345,11 +384,16 @@ def test_component_builder_packages_and_registers_cuda_plugin(
     (tokenizer / "tokenizer.json").write_bytes(tokenizer_json)
     captured = {}
 
-    monkeypatch.setattr(trt_builder, "ensure_umt5_cuda_plugin", lambda **_kwargs: umt5_cuda_plugin)
-    monkeypatch.setattr(trt_builder, "ensure_dit_cuda_plugin", lambda **_kwargs: dit_cuda_plugin)
-    monkeypatch.setattr(trt_builder, "ensure_vae_cuda_plugin", lambda **_kwargs: vae_cuda_plugin)
-    monkeypatch.setattr(trt_builder, "_validate_plugin_runtime_dependencies", lambda _path: ())
-    monkeypatch.setattr(trt_builder, "_register_plugin_library", lambda _path: None)
+    monkeypatch.setattr(
+        trt_builder,
+        "_ensure_plugin_companion",
+        lambda **_kwargs: SimpleNamespace(
+            load_path=plugin_companion,
+            elf_bytes=b"qualified-aot-companion",
+            elf_sha256=hashlib.sha256(b"qualified-aot-companion").hexdigest(),
+            contract=_plugin_contract(),
+        ),
+    )
 
     def build_text_encoder(checkpoint, **kwargs):
         captured["checkpoint"] = checkpoint
@@ -390,12 +434,12 @@ def test_component_builder_packages_and_registers_cuda_plugin(
     )
 
     assert captured["checkpoint"] == str(tmp_path / "models_t5_umt5-xxl-enc-bf16.pth")
-    assert captured["source_gelu_plugin"] == umt5_cuda_plugin
+    assert captured["source_gelu_plugin"] == plugin_companion
     assert captured["source_softmax"] is True
     assert captured["source_rmsnorm"] is True
     assert captured["denoiser_model_dir"] == str(tmp_path)
-    assert captured["denoiser_kwargs"]["cuda_bf16_plugin"] == str(umt5_cuda_plugin)
-    assert captured["denoiser_kwargs"]["dit_cuda_plugin"] == str(dit_cuda_plugin)
+    assert captured["denoiser_kwargs"]["cuda_bf16_plugin"] == str(plugin_companion)
+    assert captured["denoiser_kwargs"]["dit_cuda_plugin"] == str(plugin_companion)
     assert captured["denoiser_kwargs"]["source_attention_plugin"] is None
     for exact_flag in (
         "dit_bf16_linear",
@@ -411,9 +455,8 @@ def test_component_builder_packages_and_registers_cuda_plugin(
         "dit_final_projection",
     ):
         assert captured["denoiser_kwargs"][exact_flag] is True
-    assert components["umt5_cuda_plugin"] == b"pure-umt5-cuda-plugin"
-    assert components["dit_cuda_plugin"] == b"pure-dit-cuda-plugin"
-    assert components["vae_cuda_plugin"] == b"pure-vae-cuda-plugin"
+    assert components["plugin_contract"] == _plugin_contract()
+    assert components["plugin_library"] == b"qualified-aot-companion"
     assert components["text_encoders"] == [("umt5_xxl", b"t5")]
     assert components["denoiser"] == b"dit"
     assert components["vae_decoder"] == b"vae-recurrent"
@@ -426,6 +469,11 @@ def test_component_builder_packages_and_registers_cuda_plugin(
     manifest = components["artifact_manifest"]
     assert manifest["profile"] == _artifact_profile()
     assert set(manifest["sections"]) == set(WAN22_MODEL_OWNED_BUNDLE_SECTIONS)
+    assert len(manifest["sections"]) == 6
+    assert manifest["sections"]["wan2_2_ti2v_plugins.so"] == {
+        "sha256": hashlib.sha256(b"qualified-aot-companion").hexdigest(),
+        "size": len(b"qualified-aot-companion"),
+    }
     for name in (
         "text_encoder_0_plan",
         "denoiser_plan",
@@ -436,8 +484,10 @@ def test_component_builder_packages_and_registers_cuda_plugin(
     text_sources = {
         source["name"] for source in manifest["sections"]["text_encoder_0_plan"]["source_inputs"]
     }
-    assert "source/wan2_2_ti2v/umt5_cuda_plugins/CMakeLists.txt" in text_sources
-    assert "source/wan2_2_ti2v/umt5_cuda_plugins/wan22_umt5_gelu_plugin.cu" in text_sources
+    assert "source/wan2_2_ti2v/cuda_plugin_companion.py" in text_sources
+    assert "plugin/contract.json" in text_sources
+    assert "plugin/elf" in text_sources
+    assert "plugin/source" in text_sources
 
 
 def test_runtime_bundle_contract_is_official_profile() -> None:
@@ -459,8 +509,17 @@ def test_runtime_bundle_contract_is_official_profile() -> None:
     assert bundle_config["runtime_contract"] == {
         "implementation": "native_cpp_cuda_tensorrt",
         "artifact_integrity": "sha256_size_v1",
+        "bundle_trust_model": "trusted_executable_artifact",
+        "executable_bundle_sections": ["wan2_2_ti2v_plugins.so"],
         "required_bundle_sections": list(WAN22_REQUIRED_BUNDLE_SECTIONS),
-        "runtime_dependencies": ["trtmc_core", "cuda", "tensorrt", "cudnn"],
+        "runtime_dependencies": [
+            "trtmc_core",
+            "cuda",
+            "tensorrt",
+            "cudnn",
+            "cublaslt",
+            "nvrtc",
+        ],
         "forbidden_runtime_dependencies": [
             "python",
             "pytorch",
@@ -469,6 +528,7 @@ def test_runtime_bundle_contract_is_official_profile() -> None:
         ],
     }
     assert bundle_config["artifact_manifest"] == _bundle_components()["artifact_manifest"]
+    assert bundle_config["_trtmc_wan22_plugin_contract"] == _plugin_contract()
     assert bundle_config["bundle_loading"] == {
         "mode": "staged",
         "eager_sections": list(WAN22_EAGER_BUNDLE_SECTIONS),
@@ -478,6 +538,8 @@ def test_runtime_bundle_contract_is_official_profile() -> None:
     assert set(WAN22_EAGER_BUNDLE_SECTIONS) | set(WAN22_LAZY_BUNDLE_SECTIONS) == set(
         WAN22_REQUIRED_BUNDLE_SECTIONS
     )
+    assert "wan2_2_ti2v_plugins.so" in WAN22_LAZY_BUNDLE_SECTIONS
+    assert "wan2_2_ti2v_plugins.so" not in WAN22_EAGER_BUNDLE_SECTIONS
 
 
 def test_tokenizer_is_source_bound_in_model_owned_sections(tmp_path) -> None:
@@ -651,8 +713,20 @@ def test_bundle_section_and_native_runtime_dependency_metadata_are_exact() -> No
     )
     runtime_dir = repo_root / "src/runtime/models/wan2_2_ti2v"
     runtime_manifest = tomllib.loads((runtime_dir / "MODEL.toml").read_text())
-    expected_dependencies = ["trtmc_core", "cuda", "tensorrt", "cudnn"]
+    expected_dependencies = [
+        "trtmc_core",
+        "cuda",
+        "tensorrt",
+        "cudnn",
+        "cublaslt",
+        "nvrtc",
+    ]
     forbidden_dependencies = ["python", "pytorch", "libpython", "libtorch"]
+
+    assert python_manifest["default_build_precision"] == "bf16"
+    assert python_manifest["supported_build_precisions"] == ["bf16"]
+    assert python_manifest["build_python_modules"] == ["torch"]
+    assert python_manifest["build_dependency_extra"] == "wan"
 
     for manifest in (python_manifest, runtime_manifest):
         assert manifest["runtime_implementation"] == "native_cpp_cuda_tensorrt"
@@ -682,6 +756,52 @@ def test_bundle_section_and_native_runtime_dependency_metadata_are_exact() -> No
         text = source.read_text()
         for marker in forbidden_source_markers:
             assert marker not in text, f"{source.name} implies runtime dependency {marker}"
+
+
+def test_public_build_uses_wan_family_bf16_default(monkeypatch) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+
+    delegated_options: list[dict] = []
+
+    def delegated(_model: str, _output: str, options: dict):
+        delegated_options.append(options)
+        return object()
+
+    monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", delegated)
+    monkeypatch.setattr(
+        engine_builder,
+        "_build_native_impl",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("delegated build unexpectedly selected the native path")
+        ),
+    )
+
+    engine_builder.build(
+        "Wan-AI/Wan2.2-TI2V-5B",
+        "wan.trtfb",
+    )
+
+    assert len(delegated_options) == 1
+    assert delegated_options[0]["precision"] == "bf16"
+
+
+def test_public_build_rejects_unsupported_wan_precision_before_routing(monkeypatch) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+
+    monkeypatch.setattr(
+        engine_builder,
+        "_try_build_optimized_runtime",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("unsupported precision reached optimized routing")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not support build precision 'fp32'"):
+        engine_builder.build(
+            "Wan-AI/Wan2.2-TI2V-5B",
+            "wan.trtfb",
+            precision="fp32",
+        )
 
 
 def test_cuda_plugin_dependency_gate_rejects_torch_before_registration(
@@ -739,6 +859,16 @@ def test_artifact_manifest_rejects_mutated_section_bytes() -> None:
         "0" * 64
     )
     with pytest.raises(ValueError, match="source identity mismatch for denoiser_plan"):
+        plugin.diffusion_bundle_sections(components)
+
+    components = _bundle_components()
+    denoiser_inputs = components["artifact_manifest"]["sections"]["denoiser_plan"][
+        "source_inputs"
+    ]
+    next(source for source in denoiser_inputs if source["name"] == "plugin/elf")["sha256"] = (
+        "0" * 64
+    )
+    with pytest.raises(ValueError, match="bound to a different AOT plugin ELF"):
         plugin.diffusion_bundle_sections(components)
 
     components = _bundle_components()

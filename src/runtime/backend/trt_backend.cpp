@@ -234,7 +234,8 @@ class TrtBackend final : public IBackend {
             }
 
             auto module = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream, profile_idx,
-                                                          lane_options.distributed_communicator);
+                                                          lane_options.distributed_communicator,
+                                                          lane_options.external_bindings);
             if (!module->ok())
                 throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
             keep_backend_resources(*module, engine, stream_owner, lane_options.distributed_owner);
@@ -251,7 +252,7 @@ class TrtBackend final : public IBackend {
 
 } // namespace trtmc
 
-extern "C" trtmc::IBackend* trtmc_create_backend_v1() {
+extern "C" trtmc::IBackend* trtmc_create_backend_v2() {
     try {
         return new trtmc::TrtBackend();
     } catch (const std::exception& e) {
@@ -264,7 +265,7 @@ extern "C" std::uint32_t trtmc_backend_api_abi_version() {
     return trtmc::kTrtmcBackendApiAbiVersion;
 }
 
-extern "C" void trtmc_destroy_backend_v1(trtmc::IBackend* b) {
+extern "C" void trtmc_destroy_backend_v2(trtmc::IBackend* b) {
     delete b;
 }
 

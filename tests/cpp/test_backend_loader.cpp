@@ -32,7 +32,7 @@ static void check_incompatible_backend(const std::string& backend_name,
             check(message.find(fragment) != std::string::npos,
                   ("incompatible backend error contains '" + fragment + "'").c_str());
         }
-        check(message.find("missing trtmc_create_backend_v1") == std::string::npos,
+        check(message.find("missing trtmc_create_backend_v2") == std::string::npos,
               "API ABI is checked before the backend factory");
     }
     check(threw, "incompatible backend is rejected");
@@ -83,19 +83,42 @@ int main() {
         const char* v1_error = dlerror();
         check(v1_factory != nullptr && v1_error == nullptr,
               "v1 backend exports the versioned factory");
+
+        dlerror();
+        void* v2_factory = dlsym(v1_handle, "trtmc_create_backend_v2");
+        const char* v2_error = dlerror();
+        check(v2_factory == nullptr && v2_error != nullptr,
+              "v1 backend does not export the v2 factory");
         dlclose(v1_handle);
+    }
+
+    check_incompatible_backend(
+        "test_api_abi_v1", {"TRTMC backend API ABI 1",
+                            "runtime requires " + std::to_string(trtmc::kTrtmcBackendApiAbiVersion),
+                            "same source revision"});
+
+    dlerror();
+    void* v2_handle = dlopen(TRTMC_TEST_BACKEND_V2_PATH, RTLD_NOW | RTLD_LOCAL);
+    check(v2_handle != nullptr, "v2 backend probe DSO opens");
+    if (v2_handle != nullptr) {
+        dlerror();
+        void* v2_factory = dlsym(v2_handle, "trtmc_create_backend_v2");
+        const char* v2_error = dlerror();
+        check(v2_factory != nullptr && v2_error == nullptr,
+              "v2 backend exports the current factory");
+        dlclose(v2_handle);
     }
 
     std::string loaded_backend_name;
     trtmc::BackendLoadMetadata metadata;
-    auto* v1_backend = trtmc::BackendLoader::load_first_available(
-        {"test_api_abi_v1"}, {TRTMC_TEST_BACKEND_DIR}, &loaded_backend_name, &metadata);
-    check(v1_backend != nullptr, "new core loads a v1 backend");
-    if (v1_backend != nullptr)
-        check(std::string(v1_backend->name()) == "test_api_abi_v1", "v1 backend name is usable");
-    check(loaded_backend_name == "test_api_abi_v1", "v1 backend candidate is reported");
+    auto* v2_backend = trtmc::BackendLoader::load_first_available(
+        {"test_api_abi_v2"}, {TRTMC_TEST_BACKEND_DIR}, &loaded_backend_name, &metadata);
+    check(v2_backend != nullptr, "new core loads a v2 backend");
+    if (v2_backend != nullptr)
+        check(std::string(v2_backend->name()) == "test_api_abi_v2", "v2 backend name is usable");
+    check(loaded_backend_name == "test_api_abi_v2", "v2 backend candidate is reported");
     check(metadata.backend_api_abi == trtmc::kTrtmcBackendApiAbiVersion,
-          "v1 backend ABI is reported in load metadata");
+          "v2 backend ABI is reported in load metadata");
 
     std::cerr << (failures == 0 ? "ALL PASSED" : "SOME FAILED") << std::endl;
     return failures;

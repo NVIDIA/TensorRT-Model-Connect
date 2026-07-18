@@ -103,7 +103,44 @@ If generation fails, classify the failure before changing code:
 | Runtime says no plugin registered | The binary was built without the plugin for the bundle's `runtime_strategy`. |
 | Output differs between runs | Sampling is enabled. Use `--greedy` or a fixed `--seed` for smoke tests. |
 
-## 6. What To Read Next
+## Wan2.2 720p Video In Two Commands
+
+Install the `wan` build extra once (for a source checkout, use
+`pip install -e '.[wan]' -C py-only=true`). It supplies PyTorch only for
+reading the official T5/VAE checkpoint files during bundle creation; the
+generated bundle runs through the native C++/TensorRT runtime.
+
+```bash
+$TRTMC build Wan-AI/Wan2.2-TI2V-5B -o /tmp/wan22-ti2v-5b.trtfb
+
+$TRTMC generate-video /tmp/wan22-ti2v-5b.trtfb \
+  --prompt "Two anthropomorphic cats boxing on a spotlighted stage" \
+  --output /tmp/wan22-frames \
+  --seed 42
+```
+
+No checkpoint path, plugin path, backend directory, or build-method selector
+is required. The first command downloads the checkpoint through the standard
+Hugging Face cache and selects the family-owned BF16 default. The bundle also
+records `source_model_id` and the immutable resolved `source_revision`.
+
+The builder selects the AOT plugin image for the active TensorRT major/minor
+and embeds that single SM103+SM110 fat binary in `.trtfb`. Generation does not
+compile Model-Connect plugin source and does not look for a sibling plugin
+`.so`; cuDNN frontend can still use the host NVRTC library while constructing
+its SDPA execution plan. As a consequence, a Wan bundle is trusted executable
+content: only run bundles produced by a trusted build or artifact channel. The
+current bundle format verifies internal hashes and ABI fingerprints but does
+not authenticate a publisher signature.
+
+Wan2.2 currently exposes one qualified profile: 1280x704, 121 frames, 50
+steps, CFG 5, flow shift 5, 24 FPS, and a 512-token text encoder. Those values
+come from the bundle, so the minimal command does not repeat them. The runtime
+accepts `--num-steps 50 --height 704 --width 1280` when an explicit command is
+useful for a comparison, but other values are rejected rather than silently
+running an unqualified shape.
+
+## What To Read Next
 
 - [Build and Run](build-and-run.md) covers common tasks for text, vision-language, audio, diffusion, segmentation, and time-series bundles.
 - [Model Support](model-support.md) explains the current supported model surface from the manifest set.

@@ -12,6 +12,7 @@ and can copy only those DSOs out of a CMake build tree.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import re
@@ -40,10 +41,90 @@ class RuntimePlugin:
     model_id: str
     library: str
     strategies: tuple[str, ...]
+    builder_auxiliary_libraries: tuple[str, ...] = ()
 
     @property
     def target(self) -> str:
         return f"trtmc_model_{self.model_id}"
+
+
+def _validate_builder_auxiliary_library_patterns(
+    patterns: Iterable[str], *, owner_library: str, manifest: Path
+) -> tuple[str, ...]:
+    """Validate model-local auxiliary DSO basenames declared in MODEL.toml."""
+    validated: list[str] = []
+    for pattern in patterns:
+        if (
+            not pattern
+            or pattern == owner_library
+            or "/" in pattern
+            or "\\" in pattern
+            or not re.fullmatch(r"libtrtmc_model_[A-Za-z0-9_.?*+-]+\.so", pattern)
+        ):
+            raise SystemExit(
+                f"Invalid builder_auxiliary_libraries entry in {manifest}: {pattern!r}"
+            )
+        if pattern in validated:
+            raise SystemExit(
+                f"Duplicate builder_auxiliary_libraries entry in {manifest}: {pattern!r}"
+            )
+        validated.append(pattern)
+    return tuple(validated)
+
+
+def classify_model_libraries(
+    paths: Iterable[Path],
+    *,
+    owner_library: str,
+    auxiliary_patterns: Iterable[str] = (),
+) -> tuple[Path, list[Path]]:
+    """Separate one owner DSO from declared auxiliaries and reject siblings."""
+    libraries = sorted(set(paths))
+    owners = [path for path in libraries if path.name == owner_library]
+    if len(owners) != 1:
+        raise ValueError(
+            f"found {len(owners)} owner DSOs named {owner_library}; expected exactly 1"
+        )
+
+    auxiliaries: list[Path] = []
+    for pattern in auxiliary_patterns:
+        matches = [
+            path
+            for path in libraries
+            if path != owners[0] and fnmatch.fnmatchcase(path.name, pattern)
+        ]
+        if len(matches) != 1:
+            raise ValueError(
+                f"auxiliary DSO pattern {pattern!r} matched "
+                f"{[path.name for path in matches]}; expected exactly 1"
+            )
+        if matches[0] in auxiliaries:
+            raise ValueError(
+                f"auxiliary DSO {matches[0].name} matches more than one declared pattern"
+            )
+        auxiliaries.append(matches[0])
+
+    unclaimed = [path for path in libraries if path != owners[0] and path not in auxiliaries]
+    if unclaimed:
+        raise ValueError(
+            "found undeclared sibling model DSOs: " + ", ".join(path.name for path in unclaimed)
+        )
+    return owners[0], auxiliaries
+
+
+def runtime_plugin_payload(plugin: RuntimePlugin) -> dict[str, object]:
+    """Serialize a runtime owner while preserving old manifests for simple models."""
+    payload: dict[str, object] = {
+        "model_id": plugin.model_id,
+        "library": plugin.library,
+        "strategies": list(plugin.strategies),
+        "target": plugin.target,
+    }
+    if plugin.builder_auxiliary_libraries:
+        payload["builder_auxiliary_libraries"] = list(
+            plugin.builder_auxiliary_libraries
+        )
+    return payload
 
 
 _NODE_ID_MODEL_RE = re.compile(r"::test_model_e2e\[([^\]]+)\]")
@@ -157,11 +238,18 @@ def discover_runtime_plugins(repo_root: Path) -> dict[str, RuntimePlugin]:
         model_id = _toml_string(text, "id") or manifest.parent.name
         library = _toml_string(text, "runtime_library") or f"libtrtmc_model_{model_id}.so"
         strategies = _toml_list(text, "runtime_strategies")
+        builder_auxiliary_libraries = _validate_builder_auxiliary_library_patterns(
+            _toml_list(text, "builder_auxiliary_libraries"),
+            owner_library=library,
+            manifest=manifest,
+        )
         single_strategy = _toml_string(text, "runtime_strategy")
         if not strategies and single_strategy:
             strategies = (single_strategy,)
         if strategies:
-            plugins[model_id] = RuntimePlugin(model_id, library, strategies)
+            plugins[model_id] = RuntimePlugin(
+                model_id, library, strategies, builder_auxiliary_libraries
+            )
     return plugins
 
 
@@ -286,12 +374,7 @@ def isolation_groups(
             {
                 "id": group_id,
                 "family": family,
-                "runtime_plugin": {
-                    "model_id": plugin.model_id,
-                    "library": plugin.library,
-                    "strategies": list(plugin.strategies),
-                    "target": plugin.target,
-                },
+                "runtime_plugin": runtime_plugin_payload(plugin),
                 "models": models,
             }
         )
@@ -470,15 +553,7 @@ def command_stage_source(args: argparse.Namespace) -> int:
         "selected_models": sorted(model_names),
         "builder_families": sorted(families),
         "e2e_families": sorted(families),
-        "runtime_plugins": [
-            {
-                "model_id": plugin.model_id,
-                "library": plugin.library,
-                "strategies": list(plugin.strategies),
-                "target": plugin.target,
-            }
-            for plugin in selected_plugins
-        ],
+        "runtime_plugins": [runtime_plugin_payload(plugin) for plugin in selected_plugins],
         "tracked_only": not args.include_untracked,
         "copied_files": copied_files,
         "excluded_model_files": excluded_files,
@@ -1017,6 +1092,11 @@ def command_prepare(args: argparse.Namespace) -> int:
     repo_root = args.repo_root.resolve()
     build_dir = args.build_dir.resolve()
     output_dir = args.output_dir.resolve()
+    builder_auxiliary_dir = (
+        args.builder_auxiliary_dir.resolve()
+        if args.builder_auxiliary_dir is not None
+        else None
+    )
     manifests = discover_e2e_manifests(repo_root)
     runtime_plugins = discover_runtime_plugins(repo_root)
     model_names = selected_models(args, manifests)
@@ -1026,14 +1106,34 @@ def command_prepare(args: argparse.Namespace) -> int:
     prepared = plugins_for_models(model_names, manifests, runtime_plugins)
     output_dir.mkdir(parents=True, exist_ok=True)
     for plugin in prepared:
-        src = build_dir / "models" / plugin.model_id / plugin.library
-        if not src.is_file():
-            raise SystemExit(f"Runtime model plugin library not found: {src}")
+        model_build_dir = build_dir / "models" / plugin.model_id
+        try:
+            src, auxiliaries = classify_model_libraries(
+                model_build_dir.glob("libtrtmc_model_*.so"),
+                owner_library=plugin.library,
+                auxiliary_patterns=plugin.builder_auxiliary_libraries,
+            )
+        except ValueError as error:
+            raise SystemExit(
+                f"Invalid runtime model library layout under {model_build_dir}: {error}"
+            ) from error
+        if auxiliaries and builder_auxiliary_dir is None:
+            raise SystemExit(
+                f"{plugin.model_id} declares builder-only auxiliary DSOs; "
+                "pass --builder-auxiliary-dir so they are not staged into the runtime plugin dir"
+            )
         dst_dir = output_dir / plugin.model_id
         dst_dir.mkdir(parents=True, exist_ok=True)
-        dst = dst_dir / plugin.library
+        dst = dst_dir / src.name
         shutil.copy2(src, dst)
         print(f"{plugin.target} {dst}")
+        for source in auxiliaries:
+            assert builder_auxiliary_dir is not None
+            auxiliary_dst_dir = builder_auxiliary_dir / plugin.model_id
+            auxiliary_dst_dir.mkdir(parents=True, exist_ok=True)
+            auxiliary_dst = auxiliary_dst_dir / source.name
+            shutil.copy2(source, auxiliary_dst)
+            print(f"{plugin.target} builder-auxiliary {auxiliary_dst}")
     return 0
 
 
@@ -1061,6 +1161,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_selection_options(prepare)
     prepare.add_argument("--build-dir", type=Path, required=True)
     prepare.add_argument("--output-dir", type=Path, required=True)
+    prepare.add_argument("--builder-auxiliary-dir", type=Path)
     prepare.set_defaults(func=command_prepare)
 
     stage_source = subparsers.add_parser(

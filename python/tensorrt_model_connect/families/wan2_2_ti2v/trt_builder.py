@@ -15,7 +15,6 @@ that binds its SHA256, component source identity, CUDA plugin bytes, and exact
 
 from __future__ import annotations
 
-import ctypes
 import hashlib
 import json
 import os
@@ -26,16 +25,16 @@ from typing import Any
 
 from tensorrt_model_connect import trt_compat
 
+from .cuda_plugin_companion import Wan22PluginCompanion, load_wan22_plugin_companion
 from .model_config import WAN22_TI2V_5B, official_artifact_profile
 from .plugin import WAN22_MODEL_OWNED_BUNDLE_SECTIONS
 
 
 _FAMILY = "wan2_2_ti2v"
 _PREBUILT_MANIFEST_SCHEMA = "trtmc.wan2_2_ti2v.prebuilt.v1"
-_ARTIFACT_MANIFEST_SCHEMA = "trtmc.wan2_2_ti2v.bundle-artifacts.v2"
+_ARTIFACT_MANIFEST_SCHEMA = "trtmc.wan2_2_ti2v.bundle-artifacts.v4"
 _PACKAGE_DIR = Path(__file__).resolve().parent
 _FAMILIES_DIR = _PACKAGE_DIR.parent
-_LOADED_PLUGIN_HANDLES: dict[Path, ctypes.CDLL] = {}
 _FORBIDDEN_PLUGIN_DEPENDENCY_MARKERS = ("python", "torch", "c10")
 
 _PLAN_COMPONENTS = (
@@ -51,9 +50,8 @@ _COMPONENT_SOURCE_FILES = {
         "wan2_2_ti2v/plugin.py",
         "wan2_2_ti2v/model_config.py",
         "wan2_2_ti2v/umt5_encoder_builder.py",
+        "wan2_2_ti2v/cuda_plugin_companion.py",
         "wan2_2_ti2v/umt5_cuda_plugin_builder.py",
-        "wan2_2_ti2v/umt5_cuda_plugins/CMakeLists.txt",
-        "wan2_2_ti2v/umt5_cuda_plugins/wan22_umt5_gelu_plugin.cu",
         "wan2_2_ti2v/trt_ops.py",
     ),
     "denoiser_plan": (
@@ -62,6 +60,7 @@ _COMPONENT_SOURCE_FILES = {
         "wan2_2_ti2v/model_config.py",
         "wan2_2_ti2v/checkpoint_mapper.py",
         "wan2_2_ti2v/dit_builder.py",
+        "wan2_2_ti2v/cuda_plugin_companion.py",
         "wan2_2_ti2v/dit_cuda_plugin_builder.py",
         "wan2_2_ti2v/trt_ops.py",
     ),
@@ -72,6 +71,7 @@ _COMPONENT_SOURCE_FILES = {
         "wan2_2_ti2v/checkpoint_mapper.py",
         "wan2_2_ti2v/vae_step_builder.py",
         "wan2_2_ti2v/vae_builder.py",
+        "wan2_2_ti2v/cuda_plugin_companion.py",
         "wan2_2_ti2v/vae_cuda_plugin_builder.py",
         "wan2_2_ti2v/graph_ops.py",
         "wan2_2_ti2v/graph_blocks.py",
@@ -83,6 +83,7 @@ _COMPONENT_SOURCE_FILES = {
         "wan2_2_ti2v/checkpoint_mapper.py",
         "wan2_2_ti2v/vae_step_builder.py",
         "wan2_2_ti2v/vae_builder.py",
+        "wan2_2_ti2v/cuda_plugin_companion.py",
         "wan2_2_ti2v/vae_cuda_plugin_builder.py",
         "wan2_2_ti2v/graph_ops.py",
         "wan2_2_ti2v/graph_blocks.py",
@@ -239,24 +240,12 @@ def _checkpoint_sources(component: str, model_root: Path, weights: dict) -> list
     raise ValueError(f"Unknown Wan2.2 plan component: {component!r}")
 
 
-def _component_plugin_sections(component: str) -> tuple[str, ...]:
-    if component == "text_encoder_0_plan":
-        return ("wan2_2_umt5_cuda_plugin_so",)
-    if component == "denoiser_plan":
-        return (
-            "wan2_2_umt5_cuda_plugin_so",
-            "wan2_2_dit_cuda_plugin_so",
-        )
-    if component in {"vae_decoder_plan", "vae_decoder_first_frame_plan"}:
-        return ("wan2_2_vae_cuda_plugin_so",)
-    raise ValueError(f"Unknown Wan2.2 plan component: {component!r}")
-
-
 def _component_source_identity(
     component: str,
     model_dir: str | Path,
     weights: dict,
-    plugin_payloads: dict[str, bytes],
+    plugin_contract: dict[str, Any],
+    plugin_elf_sha256: str,
     *,
     digest_cache: dict[Path, str] | None = None,
 ) -> dict[str, Any]:
@@ -272,12 +261,25 @@ def _component_source_identity(
         }
         for filename in _COMPONENT_SOURCE_FILES[component]
     )
+    # Bind both the semantic implementation contract and the exact ELF used
+    # during engine construction. This prevents a qualified prebuilt plan from
+    # being paired with a differently linked companion that advertises the
+    # same source/ABI contract.
     inputs.extend(
-        {
-            "name": f"bundle/{section}",
-            "sha256": _sha256_bytes(plugin_payloads[section]),
-        }
-        for section in _component_plugin_sections(component)
+        (
+            {
+                "name": "plugin/contract.json",
+                "sha256": _canonical_sha256(plugin_contract),
+            },
+            {
+                "name": "plugin/source",
+                "sha256": plugin_contract["source_digest"],
+            },
+            {
+                "name": "plugin/elf",
+                "sha256": plugin_elf_sha256,
+            },
+        )
     )
     inputs.sort(key=lambda item: item["name"])
     identity_document = {
@@ -465,12 +467,6 @@ def _validate_serialized_engine_contract(plan: bytes, component: str) -> None:
         )
 
 
-def _register_plugin_library(path: Path) -> None:
-    resolved = path.expanduser().resolve()
-    if resolved not in _LOADED_PLUGIN_HANDLES:
-        _LOADED_PLUGIN_HANDLES[resolved] = ctypes.CDLL(str(resolved), mode=ctypes.RTLD_GLOBAL)
-
-
 def _validate_plugin_runtime_dependencies(path: Path) -> tuple[str, ...]:
     resolved = path.expanduser().resolve()
     try:
@@ -500,16 +496,12 @@ def _validate_plugin_runtime_dependencies(path: Path) -> tuple[str, ...]:
     return needed
 
 
-def _ensure_plugin_payloads(*, verbose: bool) -> tuple[dict[str, Path], dict[str, bytes]]:
-    paths = {
-        "wan2_2_umt5_cuda_plugin_so": ensure_umt5_cuda_plugin(verbose=verbose),
-        "wan2_2_dit_cuda_plugin_so": ensure_dit_cuda_plugin(verbose=verbose),
-        "wan2_2_vae_cuda_plugin_so": ensure_vae_cuda_plugin(verbose=verbose),
-    }
-    for path in paths.values():
-        _validate_plugin_runtime_dependencies(path)
-        _register_plugin_library(path)
-    return paths, {section: path.read_bytes() for section, path in paths.items()}
+def _ensure_plugin_companion(*, verbose: bool) -> Wan22PluginCompanion:
+    companion = load_wan22_plugin_companion(verbose=verbose)
+    # Package/CI validation audits DT_NEEDED entries. Bundle creation does not
+    # invoke readelf/binutils: the installed AOT artifact must work on a
+    # minimal host without compiler or binary-inspection tooling.
+    return companion
 
 
 def write_wan22_prebuilt_manifest(
@@ -537,15 +529,19 @@ def write_wan22_prebuilt_manifest(
     plan_file = Path(plan_path).expanduser().resolve()
     if not plan_file.is_file():
         raise FileNotFoundError(plan_file)
-    plugin_paths, plugin_payloads = _ensure_plugin_payloads(verbose=verbose)
-    # Keep the exact plugin libraries registered while TensorRT deserializes.
-    del plugin_paths
+    companion = _ensure_plugin_companion(verbose=verbose)
+    # Keep the exact companion registered while TensorRT deserializes.
     weights = {
         "_text_encoder_checkpoint": str(root / "models_t5_umt5-xxl-enc-bf16.pth"),
         "_vae_checkpoint": str(root / "Wan2.2_VAE.pth"),
     }
     identity = _component_source_identity(
-        component, root, weights, plugin_payloads, digest_cache={}
+        component,
+        root,
+        weights,
+        companion.contract,
+        companion.elf_sha256,
+        digest_cache={},
     )
     plan = plan_file.read_bytes()
     _validate_serialized_engine_contract(plan, component)
@@ -603,17 +599,24 @@ def build_wan22_components(
         raise ValueError("Wan2.2-TI2V-5B requires BF16 DiT/T5 precision")
     _validate_requested_profile(config)
 
-    # Keep all creators registered while building or validating plans.  The
-    # exact libraries are bundled and included in every dependent plan's
-    # source identity.
-    plugin_paths, plugin_payloads = _ensure_plugin_payloads(verbose=verbose)
+    # Keep all creators registered while building or validating plans. The
+    # one AOT companion contract is included in every dependent plan's source
+    # identity. The exact AOT library selected for this TensorRT ABI is also
+    # embedded into the bundle, so the resulting .trtfb remains the only
+    # runtime artifact the user has to distribute.
+    companion = _ensure_plugin_companion(verbose=verbose)
+    plugin_path = companion.load_path
+    plugin_contract = companion.contract
+    plugin_library = companion.elf_bytes
+    plugin_elf_sha256 = companion.elf_sha256
     digest_cache: dict[Path, str] = {}
     source_identities = {
         component: _component_source_identity(
             component,
             model_dir,
             weights,
-            plugin_payloads,
+            plugin_contract,
+            plugin_elf_sha256,
             digest_cache=digest_cache,
         )
         for component in _PLAN_COMPONENTS
@@ -631,7 +634,7 @@ def build_wan22_components(
     if text_encoder is None:
         text_encoder = build_native_umt5_encoder_engine(
             weights["_text_encoder_checkpoint"],
-            source_gelu_plugin=plugin_paths["wan2_2_umt5_cuda_plugin_so"],
+            source_gelu_plugin=plugin_path,
             source_softmax=True,
             source_rmsnorm=True,
             verbose=verbose,
@@ -657,8 +660,8 @@ def build_wan22_components(
             latent_width=WAN22_TI2V_5B.latent_width,
             num_layers=WAN22_TI2V_5B.num_layers,
             source_attention_plugin=None,
-            cuda_bf16_plugin=str(plugin_paths["wan2_2_umt5_cuda_plugin_so"]),
-            dit_cuda_plugin=str(plugin_paths["wan2_2_dit_cuda_plugin_so"]),
+            cuda_bf16_plugin=str(plugin_path),
+            dit_cuda_plugin=str(plugin_path),
             dit_bf16_linear=True,
             dit_time_silu=True,
             dit_time_linear2=True,
@@ -723,15 +726,14 @@ def build_wan22_components(
         raise FileNotFoundError(f"Wan2.2 tokenizer.json not found: {tokenizer_path}")
     tokenizer_json = tokenizer_path.read_bytes()
     section_payloads = {
-        **plugin_payloads,
         **plans,
         "tokenizer.json": tokenizer_json,
+        "wan2_2_ti2v_plugins.so": plugin_library,
     }
 
     return {
-        "umt5_cuda_plugin": plugin_payloads["wan2_2_umt5_cuda_plugin_so"],
-        "dit_cuda_plugin": plugin_payloads["wan2_2_dit_cuda_plugin_so"],
-        "vae_cuda_plugin": plugin_payloads["wan2_2_vae_cuda_plugin_so"],
+        "plugin_contract": plugin_contract,
+        "plugin_library": plugin_library,
         "text_encoders": [("umt5_xxl", plans["text_encoder_0_plan"])],
         "denoiser": plans["denoiser_plan"],
         "vae_decoder": plans["vae_decoder_plan"],

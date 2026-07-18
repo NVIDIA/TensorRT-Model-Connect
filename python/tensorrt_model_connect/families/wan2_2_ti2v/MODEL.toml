@@ -21,6 +21,12 @@ diffusion_pipeline_classes = [
   "WanModel",
   "WanPipeline",
 ]
+default_build_precision = "bf16"
+supported_build_precisions = ["bf16"]
+# PyTorch is used only to deserialize the official T5/VAE checkpoint weights
+# while building.  It is never linked or loaded by the native runtime.
+build_python_modules = ["torch"]
+build_dependency_extra = "wan"
 hf_allow_patterns = [
   "config.json",
   "configuration.json",
@@ -32,18 +38,17 @@ hf_allow_patterns = [
 ]
 
 # The builder owns this exact source-bound section set. Python/PyTorch are
-# checkpoint conversion dependencies only and are never bundled for runtime.
+# checkpoint conversion dependencies only. The one TRT-ABI-specific AOT
+# plugin image is embedded so the resulting .trtfb is the sole model artifact.
 runtime_implementation = "native_cpp_cuda_tensorrt"
 bundle_required_sections = [
-  "wan2_2_umt5_cuda_plugin_so",
-  "wan2_2_dit_cuda_plugin_so",
-  "wan2_2_vae_cuda_plugin_so",
   "text_encoder_0_plan",
   "denoiser_plan",
   "vae_decoder_plan",
   "vae_decoder_first_frame_plan",
   "tokenizer.json",
+  "wan2_2_ti2v_plugins.so",
   "config.json",
 ]
-runtime_dependencies = ["trtmc_core", "cuda", "tensorrt", "cudnn"]
+runtime_dependencies = ["trtmc_core", "cuda", "tensorrt", "cudnn", "cublaslt", "nvrtc"]
 forbidden_runtime_dependencies = ["python", "pytorch", "libpython", "libtorch"]

@@ -4,25 +4,16 @@
  */
 
 #include "runtime/models/wan2_2_ti2v/pipeline.h"
-#include "runtime/models/wan2_2_ti2v/plugin_cache.h"
 #include "runtime/models/wan2_2_ti2v/vae_cache_storage.h"
 
 #include <array>
-#include <cerrno>
-#include <condition_variable>
 #include <cstdint>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <iterator>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -34,75 +25,6 @@ class FakeTokenizer final : public trtmc::ITokenizer {
     int32_t id_for_token(std::string_view) const override { return -1; }
     std::string token_for_id(int32_t) const override { return {}; }
 };
-
-bool test_concurrent_plugin_publication() {
-    char directory_template[] = "/tmp/wan22_plugin_cache_XXXXXX";
-    char* raw_directory = mkdtemp(directory_template);
-    if (raw_directory == nullptr) {
-        std::cerr << "FAIL: mkdtemp failed: " << std::strerror(errno) << '\n';
-        return false;
-    }
-    const std::filesystem::path directory(raw_directory);
-    const auto output = directory / "libwan22_test_plugin.so";
-    const std::vector<char> expected = {'c', 'o', 'm', 'p', 'l', 'e', 't', 'e'};
-    {
-        std::ofstream stale(output, std::ios::binary);
-        stale.write("stale", 5);
-    }
-
-    constexpr int kThreadCount = 12;
-    std::mutex gate_mutex;
-    std::condition_variable gate;
-    int ready = 0;
-    bool start = false;
-    std::mutex errors_mutex;
-    std::vector<std::string> errors;
-    std::vector<std::thread> workers;
-    workers.reserve(kThreadCount);
-    for (int index = 0; index < kThreadCount; ++index) {
-        workers.emplace_back([&]() {
-            {
-                std::unique_lock<std::mutex> lock(gate_mutex);
-                ++ready;
-                gate.notify_all();
-                gate.wait(lock, [&start]() { return start; });
-            }
-            try {
-                trtmc::publish_wan22_cuda_plugin(output, expected);
-            } catch (const std::exception& error) {
-                std::lock_guard<std::mutex> lock(errors_mutex);
-                errors.push_back(error.what());
-            }
-        });
-    }
-    {
-        std::unique_lock<std::mutex> lock(gate_mutex);
-        gate.wait(lock, [&ready]() { return ready == kThreadCount; });
-        start = true;
-    }
-    gate.notify_all();
-    for (auto& worker : workers)
-        worker.join();
-
-    std::ifstream published(output, std::ios::binary);
-    const std::vector<char> actual((std::istreambuf_iterator<char>(published)),
-                                   std::istreambuf_iterator<char>());
-    bool temporary_left_behind = false;
-    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-        if (entry.path().filename().string().find(".tmp.") != std::string::npos)
-            temporary_left_behind = true;
-    }
-    const bool ok = errors.empty() && actual == expected && !temporary_left_behind;
-    if (!ok) {
-        std::cerr << "FAIL: concurrent CUDA plugin cache publication was not atomic";
-        if (!errors.empty())
-            std::cerr << ": " << errors.front();
-        std::cerr << '\n';
-    }
-    std::error_code ignored;
-    std::filesystem::remove_all(directory, ignored);
-    return ok;
-}
 
 bool test_vae_cache_prebindings() {
     constexpr std::size_t kCacheCount = 32;
@@ -267,8 +189,6 @@ bool test_vae_cache_small_cuda_round_trip() {
 } // namespace
 
 int main() {
-    if (!test_concurrent_plugin_publication())
-        return 1;
     if (!test_vae_cache_prebindings())
         return 1;
     if (!test_vae_cache_layout_and_policy())

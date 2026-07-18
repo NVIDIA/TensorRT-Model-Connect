@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 import re
+import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
@@ -21,6 +22,17 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
 
 _CONAN_PY_BUILD_REQUIREMENT = "conan-py-build==0.4.3"
 _PYTHON_SOURCE_ROOT = "python"
+_WAN22_BUILDER_COMPANION_GLOB = "libtrtmc_model_wan2_2_ti2v_plugins*.so"
+_WAN22_BUILDER_COMPANION_RE = re.compile(
+    r"^libtrtmc_model_wan2_2_ti2v_plugins_trt(?P<major>[0-9]+)_"
+    r"(?P<minor>[0-9]+)\.so$"
+)
+_TENSORRT_EXACT_DEPENDENCY_RE = re.compile(
+    r"^\s*tensorrt\s*==\s*(?P<major>[0-9]+)\.(?P<minor>[0-9]+)"
+    r"(?:\.[A-Za-z0-9][A-Za-z0-9._+-]*)+\s*(?:;.*)?$",
+    re.IGNORECASE,
+)
+_WAN22_RPATH_POLICY_MARKER = "_trtmc_wan22_rpath_policy"
 
 
 def get_requires_for_build_wheel(config_settings: dict[str, Any] | None = None) -> list[str]:
@@ -116,7 +128,79 @@ def build_editable(
 def _conan_build_backend() -> Any:
     from conan_py_build import build as conan_build
 
+    _install_wan22_wheel_rpath_policy(conan_build)
     return conan_build
+
+
+def _install_wan22_wheel_rpath_policy(conan_build: Any) -> None:
+    """Keep the builder-only Wan companion free of runtime search paths.
+
+    ``conan-py-build`` treats every file ending in the generic Python
+    extension suffix ``.so`` as an extension module and adds ``$ORIGIN`` to
+    it.  The Wan companion is an executable bundle payload, not a Python
+    extension, so preserve the backend's normal behavior and then remove the
+    injected search path before distlib writes the wheel and its RECORD.
+    """
+
+    original_patch_rpath = getattr(conan_build, "patch_rpath", None)
+    if original_patch_rpath is None:
+        raise RuntimeError("conan-py-build does not expose its staging RPATH hook")
+    if getattr(original_patch_rpath, _WAN22_RPATH_POLICY_MARKER, False):
+        return
+
+    def patch_rpath(staging_dir: Path) -> None:
+        original_patch_rpath(staging_dir)
+        candidates = sorted(Path(staging_dir).rglob(_WAN22_BUILDER_COMPANION_GLOB))
+        malformed = [
+            path
+            for path in candidates
+            if not _WAN22_BUILDER_COMPANION_RE.fullmatch(path.name)
+            or not path.is_file()
+            or path.is_symlink()
+        ]
+        if malformed:
+            raise RuntimeError(
+                "wheel staging contains malformed Wan2.2 builder companion paths: "
+                f"{[str(path) for path in malformed]}"
+            )
+        if len(candidates) != 1:
+            raise RuntimeError(
+                "wheel staging must contain exactly one ABI-tagged Wan2.2 builder "
+                f"companion; found {[str(path) for path in candidates]}"
+            )
+
+        companion = candidates[0]
+        filename_match = _WAN22_BUILDER_COMPANION_RE.fullmatch(companion.name)
+        if filename_match is None:  # Covered by the malformed-path gate above.
+            raise RuntimeError(f"invalid Wan2.2 builder companion name: {companion.name}")
+        companion_abi = (
+            int(filename_match.group("major")),
+            int(filename_match.group("minor")),
+        )
+        required_abi = _project_tensorrt_abi()
+        if companion_abi != required_abi:
+            raise RuntimeError(
+                "Wan2.2 wheel companion TensorRT ABI does not match the wheel dependency: "
+                f"companion={companion_abi[0]}.{companion_abi[1]}, "
+                f"Requires-Dist tensorrt={required_abi[0]}.{required_abi[1]}"
+            )
+        try:
+            subprocess.run(
+                ["patchelf", "--remove-rpath", str(companion)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError("patchelf is required to seal the Wan2.2 wheel companion") from error
+        except subprocess.CalledProcessError as error:
+            detail = (error.stderr or error.stdout or str(error)).strip()
+            raise RuntimeError(
+                f"failed to remove the Wan2.2 wheel companion RPATH: {detail}"
+            ) from error
+
+    setattr(patch_rpath, _WAN22_RPATH_POLICY_MARKER, True)
+    conan_build.patch_rpath = patch_rpath
 
 
 def _py_only_enabled(config_settings: dict[str, Any] | None) -> bool:
@@ -144,6 +228,27 @@ def _read_pyproject() -> dict[str, Any]:
         return tomllib.load(f)
 
 
+def _project_tensorrt_abi() -> tuple[int, int]:
+    dependencies = _read_pyproject().get("project", {}).get("dependencies", [])
+    requirements = [
+        str(dependency)
+        for dependency in dependencies
+        if re.match(r"^\s*tensorrt(?:\s|=|<|>|!|~|;|$)", str(dependency), re.IGNORECASE)
+    ]
+    if len(requirements) != 1:
+        raise RuntimeError(
+            "native wheel metadata must contain exactly one TensorRT dependency; "
+            f"found {requirements}"
+        )
+    match = _TENSORRT_EXACT_DEPENDENCY_RE.fullmatch(requirements[0])
+    if match is None:
+        raise RuntimeError(
+            "native wheel TensorRT dependency must be an exact major.minor version pin; "
+            f"found {requirements[0]!r}"
+        )
+    return int(match.group("major")), int(match.group("minor"))
+
+
 def _project_metadata() -> dict[str, Any]:
     project = _read_pyproject()["project"]
     return {
@@ -159,8 +264,7 @@ def _project_metadata() -> dict[str, Any]:
 def _write_dist_info(parent: Path) -> Path:
     project = _project_metadata()
     dist_info = (
-        parent
-        / f"{_wheel_distribution_name(project['name'])}-{project['version']}.dist-info"
+        parent / f"{_wheel_distribution_name(project['name'])}-{project['version']}.dist-info"
     )
     dist_info.mkdir(parents=True, exist_ok=True)
     (dist_info / "METADATA").write_text(_metadata_text(project), encoding="utf-8")

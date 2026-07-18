@@ -273,7 +273,7 @@ class RtxBackend final : public IBackend {
 
 } // namespace trtmc
 
-extern "C" trtmc::IBackend* trtmc_create_backend_v1() {
+extern "C" trtmc::IBackend* trtmc_create_backend_v2() {
     try {
         return new trtmc::RtxBackend();
     } catch (const std::exception& e) {
@@ -286,6 +286,6 @@ extern "C" std::uint32_t trtmc_backend_api_abi_version() {
     return trtmc::kTrtmcBackendApiAbiVersion;
 }
 
-extern "C" void trtmc_destroy_backend_v1(trtmc::IBackend* b) {
+extern "C" void trtmc_destroy_backend_v2(trtmc::IBackend* b) {
     delete b;
 }

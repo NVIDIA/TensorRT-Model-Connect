@@ -72,6 +72,9 @@ def test_prepare_elf_model_dir_combines_config_checkpoint_and_tokenizer(tmp_path
     assert (output / "checkpoint_42").read_bytes() == b"checkpoint"
     assert (output / "tokenizer.json").exists()
     assert (output / "t5_small_encoder_jax.pkl").read_bytes() == b"encoder"
+    readme = (output / "README.trtmc.txt").read_text(encoding="utf-8")
+    assert "-o elf.trtfb" in readme
+    assert "--method" not in readme
     assert cfg.model_type == "elf"
     assert cfg.raw["model"] == "ELF-B"
 

@@ -15,6 +15,10 @@ TensorRT-Model-Connect has three install paths:
 - NVIDIA driver and CUDA runtime libraries.
 - glibc 2.39 or newer for the published `manylinux_2_39_aarch64` wheels.
 
+Wan2.2 generation additionally requires CUDA 13 cuBLASLt and NVRTC runtime
+libraries plus cuDNN 9 on the host. These are native platform libraries, not
+Python or PyTorch runtime dependencies.
+
 Building from source also needs the repository dev container or an equivalent
 CUDA/TensorRT build environment with CMake, Ninja, Conan, CUDA headers and
 libraries, TensorRT headers and libraries, `patchelf`, and `auditwheel`.
@@ -35,6 +39,21 @@ pip install ./tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl
 trtmc version
 trtmc build --help
 ```
+
+If this environment will create Wan bundles, install the same wheel with the
+`wan` build extra (or install a compatible NVIDIA PyTorch first and let the
+extra reuse it):
+
+```bash
+pip install './tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl[wan]'
+```
+
+PyTorch is used only to read the official checkpoint containers during
+`trtmc build`; it is not a dependency of `trtmc generate-video`. The installed
+builder contains one AOT Wan plugin image for its TensorRT ABI. `trtmc build`
+embeds that image in `.trtfb`; generation does not compile it or require a
+sibling `.so`. The native wheel currently always contains this builder image;
+the `wan` extra controls only checkpoint-reader dependencies.
 
 Use the TensorRT `cp310` and TensorRT-Model-Connect `py310` wheels with Python
 3.10. Use the `cp312` and `py312` wheels with Python 3.12. The
@@ -79,6 +98,8 @@ TRTMC_TRT_INCLUDE_DIR="${TRT_INC_DIR:-/usr/include/aarch64-linux-gnu}" \
 TRTMC_TRT_LIBRARY="${TRT_LIB_DIR:-/opt/venv/lib/python3.12/site-packages/tensorrt_libs}/libnvinfer.so" \
 TRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include \
 TRTMC_CUDART_LIBRARY=/usr/local/cuda/lib64/libcudart.so \
+TRTMC_WAN22_CUDNN_INCLUDE_DIR="${CUDNN_INCLUDE_DIR:-/opt/venv/lib/python3.12/site-packages/nvidia/cudnn/include}" \
+TRTMC_WAN22_CUDNN_LIBRARY="${CUDNN_LIBRARY:-/opt/venv/lib/python3.12/site-packages/nvidia/cudnn/lib/libcudnn.so.9}" \
 WHEEL_PYVER=py312 \
 WHEEL_ABI=none \
 WHEEL_ARCH=manylinux_2_39_aarch64 \
@@ -103,7 +124,9 @@ python3.12 -m venv /tmp/trtmc-wheel-smoke
 ```
 
 Run wheel builds from the repository root. Do not point `python -m build` at a
-package subdirectory.
+package subdirectory. The wheel build fails closed if the TensorRT major/minor
+used to compile the Wan image does not match the pinned `tensorrt`
+`Requires-Dist` version.
 
 ## 3. Advanced editable Python-only install
 
@@ -124,6 +147,8 @@ Inside the dev container:
 ```bash
 pip install -e . -C py-only=true
 ```
+
+For Wan bundle development, use `pip install -e '.[wan]' -C py-only=true`.
 
 If the container already has the declared dependencies installed and you want
 to avoid dependency resolution:

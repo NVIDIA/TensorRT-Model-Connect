@@ -57,6 +57,11 @@ class BundleInfo:
     # the JSON header so older runtimes still load the bundle and treat the
     # engine as B=1. See design doc Decision C.
     max_batch_size: dict[str, int] | None = None
+    # Original Hugging Face repository identity and immutable commit selected
+    # by snapshot_download. Appended to preserve BundleInfo positional-call
+    # compatibility; omitted from headers created from local checkpoints.
+    source_model_id: str = ""
+    source_revision: str = ""
 
 
 @dataclass
@@ -217,6 +222,10 @@ def _write_file_backed_bundle(
     # Build JSON header
     header = {
         "model_id": info.model_id,
+        **({"source_model_id": info.source_model_id}
+           if info.source_model_id else {}),
+        **({"source_revision": info.source_revision}
+           if info.source_revision else {}),
         "model_type": info.model_type,
         "family": info.family,
         "trt_version": info.trt_version,
@@ -285,6 +294,10 @@ def write_bundle(
     # Build JSON header
     header = {
         "model_id": info.model_id,
+        **({"source_model_id": info.source_model_id}
+           if info.source_model_id else {}),
+        **({"source_revision": info.source_revision}
+           if info.source_revision else {}),
         "model_type": info.model_type,
         "family": info.family,
         "trt_version": info.trt_version,

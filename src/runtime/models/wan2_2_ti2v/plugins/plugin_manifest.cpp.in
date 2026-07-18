@@ -1,0 +1,171 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include <NvInfer.h>
+#include <cstdint>
+#include <cuda_runtime_api.h>
+#include <cudnn.h>
+#include <dlfcn.h>
+#include <link.h>
+#include <sstream>
+#include <string>
+
+namespace {
+
+constexpr const char* kSemanticAbi = "@TRTMC_WAN22_PLUGIN_SEMANTIC_ABI@";
+constexpr const char* kSourceDigest = "@TRTMC_WAN22_PLUGIN_SOURCE_DIGEST@";
+constexpr const char* kCreatorSet = "@TRTMC_WAN22_PLUGIN_CREATOR_SET@";
+
+const std::string& manifest_json() {
+    static const std::string value = [] {
+        std::ostringstream out;
+        out << "{\"schema\":1,\"family\":\"wan2_2_ti2v\","
+            << "\"semantic_abi\":\"" << kSemanticAbi << "\","
+            << "\"source_digest\":\"" << kSourceDigest << "\","
+            << "\"creator_set\":\"" << kCreatorSet << "\","
+            << "\"runtime_abi\":{"
+            << "\"tensorrt_major\":" << NV_TENSORRT_MAJOR << ','
+            << "\"tensorrt_minor\":" << NV_TENSORRT_MINOR << ','
+            << "\"cuda_major\":" << (CUDART_VERSION / 1000) << ','
+            << "\"cudnn_major\":" << CUDNN_MAJOR << "},"
+            << "\"cuda_architectures\":[103,110]}";
+        return out.str();
+    }();
+    return value;
+}
+
+const std::string& runtime_abi() {
+    static const std::string value = [] {
+        int cuda_version = 0;
+        const cudaError_t cuda_status = cudaRuntimeGetVersion(&cuda_version);
+        const int cuda_major = cuda_status == cudaSuccess ? cuda_version / 1000 : -1;
+        const std::size_t cudnn_version = cudnnGetVersion();
+        const int cudnn_major = static_cast<int>(cudnn_version / 10000U);
+        std::ostringstream out;
+        out << "tensorrt=" << getInferLibMajorVersion() << '.' << getInferLibMinorVersion()
+            << ";cuda=" << cuda_major << ";cudnn=" << cudnn_major;
+        return out.str();
+    }();
+    return value;
+}
+
+int runtime_search_path_state() {
+    Dl_info self_info{};
+    if (dladdr(reinterpret_cast<const void*>(&runtime_search_path_state), &self_info) == 0 ||
+        self_info.dli_fbase == nullptr) {
+        return -1;
+    }
+    struct Search {
+        void* base;
+        bool found_image{false};
+        bool found_dynamic{false};
+        bool has_search_path{false};
+    } search{self_info.dli_fbase};
+    dl_iterate_phdr(
+        [](dl_phdr_info* info, std::size_t, void* opaque) {
+            auto& state = *static_cast<Search*>(opaque);
+            if (reinterpret_cast<void*>(info->dlpi_addr) != state.base)
+                return 0;
+            state.found_image = true;
+            for (ElfW(Half) index = 0; index < info->dlpi_phnum; ++index) {
+                const auto& header = info->dlpi_phdr[index];
+                if (header.p_type != PT_DYNAMIC)
+                    continue;
+                state.found_dynamic = true;
+                const auto* dynamic =
+                    reinterpret_cast<const ElfW(Dyn)*>(info->dlpi_addr + header.p_vaddr);
+                for (; dynamic->d_tag != DT_NULL; ++dynamic) {
+                    if (dynamic->d_tag == DT_RPATH || dynamic->d_tag == DT_RUNPATH) {
+                        state.has_search_path = true;
+                        return 1;
+                    }
+                }
+            }
+            return 1;
+        },
+        &search);
+    if (!search.found_image || !search.found_dynamic)
+        return -1;
+    return search.has_search_path ? 1 : 0;
+}
+
+bool all_declared_creators_are_owned_by_this_image() {
+    auto* registry = getPluginRegistry();
+    if (registry == nullptr)
+        return false;
+    Dl_info self_info{};
+    if (dladdr(reinterpret_cast<const void*>(&all_declared_creators_are_owned_by_this_image),
+               &self_info) == 0 ||
+        self_info.dli_fbase == nullptr) {
+        return false;
+    }
+    const std::string creators(kCreatorSet);
+    std::size_t begin = 0;
+    while (begin < creators.size()) {
+        const std::size_t end = creators.find(';', begin);
+        const std::string entry =
+            creators.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+        const std::size_t first_colon = entry.find(':');
+        const std::size_t second_colon =
+            first_colon == std::string::npos ? std::string::npos : entry.find(':', first_colon + 1);
+        if (first_colon == std::string::npos || second_colon == std::string::npos)
+            return false;
+        const std::string name = entry.substr(0, first_colon);
+        const std::string version = entry.substr(first_colon + 1, second_colon - first_colon - 1);
+        const std::string plugin_namespace = entry.substr(second_colon + 1);
+        auto* creator =
+            registry->getCreator(name.c_str(), version.c_str(), plugin_namespace.c_str());
+        if (name.empty() || version.empty() || creator == nullptr) {
+            return false;
+        }
+        // TensorRT creator names are process-global. A preloaded library can
+        // make lookup succeed while rejecting this image's static registrar as
+        // a duplicate. On the supported Linux/Itanium C++ ABI, the first word
+        // is the creator vtable; require that vtable to belong to this exact
+        // ELF mapping before advertising a valid creator fingerprint.
+        const void* vtable = *reinterpret_cast<void* const*>(creator);
+        Dl_info creator_info{};
+        if (vtable == nullptr || dladdr(vtable, &creator_info) == 0 ||
+            creator_info.dli_fbase != self_info.dli_fbase) {
+            return false;
+        }
+        if (end == std::string::npos)
+            break;
+        begin = end + 1;
+    }
+    return true;
+}
+
+} // namespace
+
+extern "C" const char* trtmc_wan22_plugin_manifest_json() {
+    return manifest_json().c_str();
+}
+
+extern "C" const char* trtmc_wan22_plugin_semantic_abi() {
+    return kSemanticAbi;
+}
+
+extern "C" const char* trtmc_wan22_plugin_source_digest() {
+    return kSourceDigest;
+}
+
+extern "C" const char* trtmc_wan22_plugin_creator_set() {
+    // Verify the static PluginRegistrar initializers survived the final link
+    // and that no earlier DSO owns these process-global creator keys. A
+    // stripped, incomplete, or shadowed image fails before any plan is read.
+    return all_declared_creators_are_owned_by_this_image() ? kCreatorSet : nullptr;
+}
+
+extern "C" const char* trtmc_wan22_plugin_runtime_abi() {
+    return runtime_abi().c_str();
+}
+
+extern "C" int trtmc_wan22_plugin_runtime_search_path_state() {
+    // Zero is the only accepted result. A positive value means DT_RPATH or
+    // DT_RUNPATH is present; a negative value means the ELF could not be
+    // inspected and therefore also fails closed.
+    return runtime_search_path_state();
+}

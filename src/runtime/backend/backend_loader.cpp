@@ -49,8 +49,8 @@ std::mutex g_mu;
 std::unordered_map<std::string, CachedBackend> g_cache;
 std::unordered_map<std::string, void*> g_preloaded_dependencies;
 
-constexpr const char* kBackendCreateSymbol = "trtmc_create_backend_v1";
-constexpr const char* kBackendDestroySymbol = "trtmc_destroy_backend_v1";
+constexpr const char* kBackendCreateSymbol = "trtmc_create_backend_v2";
+constexpr const char* kBackendDestroySymbol = "trtmc_destroy_backend_v2";
 
 void cleanup_backends();
 

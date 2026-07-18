@@ -71,6 +71,21 @@ if(_trtmc_python)
   if(_trtmc_tensorrt_libs_pkg)
     list(APPEND _trtmc_default_search_paths "${_trtmc_tensorrt_libs_pkg}")
   endif()
+
+  # NVIDIA PyTorch wheels install cuDNN under the nvidia.cudnn namespace
+  # package rather than a system prefix.  Discover that root explicitly so
+  # source and Conan wheel builds produce the Wan2.2 companion without users
+  # supplying private include/library paths.
+  execute_process(
+    COMMAND "${_trtmc_python}" -c
+      "import importlib.util,sys; s=importlib.util.find_spec('nvidia.cudnn'); sys.stdout.write(s.submodule_search_locations[0] if s and s.submodule_search_locations else '')"
+    OUTPUT_VARIABLE _trtmc_cudnn_pkg
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(_trtmc_cudnn_pkg)
+    list(APPEND _trtmc_default_search_paths "${_trtmc_cudnn_pkg}")
+  endif()
 endif()
 
 find_path(TRTMC_TRT_INCLUDE_DIR NvInferRuntime.h
@@ -164,6 +179,7 @@ endif()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(cmake/trtmc_config_schemas.cmake)
 include(cmake/trtmc_pipeline_plugins.cmake)
+include(cmake/trtmc_wan22_plugins.cmake)
 add_library(trtmc_core SHARED
   src/bundle/bundle_format.cpp
   src/bundle/bundle_view.cpp
@@ -411,19 +427,6 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
         COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-nonnull>;$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-Wno-free-nonheap-object>"
     )
   endforeach()
-  # The official Wan2.2 UniPC path evaluates CFG and scheduler expressions as
-  # separate eager CUDA operations.  Contracting those source-level FP32
-  # boundaries into host FMA instructions changes the denoising trajectory.
-  # Keep this precision constraint local to the family-owned orchestration
-  # translation unit; TensorRT engines and all other model plugins retain the
-  # repository-wide optimization policy.
-  if(_trtmc_model STREQUAL "wan2_2_ti2v")
-    set_source_files_properties(
-      "${PROJECT_SOURCE_DIR}/src/runtime/models/wan2_2_ti2v/pipeline.cpp"
-      PROPERTIES
-        COMPILE_OPTIONS "$<$<COMPILE_LANG_AND_ID:CXX,GNU>:-ffp-contract=off>"
-    )
-  endif()
   add_library(trtmc_model_${_trtmc_model} SHARED
     ${_trtmc_model_sources}
     ${_trtmc_model_cuda_sources}
@@ -473,6 +476,10 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model}
   )
 endforeach()
+
+if("wan2_2_ti2v" IN_LIST TRTMC_RUNTIME_MODEL_IDS)
+  trtmc_add_wan22_plugin_companion()
+endif()
 
 # Build the TVM-FFI TensorRT plugin as a standalone shared library.
 if(_trtmc_has_tvm_ffi AND _trtmc_can_build_trt_backend)
@@ -816,11 +823,29 @@ endfunction()
 trtmc_add_test(test_bundle_format)
 trtmc_add_test(test_bundle_materialization)
 target_link_libraries(test_bundle_materialization PRIVATE nlohmann_json::nlohmann_json)
+if(TARGET trtmc_model_wan2_2_ti2v)
+  target_link_libraries(test_bundle_materialization PRIVATE trtmc_model_wan2_2_ti2v)
+  target_compile_definitions(test_bundle_materialization PRIVATE
+    TRTMC_TEST_WAN22_ARTIFACT_CONTRACT=1)
+endif()
 trtmc_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtmc_add_test(test_bundle_view)
 trtmc_add_test(test_pipeline_registry)
 trtmc_add_test(test_model_plugin_loader MODEL_OWNED)
-add_dependencies(test_model_plugin_loader trtmc_model_plugins)
+add_library(trtmc_test_model_plugin_api_abi_v1 SHARED EXCLUDE_FROM_ALL
+  tests/cpp/support/fake_model_plugin_api_abi_v1.cpp
+)
+set_target_properties(trtmc_test_model_plugin_api_abi_v1 PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test_model_plugins"
+  OUTPUT_NAME "trtmc_test_model_plugin_api_abi_v1"
+)
+add_dependencies(test_model_plugin_loader
+  trtmc_model_plugins
+  trtmc_test_model_plugin_api_abi_v1
+)
+target_compile_definitions(test_model_plugin_loader PRIVATE
+  TRTMC_TEST_MODEL_PLUGIN_V1_PATH="$<TARGET_FILE:trtmc_test_model_plugin_api_abi_v1>"
+)
 trtmc_add_test(test_backend_loader)
 add_library(trtmc_test_backend_missing_api_abi SHARED EXCLUDE_FROM_ALL
   tests/cpp/support/fake_backend_missing_api_abi.cpp
@@ -831,16 +856,20 @@ add_library(trtmc_test_backend_wrong_api_abi SHARED EXCLUDE_FROM_ALL
 add_library(trtmc_test_backend_api_abi_v1 SHARED EXCLUDE_FROM_ALL
   tests/cpp/support/fake_backend_api_abi_v1.cpp
 )
-target_include_directories(trtmc_test_backend_api_abi_v1 PRIVATE
+add_library(trtmc_test_backend_api_abi_v2 SHARED EXCLUDE_FROM_ALL
+  tests/cpp/support/fake_backend_api_abi_v2.cpp
+)
+target_include_directories(trtmc_test_backend_api_abi_v2 PRIVATE
   ${PROJECT_SOURCE_DIR}/include
 )
-target_include_directories(trtmc_test_backend_api_abi_v1 SYSTEM PRIVATE
+target_include_directories(trtmc_test_backend_api_abi_v2 SYSTEM PRIVATE
   ${TRTMC_CUDA_INCLUDE_DIR}
 )
 set_target_properties(
   trtmc_test_backend_missing_api_abi
   trtmc_test_backend_wrong_api_abi
   trtmc_test_backend_api_abi_v1
+  trtmc_test_backend_api_abi_v2
   PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test_backends"
 )
@@ -853,14 +882,19 @@ set_target_properties(trtmc_test_backend_wrong_api_abi PROPERTIES
 set_target_properties(trtmc_test_backend_api_abi_v1 PROPERTIES
   OUTPUT_NAME "trtmc_backend_test_api_abi_v1"
 )
+set_target_properties(trtmc_test_backend_api_abi_v2 PROPERTIES
+  OUTPUT_NAME "trtmc_backend_test_api_abi_v2"
+)
 add_dependencies(test_backend_loader
   trtmc_test_backend_missing_api_abi
   trtmc_test_backend_wrong_api_abi
   trtmc_test_backend_api_abi_v1
+  trtmc_test_backend_api_abi_v2
 )
 target_compile_definitions(test_backend_loader PRIVATE
   TRTMC_TEST_BACKEND_DIR="$<TARGET_FILE_DIR:trtmc_test_backend_missing_api_abi>"
   TRTMC_TEST_BACKEND_V1_PATH="$<TARGET_FILE:trtmc_test_backend_api_abi_v1>"
+  TRTMC_TEST_BACKEND_V2_PATH="$<TARGET_FILE:trtmc_test_backend_api_abi_v2>"
 )
 trtmc_add_test(test_trt_version)
 

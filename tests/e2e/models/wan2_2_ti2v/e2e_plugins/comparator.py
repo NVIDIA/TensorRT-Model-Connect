@@ -3,6 +3,6 @@
 
 """Wan2.2 TI2V-5B model-owned E2E comparator plugin."""
 
-from .comparators.diffusion import Wan22TI2VDiffusionComparator
+from .comparators.diffusion import DiffusionComparator
 
-comparator = Wan22TI2VDiffusionComparator()
+comparator = DiffusionComparator()

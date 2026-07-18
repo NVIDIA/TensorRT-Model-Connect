@@ -32,6 +32,34 @@ The wheel installs the native `trtmc` executable into the environment, the
 Python builder dependencies including TensorRT, and the TensorRT backend DSO.
 CUDA driver/runtime libraries still come from the host system.
 
+To build official Wan checkpoints, install the model-specific build extra so
+the builder can read their PyTorch `.pth` weight containers. This dependency
+is used only while creating the bundle; video generation remains native C++:
+
+```bash
+pip install './tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl[wan]'
+```
+
+After installation, Wan2.2 video generation is two Model-Connect commands:
+
+```bash
+trtmc build Wan-AI/Wan2.2-TI2V-5B -o /tmp/wan22-ti2v-5b.trtfb
+
+trtmc generate-video /tmp/wan22-ti2v-5b.trtfb \
+  --prompt "Two anthropomorphic cats boxing on a spotlighted stage" \
+  --output /tmp/wan22-frames \
+  --seed 42
+```
+
+The build command downloads and caches the Hugging Face checkpoint, selects
+Wan's BF16 precision, and records the resolved Hugging Face revision in the
+bundle. The current Wan2.2 profile is the official 1280x704, 121-frame,
+50-step configuration. It also embeds the one AOT CUDA plugin image selected
+for the active TensorRT major/minor, so deployment has no sibling plugin file
+and never rebuilds Model-Connect plugin source. Wan generation requires the
+host's CUDA 13 runtime, cuBLASLt, NVRTC, and cuDNN 9 libraries; cuDNN frontend
+may use NVRTC while constructing its SDPA execution plan.
+
 For source development, open Codex or another repo-aware coding agent and ask:
 
 ```text

@@ -11,10 +11,10 @@ from types import SimpleNamespace
 import pytest
 
 from tests.e2e.models.wan2_2_ti2v.e2e_plugins.comparators.diffusion import (
-    Wan22TI2VDiffusionComparator,
+    DiffusionComparator,
 )
 from tests.e2e.models.wan2_2_ti2v.e2e_plugins.runners.diffusion import (
-    Wan22TI2VDiffusionRunner,
+    DiffusionMediaRunner,
     build_bundle_contract_command,
     build_generate_video_command,
     validate_official_profile,
@@ -154,7 +154,7 @@ def test_runner_rejects_non_official_profiles() -> None:
 
 
 def test_comparator_requires_exact_frames_dimensions_and_non_degenerate_pixels() -> None:
-    comparator = Wan22TI2VDiffusionComparator()
+    comparator = DiffusionComparator()
     stage = StageSpec(name="end_to_end")
     profile = ThresholdProfile(
         task_strategy="diffusion_media_generation",
@@ -192,7 +192,7 @@ def test_comparator_requires_exact_frames_dimensions_and_non_degenerate_pixels()
 
 
 def test_comparator_fails_closed_without_model_sidecar_thresholds() -> None:
-    comparator = Wan22TI2VDiffusionComparator()
+    comparator = DiffusionComparator()
     output = StageOutput(stage_name="end_to_end", data={"returncode": 0})
     result = comparator.compare(
         output,
@@ -210,9 +210,6 @@ def test_l0_comparator_requires_runtime_strategy_and_all_bundle_sections() -> No
         [
             "Runtime strategy:   diffusion_wan2_2_ti2v",
             "Sections:",
-            "wan2_2_umt5_cuda_plugin_so",
-            "wan2_2_dit_cuda_plugin_so",
-            "wan2_2_vae_cuda_plugin_so",
             "text_encoder_0_plan",
             "denoiser_plan",
             "vae_decoder_plan",
@@ -229,7 +226,7 @@ def test_l0_comparator_requires_runtime_strategy_and_all_bundle_sections() -> No
             "strict_model_plugin_probe": True,
         },
     )
-    comparator = Wan22TI2VDiffusionComparator()
+    comparator = DiffusionComparator()
     result = comparator.compare(
         output,
         StageOutput(stage_name="bundle_contract"),
@@ -275,7 +272,7 @@ def test_generation_stage_exposes_one_guard_payload_with_new_runtime_marker(
         "tests.e2e.models.wan2_2_ti2v.e2e_plugins.runners.diffusion.subprocess.run",
         fake_run,
     )
-    output = Wan22TI2VDiffusionRunner().run_stage(
+    output = DiffusionMediaRunner().run_stage(
         case,
         StageSpec(name="end_to_end"),
         context,

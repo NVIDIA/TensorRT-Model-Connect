@@ -19,27 +19,23 @@ from .model_config import (
 
 
 WAN22_MODEL_OWNED_BUNDLE_SECTIONS = (
-    "wan2_2_umt5_cuda_plugin_so",
-    "wan2_2_dit_cuda_plugin_so",
-    "wan2_2_vae_cuda_plugin_so",
     "text_encoder_0_plan",
     "denoiser_plan",
     "vae_decoder_plan",
     "vae_decoder_first_frame_plan",
     "tokenizer.json",
+    "wan2_2_ti2v_plugins.so",
 )
 WAN22_REQUIRED_BUNDLE_SECTIONS = (
     *WAN22_MODEL_OWNED_BUNDLE_SECTIONS,
     "config.json",
 )
 WAN22_EAGER_BUNDLE_SECTIONS = (
-    "wan2_2_umt5_cuda_plugin_so",
-    "wan2_2_dit_cuda_plugin_so",
-    "wan2_2_vae_cuda_plugin_so",
     "tokenizer.json",
     "config.json",
 )
 WAN22_LAZY_BUNDLE_SECTIONS = (
+    "wan2_2_ti2v_plugins.so",
     "text_encoder_0_plan",
     "denoiser_plan",
     "vae_decoder_plan",
@@ -47,9 +43,8 @@ WAN22_LAZY_BUNDLE_SECTIONS = (
 )
 
 _COMPONENT_KEYS = {
-    "umt5_cuda_plugin",
-    "dit_cuda_plugin",
-    "vae_cuda_plugin",
+    "plugin_contract",
+    "plugin_library",
     "text_encoders",
     "denoiser",
     "vae_decoder",
@@ -63,7 +58,22 @@ _PLAN_SECTIONS = {
     "vae_decoder_plan",
     "vae_decoder_first_frame_plan",
 }
-_ARTIFACT_MANIFEST_SCHEMA = "trtmc.wan2_2_ti2v.bundle-artifacts.v2"
+_ARTIFACT_MANIFEST_SCHEMA = "trtmc.wan2_2_ti2v.bundle-artifacts.v4"
+_PLUGIN_CONTRACT_KEYS = {
+    "schema",
+    "family",
+    "semantic_abi",
+    "source_digest",
+    "creator_set",
+    "runtime_abi",
+    "cuda_architectures",
+}
+_PLUGIN_RUNTIME_ABI_KEYS = {
+    "tensorrt_major",
+    "tensorrt_minor",
+    "cuda_major",
+    "cudnn_major",
+}
 
 
 def _official_artifact_profile() -> dict:
@@ -98,19 +108,50 @@ def _component_section_payloads(components: dict) -> dict[str, bytes]:
     ):
         raise ValueError("Wan2.2 bundle requires exactly one UMT5-XXL text encoder")
     payloads = {
-        "wan2_2_umt5_cuda_plugin_so": components["umt5_cuda_plugin"],
-        "wan2_2_dit_cuda_plugin_so": components["dit_cuda_plugin"],
-        "wan2_2_vae_cuda_plugin_so": components["vae_cuda_plugin"],
         "text_encoder_0_plan": text_encoders[0][1],
         "denoiser_plan": components["denoiser"],
         "vae_decoder_plan": components["vae_decoder"],
         "vae_decoder_first_frame_plan": components["vae_decoder_first_frame"],
         "tokenizer.json": components["tokenizer_json"],
+        "wan2_2_ti2v_plugins.so": components["plugin_library"],
     }
     for name, payload in payloads.items():
         if not isinstance(payload, (bytes, bytearray)) or not payload:
             raise TypeError(f"Wan2.2 bundle section {name!r} must be non-empty bytes")
     return {name: bytes(payload) for name, payload in payloads.items()}
+
+
+def _validated_plugin_contract(components: dict) -> dict:
+    contract = components["plugin_contract"]
+    if not isinstance(contract, dict) or set(contract) != _PLUGIN_CONTRACT_KEYS:
+        raise ValueError("Wan2.2 plugin_contract has an unsupported schema")
+    if contract["schema"] != 1 or contract["family"] != "wan2_2_ti2v":
+        raise ValueError("Wan2.2 plugin_contract has an unsupported version or family")
+    for key in ("semantic_abi", "creator_set"):
+        if not isinstance(contract[key], str) or not contract[key]:
+            raise ValueError(f"Wan2.2 plugin_contract {key} must be a non-empty string")
+    if not _is_sha256(contract["source_digest"]):
+        raise ValueError("Wan2.2 plugin_contract source_digest must be a lowercase SHA256")
+    runtime_abi = contract["runtime_abi"]
+    if not isinstance(runtime_abi, dict) or set(runtime_abi) != _PLUGIN_RUNTIME_ABI_KEYS:
+        raise ValueError("Wan2.2 plugin_contract runtime_abi has an unsupported schema")
+    if any(
+        not isinstance(runtime_abi[key], int) or isinstance(runtime_abi[key], bool)
+        for key in _PLUGIN_RUNTIME_ABI_KEYS
+    ):
+        raise ValueError("Wan2.2 plugin_contract runtime ABI values must be integers")
+    if runtime_abi["tensorrt_minor"] < 0 or any(
+        runtime_abi[key] < 1
+        for key in ("tensorrt_major", "cuda_major", "cudnn_major")
+    ):
+        raise ValueError(
+            "Wan2.2 plugin_contract ABI majors must be positive and TensorRT minor nonnegative"
+        )
+    if contract["cuda_architectures"] != [103, 110]:
+        raise ValueError("Wan2.2 plugin_contract must bind the SM103/SM110 fat binary")
+    # JSON round-trip returns a detached tree and proves the object contains no
+    # Python-only values before it is embedded into config.json.
+    return json.loads(json.dumps(contract, sort_keys=True, separators=(",", ":")))
 
 
 def _validate_artifact_manifest(components: dict, payloads: dict[str, bytes]) -> None:
@@ -137,6 +178,14 @@ def _validate_artifact_manifest(components: dict, payloads: dict[str, bytes]) ->
             "Wan2.2 artifact_manifest must describe exactly the model-owned "
             f"bundle sections {sorted(payloads)}"
         )
+    plugin_elf_sha256 = _sha256(payloads["wan2_2_ti2v_plugins.so"])
+    plugin_contract_sha256 = _sha256(
+        json.dumps(
+            _validated_plugin_contract(components),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
     for name, payload in payloads.items():
         entry = sections[name]
         expected_entry_keys = (
@@ -174,6 +223,17 @@ def _validate_artifact_manifest(components: dict, payloads: dict[str, bytes]) ->
                     raise ValueError(
                         f"Wan2.2 artifact source input is invalid for {name}: {source!r}"
                     )
+            source_digests = {source["name"]: source["sha256"] for source in source_inputs}
+            if len(source_digests) != len(source_inputs):
+                raise ValueError(f"Wan2.2 artifact source inputs contain duplicates for {name}")
+            if source_digests.get("plugin/contract.json") != plugin_contract_sha256:
+                raise ValueError(
+                    f"Wan2.2 plan is bound to a different AOT plugin contract: {name}"
+                )
+            if source_digests.get("plugin/elf") != plugin_elf_sha256:
+                raise ValueError(
+                    f"Wan2.2 plan is bound to a different AOT plugin ELF: {name}"
+                )
             source_document = {
                 "family": "wan2_2_ti2v",
                 "component": name,
@@ -279,20 +339,32 @@ class Wan22TI2VPlugin:
     ) -> list[tuple[str, bytes]]:
         del parallel_config
         payloads = _component_section_payloads(components)
+        _validated_plugin_contract(components)
         _validate_artifact_manifest(components, payloads)
         return [(name, payloads[name]) for name in WAN22_MODEL_OWNED_BUNDLE_SECTIONS]
 
     def diffusion_bundle_config(self, config, *, components: dict) -> dict:
         payloads = _component_section_payloads(components)
+        plugin_contract = _validated_plugin_contract(components)
         _validate_artifact_manifest(components, payloads)
         result = self.get_diffusion_config(config)
         result["num_text_encoders"] = len(components["text_encoders"])
         result["artifact_manifest"] = components["artifact_manifest"]
+        result["_trtmc_wan22_plugin_contract"] = plugin_contract
         result["runtime_contract"] = {
             "implementation": "native_cpp_cuda_tensorrt",
             "artifact_integrity": "sha256_size_v1",
+            "bundle_trust_model": "trusted_executable_artifact",
+            "executable_bundle_sections": ["wan2_2_ti2v_plugins.so"],
             "required_bundle_sections": list(WAN22_REQUIRED_BUNDLE_SECTIONS),
-            "runtime_dependencies": ["trtmc_core", "cuda", "tensorrt", "cudnn"],
+            "runtime_dependencies": [
+                "trtmc_core",
+                "cuda",
+                "tensorrt",
+                "cudnn",
+                "cublaslt",
+                "nvrtc",
+            ],
             "forbidden_runtime_dependencies": [
                 "python",
                 "pytorch",

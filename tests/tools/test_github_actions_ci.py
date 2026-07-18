@@ -1713,6 +1713,8 @@ def test_package_stage_uses_conan_py_build_inputs() -> None:
     assert '"TRTMC_TRT_LIBRARY": trt_library' in text
     assert '"TRTMC_CUDA_INCLUDE_DIR": cuda_include' in text
     assert '"TRTMC_CUDART_LIBRARY": cudart' in text
+    assert '"TRTMC_WAN22_CUDNN_INCLUDE_DIR": cudnn_include' in text
+    assert '"TRTMC_WAN22_CUDNN_LIBRARY": cudnn_library' in text
 
 
 def test_impact_stage_reuses_cached_json_for_summary() -> None:
@@ -1740,6 +1742,7 @@ def test_release_wheel_build_disables_libtorch_linkage() -> None:
 def test_model_plugins_are_staged_for_installed_trtmc() -> None:
     cmake = (REPO_ROOT / "CMakeLists.txt").read_text()
     conanfile = (REPO_ROOT / "conanfile.py").read_text()
+    package = _ci_source("package.py")
     loader = (REPO_ROOT / "src" / "runtime" / "registry" / "pipeline_plugin_loader.cpp").read_text()
 
     assert "install(TARGETS trtmc_model_${_trtmc_model}" in cmake
@@ -1750,6 +1753,13 @@ def test_model_plugins_are_staged_for_installed_trtmc() -> None:
     assert "src=str(model_plugin.parent)" in conanfile
     assert "model_plugins = sorted(package_bin.glob" in conanfile
     assert "TRTMC model plugin DSOs were not staged" in conanfile
+    assert "_WAN22_BUILDER_COMPANION_RE" in conanfile
+    assert "expected exactly one ABI-tagged Wan2.2 builder companion" in conanfile
+    assert '"TRTMC_WAN22_CUDNN_INCLUDE_DIR"' in conanfile
+    assert '"TRTMC_WAN22_CUDNN_LIBRARY"' in conanfile
+    assert "WAN22_BUILDER_COMPANION_RE" in package
+    assert "packaged_wan22_companion=" in package
+    assert package.count("expected exactly one ABI-tagged Wan2.2 builder companion") >= 1
     assert '"site-packages" / "tensorrt_model_connect" / "bin"' in loader
     assert '"trtmc" / "models"' in loader
 
@@ -1830,7 +1840,12 @@ def test_selective_e2e_builds_and_runs_single_family_source_projections() -> Non
     assert '"SELECTIVE_E2E_GROUP_TIMEOUT", "90m"' in group_runner
     assert "for model in selected" in group_runner
     assert "verify-results" in group_runner
-    assert "expected exactly 1" in group_runner
+    assert '"model_dso_count": 1' in group_runner
+    assert '"builder_auxiliary_dso_count": len(auxiliary_dsos)' in group_runner
+    assert '"staged_runtime_auxiliary_dso_count": 0' in group_runner
+    assert '"bundle_embedded" if auxiliary_dsos else "none"' in group_runner
+    assert 'builder_plugins = group_dir / "builder_plugins"' in group_runner
+    assert "classify_model_libraries" in group_runner
     assert "prepare_model_plugin_dir" not in group_runner
 
 

@@ -49,7 +49,7 @@ tensorrt_model_connect.build(
 | Option | Purpose |
 | --- | --- |
 | `max_cache_length` | Default KV cache length for decoder-style bundles. |
-| `precision` | Engine precision: `fp32`, `fp16`, or `bf16`. |
+| `precision` | Optional engine precision override: `fp32`, `fp16`, or `bf16`. When omitted, the family default is used (BF16 for Wan2.2; FP32 fallback for families without a declaration). |
 | `quantize` | Structured quantization format such as `fp8` or `int4_awq`. |
 | `dynamic_kv_cache` | Build decoder bundles with runtime-resizable KV cache support. |
 | `rtx` | Build for TensorRT-RTX backend selection. |

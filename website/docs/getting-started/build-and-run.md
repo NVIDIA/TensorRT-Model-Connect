@@ -84,6 +84,29 @@ $TRTMC generate-video /tmp/flux2.trtfb \
 
 Image diffusion and video diffusion use separate runtime strategies, but both use the same bundle and C++ runtime entrypoint family.
 
+Wan2.2 uses its qualified family defaults, so neither precision nor internal
+plugin paths are part of the user command:
+
+```bash
+$TRTMC build Wan-AI/Wan2.2-TI2V-5B -o /tmp/wan22.trtfb
+
+$TRTMC generate-video /tmp/wan22.trtfb \
+  --prompt "Two anthropomorphic cats boxing on a spotlighted stage" \
+  --output /tmp/wan22-frames \
+  --seed 42
+```
+
+This produces 121 PNG frames at 1280x704 with the bundle's official 50-step
+configuration. The checkpoint is resolved from Hugging Face automatically.
+The TRT-major/minor-specific Wan AOT plugin is embedded in the bundle, so no
+plugin file, CMake, C++ compiler, or NVCC is needed at generation time. The
+host still supplies CUDA, cuDNN, cuBLASLt, and NVRTC; cuDNN frontend may use
+NVRTC while constructing the SDPA execution plan.
+
+Wan bundles created by the earlier experimental multi-DSO format must be
+rebuilt. The native runtime intentionally rejects them instead of silently
+loading plugins or plans under a different artifact contract.
+
 ## Segmentation
 
 ```bash

@@ -4,25 +4,32 @@
  */
 
 #include "bundle/bundle_view.h"
+#include "runtime/models/wan2_2_ti2v/artifact_contract.h"
 #include "runtime/models/wan2_2_ti2v/pipeline.h"
-#include "runtime/models/wan2_2_ti2v/plugin_cache.h"
+#include "runtime/models/wan2_2_ti2v/plugin_contract.h"
 #include "trtmc/runtime/pipeline_registry.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "trtmc/tokenizer.h"
 #include "utils/sha256.h"
 
-#include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <filesystem>
-#include <fstream>
+#include <linux/memfd.h>
 #include <memory>
 #include <mutex>
+#include <nlohmann/json.hpp>
+#include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <system_error>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <utility>
@@ -31,19 +38,211 @@
 namespace trtmc {
 namespace {
 
-struct Wan22CudaPluginLoadState {
-    std::string sha256;
+using StringExport = const char* (*)();
+using IntExport = int (*)();
+
+struct Wan22AotPluginState {
     void* handle{nullptr};
+    int backing_fd{-1};
+    std::string binary_sha256;
+    std::string load_error;
+    std::string dependency_runtime_abi;
+    std::vector<void*> dependency_handles;
+    wan2_2_ti2v::PluginContract contract;
+    std::string loaded_runtime_abi;
 };
 
-std::mutex& cuda_plugin_load_mutex() {
+constexpr const char* kWan22PluginSection = "wan2_2_ti2v_plugins.so";
+
+std::mutex& aot_plugin_mutex() {
     static std::mutex mutex;
     return mutex;
 }
 
-std::unordered_map<std::string, Wan22CudaPluginLoadState>& cuda_plugin_load_states() {
-    static std::unordered_map<std::string, Wan22CudaPluginLoadState> states;
-    return states;
+Wan22AotPluginState& aot_plugin_state() {
+    static Wan22AotPluginState state;
+    return state;
+}
+
+void append_path_list(std::vector<std::filesystem::path>& paths, const char* value) {
+    if (value == nullptr)
+        return;
+    std::string list(value);
+    std::size_t begin = 0;
+    while (begin <= list.size()) {
+        const auto end = list.find(':', begin);
+        const auto item = list.substr(begin, end - begin);
+        if (!item.empty())
+            paths.emplace_back(item);
+        if (end == std::string::npos)
+            break;
+        begin = end + 1;
+    }
+}
+
+void append_python_native_directories(std::vector<std::filesystem::path>& paths,
+                                      const std::filesystem::path& prefix) {
+    std::error_code error;
+    const auto lib = prefix / "lib";
+    if (!std::filesystem::is_directory(lib, error))
+        return;
+    for (std::filesystem::directory_iterator iterator(lib, error), end; !error && iterator != end;
+         iterator.increment(error)) {
+        if (!iterator->is_directory(error) ||
+            iterator->path().filename().string().rfind("python", 0) != 0) {
+            continue;
+        }
+        const auto site = iterator->path() / "site-packages";
+        paths.push_back(site / "tensorrt_libs");
+        paths.push_back(site / "nvidia" / "cudnn" / "lib");
+        paths.push_back(site / "nvidia" / "cublas" / "lib");
+        paths.push_back(site / "nvidia" / "cuda_runtime" / "lib");
+        paths.push_back(site / "nvidia" / "cuda_nvrtc" / "lib");
+    }
+}
+
+std::vector<std::vector<std::filesystem::path>> dependency_search_tiers() {
+    std::vector<std::filesystem::path> configured;
+    append_path_list(configured, std::getenv("LD_LIBRARY_PATH"));
+
+    std::vector<std::filesystem::path> packaged;
+    std::set<std::filesystem::path> prefixes;
+    for (const char* variable : {"VIRTUAL_ENV", "CONDA_PREFIX"}) {
+        if (const char* value = std::getenv(variable); value != nullptr && value[0] != '\0')
+            prefixes.emplace(value);
+    }
+    std::vector<std::filesystem::path> executable_paths;
+    append_path_list(executable_paths, std::getenv("PATH"));
+    for (const auto& path : executable_paths) {
+        if (path.filename() == "bin")
+            prefixes.insert(path.parent_path());
+    }
+    std::error_code error;
+    const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
+    if (!error && executable.parent_path().filename() == "bin")
+        prefixes.insert(executable.parent_path().parent_path());
+    for (const auto& prefix : prefixes)
+        append_python_native_directories(packaged, prefix);
+
+    std::vector<std::filesystem::path> system{
+        "/usr/local/cuda/lib64",  "/usr/lib/aarch64-linux-gnu", "/usr/lib/x86_64-linux-gnu",
+        "/lib/aarch64-linux-gnu", "/lib/x86_64-linux-gnu",
+    };
+    const std::filesystem::path local("/usr/local");
+    for (std::filesystem::directory_iterator iterator(local, error), end; !error && iterator != end;
+         iterator.increment(error)) {
+        if (!iterator->is_directory(error) ||
+            iterator->path().filename().string().rfind("cuda", 0) != 0) {
+            continue;
+        }
+        const auto targets = iterator->path() / "targets";
+        std::error_code targets_error;
+        for (std::filesystem::directory_iterator target(targets, targets_error), target_end;
+             !targets_error && target != target_end; target.increment(targets_error)) {
+            system.push_back(target->path() / "lib");
+        }
+    }
+    return {std::move(configured), std::move(packaged), std::move(system)};
+}
+
+std::optional<std::filesystem::path> resolve_dependency_path(const std::string& soname) {
+    for (const auto& tier : dependency_search_tiers()) {
+        std::set<std::filesystem::path> matches;
+        for (const auto& directory : tier) {
+            std::error_code error;
+            const auto candidate = directory / soname;
+            if (!std::filesystem::is_regular_file(candidate, error))
+                continue;
+            auto resolved = std::filesystem::canonical(candidate, error);
+            matches.insert(error ? candidate : std::move(resolved));
+        }
+        if (matches.size() == 1)
+            return *matches.begin();
+        if (matches.size() > 1) {
+            std::ostringstream message;
+            message << "Wan2.2 dependency " << soname << " is ambiguous in one search tier:";
+            for (const auto& path : matches)
+                message << ' ' << path;
+            throw std::runtime_error(message.str());
+        }
+    }
+    return std::nullopt;
+}
+
+void* load_dependency(const std::string& soname) {
+    dlerror();
+    if (void* handle = dlopen(soname.c_str(), RTLD_NOW | RTLD_GLOBAL); handle != nullptr)
+        return handle;
+    const char* first_error = dlerror();
+    const std::string bare_error = first_error != nullptr ? first_error : "unknown dlopen error";
+    const auto path = resolve_dependency_path(soname);
+    if (!path) {
+        throw std::runtime_error("Unable to resolve Wan2.2 ABI dependency " + soname + ": " +
+                                 bare_error);
+    }
+    dlerror();
+    if (void* handle = dlopen(path->c_str(), RTLD_NOW | RTLD_GLOBAL); handle != nullptr)
+        return handle;
+    const char* path_error = dlerror();
+    throw std::runtime_error("Unable to preload Wan2.2 ABI dependency " + soname + " from " +
+                             path->string() + ": " +
+                             (path_error != nullptr ? path_error : "unknown dlopen error"));
+}
+
+void preload_wan22_dependencies(const wan2_2_ti2v::PluginRuntimeAbi& abi,
+                                Wan22AotPluginState& state) {
+    const auto runtime_abi = wan2_2_ti2v::canonical_runtime_abi(abi);
+    if (!state.dependency_runtime_abi.empty()) {
+        if (state.dependency_runtime_abi != runtime_abi) {
+            throw std::runtime_error("Wan2.2 dependency ABI conflict in this process: loaded=" +
+                                     state.dependency_runtime_abi + ", requested=" + runtime_abi);
+        }
+        if (state.dependency_handles.size() == 5)
+            return;
+    } else {
+        // A partial preload changes process-global CUDA/TRT state even if a
+        // later dependency is missing. Pin retries to this exact ABI.
+        state.dependency_runtime_abi = runtime_abi;
+    }
+
+    const std::vector<std::string> dependencies{
+        "libcudart.so." + std::to_string(abi.cuda_major),
+        "libcublasLt.so." + std::to_string(abi.cuda_major),
+        "libnvrtc.so." + std::to_string(abi.cuda_major),
+        "libcudnn.so." + std::to_string(abi.cudnn_major),
+        "libnvinfer.so." + std::to_string(abi.tensorrt_major),
+    };
+    for (std::size_t index = state.dependency_handles.size(); index < dependencies.size();
+         ++index) {
+        state.dependency_handles.push_back(load_dependency(dependencies[index]));
+    }
+}
+
+std::string require_export_value(void* handle, const char* symbol) {
+    dlerror();
+    const auto function = reinterpret_cast<StringExport>(dlsym(handle, symbol));
+    const char* error = dlerror();
+    if (error != nullptr || function == nullptr) {
+        throw std::runtime_error(std::string("Wan2.2 AOT plugin companion is missing export ") +
+                                 symbol + (error != nullptr ? std::string(": ") + error : ""));
+    }
+    const char* value = function();
+    if (value == nullptr || value[0] == '\0') {
+        throw std::runtime_error(std::string("Wan2.2 AOT plugin companion returned an empty ") +
+                                 symbol);
+    }
+    return value;
+}
+
+int require_int_export_value(void* handle, const char* symbol) {
+    dlerror();
+    const auto function = reinterpret_cast<IntExport>(dlsym(handle, symbol));
+    const char* error = dlerror();
+    if (error != nullptr || function == nullptr) {
+        throw std::runtime_error(std::string("Wan2.2 AOT plugin companion is missing export ") +
+                                 symbol + (error != nullptr ? std::string(": ") + error : ""));
+    }
+    return function();
 }
 
 std::string sha256_bytes(const std::vector<char>& bytes) {
@@ -52,127 +251,168 @@ std::string sha256_bytes(const std::vector<char>& bytes) {
     return digest.hex_digest();
 }
 
-bool environment_truthy(const char* name) {
-    const char* value = std::getenv(name);
-    if (value == nullptr)
-        return false;
-    const std::string text(value);
-    return text == "1" || text == "true" || text == "TRUE" || text == "on" || text == "ON";
-}
+int create_sealed_plugin_memfd(const std::vector<char>& bytes) {
+    if (bytes.empty())
+        throw std::runtime_error("Wan2.2 embedded AOT plugin section is empty");
 
-std::vector<char> read_plugin_file(const std::filesystem::path& path) {
-    if (!std::filesystem::is_regular_file(path))
-        throw std::runtime_error("Wan2.2 CUDA plugin override is not a regular file: " +
-                                 path.string());
-    const auto file_size = std::filesystem::file_size(path);
-    if (file_size == 0 || file_size > std::vector<char>().max_size())
-        throw std::runtime_error("Wan2.2 CUDA plugin override has an invalid size: " +
-                                 path.string());
-    std::vector<char> bytes(static_cast<std::size_t>(file_size));
-    std::ifstream input(path, std::ios::binary);
-    input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    if (!input || input.gcount() != static_cast<std::streamsize>(bytes.size()))
-        throw std::runtime_error("Unable to read Wan2.2 CUDA plugin override: " + path.string());
-    return bytes;
-}
-
-std::filesystem::path cuda_plugin_cache_path(const std::string& sha256, const char* label) {
-    const char* configured = std::getenv("TRTMC_WAN22_CUDA_PLUGIN_CACHE_DIR");
-    const auto directory = configured != nullptr && configured[0] != '\0'
-                               ? std::filesystem::path(configured)
-                               : std::filesystem::temp_directory_path() / "trtmc-wan2-2";
-    std::ostringstream name;
-    name << "libtrtmc_wan2_2_" << label << "_cuda_plugin_" << sha256 << ".so";
-    return directory / name.str();
-}
-
-bool cuda_plugin_matches(const std::filesystem::path& output, const std::vector<char>& bytes) {
-    if (!std::filesystem::is_regular_file(output) ||
-        std::filesystem::file_size(output) != bytes.size()) {
-        return false;
+#ifndef MFD_EXEC
+#define MFD_EXEC 0x0010U
+#endif
+    unsigned int flags = MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_EXEC;
+    int fd = static_cast<int>(syscall(SYS_memfd_create, "trtmc-wan2-2-ti2v-plugins", flags));
+    if (fd < 0 && errno == EINVAL) {
+        // Kernels older than Linux 6.3 do not know MFD_EXEC. Their default
+        // memfd policy permits executable mappings, so retry without it.
+        flags = MFD_CLOEXEC | MFD_ALLOW_SEALING;
+        fd = static_cast<int>(syscall(SYS_memfd_create, "trtmc-wan2-2-ti2v-plugins", flags));
     }
-    std::ifstream existing(output, std::ios::binary);
-    std::vector<char> cached(bytes.size());
-    existing.read(cached.data(), static_cast<std::streamsize>(cached.size()));
-    return existing && cached == bytes;
+    if (fd < 0) {
+        throw std::runtime_error(std::string("Wan2.2 could not create an in-memory plugin file: ") +
+                                 std::strerror(errno));
+    }
+
+    std::size_t written = 0;
+    while (written < bytes.size()) {
+        const ssize_t result =
+            ::write(fd, bytes.data() + written, static_cast<size_t>(bytes.size() - written));
+        if (result < 0 && errno == EINTR)
+            continue;
+        if (result <= 0) {
+            const int saved_errno = errno;
+            ::close(fd);
+            throw std::runtime_error(std::string("Wan2.2 could not materialize its embedded AOT "
+                                                 "plugin: ") +
+                                     std::strerror(saved_errno));
+        }
+        written += static_cast<std::size_t>(result);
+    }
+
+    const int seals = F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE;
+    if (fcntl(fd, F_ADD_SEALS, seals) != 0) {
+        const int saved_errno = errno;
+        ::close(fd);
+        throw std::runtime_error(std::string("Wan2.2 could not seal its embedded AOT plugin: ") +
+                                 std::strerror(saved_errno));
+    }
+    return fd;
 }
 
-std::filesystem::path cuda_plugin_temporary_path(const std::filesystem::path& output) {
-    static std::atomic<std::uint64_t> counter{0};
-    return output.string() + ".tmp." + std::to_string(static_cast<long long>(getpid())) + "." +
-           std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+int32_t current_cuda_architecture() {
+    int device = 0;
+    cudaDeviceProp properties{};
+    const auto device_status = cudaGetDevice(&device);
+    if (device_status != cudaSuccess) {
+        throw std::runtime_error(std::string("Wan2.2 could not query the active CUDA device: ") +
+                                 cudaGetErrorString(device_status));
+    }
+    const auto properties_status = cudaGetDeviceProperties(&properties, device);
+    if (properties_status != cudaSuccess) {
+        throw std::runtime_error(std::string("Wan2.2 could not query CUDA device properties: ") +
+                                 cudaGetErrorString(properties_status));
+    }
+    return properties.major * 10 + properties.minor;
 }
 
-} // namespace
-
-std::string resolve_wan22_cuda_plugin_override(const char* environment_name) {
-    if (environment_name == nullptr || environment_name[0] == '\0')
-        throw std::invalid_argument("Wan2.2 CUDA plugin override environment name is empty");
-    const char* configured = std::getenv(environment_name);
-    if (configured == nullptr || configured[0] == '\0')
-        return {};
-    if (environment_truthy("TRTMC_MODEL_PLUGIN_STRICT")) {
-        throw std::runtime_error(std::string(environment_name) +
-                                 " is forbidden when TRTMC_MODEL_PLUGIN_STRICT is enabled");
+void validate_companion_exports(void* handle, const wan2_2_ti2v::PluginContract& installed,
+                                const std::string& runtime_abi) {
+    const int search_path_state =
+        require_int_export_value(handle, "trtmc_wan22_plugin_runtime_search_path_state");
+    if (search_path_state != 0) {
+        throw std::runtime_error(
+            "Wan2.2 AOT plugin companion contains DT_RPATH/DT_RUNPATH or could not prove "
+            "their absence");
     }
-    if (!environment_truthy("TRTMC_WAN22_ALLOW_DEVELOPMENT_PLUGIN_OVERRIDE")) {
-        throw std::runtime_error(std::string(environment_name) +
-                                 " requires TRTMC_WAN22_ALLOW_DEVELOPMENT_PLUGIN_OVERRIDE=1");
+    const auto semantic_abi = require_export_value(handle, "trtmc_wan22_plugin_semantic_abi");
+    const auto source_digest = require_export_value(handle, "trtmc_wan22_plugin_source_digest");
+    const auto creator_set = require_export_value(handle, "trtmc_wan22_plugin_creator_set");
+    if (semantic_abi != installed.semantic_abi || source_digest != installed.source_digest ||
+        creator_set != installed.creator_set) {
+        throw std::runtime_error(
+            "Wan2.2 AOT plugin companion manifest disagrees with its exported fingerprint");
     }
-    return configured;
-}
-
-void record_wan22_cuda_plugin_provenance(const std::string& creator_set,
-                                         const std::vector<char>& bytes) {
-    if (creator_set.empty() || bytes.empty())
-        throw std::invalid_argument("Wan2.2 CUDA plugin provenance requires a label and bytes");
-    const std::string digest = sha256_bytes(bytes);
-    std::lock_guard<std::mutex> lock(cuda_plugin_load_mutex());
-    auto [iterator, inserted] = cuda_plugin_load_states().try_emplace(
-        creator_set, Wan22CudaPluginLoadState{digest, nullptr});
-    if (!inserted && iterator->second.sha256 != digest) {
-        throw std::runtime_error("Conflicting Wan2.2 CUDA plugin bytes for creator set " +
-                                 creator_set + ": loaded=" + iterator->second.sha256 +
-                                 ", requested=" + digest);
-    }
-}
-
-void publish_wan22_cuda_plugin(const std::filesystem::path& output,
-                               const std::vector<char>& bytes) {
-    static std::mutex publication_mutex;
-    std::lock_guard<std::mutex> lock(publication_mutex);
-
-    std::filesystem::create_directories(output.parent_path());
-    if (cuda_plugin_matches(output, bytes))
-        return;
-
-    const auto temporary = cuda_plugin_temporary_path(output);
-    std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
-    if (!stream) {
-        std::error_code ignored;
-        std::filesystem::remove(temporary, ignored);
-        throw std::runtime_error("Unable to create the Wan2.2 CUDA plugin cache file");
-    }
-    stream.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-    stream.close();
-    if (!stream) {
-        std::error_code ignored;
-        std::filesystem::remove(temporary, ignored);
-        throw std::runtime_error("Unable to write the Wan2.2 CUDA plugin cache file");
-    }
-    try {
-        // POSIX rename publishes the complete file atomically and replaces an
-        // older cache entry without a remove/open gap. The unique temporary
-        // name also permits cooperating processes to publish concurrently.
-        std::filesystem::rename(temporary, output);
-    } catch (...) {
-        std::error_code ignored;
-        std::filesystem::remove(temporary, ignored);
-        throw;
+    if (runtime_abi != wan2_2_ti2v::canonical_runtime_abi(installed.runtime_abi)) {
+        throw std::runtime_error(
+            "Wan2.2 AOT plugin companion was loaded against an incompatible TRT/CUDA/cuDNN ABI");
     }
 }
 
-namespace {
+void load_and_validate_wan22_aot_plugin(const PipelineContext& ctx,
+                                        const std::string& expected_binary_sha256) {
+    // A Wan .trtfb is trusted executable content: the exact AOT library is
+    // authenticated against its manifest before these bytes are dlopen'd.
+    // Materialize it in a sealed anonymous file so the user still deploys one
+    // bundle and no writable cache path can replace the verified image.
+    const auto expected = wan2_2_ti2v::parse_bundle_plugin_contract(ctx.config_json);
+    const int32_t current_sm = current_cuda_architecture();
+
+    std::lock_guard<std::mutex> lock(aot_plugin_mutex());
+    auto& state = aot_plugin_state();
+    if (!state.load_error.empty()) {
+        throw std::runtime_error("Wan2.2 AOT plugin registry is unusable after an earlier load "
+                                 "failure: " +
+                                 state.load_error);
+    }
+    preload_wan22_dependencies(expected.runtime_abi, state);
+    if (state.handle == nullptr) {
+        if (!ctx.bundle_reader)
+            throw std::runtime_error("Wan2.2 requires a pinned bundle reader for its AOT plugin");
+        auto plugin_bytes = ctx.bundle_reader->read(kWan22PluginSection);
+        const std::string actual_binary_sha256 = sha256_bytes(plugin_bytes);
+        if (actual_binary_sha256 != expected_binary_sha256) {
+            throw std::runtime_error("Wan2.2 embedded AOT plugin SHA256 mismatch");
+        }
+        const int backing_fd = create_sealed_plugin_memfd(plugin_bytes);
+        const std::string requested_path = "/proc/self/fd/" + std::to_string(backing_fd);
+        dlerror();
+        void* handle = dlopen(requested_path.c_str(), RTLD_NOW | RTLD_GLOBAL);
+        if (handle == nullptr) {
+            const char* error = dlerror();
+            const std::string message = error != nullptr ? error : "unknown dlopen error";
+            ::close(backing_fd);
+            throw std::runtime_error("Unable to load Wan2.2 embedded AOT plugin: " + message);
+        }
+
+        // TensorRT creators register during dlopen. Keep the DSO alive for the
+        // process lifetime and verify every provenance export before allowing
+        // a TensorRT plan to be materialized or deserialized.
+        try {
+            const auto manifest_json =
+                require_export_value(handle, "trtmc_wan22_plugin_manifest_json");
+            auto installed = wan2_2_ti2v::parse_companion_plugin_contract(manifest_json);
+            const auto loaded_runtime_abi =
+                require_export_value(handle, "trtmc_wan22_plugin_runtime_abi");
+            validate_companion_exports(handle, installed, loaded_runtime_abi);
+            wan2_2_ti2v::validate_plugin_contract(expected, installed, loaded_runtime_abi,
+                                                  current_sm);
+
+            state.handle = handle;
+            state.backing_fd = backing_fd;
+            state.binary_sha256 = actual_binary_sha256;
+            state.contract = std::move(installed);
+            state.loaded_runtime_abi = loaded_runtime_abi;
+        } catch (const std::exception& error) {
+            // TensorRT creator registration happens in DSO constructors and
+            // cannot be undone. Keep the image mapped so any registry pointer
+            // remains valid, poison this process for later Wan loads, and
+            // fail closed without attempting dlclose.
+            state.handle = handle;
+            state.backing_fd = backing_fd;
+            state.binary_sha256 = actual_binary_sha256;
+            state.load_error = error.what();
+            throw;
+        }
+    } else if (state.binary_sha256 != expected_binary_sha256) {
+        // Loading two creator implementations into one TensorRT registry is
+        // not reversible. Refuse the second ABI before its static registration
+        // can run.
+        throw std::runtime_error(
+            "Wan2.2 AOT plugin conflict in this process: loaded_sha256=" + state.binary_sha256 +
+            ", requested_sha256=" + expected_binary_sha256);
+    }
+
+    wan2_2_ti2v::validate_plugin_contract(expected, state.contract, state.loaded_runtime_abi,
+                                          current_sm);
+}
 
 void validate_wan22_lazy_plan_sections(const PipelineContext& ctx) {
     // Validate the staged contract from header metadata only. This catches an
@@ -191,47 +431,34 @@ void validate_wan22_lazy_plan_sections(const PipelineContext& ctx) {
     }
 }
 
-void load_wan22_cuda_plugin(const PipelineContext& ctx, const char* section_name,
-                            const char* environment_name, const char* label) {
-    std::string path;
-    const auto* bytes = find_section(ctx.bundle, section_name);
-    if (bytes == nullptr || bytes->empty())
-        throw std::runtime_error(std::string("Wan2.2 bundle is missing ") + section_name);
-
-    std::vector<char> selected_bytes;
-    const std::string development_override = resolve_wan22_cuda_plugin_override(environment_name);
-    if (!development_override.empty()) {
-        path = development_override;
-        selected_bytes = read_plugin_file(path);
-    } else {
-        selected_bytes = *bytes;
-        const auto cached = cuda_plugin_cache_path(sha256_bytes(selected_bytes), label);
-        publish_wan22_cuda_plugin(cached, selected_bytes);
-        path = cached.string();
+std::unordered_map<std::string, std::string>
+parse_wan22_artifact_digests(const std::string& config_json) {
+    static constexpr const char* kArtifacts[] = {"text_encoder_0_plan", "denoiser_plan",
+                                                 "vae_decoder_plan", "vae_decoder_first_frame_plan",
+                                                 kWan22PluginSection};
+    nlohmann::json config;
+    try {
+        config = nlohmann::json::parse(config_json);
+    } catch (const nlohmann::json::exception& error) {
+        throw std::runtime_error(std::string("Invalid Wan2.2 config.json: ") + error.what());
+    }
+    const auto manifest = config.find("artifact_manifest");
+    if (manifest == config.end() || !manifest->is_object() || !manifest->contains("sections") ||
+        !(*manifest)["sections"].is_object()) {
+        throw std::runtime_error("Wan2.2 config is missing artifact_manifest sections");
     }
 
-    // Claim the fixed TensorRT creator namespace before dlopen. If another
-    // bundle already registered different implementation bytes, fail before
-    // any conflicting static registration code can execute.
-    record_wan22_cuda_plugin_provenance(label, selected_bytes);
-    const std::string selected_digest = sha256_bytes(selected_bytes);
-    std::lock_guard<std::mutex> lock(cuda_plugin_load_mutex());
-    auto& state = cuda_plugin_load_states().at(label);
-    if (state.sha256 != selected_digest) {
-        throw std::runtime_error(std::string("Conflicting Wan2.2 CUDA plugin digest for ") + label);
+    std::unordered_map<std::string, std::string> result;
+    for (const char* artifact : kArtifacts) {
+        const auto entry = (*manifest)["sections"].find(artifact);
+        if (entry == (*manifest)["sections"].end() || !entry->is_object() ||
+            !entry->contains("sha256") || !(*entry)["sha256"].is_string()) {
+            throw std::runtime_error(std::string("Wan2.2 artifact_manifest is missing ") +
+                                     artifact + " SHA256");
+        }
+        result.emplace(artifact, (*entry)["sha256"].get<std::string>());
     }
-    if (state.handle != nullptr)
-        return;
-    dlerror();
-    void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_GLOBAL);
-    if (handle == nullptr) {
-        const char* message = dlerror();
-        throw std::runtime_error(std::string("Unable to load the Wan2.2 ") + label +
-                                 " CUDA plugin: " + (message != nullptr ? message : path));
-    }
-    // Keep every creator library alive for the complete TensorRT module
-    // lifetime.  TensorRT may call plugin methods after pipeline creation.
-    state.handle = handle;
+    return result;
 }
 
 Wan22ModuleLoader make_staged_module_loader(const PipelineContext& ctx) {
@@ -252,9 +479,11 @@ Wan22ModuleLoader make_staged_module_loader(const PipelineContext& ctx) {
     const std::string runtime_cache_path = ctx.runtime_cache_path;
     IBackend* const backend = ctx.backend;
     const bool cuda_graphs = ctx.cuda_graphs;
-    return [bundle_reader = std::move(bundle_reader), runtime_cache_path, backend,
-            cuda_graphs](const std::string& section_name, cudaStream_t stream,
-                         const std::vector<ModuleExternalBinding>& external_bindings)
+    auto plan_digests = parse_wan22_artifact_digests(ctx.config_json);
+    return [bundle_reader = std::move(bundle_reader), runtime_cache_path, backend, cuda_graphs,
+            plan_digests = std::move(plan_digests)](
+               const std::string& section_name, cudaStream_t stream,
+               const std::vector<ModuleExternalBinding>& external_bindings)
                -> std::unique_ptr<ITrtModule> {
         // Only one plan payload is resident on the host. TensorRT consumes it
         // synchronously in create_module(); this vector dies before the
@@ -262,6 +491,15 @@ Wan22ModuleLoader make_staged_module_loader(const PipelineContext& ctx) {
         auto plan = bundle_reader->read(section_name);
         if (plan.empty())
             throw std::runtime_error("Wan2.2 bundle section is empty: " + section_name);
+        const auto expected_digest = plan_digests.find(section_name);
+        if (expected_digest == plan_digests.end()) {
+            throw std::runtime_error("Wan2.2 has no authenticated digest for " + section_name);
+        }
+        detail::Sha256 digest;
+        digest.update(plan.data(), plan.size());
+        if (digest.hex_digest() != expected_digest->second) {
+            throw std::runtime_error("Wan2.2 artifact SHA256 mismatch for " + section_name);
+        }
         ModuleCreateOptions options;
         options.stream = stream;
         options.runtime_cache_path = runtime_cache_path.c_str();
@@ -289,15 +527,15 @@ std::shared_ptr<ITokenizer> load_tokenizer(const BundleFile& bundle) {
 class Wan22TI2VPlugin final : public IPipelinePlugin {
   public:
     std::unique_ptr<IPipeline> create(const PipelineContext& ctx) override {
+        if (!ctx.bundle_reader)
+            throw std::runtime_error("Wan2.2 requires a pinned source bundle reader");
+        wan2_2_ti2v::validate_bundle_artifact_provenance(*ctx.bundle_reader, ctx.config_json,
+                                                         ctx.config_json.size());
+        // Embedded AOT provenance and loaded-library ABI are validated before
+        // the staged reader can materialize any TensorRT plan.
+        const auto artifact_digests = parse_wan22_artifact_digests(ctx.config_json);
+        load_and_validate_wan22_aot_plugin(ctx, artifact_digests.at(kWan22PluginSection));
         validate_wan22_lazy_plan_sections(ctx);
-        // TensorRT resolves plugin creators while deserializing plans, so the
-        // family-owned CUDA library must be registered first.
-        load_wan22_cuda_plugin(ctx, "wan2_2_umt5_cuda_plugin_so",
-                               "TRTMC_WAN22_UMT5_CUDA_PLUGIN_LIBRARY", "umt5");
-        load_wan22_cuda_plugin(ctx, "wan2_2_dit_cuda_plugin_so",
-                               "TRTMC_WAN22_DIT_CUDA_PLUGIN_LIBRARY", "dit");
-        load_wan22_cuda_plugin(ctx, "wan2_2_vae_cuda_plugin_so",
-                               "TRTMC_WAN22_VAE_CUDA_PLUGIN_LIBRARY", "vae");
         auto tokenizer = load_tokenizer(ctx.bundle);
         return std::make_unique<Wan22TI2VPipeline>(
             make_staged_module_loader(ctx), std::move(tokenizer),

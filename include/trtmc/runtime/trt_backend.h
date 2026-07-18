@@ -24,7 +24,7 @@ namespace trtmc {
 // vtable changes layout. BackendLoader validates this before constructing an
 // IBackend, and the factory/destroy symbol names carry the same version so both
 // old-core/new-backend and new-core/old-backend installations fail closed.
-inline constexpr std::uint32_t kTrtmcBackendApiAbiVersion = 1;
+inline constexpr std::uint32_t kTrtmcBackendApiAbiVersion = 2;
 
 // A caller-owned device allocation that should replace a backend-owned I/O
 // allocation while a module is constructed. The allocation must remain valid
@@ -117,6 +117,6 @@ class IBackend {
 // C ABI exported by each DSO. The main binary resolves these via dlsym.
 extern "C" {
 std::uint32_t trtmc_backend_api_abi_version();
-trtmc::IBackend* trtmc_create_backend_v1();
-void trtmc_destroy_backend_v1(trtmc::IBackend* backend);
+trtmc::IBackend* trtmc_create_backend_v2();
+void trtmc_destroy_backend_v2(trtmc::IBackend* backend);
 }

@@ -1419,6 +1419,10 @@ int cmd_inspect(const CliArgs& args) {
             return cmd_inspect_list_engines(info);
 
         std::cout << "Model ID:           " << info.model_id << '\n';
+        if (!info.source_model_id.empty())
+            std::cout << "Source model ID:    " << info.source_model_id << '\n';
+        if (!info.source_revision.empty())
+            std::cout << "Source revision:    " << info.source_revision << '\n';
         std::cout << "Model type:         " << info.model_type << '\n';
         std::cout << "Family:             " << info.family << '\n';
         if (!info.precision.empty())

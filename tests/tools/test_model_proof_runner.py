@@ -15,6 +15,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -574,7 +575,15 @@ def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
 
 def test_wan_model_proof_rejects_python_or_pytorch_runtime_dependencies() -> None:
     inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
+    selector = (REPO_ROOT / "tools/ci/model_proof_selection.py").read_text(encoding="utf-8")
     cmake = (REPO_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    manifest = tomllib.loads(
+        (REPO_ROOT / "src/runtime/models/wan2_2_ti2v/MODEL.toml").read_text(encoding="utf-8")
+    )
+
+    assert manifest["builder_auxiliary_libraries"] == [
+        "libtrtmc_model_wan2_2_ti2v_plugins_trt*.so"
+    ]
 
     for contract in (
         'runtime_model == "wan2_2_ti2v"',
@@ -584,9 +593,19 @@ def test_wan_model_proof_rejects_python_or_pytorch_runtime_dependencies() -> Non
         're.search(r"(?:python|torch|c10)"',
         'self.artifacts / "wan2_2-native-dependencies.txt"',
         'self.status.fact("wan2_2_python_free_runtime", "true")',
+        'f"builder_companion_dso_{index}": path',
+        "Wan2.2 builder companion must not contain DT_RPATH/DT_RUNPATH",
+        '"builder_auxiliary_library_count": len(auxiliary_dsos)',
+        '"staged_runtime_auxiliary_library_count": 0',
+        '"bundle_embedded" if auxiliary_dsos else "none"',
+        '"builder_auxiliary_library_sha256": auxiliary_digests',
+        'environment["TRTMC_WAN22_PLUGIN_LIBRARY_DEV"]',
+        '"runtime plugin staging must contain only the owner DSO',
         '"-DTRTMC_ENABLE_LIBTORCH_MULTINOMIAL=OFF"',
     ):
         assert contract in inner
+
+    assert 'data.get("builder_auxiliary_libraries", [])' in selector
 
     assert (
         'option(TRTMC_ENABLE_LIBTORCH_MULTINOMIAL "Enable optional libtorch-backed multinomial '
