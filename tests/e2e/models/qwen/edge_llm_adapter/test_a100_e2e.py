@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from tensorrt_model_connect.optimized_runtime.target import (
+from tensorrt_model_connect.runtime_provider.target import (
     TargetResolutionError,
     _probe_current_target_with_device,
 )

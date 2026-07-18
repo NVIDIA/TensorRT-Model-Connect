@@ -1738,7 +1738,7 @@ def _try_build_optimized_runtime(
     the selected model adapter.
     """
 
-    from .optimized_runtime.orchestrator import try_build_optimized_runtime
+    from .runtime_provider.orchestrator import try_build_optimized_runtime
 
     resolved_model_ref = model_id_or_path
     try:

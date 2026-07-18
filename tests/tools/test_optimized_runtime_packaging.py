@@ -157,7 +157,7 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
         "runtime/adapter.cpp",
     }
     assert (packaged / "IMPLEMENTATION.toml").read_text(encoding="utf-8") == "not valid TOML ["
-    sdk = module / "optimized_runtime" / "_sdk" / "include"
+    sdk = module / "runtime_provider" / "_sdk" / "include"
     assert (sdk / "runtime" / "providers" / "optimized_runtime_factory.h").is_file()
     assert (sdk / "trtmc" / "pipeline.h").is_file()
     assert (module / "bin" / "trtmc").is_file()

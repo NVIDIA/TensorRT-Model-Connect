@@ -173,9 +173,9 @@ def _private_sdk_include_roots(repository_root: Path | None = None) -> tuple[Pat
     if complete(source_roots):
         return source_roots
 
-    candidates = [root / "optimized_runtime" / "_sdk" / "include"]
+    candidates = [root / "runtime_provider" / "_sdk" / "include"]
     try:
-        specification = importlib.util.find_spec("tensorrt_model_connect.optimized_runtime")
+        specification = importlib.util.find_spec("tensorrt_model_connect.runtime_provider")
     except (ImportError, AttributeError, ValueError):
         specification = None
     if specification is not None:
@@ -195,7 +195,7 @@ def _private_sdk_include_roots(repository_root: Path | None = None) -> tuple[Pat
             return (resolved,)
     raise AdapterError(
         "Runtime build requires both private SDK headers from the "
-        "repository source tree or the base wheel's optimized_runtime/_sdk/include"
+        "repository source tree or the base wheel's runtime_provider/_sdk/include"
     )
 
 

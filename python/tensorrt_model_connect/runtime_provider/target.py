@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generic deployment-target facts used to select implementation capsules."""
+"""Generic deployment-target facts used to select runtime-provider capsules."""
 
 from __future__ import annotations
 

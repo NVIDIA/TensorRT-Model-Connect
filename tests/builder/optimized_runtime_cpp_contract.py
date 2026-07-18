@@ -10,9 +10,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from tensorrt_model_connect.optimized_runtime.build_adapter import ProbeResult, run_build
-from tensorrt_model_connect.optimized_runtime.bundle import write_optimized_bundle
-from tensorrt_model_connect.optimized_runtime.manifest import (
+from tensorrt_model_connect.runtime_provider.provider_process import ProbeResult, run_build
+from tensorrt_model_connect.runtime_provider.bundle import write_optimized_bundle
+from tensorrt_model_connect.runtime_provider.manifest import (
     ImplementationRequest,
     load_implementation_manifest,
 )

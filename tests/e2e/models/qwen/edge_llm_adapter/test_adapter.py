@@ -30,20 +30,20 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
     import tomli as tomllib
 
-from tensorrt_model_connect.optimized_runtime.build_adapter import (  # noqa: E402
+from tensorrt_model_connect.runtime_provider.provider_process import (  # noqa: E402
     BuildAdapterError,
     ImplementationRequest,
     run_build,
     run_probe,
 )
-from tensorrt_model_connect.optimized_runtime.bundle import (  # noqa: E402
+from tensorrt_model_connect.runtime_provider.bundle import (  # noqa: E402
     write_optimized_bundle,
 )
-from tensorrt_model_connect.optimized_runtime.manifest import (  # noqa: E402
+from tensorrt_model_connect.runtime_provider.manifest import (  # noqa: E402
     load_implementation_manifest,
     manifest_contract_sha256,
 )
-from tensorrt_model_connect.optimized_runtime.orchestrator import (  # noqa: E402
+from tensorrt_model_connect.runtime_provider.orchestrator import (  # noqa: E402
     discover_family_implementations_for_model,
     family_implementation_root,
 )
@@ -105,7 +105,7 @@ def test_installed_layout_compiles_the_packaged_qwen_runtime(
     package = tmp_path / "tensorrt_model_connect"
     packaged_builder = package / "families" / "qwen" / "edge_llm_adapter"
     packaged_runtime = packaged_builder / "runtime"
-    private_sdk = package / "optimized_runtime" / "_sdk" / "include"
+    private_sdk = package / "runtime_provider" / "_sdk" / "include"
     shutil.copytree(RUNTIME_ROOT, packaged_runtime)
     for source, relative in (
         (

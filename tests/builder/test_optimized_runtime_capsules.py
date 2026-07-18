@@ -11,13 +11,13 @@ from pathlib import Path
 
 import pytest
 
-from tensorrt_model_connect.optimized_runtime.build_adapter import (
+from tensorrt_model_connect.runtime_provider.provider_process import (
     BuildAdapterError,
     ProbeResult,
     run_build,
     run_probe,
 )
-from tensorrt_model_connect.optimized_runtime.manifest import (
+from tensorrt_model_connect.runtime_provider.manifest import (
     ImplementationRequest,
     ManifestDiscoveryError,
     ManifestValidationError,

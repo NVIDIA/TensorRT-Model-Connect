@@ -10,18 +10,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from tensorrt_model_connect.optimized_runtime.manifest import (
+from tensorrt_model_connect.runtime_provider.manifest import (
     AmbiguousImplementationError,
     ImplementationRequest,
     ManifestValidationError,
     load_implementation_manifest,
 )
-from tensorrt_model_connect.optimized_runtime.orchestrator import (
+from tensorrt_model_connect.runtime_provider.orchestrator import (
     discover_family_implementations_for_model,
     select_delegated_build,
     try_build_optimized_runtime,
 )
-from tensorrt_model_connect.optimized_runtime.target import (
+from tensorrt_model_connect.runtime_provider.target import (
     TargetResolutionError,
 )
 from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC
@@ -170,7 +170,7 @@ def test_family_discovery_ignores_nested_non_adapter_layout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     family_root = tmp_path / "example_family"
     _capsule(family_root / "nested", name="runtime")
@@ -187,7 +187,7 @@ def test_full_generic_build_writes_self_contained_delegated_bundle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     family_root = tmp_path / "family"
     _capsule(family_root)
@@ -230,7 +230,7 @@ def test_current_target_preserves_active_device_ordinal_only_as_launch_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tensorrt_model_connect.optimized_runtime.target as target_module
+    import tensorrt_model_connect.runtime_provider.target as target_module
 
     class HeterogeneousCudaRuntime:
         cudaError_t = SimpleNamespace(cudaSuccess=0)
@@ -261,7 +261,7 @@ def test_current_target_preserves_active_device_ordinal_only_as_launch_context(
     family_root = tmp_path / "family"
     _capsule(family_root)
     model_source = _snapshot(tmp_path / "cache")
-    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)
     output = tmp_path / "model.trtfb"
@@ -286,7 +286,7 @@ def test_malformed_unrelated_sibling_does_not_break_requested_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     root = tmp_path / "capsules"
     _capsule(
@@ -328,7 +328,7 @@ def test_public_native_build_without_an_owning_family_skips_adapter_discovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     model_source = _snapshot(
         tmp_path / "cache",
@@ -353,7 +353,7 @@ def test_public_build_fails_closed_for_malformed_model_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     root = tmp_path / "capsules"
     candidate = _capsule(
@@ -380,7 +380,7 @@ def test_unsupported_probe_returns_native_fallback_without_building(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     family_root = tmp_path / "family"
     _capsule(family_root)
@@ -420,7 +420,7 @@ def test_snapshot_selects_only_its_exact_revision_with_multiple_capsules(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     family_root = tmp_path / "family"
     _capsule(
@@ -463,7 +463,7 @@ def test_unavailable_active_target_returns_native_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     family_root = tmp_path / "family"
     _capsule(family_root)

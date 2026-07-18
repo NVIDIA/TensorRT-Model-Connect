@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Package one capsule-produced directory as a delegated Model Connect bundle."""
+"""Package one provider-produced directory as a delegated Model Connect bundle."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from tensorrt_model_connect.bundle_writer import (
     write_bundle,
 )
 
-from .build_adapter import BuildArtifact
+from .provider_process import BuildArtifact
 from .manifest import ImplementationManifest, ImplementationRequest
 
 

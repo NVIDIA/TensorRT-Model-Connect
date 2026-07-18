@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""JSON subprocess protocol for capsule-owned build adapters."""
+"""JSON subprocess protocol for model-owned runtime providers."""
 
 from __future__ import annotations
 

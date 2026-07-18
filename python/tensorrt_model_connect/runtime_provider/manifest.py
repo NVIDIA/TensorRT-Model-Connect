@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Filesystem manifest contract for isolated optimized-runtime capsules."""
+"""Filesystem manifest contract for isolated runtime-provider capsules."""
 
 from __future__ import annotations
 

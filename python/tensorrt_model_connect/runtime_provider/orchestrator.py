@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generic build-time routing for isolated optimized-runtime capsules."""
+"""Generic build-time routing for isolated runtime-provider capsules."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .build_adapter import (
+from .provider_process import (
     _ACTIVE_CUDA_DEVICE_ENV,
     ProbeResult,
     run_build,

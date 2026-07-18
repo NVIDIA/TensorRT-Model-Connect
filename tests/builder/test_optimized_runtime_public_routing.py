@@ -36,7 +36,7 @@ def test_internal_dispatch_resolves_exactly_one_model_family_before_discovery(
     tmp_path: Path,
 ) -> None:
     import tensorrt_model_connect.engine_builder as engine_builder
-    import tensorrt_model_connect.optimized_runtime.orchestrator as orchestrator
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     model = tmp_path / "model"
     model.mkdir()
@@ -308,7 +308,7 @@ def test_optimized_factory_header_is_private() -> None:
 
 
 def test_optimized_runtime_python_package_has_no_public_exports() -> None:
-    import tensorrt_model_connect.optimized_runtime as implementation_package
+    import tensorrt_model_connect.runtime_provider as implementation_package
 
     assert not hasattr(implementation_package, "__all__")
     assert not hasattr(implementation_package, "try_build_optimized_runtime")

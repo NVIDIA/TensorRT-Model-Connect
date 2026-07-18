@@ -158,7 +158,7 @@ class TensorRTModelConnectConan(ConanFile):
                 excludes=_ADAPTER_PACKAGE_EXCLUDES,
             )
 
-        private_sdk = package_module / "optimized_runtime" / "_sdk" / "include"
+        private_sdk = package_module / "runtime_provider" / "_sdk" / "include"
         copy(
             self,
             "optimized_runtime_factory.h",

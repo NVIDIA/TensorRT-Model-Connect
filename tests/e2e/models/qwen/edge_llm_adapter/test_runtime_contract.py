@@ -29,12 +29,12 @@ PYTHON_ROOT = REPOSITORY_ROOT / "python"
 if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
 
-from tensorrt_model_connect.optimized_runtime.build_adapter import (  # noqa: E402
+from tensorrt_model_connect.runtime_provider.provider_process import (  # noqa: E402
     ImplementationRequest,
     run_build,
     run_probe,
 )
-from tensorrt_model_connect.optimized_runtime.manifest import (  # noqa: E402
+from tensorrt_model_connect.runtime_provider.manifest import (  # noqa: E402
     load_implementation_manifest,
     manifest_contract_sha256,
 )

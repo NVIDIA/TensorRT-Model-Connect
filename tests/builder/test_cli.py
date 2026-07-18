@@ -314,7 +314,7 @@ class TestCmdBuildMocked:
                 _skip_profile_resolution=True,
             )
             with patch(
-                "tensorrt_model_connect.optimized_runtime.orchestrator.try_build_optimized_runtime",
+                "tensorrt_model_connect.runtime_provider.orchestrator.try_build_optimized_runtime",
                 return_value=None,
             ):
                 result = _cmd_build(args)
