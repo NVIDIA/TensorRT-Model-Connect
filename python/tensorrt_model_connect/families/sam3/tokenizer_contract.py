@@ -13,6 +13,19 @@ class Sam3TokenizerContractError(ValueError):
     """Raised when tokenizer.json cannot drive the native SAM3 tokenizer."""
 
 
+class _DuplicateJsonKeyError(ValueError):
+    """Raised before JSON decoding can overwrite a tokenizer object key."""
+
+
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonKeyError(key)
+        result[key] = value
+    return result
+
+
 def _parse_merge(entry: Any) -> tuple[str, str] | None:
     if isinstance(entry, str):
         tokens = entry.split(" ")
@@ -35,7 +48,11 @@ def validate_sam3_tokenizer_json(
 
     try:
         text = payload.decode("utf-8") if isinstance(payload, bytes) else payload
-        document = json.loads(text)
+        document = json.loads(text, object_pairs_hook=_strict_json_object)
+    except _DuplicateJsonKeyError as error:
+        raise Sam3TokenizerContractError(
+            f"tokenizer.json contains duplicate object key {str(error)!r}"
+        ) from error
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise Sam3TokenizerContractError("tokenizer.json is not valid UTF-8 JSON") from error
 

@@ -82,3 +82,10 @@ def test_sam3_tokenizer_contract_rejects_non_boolean_added_token_special_flag() 
 
     with pytest.raises(Sam3TokenizerContractError, match="special flag must be a boolean"):
         validate_sam3_tokenizer_json(payload)
+
+
+def test_sam3_tokenizer_contract_rejects_duplicate_json_keys() -> None:
+    payload = _payload().replace('"type": "BPE"', '"type": "BPE", "type": "BPE"')
+
+    with pytest.raises(Sam3TokenizerContractError, match="duplicate object key 'type'"):
+        validate_sam3_tokenizer_json(payload)
