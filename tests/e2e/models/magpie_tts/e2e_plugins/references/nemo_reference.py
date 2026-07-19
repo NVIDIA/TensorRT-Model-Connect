@@ -90,14 +90,19 @@ class NemoReference:
         json_path = str(model_dir / "nemo_ref_result.json")
 
         script = textwrap.dedent(f"""\
-            import json, os, sys, warnings
+            import json, os, random, sys, warnings
             os.environ["NEMO_LOG_LEVEL"] = "ERROR"
+            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
             warnings.filterwarnings("ignore")
 
             import fsspec
             import numpy as np
             import torch
             from huggingface_hub import hf_hub_download
+
+            torch.use_deterministic_algorithms(True)
+            torch.backends.cudnn.benchmark = False
+            torch.backends.cudnn.deterministic = True
 
             # Magpie's upstream NeMo config stores the speaker-encoder weight as
             # a Hub HTTPS URL.  CI deliberately disables the network after its
@@ -119,6 +124,8 @@ class NemoReference:
 
             fsspec.open = offline_fsspec_open
 
+            random.seed({seed})
+            np.random.seed({seed})
             torch.manual_seed({seed})
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all({seed})
@@ -134,6 +141,15 @@ class NemoReference:
             model.eval()
             device = "cuda" if torch.cuda.is_available() else "cpu"
             model = model.to(device)
+
+            # Model construction and checkpoint restoration can consume RNG
+            # state. Reset every sampling stream immediately before NeMo's
+            # multinomial decoder so the declared seed owns generation.
+            random.seed({seed})
+            np.random.seed({seed})
+            torch.manual_seed({seed})
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all({seed})
 
             # Run inference via NeMo's do_tts() API
             # Signature: do_tts(transcript, language="en", apply_TN=False,

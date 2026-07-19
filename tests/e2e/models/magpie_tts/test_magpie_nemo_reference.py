@@ -56,10 +56,28 @@ def test_magpie_reference_maps_upstream_url_to_pre_warmed_file(monkeypatch, tmp_
     assert command[0] == "/profiles/magpie/bin/python"
     script = command[2]
     compile(script, "<magpie-reference>", "exec")
+    cublas_config = script.index(
+        'os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")'
+    )
+    torch_import = script.index("import torch")
+    deterministic_algorithms = script.index(
+        "torch.use_deterministic_algorithms(True)"
+    )
     assert f"repo_id={MAGPIE_SPEAKER_ENCODER_REPO!r}" in script
     assert f"filename={MAGPIE_SPEAKER_ENCODER_FILENAME!r}" in script
     assert "local_files_only=True" in script
     assert f"speaker_checkpoint_url = {MAGPIE_SPEAKER_ENCODER_URL!r}" in script
     assert "path = speaker_checkpoint" in script
+    model_load = script.index("model = MagpieTTSModel.from_pretrained")
+    device_transfer = script.index("model = model.to(device)")
+    generation_seed = script.rindex("torch.manual_seed(42)")
+    generation = script.index("audio_tensor, audio_len = model.do_tts")
+    script_lines = [line.strip() for line in script.splitlines()]
+    assert cublas_config < torch_import < deterministic_algorithms < model_load
+    assert model_load < device_transfer < generation_seed < generation
+    assert script_lines.count("torch.manual_seed(42)") == 2
+    assert script_lines.count("torch.cuda.manual_seed_all(42)") == 2
+    assert script_lines.count("random.seed(42)") == 2
+    assert script_lines.count("np.random.seed(42)") == 2
     assert output.data["returncode"] == 0
     assert output.data["rms"] == 0.1
