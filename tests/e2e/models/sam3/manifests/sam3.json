@@ -5,6 +5,7 @@
   "family": "sam3",
   "runtime_strategy": "sam3_prompted_segmentation",
   "task_strategy": "prompted_segmentation",
+  "e2e_parallel_resource": "exclusive_gpu",
   "precision": "fp32",
   "max_cache_length": 1,
   "trust_remote_code": false,
