@@ -5,6 +5,7 @@
   "family": "z_image",
   "runtime_strategy": "diffusion_zimage",
   "task_strategy": "diffusion_media_generation",
+  "e2e_parallel_resource": "exclusive_gpu",
   "build_args": {
     "max_cache_length": 256
   },
