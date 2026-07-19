@@ -33,6 +33,19 @@ def test_personaplex_builds_require_an_exclusive_gpu(manifest_name: str) -> None
     assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
 
 
+@pytest.mark.parametrize(
+    "manifest_name",
+    ("personaplex-7b.json", "personaplex-7b-l0.json"),
+)
+def test_personaplex_keeps_four_temporal_tail_blocks_in_fp32(
+    manifest_name: str,
+) -> None:
+    manifest = json.loads((_MANIFEST_DIR / manifest_name).read_text(encoding="utf-8"))
+
+    assert manifest["precision"] == "fp16"
+    assert manifest["fp32_layers"] == [32, 33, 34, 35]
+
+
 def _thresholds() -> ThresholdProfile:
     threshold_data = json.loads(_THRESHOLD_PATH.read_text(encoding="utf-8"))
     return ThresholdProfile(
