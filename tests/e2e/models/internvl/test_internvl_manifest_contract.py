@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -22,3 +23,16 @@ def test_internvl3_2b_manifest_declares_hf_image_text_to_text_contract(
     assert case.hf_id == "OpenGVLab/InternVL3-2B-hf"
     assert case.task_strategy == "vision_language_generation"
     assert case.user_contract == "image-text-to-text"
+
+
+@pytest.mark.parametrize(
+    "manifest_name",
+    ("internvl3-8b.json", "internvl3-8b-tp4.json"),
+)
+def test_internvl3_8b_builds_reserve_an_exclusive_gpu(
+    manifest_name: str,
+) -> None:
+    manifest_path = Path(__file__).with_name("manifests") / manifest_name
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["e2e_parallel_resource"] == "exclusive_gpu"

@@ -5,6 +5,7 @@
   "family": "deepseek_v2",
   "runtime_strategy": "deepseek_v2_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
+  "e2e_parallel_resource": "exclusive_gpu",
   "precision": "fp16",
   "max_cache_length": 128,
   "trust_remote_code": false,
