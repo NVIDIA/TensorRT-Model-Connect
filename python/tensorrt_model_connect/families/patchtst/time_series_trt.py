@@ -25,6 +25,17 @@ from .checkpoint_mapper import (
 
 
 trt = trt_compat.get_trt()
+_PROCESS_LOGGER: trt.Logger | None = None
+
+
+def _get_process_logger(*, verbose: bool) -> trt.Logger:
+    """Return the TensorRT logger retained for the process lifetime."""
+    global _PROCESS_LOGGER
+    if _PROCESS_LOGGER is None:
+        _PROCESS_LOGGER = trt.Logger(
+            trt.Logger.VERBOSE if verbose else trt.Logger.WARNING
+        )
+    return _PROCESS_LOGGER
 
 
 def maybe_return_replicated_tp_plan(weights: dict, parallel_config) -> bytes | None:
@@ -71,8 +82,7 @@ def build_serialized_network(
 
 
 def create_network(*, verbose: bool = False) -> tuple[trt.Builder, trt.INetworkDefinition]:
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
+    builder = trt.Builder(_get_process_logger(verbose=verbose))
     network = builder.create_network(
         trt_compat.network_creation_flags(explicit_batch=True, strongly_typed=True)
     )
