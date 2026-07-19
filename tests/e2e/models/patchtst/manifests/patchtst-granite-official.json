@@ -7,6 +7,7 @@
   "task_strategy": "neural_operator",
   "precision": "fp16",
   "max_cache_length": 512,
+  "e2e_parallel_resource": "exclusive_gpu",
   "testcases": [
     {
       "name": "patchtst-granite-official",

@@ -10,6 +10,7 @@
     5
   ],
   "max_cache_length": 512,
+  "e2e_parallel_resource": "exclusive_gpu",
   "testcases": [
     {
       "name": "patchtst-etth1-regression-distribution",
