@@ -67,6 +67,8 @@ def create_builder_context(
     strongly_typed: bool = True,
     explicit_batch: bool = False,
     disable_tf32: bool = False,
+    builder_optimization_level: int | None = None,
+    max_num_tactics: int | None = None,
 ) -> BuilderContext:
     """Create a TensorRT builder, network, and config with common defaults."""
     context = BuilderContext(
@@ -87,6 +89,10 @@ def create_builder_context(
             trt.MemoryPoolType.WORKSPACE, workspace_bytes)
         if disable_tf32:
             context.config.clear_flag(trt.BuilderFlag.TF32)
+        if builder_optimization_level is not None:
+            context.config.builder_optimization_level = builder_optimization_level
+        if max_num_tactics is not None:
+            context.config.max_num_tactics = max_num_tactics
         return context
     except BaseException:
         context.close()
@@ -99,6 +105,8 @@ def with_builder_context(
     strongly_typed: bool = True,
     explicit_batch: bool = False,
     disable_tf32: bool = False,
+    builder_optimization_level: int | None = None,
+    max_num_tactics: int | None = None,
 ):
     """Give a builder function a lazy context with guaranteed cleanup.
 
@@ -129,6 +137,8 @@ def with_builder_context(
                         strongly_typed=strongly_typed,
                         explicit_batch=explicit_batch,
                         disable_tf32=disable_tf32,
+                        builder_optimization_level=builder_optimization_level,
+                        max_num_tactics=max_num_tactics,
                     )
                 return context
 

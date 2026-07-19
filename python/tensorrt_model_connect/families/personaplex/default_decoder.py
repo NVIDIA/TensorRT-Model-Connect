@@ -54,7 +54,12 @@ def _mark_debug_output(
     network.mark_output(out)
 
 
-@with_builder_context(workspace_bytes=1 << 30, disable_tf32=True)
+@with_builder_context(
+    workspace_bytes=1 << 30,
+    disable_tf32=True,
+    builder_optimization_level=0,
+    max_num_tactics=1,
+)
 def build_standard_decoder_engine(
     config: ModelConfig,
     weights: WeightDict,

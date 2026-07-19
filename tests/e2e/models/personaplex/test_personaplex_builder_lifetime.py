@@ -179,11 +179,15 @@ def test_create_builder_context_reuses_process_lifetime_logger(monkeypatch) -> N
     second = personaplex_utils.create_builder_context(
         verbose=True,
         workspace_bytes=1234,
+        builder_optimization_level=0,
+        max_num_tactics=1,
     )
 
     assert logger_ref() is not None
     assert [logger() for logger in builder_loggers] == [logger_ref(), logger_ref()]
     assert second.logger is logger_ref()
+    assert second.config.builder_optimization_level == 0
+    assert second.config.max_num_tactics == 1
     second.close()
     gc.collect()
     assert logger_ref() is not None
@@ -236,6 +240,8 @@ def test_builder_context_wrapper_closes_after_an_exception(monkeypatch) -> None:
         "strongly_typed": True,
         "explicit_batch": True,
         "disable_tf32": False,
+        "builder_optimization_level": None,
+        "max_num_tactics": None,
     }]
     assert context.close_count == 1
     assert released[-1] == "context"
@@ -291,13 +297,15 @@ def test_builder_context_wrapper_is_lazy(monkeypatch) -> None:
     assert dispatch_only() == b"dispatched"
 
 
-def test_standard_decoder_disables_tf32() -> None:
+def test_standard_decoder_uses_stable_fp32_tactics() -> None:
     module = importlib.import_module(
         "tensorrt_model_connect.families.personaplex.default_decoder")
     builder_context_options = inspect.getclosurevars(
         module.build_standard_decoder_engine).nonlocals
 
     assert builder_context_options["disable_tf32"] is True
+    assert builder_context_options["builder_optimization_level"] == 0
+    assert builder_context_options["max_num_tactics"] == 1
 
 
 @pytest.mark.parametrize(
