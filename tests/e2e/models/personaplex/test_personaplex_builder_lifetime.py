@@ -291,6 +291,15 @@ def test_builder_context_wrapper_is_lazy(monkeypatch) -> None:
     assert dispatch_only() == b"dispatched"
 
 
+def test_standard_decoder_disables_tf32() -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.personaplex.default_decoder")
+    builder_context_options = inspect.getclosurevars(
+        module.build_standard_decoder_engine).nonlocals
+
+    assert builder_context_options["disable_tf32"] is True
+
+
 @pytest.mark.parametrize(
     ("module_name", "function_name"),
     (

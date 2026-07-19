@@ -8,7 +8,8 @@
   "e2e_parallel_resource": "exclusive_gpu",
   "precision": "fp16",
   "fp32_layers": [
-    0
+    0,
+    1
   ],
   "max_cache_length": 512,
   "trust_remote_code": true,
@@ -29,7 +30,7 @@
       "speech_test_max_frames": 300,
       "prompt": "",
       "max_new_tokens": 1000,
-      "notes": "The temporal decoder runs in FP32 while the depth decoders and Mimi codec remain FP16. Global selector 0 keeps temporal embeddings, all 32 temporal blocks, KV caches, final norm, and heads in one FP32 path; this stabilizes freshly selected TensorRT tactics while preserving the unchanged checkpoint-owned token contract.",
+      "notes": "The temporal and depth decoders run in full FP32 while the Mimi codec remains FP16. Selectors 0 and 1 keep temporal embeddings, all 32 temporal blocks, KV caches, final norm, heads, and all 16 autoregressive depth decoders in FP32 with TF32 disabled; this stabilizes freshly selected TensorRT tactics while preserving the unchanged checkpoint-owned token contract.",
       "metadata": {
         "runtime_cli_requires_hf_python": true
       }
