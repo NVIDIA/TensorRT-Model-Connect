@@ -5,6 +5,7 @@
   "family": "internlm",
   "runtime_strategy": "internlm_decoder_kv_cache",
   "task_strategy": "text_generation_causal",
+  "e2e_parallel_resource": "exclusive_gpu",
   "max_cache_length": 256,
   "trust_remote_code": true,
   "precision": "fp16",

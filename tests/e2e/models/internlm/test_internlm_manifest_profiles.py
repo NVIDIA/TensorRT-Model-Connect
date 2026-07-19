@@ -6,8 +6,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from tests.e2e_harness.manifest_loader import load_manifest
+
+
+_MANIFEST_DIR = Path(__file__).with_name("manifests")
 
 
 def _write_manifest(tmp_path, data: dict) -> str:
@@ -58,3 +62,11 @@ def test_load_manifest_preserves_internlm_execution_profile_overrides(tmp_path) 
     assert case.execution_profiles["build"] == "internlm"
     assert case.execution_profiles["runtime"] == "custom-runtime"
     assert case.execution_profiles["reference"] == "internlm"
+
+
+def test_internlm_builds_reserve_an_exclusive_gpu() -> None:
+    for manifest_name in ("internlm2-1.8b.json", "internlm2-1.8b-tp4.json"):
+        manifest = json.loads(
+            (_MANIFEST_DIR / manifest_name).read_text(encoding="utf-8"))
+
+        assert manifest["e2e_parallel_resource"] == "exclusive_gpu"
