@@ -309,6 +309,21 @@ def test_standard_decoder_uses_stable_fp32_tactics() -> None:
 
 
 @pytest.mark.parametrize(
+    "function_name",
+    ("_build_mimi_encoder_engine", "_build_mimi_decoder_engine"),
+)
+def test_mimi_codec_uses_stable_builder_tactics(function_name: str) -> None:
+    module = importlib.import_module(
+        "tensorrt_model_connect.families.personaplex.plugin")
+    builder_context_options = inspect.getclosurevars(
+        getattr(module, function_name)).nonlocals
+
+    assert builder_context_options["disable_tf32"] is True
+    assert builder_context_options["builder_optimization_level"] == 0
+    assert builder_context_options["max_num_tactics"] == 1
+
+
+@pytest.mark.parametrize(
     ("module_name", "function_name"),
     (
         ("default_decoder", "build_standard_decoder_engine"),

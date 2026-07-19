@@ -1106,7 +1106,13 @@ def _build_mimi_rope_tables(seq_len, head_dim, base=10000.0):
     return cos_full, sin_full
 
 
-@with_builder_context(workspace_bytes=1 << 30, explicit_batch=True)
+@with_builder_context(
+    workspace_bytes=1 << 30,
+    explicit_batch=True,
+    disable_tf32=True,
+    builder_optimization_level=0,
+    max_num_tactics=1,
+)
 def _build_mimi_encoder_engine(
     weights: WeightDict,
     *,
@@ -1445,7 +1451,13 @@ def _build_mimi_encoder_engine(
     return plan_bytes
 
 
-@with_builder_context(workspace_bytes=1 << 30, explicit_batch=True)
+@with_builder_context(
+    workspace_bytes=1 << 30,
+    explicit_batch=True,
+    disable_tf32=True,
+    builder_optimization_level=0,
+    max_num_tactics=1,
+)
 def _build_mimi_decoder_engine(
     weights: WeightDict,
     *,
