@@ -467,6 +467,32 @@ def test_coexistence_runs_for_any_two_or_more_discovered_leaves(
     assert len(commands) == 3
 
 
+def test_multi_profile_qualification_requires_the_coexistence_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = _load_launcher()
+    missing_test_root = tmp_path / "missing-tests"
+    missing_test_root.mkdir()
+    monkeypatch.setattr(launcher, "TEST_ROOT", missing_test_root)
+    monkeypatch.setattr(
+        launcher,
+        "_run",
+        lambda *_args, **_kwargs: pytest.fail("missing coexistence test must fail before pytest"),
+    )
+    installed = SimpleNamespace(python=tmp_path / "python")
+
+    with pytest.raises(
+        launcher.QualificationError,
+        match="multi-profile qualification requires the coexistence test",
+    ):
+        launcher._run_coexistence_if_complete(
+            tmp_path / "run",
+            (SimpleNamespace(), SimpleNamespace()),
+            installed,
+            {},
+        )
+
+
 def test_main_orders_installed_seed_runners_profiles_and_coexistence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

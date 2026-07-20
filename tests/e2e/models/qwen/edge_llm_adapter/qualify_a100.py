@@ -834,9 +834,13 @@ def _run_coexistence_if_complete(
     environment: dict[str, str],
 ) -> None:
     coexistence = TEST_ROOT / "coexistence" / "test_a100_coexistence.py"
-    if len(profiles) < 2 or not coexistence.is_file():
-        print("coexistence=skipped (requires at least two discovered leaves and the test)")
+    if len(profiles) < 2:
+        print("coexistence=skipped (requires at least two discovered leaves)")
         return
+    if not coexistence.is_file():
+        raise QualificationError(
+            f"multi-profile qualification requires the coexistence test: {coexistence}"
+        )
     _run(
         [
             installed.python,
