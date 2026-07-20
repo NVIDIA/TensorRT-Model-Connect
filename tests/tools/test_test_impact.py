@@ -1801,6 +1801,15 @@ class TestUnitTiers:
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
 
+    def test_nightly_issue_tracker_tool(self, imap):
+        """Nightly issue tracking runs its tooling contracts, not model E2E."""
+        match = test_impact.classify_file("tools/nightly_issue_tracker.py", imap)
+
+        assert match.rule == "nightly_issue_tracker_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_source_implies_unit_tier(self, imap):
         """C++ source change implies 'cpp' unit tier alongside E2E."""
         match = test_impact.classify_file("src/runtime/trt/trt_common.cpp", imap)
@@ -3479,6 +3488,22 @@ class TestCoverageMapIntegration:
         assert result.tools_tests == [
             "tests/tools/test_github_actions_ci.py",
             "tests/tools/test_select_latest_attempt_artifact.py",
+        ]
+        assert result.fallback_tiers == []
+
+    @pytest.mark.parametrize("coverage_map", [None, {}])
+    def test_nightly_issue_tracker_selects_focused_tools_tests(self, imap, coverage_map):
+        result = test_impact.analyze_impact(
+            ["tools/nightly_issue_tracker.py"],
+            imap,
+            coverage_map=coverage_map,
+        )
+
+        assert result.e2e_models == []
+        assert result.unit_tiers == ["tools"]
+        assert result.tools_tests == [
+            "tests/tools/test_github_actions_ci.py",
+            "tests/tools/test_nightly_issue_tracker.py",
         ]
         assert result.fallback_tiers == []
 
