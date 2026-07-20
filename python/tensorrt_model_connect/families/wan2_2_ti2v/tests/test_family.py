@@ -18,6 +18,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
     import tomli as tomllib
 
+from tensorrt_model_connect.families import family_hf_required_files_by_id
 from tensorrt_model_connect.families.wan2_2_ti2v.model_config import (
     WAN22_TI2V_5B,
     official_artifact_profile,
@@ -34,6 +35,21 @@ from tensorrt_model_connect.families.wan2_2_ti2v.plugin import (
 
 def _artifact_profile() -> dict:
     return official_artifact_profile()
+
+
+def test_hf_snapshot_required_files_are_family_owned() -> None:
+    assert set(
+        family_hf_required_files_by_id()["Wan-AI/Wan2.2-TI2V-5B"]
+    ) == {
+        "config.json",
+        "diffusion_pytorch_model.safetensors.index.json",
+        "diffusion_pytorch_model-00001-of-00003.safetensors",
+        "diffusion_pytorch_model-00002-of-00003.safetensors",
+        "diffusion_pytorch_model-00003-of-00003.safetensors",
+        "Wan2.2_VAE.pth",
+        "models_t5_umt5-xxl-enc-bf16.pth",
+        "google/umt5-xxl/tokenizer.json",
+    }
 
 
 def _plugin_contract() -> dict:

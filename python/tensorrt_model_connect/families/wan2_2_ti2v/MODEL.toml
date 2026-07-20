@@ -36,6 +36,16 @@ hf_allow_patterns = [
   "models_t5_umt5-xxl-enc-bf16.pth",
   "google/umt5-xxl/**",
 ]
+hf_required_files = [
+  "Wan-AI/Wan2.2-TI2V-5B|config.json",
+  "Wan-AI/Wan2.2-TI2V-5B|diffusion_pytorch_model.safetensors.index.json",
+  "Wan-AI/Wan2.2-TI2V-5B|diffusion_pytorch_model-00001-of-00003.safetensors",
+  "Wan-AI/Wan2.2-TI2V-5B|diffusion_pytorch_model-00002-of-00003.safetensors",
+  "Wan-AI/Wan2.2-TI2V-5B|diffusion_pytorch_model-00003-of-00003.safetensors",
+  "Wan-AI/Wan2.2-TI2V-5B|Wan2.2_VAE.pth",
+  "Wan-AI/Wan2.2-TI2V-5B|models_t5_umt5-xxl-enc-bf16.pth",
+  "Wan-AI/Wan2.2-TI2V-5B|google/umt5-xxl/tokenizer.json",
+]
 
 # The builder owns this exact source-bound section set. Python/PyTorch are
 # checkpoint conversion dependencies only. The one TRT-ABI-specific AOT
