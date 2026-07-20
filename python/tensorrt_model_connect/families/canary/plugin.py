@@ -37,6 +37,7 @@ from tensorrt_model_connect import trt_compat
 from .config import ModelConfig
 from .checkpoint_mapper import WeightDict, _transpose_2d
 from .batching import CANARY_MAX_BATCH_SIZE, CANARY_MAX_DECODER_LANES
+from .builder_lifetime import get_process_trt_logger
 from . import graph_ops
 from . import graph_blocks
 from ...parallel_config import (
@@ -915,7 +916,7 @@ class CanaryPlugin:
             if encoder_layers <= int(layer) < encoder_layers + dl
         } if precision == "fp16" else set()
 
-        log = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        log = get_process_trt_logger(trt, verbose=verbose)
         b = trt.Builder(log)
         net = b.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         tc = b.create_builder_config()
@@ -1170,7 +1171,7 @@ def _build_encoder(
         raise ValueError(
             f"Unsupported Canary precision {precision!r}; expected fp32 or fp16")
 
-    log = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    log = get_process_trt_logger(trt, verbose=verbose)
     b = trt.Builder(log)
     net = b.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = b.create_builder_config()

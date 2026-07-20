@@ -22,6 +22,7 @@ from tensorrt_model_connect import trt_compat
 
 from . import graph_ops
 from .batching import CANARY_MAX_DECODER_LANES
+from .builder_lifetime import get_process_trt_logger
 from ...parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
@@ -369,7 +370,7 @@ def build_canary_tp_decoder_engine(
         work_np_dtype = np.float32
         work_trt_dtype = trt.float32
 
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    logger = get_process_trt_logger(trt, verbose=verbose)
     builder = trt.Builder(logger)
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))

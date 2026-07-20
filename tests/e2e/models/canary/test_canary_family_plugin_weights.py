@@ -9,9 +9,12 @@ Shared test code is limited to filesystem and serialization helpers.
 
 from __future__ import annotations
 
+import gc
 import importlib
+from pathlib import Path
 import sys
 from types import SimpleNamespace
+import weakref
 
 import numpy as np
 import pytest
@@ -22,6 +25,58 @@ from tests.builder.family_plugin_test_support import (
     WeightDict,
     _write_config,
 )
+
+
+_DIRECT_BUILDER_MODULES = (
+    "plugin.py",
+    "utils.py",
+    "decoder_tp_builder.py",
+)
+
+
+def test_process_logger_is_reused_and_retained() -> None:
+    from tensorrt_model_connect.families.canary import builder_lifetime
+
+    created: list[object] = []
+
+    class FakeLogger:
+        VERBOSE = 1
+        WARNING = 2
+
+        def __init__(self, severity: int) -> None:
+            self.severity = severity
+            created.append(self)
+
+    class FakeTrt:
+        Logger = FakeLogger
+
+    builder_lifetime._PROCESS_LOGGERS.pop(FakeTrt, None)
+    try:
+        first = builder_lifetime.get_process_trt_logger(
+            FakeTrt, verbose=False)
+        logger_ref = weakref.ref(first)
+        del first
+        gc.collect()
+
+        second = builder_lifetime.get_process_trt_logger(
+            FakeTrt, verbose=True)
+
+        assert logger_ref() is second
+        assert created == [second]
+        assert second.severity == FakeLogger.WARNING
+    finally:
+        builder_lifetime._PROCESS_LOGGERS.pop(FakeTrt, None)
+
+
+def test_all_canary_builders_use_the_process_logger() -> None:
+    from tensorrt_model_connect.families.canary import builder_lifetime
+
+    family_dir = Path(builder_lifetime.__file__).parent
+
+    for relative_path in _DIRECT_BUILDER_MODULES:
+        source = (family_dir / relative_path).read_text(encoding="utf-8")
+        assert ".Logger(" not in source, relative_path
+        assert "get_process_trt_logger(" in source, relative_path
 
 
 class TestCanaryPlugin:
