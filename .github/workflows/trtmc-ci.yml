@@ -392,7 +392,10 @@ jobs:
           case "$SCOPE" in
             leaf)
               test -n "$PROFILE"
-              tests=("$root/$PROFILE")
+              tests=(
+                "$root/$PROFILE"
+                "$root/coexistence/test_coexistence_contract.py"
+              )
               ;;
             family)
               test -z "$PROFILE"
