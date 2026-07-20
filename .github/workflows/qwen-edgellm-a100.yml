@@ -1,0 +1,183 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Qwen EdgeLLM x86 A100 qualification
+
+run-name: >-
+  Qwen EdgeLLM A100 · ${{ inputs.revision }} · ${{ inputs.profile || 'all profiles' }}
+
+on:
+  workflow_call:
+    inputs:
+      revision:
+        description: "Exact Git commit to qualify"
+        required: true
+        type: string
+      scope:
+        description: "Selection reason: leaf, family, provider, or nightly"
+        required: true
+        type: string
+      profile:
+        description: "One model-owned profile leaf; empty means every discovered profile"
+        required: false
+        default: ""
+        type: string
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Exact full Git commit to qualify"
+        required: true
+        type: string
+      scope:
+        description: "Selection reason: leaf, family, provider, or nightly"
+        required: true
+        default: "leaf"
+        type: choice
+        options:
+          - leaf
+          - family
+          - provider
+          - nightly
+      profile:
+        description: "One profile leaf; empty means every discovered profile"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+# Every profile shares the pinned EdgeLLM dependency build. Serialize callers
+# across premerge and nightly so separate workflow runs cannot mutate it together.
+concurrency:
+  group: trtmc-qwen-edgellm-x86-a100
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: ${{ inputs.profile || 'all profiles' }}
+    runs-on: ${{ fromJSON(vars.TRTMC_EDGELLM_A100_RUNNER_LABELS || '["self-hosted","Linux","X64","A100"]') }}
+    timeout-minutes: 360
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      CUDA_VISIBLE_DEVICES: ${{ vars.TRTMC_EDGELLM_CUDA_VISIBLE_DEVICES || '0' }}
+      TRTMC_EDGELLM_CUDA_ROOT: ${{ vars.TRTMC_EDGELLM_CUDA_ROOT }}
+      TRTMC_EDGELLM_HF_CACHE: ${{ vars.TRTMC_EDGELLM_HF_CACHE || vars.TRTMC_HF_HOME }}
+      TRTMC_EDGELLM_PYTHON: ${{ vars.TRTMC_EDGELLM_PYTHON || 'python3.12' }}
+      TRTMC_EDGELLM_TENSORRT_PYTHON_WHEEL: ${{ vars.TRTMC_EDGELLM_TENSORRT_PYTHON_WHEEL }}
+      TRTMC_EDGELLM_TENSORRT_ROOT: ${{ vars.TRTMC_EDGELLM_TENSORRT_ROOT }}
+      TRTMC_EDGELLM_WORK_ROOT: ${{ vars.TRTMC_EDGELLM_WORK_ROOT }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONHASHSEED: "0"
+
+    steps:
+      - name: Validate qualification request and provisioned paths
+        env:
+          PROFILE: ${{ inputs.profile }}
+          REVISION: ${{ inputs.revision }}
+          SCOPE: ${{ inputs.scope }}
+        run: |
+          set -euo pipefail
+          case "$SCOPE" in
+            leaf)
+              test -n "$PROFILE" || {
+                echo "::error::Leaf qualification requires one profile."; exit 1;
+              }
+              ;;
+            family|provider|nightly)
+              test -z "$PROFILE" || {
+                echo "::error::$SCOPE qualification must discover every profile."; exit 1;
+              }
+              ;;
+            *) echo "::error::Unsupported Qwen EdgeLLM CI scope: $SCOPE"; exit 1 ;;
+          esac
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "::error::Qualification revision must be a full Git SHA."; exit 1;
+          }
+          [[ "$PROFILE" =~ ^[A-Za-z0-9_.-]*$ ]] || {
+            echo "::error::Unsafe Qwen EdgeLLM profile: $PROFILE"; exit 1;
+          }
+          for name in \
+            TRTMC_EDGELLM_CUDA_ROOT \
+            TRTMC_EDGELLM_TENSORRT_PYTHON_WHEEL \
+            TRTMC_EDGELLM_TENSORRT_ROOT; do
+            test -n "${!name:-}" || {
+              echo "::error::Repository variable $name is required on the x86 A100 runner.";
+              exit 1;
+            }
+          done
+          command -v "$TRTMC_EDGELLM_PYTHON" >/dev/null || {
+            echo "::error::CPython 3.12 command is unavailable: $TRTMC_EDGELLM_PYTHON";
+            exit 1;
+          }
+          if [ -z "$TRTMC_EDGELLM_WORK_ROOT" ]; then
+            echo "TRTMC_EDGELLM_WORK_ROOT=$RUNNER_TEMP/trtmc-qwen-edgellm" >> "$GITHUB_ENV"
+          fi
+          if [ -z "$TRTMC_EDGELLM_HF_CACHE" ]; then
+            echo "TRTMC_EDGELLM_HF_CACHE=$RUNNER_TEMP/trtmc-qwen-edgellm-hf" >> "$GITHUB_ENV"
+          fi
+
+      - name: Check out the exact certified revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+          lfs: false
+
+      - name: Verify exact checkout
+        env:
+          REVISION: ${{ inputs.revision }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^{commit})" = "$REVISION"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Qualify installed APIs against direct EdgeLLM
+        env:
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          set -euo pipefail
+          arguments=(
+            --tensorrt-root "$TRTMC_EDGELLM_TENSORRT_ROOT"
+            --tensorrt-python-wheel "$TRTMC_EDGELLM_TENSORRT_PYTHON_WHEEL"
+            --cuda-root "$TRTMC_EDGELLM_CUDA_ROOT"
+            --work-dir "$TRTMC_EDGELLM_WORK_ROOT"
+            --hf-cache "$TRTMC_EDGELLM_HF_CACHE"
+          )
+          if [ -n "$PROFILE" ]; then
+            arguments+=(--profile "$PROFILE")
+          fi
+          "$TRTMC_EDGELLM_PYTHON" \
+            tests/e2e/models/qwen/edge_llm_adapter/qualify_a100.py \
+            "${arguments[@]}"
+
+      - name: Confirm qualification did not write into the checkout
+        run: |
+          set -euo pipefail
+          changes="$(git status --porcelain=v1 --untracked-files=all)"
+          test -z "$changes" || {
+            echo "::error::Qwen EdgeLLM qualification modified its exact source checkout."
+            printf '%s\n' "$changes"
+            exit 1
+          }
+
+      - name: Summarize qualification
+        env:
+          PROFILE: ${{ inputs.profile }}
+          REVISION: ${{ inputs.revision }}
+          SCOPE: ${{ inputs.scope }}
+        run: |
+          {
+            echo "### Qwen EdgeLLM x86 A100 qualification"
+            echo
+            echo "- Revision: \`$REVISION\`"
+            echo "- Scope: \`$SCOPE\`"
+            echo "- Profiles: \`${PROFILE:-all discovered profiles plus coexistence}\`"
+            echo "- Result: passed"
+          } >> "$GITHUB_STEP_SUMMARY"

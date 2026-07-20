@@ -1206,6 +1206,44 @@ jobs:
             echo "- Artifact: \`trtmc-nightly-html-report-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  qwen-edgellm-contracts:
+    name: Qwen EdgeLLM / CPU / all profiles
+    needs: legal
+    if: ${{ needs.legal.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out certified nightly snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          clean: true
+          lfs: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Provision CPU contract dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends nlohmann-json3-dev
+          python -m pip install --disable-pip-version-check --quiet pytest
+
+      - name: Run every discovered Qwen EdgeLLM CPU contract
+        run: |
+          set -euo pipefail
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python:. \
+            python -m pytest -q -p no:cacheprovider -m "not gpu" \
+            tests/e2e/models/qwen/edge_llm_adapter
+
   required:
     name: 7 / Nightly CI
     needs:
@@ -1218,6 +1256,7 @@ jobs:
       - model-proof
       - diffusion-vlm
       - report
+      - qwen-edgellm-contracts
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1235,6 +1274,7 @@ jobs:
           MODEL_RESULT: ${{ needs.model-proof.result }}
           VLM_RESULT: ${{ needs.diffusion-vlm.result }}
           REPORT_RESULT: ${{ needs.report.result }}
+          QWEN_EDGELLM_CONTRACT_RESULT: ${{ needs.qwen-edgellm-contracts.result }}
           HAS_MODELS: ${{ needs.inventory.outputs.has_models }}
           EXPECTED_COUNT: ${{ needs.inventory.outputs.expected_count }}
           EXPECTED_CASES_BY_MODEL: ${{ needs.inventory.outputs.expected_cases_by_model }}
@@ -1245,7 +1285,8 @@ jobs:
           for result in \
             "$LEGAL_RESULT" "$INVENTORY_RESULT" "$SOURCE_QUALITY_RESULT" \
             "$UNIT_RESULT" "$CACHE_RESULT" "$PACKAGE_RESULT" \
-            "$MODEL_RESULT" "$VLM_RESULT" "$REPORT_RESULT"; do
+            "$MODEL_RESULT" "$VLM_RESULT" "$REPORT_RESULT" \
+            "$QWEN_EDGELLM_CONTRACT_RESULT"; do
             test "$result" = "success"
           done
           test "$HAS_MODELS" = "true"
