@@ -40,13 +40,6 @@ CUDA_VERSION = "13.3"
 CUDA_VERSION_ENCODED = 13030
 GPU_NAME = "NVIDIA A100 80GB PCIe"
 REQUIRED_TOOLS = ("cc", "c++", "cmake", "git", "ldd", "ninja", "nvidia-smi", "readelf")
-COEXISTENCE_MODEL_IDS = frozenset(
-    {
-        "Qwen/Qwen3-0.6B",
-        "Qwen/Qwen3-1.7B",
-        "Qwen/Qwen3-4B-Instruct-2507",
-    }
-)
 
 
 class QualificationError(RuntimeError):
@@ -841,9 +834,8 @@ def _run_coexistence_if_complete(
     environment: dict[str, str],
 ) -> None:
     coexistence = TEST_ROOT / "coexistence" / "test_a100_coexistence.py"
-    available_models = {profile.model_id for profile in profiles}
-    if not COEXISTENCE_MODEL_IDS.issubset(available_models) or not coexistence.is_file():
-        print("coexistence=skipped (requires all three leaves and the coexistence test)")
+    if len(profiles) < 2 or not coexistence.is_file():
+        print("coexistence=skipped (requires at least two discovered leaves and the test)")
         return
     _run(
         [

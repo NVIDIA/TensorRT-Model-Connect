@@ -5,14 +5,15 @@
 
 from __future__ import annotations
 
-import itertools
+import ast
 import json
 import os
 import struct
 import subprocess
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import pytest
 
@@ -26,52 +27,132 @@ _PROMPT = "Reply with one short sentence about accelerated computing."
 _EDGE_COMMIT = "1ac0f2b99642045125e1c5ac7b109434ba3b36c7"
 _REPOSITORY = Path(__file__).resolve().parents[6]
 _LEAF = Path(__file__).resolve().parent
+_BUILDER_ROOT = _REPOSITORY / "python/tensorrt_model_connect/families/qwen/edge_llm_adapter"
+_TEST_ROOT = _LEAF.parent
+_BUNDLES_ENVIRONMENT = "TRTMC_QWEN_EDGELLM_BUNDLES_JSON"
 
 
 @dataclass(frozen=True)
 class _Profile:
-    slug: str
+    leaf: str
     model_id: str
     implementation_id: str
     runtime_library: str
-    bundle_environment: str
     internal_source_environment: str
     internal_build_environment: str
 
 
-_PROFILES = (
-    _Profile(
-        slug="qwen3-0.6b",
-        model_id="Qwen/Qwen3-0.6B",
-        implementation_id=("qwen3-0.6b-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80"),
-        runtime_library=("libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm_v0_9_trt11.so"),
-        bundle_environment="TRTMC_QWEN3_06B_EDGELLM_BUNDLE",
-        internal_source_environment="_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_SOURCE_DIR",
-        internal_build_environment="_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_BUILD_DIR",
-    ),
-    _Profile(
-        slug="qwen3-1.7b",
-        model_id="Qwen/Qwen3-1.7B",
-        implementation_id=("qwen3-1.7b-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80"),
-        runtime_library=("libtrtmc_impl_qwen3_1_7b_fp16_tensorrt_edge_llm_v0_9_trt11.so"),
-        bundle_environment="TRTMC_QWEN3_1_7B_EDGELLM_BUNDLE",
-        internal_source_environment="_TRTMC_INTERNAL_QWEN3_1_7B_EDGE_LLM_SOURCE_DIR",
-        internal_build_environment="_TRTMC_INTERNAL_QWEN3_1_7B_EDGE_LLM_BUILD_DIR",
-    ),
-    _Profile(
-        slug="qwen3-4b-instruct-2507",
-        model_id="Qwen/Qwen3-4B-Instruct-2507",
-        implementation_id=(
-            "qwen3-4b-instruct-2507-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80"
+def _literal_assignment(path: Path, name: str) -> object:
+    module = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    values = []
+    for statement in module.body:
+        if not isinstance(statement, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = statement.targets if isinstance(statement, ast.Assign) else [statement.target]
+        if any(isinstance(target, ast.Name) and target.id == name for target in targets):
+            values.append(ast.literal_eval(statement.value))
+    if len(values) != 1:
+        raise ValueError(f"{path} must declare exactly one literal {name}")
+    return values[0]
+
+
+def _build_environment_mapping(strict_test: Path) -> tuple[str, str]:
+    mapping = _literal_assignment(strict_test, "_PUBLIC_EDGE_BUILD_ENVIRONMENT")
+    expected = {"TRTMC_EDGE_LLM_SOURCE_DIR", "TRTMC_EDGE_LLM_BUILD_DIR"}
+    if not isinstance(mapping, dict) or set(mapping) != expected:
+        raise ValueError(f"{strict_test} must map the two public EdgeLLM build inputs")
+    if not all(
+        isinstance(value, str) and value.startswith("_TRTMC_INTERNAL_")
+        for value in mapping.values()
+    ) or len(set(mapping.values())) != len(mapping):
+        raise ValueError(f"{strict_test} contains invalid internal build mappings")
+    return mapping["TRTMC_EDGE_LLM_SOURCE_DIR"], mapping["TRTMC_EDGE_LLM_BUILD_DIR"]
+
+
+def _profile_from_manifest(manifest: Path, test_root: Path) -> _Profile:
+    leaf = manifest.parent.name
+    strict_test = test_root / leaf / "test_a100_e2e.py"
+    if not strict_test.is_file():
+        raise ValueError(f"Qwen EdgeLLM profile {leaf} has no strict A100 test")
+    with manifest.open("rb") as source:
+        descriptor = tomllib.load(source)
+    source_environment, build_environment = _build_environment_mapping(strict_test)
+    model = descriptor.get("model")
+    runtime = descriptor.get("runtime")
+    if (
+        descriptor.get("schema_version") != 1
+        or descriptor.get("downstream_runtime") != "tensorrt-edge-llm"
+        or descriptor.get("downstream_version") != "0.9.0"
+        or descriptor.get("downstream_commit") != _EDGE_COMMIT
+        or not isinstance(model, dict)
+        or not isinstance(runtime, dict)
+        or runtime.get("abi") != 1
+    ):
+        raise ValueError(f"Qwen EdgeLLM profile has an unsupported descriptor: {manifest}")
+    model_id = model.get("id")
+    implementation_id = descriptor.get("implementation_id")
+    runtime_library = runtime.get("library")
+    if not all(
+        isinstance(value, str) and value for value in (model_id, implementation_id, runtime_library)
+    ):
+        raise ValueError(f"Qwen EdgeLLM profile has incomplete identity fields: {manifest}")
+    return _Profile(
+        leaf,
+        model_id,
+        implementation_id,
+        runtime_library,
+        source_environment,
+        build_environment,
+    )
+
+
+def _discover_profiles(
+    builder_root: Path = _BUILDER_ROOT, test_root: Path = _TEST_ROOT
+) -> tuple[_Profile, ...]:
+    profiles = tuple(
+        _profile_from_manifest(manifest, test_root)
+        for manifest in sorted(builder_root.glob("*/IMPLEMENTATION.toml"))
+    )
+    if not profiles:
+        raise ValueError(f"no Qwen EdgeLLM profiles were found below {builder_root}")
+    identities = (
+        ("model IDs", [profile.model_id for profile in profiles]),
+        ("implementation IDs", [profile.implementation_id for profile in profiles]),
+        ("runtime libraries", [profile.runtime_library for profile in profiles]),
+        (
+            "internal build environment names",
+            [
+                name
+                for profile in profiles
+                for name in (
+                    profile.internal_source_environment,
+                    profile.internal_build_environment,
+                )
+            ],
         ),
-        runtime_library=(
-            "libtrtmc_impl_qwen3_4b_instruct_2507_fp16_tensorrt_edge_llm_v0_9_trt11.so"
-        ),
-        bundle_environment="TRTMC_QWEN3_4B_EDGELLM_BUNDLE",
-        internal_source_environment=("_TRTMC_INTERNAL_QWEN3_4B_INSTRUCT_2507_EDGE_LLM_SOURCE_DIR"),
-        internal_build_environment=("_TRTMC_INTERNAL_QWEN3_4B_INSTRUCT_2507_EDGE_LLM_BUILD_DIR"),
-    ),
-)
+    )
+    for description, values in identities:
+        if len(set(values)) != len(values):
+            raise ValueError(f"Qwen EdgeLLM profiles have duplicate {description}")
+    return profiles
+
+
+def _representative_load_orders(
+    profiles: Sequence[_Profile],
+) -> tuple[tuple[_Profile, ...], ...]:
+    ordered = tuple(profiles)
+    if len(ordered) < 2:
+        raise ValueError("coexistence requires at least two profiles")
+    candidates: list[tuple[_Profile, ...]] = []
+    for direction in (ordered, tuple(reversed(ordered))):
+        for offset in range(len(direction)):
+            candidate = direction[offset:] + direction[:offset]
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return tuple(candidates)
+
+
+_PROFILES = _discover_profiles()
 
 
 def _run(
@@ -169,17 +250,23 @@ def _validate_delegated_bundle(bundle: Path, profile: _Profile) -> None:
 
 
 def _build_or_resolve_bundles(tmp_path: Path) -> dict[_Profile, Path]:
-    configured = {
-        profile: os.environ.get(profile.bundle_environment, "").strip() for profile in _PROFILES
-    }
-    provided = [profile for profile, value in configured.items() if value]
-    if provided and len(provided) != len(_PROFILES):
-        missing = [profile.bundle_environment for profile, value in configured.items() if not value]
-        pytest.fail("prebuilt coexistence bundles are all-or-none; missing " + ", ".join(missing))
-    if provided:
+    configured = os.environ.get(_BUNDLES_ENVIRONMENT, "").strip()
+    if configured:
+        try:
+            paths = json.loads(configured)
+        except json.JSONDecodeError as exc:
+            pytest.fail(f"{_BUNDLES_ENVIRONMENT} is not valid JSON: {exc}")
+        expected = {profile.leaf for profile in _PROFILES}
+        if not isinstance(paths, dict) or set(paths) != expected:
+            pytest.fail(
+                f"{_BUNDLES_ENVIRONMENT} must map exactly the discovered leaves: "
+                + ", ".join(sorted(expected))
+            )
+        if not all(isinstance(value, str) and value for value in paths.values()):
+            pytest.fail(f"{_BUNDLES_ENVIRONMENT} values must be non-empty paths")
         bundles = {
-            profile: Path(value).expanduser().resolve(strict=True)
-            for profile, value in configured.items()
+            profile: Path(paths[profile.leaf]).expanduser().resolve(strict=True)
+            for profile in _PROFILES
         }
     else:
         binary = _required_file("TRTMC_BINARY", executable=True)
@@ -199,7 +286,7 @@ def _build_or_resolve_bundles(tmp_path: Path) -> dict[_Profile, Path]:
         outside_checkout.mkdir()
         bundles = {}
         for profile in _PROFILES:
-            bundle = tmp_path / f"{profile.slug}.trtfb"
+            bundle = tmp_path / f"{profile.leaf}.trtfb"
             _run(
                 [
                     str(binary),
@@ -260,8 +347,10 @@ def _build_runner(tmp_path: Path, core_library: Path) -> Path:
 @pytest.mark.gpu
 @pytest.mark.trt
 @pytest.mark.slow
-def test_three_delegated_bundles_coexist_in_every_load_order(tmp_path: Path) -> None:
-    """Keep all three real runtimes alive and generate in every load order."""
+def test_discovered_delegated_bundles_coexist_in_representative_load_orders(
+    tmp_path: Path,
+) -> None:
+    """Keep all discovered runtimes alive across bounded representative orders."""
 
     _require_supported_a100()
     bundles = _build_or_resolve_bundles(tmp_path)
@@ -277,7 +366,7 @@ def test_three_delegated_bundles_coexist_in_every_load_order(tmp_path: Path) -> 
     runtime_cache = tmp_path / "runtime-cache"
     expected: dict[Path, tuple[str, tuple[int, ...], str, str]] = {}
 
-    for order_index, order in enumerate(itertools.permutations(_PROFILES)):
+    for order_index, order in enumerate(_representative_load_orders(_PROFILES)):
         output = tmp_path / f"coexistence-{order_index}.json"
         ordered_bundles = [bundles[profile] for profile in order]
         result = _run(

@@ -412,7 +412,7 @@ def test_launcher_uses_only_the_wheel_bundled_binary_and_core() -> None:
     assert launcher_source in source
 
 
-def test_coexistence_runs_only_when_all_three_leaves_are_present(
+def test_coexistence_runs_for_any_two_or_more_discovered_leaves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     launcher = _load_launcher()
@@ -453,15 +453,18 @@ def test_coexistence_runs_only_when_all_three_leaves_are_present(
 
     monkeypatch.setattr(launcher, "_run", fake_run)
 
-    launcher._run_coexistence_if_complete(tmp_path / "run", profiles[:2], installed, {})
+    launcher._run_coexistence_if_complete(tmp_path / "run", profiles[:1], installed, {})
     assert commands == []
 
-    launcher._run_coexistence_if_complete(tmp_path / "run", profiles[:3], installed, {})
+    launcher._run_coexistence_if_complete(tmp_path / "run", profiles[:2], installed, {})
     assert len(commands) == 1
     assert str(coexistence) in commands[0]
 
-    launcher._run_coexistence_if_complete(tmp_path / "run", profiles, installed, {})
+    launcher._run_coexistence_if_complete(tmp_path / "run", profiles[:3], installed, {})
     assert len(commands) == 2
+
+    launcher._run_coexistence_if_complete(tmp_path / "run", profiles, installed, {})
+    assert len(commands) == 3
 
 
 def test_main_orders_installed_seed_runners_profiles_and_coexistence(

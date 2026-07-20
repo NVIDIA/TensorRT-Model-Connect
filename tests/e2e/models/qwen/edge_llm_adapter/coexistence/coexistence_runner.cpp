@@ -23,7 +23,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr std::size_t kRequiredBundleCount = 3;
+constexpr std::size_t kMinimumBundleCount = 2;
 
 struct Options {
     fs::path runtime_cache;
@@ -82,8 +82,8 @@ Options parse_options(int argc, char** argv) {
         throw std::invalid_argument("--output is required");
     if (options.prompt.empty())
         throw std::invalid_argument("--prompt is required");
-    if (options.bundles.size() != kRequiredBundleCount)
-        throw std::invalid_argument("exactly three bundle paths are required");
+    if (options.bundles.size() < kMinimumBundleCount)
+        throw std::invalid_argument("at least two bundle paths are required");
 
     std::set<fs::path> unique;
     for (auto& bundle : options.bundles) {
