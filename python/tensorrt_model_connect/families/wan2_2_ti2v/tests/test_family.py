@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -247,6 +248,29 @@ def test_load_weights_requires_complete_native_checkpoint(tmp_path) -> None:
     (model / "Wan2.2_VAE.pth").unlink()
     with pytest.raises(FileNotFoundError, match="Wan2.2_VAE.pth"):
         Wan22TI2VPlugin().load_weights(str(model), SimpleNamespace(raw={}))
+
+
+def test_native_vae_loader_accepts_directory_and_resolved_file(
+    tmp_path, monkeypatch
+) -> None:
+    from tensorrt_model_connect.families.wan2_2_ti2v import checkpoint_mapper
+
+    checkpoint = tmp_path / "Wan2.2_VAE.pth"
+    checkpoint.write_bytes(b"native-vae")
+    loaded_paths: list[Path] = []
+    expected = {"decoder.weight": object()}
+
+    def fake_load(path, *, map_location, weights_only):
+        assert map_location == "cpu"
+        assert weights_only is True
+        loaded_paths.append(Path(path))
+        return expected
+
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(load=fake_load))
+
+    assert checkpoint_mapper.load_native_vae_state_dict(tmp_path) is expected
+    assert checkpoint_mapper.load_native_vae_state_dict(checkpoint) is expected
+    assert loaded_paths == [checkpoint, checkpoint]
 
 
 def test_native_bundle_hooks_emit_exact_seven_section_contract(

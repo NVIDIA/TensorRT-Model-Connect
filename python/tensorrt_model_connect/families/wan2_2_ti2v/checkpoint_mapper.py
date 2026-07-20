@@ -316,11 +316,15 @@ def canonical_vae_key(native_key: str) -> str:
     return native_key
 
 
-def load_native_vae_state_dict(model_dir: str | Path) -> dict[str, Any]:
+def load_native_vae_state_dict(checkpoint: str | Path) -> dict[str, Any]:
+    """Load the native VAE from its model directory or resolved checkpoint path."""
+
     import torch
 
-    path = Path(model_dir) / "Wan2.2_VAE.pth"
-    if not path.exists():
+    path = Path(checkpoint)
+    if path.is_dir():
+        path = path / "Wan2.2_VAE.pth"
+    if not path.is_file():
         raise FileNotFoundError(path)
     state = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(state, dict):
