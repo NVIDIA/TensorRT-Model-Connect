@@ -226,6 +226,22 @@ def test_a100_gate_requires_installed_and_direct_runtime_surfaces() -> None:
     assert '.rsplit(" (", 1)[0].strip()' in source
     assert "loaded_core != expected_core" in source
     assert "installed executable did not resolve exactly one bundled libtrtmc_core" in source
+    build_call = source.index("tensorrt_model_connect.build(")
+    inspect_call = source.index("inspection = pipeline.inspect()", build_call)
+    inference_call = source.index("generated = pipeline(", inspect_call)
+    assert build_call < inspect_call < inference_call
+    installed_helper = source[
+        source.index("def _build_and_verify_installed_python_api(") : source.index(
+            "def _runner_request("
+        )
+    ]
+    assert "timeout=21_600" in installed_helper
+    assert "timeout=900" not in installed_helper
+    assert 'clean_env.pop("PYTHONPATH", None)' in source
+    assert 'clean_env["PYTHONNOUSERSITE"] = "1"' in source
+    assert 'clean_env["XDG_CACHE_HOME"]' in source
+    assert '_read_bundle_section(installed_python_bundle, "optimized_runtime.json")' in source
+    assert 'installed_descriptor["implementation_id"] == _IMPLEMENTATION_ID' in source
     assert "TRTMC_REQUIRE_EDGELLM_DIRECT" not in source
     assert "direct EdgeLLM parity/performance proof: not configured" not in source
     assert "installed-package proof: not configured" not in source
