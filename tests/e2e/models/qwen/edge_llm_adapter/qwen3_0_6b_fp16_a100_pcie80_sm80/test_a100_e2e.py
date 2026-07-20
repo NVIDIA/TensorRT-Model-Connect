@@ -355,12 +355,14 @@ print(json.dumps({
     return installed_python, binary, core
 
 
-def _verify_installed_python_api(
+def _build_and_verify_installed_python_api(
+    model_id: str,
     bundle: Path,
     cwd: Path,
     installed_python: Path,
     expected_binary: Path,
     expected_core: Path,
+    build_env: dict[str, str],
 ) -> None:
     script = """
 import json
@@ -372,10 +374,26 @@ import sys
 import tensorrt_model_connect
 
 repo = pathlib.Path(sys.argv[1]).resolve()
-pipeline = tensorrt_model_connect.Pipeline(sys.argv[2])
+module = pathlib.Path(tensorrt_model_connect.__file__).resolve()
+install_root = pathlib.Path(sys.prefix).resolve(strict=True)
+if module == repo or repo in module.parents or install_root not in module.parents:
+    raise SystemExit(f"installed build imported an invalid package: {module}")
+bundle = pathlib.Path(sys.argv[3])
+if bundle.exists():
+    raise SystemExit(f"installed Python build output already exists: {bundle}")
+tensorrt_model_connect.build(
+    sys.argv[2],
+    str(bundle),
+    max_cache_length=4096,
+    precision="fp16",
+    max_batch_size=4,
+)
+if not bundle.is_file():
+    raise SystemExit(f"installed Python build produced no bundle: {bundle}")
+pipeline = tensorrt_model_connect.Pipeline(str(bundle))
 binary = pathlib.Path(pipeline.binary).resolve(strict=True)
-expected_binary = pathlib.Path(sys.argv[4]).resolve(strict=True)
-expected_core = pathlib.Path(sys.argv[5]).resolve(strict=True)
+expected_binary = pathlib.Path(sys.argv[5]).resolve(strict=True)
+expected_core = pathlib.Path(sys.argv[6]).resolve(strict=True)
 if binary != expected_binary:
     raise SystemExit(f"installed Python API selected the wrong executable: {binary}")
 
@@ -407,34 +425,45 @@ loaded_core = pathlib.Path(core_lines[0].split("=>", 1)[1].rsplit(" (", 1)[0].st
 if loaded_core != expected_core:
     raise SystemExit(f"installed executable loaded the wrong libtrtmc_core: {loaded_core}")
 
-generated = pipeline(sys.argv[3], max_new_tokens=8, timeout=600)
+inspection = pipeline.inspect()
+if "optimized_runtime.json" not in inspection:
+    raise SystemExit("installed Python build did not produce a delegated bundle")
+generated = pipeline(sys.argv[4], max_new_tokens=8, timeout=600)
 if not generated.strip():
     raise SystemExit("installed Python API returned an empty response")
 print(json.dumps({
+    "bundle": str(bundle.resolve(strict=True)),
     "binary": str(binary),
     "core": str(loaded_core),
     "generated": generated,
+    "module": str(module),
 }, sort_keys=True))
 """
-    clean_env = os.environ.copy()
+    clean_env = dict(build_env)
     clean_env.pop("PYTHONPATH", None)
+    clean_env["PYTHONNOUSERSITE"] = "1"
+    clean_env["XDG_CACHE_HOME"] = str(cwd / "installed-python-cache")
     result = _run(
         [
             str(installed_python),
             "-c",
             script,
             str(_REPO_ROOT),
+            model_id,
             str(bundle),
             _PROMPT,
             str(expected_binary),
             str(expected_core),
         ],
-        timeout=900,
+        timeout=21_600,
         cwd=cwd,
         env=clean_env,
     )
     proof = json.loads(result.stdout.splitlines()[-1])
     assert proof["generated"].strip()
+    assert Path(proof["bundle"]).resolve(strict=True) == bundle.resolve(strict=True)
+    module = Path(proof["module"]).resolve(strict=True)
+    assert module != _REPO_ROOT and _REPO_ROOT not in module.parents
     assert Path(proof["binary"]).resolve(strict=True) == expected_binary
     assert Path(proof["core"]).resolve(strict=True) == expected_core
     print("installed-package proof:", json.dumps(proof, sort_keys=True))
@@ -746,13 +775,20 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
     assert warm_rows[0]["token_ids"] == cold_rows[0]["token_ids"]
     assert warm_rows[0]["generated"] == cold_rows[0]["generated"]
 
-    _verify_installed_python_api(
-        bundle,
+    installed_python_bundle = tmp_path / "qwen3-0.6b-edge-installed-python.trtfb"
+    _build_and_verify_installed_python_api(
+        _MODEL_ID,
+        installed_python_bundle,
         outside_checkout,
         installed_python,
         installed_binary,
         installed_core,
+        build_env,
     )
+    installed_descriptor = json.loads(
+        _read_bundle_section(installed_python_bundle, "optimized_runtime.json")
+    )
+    assert installed_descriptor["implementation_id"] == _IMPLEMENTATION_ID
 
     if configured_edge_build is None:
         pytest.fail(
