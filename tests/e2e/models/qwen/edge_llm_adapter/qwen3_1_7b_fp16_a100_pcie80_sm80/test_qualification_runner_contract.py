@@ -213,11 +213,19 @@ def test_a100_gate_requires_installed_and_direct_runtime_surfaces() -> None:
     for required in (
         "TRTMC_BINARY",
         "TRTMC_INSTALLED_PYTHON",
-        "TRTMC_INSTALLED_BINARY",
         "TRTMC_EDGELLM_DIRECT_RUNNER",
         "TRTMC_EDGELLM_MC_RUNNER",
     ):
         assert f'_required_executable("{required}")' in source
+    assert "TRTMC_INSTALLED_BINARY" not in source
+    assert 'package / "bin" / "trtmc"' in source
+    assert "assert binary == installed_binary" in source
+    assert "assert core_library == installed_core" in source
+    assert '["ldd", str(binary)]' in source
+    assert "str(binary.parent), original_library_path" not in source
+    assert '.rsplit(" (", 1)[0].strip()' in source
+    assert "loaded_core != expected_core" in source
+    assert "installed executable did not resolve exactly one bundled libtrtmc_core" in source
     assert "TRTMC_REQUIRE_EDGELLM_DIRECT" not in source
     assert "direct EdgeLLM parity/performance proof: not configured" not in source
     assert "installed-package proof: not configured" not in source
