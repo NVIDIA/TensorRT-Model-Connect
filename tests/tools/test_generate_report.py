@@ -138,6 +138,39 @@ def _make_result(
     }
 
 
+def _make_bundle_contract_only_diffusion_result() -> Dict[str, Any]:
+    result = _make_result(
+        name="bundle-only-diffusion",
+        task_strategy="diffusion_media_generation",
+        stage_outputs={
+            "trt_bundle_contract": {
+                "stage_name": "bundle_contract",
+                "text": "Runtime strategy: diffusion_example\nSections: denoiser_plan",
+                "data": {"returncode": 0},
+            },
+            "ref_bundle_contract": {
+                "stage_name": "bundle_contract",
+                "data": {"_invariant_only": True},
+                "metadata": {"source": "invariant_only"},
+            },
+        },
+    )
+    result["oracle_level"] = "L4_invariants"
+    result["case_config"].update({
+        "oracle_level": "L4_invariants",
+        "reference_backend": "invariant_only",
+        "stages": [{"name": "bundle_contract", "required": True}],
+    })
+    result["stages"] = {
+        "bundle_contract": {
+            "status": "passed",
+            "metrics": {},
+            "message": "Bundle contract passed",
+        }
+    }
+    return result
+
+
 def _write_result(tmp_path: Path, name: str, result: Dict[str, Any]) -> Path:
     """Write a result.json into a model subdirectory."""
     model_dir = tmp_path / name
@@ -1786,6 +1819,148 @@ class TestSelectFrames:
 
 
 class TestEvidenceCompleteness:
+    def test_bundle_contract_only_diffusion_uses_structured_evidence(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "bundle-only-diffusion"
+        model_dir.mkdir()
+        result = _make_bundle_contract_only_diffusion_result()
+        result["_artifact_dir"] = str(model_dir)
+
+        assert mod.validate_evidence([result], project_dir=tmp_path) == []
+        rendered = mod.render_diffusion_model(result, project_dir=tmp_path)
+        assert "Bundle Contract Evidence" in rendered
+        assert "Runtime strategy: diffusion_example" in rendered
+
+    def test_bundle_contract_only_diffusion_requires_exact_pair(self, tmp_path):
+        mod = _import_report()
+        result = _make_bundle_contract_only_diffusion_result()
+        result["stage_outputs"].pop("ref_bundle_contract")
+        result["_artifact_dir"] = str(tmp_path / "bundle-only-diffusion")
+
+        issues = mod.validate_evidence([result], project_dir=tmp_path)
+
+        assert any("missing TRT/base image or video frames" in issue for issue in issues)
+
+    def test_bundle_contract_only_diffusion_ignores_incidental_frames(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "bundle-only-with-stale-frames"
+        frames_dir = model_dir / "frames"
+        frames_dir.mkdir(parents=True)
+        _make_tiny_png(frames_dir / "frame_000.png")
+        result = _make_bundle_contract_only_diffusion_result()
+        result["_artifact_dir"] = str(model_dir)
+
+        rendered = mod.render_diffusion_model(result, project_dir=tmp_path)
+
+        assert "Bundle Contract Evidence" in rendered
+        assert "data:image/png;base64," not in rendered
+
+    def test_bundle_contract_only_diffusion_requires_readable_trt_output(self):
+        mod = _import_report()
+        result = _make_bundle_contract_only_diffusion_result()
+        result["stage_outputs"]["trt_bundle_contract"]["text"] = "  "
+
+        issues = mod.validate_evidence([result], project_dir=None)
+
+        assert any("bundle-contract output" in issue for issue in issues)
+
+    def test_bundle_contract_only_diffusion_requires_invariant_marker(self):
+        mod = _import_report()
+        result = _make_bundle_contract_only_diffusion_result()
+        result["stage_outputs"]["ref_bundle_contract"]["data"] = {}
+
+        issues = mod.validate_evidence([result], project_dir=None)
+
+        assert any("bundle-contract marker" in issue for issue in issues)
+
+    def test_bundle_contract_only_diffusion_still_validates_conditioning_image(
+        self, tmp_path
+    ):
+        mod = _import_report()
+        result = _make_bundle_contract_only_diffusion_result()
+        result["case_config"]["inputs"]["conditioning_image"] = "missing.png"
+
+        issues = mod.validate_evidence([result], project_dir=tmp_path)
+
+        assert any("conditioning image" in issue for issue in issues)
+
+    def test_l4_diffusion_generation_still_requires_frames(self, tmp_path):
+        mod = _import_report()
+        result = _make_bundle_contract_only_diffusion_result()
+        result["case_config"]["stages"].append({
+            "name": "end_to_end",
+            "required": True,
+        })
+        result["stages"]["end_to_end"] = {
+            "status": "passed",
+            "metrics": {},
+        }
+        result["stage_outputs"].update({
+            "trt_end_to_end": {
+                "stage_name": "end_to_end",
+                "data": {"num_frames": 121},
+            },
+            "ref_end_to_end": {
+                "stage_name": "end_to_end",
+                "data": {"_invariant_only": True},
+            },
+        })
+        result["_artifact_dir"] = str(tmp_path / "generation")
+
+        issues = mod.validate_evidence([result], project_dir=tmp_path)
+
+        assert any("missing TRT/base image or video frames" in issue for issue in issues)
+
+    def test_extra_diffusion_stage_output_cannot_bypass_frame_gate(self, tmp_path):
+        mod = _import_report()
+        result = _make_bundle_contract_only_diffusion_result()
+        result["stage_outputs"].update({
+            "trt_end_to_end": {"stage_name": "end_to_end", "data": {}},
+            "ref_end_to_end": {
+                "stage_name": "end_to_end",
+                "data": {"_invariant_only": True},
+            },
+        })
+        result["_artifact_dir"] = str(tmp_path / "unexpected-generation")
+
+        issues = mod.validate_evidence([result], project_dir=tmp_path)
+
+        assert any("missing TRT/base image or video frames" in issue for issue in issues)
+
+    def test_external_diffusion_requires_reference_frames(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "external-diffusion"
+        frames_dir = model_dir / "frames"
+        frames_dir.mkdir(parents=True)
+        _make_tiny_png(frames_dir / "frame_000.png")
+        result = _make_result(
+            name="external-diffusion",
+            task_strategy="diffusion_media_generation",
+            artifacts={"trt_frames": "frames"},
+        )
+        result["_artifact_dir"] = str(model_dir)
+
+        issues = mod.validate_evidence([result], project_dir=tmp_path)
+
+        assert not any("missing TRT/base" in issue for issue in issues)
+        assert any("missing reference image or video frames" in issue for issue in issues)
+
+    def test_external_diffusion_with_both_frame_sets_is_complete(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "complete-diffusion"
+        for dirname in ("frames", "ref_frames"):
+            frame_dir = model_dir / dirname
+            frame_dir.mkdir(parents=True)
+            _make_tiny_png(frame_dir / "frame_000.png")
+        result = _make_result(
+            name="complete-diffusion",
+            task_strategy="diffusion_media_generation",
+            artifacts={"trt_frames": "frames", "ref_frames": "ref_frames"},
+        )
+        result["_artifact_dir"] = str(model_dir)
+
+        assert mod.validate_evidence([result], project_dir=tmp_path) == []
+
     def test_passing_audio_requires_both_model_and_reference_files(self, tmp_path):
         mod = _import_report()
         model_dir = tmp_path / "audio"

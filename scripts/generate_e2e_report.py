@@ -1358,6 +1358,39 @@ def _stage_pairs(result: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, Any]]]
     return pairs
 
 
+def _is_successful_bundle_contract_only(result: Dict[str, Any]) -> bool:
+    """Return whether a diffusion result is exactly an L4 bundle-contract proof."""
+    cc = result.get("case_config")
+    if not isinstance(cc, dict):
+        return False
+
+    configured_stages = cc.get("stages")
+    compared_stages = result.get("stages")
+    if (
+        result.get("status") != "pass"
+        or cc.get("task_strategy") != "diffusion_media_generation"
+        or result.get("oracle_level") != "L4_invariants"
+        or cc.get("oracle_level") != "L4_invariants"
+        or cc.get("reference_backend") != "invariant_only"
+        or not isinstance(configured_stages, list)
+        or len(configured_stages) != 1
+        or not isinstance(configured_stages[0], dict)
+        or configured_stages[0].get("name") != "bundle_contract"
+        or configured_stages[0].get("required") is not True
+        or not isinstance(compared_stages, dict)
+        or set(compared_stages) != {"bundle_contract"}
+        or not isinstance(compared_stages["bundle_contract"], dict)
+        or compared_stages["bundle_contract"].get("status") != "passed"
+    ):
+        return False
+
+    pairs = _stage_pairs(result)
+    return (
+        set(pairs) == {"bundle_contract"}
+        and set(pairs["bundle_contract"]) == {"trt", "ref"}
+    )
+
+
 def _walk_named_values(value: Any, names: set[str]) -> List[Any]:
     found: List[Any] = []
     if isinstance(value, dict):
@@ -1693,7 +1726,10 @@ def render_diffusion_model(
         fallback_dir_name="ref_frames",
     )
 
-    if trt_frame_paths and ref_frame_paths:
+    if _is_successful_bundle_contract_only(result):
+        parts.append("<h4>Bundle Contract Evidence</h4>")
+        parts.append(_render_structured_stage_comparison(result))
+    elif trt_frame_paths and ref_frame_paths:
         selected_trt = _select_frames(trt_frame_paths, _MAX_DIFFUSION_FRAMES)
         selected_ref = _select_frames(ref_frame_paths, _MAX_DIFFUSION_FRAMES)
         parts.append("<h4>Visual Review: TRT vs Reference</h4>")
@@ -3236,22 +3272,43 @@ def validate_evidence(
                     result.get("stage_outputs") or {}, "ref_") is not None,
                     "missing reference text output")
         elif strategy == "diffusion_media_generation":
-            art_dir = Path(result.get("_artifact_dir") or ".")
-            artifacts = result.get("artifacts") or {}
-            trt_frames = _resolve_frame_paths(
-                artifacts.get("trt_frames", []), art_dir, "frames")
-            ref_frames = _resolve_frame_paths(
-                artifacts.get("ref_frames", []), art_dir, "ref_frames")
-            require(bool(trt_frames), "missing TRT/base image or video frames")
-            if external_reference:
-                require(bool(ref_frames), "missing reference image or video frames")
-            require(all(_embeddable(path) for path in _select_frames(
-                trt_frames, _MAX_DIFFUSION_FRAMES)),
-                "one or more selected TRT/base frames cannot be embedded")
-            if ref_frames:
+            if _is_successful_bundle_contract_only(result):
+                pair = _stage_pairs(result)["bundle_contract"]
+                trt_contract = pair["trt"]
+                ref_contract = pair["ref"]
+                require(
+                    trt_contract.get("stage_name") == "bundle_contract"
+                    and ref_contract.get("stage_name") == "bundle_contract",
+                    "serialized bundle-contract evidence has mismatched stage names",
+                )
+                require(
+                    isinstance(trt_contract.get("text"), str)
+                    and bool(trt_contract["text"].strip()),
+                    "missing human-readable TRT/base bundle-contract output",
+                )
+                ref_data = ref_contract.get("data")
+                require(
+                    isinstance(ref_data, dict)
+                    and ref_data.get("_invariant_only") is True,
+                    "missing invariant-only reference bundle-contract marker",
+                )
+            else:
+                art_dir = Path(result.get("_artifact_dir") or ".")
+                artifacts = result.get("artifacts") or {}
+                trt_frames = _resolve_frame_paths(
+                    artifacts.get("trt_frames", []), art_dir, "frames")
+                ref_frames = _resolve_frame_paths(
+                    artifacts.get("ref_frames", []), art_dir, "ref_frames")
+                require(bool(trt_frames), "missing TRT/base image or video frames")
+                if external_reference:
+                    require(bool(ref_frames), "missing reference image or video frames")
                 require(all(_embeddable(path) for path in _select_frames(
-                    ref_frames, _MAX_DIFFUSION_FRAMES)),
-                    "one or more selected reference frames cannot be embedded")
+                    trt_frames, _MAX_DIFFUSION_FRAMES)),
+                    "one or more selected TRT/base frames cannot be embedded")
+                if ref_frames:
+                    require(all(_embeddable(path) for path in _select_frames(
+                        ref_frames, _MAX_DIFFUSION_FRAMES)),
+                        "one or more selected reference frames cannot be embedded")
             condition_ref = _input_ref(
                 inputs, ("image", "image_path", "input_image", "conditioning_image"))
             if condition_ref:
