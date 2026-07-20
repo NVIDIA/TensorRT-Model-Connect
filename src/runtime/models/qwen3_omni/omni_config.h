@@ -15,6 +15,7 @@ struct OmniConfig {
     int32_t sample_rate{24000};
 
     int32_t thinker_hidden_size{0};
+    int32_t thinker_vocab_size{0};
     int32_t thinker_num_layers{0};
     int32_t thinker_num_heads{0};
     int32_t thinker_eos_token_id{151645};

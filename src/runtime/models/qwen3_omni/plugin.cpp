@@ -27,15 +27,15 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         const auto& json = ctx.config_json;
 
         // Thinker (MoE decoder) -- main engine plan
-        auto thinker_loaded = load_trt_module_from_plan(
+        auto thinker_modules = load_dual_profile_modules(
             ctx.backend, find_section(ctx.bundle, "engine_plan"), "omni thinker", opts);
-        cudaStream_t stream = thinker_loaded.module->stream();
+        cudaStream_t stream = thinker_modules.decode->stream();
         int32_t kv_dim = compute_kv_dim(ctx.config);
         // The cache allocation must follow the engine binding, not the bundle's
         // requested precision. Legacy Qwen3-Omni builders emitted FP32 cache
         // bindings even for a bundle labelled BF16; allocating BF16 here
         // truncated every present K/V row and corrupted subsequent tokens.
-        DType cache_dtype = thinker_loaded.module->tensor_dtype("cache_k_0");
+        DType cache_dtype = thinker_modules.decode->tensor_dtype("cache_k_0");
         std::unique_ptr<Qwen3OmniInferenceState> thinker_state = std::make_unique<Qwen3OmniKvCache>(
             ctx.config.num_layers, ctx.config.max_cache_length, kv_dim, stream, cache_dtype);
         if (!thinker_state->ok())
@@ -55,6 +55,7 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         OmniConfig omni_cfg;
         omni_cfg.sample_rate = extract_json_int(json, "audio_sample_rate", 24000);
         omni_cfg.thinker_hidden_size = ctx.config.hidden_size;
+        omni_cfg.thinker_vocab_size = ctx.config.vocab_size;
         omni_cfg.thinker_num_layers = ctx.config.num_layers;
         omni_cfg.thinker_num_heads = ctx.config.num_heads;
         omni_cfg.num_experts = extract_json_int(json, "num_local_experts", 8);
@@ -82,8 +83,9 @@ class Qwen3OmniPlugin final : public IPipelinePlugin {
         auto tokenizer = create_tokenizer_from_bundle(ctx.bundle);
 
         return std::make_unique<OmniPipeline>(
-            std::move(thinker_loaded.module), std::move(thinker_state), std::move(code2wav_module),
-            std::move(omni_cfg), stream, std::move(tokenizer), ctx.bundle.info.model_id);
+            std::move(thinker_modules.decode), std::move(thinker_state), std::move(code2wav_module),
+            std::move(omni_cfg), stream, std::move(tokenizer), ctx.bundle.info.model_id,
+            std::move(thinker_modules.prefill));
     }
 };
 

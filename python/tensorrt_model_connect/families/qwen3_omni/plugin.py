@@ -554,7 +554,6 @@ class Qwen3OmniPlugin:
         kv_attention_size = graph_blocks.infer_kv_attention_size(
             weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
         attention_window = max_cache_length + 1
-
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -562,16 +561,16 @@ class Qwen3OmniPlugin:
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
         # Inputs
-        token_id = network.add_input("token_id", trt.int32, (1,))
-        position_id = network.add_input("position_id", trt.int32, (1,))
+        token_id = network.add_input("token_id", trt.int32, (-1,))
+        position_id = network.add_input("position_id", trt.int32, (-1,))
         attention_mask = network.add_input(
-            "attention_mask", trt.float32, (1, attention_window))
+            "attention_mask", trt.float32, (-1, -1))
 
         # VL embed_input (for vision/audio feature injection)
         input_embed_tensor = network.add_input(
-            "input_embed", trt.float32, (1, hidden))
+            "input_embed", trt.float32, (-1, hidden))
         use_input_embed_tensor = network.add_input(
-            "use_input_embed", trt.float32, (1,))
+            "use_input_embed", trt.float32, (-1, 1))
 
         # KV cache inputs
         cache_k_inputs = []
@@ -585,6 +584,25 @@ class Qwen3OmniPlugin:
                 trt.float32, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
+
+        def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False) -> None:
+            profile = builder.create_optimization_profile()
+            min_sq = opt_sq if fixed else 1
+            profile.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
+            profile.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+            profile.set_shape(
+                "attention_mask",
+                (min_sq, max_cache_length + min_sq),
+                (opt_sq, max_cache_length + opt_sq),
+                (max_sq, max_cache_length + max_sq))
+            profile.set_shape(
+                "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
+            profile.set_shape(
+                "use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
+            trt_config.add_optimization_profile(profile)
+
+        _add_profile(min(64, max_cache_length), max_cache_length)
+        _add_profile(1, 1, fixed=True)
 
         # Shared constants
         embedding_table = graph_ops.add_constant(
@@ -610,7 +628,7 @@ class Qwen3OmniPlugin:
 
         # Conditional: (1 - flag) * token_embed + flag * input_embed
         flag_broadcast = network.add_shuffle(use_input_embed_tensor)
-        flag_broadcast.reshape_dims = (1, 1)
+        flag_broadcast.reshape_dims = (-1, 1)
         one_const = graph_ops.add_constant(
             network, (1, 1), np.array([1.0], dtype=np.float32))
         inv_flag = network.add_elementwise(
@@ -652,6 +670,8 @@ class Qwen3OmniPlugin:
                 cos_half_tensor=cos_half_tensor,
                 sin_half_tensor=sin_half_tensor,
                 rotary_embedding_dim=head_dim,
+                dynamic_kv_cache=True,
+                sequence_length=None,
             )
 
             attn_out = attn["attn_out"]
@@ -703,13 +723,28 @@ class Qwen3OmniPlugin:
                 network, hidden_state, hidden, final_norm, None,
                 eps_tensor, "rmsnorm")
 
-        hidden_out = network.add_identity(hidden_state).get_output(0)
+        # Keep the output contract fixed at one row for both profiles. Only
+        # the final prompt row can affect the first generated token.
+        hidden_shape = network.add_shape(hidden_state).get_output(0)
+        one_hidden = graph_ops.add_constant(
+            network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
+        last_start = network.add_elementwise(
+            hidden_shape, one_hidden, trt.ElementWiseOperation.SUB).get_output(0)
+        last_size = graph_ops.add_constant(
+            network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64)
+        last_slice = network.add_slice(
+            hidden_state, start=(0, 0), shape=(0, 0), stride=(1, 1))
+        last_slice.set_input(1, last_start)
+        last_slice.set_input(2, last_size)
+        last_hidden = last_slice.get_output(0)
+
+        hidden_out = network.add_identity(last_hidden).get_output(0)
         hidden_out.name = "hidden_state"
         network.mark_output(hidden_out)
 
         # LM head
         logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_out"])
+            network, last_hidden, hidden, vocab, weights["w_out"])
         b_out = np.zeros(vocab, dtype=np.float32)
         logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
 
@@ -726,7 +761,7 @@ class Qwen3OmniPlugin:
             network.mark_output(pv)
 
         if verbose:
-            print(f"[trtmc build] Building Qwen3-Omni Thinker MoE engine "
+            print(f"[trtmc build] Building dual-profile Qwen3-Omni Thinker MoE engine "
                   f"({num_layers} layers, hidden={hidden}, "
                   f"attn={attention_size}, experts={num_experts}, "
                   f"top_k={top_k}, inter={moe_intermediate}, "
@@ -987,7 +1022,7 @@ def _add_omni_moe_block(
         top_values, sum_val.get_output(0),
         trt.ElementWiseOperation.DIV)
 
-    # Compute all expert outputs and stack
+    # Compute all expert outputs and stack as [Sq, E, H].
     expert_outputs = []
     for e in range(num_experts):
         exp_out = _add_swiglu_expert(
@@ -996,40 +1031,47 @@ def _add_omni_moe_block(
             weights[f"{prefix}.expert.{e}.w_up"],
             weights[f"{prefix}.expert.{e}.w_down"],
         )
-        expert_outputs.append(exp_out)
+        expert_row = network.add_shuffle(exp_out)
+        expert_row.reshape_dims = (-1, 1, hidden_size)
+        expert_outputs.append(expert_row.get_output(0))
 
     stacked = network.add_concatenation(expert_outputs)
-    stacked.axis = 0
+    stacked.axis = 1
     stacked_out = stacked.get_output(0)
 
-    # Gather and scale each selected expert, then sum
-    result = None
-    for k in range(top_k):
-        idx_slice = network.add_slice(
-            top_indices, start=(0, k), shape=(1, 1), stride=(1, 1))
-        idx_flat = network.add_shuffle(idx_slice.get_output(0))
-        idx_flat.reshape_dims = (1,)
+    # Build token-row indices [Sq, K] and pair them with the router's expert
+    # indices. GatherND then selects K experts independently for every token.
+    routing_shape = network.add_shape(top_indices).get_output(0)
+    fill_start = network.add_constant(
+        (), trt.Weights(np.array(0, dtype=np.int32))).get_output(0)
+    fill_delta = network.add_constant(
+        (2,), trt.Weights(np.array([1, 0], dtype=np.int32))).get_output(0)
+    row_indices = network.add_fill(
+        (1, top_k), trt.FillOperation.LINSPACE, trt.int32)
+    row_indices.set_input(0, routing_shape)
+    row_indices.set_input(1, fill_start)
+    row_indices.set_input(2, fill_delta)
 
-        w_slice = network.add_slice(
-            norm_weights.get_output(0),
-            start=(0, k), shape=(1, 1), stride=(1, 1))
+    row_3d = network.add_shuffle(row_indices.get_output(0))
+    row_3d.reshape_dims = (-1, top_k, 1)
+    expert_3d = network.add_shuffle(top_indices)
+    expert_3d.reshape_dims = (-1, top_k, 1)
+    gather_indices = network.add_concatenation(
+        [row_3d.get_output(0), expert_3d.get_output(0)])
+    gather_indices.axis = 2
 
-        expert_out = network.add_gather(
-            stacked_out, idx_flat.get_output(0), 0)
+    selected = network.add_gather(
+        stacked_out, gather_indices.get_output(0), 0)
+    selected.mode = trt.GatherMode.ND
 
-        scaled_expert = network.add_elementwise(
-            expert_out.get_output(0), w_slice.get_output(0),
-            trt.ElementWiseOperation.PROD)
-
-        if result is None:
-            result = scaled_expert.get_output(0)
-        else:
-            sum_layer = network.add_elementwise(
-                result, scaled_expert.get_output(0),
-                trt.ElementWiseOperation.SUM)
-            result = sum_layer.get_output(0)
-
-    return result
+    weights_3d = network.add_shuffle(norm_weights.get_output(0))
+    weights_3d.reshape_dims = (-1, top_k, 1)
+    weighted = network.add_elementwise(
+        selected.get_output(0), weights_3d.get_output(0),
+        trt.ElementWiseOperation.PROD)
+    summed = network.add_reduce(
+        weighted.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=False)
+    return summed.get_output(0)
 
 
 # ---------------------------------------------------------------------------

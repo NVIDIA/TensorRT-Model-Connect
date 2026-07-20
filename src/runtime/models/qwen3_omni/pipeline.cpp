@@ -5,6 +5,7 @@
 
 #include "runtime/models/qwen3_omni/pipeline.h"
 
+#include "runtime/models/qwen3_omni/argmax_kernel.h"
 #include "runtime/models/qwen3_omni/omni_audio_plan.h"
 #include "runtime/models/qwen3_omni/talker_runtime.h"
 #include "trtmc/tokenizer.h"
@@ -73,10 +74,12 @@ OmniPipeline::OmniPipeline(std::unique_ptr<TrtModule> thinker,
                            std::unique_ptr<Qwen3OmniInferenceState> thinker_state,
                            std::unique_ptr<TrtModule> code2wav, OmniConfig config,
                            cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
-                           std::string model_id_str)
-    : thinker_(std::move(thinker)), thinker_state_(std::move(thinker_state)),
-      code2wav_(std::move(code2wav)), config_(std::make_unique<OmniConfig>(std::move(config))),
-      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
+                           std::string model_id_str, std::unique_ptr<TrtModule> thinker_prefill)
+    : thinker_(std::move(thinker)), thinker_prefill_(std::move(thinker_prefill)),
+      thinker_state_(std::move(thinker_state)), code2wav_(std::move(code2wav)),
+      config_(std::make_unique<OmniConfig>(std::move(config))), stream_(stream),
+      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
+      thinker_token_id_({1}, DType::kInt32, stream) {
     if (!thinker_ || !thinker_->ok())
         throw std::runtime_error("OmniPipeline: invalid thinker module");
     if (!thinker_state_ || !thinker_state_->ok())
@@ -88,7 +91,54 @@ OmniPipeline::OmniPipeline(std::unique_ptr<TrtModule> thinker,
 
 OmniPipeline::~OmniPipeline() = default;
 
-void OmniPipeline::run_thinker_step(int32_t token_id, std::vector<float>& logits) {
+namespace {
+
+int32_t host_argmax(const TensorMap& outputs, int32_t& d2h_count) {
+    auto it = outputs.find("logits");
+    if (it == outputs.end())
+        throw std::runtime_error("OmniPipeline thinker: no 'logits' output");
+    const auto& logits = it->second;
+    const auto count = static_cast<std::size_t>(logits.numel());
+    if (count == 0)
+        return 0;
+    ++d2h_count;
+    const auto* begin = static_cast<const float*>(logits.data);
+    return static_cast<int32_t>(std::distance(begin, std::max_element(begin, begin + count)));
+}
+
+bool gather_prefill_kv(TrtModule& prefill, int32_t num_layers, std::vector<const void*>& present_k,
+                       std::vector<const void*>& present_v) {
+    present_k.resize(static_cast<std::size_t>(num_layers));
+    present_v.resize(static_cast<std::size_t>(num_layers));
+    for (int32_t layer = 0; layer < num_layers; ++layer) {
+        const auto index = static_cast<std::size_t>(layer);
+        present_k[index] = prefill.device_ptr("present_k_" + std::to_string(layer));
+        present_v[index] = prefill.device_ptr("present_v_" + std::to_string(layer));
+        if (present_k[index] == nullptr || present_v[index] == nullptr)
+            return false;
+    }
+    return true;
+}
+
+Qwen3OmniKvCache* eligible_prefill_cache(TrtModule* prefill, Qwen3OmniInferenceState* state,
+                                         const OmniConfig& config, int32_t sequence_length) {
+    auto* cache = dynamic_cast<Qwen3OmniKvCache*>(state);
+    if (prefill == nullptr || cache == nullptr || sequence_length <= 0 ||
+        sequence_length > cache->max_length() || config.thinker_hidden_size <= 0 ||
+        config.thinker_vocab_size <= 0 || !prefill->has_input("input_embed"))
+        return nullptr;
+    return cache;
+}
+
+bool can_use_device_argmax(const TrtModule& module, const DeviceTensor& token_id,
+                           int32_t vocab_size) {
+    return module.device_ptr("logits") != nullptr &&
+           module.tensor_dtype("logits") == DType::kFloat32 && vocab_size > 0 && token_id.ok();
+}
+
+} // namespace
+
+int32_t OmniPipeline::run_thinker_step(int32_t token_id) {
     Tensor token_tensor;
     token_tensor.data = &token_id;
     token_tensor.shape = {1};
@@ -98,56 +148,111 @@ void OmniPipeline::run_thinker_step(int32_t token_id, std::vector<float>& logits
     inputs["token_id"] = token_tensor;
     thinker_state_->prepare_step(inputs);
 
-    TensorMap outputs = thinker_->forward(inputs);
+    ++thinker_stats_.decode_launches;
+    const bool gpu_argmax =
+        can_use_device_argmax(*thinker_, thinker_token_id_, config_->thinker_vocab_size);
+    if (!gpu_argmax) {
+        TensorMap outputs = thinker_->forward(inputs);
+        thinker_state_->advance();
+        return host_argmax(outputs, thinker_stats_.full_logits_d2h);
+    }
 
-    auto it = outputs.find("logits");
-    if (it == outputs.end())
-        throw std::runtime_error("OmniPipeline thinker: no 'logits' output");
-
-    const auto& lt = it->second;
-    auto n = lt.numel();
-    logits.resize(static_cast<std::size_t>(n));
-    std::memcpy(logits.data(), lt.data, n * sizeof(float));
-
+    thinker_->forward_async(inputs);
+    const auto* logits = static_cast<const float*>(thinker_->device_ptr("logits"));
+    qwen3_omni_gpu_argmax(logits, config_->thinker_vocab_size,
+                          static_cast<int32_t*>(thinker_token_id_.data()), stream_);
     thinker_state_->advance();
+    cudaMemcpyAsync(&thinker_token_host_, thinker_token_id_.data(), sizeof(thinker_token_host_),
+                    cudaMemcpyDeviceToHost, stream_);
+    thinker_->sync();
+    return thinker_token_host_;
 }
 
-static int32_t omni_argmax(const std::vector<float>& logits) {
-    if (logits.empty())
-        return 0;
-    return static_cast<int32_t>(
-        std::distance(logits.begin(), std::max_element(logits.begin(), logits.end())));
+bool OmniPipeline::run_thinker_prefill(const std::vector<int32_t>& input_ids, int32_t& next_token) {
+    const auto sequence_length = static_cast<int32_t>(input_ids.size());
+    auto* cache = eligible_prefill_cache(thinker_prefill_.get(), thinker_state_.get(), *config_,
+                                         sequence_length);
+    if (cache == nullptr)
+        return false;
+
+    std::vector<const void*> present_k;
+    std::vector<const void*> present_v;
+    if (!gather_prefill_kv(*thinker_prefill_, cache->num_layers(), present_k, present_v))
+        return false;
+
+    std::vector<float> input_embed(
+        static_cast<std::size_t>(sequence_length) * config_->thinker_hidden_size, 0.0F);
+    std::vector<float> use_input_embed(static_cast<std::size_t>(sequence_length), 0.0F);
+    TensorMap inputs;
+    inputs["token_id"] =
+        Tensor{const_cast<int32_t*>(input_ids.data()), {sequence_length}, DType::kInt32};
+    inputs["input_embed"] = Tensor{
+        input_embed.data(), {sequence_length, config_->thinker_hidden_size}, DType::kFloat32};
+    inputs["use_input_embed"] =
+        Tensor{use_input_embed.data(), {sequence_length, 1}, DType::kFloat32};
+    cache->bind_cache_inputs(*thinker_prefill_);
+    thinker_state_->prepare_step(inputs, sequence_length);
+
+    const bool gpu_argmax =
+        can_use_device_argmax(*thinker_prefill_, thinker_token_id_, config_->thinker_vocab_size);
+    ++thinker_stats_.prefill_launches;
+    if (gpu_argmax) {
+        thinker_prefill_->forward_async(inputs);
+        const auto* logits = static_cast<const float*>(thinker_prefill_->device_ptr("logits"));
+        qwen3_omni_gpu_argmax(logits, config_->thinker_vocab_size,
+                              static_cast<int32_t*>(thinker_token_id_.data()), stream_);
+        cache->write_prefill_kv(present_k, present_v, sequence_length);
+        cudaMemcpyAsync(&thinker_token_host_, thinker_token_id_.data(), sizeof(thinker_token_host_),
+                        cudaMemcpyDeviceToHost, stream_);
+        thinker_prefill_->sync();
+        next_token = thinker_token_host_;
+        return true;
+    }
+
+    TensorMap outputs = thinker_prefill_->forward(inputs);
+    cache->write_prefill_kv(present_k, present_v, sequence_length);
+    next_token = host_argmax(outputs, thinker_stats_.full_logits_d2h);
+    return true;
 }
 
 std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input_ids,
                                                int32_t max_tokens) {
+    thinker_stats_ = {};
+    thinker_stats_.prompt_tokens = static_cast<int32_t>(input_ids.size());
+    if (input_ids.empty() || max_tokens <= 0)
+        return {};
+
     thinker_state_->reset();
+    thinker_state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
     thinker_state_->bind_to(*thinker_);
 
-    std::vector<float> logits;
-
-    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
-        run_thinker_step(input_ids[i], logits);
-
-    if (!input_ids.empty())
-        run_thinker_step(input_ids.back(), logits);
+    int32_t next_token = 0;
+    if (!run_thinker_prefill(input_ids, next_token)) {
+        for (int32_t token : input_ids)
+            next_token = run_thinker_step(token);
+    }
+    thinker_state_->mark_prefill_complete();
 
     std::vector<int32_t> output_ids;
     output_ids.reserve(static_cast<std::size_t>(max_tokens));
 
     for (int32_t step = 0; step < max_tokens; ++step) {
-        if (logits.empty())
-            break;
-        int32_t token = omni_argmax(logits);
+        const int32_t token = next_token;
         if (token == 0 || token == config_->thinker_eos_token_id)
             break;
         output_ids.push_back(token);
-        run_thinker_step(token, logits);
+        if (step + 1 < max_tokens)
+            next_token = run_thinker_step(token);
     }
 
     std::cerr << "[trtmc] Omni Thinker: generated " << output_ids.size() << " text tokens"
               << std::endl;
     return output_ids;
+}
+
+std::vector<int32_t> OmniPipeline::generate_thinker_ids(const std::vector<int32_t>& input_ids,
+                                                        int32_t max_tokens) {
+    return run_thinker(input_ids, max_tokens);
 }
 
 std::vector<float> OmniPipeline::run_code2wav(const std::vector<int32_t>& codec_tokens,
