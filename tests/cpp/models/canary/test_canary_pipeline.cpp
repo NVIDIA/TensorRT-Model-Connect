@@ -244,7 +244,7 @@ void test_canary_with_cross_kv() {
         return;
     }
     const std::vector<float> dec_logits = {0.1F, 0.2F, 0.9F};
-    auto dec_engine = trtmc::test::build_mock_step_engine(9, 3, dec_logits);
+    auto dec_engine = trtmc::test::build_mock_step_engine(9, 3, dec_logits, 1, 5, 4);
     if (!dec_engine) {
         std::cerr << "WARNING: Could not build decoder for cross-kv test, skipping\n";
         return;
@@ -257,6 +257,8 @@ void test_canary_with_cross_kv() {
         enc_engine.get(), enc_engine->createExecutionContext(), stream);
     auto decoder = std::make_unique<trtmc::TrtModuleImpl>(
         dec_engine.get(), dec_engine->createExecutionContext(), stream);
+    check(decoder->has_input("cross_k_0"), "canary cross-kv: decoder has cross_k_0");
+    check(decoder->has_input("cross_v_0"), "canary cross-kv: decoder has cross_v_0");
     auto* decoder_ptr = decoder.get();
     auto cache = std::make_unique<trtmc::CanaryKvCache>(0, 8, 0, stream);
 

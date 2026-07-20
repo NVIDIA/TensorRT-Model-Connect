@@ -9,6 +9,7 @@
 
 #include <NvInfer.h>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace trtmc::test {
@@ -55,7 +56,13 @@ inline TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_encoder(int32_t mel_bins, 
 
 inline TrtUniquePtr<nvinfer1::ICudaEngine>
 build_mock_step_engine(int32_t mask_size, int32_t vocab_size,
-                       const std::vector<float>& const_logits) {
+                       const std::vector<float>& const_logits, int32_t cross_attention_layers = 0,
+                       int32_t source_positions = 0, int32_t hidden_size = 0) {
+    if (cross_attention_layers < 0 ||
+        (cross_attention_layers > 0 && (source_positions <= 0 || hidden_size <= 0))) {
+        return nullptr;
+    }
+
     auto builder = TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     if (!builder) {
         return nullptr;
@@ -77,6 +84,37 @@ build_mock_step_engine(int32_t mask_size, int32_t vocab_size,
     }
 
     auto* out = const_w->getOutput(0);
+    for (int32_t layer = 0; layer < cross_attention_layers; ++layer) {
+        for (const char* prefix : {"cross_k_", "cross_v_"}) {
+            const std::string name = std::string(prefix) + std::to_string(layer);
+            auto* cross_input =
+                network->addInput(name.c_str(), nvinfer1::DataType::kFLOAT,
+                                  nvinfer1::Dims{2, {source_positions, hidden_size}});
+            if (!cross_input) {
+                return nullptr;
+            }
+
+            // Keep every declared cross-attention tensor in the engine I/O contract. The
+            // fixture encoder produces zeros, so this dependency preserves the constant logits.
+            auto* first_value =
+                network->addSlice(*cross_input, nvinfer1::Dims{2, {0, 0}},
+                                  nvinfer1::Dims{2, {1, 1}}, nvinfer1::Dims{2, {1, 1}});
+            if (!first_value) {
+                return nullptr;
+            }
+            auto* flatten = network->addShuffle(*first_value->getOutput(0));
+            if (!flatten) {
+                return nullptr;
+            }
+            flatten->setReshapeDimensions(nvinfer1::Dims{1, {1}});
+            auto* logits_with_cross = network->addElementWise(*out, *flatten->getOutput(0),
+                                                              nvinfer1::ElementWiseOperation::kSUM);
+            if (!logits_with_cross) {
+                return nullptr;
+            }
+            out = logits_with_cross->getOutput(0);
+        }
+    }
     out->setName("logits");
     network->markOutput(*out);
 
