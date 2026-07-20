@@ -539,6 +539,77 @@ def test_selection_excludes_unselected_sibling_model_tests(
     assert not any(path.startswith(f"{sibling_root}/") for path in selection["python_tests"])
 
 
+def test_selection_hands_independently_routed_adapter_tests_to_their_ci_owner(
+    tmp_path: Path,
+) -> None:
+    routed_root = "tests/e2e/models/flux/edge_llm_adapter"
+
+    def project_adapter_tests(source: Path, _projection: dict[str, object]) -> None:
+        model = source / "tests/e2e/models/flux/MODEL.toml"
+        with model.open("a", encoding="utf-8") as stream:
+            stream.write(
+                '\n[ci]\nindependently_routed_test_roots = ["edge_llm_adapter"]\n'
+            )
+        root = source / routed_root
+        profile = root / "profile_a"
+        profile.mkdir(parents=True)
+        (root / "ci_impact.py").write_text("# selector\n", encoding="utf-8")
+        (root / "test_ci_impact.py").write_text("# selector tests\n", encoding="utf-8")
+        (profile / "test_adapter.py").write_text("# delegated test\n", encoding="utf-8")
+        (profile / "test_runtime_contract.py").write_text(
+            "# delegated contract\n", encoding="utf-8"
+        )
+
+    selection = _run_test_selection(
+        tmp_path,
+        "flux",
+        "premerge",
+        projection_setup=project_adapter_tests,
+    )
+
+    assert selection["independently_routed_test_roots"] == [routed_root]
+    assert not any(path.startswith(f"{routed_root}/") for path in selection["python_tests"])
+    assert selection["python_tests"]
+
+
+def test_qwen_model_proof_does_not_collect_edge_llm_leaf_tests(tmp_path: Path) -> None:
+    selection = _run_test_selection(tmp_path, "qwen", "premerge")
+    root = "tests/e2e/models/qwen/edge_llm_adapter"
+
+    assert selection["independently_routed_test_roots"] == [root]
+    assert not any(path.startswith(f"{root}/") for path in selection["python_tests"])
+    assert "tests/e2e/models/qwen/test_qwen_manifest_contract.py" in selection["python_tests"]
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    (
+        ("../edge_llm_adapter", "canonical top-level"),
+        ("edge_llm", "canonical top-level"),
+        ("missing_adapter", "unavailable"),
+    ),
+)
+def test_selection_rejects_invalid_independent_test_ownership(
+    tmp_path: Path,
+    entry: str,
+    message: str,
+) -> None:
+    def declare_invalid_root(source: Path, _projection: dict[str, object]) -> None:
+        model = source / "tests/e2e/models/flux/MODEL.toml"
+        with model.open("a", encoding="utf-8") as stream:
+            stream.write(
+                f'\n[ci]\nindependently_routed_test_roots = ["{entry}"]\n'
+            )
+
+    with pytest.raises(CiError, match=message):
+        _run_test_selection(
+            tmp_path,
+            "flux",
+            "premerge",
+            projection_setup=declare_invalid_root,
+        )
+
+
 def test_sana_selection_declares_its_pinned_model_reference_cache(
     tmp_path: Path,
 ) -> None:

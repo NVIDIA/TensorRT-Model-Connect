@@ -67,6 +67,10 @@ class ModelProofSelector:
         reference_cache = self._reference_cache(
             owner_data, str(owners["e2e"]), e2e_dir / "MODEL.toml"
         )
+        independently_routed_roots = self._independently_routed_test_roots(
+            owner_data,
+            e2e_dir,
+        )
         cases = self._cases(e2e_dir)
         selected_cases = self._select_cases(cases, str(owners["e2e"]))
         resource = (
@@ -81,7 +85,10 @@ class ModelProofSelector:
                 f"projected model must have exactly one canonical E2E test; found {len(e2e_tests)}"
             )
         python_tests = [
-            path for path in e2e_dir.rglob("test_*.py") if not path.name.endswith("_e2e.py")
+            path
+            for path in e2e_dir.rglob("test_*.py")
+            if not path.name.endswith("_e2e.py")
+            and not any(path.is_relative_to(root) for root in independently_routed_roots)
         ]
         python_family = owners["python"]
         if python_family:
@@ -100,6 +107,9 @@ class ModelProofSelector:
             "python_tests": [
                 str(path.relative_to(self.source)) for path in sorted(set(python_tests))
             ],
+            "independently_routed_test_roots": [
+                str(path.relative_to(self.source)) for path in independently_routed_roots
+            ],
             "suite": self.suite,
             "resource_class": resource,
             "gpu_resource_class": resource,
@@ -112,6 +122,49 @@ class ModelProofSelector:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return ModelProofSelection(payload)
+
+    @staticmethod
+    def _independently_routed_test_roots(
+        owner: dict[str, object],
+        e2e_dir: Path,
+    ) -> tuple[Path, ...]:
+        """Validate model-local test trees owned by a separate selective CI route."""
+
+        raw_ci = owner.get("ci", {})
+        if not isinstance(raw_ci, dict):
+            raise CiError(f"ci must be a table in {e2e_dir / 'MODEL.toml'}")
+        raw_roots = raw_ci.get("independently_routed_test_roots", [])
+        if not isinstance(raw_roots, list) or not all(
+            isinstance(item, str) for item in raw_roots
+        ):
+            raise CiError("ci.independently_routed_test_roots must be a list of strings")
+        if len(raw_roots) != len(set(raw_roots)):
+            raise CiError("ci.independently_routed_test_roots contains duplicates")
+
+        roots = []
+        for raw in sorted(raw_roots):
+            relative = PurePosixPath(raw)
+            if (
+                relative.as_posix() != raw
+                or len(relative.parts) != 1
+                or relative.parts[0] in {"", ".", ".."}
+                or not relative.name.endswith("_adapter")
+            ):
+                raise CiError(
+                    "ci.independently_routed_test_roots entries must be canonical "
+                    f"top-level *_adapter directories: {raw!r}"
+                )
+            root = e2e_dir / relative.name
+            if root.is_symlink() or not root.is_dir():
+                raise CiError(f"independently routed test root is unavailable: {root}")
+            for contract in ("ci_impact.py", "test_ci_impact.py"):
+                path = root / contract
+                if path.is_symlink() or not path.is_file():
+                    raise CiError(
+                        f"independently routed test root lacks {contract}: {root}"
+                    )
+            roots.append(root)
+        return tuple(roots)
 
     def _validate_projection(self) -> dict[str, object]:
         path = self.source / ".trtmc-model-projection.json"
