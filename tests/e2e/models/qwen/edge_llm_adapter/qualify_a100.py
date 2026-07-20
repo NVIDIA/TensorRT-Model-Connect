@@ -393,9 +393,37 @@ def _discover_profiles(repository: Path = REPOSITORY) -> tuple[Profile, ...]:
     return tuple(profiles)
 
 
+def _select_profiles(
+    profiles: Sequence[Profile], requested_leaf: str | None
+) -> tuple[Profile, ...]:
+    """Select one exact model-owned leaf, or preserve full-family qualification."""
+
+    discovered = tuple(profiles)
+    if not discovered:
+        raise QualificationError("this checkout contains no Qwen EdgeLLM profiles")
+    if requested_leaf is None:
+        return discovered
+
+    matches = tuple(profile for profile in discovered if profile.leaf == requested_leaf)
+    available = ", ".join(profile.leaf for profile in discovered)
+    if not matches:
+        raise QualificationError(
+            f"unknown Qwen EdgeLLM qualification profile {requested_leaf!r}; "
+            f"available profiles: {available}"
+        )
+    if len(matches) != 1:
+        raise QualificationError(
+            f"Qwen EdgeLLM qualification profile {requested_leaf!r} is ambiguous"
+        )
+    return matches
+
+
 def _preflight(
     arguments: argparse.Namespace,
 ) -> tuple[TensorRtInputs, CudaInputs, tuple[Profile, ...]]:
+    # Resolve the internal CI selector first so a typo cannot acquire
+    # dependencies, create environments, or start model builds.
+    profiles = _select_profiles(_discover_profiles(), arguments.profile)
     if sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 12):
         raise QualificationError(
             f"qualification requires CPython 3.12; found {sys.implementation.name} {platform.python_version()}"
@@ -415,7 +443,6 @@ def _preflight(
         _require_outside_repository(arguments.hf_cache, "Hugging Face cache")
     tensorrt = _resolve_tensorrt(arguments.tensorrt_root, arguments.tensorrt_python_wheel)
     cuda = _resolve_cuda(arguments.cuda_root)
-    profiles = _discover_profiles()
     return tensorrt, cuda, profiles
 
 
@@ -841,6 +868,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cuda-root", required=True, type=Path)
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument("--hf-cache", type=Path)
+    parser.add_argument(
+        "--profile",
+        metavar="LEAF",
+        help=(
+            "internal CI control: qualify one exact Qwen EdgeLLM adapter leaf; "
+            "omit to qualify every discovered leaf"
+        ),
+    )
     return parser.parse_args(argv)
 
 

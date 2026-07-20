@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
+import os
 import stat
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -112,6 +115,8 @@ def test_cli_requires_explicit_sdk_wheel_and_work_inputs(tmp_path: Path) -> None
             str(tmp_path / "work"),
             "--hf-cache",
             str(tmp_path / "hf"),
+            "--profile",
+            "qwen3_1_7b_fp16_a100_pcie80_sm80",
         ]
     )
 
@@ -120,9 +125,105 @@ def test_cli_requires_explicit_sdk_wheel_and_work_inputs(tmp_path: Path) -> None
     assert arguments.cuda_root == tmp_path / "cuda"
     assert arguments.work_dir == tmp_path / "work"
     assert arguments.hf_cache == tmp_path / "hf"
+    assert arguments.profile == "qwen3_1_7b_fp16_a100_pcie80_sm80"
+
+    all_profiles = launcher._parse_args(
+        [
+            "--tensorrt-root",
+            str(tmp_path / "trt"),
+            "--tensorrt-python-wheel",
+            str(tmp_path / "trt.whl"),
+            "--cuda-root",
+            str(tmp_path / "cuda"),
+            "--work-dir",
+            str(tmp_path / "work"),
+        ]
+    )
+    assert all_profiles.profile is None
 
     with pytest.raises(SystemExit):
         launcher._parse_args(["--work-dir", str(tmp_path)])
+
+
+def test_profile_selector_is_exact_and_rejects_unknown_or_ambiguous_leaves(
+    tmp_path: Path,
+) -> None:
+    launcher = _load_launcher()
+    profiles = tuple(
+        launcher.Profile(
+            leaf,
+            f"Qwen/{leaf}",
+            tmp_path / f"{index}-test.py",
+            tmp_path / f"{index}-build.py",
+            f"_SOURCE_{index}",
+            f"_BUILD_{index}",
+        )
+        for index, leaf in enumerate(("leaf-a", "leaf-b"))
+    )
+
+    assert launcher._select_profiles(profiles, None) == profiles
+    assert launcher._select_profiles(profiles, "leaf-b") == (profiles[1],)
+    with pytest.raises(launcher.QualificationError, match="unknown.*available profiles"):
+        launcher._select_profiles(profiles, "leaf")
+    with pytest.raises(launcher.QualificationError, match="ambiguous"):
+        launcher._select_profiles((profiles[0], profiles[0]), "leaf-a")
+    with pytest.raises(launcher.QualificationError, match="no Qwen EdgeLLM profiles"):
+        launcher._select_profiles((), None)
+
+
+def test_unknown_profile_fails_before_host_or_sdk_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = _load_launcher()
+    profile = launcher.Profile(
+        "known-leaf",
+        "Qwen/Known",
+        tmp_path / "test.py",
+        tmp_path / "build.py",
+        "_SOURCE",
+        "_BUILD",
+    )
+    arguments = SimpleNamespace(profile="unknown-leaf")
+    monkeypatch.setattr(launcher, "_discover_profiles", lambda: (profile,))
+    monkeypatch.setattr(
+        launcher,
+        "_active_gpu_name",
+        lambda: pytest.fail("host preflight ran before selector validation"),
+    )
+
+    with pytest.raises(launcher.QualificationError, match="unknown-leaf"):
+        launcher._preflight(arguments)
+
+
+def test_profile_selector_does_not_change_the_public_python_or_cli_api(tmp_path: Path) -> None:
+    import tensorrt_model_connect as trtmc
+    from tensorrt_model_connect.engine_builder import _build_native_impl
+
+    assert inspect.signature(trtmc.build) == inspect.signature(_build_native_impl)
+    assert "profile" not in inspect.signature(trtmc.build).parameters
+
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(LAUNCHER.parents[5] / "python")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tensorrt_model_connect",
+            "build",
+            "Qwen/Qwen3-0.6B",
+            "-o",
+            str(tmp_path / "unused.trtfb"),
+            "--profile",
+            "qwen3_0_6b_fp16_a100_pcie80_sm80",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "unrecognized arguments: --profile" in result.stderr
 
 
 def test_work_and_hf_caches_must_stay_outside_the_checkout(tmp_path: Path) -> None:
