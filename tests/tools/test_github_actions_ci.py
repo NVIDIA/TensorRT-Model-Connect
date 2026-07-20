@@ -1769,6 +1769,7 @@ def test_release_wheel_stages_core_runtime_and_uses_origin_rpath() -> None:
     conanfile = (REPO_ROOT / "conanfile.py").read_text()
     script = _ci_source("package.py")
     pyproject = (REPO_ROOT / "pyproject.toml").read_text()
+    backend_text = (REPO_ROOT / "_pyproject_backend.py").read_text()
 
     assert "set_target_properties(trtmc PROPERTIES" in cmake
     assert "BUILD_RPATH_USE_ORIGIN TRUE" in cmake
@@ -1778,8 +1779,12 @@ def test_release_wheel_stages_core_runtime_and_uses_origin_rpath() -> None:
     assert "TRTMC core DSO was not staged beside the wheel script" in conanfile
     assert "apache-tvm-ffi==0.1.12" in pyproject
     assert "script_cores" in script
-    assert 'if "$ORIGIN" not in dynamic' in script
-    assert "installed trtmc RUNPATH leaks the CI build directory" in script
+    assert "InstalledWheelValidator.require_origin_runpath" in script
+    assert "no absolute or " in script
+    assert "empty components" in script
+    assert "InstalledWheelValidator.require_core_resolution" in script
+    assert 'self.context.output(["ldd", wan_runtime_dsos[0]], unset=clean)' in script
+    assert '["patchelf", "--set-rpath", "$ORIGIN", str(payload)]' in backend_text
 
 
 def test_ci_source_build_defaults_to_packaged_libtorch_mode() -> None:

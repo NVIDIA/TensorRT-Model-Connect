@@ -35,6 +35,33 @@ _TENSORRT_EXACT_DEPENDENCY_RE = re.compile(
 _WAN22_RPATH_POLICY_MARKER = "_trtmc_wan22_rpath_policy"
 
 
+def _is_native_runtime_payload(path: Path) -> bool:
+    """Return whether a staged file is part of the relocatable native runtime."""
+
+    name = path.name
+    return (
+        name == "trtmc"
+        or name.startswith("libtrtmc_core.so")
+        or name.startswith("libtrtmc_backend_")
+        or name.startswith("libtrtmc_model_")
+    )
+
+
+def _run_patchelf(command: list[str], *, action: str) -> None:
+    try:
+        subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError("patchelf is required to normalize native wheel RPATHs") from error
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout or str(error)).strip()
+        raise RuntimeError(f"failed to {action}: {detail}") from error
+
+
 def get_requires_for_build_wheel(config_settings: dict[str, Any] | None = None) -> list[str]:
     return [_CONAN_PY_BUILD_REQUIREMENT]
 
@@ -133,13 +160,15 @@ def _conan_build_backend() -> Any:
 
 
 def _install_wan22_wheel_rpath_policy(conan_build: Any) -> None:
-    """Keep the builder-only Wan companion free of runtime search paths.
+    """Make the flattened native wheel relocatable and seal the Wan companion.
 
     ``conan-py-build`` treats every file ending in the generic Python
-    extension suffix ``.so`` as an extension module and adds ``$ORIGIN`` to
-    it.  The Wan companion is an executable bundle payload, not a Python
-    extension, so preserve the backend's normal behavior and then remove the
-    injected search path before distlib writes the wheel and its RECORD.
+    extension suffix ``.so`` as an extension module and appends ``$ORIGIN`` to
+    its existing build-tree RUNPATH.  Model Connect flattens its executable,
+    core, backends, and model DSOs into one wheel directory, so replace those
+    inherited paths with exactly ``$ORIGIN``.  The Wan companion is an
+    executable bundle payload rather than a runtime DSO, so remove its search
+    path entirely before distlib writes the wheel and its RECORD.
     """
 
     original_patch_rpath = getattr(conan_build, "patch_rpath", None)
@@ -184,20 +213,31 @@ def _install_wan22_wheel_rpath_policy(conan_build: Any) -> None:
                 f"companion={companion_abi[0]}.{companion_abi[1]}, "
                 f"Requires-Dist tensorrt={required_abi[0]}.{required_abi[1]}"
             )
-        try:
-            subprocess.run(
-                ["patchelf", "--remove-rpath", str(companion)],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as error:
-            raise RuntimeError("patchelf is required to seal the Wan2.2 wheel companion") from error
-        except subprocess.CalledProcessError as error:
-            detail = (error.stderr or error.stdout or str(error)).strip()
+
+        runtime_payloads = sorted(
+            path
+            for path in Path(staging_dir).rglob("*")
+            if (path.is_file() or path.is_symlink())
+            and _is_native_runtime_payload(path)
+            and path != companion
+        )
+        malformed_payloads = [
+            path for path in runtime_payloads if not path.is_file() or path.is_symlink()
+        ]
+        if malformed_payloads:
             raise RuntimeError(
-                f"failed to remove the Wan2.2 wheel companion RPATH: {detail}"
-            ) from error
+                "wheel staging contains malformed native runtime payloads: "
+                f"{[str(path) for path in malformed_payloads]}"
+            )
+        for payload in runtime_payloads:
+            _run_patchelf(
+                ["patchelf", "--set-rpath", "$ORIGIN", str(payload)],
+                action=f"set the native wheel RUNPATH on {payload}",
+            )
+        _run_patchelf(
+            ["patchelf", "--remove-rpath", str(companion)],
+            action="remove the Wan2.2 wheel companion RPATH",
+        )
 
     setattr(patch_rpath, _WAN22_RPATH_POLICY_MARKER, True)
     conan_build.patch_rpath = patch_rpath

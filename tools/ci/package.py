@@ -29,6 +29,7 @@ WAN22_BUILDER_COMPANION_RE = re.compile(
     r"^libtrtmc_model_wan2_2_ti2v_plugins_trt(?P<major>[0-9]+)_"
     r"(?P<minor>[0-9]+)\.so$"
 )
+ELF_RUNTIME_SEARCH_PATH_RE = re.compile(r"\((?P<tag>RPATH|RUNPATH)\)[^\[]*\[(?P<value>[^\]]*)\]")
 TENSORRT_EXACT_REQUIREMENT_RE = re.compile(
     r"^\s*tensorrt\s*==\s*(?P<major>[0-9]+)\.(?P<minor>[0-9]+)"
     r"(?:\.[A-Za-z0-9][A-Za-z0-9._+-]*)+\s*(?:;.*)?$",
@@ -54,8 +55,7 @@ def _required_tensorrt_abi(requirements: list[str], *, source: str) -> tuple[int
     ]
     if len(tensorrt_requirements) != 1:
         raise CiError(
-            f"{source} must contain exactly one TensorRT dependency; "
-            f"found {tensorrt_requirements}"
+            f"{source} must contain exactly one TensorRT dependency; found {tensorrt_requirements}"
         )
     match = TENSORRT_EXACT_REQUIREMENT_RE.fullmatch(tensorrt_requirements[0])
     if match is None:
@@ -152,6 +152,35 @@ class InstalledWheelValidator:
                 "companion resolves ABI dependencies explicitly"
             )
 
+    @staticmethod
+    def require_origin_runpath(path: Path, dynamic: str) -> None:
+        search_paths = [
+            (match.group("tag"), match.group("value"))
+            for match in ELF_RUNTIME_SEARCH_PATH_RE.finditer(dynamic)
+        ]
+        if search_paths != [("RUNPATH", "$ORIGIN")]:
+            raise CiError(
+                f"{path} must contain exactly DT_RUNPATH=$ORIGIN with no absolute or "
+                f"empty components; found {search_paths}"
+            )
+
+    @staticmethod
+    def require_core_resolution(path: Path, ldd_output: str, expected_core: Path) -> None:
+        prefix = "libtrtmc_core.so =>"
+        candidates = [line.strip() for line in ldd_output.splitlines() if prefix in line]
+        if len(candidates) != 1:
+            raise CiError(f"{path} must resolve exactly one libtrtmc_core.so; found {candidates}")
+        resolved_text = candidates[0].split(prefix, maxsplit=1)[1].strip().split(maxsplit=1)[0]
+        if resolved_text == "not":
+            raise CiError(f"{path} did not resolve libtrtmc_core.so: {candidates[0]}")
+        resolved = Path(resolved_text).resolve()
+        expected = expected_core.resolve()
+        if resolved != expected:
+            raise CiError(
+                f"{path} resolved libtrtmc_core.so from {resolved}; expected installed "
+                f"wheel core {expected}"
+            )
+
 
 class WheelArchiveValidator:
     """Check native layout, dependency metadata, and manylinux compatibility."""
@@ -208,6 +237,23 @@ class WheelArchiveValidator:
             wan22_companion_bytes = (
                 archive.read(wan22_companions[0]) if len(wan22_companions) == 1 else None
             )
+            model_runtime_dsos = [
+                name
+                for name in names
+                if "/bin/libtrtmc_model_" in name
+                and name.endswith(".so")
+                and name not in wan22_companions
+            ]
+            runtime_payloads = sorted(
+                {
+                    *binaries,
+                    *scripts,
+                    *package_cores,
+                    *script_cores,
+                    *backends,
+                    *model_runtime_dsos,
+                }
+            )
             metadata = archive.read(
                 next(name for name in names if name.endswith(".dist-info/METADATA"))
             ).decode()
@@ -253,8 +299,18 @@ class WheelArchiveValidator:
             requirements,
             source=str(wheel),
         )
-        with tempfile.TemporaryDirectory(prefix="trtmc-wheel-wan22-") as temporary_dir:
-            companion = Path(temporary_dir) / Path(wan22_companions[0]).name
+        with tempfile.TemporaryDirectory(prefix="trtmc-wheel-native-") as temporary_dir:
+            temporary_root = Path(temporary_dir)
+            with zipfile.ZipFile(wheel) as archive:
+                for name in runtime_payloads:
+                    payload = temporary_root / name
+                    payload.parent.mkdir(parents=True, exist_ok=True)
+                    payload.write_bytes(archive.read(name))
+                    dynamic = self.context.output(["readelf", "-d", payload])
+                    InstalledWheelValidator.require_origin_runpath(payload, dynamic)
+
+            companion = temporary_root / wan22_companions[0]
+            companion.parent.mkdir(parents=True, exist_ok=True)
             companion.write_bytes(wan22_companion_bytes)
             dynamic = self.context.output(["readelf", "-d", companion])
             InstalledWheelValidator.require_no_runtime_search_path(companion, dynamic)
@@ -279,6 +335,7 @@ class WheelArchiveValidator:
                 *package_cores,
                 *script_cores,
                 *backends,
+                *model_runtime_dsos,
                 *wan22_companions,
             ]
         ):
@@ -568,19 +625,23 @@ class WheelPackageManager:
         root = Path(f"/tmp/trtmc-wheel-smoke-{self.context.env.get('GITHUB_RUN_ID', 'local')}")
         self.context.remove(root)
         self._create_venv(root, wheel)
+        clean = ("VIRTUAL_ENV", "CONDA_PREFIX", "TRTMC_TRT_LIBRARY_DIR", "LD_LIBRARY_PATH")
         trtmc = root / "bin/trtmc"
         InstalledWheelValidator.require_elf(trtmc)
-        dynamic = self.context.output(["readelf", "-d", trtmc])
-        if "$ORIGIN" not in dynamic:
-            raise CiError("installed trtmc does not search for DSOs beside itself")
-        if "/workspace/" in dynamic:
-            raise CiError("installed trtmc RUNPATH leaks the CI build directory")
+        native_dirs = sorted(
+            path
+            for path in (root / "lib").glob("python*/site-packages/tensorrt_model_connect/bin")
+            if path.is_dir()
+        )
+        if len(native_dirs) != 1:
+            raise CiError(
+                "clean wheel smoke requires exactly one installed native package directory; "
+                f"found {native_dirs}"
+            )
+        native_dir = native_dirs[0]
         companions = sorted(
             path
-            for path in (root / "lib").glob(
-                "python*/site-packages/tensorrt_model_connect/bin/"
-                "libtrtmc_model_wan2_2_ti2v_plugins_trt*.so"
-            )
+            for path in native_dir.glob("libtrtmc_model_wan2_2_ti2v_plugins_trt*.so")
             if WAN22_BUILDER_COMPANION_RE.fullmatch(path.name)
         )
         if len(companions) != 1:
@@ -588,11 +649,45 @@ class WheelPackageManager:
                 "clean wheel smoke requires exactly one installed Wan2.2 builder companion; "
                 f"found {companions}"
             )
-        companion_dynamic = self.context.output(["readelf", "-d", companions[0]])
+        runtime_payloads = sorted(
+            {
+                trtmc,
+                root / "bin/libtrtmc_core.so",
+                native_dir / "trtmc",
+                *native_dir.glob("libtrtmc_core.so*"),
+                *native_dir.glob("libtrtmc_backend_*.so*"),
+                *(
+                    path
+                    for path in native_dir.glob("libtrtmc_model_*.so*")
+                    if path not in companions
+                ),
+            }
+        )
+        for payload in runtime_payloads:
+            InstalledWheelValidator.require_elf(payload)
+            dynamic = self.context.output(["readelf", "-d", payload], unset=clean)
+            InstalledWheelValidator.require_origin_runpath(payload, dynamic)
+
+        companion_dynamic = self.context.output(["readelf", "-d", companions[0]], unset=clean)
         InstalledWheelValidator.require_no_runtime_search_path(companions[0], companion_dynamic)
-        self.context.run([trtmc, "version"])
-        self.context.run([trtmc, "--help"], capture_output=True)
-        self.context.run([trtmc, "build", "--help"], capture_output=True)
+        wan_runtime_dsos = sorted(native_dir.glob("libtrtmc_model_wan2_2_ti2v.so*"))
+        if len(wan_runtime_dsos) != 1:
+            raise CiError(
+                "clean wheel smoke requires exactly one Wan2.2 runtime DSO; "
+                f"found {wan_runtime_dsos}"
+            )
+        package_cores = sorted(native_dir.glob("libtrtmc_core.so*"))
+        if len(package_cores) != 1:
+            raise CiError(
+                f"clean wheel smoke requires exactly one packaged core DSO; found {package_cores}"
+            )
+        ldd_output = self.context.output(["ldd", wan_runtime_dsos[0]], unset=clean)
+        InstalledWheelValidator.require_core_resolution(
+            wan_runtime_dsos[0], ldd_output, package_cores[0]
+        )
+        self.context.run([trtmc, "version"], unset=clean)
+        self.context.run([trtmc, "--help"], capture_output=True, unset=clean)
+        self.context.run([trtmc, "build", "--help"], capture_output=True, unset=clean)
 
     def _create_venv(self, path: Path, wheel: Path) -> None:
         self.context.run(["python", "-m", "venv", path])
@@ -696,12 +791,8 @@ class WheelPackageManager:
         if configured:
             return configured
         candidates = [
-            *Path("/opt/venv/lib").glob(
-                "python*/site-packages/nvidia/cudnn/lib/libcudnn.so.9"
-            ),
-            *Path("/usr/local/lib").glob(
-                "python*/dist-packages/nvidia/cudnn/lib/libcudnn.so.9"
-            ),
+            *Path("/opt/venv/lib").glob("python*/site-packages/nvidia/cudnn/lib/libcudnn.so.9"),
+            *Path("/usr/local/lib").glob("python*/dist-packages/nvidia/cudnn/lib/libcudnn.so.9"),
             Path("/usr/local/cudnn/lib/libcudnn.so.9"),
             Path("/usr/local/cudnn/lib64/libcudnn.so.9"),
             Path("/usr/local/cuda/lib64/libcudnn.so.9"),
