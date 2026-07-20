@@ -1130,14 +1130,14 @@ def test_model_proof_job_budget_reserves_singleton_finalization() -> None:
         "- name: Finalize model proof fallback", maxsplit=1
     )[0]
 
-    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 495 || 300 }}" in job_configuration
+    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 540 || 300 }}" in job_configuration
     assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 360 || 150 }}" in proof
     assert "inputs.suite == 'nightly' && '5400' || '3600'" in job_configuration
     assert "inputs.suite == 'nightly' && '600' || '360'" in job_configuration
     assert "inputs.expected_count" not in workflow
 
-    nightly_job_minutes = 495
-    disk_headroom_wait_minutes = 900 // 60
+    nightly_job_minutes = 540
+    disk_headroom_wait_minutes = 3600 // 60
     image_minutes = 90
     nightly_proof_minutes = 360
     finalization_margin_minutes = 30
@@ -1335,7 +1335,7 @@ def test_model_proof_checks_disk_headroom_before_checkout() -> None:
     )
     assert "TRTMC_MODEL_PROOF_MIN_FREE_GIB:" in workflow
     assert "TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS:" in workflow
-    assert "inputs.suite == 'nightly' && '900' || '60'" in workflow
+    assert "inputs.suite == 'nightly' && '3600' || '60'" in workflow
     assert "TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS:" in workflow
     assert "vars.TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS || '10'" in workflow
     assert "TRTMC_MODEL_PROOF_STALE_MINUTES:" in workflow
@@ -1484,10 +1484,10 @@ def test_model_proof_disk_headroom_zero_timeout_fails_without_sleep(tmp_path: Pa
 @pytest.mark.parametrize(
     ("timeout_seconds", "poll_seconds", "message"),
     [
-        ("-1", "10", "must be an integer from 0 to 900"),
-        ("901", "10", "must be an integer from 0 to 900"),
-        ("18446744073709551615", "10", "must be an integer from 0 to 900"),
-        ("invalid", "10", "must be an integer from 0 to 900"),
+        ("-1", "10", "must be an integer from 0 to 3600"),
+        ("3601", "10", "must be an integer from 0 to 3600"),
+        ("18446744073709551615", "10", "must be an integer from 0 to 3600"),
+        ("invalid", "10", "must be an integer from 0 to 3600"),
         ("20", "0", "must be an integer from 1 to 60"),
         ("20", "61", "must be an integer from 1 to 60"),
         ("20", "18446744073709551615", "must be an integer from 1 to 60"),
