@@ -11,6 +11,7 @@ name = "tensorrt-model-connect"
 version = "0.1.0"
 description = "TensorRT-Model-Connect builder for HuggingFace models and .trtfb bundles"
 readme = "README.md"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.10"
 dependencies = [
     "safetensors>=0.4",
@@ -29,7 +30,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7.0", "torch>=2.0"]
+test = ["pytest>=7.0", "torch>=2.0", "pyproject-metadata==0.12.1"]
 # Build-only dependency for official Wan checkpoints containing T5/VAE .pth
 # files. Kept out of the base install and never required by the C++ runtime.
 wan = ["torch>=2.0"]
@@ -45,6 +46,7 @@ packages = ["python/tensorrt_model_connect"]
 
 [tool.conan-py-build.sdist]
 include = [
+    "_pyproject_backend.py",
     "python",
     "third_party",
 ]

@@ -75,6 +75,7 @@ RUN pip install \
     sentencepiece \
     huggingface_hub \
     ml_dtypes \
+    "pyproject-metadata==0.12.1" \
     datasets
 
 # PyTorch ecosystem. The CI image is Ubuntu 24.04 to match the

@@ -21,6 +21,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
 
 
 _CONAN_PY_BUILD_REQUIREMENT = "conan-py-build==0.4.3"
+_PYPROJECT_METADATA_REQUIREMENT = "pyproject-metadata==0.12.1"
 _PYTHON_SOURCE_ROOT = "python"
 _WAN22_BUILDER_COMPANION_GLOB = "libtrtmc_model_wan2_2_ti2v_plugins*.so"
 _WAN22_BUILDER_COMPANION_RE = re.compile(
@@ -63,19 +64,19 @@ def _run_patchelf(command: list[str], *, action: str) -> None:
 
 
 def get_requires_for_build_wheel(config_settings: dict[str, Any] | None = None) -> list[str]:
-    return [_CONAN_PY_BUILD_REQUIREMENT]
+    return [_CONAN_PY_BUILD_REQUIREMENT, _PYPROJECT_METADATA_REQUIREMENT]
 
 
 def get_requires_for_build_sdist(config_settings: dict[str, Any] | None = None) -> list[str]:
-    return [_CONAN_PY_BUILD_REQUIREMENT]
+    return [_CONAN_PY_BUILD_REQUIREMENT, _PYPROJECT_METADATA_REQUIREMENT]
 
 
 def get_requires_for_build_editable(
     config_settings: dict[str, Any] | None = None,
 ) -> list[str]:
     if _py_only_enabled(config_settings):
-        return []
-    return [_CONAN_PY_BUILD_REQUIREMENT]
+        return [_PYPROJECT_METADATA_REQUIREMENT]
+    return [_CONAN_PY_BUILD_REQUIREMENT, _PYPROJECT_METADATA_REQUIREMENT]
 
 
 def prepare_metadata_for_build_wheel(
@@ -290,56 +291,48 @@ def _project_tensorrt_abi() -> tuple[int, int]:
 
 
 def _project_metadata() -> dict[str, Any]:
-    project = _read_pyproject()["project"]
-    return {
-        "name": project["name"],
-        "version": project["version"],
-        "description": project.get("description", ""),
-        "requires-python": project.get("requires-python"),
-        "dependencies": project.get("dependencies", []),
-        "optional-dependencies": project.get("optional-dependencies", {}),
-    }
+    return dict(_read_pyproject()["project"])
+
+
+def _standard_metadata(project: dict[str, Any]) -> Any:
+    try:
+        from pyproject_metadata import StandardMetadata
+    except ModuleNotFoundError as error:
+        raise RuntimeError(
+            f"{_PYPROJECT_METADATA_REQUIREMENT} is required for py-only editable metadata"
+        ) from error
+
+    return StandardMetadata.from_pyproject(
+        {"project": dict(project)},
+        project_dir=Path.cwd(),
+    )
 
 
 def _write_dist_info(parent: Path) -> Path:
     project = _project_metadata()
+    standard_metadata = _standard_metadata(project)
     dist_info = (
         parent / f"{_wheel_distribution_name(project['name'])}-{project['version']}.dist-info"
     )
     dist_info.mkdir(parents=True, exist_ok=True)
-    (dist_info / "METADATA").write_text(_metadata_text(project), encoding="utf-8")
+    with (dist_info / "METADATA").open("w", encoding="utf-8", newline="\n") as metadata_file:
+        metadata_file.write(str(standard_metadata.as_rfc822()))
     (dist_info / "WHEEL").write_text(_wheel_text(), encoding="utf-8")
+
+    project_root = Path.cwd().resolve()
+    for license_path in standard_metadata.license_files or []:
+        source = Path.cwd() / license_path.as_posix()
+        if not source.is_file():
+            raise FileNotFoundError(f"license file not found: {license_path.as_posix()!r}")
+        try:
+            resolved_source = source.resolve(strict=True)
+            relative = resolved_source.relative_to(project_root)
+        except ValueError as error:
+            raise RuntimeError(f"license file escapes the project: {license_path}") from error
+        destination = dist_info / "licenses" / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(resolved_source.read_bytes())
     return dist_info
-
-
-def _metadata_text(project: dict[str, Any]) -> str:
-    lines = [
-        "Metadata-Version: 2.1",
-        f"Name: {project['name']}",
-        f"Version: {project['version']}",
-    ]
-    if project["description"]:
-        lines.append(f"Summary: {project['description']}")
-    if project["requires-python"]:
-        lines.append(f"Requires-Python: {project['requires-python']}")
-    for dependency in project["dependencies"]:
-        lines.append(f"Requires-Dist: {dependency}")
-    for extra, dependencies in project["optional-dependencies"].items():
-        normalized_extra = _extra_name(extra)
-        lines.append(f"Provides-Extra: {normalized_extra}")
-        for dependency in dependencies:
-            lines.append(
-                f"Requires-Dist: {_dependency_with_extra_marker(dependency, normalized_extra)}"
-            )
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _dependency_with_extra_marker(dependency: str, extra: str) -> str:
-    if ";" in dependency:
-        requirement, marker = dependency.split(";", maxsplit=1)
-        return f'{requirement.strip()}; ({marker.strip()}) and extra == "{extra}"'
-    return f'{dependency}; extra == "{extra}"'
 
 
 def _wheel_text() -> str:
@@ -358,9 +351,10 @@ def _write_editable_wheel(wheel_path: Path, dist_info: Path, dist_info_name: str
     source_path = (Path.cwd() / _PYTHON_SOURCE_ROOT).resolve()
     pth_name = "__editable__.tensorrt_model_connect.pth"
     entries: list[tuple[str, bytes]] = [(pth_name, f"{source_path}\n".encode())]
-    for path in sorted(dist_info.iterdir()):
-        if path.is_file() and path.name != "RECORD":
-            entries.append((f"{dist_info_name}/{path.name}", path.read_bytes()))
+    for path in sorted(dist_info.rglob("*")):
+        relative = path.relative_to(dist_info).as_posix()
+        if path.is_file() and relative != "RECORD":
+            entries.append((f"{dist_info_name}/{relative}", path.read_bytes()))
 
     records: list[tuple[str, str, str]] = []
     with zipfile.ZipFile(wheel_path, "w", compression=zipfile.ZIP_DEFLATED) as wheel:
@@ -397,7 +391,3 @@ def _find_dist_info(metadata_directory: Path) -> Path:
 
 def _wheel_distribution_name(name: str) -> str:
     return re.sub(r"[^\w\d.]+", "_", name, flags=re.ASCII).strip("_")
-
-
-def _extra_name(name: str) -> str:
-    return re.sub(r"[-_.]+", "-", name).lower()

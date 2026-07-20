@@ -8,16 +8,22 @@ Boundary: package correctness and reuse state; source-only unit tests live elsew
 
 from __future__ import annotations
 
+import base64
+import csv
 import datetime as dt
+from email.parser import BytesParser
+from email.policy import compat32
 import hashlib
 import importlib.metadata
 import importlib.resources
+import io
 import re
 import shutil
 import sys
+import tarfile
 import tempfile
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .context import CiContext
 from .process import CiError
@@ -25,6 +31,7 @@ from .process import CiError
 
 WHEEL_BUILD_STATE = "wheel-build.json"
 WHEEL_INSTALL_STATE = "wheel-installed.json"
+PROJECT_LEGAL_FILES = ("LICENSE", "NOTICE")
 WAN22_BUILDER_COMPANION_RE = re.compile(
     r"^libtrtmc_model_wan2_2_ti2v_plugins_trt(?P<major>[0-9]+)_"
     r"(?P<minor>[0-9]+)\.so$"
@@ -45,6 +52,59 @@ WAN22_WHEEL_ATTRIBUTION_SHA256 = {
         "86b998c792894ccb911a1cb7994f7a9652894e7a094c0b5e45be2f553f45cf14"
     ),
 }
+
+
+def _require_license_file_metadata(payload: bytes, *, source: str) -> str:
+    try:
+        metadata = BytesParser(policy=compat32).parsebytes(payload)
+        metadata_text = payload.decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as error:
+        raise CiError(f"{source}: invalid UTF-8 core metadata: {error}") from error
+
+    versions = metadata.get_all("Metadata-Version", [])
+    version = versions[0] if len(versions) == 1 else ""
+    match = re.fullmatch(r"(?P<major>[0-9]+)\.(?P<minor>[0-9]+)", version)
+    if (
+        len(versions) != 1
+        or match is None
+        or int(match.group("major")) != 2
+        or int(match.group("minor")) < 4
+    ):
+        raise CiError(
+            f"{source}: license files require exactly one supported Metadata-Version 2.4 "
+            f"or newer 2.x field; found {versions}"
+        )
+
+    license_files = metadata.get_all("License-File", [])
+    if sorted(license_files) != sorted(PROJECT_LEGAL_FILES):
+        raise CiError(
+            f"{source}: expected exactly License-File fields {list(PROJECT_LEGAL_FILES)}; "
+            f"found {license_files}"
+        )
+    return metadata_text
+
+
+def _record_sha256(payload: bytes) -> str:
+    digest = hashlib.sha256(payload).digest()
+    return "sha256=" + base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _read_record(payload: bytes, *, source: str) -> dict[str, tuple[str, str]]:
+    try:
+        rows = csv.reader(io.StringIO(payload.decode("utf-8")))
+        records: dict[str, tuple[str, str]] = {}
+        for row in rows:
+            if len(row) != 3:
+                raise CiError(f"{source}: RECORD row must have three fields; found {row}")
+            path, digest, size = row
+            if path in records:
+                raise CiError(f"{source}: RECORD contains duplicate path {path}")
+            records[path] = (digest, size)
+        return records
+    except UnicodeDecodeError as error:
+        raise CiError(f"{source}: RECORD is not valid UTF-8") from error
+
+
 _CLEAN_TRT_BUILDER_SMOKE = """
 from tensorrt_model_connect import trt_compat
 
@@ -269,11 +329,58 @@ class WheelArchiveValidator:
                     f"{actual_sha256}; expected {expected_sha256}"
                 )
 
+    def _require_project_legal_files(self, archive: zipfile.ZipFile, wheel: Path) -> str:
+        archive_names = archive.namelist()
+        metadata_names = [name for name in archive_names if name.endswith(".dist-info/METADATA")]
+        if len(metadata_names) != 1:
+            raise CiError(
+                f"{wheel}: expected exactly one wheel METADATA file; found {metadata_names}"
+            )
+        metadata_name = metadata_names[0]
+        dist_info = metadata_name.rsplit("/", maxsplit=1)[0]
+        metadata_text = _require_license_file_metadata(
+            archive.read(metadata_name), source=f"{wheel} {metadata_name}"
+        )
+
+        record_name = f"{dist_info}/RECORD"
+        if archive_names.count(record_name) != 1:
+            raise CiError(
+                f"{wheel}: expected exactly one wheel RECORD file {record_name}; "
+                f"found {archive_names.count(record_name)}"
+            )
+        records = _read_record(archive.read(record_name), source=f"{wheel} {record_name}")
+
+        for relative in PROJECT_LEGAL_FILES:
+            archive_name = f"{dist_info}/licenses/{relative}"
+            count = archive_names.count(archive_name)
+            if count != 1:
+                raise CiError(
+                    f"{wheel}: expected exactly one project legal file {archive_name}; found {count}"
+                )
+            source_path = self.context.repository / relative
+            if not source_path.is_file():
+                raise CiError(f"{wheel}: project legal source file is missing: {source_path}")
+            expected = source_path.read_bytes()
+            actual = archive.read(archive_name)
+            if actual != expected:
+                raise CiError(
+                    f"{wheel}: project legal file {archive_name} does not match {source_path}"
+                )
+            expected_record = (_record_sha256(actual), str(len(actual)))
+            actual_record = records.get(archive_name)
+            if actual_record != expected_record:
+                raise CiError(
+                    f"{wheel}: RECORD entry for {archive_name} is {actual_record}; "
+                    f"expected {expected_record}"
+                )
+        return metadata_text
+
     def _validate_one(self, wheel: Path) -> None:
         if not wheel.name.endswith(f"-{self.platform}.whl"):
             raise CiError(f"{wheel}: expected platform tag {self.platform}")
         with zipfile.ZipFile(wheel) as archive:
             names = set(archive.namelist())
+            metadata = self._require_project_legal_files(archive, wheel)
             self._require_wan22_attributions(archive, wheel)
             if any(".data/purelib/" in name for name in names):
                 raise CiError(f"{wheel}: native wheel must not contain .data/purelib entries")
@@ -309,9 +416,6 @@ class WheelArchiveValidator:
                     *model_runtime_dsos,
                 }
             )
-            metadata = archive.read(
-                next(name for name in names if name.endswith(".dist-info/METADATA"))
-            ).decode()
             requirements = [
                 line.split(":", maxsplit=1)[1].strip()
                 for line in metadata.splitlines()
@@ -397,6 +501,76 @@ class WheelArchiveValidator:
             print(f"  {entry}")
 
 
+class SourceDistributionValidator:
+    """Check that the sdist preserves legal metadata and its in-tree build backend."""
+
+    def __init__(self, repository: Path):
+        self.repository = repository
+
+    def validate(self, sdists: list[Path]) -> None:
+        if len(sdists) != 1:
+            raise CiError(f"expected exactly one source distribution; found {sdists}")
+        self._validate_one(sdists[0])
+
+    @staticmethod
+    def _read_exact_file(
+        archive: tarfile.TarFile,
+        members: list[tarfile.TarInfo],
+        name: str,
+        *,
+        source: Path,
+    ) -> bytes:
+        matches = [member for member in members if member.name == name]
+        if len(matches) != 1 or not matches[0].isfile():
+            raise CiError(
+                f"{source}: expected exactly one regular sdist file {name}; found {len(matches)}"
+            )
+        extracted = archive.extractfile(matches[0])
+        if extracted is None:
+            raise CiError(f"{source}: could not read sdist file {name}")
+        return extracted.read()
+
+    def _validate_one(self, sdist: Path) -> None:
+        try:
+            archive = tarfile.open(sdist, "r:gz")
+        except (OSError, tarfile.TarError) as error:
+            raise CiError(f"{sdist}: invalid gzip source distribution: {error}") from error
+
+        with archive:
+            members = archive.getmembers()
+            pkg_info_names = [
+                member.name
+                for member in members
+                if member.isfile()
+                and len(PurePosixPath(member.name).parts) == 2
+                and PurePosixPath(member.name).name == "PKG-INFO"
+            ]
+            if len(pkg_info_names) != 1:
+                raise CiError(
+                    f"{sdist}: expected exactly one root PKG-INFO file; found {pkg_info_names}"
+                )
+            root = PurePosixPath(pkg_info_names[0]).parent.as_posix()
+            pkg_info = self._read_exact_file(archive, members, pkg_info_names[0], source=sdist)
+            _require_license_file_metadata(pkg_info, source=f"{sdist} {pkg_info_names[0]}")
+
+            required_files = (
+                *PROJECT_LEGAL_FILES,
+                "_pyproject_backend.py",
+                "pyproject.toml",
+            )
+            for relative in required_files:
+                archive_name = f"{root}/{relative}"
+                actual = self._read_exact_file(archive, members, archive_name, source=sdist)
+                source_path = self.repository / relative
+                if not source_path.is_file():
+                    raise CiError(f"{sdist}: required source file is missing: {source_path}")
+                if actual != source_path.read_bytes():
+                    raise CiError(
+                        f"{sdist}: packaged file {archive_name} does not match {source_path}"
+                    )
+        print(f"validated sdist={sdist}")
+
+
 class WheelPackageManager:
     """Own the reusable wheel build and every check of its installed artifact."""
 
@@ -460,6 +634,21 @@ class WheelPackageManager:
         ):
             self.context.remove(cache)
         (self.context.repository / "dist").mkdir(parents=True, exist_ok=True)
+
+        self.context.run(
+            [
+                "python",
+                "-m",
+                "build",
+                "--sdist",
+                "--outdir",
+                self.context.repository / "dist",
+                ".",
+            ]
+        )
+        SourceDistributionValidator(self.context.repository).validate(
+            sorted((self.context.repository / "dist").glob("*.tar.gz"))
+        )
 
         tags = self.context.env.get("TRTMC_PACKAGE_PYTHON_TAGS", "py310 py312").split()
         platform = self.context.env.get("TRTMC_PACKAGE_WHEEL_ARCH", "manylinux_2_39_aarch64")

@@ -1986,7 +1986,8 @@ def test_root_pyproject_configures_conan_py_build_wheel() -> None:
     text = (REPO_ROOT / "pyproject.toml").read_text()
     backend_text = (REPO_ROOT / "_pyproject_backend.py").read_text()
     assert 'build-backend = "_pyproject_backend"' in text
-    assert "return [_CONAN_PY_BUILD_REQUIREMENT]" in backend_text
+    assert "_PYPROJECT_METADATA_REQUIREMENT" in backend_text
+    assert "return [_CONAN_PY_BUILD_REQUIREMENT, _PYPROJECT_METADATA_REQUIREMENT]" in backend_text
     assert "conan_build.build_wheel" in backend_text
     assert "conan_build.build_sdist" in backend_text
     assert "_py_only_enabled" in backend_text

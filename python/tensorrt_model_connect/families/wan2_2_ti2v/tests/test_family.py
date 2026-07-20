@@ -18,7 +18,6 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
     import tomli as tomllib
 
-from tensorrt_model_connect.families import family_hf_required_files_by_id
 from tensorrt_model_connect.families.wan2_2_ti2v.model_config import (
     WAN22_TI2V_5B,
     official_artifact_profile,
@@ -38,9 +37,15 @@ def _artifact_profile() -> dict:
 
 
 def test_hf_snapshot_required_files_are_family_owned() -> None:
-    assert set(
-        family_hf_required_files_by_id()["Wan-AI/Wan2.2-TI2V-5B"]
-    ) == {
+    manifest_path = Path(__file__).resolve().parents[1] / "MODEL.toml"
+    with manifest_path.open("rb") as manifest_file:
+        manifest = tomllib.load(manifest_file)
+    required_files = {
+        spec.split("|", maxsplit=1)[1]
+        for spec in manifest["hf_required_files"]
+        if spec.split("|", maxsplit=1)[0] == "Wan-AI/Wan2.2-TI2V-5B"
+    }
+    assert required_files == {
         "config.json",
         "diffusion_pytorch_model.safetensors.index.json",
         "diffusion_pytorch_model-00001-of-00003.safetensors",
