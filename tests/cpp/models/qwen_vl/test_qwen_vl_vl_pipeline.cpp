@@ -64,6 +64,15 @@ static void check(bool c, const char* n) {
 
 static trtmc::TrtLogger g_logger;
 
+static nvinfer1::IRuntime* mock_runtime() {
+    // TensorRT requires the runtime to outlive every engine it deserializes.
+    // This function-static runtime is destroyed before the earlier-constructed
+    // process logger and after every mock engine owned by the tests below.
+    static auto runtime =
+        trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    return runtime.get();
+}
+
 struct CountingTextStats {
     int32_t calls{0};
     std::unordered_map<std::string, std::vector<int64_t>> shapes;
@@ -224,7 +233,9 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder() {
     auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
     if (!plan)
         return nullptr;
-    auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    auto* rt = mock_runtime();
+    if (!rt)
+        return nullptr;
     return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
@@ -258,7 +269,9 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_lora_decoder() {
     auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
     if (!plan)
         return nullptr;
-    auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    auto* rt = mock_runtime();
+    if (!rt)
+        return nullptr;
     return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
@@ -319,7 +332,9 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_vision_encoder() {
     auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
     if (!plan)
         return nullptr;
-    auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    auto* rt = mock_runtime();
+    if (!rt)
+        return nullptr;
     return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
@@ -709,7 +724,9 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_mock_decoder_with_embed(
     auto plan = trtmc::TrtUniquePtr<nvinfer1::IHostMemory>(b->buildSerializedNetwork(*n, *c));
     if (!plan)
         return nullptr;
-    auto rt = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(g_logger));
+    auto* rt = mock_runtime();
+    if (!rt)
+        return nullptr;
     return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
