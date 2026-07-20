@@ -346,15 +346,9 @@ void DeepseekOcrKvCache::advance(int32_t n_tokens) {
 }
 
 void DeepseekOcrKvCache::reset() {
+    // Reset only the logical sequence length. Attention masks hide every
+    // stale cache row, and each present row is overwritten before use.
     position_ = 0;
-    for (int32_t i = 0; i < num_layers_; ++i) {
-        auto li = static_cast<std::size_t>(i);
-        cudaMemsetAsync(cache_k_[li].data(), 0, cache_k_[li].nbytes(), stream_);
-        cudaMemsetAsync(cache_v_[li].data(), 0, cache_v_[li].nbytes(), stream_);
-        cudaMemsetAsync(present_k_[li].data(), 0, present_k_[li].nbytes(), stream_);
-        cudaMemsetAsync(present_v_[li].data(), 0, present_v_[li].nbytes(), stream_);
-    }
-    cudaStreamSynchronize(stream_);
 }
 
 std::size_t DeepseekOcrKvCache::device_memory_bytes() const {

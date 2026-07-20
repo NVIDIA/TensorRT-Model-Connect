@@ -9,6 +9,7 @@
 #include "runtime/models/internvl/tensor_names.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -65,7 +66,9 @@ TextResult InternVlPipeline::generate(const std::string& prompt, const GenerateC
         output_ids.begin() + static_cast<std::ptrdiff_t>(input_ids.size()), output_ids.end());
     std::string text = tokenizer_->decode(new_tokens);
 
-    return TextResult{std::move(text), std::move(new_tokens)};
+    auto result = TextResult{std::move(text), std::move(new_tokens)};
+    result.setup_ms = last_setup_ms_;
+    return result;
 }
 
 namespace {
@@ -398,7 +401,9 @@ TextResult InternVlPipeline::generate(const std::string& prompt, const float* im
 
     std::vector<int32_t> new_tokens(out.begin() + static_cast<std::ptrdiff_t>(input_ids.size()),
                                     out.end());
-    return TextResult{tokenizer_->decode(new_tokens), std::move(new_tokens)};
+    auto result = TextResult{tokenizer_->decode(new_tokens), std::move(new_tokens)};
+    result.setup_ms = last_setup_ms_;
+    return result;
 }
 
 InternVlPipeline::GenerationResult
@@ -407,6 +412,18 @@ InternVlPipeline::generate_ids(const std::vector<int32_t>& input_ids, const Gene
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
     auto sp = internvl_sampling_params_from_config(cfg, eos);
     return GenerationResult{generate_from_ids(input_ids, max_new, sp)};
+}
+
+void InternVlPipeline::reset_generation_context(int32_t prompt_length) {
+    const auto start = std::chrono::steady_clock::now();
+    state_->reset();
+    state_->set_prompt_length(prompt_length);
+    text_decoder_->reset_execution_context();
+    if (prefill_)
+        prefill_->reset_execution_context();
+    state_->bind_to(*text_decoder_);
+    last_setup_ms_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
 std::vector<int32_t> InternVlPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
@@ -424,12 +441,7 @@ std::vector<int32_t> InternVlPipeline::generate_from_ids(const std::vector<int32
     }
     active_sampler->reset();
 
-    state_->reset();
-    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
-    text_decoder_->reset_execution_context();
-    if (prefill_)
-        prefill_->reset_execution_context();
-    state_->bind_to(*text_decoder_);
+    reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
 
@@ -468,12 +480,7 @@ std::vector<int32_t> InternVlPipeline::generate_vl_from_ids(
     }
     active_sampler->reset();
 
-    state_->reset();
-    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
-    text_decoder_->reset_execution_context();
-    if (prefill_)
-        prefill_->reset_execution_context();
-    state_->bind_to(*text_decoder_);
+    reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
     if (!run_vl_prefill_batched(input_ids, image_features, deepstack_features, num_features,

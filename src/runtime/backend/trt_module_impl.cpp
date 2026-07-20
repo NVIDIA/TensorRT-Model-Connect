@@ -86,26 +86,6 @@ bool TrtModuleImpl::input_is_dynamic(const std::string& name) const {
     return it != buffers_.end() && it->second.is_input && it->second.is_dynamic;
 }
 
-void TrtModuleImpl::recreate_context_with_profile() {
-    delete ctx_;
-    ctx_ = engine_->createExecutionContext();
-    if (!ctx_)
-        throw std::runtime_error("[trt_module] Failed to recreate execution context");
-    if (!attach_distributed_communicator()) {
-        delete ctx_;
-        ctx_ = nullptr;
-        throw std::runtime_error("[trt_module] Failed to attach distributed communicator");
-    }
-    if (engine_->getNbOptimizationProfiles() > 0) {
-        if (!ctx_->setOptimizationProfileAsync(profile_idx_, stream_)) {
-            delete ctx_;
-            ctx_ = nullptr;
-            throw std::runtime_error("[trt_module] Failed to reset optimization profile");
-        }
-        cudaStreamSynchronize(stream_);
-    }
-}
-
 bool TrtModuleImpl::attach_distributed_communicator() {
     if (distributed_communicator_ == nullptr || ctx_ == nullptr)
         return true;
@@ -132,29 +112,13 @@ bool TrtModuleImpl::bind_tensor_address(const std::string& name, const BufferEnt
     return ok;
 }
 
-void TrtModuleImpl::rebind_buffer_to_context(const std::string& name, const BufferEntry& entry) {
-    // Fresh IExecutionContexts have neither tensor addresses nor dynamic
-    // input shapes set; replay both from our cached BufferEntry so the next
-    // enqueueV3 doesn't fail with "Not all shapes are specified".
-    if (entry.d_ptr)
-        bind_tensor_address(name, entry);
-    if (!entry.is_dynamic || entry.shape.empty())
-        return;
-    nvinfer1::Dims dims;
-    dims.nbDims = static_cast<int32_t>(entry.shape.size());
-    for (int32_t d = 0; d < dims.nbDims; ++d)
-        dims.d[d] = entry.shape[d];
-    ctx_->setInputShape(name.c_str(), dims);
-}
-
 void TrtModuleImpl::reset_execution_context() {
-    if (engine_ == nullptr)
-        return;
-    recreate_context_with_profile();
-    if (use_cuda_graph_ && cuda_graph_)
-        cuda_graph_->reset();
-    for (auto& [name, entry] : buffers_)
-        rebind_buffer_to_context(name, entry);
+    // TensorRT execution contexts contain engine/profile/binding state, not
+    // sequence-local KV or sampler state. Replacing the context here made a
+    // warm request pay context creation, profile selection, synchronization,
+    // dynamic-shape replay, and CUDA-graph recapture even when none changed.
+    // Shape changes already invalidate CUDA graphs in update_dynamic_shape(),
+    // and bind_external() updates the live context when a binding changes.
 }
 
 TrtModuleImpl::~TrtModuleImpl() {

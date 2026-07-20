@@ -71,8 +71,9 @@ class ITrtModule {
     virtual int32_t input_rank(const std::string& /*name*/) const { return 0; }
     virtual bool input_is_dynamic(const std::string& /*name*/) const { return false; }
 
-    // Reset any per-generation execution state so consecutive generate()
-    // calls start from a known-good context. Default is no-op.
+    // Reset module-owned per-generation state without replacing the loaded
+    // execution context. Sequence state belongs to the pipeline/state object;
+    // stable TensorRT contexts, profiles, bindings, and CUDA graphs are reused.
     virtual void reset_execution_context() {}
 
     // Human-readable label used for automatic runtime timing logs.

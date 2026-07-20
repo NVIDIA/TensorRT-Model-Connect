@@ -92,6 +92,7 @@ class QwenVlPipeline final : public IPipeline {
     std::unique_ptr<TrtModule> prefill_;
     std::unique_ptr<TrtModule> vision_encoder_;
     std::unique_ptr<QwenVlInferenceState> state_;
+    double last_setup_ms_{0.0};
     QwenVlConfig config_;
     QwenVlPreprocessConfig vl_preprocess_;
     cudaStream_t stream_;
@@ -115,6 +116,8 @@ class QwenVlPipeline final : public IPipeline {
         int32_t feature_dim, int32_t max_new_tokens, const QwenVlSamplingParams& params);
 
     std::pair<int32_t, int32_t> resolve_gen_limits(const GenerateConfig& cfg) const;
+
+    void reset_generation_context(int32_t prompt_length);
 
     QwenVlISampler* prepare_sampler(const QwenVlSamplingParams& params,
                                     std::unique_ptr<QwenVlISampler>& local_sampler);

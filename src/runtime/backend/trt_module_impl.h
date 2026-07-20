@@ -22,6 +22,7 @@
 namespace trtmc {
 
 class CudaGraphExec;
+class TrtModuleImplTestPeer;
 
 class TrtModuleImpl final : public ITrtModule {
   public:
@@ -66,6 +67,8 @@ class TrtModuleImpl final : public ITrtModule {
     void keep_alive(std::shared_ptr<void> resource) override;
 
   private:
+    friend class TrtModuleImplTestPeer;
+
     struct BufferEntry {
         void* d_ptr{nullptr};
         std::vector<int64_t> shape;
@@ -113,8 +116,6 @@ class TrtModuleImpl final : public ITrtModule {
     void finish_timing_event(TimingEvent event);
     void record_timed_enqueue();
     bool bind_tensor_address(const std::string& name, const BufferEntry& entry);
-    void recreate_context_with_profile();
-    void rebind_buffer_to_context(const std::string& name, const BufferEntry& entry);
     bool attach_distributed_communicator();
     static bool dims_are_dynamic(const nvinfer1::Dims& dims);
     static std::vector<int64_t> dims_to_shape(const nvinfer1::Dims& dims);

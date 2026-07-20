@@ -398,6 +398,7 @@ int main(int argc, char** argv) {
             output << result.token_ids[token_idx];
         }
         output << "]"
+               << ",\"setup_ms\":" << std::fixed << std::setprecision(6) << result.setup_ms
                << ",\"prefill_ms\":" << std::fixed << std::setprecision(6) << result.prefill_ms
                << ",\"decode_ms\":" << std::fixed << std::setprecision(6) << result.decode_ms
                << ",\"wall_ms\":" << std::fixed << std::setprecision(6) << wall_ms

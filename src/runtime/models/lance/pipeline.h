@@ -72,6 +72,7 @@ class LancePipeline final : public IPipeline {
     std::unique_ptr<TrtModule> prefill_;
     std::unique_ptr<TrtModule> vision_encoder_;
     std::unique_ptr<LanceInferenceState> state_;
+    double last_setup_ms_{0.0};
     LanceConfig config_;
     LancePreprocessConfig vl_preprocess_;
     cudaStream_t stream_;
@@ -90,6 +91,8 @@ class LancePipeline final : public IPipeline {
         int32_t feature_dim, int32_t max_new_tokens, const LanceSamplingParams& params);
 
     std::pair<int32_t, int32_t> resolve_gen_limits(const GenerateConfig& cfg) const;
+
+    void reset_generation_context(int32_t prompt_length);
 
     void run_vl_prefill_token(int32_t token_id, const std::vector<float>& image_features,
                               const std::vector<std::vector<float>>& deepstack_features,

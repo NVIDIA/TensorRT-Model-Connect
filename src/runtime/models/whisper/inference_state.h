@@ -40,7 +40,8 @@ class WhisperInferenceState {
 
     // --- Lifecycle ---
 
-    // Reset state for a new sequence (zero buffers, position = 0).
+    // Reset logical state for a new sequence. Implementations may retain device
+    // storage that remains hidden by logical lengths and attention masks.
     virtual void reset() = 0;
 
     // Bind all state tensors to the given TRT module.

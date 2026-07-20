@@ -358,6 +358,7 @@ TextResult NemotronLabsDiffusionTextGenerationPipeline::generate(const std::stri
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
 
     auto sp = nemotron_labs_diffusion_sampling_params_from_config(cfg, eos);
+    last_setup_ms_ = 0.0;
     auto timed = generate_from_ids(input_ids, max_new, sp, cfg);
 
     // Decode only the NEW tokens (skip input)
@@ -366,7 +367,10 @@ TextResult NemotronLabsDiffusionTextGenerationPipeline::generate(const std::stri
                                     timed.token_ids.end());
     std::string text = tokenizer_->decode(new_tokens);
 
-    return TextResult{std::move(text), std::move(new_tokens), timed.prefill_ms, timed.decode_ms};
+    auto result =
+        TextResult{std::move(text), std::move(new_tokens), timed.prefill_ms, timed.decode_ms};
+    result.setup_ms = last_setup_ms_;
+    return result;
 }
 
 NemotronLabsDiffusionTextGenerationPipeline::GenerationResult
@@ -610,6 +614,8 @@ std::string NemotronLabsDiffusionTextGenerationPipeline::resolve_generation_mode
 }
 
 void NemotronLabsDiffusionTextGenerationPipeline::reset_generation_context() {
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::now();
     state_->reset();
     state_bound_ = false;
     for (auto& decoder_ctx : decoders_)
@@ -618,6 +624,7 @@ void NemotronLabsDiffusionTextGenerationPipeline::reset_generation_context() {
         prefill_->reset_execution_context();
     if (linear_spec_lora_prefill_)
         linear_spec_lora_prefill_->reset_execution_context();
+    last_setup_ms_ = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
 
 int32_t NemotronLabsDiffusionTextGenerationPipeline::resolve_text_diffusion_block_length(

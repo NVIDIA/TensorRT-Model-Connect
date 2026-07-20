@@ -1817,6 +1817,52 @@ def test_text_decoder_triattention_cache_is_model_owned() -> None:
     assert not violations, _format_violations(violations)
 
 
+def test_model_owned_kv_resets_do_not_clear_reserved_device_capacity() -> None:
+    """Trace: ARCH-MODPLUG-001
+    Intent: keep warm-request KV reset proportional to logical metadata instead
+    of the configured cache capacity.
+    Preconditions: stale cache rows are hidden by each model-owned cache's
+    logical length and attention-mask contract.
+    Postconditions: dense and TriAttention reset implementations contain no
+    device memset or forced stream synchronization.
+    """
+    violations = []
+    for family in sorted(_runtime_model_ids()):
+        prefix = _model_prefix(family)
+        model_dir = RUNTIME_MODELS / family
+        runtime_users = (model_dir / "plugin.cpp", model_dir / "pipeline.cpp")
+        if not any(
+            path.is_file()
+            and f"{prefix}KvCache" in path.read_text(encoding="utf-8", errors="ignore")
+            for path in runtime_users
+        ):
+            continue
+        sources = [(model_dir / "kv_cache.cpp", f"{prefix}KvCache")]
+        triattention_source = model_dir / "triattention_kv_cache.cpp"
+        if triattention_source.is_file():
+            sources.append((triattention_source, f"{prefix}TriAttentionKvCache"))
+
+        for source, class_name in sources:
+            text = source.read_text(encoding="utf-8", errors="ignore")
+            match = re.search(
+                rf"void\s+{re.escape(class_name)}::reset\(\)\s*\{{(?P<body>.*?)^\}}",
+                text,
+                re.MULTILINE | re.DOTALL,
+            )
+            if match is None:
+                violations.append((source, 0, f"missing {class_name}::reset implementation"))
+                continue
+            body = match.group("body")
+            for forbidden in ("cudaMemset", "cudaStreamSynchronize"):
+                if forbidden in body:
+                    line = text[: match.start("body")].count("\n") + 1
+                    violations.append(
+                        (source, line, f"{class_name}::reset performs {forbidden}")
+                    )
+
+    assert not violations, _format_violations(violations)
+
+
 def test_recurrent_sampler_is_model_owned() -> None:
     """Trace: ARCH-MODPLUG-001
     Intent: keep recurrent text sampling policy local to the recurrent model

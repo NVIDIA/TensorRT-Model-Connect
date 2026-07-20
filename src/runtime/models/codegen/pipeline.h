@@ -120,6 +120,7 @@ class CodegenTextGenerationPipeline final : public IPipeline {
     std::string logits_output_name_;
     int32_t active_decoder_index_{-1};
     bool state_bound_{false};
+    double last_setup_ms_{0.0};
 
     // Internal: generate from token IDs with sampling parameters and timing.
     struct TimedGenResult {

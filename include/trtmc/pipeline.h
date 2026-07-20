@@ -43,6 +43,9 @@ struct TextResult {
 
     std::string text;
     std::vector<int32_t> token_ids;
+    // Time spent resetting per-request logical state and preparing reusable
+    // runtime objects before prefill begins.
+    double setup_ms{0.0};
     double prefill_ms{0.0};
     double decode_ms{0.0};
     // Populated by transcription pipelines when timestamp intervals are

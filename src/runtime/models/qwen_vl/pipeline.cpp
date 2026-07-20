@@ -10,6 +10,7 @@
 #include "runtime/models/qwen_vl/tensor_names.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -201,7 +202,9 @@ TextResult QwenVlPipeline::generate(const std::string& prompt, const GenerateCon
         output_ids.begin() + static_cast<std::ptrdiff_t>(input_ids.size()), output_ids.end());
     std::string text = tokenizer_->decode(new_tokens);
 
-    return TextResult{std::move(text), std::move(new_tokens)};
+    auto result = TextResult{std::move(text), std::move(new_tokens)};
+    result.setup_ms = last_setup_ms_;
+    return result;
 }
 
 namespace {
@@ -573,7 +576,9 @@ TextResult QwenVlPipeline::generate(const std::string& prompt, const float* imag
 
     std::vector<int32_t> new_tokens(out.begin() + static_cast<std::ptrdiff_t>(input_ids.size()),
                                     out.end());
-    return TextResult{tokenizer_->decode(new_tokens), std::move(new_tokens)};
+    auto result = TextResult{tokenizer_->decode(new_tokens), std::move(new_tokens)};
+    result.setup_ms = last_setup_ms_;
+    return result;
 }
 
 QwenVlPipeline::GenerationResult QwenVlPipeline::generate_ids(const std::vector<int32_t>& input_ids,
@@ -585,6 +590,18 @@ QwenVlPipeline::GenerationResult QwenVlPipeline::generate_ids(const std::vector<
     return GenerationResult{generate_from_ids(input_ids, max_new, sp)};
 }
 
+void QwenVlPipeline::reset_generation_context(int32_t prompt_length) {
+    const auto start = std::chrono::steady_clock::now();
+    state_->reset();
+    state_->set_prompt_length(prompt_length);
+    text_decoder_->reset_execution_context();
+    if (prefill_)
+        prefill_->reset_execution_context();
+    state_->bind_to(*text_decoder_);
+    last_setup_ms_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
 std::vector<int32_t> QwenVlPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
                                                        int32_t max_new_tokens,
                                                        const QwenVlSamplingParams& params) {
@@ -594,12 +611,7 @@ std::vector<int32_t> QwenVlPipeline::generate_from_ids(const std::vector<int32_t
     std::unique_ptr<QwenVlISampler> local_sampler;
     QwenVlISampler* active_sampler = prepare_sampler(params, local_sampler);
 
-    state_->reset();
-    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
-    text_decoder_->reset_execution_context();
-    if (prefill_)
-        prefill_->reset_execution_context();
-    state_->bind_to(*text_decoder_);
+    reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
 
@@ -632,12 +644,7 @@ std::vector<int32_t> QwenVlPipeline::generate_vl_from_ids(
     std::unique_ptr<QwenVlISampler> local_sampler;
     QwenVlISampler* active_sampler = prepare_sampler(params, local_sampler);
 
-    state_->reset();
-    state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
-    text_decoder_->reset_execution_context();
-    if (prefill_)
-        prefill_->reset_execution_context();
-    state_->bind_to(*text_decoder_);
+    reset_generation_context(static_cast<int32_t>(input_ids.size()));
 
     std::vector<float> logits;
     const int32_t grid_h =

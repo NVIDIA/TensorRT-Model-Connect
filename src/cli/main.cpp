@@ -302,6 +302,8 @@ void print_text_timing(const trtmc::TextResult& result) {
          << " decode_ms=" << result.decode_ms
          << " total_ms=" << (result.prefill_ms + result.decode_ms);
     std::cerr << line.str() << '\n';
+    std::cerr << std::fixed << std::setprecision(6)
+              << "[trtmc.setup_timing] setup_ms=" << result.setup_ms << '\n';
 }
 
 std::optional<std::vector<float>> read_float32_raw_file(const std::string& path,
@@ -503,12 +505,14 @@ int cmd_run(const CliArgs& args) {
         for (int w = 0; w < warmup_n; ++w)
             pipeline->generate(prompt, cfg);
 
-        std::vector<double> prefill_ms_v, decode_ms_v;
+        std::vector<double> setup_ms_v, prefill_ms_v, decode_ms_v;
+        setup_ms_v.reserve(static_cast<std::size_t>(bench_n));
         prefill_ms_v.reserve(static_cast<std::size_t>(bench_n));
         decode_ms_v.reserve(static_cast<std::size_t>(bench_n));
 
         for (int r = 0; r < bench_n; ++r) {
             auto result = pipeline->generate(prompt, cfg);
+            setup_ms_v.push_back(result.setup_ms);
             prefill_ms_v.push_back(result.prefill_ms);
             decode_ms_v.push_back(result.decode_ms);
         }
@@ -517,12 +521,14 @@ int cmd_run(const CliArgs& args) {
             return std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(v.size());
         };
 
+        const double smean = mean(setup_ms_v);
         const double pmean = mean(prefill_ms_v);
         const double dmean = mean(decode_ms_v);
         const int ntoks = cfg.max_new_tokens;
 
         std::cerr << std::fixed << std::setprecision(2);
-        std::cerr << "[trtmc.benchmark] prefill_ms=" << pmean << " decode_ms=" << dmean
+        std::cerr << "[trtmc.benchmark] setup_ms=" << smean << " prefill_ms=" << pmean
+                  << " decode_ms=" << dmean
                   << " tokens_per_sec=" << (ntoks > 0 ? ntoks / (dmean / 1000.0) : 0.0) << '\n';
 
         auto last = pipeline->generate(prompt, trtmc::GenerateConfig{cfg});
