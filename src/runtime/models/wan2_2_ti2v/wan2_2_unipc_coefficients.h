@@ -54,6 +54,7 @@ inline constexpr char kCurrentGeneratorSha256[] =
     "f5b513be69c6626b5311f57995da574a2c5bc21a785d722910139bc3fd048de6";
 inline constexpr char kCanonicalNumericalPayloadSha256[] =
     "742ec7777410d94d73c528432e21c22cb52f021d3fa841b8b942b3f9c51ee2e0";
+inline constexpr std::uint64_t kCanonicalNumericalPayloadFnv1a64 = 0xda52883b5a3a3950ULL;
 inline constexpr char kArtifactSha256[] =
     "bb58f81fae759dadeccb5ecaf5fbbf2165c5ead8e8812a21910c591725173caf";
 
@@ -1106,42 +1107,127 @@ inline constexpr std::array<UpdateCoefficients, kStepCount> kPredictor{{
      {0U, 0U}}, // step 49
 }};
 
-constexpr bool validate_tables() {
+constexpr std::uint64_t append_fnv1a_word(std::uint64_t hash, std::uint32_t word) {
+    for (std::uint32_t shift = 0U; shift < 32U; shift += 8U) {
+        hash ^= (word >> shift) & 0xffU;
+        hash *= 0x100000001b3ULL;
+    }
+    return hash;
+}
+
+template <std::size_t Size>
+constexpr std::uint64_t append_fnv1a_words(std::uint64_t hash,
+                                           const std::array<std::uint32_t, Size>& words) {
+    for (const auto word : words)
+        hash = append_fnv1a_word(hash, word);
+    return hash;
+}
+
+constexpr std::uint64_t append_fnv1a_update(std::uint64_t hash, const UpdateCoefficients& update) {
+    hash = append_fnv1a_word(hash, update.order);
+    hash = append_fnv1a_word(hash, update.sigma_t_index);
+    hash = append_fnv1a_word(hash, update.sigma_s0_index);
+    hash = append_fnv1a_word(hash, update.rk_count);
+    hash = append_fnv1a_word(hash, update.rho_count);
+    hash = append_fnv1a_word(hash, update.ratio_bits);
+    hash = append_fnv1a_word(hash, update.model_coefficient_bits);
+    hash = append_fnv1a_word(hash, update.residual_coefficient_bits);
+    hash = append_fnv1a_words(hash, update.rk_bits);
+    return append_fnv1a_words(hash, update.rho_bits);
+}
+
+constexpr std::uint64_t canonical_numerical_payload_fnv1a64() {
+    auto hash = append_fnv1a_words(0xcbf29ce484222325ULL, kTimesteps);
+    hash = append_fnv1a_words(hash, kSigmaBits);
+    hash = append_fnv1a_words(hash, kConversionSigmaBits);
+    for (const auto& corrector : kCorrector)
+        hash = append_fnv1a_update(hash, corrector);
+    for (const auto& predictor : kPredictor)
+        hash = append_fnv1a_update(hash, predictor);
+    return hash;
+}
+
+constexpr bool validate_table_boundaries() {
     if (kTimesteps.front() != 999U || kTimesteps.back() != 92U ||
         kSigmaBits.front() != 0x3f7ff2e2U || kSigmaBits.back() != 0U)
         return false;
+    return true;
+}
+
+constexpr bool validate_step_axes(std::size_t index) {
+    if (kConversionSigmaBits[index] != kSigmaBits[index])
+        return false;
+    if (index > 0U && kTimesteps[index - 1U] <= kTimesteps[index])
+        return false;
+    if (kSigmaBits[index] <= kSigmaBits[index + 1U])
+        return false;
+    return true;
+}
+
+constexpr bool validate_initial_corrector(const UpdateCoefficients& corrector) {
+    if (corrector.order != 0U || corrector.sigma_t_index != kNoSigmaIndex ||
+        corrector.sigma_s0_index != kNoSigmaIndex || corrector.rk_count != 0U ||
+        corrector.rho_count != 0U)
+        return false;
+    return true;
+}
+
+constexpr std::uint32_t corrector_order(std::size_t index) {
+    return index == 1U ? 1U : 2U;
+}
+
+constexpr bool validate_later_corrector(std::size_t index, const UpdateCoefficients& corrector) {
+    const std::uint32_t expected_order = corrector_order(index);
+    if (corrector.order != expected_order || corrector.sigma_t_index != index ||
+        corrector.sigma_s0_index != index - 1U || corrector.rk_count != expected_order ||
+        corrector.rho_count != expected_order ||
+        corrector.rk_bits[expected_order - 1U] != 0x3f800000U ||
+        corrector.model_coefficient_bits != corrector.residual_coefficient_bits)
+        return false;
+    return true;
+}
+
+constexpr bool validate_corrector(std::size_t index) {
+    const auto& corrector = kCorrector[index];
+    if (index == 0U)
+        return validate_initial_corrector(corrector);
+    return validate_later_corrector(index, corrector);
+}
+
+constexpr std::uint32_t predictor_order(std::size_t index) {
+    return index == 0U || index + 1U == kStepCount ? 1U : 2U;
+}
+
+constexpr std::uint32_t predictor_rho_count(std::uint32_t order) {
+    return order == 2U ? 1U : 0U;
+}
+
+constexpr bool validate_predictor(std::size_t index) {
+    const auto& predictor = kPredictor[index];
+    const std::uint32_t expected_order = predictor_order(index);
+    const std::uint32_t expected_rho_count = predictor_rho_count(expected_order);
+    if (predictor.order != expected_order || predictor.sigma_t_index != index + 1U ||
+        predictor.sigma_s0_index != index || predictor.rk_count != expected_order ||
+        predictor.rho_count != expected_rho_count ||
+        predictor.rk_bits[expected_order - 1U] != 0x3f800000U ||
+        predictor.model_coefficient_bits != predictor.residual_coefficient_bits)
+        return false;
+    return true;
+}
+
+constexpr bool validate_step(std::size_t index) {
+    if (!validate_step_axes(index))
+        return false;
+    if (!validate_corrector(index))
+        return false;
+    return validate_predictor(index);
+}
+
+constexpr bool validate_tables() {
+    if (!validate_table_boundaries())
+        return false;
     for (std::size_t index = 0; index < kStepCount; ++index) {
-        if (kConversionSigmaBits[index] != kSigmaBits[index])
-            return false;
-        if (index > 0U && kTimesteps[index - 1U] <= kTimesteps[index])
-            return false;
-        if (kSigmaBits[index] <= kSigmaBits[index + 1U])
-            return false;
-
-        const auto& corrector = kCorrector[index];
-        if (index == 0U) {
-            if (corrector.order != 0U || corrector.sigma_t_index != kNoSigmaIndex ||
-                corrector.sigma_s0_index != kNoSigmaIndex || corrector.rk_count != 0U ||
-                corrector.rho_count != 0U)
-                return false;
-        } else {
-            const std::uint32_t expected_order = index == 1U ? 1U : 2U;
-            if (corrector.order != expected_order || corrector.sigma_t_index != index ||
-                corrector.sigma_s0_index != index - 1U || corrector.rk_count != expected_order ||
-                corrector.rho_count != expected_order ||
-                corrector.rk_bits[expected_order - 1U] != 0x3f800000U ||
-                corrector.model_coefficient_bits != corrector.residual_coefficient_bits)
-                return false;
-        }
-
-        const auto& predictor = kPredictor[index];
-        const std::uint32_t expected_order = index == 0U || index + 1U == kStepCount ? 1U : 2U;
-        const std::uint32_t expected_rho_count = expected_order == 2U ? 1U : 0U;
-        if (predictor.order != expected_order || predictor.sigma_t_index != index + 1U ||
-            predictor.sigma_s0_index != index || predictor.rk_count != expected_order ||
-            predictor.rho_count != expected_rho_count ||
-            predictor.rk_bits[expected_order - 1U] != 0x3f800000U ||
-            predictor.model_coefficient_bits != predictor.residual_coefficient_bits)
+        if (!validate_step(index))
             return false;
     }
     return true;
@@ -1157,5 +1243,7 @@ static_assert(kConversionSigmaBits.size() == kStepCount);
 static_assert(kCorrector.size() == kStepCount);
 static_assert(kPredictor.size() == kStepCount);
 static_assert(validate_tables(), "Wan2.2 UniPC coefficient table invariant failed");
+static_assert(canonical_numerical_payload_fnv1a64() == kCanonicalNumericalPayloadFnv1a64,
+              "Wan2.2 UniPC coefficient payload bits changed");
 
 } // namespace trtmc::wan2_2_ti2v::unipc_coefficients

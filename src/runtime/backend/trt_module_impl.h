@@ -105,21 +105,48 @@ class TrtModuleImpl final : public ITrtModule {
     void
     validate_initial_external_bindings(nvinfer1::ICudaEngine* engine,
                                        const std::vector<ModuleExternalBinding>& external_bindings);
+    static bool engine_has_io_tensor(nvinfer1::ICudaEngine* engine, const std::string& name);
+    static std::size_t validate_initial_external_binding(nvinfer1::ICudaEngine* engine,
+                                                         const ModuleExternalBinding& binding);
     void free_buffers();
     void detect_dynamic_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io);
     void allocate_input_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                 int32_t num_profiles);
     void allocate_single_input(nvinfer1::ICudaEngine* engine, const std::string& name,
                                int32_t num_profiles);
+    void allocate_single_output(nvinfer1::ICudaEngine* engine, const std::string& name);
     void allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32_t num_io);
+    BufferEntry make_input_buffer_entry(nvinfer1::ICudaEngine* engine, const std::string& name,
+                                        int32_t num_profiles, nvinfer1::Dims& initial_dims) const;
+    BufferEntry make_output_buffer_entry(nvinfer1::ICudaEngine* engine,
+                                         const std::string& name) const;
+    void attach_or_allocate_buffer(const std::string& name, const char* tensor_kind,
+                                   BufferEntry& entry);
+    static void release_owned_buffer(BufferEntry& entry) noexcept;
+    void bind_buffer_or_release(const std::string& name, BufferEntry& entry);
+    void initialize_dynamic_input_shape_or_release(const std::string& name, BufferEntry& entry,
+                                                   const nvinfer1::Dims& initial_dims);
+    void store_buffer_or_release(const std::string& name, BufferEntry& entry);
     void set_dynamic_input_shapes(nvinfer1::ICudaEngine* engine, int32_t num_io,
                                   nvinfer1::OptProfileSelector selector);
+    static void require_valid_dynamic_input_shape(const std::string& name,
+                                                  const std::vector<int64_t>& shape);
+    static nvinfer1::Dims make_trt_dims(const std::vector<int64_t>& shape);
     void update_dynamic_shape(const std::string& name, BufferEntry& entry,
                               const std::vector<int64_t>& new_shape);
+    BufferEntry& require_shaped_external_target(const std::string& name, void* ptr);
+    void update_shape_with_binding_rollback(const std::string& name, BufferEntry& entry,
+                                            const std::vector<int64_t>& shape);
+    BufferEntry& require_device_input(const std::string& name, const DeviceTensor* tensor);
     void execute_enqueue();
     void flush_timing_events();
     bool begin_timing_event(TimingEvent& event);
     void finish_timing_event(TimingEvent event);
+    static void discard_timing_event(TimingEvent& event) noexcept;
+    void enqueue_or_throw();
+    void launch_cuda_graph_or_throw();
+    void capture_cuda_graph_or_fallback();
+    void enqueue_with_optional_cuda_graph();
     void record_timed_enqueue();
     void bind_tensor_address(const std::string& name, const BufferEntry& entry);
     void require_ready(const char* operation) const;

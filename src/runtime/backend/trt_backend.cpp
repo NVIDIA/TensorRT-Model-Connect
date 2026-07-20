@@ -53,6 +53,62 @@ void keep_backend_resources(ITrtModule& module,
         module.keep_alive(distributed_owner);
 }
 
+struct ResolvedBackendStream {
+    cudaStream_t stream{nullptr};
+    std::shared_ptr<void> owner;
+};
+
+bool is_valid_profile_index(int32_t profile_idx, int32_t profile_count) {
+    return profile_idx >= 0 && profile_idx < profile_count;
+}
+
+ResolvedBackendStream resolve_backend_stream(cudaStream_t requested_stream) {
+    ResolvedBackendStream resolved{requested_stream, {}};
+    if (!resolved.stream) {
+        auto owned = std::make_shared<CudaStream>();
+        if (!owned->ok())
+            throw std::runtime_error("[trtmc] Failed to create CUDA stream");
+        resolved.stream = owned->get();
+        resolved.owner = std::move(owned);
+    }
+    return resolved;
+}
+
+int32_t count_valid_profile_indices(const std::vector<int32_t>& profile_indices,
+                                    int32_t profile_count) {
+    int32_t valid_count = 0;
+    for (const int32_t profile_idx : profile_indices) {
+        if (is_valid_profile_index(profile_idx, profile_count))
+            ++valid_count;
+    }
+    return valid_count;
+}
+
+void require_unaliased_external_bindings(const ModuleCreateOptions& options,
+                                         int32_t live_profile_count) {
+    if (!options.external_bindings.empty() && live_profile_count > 1) {
+        throw std::invalid_argument(
+            "[trtmc] One external binding set cannot be shared by multiple live TRT "
+            "profile modules; use create_module or provide a per-profile binding API");
+    }
+}
+
+std::unique_ptr<ITrtModule>
+create_profile_module(const std::shared_ptr<nvinfer1::ICudaEngine>& engine,
+                      const ResolvedBackendStream& resolved_stream,
+                      const ModuleCreateOptions& options, int32_t profile_idx) {
+    auto* ctx = engine->createExecutionContext();
+    if (!ctx)
+        throw std::runtime_error("[trtmc] Failed to create TRT execution context");
+    auto module = std::make_unique<TrtModuleImpl>(engine.get(), ctx, resolved_stream.stream,
+                                                  profile_idx, options.distributed_communicator,
+                                                  options.external_bindings);
+    if (!module->ok())
+        throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
+    keep_backend_resources(*module, engine, resolved_stream.owner, options.distributed_owner);
+    return module;
+}
+
 } // namespace
 
 class TrtBackend final : public IBackend {
@@ -160,42 +216,18 @@ class TrtBackend final : public IBackend {
         std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
                                                       [](nvinfer1::ICudaEngine* p) { delete p; });
 
-        cudaStream_t stream = options.stream;
-        std::shared_ptr<void> stream_owner;
-        if (!stream) {
-            auto owned = std::make_shared<CudaStream>();
-            if (!owned->ok())
-                throw std::runtime_error("[trtmc] Failed to create CUDA stream");
-            stream = owned->get();
-            stream_owner = owned;
-        }
-
+        const auto resolved_stream = resolve_backend_stream(options.stream);
         const int32_t nprofiles = engine->getNbOptimizationProfiles();
-        int32_t requested_profile_count = 0;
-        for (const int32_t profile_idx : profile_indices) {
-            if (profile_idx >= 0 && profile_idx < nprofiles)
-                ++requested_profile_count;
-        }
-        if (!options.external_bindings.empty() && requested_profile_count > 1) {
-            throw std::invalid_argument(
-                "[trtmc] One external binding set cannot be shared by multiple live TRT "
-                "profile modules; use create_module or provide a per-profile binding API");
-        }
+        require_unaliased_external_bindings(
+            options, count_valid_profile_indices(profile_indices, nprofiles));
+
         BackendProfileModules out;
         out.modules.reserve(profile_indices.size());
         for (int32_t profile_idx : profile_indices) {
-            if (profile_idx < 0 || profile_idx >= nprofiles)
+            if (!is_valid_profile_index(profile_idx, nprofiles))
                 continue;
-            auto* ctx = engine->createExecutionContext();
-            if (!ctx)
-                throw std::runtime_error("[trtmc] Failed to create TRT execution context");
-            auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream, profile_idx,
-                                                       options.distributed_communicator,
-                                                       options.external_bindings);
-            if (!mod->ok())
-                throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
-            keep_backend_resources(*mod, engine, stream_owner, options.distributed_owner);
-            out.modules.push_back(BackendProfileModule{profile_idx, std::move(mod)});
+            auto module = create_profile_module(engine, resolved_stream, options, profile_idx);
+            out.modules.push_back(BackendProfileModule{profile_idx, std::move(module)});
         }
         return out;
     }

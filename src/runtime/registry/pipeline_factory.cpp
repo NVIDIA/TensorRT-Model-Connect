@@ -36,16 +36,104 @@ namespace trtmc {
 
 namespace detail {
 
-PipelineBundleMaterialization materialize_pipeline_bundle(BundleSectionReader& reader) {
-    const auto& info = reader.info();
+namespace {
+
+struct StagedBundlePolicy {
+    std::unordered_set<std::string> eager_names;
+    std::unordered_set<std::string> declared_names;
+    std::size_t eager_count{0};
+};
+
+const BundleSectionInfo* find_nonempty_config_section(const BundleInfo& info) {
     const auto config_info =
         std::find_if(info.sections.begin(), info.sections.end(),
                      [](const BundleSectionInfo& entry) { return entry.name == "config.json"; });
+    if (config_info == info.sections.end() || config_info->size == 0)
+        return nullptr;
+    return &*config_info;
+}
+
+void insert_staged_names(const std::vector<std::string>& names,
+                         std::unordered_set<std::string>& declared,
+                         std::unordered_set<std::string>* eager_names) {
+    for (const auto& name : names) {
+        if (name.empty() || !declared.insert(name).second)
+            throw std::runtime_error("Duplicate or empty staged bundle section: " + name);
+        if (eager_names != nullptr)
+            eager_names->insert(name);
+    }
+}
+
+StagedBundlePolicy parse_staged_bundle_policy(const std::string& policy_text) {
+    const std::string mode = extract_json_string(policy_text, "mode", "");
+    if (mode != "staged")
+        throw std::runtime_error("Unsupported bundle_loading mode: " + mode);
+
+    const auto eager = extract_json_string_array(policy_text, "eager_sections");
+    const auto lazy = extract_json_string_array(policy_text, "lazy_sections");
+    if (eager.empty() || lazy.empty()) {
+        throw std::runtime_error(
+            "Staged bundle_loading requires non-empty eager_sections and lazy_sections");
+    }
+
+    StagedBundlePolicy policy;
+    policy.eager_count = eager.size();
+    policy.declared_names.reserve(eager.size() + lazy.size());
+    policy.eager_names.reserve(eager.size());
+    insert_staged_names(eager, policy.declared_names, &policy.eager_names);
+    insert_staged_names(lazy, policy.declared_names, nullptr);
+    if (policy.eager_names.find("config.json") == policy.eager_names.end())
+        throw std::runtime_error("Staged bundle_loading must eagerly materialize config.json");
+    return policy;
+}
+
+std::unordered_set<std::string> collect_available_section_names(const BundleInfo& info) {
+    std::unordered_set<std::string> available;
+    available.reserve(info.sections.size());
+    for (const auto& section : info.sections) {
+        if (!available.insert(section.name).second)
+            throw std::runtime_error("Duplicate section in staged bundle header: " + section.name);
+    }
+    return available;
+}
+
+void require_exact_staged_partition(const BundleInfo& info, const StagedBundlePolicy& policy) {
+    if (collect_available_section_names(info) != policy.declared_names) {
+        throw std::runtime_error(
+            "Staged bundle_loading eager/lazy sections must partition the bundle header exactly");
+    }
+}
+
+BundleFile materialize_eager_sections(BundleSectionReader& reader, const BundleInfo& info,
+                                      const StagedBundlePolicy& policy,
+                                      std::vector<char> config_data) {
+    BundleFile bundle;
+    bundle.info = info;
+    bundle.sections.reserve(policy.eager_count);
+    for (const auto& section_info : info.sections) {
+        if (policy.eager_names.find(section_info.name) == policy.eager_names.end())
+            continue;
+        BundleSection section;
+        section.name = section_info.name;
+        if (section.name == "config.json")
+            section.data = std::move(config_data);
+        else
+            section.data = reader.read(section.name);
+        bundle.sections.push_back(std::move(section));
+    }
+    return bundle;
+}
+
+} // namespace
+
+PipelineBundleMaterialization materialize_pipeline_bundle(BundleSectionReader& reader) {
+    const auto& info = reader.info();
+    const auto* config_info = find_nonempty_config_section(info);
 
     // Preserve compatibility with legacy bundles that did not carry a
     // config section (or carried an empty one). PipelineFactory will retain
     // its existing manifest-default strategy resolution for those bundles.
-    if (config_info == info.sections.end() || config_info->size == 0) {
+    if (config_info == nullptr) {
         return PipelineBundleMaterialization{reader.read_all(), {}};
     }
 
@@ -56,63 +144,9 @@ PipelineBundleMaterialization materialize_pipeline_bundle(BundleSectionReader& r
         return PipelineBundleMaterialization{reader.read_all(), std::move(config_text)};
     }
 
-    const std::string mode = extract_json_string(policy_text, "mode", "");
-    if (mode != "staged") {
-        throw std::runtime_error("Unsupported bundle_loading mode: " + mode);
-    }
-    const auto eager = extract_json_string_array(policy_text, "eager_sections");
-    const auto lazy = extract_json_string_array(policy_text, "lazy_sections");
-    if (eager.empty() || lazy.empty()) {
-        throw std::runtime_error(
-            "Staged bundle_loading requires non-empty eager_sections and lazy_sections");
-    }
-
-    std::unordered_set<std::string> declared;
-    declared.reserve(eager.size() + lazy.size());
-    std::unordered_set<std::string> eager_set;
-    eager_set.reserve(eager.size());
-    for (const auto& name : eager) {
-        if (name.empty() || !declared.insert(name).second) {
-            throw std::runtime_error("Duplicate or empty staged bundle section: " + name);
-        }
-        eager_set.insert(name);
-    }
-    for (const auto& name : lazy) {
-        if (name.empty() || !declared.insert(name).second) {
-            throw std::runtime_error("Duplicate or empty staged bundle section: " + name);
-        }
-    }
-    if (eager_set.find("config.json") == eager_set.end()) {
-        throw std::runtime_error("Staged bundle_loading must eagerly materialize config.json");
-    }
-
-    std::unordered_set<std::string> available;
-    available.reserve(info.sections.size());
-    for (const auto& section : info.sections) {
-        if (!available.insert(section.name).second) {
-            throw std::runtime_error("Duplicate section in staged bundle header: " + section.name);
-        }
-    }
-    if (available != declared) {
-        throw std::runtime_error(
-            "Staged bundle_loading eager/lazy sections must partition the bundle header exactly");
-    }
-
-    BundleFile bundle;
-    bundle.info = info;
-    bundle.sections.reserve(eager.size());
-    for (const auto& section_info : info.sections) {
-        if (eager_set.find(section_info.name) == eager_set.end())
-            continue;
-        BundleSection section;
-        section.name = section_info.name;
-        if (section.name == "config.json") {
-            section.data = std::move(config_data);
-        } else {
-            section.data = reader.read(section.name);
-        }
-        bundle.sections.push_back(std::move(section));
-    }
+    const auto policy = parse_staged_bundle_policy(policy_text);
+    require_exact_staged_partition(info, policy);
+    auto bundle = materialize_eager_sections(reader, info, policy, std::move(config_data));
     return PipelineBundleMaterialization{std::move(bundle), std::move(config_text)};
 }
 

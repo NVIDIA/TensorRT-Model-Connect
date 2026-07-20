@@ -7,8 +7,8 @@
 #include "runtime/models/wan2_2_ti2v/wan2_2_unipc_cuda.h"
 
 #include <algorithm>
-#include <cuda_bf16.h>
 #include <cstring>
+#include <cuda_bf16.h>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -50,13 +50,11 @@ __device__ __forceinline__ float autocast_bf16_multiply(float left, float right)
     // operands to BF16 and rounds the product back to BF16.
     const __nv_bfloat16 left_bf16 = __float2bfloat16_rn(left);
     const __nv_bfloat16 right_bf16 = __float2bfloat16_rn(right);
-    const float product =
-        __fmul_rn(__bfloat162float(left_bf16), __bfloat162float(right_bf16));
+    const float product = __fmul_rn(__bfloat162float(left_bf16), __bfloat162float(right_bf16));
     return __bfloat162float(__float2bfloat16_rn(product));
 }
 
-__device__ __forceinline__ float bf16_output_scalar_multiply(float scalar,
-                                                              float bf16_value) {
+__device__ __forceinline__ float bf16_output_scalar_multiply(float scalar, float bf16_value) {
     // TensorIterator keeps a wrapped CPU FP32 scalar in opmath precision when
     // multiplying a BF16 CUDA tensor, then rounds the BF16 output.
     return __bfloat162float(__float2bfloat16_rn(__fmul_rn(scalar, bf16_value)));
@@ -140,8 +138,7 @@ __global__ void correct_kernel(const float* model_t, const float* newest_model,
             // bitwise-equivalent for every rk in the qualified trajectory.
             const float older_reciprocal = __frcp_rn(coefficients.older_rk);
             const float older_d1 = __fmul_rn(older_delta, older_reciprocal);
-            const float older_term =
-                autocast_bf16_multiply(coefficients.older_rho, older_d1);
+            const float older_term = autocast_bf16_multiply(coefficients.older_rho, older_d1);
             correction = __fadd_rn(older_term, current_term);
         }
 
@@ -172,10 +169,10 @@ __global__ void predict_kernel(const float* sample, const float* newest_model,
         const float base = __fsub_rn(scaled_sample, scaled_model);
         // Eager also evaluates the terminal "- coefficient * 0" for the
         // order-1 path; retaining it preserves signed-zero behavior.
-        const float adjustment = coefficients.has_previous
-                                     ? bf16_output_scalar_multiply(coefficients.residual_scale,
-                                                                   predictor_residual)
-                                     : __fmul_rn(coefficients.residual_scale, predictor_residual);
+        const float adjustment =
+            coefficients.has_previous
+                ? bf16_output_scalar_multiply(coefficients.residual_scale, predictor_residual)
+                : __fmul_rn(coefficients.residual_scale, predictor_residual);
         output[index] = __fsub_rn(base, adjustment);
     }
 }
@@ -284,6 +281,99 @@ struct FlowUniPCCuda::Impl {
         history_size = std::min<int32_t>(2, history_size + 1);
     }
 
+    void validate_step_arguments(const float* supplied_model_output, const float* supplied_sample,
+                                 const float* supplied_output, std::size_t count) const {
+        if (supplied_model_output == nullptr || supplied_sample == nullptr ||
+            supplied_output == nullptr) {
+            throw std::invalid_argument("Wan2.2 CUDA UniPC received a null tensor pointer");
+        }
+        if (count == 0)
+            throw std::invalid_argument("Wan2.2 CUDA UniPC received an empty tensor");
+        if (step_index >= num_steps)
+            throw std::out_of_range("Wan2.2 CUDA UniPC has no remaining steps");
+    }
+
+    void upload_inputs(const float* supplied_model_output, const float* supplied_sample,
+                       std::size_t bytes) {
+        check_cuda(cudaMemcpyAsync(model_output.get(), supplied_model_output, bytes,
+                                   cudaMemcpyHostToDevice, stream),
+                   "model-output copy");
+        check_cuda(
+            cudaMemcpyAsync(sample.get(), supplied_sample, bytes, cudaMemcpyHostToDevice, stream),
+            "sample copy");
+    }
+
+    void launch_conversion(std::size_t count, uint32_t grid) {
+        const std::size_t index = static_cast<std::size_t>(step_index);
+        convert_model_output_kernel<<<grid, kBlockSize, 0, stream>>>(
+            model_output.get(), sample.get(),
+            float_from_bits(unipc_coefficients::kConversionSigmaBits[index]), converted.get(),
+            count);
+        check_cuda(cudaGetLastError(), "convert kernel launch");
+    }
+
+    void launch_correction_if_needed(std::size_t count, uint32_t grid) {
+        if (step_index <= 0 || previous_order <= 0 || !last_sample_valid)
+            return;
+        if (history_size == 0)
+            throw std::logic_error("Wan2.2 CUDA UniPC correction history is incomplete");
+        if (previous_order == 2 && history_size < 2)
+            throw std::logic_error("Wan2.2 CUDA UniPC order-2 history is incomplete");
+        const CorrectCoefficients coefficients =
+            make_correct_coefficients(step_index, previous_order);
+        correct_kernel<<<grid, kBlockSize, 0, stream>>>(
+            converted.get(), newest(), coefficients.has_older ? older() : nullptr,
+            last_sample.get(), sample.get(), count, coefficients);
+        check_cuda(cudaGetLastError(), "corrector kernel launch");
+    }
+
+    void append_converted_model(std::size_t bytes) {
+        float* history_target = append_target();
+        check_cuda(cudaMemcpyAsync(history_target, converted.get(), bytes, cudaMemcpyDeviceToDevice,
+                                   stream),
+                   "model-history copy");
+        commit_append(history_target);
+    }
+
+    int32_t prediction_order() const {
+        const int32_t remaining = num_steps - step_index;
+        const int32_t available_order = std::min<int32_t>(2, lower_order_nums + 1);
+        const int32_t order = std::min(remaining, available_order);
+        if (order == 2 && history_size < 2)
+            throw std::logic_error("Wan2.2 CUDA UniPC prediction history is incomplete");
+        return order;
+    }
+
+    void preserve_corrected_sample(float* corrected_sample, std::size_t bytes) {
+        check_cuda(cudaMemcpyAsync(last_sample.get(), sample.get(), bytes, cudaMemcpyDeviceToDevice,
+                                   stream),
+                   "last-sample copy");
+        last_sample_valid = true;
+        if (corrected_sample != nullptr) {
+            check_cuda(cudaMemcpyAsync(corrected_sample, sample.get(), bytes,
+                                       cudaMemcpyDeviceToHost, stream),
+                       "corrected-sample copy");
+        }
+    }
+
+    void predict_and_download(float* supplied_output, std::size_t count, std::size_t bytes,
+                              uint32_t grid, int32_t order) {
+        const PredictCoefficients coefficients = make_predict_coefficients(step_index, order);
+        predict_kernel<<<grid, kBlockSize, 0, stream>>>(sample.get(), newest(),
+                                                        order == 2 ? older() : nullptr,
+                                                        output.get(), count, coefficients);
+        check_cuda(cudaGetLastError(), "predictor kernel launch");
+        check_cuda(
+            cudaMemcpyAsync(supplied_output, output.get(), bytes, cudaMemcpyDeviceToHost, stream),
+            "output copy");
+    }
+
+    void commit_step(int32_t order) noexcept {
+        previous_order = order;
+        lower_order_nums = std::min<int32_t>(2, lower_order_nums + 1);
+        ++step_index;
+    }
+
     cudaStream_t stream{nullptr};
     int device{0};
     int32_t num_steps{0};
@@ -354,80 +444,20 @@ void FlowUniPCCuda::step(const float* model_output, const float* sample, float* 
                          std::size_t count, float* corrected_sample) {
     if (impl_ == nullptr)
         throw std::logic_error("Wan2.2 CUDA UniPC was moved from");
-    if (model_output == nullptr || sample == nullptr || output == nullptr)
-        throw std::invalid_argument("Wan2.2 CUDA UniPC received a null tensor pointer");
-    if (count == 0)
-        throw std::invalid_argument("Wan2.2 CUDA UniPC received an empty tensor");
-    if (impl_->step_index >= impl_->num_steps)
-        throw std::out_of_range("Wan2.2 CUDA UniPC has no remaining steps");
-
+    impl_->validate_step_arguments(model_output, sample, output, count);
     impl_->ensure_device();
     impl_->reserve(count);
     const std::size_t bytes = count * sizeof(float);
-    check_cuda(cudaMemcpyAsync(impl_->model_output.get(), model_output, bytes,
-                               cudaMemcpyHostToDevice, impl_->stream),
-               "model-output copy");
-    check_cuda(
-        cudaMemcpyAsync(impl_->sample.get(), sample, bytes, cudaMemcpyHostToDevice, impl_->stream),
-        "sample copy");
-
-    const std::size_t index = static_cast<std::size_t>(impl_->step_index);
+    impl_->upload_inputs(model_output, sample, bytes);
     const uint32_t grid = grid_size(count);
-    convert_model_output_kernel<<<grid, kBlockSize, 0, impl_->stream>>>(
-        impl_->model_output.get(), impl_->sample.get(),
-        float_from_bits(unipc_coefficients::kConversionSigmaBits[index]), impl_->converted.get(),
-        count);
-    check_cuda(cudaGetLastError(), "convert kernel launch");
-
-    if (impl_->step_index > 0 && impl_->previous_order > 0 && impl_->last_sample_valid) {
-        if (impl_->history_size == 0)
-            throw std::logic_error("Wan2.2 CUDA UniPC correction history is incomplete");
-        if (impl_->previous_order == 2 && impl_->history_size < 2)
-            throw std::logic_error("Wan2.2 CUDA UniPC order-2 history is incomplete");
-        const CorrectCoefficients coefficients =
-            make_correct_coefficients(impl_->step_index, impl_->previous_order);
-        correct_kernel<<<grid, kBlockSize, 0, impl_->stream>>>(
-            impl_->converted.get(), impl_->newest(),
-            coefficients.has_older ? impl_->older() : nullptr, impl_->last_sample.get(),
-            impl_->sample.get(), count, coefficients);
-        check_cuda(cudaGetLastError(), "corrector kernel launch");
-    }
-
-    float* history_target = impl_->append_target();
-    check_cuda(cudaMemcpyAsync(history_target, impl_->converted.get(), bytes,
-                               cudaMemcpyDeviceToDevice, impl_->stream),
-               "model-history copy");
-    impl_->commit_append(history_target);
-
-    const int32_t remaining = impl_->num_steps - impl_->step_index;
-    const int32_t available_order = std::min<int32_t>(2, impl_->lower_order_nums + 1);
-    const int32_t order = std::min(remaining, available_order);
-    if (order == 2 && impl_->history_size < 2)
-        throw std::logic_error("Wan2.2 CUDA UniPC prediction history is incomplete");
-
-    check_cuda(cudaMemcpyAsync(impl_->last_sample.get(), impl_->sample.get(), bytes,
-                               cudaMemcpyDeviceToDevice, impl_->stream),
-               "last-sample copy");
-    impl_->last_sample_valid = true;
-    if (corrected_sample != nullptr) {
-        check_cuda(cudaMemcpyAsync(corrected_sample, impl_->sample.get(), bytes,
-                                   cudaMemcpyDeviceToHost, impl_->stream),
-                   "corrected-sample copy");
-    }
-
-    const PredictCoefficients coefficients = make_predict_coefficients(impl_->step_index, order);
-    predict_kernel<<<grid, kBlockSize, 0, impl_->stream>>>(
-        impl_->sample.get(), impl_->newest(), order == 2 ? impl_->older() : nullptr,
-        impl_->output.get(), count, coefficients);
-    check_cuda(cudaGetLastError(), "predictor kernel launch");
-    check_cuda(
-        cudaMemcpyAsync(output, impl_->output.get(), bytes, cudaMemcpyDeviceToHost, impl_->stream),
-        "output copy");
+    impl_->launch_conversion(count, grid);
+    impl_->launch_correction_if_needed(count, grid);
+    impl_->append_converted_model(bytes);
+    const int32_t order = impl_->prediction_order();
+    impl_->preserve_corrected_sample(corrected_sample, bytes);
+    impl_->predict_and_download(output, count, bytes, grid, order);
     check_cuda(cudaStreamSynchronize(impl_->stream), "step stream synchronize");
-
-    impl_->previous_order = order;
-    impl_->lower_order_nums = std::min<int32_t>(2, impl_->lower_order_nums + 1);
-    ++impl_->step_index;
+    impl_->commit_step(order);
 }
 
 } // namespace trtmc::wan2_2_ti2v

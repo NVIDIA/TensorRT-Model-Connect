@@ -30,6 +30,52 @@ void validate_bundle_profile(const Wan22TI2VOptions& options) {
     }
     if (options.frame_rate != kWan22OfficialFrameRate)
         throw std::invalid_argument("Wan2.2-TI2V-5B bundle requires frame_rate=24");
+    if (options.seed < 0)
+        throw std::invalid_argument("Wan2.2-TI2V-5B bundle seed must be non-negative");
+}
+
+void validate_request_overrides(const GenerateConfig& config) {
+    if (config.num_steps != -1 && config.num_steps <= 0)
+        throw std::invalid_argument("Wan2.2-TI2V-5B num_steps must be -1 or a positive integer");
+    if (!std::isfinite(config.guidance_scale) ||
+        (config.guidance_scale < 0.0F && config.guidance_scale != -1.0F)) {
+        throw std::invalid_argument(
+            "Wan2.2-TI2V-5B guidance_scale must be -1 or a finite non-negative value");
+    }
+    if (config.seed < -1)
+        throw std::invalid_argument("Wan2.2-TI2V-5B seed must be -1 or non-negative");
+}
+
+Wan22TI2VRequest make_wan22_request(const Wan22TI2VOptions& options, const GenerateConfig& config) {
+    Wan22TI2VRequest request;
+    request.negative_prompt =
+        config.negative_prompt.empty() ? options.negative_prompt : config.negative_prompt;
+    request.num_inference_steps =
+        config.num_steps > 0 ? config.num_steps : options.num_inference_steps;
+    request.guidance_scale =
+        config.guidance_scale >= 0.0F ? config.guidance_scale : options.guidance_scale;
+    request.flow_shift = options.flow_shift;
+    request.seed = config.seed >= 0 ? config.seed : options.seed;
+    request.video_height = options.video_height;
+    request.video_width = options.video_width;
+    request.video_num_frames = options.video_num_frames;
+    request.frame_rate = options.frame_rate;
+    return request;
+}
+
+void validate_resolved_request(const Wan22TI2VRequest& request, const GenerateConfig& config) {
+    if (request.num_inference_steps != kWan22OfficialInferenceSteps)
+        throw std::invalid_argument("Wan2.2-TI2V-5B requires the official 50-step profile");
+    if (request.guidance_scale != kWan22OfficialGuidanceScale)
+        throw std::invalid_argument("Wan2.2-TI2V-5B requires the official CFG=5 profile");
+    if (config.height != 0 && config.height != request.video_height) {
+        throw std::invalid_argument(
+            "Wan2.2-TI2V-5B --height must be 704 for the fixed TensorRT engine");
+    }
+    if (config.width != 0 && config.width != request.video_width) {
+        throw std::invalid_argument(
+            "Wan2.2-TI2V-5B --width must be 1280 for the fixed TensorRT engine");
+    }
 }
 
 } // namespace
@@ -55,42 +101,9 @@ Wan22TI2VOptions parse_wan22_options(const std::string& config_json) {
 Wan22TI2VRequest resolve_wan22_request(const Wan22TI2VOptions& options,
                                        const GenerateConfig& config) {
     validate_bundle_profile(options);
-    if (config.num_steps != -1 && config.num_steps <= 0)
-        throw std::invalid_argument("Wan2.2-TI2V-5B num_steps must be -1 or a positive integer");
-    if (!std::isfinite(config.guidance_scale) ||
-        (config.guidance_scale < 0.0F && config.guidance_scale != -1.0F)) {
-        throw std::invalid_argument(
-            "Wan2.2-TI2V-5B guidance_scale must be -1 or a finite non-negative value");
-    }
-    if (config.seed < -1)
-        throw std::invalid_argument("Wan2.2-TI2V-5B seed must be -1 or non-negative");
-
-    Wan22TI2VRequest request;
-    request.negative_prompt =
-        config.negative_prompt.empty() ? options.negative_prompt : config.negative_prompt;
-    request.num_inference_steps =
-        config.num_steps > 0 ? config.num_steps : options.num_inference_steps;
-    request.guidance_scale =
-        config.guidance_scale >= 0.0F ? config.guidance_scale : options.guidance_scale;
-    request.flow_shift = options.flow_shift;
-    request.seed = config.seed >= 0 ? config.seed : options.seed;
-    request.video_height = options.video_height;
-    request.video_width = options.video_width;
-    request.video_num_frames = options.video_num_frames;
-    request.frame_rate = options.frame_rate;
-
-    if (request.num_inference_steps != kWan22OfficialInferenceSteps)
-        throw std::invalid_argument("Wan2.2-TI2V-5B requires the official 50-step profile");
-    if (request.guidance_scale != kWan22OfficialGuidanceScale)
-        throw std::invalid_argument("Wan2.2-TI2V-5B requires the official CFG=5 profile");
-    if (config.height != 0 && config.height != request.video_height) {
-        throw std::invalid_argument(
-            "Wan2.2-TI2V-5B --height must be 704 for the fixed TensorRT engine");
-    }
-    if (config.width != 0 && config.width != request.video_width) {
-        throw std::invalid_argument(
-            "Wan2.2-TI2V-5B --width must be 1280 for the fixed TensorRT engine");
-    }
+    validate_request_overrides(config);
+    auto request = make_wan22_request(options, config);
+    validate_resolved_request(request, config);
     return request;
 }
 

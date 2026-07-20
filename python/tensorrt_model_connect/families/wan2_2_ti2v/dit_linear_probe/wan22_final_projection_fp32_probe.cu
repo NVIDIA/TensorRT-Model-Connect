@@ -8,13 +8,12 @@
  * This qualification-only DSO has no PyTorch, ATen, or TensorRT dependency.
  */
 
-#include <cublasLt.h>
-#include <cuda_runtime_api.h>
-
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cublasLt.h>
+#include <cuda_runtime_api.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,8 +63,7 @@ AlgoInfo describe_algorithm(const cublasLtMatmulHeuristicResult_t& result, int32
         info.tile_id = static_cast<int32_t>(unsigned_value);
     if (algorithm_attribute(result.algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &unsigned_value))
         info.stages_id = static_cast<int32_t>(unsigned_value);
-    if (algorithm_attribute(result.algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME,
-                            &unsigned_value))
+    if (algorithm_attribute(result.algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &unsigned_value))
         info.reduction_scheme = static_cast<int32_t>(unsigned_value);
     if (algorithm_attribute(result.algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, &unsigned_value))
         info.cta_swizzle = static_cast<int32_t>(unsigned_value);
@@ -105,8 +103,7 @@ class Context {
         if (!check(cublasLtMatmulDescCreate(&operation_, CUBLAS_COMPUTE_32F, CUDA_R_32F),
                    "create strict FP32 matmul") ||
             !check(cublasLtMatmulDescSetAttribute(operation_, CUBLASLT_MATMUL_DESC_TRANSA,
-                                                  &transpose_weight,
-                                                  sizeof(transpose_weight)),
+                                                  &transpose_weight, sizeof(transpose_weight)),
                    "set TRANSA") ||
             !check(cublasLtMatmulDescSetAttribute(operation_, CUBLASLT_MATMUL_DESC_TRANSB,
                                                   &transpose_input, sizeof(transpose_input)),
@@ -124,9 +121,9 @@ class Context {
         if (!check(cublasLtMatmulPreferenceCreate(&preference_), "create preference"))
             return 1;
         const size_t workspace_limit = workspace_limit_bytes();
-        if (!check(cublasLtMatmulPreferenceSetAttribute(
-                       preference_, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                       &workspace_limit, sizeof(workspace_limit)),
+        if (!check(cublasLtMatmulPreferenceSetAttribute(preference_,
+                                                        CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                        &workspace_limit, sizeof(workspace_limit)),
                    "set workspace limit"))
             return 1;
         candidates_.resize(kMaxHeuristics);
@@ -170,9 +167,9 @@ class Context {
         constexpr float beta = 0.0F;
         const auto& selected = candidates_[static_cast<size_t>(heuristic_index_)];
         return check(cublasLtMatmul(handle_, operation_, &alpha, weight, weight_layout_, input,
-                                   input_layout_, &beta, output, output_layout_, output,
-                                   output_layout_, &selected.algo, workspace, workspace_bytes,
-                                   stream),
+                                    input_layout_, &beta, output, output_layout_, output,
+                                    output_layout_, &selected.algo, workspace, workspace_bytes,
+                                    stream),
                      "cublasLtMatmul")
                    ? 0
                    : 1;
@@ -188,8 +185,8 @@ class Context {
         result.reserve(candidates_.size());
         for (size_t index = 0; index < candidates_.size(); ++index) {
             if (candidates_[index].state == CUBLAS_STATUS_SUCCESS)
-                result.push_back(describe_algorithm(candidates_[index],
-                                                    static_cast<int32_t>(index)));
+                result.push_back(
+                    describe_algorithm(candidates_[index], static_cast<int32_t>(index)));
         }
         return result;
     }
@@ -204,9 +201,9 @@ class Context {
     }
     bool create_layout(cublasLtMatrixLayout_t* layout, uint64_t rows, uint64_t columns,
                        int64_t leading_dimension, const char* name) {
-        return check(cublasLtMatrixLayoutCreate(layout, CUDA_R_32F, rows, columns,
-                                                leading_dimension),
-                     (std::string("create ") + name + " layout").c_str());
+        return check(
+            cublasLtMatrixLayoutCreate(layout, CUDA_R_32F, rows, columns, leading_dimension),
+            (std::string("create ") + name + " layout").c_str());
     }
     void reset() {
         initialized_ = false;
@@ -268,10 +265,9 @@ int trtmc_wan22_final_projection_probe_query(int32_t workspace_mib,
     return static_cast<int32_t>(candidates.size());
 }
 
-void* trtmc_wan22_final_projection_probe_create(int32_t heuristic_index,
-                                                int32_t workspace_mib) {
-    auto context = std::make_unique<trtmc::wan22::final_projection_probe::Context>(
-        heuristic_index, workspace_mib);
+void* trtmc_wan22_final_projection_probe_create(int32_t heuristic_index, int32_t workspace_mib) {
+    auto context = std::make_unique<trtmc::wan22::final_projection_probe::Context>(heuristic_index,
+                                                                                   workspace_mib);
     if (context->initialize() != 0) {
         std::fprintf(stderr, "Wan22 final projection create: %s\n", context->error().c_str());
         return nullptr;
@@ -291,10 +287,9 @@ uint64_t trtmc_wan22_final_projection_probe_workspace_bytes(void* opaque) {
         .workspace_bytes;
 }
 
-int trtmc_wan22_final_projection_probe_run(void* opaque, const float* input,
-                                          const float* weight, const float* bias, float* output,
-                                          void* workspace, uint64_t workspace_bytes,
-                                          void* stream) {
+int trtmc_wan22_final_projection_probe_run(void* opaque, const float* input, const float* weight,
+                                           const float* bias, float* output, void* workspace,
+                                           uint64_t workspace_bytes, void* stream) {
     if (opaque == nullptr)
         return 1;
     return static_cast<trtmc::wan22::final_projection_probe::Context*>(opaque)->run(

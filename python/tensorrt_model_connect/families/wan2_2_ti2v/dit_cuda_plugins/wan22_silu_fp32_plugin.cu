@@ -25,8 +25,8 @@ int64_t silu_volume(const nvinfer1::Dims& dims) {
 }
 
 __global__ void dit_silu_fp32_kernel(const float* input, float* output, int64_t count) {
-    for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         index < count; index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < count;
+         index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         // Exact PyTorch FP32 CUDA SiLU operation order: FP32 negation,
         // CUDA device exp, FP32 addition, then precise FP32 division.
         const float x_acc = static_cast<float>(input[index]);

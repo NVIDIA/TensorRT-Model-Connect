@@ -32,6 +32,10 @@ _NO_IMPACT_PATTERNS = [
     r"^scripts/",
 ]
 
+_EXPLICIT_TOOLS_TEST_TARGETS = {
+    ".clang-format-ignore": "tests/tools/test_clang_format_ignore_contract.py",
+}
+
 
 @dataclass
 class SelectionResult:
@@ -107,6 +111,11 @@ def select_tests(
 
     for path in changed_files:
         path = path.replace("\\", "/").strip("/")
+
+        explicit_tools_test = _EXPLICIT_TOOLS_TEST_TARGETS.get(path)
+        if explicit_tools_test is not None:
+            tools_tests.add(explicit_tools_test)
+            continue
 
         direct_tier = _direct_python_test_tier(path)
         if direct_tier == "builder":

@@ -19,16 +19,15 @@
  */
 
 #include <NvInferRuntime.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime_api.h>
-#include <cudnn.h>
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <cuda_bf16.h>
+#include <cuda_runtime_api.h>
+#include <cudnn.h>
 #include <memory>
 #include <string>
 #include <utility>
@@ -93,8 +92,8 @@ bool set_attribute(cudnnBackendDescriptor_t descriptor, cudnnBackendAttributeNam
     const cudnnStatus_t status = cudnnBackendSetAttribute(descriptor, name, type, count, value);
     if (status == CUDNN_STATUS_SUCCESS)
         return true;
-    error = "cudnnBackendSetAttribute(" + std::to_string(static_cast<int>(name)) + ") failed: " +
-            status_name(status);
+    error = "cudnnBackendSetAttribute(" + std::to_string(static_cast<int>(name)) +
+            ") failed: " + status_name(status);
     return false;
 }
 
@@ -170,8 +169,8 @@ __global__ void transpose_ncdhw_to_rows(const __nv_bfloat16* input, const __nv_b
         if (row < kRows && channel < kK) {
             __nv_bfloat16 value = input[static_cast<int64_t>(channel) * kRows + row];
             if constexpr (AddBias) {
-                value = __float2bfloat16_rn(__bfloat162float(value) +
-                                            __bfloat162float(bias[channel]));
+                value =
+                    __float2bfloat16_rn(__bfloat162float(value) + __bfloat162float(bias[channel]));
             }
             tile[threadIdx.y + offset][threadIdx.x] = value;
         }
@@ -204,10 +203,8 @@ class PatchCudnnContext {
         if (!check(cudnnCreate(&handle_), "cudnnCreate"))
             return 1;
         if (!make_tensor(x_desc_, {kN, kC, kD, kH, kW},
-                         {kC * kD * kH * kW, kD * kH * kW, kH * kW, kW, 1}, kUidInput,
-                         "x") ||
-            !make_tensor(w_desc_, {kK, kC, 1, 2, 2}, {kC * 4, 4, 4, 2, 1}, kUidWeight,
-                         "w") ||
+                         {kC * kD * kH * kW, kD * kH * kW, kH * kW, kW, 1}, kUidInput, "x") ||
+            !make_tensor(w_desc_, {kK, kC, 1, 2, 2}, {kC * 4, 4, 4, 2, 1}, kUidWeight, "w") ||
             !make_tensor(y_desc_, {kN, kK, kOutD, kOutH, kOutW},
                          {kK * kRows, kRows, kOutH * kOutW, kOutW, 1}, kUidOutput, "y"))
             return 1;
@@ -228,8 +225,8 @@ class PatchCudnnContext {
         return 0;
     }
 
-    int run(const void* latent, const void* weight, const void* bias, void* output,
-            void* workspace, size_t workspace_bytes, cudaStream_t stream) {
+    int run(const void* latent, const void* weight, const void* bias, void* output, void* workspace,
+            size_t workspace_bytes, cudaStream_t stream) {
         if (!initialized_ || plan_ == nullptr || latent == nullptr || weight == nullptr ||
             bias == nullptr || output == nullptr || workspace == nullptr) {
             error_ = "run called with an uninitialized context or null tensor pointer";
@@ -244,8 +241,8 @@ class PatchCudnnContext {
 
         auto* workspace_bytes_ptr = static_cast<unsigned char*>(workspace);
         void* plan_workspace = plan_workspace_bytes_ == 0 ? nullptr : workspace_bytes_ptr;
-        auto* conv_output = reinterpret_cast<__nv_bfloat16*>(
-            workspace_bytes_ptr + align_up(plan_workspace_bytes_, 256));
+        auto* conv_output = reinterpret_cast<__nv_bfloat16*>(workspace_bytes_ptr +
+                                                             align_up(plan_workspace_bytes_, 256));
         if (!prepare_variant_pack(latent, weight, conv_output, plan_workspace))
             return 1;
         if (!check(cudnnBackendExecute(handle_, plan_, variant_pack_), "cudnnBackendExecute"))
@@ -256,8 +253,8 @@ class PatchCudnnContext {
         const dim3 transpose_block(32, 8);
         const dim3 transpose_grid((kRows + 31) / 32, (kK + 31) / 32);
         if (config_.bias_mode == 1) {
-            add_bias_ncdhw<<<blocks, threads, 0, stream>>>(
-                conv_output, static_cast<const __nv_bfloat16*>(bias));
+            add_bias_ncdhw<<<blocks, threads, 0, stream>>>(conv_output,
+                                                           static_cast<const __nv_bfloat16*>(bias));
             transpose_ncdhw_to_rows<false><<<transpose_grid, transpose_block, 0, stream>>>(
                 conv_output, static_cast<const __nv_bfloat16*>(bias),
                 static_cast<__nv_bfloat16*>(output));
@@ -316,8 +313,8 @@ class PatchCudnnContext {
                              error_) &&
                set_attribute(output, CUDNN_ATTR_TENSOR_DIMENSIONS, CUDNN_TYPE_INT64, 5,
                              dimensions.data(), error_) &&
-               set_attribute(output, CUDNN_ATTR_TENSOR_STRIDES, CUDNN_TYPE_INT64, 5,
-                             strides.data(), error_) &&
+               set_attribute(output, CUDNN_ATTR_TENSOR_STRIDES, CUDNN_TYPE_INT64, 5, strides.data(),
+                             error_) &&
                set_attribute(output, CUDNN_ATTR_TENSOR_UNIQUE_ID, CUDNN_TYPE_INT64, 1, &uid,
                              error_) &&
                set_attribute(output, CUDNN_ATTR_TENSOR_BYTE_ALIGNMENT, CUDNN_TYPE_INT64, 1,
@@ -346,8 +343,8 @@ class PatchCudnnContext {
                              pads.data(), error_) &&
                set_attribute(conv_desc_, CUDNN_ATTR_CONVOLUTION_POST_PADDINGS, CUDNN_TYPE_INT64, 3,
                              pads.data(), error_) &&
-               set_attribute(conv_desc_, CUDNN_ATTR_CONVOLUTION_FILTER_STRIDES, CUDNN_TYPE_INT64,
-                             3, strides.data(), error_) &&
+               set_attribute(conv_desc_, CUDNN_ATTR_CONVOLUTION_FILTER_STRIDES, CUDNN_TYPE_INT64, 3,
+                             strides.data(), error_) &&
                set_attribute(conv_desc_, CUDNN_ATTR_CONVOLUTION_DILATIONS, CUDNN_TYPE_INT64, 3,
                              dilations.data(), error_) &&
                finalize(conv_desc_, "convolution", error_);
@@ -382,8 +379,8 @@ class PatchCudnnContext {
                              CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, operations.data(), error_) &&
                // cuDNN 9.20 still requires the deprecated handle attribute to
                // bind the target device before INSTANT heuristics are queried.
-               set_attribute(operation_graph_, CUDNN_ATTR_OPERATIONGRAPH_HANDLE,
-                             CUDNN_TYPE_HANDLE, 1, &handle_, error_) &&
+               set_attribute(operation_graph_, CUDNN_ATTR_OPERATIONGRAPH_HANDLE, CUDNN_TYPE_HANDLE,
+                             1, &handle_, error_) &&
                finalize(operation_graph_, "operation graph", error_);
     }
 
@@ -439,8 +436,8 @@ class PatchCudnnContext {
             if (config_.heuristic_index < 0) {
                 cudnnBackendDescriptor_t trial_plan = nullptr;
                 size_t trial_workspace = 0;
-                const cudnnStatus_t status = make_plan_status(configs_[index], trial_plan,
-                                                              trial_workspace);
+                const cudnnStatus_t status =
+                    make_plan_status(configs_[index], trial_plan, trial_workspace);
                 info.plan_status = static_cast<int32_t>(status);
                 info.plan_workspace_bytes = static_cast<uint64_t>(trial_workspace);
                 if (status == CUDNN_STATUS_SUCCESS)
@@ -487,14 +484,13 @@ class PatchCudnnContext {
     std::string read_plan_json(cudnnBackendDescriptor_t plan) {
         int64_t count = 0;
         if (cudnnBackendGetAttribute(plan, CUDNN_ATTR_EXECUTION_PLAN_JSON_REPRESENTATION,
-                                     CUDNN_TYPE_CHAR, 0, &count, nullptr) !=
-                CUDNN_STATUS_SUCCESS ||
+                                     CUDNN_TYPE_CHAR, 0, &count, nullptr) != CUDNN_STATUS_SUCCESS ||
             count <= 0)
             return {};
         std::string result(static_cast<size_t>(count), '\0');
         if (cudnnBackendGetAttribute(plan, CUDNN_ATTR_EXECUTION_PLAN_JSON_REPRESENTATION,
-                                     CUDNN_TYPE_CHAR, count, &count, result.data()) !=
-            CUDNN_STATUS_SUCCESS)
+                                     CUDNN_TYPE_CHAR, count, &count,
+                                     result.data()) != CUDNN_STATUS_SUCCESS)
             return {};
         while (!result.empty() && result.back() == '\0')
             result.pop_back();
@@ -507,8 +503,7 @@ class PatchCudnnContext {
             conv_output == cached_conv_output_ && plan_workspace == cached_plan_workspace_)
             return true;
         destroy_backend(variant_pack_);
-        if (!create_backend(CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR, variant_pack_,
-                            "variant pack"))
+        if (!create_backend(CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR, variant_pack_, "variant pack"))
             return false;
         const std::array<int64_t, 3> uids{kUidInput, kUidWeight, kUidOutput};
         const std::array<void*, 3> pointers{const_cast<void*>(latent), const_cast<void*>(weight),
@@ -517,8 +512,8 @@ class PatchCudnnContext {
                            uids.data(), error_) ||
             !set_attribute(variant_pack_, CUDNN_ATTR_VARIANT_PACK_DATA_POINTERS,
                            CUDNN_TYPE_VOID_PTR, 3, pointers.data(), error_) ||
-            !set_attribute(variant_pack_, CUDNN_ATTR_VARIANT_PACK_WORKSPACE, CUDNN_TYPE_VOID_PTR,
-                           1, &plan_workspace, error_) ||
+            !set_attribute(variant_pack_, CUDNN_ATTR_VARIANT_PACK_WORKSPACE, CUDNN_TYPE_VOID_PTR, 1,
+                           &plan_workspace, error_) ||
             !finalize(variant_pack_, "variant pack", error_))
             return false;
         cached_latent_ = latent;
@@ -625,8 +620,12 @@ class PatchCudnnProbePlugin final : public nvinfer1::IPluginV2DynamicExt {
     void detachFromContext() noexcept override { context_.reset(); }
     void destroy() noexcept override { delete this; }
     size_t getSerializationSize() const noexcept override { return sizeof(config_); }
-    void serialize(void* buffer) const noexcept override { std::memcpy(buffer, &config_, sizeof(config_)); }
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void serialize(void* buffer) const noexcept override {
+        std::memcpy(buffer, &config_, sizeof(config_));
+    }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
     nvinfer1::DataType getOutputDataType(int32_t, nvinfer1::DataType const*,
                                          int32_t) const noexcept override {
@@ -657,9 +656,9 @@ class PatchCudnnProbePlugin final : public nvinfer1::IPluginV2DynamicExt {
                             nvinfer1::PluginTensorDesc const*, int32_t) const noexcept override {
         return context_ != nullptr ? context_->total_workspace_bytes() : kConvOutputBytes;
     }
-    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc,
-                    nvinfer1::PluginTensorDesc const*, void const* const* inputs,
-                    void* const* outputs, void* workspace, cudaStream_t stream) noexcept override {
+    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc, nvinfer1::PluginTensorDesc const*,
+                    void const* const* inputs, void* const* outputs, void* workspace,
+                    cudaStream_t stream) noexcept override {
         if (context_ == nullptr && initialize_context() != 0)
             return 1;
         if (context_ == nullptr || inputs == nullptr || outputs == nullptr)
@@ -704,7 +703,9 @@ class PatchCudnnProbeCreator final : public nvinfer1::IPluginCreator {
         fields_ = {2, entries_};
     }
     char const* getPluginName() const noexcept override { return PatchCudnnProbePlugin::kNAME; }
-    char const* getPluginVersion() const noexcept override { return PatchCudnnProbePlugin::kVERSION; }
+    char const* getPluginVersion() const noexcept override {
+        return PatchCudnnProbePlugin::kVERSION;
+    }
     nvinfer1::PluginFieldCollection const* getFieldNames() noexcept override { return &fields_; }
     nvinfer1::IPluginV2*
     createPlugin(char const*, nvinfer1::PluginFieldCollection const* fields) noexcept override {
@@ -719,7 +720,9 @@ class PatchCudnnProbeCreator final : public nvinfer1::IPluginCreator {
                                            size_t length) noexcept override {
         return length == sizeof(ProbeConfig) ? new PatchCudnnProbePlugin(data, length) : nullptr;
     }
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
 
   private:
@@ -754,8 +757,7 @@ int trtmc_wan22_patch_cudnn_query(Wan22PatchCudnnCandidateInfo* output, int32_t 
 
 void* trtmc_wan22_patch_cudnn_create(int32_t heuristic_index, int32_t bias_mode) {
     trtmc::wan22::patch_cudnn_probe::ProbeConfig config{heuristic_index, bias_mode};
-    auto context =
-        std::make_unique<trtmc::wan22::patch_cudnn_probe::PatchCudnnContext>(config);
+    auto context = std::make_unique<trtmc::wan22::patch_cudnn_probe::PatchCudnnContext>(config);
     if (context->initialize() != 0) {
         std::fprintf(stderr, "Wan22 patch cuDNN create: %s\n", context->error().c_str());
         return nullptr;
@@ -784,7 +786,8 @@ uint64_t trtmc_wan22_patch_cudnn_plan_workspace_bytes(void* opaque) {
 uint64_t trtmc_wan22_patch_cudnn_version(void* opaque) {
     if (opaque == nullptr)
         return 0;
-    return static_cast<trtmc::wan22::patch_cudnn_probe::PatchCudnnContext*>(opaque)->cudnn_version();
+    return static_cast<trtmc::wan22::patch_cudnn_probe::PatchCudnnContext*>(opaque)
+        ->cudnn_version();
 }
 
 int trtmc_wan22_patch_cudnn_plan_json(void* opaque, char* output, int32_t capacity) {

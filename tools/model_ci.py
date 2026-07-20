@@ -49,6 +49,7 @@ MODEL_ROOT_PLATFORM_FILES = frozenset(
 PLATFORM_PROJECTION_EXACT = frozenset(
     {
         ".clang-format",
+        ".clang-format-ignore",
         ".github/scripts/write-model-proof-fallback-report.py",
         "CMakeLists.txt",
         "Dockerfile",
@@ -180,6 +181,7 @@ MODEL_COUPLED_TEST_EXACT = frozenset(
 PLATFORM_EXACT = frozenset(
     {
         ".clang-format",
+        ".clang-format-ignore",
         ".dockerignore",
         ".gitignore",
         "CMakeLists.txt",

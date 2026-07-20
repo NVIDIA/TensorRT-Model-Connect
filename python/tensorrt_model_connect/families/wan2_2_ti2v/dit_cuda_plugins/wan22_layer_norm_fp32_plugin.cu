@@ -34,8 +34,7 @@ __device__ __forceinline__ WelfordData welford_online(float value, WelfordData c
     return {new_mean, current.sigma2 + delta * (value - new_mean), new_count};
 }
 
-__device__ __forceinline__ WelfordData welford_combine(WelfordData data_b,
-                                                        WelfordData data_a) {
+__device__ __forceinline__ WelfordData welford_combine(WelfordData data_b, WelfordData data_a) {
     const float delta = data_b.mean - data_a.mean;
     const float count = data_a.count + data_b.count;
     if (count <= 0.0F)
@@ -44,8 +43,7 @@ __device__ __forceinline__ WelfordData welford_combine(WelfordData data_b,
     const float n_a = data_a.count * coefficient;
     const float n_b = data_b.count * coefficient;
     const float mean = n_a * data_a.mean + n_b * data_b.mean;
-    const float sigma2 = data_a.sigma2 + data_b.sigma2 +
-                         delta * delta * data_a.count * n_b;
+    const float sigma2 = data_a.sigma2 + data_b.sigma2 + delta * delta * data_a.count * n_b;
     return {mean, sigma2, count};
 }
 
@@ -151,7 +149,9 @@ class DitLayerNormFp32Plugin final : public nvinfer1::IPluginV2DynamicExt {
     void destroy() noexcept override { delete this; }
     size_t getSerializationSize() const noexcept override { return 0; }
     void serialize(void*) const noexcept override {}
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
     nvinfer1::DataType getOutputDataType(int32_t, nvinfer1::DataType const*,
                                          int32_t) const noexcept override {
@@ -178,17 +178,17 @@ class DitLayerNormFp32Plugin final : public nvinfer1::IPluginV2DynamicExt {
                             nvinfer1::PluginTensorDesc const*, int32_t) const noexcept override {
         return 0;
     }
-    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc,
-                    nvinfer1::PluginTensorDesc const*, void const* const* inputs,
-                    void* const* outputs, void*, cudaStream_t stream) noexcept override {
+    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc, nvinfer1::PluginTensorDesc const*,
+                    void const* const* inputs, void* const* outputs, void*,
+                    cudaStream_t stream) noexcept override {
         if (input_desc == nullptr || inputs == nullptr || outputs == nullptr)
             return 1;
         const auto& dims = input_desc[0].dims;
         if (dims.nbDims != 2)
             return 1;
         return launch_layer_norm(static_cast<const float*>(inputs[0]),
-                                 static_cast<float*>(outputs[0]), dims.d[0], dims.d[1],
-                                 kEpsilon, stream);
+                                 static_cast<float*>(outputs[0]), dims.d[0], dims.d[1], kEpsilon,
+                                 stream);
     }
 
   private:
@@ -211,7 +211,9 @@ class DitLayerNormFp32Creator final : public nvinfer1::IPluginCreator {
                                            size_t length) noexcept override {
         return new DitLayerNormFp32Plugin(data, length);
     }
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
 
   private:
@@ -222,8 +224,8 @@ class DitLayerNormFp32Creator final : public nvinfer1::IPluginCreator {
 } // namespace trtmc::wan22
 
 extern "C" int trtmc_wan22_dit_layer_norm_fp32_launch(const float* input, float* output,
-                                                       int32_t rows, int32_t columns,
-                                                       float epsilon, void* stream) {
+                                                      int32_t rows, int32_t columns, float epsilon,
+                                                      void* stream) {
     return trtmc::wan22::launch_layer_norm(input, output, rows, columns, epsilon,
                                            static_cast<cudaStream_t>(stream));
 }

@@ -561,6 +561,21 @@ def test_runtime_rejects_non_official_output_profile() -> None:
         plugin.get_diffusion_config(_runtime_config(video_num_frames=81))
 
 
+@pytest.mark.parametrize("seed", [-2, -1, 2_147_483_648])
+def test_runtime_rejects_bundle_seed_outside_native_range(seed: int) -> None:
+    plugin = Wan22TI2VPlugin()
+    with pytest.raises(
+        ValueError,
+        match="bundle seed must be between 0 and 2147483647",
+    ):
+        plugin.get_diffusion_config(_runtime_config(seed=seed))
+
+
+@pytest.mark.parametrize("seed", [0, 42, 2_147_483_647])
+def test_runtime_accepts_bundle_seed_in_native_range(seed: int) -> None:
+    assert Wan22TI2VPlugin().get_diffusion_config(_runtime_config(seed=seed))["seed"] == seed
+
+
 def _read_test_prebuilt(
     trt_builder,
     tmp_path: Path,

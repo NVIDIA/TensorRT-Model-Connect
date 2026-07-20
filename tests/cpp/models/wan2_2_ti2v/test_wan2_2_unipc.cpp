@@ -4,6 +4,8 @@
  */
 
 #include "runtime/models/wan2_2_ti2v/wan2_2_unipc.h"
+#include "runtime/models/wan2_2_ti2v/wan2_2_unipc_coefficients.h"
+#include "utils/sha256.h"
 #include "wan2_2_unipc_full_golden.h"
 
 #include <algorithm>
@@ -108,6 +110,67 @@ void check_close(float actual, float expected, float tolerance, const char* labe
         std::cerr << "FAIL: " << label << " actual=" << actual << " expected=" << expected << '\n';
         ++failures;
     }
+}
+
+void append_update_words(std::vector<std::uint32_t>& words,
+                         const trtmc::wan2_2_ti2v::unipc_coefficients::UpdateCoefficients& update) {
+    words.insert(words.end(), {update.order, update.sigma_t_index, update.sigma_s0_index,
+                               update.rk_count, update.rho_count, update.ratio_bits,
+                               update.model_coefficient_bits, update.residual_coefficient_bits});
+    words.insert(words.end(), update.rk_bits.begin(), update.rk_bits.end());
+    words.insert(words.end(), update.rho_bits.begin(), update.rho_bits.end());
+}
+
+std::vector<std::uint32_t> packed_coefficient_words() {
+    namespace coefficients = trtmc::wan2_2_ti2v::unipc_coefficients;
+    std::vector<std::uint32_t> words = {
+        static_cast<std::uint32_t>(coefficients::kStepCount),
+        static_cast<std::uint32_t>(coefficients::kSigmaCount),
+        coefficients::kNumTrainTimesteps,
+        coefficients::kSolverOrder,
+        coefficients::kFlowShiftBits,
+        coefficients::kNoSigmaIndex,
+    };
+    words.reserve(1357U);
+    words.insert(words.end(), coefficients::kTimesteps.begin(), coefficients::kTimesteps.end());
+    words.insert(words.end(), coefficients::kSigmaBits.begin(), coefficients::kSigmaBits.end());
+    words.insert(words.end(), coefficients::kConversionSigmaBits.begin(),
+                 coefficients::kConversionSigmaBits.end());
+    for (const auto& corrector : coefficients::kCorrector)
+        append_update_words(words, corrector);
+    for (const auto& predictor : coefficients::kPredictor)
+        append_update_words(words, predictor);
+    return words;
+}
+
+std::string packed_words_sha256(const std::vector<std::uint32_t>& words) {
+    trtmc::internal::Sha256 digest;
+    for (const auto word : words) {
+        const std::array<std::uint8_t, 4> big_endian = {
+            static_cast<std::uint8_t>(word >> 24U),
+            static_cast<std::uint8_t>(word >> 16U),
+            static_cast<std::uint8_t>(word >> 8U),
+            static_cast<std::uint8_t>(word),
+        };
+        digest.update(big_endian.data(), big_endian.size());
+    }
+    return digest.hex_digest();
+}
+
+void test_official_coefficient_payload_is_bit_exact() {
+    constexpr auto expected = "a86473aed0e63c6e3f2334dafbf7c02de09dfd43f075543cb94478b6c9f19635";
+    auto words = packed_coefficient_words();
+    check(words.size() == 1357U, "Wan2.2 packed UniPC coefficient word count is exact");
+    check(packed_words_sha256(words) == expected,
+          "Wan2.2 packed UniPC coefficient payload SHA-256 is exact");
+
+    words.front() ^= 1U;
+    check(packed_words_sha256(words) != expected,
+          "Wan2.2 coefficient digest detects a first-word bit change");
+    words.front() ^= 1U;
+    words.back() ^= 1U;
+    check(packed_words_sha256(words) != expected,
+          "Wan2.2 coefficient digest detects a last-word bit change");
 }
 
 void check_full_shape_close(double actual, double expected, double tolerance, int32_t step,
@@ -251,6 +314,7 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--stream-full")
         return stream_full_shape_replay();
     test_schedule_matches_upstream_wan22();
+    test_official_coefficient_payload_is_bit_exact();
     test_updates_match_upstream_cpu_and_cuda();
     test_official_fifty_step_cuda_fixture();
     test_official_full_shape_per_step_metrics();

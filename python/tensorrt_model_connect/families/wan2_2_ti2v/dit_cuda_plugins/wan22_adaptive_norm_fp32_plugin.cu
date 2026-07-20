@@ -74,7 +74,9 @@ class DitAdaptiveNormFp32Plugin final : public nvinfer1::IPluginV2DynamicExt {
     void destroy() noexcept override { delete this; }
     size_t getSerializationSize() const noexcept override { return 0; }
     void serialize(void*) const noexcept override {}
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
     nvinfer1::DataType getOutputDataType(int32_t, nvinfer1::DataType const*,
                                          int32_t) const noexcept override {
@@ -101,23 +103,23 @@ class DitAdaptiveNormFp32Plugin final : public nvinfer1::IPluginV2DynamicExt {
                             nvinfer1::PluginTensorDesc const*, int32_t) const noexcept override {
         return kWorkspaceBytes;
     }
-    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc,
-                    nvinfer1::PluginTensorDesc const*, void const* const* inputs,
-                    void* const* outputs, void* workspace, cudaStream_t stream) noexcept override {
+    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc, nvinfer1::PluginTensorDesc const*,
+                    void const* const* inputs, void* const* outputs, void* workspace,
+                    cudaStream_t stream) noexcept override {
         if (input_desc == nullptr || inputs == nullptr || outputs == nullptr)
             return 1;
         const auto& normalized_dims = input_desc[0].dims;
         const auto& shift_dims = input_desc[1].dims;
         const auto& scale_dims = input_desc[2].dims;
         if (normalized_dims.nbDims != 2 || normalized_dims.d[0] != kRows ||
-            normalized_dims.d[1] != kColumns || shift_dims.nbDims != 2 ||
-            shift_dims.d[0] != 1 || shift_dims.d[1] != kColumns || scale_dims.nbDims != 2 ||
-            scale_dims.d[0] != 1 || scale_dims.d[1] != kColumns)
+            normalized_dims.d[1] != kColumns || shift_dims.nbDims != 2 || shift_dims.d[0] != 1 ||
+            shift_dims.d[1] != kColumns || scale_dims.nbDims != 2 || scale_dims.d[0] != 1 ||
+            scale_dims.d[1] != kColumns)
             return 1;
         return launch_adaptive_norm(
             static_cast<const float*>(inputs[0]), static_cast<const float*>(inputs[1]),
-            static_cast<const float*>(inputs[2]), static_cast<float*>(outputs[0]), workspace,
-            kRows, kColumns, stream);
+            static_cast<const float*>(inputs[2]), static_cast<float*>(outputs[0]), workspace, kRows,
+            kColumns, stream);
     }
 
   private:
@@ -127,9 +129,7 @@ class DitAdaptiveNormFp32Plugin final : public nvinfer1::IPluginV2DynamicExt {
 class DitAdaptiveNormFp32Creator final : public nvinfer1::IPluginCreator {
   public:
     DitAdaptiveNormFp32Creator() { fields_ = {0, nullptr}; }
-    char const* getPluginName() const noexcept override {
-        return DitAdaptiveNormFp32Plugin::kNAME;
-    }
+    char const* getPluginName() const noexcept override { return DitAdaptiveNormFp32Plugin::kNAME; }
     char const* getPluginVersion() const noexcept override {
         return DitAdaptiveNormFp32Plugin::kVERSION;
     }
@@ -142,7 +142,9 @@ class DitAdaptiveNormFp32Creator final : public nvinfer1::IPluginCreator {
                                            size_t length) noexcept override {
         return new DitAdaptiveNormFp32Plugin(data, length);
     }
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
 
   private:
@@ -152,12 +154,13 @@ class DitAdaptiveNormFp32Creator final : public nvinfer1::IPluginCreator {
 
 } // namespace trtmc::wan22
 
-extern "C" int trtmc_wan22_dit_adaptive_norm_fp32_launch(
-    const float* normalized, const float* shift, const float* scale, float* output,
-    void* workspace, int32_t rows, int32_t columns, void* stream) {
-    return trtmc::wan22::launch_adaptive_norm(
-        normalized, shift, scale, output, workspace, rows, columns,
-        static_cast<cudaStream_t>(stream));
+extern "C" int trtmc_wan22_dit_adaptive_norm_fp32_launch(const float* normalized,
+                                                         const float* shift, const float* scale,
+                                                         float* output, void* workspace,
+                                                         int32_t rows, int32_t columns,
+                                                         void* stream) {
+    return trtmc::wan22::launch_adaptive_norm(normalized, shift, scale, output, workspace, rows,
+                                              columns, static_cast<cudaStream_t>(stream));
 }
 
 static nvinfer1::PluginRegistrar<trtmc::wan22::DitAdaptiveNormFp32Creator>

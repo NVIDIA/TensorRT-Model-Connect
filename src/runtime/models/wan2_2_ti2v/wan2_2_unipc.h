@@ -48,40 +48,60 @@ class FlowUniPC {
     }
 
     void step(const float* model_output, const float* sample, float* output, std::size_t count) {
+        validate_step_arguments(model_output, sample, output, count);
+        auto converted = convert_model_output(model_output, sample, count);
+
+        std::vector<float> corrected(sample, sample + count);
+        if (step_index_ > 0 && previous_order_ > 0 && !last_sample_.empty())
+            correct(converted, corrected);
+
+        append_model_history(std::move(converted));
+        const int32_t order = prediction_order();
+
+        last_sample_ = corrected;
+        predict(corrected, output, count, order);
+        commit_step(order);
+    }
+
+  private:
+    void validate_step_arguments(const float* model_output, const float* sample,
+                                 const float* output, std::size_t count) const {
         if (model_output == nullptr || sample == nullptr || output == nullptr)
             throw std::invalid_argument("Wan2.2 UniPC received a null tensor pointer");
         if (count == 0)
             throw std::invalid_argument("Wan2.2 UniPC received an empty tensor");
         if (step_index_ >= num_steps_)
             throw std::out_of_range("Wan2.2 UniPC has no remaining steps");
+    }
 
+    std::vector<float> convert_model_output(const float* model_output, const float* sample,
+                                            std::size_t count) const {
         const std::size_t index = static_cast<std::size_t>(step_index_);
         std::vector<float> converted(count);
         const float sigma = sigmas_[index];
         for (std::size_t i = 0; i < count; ++i)
             converted[i] = sample[i] - sigma * model_output[i];
+        return converted;
+    }
 
-        std::vector<float> corrected(sample, sample + count);
-        if (step_index_ > 0 && previous_order_ > 0 && !last_sample_.empty())
-            correct(converted, corrected);
-
+    void append_model_history(std::vector<float> converted) {
         if (model_history_.size() == 2)
             model_history_.erase(model_history_.begin());
         model_history_.push_back(std::move(converted));
+    }
 
+    int32_t prediction_order() const noexcept {
         const int32_t remaining = num_steps_ - step_index_;
         const int32_t available_order = std::min<int32_t>(2, lower_order_nums_ + 1);
-        const int32_t order = std::min(remaining, available_order);
+        return std::min(remaining, available_order);
+    }
 
-        last_sample_ = corrected;
-        predict(corrected, output, count, order);
-
+    void commit_step(int32_t order) noexcept {
         previous_order_ = order;
         lower_order_nums_ = std::min<int32_t>(2, lower_order_nums_ + 1);
         ++step_index_;
     }
 
-  private:
     static float lambda(float sigma) {
         if (sigma == 0.0F)
             return std::numeric_limits<float>::infinity();

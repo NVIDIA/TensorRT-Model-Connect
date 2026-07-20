@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+python/tensorrt_model_connect/families/wan2_2_ti2v/dit_cuda_plugins/third_party/cudnn_frontend/include/**

@@ -4,10 +4,9 @@
  */
 
 #include <NvInferRuntime.h>
-#include <cuda_runtime.h>
-
 #include <cmath>
 #include <cstdint>
+#include <cuda_runtime.h>
 #include <string>
 
 namespace trtmc::wan22 {
@@ -17,8 +16,8 @@ constexpr int32_t kTHREADS = 256;
 constexpr float kNORMALIZE_EPSILON = 1.0e-12F;
 
 __global__ void vaeRmsNormKernel(const float* input, const float* gamma, float* output,
-                                 int32_t channels, int64_t spatial_volume,
-                                 int64_t position_count, float scale) {
+                                 int32_t channels, int64_t spatial_volume, int64_t position_count,
+                                 float scale) {
     const int64_t position = static_cast<int64_t>(blockIdx.x);
     if (position >= position_count)
         return;
@@ -88,14 +87,12 @@ class VaeRmsNormPlugin final : public nvinfer1::IPluginV2DynamicExt {
         result->namespace_ = namespace_;
         return result;
     }
-    nvinfer1::DimsExprs getOutputDimensions(int32_t, nvinfer1::DimsExprs const* inputs,
-                                            int32_t, nvinfer1::IExprBuilder&) noexcept override {
+    nvinfer1::DimsExprs getOutputDimensions(int32_t, nvinfer1::DimsExprs const* inputs, int32_t,
+                                            nvinfer1::IExprBuilder&) noexcept override {
         return inputs[0];
     }
-    bool supportsFormatCombination(int32_t position,
-                                   nvinfer1::PluginTensorDesc const* in_out,
-                                   int32_t input_count,
-                                   int32_t output_count) noexcept override {
+    bool supportsFormatCombination(int32_t position, nvinfer1::PluginTensorDesc const* in_out,
+                                   int32_t input_count, int32_t output_count) noexcept override {
         return input_count == 2 && output_count == 1 && position >= 0 && position < 3 &&
                in_out[position].format == nvinfer1::TensorFormat::kLINEAR &&
                in_out[position].type == nvinfer1::DataType::kFLOAT;
@@ -103,15 +100,14 @@ class VaeRmsNormPlugin final : public nvinfer1::IPluginV2DynamicExt {
     void configurePlugin(nvinfer1::DynamicPluginTensorDesc const*, int32_t,
                          nvinfer1::DynamicPluginTensorDesc const*, int32_t) noexcept override {}
     size_t getWorkspaceSize(nvinfer1::PluginTensorDesc const*, int32_t,
-                            nvinfer1::PluginTensorDesc const*,
-                            int32_t) const noexcept override {
+                            nvinfer1::PluginTensorDesc const*, int32_t) const noexcept override {
         return 0;
     }
-    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc,
-                    nvinfer1::PluginTensorDesc const*, void const* const* inputs,
-                    void* const* outputs, void*, cudaStream_t stream) noexcept override {
-        if (input_desc == nullptr || inputs == nullptr || outputs == nullptr || inputs[0] == nullptr ||
-            inputs[1] == nullptr || outputs[0] == nullptr)
+    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc, nvinfer1::PluginTensorDesc const*,
+                    void const* const* inputs, void* const* outputs, void*,
+                    cudaStream_t stream) noexcept override {
+        if (input_desc == nullptr || inputs == nullptr || outputs == nullptr ||
+            inputs[0] == nullptr || inputs[1] == nullptr || outputs[0] == nullptr)
             return 1;
         const nvinfer1::Dims& input_dims = input_desc[0].dims;
         const nvinfer1::Dims& gamma_dims = input_desc[1].dims;
@@ -121,8 +117,8 @@ class VaeRmsNormPlugin final : public nvinfer1::IPluginV2DynamicExt {
             return 1;
 
         const int32_t channels = input_dims.d[1];
-        const int64_t spatial_volume = static_cast<int64_t>(input_dims.d[2]) * input_dims.d[3] *
-                                       input_dims.d[4];
+        const int64_t spatial_volume =
+            static_cast<int64_t>(input_dims.d[2]) * input_dims.d[3] * input_dims.d[4];
         const int64_t position_count = static_cast<int64_t>(input_dims.d[0]) * spatial_volume;
         if (position_count <= 0 || position_count > static_cast<int64_t>(UINT32_MAX))
             return 1;
@@ -146,8 +142,8 @@ class VaeRmsNormCreator final : public nvinfer1::IPluginCreator {
     char const* getPluginName() const noexcept override { return VaeRmsNormPlugin::kNAME; }
     char const* getPluginVersion() const noexcept override { return VaeRmsNormPlugin::kVERSION; }
     nvinfer1::PluginFieldCollection const* getFieldNames() noexcept override { return &fields_; }
-    nvinfer1::IPluginV2* createPlugin(
-        char const*, nvinfer1::PluginFieldCollection const*) noexcept override {
+    nvinfer1::IPluginV2* createPlugin(char const*,
+                                      nvinfer1::PluginFieldCollection const*) noexcept override {
         return new VaeRmsNormPlugin();
     }
     nvinfer1::IPluginV2* deserializePlugin(char const*, void const* data,

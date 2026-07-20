@@ -342,6 +342,13 @@ class TestSelectTests:
         assert result.builder_tests == []
         assert result.fallback_tiers == []
 
+    def test_clang_format_ignore_selects_its_contract(self, sample_map):
+        """A formatting exclusion change must never select zero validation."""
+        result = select_tests([".clang-format-ignore"], sample_map)
+
+        assert result.tools_tests == ["tests/tools/test_clang_format_ignore_contract.py"]
+        assert result.fallback_tiers == []
+
     def test_include_header_fallback(self, sample_map):
         """Unknown include/ header triggers cpp fallback."""
         result = select_tests(["include/trtmc/new_header.h"], sample_map)

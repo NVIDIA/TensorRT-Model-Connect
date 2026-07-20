@@ -11,16 +11,15 @@
  */
 
 #include <NvInferRuntime.h>
-#include <cuda_bf16.h>
-#include <cuda_runtime_api.h>
-#include <cudnn.h>
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cuda_bf16.h>
+#include <cuda_runtime_api.h>
+#include <cudnn.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -70,8 +69,8 @@ bool set_attribute(cudnnBackendDescriptor_t descriptor, cudnnBackendAttributeNam
     const cudnnStatus_t status = cudnnBackendSetAttribute(descriptor, name, type, count, value);
     if (status == CUDNN_STATUS_SUCCESS)
         return true;
-    error = "cudnnBackendSetAttribute(" + std::to_string(static_cast<int>(name)) + ") failed: " +
-            status_name(status);
+    error = "cudnnBackendSetAttribute(" + std::to_string(static_cast<int>(name)) +
+            ") failed: " + status_name(status);
     return false;
 }
 
@@ -98,8 +97,8 @@ __global__ void add_bias_ncdhw(__nv_bfloat16* tensor, const __nv_bfloat16* bias)
     for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
          index < kOutputElements; index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         const int64_t channel = index / kRows;
-        tensor[index] = __float2bfloat16_rn(__bfloat162float(tensor[index]) +
-                                            __bfloat162float(bias[channel]));
+        tensor[index] =
+            __float2bfloat16_rn(__bfloat162float(tensor[index]) + __bfloat162float(bias[channel]));
     }
 }
 
@@ -115,10 +114,8 @@ class Context {
         if (!check(cudnnCreate(&handle_), "cudnnCreate"))
             return 1;
         if (!make_tensor(x_desc_, {kN, kC, kD, kH, kW},
-                         {kC * kD * kH * kW, kD * kH * kW, kH * kW, kW, 1}, kUidInput,
-                         "x") ||
-            !make_tensor(w_desc_, {kK, kC, 1, 2, 2}, {kC * 4, 4, 4, 2, 1}, kUidWeight,
-                         "w") ||
+                         {kC * kD * kH * kW, kD * kH * kW, kH * kW, kW, 1}, kUidInput, "x") ||
+            !make_tensor(w_desc_, {kK, kC, 1, 2, 2}, {kC * 4, 4, 4, 2, 1}, kUidWeight, "w") ||
             !make_tensor(y_desc_, {kN, kK, kOutD, kOutH, kOutW},
                          {kK * kRows, kRows, kOutH * kOutW, kOutW, 1}, kUidOutput, "y") ||
             !make_convolution() || !make_operation_graph() || !select_plan())
@@ -127,8 +124,8 @@ class Context {
         return 0;
     }
 
-    int run(const void* latent, const void* weight, const void* bias, void* output,
-            void* workspace, size_t workspace_bytes, cudaStream_t stream) {
+    int run(const void* latent, const void* weight, const void* bias, void* output, void* workspace,
+            size_t workspace_bytes, cudaStream_t stream) {
         if (!initialized_ || plan_ == nullptr || latent == nullptr || weight == nullptr ||
             bias == nullptr || output == nullptr ||
             (plan_workspace_bytes_ != 0 && workspace == nullptr)) {
@@ -156,8 +153,8 @@ class Context {
                                                        static_cast<const __nv_bfloat16*>(bias));
         const cudaError_t cuda_status = cudaPeekAtLastError();
         if (cuda_status != cudaSuccess) {
-            error_ = std::string("separate BF16 bias add failed: ") +
-                     cudaGetErrorString(cuda_status);
+            error_ =
+                std::string("separate BF16 bias add failed: ") + cudaGetErrorString(cuda_status);
             return 1;
         }
         return 0;
@@ -198,8 +195,8 @@ class Context {
                              error_) &&
                set_attribute(output, CUDNN_ATTR_TENSOR_DIMENSIONS, CUDNN_TYPE_INT64, 5,
                              dimensions.data(), error_) &&
-               set_attribute(output, CUDNN_ATTR_TENSOR_STRIDES, CUDNN_TYPE_INT64, 5,
-                             strides.data(), error_) &&
+               set_attribute(output, CUDNN_ATTR_TENSOR_STRIDES, CUDNN_TYPE_INT64, 5, strides.data(),
+                             error_) &&
                set_attribute(output, CUDNN_ATTR_TENSOR_UNIQUE_ID, CUDNN_TYPE_INT64, 1, &uid,
                              error_) &&
                set_attribute(output, CUDNN_ATTR_TENSOR_BYTE_ALIGNMENT, CUDNN_TYPE_INT64, 1,
@@ -228,8 +225,8 @@ class Context {
                              pads.data(), error_) &&
                set_attribute(conv_desc_, CUDNN_ATTR_CONVOLUTION_POST_PADDINGS, CUDNN_TYPE_INT64, 3,
                              pads.data(), error_) &&
-               set_attribute(conv_desc_, CUDNN_ATTR_CONVOLUTION_FILTER_STRIDES, CUDNN_TYPE_INT64,
-                             3, strides.data(), error_) &&
+               set_attribute(conv_desc_, CUDNN_ATTR_CONVOLUTION_FILTER_STRIDES, CUDNN_TYPE_INT64, 3,
+                             strides.data(), error_) &&
                set_attribute(conv_desc_, CUDNN_ATTR_CONVOLUTION_DILATIONS, CUDNN_TYPE_INT64, 3,
                              dilations.data(), error_) &&
                finalize(conv_desc_, "convolution", error_);
@@ -262,8 +259,8 @@ class Context {
         const std::array<cudnnBackendDescriptor_t, 1> operations{operation_};
         return set_attribute(operation_graph_, CUDNN_ATTR_OPERATIONGRAPH_OPS,
                              CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, operations.data(), error_) &&
-               set_attribute(operation_graph_, CUDNN_ATTR_OPERATIONGRAPH_HANDLE,
-                             CUDNN_TYPE_HANDLE, 1, &handle_, error_) &&
+               set_attribute(operation_graph_, CUDNN_ATTR_OPERATIONGRAPH_HANDLE, CUDNN_TYPE_HANDLE,
+                             1, &handle_, error_) &&
                finalize(operation_graph_, "operation graph", error_);
     }
 
@@ -345,14 +342,13 @@ class Context {
     std::string read_plan_json(cudnnBackendDescriptor_t plan) {
         int64_t count = 0;
         if (cudnnBackendGetAttribute(plan, CUDNN_ATTR_EXECUTION_PLAN_JSON_REPRESENTATION,
-                                     CUDNN_TYPE_CHAR, 0, &count, nullptr) !=
-                CUDNN_STATUS_SUCCESS ||
+                                     CUDNN_TYPE_CHAR, 0, &count, nullptr) != CUDNN_STATUS_SUCCESS ||
             count <= 0)
             return {};
         std::string result(static_cast<size_t>(count), '\0');
         if (cudnnBackendGetAttribute(plan, CUDNN_ATTR_EXECUTION_PLAN_JSON_REPRESENTATION,
-                                     CUDNN_TYPE_CHAR, count, &count, result.data()) !=
-            CUDNN_STATUS_SUCCESS)
+                                     CUDNN_TYPE_CHAR, count, &count,
+                                     result.data()) != CUDNN_STATUS_SUCCESS)
             return {};
         while (!result.empty() && result.back() == '\0')
             result.pop_back();
@@ -365,8 +361,7 @@ class Context {
             output == cached_output_ && workspace == cached_workspace_)
             return true;
         destroy_backend(variant_pack_);
-        if (!create_backend(CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR, variant_pack_,
-                            "variant pack"))
+        if (!create_backend(CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR, variant_pack_, "variant pack"))
             return false;
         const std::array<int64_t, 3> uids{kUidInput, kUidWeight, kUidOutput};
         const std::array<void*, 3> pointers{const_cast<void*>(latent), const_cast<void*>(weight),
@@ -375,8 +370,8 @@ class Context {
                              uids.data(), error_) &&
                set_attribute(variant_pack_, CUDNN_ATTR_VARIANT_PACK_DATA_POINTERS,
                              CUDNN_TYPE_VOID_PTR, 3, pointers.data(), error_) &&
-               set_attribute(variant_pack_, CUDNN_ATTR_VARIANT_PACK_WORKSPACE,
-                             CUDNN_TYPE_VOID_PTR, 1, &workspace, error_) &&
+               set_attribute(variant_pack_, CUDNN_ATTR_VARIANT_PACK_WORKSPACE, CUDNN_TYPE_VOID_PTR,
+                             1, &workspace, error_) &&
                finalize(variant_pack_, "variant pack", error_) &&
                cache_variant_pointers(latent, weight, output, workspace);
     }
@@ -463,7 +458,9 @@ class PatchEmbeddingPlugin final : public nvinfer1::IPluginV2DynamicExt {
     void destroy() noexcept override { delete this; }
     size_t getSerializationSize() const noexcept override { return 0; }
     void serialize(void*) const noexcept override {}
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
     nvinfer1::DataType getOutputDataType(int32_t, nvinfer1::DataType const*,
                                          int32_t) const noexcept override {
@@ -497,9 +494,9 @@ class PatchEmbeddingPlugin final : public nvinfer1::IPluginV2DynamicExt {
                             nvinfer1::PluginTensorDesc const*, int32_t) const noexcept override {
         return context_ != nullptr ? context_->workspace_bytes() : 0;
     }
-    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc,
-                    nvinfer1::PluginTensorDesc const*, void const* const* inputs,
-                    void* const* outputs, void* workspace, cudaStream_t stream) noexcept override {
+    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc, nvinfer1::PluginTensorDesc const*,
+                    void const* const* inputs, void* const* outputs, void* workspace,
+                    cudaStream_t stream) noexcept override {
         if (context_ == nullptr && initialize_context() != 0)
             return 1;
         if (context_ == nullptr || inputs == nullptr || outputs == nullptr)
@@ -516,8 +513,7 @@ class PatchEmbeddingPlugin final : public nvinfer1::IPluginV2DynamicExt {
         const int status = context_->run(inputs[0], inputs[1], inputs[2], outputs[0], workspace,
                                          getWorkspaceSize(nullptr, 0, nullptr, 0), stream);
         if (status != 0)
-            std::fprintf(stderr, "Wan22DitPatchEmbedding enqueue: %s\n",
-                         context_->error().c_str());
+            std::fprintf(stderr, "Wan22DitPatchEmbedding enqueue: %s\n", context_->error().c_str());
         return status;
     }
 
@@ -540,7 +536,9 @@ class PatchEmbeddingCreator final : public nvinfer1::IPluginCreator {
   public:
     PatchEmbeddingCreator() { fields_ = {0, nullptr}; }
     char const* getPluginName() const noexcept override { return PatchEmbeddingPlugin::kNAME; }
-    char const* getPluginVersion() const noexcept override { return PatchEmbeddingPlugin::kVERSION; }
+    char const* getPluginVersion() const noexcept override {
+        return PatchEmbeddingPlugin::kVERSION;
+    }
     nvinfer1::PluginFieldCollection const* getFieldNames() noexcept override { return &fields_; }
     nvinfer1::IPluginV2* createPlugin(char const*,
                                       nvinfer1::PluginFieldCollection const*) noexcept override {
@@ -550,7 +548,9 @@ class PatchEmbeddingCreator final : public nvinfer1::IPluginCreator {
                                            size_t length) noexcept override {
         return length == 0 ? new PatchEmbeddingPlugin(data, length) : nullptr;
     }
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
 
   private:

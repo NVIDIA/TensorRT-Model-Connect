@@ -1840,6 +1840,15 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestE2EDataFiles.test_data_file_maps_to_manifest_users",),
         ),
         ClassificationRule(
+            priority=482,
+            name="clang_format_ignore_config",
+            matcher=_path_equals(".clang-format-ignore"),
+            resolver=_match_result(
+                "clang_format_ignore_config", _no_models, ["tools"], False,
+            ),
+            covered_by=("TestUnitTiers.test_clang_format_ignore_selects_contract_test",),
+        ),
+        ClassificationRule(
             priority=483,
             name="nightly_issue_tracker_tool",
             matcher=_path_equals("tools/nightly_issue_tracker.py"),
@@ -1962,6 +1971,9 @@ def _direct_python_test_targets(changed_files: List[str]) -> tuple[List[str], Li
 
 
 _EXPLICIT_TOOLS_TEST_TARGETS = {
+    ".clang-format-ignore": (
+        "tests/tools/test_clang_format_ignore_contract.py",
+    ),
     "tools/nightly_issue_tracker.py": (
         "tests/tools/test_github_actions_ci.py",
         "tests/tools/test_nightly_issue_tracker.py",

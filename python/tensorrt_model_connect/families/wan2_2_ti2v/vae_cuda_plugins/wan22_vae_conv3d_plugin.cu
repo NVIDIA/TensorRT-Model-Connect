@@ -4,15 +4,14 @@
  */
 
 #include <NvInferRuntime.h>
-#include <cuda_runtime.h>
-#include <cudnn.h>
-
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cuda_runtime.h>
+#include <cudnn.h>
 #include <iterator>
 #include <limits>
 #include <new>
@@ -44,13 +43,11 @@ struct SerializedConfig {
 static_assert(sizeof(SerializedConfig) == 32);
 
 bool isSupportedConfig(const Conv3dConfig& config) {
-    const bool channels_ok =
-        (config.input_channels == 256 || config.input_channels == 512) &&
-        config.output_channels == 256;
+    const bool channels_ok = (config.input_channels == 256 || config.input_channels == 512) &&
+                             config.output_channels == 256;
     const bool temporal_ok = config.input_depth == 3 || config.input_depth == 6;
-    const bool spatial_ok =
-        (config.input_height == 18 && config.input_width == 18) ||
-        (config.input_height == 354 && config.input_width == 642);
+    const bool spatial_ok = (config.input_height == 18 && config.input_width == 18) ||
+                            (config.input_height == 354 && config.input_width == 642);
     return config.batch == 1 && channels_ok && temporal_ok && spatial_ok;
 }
 
@@ -117,8 +114,8 @@ void reportAlgorithmOnce(const Conv3dConfig& config, cudnnConvolutionFwdAlgo_t a
                  "shape=[%d,%d,%d,%d,%d]->[%d,%d,%d,%d,%d]\n",
                  algorithmName(algorithm), static_cast<int>(algorithm), workspace_bytes,
                  config.batch, config.input_channels, config.input_depth, config.input_height,
-                 config.input_width, config.batch, config.output_channels,
-                 config.input_depth - 2, config.input_height - 2, config.input_width - 2);
+                 config.input_width, config.batch, config.output_channels, config.input_depth - 2,
+                 config.input_height - 2, config.input_width - 2);
 }
 
 } // namespace
@@ -182,10 +179,8 @@ class VaeConv3dPlugin final : public nvinfer1::IPluginV2DynamicExt {
         output.d[4] = builder.constant(config_.input_width - 2);
         return output;
     }
-    bool supportsFormatCombination(int32_t position,
-                                   nvinfer1::PluginTensorDesc const* in_out,
-                                   int32_t input_count,
-                                   int32_t output_count) noexcept override {
+    bool supportsFormatCombination(int32_t position, nvinfer1::PluginTensorDesc const* in_out,
+                                   int32_t input_count, int32_t output_count) noexcept override {
         return input_count == 3 && output_count == 1 && position >= 0 && position < 4 &&
                in_out[position].format == nvinfer1::TensorFormat::kLINEAR &&
                in_out[position].type == nvinfer1::DataType::kFLOAT;
@@ -196,8 +191,7 @@ class VaeConv3dPlugin final : public nvinfer1::IPluginV2DynamicExt {
         configured_ = validateDescriptors(inputs, input_count, outputs, output_count);
     }
     size_t getWorkspaceSize(nvinfer1::PluginTensorDesc const*, int32_t,
-                            nvinfer1::PluginTensorDesc const*,
-                            int32_t) const noexcept override {
+                            nvinfer1::PluginTensorDesc const*, int32_t) const noexcept override {
         return prepared_ ? workspace_bytes_ : 0;
     }
     int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc,
@@ -226,8 +220,8 @@ class VaeConv3dPlugin final : public nvinfer1::IPluginV2DynamicExt {
 
         const int64_t spatial_volume = static_cast<int64_t>(config_.input_depth - 2) *
                                        (config_.input_height - 2) * (config_.input_width - 2);
-        const int64_t element_count = static_cast<int64_t>(config_.batch) *
-                                      config_.output_channels * spatial_volume;
+        const int64_t element_count =
+            static_cast<int64_t>(config_.batch) * config_.output_channels * spatial_volume;
         const int64_t block_count = (element_count + kTHREADS - 1) / kTHREADS;
         if (block_count <= 0 || block_count > std::numeric_limits<uint32_t>::max())
             return 1;
@@ -240,28 +234,27 @@ class VaeConv3dPlugin final : public nvinfer1::IPluginV2DynamicExt {
   private:
     bool validateRuntimeDescriptors(nvinfer1::PluginTensorDesc const* inputs,
                                     nvinfer1::PluginTensorDesc const* outputs) const noexcept {
-        const std::array<int32_t, 5> activation{
-            config_.batch, config_.input_channels, config_.input_depth, config_.input_height,
-            config_.input_width};
-        const std::array<int32_t, 5> weight{
-            config_.output_channels, config_.input_channels, 3, 3, 3};
+        const std::array<int32_t, 5> activation{config_.batch, config_.input_channels,
+                                                config_.input_depth, config_.input_height,
+                                                config_.input_width};
+        const std::array<int32_t, 5> weight{config_.output_channels, config_.input_channels, 3, 3,
+                                            3};
         const std::array<int32_t, 1> bias{config_.output_channels};
-        const std::array<int32_t, 5> output{
-            config_.batch, config_.output_channels, config_.input_depth - 2,
-            config_.input_height - 2, config_.input_width - 2};
+        const std::array<int32_t, 5> output{config_.batch, config_.output_channels,
+                                            config_.input_depth - 2, config_.input_height - 2,
+                                            config_.input_width - 2};
         return isSupportedConfig(config_) && matches(inputs[0].dims, activation) &&
                matches(inputs[1].dims, weight) && matches(inputs[2].dims, bias) &&
                matches(outputs[0].dims, output);
     }
 
-    bool validateDescriptors(nvinfer1::DynamicPluginTensorDesc const* inputs,
-                             int32_t input_count,
+    bool validateDescriptors(nvinfer1::DynamicPluginTensorDesc const* inputs, int32_t input_count,
                              nvinfer1::DynamicPluginTensorDesc const* outputs,
                              int32_t output_count) const noexcept {
         if (inputs == nullptr || outputs == nullptr || input_count != 3 || output_count != 1)
             return false;
-        const std::array<nvinfer1::PluginTensorDesc, 3> input_desc{
-            inputs[0].desc, inputs[1].desc, inputs[2].desc};
+        const std::array<nvinfer1::PluginTensorDesc, 3> input_desc{inputs[0].desc, inputs[1].desc,
+                                                                   inputs[2].desc};
         return validateRuntimeDescriptors(input_desc.data(), &outputs[0].desc);
     }
 
@@ -287,13 +280,12 @@ class VaeConv3dPlugin final : public nvinfer1::IPluginV2DynamicExt {
                 config_.input_width,
             config_.input_depth * config_.input_height * config_.input_width,
             config_.input_height * config_.input_width, config_.input_width, 1};
-        const int output_dims[5] = {config_.batch, config_.output_channels,
-                                    config_.input_depth - 2, config_.input_height - 2,
-                                    config_.input_width - 2};
-        const int output_strides[5] = {
-            config_.output_channels * output_dims[2] * output_dims[3] * output_dims[4],
-            output_dims[2] * output_dims[3] * output_dims[4], output_dims[3] * output_dims[4],
-            output_dims[4], 1};
+        const int output_dims[5] = {config_.batch, config_.output_channels, config_.input_depth - 2,
+                                    config_.input_height - 2, config_.input_width - 2};
+        const int output_strides[5] = {config_.output_channels * output_dims[2] * output_dims[3] *
+                                           output_dims[4],
+                                       output_dims[2] * output_dims[3] * output_dims[4],
+                                       output_dims[3] * output_dims[4], output_dims[4], 1};
         const int filter_dims[5] = {config_.output_channels, config_.input_channels, 3, 3, 3};
         const int pad[3] = {0, 0, 0};
         const int stride[3] = {1, 1, 1};
@@ -302,8 +294,8 @@ class VaeConv3dPlugin final : public nvinfer1::IPluginV2DynamicExt {
                                        input_strides) != CUDNN_STATUS_SUCCESS ||
             cudnnSetTensorNdDescriptor(output_descriptor_, CUDNN_DATA_FLOAT, 5, output_dims,
                                        output_strides) != CUDNN_STATUS_SUCCESS ||
-            cudnnSetFilterNdDescriptor(filter_descriptor_, CUDNN_DATA_FLOAT,
-                                       CUDNN_TENSOR_NCHW, 5, filter_dims) != CUDNN_STATUS_SUCCESS ||
+            cudnnSetFilterNdDescriptor(filter_descriptor_, CUDNN_DATA_FLOAT, CUDNN_TENSOR_NCHW, 5,
+                                       filter_dims) != CUDNN_STATUS_SUCCESS ||
             cudnnSetConvolutionNdDescriptor(convolution_descriptor_, 3, pad, stride, dilation,
                                             CUDNN_CROSS_CORRELATION,
                                             CUDNN_DATA_FLOAT) != CUDNN_STATUS_SUCCESS ||
@@ -316,10 +308,10 @@ class VaeConv3dPlugin final : public nvinfer1::IPluginV2DynamicExt {
 
         std::array<cudnnConvolutionFwdAlgoPerf_t, CUDNN_CONVOLUTION_FWD_ALGO_COUNT> performance{};
         int returned = 0;
-        if (cudnnGetConvolutionForwardAlgorithm_v7(
-                handle_, input_descriptor_, filter_descriptor_, convolution_descriptor_,
-                output_descriptor_, static_cast<int>(performance.size()), &returned,
-                performance.data()) != CUDNN_STATUS_SUCCESS) {
+        if (cudnnGetConvolutionForwardAlgorithm_v7(handle_, input_descriptor_, filter_descriptor_,
+                                                   convolution_descriptor_, output_descriptor_,
+                                                   static_cast<int>(performance.size()), &returned,
+                                                   performance.data()) != CUDNN_STATUS_SUCCESS) {
             release();
             return false;
         }
@@ -331,8 +323,8 @@ class VaeConv3dPlugin final : public nvinfer1::IPluginV2DynamicExt {
             size_t queried_workspace = 0;
             if (cudnnGetConvolutionForwardWorkspaceSize(
                     handle_, input_descriptor_, filter_descriptor_, convolution_descriptor_,
-                    output_descriptor_, candidate.algo, &queried_workspace) !=
-                    CUDNN_STATUS_SUCCESS ||
+                    output_descriptor_, candidate.algo,
+                    &queried_workspace) != CUDNN_STATUS_SUCCESS ||
                 queried_workspace > kMAX_WORKSPACE_BYTES)
                 continue;
             algorithm_ = candidate.algo;
@@ -409,8 +401,8 @@ class VaeConv3dCreator final : public nvinfer1::IPluginCreator {
     nvinfer1::PluginFieldCollection const* getFieldNames() noexcept override {
         return &collection_;
     }
-    nvinfer1::IPluginV2* createPlugin(
-        char const*, nvinfer1::PluginFieldCollection const* collection) noexcept override {
+    nvinfer1::IPluginV2*
+    createPlugin(char const*, nvinfer1::PluginFieldCollection const* collection) noexcept override {
         Conv3dConfig config{};
         bool seen[6]{};
         if (collection == nullptr)

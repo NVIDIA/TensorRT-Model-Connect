@@ -3476,6 +3476,20 @@ class TestCoverageMapIntegration:
         assert result.fallback_tiers == []
 
     @pytest.mark.parametrize("coverage_map", [None, {}])
+    def test_clang_format_ignore_selects_contract_test(self, imap, coverage_map):
+        """Formatting exclusions must run their fail-closed provenance contract."""
+        result = test_impact.analyze_impact(
+            [".clang-format-ignore"],
+            imap,
+            coverage_map=coverage_map,
+        )
+
+        assert result.e2e_models == []
+        assert result.unit_tiers == ["tools"]
+        assert result.tools_tests == ["tests/tools/test_clang_format_ignore_contract.py"]
+        assert result.fallback_tiers == []
+
+    @pytest.mark.parametrize("coverage_map", [None, {}])
     def test_nightly_artifact_selector_selects_focused_tools_tests(self, imap, coverage_map):
         result = test_impact.analyze_impact(
             ["tools/select_latest_attempt_artifact.py"],

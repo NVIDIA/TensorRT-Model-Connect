@@ -101,11 +101,7 @@ void append_python_native_directories(std::vector<std::filesystem::path>& paths,
     }
 }
 
-std::vector<std::vector<std::filesystem::path>> dependency_search_tiers() {
-    std::vector<std::filesystem::path> configured;
-    append_path_list(configured, std::getenv("LD_LIBRARY_PATH"));
-
-    std::vector<std::filesystem::path> packaged;
+std::set<std::filesystem::path> discover_python_prefixes() {
     std::set<std::filesystem::path> prefixes;
     for (const char* variable : {"VIRTUAL_ENV", "CONDA_PREFIX"}) {
         if (const char* value = std::getenv(variable); value != nullptr && value[0] != '\0')
@@ -121,14 +117,24 @@ std::vector<std::vector<std::filesystem::path>> dependency_search_tiers() {
     const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
     if (!error && executable.parent_path().filename() == "bin")
         prefixes.insert(executable.parent_path().parent_path());
+    return prefixes;
+}
+
+std::vector<std::filesystem::path> packaged_dependency_directories() {
+    std::vector<std::filesystem::path> packaged;
+    const auto prefixes = discover_python_prefixes();
     for (const auto& prefix : prefixes)
         append_python_native_directories(packaged, prefix);
+    return packaged;
+}
 
+std::vector<std::filesystem::path> system_dependency_directories() {
     std::vector<std::filesystem::path> system{
         "/usr/local/cuda/lib64",  "/usr/lib/aarch64-linux-gnu", "/usr/lib/x86_64-linux-gnu",
         "/lib/aarch64-linux-gnu", "/lib/x86_64-linux-gnu",
     };
     const std::filesystem::path local("/usr/local");
+    std::error_code error;
     for (std::filesystem::directory_iterator iterator(local, error), end; !error && iterator != end;
          iterator.increment(error)) {
         if (!iterator->is_directory(error) ||
@@ -142,7 +148,14 @@ std::vector<std::vector<std::filesystem::path>> dependency_search_tiers() {
             system.push_back(target->path() / "lib");
         }
     }
-    return {std::move(configured), std::move(packaged), std::move(system)};
+    return system;
+}
+
+std::vector<std::vector<std::filesystem::path>> dependency_search_tiers() {
+    std::vector<std::filesystem::path> configured;
+    append_path_list(configured, std::getenv("LD_LIBRARY_PATH"));
+    return {std::move(configured), packaged_dependency_directories(),
+            system_dependency_directories()};
 }
 
 std::optional<std::filesystem::path> resolve_dependency_path(const std::string& soname) {
@@ -431,33 +444,44 @@ void validate_wan22_lazy_plan_sections(const PipelineContext& ctx) {
     }
 }
 
-std::unordered_map<std::string, std::string>
-parse_wan22_artifact_digests(const std::string& config_json) {
-    static constexpr const char* kArtifacts[] = {"text_encoder_0_plan", "denoiser_plan",
-                                                 "vae_decoder_plan", "vae_decoder_first_frame_plan",
-                                                 kWan22PluginSection};
-    nlohmann::json config;
+nlohmann::json parse_wan22_config_json(const std::string& config_json) {
     try {
-        config = nlohmann::json::parse(config_json);
+        return nlohmann::json::parse(config_json);
     } catch (const nlohmann::json::exception& error) {
         throw std::runtime_error(std::string("Invalid Wan2.2 config.json: ") + error.what());
     }
+}
+
+const nlohmann::json& require_artifact_sections(const nlohmann::json& config) {
     const auto manifest = config.find("artifact_manifest");
     if (manifest == config.end() || !manifest->is_object() || !manifest->contains("sections") ||
         !(*manifest)["sections"].is_object()) {
         throw std::runtime_error("Wan2.2 config is missing artifact_manifest sections");
     }
+    return (*manifest)["sections"];
+}
+
+std::string require_artifact_sha256(const nlohmann::json& sections, const char* artifact) {
+    const auto entry = sections.find(artifact);
+    if (entry == sections.end() || !entry->is_object() || !entry->contains("sha256") ||
+        !(*entry)["sha256"].is_string()) {
+        throw std::runtime_error(std::string("Wan2.2 artifact_manifest is missing ") + artifact +
+                                 " SHA256");
+    }
+    return (*entry)["sha256"].get<std::string>();
+}
+
+std::unordered_map<std::string, std::string>
+parse_wan22_artifact_digests(const std::string& config_json) {
+    static constexpr const char* kArtifacts[] = {"text_encoder_0_plan", "denoiser_plan",
+                                                 "vae_decoder_plan", "vae_decoder_first_frame_plan",
+                                                 kWan22PluginSection};
+    const auto config = parse_wan22_config_json(config_json);
+    const auto& sections = require_artifact_sections(config);
 
     std::unordered_map<std::string, std::string> result;
-    for (const char* artifact : kArtifacts) {
-        const auto entry = (*manifest)["sections"].find(artifact);
-        if (entry == (*manifest)["sections"].end() || !entry->is_object() ||
-            !entry->contains("sha256") || !(*entry)["sha256"].is_string()) {
-            throw std::runtime_error(std::string("Wan2.2 artifact_manifest is missing ") +
-                                     artifact + " SHA256");
-        }
-        result.emplace(artifact, (*entry)["sha256"].get<std::string>());
-    }
+    for (const char* artifact : kArtifacts)
+        result.emplace(artifact, require_artifact_sha256(sections, artifact));
     return result;
 }
 

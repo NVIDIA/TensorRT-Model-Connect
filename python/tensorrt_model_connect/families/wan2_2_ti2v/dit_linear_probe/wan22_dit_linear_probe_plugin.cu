@@ -11,13 +11,12 @@
  */
 
 #include <NvInferRuntime.h>
-#include <cublasLt.h>
-#include <cuda_runtime_api.h>
-
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cublasLt.h>
+#include <cuda_runtime_api.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -142,21 +141,20 @@ class LinearContext {
             !create_layout(&d_layout_, config_.n, config_.m, config_.n, "D(output^T)"))
             return 1;
 
-        if (!check(cublasLtMatmulPreferenceCreate(&preference_),
-                   "cublasLtMatmulPreferenceCreate"))
+        if (!check(cublasLtMatmulPreferenceCreate(&preference_), "cublasLtMatmulPreferenceCreate"))
             return 1;
         const size_t workspace_limit = workspace_limit_bytes();
-        if (!check(cublasLtMatmulPreferenceSetAttribute(
-                       preference_, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_limit,
-                       sizeof(workspace_limit)),
+        if (!check(cublasLtMatmulPreferenceSetAttribute(preference_,
+                                                        CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                        &workspace_limit, sizeof(workspace_limit)),
                    "set max workspace"))
             return 1;
 
         candidates_.resize(kMAX_HEURISTICS);
         int returned = 0;
-        if (!check(cublasLtMatmulAlgoGetHeuristic(
-                       handle_, operation_, a_layout_, b_layout_, c_layout_, d_layout_, preference_,
-                       kMAX_HEURISTICS, candidates_.data(), &returned),
+        if (!check(cublasLtMatmulAlgoGetHeuristic(handle_, operation_, a_layout_, b_layout_,
+                                                  c_layout_, d_layout_, preference_,
+                                                  kMAX_HEURISTICS, candidates_.data(), &returned),
                    "cublasLtMatmulAlgoGetHeuristic"))
             return 1;
         candidates_.resize(static_cast<size_t>(std::max(returned, 0)));
@@ -195,8 +193,8 @@ class LinearContext {
         constexpr float beta = 0.0F;
         const auto& selected = candidates_[static_cast<size_t>(config_.heuristic_index)];
         return check(cublasLtMatmul(handle_, operation_, &alpha, weight, a_layout_, x, b_layout_,
-                                   &beta, output, c_layout_, output, d_layout_, &selected.algo,
-                                   workspace, workspace_bytes, stream),
+                                    &beta, output, c_layout_, output, d_layout_, &selected.algo,
+                                    workspace, workspace_bytes, stream),
                      "cublasLtMatmul")
                    ? 0
                    : 1;
@@ -213,7 +211,8 @@ class LinearContext {
         result.reserve(candidates_.size());
         for (size_t index = 0; index < candidates_.size(); ++index) {
             if (candidates_[index].state == CUBLAS_STATUS_SUCCESS)
-                result.push_back(describe_algorithm(candidates_[index], static_cast<int32_t>(index)));
+                result.push_back(
+                    describe_algorithm(candidates_[index], static_cast<int32_t>(index)));
         }
         return result;
     }
@@ -317,8 +316,12 @@ class DitLinearProbePlugin final : public nvinfer1::IPluginV2DynamicExt {
     void detachFromContext() noexcept override { context_.reset(); }
     void destroy() noexcept override { delete this; }
     size_t getSerializationSize() const noexcept override { return sizeof(config_); }
-    void serialize(void* buffer) const noexcept override { std::memcpy(buffer, &config_, sizeof(config_)); }
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void serialize(void* buffer) const noexcept override {
+        std::memcpy(buffer, &config_, sizeof(config_));
+    }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
     nvinfer1::DataType getOutputDataType(int32_t, nvinfer1::DataType const*,
                                          int32_t) const noexcept override {
@@ -348,9 +351,9 @@ class DitLinearProbePlugin final : public nvinfer1::IPluginV2DynamicExt {
                             nvinfer1::PluginTensorDesc const*, int32_t) const noexcept override {
         return static_cast<size_t>(std::max(config_.workspace_mib, 0)) * 1024U * 1024U;
     }
-    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc,
-                    nvinfer1::PluginTensorDesc const*, void const* const* inputs,
-                    void* const* outputs, void* workspace, cudaStream_t stream) noexcept override {
+    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc, nvinfer1::PluginTensorDesc const*,
+                    void const* const* inputs, void* const* outputs, void* workspace,
+                    cudaStream_t stream) noexcept override {
         // TensorRT 11 may attach a deserialized V2 plugin without invoking the
         // legacy initialize() callback on that exact clone.  attachToContext()
         // is the primary lifecycle hook; this lazy guard is a last-resort
@@ -358,8 +361,7 @@ class DitLinearProbePlugin final : public nvinfer1::IPluginV2DynamicExt {
         if (context_ == nullptr && initialize_context() != 0)
             return 1;
         if (context_ == nullptr || inputs == nullptr || outputs == nullptr) {
-            std::fprintf(stderr,
-                         "Wan22DitLinearProbe enqueue: context=%p inputs=%p outputs=%p\n",
+            std::fprintf(stderr, "Wan22DitLinearProbe enqueue: context=%p inputs=%p outputs=%p\n",
                          static_cast<void*>(context_.get()), static_cast<const void*>(inputs),
                          static_cast<const void*>(outputs));
             return 1;
@@ -371,10 +373,9 @@ class DitLinearProbePlugin final : public nvinfer1::IPluginV2DynamicExt {
             std::fprintf(stderr,
                          "Wan22DitLinearProbe enqueue shape mismatch: x=[%d,%d] w=[%d,%d] "
                          "b=[%d] expected=[%d,%d]x[%d,%d]+[%d]\n",
-                         input_desc[0].dims.d[0], input_desc[0].dims.d[1],
-                         input_desc[1].dims.d[0], input_desc[1].dims.d[1],
-                         input_desc[2].dims.d[0], config_.m, config_.k, config_.n, config_.k,
-                         config_.n);
+                         input_desc[0].dims.d[0], input_desc[0].dims.d[1], input_desc[1].dims.d[0],
+                         input_desc[1].dims.d[1], input_desc[2].dims.d[0], config_.m, config_.k,
+                         config_.n, config_.k, config_.n);
             return 1;
         }
         const int32_t status = context_->run(inputs[0], inputs[1], inputs[2], outputs[0], workspace,
@@ -412,7 +413,9 @@ class DitLinearProbeCreator final : public nvinfer1::IPluginCreator {
         fields_ = {5, field_entries_};
     }
     char const* getPluginName() const noexcept override { return DitLinearProbePlugin::kNAME; }
-    char const* getPluginVersion() const noexcept override { return DitLinearProbePlugin::kVERSION; }
+    char const* getPluginVersion() const noexcept override {
+        return DitLinearProbePlugin::kVERSION;
+    }
     nvinfer1::PluginFieldCollection const* getFieldNames() noexcept override { return &fields_; }
     nvinfer1::IPluginV2*
     createPlugin(char const*, nvinfer1::PluginFieldCollection const* fields) noexcept override {
@@ -431,7 +434,9 @@ class DitLinearProbeCreator final : public nvinfer1::IPluginCreator {
                                            size_t length) noexcept override {
         return length == sizeof(ProbeConfig) ? new DitLinearProbePlugin(data, length) : nullptr;
     }
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
 
   private:
@@ -469,8 +474,8 @@ int trtmc_wan22_linear_probe_query(int32_t m, int32_t n, int32_t k, int32_t work
     return static_cast<int32_t>(candidates.size());
 }
 
-void* trtmc_wan22_linear_probe_create(int32_t m, int32_t n, int32_t k,
-                                      int32_t heuristic_index, int32_t workspace_mib) {
+void* trtmc_wan22_linear_probe_create(int32_t m, int32_t n, int32_t k, int32_t heuristic_index,
+                                      int32_t workspace_mib) {
     trtmc::wan22::linear_probe::ProbeConfig config{m, n, k, heuristic_index, workspace_mib};
     auto context = std::make_unique<trtmc::wan22::linear_probe::LinearContext>(config);
     if (context->initialize() != 0) {

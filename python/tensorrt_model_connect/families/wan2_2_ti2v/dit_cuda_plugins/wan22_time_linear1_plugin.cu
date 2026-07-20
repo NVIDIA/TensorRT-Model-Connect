@@ -11,14 +11,13 @@
  */
 
 #include <NvInferRuntime.h>
-#include <cublasLt.h>
-#include <cuda_runtime_api.h>
-
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cublasLt.h>
+#include <cuda_runtime_api.h>
 #include <memory>
 #include <string>
 #include <vector>
@@ -106,8 +105,7 @@ PlanInfo describe_algorithm(const cublasLtMatmulHeuristicResult_t& result, int32
         info.tile_id = static_cast<int32_t>(unsigned_value);
     if (algorithm_attribute(result.algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &unsigned_value))
         info.stages_id = static_cast<int32_t>(unsigned_value);
-    if (algorithm_attribute(result.algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME,
-                            &unsigned_value))
+    if (algorithm_attribute(result.algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &unsigned_value))
         info.reduction_scheme = static_cast<int32_t>(unsigned_value);
     if (algorithm_attribute(result.algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, &unsigned_value))
         info.cta_swizzle = static_cast<int32_t>(unsigned_value);
@@ -141,8 +139,7 @@ class Context {
         if (!check(cublasLtMatmulDescCreate(&operation_, CUBLAS_COMPUTE_32F, CUDA_R_32F),
                    "cublasLtMatmulDescCreate") ||
             !check(cublasLtMatmulDescSetAttribute(operation_, CUBLASLT_MATMUL_DESC_TRANSA,
-                                                  &transpose_weight,
-                                                  sizeof(transpose_weight)),
+                                                  &transpose_weight, sizeof(transpose_weight)),
                    "set TRANSA") ||
             !check(cublasLtMatmulDescSetAttribute(operation_, CUBLASLT_MATMUL_DESC_TRANSB,
                                                   &transpose_input, sizeof(transpose_input)),
@@ -164,8 +161,8 @@ class Context {
         if (!check(cublasLtMatmulPreferenceCreate(&preference_),
                    "cublasLtMatmulPreferenceCreate") ||
             !check(cublasLtMatmulPreferenceSetAttribute(
-                       preference_, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                       &kWorkspaceLimitBytes, sizeof(kWorkspaceLimitBytes)),
+                       preference_, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &kWorkspaceLimitBytes,
+                       sizeof(kWorkspaceLimitBytes)),
                    "set 32 MiB heuristic workspace"))
             return 1;
 
@@ -189,8 +186,8 @@ class Context {
         return 1;
     }
 
-    int run(const void* input, const void* weight, const void* bias, void* output,
-            void* workspace, size_t workspace_bytes, cudaStream_t stream) {
+    int run(const void* input, const void* weight, const void* bias, void* output, void* workspace,
+            size_t workspace_bytes, cudaStream_t stream) {
         if (!initialized_ || selected_index_ < 0 || input == nullptr || weight == nullptr ||
             bias == nullptr || output == nullptr || workspace == nullptr) {
             error_ = "run called with an uninitialized context or null pointer";
@@ -208,9 +205,9 @@ class Context {
         constexpr float beta = 0.0F;
         const auto& selected = candidates_[static_cast<size_t>(selected_index_)];
         return check(cublasLtMatmul(handle_, operation_, &alpha, weight, weight_layout_, input,
-                                   input_layout_, &beta, output, output_layout_, output,
-                                   output_layout_, &selected.algo, workspace, workspace_bytes,
-                                   stream),
+                                    input_layout_, &beta, output, output_layout_, output,
+                                    output_layout_, &selected.algo, workspace, workspace_bytes,
+                                    stream),
                      "cublasLtMatmul")
                    ? 0
                    : 1;
@@ -230,9 +227,9 @@ class Context {
 
     bool create_layout(cublasLtMatrixLayout_t* layout, uint64_t rows, uint64_t columns,
                        int64_t leading_dimension, const char* name) {
-        return check(cublasLtMatrixLayoutCreate(layout, CUDA_R_32F, rows, columns,
-                                                leading_dimension),
-                     (std::string("create ") + name + " layout").c_str());
+        return check(
+            cublasLtMatrixLayoutCreate(layout, CUDA_R_32F, rows, columns, leading_dimension),
+            (std::string("create ") + name + " layout").c_str());
     }
 
     void reset() {
@@ -296,7 +293,9 @@ class WAN22_TIME_LINEAR_PLUGIN_CLASS final : public nvinfer1::IPluginV2DynamicEx
     void destroy() noexcept override { delete this; }
     size_t getSerializationSize() const noexcept override { return 0; }
     void serialize(void*) const noexcept override {}
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
     nvinfer1::DataType getOutputDataType(int32_t, nvinfer1::DataType const*,
                                          int32_t) const noexcept override {
@@ -326,9 +325,9 @@ class WAN22_TIME_LINEAR_PLUGIN_CLASS final : public nvinfer1::IPluginV2DynamicEx
                             nvinfer1::PluginTensorDesc const*, int32_t) const noexcept override {
         return kWorkspaceLimitBytes;
     }
-    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc,
-                    nvinfer1::PluginTensorDesc const*, void const* const* inputs,
-                    void* const* outputs, void* workspace, cudaStream_t stream) noexcept override {
+    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc, nvinfer1::PluginTensorDesc const*,
+                    void const* const* inputs, void* const* outputs, void* workspace,
+                    cudaStream_t stream) noexcept override {
         if (context_ == nullptr && initialize_context() != 0)
             return 1;
         if (context_ == nullptr || inputs == nullptr || outputs == nullptr)
@@ -341,8 +340,8 @@ class WAN22_TIME_LINEAR_PLUGIN_CLASS final : public nvinfer1::IPluginV2DynamicEx
             std::fprintf(stderr, "%s input shape mismatch\n", WAN22_TIME_LINEAR_INSTANCE_NAME);
             return 1;
         }
-        const int32_t status = context_->run(inputs[0], inputs[1], inputs[2], outputs[0],
-                                             workspace, kWorkspaceLimitBytes, stream);
+        const int32_t status = context_->run(inputs[0], inputs[1], inputs[2], outputs[0], workspace,
+                                             kWorkspaceLimitBytes, stream);
         if (status != 0)
             std::fprintf(stderr, "%s enqueue: %s\n", WAN22_TIME_LINEAR_INSTANCE_NAME,
                          context_->error().c_str());
@@ -382,7 +381,9 @@ class WAN22_TIME_LINEAR_CREATOR_CLASS final : public nvinfer1::IPluginCreator {
                                            size_t length) noexcept override {
         return length == 0 ? new WAN22_TIME_LINEAR_PLUGIN_CLASS(data, length) : nullptr;
     }
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
 
   private:

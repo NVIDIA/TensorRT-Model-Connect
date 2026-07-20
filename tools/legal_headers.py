@@ -110,6 +110,7 @@ TEMPLATE_SUFFIXES = frozenset({".in", ".j2", ".jinja", ".tmpl", ".template"})
 HASH_SPECIAL_NAMES = frozenset(
     {
         ".clang-format",
+        ".clang-format-ignore",
         ".clang-tidy",
         ".dockerignore",
         ".gitattributes",

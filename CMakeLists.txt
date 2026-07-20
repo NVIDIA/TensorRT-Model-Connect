@@ -822,12 +822,6 @@ endfunction()
 # Bundle / format
 trtmc_add_test(test_bundle_format)
 trtmc_add_test(test_bundle_materialization)
-target_link_libraries(test_bundle_materialization PRIVATE nlohmann_json::nlohmann_json)
-if(TARGET trtmc_model_wan2_2_ti2v)
-  target_link_libraries(test_bundle_materialization PRIVATE trtmc_model_wan2_2_ti2v)
-  target_compile_definitions(test_bundle_materialization PRIVATE
-    TRTMC_TEST_WAN22_ARTIFACT_CONTRACT=1)
-endif()
 trtmc_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtmc_add_test(test_bundle_view)
 trtmc_add_test(test_pipeline_registry)
@@ -841,10 +835,6 @@ set_target_properties(trtmc_test_model_plugin_api_abi_v1 PROPERTIES
 )
 add_dependencies(test_model_plugin_loader
   trtmc_model_plugins
-  trtmc_test_model_plugin_api_abi_v1
-)
-target_compile_definitions(test_model_plugin_loader PRIVATE
-  TRTMC_TEST_MODEL_PLUGIN_V1_PATH="$<TARGET_FILE:trtmc_test_model_plugin_api_abi_v1>"
 )
 trtmc_add_test(test_backend_loader)
 add_library(trtmc_test_backend_missing_api_abi SHARED EXCLUDE_FROM_ALL

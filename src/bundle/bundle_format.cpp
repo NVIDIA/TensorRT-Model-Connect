@@ -53,48 +53,70 @@ std::size_t find_matching_object_end(const std::string& json, std::size_t brace_
     return pos;
 }
 
-std::uint64_t parse_section_size_field(const std::string& inner, const std::string& key) {
+[[noreturn]] void throw_malformed_section_field(const std::string& key) {
+    throw std::runtime_error("Bundle section has malformed '" + key + "'");
+}
+
+std::size_t skip_json_whitespace(const std::string& text, std::size_t position) {
+    while (position < text.size() &&
+           std::isspace(static_cast<unsigned char>(text[position])) != 0) {
+        ++position;
+    }
+    return position;
+}
+
+std::size_t require_section_value_start(const std::string& inner, const std::string& key) {
     const std::string needle = "\"" + key + "\"";
     const auto key_pos = inner.find(needle);
     if (key_pos == std::string::npos)
         throw std::runtime_error("Bundle section is missing '" + key + "'");
 
-    std::size_t colon = key_pos + needle.size();
-    while (colon < inner.size() && std::isspace(static_cast<unsigned char>(inner[colon])) != 0) {
-        ++colon;
-    }
+    const std::size_t colon = skip_json_whitespace(inner, key_pos + needle.size());
     if (colon == inner.size() || inner[colon] != ':')
-        throw std::runtime_error("Bundle section has malformed '" + key + "'");
+        throw_malformed_section_field(key);
 
-    std::size_t start = colon + 1;
-    while (start < inner.size() && std::isspace(static_cast<unsigned char>(inner[start])) != 0) {
-        ++start;
-    }
+    const std::size_t start = skip_json_whitespace(inner, colon + 1);
     if (start == inner.size())
-        throw std::runtime_error("Bundle section has malformed '" + key + "'");
+        throw_malformed_section_field(key);
     if (inner[start] == '-')
         throw std::runtime_error("Bundle section has negative '" + key + "'");
     if (!std::isdigit(static_cast<unsigned char>(inner[start])))
-        throw std::runtime_error("Bundle section has malformed '" + key + "'");
+        throw_malformed_section_field(key);
+    return start;
+}
 
+std::size_t find_decimal_end(const std::string& inner, std::size_t start, const std::string& key) {
     std::size_t end = start;
     while (end < inner.size() && std::isdigit(static_cast<unsigned char>(inner[end])) != 0)
         ++end;
     if (inner[start] == '0' && end != start + 1)
-        throw std::runtime_error("Bundle section has malformed '" + key + "'");
+        throw_malformed_section_field(key);
+    return end;
+}
 
+std::uint64_t parse_decimal_u64(const std::string& inner, std::size_t start, std::size_t end,
+                                const std::string& key) {
     std::uint64_t value = 0;
     const auto result = std::from_chars(inner.data() + start, inner.data() + end, value);
     if (result.ec == std::errc::result_out_of_range)
         throw std::runtime_error("Bundle section has overflowing '" + key + "'");
     if (result.ec != std::errc{} || result.ptr != inner.data() + end)
-        throw std::runtime_error("Bundle section has malformed '" + key + "'");
+        throw_malformed_section_field(key);
+    return value;
+}
 
-    while (end < inner.size() && std::isspace(static_cast<unsigned char>(inner[end])) != 0)
-        ++end;
-    if (end == inner.size() || (inner[end] != ',' && inner[end] != '}')) {
-        throw std::runtime_error("Bundle section has malformed '" + key + "'");
-    }
+void require_section_value_terminator(const std::string& inner, std::size_t end,
+                                      const std::string& key) {
+    end = skip_json_whitespace(inner, end);
+    if (end == inner.size() || (inner[end] != ',' && inner[end] != '}'))
+        throw_malformed_section_field(key);
+}
+
+std::uint64_t parse_section_size_field(const std::string& inner, const std::string& key) {
+    const std::size_t start = require_section_value_start(inner, key);
+    const std::size_t end = find_decimal_end(inner, start, key);
+    const std::uint64_t value = parse_decimal_u64(inner, start, end, key);
+    require_section_value_terminator(inner, end, key);
     return value;
 }
 

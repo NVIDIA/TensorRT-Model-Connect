@@ -4,9 +4,8 @@
  */
 
 #include <NvInferRuntime.h>
-#include <cuda_runtime_api.h>
-
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <string>
 
 namespace trtmc::wan22 {
@@ -55,14 +54,12 @@ class VaeFp32BarrierPlugin final : public nvinfer1::IPluginV2DynamicExt {
         result->namespace_ = namespace_;
         return result;
     }
-    nvinfer1::DimsExprs getOutputDimensions(int32_t, nvinfer1::DimsExprs const* inputs,
-                                            int32_t, nvinfer1::IExprBuilder&) noexcept override {
+    nvinfer1::DimsExprs getOutputDimensions(int32_t, nvinfer1::DimsExprs const* inputs, int32_t,
+                                            nvinfer1::IExprBuilder&) noexcept override {
         return inputs[0];
     }
-    bool supportsFormatCombination(int32_t position,
-                                   nvinfer1::PluginTensorDesc const* in_out,
-                                   int32_t input_count,
-                                   int32_t output_count) noexcept override {
+    bool supportsFormatCombination(int32_t position, nvinfer1::PluginTensorDesc const* in_out,
+                                   int32_t input_count, int32_t output_count) noexcept override {
         return input_count == 1 && output_count == 1 && position >= 0 && position < 2 &&
                in_out[position].format == nvinfer1::TensorFormat::kLINEAR &&
                in_out[position].type == nvinfer1::DataType::kFLOAT;
@@ -70,13 +67,12 @@ class VaeFp32BarrierPlugin final : public nvinfer1::IPluginV2DynamicExt {
     void configurePlugin(nvinfer1::DynamicPluginTensorDesc const*, int32_t,
                          nvinfer1::DynamicPluginTensorDesc const*, int32_t) noexcept override {}
     size_t getWorkspaceSize(nvinfer1::PluginTensorDesc const*, int32_t,
-                            nvinfer1::PluginTensorDesc const*,
-                            int32_t) const noexcept override {
+                            nvinfer1::PluginTensorDesc const*, int32_t) const noexcept override {
         return 0;
     }
-    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc,
-                    nvinfer1::PluginTensorDesc const*, void const* const* inputs,
-                    void* const* outputs, void*, cudaStream_t stream) noexcept override {
+    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc, nvinfer1::PluginTensorDesc const*,
+                    void const* const* inputs, void* const* outputs, void*,
+                    cudaStream_t stream) noexcept override {
         const int64_t count = volume(input_desc[0].dims);
         if (count <= 0 || inputs == nullptr || outputs == nullptr)
             return 1;
@@ -101,8 +97,8 @@ class VaeFp32BarrierCreator final : public nvinfer1::IPluginCreator {
         return VaeFp32BarrierPlugin::kVERSION;
     }
     nvinfer1::PluginFieldCollection const* getFieldNames() noexcept override { return &fields_; }
-    nvinfer1::IPluginV2* createPlugin(
-        char const*, nvinfer1::PluginFieldCollection const*) noexcept override {
+    nvinfer1::IPluginV2* createPlugin(char const*,
+                                      nvinfer1::PluginFieldCollection const*) noexcept override {
         return new VaeFp32BarrierPlugin();
     }
     nvinfer1::IPluginV2* deserializePlugin(char const*, void const* data,

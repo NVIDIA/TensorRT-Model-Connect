@@ -29,8 +29,7 @@ __global__ void residual_add_kernel(const float* residual, float* output) {
 }
 
 int32_t launch_gated_residual(const float* residual, const float* update, const float* gate,
-                              float* output, int32_t rows, int32_t columns,
-                              cudaStream_t stream) {
+                              float* output, int32_t rows, int32_t columns, cudaStream_t stream) {
     if (residual == nullptr || update == nullptr || gate == nullptr || output == nullptr ||
         rows != kRows || columns != kColumns)
         return 1;
@@ -61,7 +60,9 @@ class DitGatedResidualFp32Plugin final : public nvinfer1::IPluginV2DynamicExt {
     void destroy() noexcept override { delete this; }
     size_t getSerializationSize() const noexcept override { return 0; }
     void serialize(void*) const noexcept override {}
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
     nvinfer1::DataType getOutputDataType(int32_t, nvinfer1::DataType const*,
                                          int32_t) const noexcept override {
@@ -88,9 +89,9 @@ class DitGatedResidualFp32Plugin final : public nvinfer1::IPluginV2DynamicExt {
                             nvinfer1::PluginTensorDesc const*, int32_t) const noexcept override {
         return 0;
     }
-    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc,
-                    nvinfer1::PluginTensorDesc const*, void const* const* inputs,
-                    void* const* outputs, void*, cudaStream_t stream) noexcept override {
+    int32_t enqueue(nvinfer1::PluginTensorDesc const* input_desc, nvinfer1::PluginTensorDesc const*,
+                    void const* const* inputs, void* const* outputs, void*,
+                    cudaStream_t stream) noexcept override {
         if (input_desc == nullptr || inputs == nullptr || outputs == nullptr)
             return 1;
         const auto& residual = input_desc[0].dims;
@@ -100,10 +101,10 @@ class DitGatedResidualFp32Plugin final : public nvinfer1::IPluginV2DynamicExt {
             update.nbDims != 2 || update.d[0] != kRows || update.d[1] != kColumns ||
             gate.nbDims != 2 || gate.d[0] != 1 || gate.d[1] != kColumns)
             return 1;
-        return launch_gated_residual(
-            static_cast<const float*>(inputs[0]), static_cast<const float*>(inputs[1]),
-            static_cast<const float*>(inputs[2]), static_cast<float*>(outputs[0]), kRows,
-            kColumns, stream);
+        return launch_gated_residual(static_cast<const float*>(inputs[0]),
+                                     static_cast<const float*>(inputs[1]),
+                                     static_cast<const float*>(inputs[2]),
+                                     static_cast<float*>(outputs[0]), kRows, kColumns, stream);
     }
 
   private:
@@ -128,7 +129,9 @@ class DitGatedResidualFp32Creator final : public nvinfer1::IPluginCreator {
                                            size_t length) noexcept override {
         return new DitGatedResidualFp32Plugin(data, length);
     }
-    void setPluginNamespace(char const* value) noexcept override { namespace_ = value ? value : ""; }
+    void setPluginNamespace(char const* value) noexcept override {
+        namespace_ = value ? value : "";
+    }
     char const* getPluginNamespace() const noexcept override { return namespace_.c_str(); }
 
   private:
@@ -138,9 +141,10 @@ class DitGatedResidualFp32Creator final : public nvinfer1::IPluginCreator {
 
 } // namespace trtmc::wan22
 
-extern "C" int trtmc_wan22_dit_gated_residual_fp32_launch(
-    const float* residual, const float* update, const float* gate, float* output, int32_t rows,
-    int32_t columns, void* stream) {
+extern "C" int trtmc_wan22_dit_gated_residual_fp32_launch(const float* residual,
+                                                          const float* update, const float* gate,
+                                                          float* output, int32_t rows,
+                                                          int32_t columns, void* stream) {
     return trtmc::wan22::launch_gated_residual(residual, update, gate, output, rows, columns,
                                                static_cast<cudaStream_t>(stream));
 }

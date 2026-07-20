@@ -400,6 +400,7 @@ class Wan22TI2VPlugin:
         height = int(raw.get("video_height", arch.video_height))
         width = int(raw.get("video_width", arch.video_width))
         frames = int(raw.get("video_num_frames", arch.video_num_frames))
+        seed = int(raw.get("seed", 42))
         if (height, width, frames) != (
             arch.video_height,
             arch.video_width,
@@ -408,6 +409,10 @@ class Wan22TI2VPlugin:
             raise ValueError(
                 "Initial Wan2.2-TI2V-5B support is fixed to the official "
                 "1280x704, 121-frame profile"
+            )
+        if not 0 <= seed <= 2_147_483_647:
+            raise ValueError(
+                "Wan2.2-TI2V-5B bundle seed must be between 0 and 2147483647"
             )
         return {
             "diffusion_backend_type": "wan2_2_ti2v",
@@ -434,7 +439,7 @@ class Wan22TI2VPlugin:
             "text_encoder_dim": arch.text_dim,
             "latents_mean": list(VAE22_CONFIG["latents_mean"]),
             "latents_std": list(VAE22_CONFIG["latents_std"]),
-            "seed": int(raw.get("seed", 42)),
+            "seed": seed,
         }
 
     def get_bundle_config_overrides(self, config) -> dict:

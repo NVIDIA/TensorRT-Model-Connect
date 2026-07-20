@@ -33,6 +33,17 @@ void check_throws_with(Callable&& callable, const std::string& expected, const c
     }
 }
 
+template <typename Callable>
+void check_throws_exactly(Callable&& callable, const std::string& expected, const char* label) {
+    try {
+        callable();
+        std::cerr << "FAIL: " << label << " did not throw\n";
+        ++failures;
+    } catch (const std::exception& error) {
+        check(error.what() == expected, label);
+    }
+}
+
 trtmc::Wan22TI2VOptions parse_official_options() {
     // Python's default json.dumps output uses these \u escapes.  The C++
     // runtime must decode them before prompt cleaning and tokenization.
@@ -78,6 +89,10 @@ void test_bundle_rejects_accuracy_changing_profile() {
                 R"({"negative_prompt":"x","video_height":720,"video_width":1280,"video_num_frames":121})");
         },
         "1280x704", "Wan2.2 rejects mismatched bundle geometry");
+    check_throws_exactly(
+        [] { (void)trtmc::parse_wan22_options(R"({"negative_prompt":"x","seed":-2})"); },
+        "Wan2.2-TI2V-5B bundle seed must be non-negative",
+        "Wan2.2 rejects a negative bundle seed before unsigned RNG conversion");
 }
 
 void test_request_resolution_and_validation() {
@@ -128,6 +143,52 @@ void test_request_rejects_invalid_sentinel_values() {
                       "Wan2.2 rejects invalid negative seed");
 }
 
+void test_request_error_precedence_is_stable() {
+    const auto options = parse_official_options();
+    trtmc::GenerateConfig config;
+    config.num_steps = 0;
+    config.guidance_scale = std::numeric_limits<float>::quiet_NaN();
+    config.seed = -2;
+    check_throws_exactly([&] { (void)trtmc::resolve_wan22_request(options, config); },
+                         "Wan2.2-TI2V-5B num_steps must be -1 or a positive integer",
+                         "Wan2.2 validates steps before guidance and seed");
+
+    config.num_steps = -1;
+    check_throws_exactly([&] { (void)trtmc::resolve_wan22_request(options, config); },
+                         "Wan2.2-TI2V-5B guidance_scale must be -1 or a finite non-negative value",
+                         "Wan2.2 validates guidance before seed");
+
+    config.guidance_scale = -1.0F;
+    check_throws_exactly([&] { (void)trtmc::resolve_wan22_request(options, config); },
+                         "Wan2.2-TI2V-5B seed must be -1 or non-negative",
+                         "Wan2.2 validates seed after guidance");
+
+    config.seed = -1;
+    config.num_steps = 49;
+    config.guidance_scale = 4.0F;
+    config.height = 720;
+    config.width = 720;
+    check_throws_exactly([&] { (void)trtmc::resolve_wan22_request(options, config); },
+                         "Wan2.2-TI2V-5B requires the official 50-step profile",
+                         "Wan2.2 validates resolved steps before later profile fields");
+
+    config.num_steps = 50;
+    check_throws_exactly([&] { (void)trtmc::resolve_wan22_request(options, config); },
+                         "Wan2.2-TI2V-5B requires the official CFG=5 profile",
+                         "Wan2.2 validates resolved guidance before geometry");
+
+    config.guidance_scale = 5.0F;
+    check_throws_exactly([&] { (void)trtmc::resolve_wan22_request(options, config); },
+                         "Wan2.2-TI2V-5B --height must be 704 for the fixed TensorRT engine",
+                         "Wan2.2 validates height before width");
+
+    auto invalid_options = options;
+    invalid_options.flow_shift = 3.0F;
+    check_throws_exactly([&] { (void)trtmc::resolve_wan22_request(invalid_options, config); },
+                         "Wan2.2-TI2V-5B bundle requires flow_shift=5",
+                         "Wan2.2 validates bundle profile before request overrides");
+}
+
 } // namespace
 
 int main() {
@@ -135,5 +196,6 @@ int main() {
     test_bundle_rejects_accuracy_changing_profile();
     test_request_resolution_and_validation();
     test_request_rejects_invalid_sentinel_values();
+    test_request_error_precedence_is_stable();
     return failures == 0 ? 0 : 1;
 }

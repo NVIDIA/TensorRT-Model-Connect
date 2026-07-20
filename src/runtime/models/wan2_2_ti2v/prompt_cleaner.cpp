@@ -5,6 +5,8 @@
 
 #include "runtime/models/wan2_2_ti2v/prompt_cleaner.h"
 
+#include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <stdexcept>
@@ -19,41 +21,49 @@ bool is_continuation(unsigned char value) {
     return (value & 0xC0U) == 0x80U;
 }
 
+struct Utf8Lead {
+    int continuation_count;
+    uint32_t codepoint;
+    uint32_t minimum;
+};
+
+Utf8Lead decode_utf8_lead(unsigned char first) {
+    if ((first & 0xE0U) == 0xC0U)
+        return {1, first & 0x1FU, 0x80U};
+    if ((first & 0xF0U) == 0xE0U)
+        return {2, first & 0x0FU, 0x800U};
+    if ((first & 0xF8U) == 0xF0U)
+        return {3, first & 0x07U, 0x10000U};
+    throw std::invalid_argument("Wan2.2 prompt contains invalid UTF-8");
+}
+
+uint32_t consume_utf8_continuations(std::string_view text, std::size_t& offset, Utf8Lead lead) {
+    if (offset + static_cast<std::size_t>(lead.continuation_count) > text.size())
+        throw std::invalid_argument("Wan2.2 prompt contains truncated UTF-8");
+    for (int index = 0; index < lead.continuation_count; ++index) {
+        const auto next = static_cast<unsigned char>(text[offset++]);
+        if (!is_continuation(next))
+            throw std::invalid_argument("Wan2.2 prompt contains invalid UTF-8 continuation");
+        lead.codepoint = (lead.codepoint << 6U) | (next & 0x3FU);
+    }
+    return lead.codepoint;
+}
+
+void require_valid_unicode_scalar(uint32_t codepoint, uint32_t minimum) {
+    if (codepoint < minimum || codepoint > 0x10FFFFU ||
+        (codepoint >= 0xD800U && codepoint <= 0xDFFFU)) {
+        throw std::invalid_argument("Wan2.2 prompt contains invalid UTF-8 code point");
+    }
+}
+
 uint32_t decode_utf8(std::string_view text, std::size_t& offset) {
     const auto first = static_cast<unsigned char>(text[offset++]);
     if (first < 0x80U)
         return first;
 
-    int continuation_count = 0;
-    uint32_t codepoint = 0;
-    uint32_t minimum = 0;
-    if ((first & 0xE0U) == 0xC0U) {
-        continuation_count = 1;
-        codepoint = first & 0x1FU;
-        minimum = 0x80U;
-    } else if ((first & 0xF0U) == 0xE0U) {
-        continuation_count = 2;
-        codepoint = first & 0x0FU;
-        minimum = 0x800U;
-    } else if ((first & 0xF8U) == 0xF0U) {
-        continuation_count = 3;
-        codepoint = first & 0x07U;
-        minimum = 0x10000U;
-    } else {
-        throw std::invalid_argument("Wan2.2 prompt contains invalid UTF-8");
-    }
-
-    if (offset + static_cast<std::size_t>(continuation_count) > text.size())
-        throw std::invalid_argument("Wan2.2 prompt contains truncated UTF-8");
-    for (int index = 0; index < continuation_count; ++index) {
-        const auto next = static_cast<unsigned char>(text[offset++]);
-        if (!is_continuation(next))
-            throw std::invalid_argument("Wan2.2 prompt contains invalid UTF-8 continuation");
-        codepoint = (codepoint << 6U) | (next & 0x3FU);
-    }
-    if (codepoint < minimum || codepoint > 0x10FFFFU ||
-        (codepoint >= 0xD800U && codepoint <= 0xDFFFU))
-        throw std::invalid_argument("Wan2.2 prompt contains invalid UTF-8 code point");
+    const auto lead = decode_utf8_lead(first);
+    const auto codepoint = consume_utf8_continuations(text, offset, lead);
+    require_valid_unicode_scalar(codepoint, lead.minimum);
     return codepoint;
 }
 
@@ -75,41 +85,14 @@ void append_utf8(std::string& output, uint32_t codepoint) {
     }
 }
 
+inline constexpr std::array<uint32_t, 29> kUnicodeWhitespace = {
+    0x0009U, 0x000AU, 0x000BU, 0x000CU, 0x000DU, 0x001CU, 0x001DU, 0x001EU, 0x001FU, 0x0020U,
+    0x0085U, 0x00A0U, 0x1680U, 0x2000U, 0x2001U, 0x2002U, 0x2003U, 0x2004U, 0x2005U, 0x2006U,
+    0x2007U, 0x2008U, 0x2009U, 0x200AU, 0x2028U, 0x2029U, 0x202FU, 0x205FU, 0x3000U,
+};
+
 bool is_unicode_whitespace(uint32_t codepoint) {
-    switch (codepoint) {
-    case 0x0009U:
-    case 0x000AU:
-    case 0x000BU:
-    case 0x000CU:
-    case 0x000DU:
-    case 0x001CU:
-    case 0x001DU:
-    case 0x001EU:
-    case 0x001FU:
-    case 0x0020U:
-    case 0x0085U:
-    case 0x00A0U:
-    case 0x1680U:
-    case 0x2000U:
-    case 0x2001U:
-    case 0x2002U:
-    case 0x2003U:
-    case 0x2004U:
-    case 0x2005U:
-    case 0x2006U:
-    case 0x2007U:
-    case 0x2008U:
-    case 0x2009U:
-    case 0x200AU:
-    case 0x2028U:
-    case 0x2029U:
-    case 0x202FU:
-    case 0x205FU:
-    case 0x3000U:
-        return true;
-    default:
-        return false;
-    }
+    return std::binary_search(kUnicodeWhitespace.begin(), kUnicodeWhitespace.end(), codepoint);
 }
 
 uint32_t repair_character_width(uint32_t codepoint) {
@@ -118,6 +101,10 @@ uint32_t repair_character_width(uint32_t codepoint) {
     if (codepoint >= 0xFF01U && codepoint <= 0xFF5EU)
         return codepoint - 0xFEE0U;
     return codepoint == 0x3000U ? 0x0020U : codepoint;
+}
+
+bool is_unicode_scalar(uint32_t value) {
+    return value <= 0x10FFFFU && !(value >= 0xD800U && value <= 0xDFFFU);
 }
 
 bool parse_numeric_entity(std::string_view entity, uint32_t& value) {
@@ -134,8 +121,7 @@ bool parse_numeric_entity(std::string_view entity, uint32_t& value) {
     const char* first = entity.data() + begin;
     const char* last = entity.data() + entity.size();
     const auto result = std::from_chars(first, last, value, base);
-    return result.ec == std::errc{} && result.ptr == last && value <= 0x10FFFFU &&
-           !(value >= 0xD800U && value <= 0xDFFFU);
+    return result.ec == std::errc{} && result.ptr == last && is_unicode_scalar(value);
 }
 
 bool named_entity(std::string_view entity, std::string_view& replacement) {

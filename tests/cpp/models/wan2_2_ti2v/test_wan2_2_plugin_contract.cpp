@@ -49,6 +49,16 @@ bool rejects(Function&& function, const char* message_fragment) {
     return false;
 }
 
+template <typename Function>
+bool rejects_exactly(Function&& function, const std::string& expected_message) {
+    try {
+        function();
+    } catch (const std::runtime_error& error) {
+        return error.what() == expected_message;
+    }
+    return false;
+}
+
 void test_parse_and_validate_exact_contract() {
     const auto manifest = contract_json();
     const auto expected = trtmc::wan2_2_ti2v::parse_bundle_plugin_contract(bundle_config(manifest));
@@ -170,12 +180,62 @@ void test_every_provenance_dimension_fails_closed() {
           "missing fatbin architecture is rejected");
 }
 
+void test_validation_error_precedence_is_stable() {
+    const auto installed = trtmc::wan2_2_ti2v::parse_companion_plugin_contract(contract_json());
+    const auto runtime_abi = "tensorrt=11.1;cuda=13;cudnn=9";
+
+    auto identity_mismatch = installed;
+    identity_mismatch.schema = 2;
+    identity_mismatch.family = "other-family";
+    identity_mismatch.semantic_abi = "other-abi";
+    check(rejects_exactly(
+              [&]() {
+                  trtmc::wan2_2_ti2v::validate_plugin_contract(identity_mismatch, installed,
+                                                               runtime_abi, 110);
+              },
+              "Wan2.2 AOT plugin contract schema mismatch"),
+          "schema mismatch precedes later identity mismatches");
+
+    identity_mismatch.schema = installed.schema;
+    check(rejects_exactly(
+              [&]() {
+                  trtmc::wan2_2_ti2v::validate_plugin_contract(identity_mismatch, installed,
+                                                               runtime_abi, 110);
+              },
+              "Wan2.2 AOT plugin family mismatch: bundle='other-family', "
+              "installed='wan2_2_ti2v'"),
+          "family mismatch precedes semantic ABI mismatch");
+
+    auto runtime_mismatch = installed;
+    runtime_mismatch.runtime_abi.tensorrt_minor = 2;
+    check(rejects_exactly(
+              [&]() {
+                  trtmc::wan2_2_ti2v::validate_plugin_contract(
+                      runtime_mismatch, installed, "tensorrt=11.1;cuda=12;cudnn=9", 120);
+              },
+              "Wan2.2 AOT plugin declared runtime ABI mismatch: "
+              "bundle='tensorrt=11.2;cuda=13;cudnn=9', "
+              "installed='tensorrt=11.1;cuda=13;cudnn=9'"),
+          "declared runtime mismatch precedes loaded runtime and architecture mismatches");
+
+    auto missing_current_sm = installed;
+    missing_current_sm.cuda_architectures = {103};
+    check(rejects_exactly(
+              [&]() {
+                  trtmc::wan2_2_ti2v::validate_plugin_contract(installed, missing_current_sm,
+                                                               runtime_abi, 110);
+              },
+              "Wan2.2 AOT plugin does not contain current GPU sm_110"),
+          "missing current SM precedes architecture-set mismatch");
+}
+
 } // namespace
 
 int main() {
     test_parse_and_validate_exact_contract();
     test_missing_or_malformed_contract_fails_closed();
     test_every_provenance_dimension_fails_closed();
+    test_validation_error_precedence_is_stable();
     if (failures != 0) {
         std::cerr << failures << " test(s) FAILED\n";
         return 1;

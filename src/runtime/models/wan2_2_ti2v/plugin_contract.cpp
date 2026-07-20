@@ -67,35 +67,45 @@ int32_t require_nonnegative_integer(const nlohmann::json& object, const char* ke
     return value;
 }
 
-PluginContract parse_contract_object(const nlohmann::json& object) {
+void validate_contract_root(const nlohmann::json& object) {
     if (!has_exact_keys(object, {"schema", "family", "semantic_abi", "source_digest", "creator_set",
                                  "runtime_abi", "cuda_architectures"})) {
         invalid_contract("contract root has unsupported fields");
     }
+}
 
-    PluginContract contract;
-    contract.schema = require_positive_integer(object, "schema");
-    if (contract.schema != kPluginContractSchema) {
-        invalid_contract("unsupported schema " + std::to_string(contract.schema));
-    }
-    contract.family = require_string(object, "family");
-    if (contract.family != kPluginFamily)
+int32_t require_supported_schema(const nlohmann::json& object) {
+    const auto schema = require_positive_integer(object, "schema");
+    if (schema != kPluginContractSchema)
+        invalid_contract("unsupported schema " + std::to_string(schema));
+    return schema;
+}
+
+std::string require_plugin_family(const nlohmann::json& object) {
+    auto family = require_string(object, "family");
+    if (family != kPluginFamily)
         invalid_contract("family must be wan2_2_ti2v");
-    contract.semantic_abi = require_string(object, "semantic_abi");
-    contract.source_digest = require_string(object, "source_digest");
-    if (contract.source_digest.size() != 64 ||
-        !std::all_of(contract.source_digest.begin(), contract.source_digest.end(), [](char value) {
+    return family;
+}
+
+std::string require_source_digest(const nlohmann::json& object) {
+    auto digest = require_string(object, "source_digest");
+    if (digest.size() != 64 || !std::all_of(digest.begin(), digest.end(), [](char value) {
             return std::isdigit(static_cast<unsigned char>(value)) != 0 ||
                    (value >= 'a' && value <= 'f');
         })) {
         invalid_contract("source_digest must be a lowercase SHA-256 digest");
     }
-    contract.creator_set = require_string(object, "creator_set");
+    return digest;
+}
+
+std::string require_creator_set(const nlohmann::json& object) {
+    auto creator_set = require_string(object, "creator_set");
     std::vector<std::string> creators;
     std::size_t begin = 0;
-    while (begin <= contract.creator_set.size()) {
-        const auto end = contract.creator_set.find(';', begin);
-        const auto entry = contract.creator_set.substr(begin, end - begin);
+    while (begin <= creator_set.size()) {
+        const auto end = creator_set.find(';', begin);
+        const auto entry = creator_set.substr(begin, end - begin);
         if (entry.empty() || std::count(entry.begin(), entry.end(), ':') != 2)
             invalid_contract("creator_set must contain canonical name:version:namespace data");
         creators.push_back(entry);
@@ -107,38 +117,108 @@ PluginContract parse_contract_object(const nlohmann::json& object) {
         std::adjacent_find(creators.begin(), creators.end()) != creators.end()) {
         invalid_contract("creator_set must be sorted and unique");
     }
+    return creator_set;
+}
 
+PluginRuntimeAbi require_runtime_abi(const nlohmann::json& object) {
     const auto& abi = require_object_member(object, "runtime_abi");
     if (!has_exact_keys(abi, {"tensorrt_major", "tensorrt_minor", "cuda_major", "cudnn_major"})) {
         invalid_contract("runtime_abi has unsupported fields");
     }
-    contract.runtime_abi.tensorrt_major = require_positive_integer(abi, "tensorrt_major");
-    contract.runtime_abi.tensorrt_minor = require_nonnegative_integer(abi, "tensorrt_minor");
-    contract.runtime_abi.cuda_major = require_positive_integer(abi, "cuda_major");
-    contract.runtime_abi.cudnn_major = require_positive_integer(abi, "cudnn_major");
+    PluginRuntimeAbi result;
+    result.tensorrt_major = require_positive_integer(abi, "tensorrt_major");
+    result.tensorrt_minor = require_nonnegative_integer(abi, "tensorrt_minor");
+    result.cuda_major = require_positive_integer(abi, "cuda_major");
+    result.cudnn_major = require_positive_integer(abi, "cudnn_major");
+    return result;
+}
 
+std::vector<int32_t> parse_cuda_architectures(const nlohmann::json& object) {
     const auto architectures = object.find("cuda_architectures");
     if (architectures == object.end() || !architectures->is_array() || architectures->empty())
         invalid_contract("missing non-empty array field 'cuda_architectures'");
+
+    std::vector<int32_t> result;
     for (const auto& value : *architectures) {
         if (!value.is_number_integer() || value.get<int32_t>() <= 0)
             invalid_contract("cuda_architectures must contain positive integers");
-        contract.cuda_architectures.push_back(value.get<int32_t>());
+        result.push_back(value.get<int32_t>());
     }
-    if (!std::is_sorted(contract.cuda_architectures.begin(), contract.cuda_architectures.end()) ||
-        std::adjacent_find(contract.cuda_architectures.begin(),
-                           contract.cuda_architectures.end()) !=
-            contract.cuda_architectures.end()) {
+    return result;
+}
+
+void validate_cuda_architecture_set(const std::vector<int32_t>& architectures) {
+    if (!std::is_sorted(architectures.begin(), architectures.end()) ||
+        std::adjacent_find(architectures.begin(), architectures.end()) != architectures.end()) {
         invalid_contract("cuda_architectures must be sorted and unique");
     }
-    if (contract.cuda_architectures != std::vector<int32_t>{103, 110})
+    if (architectures != std::vector<int32_t>{103, 110})
         invalid_contract("cuda_architectures must be exactly [103,110]");
+}
+
+PluginContract parse_contract_object(const nlohmann::json& object) {
+    validate_contract_root(object);
+    PluginContract contract;
+    contract.schema = require_supported_schema(object);
+    contract.family = require_plugin_family(object);
+    contract.semantic_abi = require_string(object, "semantic_abi");
+    contract.source_digest = require_source_digest(object);
+    contract.creator_set = require_creator_set(object);
+    contract.runtime_abi = require_runtime_abi(object);
+    contract.cuda_architectures = parse_cuda_architectures(object);
+    validate_cuda_architecture_set(contract.cuda_architectures);
     return contract;
 }
 
 std::string mismatch(const char* field, const std::string& expected, const std::string& actual) {
     return std::string("Wan2.2 AOT plugin ") + field + " mismatch: bundle='" + expected +
            "', installed='" + actual + "'";
+}
+
+void validate_plugin_identity(const PluginContract& expected, const PluginContract& installed) {
+    if (expected.schema != installed.schema)
+        throw std::runtime_error("Wan2.2 AOT plugin contract schema mismatch");
+    if (expected.family != installed.family)
+        throw std::runtime_error(mismatch("family", expected.family, installed.family));
+    if (expected.semantic_abi != installed.semantic_abi) {
+        throw std::runtime_error(
+            mismatch("semantic ABI", expected.semantic_abi, installed.semantic_abi));
+    }
+    if (expected.source_digest != installed.source_digest) {
+        throw std::runtime_error(
+            mismatch("source digest", expected.source_digest, installed.source_digest));
+    }
+    if (expected.creator_set != installed.creator_set) {
+        throw std::runtime_error(
+            mismatch("creator set", expected.creator_set, installed.creator_set));
+    }
+}
+
+void validate_plugin_runtime(const PluginContract& expected, const PluginContract& installed,
+                             const std::string& loaded_runtime_abi) {
+    if (!(expected.runtime_abi == installed.runtime_abi)) {
+        throw std::runtime_error(mismatch("declared runtime ABI",
+                                          canonical_runtime_abi(expected.runtime_abi),
+                                          canonical_runtime_abi(installed.runtime_abi)));
+    }
+    const auto expected_runtime = canonical_runtime_abi(expected.runtime_abi);
+    if (loaded_runtime_abi != expected_runtime) {
+        throw std::runtime_error(
+            mismatch("loaded runtime ABI", expected_runtime, loaded_runtime_abi));
+    }
+}
+
+void validate_plugin_architectures(const PluginContract& expected, const PluginContract& installed,
+                                   int32_t current_sm) {
+    if (current_sm <= 0 ||
+        std::find(installed.cuda_architectures.begin(), installed.cuda_architectures.end(),
+                  current_sm) == installed.cuda_architectures.end()) {
+        throw std::runtime_error("Wan2.2 AOT plugin does not contain current GPU sm_" +
+                                 std::to_string(current_sm));
+    }
+    if (expected.cuda_architectures != installed.cuda_architectures) {
+        throw std::runtime_error("Wan2.2 AOT plugin CUDA architecture set mismatch");
+    }
 }
 
 } // namespace
@@ -169,41 +249,9 @@ std::string canonical_runtime_abi(const PluginRuntimeAbi& abi) {
 
 void validate_plugin_contract(const PluginContract& expected, const PluginContract& installed,
                               const std::string& loaded_runtime_abi, int32_t current_sm) {
-    if (expected.schema != installed.schema)
-        throw std::runtime_error("Wan2.2 AOT plugin contract schema mismatch");
-    if (expected.family != installed.family)
-        throw std::runtime_error(mismatch("family", expected.family, installed.family));
-    if (expected.semantic_abi != installed.semantic_abi) {
-        throw std::runtime_error(
-            mismatch("semantic ABI", expected.semantic_abi, installed.semantic_abi));
-    }
-    if (expected.source_digest != installed.source_digest) {
-        throw std::runtime_error(
-            mismatch("source digest", expected.source_digest, installed.source_digest));
-    }
-    if (expected.creator_set != installed.creator_set) {
-        throw std::runtime_error(
-            mismatch("creator set", expected.creator_set, installed.creator_set));
-    }
-    if (!(expected.runtime_abi == installed.runtime_abi)) {
-        throw std::runtime_error(mismatch("declared runtime ABI",
-                                          canonical_runtime_abi(expected.runtime_abi),
-                                          canonical_runtime_abi(installed.runtime_abi)));
-    }
-    const auto expected_runtime = canonical_runtime_abi(expected.runtime_abi);
-    if (loaded_runtime_abi != expected_runtime) {
-        throw std::runtime_error(
-            mismatch("loaded runtime ABI", expected_runtime, loaded_runtime_abi));
-    }
-    if (current_sm <= 0 ||
-        std::find(installed.cuda_architectures.begin(), installed.cuda_architectures.end(),
-                  current_sm) == installed.cuda_architectures.end()) {
-        throw std::runtime_error("Wan2.2 AOT plugin does not contain current GPU sm_" +
-                                 std::to_string(current_sm));
-    }
-    if (expected.cuda_architectures != installed.cuda_architectures) {
-        throw std::runtime_error("Wan2.2 AOT plugin CUDA architecture set mismatch");
-    }
+    validate_plugin_identity(expected, installed);
+    validate_plugin_runtime(expected, installed, loaded_runtime_abi);
+    validate_plugin_architectures(expected, installed, current_sm);
 }
 
 } // namespace trtmc::wan2_2_ti2v

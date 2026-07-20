@@ -190,16 +190,21 @@ static void test_read_single_bundle_section_validates_bounds() {
     trtmc_test::remove_all_safe(tmp);
 }
 
-static bool section_metadata_is_rejected(const std::filesystem::path& path,
-                                         const std::string& fields) {
+static std::string section_metadata_error(const std::filesystem::path& path,
+                                          const std::string& fields) {
     const std::string json = "{\"sections\":{\"target\":{" + fields + "}}}";
     write_bundle_with_sections(path.string(), json, {{'x', 'y', 'z'}});
     try {
         (void)trtmc::ReadBundleSection(path.string(), "target");
-    } catch (const std::runtime_error&) {
-        return true;
+    } catch (const std::runtime_error& error) {
+        return error.what();
     }
-    return false;
+    return {};
+}
+
+static bool section_metadata_is_rejected(const std::filesystem::path& path,
+                                         const std::string& fields) {
+    return !section_metadata_error(path, fields).empty();
 }
 
 static void test_read_single_bundle_section_rejects_invalid_numbers() {
@@ -222,6 +227,29 @@ static void test_read_single_bundle_section_rejects_invalid_numbers() {
           "single-section read rejects overflowing offset");
     check(section_metadata_is_rejected(path, "\"offset\":0,\"size\":18446744073709551616"),
           "single-section read rejects overflowing size");
+    check(section_metadata_is_rejected(path, "\"offset\":00,\"size\":1"),
+          "single-section read rejects a leading-zero offset");
+    check(section_metadata_is_rejected(path, "\"offset\":0,\"size\":01"),
+          "single-section read rejects a leading-zero size");
+    check(section_metadata_is_rejected(path, "\"offset\" 0,\"size\":1"),
+          "single-section read rejects a missing colon");
+    check(section_metadata_is_rejected(path, "\"offset\":+0,\"size\":1"),
+          "single-section read rejects a leading plus sign");
+    check(section_metadata_is_rejected(path, "\"offset\":0,\"size\":1e0"),
+          "single-section read rejects exponent notation");
+    check(section_metadata_is_rejected(path, "\"offset\":0,\"size\":1x"),
+          "single-section read rejects a numeric suffix");
+
+    const auto max_value_error =
+        section_metadata_error(path, "\"offset\":18446744073709551615,\"size\":0");
+    check(max_value_error.find("outside file bounds") != std::string::npos,
+          "single-section read parses UINT64_MAX before rejecting its file bounds");
+
+    const std::string whitespace_json =
+        R"({"sections":{"target":{"offset" 	: 0 , "size" : 3 }}})";
+    write_bundle_with_sections(path.string(), whitespace_json, {{'x', 'y', 'z'}});
+    check(trtmc::ReadBundleSection(path.string(), "target") == std::vector<char>({'x', 'y', 'z'}),
+          "single-section read accepts whitespace around unsigned fields");
 
     trtmc_test::remove_all_safe(tmp);
 }

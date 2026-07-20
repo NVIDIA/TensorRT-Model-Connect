@@ -138,7 +138,19 @@ class SourceQualityChecks:
             print("Checking Python lint on changed files:")
             print("\n".join(python_files))
             self.context.run(["ruff", "check", "--config", "ruff.toml", *python_files])
-        cpp_files = self._changed_files(base, "*.cpp", "*.h")
+        cpp_files = self._changed_files(
+            base,
+            "*.c",
+            "*.cc",
+            "*.cpp",
+            "*.cxx",
+            "*.cu",
+            "*.cuh",
+            "*.h",
+            "*.hh",
+            "*.hpp",
+            "*.hxx",
+        )
         if cpp_files:
             print("Checking C++ formatting on changed files:")
             print("\n".join(cpp_files))

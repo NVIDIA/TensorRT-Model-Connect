@@ -22,8 +22,11 @@ runtime_tests = [
   "test_wan2_2_cuda_rng|test_wan2_2_cuda_rng.cpp|_|torch_cuda_normal.cu|REQUIRES_GPU",
   "test_wan2_2_prompt_cleaner|test_wan2_2_prompt_cleaner.cpp|_|prompt_cleaner.cpp|_",
   "test_wan2_2_options|test_wan2_2_options.cpp|nlohmann_json::nlohmann_json|options.cpp|_",
+  "test_wan2_2_artifact_contract|test_wan2_2_artifact_contract.cpp|trtmc_model_wan2_2_ti2v,nlohmann_json::nlohmann_json|_|_",
+  "test_wan2_2_model_plugin_api_abi|test_wan2_2_model_plugin_api_abi.cpp|trtmc_test_model_plugin_api_abi_v1|_|_",
   "test_wan2_2_plugin_contract|test_wan2_2_plugin_contract.cpp|trtmc_model_wan2_2_ti2v|_|_",
   "test_wan2_2_staged_pipeline|test_wan2_2_staged_pipeline.cpp|trtmc_model_wan2_2_ti2v|_|REQUIRES_GPU",
   "test_wan2_2_unipc|test_wan2_2_unipc.cpp|_|_|_",
   "test_wan2_2_unipc_cuda|test_wan2_2_unipc_cuda.cpp|_|wan2_2_unipc_cuda.cu|REQUIRES_GPU",
+  "test_wan2_2_trt_module_contracts|test_wan2_2_trt_module_contracts.cpp|_|_|REQUIRES_TRT,REQUIRES_GPU",
 ]
