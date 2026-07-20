@@ -94,6 +94,7 @@ def test_nightly_requires_the_complete_edge_cpu_contract_tree() -> None:
     assert "ref: ${{ needs.legal.outputs.tested_sha }}" in job
     assert "tests/e2e/models/qwen/edge_llm_adapter" in job
     assert "nlohmann-json3-dev" in job
+    assert "numpy pytest" in job
     assert '-m "not gpu"' in job
     assert "- qwen-edgellm-contracts" in required
     assert "QWEN_EDGELLM_CONTRACT_RESULT" in required

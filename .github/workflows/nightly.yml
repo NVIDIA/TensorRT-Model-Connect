@@ -1235,7 +1235,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends nlohmann-json3-dev
-          python -m pip install --disable-pip-version-check --quiet pytest
+          python -m pip install --disable-pip-version-check --quiet numpy pytest
 
       - name: Run every discovered Qwen EdgeLLM CPU contract
         run: |
