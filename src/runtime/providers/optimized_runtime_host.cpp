@@ -889,12 +889,8 @@ std::string pipeline_abi_sha256(const internal::OptimizedRuntimeFactoryV1& facto
     return std::string(value);
 }
 
-void validate_factory(const internal::OptimizedRuntimeFactoryV1& factory,
-                      const OptimizedRuntimeDescriptor& descriptor) {
-    if (factory.abi_version != internal::kOptimizedRuntimeFactoryAbiVersionV1 ||
-        !has_valid_factory_table_size(factory.struct_size) || factory.create == nullptr) {
-        throw std::runtime_error("Optimized-runtime DSO has an invalid factory v1 table");
-    }
+void validate_pipeline_abi(const internal::OptimizedRuntimeFactoryV1& factory,
+                           const OptimizedRuntimeDescriptor& descriptor) {
     if (factory.pipeline_abi_version != internal::kOptimizedRuntimePipelineAbiVersionV1) {
         throw std::runtime_error(
             "Optimized-runtime IPipeline ABI version mismatch for implementation '" +
@@ -916,6 +912,15 @@ void validate_factory(const internal::OptimizedRuntimeFactoryV1& factory,
             descriptor.implementation_id +
             "'; rebuild the provider with this Model Connect private SDK");
     }
+}
+
+void validate_factory(const internal::OptimizedRuntimeFactoryV1& factory,
+                      const OptimizedRuntimeDescriptor& descriptor) {
+    if (factory.abi_version != internal::kOptimizedRuntimeFactoryAbiVersionV1 ||
+        !has_valid_factory_table_size(factory.struct_size) || factory.create == nullptr) {
+        throw std::runtime_error("Optimized-runtime DSO has an invalid factory v1 table");
+    }
+    validate_pipeline_abi(factory, descriptor);
     if (factory_string(factory.implementation_id) != descriptor.implementation_id) {
         throw std::runtime_error(
             "Optimized-runtime factory implementation identity mismatch for '" +
