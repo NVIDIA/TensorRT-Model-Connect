@@ -15,12 +15,58 @@
 #include "trtmc/tokenizer.h"
 #include "utils/wav_reader.h"
 
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <vector>
 
 namespace trtmc {
+
+namespace {
+
+using WhisperClock = std::chrono::steady_clock;
+
+bool whisper_stage_timing_enabled() {
+    const char* value = std::getenv("TRTMC_WHISPER_STAGE_TIMING");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+double elapsed_ms(WhisperClock::time_point start, WhisperClock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+struct WhisperStageTimestamps {
+    WhisperClock::time_point transcribe_start;
+    WhisperClock::time_point resample_end;
+    WhisperClock::time_point mel_end;
+    WhisperClock::time_point encoder_end;
+    WhisperClock::time_point cross_kv_end;
+    WhisperClock::time_point decoder_end;
+    WhisperClock::time_point postprocess_end;
+};
+
+void report_whisper_stage_timing(bool enabled, const WhisperStageTimestamps& timestamps) {
+    if (!enabled) {
+        return;
+    }
+    std::ostringstream timing;
+    timing << "[trtmc.whisper_timing.json] {\"frontend_ms\":"
+           << elapsed_ms(timestamps.transcribe_start, timestamps.mel_end) << ",\"resample_ms\":"
+           << elapsed_ms(timestamps.transcribe_start, timestamps.resample_end)
+           << ",\"mel_ms\":" << elapsed_ms(timestamps.resample_end, timestamps.mel_end)
+           << ",\"encoder_ms\":" << elapsed_ms(timestamps.mel_end, timestamps.encoder_end)
+           << ",\"cross_kv_ms\":" << elapsed_ms(timestamps.encoder_end, timestamps.cross_kv_end)
+           << ",\"decoder_ms\":" << elapsed_ms(timestamps.cross_kv_end, timestamps.decoder_end)
+           << ",\"postprocess_ms\":"
+           << elapsed_ms(timestamps.decoder_end, timestamps.postprocess_end) << ",\"total_ms\":"
+           << elapsed_ms(timestamps.transcribe_start, timestamps.postprocess_end) << '}';
+    std::cerr << timing.str() << std::endl;
+}
+
+} // namespace
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WhisperPipeline
@@ -86,6 +132,9 @@ WhisperPipeline::~WhisperPipeline() {
 
 TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samples,
                                        int32_t max_new_tokens, int32_t input_sample_rate) {
+    const bool report_stage_timing = whisper_stage_timing_enabled();
+    const auto transcribe_start = WhisperClock::now();
+
     // Step 0: Resample if needed
     const float* samples_ptr = audio_data;
     int32_t samples_count = num_samples;
@@ -99,6 +148,7 @@ TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samp
         samples_ptr = resampled_buf.data();
         samples_count = static_cast<int32_t>(resampled_buf.size());
     }
+    const auto resample_end = WhisperClock::now();
 
     // Step 1: Extract mel spectrogram
     whisper::MelResult mel;
@@ -108,6 +158,7 @@ TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samp
                                                mel_n_fft_, mel_hop_length_, mel_chunk_length_,
                                                mel_sampling_rate_);
     }
+    const auto mel_end = WhisperClock::now();
 
     if (mel.data.empty()) {
         return TextResult{"[mel extraction failed]", {}};
@@ -116,6 +167,7 @@ TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samp
     // Step 2: Run encoder
     std::cerr << "[whisper] Running encoder ..." << std::endl;
     run_encoder(mel.data.data(), mel.n_mels, mel.n_frames);
+    const auto encoder_end = WhisperClock::now();
 
     // Compute actual encoder sequence length for masking
     const int32_t mel_full = resolve_whisper_expected_mel_length(whisper_config_);
@@ -129,11 +181,13 @@ TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samp
     // Step 3: Set up cross-attention K/V
     std::cerr << "[whisper] Computing cross-attention K/V ..." << std::endl;
     setup_cross_attention(actual_enc_seq_len);
+    const auto cross_kv_end = WhisperClock::now();
 
     // Step 4: Run decoder
     std::vector<int32_t> initial_tokens = make_whisper_initial_decoder_tokens(whisper_config_);
     std::cerr << "[whisper] Running decoder ..." << std::endl;
     auto output_ids = run_decoder(initial_tokens, max_new_tokens);
+    const auto decoder_end = WhisperClock::now();
 
     // Step 5: Decode token IDs
     TextResult out;
@@ -141,6 +195,10 @@ TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samp
     if (tokenizer_ && !out.token_ids.empty()) {
         out.text = tokenizer_->decode(out.token_ids);
     }
+    const auto postprocess_end = WhisperClock::now();
+    report_whisper_stage_timing(report_stage_timing,
+                                {transcribe_start, resample_end, mel_end, encoder_end, cross_kv_end,
+                                 decoder_end, postprocess_end});
     return out;
 }
 
