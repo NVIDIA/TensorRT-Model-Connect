@@ -121,7 +121,7 @@ static trtmc::SegformerPreprocessConfig make_test_preprocess_config() {
     return config;
 }
 
-// Mock: pixel_values[3,4,4] float -> output_mask[1,16] float.
+// Mock: pixel_values[1,3,4,4] float -> output_mask[1,16] float.
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine() {
     auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
@@ -129,7 +129,7 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine() {
     c->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* pv =
-        n->addInput("pixel_values", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{3, {3, 4, 4}});
+        n->addInput("pixel_values", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{4, {1, 3, 4, 4}});
 
     float cv[16];
     for (int i = 0; i < 16; ++i)
@@ -149,7 +149,7 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine() {
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
-// Mock: pixel_values[3,4,4] float -> mask[1] float.
+// Mock: pixel_values[1,3,4,4] float -> mask[1] float.
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine_mask_output() {
     auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
@@ -157,7 +157,7 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine_mask_outp
     c->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* pv =
-        n->addInput("pixel_values", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{3, {3, 4, 4}});
+        n->addInput("pixel_values", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{4, {1, 3, 4, 4}});
 
     float cv[1] = {1.0f};
     auto* cst = n->addConstant(nvinfer1::Dims{1, {1}},
@@ -175,7 +175,7 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine_mask_outp
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
-// Mock: pixel_values[3,4,4] float -> logits[1,2,2,2] float.
+// Mock: pixel_values[1,3,4,4] float -> logits[1,2,2,2] float.
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine_4d() {
     auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
@@ -183,7 +183,7 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine_4d() {
     c->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* pv =
-        n->addInput("pixel_values", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{3, {3, 4, 4}});
+        n->addInput("pixel_values", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{4, {1, 3, 4, 4}});
 
     const float cv[8] = {
         1.0F, 0.0F, 0.0F, 1.0F, // class 0
@@ -204,7 +204,7 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine_4d() {
         rt->deserializeCudaEngine(plan->data(), plan->size()));
 }
 
-// Mock: pixel_values[3,4,4] float -> logits[2,4,4] float.
+// Mock: pixel_values[1,3,4,4] float -> logits[2,4,4] float.
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine_2d() {
     auto b = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(g_logger));
     auto n = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(b->createNetworkV2(0));
@@ -212,7 +212,7 @@ static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_segment_engine_2d() {
     c->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1 << 20);
 
     auto* pv =
-        n->addInput("pixel_values", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{3, {3, 4, 4}});
+        n->addInput("pixel_values", nvinfer1::DataType::kFLOAT, nvinfer1::Dims{4, {1, 3, 4, 4}});
 
     float cv[32];
     for (int i = 0; i < 32; ++i)

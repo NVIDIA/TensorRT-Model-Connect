@@ -84,7 +84,7 @@ SegmentResult SegmentPipeline::segment(const float* pixels, int32_t height, int3
 
     Tensor img_t;
     img_t.data = pixel_values.data();
-    img_t.shape = {3, preprocess_config_.input_image_h, preprocess_config_.input_image_w};
+    img_t.shape = {1, 3, preprocess_config_.input_image_h, preprocess_config_.input_image_w};
     img_t.dtype = DType::kFloat32;
 
     SegmentResult result;
