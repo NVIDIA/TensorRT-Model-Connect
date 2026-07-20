@@ -16,6 +16,7 @@ from tensorrt_model_connect.runtime_provider.manifest import (
     ManifestValidationError,
     load_implementation_manifest,
 )
+from tensorrt_model_connect.runtime_provider.provider_process import BuildAdapterError
 from tensorrt_model_connect.runtime_provider.orchestrator import (
     discover_family_implementations_for_model,
     select_delegated_build,
@@ -66,6 +67,8 @@ parser.add_argument("--request", required=True)
 parser.add_argument("--output")
 args = parser.parse_args()
 request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+parameters = request["parameters"]
+public_options = parameters.get("public_options", parameters)
 if request["parameters"].get("verify_launch_context"):
     assert os.environ.get("TRTMC_INTERNAL_OPTIMIZED_RUNTIME_CUDA_DEVICE") == "1"
     assert "active_device_ordinal" not in request["target"]
@@ -73,15 +76,21 @@ if request["parameters"].get("verify_launch_context"):
 if args.operation == "probe":
     print(json.dumps({
         "schema_version": 1,
-        "supported": request["parameters"].get("precision") == "fp16",
+        "supported": public_options.get("precision") == "fp16",
         **({
             "profile_id": "a100-fp16-b4",
-        } if request["parameters"].get("precision") == "fp16" else {
+        } if public_options.get("precision") == "fp16" else {
             "reason": "only the fp16 profile is supported",
         }),
     }))
 elif args.operation == "build":
     output = Path(args.output)
+    family_options = public_options.get("family_build_options") or {}
+    if family_options.get("inject_test_build_failure"):
+        partial = output / "artifacts" / "engine.dir"
+        partial.mkdir(parents=True)
+        (partial / "partial.plan").write_bytes(b"must-not-publish")
+        raise RuntimeError("injected delegated build failure after partial staging")
     artifacts = output / "artifacts"
     (artifacts / "engine.dir").mkdir(parents=True)
     (artifacts / "engine.dir" / "engine.plan").write_bytes(b"engine")
@@ -330,6 +339,125 @@ def test_malformed_unrelated_sibling_does_not_break_requested_model(
 
     assert selection is not None
     assert selection.manifest.implementation_id == "requested-runtime"
+
+
+def test_discovery_and_probe_are_bounded_with_many_models_and_runtime_namespaces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tensorrt_model_connect.runtime_provider.manifest as manifest_module
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    family_root = tmp_path / "families" / "example"
+    requested = _capsule(
+        family_root,
+        runtime_adapter="future_runtime_adapter",
+        name="requested",
+        implementation_id="requested-future-runtime",
+        model_id="Example/Requested-Model",
+    )
+    _capsule(
+        family_root,
+        runtime_adapter="edge_llm_adapter",
+        name="other-edge-model",
+        implementation_id="other-edge-runtime",
+        model_id="Example/Other-Edge-Model",
+    )
+    for index in range(1000):
+        namespace = "edge_llm_adapter" if index % 2 == 0 else "future_runtime_adapter"
+        manifest = family_root / namespace / f"unrelated-{index:04d}" / "IMPLEMENTATION.toml"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            f'''[model]\nid = "Example/Unrelated-{index:04d}"\nbroken = [\n''',
+            encoding="utf-8",
+        )
+
+    parsed: list[Path] = []
+    original_load = manifest_module.load_implementation_manifest
+
+    def counted_load(path: str | Path):
+        parsed.append(Path(path))
+        return original_load(path)
+
+    probes: list[str] = []
+    original_probe = orchestrator.run_probe
+
+    def counted_probe(manifest, request, **kwargs):
+        probes.append(manifest.implementation_id)
+        return original_probe(manifest, request, **kwargs)
+
+    monkeypatch.setattr(manifest_module, "load_implementation_manifest", counted_load)
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)
+    monkeypatch.setattr(orchestrator, "run_probe", counted_probe)
+
+    discovered = discover_family_implementations_for_model(
+        "example",
+        "Example/Requested-Model",
+    )
+    selection = select_delegated_build(
+        discovered,
+        ImplementationRequest(
+            model_id="Example/Requested-Model",
+            model_revision=_REVISION,
+            target=_target(),
+            parameters={"precision": "fp16"},
+        ),
+    )
+
+    assert len(tuple(family_root.glob("*_adapter/*/IMPLEMENTATION.toml"))) == 1002
+    assert [manifest.path for manifest in discovered] == [requested.resolve()]
+    assert parsed == [requested.resolve()]
+    assert selection is not None
+    assert selection.manifest.implementation_id == "requested-future-runtime"
+    assert probes == ["requested-future-runtime"]
+
+
+def test_positive_delegated_build_failure_is_terminal_and_atomic(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    family_root = tmp_path / "family"
+    _capsule(family_root)
+    model_source = _snapshot(tmp_path / "cache")
+    output = tmp_path / "published" / "model.trtfb"
+    native_calls: list[dict] = []
+
+    monkeypatch.setattr(engine_builder, "_resolve_model", lambda _model: str(model_source))
+    monkeypatch.setattr(
+        engine_builder.ModelConfig,
+        "from_dir",
+        lambda _model_dir: SimpleNamespace(model_type="example"),
+    )
+    monkeypatch.setattr(engine_builder, "resolve_family_id", lambda _config: "example")
+    monkeypatch.setattr(
+        engine_builder,
+        "_build_native_impl",
+        lambda **kwargs: native_calls.append(kwargs),
+    )
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)
+    monkeypatch.setattr(
+        orchestrator,
+        "_probe_current_target_with_device",
+        lambda: (_target(), 0),
+    )
+
+    with pytest.raises(
+        BuildAdapterError,
+        match=r"(?s)build failed with exit code.*injected delegated build failure",
+    ):
+        engine_builder.build(
+            "Example/Model",
+            str(output),
+            precision="fp16",
+            family_build_options={"inject_test_build_failure": True},
+        )
+
+    assert native_calls == []
+    assert not output.exists()
+    assert not tuple(output.parent.glob(".trtmc-*"))
 
 
 def test_public_native_build_without_an_owning_family_skips_adapter_discovery(
