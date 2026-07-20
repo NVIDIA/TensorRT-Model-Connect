@@ -1004,11 +1004,12 @@ def test_fake_probe_and_build_require_the_same_internal_authorization(
     monkeypatch.delenv("_TRTMC_INTERNAL_QWEN3_06B_ALLOW_FAKE_RUNTIME_BUILD", raising=False)
     reason = "Fake runtime builds require _TRTMC_INTERNAL_QWEN3_06B_ALLOW_FAKE_RUNTIME_BUILD=1"
     manifest = load_implementation_manifest(MANIFEST_PATH)
-    with pytest.raises(BuildAdapterError, match=reason):
-        run_probe(
-            manifest,
-            _request(parameters={"runtime_build": {"fake": True}}),
-        )
+    probe = run_probe(
+        manifest,
+        _request(parameters={"runtime_build": {"fake": True}}),
+    )
+    assert not probe.supported
+    assert probe.reason == reason
     with pytest.raises(adapter.AdapterError, match=reason):
         adapter._build_runtime_dso(
             tmp_path / "output",
@@ -1084,10 +1085,15 @@ def test_qualified_probe_reports_wrong_tensorrt_without_bootstrapping(
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert adapter.main(["probe", "--request", str(request_path)]) == 1
+    assert adapter.main(["probe", "--request", str(request_path)]) == 0
     captured = capsys.readouterr()
-    assert not captured.out
-    assert "found TensorRT 10.14.1.48, not 11.2.0.113" in captured.err
+    assert json.loads(captured.out) == {
+        "reason": "Qwen Edge-LLM software profile is unavailable: "
+        "found TensorRT 10.14.1.48, not 11.2.0.113",
+        "schema_version": 1,
+        "supported": False,
+    }
+    assert not captured.err
 
 
 def test_tensorrt_resolution_requires_one_exact_core_and_parser_installation(

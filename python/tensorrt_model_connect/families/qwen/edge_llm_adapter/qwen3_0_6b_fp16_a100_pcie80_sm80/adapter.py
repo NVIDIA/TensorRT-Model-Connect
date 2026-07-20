@@ -2842,12 +2842,17 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 software_reason = _software_profile_reason(parameters)
                 if software_reason:
-                    raise AdapterError(software_reason)
-                response = {
-                    "schema_version": 1,
-                    "supported": True,
-                    "profile_id": profile["profile_id"],
-                }
+                    response = {
+                        "schema_version": 1,
+                        "supported": False,
+                        "reason": software_reason,
+                    }
+                else:
+                    response = {
+                        "schema_version": 1,
+                        "supported": True,
+                        "profile_id": profile["profile_id"],
+                    }
         else:
             assert args.output is not None
             response = _build(

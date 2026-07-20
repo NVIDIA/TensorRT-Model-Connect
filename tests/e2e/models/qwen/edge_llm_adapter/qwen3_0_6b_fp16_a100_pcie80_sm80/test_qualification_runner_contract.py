@@ -206,3 +206,18 @@ def test_runner_build_is_leaf_local_and_pins_every_external_boundary() -> None:
     assert '("CC", "CMAKE_C_COMPILER")' in helper
     assert '("CXX", "CMAKE_CXX_COMPILER")' in helper
     assert '("CUDAHOSTCXX", "CMAKE_CUDA_HOST_COMPILER")' in helper
+
+
+def test_a100_gate_requires_installed_and_direct_runtime_surfaces() -> None:
+    source = (LEAF / "test_a100_e2e.py").read_text(encoding="utf-8")
+    for required in (
+        'TRTMC_BINARY',
+        'TRTMC_INSTALLED_PYTHON',
+        'TRTMC_INSTALLED_BINARY',
+        'TRTMC_EDGELLM_DIRECT_RUNNER',
+        'TRTMC_EDGELLM_MC_RUNNER',
+    ):
+        assert f'_required_executable("{required}")' in source
+    assert "TRTMC_REQUIRE_EDGELLM_DIRECT" not in source
+    assert "direct EdgeLLM parity/performance proof: not configured" not in source
+    assert "installed-package proof: not configured" not in source

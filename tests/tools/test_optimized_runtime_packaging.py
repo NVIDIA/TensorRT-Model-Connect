@@ -134,7 +134,7 @@ def _write_nested_adapter(
     with_runtime: bool = True,
     with_excluded_files: bool = False,
 ) -> tuple[Path, Path]:
-    relative = Path("edge_llm_adapter") / profile
+    relative = Path("example_runtime_adapter") / profile
     builder = source / "python/tensorrt_model_connect/families/model_a" / relative
     runtime = source / "src/runtime/models/model_a" / relative
     builder.mkdir(parents=True)
@@ -183,7 +183,7 @@ def test_package_stages_a_nested_model_owned_adapter_as_inert_source(
 
     module = _package(recipe_module, source, tmp_path)
 
-    packaged = module / "families" / "model_a" / "edge_llm_adapter" / "profile_a"
+    packaged = module / "families" / "model_a" / "example_runtime_adapter" / "profile_a"
     assert _inventory(packaged) == {
         "IMPLEMENTATION.toml",
         "adapter.py",
@@ -212,7 +212,7 @@ def test_package_keeps_two_profiles_leaf_local_without_collisions(
     _write_private_sdk(source)
 
     module = _package(recipe_module, source, tmp_path)
-    adapter = module / "families" / "model_a" / "edge_llm_adapter"
+    adapter = module / "families" / "model_a" / "example_runtime_adapter"
 
     assert sorted(path.parent.name for path in adapter.glob("*/IMPLEMENTATION.toml")) == [
         "profile_a",
@@ -243,7 +243,7 @@ def test_package_excludes_lazy_dependencies_build_outputs_and_private_tests(
     _write_private_sdk(source)
 
     module = _package(recipe_module, source, tmp_path)
-    packaged = module / "families" / "model_a" / "edge_llm_adapter" / "profile_a"
+    packaged = module / "families" / "model_a" / "example_runtime_adapter" / "profile_a"
 
     assert _inventory(packaged) == {
         "IMPLEMENTATION.toml",
@@ -271,7 +271,7 @@ def test_package_rejects_nested_builder_without_matching_nested_runtime(
     with pytest.raises(
         recipe_module.ConanException,
         match=(
-            "model_a/edge_llm_adapter/profile_a has no matching runtime source directory"
+            "model_a/example_runtime_adapter/profile_a has no matching runtime source directory"
         ),
     ):
         _package(recipe_module, source, tmp_path)
@@ -280,9 +280,9 @@ def test_package_rejects_nested_builder_without_matching_nested_runtime(
 @pytest.mark.parametrize(
     "relative_manifest",
     (
-        "edge_llm_adapter/IMPLEMENTATION.toml",
-        "edge_llm_adaptor/profile_a/IMPLEMENTATION.toml",
-        "edge_llm_adapter/profile_a/extra/IMPLEMENTATION.toml",
+        "example_runtime_adapter/IMPLEMENTATION.toml",
+        "example_runtime_adaptor/profile_a/IMPLEMENTATION.toml",
+        "example_runtime_adapter/profile_a/extra/IMPLEMENTATION.toml",
     ),
 )
 def test_package_ignores_noncanonical_manifest_layouts(
@@ -325,7 +325,7 @@ def test_package_does_not_recursively_interpret_deep_vendor_manifests(
     _write_private_sdk(source)
 
     module = _package(recipe_module, source, tmp_path)
-    packaged = module / "families/model_a/edge_llm_adapter/profile_a"
+    packaged = module / "families/model_a/example_runtime_adapter/profile_a"
 
     assert (packaged / "IMPLEMENTATION.toml").is_file()
     assert not (packaged / "dependencies").exists()
@@ -340,7 +340,7 @@ def test_package_rejects_symlinked_builder_capsule_components(
     recipe_module = _load_conan_recipe(monkeypatch)
     source = tmp_path / "source"
     family = source / "python/tensorrt_model_connect/families/model_a"
-    provider = family / "edge_llm_adapter"
+    provider = family / "example_runtime_adapter"
     profile = provider / "profile_a"
     manifest = profile / "IMPLEMENTATION.toml"
 
@@ -379,7 +379,7 @@ def test_package_rejects_symlinked_builder_family_alias_within_family_root(
     source = tmp_path / "source"
     families = source / "python/tensorrt_model_connect/families"
     sibling_family = families / "model_b"
-    manifest = sibling_family / "edge_llm_adapter/profile_a/IMPLEMENTATION.toml"
+    manifest = sibling_family / "example_runtime_adapter/profile_a/IMPLEMENTATION.toml"
     manifest.parent.mkdir(parents=True)
     manifest.write_text("aliased = true\n", encoding="utf-8")
     (families / "model_a").symlink_to(sibling_family, target_is_directory=True)
@@ -398,7 +398,7 @@ def test_package_rejects_families_root_resolving_outside_source(
     recipe_module = _load_conan_recipe(monkeypatch)
     source = tmp_path / "source"
     outside_families = tmp_path / "outside-families"
-    manifest = outside_families / "model_a/edge_llm_adapter/profile_a/IMPLEMENTATION.toml"
+    manifest = outside_families / "model_a/example_runtime_adapter/profile_a/IMPLEMENTATION.toml"
     manifest.parent.mkdir(parents=True)
     manifest.write_text("escaped = true\n", encoding="utf-8")
     family_parent = source / "python/tensorrt_model_connect"
@@ -428,12 +428,12 @@ def test_package_rejects_symlinked_runtime_directories(
     )
     runtime_root = source / "src/runtime/models"
     family = runtime_root / "model_a"
-    provider = family / "edge_llm_adapter"
+    provider = family / "example_runtime_adapter"
     profile = provider / "profile_a"
 
     if component == "family":
         target = source / "outside-runtime-family"
-        (target / "edge_llm_adapter/profile_a").mkdir(parents=True)
+        (target / "example_runtime_adapter/profile_a").mkdir(parents=True)
         runtime_root.mkdir(parents=True)
         family.symlink_to(target, target_is_directory=True)
     elif component == "provider":
@@ -467,7 +467,7 @@ def test_package_rejects_runtime_root_resolving_outside_source(
         with_runtime=False,
     )
     outside_runtime_root = tmp_path / "outside-runtime-models"
-    (outside_runtime_root / "model_a/edge_llm_adapter/profile_a").mkdir(parents=True)
+    (outside_runtime_root / "model_a/example_runtime_adapter/profile_a").mkdir(parents=True)
     runtime_parent = source / "src/runtime"
     runtime_parent.mkdir(parents=True)
     (runtime_parent / "models").symlink_to(outside_runtime_root, target_is_directory=True)

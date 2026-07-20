@@ -28,7 +28,6 @@
 //   trtmc version
 
 #include "cli/args.h"
-#include "cli/text_timing.h"
 #include "stb_image_write.h"
 #include "trtmc/bundle.h"
 #include "trtmc/config/cli_support.h"
@@ -298,7 +297,11 @@ int cmd_version() {
 }
 
 void print_text_timing(const trtmc::TextResult& result) {
-    std::cerr << trtmc::cli::format_text_timing(result.prefill_ms, result.decode_ms) << '\n';
+    std::ostringstream line;
+    line << std::fixed << std::setprecision(6) << "[trtmc.timing] prefill_ms=" << result.prefill_ms
+         << " decode_ms=" << result.decode_ms
+         << " total_ms=" << (result.prefill_ms + result.decode_ms);
+    std::cerr << line.str() << '\n';
 }
 
 std::optional<std::vector<float>> read_float32_raw_file(const std::string& path,
@@ -499,16 +502,27 @@ int cmd_run(const CliArgs& args) {
         for (int w = 0; w < warmup_n; ++w)
             pipeline->generate(prompt, cfg);
 
-        std::vector<trtmc::cli::TextTimingPoint> samples;
-        samples.reserve(static_cast<std::size_t>(bench_n));
+        std::vector<double> prefill_ms_v, decode_ms_v;
+        prefill_ms_v.reserve(static_cast<std::size_t>(bench_n));
+        decode_ms_v.reserve(static_cast<std::size_t>(bench_n));
 
         for (int r = 0; r < bench_n; ++r) {
             auto result = pipeline->generate(prompt, cfg);
-            samples.push_back({result.prefill_ms, result.decode_ms, result.token_ids.size()});
+            prefill_ms_v.push_back(result.prefill_ms);
+            decode_ms_v.push_back(result.decode_ms);
         }
 
-        const auto metrics = trtmc::cli::summarize_text_benchmark(samples);
-        std::cerr << trtmc::cli::format_text_benchmark(metrics) << '\n';
+        auto mean = [](const std::vector<double>& v) {
+            return std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(v.size());
+        };
+
+        const double pmean = mean(prefill_ms_v);
+        const double dmean = mean(decode_ms_v);
+        const int ntoks = cfg.max_new_tokens;
+
+        std::cerr << std::fixed << std::setprecision(2);
+        std::cerr << "[trtmc.benchmark] prefill_ms=" << pmean << " decode_ms=" << dmean
+                  << " tokens_per_sec=" << (ntoks > 0 ? ntoks / (dmean / 1000.0) : 0.0) << '\n';
 
         auto last = pipeline->generate(prompt, trtmc::GenerateConfig{cfg});
         std::cout << last.text << '\n';
