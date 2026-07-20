@@ -751,6 +751,7 @@ const trtmc::internal::OptimizedRuntimeFactoryV1 kFactoryV1 = {
     trtmc::internal::kCurrentOptimizedRuntimeToolchainAbiV1,
     kProcessCompatibilityNamespace,
     kProcessCompatibilityFingerprint,
+    trtmc::internal::kCurrentOptimizedRuntimePipelineAbiSha256V1,
 };
 
 } // namespace
