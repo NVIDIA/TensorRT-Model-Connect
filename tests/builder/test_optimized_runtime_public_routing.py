@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_public_python_build_signature_is_unchanged() -> None:
     import tensorrt_model_connect as trtmc
@@ -148,6 +150,182 @@ def test_python_build_treats_omitted_and_explicit_defaults_identically(
     assert calls[0]["precision"] == "fp32"
 
 
+def test_python_build_preflights_family_dependencies_before_resolution(
+    monkeypatch,
+) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    monkeypatch.setattr(
+        engine_builder,
+        "_public_build_family_hint",
+        lambda _model: "wan2_2_ti2v",
+    )
+
+    def missing_dependency(family: str) -> None:
+        assert family == "wan2_2_ti2v"
+        raise RuntimeError("missing family build dependency")
+
+    monkeypatch.setattr(
+        engine_builder,
+        "preflight_family_build_dependencies",
+        missing_dependency,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "discover_family_implementations_for_model",
+        lambda _family, _model: (),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_try_build_optimized_runtime",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("checkpoint resolution must not start")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="missing family build dependency"):
+        engine_builder.build(
+            "Wan-AI/Wan2.2-TI2V-5B",
+            "wan.trtfb",
+        )
+
+
+def test_python_build_capsule_does_not_require_native_family_dependencies(
+    monkeypatch,
+) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    monkeypatch.setattr(
+        engine_builder,
+        "_public_build_family_hint",
+        lambda _model: "wan2_2_ti2v",
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "discover_family_implementations_for_model",
+        lambda _family, _model: (object(),),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "preflight_family_build_dependencies",
+        lambda _family: (_ for _ in ()).throw(
+            AssertionError("optimized capsule must not require native dependencies")
+        ),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_try_build_optimized_runtime",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_build_native_impl",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("native build was selected")
+        ),
+    )
+
+    engine_builder.build(
+        "Wan-AI/Wan2.2-TI2V-5B",
+        "wan.trtfb",
+    )
+
+
+def test_python_build_preflights_before_native_after_capsule_declines(
+    monkeypatch,
+) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    monkeypatch.setattr(
+        engine_builder,
+        "_public_build_family_hint",
+        lambda _model: "wan2_2_ti2v",
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "discover_family_implementations_for_model",
+        lambda _family, _model: (object(),),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_try_build_optimized_runtime",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "preflight_family_build_dependencies",
+        lambda _family: (_ for _ in ()).throw(
+            RuntimeError("missing native family dependency")
+        ),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_build_native_impl",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("native build must not start without its dependency")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="missing native family dependency"):
+        engine_builder.build(
+            "Wan-AI/Wan2.2-TI2V-5B",
+            "wan.trtfb",
+        )
+
+
+def test_python_build_preserves_local_snapshot_capsule_routing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    snapshot = tmp_path / "hub" / "models--Example--Model" / "snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text(
+        '{"model_type":"example_family"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_public_build_family_hint",
+        lambda _model: "example_family",
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "discover_family_implementations_for_model",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local snapshot identity must be resolved by optimized routing")
+        ),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "preflight_family_build_dependencies",
+        lambda _family: (_ for _ in ()).throw(
+            AssertionError("successful capsule must not require native dependencies")
+        ),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_try_build_optimized_runtime",
+        lambda model, _output, _options: object()
+        if model == str(snapshot)
+        else (_ for _ in ()).throw(AssertionError("unexpected model reference")),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_build_native_impl",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("native build was selected")
+        ),
+    )
+
+    engine_builder.build(str(snapshot), "model.trtfb")
+
+
 def test_python_build_preserves_native_call_when_no_capsule_matches(monkeypatch) -> None:
     import tensorrt_model_connect.engine_builder as engine_builder
 
@@ -233,6 +411,35 @@ def test_cli_delegation_preserves_explicit_default_options(monkeypatch) -> None:
             "max_cache_length": 256,
             "precision": "fp32",
         }
+    ]
+
+
+def test_cli_delegation_treats_hidden_method_aliases_as_no_ops(monkeypatch) -> None:
+    import tensorrt_model_connect.build_cli as build_cli
+    import tensorrt_model_connect.engine_builder as engine_builder
+
+    calls: list[dict] = []
+
+    def delegated(_model: str, _output: str, options: dict):
+        calls.append(options)
+        return object()
+
+    monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", delegated)
+
+    for method in ("trt", "auto"):
+        args = argparse.Namespace(
+            command="build",
+            model="example/model",
+            output=f"{method}.trtfb",
+            precision="fp32",
+            max_cache_length=256,
+            method=method,
+        )
+        assert build_cli._cmd_build(args) == 0
+
+    assert calls == [
+        {"max_cache_length": 256, "precision": "fp32"},
+        {"max_cache_length": 256, "precision": "fp32"},
     ]
 
 

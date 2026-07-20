@@ -28,6 +28,7 @@ from .families import (
     family_has_capability,
     find_plugin,
     find_diffusion_plugin,
+    preflight_family_build_dependencies,
     resolve_config_from_model_dir,
     _resolve_diffusion_family_id,
     resolve_family_id,
@@ -1891,15 +1892,6 @@ def _public_build_family_hint(model_id_or_path: str) -> str:
     return ""
 
 
-def _public_build_precision(model_id_or_path: str, requested: str | None) -> str:
-    """Apply the model-owned precision default at the public API boundary."""
-
-    return family_build_precision(
-        _public_build_family_hint(model_id_or_path),
-        requested,
-    )
-
-
 def _try_build_optimized_runtime(
     model_id_or_path: str,
     output_path: str | Path,
@@ -1990,8 +1982,9 @@ def build(
     """
 
     build_arguments = dict(locals())
-    build_arguments["precision"] = _public_build_precision(
-        model_id_or_path,
+    hinted_family = _public_build_family_hint(model_id_or_path)
+    build_arguments["precision"] = family_build_precision(
+        hinted_family,
         precision,
     )
     public_options = {
@@ -1999,10 +1992,29 @@ def build(
         for name, value in build_arguments.items()
         if name not in {"model_id_or_path", "output_path"}
     }
-    if _try_build_optimized_runtime(
-        model_id_or_path,
-        output_path,
-        public_options,
-    ) is not None:
-        return
+    probe_optimized_runtime = True
+    local_model_ref = Path(model_id_or_path).expanduser().exists()
+    if hinted_family and not local_model_ref:
+        from .runtime_provider.orchestrator import (
+            discover_family_implementations_for_model,
+        )
+
+        probe_optimized_runtime = bool(
+            discover_family_implementations_for_model(
+                hinted_family,
+                model_id_or_path,
+            )
+        )
+        if not probe_optimized_runtime:
+            preflight_family_build_dependencies(hinted_family)
+
+    if probe_optimized_runtime:
+        if _try_build_optimized_runtime(
+            model_id_or_path,
+            output_path,
+            public_options,
+        ) is not None:
+            return
+        if hinted_family:
+            preflight_family_build_dependencies(hinted_family)
     _build_native_impl(**build_arguments)

@@ -521,6 +521,31 @@ def family_build_dependency_extra(family: object) -> str:
     return metadata[0].build_dependency_extra
 
 
+def preflight_family_build_dependencies(family: object) -> None:
+    """Fail before checkpoint resolution when family build modules are absent."""
+    family_id = str(family or "")
+    missing = [
+        module
+        for module in family_build_python_modules(family)
+        if importlib.util.find_spec(module) is None
+    ]
+    if not missing:
+        return
+
+    modules = ", ".join(missing)
+    extra = family_build_dependency_extra(family)
+    install_hint = (
+        "Install the family build dependencies with "
+        f"'pip install tensorrt-model-connect[{extra}]'."
+        if extra else
+        "Reinstall TensorRT-Model-Connect with this family's build dependencies."
+    )
+    raise RuntimeError(
+        f"Family {family_id} requires build dependency module(s): {modules}. "
+        f"{install_hint} No checkpoint path or plugin path is required."
+    )
+
+
 def family_python_profile_specs() -> dict[str, dict[str, object]]:
     """Return Python profile specs declared by family-owned MODEL.toml files.
 

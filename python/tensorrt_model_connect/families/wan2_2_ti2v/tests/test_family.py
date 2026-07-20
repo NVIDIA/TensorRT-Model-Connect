@@ -820,20 +820,30 @@ def test_bundle_section_and_native_runtime_dependency_metadata_are_exact() -> No
 
 def test_public_build_uses_wan_family_bf16_default(monkeypatch) -> None:
     import tensorrt_model_connect.engine_builder as engine_builder
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
-    delegated_options: list[dict] = []
-
-    def delegated(_model: str, _output: str, options: dict):
-        delegated_options.append(options)
-        return object()
-
-    monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", delegated)
+    native_options: list[dict] = []
+    monkeypatch.setattr(
+        orchestrator,
+        "discover_family_implementations_for_model",
+        lambda _family, _model: (),
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "preflight_family_build_dependencies",
+        lambda _family: None,
+    )
+    monkeypatch.setattr(
+        engine_builder,
+        "_try_build_optimized_runtime",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Wan without a capsule must not resolve twice")
+        ),
+    )
     monkeypatch.setattr(
         engine_builder,
         "_build_native_impl",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("delegated build unexpectedly selected the native path")
-        ),
+        lambda **kwargs: native_options.append(kwargs),
     )
 
     engine_builder.build(
@@ -841,8 +851,9 @@ def test_public_build_uses_wan_family_bf16_default(monkeypatch) -> None:
         "wan.trtfb",
     )
 
-    assert len(delegated_options) == 1
-    assert delegated_options[0]["precision"] == "bf16"
+    assert len(native_options) == 1
+    assert native_options[0]["model_id_or_path"] == "Wan-AI/Wan2.2-TI2V-5B"
+    assert native_options[0]["precision"] == "bf16"
 
 
 def test_public_build_rejects_unsupported_wan_precision_before_routing(monkeypatch) -> None:

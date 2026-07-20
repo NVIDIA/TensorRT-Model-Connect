@@ -378,7 +378,7 @@ def test_wan_missing_torch_preflight_names_model_extra(monkeypatch):
     import tensorrt_model_connect.families as families
 
     monkeypatch.setattr(
-        cli.importlib.util,
+        families.importlib.util,
         "find_spec",
         lambda module: None if module == "torch" else object(),
     )
@@ -388,6 +388,37 @@ def test_wan_missing_torch_preflight_names_model_extra(monkeypatch):
     assert families.family_build_precision("wan2_2_ti2v") == "bf16"
     assert families.family_build_python_modules("wan2_2_ti2v") == ("torch",)
     assert families.family_build_dependency_extra("wan2_2_ti2v") == "wan"
+
+
+def test_wan_missing_torch_stops_cli_before_checkpoint_download(
+    monkeypatch, tmp_path, capsys
+):
+    import tensorrt_model_connect.families as families
+
+    monkeypatch.setattr(
+        families.importlib.util,
+        "find_spec",
+        lambda module: None if module == "torch" else object(),
+    )
+    monkeypatch.setattr(
+        cli,
+        "_resolve_build_model_metadata",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("checkpoint download must not start")
+        ),
+    )
+    args = argparse.Namespace(
+        model="Wan-AI/Wan2.2-TI2V-5B",
+        output=str(tmp_path / "wan.trtfb"),
+        precision=None,
+        verbose=False,
+        _skip_profile_resolution=False,
+    )
+
+    assert cli._cmd_build(args) == 1
+    stderr = capsys.readouterr().err
+    assert "requires build dependency module(s): torch" in stderr
+    assert "tensorrt-model-connect[wan]" in stderr
 
 
 def test_wan_torch_is_build_extra_not_global_runtime_dependency():

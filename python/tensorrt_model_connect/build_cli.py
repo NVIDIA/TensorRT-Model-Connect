@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import subprocess
@@ -35,6 +34,7 @@ __version__ = _get_version()
 _OPTIMIZED_ROUTING_INTERNAL_FIELDS = frozenset({
     "active_python_profile",
     "command",
+    "method",
     "model",
     "output",
 })
@@ -329,30 +329,9 @@ def _resolve_family_build_precision(
 
 def _preflight_family_build_dependencies(family: str) -> None:
     """Fail before checkpoint download when a family build module is absent."""
-    from .families import (
-        family_build_dependency_extra,
-        family_build_python_modules,
-    )
+    from .families import preflight_family_build_dependencies
 
-    missing = [
-        module
-        for module in family_build_python_modules(family)
-        if importlib.util.find_spec(module) is None
-    ]
-    if not missing:
-        return
-    modules = ", ".join(missing)
-    extra = family_build_dependency_extra(family)
-    install_hint = (
-        f"Install the family build dependencies with "
-        f"'pip install tensorrt-model-connect[{extra}]'."
-        if extra else
-        "Reinstall TensorRT-Model-Connect with this family's build dependencies."
-    )
-    raise RuntimeError(
-        f"Family {family} requires build dependency module(s): {modules}. "
-        f"{install_hint} No checkpoint path or plugin path is required."
-    )
+    preflight_family_build_dependencies(family)
 
 
 def _resolve_build_model_metadata(model_ref: str, method_name: str) -> tuple[str, str]:
