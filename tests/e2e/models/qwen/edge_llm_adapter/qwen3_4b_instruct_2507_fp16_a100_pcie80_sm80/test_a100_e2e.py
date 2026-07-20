@@ -295,17 +295,9 @@ print("load-only-ok")
     )
 
 
-def _verify_installed_python_api(bundle: Path, binary: Path, cwd: Path) -> None:
-    configured_python = os.environ.get("TRTMC_INSTALLED_PYTHON", "").strip()
-    if not configured_python:
-        print("installed-package proof: not configured (set TRTMC_INSTALLED_PYTHON)")
-        return
-    installed_python = Path(configured_python).expanduser().resolve(strict=True)
-    installed_binary = (
-        Path(os.environ.get("TRTMC_INSTALLED_BINARY", str(binary)))
-        .expanduser()
-        .resolve(strict=True)
-    )
+def _verify_installed_python_api(bundle: Path, cwd: Path) -> None:
+    installed_python = _required_executable("TRTMC_INSTALLED_PYTHON")
+    installed_binary = _required_executable("TRTMC_INSTALLED_BINARY")
     script = """
 import json
 import pathlib
@@ -640,38 +632,16 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
     assert warm_rows[0]["token_ids"] == cold_rows[0]["token_ids"]
     assert warm_rows[0]["generated"] == cold_rows[0]["generated"]
 
-    _verify_installed_python_api(bundle, binary, outside_checkout)
+    _verify_installed_python_api(bundle, outside_checkout)
 
-    direct_runner_value = os.environ.get("TRTMC_EDGELLM_DIRECT_RUNNER", "").strip()
-    mc_runner_value = os.environ.get("TRTMC_EDGELLM_MC_RUNNER", "").strip()
-    require_direct = os.environ.get("TRTMC_REQUIRE_EDGELLM_DIRECT", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    if not direct_runner_value or not mc_runner_value:
-        if require_direct:
-            pytest.fail(
-                "TRTMC_REQUIRE_EDGELLM_DIRECT is set but both "
-                "TRTMC_EDGELLM_DIRECT_RUNNER and TRTMC_EDGELLM_MC_RUNNER are required"
-            )
-        print(
-            "direct EdgeLLM parity/performance proof: not configured "
-            "(set TRTMC_EDGELLM_DIRECT_RUNNER, TRTMC_EDGELLM_MC_RUNNER, and "
-            "TRTMC_REQUIRE_EDGELLM_DIRECT=1 for qualification)"
-        )
-        return
     if configured_edge_build is None:
         pytest.fail(
             "TRTMC_EDGE_LLM_BUILD_DIR is required with qualification runners so the exact "
             "stamped EdgeLLM build products can be revalidated before execution"
         )
     assert _verify_edge_build_stamp(configured_edge_build) == edge_build_stamp
-    direct_runner = Path(direct_runner_value).expanduser().resolve(strict=True)
-    mc_runner = Path(mc_runner_value).expanduser().resolve(strict=True)
-    assert direct_runner.is_file() and os.access(direct_runner, os.X_OK)
-    assert mc_runner.is_file() and os.access(mc_runner, os.X_OK)
+    direct_runner = _required_executable("TRTMC_EDGELLM_DIRECT_RUNNER")
+    mc_runner = _required_executable("TRTMC_EDGELLM_MC_RUNNER")
     _verify_direct_runtime_and_performance(
         direct_runner,
         mc_runner,

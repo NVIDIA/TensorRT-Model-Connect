@@ -132,6 +132,7 @@ _EXPECTED_ENGINE_MODEL_CONFIG = {
     "model": "qwen3",
     "spec_decode_type": "none",
     "engine_role": "llm",
+    "edgellm_version": _EDGE_LLM_VERSION,
     "vocab_size": 151936,
     "max_position_embeddings": 262144,
     "hidden_size": 2560,
@@ -819,10 +820,6 @@ def _validate_engine_directory(path: Path) -> tuple[Path, int]:
             "Edge-LLM engine reduced_vocab_size must be absent or null for this profile"
         )
     vocab_size = config["vocab_size"]
-    if config.get("edgellm_version") != _EDGE_LLM_VERSION:
-        raise AdapterError(
-            f"Edge-LLM engine was not built by pinned runtime version {_EDGE_LLM_VERSION}"
-        )
     builder = _require_mapping(config.get("builder_config"), "Edge-LLM builder_config")
     for field, value in _EXPECTED_ENGINE_BUILDER_CONFIG.items():
         if type(builder.get(field)) is not type(value) or builder.get(field) != value:
@@ -2846,12 +2843,17 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 software_reason = _software_profile_reason(parameters)
                 if software_reason:
-                    raise AdapterError(software_reason)
-                response = {
-                    "schema_version": 1,
-                    "supported": True,
-                    "profile_id": profile["profile_id"],
-                }
+                    response = {
+                        "schema_version": 1,
+                        "supported": False,
+                        "reason": software_reason,
+                    }
+                else:
+                    response = {
+                        "schema_version": 1,
+                        "supported": True,
+                        "profile_id": profile["profile_id"],
+                    }
         else:
             assert args.output is not None
             response = _build(
