@@ -12,7 +12,7 @@ import json
 import sys
 from pathlib import Path
 
-import tensorrt as trt
+from tensorrt_model_connect.trt_compat import trt
 import torch
 
 

@@ -14,7 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import tensorrt as trt
+from tensorrt_model_connect.trt_compat import trt
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))

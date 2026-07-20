@@ -11,7 +11,7 @@ import hashlib
 import json
 from pathlib import Path
 
-import tensorrt as trt
+from tensorrt_model_connect.trt_compat import trt
 
 from tensorrt_model_connect.families.wan2_2_ti2v.vae_builder import (
     load_vae_cuda_plugin,

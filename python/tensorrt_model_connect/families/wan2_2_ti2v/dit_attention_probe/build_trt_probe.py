@@ -10,10 +10,16 @@ import argparse
 import ctypes
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
-import tensorrt as trt
+
+_PYTHON_ROOT = Path(__file__).resolve().parents[4]
+if str(_PYTHON_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PYTHON_ROOT))
+
+from tensorrt_model_connect.trt_compat import trt  # noqa: E402
 
 
 def main() -> int:

@@ -13,7 +13,7 @@ import statistics
 from pathlib import Path
 
 import numpy as np
-import tensorrt as trt
+from tensorrt_model_connect.trt_compat import trt
 import torch
 import torch.nn.functional as functional
 

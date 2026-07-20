@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import tensorrt as trt
+from tensorrt_model_connect.trt_compat import trt
 import torch
 from diffusers import AutoencoderKLWan
 from diffusers.models.autoencoders.autoencoder_kl_wan import unpatchify

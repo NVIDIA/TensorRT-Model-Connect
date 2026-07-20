@@ -13,7 +13,7 @@ import json
 import time
 from pathlib import Path
 
-import tensorrt as trt
+from tensorrt_model_connect.trt_compat import trt
 import torch
 
 from tensorrt_model_connect.families.wan2_2_ti2v.reference.qualify_umt5_block_stages import (

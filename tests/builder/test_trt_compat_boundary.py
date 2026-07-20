@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -75,6 +76,51 @@ def test_tensor_rt_python_api_is_imported_only_through_compat_layer():
                 violations.append(f"{rel}:{node.lineno} uses EXPLICIT_BATCH directly")
 
     assert violations == []
+
+
+def test_wan22_attention_probe_bootstraps_source_tree(tmp_path):
+    """The tracked qualification launchers can execute the probe without an install."""
+    script = (
+        TRTMC_BUILD_ROOT
+        / "families"
+        / "wan2_2_ti2v"
+        / "dit_attention_probe"
+        / "build_trt_probe.py"
+    )
+    wrapper = (
+        "import runpy,sys,types;"
+        "sys.modules['numpy']=types.ModuleType('numpy');"
+        "script=sys.argv[1];"
+        "sys.argv=[script,'--help'];"
+        "runpy.run_path(script,run_name='__main__')"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", wrapper, str(script)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--plugin" in result.stdout
+
+
+def test_wan22_time_probe_bootstraps_before_compat_import():
+    """The time-path probe's existing source bootstrap must precede package imports."""
+    script = (
+        TRTMC_BUILD_ROOT
+        / "families"
+        / "wan2_2_ti2v"
+        / "dit_time_probe"
+        / "qualify_current_trt_time_path.py"
+    )
+    source = script.read_text(encoding="utf-8")
+
+    assert source.index("sys.path.insert(0, str(PYTHON_ROOT))") < source.index(
+        "from tensorrt_model_connect.trt_compat import trt"
+    )
 
 
 def test_trt_compat_proxy_wraps_version_sensitive_builder_calls(monkeypatch):

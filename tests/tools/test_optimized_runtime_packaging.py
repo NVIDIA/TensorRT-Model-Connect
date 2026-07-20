@@ -92,22 +92,34 @@ def _load_conan_recipe(monkeypatch: pytest.MonkeyPatch):
     return module
 
 
-def _fake_native_build(build: Path) -> None:
-    for relative in (
+def _fake_native_build(build: Path, *, include_wan22_companion: bool = True) -> None:
+    native_files = [
         "trtmc",
         "libtrtmc_core.so",
         "libtrtmc_backend_trt.so",
         "models/example/libtrtmc_model_example.so",
-    ):
+    ]
+    if include_wan22_companion:
+        native_files.append(
+            "models/wan2_2_ti2v/"
+            "libtrtmc_model_wan2_2_ti2v_plugins_trt11_2.so"
+        )
+    for relative in native_files:
         path = build / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(relative.encode())
 
 
-def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
+def _package(
+    recipe_module,
+    source: Path,
+    tmp_path: Path,
+    *,
+    include_wan22_companion: bool = True,
+) -> Path:
     build = tmp_path / "build"
     package = tmp_path / "package"
-    _fake_native_build(build)
+    _fake_native_build(build, include_wan22_companion=include_wan22_companion)
     recipe = recipe_module.TensorRTModelConnectConan()
     recipe.source_folder = str(source)
     recipe.build_folder = str(build)
@@ -161,6 +173,26 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     assert (sdk / "runtime" / "providers" / "optimized_runtime_factory.h").is_file()
     assert (sdk / "trtmc" / "pipeline.h").is_file()
     assert (module / "bin" / "trtmc").is_file()
+
+
+def test_package_rejects_missing_wan22_builder_companion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_module = _load_conan_recipe(monkeypatch)
+    source = tmp_path / "source"
+    source.mkdir()
+
+    with pytest.raises(
+        recipe_module.ConanException,
+        match=r"expected exactly one ABI-tagged Wan2.2 builder companion.*found \[\]",
+    ):
+        _package(
+            recipe_module,
+            source,
+            tmp_path,
+            include_wan22_companion=False,
+        )
 
 
 def test_package_rejects_builder_without_matching_runtime(

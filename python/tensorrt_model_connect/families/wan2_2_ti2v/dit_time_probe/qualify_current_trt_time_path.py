@@ -14,12 +14,14 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import tensorrt as trt
 import torch
 
 FAMILY_DIR = Path(__file__).resolve().parents[1]
 PYTHON_ROOT = Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(PYTHON_ROOT))
+if str(PYTHON_ROOT) not in sys.path:
+    sys.path.insert(0, str(PYTHON_ROOT))
+
+from tensorrt_model_connect.trt_compat import trt  # noqa: E402
 from tensorrt_model_connect.families.wan2_2_ti2v import trt_ops as op  # noqa: E402
 
 

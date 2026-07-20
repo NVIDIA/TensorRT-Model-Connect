@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-import tensorrt as trt
+from tensorrt_model_connect.trt_compat import trt
 import torch
 import torch.nn.functional as functional
 
