@@ -12,16 +12,54 @@
 #include "utils/wav_reader.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
 namespace trtmc {
 
 namespace {
+
+using RnntClock = std::chrono::steady_clock;
+
+struct RnntStageTotals {
+    double frontend_ms{0.0};
+    double encoder_and_transfer_ms{0.0};
+    double predictor_joint_and_transfer_ms{0.0};
+    double text_ms{0.0};
+};
+
+bool rnnt_stage_timing_enabled() {
+    const char* value = std::getenv("TRTMC_RNNT_STAGE_TIMING");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+double elapsed_ms(RnntClock::time_point start, RnntClock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+void report_rnnt_stage_timing(bool enabled, const char* mode, const RnntStageTotals& stages,
+                              double total_ms, int64_t source_samples, int64_t resampled_samples,
+                              int64_t mel_frames) {
+    if (!enabled) {
+        return;
+    }
+    std::ostringstream timing;
+    timing << "[trtmc.rnnt_timing.json] {\"mode\":\"" << mode
+           << "\",\"frontend_ms\":" << stages.frontend_ms
+           << ",\"encoder_and_transfer_ms\":" << stages.encoder_and_transfer_ms
+           << ",\"predictor_joint_and_transfer_ms\":" << stages.predictor_joint_and_transfer_ms
+           << ",\"text_ms\":" << stages.text_ms << ",\"total_ms\":" << total_ms
+           << ",\"source_samples\":" << source_samples
+           << ",\"resampled_samples\":" << resampled_samples << ",\"mel_frames\":" << mel_frames
+           << '}';
+    std::cerr << timing.str() << std::endl;
+}
 
 Tensor make_tensor(void* data, std::vector<int64_t> shape, DType dtype) {
     Tensor t;
@@ -56,6 +94,20 @@ int32_t subsampled_frame_count(int32_t frames, bool causal) {
 bool rnnt_stream_debug_enabled() {
     const char* v = std::getenv("TRTMC_RNNT_STREAM_DEBUG");
     return v && std::string(v) != "0";
+}
+
+rnnt::MelSpectrogramOptions make_rnnt_mel_options(const RnntConfig& config) {
+    rnnt::MelSpectrogramOptions options;
+    options.n_fft = config.mel_n_fft;
+    options.win_length = config.mel_win_length;
+    options.hop_length = config.mel_hop_length;
+    options.chunk_length_s = config.mel_chunk_length;
+    options.sample_rate = config.sample_rate;
+    options.symmetric_window = true;
+    options.center_window_in_fft = true;
+    options.preemphasis = config.mel_preemph;
+    options.log_scale = rnnt::MelLogScale::kNaturalLog;
+    return options;
 }
 
 void validate_rnnt_module(const std::unique_ptr<TrtModule>& module, const char* name) {
@@ -107,13 +159,21 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
     RnntTranscriptionStream(RnntPipeline& pipeline, TranscriptionStreamConfig cfg)
         : pipeline_(pipeline), cfg_(cfg),
           schedule_(make_nemotron_streaming_schedule(
-              cfg_.att_context_left, cfg_.att_context_right, cfg_.input_sample_rate,
-              pipeline.config_.mel_hop_length, pipeline.config_.subsampling_factor)) {
+              cfg_.att_context_left, cfg_.att_context_right,
+              cfg_.input_sample_rate > 0 ? cfg_.input_sample_rate : pipeline.config_.sample_rate,
+              pipeline.config_.mel_hop_length, pipeline.config_.subsampling_factor)),
+          transcribe_start_(RnntClock::now()),
+          feature_state_(pipeline_.mel_fb_->data.data(), pipeline_.mel_fb_->n_freq_bins,
+                         pipeline_.mel_fb_->n_mel_bins, make_rnnt_mel_options(pipeline_.config_),
+                         cfg_.input_sample_rate > 0 ? cfg_.input_sample_rate
+                                                    : pipeline_.config_.sample_rate) {
         const auto state_elems = static_cast<std::size_t>(pipeline_.config_.pred_num_layers) *
                                  pipeline_.config_.pred_hidden_size;
         state_h_.assign(state_elems, 0.0F);
         state_c_.assign(state_elems, 0.0F);
+        const auto decode_start = RnntClock::now();
         pred_output_ = pipeline_.run_predictor(pipeline_.config_.blank_id, state_h_, state_c_);
+        stages_.predictor_joint_and_transfer_ms += elapsed_ms(decode_start, RnntClock::now());
         reset_encoder_cache();
     }
 
@@ -127,7 +187,9 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
             throw std::runtime_error("RNNT streaming transcription stream is already finished");
 
         if (num_samples > 0) {
-            audio_.insert(audio_.end(), audio_samples, audio_samples + num_samples);
+            const auto frontend_start = RnntClock::now();
+            feature_state_.accept_audio(audio_samples, num_samples);
+            stages_.frontend_ms += elapsed_ms(frontend_start, RnntClock::now());
             accepted_samples_ += num_samples;
         }
         ++chunk_index_;
@@ -135,8 +197,11 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
         if (is_final)
             return finish();
 
-        const int32_t required_mel = use_first_step_plan() ? schedule_.first_shift_mel_frames
-                                                           : schedule_.next_shift_mel_frames;
+        const int32_t shift = use_first_step_plan() ? schedule_.first_shift_mel_frames
+                                                    : schedule_.next_shift_mel_frames;
+        const int32_t retained_lookahead =
+            schedule_.next_shift_mel_frames - schedule_.first_shift_mel_frames;
+        const int32_t required_mel = shift + retained_lookahead;
         if (available_mel_frames() - next_mel_start_ < required_mel)
             return make_result(false);
 
@@ -150,11 +215,18 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
 
         final_ = process_ready(true);
         final_.is_final = true;
+        const auto feature_stats = feature_state_.stats();
+        report_rnnt_stage_timing(
+            rnnt_stage_timing_enabled(), "streaming", stages_,
+            elapsed_ms(transcribe_start_, RnntClock::now()), feature_stats.accepted_source_samples,
+            feature_stats.generated_resampled_samples, feature_stats.computed_mel_frames);
         return final_;
     }
 
     void reset() override {
-        audio_.clear();
+        transcribe_start_ = RnntClock::now();
+        stages_ = {};
+        feature_state_.reset();
         accepted_samples_ = 0;
         chunk_index_ = 0;
         finished_ = false;
@@ -163,7 +235,9 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
         emitted_.clear();
         std::fill(state_h_.begin(), state_h_.end(), 0.0F);
         std::fill(state_c_.begin(), state_c_.end(), 0.0F);
+        const auto decode_start = RnntClock::now();
         pred_output_ = pipeline_.run_predictor(pipeline_.config_.blank_id, state_h_, state_c_);
+        stages_.predictor_joint_and_transfer_ms += elapsed_ms(decode_start, RnntClock::now());
         reset_encoder_cache();
     }
 
@@ -201,39 +275,10 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
         return true;
     }
 
-    int32_t available_mel_frames() const {
-        int64_t samples = static_cast<int64_t>(audio_.size());
-        if (cfg_.input_sample_rate > 0 && cfg_.input_sample_rate != pipeline_.config_.sample_rate) {
-            samples = samples * pipeline_.config_.sample_rate / cfg_.input_sample_rate;
-        }
-        return static_cast<int32_t>(
-            std::max<int64_t>(0, samples / pipeline_.config_.mel_hop_length));
-    }
+    int32_t available_mel_frames() const { return feature_state_.available_frames(); }
 
-    rnnt::MelResult extract_all_mel(int32_t& actual_frames) const {
-        const float* samples_ptr = audio_.data();
-        int32_t samples_count = static_cast<int32_t>(audio_.size());
-        std::vector<float> resampled;
-        if (cfg_.input_sample_rate > 0 && cfg_.input_sample_rate != pipeline_.config_.sample_rate) {
-            resampled = resample_linear(audio_.data(), static_cast<int32_t>(audio_.size()),
-                                        cfg_.input_sample_rate, pipeline_.config_.sample_rate);
-            samples_ptr = resampled.data();
-            samples_count = static_cast<int32_t>(resampled.size());
-        }
-
-        rnnt::MelResult mel = rnnt::extract_rnnt_mel_spectrogram(
-            samples_ptr, samples_count, pipeline_.mel_fb_->data.data(),
-            pipeline_.mel_fb_->n_freq_bins, pipeline_.mel_fb_->n_mel_bins,
-            pipeline_.config_.mel_n_fft, pipeline_.config_.mel_win_length,
-            pipeline_.config_.mel_hop_length, pipeline_.config_.mel_chunk_length,
-            pipeline_.config_.sample_rate, pipeline_.config_.mel_preemph);
-        actual_frames =
-            std::min(mel.n_frames, std::max(0, samples_count / pipeline_.config_.mel_hop_length));
-        return mel;
-    }
-
-    std::vector<float> make_chunk_mel(const rnnt::MelResult& mel, int32_t start_frame,
-                                      int32_t valid_new_frames, bool first_step) const {
+    std::vector<float> make_chunk_mel(int32_t start_frame, int32_t valid_new_frames,
+                                      bool first_step) const {
         const int32_t chunk_frames =
             first_step ? schedule_.first_shift_mel_frames : schedule_.next_shift_mel_frames;
         const int32_t pre = first_step ? schedule_.first_pre_encode_cache_mel_frames
@@ -244,23 +289,24 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
         for (int32_t m = 0; m < pipeline_.config_.num_mel_bins; ++m) {
             for (int32_t p = 0; p < pre; ++p) {
                 const int32_t src_frame = start_frame - pre + p;
-                if (src_frame >= 0 && src_frame < mel.n_frames) {
+                if (src_frame >= 0 && src_frame < feature_state_.frame_count()) {
                     chunk[static_cast<std::size_t>(m) * total + p] =
-                        mel.data[static_cast<std::size_t>(m) * mel.n_frames + src_frame];
+                        feature_state_.value(m, src_frame);
                 }
             }
             for (int32_t p = 0; p < valid_new_frames; ++p) {
                 const int32_t src_frame = start_frame + p;
-                if (src_frame >= 0 && src_frame < mel.n_frames) {
+                if (src_frame >= 0 && src_frame < feature_state_.frame_count()) {
                     chunk[static_cast<std::size_t>(m) * total + pre + p] =
-                        mel.data[static_cast<std::size_t>(m) * mel.n_frames + src_frame];
+                        feature_state_.value(m, src_frame);
                 }
             }
         }
         return chunk;
     }
 
-    TranscriptionStreamResult make_result(bool is_final) const {
+    TranscriptionStreamResult make_result(bool is_final) {
+        const auto text_start = RnntClock::now();
         TranscriptionStreamResult out;
         out.token_ids = emitted_;
         if (pipeline_.tokenizer_ && !out.token_ids.empty())
@@ -269,6 +315,7 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
         out.chunk_index = chunk_index_;
         out.accepted_samples = accepted_samples_;
         out.sample_rate = cfg_.input_sample_rate;
+        stages_.text_ms += elapsed_ms(text_start, RnntClock::now());
         return out;
     }
 
@@ -292,7 +339,7 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
         print_vector_stats("encoder", enc);
     }
 
-    bool process_next_chunk(const rnnt::MelResult& mel, int32_t actual_mel_frames, bool final) {
+    bool process_next_chunk(int32_t actual_mel_frames, bool final) {
         const bool first_step = use_first_step_plan();
         const int32_t shift = current_shift_mel_frames(first_step);
         const int32_t remaining = actual_mel_frames - next_mel_start_;
@@ -305,15 +352,22 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
         if (valid_query_frames <= 0)
             return false;
 
-        auto chunk = make_chunk_mel(mel, next_mel_start_, valid_new_frames, first_step);
+        const auto frontend_start = RnntClock::now();
+        feature_state_.ensure_frames(next_mel_start_ + valid_new_frames, final);
+        auto chunk = make_chunk_mel(next_mel_start_, valid_new_frames, first_step);
+        stages_.frontend_ms += elapsed_ms(frontend_start, RnntClock::now());
         std::vector<float> next_channel;
         std::vector<float> next_time;
         const auto before_tokens = emitted_.size();
+        const auto encoder_start = RnntClock::now();
         auto enc = pipeline_.run_streaming_encoder(
             cfg_.att_context_right, chunk, cache_last_channel_, cache_last_time_,
             cache_last_channel_len_, valid_query_frames, first_step, next_channel, next_time);
+        stages_.encoder_and_transfer_ms += elapsed_ms(encoder_start, RnntClock::now());
+        const auto decode_start = RnntClock::now();
         pipeline_.decode_encoder_frames(enc, valid_query_frames, token_limit(), pred_output_,
                                         state_h_, state_c_, emitted_);
+        stages_.predictor_joint_and_transfer_ms += elapsed_ms(decode_start, RnntClock::now());
         if (rnnt_stream_debug_enabled())
             trace_streaming_chunk(enc, before_tokens, valid_new_frames, valid_query_frames);
 
@@ -327,15 +381,12 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
     }
 
     TranscriptionStreamResult process_ready(bool final) {
-        if (audio_.empty())
+        if (accepted_samples_ == 0)
             return make_result(final);
-        int32_t actual_mel_frames = 0;
-        rnnt::MelResult mel = extract_all_mel(actual_mel_frames);
-        if (mel.data.empty())
-            return make_result(final);
+        const int32_t actual_mel_frames = available_mel_frames();
 
         while (!token_limit_reached()) {
-            if (!process_next_chunk(mel, actual_mel_frames, final))
+            if (!process_next_chunk(actual_mel_frames, final))
                 break;
         }
         return make_result(final);
@@ -356,7 +407,9 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
     RnntPipeline& pipeline_;
     TranscriptionStreamConfig cfg_;
     RnntStreamingSchedule schedule_;
-    std::vector<float> audio_;
+    RnntClock::time_point transcribe_start_;
+    rnnt::IncrementalMelSpectrogram feature_state_;
+    RnntStageTotals stages_;
     std::vector<float> cache_last_channel_;
     std::vector<float> cache_last_time_;
     std::vector<float> pred_output_;
@@ -483,12 +536,20 @@ RnntPipeline::create_transcription_stream(const TranscriptionStreamConfig& cfg) 
 
 TextResult RnntPipeline::transcribe(const float* audio_data, int32_t num_samples,
                                     int32_t max_new_tokens, int32_t input_sample_rate) {
+    const bool report_timing = rnnt_stage_timing_enabled();
+    const auto transcribe_start = RnntClock::now();
+    RnntStageTotals stages;
+
     int32_t actual_mel_frames = 0;
     auto mel = extract_padded_mel(audio_data, num_samples, input_sample_rate, actual_mel_frames);
+    const auto frontend_end = RnntClock::now();
+    stages.frontend_ms = elapsed_ms(transcribe_start, frontend_end);
     if (mel.empty())
         return TextResult{"[mel extraction failed]", {}};
 
     auto encoder_output = run_encoder(mel, actual_mel_frames);
+    const auto encoder_end = RnntClock::now();
+    stages.encoder_and_transfer_ms = elapsed_ms(frontend_end, encoder_end);
     const int32_t encoder_frames =
         static_cast<int32_t>(encoder_output.size()) / config_.encoder_hidden_size;
     if (encoder_frames <= 0)
@@ -506,11 +567,22 @@ TextResult RnntPipeline::transcribe(const float* audio_data, int32_t num_samples
 
     decode_encoder_frames(encoder_output, encoder_frames, token_limit, pred_output, state_h,
                           state_c, emitted);
+    const auto decode_end = RnntClock::now();
+    stages.predictor_joint_and_transfer_ms = elapsed_ms(encoder_end, decode_end);
 
     TextResult out;
     out.token_ids = std::move(emitted);
     if (tokenizer_ && !out.token_ids.empty())
         out.text = tokenizer_->decode(out.token_ids);
+    const auto text_end = RnntClock::now();
+    stages.text_ms = elapsed_ms(decode_end, text_end);
+    const int64_t resampled_samples =
+        input_sample_rate > 0 && input_sample_rate != config_.sample_rate
+            ? static_cast<int64_t>(num_samples) * config_.sample_rate / input_sample_rate
+            : num_samples;
+    report_rnnt_stage_timing(report_timing, "offline", stages,
+                             elapsed_ms(transcribe_start, text_end), num_samples, resampled_samples,
+                             actual_mel_frames);
     return out;
 }
 

@@ -239,15 +239,17 @@ PolyphaseSincWeights build_polyphase_sinc_weights(int32_t source_rate, int32_t t
     return table;
 }
 
-std::vector<float> resample_polyphase(const float* samples, int32_t n_samples, int32_t source_rate,
-                                      int32_t target_rate, int32_t out_len, double cutoff,
-                                      int32_t half_taps) {
+std::vector<float> resample_polyphase_range(const float* samples, int32_t n_samples,
+                                            int32_t source_rate, int32_t target_rate,
+                                            int32_t output_start, int32_t output_count,
+                                            double cutoff, int32_t half_taps) {
     const PolyphaseSincWeights table =
         build_polyphase_sinc_weights(source_rate, target_rate, cutoff, half_taps);
     const int32_t tap_count = 2 * half_taps;
-    std::vector<float> resampled(out_len);
+    std::vector<float> resampled(output_count);
 
-    for (int32_t i = 0; i < out_len; ++i) {
+    for (int32_t local_index = 0; local_index < output_count; ++local_index) {
+        const int32_t i = output_start + local_index;
         const int64_t position_numerator = static_cast<int64_t>(i) * source_rate;
         const int32_t center = static_cast<int32_t>(position_numerator / target_rate);
         const int32_t remainder = static_cast<int32_t>(position_numerator % target_rate);
@@ -264,7 +266,8 @@ std::vector<float> resample_polyphase(const float* samples, int32_t n_samples, i
             acc += static_cast<double>(samples[center + offset]) * weight;
             weight_sum += weight;
         }
-        resampled[i] = weight_sum > 1e-12 ? static_cast<float>(acc / weight_sum) : 0.0F;
+        resampled[static_cast<std::size_t>(local_index)] =
+            weight_sum > 1e-12 ? static_cast<float>(acc / weight_sum) : 0.0F;
     }
     return resampled;
 }
@@ -290,11 +293,34 @@ WavData read_wav(const std::string& path) {
 
 std::vector<float> resample_linear(const float* samples, int32_t n_samples, int32_t source_rate,
                                    int32_t target_rate) {
-    if (source_rate == target_rate || n_samples <= 0)
-        return std::vector<float>(samples, samples + n_samples);
-
+    if (n_samples <= 0)
+        return {};
+    if (samples == nullptr)
+        throw std::invalid_argument("resample input must not be null");
+    if (source_rate <= 0 || target_rate <= 0)
+        throw std::invalid_argument("resample rates must be positive");
     const int32_t out_len = compute_output_length(n_samples, source_rate, target_rate);
-    std::vector<float> resampled(out_len);
+    return resample_linear_range(samples, n_samples, source_rate, target_rate, 0, out_len);
+}
+
+std::vector<float> resample_linear_range(const float* samples, int32_t n_samples,
+                                         int32_t source_rate, int32_t target_rate,
+                                         int32_t output_start, int32_t output_count) {
+    if (n_samples <= 0 || output_count <= 0)
+        return {};
+    if (samples == nullptr)
+        throw std::invalid_argument("resample input must not be null");
+    if (source_rate <= 0 || target_rate <= 0)
+        throw std::invalid_argument("resample rates must be positive");
+
+    const int32_t full_output_length = compute_output_length(n_samples, source_rate, target_rate);
+    const int32_t range_start = std::clamp(output_start, 0, full_output_length);
+    const int32_t range_count = std::clamp(output_count, 0, full_output_length - range_start);
+    if (range_count <= 0)
+        return {};
+    if (source_rate == target_rate) {
+        return std::vector<float>(samples + range_start, samples + range_start + range_count);
+    }
 
     const int32_t half_taps = 16;
     const double cutoff =
@@ -307,14 +333,17 @@ std::vector<float> resample_linear(const float* samples, int32_t n_samples, int3
     constexpr int32_t kMaxPrecomputedPhases = 2048;
     const int32_t phase_count = target_rate / std::gcd(source_rate, target_rate);
     if (phase_count <= kMaxPrecomputedPhases) {
-        return resample_polyphase(samples, n_samples, source_rate, target_rate, out_len, cutoff,
-                                  half_taps);
+        return resample_polyphase_range(samples, n_samples, source_rate, target_rate, range_start,
+                                        range_count, cutoff, half_taps);
     }
 
-    for (int32_t i = 0; i < out_len; ++i) {
+    std::vector<float> resampled(range_count);
+    for (int32_t local_index = 0; local_index < range_count; ++local_index) {
+        const int32_t i = range_start + local_index;
         const double src_pos = static_cast<double>(i) * static_cast<double>(source_rate) /
                                static_cast<double>(target_rate);
-        resampled[i] = resample_at_position(samples, n_samples, src_pos, cutoff, half_taps);
+        resampled[static_cast<std::size_t>(local_index)] =
+            resample_at_position(samples, n_samples, src_pos, cutoff, half_taps);
     }
     return resampled;
 }

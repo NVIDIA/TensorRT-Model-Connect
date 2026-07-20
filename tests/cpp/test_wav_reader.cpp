@@ -106,6 +106,37 @@ static void check_resample_matches_reference(int32_t source_rate, int32_t target
     check(matches, test_name);
 }
 
+static void check_resample_ranges_match_full(int32_t source_rate, int32_t target_rate,
+                                             const std::vector<int32_t>& range_sizes,
+                                             const char* test_name) {
+    std::vector<float> input(1003);
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        input[i] = static_cast<float>(0.7 * std::sin(static_cast<double>(i) * 0.11) +
+                                      0.2 * std::cos(static_cast<double>(i) * 0.037));
+    }
+    const auto full = trtmc::resample_linear(input.data(), static_cast<int32_t>(input.size()),
+                                             source_rate, target_rate);
+    std::vector<float> ranged;
+    int32_t start = 0;
+    for (const int32_t requested : range_sizes) {
+        auto part = trtmc::resample_linear_range(input.data(), static_cast<int32_t>(input.size()),
+                                                 source_rate, target_rate, start, requested);
+        start += static_cast<int32_t>(part.size());
+        ranged.insert(ranged.end(), part.begin(), part.end());
+    }
+    if (start < static_cast<int32_t>(full.size())) {
+        auto part = trtmc::resample_linear_range(input.data(), static_cast<int32_t>(input.size()),
+                                                 source_rate, target_rate, start,
+                                                 static_cast<int32_t>(full.size()) - start);
+        ranged.insert(ranged.end(), part.begin(), part.end());
+    }
+    bool matches = ranged.size() == full.size();
+    for (std::size_t i = 0; matches && i < full.size(); ++i) {
+        matches = ranged[i] == full[i];
+    }
+    check(matches, test_name);
+}
+
 static std::filesystem::path make_temp_dir() {
     char pattern[] = "/tmp/trtmc_wav_test_XXXXXX";
     char* dir = mkdtemp(pattern);
@@ -265,7 +296,17 @@ int main() {
     check_resample_matches_reference(44100, 16000, "resample_polyphase: 44.1k to 16k parity");
     check_resample_matches_reference(16000, 48000, "resample_polyphase: 16k to 48k parity");
 
-    // Test 7: Invalid file throws
+    // Test 7: independently generated output ranges concatenate bit-exactly.
+    check_resample_ranges_match_full(48000, 16000, {1, 7, 31, 53},
+                                     "resample_ranges: 48k to 16k parity");
+    check_resample_ranges_match_full(44100, 16000, {3, 11, 29, 47},
+                                     "resample_ranges: 44.1k to 16k parity");
+    check_resample_ranges_match_full(16000, 48000, {5, 17, 61, 101},
+                                     "resample_ranges: 16k to 48k parity");
+    check_resample_ranges_match_full(16000, 16000, {2, 13, 37, 89},
+                                     "resample_ranges: identity parity");
+
+    // Test 8: Invalid file throws
     {
         bool caught = false;
         try {
