@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import fcntl
 import hashlib
 import importlib.util
 import json
 import os
+import platform
 import re
 import shutil
 import stat
@@ -31,20 +33,21 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
 CAPSULE_ROOT = Path(__file__).resolve().parent
 REPOSITORY_ROOT = Path(__file__).resolve().parents[6]
 
-IMPLEMENTATION_ID = "qwen3-0.6b-fp16.tensorrt-edge-llm.a100-pcie80-sm80"
+IMPLEMENTATION_ID = "qwen3-0.6b-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80"
 MODEL_ID = "Qwen/Qwen3-0.6B"
 MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
-RUNTIME_LIBRARY = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm.so"
+RUNTIME_LIBRARY = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm_v0_9_trt11.so"
 EDGE_LLM_PLUGIN = "libNvInfer_edgellm_plugin.so"
 PROFILE_PATH = CAPSULE_ROOT / "profiles" / "a100-pcie80-sm80-fp16.toml"
 DEPENDENCY_PATH = CAPSULE_ROOT / "dependency.lock"
 IMPLEMENTATION_PATH = CAPSULE_ROOT / "IMPLEMENTATION.toml"
 _EDGE_LLM_SOURCE = "https://github.com/NVIDIA/TensorRT-Edge-LLM.git"
-_EDGE_LLM_COMMIT = "2620a9768022f25dff18912db2fb92b2ef264a70"
-_EDGE_LLM_TAG = "v0.6.1"
-_TENSORRT_VERSION = (10, 14, 1, 48)
+_EDGE_LLM_COMMIT = "1ac0f2b99642045125e1c5ac7b109434ba3b36c7"
+_EDGE_LLM_TAG = "v0.9.0"
+_EDGE_LLM_VERSION = "0.9.0"
+_TENSORRT_VERSION = (11, 2, 0, 113)
 _TENSORRT_VERSION_TEXT = ".".join(str(component) for component in _TENSORRT_VERSION)
-_CUDA_VERSION = (12, 8)
+_CUDA_VERSION = (13, 3)
 _CUDA_VERSION_TEXT = ".".join(str(component) for component in _CUDA_VERSION)
 _ENGINE_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_ENGINE_DIR"
 _RUNTIME_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_RUNTIME_LIBRARY"
@@ -56,9 +59,55 @@ _ONNX_PARSER_INCLUDE_ENV = "_TRTMC_INTERNAL_QWEN3_06B_ONNX_PARSER_INCLUDE_DIR"
 _ONNX_PARSER_LIBRARY_ENV = "_TRTMC_INTERNAL_QWEN3_06B_ONNX_PARSER_LIBRARY"
 _CUDA_INCLUDE_ENV = "_TRTMC_INTERNAL_QWEN3_06B_CUDA_INCLUDE_DIR"
 _CUDART_LIBRARY_ENV = "_TRTMC_INTERNAL_QWEN3_06B_CUDART_LIBRARY"
+_CUDA_DRIVER_LIBRARY_ENV = "_TRTMC_INTERNAL_QWEN3_06B_CUDA_DRIVER_LIBRARY"
 _ALLOW_FAKE_RUNTIME_BUILD_ENV = "_TRTMC_INTERNAL_QWEN3_06B_ALLOW_FAKE_RUNTIME_BUILD"
 _DEPENDENCY_CACHE_ENV = "_TRTMC_INTERNAL_OPTIMIZED_RUNTIME_DEPENDENCY_ROOT"
 _ACTIVE_CUDA_DEVICE_ENV = "TRTMC_INTERNAL_OPTIMIZED_RUNTIME_CUDA_DEVICE"
+_PYTHON_PROFILE_ROOT_ENV = "TRTMC_PYTHON_PROFILE_ROOT"
+_LEGACY_PYTHON_PROFILE_ROOT_ENV = "TRTMC_E2E_PROFILE_ROOT"
+_PYTHON_PROFILE_PREBUILT_ONLY_ENV = "TRTMC_PYTHON_PROFILE_PREBUILT_ONLY"
+_DEFAULT_PYTHON_PROFILE_ROOT = "/tmp/trtmc-python-profiles"
+_EXPORTER_PROFILE_NAME = "qwen3-0-6b-edgellm-v09-exporter"
+_EXPORTER_PROFILE_LAYOUT_VERSION = "isolated-hashed-closure-v2"
+_EXPORTER_LOCK_HEADER = {
+    "implementation": "CPython",
+    "version": "3.12",
+    "platform": "linux",
+    "architecture": "x86_64",
+    "abi": "cp312",
+    "wheel_target": "x86_64-manylinux_2_28",
+    "lock_format": "pip-require-hashes-v1",
+    "resolver": "uv==0.11.29",
+    "package_count": 60,
+}
+_EXPORT_REQUIREMENT = re.compile(
+    r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[A-Za-z0-9][A-Za-z0-9._+!-]*) "
+    r"--hash=sha256:(?P<sha256>[0-9a-f]{64})"
+)
+_EDGE_EXPORT_BOOTSTRAP = (
+    "import runpy, sys; "
+    "source=sys.argv.pop(1); "
+    "sys.path.insert(0, source); "
+    "runpy.run_module('tensorrt_edgellm.scripts.export', run_name='__main__', alter_sys=True)"
+)
+_EXPORTER_IMPORTS = {
+    "numpy": "numpy",
+    "onnx": "onnx",
+    "onnx-graphsurgeon": "onnx_graphsurgeon",
+    "onnxscript": "onnxscript",
+    "safetensors": "safetensors",
+    "torch": "torch",
+    "transformers": "transformers",
+}
+_EXPECTED_EXPORTER_PACKAGES = {
+    "torch": "2.12.0",
+    "transformers": "5.9.0",
+    "onnx": "1.19.0",
+    "onnxscript": "0.7.0",
+    "safetensors": "0.7.0",
+    "numpy": "2.4.6",
+    "onnx-graphsurgeon": "0.6.1",
+}
 _MAX_ARTIFACT_ENTRIES = 65536
 _MAX_ARTIFACT_TOTAL_SIZE = 1 << 40
 _PRIVATE_SDK_HEADERS = (
@@ -86,6 +135,39 @@ _REQUIRED_TARGET = {
     "gpu_architecture": "sm80",
     "gpu_name": "NVIDIA A100 80GB PCIe",
 }
+_EDGE_BUILD_STAMP = ".trtmc-edge-build-stamp.json"
+_EDGE_BUILD_TARGETS = ("edgellmCore", "NvInfer_edgellm_plugin", "llm_build")
+_EDGE_BUILD_ENVIRONMENT = (
+    "AR",
+    "CC",
+    "CFLAGS",
+    "CMAKE_ARGS",
+    "CMAKE_BUILD_PARALLEL_LEVEL",
+    "CMAKE_COMMAND",
+    "CMAKE_GENERATOR",
+    "CMAKE_INCLUDE_PATH",
+    "CMAKE_LIBRARY_PATH",
+    "CMAKE_PREFIX_PATH",
+    "CPATH",
+    "CPPFLAGS",
+    "CUDAFLAGS",
+    "CUDAHOSTCXX",
+    "CUDAARCHS",
+    "CUDA_HOME",
+    "CUDA_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "CXX",
+    "CXXFLAGS",
+    "LD",
+    "LD_LIBRARY_PATH",
+    "LDFLAGS",
+    "LIBRARY_PATH",
+    "NVCC_APPEND_FLAGS",
+    "NVCC_PREPEND_FLAGS",
+    "PATH",
+    "PKG_CONFIG_PATH",
+    "SOURCE_DATE_EPOCH",
+)
 
 
 def _runtime_source_root() -> Path:
@@ -127,8 +209,20 @@ class _CudaInstallation:
     root: Path
     include_dir: Path
     cudart_library: Path
+    driver_library: Path
     compiler: Path
     version: str
+
+
+@dataclass(frozen=True)
+class _EdgeBuildToolchain:
+    cc: Path
+    cxx: Path
+    linker: Path
+    archiver: Path
+    cmake: Path
+    sha256: str
+    architecture: str
 
 
 @dataclass(frozen=True)
@@ -139,6 +233,7 @@ class _EdgeDependency:
     plugin: Path
     tensorrt: _TensorRtInstallation
     cuda: _CudaInstallation
+    toolchain: _EdgeBuildToolchain | None = None
 
 
 def _load_json(path: Path, description: str) -> dict[str, Any]:
@@ -222,13 +317,15 @@ def _pinned_edge_dependency() -> tuple[str, str, str, str, str]:
     expected = {
         "name": "tensorrt-edge-llm",
         "source": _EDGE_LLM_SOURCE,
-        "version": "0.6.1",
+        "version": _EDGE_LLM_VERSION,
         "tag": _EDGE_LLM_TAG,
         "commit": _EDGE_LLM_COMMIT,
         "source_mode": "git",
     }
     if dict(downstream) != expected:
-        raise AdapterError("Capsule dependency lock does not name the supported Edge-LLM source pin")
+        raise AdapterError(
+            "Capsule dependency lock does not name the supported Edge-LLM source pin"
+        )
     tensorrt = _require_mapping(dependency.get("tensorrt"), "dependency.tensorrt")
     expected_tensorrt = {"version": _TENSORRT_VERSION_TEXT}
     if dict(tensorrt) != expected_tensorrt:
@@ -237,6 +334,10 @@ def _pinned_edge_dependency() -> tuple[str, str, str, str, str]:
     expected_cuda = {"version": _CUDA_VERSION_TEXT}
     if dict(cuda) != expected_cuda:
         raise AdapterError("Capsule dependency lock does not name the supported CUDA toolkit")
+    exporter_python = _require_mapping(
+        dependency.get("exporter_python"), "dependency.exporter_python"
+    )
+    _parse_exporter_lock(exporter_python)
     return (
         _EDGE_LLM_SOURCE,
         _EDGE_LLM_TAG,
@@ -244,6 +345,68 @@ def _pinned_edge_dependency() -> tuple[str, str, str, str, str]:
         _TENSORRT_VERSION_TEXT,
         _CUDA_VERSION_TEXT,
     )
+
+
+def _canonical_package_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _parse_exporter_lock(
+    exporter_python: Mapping[str, Any],
+) -> tuple[str, dict[str, str]]:
+    expected_fields = {*_EXPORTER_LOCK_HEADER, "requirements", "direct"}
+    if set(exporter_python) != expected_fields:
+        raise AdapterError("Capsule exporter Python lock must contain the exact required fields")
+    for field, expected in _EXPORTER_LOCK_HEADER.items():
+        if (
+            type(exporter_python.get(field)) is not type(expected)
+            or exporter_python[field] != expected
+        ):
+            raise AdapterError(f"Capsule exporter Python lock field {field} must be {expected!r}")
+
+    direct = _require_mapping(exporter_python.get("direct"), "dependency.exporter_python.direct")
+    if dict(direct) != _EXPECTED_EXPORTER_PACKAGES:
+        raise AdapterError(
+            "Capsule dependency lock does not name the exact Edge-LLM exporter direct packages"
+        )
+    requirements = exporter_python.get("requirements")
+    if not isinstance(requirements, str):
+        raise AdapterError("Capsule exporter Python requirements lock must be a string")
+
+    packages: dict[str, str] = {}
+    canonical_lines: list[str] = []
+    for raw_line in requirements.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = _EXPORT_REQUIREMENT.fullmatch(line)
+        if match is None:
+            raise AdapterError(f"Invalid hashed exporter Python requirement: {line!r}")
+        name = _canonical_package_name(match.group("name"))
+        if name in packages:
+            raise AdapterError(f"Duplicate exporter Python requirement: {name}")
+        packages[name] = match.group("version")
+        canonical_lines.append(line)
+    if len(packages) != _EXPORTER_LOCK_HEADER["package_count"]:
+        raise AdapterError(
+            "Capsule exporter Python lock package count does not match its requirements"
+        )
+    if list(packages) != sorted(packages):
+        raise AdapterError("Capsule exporter Python requirements must be sorted by package name")
+    for name, version in _EXPECTED_EXPORTER_PACKAGES.items():
+        if packages.get(_canonical_package_name(name)) != version:
+            raise AdapterError(
+                f"Capsule exporter Python closure does not contain {name}=={version}"
+            )
+    return "\n".join(canonical_lines) + "\n", packages
+
+
+def _load_exporter_lock() -> tuple[str, dict[str, str]]:
+    dependency = _load_toml(DEPENDENCY_PATH, "capsule dependency lock")
+    exporter_python = _require_mapping(
+        dependency.get("exporter_python"), "dependency.exporter_python"
+    )
+    return _parse_exporter_lock(exporter_python)
 
 
 def _require_mapping(value: Any, description: str) -> Mapping[str, Any]:
@@ -255,7 +418,7 @@ def _require_mapping(value: Any, description: str) -> Mapping[str, Any]:
 def _validate_capsule_data(profile: Mapping[str, Any]) -> None:
     expected_profile = {
         "schema_version": 1,
-        "profile_id": "qwen3-0.6b-fp16--a100-pcie80-sm80",
+        "profile_id": "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt11",
         "operation": "text-generation-v1",
         "precision": "fp16",
         "quantization": "none",
@@ -364,6 +527,15 @@ def _load_request(path: Path) -> dict[str, Any]:
     if not isinstance(runtime_build, dict):
         raise AdapterError("Capsule parameter runtime_build must be an object")
     _validate_runtime_build(parameters)
+    injected_payloads = sorted(
+        field
+        for field in ("engine_dir", "runtime_library", "runtime_plugin")
+        if field in parameters
+    )
+    if injected_payloads and not _test_payload_injection_enabled(parameters):
+        raise AdapterError(
+            "Capsule payload overrides are test-only: " + ", ".join(injected_payloads)
+        )
     return request
 
 
@@ -431,6 +603,7 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
         "quantize",
         "verbose",
     }
+
     def inert(value: Any) -> bool:
         return (
             value is None
@@ -441,9 +614,7 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
             or value == {}
         )
 
-    unknown = sorted(
-        field for field in set(options) - recognized if not inert(options[field])
-    )
+    unknown = sorted(field for field in set(options) - recognized if not inert(options[field]))
     if unknown:
         return "Qwen Edge-LLM capsule does not recognize public option(s): " + ", ".join(unknown)
 
@@ -513,6 +684,13 @@ def _parameter_or_environment(
     if isinstance(value, str) and value.strip():
         return value.strip()
     return os.environ.get(environment_name, "").strip()
+
+
+def _test_payload_injection_enabled(parameters: Mapping[str, Any]) -> bool:
+    runtime_build = _validate_runtime_build(parameters)
+    return runtime_build.get("fake") is True and (
+        os.environ.get(_ALLOW_FAKE_RUNTIME_BUILD_ENV, "").strip() == "1"
+    )
 
 
 def _require_payload(
@@ -598,8 +776,10 @@ def _validate_engine_directory(path: Path) -> tuple[Path, int]:
     vocab_size = config.get("reduced_vocab_size") or config.get("vocab_size")
     if type(vocab_size) is not int or not 0 < vocab_size < (1 << 31):
         raise AdapterError("Edge-LLM engine vocab_size must be a positive INT32")
-    if config.get("edgellm_version") != "0.6.1":
-        raise AdapterError("Edge-LLM engine was not built by pinned runtime version 0.6.1")
+    if config.get("edgellm_version") != _EDGE_LLM_VERSION:
+        raise AdapterError(
+            f"Edge-LLM engine was not built by pinned runtime version {_EDGE_LLM_VERSION}"
+        )
     builder = _require_mapping(config.get("builder_config"), "Edge-LLM builder_config")
     expected = {
         "max_input_len": 1024,
@@ -729,7 +909,11 @@ def _probe_build_device() -> None:
 
 
 def _run_tool(
-    command: list[str], *, verbose: bool, environment: Mapping[str, str] | None = None
+    command: list[str],
+    *,
+    verbose: bool,
+    environment: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
 ) -> None:
     try:
         result = subprocess.run(
@@ -738,6 +922,7 @@ def _run_tool(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=dict(environment) if environment is not None else None,
+            cwd=str(cwd) if cwd is not None else None,
             check=False,
         )
     except OSError as exc:
@@ -756,6 +941,305 @@ def _run_tool(
         )
 
 
+def _python_profile_root() -> Path:
+    configured = (
+        os.environ.get(_PYTHON_PROFILE_ROOT_ENV, "").strip()
+        or os.environ.get(_LEGACY_PYTHON_PROFILE_ROOT_ENV, "").strip()
+        or _DEFAULT_PYTHON_PROFILE_ROOT
+    )
+    return Path(configured).expanduser()
+
+
+def _python_profile_prebuilt_only() -> bool:
+    return os.environ.get(_PYTHON_PROFILE_PREBUILT_ONLY_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _glibc_version() -> tuple[int, int] | None:
+    libc_name, libc_version = platform.libc_ver()
+    candidates = [f"{libc_name} {libc_version}".strip()]
+    if not libc_name or libc_name.lower() == "glibc":
+        try:
+            candidates.append(os.confstr("CS_GNU_LIBC_VERSION") or "")
+        except (AttributeError, OSError, ValueError):
+            pass
+    for candidate in candidates:
+        match = re.fullmatch(r"(?:glibc\s+)?([0-9]+)\.([0-9]+)(?:\.[0-9]+)?", candidate)
+        if match is not None:
+            return int(match.group(1)), int(match.group(2))
+    return None
+
+
+def _validate_exporter_host() -> None:
+    glibc = _glibc_version()
+    actual = {
+        "implementation": sys.implementation.name,
+        "version": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "platform": sys.platform,
+        "architecture": platform.machine(),
+        "glibc": ".".join(str(component) for component in glibc) if glibc else "unknown",
+    }
+    expected = {
+        "implementation": "cpython",
+        "version": "3.12",
+        "platform": "linux",
+        "architecture": "x86_64",
+    }
+    if (
+        any(actual[field] != value for field, value in expected.items())
+        or not glibc
+        or glibc
+        < (
+            2,
+            28,
+        )
+    ):
+        raise AdapterError(
+            "Qwen Edge-LLM exporter lock requires CPython 3.12 on Linux x86_64 "
+            "with glibc >=2.28: " + json.dumps(actual, sort_keys=True)
+        )
+
+
+def _isolated_python_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE"):
+        environment.pop(name, None)
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PIP_CONFIG_FILE"] = os.devnull
+    return environment
+
+
+def _exporter_profile_identity() -> str:
+    try:
+        lock_bytes = DEPENDENCY_PATH.read_bytes()
+    except OSError as exc:
+        raise AdapterError(
+            f"Unable to read capsule dependency lock {DEPENDENCY_PATH}: {exc}"
+        ) from exc
+    payload = b"\0".join(
+        (
+            _EXPORTER_PROFILE_LAYOUT_VERSION.encode("utf-8"),
+            str(Path(sys.executable).absolute()).encode("utf-8"),
+            sys.version.encode("utf-8"),
+            platform.machine().encode("utf-8"),
+            _EDGE_LLM_COMMIT.encode("ascii"),
+            lock_bytes,
+        )
+    )
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _exporter_profile_paths() -> tuple[str, Path, Path, Path]:
+    identity = _exporter_profile_identity()
+    root = _python_profile_root()
+    environment = root / f"{_EXPORTER_PROFILE_NAME}-{identity[:16]}"
+    return (
+        identity,
+        environment,
+        environment / "bin" / "python",
+        root / (f"{_EXPORTER_PROFILE_NAME}-{identity[:16]}.lock"),
+    )
+
+
+def _verify_exporter_python(python: Path) -> None:
+    if not python.is_file() or not os.access(python, os.X_OK):
+        raise AdapterError(f"Edge-LLM exporter Python is unavailable: {python}")
+    _requirements, expected = _load_exporter_lock()
+    version_script = (
+        "import importlib.metadata as m, json, re; "
+        "canonical=lambda name: re.sub(r'[-_.]+', '-', name).lower(); "
+        "actual={canonical(dist.metadata['Name']): dist.version for dist in m.distributions()}; "
+        "print(json.dumps(actual, sort_keys=True))"
+    )
+    environment = _isolated_python_environment()
+    try:
+        result = subprocess.run(
+            [str(python), "-I", "-c", version_script],
+            capture_output=True,
+            text=True,
+            env=environment,
+            cwd=str(python.parent),
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AdapterError(f"Unable to verify Edge-LLM exporter Python {python}: {exc}") from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise AdapterError(
+            f"Unable to inspect Edge-LLM exporter Python {python}: {detail or result.returncode}"
+        )
+    try:
+        actual = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise AdapterError(
+            f"Edge-LLM exporter Python returned invalid package metadata: {result.stdout!r}"
+        ) from exc
+    if not isinstance(actual, dict):
+        raise AdapterError("Edge-LLM exporter Python package metadata must be a JSON object")
+    mismatches: dict[str, Any] = {
+        name: {"expected": expected[name], "actual": actual.get(name)}
+        for name in expected
+        if actual.get(name) != expected[name]
+    }
+    unexpected = {name: version for name, version in actual.items() if name not in expected}
+    if unexpected:
+        mismatches["unexpected"] = unexpected
+    if mismatches:
+        raise AdapterError(
+            "Edge-LLM exporter Python package inventory does not match the capsule lock: "
+            + json.dumps(mismatches, sort_keys=True)
+        )
+
+    import_script = (
+        "import importlib, json, sys; "
+        "modules=json.loads(sys.argv[1]); "
+        "[importlib.import_module(module) for module in modules.values()]"
+    )
+    try:
+        result = subprocess.run(
+            [str(python), "-I", "-c", import_script, json.dumps(_EXPORTER_IMPORTS, sort_keys=True)],
+            capture_output=True,
+            text=True,
+            env=environment,
+            cwd=str(python.parent),
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AdapterError(
+            f"Unable to smoke-test Edge-LLM exporter Python {python}: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise AdapterError(
+            f"Edge-LLM exporter Python import smoke failed for {python}: "
+            f"{detail or result.returncode}"
+        )
+
+
+def _existing_exporter_python(identity: str, environment: Path, python: Path) -> Path | None:
+    ready = environment / ".ready"
+    try:
+        if ready.read_text(encoding="utf-8").strip() != identity:
+            return None
+    except (OSError, UnicodeError):
+        return None
+    try:
+        _verify_exporter_python(python)
+    except AdapterError:
+        return None
+    return python
+
+
+def _probe_exporter_python() -> None:
+    """Check exporter-environment viability without writing or installing."""
+
+    _validate_exporter_host()
+    identity, environment, python, _lock = _exporter_profile_paths()
+    if _existing_exporter_python(identity, environment, python) is not None:
+        return
+    if _python_profile_prebuilt_only():
+        raise AdapterError(
+            f"Edge-LLM exporter Python profile is not prebuilt or is corrupt: {environment}"
+        )
+    missing = [name for name in ("venv", "ensurepip") if importlib.util.find_spec(name) is None]
+    if missing:
+        raise AdapterError(
+            "Edge-LLM exporter Python cannot be materialized because the base interpreter "
+            "is missing: " + ", ".join(missing)
+        )
+
+
+def _materialize_exporter_python() -> Path:
+    """Create this leaf's exact exporter environment after profile selection."""
+
+    _validate_exporter_host()
+    locked_requirements, _packages = _load_exporter_lock()
+    identity, environment, python, lock = _exporter_profile_paths()
+    existing = _existing_exporter_python(identity, environment, python)
+    if existing is not None:
+        return existing
+    if _python_profile_prebuilt_only():
+        raise AdapterError(
+            f"Edge-LLM exporter Python profile is not prebuilt or is corrupt: {environment}"
+        )
+
+    root = environment.parent
+    root.mkdir(parents=True, exist_ok=True)
+    with lock.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        existing = _existing_exporter_python(identity, environment, python)
+        if existing is not None:
+            return existing
+
+        staging = Path(tempfile.mkdtemp(prefix=f"{_EXPORTER_PROFILE_NAME}-", dir=str(root)))
+        staging_python = staging / "bin" / "python"
+        requirements = staging / "requirements.lock.txt"
+        requirements.write_text(locked_requirements, encoding="utf-8")
+        isolated_environment = _isolated_python_environment()
+        try:
+            _run_checked(
+                [sys.executable, "-I", "-m", "venv", str(staging)],
+                "create the Qwen Edge-LLM exporter Python profile",
+                environment=isolated_environment,
+                cwd=root,
+            )
+            _run_checked(
+                [
+                    str(staging_python),
+                    "-I",
+                    "-m",
+                    "pip",
+                    "--isolated",
+                    "install",
+                    "--disable-pip-version-check",
+                    "--no-input",
+                    "--only-binary=:all:",
+                    "--require-hashes",
+                    "--no-deps",
+                    "--no-compile",
+                    "-r",
+                    str(requirements),
+                ],
+                "install the Qwen Edge-LLM exporter Python profile",
+                environment=isolated_environment,
+                cwd=staging,
+            )
+            _verify_exporter_python(staging_python)
+            (staging / ".ready").write_text(identity + "\n", encoding="utf-8")
+            if environment.exists():
+                shutil.rmtree(environment)
+            staging.rename(environment)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    return python
+
+
+def _edge_export_command(
+    python: Path,
+    edge_source: Path,
+    model_source: Path,
+    output_root: Path,
+) -> list[str]:
+    return [
+        str(python),
+        "-I",
+        "-c",
+        _EDGE_EXPORT_BOOTSTRAP,
+        str(edge_source),
+        str(model_source),
+        str(output_root),
+        "--dtype=float16",
+    ]
+
+
 def _build_or_resolve_engine(
     parameters: Mapping[str, Any],
     output: Path,
@@ -764,6 +1248,8 @@ def _build_or_resolve_engine(
 ) -> tuple[Path, int, Path | None]:
     configured_engine = _parameter_or_environment(parameters, "engine_dir", _ENGINE_ENV)
     if configured_engine:
+        if not _test_payload_injection_enabled(parameters):
+            raise AdapterError("Edge-LLM engine payload overrides are test-only")
         if dependency is not None:
             _validate_edge_source(dependency.source_dir)
         engine, vocab_size = _validate_engine_directory(Path(configured_engine))
@@ -773,20 +1259,21 @@ def _build_or_resolve_engine(
     workspace_base = output / ".edge-build-workspace"
     workspace_base.mkdir(parents=True, exist_ok=True)
     attempt = Path(tempfile.mkdtemp(prefix="qwen3-edge-", dir=workspace_base))
-    onnx = attempt / "onnx"
+    output_root = attempt / "output_root"
+    onnx = output_root / "llm"
     engine = attempt / "engine.dir"
-    onnx.mkdir()
+    output_root.mkdir()
     engine.mkdir()
+    tool_cwd = attempt / ".tool-cwd"
+    tool_cwd.mkdir()
     runtime_build = _validate_runtime_build(parameters)
     if dependency is None:
         dependency = _resolve_edge_dependency(output, runtime_build)
-    export_script = dependency.source_dir / "tensorrt_edgellm" / "scripts" / "export_llm.py"
+    export_script = dependency.source_dir / "tensorrt_edgellm" / "scripts" / "export.py"
     if not export_script.is_file():
         raise AdapterError(f"Pinned TensorRT Edge-LLM exporter is missing: {export_script}")
-    export_environment = os.environ.copy()
-    export_environment["PYTHONPATH"] = str(dependency.source_dir)
-    export_environment["PYTHONDONTWRITEBYTECODE"] = "1"
-    export_environment["PYTHONNOUSERSITE"] = "1"
+    export_environment = _isolated_python_environment()
+    exporter_python = _materialize_exporter_python()
     _validate_edge_source(dependency.source_dir)
     model_source = _materialize_model_source(str(parameters.get("model_source") or MODEL_ID))
     public_options = _require_mapping(
@@ -795,15 +1282,15 @@ def _build_or_resolve_engine(
     verbose = bool(public_options.get("verbose", False))
     try:
         _run_tool(
-            [
-                sys.executable,
-                str(export_script),
-                f"--model_dir={model_source}",
-                f"--output_dir={onnx}",
-                "--device=cuda",
-            ],
+            _edge_export_command(
+                exporter_python,
+                dependency.source_dir,
+                model_source,
+                output_root,
+            ),
             verbose=verbose,
             environment=export_environment,
+            cwd=tool_cwd,
         )
         if dependency is not None:
             _validate_edge_source(dependency.source_dir)
@@ -823,7 +1310,22 @@ def _build_or_resolve_engine(
                 # build/libNvInfer_edgellm_plugin.so. Bind engine creation to
                 # the exact plugin payload that this capsule will package.
                 "EDGELLM_PLUGIN_PATH": str(plugin_path),
+                "LD_LIBRARY_PATH": os.pathsep.join(
+                    dict.fromkeys(
+                        (
+                            str(dependency.tensorrt.library.parent),
+                            str(dependency.tensorrt.onnx_parser_library.parent),
+                            str(dependency.cuda.cudart_library.parent),
+                            *(
+                                (os.environ["LD_LIBRARY_PATH"],)
+                                if os.environ.get("LD_LIBRARY_PATH")
+                                else ()
+                            ),
+                        )
+                    )
+                ),
             },
+            cwd=tool_cwd,
         )
         if dependency is not None:
             _validate_edge_source(dependency.source_dir)
@@ -858,6 +1360,7 @@ def _validate_runtime_build(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
         "onnx_parser_library",
         "cuda_include_dir",
         "cudart_library",
+        "cuda_driver_library",
     }
     unknown = sorted(set(runtime_build) - allowed)
     if unknown:
@@ -876,9 +1379,22 @@ def _validate_runtime_build(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
     return runtime_build
 
 
-def _run_checked(command: list[str], description: str) -> None:
+def _run_checked(
+    command: list[str],
+    description: str,
+    *,
+    environment: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> None:
     try:
-        result = subprocess.run(command, text=True, capture_output=True, check=False)
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            env=dict(environment) if environment is not None else None,
+            cwd=str(cwd) if cwd is not None else None,
+            check=False,
+        )
     except OSError as exc:
         raise AdapterError(f"Unable to launch {description}: {exc}") from exc
     if result.returncode != 0:
@@ -907,6 +1423,42 @@ def _run_capture(command: list[str], description: str) -> str:
     return result.stdout.rstrip()
 
 
+def _validate_packaged_elf(path: Path) -> None:
+    header = _run_capture(["readelf", "-h", str(path)], f"ELF header inspection for {path.name}")
+    if "Class:                             ELF64" not in header:
+        raise AdapterError(f"Packaged Edge-LLM payload is not ELF64: {path}")
+    if "Machine:                           Advanced Micro Devices X86-64" not in header:
+        raise AdapterError(f"Packaged Edge-LLM payload is not x86-64: {path}")
+
+    dynamic = _run_capture(
+        ["readelf", "-d", str(path)], f"ELF dynamic-section inspection for {path.name}"
+    )
+    search_paths = re.findall(r"\((?:RPATH|RUNPATH)\).*?\[(.*?)\]", dynamic, flags=re.MULTILINE)
+    if search_paths:
+        raise AdapterError(
+            f"Packaged Edge-LLM payload contains forbidden RPATH/RUNPATH entries: {path}: "
+            + ", ".join(search_paths)
+        )
+    needed = set(re.findall(r"Shared library: \[(.*?)\]", dynamic))
+    required = {"libcuda.so.1", "libcudart.so.13", "libnvinfer.so.11"}
+    missing = sorted(required - needed)
+    if missing:
+        raise AdapterError(
+            f"Packaged Edge-LLM payload is missing required runtime dependencies: {path}: "
+            + ", ".join(missing)
+        )
+    wrong_tensorrt = sorted(
+        library
+        for library in needed
+        if library.startswith("libnvinfer.so.") and library != "libnvinfer.so.11"
+    )
+    if wrong_tensorrt:
+        raise AdapterError(
+            f"Packaged Edge-LLM payload links an unsupported TensorRT runtime: {path}: "
+            + ", ".join(wrong_tensorrt)
+        )
+
+
 def _validate_edge_source(source: Path) -> Path:
     source_url, _, expected_commit, _, _ = _pinned_edge_dependency()
     try:
@@ -917,7 +1469,7 @@ def _validate_edge_source(source: Path) -> Path:
         resolved / "CMakeLists.txt",
         resolved / "cpp" / "common" / "version.h",
         resolved / "3rdParty" / "nlohmannJson" / "include" / "nlohmann" / "json.hpp",
-        resolved / "tensorrt_edgellm" / "scripts" / "export_llm.py",
+        resolved / "tensorrt_edgellm" / "scripts" / "export.py",
     )
     missing = [str(path) for path in required if not path.is_file()]
     if missing:
@@ -1357,6 +1909,7 @@ def _cuda_installation(
     root: Path,
     include_dir: Path,
     configured_cudart: Path | None,
+    configured_driver: Path | None,
 ) -> _CudaInstallation:
     root = root.resolve(strict=True)
     include_dir = include_dir.resolve(strict=True)
@@ -1364,7 +1917,7 @@ def _cuda_installation(
         include_dir.relative_to(root)
     except ValueError as exc:
         raise AdapterError(
-            "CUDA headers, compiler, and libcudart must come from the same exact "
+            "CUDA headers, compiler, libcudart, and libcuda must come from the same exact "
             f"CUDA {_CUDA_VERSION_TEXT} toolkit"
         ) from exc
     version = _cuda_version(root, include_dir)
@@ -1387,7 +1940,7 @@ def _cuda_installation(
         compiler.relative_to(root)
     except ValueError as exc:
         raise AdapterError(
-            "CUDA headers, compiler, and libcudart must come from the same exact "
+            "CUDA headers, compiler, libcudart, and libcuda must come from the same exact "
             f"CUDA {_CUDA_VERSION_TEXT} toolkit"
         ) from exc
 
@@ -1409,20 +1962,62 @@ def _cuda_installation(
         break
     if cudart is None and configured_cudart is not None:
         raise AdapterError(
-            "CUDA headers, compiler, and libcudart must come from the same exact "
+            "CUDA headers, compiler, libcudart, and libcuda must come from the same exact "
             f"CUDA {_CUDA_VERSION_TEXT} toolkit"
         )
     if cudart is None:
         raise AdapterError(f"Unable to find libcudart below CUDA toolkit {root}")
-    return _CudaInstallation(root, include_dir, cudart, compiler, version)
+
+    driver_candidates = (
+        [configured_driver]
+        if configured_driver is not None
+        else _library_candidates(
+            [
+                root / "lib64" / "stubs",
+                root / "lib" / "stubs",
+                root / "targets" / "x86_64-linux" / "lib" / "stubs",
+                root / "targets" / "x86_64-linux" / "lib",
+                root / "lib64",
+                root / "lib",
+            ],
+            "libcuda",
+        )
+    )
+    driver: Path | None = None
+    for candidate in driver_candidates:
+        if not candidate.is_file() or not candidate.name.startswith("libcuda.so"):
+            continue
+        resolved = candidate.resolve(strict=True)
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        driver = resolved
+        break
+    if driver is None and configured_driver is not None:
+        raise AdapterError(
+            "CUDA headers, compiler, libcudart, and libcuda must come from the same exact "
+            f"CUDA {_CUDA_VERSION_TEXT} toolkit"
+        )
+    if driver is None:
+        raise AdapterError(
+            f"Unable to find the CUDA driver stub or library below CUDA toolkit {root}"
+        )
+    return _CudaInstallation(root, include_dir, cudart, driver, compiler, version)
 
 
 def _resolve_cuda(runtime_build: Mapping[str, Any]) -> _CudaInstallation:
     configured_include = _runtime_setting(runtime_build, "cuda_include_dir", _CUDA_INCLUDE_ENV)
     configured_cudart_value = _runtime_setting(runtime_build, "cudart_library", _CUDART_LIBRARY_ENV)
+    configured_driver_value = _runtime_setting(
+        runtime_build, "cuda_driver_library", _CUDA_DRIVER_LIBRARY_ENV
+    )
     configured_cudart = Path(configured_cudart_value) if configured_cudart_value else None
+    configured_driver = Path(configured_driver_value) if configured_driver_value else None
     if configured_cudart is not None and not configured_cudart.is_file():
         raise AdapterError(f"Configured libcudart does not exist: {configured_cudart}")
+    if configured_driver is not None and not configured_driver.is_file():
+        raise AdapterError(f"Configured CUDA driver library does not exist: {configured_driver}")
 
     # Capsule-specific overrides are exact inputs, not discovery hints. Validate
     # their single toolkit immediately so an invalid override cannot fall back to
@@ -1438,6 +2033,7 @@ def _resolve_cuda(runtime_build: Mapping[str, Any]) -> _CudaInstallation:
             _cuda_toolkit_root(include_dir),
             include_dir,
             configured_cudart,
+            configured_driver,
         )
 
     if configured_cudart is not None:
@@ -1446,11 +2042,19 @@ def _resolve_cuda(runtime_build: Mapping[str, Any]) -> _CudaInstallation:
         cuda_header = _first_header(_header_directories([root]), "cuda_runtime_api.h")
         if cuda_header is None:
             raise AdapterError(f"Unable to find CUDA toolkit headers below {root}")
-        return _cuda_installation(root, cuda_header.parent, cudart)
+        return _cuda_installation(root, cuda_header.parent, cudart, configured_driver)
+
+    if configured_driver is not None:
+        driver = configured_driver.resolve(strict=True)
+        root = _cuda_toolkit_root(driver.parent)
+        cuda_header = _first_header(_header_directories([root]), "cuda_runtime_api.h")
+        if cuda_header is None:
+            raise AdapterError(f"Unable to find CUDA toolkit headers below {root}")
+        return _cuda_installation(root, cuda_header.parent, None, driver)
 
     prefixes = _dependency_prefixes(
         ("CUDA_HOME", "CUDA_PATH", "CUDAToolkit_ROOT"),
-        ("/usr/local/cuda", "/usr/local/cuda-12.8", "/opt/cuda"),
+        ("/usr/local/cuda", "/usr/local/cuda-13.3", "/opt/cuda"),
     )
     prefixes = _deduplicate_paths(
         [
@@ -1470,7 +2074,7 @@ def _resolve_cuda(runtime_build: Mapping[str, Any]) -> _CudaInstallation:
             errors.append(f"Unable to find CUDA toolkit headers below {root}")
             continue
         try:
-            return _cuda_installation(root, cuda_header.parent, None)
+            return _cuda_installation(root, cuda_header.parent, None, None)
         except AdapterError as exc:
             errors.append(str(exc))
     detail = f" ({'; '.join(errors)})" if errors else ""
@@ -1492,19 +2096,274 @@ def _cmake_cache_value(build_dir: Path, key: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _edge_products(build_dir: Path) -> tuple[Path, Path, Path, Path] | None:
+def _resolved_compiler(environment: str, default: str) -> Path:
+    configured = os.environ.get(environment, "").strip() or default
+    if any(character.isspace() for character in configured):
+        raise AdapterError(f"{environment} must name one compiler executable")
+    candidate = shutil.which(configured)
+    if candidate is None:
+        raise AdapterError(f"Required host compiler is unavailable: {configured}")
+    try:
+        return Path(candidate).resolve(strict=True)
+    except OSError as exc:
+        raise AdapterError(f"Unable to resolve host compiler {candidate}: {exc}") from exc
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as input_file:
+            for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        raise AdapterError(f"Unable to hash build identity file {path}: {exc}") from exc
+    return digest.hexdigest()
+
+
+def _resolved_build_tool(environment: str, compiler: Path, program: str) -> Path:
+    configured = os.environ.get(environment, "").strip()
+    candidate = configured or _run_capture(
+        [str(compiler), f"-print-prog-name={program}"], f"host {program} inspection"
+    )
+    resolved = shutil.which(candidate) if not Path(candidate).is_absolute() else candidate
+    if not resolved:
+        raise AdapterError(f"Required build tool is unavailable: {candidate}")
+    try:
+        return Path(resolved).resolve(strict=True)
+    except OSError as exc:
+        raise AdapterError(f"Unable to resolve build tool {resolved}: {exc}") from exc
+
+
+def _host_toolchain_identity(
+    source: Path,
+    tensorrt: _TensorRtInstallation,
+    cuda: _CudaInstallation,
+) -> _EdgeBuildToolchain:
+    cc = _resolved_compiler("CC", "cc")
+    cxx = _resolved_compiler("CXX", "c++")
+    linker = _resolved_build_tool("LD", cxx, "ld")
+    archiver = _resolved_build_tool("AR", cxx, "ar")
+    cmake = _resolved_compiler("CMAKE_COMMAND", "cmake")
+    libstdcxx_value = _run_capture(
+        [str(cxx), "-print-file-name=libstdc++.so"], "host C++ runtime inspection"
+    )
+    try:
+        libstdcxx = Path(libstdcxx_value).resolve(strict=True)
+    except OSError as exc:
+        raise AdapterError(
+            f"Host C++ compiler did not resolve libstdc++.so: {libstdcxx_value or '<none>'}"
+        ) from exc
+    architecture = platform.machine()
+    files = {
+        "archiver": archiver,
+        "cmake": cmake,
+        "cuda.cuda.h": cuda.include_dir / "cuda.h",
+        "cuda.cuda_runtime_api.h": cuda.include_dir / "cuda_runtime_api.h",
+        "cuda.driver": cuda.driver_library,
+        "cuda.nvcc": cuda.compiler,
+        "cuda.runtime": cuda.cudart_library,
+        "edge.CMakeLists.txt": source / "CMakeLists.txt",
+        "edge.llmInferenceRuntime.h": source / "cpp" / "runtime" / "llmInferenceRuntime.h",
+        "edge.version.h": source / "cpp" / "common" / "version.h",
+        "host.cc": cc,
+        "host.cxx": cxx,
+        "host.libstdc++": libstdcxx,
+        "linker": linker,
+        "tensorrt.NvInfer.h": tensorrt.include_dir / "NvInfer.h",
+        "tensorrt.NvInferVersion.h": tensorrt.include_dir / "NvInferVersion.h",
+        "tensorrt.NvOnnxParser.h": tensorrt.onnx_parser_include_dir / "NvOnnxParser.h",
+        "tensorrt.nvinfer": tensorrt.library,
+        "tensorrt.onnx_parser": tensorrt.onnx_parser_library,
+    }
+    file_identity = {
+        name: {"path": str(path.resolve(strict=True)), "sha256": _file_sha256(path)}
+        for name, path in files.items()
+    }
+    versions = {
+        "cc": _run_capture([str(cc), "--version"], "host C compiler inspection"),
+        "cmake": _run_capture([str(cmake), "--version"], "CMake inspection"),
+        "cxx": _run_capture([str(cxx), "--version"], "host C++ compiler inspection"),
+        "nvcc": _run_capture([str(cuda.compiler), "--version"], "CUDA compiler inspection"),
+    }
+    payload = {
+        "architecture": architecture,
+        "build_environment": {name: os.environ.get(name, "") for name in _EDGE_BUILD_ENVIRONMENT},
+        "files": file_identity,
+        "schema_version": 1,
+        "versions": versions,
+    }
+    identity = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return _EdgeBuildToolchain(cc, cxx, linker, archiver, cmake, identity, architecture)
+
+
+def _edge_products(build_dir: Path) -> tuple[Path, Path, Path] | None:
     for configuration in ("", "Release", "RelWithDebInfo", "Debug"):
         suffix = Path(configuration) if configuration else Path()
         core = build_dir / "cpp" / suffix / "libedgellmCore.a"
-        tokenizer = build_dir / "cpp" / suffix / "libedgellmTokenizer.a"
         plugin = build_dir / suffix / "libNvInfer_edgellm_plugin.so.1.0"
         build_tool = build_dir / "examples" / "llm" / suffix / "llm_build"
-        if all(
-            path.is_file() and path.stat().st_size > 0
-            for path in (core, tokenizer, plugin, build_tool)
-        ):
-            return core, tokenizer, plugin, build_tool
+        if all(path.is_file() and path.stat().st_size > 0 for path in (core, plugin, build_tool)):
+            return core, plugin, build_tool
     return None
+
+
+def _edge_configure_definitions(
+    source: Path,
+    tensorrt: _TensorRtInstallation,
+    cuda: _CudaInstallation,
+    toolchain: _EdgeBuildToolchain,
+) -> dict[str, str]:
+    return {
+        "AARCH64_BUILD": "OFF",
+        "BUILD_PYTHON_BINDINGS": "OFF",
+        "BUILD_UNIT_TESTS": "OFF",
+        "CMAKE_AR": str(toolchain.archiver),
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "80",
+        "CMAKE_CUDA_COMPILER": str(cuda.compiler),
+        "CMAKE_CUDA_HOST_COMPILER": str(toolchain.cxx),
+        "CMAKE_CXX_COMPILER": str(toolchain.cxx),
+        "CMAKE_C_COMPILER": str(toolchain.cc),
+        "CMAKE_LINKER": str(toolchain.linker),
+        "CMAKE_SKIP_RPATH": "ON",
+        "CUDA_CTK_VERSION": cuda.version,
+        "CUDA_DIR": str(cuda.root),
+        "CUDA_DRIVER_LIB": str(cuda.driver_library),
+        "CUDA_RUNTIME_API_INCLUDE_DIR": str(cuda.include_dir),
+        "CUDART_LIB": str(cuda.cudart_library),
+        "ENABLE_CUTE_DSL": "OFF",
+        "ENABLE_NVTX_PROFILING": "OFF",
+        "NVINFER_LIB": str(tensorrt.library),
+        "NV_ONNX_PARSER_LIB": str(tensorrt.onnx_parser_library),
+        "ONNX_PARSER_INCLUDE_DIR": str(tensorrt.onnx_parser_include_dir),
+        "TRTMC_EDGE_BUILD_HOST_ARCHITECTURE": toolchain.architecture,
+        "TRTMC_EDGE_BUILD_TOOLCHAIN_SHA256": toolchain.sha256,
+        "TRT_INCLUDE_DIR": str(tensorrt.include_dir),
+        "TRT_PACKAGE_DIR": str(tensorrt.library.parent),
+        "TensorRT_INCLUDE_DIR": str(tensorrt.include_dir),
+        "TensorRT_LIBRARY": str(tensorrt.library),
+        "TensorRT_OnnxParser_INCLUDE_DIR": str(tensorrt.onnx_parser_include_dir),
+        "TensorRT_OnnxParser_LIBRARY": str(tensorrt.onnx_parser_library),
+    }
+
+
+def _edge_build_recipe(
+    source: Path,
+    tensorrt: _TensorRtInstallation,
+    cuda: _CudaInstallation,
+    toolchain: _EdgeBuildToolchain,
+) -> dict[str, Any]:
+    return {
+        "build_environment": {name: os.environ.get(name, "") for name in _EDGE_BUILD_ENVIRONMENT},
+        "configure_definitions": _edge_configure_definitions(source, tensorrt, cuda, toolchain),
+        "edge_commit": _EDGE_LLM_COMMIT,
+        "edge_version": _EDGE_LLM_VERSION,
+        "schema_version": 1,
+        "source": str(source.resolve(strict=True)),
+        "targets": list(_EDGE_BUILD_TARGETS),
+        "toolchain_sha256": toolchain.sha256,
+    }
+
+
+def _canonical_sha256(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _edge_cache_matches(
+    build_dir: Path,
+    source: Path,
+    definitions: Mapping[str, str],
+    recipe_sha256: str,
+) -> bool:
+    if _cmake_cache_value(build_dir, "CMAKE_HOME_DIRECTORY") != str(source.resolve()):
+        return False
+    expected = {**definitions, "TRTMC_EDGE_BUILD_RECIPE_SHA256": recipe_sha256}
+    path_keys = {
+        "CMAKE_AR",
+        "CMAKE_CUDA_COMPILER",
+        "CMAKE_CUDA_HOST_COMPILER",
+        "CMAKE_CXX_COMPILER",
+        "CMAKE_C_COMPILER",
+        "CMAKE_LINKER",
+        "CUDA_DIR",
+        "CUDA_DRIVER_LIB",
+        "CUDA_RUNTIME_API_INCLUDE_DIR",
+        "CUDART_LIB",
+        "NVINFER_LIB",
+        "NV_ONNX_PARSER_LIB",
+        "ONNX_PARSER_INCLUDE_DIR",
+        "TRT_INCLUDE_DIR",
+        "TRT_PACKAGE_DIR",
+        "TensorRT_INCLUDE_DIR",
+        "TensorRT_LIBRARY",
+        "TensorRT_OnnxParser_INCLUDE_DIR",
+        "TensorRT_OnnxParser_LIBRARY",
+    }
+    for key, expected_value in expected.items():
+        cached = _cmake_cache_value(build_dir, key)
+        if not cached:
+            return False
+        if key not in path_keys:
+            if cached != expected_value:
+                return False
+            continue
+        try:
+            if Path(cached).resolve(strict=True) != Path(expected_value).resolve(strict=True):
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def _edge_product_hashes(build_dir: Path, products: tuple[Path, Path, Path]) -> dict[str, str]:
+    return {path.relative_to(build_dir).as_posix(): _file_sha256(path) for path in products}
+
+
+def _write_edge_build_stamp(
+    build_dir: Path,
+    recipe: Mapping[str, Any],
+    products: tuple[Path, Path, Path],
+) -> None:
+    stamp = build_dir / _EDGE_BUILD_STAMP
+    payload = {
+        "products": _edge_product_hashes(build_dir, products),
+        "recipe": dict(recipe),
+        "recipe_sha256": _canonical_sha256(recipe),
+        "schema_version": 1,
+    }
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f"{_EDGE_BUILD_STAMP}.", dir=build_dir)
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        temporary.write_text(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, stamp)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _edge_build_stamp_matches(
+    build_dir: Path,
+    recipe: Mapping[str, Any],
+    products: tuple[Path, Path, Path],
+) -> bool:
+    try:
+        stamp = _load_json(build_dir / _EDGE_BUILD_STAMP, "Edge-LLM build stamp")
+    except AdapterError:
+        return False
+    expected = {
+        "products": _edge_product_hashes(build_dir, products),
+        "recipe": dict(recipe),
+        "recipe_sha256": _canonical_sha256(recipe),
+        "schema_version": 1,
+    }
+    return stamp == expected
 
 
 def _edge_build_matches(
@@ -1512,31 +2371,19 @@ def _edge_build_matches(
     source: Path,
     tensorrt: _TensorRtInstallation,
     cuda: _CudaInstallation,
+    toolchain: _EdgeBuildToolchain | None = None,
+    recipe: Mapping[str, Any] | None = None,
 ) -> bool:
-    if _edge_products(build_dir) is None:
+    products = _edge_products(build_dir)
+    if products is None:
         return False
-    expected = {
-        "CMAKE_HOME_DIRECTORY": source,
-        "TRT_INCLUDE_DIR": tensorrt.include_dir,
-        "NVINFER_LIB": tensorrt.library,
-        "ONNX_PARSER_INCLUDE_DIR": tensorrt.onnx_parser_include_dir,
-        "NV_ONNX_PARSER_LIB": tensorrt.onnx_parser_library,
-        "CUDA_RUNTIME_API_INCLUDE_DIR": cuda.include_dir,
-        "CUDART_LIB": cuda.cudart_library,
-        "CMAKE_CUDA_COMPILER": cuda.compiler,
-    }
-    if _cmake_cache_value(build_dir, "CMAKE_BUILD_TYPE") != "Release":
-        return False
-    for key, path in expected.items():
-        cached = _cmake_cache_value(build_dir, key)
-        if not cached:
-            return False
-        try:
-            if Path(cached).resolve(strict=True) != path.resolve(strict=True):
-                return False
-        except OSError:
-            return False
-    return True
+    resolved_toolchain = toolchain or _host_toolchain_identity(source, tensorrt, cuda)
+    resolved_recipe = recipe or _edge_build_recipe(source, tensorrt, cuda, resolved_toolchain)
+    definitions = _edge_configure_definitions(source, tensorrt, cuda, resolved_toolchain)
+    recipe_sha256 = _canonical_sha256(resolved_recipe)
+    return _edge_cache_matches(
+        build_dir, source, definitions, recipe_sha256
+    ) and _edge_build_stamp_matches(build_dir, resolved_recipe, products)
 
 
 def _resolve_edge_dependency(
@@ -1547,20 +2394,25 @@ def _resolve_edge_dependency(
     tensorrt = _resolve_tensorrt(runtime_build)
     cuda = _resolve_cuda(runtime_build)
     parallel = runtime_build.get("parallel", 2)
+    toolchain = _host_toolchain_identity(source, tensorrt, cuda)
+    definitions = _edge_configure_definitions(source, tensorrt, cuda, toolchain)
+    recipe = _edge_build_recipe(source, tensorrt, cuda, toolchain)
+    recipe_sha256 = _canonical_sha256(recipe)
 
     configured_build = _runtime_setting(runtime_build, "edge_llm_build_dir", _EDGE_BUILD_DIR_ENV)
     if configured_build:
         candidate = Path(configured_build)
-        if _edge_build_matches(candidate, source, tensorrt, cuda):
+        if _edge_build_matches(candidate, source, tensorrt, cuda, toolchain, recipe):
             products = _edge_products(candidate)
             assert products is not None
             return _EdgeDependency(
                 source,
                 candidate.resolve(strict=True),
-                products[3],
                 products[2],
+                products[1],
                 tensorrt,
                 cuda,
+                toolchain,
             )
         build_dir = Path(configured_build).expanduser()
         if (build_dir / "CMakeCache.txt").exists():
@@ -1571,27 +2423,15 @@ def _resolve_edge_dependency(
     else:
         build_dir = output / ".edge-dependency-build"
 
-    cmake_launcher = "cmake"
+    cmake_launcher = str(toolchain.cmake)
     configure = [
         cmake_launcher,
         "-S",
         str(source),
         "-B",
         str(build_dir),
-        "-DCMAKE_BUILD_TYPE=Release",
-        "-DBUILD_UNIT_TESTS=OFF",
-        "-DENABLE_CUTE_DSL_FMHA=OFF",
-        "-DENABLE_NVTX_PROFILING=OFF",
-        f"-DTRT_PACKAGE_DIR={tensorrt.library.parent}",
-        f"-DTRT_INCLUDE_DIR={tensorrt.include_dir}",
-        f"-DNVINFER_LIB={tensorrt.library}",
-        f"-DONNX_PARSER_INCLUDE_DIR={tensorrt.onnx_parser_include_dir}",
-        f"-DNV_ONNX_PARSER_LIB={tensorrt.onnx_parser_library}",
-        f"-DCUDA_DIR={cuda.root}",
-        f"-DCUDA_CTK_VERSION={cuda.version}",
-        f"-DCMAKE_CUDA_COMPILER={cuda.compiler}",
-        f"-DCUDA_RUNTIME_API_INCLUDE_DIR={cuda.include_dir}",
-        f"-DCUDART_LIB={cuda.cudart_library}",
+        *(f"-D{name}={value}" for name, value in definitions.items()),
+        f"-DTRTMC_EDGE_BUILD_RECIPE_SHA256={recipe_sha256}",
     ]
     _run_checked(configure, "pinned TensorRT Edge-LLM CMake configure")
     _validate_edge_source(source)
@@ -1603,26 +2443,27 @@ def _resolve_edge_dependency(
             "--parallel",
             str(parallel),
             "--target",
-            "edgellmCore",
-            "edgellmTokenizer",
-            "NvInfer_edgellm_plugin",
-            "llm_build",
+            *_EDGE_BUILD_TARGETS,
         ],
         "pinned TensorRT Edge-LLM required-target build",
     )
     _validate_edge_source(source)
     products = _edge_products(build_dir)
-    if products is None or not _edge_build_matches(build_dir, source, tensorrt, cuda):
+    if products is None or not _edge_cache_matches(build_dir, source, definitions, recipe_sha256):
         raise AdapterError(
             "TensorRT Edge-LLM build did not produce a complete pinned runtime and llm_build tool"
         )
+    _write_edge_build_stamp(build_dir, recipe, products)
+    if not _edge_build_matches(build_dir, source, tensorrt, cuda, toolchain, recipe):
+        raise AdapterError("TensorRT Edge-LLM build stamp validation failed after build")
     return _EdgeDependency(
         source,
         build_dir.resolve(strict=True),
-        products[3],
         products[2],
+        products[1],
         tensorrt,
         cuda,
+        toolchain,
     )
 
 
@@ -1647,7 +2488,11 @@ def _build_runtime_dso(
     else:
         sdk_include_dirs = ";".join(str(root) for root in _private_sdk_include_roots())
     dependency = None if fake else _resolve_edge_dependency(output, runtime_build)
-    cmake_launcher = "cmake"
+    cmake_launcher = (
+        str(dependency.toolchain.cmake)
+        if dependency is not None and dependency.toolchain is not None
+        else "cmake"
+    )
     edge_source = (
         _runtime_setting(
             runtime_build,
@@ -1684,7 +2529,19 @@ def _build_runtime_dso(
         f"-DTRTMC_QWEN_EDGE_MANIFEST_SHA256={manifest_sha256}",
     ]
     if dependency is not None:
+        selected_cc = (
+            dependency.toolchain.cc
+            if dependency.toolchain is not None
+            else _resolved_compiler("CC", "cc")
+        )
+        selected_cxx = (
+            dependency.toolchain.cxx
+            if dependency.toolchain is not None
+            else _resolved_compiler("CXX", "c++")
+        )
         required = {
+            "CMAKE_C_COMPILER": selected_cc,
+            "CMAKE_CXX_COMPILER": selected_cxx,
             "TRTMC_EDGE_LLM_SOURCE_DIR": dependency.source_dir,
             "TRTMC_EDGE_LLM_BUILD_DIR": dependency.build_dir,
             "TRTMC_TENSORRT_INCLUDE_DIR": dependency.tensorrt.include_dir,
@@ -1692,9 +2549,18 @@ def _build_runtime_dso(
             "TRTMC_TENSORRT_VERSION": _TENSORRT_VERSION_TEXT,
             "TRTMC_CUDA_INCLUDE_DIR": dependency.cuda.include_dir,
             "TRTMC_CUDART_LIBRARY": dependency.cuda.cudart_library,
+            "TRTMC_CUDA_DRIVER_LIBRARY": dependency.cuda.driver_library,
             "TRTMC_CUDA_VERSION": _CUDA_VERSION_TEXT,
             "CMAKE_CUDA_COMPILER": dependency.cuda.compiler,
+            "CMAKE_CUDA_HOST_COMPILER": selected_cxx,
         }
+        if dependency.toolchain is not None:
+            required.update(
+                {
+                    "CMAKE_AR": dependency.toolchain.archiver,
+                    "CMAKE_LINKER": dependency.toolchain.linker,
+                }
+            )
         configure.extend(f"-D{name}={value}" for name, value in required.items())
     _run_checked(configure, "capsule runtime CMake configure")
     if dependency is not None:
@@ -1718,6 +2584,11 @@ def _build_runtime_dso(
         )
     plugin_candidates = list(build_directory.rglob(EDGE_LLM_PLUGIN))
     plugin = plugin_candidates[0] if len(plugin_candidates) == 1 else None
+    if dependency is not None:
+        if plugin is None:
+            raise AdapterError("Capsule runtime build did not stage exactly one Edge-LLM plugin")
+        _validate_packaged_elf(runtime_candidates[0])
+        _validate_packaged_elf(plugin)
     return runtime_candidates[0], plugin, dependency
 
 
@@ -1728,17 +2599,19 @@ def _resolve_runtime_payloads(
 ) -> tuple[Path, Path, _EdgeDependency | None]:
     explicit_runtime = _parameter_or_environment(parameters, "runtime_library", _RUNTIME_ENV)
     if explicit_runtime:
+        if not _test_payload_injection_enabled(parameters):
+            raise AdapterError("Edge-LLM runtime payload overrides are test-only")
         runtime = _require_payload(
             parameters, "runtime_library", _RUNTIME_ENV, "Qwen Edge-LLM runtime DSO"
         )
         built_plugin = None
         dependency = None
     else:
-        runtime, built_plugin, dependency = _build_runtime_dso(
-            output, parameters, manifest_sha256
-        )
+        runtime, built_plugin, dependency = _build_runtime_dso(output, parameters, manifest_sha256)
     explicit_plugin = _parameter_or_environment(parameters, "runtime_plugin", _PLUGIN_ENV)
     if explicit_plugin:
+        if not _test_payload_injection_enabled(parameters):
+            raise AdapterError("Edge-LLM plugin payload overrides are test-only")
         plugin = _require_payload(
             parameters, "runtime_plugin", _PLUGIN_ENV, "Qwen Edge-LLM TensorRT plugin"
         )
@@ -1756,66 +2629,28 @@ def _software_profile_reason(parameters: Mapping[str, Any]) -> str:
 
     runtime_build = _validate_runtime_build(parameters)
     fake = runtime_build.get("fake", False)
-    if fake is True and os.environ.get(_ALLOW_FAKE_RUNTIME_BUILD_ENV, "").strip() == "1":
+    if fake is True:
+        if os.environ.get(_ALLOW_FAKE_RUNTIME_BUILD_ENV, "").strip() != "1":
+            return f"Fake runtime builds require {_ALLOW_FAKE_RUNTIME_BUILD_ENV}=1"
         return ""
 
     runtime = _parameter_or_environment(parameters, "runtime_library", _RUNTIME_ENV)
     plugin = _parameter_or_environment(parameters, "runtime_plugin", _PLUGIN_ENV)
     engine = _parameter_or_environment(parameters, "engine_dir", _ENGINE_ENV)
-    if runtime or plugin:
-        if not runtime or not plugin:
-            return "Qwen Edge-LLM prebuilt runtime selection requires both runtime_library and runtime_plugin"
-        try:
-            _require_payload(
-                parameters, "runtime_library", _RUNTIME_ENV, "Qwen Edge-LLM runtime DSO"
-            )
-            _require_payload(
-                parameters,
-                "runtime_plugin",
-                _PLUGIN_ENV,
-                "Qwen Edge-LLM TensorRT plugin",
-            )
-        except AdapterError as exc:
-            return str(exc)
-    if engine:
-        try:
-            _validate_engine_directory(Path(engine))
-        except AdapterError as exc:
-            return str(exc)
-    if runtime and plugin and engine:
-        return ""
+    if runtime or plugin or engine:
+        return "Qwen Edge-LLM payload overrides are test-only"
 
     # Every non-prebuilt path uses the exact pinned Edge-LLM checkout and its
     # own exporter and engine builder. There is no ambient-tool fallback.
     missing_commands = sorted(
-        command for command in ("cmake", "git") if shutil.which(command) is None
+        command for command in ("cmake", "git", "readelf") if shutil.which(command) is None
     )
     if missing_commands:
-        return "Qwen Edge-LLM build prerequisites are unavailable: " + ", ".join(
-            missing_commands
-        )
-    if not engine:
-        exporter_modules = (
-            "PIL",
-            "datasets",
-            "modelopt",
-            "numpy",
-            "onnx",
-            "onnx_graphsurgeon",
-            "safetensors",
-            "torch",
-            "torchvision",
-            "transformers",
-        )
-        missing_modules = [
-            module
-            for module in exporter_modules
-            if importlib.util.find_spec(module) is None
-        ]
-        if missing_modules:
-            return "Qwen Edge-LLM build prerequisites are unavailable: " + ", ".join(
-                missing_modules
-            )
+        return "Qwen Edge-LLM build prerequisites are unavailable: " + ", ".join(missing_commands)
+    try:
+        _probe_exporter_python()
+    except AdapterError as exc:
+        return str(exc)
 
     try:
         _resolve_tensorrt(runtime_build)
@@ -1891,7 +2726,7 @@ def _build(
             },
             "versions": {
                 "model_revision": MODEL_REVISION,
-                "edge_llm": "0.6.1",
+                "edge_llm": _EDGE_LLM_VERSION,
                 "edge_llm_commit": edge_commit,
                 "tensorrt": tensorrt_version,
                 "cuda": cuda_version,

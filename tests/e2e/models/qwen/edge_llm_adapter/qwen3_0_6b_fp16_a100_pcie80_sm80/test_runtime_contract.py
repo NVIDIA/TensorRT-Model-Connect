@@ -49,11 +49,28 @@ from tensorrt_model_connect.runtime_provider.manifest import (  # noqa: E402
 )
 
 
-IMPLEMENTATION_ID = "qwen3-0.6b-fp16.tensorrt-edge-llm.a100-pcie80-sm80"
+IMPLEMENTATION_ID = "qwen3-0.6b-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80"
 MODEL_ID = "Qwen/Qwen3-0.6B"
 MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
-PROFILE_ID = "qwen3-0.6b-fp16--a100-pcie80-sm80"
-RUNTIME_LIBRARY = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm.so"
+PROFILE_ID = "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt11"
+RUNTIME_LIBRARY = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm_v0_9_trt11.so"
+
+
+def test_real_runtime_delegates_graph_capture_and_generation_to_edgellm() -> None:
+    source = (RUNTIME_ROOT / "adapter.cpp").read_text(encoding="utf-8")
+
+    assert "RTLD_NOW | RTLD_LOCAL" in source
+    assert source.index("configure_edge_logging();") < source.index("open_edge_plugin(plugin);")
+    assert "captureDecodingCUDAGraph(handle.stream)" in source
+    assert "decoding CUDA graph capture failed" in source
+    assert "handle.runtime->handleRequest(edge_request, edge_response, handle.stream)" in source
+
+
+@pytest.fixture(autouse=True)
+def _enable_test_only_payload_injection(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("_TRTMC_INTERNAL_QWEN3_06B_ALLOW_FAKE_RUNTIME_BUILD", "1")
+
+
 class CreateRequest(ctypes.Structure):
     _fields_ = [
         ("abi_version", ctypes.c_uint32),
@@ -69,6 +86,22 @@ class CreateRequest(ctypes.Structure):
     ]
 
 
+class ToolchainAbiV1(ctypes.Structure):
+    _fields_ = [
+        ("compiler_family", ctypes.c_uint32),
+        ("compiler_major_version", ctypes.c_uint32),
+        ("cxx_abi_family", ctypes.c_uint32),
+        ("cxx_abi_version", ctypes.c_uint32),
+        ("cxx_language_standard", ctypes.c_uint32),
+        ("standard_library_family", ctypes.c_uint32),
+        ("standard_library_version", ctypes.c_uint32),
+        ("standard_library_abi", ctypes.c_uint32),
+        ("pointer_size", ctypes.c_uint32),
+        ("string_size", ctypes.c_uint32),
+        ("string_alignment", ctypes.c_uint32),
+    ]
+
+
 class FactoryV1(ctypes.Structure):
     _fields_ = [
         ("abi_version", ctypes.c_uint32),
@@ -79,6 +112,9 @@ class FactoryV1(ctypes.Structure):
         ("runtime_commit", ctypes.c_char_p),
         ("create", ctypes.c_void_p),
         ("pipeline_abi_version", ctypes.c_uint32),
+        ("toolchain_abi", ToolchainAbiV1),
+        ("process_compatibility_namespace", ctypes.c_char_p),
+        ("process_compatibility_fingerprint", ctypes.c_char_p),
     ]
 
 
@@ -122,7 +158,7 @@ def _run(command: list[str]) -> None:
 
 
 def _build_fake_runtime(
-    build: Path, *, tensorrt_build: int = 48, cuda_runtime_version: int = 12080
+    build: Path, *, tensorrt_build: int = 113, cuda_runtime_version: int = 13030
 ) -> Path:
     json_include = _nlohmann_json_include()
     manifest = load_implementation_manifest(CAPSULE_ROOT / "IMPLEMENTATION.toml")
@@ -134,17 +170,11 @@ def _build_fake_runtime(
             "-B",
             str(build),
             "-DTRTMC_QWEN_EDGE_FAKE_RUNTIME=ON",
-            (
-                "-DTRTMC_SDK_INCLUDE_DIRS="
-                f"{REPOSITORY_ROOT / 'src'};{REPOSITORY_ROOT / 'include'}"
-            ),
+            (f"-DTRTMC_SDK_INCLUDE_DIRS={REPOSITORY_ROOT / 'src'};{REPOSITORY_ROOT / 'include'}"),
             f"-DTRTMC_NLOHMANN_JSON_INCLUDE_DIR={json_include}",
             f"-DTRTMC_QWEN_EDGE_FAKE_TENSORRT_BUILD={tensorrt_build}",
             f"-DTRTMC_QWEN_EDGE_FAKE_CUDA_RUNTIME_VERSION={cuda_runtime_version}",
-            (
-                "-DTRTMC_QWEN_EDGE_MANIFEST_SHA256="
-                f"{manifest_contract_sha256(manifest)}"
-            ),
+            (f"-DTRTMC_QWEN_EDGE_MANIFEST_SHA256={manifest_contract_sha256(manifest)}"),
             "-DCMAKE_BUILD_TYPE=Release",
         ]
     )
@@ -166,7 +196,7 @@ def _fake_engine(root: Path) -> Path:
         json.dumps(
             {
                 "vocab_size": 151936,
-                "edgellm_version": "0.6.1",
+                "edgellm_version": "0.9.0",
                 "builder_config": {
                     "max_input_len": 1024,
                     "max_kv_cache_capacity": 4096,
@@ -207,6 +237,7 @@ def _staged_capsule(tmp_path: Path, fake_runtime: Path):
             "engine_dir": str(engine),
             "runtime_library": str(fake_runtime),
             "runtime_plugin": str(plugin),
+            "runtime_build": {"fake": True},
         },
     )
     probe = run_probe(manifest, request)
@@ -259,9 +290,13 @@ def test_fake_runtime_exports_exact_identity_and_validates_create_metadata(
     assert factory.abi_version == 1
     assert factory.implementation_id.decode() == IMPLEMENTATION_ID
     assert factory.runtime_name == b"tensorrt-edge-llm"
-    assert factory.runtime_version == b"0.6.1"
-    assert factory.runtime_commit == b"2620a9768022f25dff18912db2fb92b2ef264a70"
+    assert factory.runtime_version == b"0.9.0"
+    assert factory.runtime_commit == b"1ac0f2b99642045125e1c5ac7b109434ba3b36c7"
     assert factory.pipeline_abi_version == 1
+    assert factory.process_compatibility_namespace == b"tensorrt-edge-llm.plugin-registry"
+    assert factory.process_compatibility_fingerprint == (
+        b"edgellm-1ac0f2b99642045125e1c5ac7b109434ba3b36c7-trt11.2.0.113-cuda13.3-sm80"
+    )
 
     exported = subprocess.run(
         ["nm", "-D", "--defined-only", str(dso_path)],
@@ -269,9 +304,7 @@ def test_fake_runtime_exports_exact_identity_and_validates_create_metadata(
         capture_output=True,
         check=True,
     ).stdout
-    assert (
-        "trtmc_get_optimized_runtime_factory_v1@@TRTMC_QWEN3_EDGE_FACTORY_1" in exported
-    )
+    assert "trtmc_get_optimized_runtime_factory_v1@@TRTMC_QWEN3_EDGE_FACTORY_1" in exported
     assert "trtmc_get_runtime_provider" not in exported
 
     metadata_bytes = json.dumps(dict(artifact.descriptor), sort_keys=True).encode("utf-8")
@@ -362,26 +395,22 @@ def test_runtime_rejects_nonexact_build_binding_field_set(
 
 
 def test_runtime_rejects_the_wrong_loaded_tensorrt_build_before_construction(
-    tmp_path: Path
+    tmp_path: Path,
 ) -> None:
-    wrong_runtime = _build_fake_runtime(tmp_path / "wrong-trt-build", tensorrt_build=47)
+    wrong_runtime = _build_fake_runtime(tmp_path / "wrong-trt-build", tensorrt_build=112)
     artifact, _ = _staged_capsule(tmp_path, wrong_runtime)
     assert _rejected_create(artifact, dict(artifact.descriptor)) == (
-        b"loaded TensorRT runtime version 10.14.1.47 is unsupported; expected 10.14.1.48"
+        b"loaded TensorRT runtime version 11.2.0.112 is unsupported; expected 11.2.0.113"
     )
 
 
-def test_runtime_rejects_wrong_cuda_before_plugin_validation(
-    tmp_path: Path
-) -> None:
-    wrong_runtime = _build_fake_runtime(
-        tmp_path / "wrong-cuda-runtime", cuda_runtime_version=12070
-    )
+def test_runtime_rejects_wrong_cuda_before_plugin_validation(tmp_path: Path) -> None:
+    wrong_runtime = _build_fake_runtime(tmp_path / "wrong-cuda-runtime", cuda_runtime_version=13020)
     artifact, _ = _staged_capsule(tmp_path, wrong_runtime)
     (artifact.artifacts_path / "libNvInfer_edgellm_plugin.so").unlink()
 
     assert _rejected_create(artifact, dict(artifact.descriptor)) == (
-        b"loaded CUDA runtime version 12070 is unsupported; expected 12080 (CUDA 12.8)"
+        b"loaded CUDA runtime version 13020 is unsupported; expected 13030 (CUDA 13.3)"
     )
 
 
@@ -393,7 +422,7 @@ def test_fake_runtime_factory_returns_an_ipipeline_that_owns_generation(
     metadata.write_text(json.dumps(dict(artifact.descriptor), sort_keys=True), encoding="utf-8")
     client = tmp_path / "factory_client.cpp"
     client.write_text(
-        r'''
+        r"""
 #include "runtime/providers/optimized_runtime_factory.h"
 
 #include <dlfcn.h>
@@ -423,7 +452,7 @@ int main(int argc, char** argv) {
     request.struct_size = sizeof(request);
     request.implementation_id = factory->implementation_id;
     request.model_id = "Qwen/Qwen3-0.6B";
-    request.profile_id = "qwen3-0.6b-fp16--a100-pcie80-sm80";
+    request.profile_id = "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt11";
     request.bundle_path = "fake.trtfb";
     request.artifact_path = argv[2];
     request.implementation_metadata = metadata.data();
@@ -452,34 +481,37 @@ int main(int argc, char** argv) {
     const auto normalized = pipeline->generate("normalized", config);
     if (normalized.text != "fake:normalized")
         return 14;
-    config.top_p = 1.0F;
-    try {
-        (void)pipeline->generate("unsupported", config);
+    config.top_k = 1;
+    const auto nucleus = pipeline->generate("inspect-sampling", config);
+    if (nucleus.text != "fake-sampling:0:0.800000")
         return 15;
-    } catch (const std::invalid_argument& exception) {
-        if (std::string(exception.what()) !=
-            "Qwen Edge-LLM 0.6.1 cannot represent top_k <= 0 with top_p == 1.0 "
-            "because it requires at least one sampling filter")
-            return 16;
-    }
+    config.top_p = 1.0F;
+    const auto greedy_defaults = pipeline->generate("greedy-defaults", config);
+    if (greedy_defaults.text != "fake:greedy-defaults")
+        return 16;
+    config.temperature = 0.5F;
+    const auto greedy_temperature = pipeline->generate("greedy-temperature", config);
+    if (greedy_temperature.text != "fake:greedy-temperature")
+        return 17;
+    config.temperature = 0.0F;
     config.top_k = 1;
     config.min_p = 0.1F;
     try {
         (void)pipeline->generate("rejected", config);
-        return 17;
+        return 18;
     } catch (const std::invalid_argument&) {
     }
     config.min_p = 0.0F;
     config.lora_adapter_id = "unsupported-adapter";
     try {
         (void)pipeline->generate("rejected-lora", config);
-        return 18;
+        return 19;
     } catch (const std::invalid_argument&) {
     }
     std::cout << first.text << "\n" << second.text << "\n";
     return 0;
 }
-'''.lstrip(),
+""".lstrip(),
         encoding="utf-8",
     )
     binary = tmp_path / "factory-client"

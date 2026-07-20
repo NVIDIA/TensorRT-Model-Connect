@@ -41,16 +41,21 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr const char* kImplementationId = "qwen3-0.6b-fp16.tensorrt-edge-llm.a100-pcie80-sm80";
+constexpr const char* kImplementationId =
+    "qwen3-0.6b-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80";
 constexpr const char* kModelId = "Qwen/Qwen3-0.6B";
 constexpr const char* kModelRevision = "c1899de289a04d12100db370d81485cdf75e47ca";
-constexpr const char* kProfileId = "qwen3-0.6b-fp16--a100-pcie80-sm80";
-constexpr const char* kRuntimeLibrary = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm.so";
+constexpr const char* kProfileId = "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt11";
+constexpr const char* kRuntimeLibrary =
+    "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm_v0_9_trt11.so";
 constexpr const char* kPluginLibrary = "libNvInfer_edgellm_plugin.so";
-constexpr const char* kEdgeVersion = "0.6.1";
-constexpr const char* kEdgeCommit = "2620a9768022f25dff18912db2fb92b2ef264a70";
-constexpr const char* kTensorRtVersion = "10.14.1.48";
-constexpr const char* kCudaVersion = "12.8";
+constexpr const char* kEdgeVersion = "0.9.0";
+constexpr const char* kEdgeCommit = "1ac0f2b99642045125e1c5ac7b109434ba3b36c7";
+constexpr const char* kTensorRtVersion = "11.2.0.113";
+constexpr const char* kCudaVersion = "13.3";
+constexpr const char* kProcessCompatibilityNamespace = "tensorrt-edge-llm.plugin-registry";
+constexpr const char* kProcessCompatibilityFingerprint =
+    "edgellm-1ac0f2b99642045125e1c5ac7b109434ba3b36c7-trt11.2.0.113-cuda13.3-sm80";
 constexpr int32_t kMaxInputLength = 1024;
 constexpr int32_t kMaxCacheLength = 4096;
 constexpr int32_t kMaxBatchSize = 4;
@@ -87,7 +92,7 @@ TensorRtRuntimeVersion loaded_tensorrt_runtime_version() noexcept {
 
 void require_supported_tensorrt_runtime() {
     const TensorRtRuntimeVersion observed = loaded_tensorrt_runtime_version();
-    constexpr TensorRtRuntimeVersion supported{10, 14, 1, 48};
+    constexpr TensorRtRuntimeVersion supported{11, 2, 0, 113};
     if (observed.major != supported.major || observed.minor != supported.minor ||
         observed.patch != supported.patch || observed.build != supported.build) {
         throw std::runtime_error("loaded TensorRT runtime version " + version_string(observed) +
@@ -107,11 +112,11 @@ int32_t loaded_cuda_runtime_version() {
 }
 
 void require_supported_cuda_runtime() {
-    constexpr int32_t supported = 12080;
+    constexpr int32_t supported = 13030;
     const int32_t observed = loaded_cuda_runtime_version();
     if (observed != supported) {
         throw std::runtime_error("loaded CUDA runtime version " + std::to_string(observed) +
-                                 " is unsupported; expected 12080 (CUDA 12.8)");
+                                 " is unsupported; expected 13030 (CUDA 13.3)");
     }
 }
 
@@ -368,7 +373,7 @@ void open_edge_plugin(ProcessPluginLibrary& plugin) {
     const fs::file_status status = fs::symlink_status(plugin_path, status_error);
     if (status_error || fs::is_symlink(status) || !fs::is_regular_file(status))
         throw std::runtime_error("capsule plugin is unavailable: " + plugin_path.string());
-    int flags = RTLD_LAZY | RTLD_LOCAL;
+    int flags = RTLD_NOW | RTLD_LOCAL;
 #ifdef RTLD_NODELETE
     flags |= RTLD_NODELETE;
 #endif
@@ -393,12 +398,22 @@ void initialize_edge_plugin(ProcessPluginLibrary& plugin) {
         throw std::runtime_error("initEdgellmPlugins returned false");
 }
 
+void configure_edge_logging() noexcept {
+    // MC's public CLI reserves stdout for the generated result. Edge-LLM 0.9.0
+    // sends INFO messages to stdout by default, which would make the unchanged
+    // Python wrapper return runtime logs as part of the generated text. Keep
+    // warnings and errors (which Edge writes to stderr), but suppress INFO and
+    // VERBOSE output for this model-owned integration.
+    trt_edgellm::gLogger.setLevel(nvinfer1::ILogger::Severity::kWARNING);
+}
+
 void ensure_edge_plugin_loaded() {
     static std::once_flag once;
     static std::exception_ptr initialization_error;
     static ProcessPluginLibrary plugin;
     std::call_once(once, [] {
         try {
+            configure_edge_logging();
             open_edge_plugin(plugin);
             initialize_edge_plugin(plugin);
         } catch (...) {
@@ -407,15 +422,6 @@ void ensure_edge_plugin_loaded() {
     });
     if (initialization_error)
         std::rethrow_exception(initialization_error);
-}
-
-void configure_edge_logging() noexcept {
-    // MC's public CLI reserves stdout for the generated result. Edge-LLM 0.6.1
-    // sends INFO messages to stdout by default, which would make the unchanged
-    // Python wrapper return runtime logs as part of the generated text. Keep
-    // warnings and errors (which Edge writes to stderr), but suppress INFO and
-    // VERBOSE output for this model-owned integration.
-    trt_edgellm::gLogger.setLevel(nvinfer1::ILogger::Severity::kWARNING);
 }
 
 class CudaDeviceGuard {
@@ -450,6 +456,7 @@ struct EdgeLlmHandle {
 #ifndef TRTMC_QWEN_EDGE_FAKE_RUNTIME
     cudaStream_t stream{nullptr};
     int device{-1};
+    bool decoding_cuda_graph{false};
     std::unique_ptr<trt_edgellm::rt::LLMInferenceRuntime> runtime;
     ~EdgeLlmHandle() {
         int previous_device = -1;
@@ -518,7 +525,6 @@ initialize_edge_handle(const trtmc::internal::OptimizedRuntimePipelineCreateRequ
     require_fake_plugin_payload();
     (void)engine_directory;
 #else
-    configure_edge_logging();
     ensure_edge_plugin_loaded();
     const cudaDeviceProp properties = query_active_cuda_device(*handle);
     require_supported_a100(properties, metadata.minimum_memory_mib);
@@ -534,6 +540,12 @@ void create_edge_runtime(EdgeLlmHandle& handle, const fs::path& engine_directory
     handle.runtime = std::make_unique<trt_edgellm::rt::LLMInferenceRuntime>(
         engine_directory.string(), std::string{}, std::unordered_map<std::string, std::string>{},
         handle.stream);
+    // Match Edge-LLM's own long-lived inference entry point. Graph capture is
+    // an Edge-LLM lifecycle operation and part of this profile's qualified
+    // performance path, so a silent non-graph fallback is not acceptable.
+    handle.decoding_cuda_graph = handle.runtime->captureDecodingCUDAGraph(handle.stream);
+    if (!handle.decoding_cuda_graph)
+        throw std::runtime_error("Qwen Edge-LLM decoding CUDA graph capture failed");
 }
 #endif
 
@@ -556,7 +568,7 @@ struct CapsuleGenerationRequest {
 bool valid_sampling_numbers(const CapsuleGenerationRequest& request) noexcept {
     return std::isfinite(request.temperature) && request.temperature >= 0.0F &&
            std::isfinite(request.top_p) && request.top_p >= 0.0F && request.top_p <= 1.0F &&
-           (request.top_k > 0 || request.top_p < 1.0F);
+           request.top_k >= 0;
 }
 
 bool valid_sampling_limits(const EdgeLlmHandle& handle,
@@ -569,11 +581,6 @@ bool valid_sampling_limits(const EdgeLlmHandle& handle,
 
 void validate_sampling_request(const EdgeLlmHandle& handle,
                                const CapsuleGenerationRequest& request) {
-    if (request.top_k == 0 && request.top_p == 1.0F) {
-        throw std::invalid_argument(
-            "Qwen Edge-LLM 0.6.1 cannot represent top_k <= 0 with top_p == 1.0 "
-            "because it requires at least one sampling filter");
-    }
     if (!valid_sampling_numbers(request) || !valid_sampling_limits(handle, request))
         throw std::invalid_argument("invalid Qwen Edge-LLM sampling request");
 }
@@ -610,6 +617,11 @@ EdgeLlmResponse execute_one(EdgeLlmHandle& handle, const CapsuleGenerationReques
     const std::string prompt = request.prompt == nullptr
                                    ? std::string{}
                                    : std::string(request.prompt, request.prompt_size);
+    if (prompt == "inspect-sampling") {
+        result.text =
+            "fake-sampling:" + std::to_string(request.top_k) + ":" + std::to_string(request.top_p);
+        return result;
+    }
     result.text = "fake:" + prompt;
     const std::size_t count =
         std::min<std::size_t>(prompt.size(), static_cast<std::size_t>(request.max_new_tokens));
@@ -667,17 +679,20 @@ void validate_generate_config(const trtmc::GenerateConfig& config) {
     }
 }
 
+int32_t edge_top_k(const trtmc::GenerateConfig& config) noexcept {
+    constexpr float epsilon = 1.0e-6F;
+    const bool nucleus = config.top_p > 0.0F && config.top_p < 1.0F - epsilon;
+    if (config.top_k <= 1)
+        return nucleus ? 0 : 1;
+    return config.top_k;
+}
+
 CapsuleGenerationRequest capsule_request(const std::string& prompt,
                                          const trtmc::GenerateConfig& config) {
     validate_generate_config(config);
-    return CapsuleGenerationRequest{prompt.data(),
-                                    prompt.size(),
-                                    config.max_new_tokens,
-                                    config.temperature,
-                                    std::max(config.top_k, int32_t{0}),
-                                    config.top_p,
-                                    config.use_chat_template,
-                                    config.enable_thinking};
+    return CapsuleGenerationRequest{
+        prompt.data(),      prompt.size(), config.max_new_tokens,    config.temperature,
+        edge_top_k(config), config.top_p,  config.use_chat_template, config.enable_thinking};
 }
 
 class QwenEdgeLlmPipeline final : public trtmc::IPipeline {
@@ -692,7 +707,7 @@ class QwenEdgeLlmPipeline final : public trtmc::IPipeline {
         validate_sampling_request(*handle_, request);
         std::lock_guard<std::mutex> lock(mutex_);
         EdgeLlmResponse response = execute_one(*handle_, request);
-        // Edge-LLM 0.6.1 does not expose a trustworthy prefill/decode split.
+        // Edge-LLM 0.9.0 does not expose a trustworthy prefill/decode split.
         // Report both metrics as unavailable instead of mislabeling wall time.
         return trtmc::TextResult(std::move(response.text), std::move(response.token_ids), 0.0, 0.0);
     }
@@ -733,6 +748,10 @@ const trtmc::internal::OptimizedRuntimeFactoryV1 kFactoryV1 = {
     kEdgeVersion,
     kEdgeCommit,
     &create_pipeline,
+    trtmc::internal::kOptimizedRuntimePipelineAbiVersionV1,
+    trtmc::internal::kCurrentOptimizedRuntimeToolchainAbiV1,
+    kProcessCompatibilityNamespace,
+    kProcessCompatibilityFingerprint,
 };
 
 } // namespace
