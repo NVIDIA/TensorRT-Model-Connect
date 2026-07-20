@@ -1349,3 +1349,39 @@ jobs:
               > /dev/null
             echo "Published release asset: $name"
           done
+
+  nightly-issue:
+    name: 9 / Nightly failure issue
+    needs:
+      - required
+      - release
+    # This is the workflow's only issue-mutation path. Manual runs and forks
+    # stay useful for validation without touching the production issue list.
+    if: >-
+      ${{
+        always() &&
+        github.event_name == 'schedule' &&
+        github.ref == 'refs/heads/main' &&
+        github.repository == 'NVIDIA/TensorRT-Model-Connect'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+
+    steps:
+      - name: Check out the scheduled Nightly snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Reconcile the scheduled Nightly failure issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NIGHTLY_REQUIRED_RESULT: ${{ needs.required.result }}
+          NIGHTLY_RELEASE_RESULT: ${{ needs.release.result }}
+        run: python3 tools/nightly_issue_tracker.py --apply

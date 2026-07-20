@@ -1125,17 +1125,35 @@ def test_nightly_all_gpu_gate_uses_the_model_proof_machine_lock() -> None:
     )
 
 
-def test_nightly_grants_write_permission_only_after_the_final_gate() -> None:
+def test_nightly_grants_mutation_permissions_only_after_the_final_gate() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    before_release, release = text.split("\n  release:", maxsplit=1)
+    before_release, after_release = text.split("\n  release:", maxsplit=1)
+    release, issue_tracker = after_release.split("\n  nightly-issue:", maxsplit=1)
     assert "permissions: {}" in before_release
     assert "contents: write" not in before_release
+    assert "issues: write" not in before_release
     assert text.count("contents: write") == 1
+    assert text.count("issues: write") == 1
     assert "contents: write" in release
+    assert "issues: write" not in release
     assert "needs.required.result == 'success'" in release
     assert "github.event_name == 'schedule' || github.ref == 'refs/heads/main'" in release
     assert "target_commitish" in release
     assert 'os.environ["TESTED_SHA"]' in release
+    assert "issues: write" in issue_tracker
+    assert "actions: read" in issue_tracker
+    assert "contents: read" in issue_tracker
+    assert "- required" in issue_tracker
+    assert "- release" in issue_tracker
+    assert "always()" in issue_tracker
+    assert "github.event_name == 'schedule'" in issue_tracker
+    assert "github.ref == 'refs/heads/main'" in issue_tracker
+    assert "github.repository == 'NVIDIA/TensorRT-Model-Connect'" in issue_tracker
+    assert "NIGHTLY_REQUIRED_RESULT: ${{ needs.required.result }}" in issue_tracker
+    assert "NIGHTLY_RELEASE_RESULT: ${{ needs.release.result }}" in issue_tracker
+    assert "python3 tools/nightly_issue_tracker.py --apply" in issue_tracker
+    assert text.count("python3 tools/nightly_issue_tracker.py --apply") == 1
+    assert "persist-credentials: false" in issue_tracker
     assert "secrets: inherit" not in text
 
 
@@ -1232,6 +1250,7 @@ def test_nightly_graph_stage_numbers_are_unambiguous() -> None:
     assert "name: 6 / Combined HTML report" in text
     assert "name: 7 / Nightly CI" in text
     assert "name: 8 / Publish nightly wheels" in text
+    assert "name: 9 / Nightly failure issue" in text
 
 
 def test_github_workflows_write_e2e_markdown_summary() -> None:
