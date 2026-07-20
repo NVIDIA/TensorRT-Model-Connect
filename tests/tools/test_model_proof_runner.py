@@ -1130,13 +1130,14 @@ def test_model_proof_job_budget_reserves_singleton_finalization() -> None:
         "- name: Finalize model proof fallback", maxsplit=1
     )[0]
 
-    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 480 || 300 }}" in job_configuration
+    assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 495 || 300 }}" in job_configuration
     assert "timeout-minutes: ${{ inputs.suite == 'nightly' && 360 || 150 }}" in proof
     assert "inputs.suite == 'nightly' && '5400' || '3600'" in job_configuration
     assert "inputs.suite == 'nightly' && '600' || '360'" in job_configuration
     assert "inputs.expected_count" not in workflow
 
-    nightly_job_minutes = 480
+    nightly_job_minutes = 495
+    disk_headroom_wait_minutes = 900 // 60
     image_minutes = 90
     nightly_proof_minutes = 360
     finalization_margin_minutes = 30
@@ -1154,7 +1155,10 @@ def test_model_proof_job_budget_reserves_singleton_finalization() -> None:
         lease_minutes + sana_build_minutes + e2e_and_report_margin_minutes
     )
     assert nightly_job_minutes >= (
-        image_minutes + nightly_proof_minutes + finalization_margin_minutes
+        disk_headroom_wait_minutes
+        + image_minutes
+        + nightly_proof_minutes
+        + finalization_margin_minutes
     )
     assert nightly_proof_minutes <= 360
 
@@ -1330,6 +1334,10 @@ def test_model_proof_checks_disk_headroom_before_checkout() -> None:
         "Check out exact source revision"
     )
     assert "TRTMC_MODEL_PROOF_MIN_FREE_GIB:" in workflow
+    assert "TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS:" in workflow
+    assert "inputs.suite == 'nightly' && '900' || '60'" in workflow
+    assert "TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS:" in workflow
+    assert "vars.TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS || '10'" in workflow
     assert "TRTMC_MODEL_PROOF_STALE_MINUTES:" in workflow
     assert '-mmin "+$TRTMC_MODEL_PROOF_STALE_MINUTES"' in disk_check
     assert "-name work -o -name projection" in disk_check
@@ -1338,7 +1346,183 @@ def test_model_proof_checks_disk_headroom_before_checkout() -> None:
     assert 'required_gib="$((TRTMC_MODEL_PROOF_MIN_FREE_GIB * proof_capacity))"' in disk_check
     assert 'required_kib="$((required_gib * 1024 * 1024))"' in disk_check
     assert 'df -Pk "$GITHUB_WORKSPACE"' in disk_check
+    assert '[ "$available_kib" -ge "$required_kib" ]' in disk_check
+    assert 'sleep "$sleep_seconds"' in disk_check
+    assert 'waited_seconds="$((waited_seconds + sleep_seconds))"' in disk_check
     assert "Insufficient model-proof disk headroom" in disk_check
+
+
+def _model_proof_disk_headroom_script() -> str:
+    workflow = yaml.safe_load(PROOF_WORKFLOW.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["prove"]["steps"]
+    return next(
+        step["run"] for step in steps if step.get("name") == "Check model proof disk headroom"
+    )
+
+
+def _run_model_proof_disk_headroom_check(
+    tmp_path: Path,
+    *,
+    available_kib: list[int | str],
+    timeout_seconds: str = "20",
+    poll_seconds: str = "10",
+) -> tuple[subprocess.CompletedProcess[str], list[str], int]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    df_state = tmp_path / "df-state"
+    sleep_log = tmp_path / "sleep-log"
+
+    fake_df = fake_bin / "df"
+    fake_df.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env bash
+            set -euo pipefail
+            call=0
+            if [ -f "$FAKE_DF_STATE" ]; then
+              read -r call < "$FAKE_DF_STATE"
+            fi
+            IFS=, read -r -a values <<< "$FAKE_DF_AVAILABLE_KIB"
+            index="$call"
+            if [ "$index" -ge "${#values[@]}" ]; then
+              index="$((${#values[@]} - 1))"
+            fi
+            available="${values[$index]}"
+            printf '%s\n' "$((call + 1))" > "$FAKE_DF_STATE"
+            printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'
+            printf '/dev/fake 999999999 0 %s 0%% %s\n' "$available" "$GITHUB_WORKSPACE"
+            """
+        ),
+        encoding="utf-8",
+    )
+    fake_df.chmod(0o755)
+
+    fake_sleep = fake_bin / "sleep"
+    fake_sleep.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'printf \'%s\\n\' "${1:?}" >> "$FAKE_SLEEP_LOG"\n',
+        encoding="utf-8",
+    )
+    fake_sleep.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "GITHUB_WORKSPACE": str(tmp_path),
+            "TRTMC_MODEL_PROOF_MIN_FREE_GIB": "40",
+            "TRTMC_MODEL_PROOF_STALE_MINUTES": "600",
+            "TRTMC_MODEL_PROOF_GPU_IDS": "0,1,2,3",
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
+            "TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS": timeout_seconds,
+            "TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS": poll_seconds,
+            "FAKE_DF_AVAILABLE_KIB": ",".join(str(value) for value in available_kib),
+            "FAKE_DF_STATE": str(df_state),
+            "FAKE_SLEEP_LOG": str(sleep_log),
+        }
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=_model_proof_disk_headroom_script(),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    sleeps = sleep_log.read_text(encoding="utf-8").splitlines() if sleep_log.exists() else []
+    df_calls = int(df_state.read_text(encoding="utf-8")) if df_state.exists() else 0
+    return result, sleeps, df_calls
+
+
+def test_model_proof_disk_headroom_waits_for_transient_capacity(tmp_path: Path) -> None:
+    required_kib = 40 * 16 * 1024 * 1024
+
+    result, sleeps, df_calls = _run_model_proof_disk_headroom_check(
+        tmp_path,
+        available_kib=[required_kib - 1, required_kib - 1, required_kib],
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sleeps == ["10", "10"]
+    assert df_calls == 3
+    assert "ready after 20s" in result.stdout
+    assert "640 GiB available; 640 GiB required for 16 GPU proof slots" in result.stdout
+
+
+def test_model_proof_disk_headroom_timeout_remains_fail_closed(tmp_path: Path) -> None:
+    required_kib = 40 * 16 * 1024 * 1024
+
+    result, sleeps, df_calls = _run_model_proof_disk_headroom_check(
+        tmp_path,
+        available_kib=[required_kib - 1],
+        timeout_seconds="15",
+    )
+
+    assert result.returncode == 1
+    assert sleeps == ["10", "5"]
+    assert df_calls == 3
+    assert "after waiting 15s" in result.stderr
+    assert "639 GiB available; 640 GiB required for 16 GPU proof slots" in result.stderr
+
+
+def test_model_proof_disk_headroom_zero_timeout_fails_without_sleep(tmp_path: Path) -> None:
+    required_kib = 40 * 16 * 1024 * 1024
+
+    result, sleeps, df_calls = _run_model_proof_disk_headroom_check(
+        tmp_path,
+        available_kib=[required_kib - 1],
+        timeout_seconds="0",
+    )
+
+    assert result.returncode == 1
+    assert sleeps == []
+    assert df_calls == 1
+    assert "after waiting 0s" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("timeout_seconds", "poll_seconds", "message"),
+    [
+        ("-1", "10", "must be an integer from 0 to 900"),
+        ("901", "10", "must be an integer from 0 to 900"),
+        ("18446744073709551615", "10", "must be an integer from 0 to 900"),
+        ("invalid", "10", "must be an integer from 0 to 900"),
+        ("20", "0", "must be an integer from 1 to 60"),
+        ("20", "61", "must be an integer from 1 to 60"),
+        ("20", "18446744073709551615", "must be an integer from 1 to 60"),
+        ("20", "invalid", "must be an integer from 1 to 60"),
+    ],
+)
+def test_model_proof_disk_headroom_rejects_invalid_wait_configuration(
+    tmp_path: Path,
+    timeout_seconds: str,
+    poll_seconds: str,
+    message: str,
+) -> None:
+    result, sleeps, df_calls = _run_model_proof_disk_headroom_check(
+        tmp_path,
+        available_kib=[40 * 16 * 1024 * 1024],
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+    )
+
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert sleeps == []
+    assert df_calls == 0
+
+
+def test_model_proof_disk_headroom_rejects_malformed_df_output(tmp_path: Path) -> None:
+    result, sleeps, df_calls = _run_model_proof_disk_headroom_check(
+        tmp_path,
+        available_kib=["not-a-number"],
+    )
+
+    assert result.returncode == 1
+    assert "Unable to determine model-proof disk headroom from df" in result.stderr
+    assert sleeps == []
+    assert df_calls == 1
 
 
 def test_model_proof_uploads_before_singleton_gate_and_cleanup() -> None:

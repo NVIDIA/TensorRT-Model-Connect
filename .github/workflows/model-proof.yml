@@ -28,9 +28,9 @@ jobs:
   prove:
     name: ${{ inputs.model }}
     runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
-    # Reserve time after the bounded image/proof steps for fallback generation
-    # and artifact publication even when a model reaches its proof timeout.
-    timeout-minutes: ${{ inputs.suite == 'nightly' && 480 || 300 }}
+    # Reserve time after the bounded disk/image/proof steps for fallback
+    # generation and artifact publication even when a model reaches a timeout.
+    timeout-minutes: ${{ inputs.suite == 'nightly' && 495 || 300 }}
 
     defaults:
       run:
@@ -48,6 +48,8 @@ jobs:
       TRTMC_MODEL_PROOF_GPU_LOCK_DIR: ${{ vars.TRTMC_MODEL_PROOF_GPU_LOCK_DIR || '/tmp/trtmc-model-proof-gpu-locks' }}
       TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || (inputs.suite == 'nightly' && '5400' || '3600') }}
       TRTMC_MODEL_PROOF_MIN_FREE_GIB: ${{ vars.TRTMC_MODEL_PROOF_MIN_FREE_GIB || '40' }}
+      TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS: ${{ vars.TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS || (inputs.suite == 'nightly' && '900' || '60') }}
+      TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS: ${{ vars.TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS || '10' }}
       TRTMC_MODEL_PROOF_STALE_MINUTES: ${{ vars.TRTMC_MODEL_PROOF_STALE_MINUTES || (inputs.suite == 'nightly' && '600' || '360') }}
       PYTHONHASHSEED: "0"
 
@@ -122,6 +124,16 @@ jobs:
             echo "TRTMC_MODEL_PROOF_STALE_MINUTES must be a positive integer." >&2
             exit 1
           fi
+          if ! [[ "$TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS" =~ ^(0|[1-9][0-9]{0,2})$ ]] || \
+             [ "$TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS" -gt 900 ]; then
+            echo "TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS must be an integer from 0 to 900." >&2
+            exit 1
+          fi
+          if ! [[ "$TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS" =~ ^[1-9][0-9]?$ ]] || \
+             [ "$TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS" -gt 60 ]; then
+            echo "TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS must be an integer from 1 to 60." >&2
+            exit 1
+          fi
           if ! [[ "$TRTMC_MODEL_PROOF_GPU_IDS" =~ ^(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*$ ]]; then
             echo "TRTMC_MODEL_PROOF_GPU_IDS must be a comma-separated list of non-negative integers." >&2
             exit 1
@@ -154,14 +166,33 @@ jobs:
             seen_gpu_ids[$gpu_id]=1
           done
           proof_capacity="$((${#gpu_ids[@]} * TRTMC_MODEL_PROOF_SLOTS_PER_GPU))"
-          available_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 {print $4}')"
           required_gib="$((TRTMC_MODEL_PROOF_MIN_FREE_GIB * proof_capacity))"
           required_kib="$((required_gib * 1024 * 1024))"
-          if [ "$available_kib" -lt "$required_kib" ]; then
+          waited_seconds=0
+          while :; do
+            available_kib="$(df -Pk "$GITHUB_WORKSPACE" | awk 'NR == 2 {print $4}')"
+            if ! [[ "$available_kib" =~ ^[0-9]+$ ]]; then
+              echo "Unable to determine model-proof disk headroom from df." >&2
+              exit 1
+            fi
             available_gib="$((available_kib / 1024 / 1024))"
-            echo "Insufficient model-proof disk headroom: ${available_gib} GiB available; ${required_gib} GiB required for ${proof_capacity} GPU proof slots." >&2
-            exit 1
-          fi
+            if [ "$available_kib" -ge "$required_kib" ]; then
+              echo "Model-proof disk headroom ready after ${waited_seconds}s: ${available_gib} GiB available; ${required_gib} GiB required for ${proof_capacity} GPU proof slots."
+              break
+            fi
+            if [ "$waited_seconds" -ge "$TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS" ]; then
+              echo "Insufficient model-proof disk headroom after waiting ${waited_seconds}s: ${available_gib} GiB available; ${required_gib} GiB required for ${proof_capacity} GPU proof slots." >&2
+              exit 1
+            fi
+            remaining_seconds="$((TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS - waited_seconds))"
+            sleep_seconds="$TRTMC_MODEL_PROOF_DISK_HEADROOM_POLL_SECONDS"
+            if [ "$sleep_seconds" -gt "$remaining_seconds" ]; then
+              sleep_seconds="$remaining_seconds"
+            fi
+            echo "Waiting for model-proof disk headroom: ${available_gib} GiB available; ${required_gib} GiB required for ${proof_capacity} GPU proof slots; retrying in ${sleep_seconds}s."
+            sleep "$sleep_seconds"
+            waited_seconds="$((waited_seconds + sleep_seconds))"
+          done
 
       - name: Check out exact source revision
         id: checkout
