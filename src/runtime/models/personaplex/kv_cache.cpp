@@ -354,7 +354,6 @@ void PersonaplexKvCache::reset() {
         cudaMemsetAsync(present_k_[li].data(), 0, present_k_[li].nbytes(), stream_);
         cudaMemsetAsync(present_v_[li].data(), 0, present_v_[li].nbytes(), stream_);
     }
-    cudaStreamSynchronize(stream_);
 }
 
 std::size_t PersonaplexKvCache::device_memory_bytes() const {

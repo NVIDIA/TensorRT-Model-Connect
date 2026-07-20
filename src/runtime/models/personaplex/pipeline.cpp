@@ -6,6 +6,7 @@
 #include "runtime/models/personaplex/pipeline.h"
 
 #include "runtime/models/personaplex/decode_runtime.h"
+#include "runtime/models/personaplex/sampling_kernels.h"
 #include "runtime/models/personaplex/speech_decode_stop_policy.h"
 #include "runtime/models/personaplex/speech_delay_cache.h"
 #include "runtime/models/personaplex/speech_depth_plan.h"
@@ -146,6 +147,63 @@ std::shared_ptr<ISubprocessRunner> CreateDefaultSubprocessRunner() {
 
 // ─── SpeechPipeline (TrtModule-based) ───
 
+namespace {
+
+constexpr uint64_t kSpeechSamplingSeed = 0x5EEDC0DECAFE1234ULL;
+
+DeviceTensor upload_float_table(const std::vector<float>& values, cudaStream_t stream,
+                                const char* label) {
+    if (values.empty())
+        return {};
+    DeviceTensor tensor({static_cast<int64_t>(values.size())}, DType::kFloat32, stream);
+    if (!tensor.ok() || !tensor.copy_from_host(values.data()))
+        throw std::runtime_error(std::string("SpeechPipeline: failed to upload ") + label);
+    return tensor;
+}
+
+int32_t output_width(const TrtModule& module, const char* name) {
+    const auto shape = module.tensor_shape(name);
+    if (shape.empty() || shape.back() <= 0 || shape.back() > INT32_MAX)
+        throw std::runtime_error(std::string("SpeechPipeline: invalid output shape for ") + name);
+    return static_cast<int32_t>(shape.back());
+}
+
+bool speech_is_sampling_enabled(const SpeechConfig& config) {
+    return config.depth_temperature > 0.0F && config.depth_top_k > 0;
+}
+
+} // namespace
+
+struct SpeechDeviceWorkspace {
+    SpeechDeviceWorkspace(const SpeechConfig& config, cudaStream_t stream)
+        : depth_projection(upload_float_table(config.depth_projection, stream, "depth projection")),
+          depth_text_embedding(
+              upload_float_table(config.depth_text_embedding, stream, "depth text embedding")),
+          depth_audio_embeddings(
+              upload_float_table(config.depth_audio_embeddings, stream, "depth audio embeddings")),
+          depth_embed({std::max(config.depth_hidden_size, 1)}, DType::kFloat32, stream),
+          selected_tokens({static_cast<int64_t>(std::max(config.num_codebooks + 1, 1))},
+                          DType::kInt32, stream),
+          dummy_token(DeviceTensor::zeros({1}, DType::kInt32, stream)),
+          use_input_embed({1}, DType::kFloat32, stream), rng_state({2}, DType::kInt32, stream) {
+        constexpr float one = 1.0F;
+        if (!depth_embed.ok() || !selected_tokens.ok() || !dummy_token.ok() ||
+            !use_input_embed.ok() || !rng_state.ok() || !use_input_embed.copy_from_host(&one) ||
+            !rng_state.copy_from_host(&kSpeechSamplingSeed)) {
+            throw std::runtime_error("SpeechPipeline: failed to allocate device generation state");
+        }
+    }
+
+    DeviceTensor depth_projection;
+    DeviceTensor depth_text_embedding;
+    DeviceTensor depth_audio_embeddings;
+    DeviceTensor depth_embed;
+    DeviceTensor selected_tokens;
+    DeviceTensor dummy_token;
+    DeviceTensor use_input_embed;
+    DeviceTensor rng_state;
+};
+
 SpeechPipeline::SpeechPipeline(std::unique_ptr<TrtModule> mimi_encoder,
                                std::unique_ptr<TrtModule> temporal,
                                std::unique_ptr<PersonaplexInferenceState> temporal_state,
@@ -155,7 +213,7 @@ SpeechPipeline::SpeechPipeline(std::unique_ptr<TrtModule> mimi_encoder,
                                cudaStream_t stream,
                                std::shared_ptr<ISubprocessRunner> subprocess_runner,
                                std::string model_id_str)
-    : mimi_encoder_(std::move(mimi_encoder)), temporal_(std::move(temporal)),
+    : temporal_(std::move(temporal)), mimi_encoder_(std::move(mimi_encoder)),
       temporal_state_(std::move(temporal_state)), depth_engines_(std::move(depth_engines)),
       depth_state_(std::move(depth_state)), mimi_decoder_(std::move(mimi_decoder)), stream_(stream),
       config_(std::move(config)), subprocess_runner_(std::move(subprocess_runner)),
@@ -168,11 +226,18 @@ SpeechPipeline::SpeechPipeline(std::unique_ptr<TrtModule> mimi_encoder,
     if (!subprocess_runner_)
         subprocess_runner_ = CreateDefaultSubprocessRunner();
 
-    // Fixed deterministic seed for reproducible audio output.
-    // PersonaPlex depth sampling (temperature=0.8, top_k=250) is sensitive
-    // to the RNG sequence; a fixed seed ensures identical output across runs
-    // and between the old and new pipeline paths.
-    rng_state_ = 0x5EEDC0DECAFE1234ULL;
+    device_workspace_ = std::make_unique<SpeechDeviceWorkspace>(config_, stream_);
+    temporal_->bind_external("token_id", device_workspace_->dummy_token.data());
+    temporal_->bind_external("use_input_embed", device_workspace_->use_input_embed.data());
+    for (auto& engine : depth_engines_) {
+        if (!engine)
+            continue;
+        if (engine->stream() != stream_)
+            throw std::runtime_error("SpeechPipeline: generation modules must share one stream");
+        engine->bind_external("token_id", device_workspace_->dummy_token.data());
+        engine->bind_external("use_input_embed", device_workspace_->use_input_embed.data());
+        engine->bind_external("input_embed", device_workspace_->depth_embed.data());
+    }
 }
 
 SpeechPipeline::~SpeechPipeline() = default;
@@ -289,63 +354,47 @@ std::vector<int32_t> SpeechPipeline::run_mimi_encode(const float* samples, int32
 // Temporal step with PersonaplexKvCache: input_embed -> logits (+ hidden_state)
 // ---------------------------------------------------------------------------
 
-void SpeechPipeline::run_temporal_embed_step(const float* embed_ptr, int32_t embed_size,
-                                             std::vector<float>& logits,
-                                             std::vector<float>& hidden_out) {
+SpeechTemporalDeviceOutput SpeechPipeline::run_temporal_embed_step(const float* embed_ptr,
+                                                                   int32_t embed_size) {
     temporal_state_->bind_to(*temporal_);
 
-    float use_input_embed = 1.0F;
-    int32_t dummy_token = 0;
-
-    // Copy embed to mutable buffer (Tensor requires non-const pointer)
-    std::vector<float> embed_buf(embed_ptr, embed_ptr + embed_size);
-
-    Tensor token_tensor;
-    token_tensor.data = &dummy_token;
-    token_tensor.shape = {1};
-    token_tensor.dtype = DType::kInt32;
-
     Tensor embed_tensor;
-    embed_tensor.data = embed_buf.data();
+    embed_tensor.data = const_cast<float*>(embed_ptr);
     embed_tensor.shape = {static_cast<int64_t>(embed_size)};
     embed_tensor.dtype = DType::kFloat32;
 
-    Tensor use_embed_tensor;
-    use_embed_tensor.data = &use_input_embed;
-    use_embed_tensor.shape = {1};
-    use_embed_tensor.dtype = DType::kFloat32;
-
     TensorMap inputs;
-    inputs["token_id"] = token_tensor;
     inputs["input_embed"] = embed_tensor;
-    inputs["use_input_embed"] = use_embed_tensor;
     temporal_state_->prepare_step(inputs);
 
-    TensorMap outputs = temporal_->forward(inputs);
+    temporal_->forward_async(inputs);
+    const auto* logits = static_cast<const float*>(temporal_->device_ptr("logits"));
+    if (!logits || temporal_->tensor_dtype("logits") != DType::kFloat32)
+        throw std::runtime_error("SpeechPipeline temporal: FP32 device logits unavailable");
 
-    // Extract logits
-    auto logits_it = outputs.find("logits");
-    if (logits_it == outputs.end())
-        throw std::runtime_error("SpeechPipeline temporal: no 'logits' output");
-
-    const auto& lt = logits_it->second;
-    auto n = lt.numel();
-    logits.resize(static_cast<std::size_t>(n));
-    std::memcpy(logits.data(), lt.data, n * sizeof(float));
-
-    // Extract hidden_state if available
-    auto hidden_it = outputs.find("hidden_state");
-    if (hidden_it != outputs.end()) {
-        const auto& ht = hidden_it->second;
-        auto hn = ht.numel();
-        hidden_out.resize(static_cast<std::size_t>(hn));
-        std::memcpy(hidden_out.data(), ht.data, hn * sizeof(float));
-    } else {
-        // Fallback: use logits as hidden representation (truncated/padded to hidden_size)
-        hidden_out.clear();
+    const bool sampled = speech_is_sampling_enabled(config_);
+    if (!personaplex_select_token(logits, output_width(*temporal_, "logits"), sampled ? 0.7F : 0.0F,
+                                  sampled ? 25 : 0, output_width(*temporal_, "logits") - 1,
+                                  static_cast<uint64_t*>(device_workspace_->rng_state.data()),
+                                  static_cast<int32_t*>(device_workspace_->selected_tokens.data()),
+                                  stream_)) {
+        throw std::runtime_error(
+            "SpeechPipeline temporal: device sampling failed or is unsupported");
     }
 
     temporal_state_->advance();
+
+    SpeechTemporalDeviceOutput output;
+    if (temporal_->has_output("hidden_state")) {
+        output.hidden = temporal_->device_ptr("hidden_state");
+        output.hidden_dtype = temporal_->tensor_dtype("hidden_state");
+    } else {
+        output.hidden = logits;
+        output.hidden_dtype = DType::kFloat32;
+    }
+    if (!output.hidden)
+        throw std::runtime_error("SpeechPipeline temporal: device hidden state unavailable");
+    return output;
 }
 
 // ---------------------------------------------------------------------------
@@ -358,159 +407,85 @@ int32_t speech_clamp_token(int32_t token, int32_t vocab_size) {
     return clamp_speech_depth_token(token, vocab_size);
 }
 
-bool speech_is_sampling_enabled(const SpeechConfig& cfg) {
-    return cfg.depth_temperature > 0.0F && cfg.depth_top_k > 0;
-}
-
-int32_t speech_select_depth_token_greedy(const std::vector<float>& logits, const SpeechConfig&,
-                                         uint64_t&) {
-    return personaplex_select_argmax_token(logits);
-}
-
-int32_t speech_select_depth_token_sampled(const std::vector<float>& logits, const SpeechConfig& cfg,
-                                          uint64_t& rng_state) {
-    return personaplex_sample_token_topk(logits, cfg.depth_temperature, cfg.depth_top_k, rng_state);
-}
-
-using SpeechDepthTokenSelectFn = int32_t (*)(const std::vector<float>&, const SpeechConfig&,
-                                             uint64_t&);
-
-SpeechDepthTokenSelectFn speech_select_depth_token_dispatch(const SpeechConfig& cfg) {
-    return speech_is_sampling_enabled(cfg) ? speech_select_depth_token_sampled
-                                           : speech_select_depth_token_greedy;
-}
-
-int32_t speech_sample_temporal_text_token(const std::vector<float>& logits, int32_t text_pad_id,
-                                          const SpeechConfig& cfg, uint64_t& rng_state) {
-    if (logits.empty())
-        return text_pad_id;
-    if (speech_is_sampling_enabled(cfg)) {
-        constexpr float kTextTemp = 0.7F;
-        constexpr int32_t kTextTopK = 25;
-        return personaplex_sample_token_topk(logits, kTextTemp, kTextTopK, rng_state);
-    }
-    return personaplex_select_argmax_token(logits);
-}
-
-void speech_maybe_log_depth_debug(int32_t cb, int32_t depth_call_idx,
-                                  const std::vector<float>& logits, int32_t best) {
-    if (cb != 0 || depth_call_idx >= 12 || logits.empty())
-        return;
-    int32_t top1 = -1;
-    int32_t top2 = -1;
-    float v1 = -1.0e30F;
-    float v2 = -1.0e30F;
-    for (int32_t i = 0; i < static_cast<int32_t>(logits.size()); ++i) {
-        const float v = logits[static_cast<std::size_t>(i)];
-        if (v > v1) {
-            v2 = v1;
-            top2 = top1;
-            v1 = v;
-            top1 = i;
-        } else if (v > v2) {
-            v2 = v;
-            top2 = i;
-        }
-    }
-    std::cerr << "[speech] DepthDbg frame=" << depth_call_idx << " cb0 top1=" << top1
-              << " v1=" << v1 << " top2=" << top2 << " v2=" << v2 << " margin=" << (v1 - v2)
-              << " sampled=" << best << std::endl;
-}
-
 } // anonymous namespace
 
-std::vector<int32_t> SpeechPipeline::run_depth(const float* temporal_hidden, int32_t hidden_dim,
-                                               int32_t text_token,
-                                               const int32_t* forced_audio_tokens,
-                                               const uint8_t* forced_audio_provided) {
-    (void)hidden_dim;
-
-    const auto& cfg = config_;
-    const int32_t num_cb = cfg.num_codebooks;
-    const int32_t depth_hidden = cfg.depth_hidden_size;
-
+void SpeechPipeline::run_depth(const SpeechTemporalDeviceOutput& temporal_output,
+                               int32_t text_token, bool text_token_is_forced,
+                               const int32_t* forced_audio_tokens,
+                               const uint8_t* forced_audio_provided) {
     if (depth_engines_.empty())
-        return std::vector<int32_t>(static_cast<std::size_t>(num_cb), 0);
+        throw std::runtime_error("SpeechPipeline: no depth engine available");
 
-    // Reset shared depth cache for this frame
     depth_state_->reset();
-
-    std::vector<int32_t> codebook_tokens;
-    codebook_tokens.reserve(static_cast<std::size_t>(num_cb));
-    const int32_t depth_call_idx = depth_debug_call_count_++;
-
-    std::vector<float> logits;
-    const auto projection_view = make_depth_projection_view(cfg, temporal_hidden);
-
-    std::vector<float> depth_embed(static_cast<std::size_t>(depth_hidden), 0.0F);
-    const auto select_token = speech_select_depth_token_dispatch(cfg);
-
-    int32_t prev_token = 0;
-
-    for (int32_t cb = 0; cb < num_cb; ++cb) {
-        const auto cb_idx = static_cast<std::size_t>(cb);
-        auto* engine = (cb_idx < depth_engines_.size() && depth_engines_[cb_idx])
-                           ? depth_engines_[cb_idx].get()
-                           : depth_engines_[0].get();
-
-        build_depth_input_embedding(cfg, projection_view, cb, text_token, prev_token, depth_hidden,
-                                    depth_embed);
-
-        // Bind depth cache and run with input_embed
-        depth_state_->bind_to(*engine);
-
-        float use_input_embed = 1.0F;
-        int32_t dummy_token = 0;
-
-        Tensor token_tensor;
-        token_tensor.data = &dummy_token;
-        token_tensor.shape = {1};
-        token_tensor.dtype = DType::kInt32;
-
-        Tensor embed_tensor;
-        embed_tensor.data = depth_embed.data();
-        embed_tensor.shape = {static_cast<int64_t>(depth_hidden)};
-        embed_tensor.dtype = DType::kFloat32;
-
-        Tensor use_embed_tensor;
-        use_embed_tensor.data = &use_input_embed;
-        use_embed_tensor.shape = {1};
-        use_embed_tensor.dtype = DType::kFloat32;
-
-        TensorMap inputs;
-        inputs["token_id"] = token_tensor;
-        inputs["input_embed"] = embed_tensor;
-        inputs["use_input_embed"] = use_embed_tensor;
-        depth_state_->prepare_step(inputs);
-
-        TensorMap outputs = engine->forward(inputs);
-
-        auto logits_it = outputs.find("logits");
-        if (logits_it == outputs.end()) {
-            std::cerr << "[speech] Depth step cb=" << cb << " failed: no logits" << std::endl;
-            break;
-        }
-
-        const auto& lt = logits_it->second;
-        auto n = lt.numel();
-        logits.resize(static_cast<std::size_t>(n));
-        std::memcpy(logits.data(), lt.data, n * sizeof(float));
-
-        depth_state_->advance();
-
-        int32_t best = select_token(logits, cfg, rng_state_);
-        best = std::max(0, std::min(best, cfg.codebook_size - 1));
-        codebook_tokens.push_back(best);
-        prev_token =
-            resolve_depth_prev_token(cb, best, cfg, forced_audio_tokens, forced_audio_provided);
-        speech_maybe_log_depth_debug(cb, depth_call_idx, logits, best);
+    auto* selected_tokens = static_cast<int32_t*>(device_workspace_->selected_tokens.data());
+    for (int32_t codebook = 0; codebook < config_.num_codebooks; ++codebook) {
+        prepare_depth_input(temporal_output, codebook, text_token, text_token_is_forced,
+                            forced_audio_tokens, forced_audio_provided, selected_tokens);
+        enqueue_depth_step(depth_engine_for_codebook(codebook), codebook, selected_tokens);
     }
+}
 
-    // Pad if we stopped early
-    while (static_cast<int32_t>(codebook_tokens.size()) < num_cb)
-        codebook_tokens.push_back(0);
+TrtModule& SpeechPipeline::depth_engine_for_codebook(int32_t codebook) {
+    const auto index = static_cast<std::size_t>(codebook);
+    if (index < depth_engines_.size() && depth_engines_[index])
+        return *depth_engines_[index];
+    return *depth_engines_.front();
+}
 
-    return codebook_tokens;
+void SpeechPipeline::prepare_depth_input(const SpeechTemporalDeviceOutput& temporal_output,
+                                         int32_t codebook, int32_t text_token,
+                                         bool text_token_is_forced,
+                                         const int32_t* forced_audio_tokens,
+                                         const uint8_t* forced_audio_provided,
+                                         int32_t* selected_tokens) {
+    const int32_t previous_codebook = codebook - 1;
+    const bool previous_is_forced = previous_codebook >= 0 && forced_audio_tokens &&
+                                    forced_audio_provided &&
+                                    forced_audio_provided[previous_codebook] != 0;
+    const int32_t forced_previous = previous_is_forced ? forced_audio_tokens[previous_codebook] : 0;
+    personaplex_prepare_depth_embedding(
+        static_cast<float*>(device_workspace_->depth_embed.data()), temporal_output.hidden,
+        temporal_output.hidden_dtype,
+        static_cast<const float*>(device_workspace_->depth_projection.data()),
+        device_workspace_->depth_projection.numel(),
+        static_cast<const float*>(device_workspace_->depth_text_embedding.data()),
+        device_workspace_->depth_text_embedding.numel(),
+        static_cast<const float*>(device_workspace_->depth_audio_embeddings.data()),
+        device_workspace_->depth_audio_embeddings.numel(), selected_tokens, codebook, text_token,
+        text_token_is_forced, forced_previous, previous_is_forced, config_.depth_hidden_size,
+        config_.temporal_hidden_size, config_.depth_text_vocab, config_.audio_vocab_size,
+        config_.num_depformer_emb, stream_);
+    if (const auto error = cudaGetLastError(); error != cudaSuccess) {
+        throw std::runtime_error(std::string("SpeechPipeline depth embedding: ") +
+                                 cudaGetErrorString(error));
+    }
+}
+
+void SpeechPipeline::enqueue_depth_step(TrtModule& engine, int32_t codebook,
+                                        int32_t* selected_tokens) {
+    depth_state_->bind_to(engine);
+    TensorMap inputs;
+    depth_state_->prepare_step(inputs);
+    engine.forward_async(inputs);
+    const auto* logits = static_cast<const float*>(engine.device_ptr("logits"));
+    if (!logits || engine.tensor_dtype("logits") != DType::kFloat32)
+        throw std::runtime_error("SpeechPipeline depth: FP32 device logits unavailable");
+    depth_state_->advance();
+    if (!personaplex_select_token(logits, output_width(engine, "logits"), config_.depth_temperature,
+                                  config_.depth_top_k, config_.codebook_size - 1,
+                                  static_cast<uint64_t*>(device_workspace_->rng_state.data()),
+                                  selected_tokens + codebook + 1, stream_)) {
+        throw std::runtime_error("SpeechPipeline depth: device sampling failed or is unsupported");
+    }
+}
+
+void SpeechPipeline::download_selected_frame_tokens(std::vector<int32_t>& selected_tokens) {
+    selected_tokens.resize(static_cast<std::size_t>(config_.num_codebooks + 1));
+    const auto bytes = selected_tokens.size() * sizeof(int32_t);
+    auto error = cudaMemcpyAsync(selected_tokens.data(), device_workspace_->selected_tokens.data(),
+                                 bytes, cudaMemcpyDeviceToHost, stream_);
+    if (error != cudaSuccess || cudaStreamSynchronize(stream_) != cudaSuccess)
+        throw std::runtime_error("SpeechPipeline: failed to download selected frame tokens");
 }
 
 // ---------------------------------------------------------------------------
@@ -672,14 +647,14 @@ void SpeechPipeline::run_text_prompt() {
     if (!resolve_text_prompt_tokens(cfg, *subprocess_runner_, text_tokens))
         return;
 
-    std::vector<float> summed_embed(static_cast<std::size_t>(hidden));
-    std::vector<float> logits;
-    std::vector<float> hidden_out;
-
+    std::vector<float> prompt_embeddings(text_tokens.size() * static_cast<std::size_t>(hidden));
     for (std::size_t t = 0; t < text_tokens.size(); ++t) {
-        compute_text_prompt_frame_embed(cfg, text_tokens[t], hidden, summed_embed.data());
-        run_temporal_embed_step(summed_embed.data(), hidden, logits, hidden_out);
+        auto* embedding = prompt_embeddings.data() + t * static_cast<std::size_t>(hidden);
+        compute_text_prompt_frame_embed(cfg, text_tokens[t], hidden, embedding);
+        run_temporal_embed_step(embedding, hidden);
     }
+    if (cudaStreamSynchronize(stream_) != cudaSuccess)
+        throw std::runtime_error("SpeechPipeline: text prompt synchronization failed");
 
     std::cerr << "[speech] Text prompt injection complete (" << text_tokens.size()
               << " temporal steps)" << std::endl;
@@ -740,17 +715,12 @@ void speech_maybe_log_stop_decision(SpeechDecodeStopReason reason,
     }
 }
 
-void speech_maybe_log_interleaved_debug(int32_t offset, int32_t hidden,
-                                        const std::vector<float>& frame_hidden, int32_t text_input,
+void speech_maybe_log_interleaved_debug(int32_t offset, int32_t text_input,
                                         int32_t sampled_text_token,
                                         const std::vector<int32_t>& frame_codes) {
     if (offset <= 0 || offset > 5)
         return;
-    float l2 = 0.0F;
-    for (int32_t d = 0; d < hidden; ++d)
-        l2 += frame_hidden[static_cast<std::size_t>(d)] * frame_hidden[static_cast<std::size_t>(d)];
-    l2 = std::sqrt(l2);
-    std::cerr << "[speech] Offset " << offset << " hidden L2=" << l2 << " text_in=" << text_input
+    std::cerr << "[speech] Offset " << offset << " text_in=" << text_input
               << " text_out=" << sampled_text_token << " depth:";
     for (int32_t cb = 0; cb < std::min(4, static_cast<int32_t>(frame_codes.size())); ++cb)
         std::cerr << " " << frame_codes[static_cast<std::size_t>(cb)];
@@ -802,13 +772,12 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
     speech_log_stop_configuration(config_, plan.extra_tail);
 
     std::vector<float> summed_embed(static_cast<std::size_t>(hidden));
-    std::vector<float> frame_hidden(static_cast<std::size_t>(hidden));
-    std::vector<float> logits;
-    std::vector<float> hidden_out;
     std::vector<int32_t> moshi_input(static_cast<std::size_t>(settings.stream_cb));
     std::vector<int32_t> user_input(static_cast<std::size_t>(settings.stream_cb));
     std::vector<int32_t> target_audio_tokens(static_cast<std::size_t>(settings.num_cb));
     std::vector<uint8_t> target_audio_provided(static_cast<std::size_t>(settings.num_cb));
+    std::vector<int32_t> selected_frame_tokens;
+    std::vector<int32_t> frame_codes(static_cast<std::size_t>(settings.num_cb));
 
     frames_collected = 0;
     for (int32_t offset = 0; offset < plan.total_iters && frames_collected < plan.output_frames;
@@ -832,28 +801,18 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
                                          moshi_input.data(), user_input.data(), text_input,
                                          summed_embed.data());
 
-        run_temporal_embed_step(summed_embed.data(), settings.hidden, logits, hidden_out);
-
-        if (!hidden_out.empty()) {
-            frame_hidden.resize(static_cast<std::size_t>(settings.hidden));
-            const auto copy_sz =
-                std::min(hidden_out.size(), static_cast<std::size_t>(settings.hidden));
-            std::memcpy(frame_hidden.data(), hidden_out.data(), copy_sz * sizeof(float));
-        } else {
-            fill_hidden_from_logits(frame_hidden, logits, settings.hidden);
-        }
-
-        const int32_t sampled_text_token =
-            speech_sample_temporal_text_token(logits, settings.text_pad_id, config_, rng_state_);
+        const auto temporal_output = run_temporal_embed_step(summed_embed.data(), settings.hidden);
         const auto text_target_idx = delay_cache_index(delay_state, 0, target_pos);
         const bool text_provided = delay_state.provided[text_target_idx] != 0;
-        const int32_t next_text_token =
-            text_provided ? delay_state.cache[text_target_idx] : sampled_text_token;
+        const int32_t forced_text_token = delay_state.cache[text_target_idx];
 
         build_target_audio_arrays(delay_state, target_pos, settings.num_cb, settings.audio_bos,
                                   target_audio_tokens, target_audio_provided);
-        auto frame_codes = run_depth(frame_hidden.data(), settings.hidden, next_text_token,
-                                     target_audio_tokens.data(), target_audio_provided.data());
+        run_depth(temporal_output, forced_text_token, text_provided, target_audio_tokens.data(),
+                  target_audio_provided.data());
+        download_selected_frame_tokens(selected_frame_tokens);
+        const int32_t sampled_text_token = selected_frame_tokens[0];
+        std::copy_n(selected_frame_tokens.begin() + 1, settings.num_cb, frame_codes.begin());
 
         clear_provided_flags_at_pos(delay_state, model_input_pos);
         write_generated_tokens_to_delay_cache(delay_state, target_pos, sampled_text_token,
@@ -876,8 +835,7 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
         const auto stop_decision = UpdateSpeechDecodeStopState(stop_state, stop_input);
         stop_state = stop_decision.state;
         speech_maybe_log_stop_decision(stop_decision.reason, stop_state, offset);
-        speech_maybe_log_interleaved_debug(offset, settings.hidden, frame_hidden, text_input,
-                                           sampled_text_token, frame_codes);
+        speech_maybe_log_interleaved_debug(offset, text_input, sampled_text_token, frame_codes);
         if (stop_decision.should_break)
             break;
     }
@@ -903,8 +861,6 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
                                   const GenerateConfig& cfg, int32_t input_sample_rate) {
     AudioResult result;
     result.sample_rate = config_.sample_rate;
-
-    depth_debug_call_count_ = 0;
 
     const int32_t max_output_frames = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : 375;
 

@@ -27,6 +27,12 @@
 namespace trtmc {
 
 class ISubprocessRunner;
+struct SpeechDeviceWorkspace;
+
+struct SpeechTemporalDeviceOutput {
+    const void* hidden{nullptr};
+    DType hidden_dtype{DType::kFloat32};
+};
 
 class SpeechPipeline final : public IPipeline {
   public:
@@ -50,12 +56,18 @@ class SpeechPipeline final : public IPipeline {
   private:
     std::vector<int32_t> run_mimi_encode(const float* samples, int32_t num_samples);
 
-    void run_temporal_embed_step(const float* embed_ptr, int32_t embed_size,
-                                 std::vector<float>& logits, std::vector<float>& hidden_out);
+    SpeechTemporalDeviceOutput run_temporal_embed_step(const float* embed_ptr, int32_t embed_size);
 
-    std::vector<int32_t> run_depth(const float* temporal_hidden, int32_t hidden_dim,
-                                   int32_t text_token, const int32_t* forced_audio_tokens = nullptr,
-                                   const uint8_t* forced_audio_provided = nullptr);
+    void run_depth(const SpeechTemporalDeviceOutput& temporal_output, int32_t text_token,
+                   bool text_token_is_forced, const int32_t* forced_audio_tokens = nullptr,
+                   const uint8_t* forced_audio_provided = nullptr);
+    TrtModule& depth_engine_for_codebook(int32_t codebook);
+    void prepare_depth_input(const SpeechTemporalDeviceOutput& temporal_output, int32_t codebook,
+                             int32_t text_token, bool text_token_is_forced,
+                             const int32_t* forced_audio_tokens,
+                             const uint8_t* forced_audio_provided, int32_t* selected_tokens);
+    void enqueue_depth_step(TrtModule& engine, int32_t codebook, int32_t* selected_tokens);
+    void download_selected_frame_tokens(std::vector<int32_t>& selected_tokens);
 
     std::vector<float> run_mimi_decode(const std::vector<int32_t>& codec_tokens,
                                        int32_t num_frames);
@@ -69,23 +81,21 @@ class SpeechPipeline final : public IPipeline {
                                    std::vector<int32_t>& output_codes, int32_t& frames_collected);
     void speak_postprocess_waveform(std::vector<float>& waveform, int32_t generated_frames) const;
 
-    std::unique_ptr<TrtModule> mimi_encoder_;
     std::unique_ptr<TrtModule> temporal_;
+    std::unique_ptr<TrtModule> mimi_encoder_;
     std::unique_ptr<PersonaplexInferenceState> temporal_state_;
     std::vector<std::unique_ptr<TrtModule>> depth_engines_;
     std::unique_ptr<PersonaplexInferenceState> depth_state_;
     std::unique_ptr<TrtModule> mimi_decoder_;
+    std::unique_ptr<SpeechDeviceWorkspace> device_workspace_;
 
     cudaStream_t stream_;
     SpeechConfig config_;
     std::shared_ptr<ISubprocessRunner> subprocess_runner_;
     std::string model_id_;
-    uint64_t rng_state_{0};
 
     int32_t last_encode_frames_{0};
     int32_t last_encode_codebooks_{0};
-
-    int32_t depth_debug_call_count_{0};
 };
 
 } // namespace trtmc

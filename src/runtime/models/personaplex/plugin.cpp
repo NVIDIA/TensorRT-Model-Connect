@@ -84,6 +84,8 @@ class PersonaPlexPlugin final : public IPipelinePlugin {
                                       "speech temporal", temporal_opts);
 
         cudaStream_t stream = temporal_loaded.module->stream();
+        ModuleCreateOptions chained_opts = opts;
+        chained_opts.stream = stream;
 
         const int32_t temporal_kv_fallback =
             compute_kv_dim_kv_heads(ctx.config, ctx.config.hidden_size);
@@ -98,7 +100,7 @@ class PersonaPlexPlugin final : public IPipelinePlugin {
             throw std::runtime_error(
                 "SpeechPipeline: failed to create temporal PersonaplexKvCache");
 
-        auto depth_engines = load_depth_engines(ctx.backend, ctx.bundle, opts);
+        auto depth_engines = load_depth_engines(ctx.backend, ctx.bundle, chained_opts);
 
         const auto depth_cfg = make_depth_engine_config(ctx.config_json, ctx.config);
         int32_t depth_kv_dim = compute_kv_dim_kv_heads(depth_cfg, depth_cfg.hidden_size);
@@ -114,10 +116,10 @@ class PersonaPlexPlugin final : public IPipelinePlugin {
 
         auto mimi_encoder =
             extract_optional_module(ctx.backend, find_section(ctx.bundle, "mimi_encoder_plan"),
-                                    "speech mimi_encoder", opts);
+                                    "speech mimi_encoder", chained_opts);
         auto mimi_decoder =
             extract_optional_module(ctx.backend, find_section(ctx.bundle, "mimi_decoder_plan"),
-                                    "speech mimi_decoder", opts);
+                                    "speech mimi_decoder", chained_opts);
 
         return std::make_unique<SpeechPipeline>(
             std::move(mimi_encoder), std::move(temporal_loaded.module), std::move(temporal_state),
