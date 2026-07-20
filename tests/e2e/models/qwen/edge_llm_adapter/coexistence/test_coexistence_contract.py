@@ -233,11 +233,16 @@ def test_a100_gate_requires_exact_delegated_descriptors_and_bounded_orders(
     scope = runpy.run_path(str(_LEAF / "test_a100_coexistence.py"))
     profiles = scope["_PROFILES"]
     validate = scope["_validate_delegated_bundle"]
-    orders = scope["_representative_load_orders"](profiles)
-    assert len(orders) <= 2 * len(profiles)
-    assert all(set(order) == set(profiles) for order in orders)
-    if len(profiles) == 3:
-        assert len(orders) == 6
+    representative_load_orders = scope["_representative_load_orders"]
+    if len(profiles) < 2:
+        with pytest.raises(ValueError, match="at least two profiles"):
+            representative_load_orders(profiles)
+    else:
+        orders = representative_load_orders(profiles)
+        assert len(orders) <= 2 * len(profiles)
+        assert all(set(order) == set(profiles) for order in orders)
+        if len(profiles) == 3:
+            assert len(orders) == 6
 
     for profile in profiles:
         bundle = tmp_path / f"{profile.leaf}.trtfb"
