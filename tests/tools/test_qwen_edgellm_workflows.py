@@ -54,6 +54,7 @@ def test_premerge_requires_only_selected_cpu_contracts_until_a100_is_provisioned
     assert '"$root/$PROFILE"' in contracts
     assert '"$root/coexistence/test_coexistence_contract.py"' in contracts
     assert "nlohmann-json3-dev" in contracts
+    assert "numpy pytest" in contracts
     assert '-m "not gpu"' in contracts
     assert "tests/e2e/models/qwen/edge_llm_adapter" in contracts
     assert "\n  qwen-edgellm-a100:" not in workflow
