@@ -773,28 +773,62 @@ def _validate_engine_directory(path: Path) -> tuple[Path, int]:
     if config_path.is_symlink() or not config_path.is_file():
         raise AdapterError(f"Edge-LLM engine is missing non-symlink config.json: {engine}")
     config = _load_json(config_path, "Edge-LLM engine config")
-    vocab_size = config.get("reduced_vocab_size") or config.get("vocab_size")
-    if type(vocab_size) is not int or not 0 < vocab_size < (1 << 31):
-        raise AdapterError("Edge-LLM engine vocab_size must be a positive INT32")
-    if config.get("edgellm_version") != _EDGE_LLM_VERSION:
-        raise AdapterError(
-            f"Edge-LLM engine was not built by pinned runtime version {_EDGE_LLM_VERSION}"
-        )
+    expected_model = {
+        "model": "qwen3",
+        "spec_decode_type": "none",
+        "engine_role": "llm",
+        "edgellm_version": _EDGE_LLM_VERSION,
+        "vocab_size": 151936,
+        "hidden_size": 1024,
+        "intermediate_size": 3072,
+        "num_hidden_layers": 28,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "max_position_embeddings": 40960,
+        "rope_theta": 1000000.0,
+        "rope_scaling": None,
+        "partial_rotary_factor": 1.0,
+        "num_deepstack_features": 0,
+        "ple_enabled": False,
+        "num_ple_inputs": 0,
+        "ple_hidden_size": 0,
+        "kv_cache_dtype": "fp16",
+    }
+    for field, expected_value in expected_model.items():
+        actual_value = config.get(field)
+        if (
+            field not in config
+            or type(actual_value) is not type(expected_value)
+            or actual_value != expected_value
+        ):
+            raise AdapterError(f"Edge-LLM engine config.{field} must be exactly {expected_value!r}")
+    if config.get("reduced_vocab_size") is not None:
+        raise AdapterError("Edge-LLM engine config.reduced_vocab_size must be absent or null")
+    for field in ("tp_size", "tp_rank"):
+        if field in config:
+            raise AdapterError(
+                f"Edge-LLM engine config.{field} must be absent for this single-GPU profile"
+            )
     builder = _require_mapping(config.get("builder_config"), "Edge-LLM builder_config")
     expected = {
         "max_input_len": 1024,
         "max_kv_cache_capacity": 4096,
         "max_batch_size": 4,
+        "spec_draft": False,
+        "spec_base": False,
+        "max_lora_rank": 0,
+        "trt_native_ops": False,
     }
     for field, value in expected.items():
-        if type(builder.get(field)) is not int or builder.get(field) != value:
+        if type(builder.get(field)) is not type(value) or builder.get(field) != value:
             raise AdapterError(f"Edge-LLM engine builder_config.{field} must be exactly {value}")
     for filename in _REQUIRED_ENGINE_FILES:
         artifact = engine / filename
         if artifact.is_symlink() or not artifact.is_file() or artifact.stat().st_size <= 0:
             raise AdapterError(f"Edge-LLM engine is missing required artifact {filename}")
     _validate_artifact_tree(engine)
-    return engine, vocab_size
+    return engine, expected_model["vocab_size"]
 
 
 def _snapshot_identity(path: Path) -> tuple[str, str] | None:

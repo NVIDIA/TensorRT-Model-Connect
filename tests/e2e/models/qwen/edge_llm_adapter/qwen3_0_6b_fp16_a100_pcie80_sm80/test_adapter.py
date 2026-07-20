@@ -224,20 +224,44 @@ def _request(
     )
 
 
+def _fake_engine_config() -> dict[str, object]:
+    return {
+        "model": "qwen3",
+        "spec_decode_type": "none",
+        "engine_role": "llm",
+        "edgellm_version": "0.9.0",
+        "vocab_size": 151936,
+        "hidden_size": 1024,
+        "intermediate_size": 3072,
+        "num_hidden_layers": 28,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "max_position_embeddings": 40960,
+        "rope_theta": 1000000.0,
+        "rope_scaling": None,
+        "partial_rotary_factor": 1.0,
+        "num_deepstack_features": 0,
+        "ple_enabled": False,
+        "num_ple_inputs": 0,
+        "ple_hidden_size": 0,
+        "kv_cache_dtype": "fp16",
+        "builder_config": {
+            "max_input_len": 1024,
+            "max_kv_cache_capacity": 4096,
+            "max_batch_size": 4,
+            "spec_draft": False,
+            "spec_base": False,
+            "max_lora_rank": 0,
+            "trt_native_ops": False,
+        },
+    }
+
+
 def _fake_engine(root: Path) -> Path:
     root.mkdir()
     (root / "config.json").write_text(
-        json.dumps(
-            {
-                "vocab_size": 151936,
-                "edgellm_version": "0.9.0",
-                "builder_config": {
-                    "max_input_len": 1024,
-                    "max_kv_cache_capacity": 4096,
-                    "max_batch_size": 4,
-                },
-            }
-        ),
+        json.dumps(_fake_engine_config()),
         encoding="utf-8",
     )
     for filename in (
@@ -267,6 +291,119 @@ def _prebuilt_runtime_parameters(tmp_path: Path) -> dict[str, object]:
         "max_cache_length": 4096,
         "max_batch_size": 4,
     }
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("model", "qwen3_moe"),
+        ("spec_decode_type", "eagle3"),
+        ("engine_role", "base"),
+        ("edgellm_version", "0.9.1"),
+        ("vocab_size", True),
+        ("hidden_size", 2048),
+        ("intermediate_size", 6144),
+        ("num_hidden_layers", 29),
+        ("num_attention_heads", 32),
+        ("num_key_value_heads", 4),
+        ("head_dim", 64),
+        ("max_position_embeddings", 262144),
+        ("rope_theta", 1000000),
+        ("rope_scaling", {}),
+        ("partial_rotary_factor", 0.5),
+        ("num_deepstack_features", 1),
+        ("ple_enabled", 0),
+        ("num_ple_inputs", 1),
+        ("ple_hidden_size", 1024),
+        ("kv_cache_dtype", "fp8"),
+    ),
+)
+def test_engine_model_fingerprint_is_exact(
+    tmp_path: Path, field: str, invalid_value: object
+) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "engine")
+    config_path = engine / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config[field] = invalid_value
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match=rf"config\.{field}"):
+        adapter._validate_engine_directory(engine)
+
+
+def test_engine_rejects_a_qwen3_1_7b_sibling_fingerprint(tmp_path: Path) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "engine")
+    config_path = engine / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.update(
+        {
+            "hidden_size": 2048,
+            "intermediate_size": 6144,
+            "num_attention_heads": 16,
+        }
+    )
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match=r"config\.hidden_size"):
+        adapter._validate_engine_directory(engine)
+
+
+@pytest.mark.parametrize("field", ("model", "rope_scaling", "kv_cache_dtype"))
+def test_engine_rejects_missing_required_model_fields(tmp_path: Path, field: str) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "engine")
+    config_path = engine / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    del config[field]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match=rf"config\.{field}"):
+        adapter._validate_engine_directory(engine)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("max_input_len", 2048),
+        ("max_kv_cache_capacity", 8192),
+        ("max_batch_size", 1),
+        ("spec_draft", True),
+        ("spec_base", True),
+        ("max_lora_rank", 8),
+        ("trt_native_ops", True),
+    ),
+)
+def test_engine_builder_fingerprint_is_exact(
+    tmp_path: Path, field: str, invalid_value: object
+) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "engine")
+    config_path = engine / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["builder_config"][field] = invalid_value
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match=rf"builder_config\.{field}"):
+        adapter._validate_engine_directory(engine)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), (("reduced_vocab_size", 32000), ("tp_size", 2), ("tp_rank", 0))
+)
+def test_engine_rejects_incompatible_optional_features(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "engine")
+    config_path = engine / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config[field] = value
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match=rf"config\.{field}"):
+        adapter._validate_engine_directory(engine)
 
 
 def _run_build_after_probe(manifest, request, output: Path):
@@ -1569,15 +1706,7 @@ def test_engine_export_uses_pinned_dependency_tools_despite_ambient_poison(
         if engine_argument is None:
             return
         engine = Path(engine_argument.split("=", 1)[1])
-        _fake_engine_contents = {
-            "vocab_size": 151936,
-            "edgellm_version": "0.9.0",
-            "builder_config": {
-                "max_input_len": 1024,
-                "max_kv_cache_capacity": 4096,
-                "max_batch_size": 4,
-            },
-        }
+        _fake_engine_contents = _fake_engine_config()
         (engine / "config.json").write_text(json.dumps(_fake_engine_contents), encoding="utf-8")
         for filename in (
             "llm.engine",
