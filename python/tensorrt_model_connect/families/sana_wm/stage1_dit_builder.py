@@ -9632,15 +9632,6 @@ def build_sana_wm_stage1_dit_engine(
     builder = trt.Builder(logger)
     builder_config = builder.create_builder_config()
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
-    if hasattr(builder_config, "builder_optimization_level"):
-        builder_config.builder_optimization_level = 0
-    if hasattr(builder_config, "max_num_tactics"):
-        builder_config.max_num_tactics = 1
-    if hasattr(builder_config, "tiling_optimization_level") and hasattr(
-        trt,
-        "TilingOptimizationLevel",
-    ):
-        builder_config.tiling_optimization_level = trt.TilingOptimizationLevel.NONE
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     shape = stage1_shape_from_config(raw_config, weights)
     dtype = _target_np_dtype(precision)

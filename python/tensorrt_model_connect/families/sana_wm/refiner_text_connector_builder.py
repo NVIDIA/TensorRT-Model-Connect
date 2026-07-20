@@ -220,8 +220,6 @@ def build_sana_wm_refiner_text_connector_engine(
     builder = trt_module.Builder(logger)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt_module.MemoryPoolType.WORKSPACE, 16 << 30)
-    if hasattr(config, "builder_optimization_level"):
-        config.builder_optimization_level = 0
 
     network = builder.create_network(
         1 << int(trt_module.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
@@ -506,8 +504,6 @@ def _build_exact_sana_wm_refiner_text_connector_engine(
     builder = trt_module.Builder(logger)
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt_module.MemoryPoolType.WORKSPACE, 16 << 30)
-    if hasattr(config, "builder_optimization_level"):
-        config.builder_optimization_level = 0
     network = builder.create_network(
         1 << int(trt_module.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     )
