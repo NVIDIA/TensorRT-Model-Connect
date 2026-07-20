@@ -667,6 +667,49 @@ def test_latest_failed_attempt_supersedes_an_older_passing_attempt(
     assert payload["models"][0]["status"] == "failed"
 
 
+def test_failed_artifact_without_proof_uses_status_gpu_lease_metadata(
+    tmp_path: Path,
+) -> None:
+    root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    (root / "proof.json").unlink()
+    status_path = root / "model-proof-status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    status["outcome"] = "failed"
+    status["exit_code"] = 1
+    status["validation_exit_code"] = 1
+    status_path.write_text(json.dumps(status), encoding="utf-8")
+
+    rc, _output, combined_status_path = _run(tmp_path, ["alpha"])
+
+    assert rc == 2
+    combined_status = json.loads(combined_status_path.read_text(encoding="utf-8"))
+    model_status = combined_status["models"][0]
+    assert model_status["status"] == "failed"
+    assert "alpha: proof is missing: proof.json" in model_status["issues"]
+    assert "alpha: status outcome must be 'passed', found 'failed'" in model_status["issues"]
+    assert not any("GPU lease" in issue for issue in model_status["issues"])
+    assert not any("Is a directory" in issue for issue in model_status["issues"])
+
+
+def test_missing_gpu_lease_declaration_fails_without_reading_artifact_directory(
+    tmp_path: Path,
+) -> None:
+    root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    (root / "proof.json").unlink()
+    for filename in ("model-proof-status.json", "selection.json"):
+        path = root / filename
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.pop("gpu_lease_evidence")
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    rc, _output, status_path = _run(tmp_path, ["alpha"])
+
+    assert rc == 2
+    model_issues = json.loads(status_path.read_text(encoding="utf-8"))["models"][0]["issues"]
+    assert "alpha: GPU lease evidence is not declared as 'gpu-lease.json'" in model_issues
+    assert not any("Is a directory" in issue for issue in model_issues)
+
+
 def test_wrong_metadata_fallback_and_case_mismatch_fail_closed(tmp_path: Path) -> None:
     root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
     status = json.loads((root / "model-proof-status.json").read_text(encoding="utf-8"))

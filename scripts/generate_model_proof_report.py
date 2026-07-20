@@ -556,23 +556,37 @@ def compose(args: argparse.Namespace) -> int:
         for proof_issue in e2e_report.validate_proof_context(status, proof, selection):
             model_issues.append(f"{model}: {proof_issue}")
 
-        lease_path = artifacts_root / str(proof.get("gpu_lease_evidence") or "")
-        lease = _read_json(lease_path, f"{model}: GPU lease evidence", model_issues)
-        for field, expected in (
-            ("model", model),
-            ("source_revision", args.revision),
-            ("gpu_id", proof.get("gpu_id")),
-            ("gpu_resource_class", proof.get("gpu_resource_class")),
-            ("gpu_slot_ids", proof.get("gpu_slot_ids")),
-            ("gpu_slots_per_device", proof.get("gpu_slots_per_device")),
-        ):
-            _check_equal(
+        lease_metadata = next(
+            (
+                payload
+                for payload in (proof, status, selection)
+                if payload.get("gpu_lease_evidence") == "gpu-lease.json"
+            ),
+            None,
+        )
+        if lease_metadata is None:
+            model_issues.append(f"{model}: GPU lease evidence is not declared as 'gpu-lease.json'")
+        else:
+            lease = _read_json(
+                artifacts_root / "gpu-lease.json",
+                f"{model}: GPU lease evidence",
                 model_issues,
-                model,
-                f"GPU lease {field}",
-                lease.get(field),
-                expected,
             )
+            for field, expected in (
+                ("model", model),
+                ("source_revision", args.revision),
+                ("gpu_id", lease_metadata.get("gpu_id")),
+                ("gpu_resource_class", lease_metadata.get("gpu_resource_class")),
+                ("gpu_slot_ids", lease_metadata.get("gpu_slot_ids")),
+                ("gpu_slots_per_device", lease_metadata.get("gpu_slots_per_device")),
+            ):
+                _check_equal(
+                    model_issues,
+                    model,
+                    f"GPU lease {field}",
+                    lease.get(field),
+                    expected,
+                )
 
         report_path = artifacts_root / "model-proof-report.html"
         try:
