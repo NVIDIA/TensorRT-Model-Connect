@@ -153,7 +153,23 @@ struct OptimizedRuntimeFactoryV1 {
     // binary-incompatible way. Source-only edits do not invalidate adapters.
     std::uint32_t pipeline_abi_version{kOptimizedRuntimePipelineAbiVersionV1};
     OptimizedRuntimeToolchainAbiV1 toolchain_abi{kCurrentOptimizedRuntimeToolchainAbiV1};
+
+    // Optional process-global compatibility claim. A runtime that mutates a
+    // process-global registry during create() names that registry and supplies
+    // a deterministic fingerprint of the state it installs. Factories that
+    // do not make such mutations leave both pointers null. The host allows
+    // multiple factories to claim one namespace only when their fingerprints
+    // are identical.
+    //
+    // These fields extend the end of the V1 table. A factory compiled against
+    // the original V1 layout may report kOptimizedRuntimeFactoryV1BaseSize and
+    // is treated as making no claim.
+    const char* process_compatibility_namespace{nullptr};
+    const char* process_compatibility_fingerprint{nullptr};
 };
+
+inline constexpr std::uint32_t kOptimizedRuntimeFactoryV1BaseSize = static_cast<std::uint32_t>(
+    offsetof(OptimizedRuntimeFactoryV1, process_compatibility_namespace));
 
 using GetOptimizedRuntimeFactoryV1 = const OptimizedRuntimeFactoryV1* (*)() noexcept;
 

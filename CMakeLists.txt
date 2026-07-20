@@ -643,6 +643,52 @@ set_target_properties(trtmc_test_optimized_runtime PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/good"
 )
 
+function(trtmc_add_process_compatibility_fake TARGET_NAME OUTPUT_NAME OUTPUT_DIRECTORY
+         IMPLEMENTATION_ID RUNTIME_NAME FINGERPRINT)
+  add_library(${TARGET_NAME} SHARED EXCLUDE_FROM_ALL
+    tests/cpp/fakes/fake_optimized_runtime_provider.cpp
+  )
+  target_include_directories(${TARGET_NAME} PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src
+  )
+  target_compile_definitions(${TARGET_NAME} PRIVATE
+    TRTMC_FAKE_OPTIMIZED_IMPLEMENTATION_ID="${IMPLEMENTATION_ID}"
+    TRTMC_FAKE_OPTIMIZED_RUNTIME_NAME="${RUNTIME_NAME}"
+    TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_NAMESPACE="test.process-registry"
+    TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_FINGERPRINT="${FINGERPRINT}"
+  )
+  set_target_properties(${TARGET_NAME} PROPERTIES
+    OUTPUT_NAME ${OUTPUT_NAME}
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/${OUTPUT_DIRECTORY}"
+  )
+endfunction()
+
+trtmc_add_process_compatibility_fake(
+  trtmc_test_optimized_runtime_claim_alpha
+  trtmc_impl_example_optimized_runtime_claim_alpha
+  claim-alpha
+  example-optimized-runtime-claim-alpha
+  test-optimized-runtime-claim-alpha
+  sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+)
+trtmc_add_process_compatibility_fake(
+  trtmc_test_optimized_runtime_claim_alpha_compatible
+  trtmc_impl_example_optimized_runtime_claim_alpha_compatible
+  claim-alpha-compatible
+  example-optimized-runtime-claim-alpha-compatible
+  test-optimized-runtime-claim-alpha-compatible
+  sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+)
+trtmc_add_process_compatibility_fake(
+  trtmc_test_optimized_runtime_claim_beta
+  trtmc_impl_example_optimized_runtime_claim_beta
+  claim-beta
+  example-optimized-runtime-claim-beta
+  test-optimized-runtime-claim-beta
+  sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+)
+
 add_library(trtmc_test_wrong_optimized_runtime SHARED EXCLUDE_FROM_ALL
   tests/cpp/fakes/fake_optimized_runtime_provider.cpp
 )
@@ -812,15 +858,49 @@ trtmc_add_test(test_trt_version)
 trtmc_add_test(test_optimized_runtime_host)
 add_dependencies(test_optimized_runtime_host
   trtmc_test_optimized_runtime
+  trtmc_test_optimized_runtime_claim_alpha
+  trtmc_test_optimized_runtime_claim_alpha_compatible
+  trtmc_test_optimized_runtime_claim_beta
   trtmc_test_wrong_optimized_runtime
   trtmc_test_wrong_optimized_runtime_abi
   trtmc_test_optimized_embedding
 )
 target_compile_definitions(test_optimized_runtime_host PRIVATE
   TRTMC_TEST_OPTIMIZED_PROVIDER_DSO="$<TARGET_FILE:trtmc_test_optimized_runtime>"
+  TRTMC_TEST_OPTIMIZED_CLAIM_ALPHA_DSO="$<TARGET_FILE:trtmc_test_optimized_runtime_claim_alpha>"
+  TRTMC_TEST_OPTIMIZED_CLAIM_ALPHA_COMPATIBLE_DSO="$<TARGET_FILE:trtmc_test_optimized_runtime_claim_alpha_compatible>"
+  TRTMC_TEST_OPTIMIZED_CLAIM_BETA_DSO="$<TARGET_FILE:trtmc_test_optimized_runtime_claim_beta>"
   TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_DSO="$<TARGET_FILE:trtmc_test_wrong_optimized_runtime>"
   TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_ABI_DSO="$<TARGET_FILE:trtmc_test_wrong_optimized_runtime_abi>"
   TRTMC_TEST_OPTIMIZED_EMBEDDING_DSO="$<TARGET_FILE:trtmc_test_optimized_embedding>"
+)
+add_test(
+  NAME test_optimized_runtime_process_compatibility_alpha_first
+  COMMAND test_optimized_runtime_host --process-compatibility-alpha-first
+)
+add_test(
+  NAME test_optimized_runtime_process_compatibility_beta_first
+  COMMAND test_optimized_runtime_host --process-compatibility-beta-first
+)
+add_test(
+  NAME test_optimized_runtime_process_compatibility_concurrent
+  COMMAND test_optimized_runtime_host --process-compatibility-concurrent
+)
+add_test(
+  NAME test_optimized_runtime_process_compatibility_create_failure
+  COMMAND test_optimized_runtime_host --process-compatibility-create-failure
+)
+add_test(
+  NAME test_optimized_runtime_process_compatibility_malformed
+  COMMAND test_optimized_runtime_host --process-compatibility-malformed
+)
+set_tests_properties(
+  test_optimized_runtime_process_compatibility_alpha_first
+  test_optimized_runtime_process_compatibility_beta_first
+  test_optimized_runtime_process_compatibility_concurrent
+  test_optimized_runtime_process_compatibility_create_failure
+  test_optimized_runtime_process_compatibility_malformed
+  PROPERTIES LABELS "platform"
 )
 if(_trtmc_python)
   add_test(
@@ -849,6 +929,7 @@ trtmc_add_test(test_json_helpers)
 trtmc_add_test(test_data_dir)
 trtmc_add_test(test_cli_args)
 target_sources(test_cli_args PRIVATE src/cli/args.cpp)
+trtmc_add_test(test_cli_text_timing)
 trtmc_add_test(test_config_schema_registry)
 trtmc_add_test(test_config_cli_support)
 trtmc_add_test(test_config_schemas_triattention)

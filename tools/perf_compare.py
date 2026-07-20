@@ -39,6 +39,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
+import re
 import statistics
 import subprocess
 import sys
@@ -366,6 +368,50 @@ def bench_trt_family(
     )
 
 
+def _parse_trtmc_cpp_benchmark(stderr: str) -> dict | None:
+    """Parse finite CLI timings or preserve an explicit unavailable state."""
+    match = re.search(
+        r"\[trtmc\.benchmark\]\s+prefill_ms=(\S+)\s+decode_ms=(\S+)"
+        r"\s+tokens_per_sec=(\S+)",
+        stderr)
+    if match is None:
+        return None
+
+    labels = ("prefill_ms", "decode_ms", "tokens_per_sec")
+    raw_values = dict(zip(labels, match.groups()))
+    unavailable = [
+        label for label, value in raw_values.items() if value == "unavailable"
+    ]
+    if unavailable:
+        return {
+            "timing_available": False,
+            "timing_status": "unavailable",
+            "unavailable_metrics": unavailable,
+        }
+
+    try:
+        values = {label: float(value) for label, value in raw_values.items()}
+    except ValueError:
+        return None
+    invalid = [
+        label for label, value in values.items()
+        if (not math.isfinite(value)
+            or (label == "decode_ms" and value <= 0.0)
+            or (label != "decode_ms" and value < 0.0))
+    ]
+    if invalid:
+        return {
+            "timing_available": False,
+            "timing_status": "unavailable",
+            "unavailable_metrics": invalid,
+        }
+    return {
+        "timing_available": True,
+        "timing_status": "available",
+        **values,
+    }
+
+
 def bench_trtmc_cpp(
     binary: str,
     bundle_path: str,
@@ -383,8 +429,6 @@ def bench_trtmc_cpp(
 
     Returns a dict with the same schema as bench_trt(), or None on error.
     """
-    import re
-
     cmd = [
         binary, "run", bundle_path,
         "--prompt", prompt,
@@ -409,21 +453,23 @@ def bench_trtmc_cpp(
               file=sys.stderr)
         return None
 
-    # Parse "[trtmc.benchmark] prefill_ms=X decode_ms=Y tokens_per_sec=Z"
-    m = re.search(
-        r"\[trtmc\.benchmark\]\s+prefill_ms=([\d.]+)\s+decode_ms=([\d.]+)"
-        r"\s+tokens_per_sec=([\d.]+)",
-        result.stderr)
-    if not m:
+    parsed = _parse_trtmc_cpp_benchmark(result.stderr)
+    if parsed is None:
         print("[perf] C++ binary: could not parse benchmark output from stderr.",
               file=sys.stderr)
         if verbose:
             print(result.stderr, file=sys.stderr)
         return None
+    if not parsed["timing_available"]:
+        unavailable = ", ".join(parsed["unavailable_metrics"])
+        print("[perf] C++ binary reports split timing unavailable "
+              f"({unavailable}); omitting decode throughput comparisons.",
+              file=sys.stderr)
+        return {**parsed, "gen_ids": []}
 
-    prefill_ms = float(m.group(1))
-    decode_ms  = float(m.group(2))
-    tps        = float(m.group(3))
+    prefill_ms = parsed["prefill_ms"]
+    decode_ms = parsed["decode_ms"]
+    tps = parsed["tokens_per_sec"]
 
     if verbose:
         print(f"  [cpp] prefill={prefill_ms:.2f}ms decode={decode_ms:.2f}ms "
@@ -431,8 +477,10 @@ def bench_trtmc_cpp(
 
     # The C++ binary reports the mean over all timed iterations; synthesise
     # single-element lists so the same stats helpers work.
-    n_decode_tokens = int(round(tps * decode_ms / 1000.0)) if tps > 0 else max_new_tokens
+    n_decode_tokens = int(round(tps * decode_ms / 1000.0))
     return {
+        "timing_available": True,
+        "timing_status": "available",
         "prefill_times": [prefill_ms],
         "decode_times": [decode_ms],
         "decode_token_counts": [n_decode_tokens],
@@ -822,7 +870,12 @@ def build_json_output(model_name: str, prompt: str, num_input_tokens: int,
         "peak_memory_mb": peak_memory_mb,
     }
 
-    if cpp_res is not None:
+    if cpp_res is not None and not cpp_res.get("timing_available", True):
+        out["trt_cpp"] = {
+            "timing_status": "unavailable",
+            "unavailable_metrics": list(cpp_res.get("unavailable_metrics", [])),
+        }
+    elif cpp_res is not None:
         cpp_prefill = _stats(cpp_res["prefill_times"])
         cpp_decode = _stats(cpp_res["decode_times"])
         cpp_avg_tokens = (statistics.mean(cpp_res["decode_token_counts"])
@@ -831,6 +884,7 @@ def build_json_output(model_name: str, prompt: str, num_input_tokens: int,
         cpp_total = _stats([p + d for p, d in zip(cpp_res["prefill_times"],
                                                    cpp_res["decode_times"])])
         out["trt_cpp"] = {
+            "timing_status": "available",
             "prefill_ms": cpp_prefill,
             "decode_ms": cpp_decode,
             "per_token_ms": cpp_tok["per_token_ms"],

@@ -11,6 +11,7 @@
 #include "utils/sha256.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <exception>
@@ -26,6 +27,18 @@
 
 #ifndef TRTMC_TEST_OPTIMIZED_PROVIDER_DSO
 #error "TRTMC_TEST_OPTIMIZED_PROVIDER_DSO must be defined"
+#endif
+
+#ifndef TRTMC_TEST_OPTIMIZED_CLAIM_ALPHA_DSO
+#error "TRTMC_TEST_OPTIMIZED_CLAIM_ALPHA_DSO must be defined"
+#endif
+
+#ifndef TRTMC_TEST_OPTIMIZED_CLAIM_ALPHA_COMPATIBLE_DSO
+#error "TRTMC_TEST_OPTIMIZED_CLAIM_ALPHA_COMPATIBLE_DSO must be defined"
+#endif
+
+#ifndef TRTMC_TEST_OPTIMIZED_CLAIM_BETA_DSO
+#error "TRTMC_TEST_OPTIMIZED_CLAIM_BETA_DSO must be defined"
 #endif
 
 #ifndef TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_DSO
@@ -82,6 +95,45 @@ RuntimeSpec embedding_spec() {
                        kEmbeddingModelId,          "embedding-profile",
                        "test-embedding-runtime",   "test-embedding-1.0",
                        "test-embedding-commit",    TRTMC_TEST_OPTIMIZED_EMBEDDING_DSO};
+}
+
+RuntimeSpec claim_alpha_spec() {
+    return RuntimeSpec{
+        "example-optimized-runtime-claim-alpha",
+        "libtrtmc_impl_example_optimized_runtime_claim_alpha.so",
+        kModelId,
+        "claim-alpha-profile",
+        "test-optimized-runtime-claim-alpha",
+        "test-runtime-1.0",
+        "test-runtime-commit",
+        TRTMC_TEST_OPTIMIZED_CLAIM_ALPHA_DSO,
+    };
+}
+
+RuntimeSpec claim_alpha_compatible_spec() {
+    return RuntimeSpec{
+        "example-optimized-runtime-claim-alpha-compatible",
+        "libtrtmc_impl_example_optimized_runtime_claim_alpha_compatible.so",
+        kModelId,
+        "claim-alpha-compatible-profile",
+        "test-optimized-runtime-claim-alpha-compatible",
+        "test-runtime-1.0",
+        "test-runtime-commit",
+        TRTMC_TEST_OPTIMIZED_CLAIM_ALPHA_COMPATIBLE_DSO,
+    };
+}
+
+RuntimeSpec claim_beta_spec() {
+    return RuntimeSpec{
+        "example-optimized-runtime-claim-beta",
+        "libtrtmc_impl_example_optimized_runtime_claim_beta.so",
+        kModelId,
+        "claim-beta-profile",
+        "test-optimized-runtime-claim-beta",
+        "test-runtime-1.0",
+        "test-runtime-commit",
+        TRTMC_TEST_OPTIMIZED_CLAIM_BETA_DSO,
+    };
 }
 
 int failures = 0;
@@ -234,6 +286,18 @@ std::vector<std::string> read_lines(const fs::path& path) {
 
 std::size_t count_line(const std::vector<std::string>& lines, const std::string& value) {
     return static_cast<std::size_t>(std::count(lines.begin(), lines.end(), value));
+}
+
+std::string exception_message(const std::exception_ptr& error) {
+    if (error == nullptr)
+        return {};
+    try {
+        std::rethrow_exception(error);
+    } catch (const std::exception& exception) {
+        return exception.what();
+    } catch (...) {
+        return "non-standard exception";
+    }
 }
 
 void test_model_owned_text_pipeline_and_eager_load() {
@@ -392,6 +456,182 @@ void test_concurrent_repeated_loads_share_published_cache_and_dso() {
           "deduplicated process-lifetime DSO reference remains loaded");
 }
 
+void test_process_compatibility_alpha_first() {
+    trtmc_test::TempDirGuard temporary;
+    const fs::path root(temporary.path());
+    const fs::path events = root / "events.txt";
+    const fs::path alpha_bundle = root / "alpha.trtfb";
+    const fs::path compatible_bundle = root / "alpha-compatible.trtfb";
+    const fs::path beta_bundle = root / "beta.trtfb";
+    write_bundle(alpha_bundle, claim_alpha_spec());
+    write_bundle(compatible_bundle, claim_alpha_compatible_spec());
+    write_bundle(beta_bundle, claim_beta_spec());
+    trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
+
+    auto alpha = trtmc::load(alpha_bundle.string(), load_options(root / "cache"));
+    auto compatible = trtmc::load(compatible_bundle.string(), load_options(root / "cache"));
+    check(alpha != nullptr && compatible != nullptr,
+          "different providers with the same process fingerprint coexist");
+
+    bool rejected = false;
+    try {
+        (void)trtmc::load(beta_bundle.string(), load_options(root / "cache"));
+    } catch (const std::runtime_error& error) {
+        rejected =
+            std::string(error.what()).find("process compatibility conflict") != std::string::npos;
+    }
+    check(rejected, "a different process fingerprint is rejected after alpha claims first");
+    check(count_line(read_lines(events), "create") == 2,
+          "incompatible beta is rejected before its create callback");
+}
+
+void test_process_compatibility_beta_first() {
+    trtmc_test::TempDirGuard temporary;
+    const fs::path root(temporary.path());
+    const fs::path events = root / "events.txt";
+    const fs::path alpha_bundle = root / "alpha.trtfb";
+    const fs::path beta_bundle = root / "beta.trtfb";
+    write_bundle(alpha_bundle, claim_alpha_spec());
+    write_bundle(beta_bundle, claim_beta_spec());
+    trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
+
+    auto beta = trtmc::load(beta_bundle.string(), load_options(root / "cache"));
+    check(beta != nullptr, "beta process fingerprint can claim an empty process");
+    bool rejected = false;
+    try {
+        (void)trtmc::load(alpha_bundle.string(), load_options(root / "cache"));
+    } catch (const std::runtime_error& error) {
+        rejected =
+            std::string(error.what()).find("process compatibility conflict") != std::string::npos;
+    }
+    check(rejected, "a different process fingerprint is rejected after beta claims first");
+    check(count_line(read_lines(events), "create") == 1,
+          "reverse load order rejects incompatible alpha before create");
+}
+
+void test_process_compatibility_concurrent() {
+    trtmc_test::TempDirGuard temporary;
+    const fs::path root(temporary.path());
+    const fs::path events = root / "events.txt";
+    const fs::path alpha_bundle = root / "alpha.trtfb";
+    const fs::path beta_bundle = root / "beta.trtfb";
+    write_bundle(alpha_bundle, claim_alpha_spec());
+    write_bundle(beta_bundle, claim_beta_spec());
+    trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
+
+    std::array<std::unique_ptr<trtmc::IPipeline>, 2> pipelines;
+    std::array<std::exception_ptr, 2> errors;
+    std::atomic<std::size_t> ready{0};
+    std::atomic<bool> start{false};
+    const std::array<fs::path, 2> bundles = {alpha_bundle, beta_bundle};
+    std::array<std::thread, 2> workers;
+    for (std::size_t index = 0; index < workers.size(); ++index) {
+        workers[index] = std::thread([&, index] {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            try {
+                pipelines[index] =
+                    trtmc::load(bundles[index].string(), load_options(root / "cache"));
+            } catch (...) {
+                errors[index] = std::current_exception();
+            }
+        });
+    }
+    while (ready.load(std::memory_order_acquire) != workers.size())
+        std::this_thread::yield();
+    start.store(true, std::memory_order_release);
+    for (auto& worker : workers)
+        worker.join();
+
+    const std::size_t successes = static_cast<std::size_t>(pipelines[0] != nullptr) +
+                                  static_cast<std::size_t>(pipelines[1] != nullptr);
+    const std::size_t conflicts =
+        static_cast<std::size_t>(exception_message(errors[0]).find(
+                                     "process compatibility conflict") != std::string::npos) +
+        static_cast<std::size_t>(exception_message(errors[1]).find(
+                                     "process compatibility conflict") != std::string::npos);
+    check(successes == 1 && conflicts == 1,
+          "concurrent incompatible claims atomically choose exactly one fingerprint");
+    check(count_line(read_lines(events), "create") == 1,
+          "concurrent losing fingerprint is rejected before create");
+}
+
+void test_process_compatibility_survives_create_failure() {
+    trtmc_test::TempDirGuard temporary;
+    const fs::path root(temporary.path());
+    const fs::path events = root / "events.txt";
+    const fs::path alpha_bundle = root / "alpha.trtfb";
+    const fs::path beta_bundle = root / "beta.trtfb";
+    write_bundle(alpha_bundle, claim_alpha_spec());
+    write_bundle(beta_bundle, claim_beta_spec());
+    trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
+
+    bool create_failed = false;
+    {
+        trtmc_test::EnvVarGuard failure_guard("TRTMC_FAKE_OPTIMIZED_FAIL_CREATE", "1");
+        try {
+            (void)trtmc::load(alpha_bundle.string(), load_options(root / "cache"));
+        } catch (const std::runtime_error& error) {
+            create_failed = std::string(error.what()).find("failed to create its pipeline") !=
+                            std::string::npos;
+        }
+    }
+    check(create_failed, "first claimed runtime reports its injected create failure");
+
+    bool incompatible_rejected = false;
+    try {
+        (void)trtmc::load(beta_bundle.string(), load_options(root / "cache"));
+    } catch (const std::runtime_error& error) {
+        incompatible_rejected =
+            std::string(error.what()).find("process compatibility conflict") != std::string::npos;
+    }
+    check(incompatible_rejected, "a failed create permanently retains its process claim");
+    check(count_line(read_lines(events), "create") == 1,
+          "retained failed-create claim rejects the incompatible runtime before create");
+}
+
+void test_process_compatibility_malformed_claims() {
+    trtmc_test::TempDirGuard temporary;
+    const fs::path root(temporary.path());
+    const fs::path events = root / "events.txt";
+    const fs::path bundle = root / "malformed.trtfb";
+    write_bundle(bundle, text_spec());
+    trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
+
+    const std::array<std::pair<const char*, const char*>, 7> malformed = {{
+        {"namespace-only", "both be provided or both be null"},
+        {"fingerprint-only", "both be provided or both be null"},
+        {"invalid-namespace", "namespace must be a bounded canonical"},
+        {"invalid-fingerprint", "fingerprint must be a bounded canonical"},
+        {"oversized-namespace", "namespace must be a bounded canonical"},
+        {"oversized-fingerprint", "fingerprint must be a bounded canonical"},
+        {"partial-table", "invalid factory v1 table"},
+    }};
+    for (std::size_t index = 0; index < malformed.size(); ++index) {
+        trtmc_test::EnvVarGuard mode_guard("TRTMC_FAKE_OPTIMIZED_FACTORY_MODE",
+                                           malformed[index].first);
+        bool rejected = false;
+        try {
+            (void)trtmc::load(bundle.string(),
+                              load_options(root / ("cache-" + std::to_string(index))));
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find(malformed[index].second) != std::string::npos;
+        }
+        check(rejected, "malformed process compatibility claim fails before create");
+    }
+    check(count_line(read_lines(events), "create") == 0,
+          "no malformed process compatibility claim reaches create");
+
+    {
+        trtmc_test::EnvVarGuard mode_guard("TRTMC_FAKE_OPTIMIZED_FACTORY_MODE", "legacy-table");
+        auto pipeline = trtmc::load(bundle.string(), load_options(root / "legacy-cache"));
+        check(pipeline != nullptr, "original V1 factory size remains backward compatible");
+    }
+    check(count_line(read_lines(events), "create") == 1,
+          "legacy V1 factory without the optional claim reaches create");
+}
+
 void test_descriptor_is_strict_and_fail_closed() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
@@ -541,6 +781,24 @@ int main(int argc, char** argv) {
             std::cerr << "Python-writer bundle failed C++ load: " << error.what() << '\n';
             return 1;
         }
+    }
+    if (argc == 2) {
+        const std::string mode(argv[1]);
+        if (mode == "--process-compatibility-alpha-first") {
+            test_process_compatibility_alpha_first();
+        } else if (mode == "--process-compatibility-beta-first") {
+            test_process_compatibility_beta_first();
+        } else if (mode == "--process-compatibility-concurrent") {
+            test_process_compatibility_concurrent();
+        } else if (mode == "--process-compatibility-create-failure") {
+            test_process_compatibility_survives_create_failure();
+        } else if (mode == "--process-compatibility-malformed") {
+            test_process_compatibility_malformed_claims();
+        } else {
+            std::cerr << "Unknown test mode: " << mode << '\n';
+            return 2;
+        }
+        return failures == 0 ? 0 : 1;
     }
     test_pipeline_abi_version_fails_before_create();
     test_exact_embedded_dso_identity();

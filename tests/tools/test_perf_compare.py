@@ -91,6 +91,75 @@ class TestFormatting:
         assert mod._speedup(100.0, -1.0) == "N/A"
 
 
+class TestCppBenchmarkParsing:
+    """C++ CLI timing is finite and usable or explicitly unavailable."""
+
+    def test_normal_timing_is_parsed(self):
+        mod = _import_perf_compare()
+        parsed = mod._parse_trtmc_cpp_benchmark(
+            "[trtmc.benchmark] prefill_ms=5.00 decode_ms=20.00 "
+            "tokens_per_sec=400.00\n")
+
+        assert parsed == {
+            "timing_available": True,
+            "timing_status": "available",
+            "prefill_ms": 5.0,
+            "decode_ms": 20.0,
+            "tokens_per_sec": 400.0,
+        }
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "[trtmc.benchmark] prefill_ms=unavailable decode_ms=unavailable "
+            "tokens_per_sec=unavailable",
+            "[trtmc.benchmark] prefill_ms=0 decode_ms=0 tokens_per_sec=inf",
+            "[trtmc.benchmark] prefill_ms=nan decode_ms=10 tokens_per_sec=100",
+            "[trtmc.benchmark] prefill_ms=1 decode_ms=inf tokens_per_sec=100",
+        ],
+    )
+    def test_unavailable_and_non_finite_timing_are_distinguished(self, line):
+        mod = _import_perf_compare()
+        parsed = mod._parse_trtmc_cpp_benchmark(line)
+
+        assert parsed is not None
+        assert parsed["timing_available"] is False
+        assert parsed["timing_status"] == "unavailable"
+        assert parsed["unavailable_metrics"]
+
+    def test_benchmark_preserves_explicit_unavailable_status(self, monkeypatch, capsys):
+        mod = _import_perf_compare()
+        completed = mock.Mock(
+            returncode=0,
+            stderr=("[trtmc.benchmark] prefill_ms=unavailable "
+                    "decode_ms=unavailable tokens_per_sec=unavailable\n"),
+            stdout="generated",
+        )
+        monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: completed)
+
+        result = mod.bench_trtmc_cpp(
+            "trtmc", "model.trtfb", "hello", 32, 1, 2, None, False)
+
+        assert result["timing_available"] is False
+        assert "split timing unavailable" in capsys.readouterr().err
+
+    def test_benchmark_reconstructs_actual_average_token_count(self, monkeypatch):
+        mod = _import_perf_compare()
+        completed = mock.Mock(
+            returncode=0,
+            stderr=("[trtmc.benchmark] prefill_ms=2.00 decode_ms=10.00 "
+                    "tokens_per_sec=400.00\n"),
+            stdout="generated",
+        )
+        monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: completed)
+
+        result = mod.bench_trtmc_cpp(
+            "trtmc", "model.trtfb", "hello", 32, 1, 2, None, False)
+
+        assert result["timing_available"] is True
+        assert result["decode_token_counts"] == [4]
+
+
 # ---------------------------------------------------------------------------
 # build_json_output
 # ---------------------------------------------------------------------------
@@ -121,6 +190,26 @@ class TestBuildJsonOutput:
         assert "hf" in result
         assert "speedup" in result
         assert "token_match" in result
+
+    def test_cpp_unavailable_timing_is_retained_without_speedup(self):
+        mod = _import_perf_compare()
+        trt = _make_bench_result([5.0], [100.0], 10, list(range(10)))
+        hf = _make_bench_result([5.0], [200.0], 10, list(range(10)))
+        cpp = {
+            "timing_available": False,
+            "timing_status": "unavailable",
+            "unavailable_metrics": ["prefill_ms", "decode_ms", "tokens_per_sec"],
+            "gen_ids": [],
+        }
+
+        result = mod.build_json_output(
+            "m", "p", 1, 10, 1, 0, "float16", trt, hf, cpp_res=cpp)
+
+        assert result["trt_cpp"] == {
+            "timing_status": "unavailable",
+            "unavailable_metrics": ["prefill_ms", "decode_ms", "tokens_per_sec"],
+        }
+        assert "cpp_vs_hf_decode" not in result["speedup"]
 
     def test_metadata_fields(self):
         mod = _import_perf_compare()

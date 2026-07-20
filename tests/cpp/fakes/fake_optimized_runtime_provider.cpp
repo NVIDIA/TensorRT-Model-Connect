@@ -19,9 +19,21 @@
 #define TRTMC_FAKE_OPTIMIZED_IMPLEMENTATION_ID "example-optimized-runtime"
 #endif
 
+#ifndef TRTMC_FAKE_OPTIMIZED_RUNTIME_NAME
+#define TRTMC_FAKE_OPTIMIZED_RUNTIME_NAME "test-optimized-runtime"
+#endif
+
 #ifndef TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_VERSION
 #define TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_VERSION                                                  \
     trtmc::internal::kOptimizedRuntimePipelineAbiVersionV1
+#endif
+
+#ifndef TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_NAMESPACE
+#define TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_NAMESPACE nullptr
+#endif
+
+#ifndef TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_FINGERPRINT
+#define TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_FINGERPRINT nullptr
 #endif
 
 namespace {
@@ -137,11 +149,14 @@ const trtmc::internal::OptimizedRuntimeFactoryV1 kFactory = {
     trtmc::internal::kOptimizedRuntimeFactoryAbiVersionV1,
     sizeof(trtmc::internal::OptimizedRuntimeFactoryV1),
     TRTMC_FAKE_OPTIMIZED_IMPLEMENTATION_ID,
-    "test-optimized-runtime",
+    TRTMC_FAKE_OPTIMIZED_RUNTIME_NAME,
     "test-runtime-1.0",
     "test-runtime-commit",
     &create_pipeline,
     TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_VERSION,
+    trtmc::internal::kCurrentOptimizedRuntimeToolchainAbiV1,
+    TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_NAMESPACE,
+    TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_FINGERPRINT,
 };
 
 const trtmc::internal::OptimizedRuntimeFactoryV1 kWrongToolchainFactory = [] {
@@ -150,10 +165,67 @@ const trtmc::internal::OptimizedRuntimeFactoryV1 kWrongToolchainFactory = [] {
     return factory;
 }();
 
+trtmc::internal::OptimizedRuntimeFactoryV1 factory_with_claim(const char* compatibility_namespace,
+                                                              const char* fingerprint) {
+    auto factory = kFactory;
+    factory.process_compatibility_namespace = compatibility_namespace;
+    factory.process_compatibility_fingerprint = fingerprint;
+    return factory;
+}
+
+const std::string kOversizedNamespace(128, 'a');
+const std::string kOversizedFingerprint(256, 'b');
+const trtmc::internal::OptimizedRuntimeFactoryV1 kNamespaceOnlyFactory =
+    factory_with_claim("test.process-registry", nullptr);
+const trtmc::internal::OptimizedRuntimeFactoryV1 kFingerprintOnlyFactory =
+    factory_with_claim(nullptr, "sha256:1234");
+const trtmc::internal::OptimizedRuntimeFactoryV1 kInvalidNamespaceFactory =
+    factory_with_claim("Invalid Namespace", "sha256:1234");
+const trtmc::internal::OptimizedRuntimeFactoryV1 kInvalidFingerprintFactory =
+    factory_with_claim("test.process-registry", "INVALID FINGERPRINT");
+const trtmc::internal::OptimizedRuntimeFactoryV1 kOversizedNamespaceFactory =
+    factory_with_claim(kOversizedNamespace.c_str(), "sha256:1234");
+const trtmc::internal::OptimizedRuntimeFactoryV1 kOversizedFingerprintFactory =
+    factory_with_claim("test.process-registry", kOversizedFingerprint.c_str());
+const trtmc::internal::OptimizedRuntimeFactoryV1 kPartialClaimTableFactory = [] {
+    auto factory = factory_with_claim("test.process-registry", "sha256:1234");
+    factory.struct_size = trtmc::internal::kOptimizedRuntimeFactoryV1BaseSize + sizeof(const char*);
+    return factory;
+}();
+const trtmc::internal::OptimizedRuntimeFactoryV1 kLegacyFactory = [] {
+    auto factory = kFactory;
+    factory.struct_size = trtmc::internal::kOptimizedRuntimeFactoryV1BaseSize;
+    return factory;
+}();
+
+const trtmc::internal::OptimizedRuntimeFactoryV1* malformed_factory(const char* mode) noexcept {
+    if (std::strcmp(mode, "namespace-only") == 0)
+        return &kNamespaceOnlyFactory;
+    if (std::strcmp(mode, "fingerprint-only") == 0)
+        return &kFingerprintOnlyFactory;
+    if (std::strcmp(mode, "invalid-namespace") == 0)
+        return &kInvalidNamespaceFactory;
+    if (std::strcmp(mode, "invalid-fingerprint") == 0)
+        return &kInvalidFingerprintFactory;
+    if (std::strcmp(mode, "oversized-namespace") == 0)
+        return &kOversizedNamespaceFactory;
+    if (std::strcmp(mode, "oversized-fingerprint") == 0)
+        return &kOversizedFingerprintFactory;
+    if (std::strcmp(mode, "partial-table") == 0)
+        return &kPartialClaimTableFactory;
+    if (std::strcmp(mode, "legacy-table") == 0)
+        return &kLegacyFactory;
+    return nullptr;
+}
+
 } // namespace
 
 extern "C" const trtmc::internal::OptimizedRuntimeFactoryV1*
 trtmc_get_optimized_runtime_factory_v1() noexcept {
+    if (const char* mode = std::getenv("TRTMC_FAKE_OPTIMIZED_FACTORY_MODE");
+        mode != nullptr && mode[0] != '\0') {
+        return malformed_factory(mode);
+    }
     if (const char* mismatch = std::getenv("TRTMC_FAKE_OPTIMIZED_WRONG_TOOLCHAIN_ABI");
         mismatch != nullptr && mismatch[0] != '\0') {
         return &kWrongToolchainFactory;

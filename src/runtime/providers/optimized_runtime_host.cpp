@@ -34,6 +34,7 @@
 #include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -50,6 +51,8 @@ constexpr std::uint64_t kMaxArtifactEntries = 65536;
 constexpr std::uint64_t kMaxArtifactPathBytes = 4096;
 constexpr std::uint64_t kMaxArtifactTotalSize = 1ULL << 40;
 constexpr std::size_t kErrorCapacity = 4096;
+constexpr std::size_t kMaxProcessCompatibilityNamespaceSize = 127;
+constexpr std::size_t kMaxProcessCompatibilityFingerprintSize = 255;
 
 struct RuntimeIdentity {
     std::string name;
@@ -848,11 +851,15 @@ resolve_factory(void* dso, const OptimizedRuntimeDescriptor& descriptor) {
     return factory;
 }
 
+bool has_valid_factory_table_size(std::uint32_t size) {
+    return size == internal::kOptimizedRuntimeFactoryV1BaseSize ||
+           size >= sizeof(internal::OptimizedRuntimeFactoryV1);
+}
+
 void validate_factory(const internal::OptimizedRuntimeFactoryV1& factory,
                       const OptimizedRuntimeDescriptor& descriptor) {
     if (factory.abi_version != internal::kOptimizedRuntimeFactoryAbiVersionV1 ||
-        factory.struct_size < sizeof(internal::OptimizedRuntimeFactoryV1) ||
-        factory.create == nullptr) {
+        !has_valid_factory_table_size(factory.struct_size) || factory.create == nullptr) {
         throw std::runtime_error("Optimized-runtime DSO has an invalid factory v1 table");
     }
     if (factory.pipeline_abi_version != internal::kOptimizedRuntimePipelineAbiVersionV1) {
@@ -885,6 +892,89 @@ void validate_factory(const internal::OptimizedRuntimeFactoryV1& factory,
     if (factory_string(factory.runtime_commit) != descriptor.runtime.commit) {
         throw std::runtime_error("Optimized-runtime source revision mismatch for implementation '" +
                                  descriptor.implementation_id + "'");
+    }
+}
+
+bool is_lower_ascii_alphanumeric(unsigned char character) {
+    return (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9');
+}
+
+bool is_process_compatibility_namespace_character(unsigned char character) {
+    return is_lower_ascii_alphanumeric(character) || character == '.' || character == '-' ||
+           character == '_';
+}
+
+bool is_process_compatibility_fingerprint_character(unsigned char character) {
+    return is_process_compatibility_namespace_character(character) || character == ':' ||
+           character == '+';
+}
+
+bool is_canonical_process_compatibility_string(std::string_view value, std::size_t max_size,
+                                               bool allow_fingerprint_punctuation) {
+    if (value.empty() || value.size() > max_size)
+        return false;
+    if (!is_lower_ascii_alphanumeric(static_cast<unsigned char>(value.front())) ||
+        !is_lower_ascii_alphanumeric(static_cast<unsigned char>(value.back()))) {
+        return false;
+    }
+    if (allow_fingerprint_punctuation)
+        return std::all_of(value.begin(), value.end(),
+                           is_process_compatibility_fingerprint_character);
+    return std::all_of(value.begin(), value.end(), is_process_compatibility_namespace_character);
+}
+
+std::string bounded_process_compatibility_string(const char* value, std::size_t max_size,
+                                                 const char* field,
+                                                 bool allow_fingerprint_punctuation) {
+    if (value == nullptr)
+        return {};
+    const std::size_t size = strnlen(value, max_size + 1);
+    if (size > max_size ||
+        !is_canonical_process_compatibility_string(std::string_view(value, size), max_size,
+                                                   allow_fingerprint_punctuation)) {
+        throw std::runtime_error(std::string("Optimized-runtime process compatibility ") + field +
+                                 " must be a bounded canonical lowercase ASCII string");
+    }
+    return std::string(value, size);
+}
+
+void claim_process_compatibility(const internal::OptimizedRuntimeFactoryV1& factory,
+                                 const OptimizedRuntimeDescriptor& descriptor) {
+    if (factory.struct_size == internal::kOptimizedRuntimeFactoryV1BaseSize)
+        return;
+
+    const bool has_namespace = factory.process_compatibility_namespace != nullptr;
+    const bool has_fingerprint = factory.process_compatibility_fingerprint != nullptr;
+    if (has_namespace != has_fingerprint) {
+        throw std::runtime_error(
+            "Optimized-runtime process compatibility namespace and fingerprint must both be "
+            "provided or both be null for implementation '" +
+            descriptor.implementation_id + "'");
+    }
+    if (!has_namespace)
+        return;
+
+    const std::string compatibility_namespace = bounded_process_compatibility_string(
+        factory.process_compatibility_namespace, kMaxProcessCompatibilityNamespaceSize, "namespace",
+        false);
+    const std::string compatibility_fingerprint = bounded_process_compatibility_string(
+        factory.process_compatibility_fingerprint, kMaxProcessCompatibilityFingerprintSize,
+        "fingerprint", true);
+
+    // Process-global state intentionally survives every pipeline and every
+    // create failure. A failed create may already have mutated the downstream
+    // registry, so releasing its claim would permit an incompatible runtime to
+    // enter the process later.
+    static auto* mutex = new std::mutex;
+    static auto* claims = new std::unordered_map<std::string, std::string>;
+    std::lock_guard<std::mutex> lock(*mutex);
+    const auto [existing, inserted] =
+        claims->emplace(compatibility_namespace, compatibility_fingerprint);
+    if (!inserted && existing->second != compatibility_fingerprint) {
+        throw std::runtime_error(
+            "Optimized-runtime process compatibility conflict for namespace '" +
+            compatibility_namespace + "' while loading implementation '" +
+            descriptor.implementation_id + "'");
     }
 }
 
@@ -974,6 +1064,7 @@ std::unique_ptr<IPipeline> try_make_optimized_runtime_pipeline(const std::string
     DsoHandle dso(open_provider_dso(artifacts, descriptor));
     const internal::OptimizedRuntimeFactoryV1* factory = resolve_factory(dso.get(), descriptor);
     validate_factory(*factory, descriptor);
+    claim_process_compatibility(*factory, descriptor);
     auto pipeline = create_pipeline(*factory, descriptor, bundle_path, artifacts,
                                     implementation_metadata, options);
     if (retain_dso_for_process_lifetime(dso.get()))
