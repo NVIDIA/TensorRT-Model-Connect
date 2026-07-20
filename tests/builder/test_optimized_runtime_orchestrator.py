@@ -110,11 +110,12 @@ elif args.operation == "build":
 def _capsule(
     root: Path,
     *,
+    runtime_adapter: str = "fake_runtime_adapter",
     name: str = "fake",
     implementation_id: str = "fake-a100-runtime",
     model_id: str = "Example/Model",
 ) -> Path:
-    capsule = root / name
+    capsule = root / runtime_adapter / name
     (capsule / "builder").mkdir(parents=True)
     (capsule / "builder" / "adapter.py").write_text(_ADAPTER, encoding="utf-8")
     manifest = capsule / "IMPLEMENTATION.toml"
@@ -166,21 +167,28 @@ def _target() -> dict[str, object]:
     }
 
 
-def test_family_discovery_ignores_nested_non_adapter_layout(
+def test_family_discovery_ignores_a_noncanonical_nested_adapter_layout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
     family_root = tmp_path / "example_family"
-    _capsule(family_root / "nested", name="runtime")
+    requested = _capsule(family_root, name="requested")
+    _capsule(
+        family_root,
+        runtime_adapter="not_an_adapter_namespace",
+        name="ignored",
+    )
     monkeypatch.setattr(
         orchestrator,
         "family_implementation_root",
         lambda _family: family_root,
     )
 
-    assert not discover_family_implementations_for_model("example_family", "Example/Model")
+    discovered = discover_family_implementations_for_model("example_family", "Example/Model")
+
+    assert [manifest.path for manifest in discovered] == [requested.resolve()]
 
 
 def test_full_generic_build_writes_self_contained_delegated_bundle(

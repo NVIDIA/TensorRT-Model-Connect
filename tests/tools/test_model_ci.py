@@ -407,15 +407,15 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
     ("path", "content"),
     (
         (
-            "python/tensorrt_model_connect/families/model_b/optimized_adapter/adapter.py",
+            "python/tensorrt_model_connect/families/model_b/optimized_adapter/profile_a/adapter.py",
             'MODEL = "model_b"\n',
         ),
         (
-            "src/runtime/models/model_b/optimized_adapter/adapter.cpp",
+            "src/runtime/models/model_b/optimized_adapter/profile_a/adapter.cpp",
             "// model_b optimized runtime adapter\n",
         ),
         (
-            "tests/e2e/models/model_b/optimized_adapter/test_contract.py",
+            "tests/e2e/models/model_b/optimized_adapter/profile_a/test_contract.py",
             "def test_contract():\n    assert True\n",
         ),
     ),
@@ -1008,10 +1008,10 @@ def test_projection_includes_only_the_selected_family_adapter_subtrees(
 ) -> None:
     repo, _ = _make_repo(tmp_path)
     selected_paths = (
-        "python/tensorrt_model_connect/families/model_b/optimized_adapter/adapter.py",
-        "python/tensorrt_model_connect/families/model_b/optimized_adapter/dependency.lock",
-        "src/runtime/models/model_b/optimized_adapter/adapter.cpp",
-        "tests/e2e/models/model_b/optimized_adapter/test_contract.py",
+        "python/tensorrt_model_connect/families/model_b/optimized_adapter/profile_a/adapter.py",
+        "python/tensorrt_model_connect/families/model_b/optimized_adapter/profile_a/dependency.lock",
+        "src/runtime/models/model_b/optimized_adapter/profile_a/adapter.cpp",
+        "tests/e2e/models/model_b/optimized_adapter/profile_a/test_contract.py",
     )
     sibling_paths = tuple(path.replace("model_b", "model_a") for path in selected_paths)
     for path in selected_paths:

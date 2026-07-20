@@ -30,26 +30,126 @@ _ADAPTER_PACKAGE_EXCLUDES = (
 )
 
 
-def _model_owned_adapters(source_folder: str | Path) -> tuple[tuple[str, str, Path, Path], ...]:
+def _resolved_packaging_path(
+    path: Path,
+    root: Path,
+    *,
+    description: str,
+    directory: bool,
+) -> Path:
+    """Resolve one packaging input without accepting links or root escapes."""
+
+    if path.is_symlink():
+        raise ConanException(f"{description} must not be a symlink: {path}")
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ConanException(f"Unable to resolve {description} {path}: {exc}") from exc
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ConanException(
+            f"{description} resolves outside its packaging root {root}: {path} -> {resolved}"
+        ) from exc
+    expected_type = resolved.is_dir() if directory else resolved.is_file()
+    if not expected_type:
+        kind = "directory" if directory else "regular file"
+        raise ConanException(f"{description} must be a {kind}: {path}")
+    return resolved
+
+
+def _model_owned_adapters(source_folder: str | Path) -> tuple[tuple[str, Path, Path, Path], ...]:
     """Locate model-owned adapter source trees without interpreting their contents."""
 
     source = Path(source_folder)
     families_root = source / "python" / "tensorrt_model_connect" / "families"
     runtime_root = source / "src" / "runtime" / "models"
-    adapters: list[tuple[str, str, Path, Path]] = []
+    adapters: list[tuple[str, Path, Path, Path]] = []
     if not families_root.is_dir():
         return ()
-    for manifest in sorted(families_root.glob("*/*/IMPLEMENTATION.toml")):
+
+    canonical_manifests = sorted(
+        families_root.glob("*/*_adapter/*/IMPLEMENTATION.toml"),
+        key=lambda path: str(path),
+    )
+    if not canonical_manifests:
+        return ()
+
+    try:
+        source_root = source.resolve(strict=True)
+        families_root_resolved = families_root.resolve(strict=True)
+        families_root_resolved.relative_to(source_root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ConanException(
+            f"Model family packaging root escapes or cannot be resolved below {source}: "
+            f"{families_root}"
+        ) from exc
+
+    for manifest in canonical_manifests:
         builder = manifest.parent
-        family = builder.parent.name
-        adapter = builder.name
-        runtime = runtime_root / family / adapter
+        relative = builder.relative_to(families_root)
+        family = relative.parts[0]
+        adapter_profile = Path(*relative.parts[1:])
+        provider = builder.parent
+        _resolved_packaging_path(
+            provider.parent,
+            families_root_resolved,
+            description="Model-owned build adapter family directory",
+            directory=True,
+        )
+        _resolved_packaging_path(
+            provider,
+            families_root_resolved,
+            description="Model-owned build adapter provider directory",
+            directory=True,
+        )
+        builder_resolved = _resolved_packaging_path(
+            builder,
+            families_root_resolved,
+            description="Model-owned build adapter profile directory",
+            directory=True,
+        )
+        _resolved_packaging_path(
+            manifest,
+            families_root_resolved,
+            description="Model-owned build adapter manifest",
+            directory=False,
+        )
+
+        runtime = runtime_root / family / adapter_profile
         if not runtime.is_dir():
             raise ConanException(
                 "Model-owned build adapter "
-                f"{family}/{adapter} has no matching runtime source directory: {runtime}"
+                f"{family}/{adapter_profile.as_posix()} has no matching runtime source directory: "
+                f"{runtime}"
             )
-        adapters.append((family, adapter, builder, runtime))
+        try:
+            runtime_root_resolved = runtime_root.resolve(strict=True)
+            runtime_root_resolved.relative_to(source_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ConanException(
+                f"Model-owned runtime packaging root escapes or cannot be resolved below {source}: "
+                f"{runtime_root}"
+            ) from exc
+        runtime_family = runtime_root / family
+        runtime_provider = runtime_family / adapter_profile.parts[0]
+        for runtime_directory, description in (
+            (runtime_family, "Model-owned runtime family directory"),
+            (runtime_provider, "Model-owned runtime provider directory"),
+        ):
+            _resolved_packaging_path(
+                runtime_directory,
+                runtime_root_resolved,
+                description=description,
+                directory=True,
+            )
+        runtime_resolved = _resolved_packaging_path(
+            runtime,
+            runtime_root_resolved,
+            description="Model-owned runtime profile directory",
+            directory=True,
+        )
+        adapters.append((family, adapter_profile, builder_resolved, runtime_resolved))
     return tuple(adapters)
 
 
@@ -139,10 +239,10 @@ class TensorRTModelConnectConan(ConanFile):
         # Each model family owns its build adapter and matching runtime source.
         # They remain inert package data until that family selects the adapter;
         # no downstream runtime is built or linked while packaging Model Connect.
-        for family, adapter, builder_source, runtime_source in _model_owned_adapters(
+        for family, adapter_profile, builder_source, runtime_source in _model_owned_adapters(
             self.source_folder
         ):
-            packaged_adapter = package_module / "families" / family / adapter
+            packaged_adapter = package_module / "families" / family / adapter_profile
             copy(
                 self,
                 "*",

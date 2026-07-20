@@ -894,19 +894,19 @@ class TestModelOwnedAdapterIsolation:
         ("path", "expected_rule", "expected_tier", "rebuild"),
         (
             (
-                "python/tensorrt_model_connect/families/decoder_family/optimized_adapter/adapter.py",
+                "python/tensorrt_model_connect/families/decoder_family/optimized_adapter/profile_a/adapter.py",
                 "family_package",
                 "builder",
                 False,
             ),
             (
-                "src/runtime/models/decoder_family/optimized_adapter/adapter.cpp",
+                "src/runtime/models/decoder_family/optimized_adapter/profile_a/adapter.cpp",
                 "cpp_runtime_model",
                 "cpp",
                 True,
             ),
             (
-                "tests/e2e/models/decoder_family/optimized_adapter/test_contract.py",
+                "tests/e2e/models/decoder_family/optimized_adapter/profile_a/test_contract.py",
                 "e2e_model_owned_test",
                 None,
                 False,

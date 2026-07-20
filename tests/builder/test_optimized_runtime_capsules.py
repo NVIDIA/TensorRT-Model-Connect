@@ -82,6 +82,7 @@ def _toml_value(value: object) -> str:
 def _write_capsule(
     root: Path,
     *,
+    runtime_adapter: str | None = "acme_runtime_adapter",
     capsule_name: str = "example-optimized-a100",
     implementation_id: str = "example-model.acme-runtime.a100-fp16",
     model_id: str = "Example/Optimized-Model",
@@ -91,6 +92,8 @@ def _write_capsule(
     timeout_seconds: int = 30,
 ) -> Path:
     capsule = root / capsule_name
+    if runtime_adapter is not None:
+        capsule = root / runtime_adapter / capsule_name
     builder_dir = capsule / "builder"
     builder_dir.mkdir(parents=True)
     adapter_path = builder_dir / "adapter.py"
@@ -178,23 +181,191 @@ def test_model_scoped_discovery_is_stable_and_uncached(tmp_path: Path) -> None:
     ]
 
 
-def test_discovery_rejects_duplicate_implementation_ids(tmp_path: Path) -> None:
-    _write_capsule(tmp_path, capsule_name="one", implementation_id="duplicate")
-    _write_capsule(tmp_path, capsule_name="two", implementation_id="duplicate")
+def test_discovery_rejects_duplicate_ids_for_the_requested_model(
+    tmp_path: Path,
+) -> None:
+    _write_capsule(
+        tmp_path,
+        runtime_adapter="alpha_runtime_adapter",
+        capsule_name="one",
+        implementation_id="duplicate",
+    )
+    _write_capsule(
+        tmp_path,
+        runtime_adapter="beta_runtime_adapter",
+        capsule_name="two",
+        implementation_id="duplicate",
+    )
 
-    with pytest.raises(ManifestDiscoveryError, match="duplicate.*one.*two"):
+    with pytest.raises(
+        ManifestDiscoveryError,
+        match="duplicate.*alpha_runtime_adapter.*beta_runtime_adapter",
+    ):
         discover_implementations_for_model(tmp_path, "Example/Optimized-Model")
+
+
+def test_discovery_allows_the_same_id_for_an_unrelated_model(tmp_path: Path) -> None:
+    requested = _write_capsule(
+        tmp_path,
+        runtime_adapter="requested_runtime_adapter",
+        capsule_name="requested",
+        implementation_id="shared-id",
+        model_id="Example/Requested-Model",
+    )
+    _write_capsule(
+        tmp_path,
+        runtime_adapter="unrelated_runtime_adapter",
+        capsule_name="unrelated",
+        implementation_id="shared-id",
+        model_id="Example/Unrelated-Model",
+    )
+
+    discovered = discover_implementations_for_model(tmp_path, "Example/Requested-Model")
+
+    assert [manifest.path for manifest in discovered] == [requested.resolve()]
+
+
+def test_discovery_ignores_a_non_adapter_runtime_namespace(tmp_path: Path) -> None:
+    requested = _write_capsule(
+        tmp_path,
+        runtime_adapter="acme_runtime_adapter",
+        capsule_name="requested",
+        implementation_id="requested-runtime",
+    )
+    invalid = _write_capsule(
+        tmp_path,
+        runtime_adapter="acme_runtime",
+        capsule_name="invalid",
+        implementation_id="invalid-runtime",
+    )
+
+    discovered = discover_implementations_for_model(tmp_path, "Example/Optimized-Model")
+
+    assert [manifest.path for manifest in discovered] == [requested.resolve()]
+    assert invalid.resolve() not in {manifest.path for manifest in discovered}
+
+
+def test_discovery_ignores_a_legacy_flat_capsule(
+    tmp_path: Path,
+) -> None:
+    requested = _write_capsule(
+        tmp_path,
+        runtime_adapter="acme_runtime_adapter",
+        capsule_name="requested",
+        implementation_id="requested-runtime",
+    )
+    legacy = _write_capsule(
+        tmp_path,
+        runtime_adapter=None,
+        capsule_name="legacy",
+    )
+
+    discovered = discover_implementations_for_model(tmp_path, "Example/Optimized-Model")
+
+    assert [manifest.path for manifest in discovered] == [requested.resolve()]
+    assert legacy.resolve() not in {manifest.path for manifest in discovered}
+
+
+def test_discovery_ignores_capsules_below_the_profile_depth(tmp_path: Path) -> None:
+    requested = _write_capsule(
+        tmp_path,
+        runtime_adapter="acme_runtime_adapter",
+        capsule_name="requested",
+        implementation_id="requested-runtime",
+    )
+    too_deep = _write_capsule(
+        tmp_path / "acme_runtime_adapter",
+        runtime_adapter="nested_runtime_adapter",
+        capsule_name="too-deep",
+    )
+
+    discovered = discover_implementations_for_model(tmp_path, "Example/Optimized-Model")
+
+    assert [manifest.path for manifest in discovered] == [requested.resolve()]
+    assert too_deep.resolve() not in {manifest.path for manifest in discovered}
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO fixture requires POSIX")
+def test_discovery_ignores_a_non_regular_canonical_manifest(tmp_path: Path) -> None:
+    requested = _write_capsule(
+        tmp_path,
+        runtime_adapter="acme_runtime_adapter",
+        capsule_name="requested",
+        implementation_id="requested-runtime",
+    )
+    fifo = tmp_path / "unrelated_runtime_adapter" / "fifo-profile" / "IMPLEMENTATION.toml"
+    fifo.parent.mkdir(parents=True)
+    os.mkfifo(fifo)
+
+    discovered = discover_implementations_for_model(tmp_path, "Example/Optimized-Model")
+
+    assert [manifest.path for manifest in discovered] == [requested.resolve()]
+
+
+def test_discovery_rejects_a_symlinked_provider_directory(tmp_path: Path) -> None:
+    family = tmp_path / "family"
+    family.mkdir()
+    external = _write_capsule(
+        tmp_path / "external",
+        runtime_adapter="real_runtime_adapter",
+    )
+    provider = family / "linked_runtime_adapter"
+    provider.symlink_to(external.parents[1], target_is_directory=True)
+
+    with pytest.raises(
+        ManifestDiscoveryError,
+        match=r"provider directory must not be a symbolic link.*linked_runtime_adapter",
+    ):
+        discover_implementations_for_model(family, "Example/Optimized-Model")
+
+
+def test_discovery_rejects_a_symlinked_profile_directory(tmp_path: Path) -> None:
+    family = tmp_path / "family"
+    provider = family / "acme_runtime_adapter"
+    provider.mkdir(parents=True)
+    external = _write_capsule(
+        tmp_path / "external",
+        runtime_adapter="real_runtime_adapter",
+    )
+    profile = provider / "linked-profile"
+    profile.symlink_to(external.parent, target_is_directory=True)
+
+    with pytest.raises(
+        ManifestDiscoveryError,
+        match=r"profile directory must not be a symbolic link.*linked-profile",
+    ):
+        discover_implementations_for_model(family, "Example/Optimized-Model")
+
+
+def test_discovery_rejects_a_symlinked_manifest_file(tmp_path: Path) -> None:
+    family = tmp_path / "family"
+    profile = family / "acme_runtime_adapter" / "linked-manifest"
+    profile.mkdir(parents=True)
+    external = _write_capsule(
+        tmp_path / "external",
+        runtime_adapter="real_runtime_adapter",
+    )
+    manifest = profile / "IMPLEMENTATION.toml"
+    manifest.symlink_to(external)
+
+    with pytest.raises(
+        ManifestDiscoveryError,
+        match=r"manifest file must not be a symbolic link.*IMPLEMENTATION\.toml",
+    ):
+        discover_implementations_for_model(family, "Example/Optimized-Model")
 
 
 def test_model_scoped_discovery_filters_valid_family_owned_adapters(tmp_path: Path) -> None:
     requested = _write_capsule(
         tmp_path,
+        runtime_adapter="requested_runtime_adapter",
         capsule_name="requested",
         implementation_id="requested-runtime",
         model_id="Example/Requested-Model",
     )
     unrelated = _write_capsule(
         tmp_path,
+        runtime_adapter="unrelated_runtime_adapter",
         capsule_name="unrelated",
         implementation_id="unrelated-runtime",
         model_id="Example/Unrelated-Model",
@@ -210,12 +381,14 @@ def test_model_scoped_discovery_accepts_literal_string_indexes(
 ) -> None:
     requested = _write_capsule(
         tmp_path,
+        runtime_adapter="requested_runtime_adapter",
         capsule_name="requested",
         implementation_id="requested-runtime",
         model_id="Example/Requested-Model",
     )
     unrelated = _write_capsule(
         tmp_path,
+        runtime_adapter="unrelated_runtime_adapter",
         capsule_name="unrelated",
         implementation_id="unrelated-runtime",
         model_id="Example/Unrelated-Model",
@@ -238,12 +411,14 @@ def test_model_scoped_discovery_ignores_malformed_unrelated_sibling(
 ) -> None:
     requested = _write_capsule(
         tmp_path,
+        runtime_adapter="requested_runtime_adapter",
         capsule_name="requested",
         implementation_id="requested-runtime",
         model_id="Example/Requested-Model",
     )
     unrelated = _write_capsule(
         tmp_path,
+        runtime_adapter="unrelated_runtime_adapter",
         capsule_name="unrelated",
         implementation_id="unrelated-runtime",
         model_id="Example/Unrelated-Model",

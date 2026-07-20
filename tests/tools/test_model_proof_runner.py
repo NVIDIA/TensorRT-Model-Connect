@@ -489,8 +489,8 @@ def test_selection_includes_every_owned_python_family_test(
 def _selection_with_nested_adapter_and_unselected_sibling(
     tmp_path: Path,
 ) -> tuple[dict, str, str]:
-    selected_root = "tests/e2e/models/flux/optimized_adapter"
-    sibling_root = "tests/e2e/models/sibling_model/optimized_adapter"
+    selected_root = "tests/e2e/models/flux/optimized_adapter/profile_a"
+    sibling_root = "tests/e2e/models/sibling_model/optimized_adapter/profile_a"
 
     def project_adapter_tests(source: Path, _projection: dict[str, object]) -> None:
         selected_tests = source / selected_root

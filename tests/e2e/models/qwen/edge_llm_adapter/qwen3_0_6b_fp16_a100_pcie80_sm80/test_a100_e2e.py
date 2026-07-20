@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,6 +21,7 @@ from tensorrt_model_connect.runtime_provider.target import (
 
 
 _MODEL_ID = "Qwen/Qwen3-0.6B"
+_IMPLEMENTATION_ID = "qwen3-0.6b-fp16.tensorrt-edge-llm.a100-pcie80-sm80"
 
 
 def _run(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
@@ -47,6 +50,30 @@ def _require_supported_a100() -> None:
         )
 
 
+def _read_bundle_header(bundle: Path) -> tuple[int, dict[str, Any]]:
+    with bundle.open("rb") as stream:
+        assert stream.read(8) == b"TRTFB\x00\x01\x00"
+        header_size = struct.unpack("<Q", stream.read(8))[0]
+        header = json.loads(stream.read(header_size))
+    return header_size, header
+
+
+def _read_bundle_section(bundle: Path, name: str) -> bytes:
+    header_size, header = _read_bundle_header(bundle)
+    with bundle.open("rb") as stream:
+        section = header["sections"][name]
+        stream.seek(16 + header_size + section["offset"])
+        return stream.read(section["size"])
+
+
+def _tree_inventory(root: Path) -> dict[str, tuple[int, int]]:
+    return {
+        str(path.relative_to(root)): (path.stat().st_size, path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
 @pytest.mark.e2e
 @pytest.mark.gpu
 @pytest.mark.trt
@@ -62,7 +89,8 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
 
     bundle = tmp_path / "qwen3-0.6b-edge.trtfb"
     cache = tmp_path / "runtime-cache"
-    output = tmp_path / "generated.jsonl"
+    cold_output = tmp_path / "generated-cold.jsonl"
+    warm_output = tmp_path / "generated-warm.jsonl"
 
     _run(
         [
@@ -79,6 +107,17 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
             "4",
         ],
         timeout=21_600,
+    )
+    _header_size, header = _read_bundle_header(bundle)
+    assert header["model_type"] == "qwen3"
+    assert header["family"] == "qwen"
+    descriptor = json.loads(_read_bundle_section(bundle, "optimized_runtime.json"))
+    assert descriptor["implementation_id"] == _IMPLEMENTATION_ID
+    expected_cache = (
+        cache
+        / "optimized-runtimes"
+        / _IMPLEMENTATION_ID
+        / f"{descriptor['profile_id']}-{descriptor['artifact']['tree_sha256']}"
     )
     inspect = _run([str(binary), "inspect", str(bundle)], timeout=60)
     assert "optimized_runtime.json" in inspect.stdout
@@ -102,12 +141,46 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
             "--runtime-cache",
             str(cache),
             "--output",
-            str(output),
+            str(cold_output),
         ],
         timeout=600,
     )
+    assert expected_cache.is_dir()
+    assert (expected_cache / "engine.dir").is_dir()
+    cold_inventory = _tree_inventory(expected_cache)
+    assert cold_inventory
 
-    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == 1
-    assert rows[0]["generated"].strip()
-    assert any(path.is_dir() for path in cache.rglob("engine.dir"))
+    _run(
+        [
+            str(binary),
+            "run",
+            str(bundle),
+            "--prompt",
+            "Reply with one short sentence about accelerated computing.",
+            "--greedy",
+            "--top-p",
+            "1",
+            "--top-k",
+            "1",
+            "--no-thinking",
+            "--max-new-tokens",
+            "32",
+            "--runtime-cache",
+            str(cache),
+            "--output",
+            str(warm_output),
+        ],
+        timeout=600,
+    )
+    assert _tree_inventory(expected_cache) == cold_inventory
+
+    cold_rows = [
+        json.loads(line) for line in cold_output.read_text(encoding="utf-8").splitlines()
+    ]
+    warm_rows = [
+        json.loads(line) for line in warm_output.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(cold_rows) == len(warm_rows) == 1
+    assert cold_rows[0]["generated"].strip()
+    assert cold_rows[0]["token_ids"]
+    assert warm_rows[0]["token_ids"] == cold_rows[0]["token_ids"]

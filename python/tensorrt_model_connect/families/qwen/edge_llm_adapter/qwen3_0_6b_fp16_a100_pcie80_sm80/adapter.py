@@ -29,7 +29,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
 
 
 CAPSULE_ROOT = Path(__file__).resolve().parent
-REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[6]
 
 IMPLEMENTATION_ID = "qwen3-0.6b-fp16.tensorrt-edge-llm.a100-pcie80-sm80"
 MODEL_ID = "Qwen/Qwen3-0.6B"
@@ -94,7 +94,15 @@ def _runtime_source_root() -> Path:
     packaged = CAPSULE_ROOT / "runtime"
     if packaged.is_dir():
         return packaged
-    source = REPOSITORY_ROOT / "src" / "runtime" / "models" / "qwen" / "edge_llm_adapter"
+    source = (
+        REPOSITORY_ROOT
+        / "src"
+        / "runtime"
+        / "models"
+        / "qwen"
+        / "edge_llm_adapter"
+        / "qwen3_0_6b_fp16_a100_pcie80_sm80"
+    )
     if source.is_dir():
         return source
     raise AdapterError(
@@ -1889,8 +1897,8 @@ def _build(
                 "cuda": cuda_version,
             },
             "bundle_info": {
-                "model_type": "optimized_runtime",
-                "family": "optimized_runtime",
+                "model_type": "qwen3",
+                "family": "qwen",
                 "trt_version": tensorrt_version,
                 "gpu_name": "NVIDIA A100 80GB PCIe",
                 "vocab_size": vocab_size,
@@ -1902,8 +1910,8 @@ def _build(
             "bundle_config": {
                 "model_id": MODEL_ID,
                 "model_revision": MODEL_REVISION,
-                "model_type": "optimized_runtime",
-                "family": "optimized_runtime",
+                "model_type": "qwen3",
+                "family": "qwen",
                 "runtime_provider": IMPLEMENTATION_ID,
                 "runtime_strategy": "text_generation",
                 "precision": str(profile_data["precision"]),

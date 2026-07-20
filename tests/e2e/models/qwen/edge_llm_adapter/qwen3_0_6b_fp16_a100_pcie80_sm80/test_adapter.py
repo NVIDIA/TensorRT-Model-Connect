@@ -16,11 +16,25 @@ from pathlib import Path
 import pytest
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[6]
 CAPSULE_ROOT = (
-    REPOSITORY_ROOT / "python" / "tensorrt_model_connect" / "families" / "qwen" / "edge_llm_adapter"
+    REPOSITORY_ROOT
+    / "python"
+    / "tensorrt_model_connect"
+    / "families"
+    / "qwen"
+    / "edge_llm_adapter"
+    / "qwen3_0_6b_fp16_a100_pcie80_sm80"
 )
-RUNTIME_ROOT = REPOSITORY_ROOT / "src" / "runtime" / "models" / "qwen" / "edge_llm_adapter"
+RUNTIME_ROOT = (
+    REPOSITORY_ROOT
+    / "src"
+    / "runtime"
+    / "models"
+    / "qwen"
+    / "edge_llm_adapter"
+    / "qwen3_0_6b_fp16_a100_pcie80_sm80"
+)
 PYTHON_ROOT = REPOSITORY_ROOT / "python"
 if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
@@ -87,7 +101,7 @@ def test_source_checkout_discovers_edge_llm_only_from_qwen_builder() -> None:
     root = family_implementation_root("qwen")
     discovered = discover_family_implementations_for_model("qwen", MODEL_ID)
 
-    assert root == CAPSULE_ROOT.parent
+    assert root == CAPSULE_ROOT.parents[1]
     assert [manifest.implementation_id for manifest in discovered] == [IMPLEMENTATION_ID]
 
 
@@ -103,7 +117,13 @@ def test_installed_layout_compiles_the_packaged_qwen_runtime(
 ) -> None:
     adapter = _load_adapter_module()
     package = tmp_path / "tensorrt_model_connect"
-    packaged_builder = package / "families" / "qwen" / "edge_llm_adapter"
+    packaged_builder = (
+        package
+        / "families"
+        / "qwen"
+        / "edge_llm_adapter"
+        / "qwen3_0_6b_fp16_a100_pcie80_sm80"
+    )
     packaged_runtime = packaged_builder / "runtime"
     private_sdk = package / "runtime_provider" / "_sdk" / "include"
     shutil.copytree(RUNTIME_ROOT, packaged_runtime)
@@ -523,6 +543,10 @@ def test_build_stages_explicit_engine_runtime_and_plugin_payloads(tmp_path: Path
     }
     assert build.descriptor["versions"]["edge_llm"] == "0.6.1"
     assert build.descriptor["versions"]["cuda"] == "12.8"
+    assert build.descriptor["bundle_info"]["family"] == "qwen"
+    assert build.descriptor["bundle_info"]["model_type"] == "qwen3"
+    assert build.descriptor["bundle_config"]["family"] == "qwen"
+    assert build.descriptor["bundle_config"]["model_type"] == "qwen3"
     assert build.descriptor["bundle_config"]["runtime_provider"] == IMPLEMENTATION_ID
     assert "metadata" not in build.descriptor
 

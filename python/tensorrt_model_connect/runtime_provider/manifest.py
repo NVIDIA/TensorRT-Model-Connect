@@ -403,7 +403,42 @@ def _manifest_paths(root: str | Path) -> tuple[Path, ...]:
         raise ManifestDiscoveryError(f"Discovery root does not exist: {raw_root}") from exc
     if not resolved.is_dir():
         raise ManifestDiscoveryError(f"Discovery root is not a directory: {resolved}")
-    return tuple(sorted(resolved.glob(f"*/{MANIFEST_NAME}"), key=lambda path: str(path)))
+    candidates = tuple(
+        sorted(
+            resolved.glob(f"*_adapter/*/{MANIFEST_NAME}"),
+            key=lambda path: str(path),
+        )
+    )
+    validated: list[Path] = []
+    for manifest in candidates:
+        profile = manifest.parent
+        provider = profile.parent
+        for kind, candidate in (
+            ("provider directory", provider),
+            ("profile directory", profile),
+            ("manifest file", manifest),
+        ):
+            if candidate.is_symlink():
+                raise ManifestDiscoveryError(
+                    f"Optimized-runtime {kind} must not be a symbolic link: {candidate}"
+                )
+        try:
+            resolved_manifest = manifest.resolve(strict=True)
+        except OSError as exc:
+            raise ManifestDiscoveryError(
+                f"Optimized-runtime manifest is unavailable: {manifest}: {exc}"
+            ) from exc
+        try:
+            resolved_manifest.relative_to(resolved)
+        except ValueError as exc:
+            raise ManifestDiscoveryError(
+                "Optimized-runtime manifest resolves outside the selected family root: "
+                f"{manifest} -> {resolved_manifest}"
+            ) from exc
+        if not resolved_manifest.is_file():
+            continue
+        validated.append(resolved_manifest)
+    return tuple(validated)
 
 
 def _reject_duplicate_implementation_ids(
@@ -468,17 +503,20 @@ def discover_implementations_for_model(
     root: str | Path,
     model_id: str,
 ) -> tuple[ImplementationManifest, ...]:
-    """Load exact-model implementations below already selected family roots.
+    """Load exact-model implementations from one selected family root.
 
-    Discovery reads only each sibling's ``[model]`` index. Full parsing and
-    strict validation are intentionally limited to the requested model.
+    A discoverable implementation has the exact model-owned layout
+    ``<runtime>_adapter/<profile>/IMPLEMENTATION.toml``. Discovery reads only
+    each sibling's ``[model]`` index. Full parsing and strict validation are
+    intentionally limited to the requested model.
     """
 
     if not isinstance(model_id, str) or not model_id.strip():
         raise ValueError("model_id must be a non-empty string")
+    paths = _manifest_paths(root)
     manifests = tuple(
         load_implementation_manifest(path)
-        for path in _manifest_paths(root)
+        for path in paths
         if _declared_model_id(path) == model_id
     )
     _reject_duplicate_implementation_ids(manifests)

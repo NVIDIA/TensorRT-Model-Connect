@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[5]
+REPOSITORY_ROOT = Path(__file__).resolve().parents[6]
 CAPSULE_ROOT = (
     REPOSITORY_ROOT
     / "python"
@@ -23,8 +23,17 @@ CAPSULE_ROOT = (
     / "families"
     / "qwen"
     / "edge_llm_adapter"
+    / "qwen3_0_6b_fp16_a100_pcie80_sm80"
 )
-RUNTIME_ROOT = REPOSITORY_ROOT / "src" / "runtime" / "models" / "qwen" / "edge_llm_adapter"
+RUNTIME_ROOT = (
+    REPOSITORY_ROOT
+    / "src"
+    / "runtime"
+    / "models"
+    / "qwen"
+    / "edge_llm_adapter"
+    / "qwen3_0_6b_fp16_a100_pcie80_sm80"
+)
 PYTHON_ROOT = REPOSITORY_ROOT / "python"
 if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
