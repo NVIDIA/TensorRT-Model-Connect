@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import json
 import os
 import subprocess
@@ -115,6 +116,7 @@ class FactoryV1(ctypes.Structure):
         ("toolchain_abi", ToolchainAbiV1),
         ("process_compatibility_namespace", ctypes.c_char_p),
         ("process_compatibility_fingerprint", ctypes.c_char_p),
+        ("pipeline_abi_sha256", ctypes.c_char_p),
     ]
 
 
@@ -315,6 +317,9 @@ def test_fake_runtime_exports_exact_identity_and_validates_create_metadata(
     assert factory.runtime_version == b"0.9.0"
     assert factory.runtime_commit == b"1ac0f2b99642045125e1c5ac7b109434ba3b36c7"
     assert factory.pipeline_abi_version == 1
+    assert factory.pipeline_abi_sha256.decode() == hashlib.sha256(
+        (REPOSITORY_ROOT / "include/trtmc/pipeline.h").read_bytes()
+    ).hexdigest()
     assert factory.process_compatibility_namespace == b"tensorrt-edge-llm.plugin-registry"
     assert factory.process_compatibility_fingerprint == (
         b"edgellm-1ac0f2b99642045125e1c5ac7b109434ba3b36c7-trt11.2.0.113-cuda13.3-sm80"

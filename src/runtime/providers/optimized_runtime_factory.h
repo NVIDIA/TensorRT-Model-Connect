@@ -34,6 +34,19 @@ inline constexpr std::uint32_t kOptimizedRuntimePipelineAbiVersionV1 = 1U;
 inline constexpr char kOptimizedRuntimeFactoryEntrypointV1[] =
     "trtmc_get_optimized_runtime_factory_v1";
 
+// The adapter build must define this to the SHA-256 of the exact
+// trtmc/pipeline.h it includes. An empty value is intentionally retained for
+// non-provider consumers of this private header; the host rejects it before
+// create() can be called.
+#if defined(TRTMC_OPTIMIZED_RUNTIME_PIPELINE_ABI_SHA256)
+inline constexpr char kCurrentOptimizedRuntimePipelineAbiSha256V1[] =
+    TRTMC_OPTIMIZED_RUNTIME_PIPELINE_ABI_SHA256;
+static_assert(sizeof(kCurrentOptimizedRuntimePipelineAbiSha256V1) == 65,
+              "The optimized-runtime pipeline ABI fingerprint must be a SHA-256 digest");
+#else
+inline constexpr char kCurrentOptimizedRuntimePipelineAbiSha256V1[] = "";
+#endif
+
 // IPipeline passes C++ standard-library objects across the DSO boundary. Keep
 // the versioned operation ABI above, and additionally require both sides to
 // have been built with a compatible compiler and standard-library ABI.
@@ -150,7 +163,8 @@ struct OptimizedRuntimeFactoryV1 {
     const char* runtime_commit;
     CreateOptimizedRuntimePipelineV1 create;
     // Bump this explicit contract version only when IPipeline changes in a
-    // binary-incompatible way. Source-only edits do not invalidate adapters.
+    // binary-incompatible way. The automatic header digest below additionally
+    // fails closed for every pipeline header edit, including a missed bump.
     std::uint32_t pipeline_abi_version{kOptimizedRuntimePipelineAbiVersionV1};
     OptimizedRuntimeToolchainAbiV1 toolchain_abi{kCurrentOptimizedRuntimeToolchainAbiV1};
 
@@ -161,15 +175,25 @@ struct OptimizedRuntimeFactoryV1 {
     // multiple factories to claim one namespace only when their fingerprints
     // are identical.
     //
-    // These fields extend the end of the V1 table. A factory compiled against
-    // the original V1 layout may report kOptimizedRuntimeFactoryV1BaseSize and
-    // is treated as making no claim.
+    // These fields were the original V1 tail. Their offsets are preserved so
+    // the host can safely inspect struct_size from older factories and reject
+    // them before reading the required ABI-digest extension below.
     const char* process_compatibility_namespace{nullptr};
     const char* process_compatibility_fingerprint{nullptr};
+
+    // Required automatic fingerprint of the exact private IPipeline header.
+    // This is a tail extension so all fields from the original V1 table retain
+    // their offsets. The host validates struct_size before reading this field
+    // and fails closed for factories built against the shorter table.
+    const char* pipeline_abi_sha256{kCurrentOptimizedRuntimePipelineAbiSha256V1};
 };
 
 inline constexpr std::uint32_t kOptimizedRuntimeFactoryV1BaseSize = static_cast<std::uint32_t>(
     offsetof(OptimizedRuntimeFactoryV1, process_compatibility_namespace));
+inline constexpr std::uint32_t kOptimizedRuntimeFactoryV1CompatibilitySize =
+    static_cast<std::uint32_t>(offsetof(OptimizedRuntimeFactoryV1, pipeline_abi_sha256));
+inline constexpr std::uint32_t kOptimizedRuntimeFactoryV1RequiredSize =
+    static_cast<std::uint32_t>(sizeof(OptimizedRuntimeFactoryV1));
 
 using GetOptimizedRuntimeFactoryV1 = const OptimizedRuntimeFactoryV1* (*)() noexcept;
 

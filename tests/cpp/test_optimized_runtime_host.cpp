@@ -49,6 +49,10 @@
 #error "TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_ABI_DSO must be defined"
 #endif
 
+#ifndef TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_SDK_ABI_DSO
+#error "TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_SDK_ABI_DSO must be defined"
+#endif
+
 #ifndef TRTMC_TEST_OPTIMIZED_EMBEDDING_DSO
 #error "TRTMC_TEST_OPTIMIZED_EMBEDDING_DSO must be defined"
 #endif
@@ -599,7 +603,7 @@ void test_process_compatibility_malformed_claims() {
     write_bundle(bundle, text_spec());
     trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
 
-    const std::array<std::pair<const char*, const char*>, 7> malformed = {{
+    const std::array<std::pair<const char*, const char*>, 9> malformed = {{
         {"namespace-only", "both be provided or both be null"},
         {"fingerprint-only", "both be provided or both be null"},
         {"invalid-namespace", "namespace must be a bounded canonical"},
@@ -607,6 +611,8 @@ void test_process_compatibility_malformed_claims() {
         {"oversized-namespace", "namespace must be a bounded canonical"},
         {"oversized-fingerprint", "fingerprint must be a bounded canonical"},
         {"partial-table", "invalid factory v1 table"},
+        {"missing-pipeline-abi", "private SDK ABI fingerprint is missing"},
+        {"invalid-pipeline-abi", "private SDK ABI fingerprint is invalid"},
     }};
     for (std::size_t index = 0; index < malformed.size(); ++index) {
         trtmc_test::EnvVarGuard mode_guard("TRTMC_FAKE_OPTIMIZED_FACTORY_MODE",
@@ -625,11 +631,17 @@ void test_process_compatibility_malformed_claims() {
 
     {
         trtmc_test::EnvVarGuard mode_guard("TRTMC_FAKE_OPTIMIZED_FACTORY_MODE", "legacy-table");
-        auto pipeline = trtmc::load(bundle.string(), load_options(root / "legacy-cache"));
-        check(pipeline != nullptr, "original V1 factory size remains backward compatible");
+        bool rejected = false;
+        try {
+            (void)trtmc::load(bundle.string(), load_options(root / "legacy-cache"));
+        } catch (const std::runtime_error& error) {
+            rejected =
+                std::string(error.what()).find("invalid factory v1 table") != std::string::npos;
+        }
+        check(rejected, "short pre-fingerprint V1 table fails closed before tail access");
     }
-    check(count_line(read_lines(events), "create") == 1,
-          "legacy V1 factory without the optional claim reaches create");
+    check(count_line(read_lines(events), "create") == 0,
+          "short pre-fingerprint V1 table never reaches create");
 }
 
 void test_descriptor_is_strict_and_fail_closed() {
@@ -759,6 +771,30 @@ void test_toolchain_abi_fails_before_create() {
           "mismatched toolchain DSO is rejected before create");
 }
 
+void test_private_sdk_abi_fails_before_create() {
+    trtmc_test::TempDirGuard temporary;
+    const fs::path root(temporary.path());
+    const fs::path events = root / "events.txt";
+    const RuntimeSpec spec = text_spec(TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_SDK_ABI_DSO);
+    const fs::path bundle = root / "wrong-private-sdk-abi.trtfb";
+    write_bundle(bundle, spec);
+    trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
+
+    bool threw = false;
+    try {
+        (void)trtmc::load(bundle.string(), load_options(root / "cache"));
+    } catch (const std::runtime_error& error) {
+        threw = std::string(error.what()).find("private SDK ABI fingerprint mismatch") !=
+                std::string::npos;
+    }
+    check(threw, "mismatched private SDK ABI fingerprint fails closed");
+    const auto events_before_return = read_lines(events);
+    check(count_line(events_before_return, "dlopen") == 1,
+          "mismatched private SDK DSO is inspected exactly once");
+    check(count_line(events_before_return, "create") == 0,
+          "mismatched private SDK DSO is rejected before create");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -803,6 +839,7 @@ int main(int argc, char** argv) {
     test_pipeline_abi_version_fails_before_create();
     test_exact_embedded_dso_identity();
     test_toolchain_abi_fails_before_create();
+    test_private_sdk_abi_fails_before_create();
     test_model_owned_text_pipeline_and_eager_load();
     test_legacy_load_overload_delegates_to_optimized_runtime();
     test_concurrent_repeated_loads_share_published_cache_and_dso();

@@ -51,8 +51,11 @@ endif()
 
 set(_target trtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm_v0_9_trt11)
 add_library(${_target} SHARED adapter.cpp)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_pipeline_header}")
+file(SHA256 "${_pipeline_header}" _trtmc_pipeline_abi_sha256)
 target_compile_definitions(${_target} PRIVATE
-  TRTMC_QWEN_EDGE_MANIFEST_SHA256="${TRTMC_QWEN_EDGE_MANIFEST_SHA256}")
+  TRTMC_QWEN_EDGE_MANIFEST_SHA256="${TRTMC_QWEN_EDGE_MANIFEST_SHA256}"
+  TRTMC_OPTIMIZED_RUNTIME_PIPELINE_ABI_SHA256="${_trtmc_pipeline_abi_sha256}")
 target_include_directories(${_target} PRIVATE
   "${CMAKE_CURRENT_BINARY_DIR}"
   ${TRTMC_SDK_INCLUDE_DIRS}

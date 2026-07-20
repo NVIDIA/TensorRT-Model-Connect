@@ -54,6 +54,13 @@ constexpr std::size_t kErrorCapacity = 4096;
 constexpr std::size_t kMaxProcessCompatibilityNamespaceSize = 127;
 constexpr std::size_t kMaxProcessCompatibilityFingerprintSize = 255;
 
+#if !defined(TRTMC_OPTIMIZED_RUNTIME_PIPELINE_ABI_SHA256)
+#error "The optimized-runtime host requires the pipeline ABI SHA-256"
+#endif
+constexpr std::string_view kPipelineAbiSha256 = TRTMC_OPTIMIZED_RUNTIME_PIPELINE_ABI_SHA256;
+static_assert(kPipelineAbiSha256.size() == 64,
+              "The optimized-runtime pipeline ABI fingerprint must be a SHA-256 digest");
+
 struct RuntimeIdentity {
     std::string name;
     std::string version;
@@ -852,8 +859,34 @@ resolve_factory(void* dso, const OptimizedRuntimeDescriptor& descriptor) {
 }
 
 bool has_valid_factory_table_size(std::uint32_t size) {
-    return size == internal::kOptimizedRuntimeFactoryV1BaseSize ||
-           size >= sizeof(internal::OptimizedRuntimeFactoryV1);
+    // The ABI digest is a required tail field. Reject both historical table
+    // sizes before reading any tail member, while allowing future extensions.
+    return size >= internal::kOptimizedRuntimeFactoryV1RequiredSize;
+}
+
+bool is_lowercase_sha256(std::string_view value) {
+    return value.size() == 64 &&
+           std::all_of(value.begin(), value.end(), [](unsigned char character) {
+               return (character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f');
+           });
+}
+
+std::string pipeline_abi_sha256(const internal::OptimizedRuntimeFactoryV1& factory,
+                                const OptimizedRuntimeDescriptor& descriptor) {
+    if (factory.pipeline_abi_sha256 == nullptr) {
+        throw std::runtime_error(
+            "Optimized-runtime private SDK ABI fingerprint is missing for implementation '" +
+            descriptor.implementation_id + "'");
+    }
+    const std::size_t size = strnlen(factory.pipeline_abi_sha256, 65);
+    const std::string_view value(factory.pipeline_abi_sha256, size);
+    if (!is_lowercase_sha256(value)) {
+        throw std::runtime_error(
+            "Optimized-runtime private SDK ABI fingerprint is invalid for implementation '" +
+            descriptor.implementation_id + "'");
+    }
+    return std::string(value);
 }
 
 void validate_factory(const internal::OptimizedRuntimeFactoryV1& factory,
@@ -875,6 +908,13 @@ void validate_factory(const internal::OptimizedRuntimeFactoryV1& factory,
             "Optimized-runtime C++ toolchain ABI mismatch for implementation '" +
             descriptor.implementation_id +
             "'; rebuild the provider with the Model Connect compiler and standard library");
+    }
+    const std::string provider_pipeline_abi = pipeline_abi_sha256(factory, descriptor);
+    if (provider_pipeline_abi != kPipelineAbiSha256) {
+        throw std::runtime_error(
+            "Optimized-runtime private SDK ABI fingerprint mismatch for implementation '" +
+            descriptor.implementation_id +
+            "'; rebuild the provider with this Model Connect private SDK");
     }
     if (factory_string(factory.implementation_id) != descriptor.implementation_id) {
         throw std::runtime_error(
@@ -940,9 +980,6 @@ std::string bounded_process_compatibility_string(const char* value, std::size_t 
 
 void claim_process_compatibility(const internal::OptimizedRuntimeFactoryV1& factory,
                                  const OptimizedRuntimeDescriptor& descriptor) {
-    if (factory.struct_size == internal::kOptimizedRuntimeFactoryV1BaseSize)
-        return;
-
     const bool has_namespace = factory.process_compatibility_namespace != nullptr;
     const bool has_fingerprint = factory.process_compatibility_fingerprint != nullptr;
     if (has_namespace != has_fingerprint) {

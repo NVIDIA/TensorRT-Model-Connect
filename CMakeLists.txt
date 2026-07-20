@@ -19,6 +19,27 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(GNUInstallDirs)
 
+# Optimized-runtime DSOs return the private C++ IPipeline interface across a
+# DSO boundary. Bind every participant to the exact pipeline header bytes so a
+# header edit cannot rely on a manually maintained ABI version bump. Tracking
+# the file as a configure dependency makes an ordinary incremental build
+# recompute the digest before compiling either side of the boundary.
+set(_TRTMC_OPTIMIZED_RUNTIME_PIPELINE_HEADER
+  "${PROJECT_SOURCE_DIR}/include/trtmc/pipeline.h")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${_TRTMC_OPTIMIZED_RUNTIME_PIPELINE_HEADER}")
+file(SHA256 "${_TRTMC_OPTIMIZED_RUNTIME_PIPELINE_HEADER}"
+  _TRTMC_OPTIMIZED_RUNTIME_PIPELINE_ABI_SHA256)
+
+function(trtmc_bind_optimized_runtime_pipeline_abi TARGET_NAME)
+  if(NOT TARGET ${TARGET_NAME})
+    message(FATAL_ERROR
+      "Cannot bind optimized-runtime pipeline ABI for missing target ${TARGET_NAME}")
+  endif()
+  target_compile_definitions(${TARGET_NAME} PRIVATE
+    TRTMC_OPTIMIZED_RUNTIME_PIPELINE_ABI_SHA256="${_TRTMC_OPTIMIZED_RUNTIME_PIPELINE_ABI_SHA256}")
+endfunction()
+
 option(TRTMC_ENABLE_TRT "Enable TensorRT backend DSO integration" ON)
 option(TRTMC_BUILD_BACKEND_TRT "Build standard TensorRT backend DSO" ON)
 option(TRTMC_BUILD_TESTS "Build C++ unit test executables" ON)
@@ -202,6 +223,7 @@ add_library(trtmc_core SHARED
   src/runtime/registry/pipeline_plugin_loader.cpp
   ${TRTMC_MODEL_PLUGIN_INDEX_SOURCE}
 )
+trtmc_bind_optimized_runtime_pipeline_abi(trtmc_core)
 
 # Keep warning policy strict for project code, but avoid CI log spam from
 # vendored STB implementation headers and known GCC 13/libstdc++ false
@@ -634,6 +656,7 @@ add_custom_target(trtmc_platform_cpp_tests)
 add_library(trtmc_test_optimized_runtime SHARED EXCLUDE_FROM_ALL
   tests/cpp/fakes/fake_optimized_runtime_provider.cpp
 )
+trtmc_bind_optimized_runtime_pipeline_abi(trtmc_test_optimized_runtime)
 target_include_directories(trtmc_test_optimized_runtime PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src
@@ -648,6 +671,7 @@ function(trtmc_add_process_compatibility_fake TARGET_NAME OUTPUT_NAME OUTPUT_DIR
   add_library(${TARGET_NAME} SHARED EXCLUDE_FROM_ALL
     tests/cpp/fakes/fake_optimized_runtime_provider.cpp
   )
+  trtmc_bind_optimized_runtime_pipeline_abi(${TARGET_NAME})
   target_include_directories(${TARGET_NAME} PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src
@@ -692,6 +716,7 @@ trtmc_add_process_compatibility_fake(
 add_library(trtmc_test_wrong_optimized_runtime SHARED EXCLUDE_FROM_ALL
   tests/cpp/fakes/fake_optimized_runtime_provider.cpp
 )
+trtmc_bind_optimized_runtime_pipeline_abi(trtmc_test_wrong_optimized_runtime)
 target_include_directories(trtmc_test_wrong_optimized_runtime PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src
@@ -707,6 +732,7 @@ set_target_properties(trtmc_test_wrong_optimized_runtime PROPERTIES
 add_library(trtmc_test_wrong_optimized_runtime_abi SHARED EXCLUDE_FROM_ALL
   tests/cpp/fakes/fake_optimized_runtime_provider.cpp
 )
+trtmc_bind_optimized_runtime_pipeline_abi(trtmc_test_wrong_optimized_runtime_abi)
 target_include_directories(trtmc_test_wrong_optimized_runtime_abi PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src
@@ -719,9 +745,26 @@ set_target_properties(trtmc_test_wrong_optimized_runtime_abi PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/wrong-abi"
 )
 
+add_library(trtmc_test_wrong_optimized_runtime_sdk_abi SHARED EXCLUDE_FROM_ALL
+  tests/cpp/fakes/fake_optimized_runtime_provider.cpp
+)
+trtmc_bind_optimized_runtime_pipeline_abi(trtmc_test_wrong_optimized_runtime_sdk_abi)
+target_include_directories(trtmc_test_wrong_optimized_runtime_sdk_abi PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src
+)
+target_compile_definitions(trtmc_test_wrong_optimized_runtime_sdk_abi PRIVATE
+  TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_SHA256="0000000000000000000000000000000000000000000000000000000000000000"
+)
+set_target_properties(trtmc_test_wrong_optimized_runtime_sdk_abi PROPERTIES
+  OUTPUT_NAME trtmc_impl_example_optimized_runtime
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/wrong-sdk-abi"
+)
+
 add_library(trtmc_test_optimized_embedding SHARED EXCLUDE_FROM_ALL
   tests/cpp/fakes/fake_optimized_runtime_embedding.cpp
 )
+trtmc_bind_optimized_runtime_pipeline_abi(trtmc_test_optimized_embedding)
 target_include_directories(trtmc_test_optimized_embedding PRIVATE
   ${PROJECT_SOURCE_DIR}/include
   ${PROJECT_SOURCE_DIR}/src
@@ -863,6 +906,7 @@ add_dependencies(test_optimized_runtime_host
   trtmc_test_optimized_runtime_claim_beta
   trtmc_test_wrong_optimized_runtime
   trtmc_test_wrong_optimized_runtime_abi
+  trtmc_test_wrong_optimized_runtime_sdk_abi
   trtmc_test_optimized_embedding
 )
 target_compile_definitions(test_optimized_runtime_host PRIVATE
@@ -872,6 +916,7 @@ target_compile_definitions(test_optimized_runtime_host PRIVATE
   TRTMC_TEST_OPTIMIZED_CLAIM_BETA_DSO="$<TARGET_FILE:trtmc_test_optimized_runtime_claim_beta>"
   TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_DSO="$<TARGET_FILE:trtmc_test_wrong_optimized_runtime>"
   TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_ABI_DSO="$<TARGET_FILE:trtmc_test_wrong_optimized_runtime_abi>"
+  TRTMC_TEST_WRONG_OPTIMIZED_PROVIDER_SDK_ABI_DSO="$<TARGET_FILE:trtmc_test_wrong_optimized_runtime_sdk_abi>"
   TRTMC_TEST_OPTIMIZED_EMBEDDING_DSO="$<TARGET_FILE:trtmc_test_optimized_embedding>"
 )
 add_test(

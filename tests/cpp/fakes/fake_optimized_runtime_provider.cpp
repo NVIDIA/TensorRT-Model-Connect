@@ -28,6 +28,11 @@
     trtmc::internal::kOptimizedRuntimePipelineAbiVersionV1
 #endif
 
+#ifndef TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_SHA256
+#define TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_SHA256                                                   \
+    trtmc::internal::kCurrentOptimizedRuntimePipelineAbiSha256V1
+#endif
+
 #ifndef TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_NAMESPACE
 #define TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_NAMESPACE nullptr
 #endif
@@ -157,11 +162,22 @@ const trtmc::internal::OptimizedRuntimeFactoryV1 kFactory = {
     trtmc::internal::kCurrentOptimizedRuntimeToolchainAbiV1,
     TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_NAMESPACE,
     TRTMC_FAKE_OPTIMIZED_COMPATIBILITY_FINGERPRINT,
+    TRTMC_FAKE_OPTIMIZED_PIPELINE_ABI_SHA256,
 };
 
 const trtmc::internal::OptimizedRuntimeFactoryV1 kWrongToolchainFactory = [] {
     auto factory = kFactory;
     ++factory.toolchain_abi.compiler_major_version;
+    return factory;
+}();
+const trtmc::internal::OptimizedRuntimeFactoryV1 kMissingPipelineAbiFactory = [] {
+    auto factory = kFactory;
+    factory.pipeline_abi_sha256 = nullptr;
+    return factory;
+}();
+const trtmc::internal::OptimizedRuntimeFactoryV1 kInvalidPipelineAbiFactory = [] {
+    auto factory = kFactory;
+    factory.pipeline_abi_sha256 = "not-a-sha256";
     return factory;
 }();
 
@@ -194,7 +210,7 @@ const trtmc::internal::OptimizedRuntimeFactoryV1 kPartialClaimTableFactory = [] 
 }();
 const trtmc::internal::OptimizedRuntimeFactoryV1 kLegacyFactory = [] {
     auto factory = kFactory;
-    factory.struct_size = trtmc::internal::kOptimizedRuntimeFactoryV1BaseSize;
+    factory.struct_size = trtmc::internal::kOptimizedRuntimeFactoryV1CompatibilitySize;
     return factory;
 }();
 
@@ -215,6 +231,10 @@ const trtmc::internal::OptimizedRuntimeFactoryV1* malformed_factory(const char* 
         return &kPartialClaimTableFactory;
     if (std::strcmp(mode, "legacy-table") == 0)
         return &kLegacyFactory;
+    if (std::strcmp(mode, "missing-pipeline-abi") == 0)
+        return &kMissingPipelineAbiFactory;
+    if (std::strcmp(mode, "invalid-pipeline-abi") == 0)
+        return &kInvalidPipelineAbiFactory;
     return nullptr;
 }
 
