@@ -13,6 +13,7 @@ import sys
 from dataclasses import dataclass
 from typing import Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
@@ -26,6 +27,10 @@ EXPECTED_API_URL = "https://api.github.com"
 TRACKER_MARKER = "<!-- trtmc-nightly-failure-tracker:v1 -->"
 FAILURE_TITLE = "[Nightly] Scheduled validation needs attention"
 RECOVERY_TITLE = "[Nightly] Scheduled validation recovered"
+NIGHTLY_FAILURE_LABEL = "Nightly Failure"
+NIGHTLY_FAILURE_LABEL_COLOR = "B60205"
+NIGHTLY_FAILURE_LABEL_DESCRIPTION = "Automated failure in the scheduled Nightly workflow"
+REQUIRED_ISSUE_LABELS = ("bug", NIGHTLY_FAILURE_LABEL)
 FAILURE_CONCLUSIONS = {
     "action_required",
     "cancelled",
@@ -147,6 +152,10 @@ class TrackerApi(Protocol):
 
     def list_run_artifacts(self, run_id: int) -> list[dict[str, object]]: ...
 
+    def ensure_label(self, *, name: str, color: str, description: str) -> None: ...
+
+    def add_issue_labels(self, issue_number: int, labels: Sequence[str]) -> None: ...
+
     def create_issue(self, payload: dict[str, object]) -> dict[str, object]: ...
 
     def update_issue(self, issue_number: int, payload: dict[str, object]) -> dict[str, object]: ...
@@ -179,6 +188,8 @@ class GitHubApi:
         method: str,
         path: str,
         payload: dict[str, object] | None = None,
+        *,
+        allow_not_found: bool = False,
     ) -> object:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         headers = {
@@ -199,6 +210,8 @@ class GitHubApi:
             with urlopen(request, timeout=30) as response:  # noqa: S310
                 body = response.read()
         except HTTPError as error:
+            if allow_not_found and error.code == 404:
+                return None
             details = error.read(2_000).decode("utf-8", errors="replace")
             raise TrackerError(
                 f"GitHub API {method} {path} returned {error.code}: {details}"
@@ -256,8 +269,41 @@ class GitHubApi:
             raise TrackerError("GitHub issue mutation was attempted without --apply")
         response = self._request(method, path, payload)
         if not isinstance(response, dict):
-            raise TrackerError(f"GitHub API {method} {path} returned no issue object")
+            raise TrackerError(f"GitHub API {method} {path} returned no resource object")
         return response
+
+    def ensure_label(self, *, name: str, color: str, description: str) -> None:
+        encoded_name = quote(name, safe="")
+        path = f"/repos/{self.repository}/labels/{encoded_name}"
+        existing = self._request("GET", path, allow_not_found=True)
+        if existing is not None:
+            if not isinstance(existing, dict) or str(existing.get("name") or "").casefold() != (
+                name.casefold()
+            ):
+                raise TrackerError(f"GitHub API GET {path} returned an invalid label object")
+            return
+        created = self._mutate(
+            "POST",
+            f"/repos/{self.repository}/labels",
+            {"name": name, "color": color, "description": description},
+        )
+        if str(created.get("name") or "").casefold() != name.casefold():
+            raise TrackerError("GitHub API created an unexpected repository label")
+
+    def add_issue_labels(self, issue_number: int, labels: Sequence[str]) -> None:
+        if not self.allow_mutations:
+            raise TrackerError("GitHub issue mutation was attempted without --apply")
+        response = self._request(
+            "POST",
+            f"/repos/{self.repository}/issues/{issue_number}/labels",
+            {"labels": list(labels)},
+        )
+        if not isinstance(response, list) or not all(isinstance(item, dict) for item in response):
+            raise TrackerError("GitHub API returned an invalid issue label list")
+        names = {str(item.get("name") or "").casefold() for item in response}
+        missing = [label for label in labels if label.casefold() not in names]
+        if missing:
+            raise TrackerError(f"GitHub API did not apply issue labels: {', '.join(missing)}")
 
     def create_issue(self, payload: dict[str, object]) -> dict[str, object]:
         return self._mutate("POST", f"/repos/{self.repository}/issues", payload)
@@ -304,6 +350,41 @@ def _issue_number(issue: Mapping[str, object]) -> int:
 def _issue_url(issue: Mapping[str, object]) -> str | None:
     value = issue.get("html_url")
     return value if isinstance(value, str) and value.startswith("https://") else None
+
+
+def _issue_has_label(issue: Mapping[str, object], label_name: str) -> bool:
+    raw_labels = issue.get("labels")
+    if not isinstance(raw_labels, list):
+        return False
+    for label in raw_labels:
+        if isinstance(label, str):
+            name = label
+        elif isinstance(label, Mapping):
+            name = str(label.get("name") or "")
+        else:
+            continue
+        if name.casefold() == label_name.casefold():
+            return True
+    return False
+
+
+def _missing_issue_labels(
+    issue: Mapping[str, object], required_labels: Sequence[str]
+) -> list[str]:
+    return [label for label in required_labels if not _issue_has_label(issue, label)]
+
+
+def _ensure_nightly_failure_label(api: TrackerApi) -> None:
+    api.ensure_label(
+        name=NIGHTLY_FAILURE_LABEL,
+        color=NIGHTLY_FAILURE_LABEL_COLOR,
+        description=NIGHTLY_FAILURE_LABEL_DESCRIPTION,
+    )
+
+
+def _add_nightly_failure_label(api: TrackerApi, tracker: Mapping[str, object]) -> None:
+    _ensure_nightly_failure_label(api)
+    api.add_issue_labels(_issue_number(tracker), [NIGHTLY_FAILURE_LABEL])
 
 
 def _find_tracker(issues: Sequence[Mapping[str, object]]) -> Mapping[str, object] | None:
@@ -463,23 +544,41 @@ def reconcile(run: NightlyRun, api: TrackerApi, *, apply: bool) -> ReconcileResu
         }
         if not apply:
             return _result("would-close", tracker)
+        if not _issue_has_label(tracker, NIGHTLY_FAILURE_LABEL):
+            _add_nightly_failure_label(api, tracker)
         return _result("closed", api.update_issue(_issue_number(tracker), payload))
 
     if tracker is not None and run.run_marker in str(tracker.get("body") or ""):
+        if not _issue_has_label(tracker, NIGHTLY_FAILURE_LABEL):
+            if not apply:
+                return _result("would-label", tracker)
+            _add_nightly_failure_label(api, tracker)
+            return _result("labeled", tracker)
         return _result("already-reconciled", tracker)
 
     jobs = api.list_run_jobs(run.run_id, run.run_attempt)
     artifacts = api.list_run_artifacts(run.run_id)
     body = render_failure_body(run, jobs, artifacts)
     if tracker is None:
-        payload = {"title": FAILURE_TITLE, "body": body, "labels": ["bug"]}
+        payload = {
+            "title": FAILURE_TITLE,
+            "body": body,
+            "labels": list(REQUIRED_ISSUE_LABELS),
+        }
         if not apply:
             return _result("would-create")
-        return _result("created", api.create_issue(payload))
+        _ensure_nightly_failure_label(api)
+        created = api.create_issue(payload)
+        missing_labels = _missing_issue_labels(created, REQUIRED_ISSUE_LABELS)
+        if missing_labels:
+            api.add_issue_labels(_issue_number(created), missing_labels)
+        return _result("created", created)
 
     payload = {"title": FAILURE_TITLE, "body": body, "state": "open"}
     if not apply:
         return _result("would-update", tracker)
+    if not _issue_has_label(tracker, NIGHTLY_FAILURE_LABEL):
+        _add_nightly_failure_label(api, tracker)
     return _result("updated", api.update_issue(_issue_number(tracker), payload))
 
 

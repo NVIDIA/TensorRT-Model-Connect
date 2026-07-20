@@ -20,6 +20,9 @@ from tools.nightly_issue_tracker import (
     EXPECTED_API_URL,
     EXPECTED_SERVER_URL,
     FAILURE_TITLE,
+    NIGHTLY_FAILURE_LABEL,
+    NIGHTLY_FAILURE_LABEL_COLOR,
+    NIGHTLY_FAILURE_LABEL_DESCRIPTION,
     RECOVERY_TITLE,
     TRACKER_MARKER,
     GitHubApi,
@@ -76,6 +79,12 @@ class FakeApi:
         self.calls.append(("list_run_artifacts", run_id))
         return self.artifacts
 
+    def ensure_label(self, *, name: str, color: str, description: str) -> None:
+        self.calls.append(("ensure_label", name, color, description))
+
+    def add_issue_labels(self, issue_number: int, labels: list[str]) -> None:
+        self.calls.append(("add_issue_labels", issue_number, list(labels)))
+
     def create_issue(self, payload: dict[str, object]) -> dict[str, object]:
         self.calls.append(("create_issue", payload))
         return {
@@ -95,7 +104,12 @@ class FakeApi:
 
     @property
     def mutations(self) -> list[tuple[object, ...]]:
-        return [call for call in self.calls if call[0] in {"create_issue", "update_issue"}]
+        return [
+            call
+            for call in self.calls
+            if call[0]
+            in {"ensure_label", "add_issue_labels", "create_issue", "update_issue"}
+        ]
 
 
 def _run(**overrides: str) -> NightlyRun:
@@ -103,12 +117,21 @@ def _run(**overrides: str) -> NightlyRun:
 
 
 def _tracker_issue(
-    *, number: int = 55, body: str = TRACKER_MARKER, state: str = "open"
+    *,
+    number: int = 55,
+    body: str = TRACKER_MARKER,
+    state: str = "open",
+    labels: list[dict[str, str] | str] | None = None,
 ) -> dict[str, object]:
     return {
         "number": number,
         "state": state,
         "body": body,
+        "labels": (
+            labels
+            if labels is not None
+            else [{"name": "bug"}, {"name": NIGHTLY_FAILURE_LABEL}]
+        ),
         "html_url": (f"https://github.com/NVIDIA/TensorRT-Model-Connect/issues/{number}"),
     }
 
@@ -156,7 +179,7 @@ def test_default_mode_plans_a_failure_without_mutating() -> None:
     assert parse_args(["--apply"]).apply is True
 
 
-def test_first_failure_creates_one_bug_with_current_attempt_evidence() -> None:
+def test_first_failure_creates_labeled_bug_with_current_attempt_evidence() -> None:
     run = _run()
     api = FakeApi(
         issues=[
@@ -204,11 +227,16 @@ def test_first_failure_creates_one_bug_with_current_attempt_evidence() -> None:
 
     assert result.action == "created"
     assert ("list_run_jobs", 777, 2) in api.calls
-    assert len(api.mutations) == 1
-    operation, payload = api.mutations[0]
+    assert api.mutations[0] == (
+        "ensure_label",
+        NIGHTLY_FAILURE_LABEL,
+        NIGHTLY_FAILURE_LABEL_COLOR,
+        NIGHTLY_FAILURE_LABEL_DESCRIPTION,
+    )
+    operation, payload = api.mutations[1]
     assert operation == "create_issue"
     assert payload["title"] == FAILURE_TITLE
-    assert payload["labels"] == ["bug"]
+    assert payload["labels"] == ["bug", NIGHTLY_FAILURE_LABEL]
     body = str(payload["body"])
     assert TRACKER_MARKER in body
     assert run.run_marker in body
@@ -225,17 +253,29 @@ def test_first_failure_creates_one_bug_with_current_attempt_evidence() -> None:
 
 def test_later_failure_updates_the_open_tracker_and_same_attempt_is_idempotent() -> None:
     run = _run(GITHUB_RUN_ID="778", GITHUB_RUN_ATTEMPT="1")
-    tracker = _tracker_issue(body=f"{TRACKER_MARKER}\n<!-- old run -->")
+    tracker = _tracker_issue(
+        body=f"{TRACKER_MARKER}\n<!-- old run -->",
+        labels=[{"name": "bug"}, {"name": "human-triage"}],
+    )
     api = FakeApi(issues=[tracker])
 
     result = reconcile(run, api, apply=True)
 
     assert result.action == "updated"
-    assert len(api.mutations) == 1
-    operation, issue_number, payload = api.mutations[0]
+    assert api.mutations[:2] == [
+        (
+            "ensure_label",
+            NIGHTLY_FAILURE_LABEL,
+            NIGHTLY_FAILURE_LABEL_COLOR,
+            NIGHTLY_FAILURE_LABEL_DESCRIPTION,
+        ),
+        ("add_issue_labels", 55, [NIGHTLY_FAILURE_LABEL]),
+    ]
+    operation, issue_number, payload = api.mutations[2]
     assert operation == "update_issue"
     assert issue_number == 55
     assert payload["state"] == "open"
+    assert "labels" not in payload
     assert run.run_marker in str(payload["body"])
 
     reconciled = _tracker_issue(body=str(payload["body"]))
@@ -246,18 +286,73 @@ def test_later_failure_updates_the_open_tracker_and_same_attempt_is_idempotent()
     assert second_api.mutations == []
 
 
+def test_same_attempt_backfills_missing_label_without_rewriting_issue() -> None:
+    run = _run(GITHUB_RUN_ID="778", GITHUB_RUN_ATTEMPT="1")
+    tracker = _tracker_issue(
+        body=f"{TRACKER_MARKER}\n{run.run_marker}",
+        labels=[{"name": "bug"}, {"name": "human-triage"}],
+    )
+    api = FakeApi(issues=[tracker])
+
+    result = reconcile(run, api, apply=True)
+
+    assert result.action == "labeled"
+    assert api.mutations == [
+        (
+            "ensure_label",
+            NIGHTLY_FAILURE_LABEL,
+            NIGHTLY_FAILURE_LABEL_COLOR,
+            NIGHTLY_FAILURE_LABEL_DESCRIPTION,
+        ),
+        ("add_issue_labels", 55, [NIGHTLY_FAILURE_LABEL]),
+    ]
+    assert not any(call[0] == "update_issue" for call in api.calls)
+
+
+def test_same_attempt_dry_run_plans_label_without_mutating() -> None:
+    run = _run(GITHUB_RUN_ID="778", GITHUB_RUN_ATTEMPT="1")
+    tracker = _tracker_issue(
+        body=f"{TRACKER_MARKER}\n{run.run_marker}",
+        labels=[{"name": "bug"}],
+    )
+    api = FakeApi(issues=[tracker])
+
+    result = reconcile(run, api, apply=False)
+
+    assert result.action == "would-label"
+    assert api.calls == [("list_open_issues",)]
+    assert api.mutations == []
+
+
 def test_success_closes_one_open_tracker_without_erasing_failure_evidence() -> None:
     run = _run(
         NIGHTLY_REQUIRED_RESULT="success",
         NIGHTLY_RELEASE_RESULT="success",
     )
-    api = FakeApi(issues=[_tracker_issue(body=f"{TRACKER_MARKER}\nlast failure evidence")])
+    api = FakeApi(
+        issues=[
+            _tracker_issue(
+                body=f"{TRACKER_MARKER}\nlast failure evidence",
+                labels=[{"name": "bug"}, {"name": "human-triage"}],
+            )
+        ]
+    )
 
     result = reconcile(run, api, apply=True)
 
     assert result.action == "closed"
-    operation, issue_number, payload = api.mutations[0]
+    assert api.mutations[:2] == [
+        (
+            "ensure_label",
+            NIGHTLY_FAILURE_LABEL,
+            NIGHTLY_FAILURE_LABEL_COLOR,
+            NIGHTLY_FAILURE_LABEL_DESCRIPTION,
+        ),
+        ("add_issue_labels", 55, [NIGHTLY_FAILURE_LABEL]),
+    ]
+    operation, issue_number, payload = api.mutations[2]
     assert operation == "update_issue" and issue_number == 55
+    assert "labels" not in payload
     assert payload["title"] == RECOVERY_TITLE
     assert payload["state"] == "closed"
     assert payload["state_reason"] == "completed"
@@ -296,6 +391,208 @@ def test_rest_client_refuses_mutation_without_explicit_apply() -> None:
 
     with pytest.raises(TrackerError, match="without --apply"):
         api.create_issue({"title": "must not be sent"})
+    with pytest.raises(TrackerError, match="without --apply"):
+        api.add_issue_labels(55, [NIGHTLY_FAILURE_LABEL])
+
+    class MissingLabelApi(GitHubApi):
+        def _request(
+            self,
+            method: str,
+            path: str,
+            payload: dict[str, object] | None = None,
+            *,
+            allow_not_found: bool = False,
+        ) -> object:
+            return None
+
+    missing = MissingLabelApi(
+        api_url=EXPECTED_API_URL,
+        repository=EXPECTED_REPOSITORY,
+        token="not-a-real-token",
+        allow_mutations=False,
+    )
+    with pytest.raises(TrackerError, match="without --apply"):
+        missing.ensure_label(
+            name=NIGHTLY_FAILURE_LABEL,
+            color=NIGHTLY_FAILURE_LABEL_COLOR,
+            description=NIGHTLY_FAILURE_LABEL_DESCRIPTION,
+        )
+
+
+def test_rest_client_creates_missing_repository_label() -> None:
+    class RecordingApi(GitHubApi):
+        def __init__(self) -> None:
+            super().__init__(
+                api_url=EXPECTED_API_URL,
+                repository=EXPECTED_REPOSITORY,
+                token="not-a-real-token",
+                allow_mutations=True,
+            )
+            self.requests: list[tuple[object, ...]] = []
+
+        def _request(
+            self,
+            method: str,
+            path: str,
+            payload: dict[str, object] | None = None,
+            *,
+            allow_not_found: bool = False,
+        ) -> object:
+            self.requests.append((method, path, payload, allow_not_found))
+            if method == "GET":
+                return None
+            return {"name": NIGHTLY_FAILURE_LABEL}
+
+    api = RecordingApi()
+
+    api.ensure_label(
+        name=NIGHTLY_FAILURE_LABEL,
+        color=NIGHTLY_FAILURE_LABEL_COLOR,
+        description=NIGHTLY_FAILURE_LABEL_DESCRIPTION,
+    )
+
+    assert api.requests == [
+        (
+            "GET",
+            "/repos/NVIDIA/TensorRT-Model-Connect/labels/Nightly%20Failure",
+            None,
+            True,
+        ),
+        (
+            "POST",
+            "/repos/NVIDIA/TensorRT-Model-Connect/labels",
+            {
+                "name": NIGHTLY_FAILURE_LABEL,
+                "color": NIGHTLY_FAILURE_LABEL_COLOR,
+                "description": NIGHTLY_FAILURE_LABEL_DESCRIPTION,
+            },
+            False,
+        ),
+    ]
+
+
+def test_rest_client_reuses_existing_repository_label() -> None:
+    class RecordingApi(GitHubApi):
+        def __init__(self) -> None:
+            super().__init__(
+                api_url=EXPECTED_API_URL,
+                repository=EXPECTED_REPOSITORY,
+                token="not-a-real-token",
+                allow_mutations=True,
+            )
+            self.requests: list[tuple[object, ...]] = []
+
+        def _request(
+            self,
+            method: str,
+            path: str,
+            payload: dict[str, object] | None = None,
+            *,
+            allow_not_found: bool = False,
+        ) -> object:
+            self.requests.append((method, path, payload, allow_not_found))
+            return {"name": "NIGHTLY FAILURE"}
+
+    api = RecordingApi()
+
+    api.ensure_label(
+        name=NIGHTLY_FAILURE_LABEL,
+        color=NIGHTLY_FAILURE_LABEL_COLOR,
+        description=NIGHTLY_FAILURE_LABEL_DESCRIPTION,
+    )
+
+    assert api.requests == [
+        (
+            "GET",
+            "/repos/NVIDIA/TensorRT-Model-Connect/labels/Nightly%20Failure",
+            None,
+            True,
+        )
+    ]
+
+
+def test_rest_client_adds_label_without_replacing_existing_labels() -> None:
+    class RecordingApi(GitHubApi):
+        def __init__(self) -> None:
+            super().__init__(
+                api_url=EXPECTED_API_URL,
+                repository=EXPECTED_REPOSITORY,
+                token="not-a-real-token",
+                allow_mutations=True,
+            )
+            self.request: tuple[object, ...] | None = None
+
+        def _request(
+            self,
+            method: str,
+            path: str,
+            payload: dict[str, object] | None = None,
+            *,
+            allow_not_found: bool = False,
+        ) -> object:
+            self.request = (method, path, payload, allow_not_found)
+            return [
+                {"name": "bug"},
+                {"name": "human-triage"},
+                {"name": NIGHTLY_FAILURE_LABEL},
+            ]
+
+    api = RecordingApi()
+
+    api.add_issue_labels(55, [NIGHTLY_FAILURE_LABEL])
+
+    assert api.request == (
+        "POST",
+        "/repos/NVIDIA/TensorRT-Model-Connect/issues/55/labels",
+        {"labels": [NIGHTLY_FAILURE_LABEL]},
+        False,
+    )
+
+
+def test_rest_client_rejects_an_incomplete_add_labels_response() -> None:
+    class DroppingApi(GitHubApi):
+        def _request(
+            self,
+            method: str,
+            path: str,
+            payload: dict[str, object] | None = None,
+            *,
+            allow_not_found: bool = False,
+        ) -> object:
+            return [{"name": "bug"}]
+
+    api = DroppingApi(
+        api_url=EXPECTED_API_URL,
+        repository=EXPECTED_REPOSITORY,
+        token="not-a-real-token",
+        allow_mutations=True,
+    )
+
+    with pytest.raises(TrackerError, match="did not apply issue labels"):
+        api.add_issue_labels(55, [NIGHTLY_FAILURE_LABEL])
+
+
+def test_create_repairs_any_labels_dropped_by_github() -> None:
+    class DroppingApi(FakeApi):
+        def create_issue(self, payload: dict[str, object]) -> dict[str, object]:
+            self.calls.append(("create_issue", payload))
+            return {
+                "number": 101,
+                "state": "open",
+                "labels": [],
+                "html_url": "https://github.com/NVIDIA/TensorRT-Model-Connect/issues/101",
+            }
+
+    api = DroppingApi()
+
+    result = reconcile(_run(), api, apply=True)
+
+    assert result.action == "created"
+    assert api.mutations[-1] == (
+        "add_issue_labels",
+        101,
+        ["bug", NIGHTLY_FAILURE_LABEL],
+    )
 
 
 def test_rest_client_refuses_to_send_token_to_another_host_or_repository() -> None:
