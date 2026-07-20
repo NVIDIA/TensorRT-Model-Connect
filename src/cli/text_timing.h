@@ -14,7 +14,7 @@
 
 namespace trtmc::cli {
 
-struct TextTimingSample {
+struct TextTimingPoint {
     double prefill_ms{0.0};
     double decode_ms{0.0};
     std::size_t generated_tokens{0};
@@ -33,7 +33,7 @@ inline bool text_timing_available(double prefill_ms, double decode_ms) noexcept 
 }
 
 inline TextBenchmarkMetrics
-summarize_text_benchmark(const std::vector<TextTimingSample>& samples) noexcept {
+summarize_text_benchmark(const std::vector<TextTimingPoint>& samples) noexcept {
     if (samples.empty())
         return {};
 

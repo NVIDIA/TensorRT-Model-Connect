@@ -499,7 +499,7 @@ int cmd_run(const CliArgs& args) {
         for (int w = 0; w < warmup_n; ++w)
             pipeline->generate(prompt, cfg);
 
-        std::vector<trtmc::cli::TextTimingSample> samples;
+        std::vector<trtmc::cli::TextTimingPoint> samples;
         samples.reserve(static_cast<std::size_t>(bench_n));
 
         for (int r = 0; r < bench_n; ++r) {

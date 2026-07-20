@@ -42,7 +42,7 @@ void test_normal_timing_keeps_numeric_output() {
 
 void test_zero_timing_is_explicitly_unavailable() {
     const auto metrics =
-        trtmc::cli::summarize_text_benchmark({trtmc::cli::TextTimingSample{0.0, 0.0, 32}});
+        trtmc::cli::summarize_text_benchmark({trtmc::cli::TextTimingPoint{0.0, 0.0, 32}});
     check(!metrics.timing_available, "zero timing is unavailable");
     check(trtmc::cli::format_text_benchmark(metrics) ==
               "[trtmc.benchmark] prefill_ms=unavailable decode_ms=unavailable "
@@ -57,7 +57,7 @@ void test_zero_timing_is_explicitly_unavailable() {
 void test_non_finite_timing_is_explicitly_unavailable() {
     const double nan = std::numeric_limits<double>::quiet_NaN();
     const double infinity = std::numeric_limits<double>::infinity();
-    for (const auto& sample : std::vector<trtmc::cli::TextTimingSample>{
+    for (const auto& sample : std::vector<trtmc::cli::TextTimingPoint>{
              {nan, 10.0, 4},
              {1.0, nan, 4},
              {infinity, 10.0, 4},
