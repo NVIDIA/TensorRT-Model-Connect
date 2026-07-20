@@ -295,9 +295,8 @@ print("load-only-ok")
     )
 
 
-def _verify_installed_python_api(bundle: Path, cwd: Path) -> None:
+def _installed_package_payload(cwd: Path) -> tuple[Path, Path, Path]:
     installed_python = _required_executable("TRTMC_INSTALLED_PYTHON")
-    installed_binary = _required_executable("TRTMC_INSTALLED_BINARY")
     script = """
 import json
 import pathlib
@@ -308,11 +307,114 @@ repo = pathlib.Path(sys.argv[1]).resolve()
 module = pathlib.Path(tensorrt_model_connect.__file__).resolve()
 if module == repo or repo in module.parents:
     raise SystemExit(f"source checkout leaked into installed-package proof: {module}")
-pipeline = tensorrt_model_connect.Pipeline(sys.argv[2], binary=sys.argv[3])
-generated = pipeline(sys.argv[4], max_new_tokens=8, timeout=600)
+install_root = pathlib.Path(sys.prefix).resolve(strict=True)
+if install_root not in module.parents:
+    raise SystemExit(
+        f"installed module is outside the selected Python environment: {module} not below {install_root}"
+    )
+package = module.parent
+pipeline = tensorrt_model_connect.Pipeline("unused-provenance-probe.trtfb")
+binary = pathlib.Path(pipeline.binary).resolve(strict=True)
+expected_binary = (package / "bin" / "trtmc").resolve(strict=True)
+if binary != expected_binary:
+    raise SystemExit(
+        f"installed Python API did not select its bundled executable: {binary} != {expected_binary}"
+    )
+cores = {path.resolve(strict=True) for path in binary.parent.glob("libtrtmc_core.so*")}
+if len(cores) != 1:
+    raise SystemExit(f"installed package has no bundled libtrtmc_core beside {binary}")
+core = cores.pop()
+for path in (binary, core):
+    if (
+        path == repo
+        or repo in path.parents
+        or install_root not in path.parents
+        or package not in path.parents
+    ):
+        raise SystemExit(f"installed-package native payload escaped its package root: {path}")
+print(json.dumps({
+    "module": str(module),
+    "install_root": str(install_root),
+    "binary": str(binary),
+    "core": str(core),
+}, sort_keys=True))
+"""
+    clean_env = os.environ.copy()
+    clean_env.pop("PYTHONPATH", None)
+    result = _run(
+        [str(installed_python), "-c", script, str(_REPO_ROOT)],
+        timeout=300,
+        cwd=cwd,
+        env=clean_env,
+    )
+    proof = json.loads(result.stdout.splitlines()[-1])
+    binary = Path(proof["binary"]).resolve(strict=True)
+    core = Path(proof["core"]).resolve(strict=True)
+    for native_path in (binary, core):
+        assert native_path != _REPO_ROOT and _REPO_ROOT not in native_path.parents
+    return installed_python, binary, core
+
+
+def _verify_installed_python_api(
+    bundle: Path,
+    cwd: Path,
+    installed_python: Path,
+    expected_binary: Path,
+    expected_core: Path,
+) -> None:
+    script = """
+import json
+import os
+import pathlib
+import re
+import subprocess
+import sys
+import tensorrt_model_connect
+
+repo = pathlib.Path(sys.argv[1]).resolve()
+pipeline = tensorrt_model_connect.Pipeline(sys.argv[2])
+binary = pathlib.Path(pipeline.binary).resolve(strict=True)
+expected_binary = pathlib.Path(sys.argv[4]).resolve(strict=True)
+expected_core = pathlib.Path(sys.argv[5]).resolve(strict=True)
+if binary != expected_binary:
+    raise SystemExit(f"installed Python API selected the wrong executable: {binary}")
+
+# Do not repair the wheel's loader path. Remove source-tree entries while
+# preserving the host TensorRT/CUDA paths, then require the executable's own
+# $ORIGIN RUNPATH to resolve its bundled core.
+clean_library_path = []
+for raw_path in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep):
+    if not raw_path:
+        continue
+    path = pathlib.Path(raw_path).expanduser().resolve()
+    if path == repo or repo in path.parents:
+        continue
+    clean_library_path.append(str(path))
+os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(clean_library_path)
+linked = subprocess.run(
+    ["ldd", str(binary)], check=True, capture_output=True, text=True
+).stdout.splitlines()
+pattern = re.compile(r"^\\s*libtrtmc_core\\.so(?:\\.[^ ]+)?\\s+=>\\s+")
+core_lines = [line for line in linked if pattern.match(line)]
+if len(core_lines) != 1 or " (" not in core_lines[0]:
+    raise SystemExit(
+        "installed executable did not resolve exactly one bundled libtrtmc_core: "
+        + repr(linked)
+    )
+loaded_core = pathlib.Path(core_lines[0].split("=>", 1)[1].rsplit(" (", 1)[0].strip()).resolve(
+    strict=True
+)
+if loaded_core != expected_core:
+    raise SystemExit(f"installed executable loaded the wrong libtrtmc_core: {loaded_core}")
+
+generated = pipeline(sys.argv[3], max_new_tokens=8, timeout=600)
 if not generated.strip():
     raise SystemExit("installed Python API returned an empty response")
-print(json.dumps({"module": str(module), "generated": generated}, sort_keys=True))
+print(json.dumps({
+    "binary": str(binary),
+    "core": str(loaded_core),
+    "generated": generated,
+}, sort_keys=True))
 """
     clean_env = os.environ.copy()
     clean_env.pop("PYTHONPATH", None)
@@ -323,8 +425,9 @@ print(json.dumps({"module": str(module), "generated": generated}, sort_keys=True
             script,
             str(_REPO_ROOT),
             str(bundle),
-            str(installed_binary),
             _PROMPT,
+            str(expected_binary),
+            str(expected_core),
         ],
         timeout=900,
         cwd=cwd,
@@ -332,6 +435,8 @@ print(json.dumps({"module": str(module), "generated": generated}, sort_keys=True
     )
     proof = json.loads(result.stdout.splitlines()[-1])
     assert proof["generated"].strip()
+    assert Path(proof["binary"]).resolve(strict=True) == expected_binary
+    assert Path(proof["core"]).resolve(strict=True) == expected_core
     print("installed-package proof:", json.dumps(proof, sort_keys=True))
 
 
@@ -502,9 +607,16 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
     """Qualify the unchanged public workflow and its direct EdgeLLM delegation."""
 
     _require_supported_a100()
-    binary = _required_executable("TRTMC_BINARY")
     outside_checkout = tmp_path / "outside-checkout"
     outside_checkout.mkdir()
+    installed_python, installed_binary, installed_core = _installed_package_payload(
+        outside_checkout
+    )
+    binary = _required_executable("TRTMC_BINARY")
+    assert binary == installed_binary, (
+        "TRTMC_BINARY must be the executable bundled in the installed wheel: "
+        f"{binary} != {installed_binary}"
+    )
 
     build_env = os.environ.copy()
     configured_edge_build: Path | None = None
@@ -574,8 +686,10 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
         / f"{descriptor['profile_id']}-{descriptor['artifact']['tree_sha256']}"
     )
     core_library_value = os.environ.get("TRTMC_CORE_LIBRARY", "").strip()
-    core_library = Path(core_library_value or binary.parent / "libtrtmc_core.so").resolve(
-        strict=True
+    core_library = Path(core_library_value or installed_core).resolve(strict=True)
+    assert core_library == installed_core, (
+        "TRTMC_CORE_LIBRARY must be the core bundled in the installed wheel: "
+        f"{core_library} != {installed_core}"
     )
     runtime_env = os.environ.copy()
     runtime_env["LD_LIBRARY_PATH"] = os.pathsep.join(
@@ -632,7 +746,13 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
     assert warm_rows[0]["token_ids"] == cold_rows[0]["token_ids"]
     assert warm_rows[0]["generated"] == cold_rows[0]["generated"]
 
-    _verify_installed_python_api(bundle, outside_checkout)
+    _verify_installed_python_api(
+        bundle,
+        outside_checkout,
+        installed_python,
+        installed_binary,
+        installed_core,
+    )
 
     if configured_edge_build is None:
         pytest.fail(
