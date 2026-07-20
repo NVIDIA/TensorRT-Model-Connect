@@ -59,6 +59,7 @@ constexpr const char* kProcessCompatibilityFingerprint =
 constexpr int32_t kMaxInputLength = 1024;
 constexpr int32_t kMaxCacheLength = 4096;
 constexpr int32_t kMaxBatchSize = 4;
+constexpr int32_t kVocabSize = 151936;
 // Edge-LLM's sampling implementation bounds top-k scratch space at 1024 for
 // this supported profile. This is capsule policy, not part of the generic MC
 // package-private factory contract.
@@ -312,10 +313,7 @@ validate_metadata(const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1
     require_int_value(limits, "max_cache_length", kMaxCacheLength,
                       "implementation metadata limits");
     require_int_value(limits, "max_batch_size", kMaxBatchSize, "implementation metadata limits");
-    const int32_t vocab_size =
-        require_int32(limits, "vocab_size", "implementation metadata limits");
-    if (vocab_size <= 0)
-        throw std::runtime_error("implementation metadata vocab_size must be positive");
+    require_int_value(limits, "vocab_size", kVocabSize, "implementation metadata limits");
 
     const auto& versions = require_object(root, "versions", "implementation metadata");
     require_exact_keys(versions,
@@ -330,7 +328,7 @@ validate_metadata(const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1
                          "implementation metadata versions");
     require_string_value(versions, "cuda", kCudaVersion, "implementation metadata versions");
 
-    return CapsuleMetadata{vocab_size, kMinimumMemoryMiB};
+    return CapsuleMetadata{kVocabSize, kMinimumMemoryMiB};
 }
 
 fs::path require_directory(const fs::path& path, const std::string& description) {

@@ -334,6 +334,10 @@ def test_fake_runtime_exports_exact_identity_and_validates_create_metadata(
     invalid_metadata["target"]["gpu_name"] = "NVIDIA H100 80GB HBM3"
     assert b"gpu_name" in _rejected_create(artifact, invalid_metadata)
 
+    invalid_metadata = json.loads(metadata_bytes)
+    invalid_metadata["limits"]["vocab_size"] = 32000
+    assert b"vocab_size" in _rejected_create(artifact, invalid_metadata)
+
 
 def test_runtime_compile_binding_matches_selected_manifest_and_profile(
     tmp_path: Path, fake_runtime: Path
