@@ -10,13 +10,52 @@
 #include "trtmc/tokenizer.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 
 namespace trtmc {
 
 namespace {
+
+using OmniClock = std::chrono::steady_clock;
+
+struct OmniStageTotals {
+    double input_preparation_ms{0.0};
+    double thinker_and_transfer_ms{0.0};
+    double worker_start_ms{0.0};
+    double talker_ms{0.0};
+    double ipc_ms{0.0};
+    double code2wav_and_transfer_ms{0.0};
+    double output_materialization_ms{0.0};
+};
+
+double elapsed_ms(OmniClock::time_point start, OmniClock::time_point end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+bool omni_stage_timing_enabled() {
+    const char* value = std::getenv("TRTMC_QWEN3_OMNI_STAGE_TIMING");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+void report_omni_stage_timing(const OmniStageTotals& stages, double total_ms) {
+    if (!omni_stage_timing_enabled())
+        return;
+    std::ostringstream timing;
+    timing << "[trtmc.qwen3_omni_timing.json] {\"input_preparation_ms\":"
+           << stages.input_preparation_ms
+           << ",\"thinker_and_transfer_ms\":" << stages.thinker_and_transfer_ms
+           << ",\"worker_start_ms\":" << stages.worker_start_ms
+           << ",\"talker_ms\":" << stages.talker_ms << ",\"ipc_ms\":" << stages.ipc_ms
+           << ",\"code2wav_and_transfer_ms\":" << stages.code2wav_and_transfer_ms
+           << ",\"output_materialization_ms\":" << stages.output_materialization_ms
+           << ",\"total_ms\":" << total_ms << '}';
+    std::cerr << timing.str() << std::endl;
+}
 
 std::string format_omni_chat_prompt(const std::string& prompt) {
     return "<|im_start|>system\n"
@@ -42,6 +81,9 @@ OmniPipeline::OmniPipeline(std::unique_ptr<TrtModule> thinker,
         throw std::runtime_error("OmniPipeline: invalid thinker module");
     if (!thinker_state_ || !thinker_state_->ok())
         throw std::runtime_error("OmniPipeline: invalid thinker cache");
+    talker_runtime_ = std::make_unique<Qwen3OmniTalkerRuntime>(
+        config_->hf_python, config_->talker_model_id, config_->talker_model_revision,
+        config_->talker_n_codebooks, config_->code2wav_max_frames);
 }
 
 OmniPipeline::~OmniPipeline() = default;
@@ -109,7 +151,9 @@ std::vector<int32_t> OmniPipeline::run_thinker(const std::vector<int32_t>& input
 }
 
 std::vector<float> OmniPipeline::run_code2wav(const std::vector<int32_t>& codec_tokens,
-                                              int32_t n_codebooks, int32_t n_frames) {
+                                              int32_t n_codebooks, int32_t n_frames,
+                                              double& code2wav_and_transfer_ms,
+                                              double& output_materialization_ms) {
     if (!code2wav_) {
         throw std::runtime_error("OmniPipeline: required Code2Wav engine is unavailable");
     }
@@ -128,7 +172,9 @@ std::vector<float> OmniPipeline::run_code2wav(const std::vector<int32_t>& codec_
     TensorMap inputs;
     inputs["codec_tokens"] = codes_tensor;
 
+    const auto code2wav_start = OmniClock::now();
     TensorMap outputs = code2wav_->forward(inputs);
+    code2wav_and_transfer_ms = elapsed_ms(code2wav_start, OmniClock::now());
 
     auto it = outputs.find("waveform");
     if (it == outputs.end()) {
@@ -141,8 +187,10 @@ std::vector<float> OmniPipeline::run_code2wav(const std::vector<int32_t>& codec_
     const auto copy_n =
         code2wav_output_samples(*config_, actual_frames, static_cast<std::size_t>(total_out));
 
+    const auto materialize_start = OmniClock::now();
     std::vector<float> waveform(static_cast<std::size_t>(copy_n));
     std::memcpy(waveform.data(), wt.data, copy_n * sizeof(float));
+    output_materialization_ms = elapsed_ms(materialize_start, OmniClock::now());
 
     std::cerr << "[trtmc] Omni Code2Wav: " << actual_frames << " frames -> " << waveform.size()
               << " samples" << std::endl;
@@ -150,9 +198,13 @@ std::vector<float> OmniPipeline::run_code2wav(const std::vector<int32_t>& codec_
 }
 
 AudioResult OmniPipeline::generate_audio(const std::string& prompt, const GenerateConfig& cfg) {
+    const auto total_start = OmniClock::now();
+    OmniStageTotals stages;
+    const auto input_start = OmniClock::now();
     std::vector<int32_t> input_ids;
     if (tokenizer_)
         input_ids = tokenizer_->encode(format_omni_chat_prompt(prompt));
+    stages.input_preparation_ms = elapsed_ms(input_start, OmniClock::now());
 
     int32_t max_tokens = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : 768;
 
@@ -162,21 +214,29 @@ AudioResult OmniPipeline::generate_audio(const std::string& prompt, const Genera
     std::cerr << "[trtmc] Omni: starting pipeline with " << input_ids.size() << " input tokens"
               << std::endl;
 
+    const auto thinker_start = OmniClock::now();
     auto text_tokens = run_thinker(input_ids, max_tokens);
+    stages.thinker_and_transfer_ms = elapsed_ms(thinker_start, OmniClock::now());
     if (text_tokens.empty()) {
         std::cerr << "[trtmc] Omni: Thinker produced no tokens" << std::endl;
+        report_omni_stage_timing(stages, elapsed_ms(total_start, OmniClock::now()));
         return result;
     }
 
     if (!tokenizer_)
         throw std::runtime_error("OmniPipeline: tokenizer is required for official Talker input");
+    const auto text_start = OmniClock::now();
     const std::string assistant_text = tokenizer_->decode(text_tokens);
+    stages.output_materialization_ms += elapsed_ms(text_start, OmniClock::now());
     std::cerr << "[trtmc] Omni Thinker text: " << assistant_text << std::endl;
 
-    auto talker_result = run_qwen3_omni_official_talker(
-        config_->hf_python, config_->talker_model_id, config_->talker_model_revision, prompt,
-        assistant_text, config_->talker_n_codebooks, config_->code2wav_max_frames);
+    auto talker_result = talker_runtime_->run(prompt, assistant_text);
+    stages.worker_start_ms = talker_result.worker_start_ms;
+    stages.talker_ms = talker_result.talker_ms;
+    stages.ipc_ms = talker_result.ipc_ms;
+    stages.output_materialization_ms += talker_result.output_materialization_ms;
     if (talker_result.exit_code != 0) {
+        report_omni_stage_timing(stages, elapsed_ms(total_start, OmniClock::now()));
         throw std::runtime_error("OmniPipeline: official Talker failed: " +
                                  talker_result.stderr_data);
     }
@@ -187,8 +247,11 @@ AudioResult OmniPipeline::generate_audio(const std::string& prompt, const Genera
         throw std::runtime_error("OmniPipeline: official Talker produced no codec frames");
     std::cerr << "[trtmc] Omni official Talker: " << codec_plan.n_frames << " frames x "
               << codec_plan.n_codebooks << " codebooks" << std::endl;
+    double waveform_materialization_ms = 0.0;
     auto waveform =
-        run_code2wav(talker_result.frame_major_codes, codec_plan.n_codebooks, codec_plan.n_frames);
+        run_code2wav(talker_result.frame_major_codes, codec_plan.n_codebooks, codec_plan.n_frames,
+                     stages.code2wav_and_transfer_ms, waveform_materialization_ms);
+    stages.output_materialization_ms += waveform_materialization_ms;
     if (!waveform.empty()) {
         result.samples = std::move(waveform);
         result.num_samples = static_cast<int32_t>(result.samples.size());
@@ -200,6 +263,7 @@ AudioResult OmniPipeline::generate_audio(const std::string& prompt, const Genera
                       : 0.0F)
               << "s @ " << result.sample_rate << " Hz)" << std::endl;
 
+    report_omni_stage_timing(stages, elapsed_ms(total_start, OmniClock::now()));
     return result;
 }
 

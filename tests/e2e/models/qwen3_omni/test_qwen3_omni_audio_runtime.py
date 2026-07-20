@@ -3,14 +3,23 @@
 
 from __future__ import annotations
 
+import io
 import struct
 
+import numpy as np
 import pytest
 
 from tensorrt_model_connect.families.qwen3_omni.audio_runtime import (
     TalkerRequest,
+    _WORKER_ERROR,
+    _WORKER_MAGIC,
+    _WORKER_OK,
+    _WORKER_READY,
+    _WORKER_REQUEST_HEADER,
+    _WORKER_RESPONSE_HEADER,
     _chatml,
     _read_request,
+    _serve_worker,
 )
 from tensorrt_model_connect.config import ModelConfig
 from tensorrt_model_connect.families.qwen3_omni.plugin import (
@@ -25,6 +34,27 @@ def _payload(prompt: str, assistant: str) -> bytes:
     return (
         struct.pack("<II", len(prompt_bytes), len(assistant_bytes)) + prompt_bytes + assistant_bytes
     )
+
+
+def _worker_input(*requests: bytes) -> io.BytesIO:
+    framed = bytearray()
+    for request in requests:
+        framed.extend(_WORKER_REQUEST_HEADER.pack(_WORKER_MAGIC, len(request)))
+        framed.extend(request)
+    framed.extend(_WORKER_REQUEST_HEADER.pack(_WORKER_MAGIC, 0))
+    return io.BytesIO(framed)
+
+
+def _worker_responses(payload: bytes) -> list[tuple[int, bytes, float]]:
+    stream = io.BytesIO(payload)
+    responses = []
+    while header := stream.read(_WORKER_RESPONSE_HEADER.size):
+        magic, status, size, talker_ms = _WORKER_RESPONSE_HEADER.unpack(header)
+        assert magic == _WORKER_MAGIC
+        body = stream.read(size)
+        assert len(body) == size
+        responses.append((status, body, talker_ms))
+    return responses
 
 
 def test_talker_request_preserves_prompt_and_trims_generated_stop_marker() -> None:
@@ -49,6 +79,71 @@ def test_talker_chatml_contains_model_roles_and_exact_text() -> None:
     assert "<|im_start|>system\n" in rendered
     assert "<|im_start|>user\nquestion<|im_end|>" in rendered
     assert "<|im_start|>assistant\nanswer<|im_end|>" in rendered
+
+
+def test_persistent_talker_worker_initializes_once_for_multiple_requests() -> None:
+    lifecycle = {"initializations": 0, "requests": 0}
+
+    class FakeTalker:
+        def __init__(self, model_id: str, revision: str, max_frames: int) -> None:
+            assert (model_id, revision, max_frames) == ("model", "revision", 4)
+            lifecycle["initializations"] += 1
+
+        def generate_codes(self, request: TalkerRequest) -> np.ndarray:
+            lifecycle["requests"] += 1
+            value = lifecycle["requests"]
+            assert request.assistant_text in {"first", "second"}
+            return np.full((1, 2), value, dtype="<i4")
+
+    output = io.BytesIO()
+    _serve_worker(
+        "model",
+        "revision",
+        4,
+        _worker_input(_payload("prompt", "first"), _payload("prompt", "second")),
+        output,
+        FakeTalker,
+    )
+
+    responses = _worker_responses(output.getvalue())
+    assert [response[0] for response in responses] == [_WORKER_READY, _WORKER_OK, _WORKER_OK]
+    assert np.frombuffer(responses[1][1], dtype="<i4").tolist() == [1, 1]
+    assert np.frombuffer(responses[2][1], dtype="<i4").tolist() == [2, 2]
+    assert lifecycle == {"initializations": 1, "requests": 2}
+
+
+def test_persistent_talker_worker_reports_request_error_and_continues() -> None:
+    lifecycle = {"initializations": 0, "requests": 0}
+
+    class RecoveringTalker:
+        def __init__(self, _model_id: str, _revision: str, _max_frames: int) -> None:
+            lifecycle["initializations"] += 1
+
+        def generate_codes(self, _request: TalkerRequest) -> np.ndarray:
+            lifecycle["requests"] += 1
+            if lifecycle["requests"] == 1:
+                raise RuntimeError("intentional request failure")
+            return np.array([[7, 8]], dtype="<i4")
+
+    output = io.BytesIO()
+    _serve_worker(
+        "model",
+        "",
+        4,
+        _worker_input(_payload("prompt", "first"), _payload("prompt", "second")),
+        output,
+        RecoveringTalker,
+    )
+
+    responses = _worker_responses(output.getvalue())
+    assert [response[0] for response in responses] == [
+        _WORKER_READY,
+        _WORKER_ERROR,
+        _WORKER_OK,
+    ]
+    assert b"intentional request failure" in responses[1][1]
+    assert np.frombuffer(responses[2][1], dtype="<i4").tolist() == [7, 8]
+    assert lifecycle == {"initializations": 1, "requests": 2}
 
 
 def test_talker_model_locator_pins_hugging_face_snapshot(tmp_path) -> None:

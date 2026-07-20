@@ -24,6 +24,8 @@
 
 namespace trtmc {
 
+class Qwen3OmniTalkerRuntime;
+
 class OmniPipeline final : public IPipeline {
   public:
     OmniPipeline(std::unique_ptr<TrtModule> thinker,
@@ -42,12 +44,14 @@ class OmniPipeline final : public IPipeline {
     void run_thinker_step(int32_t token_id, std::vector<float>& logits);
     std::vector<int32_t> run_thinker(const std::vector<int32_t>& input_ids, int32_t max_tokens);
     std::vector<float> run_code2wav(const std::vector<int32_t>& codec_tokens, int32_t n_codebooks,
-                                    int32_t n_frames);
+                                    int32_t n_frames, double& code2wav_and_transfer_ms,
+                                    double& output_materialization_ms);
 
     std::unique_ptr<TrtModule> thinker_;
     std::unique_ptr<Qwen3OmniInferenceState> thinker_state_;
     std::unique_ptr<TrtModule> code2wav_;
     std::unique_ptr<OmniConfig> config_;
+    std::unique_ptr<Qwen3OmniTalkerRuntime> talker_runtime_;
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;

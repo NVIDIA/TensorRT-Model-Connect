@@ -18,7 +18,7 @@ def test_qwen3_omni_runtime_feeds_generated_text_to_official_talker() -> None:
     source = (ROOT / "src/runtime/models/qwen3_omni/pipeline.cpp").read_text()
 
     assert "tokenizer_->decode(text_tokens)" in source
-    assert "run_qwen3_omni_official_talker" in source
+    assert "talker_runtime_->run(prompt, assistant_text)" in source
     assert "format_omni_chat_prompt(prompt)" in source
     assert "token == config_->thinker_eos_token_id" in source
     assert 'outputs.find("hidden_state")' not in source
@@ -59,6 +59,6 @@ def test_qwen3_omni_runtime_has_no_retired_talker_recurrent_state() -> None:
 
     assert "Qwen3OmniKvCache" in plugin
     assert "Qwen3OmniRecurrentState" not in plugin
-    assert 'runtime/models/qwen3_omni/recurrent_state.h' not in plugin
+    assert "runtime/models/qwen3_omni/recurrent_state.h" not in plugin
     assert not (runtime / "recurrent_state.h").exists()
     assert not (runtime / "recurrent_state.cpp").exists()
