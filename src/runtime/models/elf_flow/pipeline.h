@@ -28,6 +28,7 @@ class ElfFlowPipeline final : public IPipeline {
                     std::string model_id_str = "",
                     std::unique_ptr<TrtModule> text_encoder = nullptr, float latent_mean = 0.0F,
                     float latent_std = 1.0F, int32_t encoder_pad_token_id = 0);
+    ~ElfFlowPipeline() override;
 
     TextResult generate(const std::string& prompt, const GenerateConfig& cfg = {}) override;
     int32_t default_max_new_tokens() const override { return 0; }
@@ -75,6 +76,7 @@ class ElfFlowPipeline final : public IPipeline {
         std::vector<float> z;
         std::vector<float> x_pred;
     };
+    struct DeviceSamplingWorkspace;
 
     static const Tensor* select_output(const TensorMap& outputs, bool decoder_mode);
     static std::vector<float> copy_tensor_data(const Tensor& tensor);
@@ -130,6 +132,29 @@ class ElfFlowPipeline final : public IPipeline {
     void run_sampling(SamplingWorkspace& workspace, const GenerateConfig& cfg,
                       const ConditionState& cond, const SamplingOptions& options,
                       const std::vector<float>& steps);
+    bool supports_device_sampling() const;
+    DeviceSamplingWorkspace&
+    prepare_device_sampling_workspace(const SamplingWorkspace& host_workspace,
+                                      const ConditionState& cond,
+                                      const std::vector<float>& sde_noises);
+    std::vector<float> make_device_sde_noises(const GenerateConfig& cfg,
+                                              const SamplingOptions& options,
+                                              const std::vector<float>& steps) const;
+    void enqueue_device_forward(DeviceSamplingWorkspace& workspace, float timestep,
+                                float self_cond_cfg_scale, bool decoder_mode, bool zero_condition,
+                                bool zero_self_condition);
+    void run_device_denoise_step(DeviceSamplingWorkspace& workspace, const SamplingOptions& options,
+                                 float timestep, float next_timestep);
+    void run_device_sampling(DeviceSamplingWorkspace& workspace, const SamplingOptions& options,
+                             const std::vector<float>& steps);
+    std::vector<int32_t> decode_device_tokens(DeviceSamplingWorkspace& workspace,
+                                              const SamplingOptions& options, int32_t eos_token_id,
+                                              int32_t prefix_tokens_to_drop,
+                                              int32_t max_output_tokens);
+    TextResult make_device_text_result(DeviceSamplingWorkspace& workspace,
+                                       const GenerateConfig& cfg, const SamplingOptions& options,
+                                       bool has_condition, int32_t eos_token_id,
+                                       int32_t cond_prefix_len, double sampling_ms);
     TextResult make_text_result(const SamplingWorkspace& workspace, const GenerateConfig& cfg,
                                 const SamplingOptions& options, bool has_condition,
                                 int32_t eos_token_id, int32_t cond_prefix_len, double sampling_ms);
@@ -158,6 +183,7 @@ class ElfFlowPipeline final : public IPipeline {
     int32_t encoder_pad_token_id_{0};
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
+    std::unique_ptr<DeviceSamplingWorkspace> device_sampling_workspace_;
 };
 
 } // namespace trtmc

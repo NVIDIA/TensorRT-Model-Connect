@@ -5,7 +5,10 @@
 
 #include "runtime/models/elf_flow/pipeline.h"
 
+#include "runtime/models/elf_flow/sampling_kernels.h"
+
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -130,7 +133,76 @@ float resolve_nonnegative_float(float value, float fallback) {
     return fallback;
 }
 
+void check_cuda(cudaError_t error, const char* operation) {
+    if (error == cudaSuccess)
+        return;
+    throw std::runtime_error(std::string("ElfFlowPipeline: ") + operation +
+                             " failed: " + cudaGetErrorString(error));
+}
+
 } // namespace
+
+struct ElfFlowPipeline::DeviceSamplingWorkspace {
+    DeviceSamplingWorkspace(int32_t max_length, int32_t input_dim, int32_t text_dim,
+                            cudaStream_t stream_value)
+        : stream(stream_value), z({max_length, text_dim}, DType::kFloat32, stream),
+          self_condition({max_length, text_dim}, DType::kFloat32, stream),
+          z_eval({max_length, text_dim}, DType::kFloat32, stream),
+          condition({max_length, text_dim}, DType::kFloat32, stream),
+          condition_mask({max_length}, DType::kFloat32, stream),
+          model_latent({max_length, input_dim}, DType::kFloat32, stream),
+          timestep({1}, DType::kFloat32, stream), decoder_mode({1}, DType::kFloat32, stream),
+          self_cond_cfg_scale({1}, DType::kFloat32, stream),
+          conditional_denoised({max_length, text_dim}, DType::kFloat32, stream),
+          token_ids({max_length}, DType::kInt32, stream) {}
+
+    bool ok() const {
+        const std::array<const DeviceTensor*, 11> required = {
+            &z,
+            &self_condition,
+            &z_eval,
+            &condition,
+            &condition_mask,
+            &model_latent,
+            &timestep,
+            &decoder_mode,
+            &self_cond_cfg_scale,
+            &conditional_denoised,
+            &token_ids,
+        };
+        return std::all_of(required.begin(), required.end(),
+                           [](const DeviceTensor* tensor) { return tensor->ok(); });
+    }
+
+    void ensure_sde_noises(std::size_t numel) {
+        if (numel == sde_noise_numel)
+            return;
+        sde_noises = numel == 0
+                         ? DeviceTensor{}
+                         : DeviceTensor({static_cast<int64_t>(numel)}, DType::kFloat32, stream);
+        sde_noise_numel = numel;
+        if (numel > 0 && !sde_noises.ok())
+            throw std::runtime_error("ElfFlowPipeline: failed to allocate device SDE noise");
+    }
+
+    cudaStream_t stream{nullptr};
+    DeviceTensor z;
+    DeviceTensor self_condition;
+    DeviceTensor z_eval;
+    DeviceTensor condition;
+    DeviceTensor condition_mask;
+    DeviceTensor model_latent;
+    DeviceTensor timestep;
+    DeviceTensor decoder_mode;
+    DeviceTensor self_cond_cfg_scale;
+    DeviceTensor conditional_denoised;
+    DeviceTensor token_ids;
+    DeviceTensor sde_noises;
+    std::size_t sde_noise_numel{0};
+    float host_timestep{0.0F};
+    float host_decoder_mode{0.0F};
+    float host_self_cond_cfg_scale{1.0F};
+};
 
 ElfFlowPipeline::ElfFlowPipeline(std::unique_ptr<TrtModule> model, int32_t max_length,
                                  int32_t max_input_length, int32_t input_dim, int32_t text_dim,
@@ -151,6 +223,8 @@ ElfFlowPipeline::ElfFlowPipeline(std::unique_ptr<TrtModule> model, int32_t max_l
     configure_model_dimensions();
     configure_text_encoder();
 }
+
+ElfFlowPipeline::~ElfFlowPipeline() = default;
 
 void ElfFlowPipeline::configure_model_dimensions() {
     max_length_ = infer_static_dim(*model_, "latent", 0, max_length_);
@@ -697,6 +771,215 @@ void ElfFlowPipeline::run_sampling(SamplingWorkspace& workspace, const GenerateC
         run_final_step(workspace, cond, options, steps);
 }
 
+bool ElfFlowPipeline::supports_device_sampling() const {
+    if (!model_->has_input("latent") || !model_->has_input("timestep") ||
+        !model_->has_input("decoder_mode") || !model_->has_output("denoised") ||
+        !model_->has_output("decoder_logits")) {
+        return false;
+    }
+    if (model_->tensor_dtype("latent") != DType::kFloat32 ||
+        model_->tensor_dtype("denoised") != DType::kFloat32 ||
+        model_->tensor_dtype("decoder_logits") != DType::kFloat32) {
+        return false;
+    }
+    return model_->device_ptr("denoised") != nullptr &&
+           model_->device_ptr("decoder_logits") != nullptr;
+}
+
+ElfFlowPipeline::DeviceSamplingWorkspace&
+ElfFlowPipeline::prepare_device_sampling_workspace(const SamplingWorkspace& host_workspace,
+                                                   const ConditionState& cond,
+                                                   const std::vector<float>& sde_noises) {
+    if (!device_sampling_workspace_) {
+        device_sampling_workspace_ = std::make_unique<DeviceSamplingWorkspace>(
+            max_length_, input_dim_, text_dim_, model_->stream());
+    }
+    auto& workspace = *device_sampling_workspace_;
+    if (!workspace.ok())
+        throw std::runtime_error("ElfFlowPipeline: failed to allocate device sampling workspace");
+    workspace.ensure_sde_noises(sde_noises.size());
+
+    const bool copied = workspace.z.copy_from_host(host_workspace.z.data()) &&
+                        workspace.self_condition.copy_from_host(host_workspace.x_pred.data()) &&
+                        workspace.condition.copy_from_host(cond.latents.data()) &&
+                        workspace.condition_mask.copy_from_host(cond.mask.data());
+    if (!copied)
+        throw std::runtime_error("ElfFlowPipeline: failed to upload device sampling inputs");
+    if (!sde_noises.empty() && !workspace.sde_noises.copy_from_host(sde_noises.data()))
+        throw std::runtime_error("ElfFlowPipeline: failed to upload device SDE noise");
+    return workspace;
+}
+
+std::vector<float> ElfFlowPipeline::make_device_sde_noises(const GenerateConfig& cfg,
+                                                           const SamplingOptions& options,
+                                                           const std::vector<float>& steps) const {
+    if (options.sde_gamma <= 0.0F || steps.size() <= 2U)
+        return {};
+    if (!cfg.sde_noises.empty())
+        return cfg.sde_noises;
+
+    const std::size_t latent_numel =
+        static_cast<std::size_t>(max_length_) * static_cast<std::size_t>(text_dim_);
+    const std::size_t step_count = steps.size() - 2U;
+    std::vector<float> noises(step_count * latent_numel);
+    std::mt19937 rng(normalize_seed(options.seed) ^ 0x85EBCA6BU);
+    std::normal_distribution<float> normal(0.0F, denoiser_noise_scale_);
+    for (float& value : noises)
+        value = normal(rng);
+    return noises;
+}
+
+void ElfFlowPipeline::enqueue_device_forward(DeviceSamplingWorkspace& workspace, float timestep,
+                                             float self_cond_cfg_scale, bool decoder_mode,
+                                             bool zero_condition, bool zero_self_condition) {
+    elf_prepare_model_latent(static_cast<float*>(workspace.model_latent.data()),
+                             static_cast<const float*>(workspace.z_eval.data()),
+                             static_cast<const float*>(workspace.self_condition.data()),
+                             static_cast<const float*>(workspace.condition_mask.data()),
+                             max_length_, text_dim_, input_dim_, zero_condition,
+                             zero_self_condition, workspace.stream);
+    check_cuda(cudaGetLastError(), "prepare model latent kernel");
+
+    workspace.host_timestep = timestep;
+    workspace.host_decoder_mode = decoder_mode ? 1.0F : 0.0F;
+    workspace.host_self_cond_cfg_scale = self_cond_cfg_scale;
+    const bool copied =
+        workspace.timestep.copy_from_host(&workspace.host_timestep) &&
+        workspace.decoder_mode.copy_from_host(&workspace.host_decoder_mode) &&
+        workspace.self_cond_cfg_scale.copy_from_host(&workspace.host_self_cond_cfg_scale);
+    if (!copied)
+        throw std::runtime_error("ElfFlowPipeline: failed to upload engine scalar inputs");
+
+    DeviceTensorMap inputs;
+    inputs["latent"] = &workspace.model_latent;
+    inputs["timestep"] = &workspace.timestep;
+    inputs["decoder_mode"] = &workspace.decoder_mode;
+    if (model_->has_input("self_cond_cfg_scale"))
+        inputs["self_cond_cfg_scale"] = &workspace.self_cond_cfg_scale;
+    model_->forward_device_async(inputs);
+}
+
+void ElfFlowPipeline::run_device_denoise_step(DeviceSamplingWorkspace& workspace,
+                                              const SamplingOptions& options, float timestep,
+                                              float next_timestep) {
+    enqueue_device_forward(workspace, timestep, options.self_cond_cfg_scale, false, false, false);
+    const auto* denoised = static_cast<const float*>(model_->device_ptr("denoised"));
+    if (options.cfg_scale == 1.0F) {
+        elf_update_latent(static_cast<float*>(workspace.z.data()),
+                          static_cast<float*>(workspace.self_condition.data()),
+                          static_cast<const float*>(workspace.z_eval.data()), denoised,
+                          static_cast<const float*>(workspace.condition.data()),
+                          static_cast<const float*>(workspace.condition_mask.data()), timestep,
+                          next_timestep, t_eps_, max_length_, text_dim_, workspace.stream);
+        check_cuda(cudaGetLastError(), "update latent kernel");
+        return;
+    }
+
+    check_cuda(cudaMemcpyAsync(workspace.conditional_denoised.data(), denoised,
+                               workspace.conditional_denoised.nbytes(), cudaMemcpyDeviceToDevice,
+                               workspace.stream),
+               "preserve conditional denoiser output");
+    enqueue_device_forward(workspace, timestep, options.self_cond_cfg_scale, false, true, false);
+    const auto* unconditional = static_cast<const float*>(model_->device_ptr("denoised"));
+    elf_update_latent_cfg(static_cast<float*>(workspace.z.data()),
+                          static_cast<float*>(workspace.self_condition.data()),
+                          static_cast<const float*>(workspace.z_eval.data()),
+                          static_cast<const float*>(workspace.conditional_denoised.data()),
+                          unconditional, static_cast<const float*>(workspace.condition.data()),
+                          static_cast<const float*>(workspace.condition_mask.data()),
+                          options.cfg_scale, timestep, next_timestep, t_eps_, max_length_,
+                          text_dim_, workspace.stream);
+    check_cuda(cudaGetLastError(), "update CFG latent kernel");
+}
+
+void ElfFlowPipeline::run_device_sampling(DeviceSamplingWorkspace& workspace,
+                                          const SamplingOptions& options,
+                                          const std::vector<float>& steps) {
+    const std::size_t latent_numel =
+        static_cast<std::size_t>(max_length_) * static_cast<std::size_t>(text_dim_);
+    for (std::size_t i = 0; i + 2U < steps.size(); ++i) {
+        const float timestep = steps[i];
+        const float next_timestep = steps[i + 1U];
+        float evaluation_timestep = timestep;
+        if (options.sde_gamma > 0.0F) {
+            const float alpha =
+                std::clamp(1.0F - options.sde_gamma * (next_timestep - timestep), 0.0F, 1.0F);
+            evaluation_timestep = alpha * timestep;
+            const auto* noise = static_cast<const float*>(workspace.sde_noises.data()) +
+                                static_cast<std::ptrdiff_t>(i * latent_numel);
+            elf_prepare_sde_latent(static_cast<float*>(workspace.z_eval.data()),
+                                   static_cast<const float*>(workspace.z.data()), noise,
+                                   static_cast<const float*>(workspace.condition.data()),
+                                   static_cast<const float*>(workspace.condition_mask.data()),
+                                   alpha, max_length_, text_dim_, workspace.stream);
+            check_cuda(cudaGetLastError(), "prepare SDE latent kernel");
+        } else if (!workspace.z_eval.copy_from(workspace.z)) {
+            throw std::runtime_error("ElfFlowPipeline: failed to stage device latent");
+        }
+        run_device_denoise_step(workspace, options, evaluation_timestep, next_timestep);
+    }
+
+    if (steps.size() < 2U)
+        return;
+    if (!workspace.z_eval.copy_from(workspace.z))
+        throw std::runtime_error("ElfFlowPipeline: failed to stage final device latent");
+    run_device_denoise_step(workspace, options, steps[steps.size() - 2U], steps.back());
+}
+
+std::vector<int32_t> ElfFlowPipeline::decode_device_tokens(DeviceSamplingWorkspace& workspace,
+                                                           const SamplingOptions& options,
+                                                           int32_t eos_token_id,
+                                                           int32_t prefix_tokens_to_drop,
+                                                           int32_t max_output_tokens) {
+    if (!workspace.z_eval.copy_from(workspace.z))
+        throw std::runtime_error("ElfFlowPipeline: failed to stage decoder latent");
+    enqueue_device_forward(workspace, 1.0F, options.self_cond_cfg_scale, true, false, true);
+
+    const int32_t start = std::max(0, std::min(prefix_tokens_to_drop, max_length_));
+    const int32_t limit =
+        max_output_tokens > 0 ? std::min(max_length_, start + max_output_tokens) : max_length_;
+    const int32_t row_count = limit - start;
+    if (row_count <= 0)
+        return {};
+
+    const auto* logits = static_cast<const float*>(model_->device_ptr("decoder_logits"));
+    elf_argmax_rows(logits, vocab_size_, start, row_count,
+                    static_cast<int32_t*>(workspace.token_ids.data()), workspace.stream);
+    check_cuda(cudaGetLastError(), "decoder argmax kernel");
+
+    std::vector<int32_t> all_token_ids(static_cast<std::size_t>(row_count));
+    check_cuda(cudaMemcpyAsync(all_token_ids.data(), workspace.token_ids.data(),
+                               all_token_ids.size() * sizeof(int32_t), cudaMemcpyDeviceToHost,
+                               workspace.stream),
+               "download selected token IDs");
+    check_cuda(cudaStreamSynchronize(workspace.stream), "synchronize final decoder");
+
+    std::vector<int32_t> token_ids;
+    token_ids.reserve(all_token_ids.size());
+    for (int32_t token_id : all_token_ids) {
+        if (eos_token_id >= 0 && token_id == eos_token_id)
+            break;
+        token_ids.push_back(token_id);
+    }
+    return token_ids;
+}
+
+TextResult ElfFlowPipeline::make_device_text_result(DeviceSamplingWorkspace& workspace,
+                                                    const GenerateConfig& cfg,
+                                                    const SamplingOptions& options,
+                                                    bool has_condition, int32_t eos_token_id,
+                                                    int32_t cond_prefix_len, double sampling_ms) {
+    const auto decode_start = std::chrono::steady_clock::now();
+    TextResult result;
+    result.token_ids = decode_device_tokens(workspace, options, eos_token_id, cond_prefix_len,
+                                            resolve_max_output_tokens(cfg, has_condition));
+    result.text = tokenizer_->decode(result.token_ids);
+    const auto decode_end = std::chrono::steady_clock::now();
+    result.prefill_ms = sampling_ms;
+    result.decode_ms = std::chrono::duration<double, std::milli>(decode_end - decode_start).count();
+    return result;
+}
+
 TextResult ElfFlowPipeline::make_text_result(const SamplingWorkspace& workspace,
                                              const GenerateConfig& cfg,
                                              const SamplingOptions& options, bool has_condition,
@@ -724,6 +1007,18 @@ TextResult ElfFlowPipeline::generate(const std::string& prompt, const GenerateCo
     const auto options = resolve_sampling_options(cfg, has_condition);
     auto workspace = make_sampling_workspace(cfg, cond, options.seed);
     const auto steps = make_sampling_steps(cfg, options.num_steps, options.seed);
+    if (supports_device_sampling()) {
+        validate_sde_noises(cfg, steps);
+        const auto sde_noises = make_device_sde_noises(cfg, options, steps);
+        auto& device_workspace = prepare_device_sampling_workspace(workspace, cond, sde_noises);
+        run_device_sampling(device_workspace, options, steps);
+        check_cuda(cudaStreamSynchronize(device_workspace.stream), "synchronize flow sampling");
+        const auto sampling_end = std::chrono::steady_clock::now();
+        const double sampling_ms =
+            std::chrono::duration<double, std::milli>(sampling_end - t_start).count();
+        return make_device_text_result(device_workspace, cfg, options, has_condition, eos_token_id,
+                                       condition_prefix_tokens(cond.mask), sampling_ms);
+    }
     run_sampling(workspace, cfg, cond, options, steps);
     auto t_after_sampling = std::chrono::steady_clock::now();
     const double sampling_ms =

@@ -630,6 +630,8 @@ def test_elf_trtmc_run_generates_text_from_diffusion_decode(tmp_path: Path) -> N
             str(trtmc_binary),
             "run",
             str(bundle_path),
+            "--prompt",
+            "",
             "--num-steps",
             "1",
             "--guidance-scale",
