@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.24)
-project(trtmc_qwen3_06b_fp16_edge_llm_v09_trt11_runtime LANGUAGES CXX)
+project(trtmc_qwen3_1_7b_fp16_edge_llm_v09_trt11_runtime LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

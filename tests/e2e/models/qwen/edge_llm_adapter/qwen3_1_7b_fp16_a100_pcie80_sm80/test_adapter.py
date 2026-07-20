@@ -80,6 +80,7 @@ ENGINE_MODEL_CONFIG: dict[str, object] = {
     "model": "qwen3",
     "spec_decode_type": "none",
     "engine_role": "llm",
+    "edgellm_version": "0.9.0",
     "vocab_size": 151936,
     "hidden_size": 2048,
     "intermediate_size": 6144,
@@ -106,6 +107,13 @@ ENGINE_BUILDER_CONFIG: dict[str, object] = {
     "max_lora_rank": 0,
     "trt_native_ops": False,
 }
+REQUIRED_ENGINE_FILES = (
+    "llm.engine",
+    "embedding.safetensors",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "processed_chat_template.json",
+)
 
 
 def test_qwen_adapter_package_inventory_is_model_owned() -> None:
@@ -260,7 +268,6 @@ def _fake_engine(root: Path) -> Path:
         json.dumps(
             {
                 **ENGINE_MODEL_CONFIG,
-                "edgellm_version": "0.9.0",
                 "builder_config": ENGINE_BUILDER_CONFIG,
             }
         ),
@@ -295,6 +302,16 @@ def _prebuilt_runtime_parameters(tmp_path: Path) -> dict[str, object]:
     }
 
 
+def _wrong_engine_value(value: object) -> object:
+    if type(value) is bool:
+        return not value
+    if type(value) in (int, float):
+        return value + 1
+    if value is None:
+        return "not-null"
+    return f"{value}-wrong"
+
+
 @pytest.mark.parametrize("field", tuple(ENGINE_MODEL_CONFIG))
 def test_engine_validation_rejects_each_wrong_model_fingerprint_field(
     tmp_path: Path, field: str
@@ -303,30 +320,23 @@ def test_engine_validation_rejects_each_wrong_model_fingerprint_field(
     engine = _fake_engine(tmp_path / "wrong-engine")
     config_path = engine / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    value = config[field]
-    if value is None:
-        config[field] = {"wrong": "value"}
-    elif type(value) is bool:
-        config[field] = not value
-    elif type(value) in (int, float):
-        config[field] = value + 1
-    else:
-        config[field] = f"{value}-wrong"
+    config[field] = _wrong_engine_value(config[field])
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
     with pytest.raises(adapter.AdapterError, match=rf"config\.{field} must be exactly"):
         adapter._validate_engine_directory(engine)
 
 
-def test_engine_validation_rejects_missing_exact_model_field(tmp_path: Path) -> None:
+@pytest.mark.parametrize("field", tuple(ENGINE_MODEL_CONFIG))
+def test_engine_validation_rejects_each_missing_model_field(tmp_path: Path, field: str) -> None:
     adapter = _load_adapter_module()
     engine = _fake_engine(tmp_path / "missing-model-field-engine")
     config_path = engine / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    del config["rope_scaling"]
+    del config[field]
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
-    with pytest.raises(adapter.AdapterError, match=r"config\.rope_scaling must be exactly"):
+    with pytest.raises(adapter.AdapterError, match=rf"config\.{field} must be exactly"):
         adapter._validate_engine_directory(engine)
 
 
@@ -371,11 +381,35 @@ def test_engine_validation_rejects_each_wrong_builder_field(tmp_path: Path, fiel
     engine = _fake_engine(tmp_path / "wrong-builder-engine")
     config_path = engine / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    value = config["builder_config"][field]
-    config["builder_config"][field] = not value if type(value) is bool else value + 1
+    config["builder_config"][field] = _wrong_engine_value(config["builder_config"][field])
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
     with pytest.raises(adapter.AdapterError, match=rf"builder_config\.{field} must be exactly"):
+        adapter._validate_engine_directory(engine)
+
+
+@pytest.mark.parametrize("field", tuple(ENGINE_BUILDER_CONFIG))
+def test_engine_validation_rejects_each_missing_builder_field(tmp_path: Path, field: str) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "missing-builder-engine")
+    config_path = engine / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    del config["builder_config"][field]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match=rf"builder_config\.{field} must be exactly"):
+        adapter._validate_engine_directory(engine)
+
+
+@pytest.mark.parametrize("filename", REQUIRED_ENGINE_FILES)
+def test_engine_validation_rejects_each_missing_required_artifact(
+    tmp_path: Path, filename: str
+) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "missing-artifact-engine")
+    (engine / filename).unlink()
+
+    with pytest.raises(adapter.AdapterError, match=rf"missing required artifact {filename}"):
         adapter._validate_engine_directory(engine)
 
 
@@ -1001,11 +1035,12 @@ def test_fake_probe_and_build_require_the_same_internal_authorization(
     monkeypatch.delenv("_TRTMC_INTERNAL_QWEN3_1_7B_ALLOW_FAKE_RUNTIME_BUILD", raising=False)
     reason = "Fake runtime builds require _TRTMC_INTERNAL_QWEN3_1_7B_ALLOW_FAKE_RUNTIME_BUILD=1"
     manifest = load_implementation_manifest(MANIFEST_PATH)
-    with pytest.raises(BuildAdapterError, match=reason):
-        run_probe(
-            manifest,
-            _request(parameters={"runtime_build": {"fake": True}}),
-        )
+    probe = run_probe(
+        manifest,
+        _request(parameters={"runtime_build": {"fake": True}}),
+    )
+    assert not probe.supported
+    assert probe.reason == reason
     with pytest.raises(adapter.AdapterError, match=reason):
         adapter._build_runtime_dso(
             tmp_path / "output",
@@ -1081,10 +1116,15 @@ def test_qualified_probe_reports_wrong_tensorrt_without_bootstrapping(
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert adapter.main(["probe", "--request", str(request_path)]) == 1
+    assert adapter.main(["probe", "--request", str(request_path)]) == 0
     captured = capsys.readouterr()
-    assert not captured.out
-    assert "found TensorRT 10.14.1.48, not 11.2.0.113" in captured.err
+    assert json.loads(captured.out) == {
+        "reason": "Qwen Edge-LLM software profile is unavailable: "
+        "found TensorRT 10.14.1.48, not 11.2.0.113",
+        "schema_version": 1,
+        "supported": False,
+    }
+    assert not captured.err
 
 
 def test_tensorrt_resolution_requires_one_exact_core_and_parser_installation(
