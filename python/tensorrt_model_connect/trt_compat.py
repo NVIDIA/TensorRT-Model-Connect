@@ -13,11 +13,13 @@ truth.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import ctypes
 import importlib
 import importlib.util
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -28,6 +30,12 @@ _RTX_MODULE = "tensorrt_rtx"
 _backend_module_name = _STANDARD_MODULE
 _backend_label = "TensorRT"
 _module: ModuleType | None = None
+_internal_library_path_state: tuple[int, str, str, str] | None = None
+_internal_library_handle: Any | None = None
+_internal_library_path_lock = threading.Lock()
+
+_LIBNVINFER_NAME_RE = re.compile(r"^libnvinfer\.so(?:\.(\d+)(?:\.(\d+))?(?:\.\d+)*)?$")
+_SHARED_LIBRARY_VERSION_RE = re.compile(r"\.so\.(\d+)\.(\d+)\.(\d+)$")
 
 _TIMING_CACHE_PATH_ENV = "TRTMC_TRT_TIMING_CACHE_PATH"
 _TIMING_CACHE_DIR_ENV = "TRTMC_TRT_TIMING_CACHE_DIR"
@@ -134,12 +142,218 @@ def loaded_libnvinfer_paths() -> list[str]:
     paths: list[str] = []
     try:
         for line in maps.read_text(errors="ignore").splitlines():
-            path = line.rsplit(" ", 1)[-1]
-            if "libnvinfer.so" in path and path not in paths:
+            fields = line.split(maxsplit=5)
+            if len(fields) < 6:
+                continue
+            path = fields[5].removesuffix(" (deleted)")
+            if _LIBNVINFER_NAME_RE.fullmatch(Path(path).name) and path not in paths:
                 paths.append(path)
     except OSError:
         return []
     return paths
+
+
+def _version_triplet(version: str) -> tuple[int, int, int] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def _native_library_version(handle: Any) -> tuple[int, int, int] | None:
+    try:
+        major_fn = handle.getInferLibMajorVersion
+        minor_fn = handle.getInferLibMinorVersion
+        patch_fn = handle.getInferLibPatchVersion
+    except AttributeError:
+        return None
+    major_fn.argtypes = []
+    major_fn.restype = ctypes.c_int
+    minor_fn.argtypes = []
+    minor_fn.restype = ctypes.c_int
+    patch_fn.argtypes = []
+    patch_fn.restype = ctypes.c_int
+    return int(major_fn()), int(minor_fn()), int(patch_fn())
+
+
+def _resolved_unique_paths(values: list[str]) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for value in values:
+        path = Path(value).expanduser().resolve(strict=False)
+        if path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def _select_loaded_libnvinfer(
+    expected_version: tuple[int, int, int],
+) -> tuple[Path, Any] | None:
+    candidates = _resolved_unique_paths(loaded_libnvinfer_paths())
+    if not candidates:
+        # Fake TRT modules and older/system installations may not expose a
+        # mapped libnvinfer path. Preserve their existing loader behavior.
+        return None
+
+    matching: list[tuple[Path, Any]] = []
+    mismatched: list[tuple[Path, tuple[int, int, int]]] = []
+    unknown: list[tuple[Path, Any]] = []
+    load_errors: list[tuple[Path, str]] = []
+    for path in candidates:
+        try:
+            handle = ctypes.CDLL(str(path))
+        except OSError as exc:
+            load_errors.append((path, str(exc)))
+            continue
+        native_version = _native_library_version(handle)
+        if native_version is None:
+            unknown.append((path, handle))
+        elif native_version == expected_version:
+            matching.append((path, handle))
+        else:
+            mismatched.append((path, native_version))
+
+    if load_errors:
+        rendered = ", ".join(f"{path}: {error}" for path, error in load_errors)
+        raise RuntimeError(
+            "Unable to inspect every mapped libnvinfer before configuring TensorRT "
+            f"builder libraries: {rendered}"
+        )
+    modern_unknown = [path for path, handle in unknown if hasattr(handle, "setInternalLibraryPath")]
+    if modern_unknown:
+        rendered = ", ".join(str(path) for path in modern_unknown)
+        raise RuntimeError(
+            "Unable to determine the exact version of mapped libnvinfer DSOs that "
+            f"expose setInternalLibraryPath: {rendered}"
+        )
+    if matching and unknown:
+        rendered = ", ".join(str(path) for path, _ in unknown)
+        raise RuntimeError(
+            "A TensorRT version-matched libnvinfer is loaded alongside DSOs whose version "
+            f"cannot be verified: {rendered}"
+        )
+    if mismatched:
+        expected = ".".join(str(value) for value in expected_version)
+        rendered = ", ".join(
+            f"{path} (version {version[0]}.{version[1]}.{version[2]})"
+            for path, version in mismatched
+        )
+        if matching:
+            raise RuntimeError(
+                "Multiple TensorRT versions are loaded in one builder process: "
+                f"Python version {expected}, incompatible libnvinfer DSOs: {rendered}"
+            )
+        raise RuntimeError(
+            f"TensorRT Python version {expected} does not match loaded libnvinfer: {rendered}"
+        )
+
+    matching_dirs = {path.parent for path, _ in matching}
+    if len(matching_dirs) > 1:
+        rendered = ", ".join(str(path) for path, _ in matching)
+        expected = ".".join(str(value) for value in expected_version)
+        raise RuntimeError(
+            "TensorRT internal builder library path is ambiguous: Python version "
+            f"{expected} has matching libnvinfer DSOs in multiple directories: {rendered}"
+        )
+    if matching:
+        return matching[0]
+
+    # A library without version-query exports predates this compatibility
+    # contract. Leave it on its original loader path instead of guessing.
+    assert unknown
+    return None
+
+
+def _builder_resource_matches_version(path: Path, expected_version: tuple[int, int, int]) -> bool:
+    if not path.name.startswith("libnvinfer_builder_resource"):
+        return False
+    match = _SHARED_LIBRARY_VERSION_RE.search(path.name)
+    if match is None:
+        return False
+    version = tuple(int(match.group(index)) for index in (1, 2, 3))
+    if version != expected_version:
+        return False
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return False
+    return resolved.is_file()
+
+
+def _require_internal_library_directory(
+    libnvinfer_path: Path,
+    expected_version: tuple[int, int, int],
+) -> Path:
+    directory = libnvinfer_path.parent
+    resources = sorted(directory.glob("libnvinfer_builder_resource*.so*"))
+    if any(_builder_resource_matches_version(path, expected_version) for path in resources):
+        return directory
+    expected = ".".join(str(value) for value in expected_version)
+    suffix = ""
+    if resources:
+        suffix = "; incompatible resources: " + ", ".join(str(path) for path in resources)
+    raise RuntimeError(
+        "TensorRT internal builder resources for version "
+        f"{expected} were not found beside loaded {libnvinfer_path}{suffix}"
+    )
+
+
+def _configure_standard_internal_library_path(module: ModuleType) -> None:
+    if _backend_module_name != _STANDARD_MODULE:
+        return
+    # Unit-test doubles and legacy pure-Python shims do not own a native module.
+    if not getattr(module, "__file__", None):
+        return
+    expected_version = _version_triplet(str(getattr(module, "__version__", "")))
+    if expected_version is None:
+        raise RuntimeError(
+            "Cannot configure TensorRT internal builder libraries because "
+            f"{_STANDARD_MODULE}.__version__ is missing or invalid"
+        )
+
+    # setInternalLibraryPath changes process-global TensorRT state. Serialize
+    # both the map validation and the first setter call so concurrent Builder
+    # creation cannot race the set-once guard.
+    with _internal_library_path_lock:
+        _configure_standard_internal_library_path_locked(module, expected_version)
+
+
+def _configure_standard_internal_library_path_locked(
+    module: ModuleType,
+    expected_version: tuple[int, int, int],
+) -> None:
+    global _internal_library_handle, _internal_library_path_state
+
+    expected = ".".join(str(value) for value in expected_version)
+    selected = _select_loaded_libnvinfer(expected_version)
+    if selected is None:
+        return
+    libnvinfer_path, handle = selected
+    try:
+        configure = handle.setInternalLibraryPath
+    except AttributeError:
+        # Older TensorRT libraries do not expose the supported internal-path
+        # hook. Preserve their prior loader behavior.
+        return
+    library_dir = _require_internal_library_directory(libnvinfer_path, expected_version)
+    state = (id(module), expected, str(libnvinfer_path), str(library_dir))
+    if _internal_library_path_state == state:
+        return
+    configure.argtypes = [ctypes.c_char_p]
+    configure.restype = ctypes.c_bool
+    try:
+        configured = bool(configure(os.fsencode(library_dir)))
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "TensorRT failed to configure its internal builder library path "
+            f"to {library_dir}: {exc}"
+        ) from exc
+    if not configured:
+        raise RuntimeError(f"TensorRT rejected its internal builder library path: {library_dir}")
+
+    _internal_library_handle = handle
+    _internal_library_path_state = state
 
 
 def resolved_summary() -> str:
@@ -459,6 +673,7 @@ class _BuilderFactory:
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         module = self._module_getter()
+        _configure_standard_internal_library_path(module)
         return _BuilderProxy(module.Builder(*args, **kwargs), module)
 
     def __getattr__(self, name: str) -> Any:

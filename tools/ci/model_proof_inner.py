@@ -19,6 +19,7 @@ from pathlib import Path
 from .context import CiContext
 from .model_proof import ModelProofRequest
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
+from .package import _CLEAN_TRT_BUILDER_SMOKE
 from .process import CiError
 from .task_eval import TaskEvalRunner
 from tools.model_plugin_isolation import classify_model_libraries
@@ -368,6 +369,28 @@ class ModelProofInnerPipeline:
                 *targets,
             ],
             self.artifacts / "build.log",
+        )
+        self._run_logged(
+            [
+                "env",
+                "-u",
+                "VIRTUAL_ENV",
+                "-u",
+                "CONDA_PREFIX",
+                "-u",
+                "TRTMC_TRT_LIBRARY_DIR",
+                "-u",
+                "LD_LIBRARY_PATH",
+                self._python(),
+                "-c",
+                _CLEAN_TRT_BUILDER_SMOKE,
+            ],
+            self.artifacts / "build.log",
+            append=True,
+            updates={
+                "PYTHONPATH": f"{self.source / 'python'}:{self.source}",
+                "PYTHONDONTWRITEBYTECODE": "1",
+            },
         )
         self.status.step("scratch_build", "passed")
         dso, auxiliary_dsos = self._validate_dso(runtime_model, runtime_library, auxiliary_patterns)

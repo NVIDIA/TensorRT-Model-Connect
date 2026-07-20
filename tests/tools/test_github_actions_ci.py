@@ -2008,6 +2008,53 @@ def test_wheel_model_smoke_checks_py312_wheel_only() -> None:
     assert "InstalledWheelValidator.require_elf(trtmc)" in smoke_block
 
 
+def test_ci_smokes_cover_cpu_bootstrap_and_gpu_builder_with_scrubbed_loader_env() -> None:
+    text = _ci_source("package.py")
+    model_proof = _ci_source("model_proof_inner.py")
+    probe = text.split('_CLEAN_TRT_BUILDER_SMOKE = """', maxsplit=1)[1].split('"""', maxsplit=1)[0]
+    bootstrap = text.split('_CLEAN_TRT_BOOTSTRAP_SMOKE = """', maxsplit=1)[1].split(
+        '"""', maxsplit=1
+    )[0]
+    model_smoke = text.split("def model_smoke", maxsplit=1)[1].split(
+        "def _clean_venv_smoke", maxsplit=1
+    )[0]
+    smoke = text.split("def _clean_venv_smoke", maxsplit=1)[1].split(
+        "def _create_venv", maxsplit=1
+    )[0]
+
+    assert "builder.build_serialized_network(network, config)" in probe
+    assert "if plan is None" in probe
+    assert "if not payload" in probe
+    assert "_configure_standard_internal_library_path(module)" in bootstrap
+    assert "import tensorrt_model_connect" in bootstrap
+    assert "import tensorrt" in bootstrap
+    assert "Path(sys.prefix).resolve(strict=True)" in bootstrap
+    assert "path.relative_to(prefix)" in bootstrap
+    assert 'f"tensorrt_model_connect={module_paths[' in bootstrap
+    assert 'f"tensorrt={module_paths[' in bootstrap
+    assert "from .package import _CLEAN_TRT_BUILDER_SMOKE" in model_proof
+    assert '"-c",\n                _CLEAN_TRT_BUILDER_SMOKE' in model_proof
+    for variable in (
+        "VIRTUAL_ENV",
+        "CONDA_PREFIX",
+        "TRTMC_TRT_LIBRARY_DIR",
+        "LD_LIBRARY_PATH",
+    ):
+        assert f'"-u",\n                "{variable}"' in model_proof
+    for variable in (
+        "VIRTUAL_ENV",
+        "CONDA_PREFIX",
+        "TRTMC_TRT_LIBRARY_DIR",
+        "LD_LIBRARY_PATH",
+        "PYTHONPATH",
+        "PYTHONHOME",
+    ):
+        assert f'"{variable}"' in model_smoke
+        assert f'"{variable}"' in smoke
+    assert '[root / "bin/python", "-I", "-c", _CLEAN_TRT_BOOTSTRAP_SMOKE]' in smoke
+    assert "unset=clean" in smoke
+
+
 def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> None:
     text = _ci_source("e2e.py")
     zero_model_block = text.split(

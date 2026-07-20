@@ -6,8 +6,12 @@ from __future__ import annotations
 import ast
 import subprocess
 import sys
+import threading
+import time
 import types
 from pathlib import Path
+
+import pytest
 
 from tensorrt_model_connect import trt_compat
 
@@ -17,6 +21,50 @@ TRTMC_BUILD_ROOT = REPO_ROOT / "python" / "tensorrt_model_connect"
 ALLOWED_TRT_BOUNDARY_FILES = {
     TRTMC_BUILD_ROOT / "trt_compat.py",
 }
+
+
+class _FakeNativeFunction:
+    def __init__(self, result, calls: list | None = None):
+        self.result = result
+        self.calls = calls
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args):
+        if self.calls is not None:
+            self.calls.append(args)
+        return self.result
+
+
+class _FakeLibnvinfer:
+    def __init__(
+        self,
+        version: tuple[int, int, int],
+        *,
+        configured: bool = True,
+        configure_calls: list | None = None,
+    ):
+        self.getInferLibMajorVersion = _FakeNativeFunction(version[0])
+        self.getInferLibMinorVersion = _FakeNativeFunction(version[1])
+        self.getInferLibPatchVersion = _FakeNativeFunction(version[2])
+        self.setInternalLibraryPath = _FakeNativeFunction(configured, configure_calls)
+
+
+def _native_like_trt_module(tmp_path: Path, version: str = "11.2.0.113"):
+    module = types.ModuleType("tensorrt")
+    module.__version__ = version
+    module.__file__ = str(tmp_path / "site-packages/tensorrt/__init__.py")
+    module.Builder = lambda *_args, **_kwargs: object()
+    return module
+
+
+def _install_fake_trt_module(monkeypatch, module) -> None:
+    monkeypatch.setitem(sys.modules, "tensorrt", module)
+    monkeypatch.setattr(trt_compat, "_module", None)
+    monkeypatch.setattr(trt_compat, "_backend_module_name", "tensorrt")
+    monkeypatch.setattr(trt_compat, "_backend_label", "TensorRT")
+    monkeypatch.setattr(trt_compat, "_internal_library_path_state", None)
+    monkeypatch.setattr(trt_compat, "_internal_library_handle", None)
 
 
 def _constant_string(node: ast.AST) -> str | None:
@@ -121,6 +169,288 @@ def test_wan22_time_probe_bootstraps_before_compat_import():
     assert source.index("sys.path.insert(0, str(PYTHON_ROOT))") < source.index(
         "from tensorrt_model_connect.trt_compat import trt"
     )
+
+
+def test_trt_compat_configures_internal_builder_library_path_once(monkeypatch, tmp_path):
+    lib_dir = tmp_path / "sdk/lib"
+    lib_dir.mkdir(parents=True)
+    libnvinfer = lib_dir / "libnvinfer.so.11.2.0"
+    libnvinfer.touch()
+    (lib_dir / "libnvinfer_builder_resource_sm100.so.11.2.0").touch()
+    module = _native_like_trt_module(tmp_path)
+    _install_fake_trt_module(monkeypatch, module)
+
+    configure_calls: list[tuple[bytes]] = []
+    handle = _FakeLibnvinfer((11, 2, 0), configure_calls=configure_calls)
+    cdll_calls: list[str] = []
+    monkeypatch.setattr(trt_compat, "loaded_libnvinfer_paths", lambda: [str(libnvinfer)])
+    monkeypatch.setattr(
+        trt_compat.ctypes,
+        "CDLL",
+        lambda path: (cdll_calls.append(path), handle)[1],
+    )
+
+    trt = trt_compat.get_trt()
+    trt.Builder(None)
+    trt.Builder(None)
+
+    # The setter is process-global and runs once, but every Builder call must
+    # rescan the mapped DSOs so a late-loaded conflicting TensorRT is detected.
+    assert cdll_calls == [str(libnvinfer), str(libnvinfer)]
+    assert configure_calls == [(str(lib_dir).encode(),)]
+    assert handle.setInternalLibraryPath.argtypes == [trt_compat.ctypes.c_char_p]
+    assert handle.setInternalLibraryPath.restype is trt_compat.ctypes.c_bool
+
+
+def test_trt_compat_configures_internal_builder_library_path_once_concurrently(
+    monkeypatch, tmp_path
+):
+    lib_dir = tmp_path / "sdk/lib"
+    lib_dir.mkdir(parents=True)
+    libnvinfer = lib_dir / "libnvinfer.so.11.2.0"
+    libnvinfer.touch()
+    (lib_dir / "libnvinfer_builder_resource_sm100.so.11.2.0").touch()
+    module = _native_like_trt_module(tmp_path)
+    _install_fake_trt_module(monkeypatch, module)
+
+    configure_calls: list[tuple[bytes]] = []
+
+    def slow_configure(*args):
+        configure_calls.append(args)
+        time.sleep(0.05)
+        return True
+
+    handle = _FakeLibnvinfer((11, 2, 0))
+    handle.setInternalLibraryPath = slow_configure
+    monkeypatch.setattr(trt_compat, "loaded_libnvinfer_paths", lambda: [str(libnvinfer)])
+    monkeypatch.setattr(trt_compat.ctypes, "CDLL", lambda _path: handle)
+
+    trt = trt_compat.get_trt()
+    start = threading.Barrier(3)
+    errors: list[BaseException] = []
+
+    def create_builder():
+        try:
+            start.wait()
+            trt.Builder(None)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=create_builder) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert configure_calls == [(str(lib_dir).encode(),)]
+
+
+def test_trt_compat_rejects_loaded_libnvinfer_version_mismatch(monkeypatch, tmp_path):
+    libnvinfer = tmp_path / "libnvinfer.so.11.2.1"
+    libnvinfer.touch()
+    module = _native_like_trt_module(tmp_path)
+    _install_fake_trt_module(monkeypatch, module)
+    monkeypatch.setattr(trt_compat, "loaded_libnvinfer_paths", lambda: [str(libnvinfer)])
+    monkeypatch.setattr(trt_compat.ctypes, "CDLL", lambda _path: _FakeLibnvinfer((11, 2, 1)))
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"TensorRT Python version 11\.2\.0 does not match.*version 11\.2\.1",
+    ):
+        trt_compat.get_trt().Builder(None)
+
+
+def test_trt_compat_rejects_mixed_loaded_libnvinfer_versions(monkeypatch, tmp_path):
+    matching = tmp_path / "matching/libnvinfer.so.11.2.0"
+    mismatched = tmp_path / "mismatched/libnvinfer.so.10.16.1"
+    matching.parent.mkdir()
+    mismatched.parent.mkdir()
+    matching.touch()
+    mismatched.touch()
+    module = _native_like_trt_module(tmp_path)
+    _install_fake_trt_module(monkeypatch, module)
+    monkeypatch.setattr(
+        trt_compat,
+        "loaded_libnvinfer_paths",
+        lambda: [str(matching), str(mismatched)],
+    )
+
+    def fake_cdll(path):
+        version = (11, 2, 0) if Path(path) == matching else (10, 16, 1)
+        return _FakeLibnvinfer(version)
+
+    monkeypatch.setattr(trt_compat.ctypes, "CDLL", fake_cdll)
+
+    with pytest.raises(RuntimeError, match="Multiple TensorRT versions are loaded"):
+        trt_compat.get_trt().Builder(None)
+
+
+def test_trt_compat_rejects_ambiguous_matching_libnvinfer_directories(monkeypatch, tmp_path):
+    first = tmp_path / "one/libnvinfer.so.11.2.0"
+    second = tmp_path / "two/libnvinfer.so.11.2.0"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.touch()
+    second.touch()
+    module = _native_like_trt_module(tmp_path)
+    _install_fake_trt_module(monkeypatch, module)
+    monkeypatch.setattr(
+        trt_compat,
+        "loaded_libnvinfer_paths",
+        lambda: [str(first), str(second)],
+    )
+    monkeypatch.setattr(trt_compat.ctypes, "CDLL", lambda _path: _FakeLibnvinfer((11, 2, 0)))
+
+    with pytest.raises(RuntimeError, match="matching libnvinfer DSOs in multiple"):
+        trt_compat.get_trt().Builder(None)
+
+
+def test_trt_compat_reports_missing_or_rejected_builder_resource(monkeypatch, tmp_path):
+    lib_dir = tmp_path / "sdk/lib"
+    lib_dir.mkdir(parents=True)
+    libnvinfer = lib_dir / "libnvinfer.so.11.2.0"
+    libnvinfer.touch()
+    module = _native_like_trt_module(tmp_path)
+    _install_fake_trt_module(monkeypatch, module)
+    handle = _FakeLibnvinfer((11, 2, 0), configured=False)
+    monkeypatch.setattr(trt_compat, "loaded_libnvinfer_paths", lambda: [str(libnvinfer)])
+    monkeypatch.setattr(trt_compat.ctypes, "CDLL", lambda _path: handle)
+
+    with pytest.raises(RuntimeError, match=r"resources for version 11\.2\.0 were not found"):
+        trt_compat.get_trt().Builder(None)
+
+    (lib_dir / "libnvinfer_builder_resource_sm100.so.11.2.0").touch()
+    with pytest.raises(RuntimeError, match="rejected its internal builder library path"):
+        trt_compat.get_trt().Builder(None)
+
+
+@pytest.mark.parametrize(
+    "invalid_resource",
+    ("wrong_patch", "major_only", "dangling_symlink", "directory"),
+)
+def test_trt_compat_rejects_non_exact_or_non_file_builder_resource(
+    monkeypatch, tmp_path, invalid_resource
+):
+    lib_dir = tmp_path / "sdk/lib"
+    lib_dir.mkdir(parents=True)
+    libnvinfer = lib_dir / "libnvinfer.so.11.2.0"
+    libnvinfer.touch()
+    if invalid_resource == "wrong_patch":
+        resource = lib_dir / "libnvinfer_builder_resource_sm100.so.11.2.1"
+        resource.touch()
+    elif invalid_resource == "major_only":
+        resource = lib_dir / "libnvinfer_builder_resource_sm100.so.11"
+        resource.touch()
+    elif invalid_resource == "dangling_symlink":
+        resource = lib_dir / "libnvinfer_builder_resource_sm100.so.11.2.0"
+        resource.symlink_to(lib_dir / "missing-builder-resource.so.11.2.0")
+    else:
+        resource = lib_dir / "libnvinfer_builder_resource_sm100.so.11.2.0"
+        resource.mkdir()
+
+    module = _native_like_trt_module(tmp_path)
+    _install_fake_trt_module(monkeypatch, module)
+    configure_calls: list[tuple[bytes]] = []
+    handle = _FakeLibnvinfer(
+        (11, 2, 0),
+        configure_calls=configure_calls,
+    )
+    monkeypatch.setattr(trt_compat, "loaded_libnvinfer_paths", lambda: [str(libnvinfer)])
+    monkeypatch.setattr(trt_compat.ctypes, "CDLL", lambda _path: handle)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"resources for version 11\.2\.0 were not found",
+    ):
+        trt_compat.get_trt().Builder(None)
+    assert configure_calls == []
+
+
+@pytest.mark.parametrize(
+    ("late_version", "expected_error"),
+    (
+        ((10, 16, 1), "Multiple TensorRT versions are loaded"),
+        ((11, 2, 0), "matching libnvinfer DSOs in multiple directories"),
+    ),
+)
+def test_trt_compat_rescans_mapped_libraries_after_first_builder(
+    monkeypatch, tmp_path, late_version, expected_error
+):
+    first = tmp_path / "first/libnvinfer.so.11.2.0"
+    second = (
+        tmp_path
+        / "second"
+        / ("libnvinfer.so.11.2.0" if late_version == (11, 2, 0) else "libnvinfer.so.10.16.1")
+    )
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.touch()
+    second.touch()
+    (first.parent / "libnvinfer_builder_resource_sm100.so.11.2.0").touch()
+    module = _native_like_trt_module(tmp_path)
+    _install_fake_trt_module(monkeypatch, module)
+
+    configure_calls: list[tuple[bytes]] = []
+    first_handle = _FakeLibnvinfer(
+        (11, 2, 0),
+        configure_calls=configure_calls,
+    )
+    second_handle = _FakeLibnvinfer(late_version)
+    mapped = [str(first)]
+    monkeypatch.setattr(trt_compat, "loaded_libnvinfer_paths", lambda: mapped)
+    monkeypatch.setattr(
+        trt_compat.ctypes,
+        "CDLL",
+        lambda path: first_handle if Path(path) == first else second_handle,
+    )
+
+    trt = trt_compat.get_trt()
+    trt.Builder(None)
+    mapped.append(str(second))
+    with pytest.raises(RuntimeError, match=expected_error):
+        trt.Builder(None)
+
+    assert configure_calls == [(str(first.parent).encode(),)]
+
+
+def test_trt_compat_preserves_older_library_without_internal_path_api(monkeypatch, tmp_path):
+    libnvinfer = tmp_path / "libnvinfer.so.10.16.1"
+    libnvinfer.touch()
+    module = _native_like_trt_module(tmp_path, version="10.16.1.11")
+    _install_fake_trt_module(monkeypatch, module)
+    handle = _FakeLibnvinfer((10, 16, 1))
+    del handle.setInternalLibraryPath
+    monkeypatch.setattr(trt_compat, "loaded_libnvinfer_paths", lambda: [str(libnvinfer)])
+    monkeypatch.setattr(trt_compat.ctypes, "CDLL", lambda _path: handle)
+
+    trt_compat.get_trt().Builder(None)
+    assert trt_compat._internal_library_path_state is None
+
+
+@pytest.mark.parametrize("backend", ("tensorrt", "tensorrt_rtx"))
+def test_trt_compat_preserves_fake_and_rtx_module_loader_behavior(monkeypatch, backend):
+    module = types.ModuleType(backend)
+    module.__version__ = "11.2.0.113"
+    module.__file__ = f"/fake/{backend}/__init__.py"
+    module.Builder = lambda *_args, **_kwargs: object()
+    module.Runtime = lambda *_args, **_kwargs: object()
+    monkeypatch.setitem(sys.modules, backend, module)
+    monkeypatch.setattr(trt_compat, "_module", None)
+    monkeypatch.setattr(trt_compat, "_backend_module_name", backend)
+    monkeypatch.setattr(
+        trt_compat,
+        "loaded_libnvinfer_paths",
+        lambda: (_ for _ in ()).throw(AssertionError("native discovery must not run")),
+    )
+
+    trt = trt_compat.get_trt()
+    if backend == "tensorrt_rtx":
+        trt.Builder(None)
+    else:
+        trt.Runtime(None)
 
 
 def test_trt_compat_proxy_wraps_version_sensitive_builder_calls(monkeypatch):

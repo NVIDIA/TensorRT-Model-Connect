@@ -45,6 +45,61 @@ WAN22_WHEEL_ATTRIBUTION_SHA256 = {
         "86b998c792894ccb911a1cb7994f7a9652894e7a094c0b5e45be2f553f45cf14"
     ),
 }
+_CLEAN_TRT_BUILDER_SMOKE = """
+from tensorrt_model_connect import trt_compat
+
+trt = trt_compat.get_trt()
+logger = trt.Logger(trt.Logger.WARNING)
+builder = trt.Builder(logger)
+network = builder.create_network(
+    trt_compat.network_creation_flags(strongly_typed=True)
+)
+tensor = network.add_input("input", trt.float32, (1,))
+identity = network.add_identity(tensor)
+network.mark_output(identity.get_output(0))
+config = builder.create_builder_config()
+plan = builder.build_serialized_network(network, config)
+if plan is None:
+    raise RuntimeError("clean TensorRT builder smoke returned no serialized plan")
+payload = bytes(plan)
+if not payload:
+    raise RuntimeError("clean TensorRT builder smoke returned an empty serialized plan")
+print(f"clean TensorRT builder smoke plan_bytes={len(payload)}")
+"""
+_CLEAN_TRT_BOOTSTRAP_SMOKE = """
+from pathlib import Path
+import sys
+
+import tensorrt
+import tensorrt_model_connect
+from tensorrt_model_connect import trt_compat
+
+prefix = Path(sys.prefix).resolve(strict=True)
+module_paths = {
+    "tensorrt_model_connect": Path(tensorrt_model_connect.__file__).resolve(strict=True),
+    "tensorrt": Path(tensorrt.__file__).resolve(strict=True),
+}
+for name, path in module_paths.items():
+    try:
+        path.relative_to(prefix)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"clean wheel smoke imported {name} outside venv {prefix}: {path}"
+        ) from exc
+
+module = trt_compat.load_module()
+trt_compat._configure_standard_internal_library_path(module)
+state = trt_compat._internal_library_path_state
+if state is None:
+    raise RuntimeError("clean TensorRT builder-library bootstrap did not configure a path")
+print(
+    "clean TensorRT builder-library bootstrap "
+    f"venv={prefix} "
+    f"tensorrt_model_connect={module_paths['tensorrt_model_connect']} "
+    f"tensorrt={module_paths['tensorrt']} "
+    f"path={state[3]}"
+)
+"""
 
 
 def _required_tensorrt_abi(requirements: list[str], *, source: str) -> tuple[int, int]:
@@ -569,7 +624,14 @@ class WheelPackageManager:
         trtmc = venv / "bin/trtmc"
         self.context.run([python, "-m", "pip", "check"])
         InstalledWheelValidator.require_elf(trtmc)
-        clean = ("VIRTUAL_ENV", "CONDA_PREFIX", "TRTMC_TRT_LIBRARY_DIR", "LD_LIBRARY_PATH")
+        clean = (
+            "VIRTUAL_ENV",
+            "CONDA_PREFIX",
+            "TRTMC_TRT_LIBRARY_DIR",
+            "LD_LIBRARY_PATH",
+            "PYTHONPATH",
+            "PYTHONHOME",
+        )
         self.context.run([trtmc, "version"], unset=clean)
         bundle = smoke_root / str(config["bundle"])
         timing_cache = smoke_root / str(config["timing_cache"])
@@ -625,7 +687,14 @@ class WheelPackageManager:
         root = Path(f"/tmp/trtmc-wheel-smoke-{self.context.env.get('GITHUB_RUN_ID', 'local')}")
         self.context.remove(root)
         self._create_venv(root, wheel)
-        clean = ("VIRTUAL_ENV", "CONDA_PREFIX", "TRTMC_TRT_LIBRARY_DIR", "LD_LIBRARY_PATH")
+        clean = (
+            "VIRTUAL_ENV",
+            "CONDA_PREFIX",
+            "TRTMC_TRT_LIBRARY_DIR",
+            "LD_LIBRARY_PATH",
+            "PYTHONPATH",
+            "PYTHONHOME",
+        )
         trtmc = root / "bin/trtmc"
         InstalledWheelValidator.require_elf(trtmc)
         native_dirs = sorted(
@@ -688,6 +757,10 @@ class WheelPackageManager:
         self.context.run([trtmc, "version"], unset=clean)
         self.context.run([trtmc, "--help"], capture_output=True, unset=clean)
         self.context.run([trtmc, "build", "--help"], capture_output=True, unset=clean)
+        self.context.run(
+            [root / "bin/python", "-I", "-c", _CLEAN_TRT_BOOTSTRAP_SMOKE],
+            unset=clean,
+        )
 
     def _create_venv(self, path: Path, wheel: Path) -> None:
         self.context.run(["python", "-m", "venv", path])
