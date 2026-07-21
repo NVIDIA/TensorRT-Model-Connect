@@ -1,16 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared T5 encoder engine builder.
+"""LTX-Video T5 encoder engine builder.
 
 Builds a TensorRT engine for a T5-style text encoder (UMT5, mT5, T5).
-Reusable by: Wan2.1, FLUX, SD3, Hunyuan Video, CogVideoX.
 
 Engine I/O:
     Input:  input_ids [1, max_seq_len] int32
     Output: text_embeddings [1, max_seq_len, d_model] float32
 
-Single forward pass (no cache), like vision encoder.
+Single forward pass; no decoder cache is required.
 """
 
 from __future__ import annotations
@@ -21,12 +20,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
+from .. import model as graph_ops
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
+    from ...weights import WeightDict
 
 
 def build_t5_encoder_engine(
@@ -95,11 +94,9 @@ def build_t5_encoder_engine(
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     # --- Inputs ---
-    input_ids = network.add_input(
-        "input_ids", trt.int32, (1, max_seq_len))
+    input_ids = network.add_input("input_ids", trt.int32, (1, max_seq_len))
     # Attention mask: [1, max_seq_len] float32, 0.0 for valid, -1e9 for padding
-    attention_mask_input = network.add_input(
-        "attention_mask", trt.float32, (1, max_seq_len))
+    attention_mask_input = network.add_input("attention_mask", trt.float32, (1, max_seq_len))
 
     # --- Constants ---
     eps_t = graph_ops.add_constant(
@@ -122,7 +119,8 @@ def build_t5_encoder_engine(
     # --- Relative position bias ---
     # Precompute bucket indices [max_seq_len, max_seq_len]
     bucket_indices = graph_ops.make_t5_relative_position_bias(
-        num_heads, max_seq_len,
+        num_heads,
+        max_seq_len,
         num_buckets=relative_attention_num_buckets,
         max_distance=relative_attention_max_distance,
     )
@@ -145,7 +143,8 @@ def build_t5_encoder_engine(
         else:
             # Fallback: use layer 0's bias (vanilla T5 behavior)
             rel_bias_weight = weights[
-                "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"]
+                "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight"
+            ]
 
         bias_table = np.zeros(
             (num_heads, max_seq_len, max_seq_len), dtype=work_np_dtype)
@@ -161,8 +160,8 @@ def build_t5_encoder_engine(
 
         # Combine position bias + attention mask
         position_bias_masked = network.add_elementwise(
-            rel_bias_const, attn_mask_3d.get_output(0),
-            trt.ElementWiseOperation.SUM)
+            rel_bias_const, attn_mask_3d.get_output(0), trt.ElementWiseOperation.SUM
+        )
         per_layer_bias.append(position_bias_masked.get_output(0))
 
     # --- Encoder layers ---
@@ -213,11 +212,17 @@ def build_t5_encoder_engine(
         mask_4d = network.add_shuffle(layer_bias)
         mask_4d.reshape_dims = (1, num_heads, max_seq_len, max_seq_len)
         context_flat = graph_ops.add_attention_from_rows(
-            network, q, k, v,
-            num_heads=num_heads, head_dim=d_kv,
-            q_seq=max_seq_len, kv_seq=max_seq_len,
+            network,
+            q,
+            k,
+            v,
+            num_heads=num_heads,
+            head_dim=d_kv,
+            q_seq=max_seq_len,
+            kv_seq=max_seq_len,
             mask=mask_4d.get_output(0),
-            scale=1.0)
+            scale=1.0,
+        )
 
         # Output projection
         attn_out = graph_ops.add_matmul_rhs_constant(
@@ -315,7 +320,7 @@ def load_t5_weights(
     import os
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
-    from .checkpoint_mapper import (
+    from ...weights import (
         WeightDict,
         _has_tensor,
         _load_tensor,
@@ -382,6 +387,7 @@ def load_t5_weights(
 
     # Final layer norm
     weights["encoder.final_layer_norm.weight"] = _load_tensor(
-        readers, "encoder.final_layer_norm.weight").astype(np.float32)
+        readers, "encoder.final_layer_norm.weight"
+    ).astype(np.float32)
 
     return weights

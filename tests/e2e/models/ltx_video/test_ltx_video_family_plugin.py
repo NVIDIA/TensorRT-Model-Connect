@@ -114,9 +114,9 @@ def test_build_components_calls_native_subbuilders(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.ltx_video.t5_encoder_builder",
+        "tensorrt_model_connect.families.ltx_video.model.components.text_encoder",
         _module(
-            "tensorrt_model_connect.families.ltx_video.t5_encoder_builder",
+            "tensorrt_model_connect.families.ltx_video.model.components.text_encoder",
             load_t5_weights=load_t5_weights,
             build_t5_encoder_engine=build_t5_encoder_engine,
         ),
@@ -221,7 +221,7 @@ def test_get_diffusion_config_uses_ltx_scheduler_fields() -> None:
 
 
 def test_ltx_rope_tables_use_diffusers_frequency_triplet_order() -> None:
-    from tensorrt_model_connect.families.ltx_video.ltx_dit_builder import make_ltx_rope_tables
+    from tensorrt_model_connect.families.ltx_video.model.model import make_ltx_rope_tables
 
     dim = 14
     latent_frames = 1
@@ -273,7 +273,7 @@ def test_ltx_rope_tables_use_diffusers_frequency_triplet_order() -> None:
 
 
 def test_ltx_rotate_half_matrix_rotates_within_each_head() -> None:
-    from tensorrt_model_connect.families.ltx_video.ltx_dit_builder import _make_ltx_rotate_half_matrix
+    from tensorrt_model_connect.families.ltx_video.model.model import _make_ltx_rotate_half_matrix
 
     interleaved = _make_ltx_rotate_half_matrix(8, 2, interleaved=True)
     x = np.arange(8, dtype=np.float32)

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from tensorrt_model_connect import trt_compat
-from .checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, _open_safetensors
+from ...weights import WeightDict, _has_tensor, _load_tensor, _open_safetensors
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -37,7 +37,7 @@ def _ensure_trt() -> Any:
 def _ensure_graph_ops() -> Any:
     global graph_ops
     if graph_ops is None:
-        from . import graph_ops as graph_ops_module
+        from .. import model as graph_ops_module
 
         graph_ops = graph_ops_module
     return graph_ops
@@ -106,9 +106,7 @@ def load_ltx_vae_weights(
             weights[f"{up}.weight"] = f(f"{up}.weight")
             weights[f"{up}.bias"] = f(f"{up}.bias")
 
-        _load_resnet_series(
-            weights, readers, f"decoder.up_blocks.{block}.resnets", dtype
-        )
+        _load_resnet_series(weights, readers, f"decoder.up_blocks.{block}.resnets", dtype)
         block += 1
 
     weights["decoder.conv_out.conv.weight"] = f("decoder.conv_out.conv.weight")
@@ -146,9 +144,7 @@ def build_ltx_vae_decoder_engine(
     config = builder.create_builder_config()
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
 
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
-    )
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
     x = network.add_input(
         "latents",
@@ -221,9 +217,7 @@ def build_ltx_vae_decoder_engine(
             cur_w *= 2
             prev_ch = out_ch
 
-        resnet_count = _count_resnets(
-            weights, f"decoder.up_blocks.{block_idx}.resnets"
-        )
+        resnet_count = _count_resnets(weights, f"decoder.up_blocks.{block_idx}.resnets")
         if block_idx + 1 < len(dec_layers):
             expected = dec_layers[block_idx + 1]
             if resnet_count and resnet_count != expected:
@@ -313,12 +307,8 @@ def _load_resnet_block(
         weights[f"{prefix}.norm3.weight"] = f(f"{prefix}.norm3.weight", norm=True)
         weights[f"{prefix}.norm3.bias"] = f(f"{prefix}.norm3.bias", norm=True)
     if _has_tensor(readers, f"{prefix}.conv_shortcut.conv.weight"):
-        weights[f"{prefix}.conv_shortcut.conv.weight"] = f(
-            f"{prefix}.conv_shortcut.conv.weight"
-        )
-        weights[f"{prefix}.conv_shortcut.conv.bias"] = f(
-            f"{prefix}.conv_shortcut.conv.bias"
-        )
+        weights[f"{prefix}.conv_shortcut.conv.weight"] = f(f"{prefix}.conv_shortcut.conv.weight")
+        weights[f"{prefix}.conv_shortcut.conv.bias"] = f(f"{prefix}.conv_shortcut.conv.bias")
 
 
 def _count_resnets(weights: "Mapping[str, np.ndarray]", prefix: str) -> int:
@@ -377,20 +367,14 @@ def _rms_norm_channels(
     out_dtype = inp.dtype
     x = inp if inp.dtype == trt.float32 else network.add_cast(inp, trt.float32).get_output(0)
     sq = network.add_elementwise(x, x, trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True
-    )
-    eps_t = graph_ops.add_constant(
-        network, (1, 1, 1, 1, 1), np.array([eps], dtype=np.float32)
-    )
-    denom = network.add_elementwise(
-        mean.get_output(0), eps_t, trt.ElementWiseOperation.SUM
-    )
+    mean = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    eps_t = graph_ops.add_constant(network, (1, 1, 1, 1, 1), np.array([eps], dtype=np.float32))
+    denom = network.add_elementwise(mean.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
     sqrt = network.add_unary(denom.get_output(0), trt.UnaryOperation.SQRT)
     recip = network.add_unary(sqrt.get_output(0), trt.UnaryOperation.RECIP)
-    out = network.add_elementwise(
-        x, recip.get_output(0), trt.ElementWiseOperation.PROD
-    ).get_output(0)
+    out = network.add_elementwise(x, recip.get_output(0), trt.ElementWiseOperation.PROD).get_output(
+        0
+    )
     if channels <= 0:
         raise ValueError("channels must be positive")
     return _cast_back(network, out, out_dtype)
@@ -412,15 +396,9 @@ def _layer_norm_channels(
         x, mean.get_output(0), trt.ElementWiseOperation.SUB
     ).get_output(0)
     sq = network.add_elementwise(centered, centered, trt.ElementWiseOperation.PROD)
-    var = network.add_reduce(
-        sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True
-    )
-    eps_t = graph_ops.add_constant(
-        network, (1, 1, 1, 1, 1), np.array([eps], dtype=np.float32)
-    )
-    denom = network.add_elementwise(
-        var.get_output(0), eps_t, trt.ElementWiseOperation.SUM
-    )
+    var = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
+    eps_t = graph_ops.add_constant(network, (1, 1, 1, 1, 1), np.array([eps], dtype=np.float32))
+    denom = network.add_elementwise(var.get_output(0), eps_t, trt.ElementWiseOperation.SUM)
     sqrt = network.add_unary(denom.get_output(0), trt.UnaryOperation.SQRT)
     recip = network.add_unary(sqrt.get_output(0), trt.UnaryOperation.RECIP)
     norm = network.add_elementwise(
@@ -492,9 +470,7 @@ def _resnet_block(
             dtype=dtype,
         )
 
-    return network.add_elementwise(
-        h, shortcut, trt.ElementWiseOperation.SUM
-    ).get_output(0)
+    return network.add_elementwise(h, shortcut, trt.ElementWiseOperation.SUM).get_output(0)
 
 
 def _pixel_shuffle_3d(

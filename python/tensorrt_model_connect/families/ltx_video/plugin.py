@@ -18,8 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-from .checkpoint_mapper import WeightDict
-from .config import ModelConfig
+from .weights import WeightDict
 
 
 class LTXVideoPlugin:
@@ -55,28 +54,22 @@ class LTXVideoPlugin:
     _DEFAULT_NUM_STEPS = 50
     _DEFAULT_GUIDANCE_SCALE = 3.0
     _DEFAULT_GUIDANCE_RESCALE = 0.0
-    _DEFAULT_NEGATIVE_PROMPT = (
-        "worst quality, inconsistent motion, blurry, jittery, distorted"
-    )
+    _DEFAULT_NEGATIVE_PROMPT = "worst quality, inconsistent motion, blurry, jittery, distorted"
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
         return mt in ("ltx", "ltx_video", "ltx-video", "ltxpipeline")
 
-    def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
+    def load_weights(self, model_dir: str, config) -> WeightDict:
         model_path = Path(model_dir)
         model_index_path = model_path / "model_index.json"
         if not model_index_path.exists():
-            raise ValueError(
-                f"Expected diffusers format with model_index.json in {model_dir}"
-            )
+            raise ValueError(f"Expected diffusers format with model_index.json in {model_dir}")
 
         model_index = json.loads(model_index_path.read_text())
         pipeline_class = str(model_index.get("_class_name", ""))
         if pipeline_class not in self.pipeline_classes:
-            raise ValueError(
-                f"Expected LTX pipeline class, got {pipeline_class!r}"
-            )
+            raise ValueError(f"Expected LTX pipeline class, got {pipeline_class!r}")
 
         weights = WeightDict()
         weights["_model_format"] = "diffusers"
@@ -108,7 +101,7 @@ class LTXVideoPlugin:
 
     def build_engine(
         self,
-        config: ModelConfig,
+        config,
         weights: WeightDict,
         max_cache_length: int,
         *,
@@ -116,14 +109,12 @@ class LTXVideoPlugin:
         quant_ctx=None,
         verbose: bool = False,
     ) -> bytes:
-        raise NotImplementedError(
-            "LTX-Video uses build_components(), not build_engine()"
-        )
+        raise NotImplementedError("LTX-Video uses build_components(), not build_engine()")
 
     def build_components(
         self,
         model_dir: str,
-        config: ModelConfig,
+        config,
         weights: WeightDict,
         *,
         precision: str = "fp32",
@@ -131,16 +122,14 @@ class LTXVideoPlugin:
         **_kwargs,
     ) -> dict:
         del model_dir
-        from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
+        from .model.components.text_encoder import build_t5_encoder_engine, load_t5_weights
 
         t5_cfg = weights.get("_text_encoder_config", {})
         transformer_cfg = weights.get("_transformer_config", {})
 
         height = int(config.raw.get("video_height", self._DEFAULT_HEIGHT))
         width = int(config.raw.get("video_width", self._DEFAULT_WIDTH))
-        num_frames = int(
-            config.raw.get("video_num_frames", self._DEFAULT_NUM_FRAMES)
-        )
+        num_frames = int(config.raw.get("video_num_frames", self._DEFAULT_NUM_FRAMES))
         frame_rate = int(config.raw.get("frame_rate", self._DEFAULT_FRAME_RATE))
 
         latent_frames = (num_frames - 1) // self._SCALE_FACTOR_TEMPORAL + 1
@@ -219,9 +208,7 @@ class LTXVideoPlugin:
             text_dim=t5_d_model,
             frame_rate=frame_rate,
             precision=compute_precision,
-            in_channels=int(
-                transformer_cfg.get("in_channels", self._DIT_IN_CHANNELS)
-            ),
+            in_channels=int(transformer_cfg.get("in_channels", self._DIT_IN_CHANNELS)),
             verbose=verbose,
         )
 
@@ -242,7 +229,9 @@ class LTXVideoPlugin:
             "vae_decoder": vae_plan,
         }
 
-    def diffusion_bundle_sections(self, components: dict, *, parallel_config=None) -> list[tuple[str, bytes]]:
+    def diffusion_bundle_sections(
+        self, components: dict, *, parallel_config=None
+    ) -> list[tuple[str, bytes]]:
         del parallel_config
         sections: list[tuple[str, bytes]] = []
         for index, (_name, plan) in enumerate(components["text_encoders"]):
@@ -251,13 +240,16 @@ class LTXVideoPlugin:
         sections.append(("vae_decoder_plan", components["vae_decoder"]))
         return sections
 
-    def diffusion_bundle_config(self, config: ModelConfig, *, components: dict) -> dict:
+    def diffusion_bundle_config(self, config, *, components: dict) -> dict:
         cfg = self.get_diffusion_config(config)
         cfg["num_text_encoders"] = len(components["text_encoders"])
         return cfg
 
     def diffusion_tokenizer_add_special_tokens(
-        self, model_dir_path, *, detect_tokenizer_add_special_tokens,
+        self,
+        model_dir_path,
+        *,
+        detect_tokenizer_add_special_tokens,
     ) -> bool:
         from pathlib import Path
 
@@ -269,15 +261,22 @@ class LTXVideoPlugin:
         return bool(detect_tokenizer_add_special_tokens(model_dir))
 
     def diffusion_tokenizer_bundle_sections(
-        self, model_dir_path, *, ensure_tokenizer_json,
+        self,
+        model_dir_path,
+        *,
+        ensure_tokenizer_json,
     ) -> list[tuple[str, bytes]]:
         from pathlib import Path
 
         model_dir = Path(model_dir_path)
         token_filenames = (
-            "tokenizer.json", "tokenizer_config.json",
-            "special_tokens_map.json", "vocab.json",
-            "merges.txt", "spiece.model", "tokenizer.model",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "vocab.json",
+            "merges.txt",
+            "spiece.model",
+            "tokenizer.model",
         )
         sections: list[tuple[str, bytes]] = []
         embedded: set[str] = set()
@@ -310,16 +309,14 @@ class LTXVideoPlugin:
                     sections.append((dst_name, file_path.read_bytes()))
         return sections
 
-    def get_diffusion_config(self, config: ModelConfig) -> dict:
+    def get_diffusion_config(self, config) -> dict:
         transformer_cfg = config.raw.get("_transformer_config", {})
         scheduler_cfg = config.raw.get("_scheduler_config", {})
         vae_cfg = config.raw.get("_vae_config", {})
 
         height = int(config.raw.get("video_height", self._DEFAULT_HEIGHT))
         width = int(config.raw.get("video_width", self._DEFAULT_WIDTH))
-        num_frames = int(
-            config.raw.get("video_num_frames", self._DEFAULT_NUM_FRAMES)
-        )
+        num_frames = int(config.raw.get("video_num_frames", self._DEFAULT_NUM_FRAMES))
 
         return {
             "diffusion_backend_type": "ltx_video",
@@ -327,37 +324,25 @@ class LTXVideoPlugin:
             "num_inference_steps": int(
                 config.raw.get("num_inference_steps", self._DEFAULT_NUM_STEPS)
             ),
-            "guidance_scale": float(
-                config.raw.get("guidance_scale", self._DEFAULT_GUIDANCE_SCALE)
-            ),
+            "guidance_scale": float(config.raw.get("guidance_scale", self._DEFAULT_GUIDANCE_SCALE)),
             "guidance_rescale": float(
                 config.raw.get("guidance_rescale", self._DEFAULT_GUIDANCE_RESCALE)
             ),
             "video_height": height,
             "video_width": width,
             "video_num_frames": num_frames,
-            "frame_rate": int(
-                config.raw.get("frame_rate", self._DEFAULT_FRAME_RATE)
-            ),
+            "frame_rate": int(config.raw.get("frame_rate", self._DEFAULT_FRAME_RATE)),
             "negative_prompt": str(
                 config.raw.get("negative_prompt", self._DEFAULT_NEGATIVE_PROMPT)
             ),
             "z_dim": int(transformer_cfg.get("in_channels", self._DIT_IN_CHANNELS)),
-            "dit_dim": int(
-                transformer_cfg.get("num_attention_heads", self._DIT_NUM_HEADS)
-            )
+            "dit_dim": int(transformer_cfg.get("num_attention_heads", self._DIT_NUM_HEADS))
             * int(transformer_cfg.get("attention_head_dim", 64)),
-            "dit_num_heads": int(
-                transformer_cfg.get("num_attention_heads", self._DIT_NUM_HEADS)
-            ),
-            "dit_num_layers": int(
-                transformer_cfg.get("num_layers", self._DIT_NUM_LAYERS)
-            ),
+            "dit_num_heads": int(transformer_cfg.get("num_attention_heads", self._DIT_NUM_HEADS)),
+            "dit_num_layers": int(transformer_cfg.get("num_layers", self._DIT_NUM_LAYERS)),
             "patch_size": self._PATCH_SIZE,
             "scale_factor_temporal": int(
-                vae_cfg.get(
-                    "temporal_compression_ratio", self._SCALE_FACTOR_TEMPORAL
-                )
+                vae_cfg.get("temporal_compression_ratio", self._SCALE_FACTOR_TEMPORAL)
             ),
             "scale_factor_spatial": int(
                 vae_cfg.get("spatial_compression_ratio", self._SCALE_FACTOR_SPATIAL)
@@ -365,17 +350,11 @@ class LTXVideoPlugin:
             "text_seq_len": self._T5_MAX_SEQ_LEN,
             "text_encoder_dim": self._T5_D_MODEL,
             "flow_shift": float(scheduler_cfg.get("shift", 1.0)),
-            "use_dynamic_shifting": int(
-                bool(scheduler_cfg.get("use_dynamic_shifting", True))
-            ),
+            "use_dynamic_shifting": int(bool(scheduler_cfg.get("use_dynamic_shifting", True))),
             "base_shift": float(scheduler_cfg.get("base_shift", 0.95)),
             "max_shift": float(scheduler_cfg.get("max_shift", 2.05)),
-            "base_image_seq_len": int(
-                scheduler_cfg.get("base_image_seq_len", 1024)
-            ),
-            "max_image_seq_len": int(
-                scheduler_cfg.get("max_image_seq_len", 4096)
-            ),
+            "base_image_seq_len": int(scheduler_cfg.get("base_image_seq_len", 1024)),
+            "max_image_seq_len": int(scheduler_cfg.get("max_image_seq_len", 4096)),
             "shift_terminal": float(scheduler_cfg.get("shift_terminal", 0.1)),
             "latents_mean": list(config.raw.get("_vae_latents_mean", [])),
             "latents_std": list(config.raw.get("_vae_latents_std", [])),
@@ -420,7 +399,7 @@ def _compile_ltx_denoiser_engine(
     verbose: bool,
 ) -> bytes:
     del text_dim
-    from .ltx_dit_builder import build_ltx_dit_engine, load_ltx_dit_weights
+    from .model.model import build_ltx_dit_engine, load_ltx_dit_weights
 
     weights = load_ltx_dit_weights(transformer_dir, precision=precision)
     return build_ltx_dit_engine(
@@ -446,7 +425,7 @@ def _compile_ltx_vae_decoder_engine(
     precision: str,
     verbose: bool,
 ) -> bytes:
-    from .ltx_vae_builder import build_ltx_vae_decoder_engine, load_ltx_vae_weights
+    from .model.components.vae import build_ltx_vae_decoder_engine, load_ltx_vae_weights
 
     weights = load_ltx_vae_weights(vae_dir, precision=precision)
     return build_ltx_vae_decoder_engine(
