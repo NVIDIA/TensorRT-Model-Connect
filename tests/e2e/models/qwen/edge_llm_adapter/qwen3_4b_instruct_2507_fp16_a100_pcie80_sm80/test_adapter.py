@@ -67,11 +67,11 @@ from tensorrt_model_connect.runtime_provider.orchestrator import (  # noqa: E402
 
 MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 MODEL_REVISION = "cdbee75f17c01a7cc42f958dc650907174af0554"
-IMPLEMENTATION_ID = "qwen3-4b-instruct-2507-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80"
-PROFILE_ID = "qwen3-4b-instruct-2507-fp16--a100-pcie80-sm80--edgellm0.9-trt11"
+IMPLEMENTATION_ID = "qwen3-4b-instruct-2507-fp16.tensorrt-edge-llm-v0.9.trt10.a100-pcie80-sm80"
+PROFILE_ID = "qwen3-4b-instruct-2507-fp16--a100-pcie80-sm80--edgellm0.9-trt10"
 EDGE_COMMIT = "1ac0f2b99642045125e1c5ac7b109434ba3b36c7"
 EDGE_SOURCE = "https://github.com/NVIDIA/TensorRT-Edge-LLM.git"
-RUNTIME_LIBRARY = "libtrtmc_impl_qwen3_4b_instruct_2507_fp16_tensorrt_edge_llm_v0_9_trt11.so"
+RUNTIME_LIBRARY = "libtrtmc_impl_qwen3_4b_instruct_2507_fp16_tensorrt_edge_llm_v0_9_trt10.so"
 RUNTIME_PLUGIN = "libNvInfer_edgellm_plugin.so"
 MANIFEST_PATH = CAPSULE_ROOT / "IMPLEMENTATION.toml"
 PROFILE_PATH = CAPSULE_ROOT / "profiles" / "a100-pcie80-sm80-fp16.toml"
@@ -90,7 +90,11 @@ ENGINE_MODEL_CONFIG = {
     "num_key_value_heads": 8,
     "head_dim": 128,
     "rope_theta": 5000000.0,
-    "rope_scaling": None,
+    "rope_scaling": {
+        "rope_theta": 5000000,
+        "rope_type": "default",
+        "type": "default",
+    },
     "partial_rotary_factor": 1.0,
     "num_deepstack_features": 0,
     "ple_enabled": False,
@@ -115,6 +119,11 @@ QWEN3_06B_ENGINE_MODEL_CONFIG = {
     "num_hidden_layers": 28,
     "num_attention_heads": 16,
     "rope_theta": 1000000.0,
+    "rope_scaling": {
+        "rope_theta": 1000000,
+        "rope_type": "default",
+        "type": "default",
+    },
 }
 QWEN3_17B_ENGINE_MODEL_CONFIG = {
     **ENGINE_MODEL_CONFIG,
@@ -124,6 +133,11 @@ QWEN3_17B_ENGINE_MODEL_CONFIG = {
     "num_hidden_layers": 28,
     "num_attention_heads": 16,
     "rope_theta": 1000000.0,
+    "rope_scaling": {
+        "rope_theta": 1000000,
+        "rope_type": "default",
+        "type": "default",
+    },
 }
 REQUIRED_ENGINE_FILES = (
     "llm.engine",
@@ -456,8 +470,8 @@ def test_qwen3_4b_adapter_rejects_sibling_qwen3_engine(
 def _make_cuda_toolkit(
     root: Path,
     *,
-    encoded_header_version: int = 13030,
-    compiler_version: str = "13.3",
+    encoded_header_version: int = 12090,
+    compiler_version: str = "12.9",
 ) -> tuple[Path, Path, Path, Path]:
     include = root / "include"
     include.mkdir(parents=True)
@@ -523,8 +537,8 @@ def test_manifest_profile_and_dependency_pins_are_exact_and_capsule_owned() -> N
         "commit": EDGE_COMMIT,
         "source_mode": "git",
     }
-    assert dependency["tensorrt"] == {"version": "11.2.0.113"}
-    assert dependency["cuda"] == {"version": "13.3"}
+    assert dependency["tensorrt"] == {"version": "10.16.1.11"}
+    assert dependency["cuda"] == {"version": "12.9"}
     exporter_python = dependency["exporter_python"]
     assert exporter_python["direct"] == {
         "torch": "2.12.0",
@@ -1027,8 +1041,9 @@ def test_edge_export_bootstrap_ignores_caller_cwd_and_pythonpath_poison(
     )
 
     assert result.returncode == 0, result.stderr
-    assert command[1:3] == ["-I", "-c"]
+    assert command[1:4] == ["-I", "-B", "-c"]
     assert (output / "selected.txt").read_text(encoding="utf-8") == "pinned"
+    assert not list(pinned_source.rglob("__pycache__"))
 
 
 def test_production_probe_rejects_unqualified_prebuilt_payload_overrides(
@@ -1089,9 +1104,13 @@ def test_build_stages_test_only_engine_runtime_and_plugin_payloads(
         "vocab_size": 151936,
     }
     assert build.descriptor["versions"]["edge_llm"] == "0.9.0"
-    assert build.descriptor["versions"]["cuda"] == "13.3"
+    assert build.descriptor["versions"]["cuda"] == "12.9"
     assert build.descriptor["bundle_info"]["family"] == "qwen"
     assert build.descriptor["bundle_info"]["model_type"] == "qwen3"
+    assert build.descriptor["bundle_info"]["hidden_size"] == 2560
+    assert build.descriptor["bundle_info"]["num_layers"] == 36
+    assert build.descriptor["bundle_info"]["num_attention_heads"] == 32
+    assert build.descriptor["bundle_info"]["num_key_value_heads"] == 8
     assert build.descriptor["bundle_config"]["family"] == "qwen"
     assert build.descriptor["bundle_config"]["model_type"] == "qwen3"
     assert build.descriptor["bundle_config"]["runtime_provider"] == IMPLEMENTATION_ID
@@ -1111,7 +1130,7 @@ def test_qualified_probe_reports_wrong_tensorrt_without_bootstrapping(
     _qualify_exporter_host(adapter, monkeypatch)
 
     def wrong_tensorrt(_runtime_build):
-        raise adapter.AdapterError("found TensorRT 10.14.1.48, not 11.2.0.113")
+        raise adapter.AdapterError("found TensorRT 10.14.1.48, not 10.16.1.11")
 
     def forbidden_bootstrap(*_args, **_kwargs):
         raise AssertionError("unsupported probe must not bootstrap Edge-LLM")
@@ -1133,7 +1152,7 @@ def test_qualified_probe_reports_wrong_tensorrt_without_bootstrapping(
     captured = capsys.readouterr()
     assert json.loads(captured.out) == {
         "reason": "Qwen Edge-LLM software profile is unavailable: "
-        "found TensorRT 10.14.1.48, not 11.2.0.113",
+        "found TensorRT 10.14.1.48, not 10.16.1.11",
         "schema_version": 1,
         "supported": False,
     }
@@ -1149,17 +1168,17 @@ def test_tensorrt_resolution_requires_one_exact_core_and_parser_installation(
     (include / "NvInfer.h").write_text("// fixture\n", encoding="utf-8")
     version_header = include / "NvInferVersion.h"
     version_header.write_text(
-        "#define NV_TENSORRT_MAJOR 11\n"
-        "#define NV_TENSORRT_MINOR 2\n"
-        "#define NV_TENSORRT_PATCH 0\n"
-        "#define NV_TENSORRT_BUILD 113\n",
+        "#define NV_TENSORRT_MAJOR 10\n"
+        "#define NV_TENSORRT_MINOR 16\n"
+        "#define NV_TENSORRT_PATCH 1\n"
+        "#define NV_TENSORRT_BUILD 11\n",
         encoding="utf-8",
     )
     (include / "NvOnnxParser.h").write_text("// fixture\n", encoding="utf-8")
     library_dir = tmp_path / "lib"
     library_dir.mkdir()
-    core = library_dir / "libnvinfer.so.11.2.0.113"
-    parser = library_dir / "libnvonnxparser.so.11"
+    core = library_dir / "libnvinfer.so.10.16.1.11"
+    parser = library_dir / "libnvonnxparser.so.10"
     core.write_bytes(b"exact TensorRT core")
     parser.write_bytes(b"exact TensorRT parser")
     runtime_build = {
@@ -1168,7 +1187,7 @@ def test_tensorrt_resolution_requires_one_exact_core_and_parser_installation(
         "onnx_parser_include_dir": str(include),
         "onnx_parser_library": str(parser),
     }
-    monkeypatch.setattr(adapter, "_library_tensorrt_version", lambda _library: (11, 2, 0, 113))
+    monkeypatch.setattr(adapter, "_library_tensorrt_version", lambda _library: (10, 16, 1, 11))
 
     resolved = adapter._resolve_tensorrt(runtime_build)
     assert resolved.library == core
@@ -1176,17 +1195,17 @@ def test_tensorrt_resolution_requires_one_exact_core_and_parser_installation(
 
     version_header.write_text(
         version_header.read_text(encoding="utf-8").replace(
-            "#define NV_TENSORRT_BUILD 113", "#define NV_TENSORRT_BUILD 112"
+            "#define NV_TENSORRT_BUILD 11", "#define NV_TENSORRT_BUILD 10"
         ),
         encoding="utf-8",
     )
-    with pytest.raises(adapter.AdapterError, match="11.2.0.112, not 11.2.0.113"):
+    with pytest.raises(adapter.AdapterError, match="10.16.1.10, not 10.16.1.11"):
         adapter._resolve_tensorrt(runtime_build)
 
 
 @pytest.mark.parametrize(
     ("header_version", "compiler_version"),
-    ((12080, "13.3"), (13030, "12.8")),
+    ((12080, "12.9"), (12090, "12.8")),
 )
 def test_cuda_resolution_rejects_unsupported_toolkit_components(
     tmp_path: Path,
@@ -1200,11 +1219,11 @@ def test_cuda_resolution_rejects_unsupported_toolkit_components(
         compiler_version=compiler_version,
     )
 
-    with pytest.raises(adapter.AdapterError, match=r"not 13\.3"):
+    with pytest.raises(adapter.AdapterError, match=r"not 12\.9"):
         adapter._resolve_cuda({"cuda_include_dir": str(include), "cudart_library": str(cudart)})
 
 
-def test_cuda_resolution_pins_one_coherent_13_3_toolkit(tmp_path: Path) -> None:
+def test_cuda_resolution_pins_one_coherent_12_9_toolkit(tmp_path: Path) -> None:
     adapter = _load_adapter_module()
     cuda_root = tmp_path / "cuda"
     include, compiler, cudart, driver = _make_cuda_toolkit(cuda_root)
@@ -1218,7 +1237,7 @@ def test_cuda_resolution_pins_one_coherent_13_3_toolkit(tmp_path: Path) -> None:
     assert resolved.cudart_library == cudart.resolve()
     assert resolved.driver_library == driver.resolve()
     assert resolved.compiler == compiler.resolve()
-    assert resolved.version == "13.3"
+    assert resolved.version == "12.9"
 
     explicit_driver = cuda_root / "lib64" / "libcuda.so"
     explicit_driver.write_bytes(b"explicit CUDA driver library")
@@ -1233,11 +1252,11 @@ def test_cuda_resolution_pins_one_coherent_13_3_toolkit(tmp_path: Path) -> None:
 
     other_root = tmp_path / "other-cuda"
     _other_include, _other_compiler, other_cudart, other_driver = _make_cuda_toolkit(other_root)
-    with pytest.raises(adapter.AdapterError, match="same exact CUDA 13.3 toolkit"):
+    with pytest.raises(adapter.AdapterError, match="same exact CUDA 12.9 toolkit"):
         adapter._resolve_cuda(
             {"cuda_include_dir": str(include), "cudart_library": str(other_cudart)}
         )
-    with pytest.raises(adapter.AdapterError, match="same exact CUDA 13.3 toolkit"):
+    with pytest.raises(adapter.AdapterError, match="same exact CUDA 12.9 toolkit"):
         adapter._resolve_cuda(
             {
                 "cuda_include_dir": str(include),
@@ -1394,12 +1413,12 @@ def test_edge_toolchain_identity_hashes_tools_dependencies_headers_and_flags(
     archiver = fixture(tmp_path / "tools" / "ar")
     libstdcxx = fixture(tmp_path / "tools" / "libstdc++.so")
     nvcc = fixture(cuda_root / "bin" / "nvcc", b"nvcc-v1")
-    trt_library = fixture(tmp_path / "trt" / "libnvinfer.so.11")
-    onnx_library = fixture(tmp_path / "trt" / "libnvonnxparser.so.11")
+    trt_library = fixture(tmp_path / "trt" / "libnvinfer.so.10")
+    onnx_library = fixture(tmp_path / "trt" / "libnvonnxparser.so.10")
     cudart = fixture(cuda_root / "libcudart.so")
     driver = fixture(cuda_root / "libcuda.so")
     tensorrt = adapter._TensorRtInstallation(trt_include, trt_library, trt_include, onnx_library)
-    cuda = adapter._CudaInstallation(cuda_root, cuda_include, cudart, driver, nvcc, "13.3")
+    cuda = adapter._CudaInstallation(cuda_root, cuda_include, cudart, driver, nvcc, "12.9")
 
     def resolved_compiler(environment: str, _default: str) -> Path:
         return {"CC": cc, "CXX": cxx, "CMAKE_COMMAND": cmake}[environment]
@@ -1439,9 +1458,9 @@ def test_selected_build_builds_only_required_edge_targets(
     source.mkdir()
     trt_include = tmp_path / "trt-include"
     trt_include.mkdir()
-    trt_library = tmp_path / "libnvinfer.so.11"
+    trt_library = tmp_path / "libnvinfer.so.10"
     trt_library.write_bytes(b"trt")
-    onnx_library = tmp_path / "libnvonnxparser.so.11"
+    onnx_library = tmp_path / "libnvonnxparser.so.10"
     onnx_library.write_bytes(b"onnx")
     cuda_root = tmp_path / "cuda"
     cuda_include = cuda_root / "include"
@@ -1455,7 +1474,7 @@ def test_selected_build_builds_only_required_edge_targets(
     cuda_compiler.write_bytes(b"nvcc")
     tensorrt = adapter._TensorRtInstallation(trt_include, trt_library, trt_include, onnx_library)
     cuda = adapter._CudaInstallation(
-        cuda_root, cuda_include, cudart, cuda_driver, cuda_compiler, "13.3"
+        cuda_root, cuda_include, cudart, cuda_driver, cuda_compiler, "12.9"
     )
     calls: list[list[str]] = []
     validated_sources: list[Path] = []
@@ -1536,7 +1555,7 @@ def test_selected_build_builds_only_required_edge_targets(
     assert f"-DTensorRT_LIBRARY={trt_library}" in configure
     assert f"-DTensorRT_OnnxParser_INCLUDE_DIR={trt_include}" in configure
     assert f"-DTensorRT_OnnxParser_LIBRARY={onnx_library}" in configure
-    assert "-DCUDA_CTK_VERSION=13.3" in configure
+    assert "-DCUDA_CTK_VERSION=12.9" in configure
     assert f"-DCUDA_DRIVER_LIB={cuda_driver}" in configure
     assert f"-DCMAKE_AR={archiver}" in configure
     assert f"-DCMAKE_LINKER={linker}" in configure
@@ -1630,7 +1649,7 @@ def test_runtime_dso_build_receives_exact_cuda_driver_library(
         placeholder,
         adapter._TensorRtInstallation(include, placeholder, include, placeholder),
         adapter._CudaInstallation(
-            tmp_path / "cuda", include, placeholder, driver, placeholder, "13.3"
+            tmp_path / "cuda", include, placeholder, driver, placeholder, "12.9"
         ),
         toolchain,
     )
@@ -1683,8 +1702,8 @@ def test_real_payload_validation_rejects_every_runpath(
 """
     dynamic = f"""
  0x0000000000000001 (NEEDED) Shared library: [libcuda.so.1]
- 0x0000000000000001 (NEEDED) Shared library: [libcudart.so.13]
- 0x0000000000000001 (NEEDED) Shared library: [libnvinfer.so.11]
+ 0x0000000000000001 (NEEDED) Shared library: [libcudart.so.12]
+ 0x0000000000000001 (NEEDED) Shared library: [libnvinfer.so.10]
  0x000000000000001d (RUNPATH) Library runpath: [{runpath}]
 """
     monkeypatch.setattr(
@@ -1721,7 +1740,7 @@ def test_engine_export_uses_pinned_dependency_tools_despite_ambient_poison(
         build_tool,
         plugin,
         adapter._TensorRtInstallation(include, placeholder, include, placeholder),
-        adapter._CudaInstallation(tmp_path, include, placeholder, placeholder, placeholder, "13.3"),
+        adapter._CudaInstallation(tmp_path, include, placeholder, placeholder, placeholder, "12.9"),
     )
     model_source = tmp_path / "model"
     model_source.mkdir()
@@ -1781,7 +1800,10 @@ def test_engine_export_uses_pinned_dependency_tools_despite_ambient_poison(
     assert invocations[0][0] == adapter._edge_export_command(
         Path(sys.executable), source, model_source, attempt / "output_root"
     )
+    assert invocations[0][0][1:3] == ["-I", "-B"]
     assert "PYTHONPATH" not in invocations[0][1]
+    assert invocations[0][1]["LOGNAME"] == f"trtmc-edgellm-{os.getuid()}"
+    assert invocations[0][1]["USER"] == f"trtmc-edgellm-{os.getuid()}"
     assert invocations[0][1]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert invocations[0][1]["PYTHONNOUSERSITE"] == "1"
     assert invocations[0][1]["PIP_CONFIG_FILE"] == os.devnull
@@ -1817,7 +1839,7 @@ def test_engine_build_revalidates_source_after_each_tool(
         build_tool,
         plugin,
         adapter._TensorRtInstallation(include, placeholder, include, placeholder),
-        adapter._CudaInstallation(tmp_path, include, placeholder, placeholder, placeholder, "13.3"),
+        adapter._CudaInstallation(tmp_path, include, placeholder, placeholder, placeholder, "12.9"),
     )
     model_source = tmp_path / "model"
     model_source.mkdir()
@@ -1872,3 +1894,37 @@ def test_verbose_edge_tool_logs_never_pollute_json_stdout(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "child stdout\nchild stderr\n"
+
+
+@pytest.mark.parametrize("failure_stream", ("stderr", "stdout"))
+@pytest.mark.parametrize("verbose", (False, True))
+def test_failed_edge_tool_exposes_bounded_output_tail_before_transport_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_stream: str,
+    verbose: bool,
+) -> None:
+    adapter = _load_adapter_module()
+    leading = f"{failure_stream.upper()}-LEADING-NOISE"
+    trailing = f"{failure_stream.upper()}-FINAL-TRACEBACK"
+    failure_output = f"{leading}\n{'x' * 5000}\n{trailing}\n"
+    completed = subprocess.CompletedProcess(
+        ["edge-tool", "--flag"],
+        returncode=17,
+        stdout=failure_output if failure_stream == "stdout" else "ignored stdout\n",
+        stderr=failure_output if failure_stream == "stderr" else " \n",
+    )
+    monkeypatch.setattr(adapter.subprocess, "run", lambda *_args, **_kwargs: completed)
+
+    with pytest.raises(adapter.AdapterError) as failure:
+        adapter._run_tool(["edge-tool", "--flag"], verbose=verbose)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    message = str(failure.value)
+    assert leading not in message
+    assert f"{failure_stream} tail" in message
+    assert "leading characters omitted" in message
+    assert "Command: edge-tool --flag" in message
+    assert trailing in ("Qwen adapter error: " + message)[:4000]

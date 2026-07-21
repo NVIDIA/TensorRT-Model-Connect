@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
         [&] { ++synchronized; });
     if (generated != 35 || synchronized != 66 || measurements.iterations.size() != 30)
         return 1;
-    const qwen_edge_qualification::RuntimeVersions versions{11, 2, 0, 113, 13030};
+    const qwen_edge_qualification::RuntimeVersions versions{10, 16, 1, 11, 12090};
     qwen_edge_qualification::write_result(argv[1], "contract", versions, measurements);
     return 0;
 }
@@ -77,8 +77,8 @@ int main(int argc, char** argv) {
     output = tmp_path / "result.json"
     subprocess.run([str(binary), str(output)], check=True)
     result = json.loads(output.read_text(encoding="utf-8"))
-    assert result["observed_tensorrt_version"] == "11.2.0.113"
-    assert result["observed_cuda_runtime_version"] == 13030
+    assert result["observed_tensorrt_version"] == "10.16.1.11"
+    assert result["observed_cuda_runtime_version"] == 12090
     assert result["decoding_cuda_graph_captured"] is True
 
 
@@ -97,8 +97,8 @@ def test_direct_runner_uses_the_official_edge_lifecycle_and_native_ids() -> None
         "cudaRuntimeGetVersion(&cuda_runtime)",
     ):
         assert symbol in source
-    assert 'throw std::runtime_error("loaded TensorRT runtime is not 11.2.0.113")' in source
-    assert 'throw std::runtime_error("loaded CUDA runtime is not 13030")' in source
+    assert 'throw std::runtime_error("loaded TensorRT runtime is not 10.16.1.11")' in source
+    assert 'throw std::runtime_error("loaded CUDA runtime is not 12090")' in source
     assert 'check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize")' in source
     assert "cudaStreamSynchronize" not in source
     header = (LEAF / "qualification_runner.h").read_text(encoding="utf-8")
@@ -119,8 +119,8 @@ def test_mc_runner_uses_only_the_public_cpp_pipeline_and_native_ids() -> None:
         "cudaRuntimeGetVersion(&cuda_runtime)",
     ):
         assert symbol in source
-    assert 'throw std::runtime_error("loaded TensorRT runtime is not 11.2.0.113")' in source
-    assert 'throw std::runtime_error("loaded CUDA runtime is not 13030")' in source
+    assert 'throw std::runtime_error("loaded TensorRT runtime is not 10.16.1.11")' in source
+    assert 'throw std::runtime_error("loaded CUDA runtime is not 12090")' in source
 
 
 def test_edge_build_stamp_rehashes_recipe_and_exact_products(tmp_path: Path) -> None:
@@ -192,8 +192,11 @@ def test_runner_build_is_leaf_local_and_pins_every_external_boundary() -> None:
     ):
         assert f'set({variable} "" CACHE' in cmake
     assert "1ac0f2b99642045125e1c5ac7b109434ba3b36c7" in cmake
-    assert "11.2.0.113" in cmake
-    assert 'TRTMC_CUDA_VERSION STREQUAL "13.3"' in cmake
+    assert "10.16.1.11" in cmake
+    assert 'TRTMC_CUDA_VERSION STREQUAL "12.9"' in cmake
+    assert 'CMAKE_CUDA_COMPILER_VERSION MATCHES "^12\\\\.9' in cmake
+    assert 'libnvinfer\\\\.so(\\\\.10' in cmake
+    assert 'libcudart\\\\.so(\\\\.12' in cmake
     assert 'REGEX "^CMAKE_HOME_DIRECTORY:INTERNAL="' in cmake
     assert 'STREQUAL "libNvInfer_edgellm_plugin.so.1.0"' in cmake
     assert "add_executable(trtmc_edgellm_direct_runner" in cmake

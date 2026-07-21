@@ -12,10 +12,10 @@ commit = "1ac0f2b99642045125e1c5ac7b109434ba3b36c7"
 source_mode = "git"
 
 [tensorrt]
-version = "11.2.0.113"
+version = "10.16.1.11"
 
 [cuda]
-version = "13.3"
+version = "12.9"
 
 [exporter_python]
 implementation = "CPython"

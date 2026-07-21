@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.24)
-project(trtmc_qwen3_4b_instruct_2507_fp16_edge_llm_v09_trt11_runtime LANGUAGES CXX)
+project(trtmc_qwen3_4b_instruct_2507_fp16_edge_llm_v09_trt10_runtime LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -49,7 +49,7 @@ if(NOT _manifest_digest_length EQUAL 64 OR
     "TRTMC_QWEN_EDGE_MANIFEST_SHA256 must be a lowercase SHA-256 digest")
 endif()
 
-set(_target trtmc_impl_qwen3_4b_instruct_2507_fp16_tensorrt_edge_llm_v0_9_trt11)
+set(_target trtmc_impl_qwen3_4b_instruct_2507_fp16_tensorrt_edge_llm_v0_9_trt10)
 add_library(${_target} SHARED adapter.cpp)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_pipeline_header}")
 file(SHA256 "${_pipeline_header}" _trtmc_pipeline_abi_sha256)
@@ -66,21 +66,21 @@ target_link_options(${_target} PRIVATE
   -Wl,--exclude-libs,ALL
   -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/exports.map)
 set_target_properties(${_target} PROPERTIES
-  OUTPUT_NAME trtmc_impl_qwen3_4b_instruct_2507_fp16_tensorrt_edge_llm_v0_9_trt11
+  OUTPUT_NAME trtmc_impl_qwen3_4b_instruct_2507_fp16_tensorrt_edge_llm_v0_9_trt10
   SKIP_BUILD_RPATH TRUE
   INSTALL_RPATH ""
   LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/exports.map")
 
 if(TRTMC_QWEN_EDGE_FAKE_RUNTIME)
-  set(TRTMC_QWEN_EDGE_FAKE_TENSORRT_MAJOR 11 CACHE STRING
+  set(TRTMC_QWEN_EDGE_FAKE_TENSORRT_MAJOR 10 CACHE STRING
     "Fake loaded TensorRT major version for capsule contract tests")
-  set(TRTMC_QWEN_EDGE_FAKE_TENSORRT_MINOR 2 CACHE STRING
+  set(TRTMC_QWEN_EDGE_FAKE_TENSORRT_MINOR 16 CACHE STRING
     "Fake loaded TensorRT minor version for capsule contract tests")
-  set(TRTMC_QWEN_EDGE_FAKE_TENSORRT_PATCH 0 CACHE STRING
+  set(TRTMC_QWEN_EDGE_FAKE_TENSORRT_PATCH 1 CACHE STRING
     "Fake loaded TensorRT patch version for capsule contract tests")
-  set(TRTMC_QWEN_EDGE_FAKE_TENSORRT_BUILD 113 CACHE STRING
+  set(TRTMC_QWEN_EDGE_FAKE_TENSORRT_BUILD 11 CACHE STRING
     "Fake loaded TensorRT build version for capsule contract tests")
-  set(TRTMC_QWEN_EDGE_FAKE_CUDA_RUNTIME_VERSION 13030 CACHE STRING
+  set(TRTMC_QWEN_EDGE_FAKE_CUDA_RUNTIME_VERSION 12090 CACHE STRING
     "Fake loaded CUDA runtime integer version for capsule contract tests")
   foreach(_component MAJOR MINOR PATCH BUILD)
     if(NOT TRTMC_QWEN_EDGE_FAKE_TENSORRT_${_component} MATCHES "^[0-9]+$")
@@ -128,13 +128,13 @@ else()
       message(FATAL_ERROR "${_required} is required for the real capsule runtime")
     endif()
   endforeach()
-  if(NOT TRTMC_TENSORRT_VERSION STREQUAL "11.2.0.113")
+  if(NOT TRTMC_TENSORRT_VERSION STREQUAL "10.16.1.11")
     message(FATAL_ERROR
-      "This capsule supports TensorRT 11.2.0.113, got ${TRTMC_TENSORRT_VERSION}")
+      "This capsule supports TensorRT 10.16.1.11, got ${TRTMC_TENSORRT_VERSION}")
   endif()
-  if(NOT TRTMC_CUDA_VERSION STREQUAL "13.3")
+  if(NOT TRTMC_CUDA_VERSION STREQUAL "12.9")
     message(FATAL_ERROR
-      "This capsule supports CUDA 13.3, got ${TRTMC_CUDA_VERSION}")
+      "This capsule supports CUDA 12.9, got ${TRTMC_CUDA_VERSION}")
   endif()
   foreach(_header
       "${TRTMC_EDGE_LLM_SOURCE_DIR}/cpp/runtime/llmInferenceRuntime.h"
@@ -198,8 +198,8 @@ else()
       "TRTMC_TENSORRT_VERSION=${TRTMC_TENSORRT_VERSION}")
   endif()
   file(READ "${TRTMC_CUDA_INCLUDE_DIR}/cuda.h" _cuda_version_header)
-  if(NOT _cuda_version_header MATCHES "#define[ \t]+CUDA_VERSION[ \t]+13030([^0-9]|$)")
-    message(FATAL_ERROR "This capsule requires exact CUDA 13.3 headers")
+  if(NOT _cuda_version_header MATCHES "#define[ \t]+CUDA_VERSION[ \t]+12090([^0-9]|$)")
+    message(FATAL_ERROR "This capsule requires exact CUDA 12.9 headers")
   endif()
   file(REAL_PATH "${TRTMC_CUDA_INCLUDE_DIR}" _cuda_include_real)
   get_filename_component(_cuda_target_root "${_cuda_include_real}" DIRECTORY)
@@ -208,7 +208,7 @@ else()
     string(FIND "${_cuda_library_real}" "${_cuda_target_root}/" _cuda_root_prefix)
     if(NOT _cuda_root_prefix EQUAL 0)
       message(FATAL_ERROR
-        "${_cuda_library} must come from the same CUDA 13.3 installation as "
+        "${_cuda_library} must come from the same CUDA 12.9 installation as "
         "TRTMC_CUDA_INCLUDE_DIR")
     endif()
   endforeach()
@@ -254,9 +254,9 @@ else()
   endif()
 
   enable_language(CUDA)
-  if(NOT CMAKE_CUDA_COMPILER_VERSION MATCHES "^13\\.3(\\.[0-9]+)?$")
+  if(NOT CMAKE_CUDA_COMPILER_VERSION MATCHES "^12\\.9(\\.[0-9]+)?$")
     message(FATAL_ERROR
-      "This capsule requires exact CUDA 13.3 nvcc, got "
+      "This capsule requires exact CUDA 12.9 nvcc, got "
       "${CMAKE_CUDA_COMPILER_VERSION}")
   endif()
   target_include_directories(${_target} PRIVATE

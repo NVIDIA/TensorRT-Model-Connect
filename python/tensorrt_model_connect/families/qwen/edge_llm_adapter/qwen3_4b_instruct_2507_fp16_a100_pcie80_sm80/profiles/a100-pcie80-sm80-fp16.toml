@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version = 1
-profile_id = "qwen3-4b-instruct-2507-fp16--a100-pcie80-sm80--edgellm0.9-trt11"
+profile_id = "qwen3-4b-instruct-2507-fp16--a100-pcie80-sm80--edgellm0.9-trt10"
 operation = "text-generation-v1"
 precision = "fp16"
 quantization = "none"
