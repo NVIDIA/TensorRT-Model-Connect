@@ -30,9 +30,9 @@ try:
     # machinery would rebind the package attribute ``gpt_oss.plugin`` from
     # the plugin *instance* to the submodule and break sibling tests.
     import tensorrt_model_connect.families.gpt_oss as gpt_oss
-    from tensorrt_model_connect.families.gpt_oss import graph_ops
     from tensorrt_model_connect.families.gpt_oss.config import ModelConfig
-    from tensorrt_model_connect.families.gpt_oss.utils import (
+    from tensorrt_model_connect.families.gpt_oss.model import model as graph_ops
+    from tensorrt_model_connect.families.gpt_oss.model.model import (
         make_rope_half_tables,
         resolve_rope_parameters,
     )
@@ -185,7 +185,7 @@ def _tiny_gpt_oss_config(layer_types: list[str], sliding_window: int) -> ModelCo
 
 
 def _tiny_gpt_oss_weights(config: ModelConfig, seed: int = 7):
-    from tensorrt_model_connect.families.gpt_oss.checkpoint_mapper import WeightDict
+    from tensorrt_model_connect.families.gpt_oss.weights import WeightDict
 
     rng = np.random.default_rng(seed)
     hidden = config.hidden_size

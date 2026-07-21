@@ -36,21 +36,21 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _transpose_2d,
 )
-from . import graph_ops
-from . import graph_blocks
+from .model import model as graph_ops
+from .model import model as graph_blocks
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .standard_decoder_builder import _apply_norm, _mark_debug_output
-from .utils import make_rope_half_tables
+from .model.model import _apply_norm, _mark_debug_output
 
 
 trt = trt_compat.get_trt()
+
 
 class GptOssPlugin:
     name = "gpt_oss"
@@ -61,7 +61,9 @@ class GptOssPlugin:
         return model_type.lower() == "gpt_oss"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Load GPT-OSS weights via AutoModelForCausalLM (handles MXFP4 dequant).
 
@@ -71,18 +73,18 @@ class GptOssPlugin:
         import torch
         from transformers import AutoModelForCausalLM
 
-        print("[trtmc build] Loading GPT-OSS model (MXFP4 auto-dequant) ...",
-              file=sys.stderr, flush=True)
+        print(
+            "[trtmc build] Loading GPT-OSS model (MXFP4 auto-dequant) ...",
+            file=sys.stderr,
+            flush=True,
+        )
 
         model = AutoModelForCausalLM.from_pretrained(
             model_dir,
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
-        state = {
-            k: v.float().cpu().numpy()
-            for k, v in model.state_dict().items()
-        }
+        state = {k: v.float().cpu().numpy() for k, v in model.state_dict().items()}
         del model
         gc.collect()
 
@@ -96,7 +98,8 @@ class GptOssPlugin:
         # Embedding
         embedding = state["model.embed_tokens.weight"]
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         attention_size = 0
@@ -107,10 +110,12 @@ class GptOssPlugin:
             hf = f"model.layers.{layer_idx}"
 
             # RMSNorm (no biases)
-            weights[f"{prefix}.input_norm"] = state[
-                f"{hf}.input_layernorm.weight"].astype(np.float32)
+            weights[f"{prefix}.input_norm"] = state[f"{hf}.input_layernorm.weight"].astype(
+                np.float32
+            )
             weights[f"{prefix}.post_attn_norm"] = state[
-                f"{hf}.post_attention_layernorm.weight"].astype(np.float32)
+                f"{hf}.post_attention_layernorm.weight"
+            ].astype(np.float32)
 
             # --- Attention projections (with biases) ---
             q_raw = state[f"{hf}.self_attn.q_proj.weight"]
@@ -134,28 +139,21 @@ class GptOssPlugin:
             weights[f"{prefix}.w_o"] = o_t
 
             # Attention biases
-            weights[f"{prefix}.q_bias"] = state[
-                f"{hf}.self_attn.q_proj.bias"].astype(np.float32)
-            weights[f"{prefix}.o_bias"] = state[
-                f"{hf}.self_attn.o_proj.bias"].astype(np.float32)
+            weights[f"{prefix}.q_bias"] = state[f"{hf}.self_attn.q_proj.bias"].astype(np.float32)
+            weights[f"{prefix}.o_bias"] = state[f"{hf}.self_attn.o_proj.bias"].astype(np.float32)
 
-            weights[f"{prefix}.k_bias"] = state[
-                f"{hf}.self_attn.k_proj.bias"].astype(np.float32)
-            weights[f"{prefix}.v_bias"] = state[
-                f"{hf}.self_attn.v_proj.bias"].astype(np.float32)
+            weights[f"{prefix}.k_bias"] = state[f"{hf}.self_attn.k_proj.bias"].astype(np.float32)
+            weights[f"{prefix}.v_bias"] = state[f"{hf}.self_attn.v_proj.bias"].astype(np.float32)
 
             # Attention sinks (per-head learned parameter for softmax normalization)
             sinks_key = f"{hf}.self_attn.sinks"
             if sinks_key in state:
-                weights[f"{prefix}.sinks"] = state[sinks_key].astype(
-                    np.float32)
+                weights[f"{prefix}.sinks"] = state[sinks_key].astype(np.float32)
 
             # --- Router ---
             router_w = state[f"{hf}.mlp.router.weight"]  # [num_experts, hidden]
-            weights[f"{prefix}.router"] = _transpose_2d(
-                router_w, "router")
-            weights[f"{prefix}.router_bias"] = state[
-                f"{hf}.mlp.router.bias"].astype(np.float32)
+            weights[f"{prefix}.router"] = _transpose_2d(router_w, "router")
+            weights[f"{prefix}.router_bias"] = state[f"{hf}.mlp.router.bias"].astype(np.float32)
 
             # --- Packed expert weights ---
             gate_up = state[f"{hf}.mlp.experts.gate_up_proj"]
@@ -171,15 +169,15 @@ class GptOssPlugin:
             for e_idx in range(num_experts):
                 gu = gate_up[e_idx]  # [hidden, 2*inter]
                 # Interleaved: gate = columns 0,2,4,...  up = columns 1,3,5,...
-                weights[f"{prefix}.expert.{e_idx}.w_gate"] = (
-                    np.ascontiguousarray(
-                        gu[:, ::2], dtype=np.float32))
-                weights[f"{prefix}.expert.{e_idx}.w_up"] = (
-                    np.ascontiguousarray(
-                        gu[:, 1::2], dtype=np.float32))
-                weights[f"{prefix}.expert.{e_idx}.w_down"] = (
-                    np.ascontiguousarray(
-                        down[e_idx], dtype=np.float32))
+                weights[f"{prefix}.expert.{e_idx}.w_gate"] = np.ascontiguousarray(
+                    gu[:, ::2], dtype=np.float32
+                )
+                weights[f"{prefix}.expert.{e_idx}.w_up"] = np.ascontiguousarray(
+                    gu[:, 1::2], dtype=np.float32
+                )
+                weights[f"{prefix}.expert.{e_idx}.w_down"] = np.ascontiguousarray(
+                    down[e_idx], dtype=np.float32
+                )
 
             if moe_intermediate == 0:
                 moe_intermediate = per_expert_inter
@@ -187,12 +185,9 @@ class GptOssPlugin:
             # Per-expert biases (also interleaved for gate_up)
             for e_idx in range(num_experts):
                 gu_b = gate_up_bias[e_idx]  # [2*inter]
-                weights[f"{prefix}.expert.{e_idx}.gate_bias"] = (
-                    gu_b[::2].astype(np.float32))
-                weights[f"{prefix}.expert.{e_idx}.up_bias"] = (
-                    gu_b[1::2].astype(np.float32))
-                weights[f"{prefix}.expert.{e_idx}.down_bias"] = (
-                    down_bias[e_idx].astype(np.float32))
+                weights[f"{prefix}.expert.{e_idx}.gate_bias"] = gu_b[::2].astype(np.float32)
+                weights[f"{prefix}.expert.{e_idx}.up_bias"] = gu_b[1::2].astype(np.float32)
+                weights[f"{prefix}.expert.{e_idx}.down_bias"] = down_bias[e_idx].astype(np.float32)
 
         # Final norm
         final_key = "model.norm.weight"
@@ -206,8 +201,7 @@ class GptOssPlugin:
         if lm_key in state:
             weights["w_out"] = _transpose_2d(state[lm_key], "lm_head")
         else:
-            weights["w_out"] = _transpose_2d(
-                embedding.copy(), "embedding_tied")
+            weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
         lm_bias_key = "lm_head.bias"
         if lm_bias_key in state:
@@ -217,25 +211,33 @@ class GptOssPlugin:
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_num_experts"] = num_experts  # type: ignore[assignment]
         weights["_moe_intermediate_size"] = moe_intermediate  # type: ignore[assignment]
-        weights["_num_experts_per_tok"] = config.raw.get(
-            "num_experts_per_tok", 4)  # type: ignore[assignment]
+        weights["_num_experts_per_tok"] = config.raw.get("num_experts_per_tok", 4)  # type: ignore[assignment]
 
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="GPT-OSS tensor-parallel builds")
-            from .tp_builder import build_gpt_oss_tp_engine
+                parallel, feature="GPT-OSS tensor-parallel builds"
+            )
+            from .model.parallel import build_gpt_oss_tp_engine
+
             return build_gpt_oss_tp_engine(
-                config, weights, max_cache_length,
+                config,
+                weights,
+                max_cache_length,
                 precision=precision,
                 quant_ctx=quant_ctx,
                 verbose=verbose,
@@ -243,8 +245,7 @@ class GptOssPlugin:
                 parallel_config=parallel,
             )
 
-        attention_size: int = weights.get(
-            "_attention_size", config.attention_size)
+        attention_size: int = weights.get("_attention_size", config.attention_size)
         num_experts: int = weights["_num_experts"]
         moe_intermediate: int = weights["_moe_intermediate_size"]
         top_k: int = weights["_num_experts_per_tok"]
@@ -255,16 +256,15 @@ class GptOssPlugin:
         num_kv_heads = config.num_key_value_heads
         head_dim = attention_size // num_heads
         kv_attention_size = graph_blocks.infer_kv_attention_size(
-            weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim
+        )
         attention_window = max_cache_length + 1
 
-        logger = trt.Logger(
-            trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+        logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
-        trt_config.set_memory_pool_limit(
-            trt.MemoryPoolType.WORKSPACE, 1 << 30)
+        trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
         if precision == "fp16":
             work_np_dtype = np.float16
@@ -291,8 +291,7 @@ class GptOssPlugin:
         # -----------------------------------------------------------
         token_id = network.add_input("token_id", trt.int32, (1,))
         position_id = network.add_input("position_id", trt.int32, (1,))
-        attention_mask = network.add_input(
-            "attention_mask", trt.float32, (1, attention_window))
+        attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
 
         cache_k_inputs = []
         cache_v_inputs = []
@@ -332,7 +331,7 @@ class GptOssPlugin:
         # GPT-OSS uses YaRN RoPE scaling. Hub checkpoints serialize it under
         # rope_scaling; transformers 5.x configs use rope_parameters. The
         # shared helper accepts both and applies HF-exact YaRN semantics.
-        cos_half_np, sin_half_np = make_rope_half_tables(
+        cos_half_np, sin_half_np = graph_ops.make_rope_half_tables(
             config, attention_window, head_dim)
 
         cos_half_tensor = graph_ops.add_constant(
@@ -426,12 +425,8 @@ class GptOssPlugin:
             present_v_outputs.append(present_v)
 
             if debug_layer_outputs:
-                _mark_debug_output(
-                    network, result["post_attn"],
-                    f"debug_post_attn_{layer_idx}")
-                _mark_debug_output(
-                    network, hidden_state,
-                    f"debug_hidden_{layer_idx}")
+                _mark_debug_output(network, result["post_attn"], f"debug_post_attn_{layer_idx}")
+                _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
 
         # -----------------------------------------------------------
         # Final norm
@@ -440,7 +435,7 @@ class GptOssPlugin:
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = _apply_norm(
                 network, hidden_state, hidden, final_norm,
-                None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
+                eps_tensor, dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # LM head (logits)
@@ -479,11 +474,14 @@ class GptOssPlugin:
         # Build engine
         # -----------------------------------------------------------
         if verbose:
-            print(f"[trtmc build] Building GPT-OSS MoE TRT engine "
-                  f"({num_layers} layers, hidden={hidden}, "
-                  f"attn={attention_size}, experts={num_experts}, "
-                  f"top_k={top_k}, inter={moe_intermediate}, "
-                  f"cache={max_cache_length}) ...", file=sys.stderr)
+            print(
+                f"[trtmc build] Building GPT-OSS MoE TRT engine "
+                f"({num_layers} layers, hidden={hidden}, "
+                f"attn={attention_size}, experts={num_experts}, "
+                f"top_k={top_k}, inter={moe_intermediate}, "
+                f"cache={max_cache_length}) ...",
+                file=sys.stderr,
+            )
 
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
@@ -547,11 +545,10 @@ def _add_gpt_oss_expert(
     alpha_const = graph_ops.add_constant(
         network, (1, 1), np.array([alpha], dtype=dtype), dtype=dtype)
     gate_scaled = network.add_elementwise(
-        gate, alpha_const, trt.ElementWiseOperation.PROD).get_output(0)
-    sigmoid = network.add_activation(
-        gate_scaled, trt.ActivationType.SIGMOID).get_output(0)
-    glu = network.add_elementwise(
-        gate, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
+        gate, alpha_const, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    sigmoid = network.add_activation(gate_scaled, trt.ActivationType.SIGMOID).get_output(0)
+    glu = network.add_elementwise(gate, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
 
     # output = (up + 1) * glu
     one_const = graph_ops.add_constant(
@@ -600,9 +597,8 @@ def _add_gpt_oss_moe_block(
             network, router_logits, num_experts, router_bias, dtype=dtype)
 
     # 2. TopK on RAW logits (not softmax)
-    topk = network.add_topk(
-        router_logits, trt.TopKOperation.MAX, top_k, 1 << 1)
-    top_values = topk.get_output(0)   # [1, top_k]
+    topk = network.add_topk(router_logits, trt.TopKOperation.MAX, top_k, 1 << 1)
+    top_values = topk.get_output(0)  # [1, top_k]
     top_indices = topk.get_output(1)  # [1, top_k]
 
     # 3. Softmax ONLY over the selected top-k values
@@ -614,7 +610,10 @@ def _add_gpt_oss_moe_block(
     expert_outputs = []
     for e in range(num_experts):
         exp_out = _add_gpt_oss_expert(
-            network, inp, hidden_size, moe_intermediate,
+            network,
+            inp,
+            hidden_size,
+            moe_intermediate,
             weights[f"{prefix}.expert.{e}.w_gate"],
             weights[f"{prefix}.expert.{e}.w_up"],
             weights[f"{prefix}.expert.{e}.w_down"],
@@ -632,28 +631,24 @@ def _add_gpt_oss_moe_block(
     # 5. Gather selected experts, scale, and sum
     result = None
     for k_idx in range(top_k):
-        idx_slice = network.add_slice(
-            top_indices, start=(0, k_idx), shape=(1, 1), stride=(1, 1))
+        idx_slice = network.add_slice(top_indices, start=(0, k_idx), shape=(1, 1), stride=(1, 1))
         idx_flat = network.add_shuffle(idx_slice.get_output(0))
         idx_flat.reshape_dims = (1,)
 
-        w_slice = network.add_slice(
-            routing_weights,
-            start=(0, k_idx), shape=(1, 1), stride=(1, 1))
+        w_slice = network.add_slice(routing_weights, start=(0, k_idx), shape=(1, 1), stride=(1, 1))
 
-        expert_out = network.add_gather(
-            stacked_out, idx_flat.get_output(0), 0)
+        expert_out = network.add_gather(stacked_out, idx_flat.get_output(0), 0)
 
         scaled = network.add_elementwise(
-            expert_out.get_output(0), w_slice.get_output(0),
-            trt.ElementWiseOperation.PROD)
+            expert_out.get_output(0), w_slice.get_output(0), trt.ElementWiseOperation.PROD
+        )
 
         if result is None:
             result = scaled.get_output(0)
         else:
             sum_layer = network.add_elementwise(
-                result, scaled.get_output(0),
-                trt.ElementWiseOperation.SUM)
+                result, scaled.get_output(0), trt.ElementWiseOperation.SUM
+            )
             result = sum_layer.get_output(0)
 
     return result
@@ -723,11 +718,11 @@ def _add_gpt_oss_attention(
 
     # Native RoPE
     q = graph_ops.add_apply_rope_native(
-        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim
+    )
     k = graph_ops.add_apply_rope_native(
-        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim
+    )
 
     # Save present K/V
     present_k = k
@@ -739,11 +734,9 @@ def _add_gpt_oss_attention(
     v_reshape = network.add_shuffle(v)
     v_reshape.reshape_dims = (1, kv_attention_size)
 
-    all_k = network.add_concatenation(
-        [cache_k, k_reshape.get_output(0)])
+    all_k = network.add_concatenation([cache_k, k_reshape.get_output(0)])
     all_k.axis = 0
-    all_v = network.add_concatenation(
-        [cache_v, v_reshape.get_output(0)])
+    all_v = network.add_concatenation([cache_v, v_reshape.get_output(0)])
     all_v.axis = 0
 
     # Native attention is valid when no learned attention sink logits are
@@ -752,11 +745,17 @@ def _add_gpt_oss_attention(
     if sinks is None:
         mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
         context_flat = graph_ops.add_attention_from_rows(
-            network, q, all_k.get_output(0), all_v.get_output(0),
-            num_heads=num_heads, head_dim=head_dim,
+            network,
+            q,
+            all_k.get_output(0),
+            all_v.get_output(0),
+            num_heads=num_heads,
+            head_dim=head_dim,
             num_kv_heads=num_kv_heads,
-            q_seq=1, kv_seq=attention_window,
-            mask=mask_4d)
+            q_seq=1,
+            kv_seq=attention_window,
+            mask=mask_4d,
+        )
     else:
         # Multi-head reshape
         q_heads = network.add_shuffle(q)
@@ -777,13 +776,17 @@ def _add_gpt_oss_attention(
             v_slices = []
             for kvh in range(num_kv_heads):
                 ks = network.add_slice(
-                    k_heads_t, start=(kvh, 0, 0),
+                    k_heads_t,
+                    start=(kvh, 0, 0),
                     shape=(1, attention_window, head_dim),
-                    stride=(1, 1, 1))
+                    stride=(1, 1, 1),
+                )
                 vs = network.add_slice(
-                    v_heads_t, start=(kvh, 0, 0),
+                    v_heads_t,
+                    start=(kvh, 0, 0),
                     shape=(1, attention_window, head_dim),
-                    stride=(1, 1, 1))
+                    stride=(1, 1, 1),
+                )
                 k_slices.extend([ks.get_output(0)] * group_size)
                 v_slices.extend([vs.get_output(0)] * group_size)
             k_expand = network.add_concatenation(k_slices)
@@ -795,18 +798,21 @@ def _add_gpt_oss_attention(
 
         # Attention scores: Q @ K^T * scale
         score = network.add_matrix_multiply(
-            q_heads.get_output(0), trt.MatrixOperation.NONE,
-            k_heads_t, trt.MatrixOperation.TRANSPOSE)
+            q_heads.get_output(0),
+            trt.MatrixOperation.NONE,
+            k_heads_t,
+            trt.MatrixOperation.TRANSPOSE,
+        )
         scaled = network.add_elementwise(
-            score.get_output(0), attn_scale_tensor,
-            trt.ElementWiseOperation.PROD)
+            score.get_output(0), attn_scale_tensor, trt.ElementWiseOperation.PROD
+        )
 
         # Apply causal mask: [num_heads, 1, attention_window]
         mask3d = network.add_shuffle(attention_mask)
         mask3d.reshape_dims = (1, 1, attention_window)
         masked = network.add_elementwise(
-            scaled.get_output(0), mask3d.get_output(0),
-            trt.ElementWiseOperation.SUM)
+            scaled.get_output(0), mask3d.get_output(0), trt.ElementWiseOperation.SUM
+        )
         # masked: [num_heads, 1, attention_window]
 
         # --- Attention sinks ---
@@ -815,17 +821,15 @@ def _add_gpt_oss_attention(
             network, (num_heads, 1, 1), sinks.reshape(num_heads, 1, 1),
             dtype=dtype)
         # Concatenate sink column to attention logits: [H, 1, W] + [H, 1, 1] -> [H, 1, W+1]
-        combined = network.add_concatenation(
-            [masked.get_output(0), sinks_const])
+        combined = network.add_concatenation([masked.get_output(0), sinks_const])
         combined.axis = 2
         combined_out = combined.get_output(0)  # [num_heads, 1, attention_window + 1]
 
         # Subtract max for numerical stability (matches HF)
-        max_val = network.add_reduce(
-            combined_out, trt.ReduceOperation.MAX, 1 << 2, keep_dims=True)
+        max_val = network.add_reduce(combined_out, trt.ReduceOperation.MAX, 1 << 2, keep_dims=True)
         stable = network.add_elementwise(
-            combined_out, max_val.get_output(0),
-            trt.ElementWiseOperation.SUB)
+            combined_out, max_val.get_output(0), trt.ElementWiseOperation.SUB
+        )
 
         # Softmax over the extended dimension
         softmax = network.add_softmax(stable.get_output(0))
@@ -836,13 +840,14 @@ def _add_gpt_oss_attention(
             softmax.get_output(0),
             start=(0, 0, 0),
             shape=(num_heads, 1, attention_window),
-            stride=(1, 1, 1))
+            stride=(1, 1, 1),
+        )
         attn_probs = scores.get_output(0)
 
         # Context: attn_probs @ V
         context_heads = network.add_matrix_multiply(
-            attn_probs, trt.MatrixOperation.NONE,
-            v_heads_t, trt.MatrixOperation.NONE)
+            attn_probs, trt.MatrixOperation.NONE, v_heads_t, trt.MatrixOperation.NONE
+        )
 
         context_flat = network.add_shuffle(context_heads.get_output(0))
         context_flat.reshape_dims = (1, attention_size)
@@ -896,30 +901,41 @@ def _add_gpt_oss_decoder_layer(
     normed = _apply_norm(
         network, hidden, hidden_size,
         weights[f"{prefix}.input_norm"],
-        None, eps_tensor, "rmsnorm", dtype=dtype)
+        eps_tensor, dtype=dtype)
 
     # Attention with sinks
     attn = _add_gpt_oss_attention(
-        network, normed, cache_k, cache_v, attention_mask, position_id,
-        weights=weights, prefix=prefix,
-        hidden_size=hidden_size, attention_size=attention_size,
+        network,
+        normed,
+        cache_k,
+        cache_v,
+        attention_mask,
+        position_id,
+        weights=weights,
+        prefix=prefix,
+        hidden_size=hidden_size,
+        attention_size=attention_size,
         kv_attention_size=kv_attention_size,
-        num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
         max_cache_length=max_cache_length,
-        cos_half_tensor=cos_half_tensor, sin_half_tensor=sin_half_tensor,
+        cos_half_tensor=cos_half_tensor,
+        sin_half_tensor=sin_half_tensor,
         attn_scale_tensor=attn_scale_tensor,
         dtype=dtype,
     )
 
     # Residual connection
-    residual1 = network.add_elementwise(
-        hidden, attn["attn_out"], trt.ElementWiseOperation.SUM)
+    residual1 = network.add_elementwise(hidden, attn["attn_out"], trt.ElementWiseOperation.SUM)
 
     # Post-attention RMSNorm
     norm2 = _apply_norm(
-        network, residual1.get_output(0), hidden_size,
+        network,
+        residual1.get_output(0),
+        hidden_size,
         weights[f"{prefix}.post_attn_norm"],
-        None, eps_tensor, "rmsnorm", dtype=dtype)
+        eps_tensor, dtype=dtype)
 
     # MoE block
     moe_out = _add_gpt_oss_moe_block(
@@ -928,7 +944,8 @@ def _add_gpt_oss_decoder_layer(
 
     # Residual connection
     residual2 = network.add_elementwise(
-        residual1.get_output(0), moe_out, trt.ElementWiseOperation.SUM)
+        residual1.get_output(0), moe_out, trt.ElementWiseOperation.SUM
+    )
 
     return {
         "hidden": residual2.get_output(0),
