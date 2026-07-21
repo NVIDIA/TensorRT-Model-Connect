@@ -11,6 +11,8 @@ Postconditions: Layer type aliases are normalized correctly and branch-specific 
 
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 import pytest
 
@@ -19,7 +21,8 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.qwen3_5 as qwen3_5
+    qwen3_5 = importlib.import_module(
+        "tensorrt_model_connect.families.qwen3_5.plugin")
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 

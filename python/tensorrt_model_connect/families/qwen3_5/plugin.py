@@ -68,15 +68,15 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
 )
-from . import graph_ops
-from . import graph_blocks
+from .model import model as graph_ops
+from .model import model as graph_blocks
 
 
 trt = trt_compat.get_trt()
