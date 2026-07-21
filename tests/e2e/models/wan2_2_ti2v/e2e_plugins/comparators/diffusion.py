@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from ..contracts import CompareResult, MetricResult, StageOutput, StageSpec, ThresholdProfile
+from .frame_accuracy import compare_png_sequences
 
 _REQUIRED_BUNDLE_TOKENS = (
     "Runtime strategy:   diffusion_wan2_2_ti2v",
@@ -26,6 +27,12 @@ _REQUIRED_FRAME_THRESHOLDS = (
     "min_pixel_std",
 )
 
+_REQUIRED_REFERENCE_THRESHOLDS = (
+    "min_cosine_uint8",
+    "min_frame_cosine_uint8",
+    "max_rmse_uint8",
+)
+
 
 def _metric(value: float, threshold: float, operator: str, passed: bool) -> MetricResult:
     return MetricResult(value=value, threshold=threshold, operator=operator, passed=passed)
@@ -43,11 +50,15 @@ class DiffusionComparator:
         threshold: ThresholdProfile,
         stage: StageSpec,
     ) -> CompareResult:
-        del ref
         if stage.name == "bundle_contract":
             return self._compare_bundle_contract(trt, stage)
 
-        missing = sorted(set(_REQUIRED_FRAME_THRESHOLDS) - set(threshold.metrics))
+        reference_data = ref.data or {}
+        has_external_reference = not bool(reference_data.get("_invariant_only", False))
+        required_thresholds = set(_REQUIRED_FRAME_THRESHOLDS)
+        if has_external_reference:
+            required_thresholds.update(_REQUIRED_REFERENCE_THRESHOLDS)
+        missing = sorted(required_thresholds - set(threshold.metrics))
         if missing:
             return CompareResult(
                 stage_name=stage.name,
@@ -91,7 +102,28 @@ class DiffusionComparator:
             "pixel_mean_max": _metric(pixel_mean, max_mean, "<=", pixel_mean <= max_mean),
             "pixel_std_min": _metric(pixel_std, min_std, ">=", pixel_std >= min_std),
         }
+        if has_external_reference:
+            error = self._add_reference_metrics(
+                metrics,
+                data,
+                reference_data,
+                threshold,
+                expected_frames,
+            )
+            if error:
+                return CompareResult(
+                    stage_name=stage.name,
+                    status="failed",
+                    metrics=metrics,
+                    composite_rule="all external-reference frames must be present and comparable",
+                    message=f"Wan2.2 TI2V all-frame reference comparison failed: {error}",
+                )
         passed = all(metric.passed for metric in metrics.values())
+        reference_rule = ""
+        if has_external_reference:
+            reference_rule = (
+                f" AND all {expected_frames} HF/TRT frames meet cosine and RMSE thresholds"
+            )
         return CompareResult(
             stage_name=stage.name,
             status="passed" if passed else "failed",
@@ -99,9 +131,74 @@ class DiffusionComparator:
             composite_rule=(
                 f"native command succeeds AND output is exactly {expected_frames} "
                 f"{expected_width}x{expected_height} frames AND pixels are non-degenerate"
+                f"{reference_rule}"
             ),
-            message=f"Wan2.2 TI2V fixed-profile invariant contract: {'PASS' if passed else 'FAIL'}",
+            message=f"Wan2.2 TI2V fixed-profile qualification: {'PASS' if passed else 'FAIL'}",
         )
+
+    @staticmethod
+    def _add_reference_metrics(
+        metrics: dict[str, MetricResult],
+        trt_data: dict,
+        reference_data: dict,
+        threshold: ThresholdProfile,
+        expected_frames: int,
+    ) -> str:
+        reference_returncode = int(reference_data.get("returncode", -1))
+        reference_frames = int(reference_data.get("num_frames", 0))
+        metrics["reference_returncode"] = _metric(
+            float(reference_returncode), 0.0, "==", reference_returncode == 0
+        )
+        metrics["reference_exact_num_frames"] = _metric(
+            float(reference_frames),
+            float(expected_frames),
+            "==",
+            reference_frames == expected_frames,
+        )
+        try:
+            accuracy = compare_png_sequences(
+                reference_data.get("frame_paths") or [],
+                trt_data.get("frame_paths") or [],
+            )
+        except (OSError, ValueError) as exc:
+            metrics["all_reference_frames_compared"] = _metric(
+                0.0, float(expected_frames), "==", False
+            )
+            return str(exc)
+
+        min_cosine = float(threshold.metrics["min_cosine_uint8"])
+        min_frame_cosine = float(threshold.metrics["min_frame_cosine_uint8"])
+        max_rmse = float(threshold.metrics["max_rmse_uint8"])
+        compared_frames = float(accuracy["frame_count"])
+        cosine = float(accuracy["cosine_uint8"])
+        frame_cosine = float(accuracy["minimum_frame_cosine_uint8"])
+        rmse = float(accuracy["rmse_uint8"])
+        frame_rmse = float(accuracy["maximum_frame_rmse_uint8"])
+        metrics.update(
+            {
+                "all_reference_frames_compared": _metric(
+                    compared_frames,
+                    float(expected_frames),
+                    "==",
+                    compared_frames == expected_frames,
+                ),
+                "cosine_uint8": _metric(cosine, min_cosine, ">=", cosine >= min_cosine),
+                "minimum_frame_cosine_uint8": _metric(
+                    frame_cosine,
+                    min_frame_cosine,
+                    ">=",
+                    frame_cosine >= min_frame_cosine,
+                ),
+                "rmse_uint8": _metric(rmse, max_rmse, "<=", rmse <= max_rmse),
+                "maximum_frame_rmse_uint8": _metric(
+                    frame_rmse,
+                    max_rmse,
+                    "<=",
+                    frame_rmse <= max_rmse,
+                ),
+            }
+        )
+        return ""
 
     def _compare_bundle_contract(
         self,

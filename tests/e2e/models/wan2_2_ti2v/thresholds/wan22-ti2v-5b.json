@@ -3,7 +3,10 @@
     "exact_num_frames": 121,
     "exact_video_height": 704,
     "exact_video_width": 1280,
+    "max_rmse_uint8": 1.0,
     "max_pixel_mean": 0.98,
+    "min_cosine_uint8": 0.998,
+    "min_frame_cosine_uint8": 0.998,
     "min_pixel_mean": 0.02,
     "min_pixel_std": 0.01
   }

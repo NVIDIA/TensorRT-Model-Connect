@@ -67,7 +67,10 @@ def test_manifest_is_the_official_max_profile() -> None:
         "exact_num_frames": 121,
         "exact_video_height": 704,
         "exact_video_width": 1280,
+        "max_rmse_uint8": 1.0,
         "max_pixel_mean": 0.98,
+        "min_cosine_uint8": 0.998,
+        "min_frame_cosine_uint8": 0.998,
         "min_pixel_mean": 0.02,
         "min_pixel_std": 0.01,
     }
@@ -288,6 +291,137 @@ def test_comparator_requires_exact_frames_dimensions_and_non_degenerate_pixels()
     result = comparator.compare(output, reference, profile, stage)
     assert result.status == "failed"
     assert not result.metrics["exact_num_frames"].passed
+
+
+def test_nightly_comparator_compares_every_hf_and_trt_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import numpy as np
+
+    from tests.e2e.models.wan2_2_ti2v.e2e_plugins.comparators import frame_accuracy
+
+    reference_paths = []
+    trt_paths = []
+    pixels = {}
+    loaded_paths = []
+    for root, paths in (
+        (tmp_path / "hf_frames", reference_paths),
+        (tmp_path / "frames", trt_paths),
+    ):
+        root.mkdir()
+        for index in range(121):
+            path = root / f"frame_{index:04d}.png"
+            path.touch()
+            paths.append(str(path))
+            pixels[str(path)] = np.full(
+                (1, 1, 3),
+                (80 + index % 40, 100, 120),
+                dtype=np.uint8,
+            )
+
+    def load_rgb(path: Path):
+        loaded_paths.append(str(path))
+        return pixels[str(path)]
+
+    monkeypatch.setattr(frame_accuracy, "_load_rgb", load_rgb)
+
+    thresholds = {
+        "exact_num_frames": 121,
+        "exact_video_height": 1,
+        "exact_video_width": 1,
+        "max_pixel_mean": 0.98,
+        "min_pixel_mean": 0.02,
+        "min_pixel_std": 0.01,
+        "min_cosine_uint8": 0.998,
+        "min_frame_cosine_uint8": 0.998,
+        "max_rmse_uint8": 1.0,
+    }
+    output = StageOutput(
+        stage_name="end_to_end",
+        data={
+            "returncode": 0,
+            "num_frames": 121,
+            "frame_paths": trt_paths,
+            "frame_stats": {
+                "width": 1,
+                "height": 1,
+                "dimensions_consistent": True,
+                "mean": 0.5,
+                "std": 0.2,
+            },
+        },
+    )
+    reference = StageOutput(
+        stage_name="end_to_end",
+        data={"returncode": 0, "num_frames": 121, "frame_paths": reference_paths},
+    )
+    comparator = DiffusionComparator()
+    profile = ThresholdProfile(task_strategy="diffusion_media_generation", metrics=thresholds)
+    stage = StageSpec(name="end_to_end")
+
+    result = comparator.compare(output, reference, profile, stage)
+    assert result.status == "passed"
+    assert result.metrics["all_reference_frames_compared"].value == 121
+    assert result.metrics["all_reference_frames_compared"].passed
+    assert result.metrics["cosine_uint8"].value == 1.0
+    assert result.metrics["rmse_uint8"].value == 0.0
+    assert len(loaded_paths) == 242
+    assert loaded_paths[-2:] == [reference_paths[120], trt_paths[120]]
+
+    pixels[trt_paths[120]] = np.full((1, 1, 3), (120, 140, 160), dtype=np.uint8)
+    result = comparator.compare(output, reference, profile, stage)
+    assert result.status == "failed"
+    assert not result.metrics["maximum_frame_rmse_uint8"].passed
+
+
+def test_nightly_comparator_fails_closed_when_a_reference_frame_is_missing(
+    tmp_path: Path,
+) -> None:
+    reference = tmp_path / "hf_frames" / "frame_0000.png"
+    actual = tmp_path / "frames" / "frame_0000.png"
+    reference.parent.mkdir()
+    actual.parent.mkdir()
+    actual.touch()
+    thresholds = {
+        "exact_num_frames": 1,
+        "exact_video_height": 2,
+        "exact_video_width": 2,
+        "max_pixel_mean": 0.98,
+        "min_pixel_mean": 0.02,
+        "min_pixel_std": 0.01,
+        "min_cosine_uint8": 0.998,
+        "min_frame_cosine_uint8": 0.998,
+        "max_rmse_uint8": 1.0,
+    }
+    output = StageOutput(
+        stage_name="end_to_end",
+        data={
+            "returncode": 0,
+            "num_frames": 1,
+            "frame_paths": [str(actual)],
+            "frame_stats": {
+                "width": 2,
+                "height": 2,
+                "dimensions_consistent": True,
+                "mean": 0.5,
+                "std": 0.2,
+            },
+        },
+    )
+    result = DiffusionComparator().compare(
+        output,
+        StageOutput(
+            stage_name="end_to_end",
+            data={"returncode": 0, "num_frames": 1, "frame_paths": [str(reference)]},
+        ),
+        ThresholdProfile(task_strategy="diffusion_media_generation", metrics=thresholds),
+        StageSpec(name="end_to_end"),
+    )
+
+    assert result.status == "failed"
+    assert "missing" in result.message
+    assert not result.metrics["all_reference_frames_compared"].passed
 
 
 def test_l0_comparator_requires_exact_reduced_profile_output() -> None:
