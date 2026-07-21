@@ -512,6 +512,21 @@ the producing class remains the source of truth for optional evidence fields.
 - **Boundary:** It reads and validates ownership metadata. It does not copy
   caches, acquire a GPU, compile source, or execute tests.
 
+### `optimized_contracts.py`
+
+- **Functionality / units:** Discovers complete model-owned `*_adapter` CI
+  contracts and aggregates each adapter's leaf, family, or provider selection
+  into premerge and exhaustive-nightly matrices.
+- **Inputs:** An exact Git base/head pair for premerge, or one exact revision
+  with `--all` for nightly. Each registered Test adapter owns `ci_impact.py`,
+  `ci_run.py`, and `test_ci_impact.py`, with matching Builder and Runtime roots.
+- **Outputs:** JSON and GitHub outputs named `run`, `matrix`, and `selection`;
+  matrix rows contain only `adapter_root`, `runner`, `scope`, and `profile`.
+- **Boundary:** It validates registration and routes CI. Model/provider matching,
+  test selection, specialized dependencies, and execution remain model-owned.
+  Manual accelerator qualification also stays model/runtime-specific; this
+  dispatcher owns CPU contracts only.
+
 ### `model_proof.py`
 
 - **Functionality / units:** `ModelProofRunner` performs trusted host setup;

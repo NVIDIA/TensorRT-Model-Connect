@@ -145,10 +145,9 @@ jobs:
       mode: ${{ steps.impact.outputs.mode }}
       run_unit_tests: ${{ steps.impact.outputs.run_unit_tests }}
       unit_scope: ${{ steps.impact.outputs.unit_scope }}
-      qwen_edgellm_mode: ${{ steps.qwen_edgellm.outputs.qwen_edgellm_mode }}
-      qwen_edgellm_run: ${{ steps.qwen_edgellm.outputs.qwen_edgellm_run }}
-      qwen_edgellm_profiles: ${{ steps.qwen_edgellm.outputs.qwen_edgellm_profiles }}
-      qwen_edgellm_matrix: ${{ steps.qwen_edgellm.outputs.qwen_edgellm_matrix }}
+      optimized_contracts_run: ${{ steps.optimized_contracts.outputs.run }}
+      optimized_contracts_matrix: ${{ steps.optimized_contracts.outputs.matrix }}
+      optimized_contracts_selection: ${{ steps.optimized_contracts.outputs.selection }}
 
     steps:
       - name: Check out pinned merge snapshot
@@ -200,14 +199,14 @@ jobs:
             --fallback-model ltx_video \
             --github-output "$GITHUB_OUTPUT"
 
-      - name: Select Qwen EdgeLLM adapter scope
-        id: qwen_edgellm
+      - name: Select model-owned optimized-runtime contracts
+        id: optimized_contracts
         env:
           BASE_SHA: ${{ steps.refs.outputs.base_sha }}
           TESTED_SHA: ${{ steps.refs.outputs.tested_sha }}
         run: |
           set -euo pipefail
-          python3 tests/e2e/models/qwen/edge_llm_adapter/ci_impact.py \
+          python3 tools/ci/optimized_contracts.py \
             --base "$BASE_SHA" \
             --head "$TESTED_SHA" \
             --github-output "$GITHUB_OUTPUT"
@@ -220,8 +219,7 @@ jobs:
           MODE: ${{ steps.impact.outputs.mode }}
           RUN_UNIT_TESTS: ${{ steps.impact.outputs.run_unit_tests }}
           UNIT_SCOPE: ${{ steps.impact.outputs.unit_scope }}
-          QWEN_EDGELLM_MODE: ${{ steps.qwen_edgellm.outputs.qwen_edgellm_mode }}
-          QWEN_EDGELLM_PROFILES: ${{ steps.qwen_edgellm.outputs.qwen_edgellm_profiles }}
+          OPTIMIZED_CONTRACTS_SELECTION: ${{ steps.optimized_contracts.outputs.selection }}
         run: |
           {
             echo "### Model impact"
@@ -232,8 +230,7 @@ jobs:
             echo "- Representative fallback models: \`$FALLBACK_MODELS\`"
             echo "- Run source-only units: \`$RUN_UNIT_TESTS\`"
             echo "- Unit scope: \`$UNIT_SCOPE\`"
-            echo "- Qwen EdgeLLM scope: \`$QWEN_EDGELLM_MODE\`"
-            echo "- Qwen EdgeLLM profiles: \`$QWEN_EDGELLM_PROFILES\`"
+            echo "- Optimized-runtime CPU contracts: \`$OPTIMIZED_CONTRACTS_SELECTION\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
   source-quality:
@@ -342,19 +339,19 @@ jobs:
             rm -rf "$DOCKER_CONFIG"
           fi
 
-  qwen-edgellm-contracts:
-    name: Qwen EdgeLLM / CPU / ${{ matrix.profile || matrix.scope }}
+  optimized-runtime-contracts:
+    name: Optimized runtime / CPU / ${{ matrix.adapter_root }} / ${{ matrix.profile || matrix.scope }}
     needs:
       - legal
       - impact
     if: >-
       ${{
         needs.legal.outputs.authorized == 'true' &&
-        needs.impact.outputs.qwen_edgellm_run == 'true'
+        needs.impact.outputs.optimized_contracts_run == 'true'
       }}
     strategy:
       fail-fast: true
-      matrix: ${{ fromJSON(needs.impact.outputs.qwen_edgellm_matrix) }}
+      matrix: ${{ fromJSON(needs.impact.outputs.optimized_contracts_matrix) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -375,47 +372,28 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Provision CPU contract dependencies
+      - name: Provision CPU contract harness
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends nlohmann-json3-dev
           python -m pip install --disable-pip-version-check --quiet numpy pytest
 
-      - name: Run exactly the selected adapter contracts
+      - name: Run the selected model-owned contracts
         env:
+          ADAPTER_ROOT: ${{ matrix.adapter_root }}
+          RUNNER: ${{ matrix.runner }}
           PROFILE: ${{ matrix.profile }}
           SCOPE: ${{ matrix.scope }}
         run: |
           set -euo pipefail
-          root="tests/e2e/models/qwen/edge_llm_adapter"
-          case "$SCOPE" in
-            leaf)
-              test -n "$PROFILE"
-              tests=(
-                "$root/$PROFILE"
-                "$root/coexistence/test_coexistence_contract.py"
-              )
-              ;;
-            family)
-              test -z "$PROFILE"
-              tests=("$root")
-              ;;
-            provider)
-              test -z "$PROFILE"
-              tests=(
-                "$root"
-                tests/builder/test_manifest_validation.py
-                tests/builder/test_optimized_runtime_capsules.py
-                tests/builder/test_optimized_runtime_orchestrator.py
-                tests/builder/test_optimized_runtime_public_routing.py
-                tests/tools/test_optimized_runtime_packaging.py
-              )
-              ;;
-            *) echo "Unexpected Qwen EdgeLLM CPU scope: $SCOPE" >&2; exit 1 ;;
-          esac
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python:. \
-            python -m pytest -q -p no:cacheprovider -m "not gpu" "${tests[@]}"
+          test -n "$ADAPTER_ROOT"
+          test -n "$RUNNER"
+          test "$RUNNER" = "$ADAPTER_ROOT/ci_run.py"
+          test -f "$RUNNER"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python:. python "$RUNNER" \
+            --scope "$SCOPE" \
+            --profile "$PROFILE"
 
   model-proof:
     name: 4 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]
@@ -750,7 +728,7 @@ jobs:
       - model-proof
       - no-model
       - report
-      - qwen-edgellm-contracts
+      - optimized-runtime-contracts
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -769,8 +747,8 @@ jobs:
           MODEL_RESULT: ${{ needs.model-proof.result }}
           NO_MODEL_RESULT: ${{ needs.no-model.result }}
           REPORT_RESULT: ${{ needs.report.result }}
-          QWEN_EDGELLM_RUN: ${{ needs.impact.outputs.qwen_edgellm_run }}
-          QWEN_EDGELLM_CONTRACT_RESULT: ${{ needs.qwen-edgellm-contracts.result }}
+          OPTIMIZED_CONTRACTS_RUN: ${{ needs.impact.outputs.optimized_contracts_run }}
+          OPTIMIZED_CONTRACT_RESULT: ${{ needs.optimized-runtime-contracts.result }}
           HAS_MODELS: ${{ needs.impact.outputs.has_models }}
           EXPECTED_COUNT: ${{ needs.impact.outputs.expected_count }}
         run: |
@@ -822,17 +800,17 @@ jobs:
             exit 1
           }
 
-          case "$QWEN_EDGELLM_RUN" in
+          case "$OPTIMIZED_CONTRACTS_RUN" in
             true)
-              test "$QWEN_EDGELLM_CONTRACT_RESULT" = "success" || {
-                echo "::error::Qwen EdgeLLM CPU contracts: $QWEN_EDGELLM_CONTRACT_RESULT"
+              test "$OPTIMIZED_CONTRACT_RESULT" = "success" || {
+                echo "::error::Optimized-runtime CPU contracts: $OPTIMIZED_CONTRACT_RESULT"
                 exit 1
               }
               ;;
             false)
-              test "$QWEN_EDGELLM_CONTRACT_RESULT" = "skipped"
+              test "$OPTIMIZED_CONTRACT_RESULT" = "skipped"
               ;;
-            *) echo "::error::Invalid Qwen EdgeLLM impact output"; exit 1 ;;
+            *) echo "::error::Invalid optimized-runtime impact output"; exit 1 ;;
           esac
 
           case "$HAS_MODELS" in

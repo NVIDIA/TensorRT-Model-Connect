@@ -141,8 +141,17 @@ class ModelProofSelector:
         if len(raw_roots) != len(set(raw_roots)):
             raise CiError("ci.independently_routed_test_roots contains duplicates")
 
+        discovered = {
+            path.name
+            for path in e2e_dir.glob("*_adapter")
+            if (path.is_dir() or path.is_symlink())
+            and any(
+                (path / contract).exists()
+                for contract in ("ci_impact.py", "ci_run.py", "test_ci_impact.py")
+            )
+        }
         roots = []
-        for raw in sorted(raw_roots):
+        for raw in sorted(set(raw_roots) | discovered):
             relative = PurePosixPath(raw)
             if (
                 relative.as_posix() != raw
@@ -157,7 +166,7 @@ class ModelProofSelector:
             root = e2e_dir / relative.name
             if root.is_symlink() or not root.is_dir():
                 raise CiError(f"independently routed test root is unavailable: {root}")
-            for contract in ("ci_impact.py", "test_ci_impact.py"):
+            for contract in ("ci_impact.py", "ci_run.py", "test_ci_impact.py"):
                 path = root / contract
                 if path.is_symlink() or not path.is_file():
                     raise CiError(

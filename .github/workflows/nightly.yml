@@ -57,6 +57,8 @@ jobs:
       expected_cases_by_model: ${{ steps.inventory.outputs.expected_cases_by_model }}
       expected_result_count: ${{ steps.inventory.outputs.expected_result_count }}
       mode: ${{ steps.inventory.outputs.mode }}
+      optimized_contracts_run: ${{ steps.optimized_contracts.outputs.run }}
+      optimized_contracts_matrix: ${{ steps.optimized_contracts.outputs.matrix }}
 
     steps:
       - name: Check out certified nightly snapshot
@@ -79,6 +81,17 @@ jobs:
           set -euo pipefail
           python3 tools/model_ci.py all \
             --revision "$TESTED_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Select every model-owned optimized-runtime contract
+        id: optimized_contracts
+        env:
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+        run: |
+          set -euo pipefail
+          python3 tools/ci/optimized_contracts.py \
+            --all \
+            --head "$TESTED_SHA" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Verify and summarize full inventory
@@ -1206,10 +1219,19 @@ jobs:
             echo "- Artifact: \`trtmc-nightly-html-report-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  qwen-edgellm-contracts:
-    name: Qwen EdgeLLM / CPU / all profiles
-    needs: legal
-    if: ${{ needs.legal.result == 'success' }}
+  optimized-runtime-contracts:
+    name: Optimized runtime / CPU / ${{ matrix.adapter_root }} / all profiles
+    needs:
+      - legal
+      - inventory
+    if: >-
+      ${{
+        needs.legal.result == 'success' &&
+        needs.inventory.outputs.optimized_contracts_run == 'true'
+      }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.inventory.outputs.optimized_contracts_matrix) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -1230,19 +1252,28 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Provision CPU contract dependencies
+      - name: Provision CPU contract harness
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends nlohmann-json3-dev
           python -m pip install --disable-pip-version-check --quiet numpy pytest
 
-      - name: Run every discovered Qwen EdgeLLM CPU contract
+      - name: Run every contract in the model-owned adapter
+        env:
+          ADAPTER_ROOT: ${{ matrix.adapter_root }}
+          RUNNER: ${{ matrix.runner }}
+          PROFILE: ${{ matrix.profile }}
+          SCOPE: ${{ matrix.scope }}
         run: |
           set -euo pipefail
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python:. \
-            python -m pytest -q -p no:cacheprovider -m "not gpu" \
-            tests/e2e/models/qwen/edge_llm_adapter
+          test -n "$ADAPTER_ROOT"
+          test -n "$RUNNER"
+          test "$RUNNER" = "$ADAPTER_ROOT/ci_run.py"
+          test -f "$RUNNER"
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python:. python "$RUNNER" \
+            --scope "$SCOPE" \
+            --profile "$PROFILE"
 
   required:
     name: 7 / Nightly CI
@@ -1256,7 +1287,7 @@ jobs:
       - model-proof
       - diffusion-vlm
       - report
-      - qwen-edgellm-contracts
+      - optimized-runtime-contracts
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1274,7 +1305,8 @@ jobs:
           MODEL_RESULT: ${{ needs.model-proof.result }}
           VLM_RESULT: ${{ needs.diffusion-vlm.result }}
           REPORT_RESULT: ${{ needs.report.result }}
-          QWEN_EDGELLM_CONTRACT_RESULT: ${{ needs.qwen-edgellm-contracts.result }}
+          OPTIMIZED_CONTRACTS_RUN: ${{ needs.inventory.outputs.optimized_contracts_run }}
+          OPTIMIZED_CONTRACT_RESULT: ${{ needs.optimized-runtime-contracts.result }}
           HAS_MODELS: ${{ needs.inventory.outputs.has_models }}
           EXPECTED_COUNT: ${{ needs.inventory.outputs.expected_count }}
           EXPECTED_CASES_BY_MODEL: ${{ needs.inventory.outputs.expected_cases_by_model }}
@@ -1285,10 +1317,14 @@ jobs:
           for result in \
             "$LEGAL_RESULT" "$INVENTORY_RESULT" "$SOURCE_QUALITY_RESULT" \
             "$UNIT_RESULT" "$CACHE_RESULT" "$PACKAGE_RESULT" \
-            "$MODEL_RESULT" "$VLM_RESULT" "$REPORT_RESULT" \
-            "$QWEN_EDGELLM_CONTRACT_RESULT"; do
+            "$MODEL_RESULT" "$VLM_RESULT" "$REPORT_RESULT"; do
             test "$result" = "success"
           done
+          case "$OPTIMIZED_CONTRACTS_RUN" in
+            true) test "$OPTIMIZED_CONTRACT_RESULT" = "success" ;;
+            false) test "$OPTIMIZED_CONTRACT_RESULT" = "skipped" ;;
+            *) echo "::error::Invalid optimized-runtime inventory output"; exit 1 ;;
+          esac
           test "$HAS_MODELS" = "true"
           test "$EXPECTED_COUNT" -gt 0
           test -n "$EXPECTED_CASES_BY_MODEL"

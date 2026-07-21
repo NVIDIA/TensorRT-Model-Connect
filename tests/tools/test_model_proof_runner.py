@@ -539,21 +539,17 @@ def test_selection_excludes_unselected_sibling_model_tests(
     assert not any(path.startswith(f"{sibling_root}/") for path in selection["python_tests"])
 
 
-def test_selection_hands_independently_routed_adapter_tests_to_their_ci_owner(
+def test_selection_auto_hands_optimized_adapter_tests_to_their_ci_owner(
     tmp_path: Path,
 ) -> None:
     routed_root = "tests/e2e/models/flux/edge_llm_adapter"
 
     def project_adapter_tests(source: Path, _projection: dict[str, object]) -> None:
-        model = source / "tests/e2e/models/flux/MODEL.toml"
-        with model.open("a", encoding="utf-8") as stream:
-            stream.write(
-                '\n[ci]\nindependently_routed_test_roots = ["edge_llm_adapter"]\n'
-            )
         root = source / routed_root
         profile = root / "profile_a"
         profile.mkdir(parents=True)
         (root / "ci_impact.py").write_text("# selector\n", encoding="utf-8")
+        (root / "ci_run.py").write_text("# runner\n", encoding="utf-8")
         (root / "test_ci_impact.py").write_text("# selector tests\n", encoding="utf-8")
         (profile / "test_adapter.py").write_text("# delegated test\n", encoding="utf-8")
         (profile / "test_runtime_contract.py").write_text(

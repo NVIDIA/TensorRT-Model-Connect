@@ -40,31 +40,6 @@ def test_reusable_a100_workflow_is_exact_pinned_and_runner_provisioned() -> None
     assert not re.search(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", workflow)
 
 
-def test_premerge_requires_only_selected_cpu_contracts_until_a100_is_provisioned() -> None:
-    workflow = (REPOSITORY / ".github/workflows/trtmc-ci.yml").read_text(encoding="utf-8")
-    impact = workflow.split("\n  impact:", 1)[1].split("\n  source-quality:", 1)[0]
-    contracts = workflow.split("\n  qwen-edgellm-contracts:", 1)[1].split(
-        "\n  model-proof:", 1
-    )[0]
-    required = workflow.split("\n  required:", 1)[1]
-
-    assert "tests/e2e/models/qwen/edge_llm_adapter/ci_impact.py" in impact
-    assert "qwen_edgellm_matrix:" in impact
-    assert "matrix: ${{ fromJSON(needs.impact.outputs.qwen_edgellm_matrix) }}" in contracts
-    assert '"$root/$PROFILE"' in contracts
-    assert '"$root/coexistence/test_coexistence_contract.py"' in contracts
-    assert "nlohmann-json3-dev" in contracts
-    assert "numpy pytest" in contracts
-    assert '-m "not gpu"' in contracts
-    assert "tests/e2e/models/qwen/edge_llm_adapter" in contracts
-    assert "\n  qwen-edgellm-a100:" not in workflow
-    assert "uses: ./.github/workflows/qwen-edgellm-a100.yml" not in workflow
-    assert "- qwen-edgellm-contracts" in required
-    assert 'test "$QWEN_EDGELLM_CONTRACT_RESULT" = "success"' in required
-    assert 'test "$QWEN_EDGELLM_CONTRACT_RESULT" = "skipped"' in required
-    assert "QWEN_EDGELLM_A100_RESULT" not in required
-
-
 def test_a100_rollout_is_manual_until_an_x86_runner_is_provisioned() -> None:
     nightly = (REPOSITORY / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
     premerge = (REPOSITORY / ".github/workflows/trtmc-ci.yml").read_text(encoding="utf-8")
@@ -82,23 +57,6 @@ def test_a100_rollout_is_manual_until_an_x86_runner_is_provisioned() -> None:
     assert 'default: ""' in manual
     assert "_discover_profiles()" in launcher_text
     assert "_run_coexistence_if_complete" in launcher_text
-
-
-def test_nightly_requires_the_complete_edge_cpu_contract_tree() -> None:
-    workflow = (REPOSITORY / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
-    job = workflow.split("\n  qwen-edgellm-contracts:", 1)[1].split(
-        "\n  required:", 1
-    )[0]
-    required = workflow.split("\n  required:", 1)[1].split("\n  release:", 1)[0]
-
-    assert "ref: ${{ needs.legal.outputs.tested_sha }}" in job
-    assert "tests/e2e/models/qwen/edge_llm_adapter" in job
-    assert "nlohmann-json3-dev" in job
-    assert "numpy pytest" in job
-    assert '-m "not gpu"' in job
-    assert "- qwen-edgellm-contracts" in required
-    assert "QWEN_EDGELLM_CONTRACT_RESULT" in required
-    assert '"$QWEN_EDGELLM_CONTRACT_RESULT"' in required
 
 
 def test_qwen_declares_dedicated_edge_test_ownership() -> None:
