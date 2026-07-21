@@ -6,21 +6,20 @@
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_blocks, graph_ops
-from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .standard_decoder_builder import _apply_norm, _mark_debug_output
+from . import model as graph_blocks, model as graph_ops
+from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
+from .model import _apply_norm, _mark_debug_output
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-    from .config import ModelConfig
-    from ...parallel_config import ParallelConfig
+    from ..weights import WeightDict
+    from ....parallel_config import ParallelConfig
 
 
 def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
@@ -32,7 +31,7 @@ def _slice_first_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
 
 
 def _validate_mixtral_tp(
-    config: "ModelConfig",
+    config: Any,
     weights: "WeightDict",
     parallel: "ParallelConfig",
 ) -> None:
@@ -45,11 +44,13 @@ def _validate_mixtral_tp(
     if int(config.num_attention_heads) % tp != 0:
         raise ValueError(
             "Mixtral tensor parallel requires num_attention_heads divisible by tp_size "
-            f"({config.num_attention_heads} vs {tp})")
+            f"({config.num_attention_heads} vs {tp})"
+        )
     if int(config.num_key_value_heads) % tp != 0:
         raise ValueError(
             "Mixtral tensor parallel requires num_key_value_heads divisible by tp_size "
-            f"({config.num_key_value_heads} vs {tp})")
+            f"({config.num_key_value_heads} vs {tp})"
+        )
 
     attention_size = int(weights.get("_attention_size", config.attention_size))
     kv_attention_size = graph_blocks.infer_kv_attention_size(
@@ -66,12 +67,12 @@ def _validate_mixtral_tp(
     for name, value in checks.items():
         if value % tp != 0:
             raise ValueError(
-                f"Mixtral tensor parallel requires {name} divisible by tp_size "
-                f"({value} vs {tp})")
+                f"Mixtral tensor parallel requires {name} divisible by tp_size ({value} vs {tp})"
+            )
 
 
 def shard_mixtral_weights(
-    config: "ModelConfig",
+    config: Any,
     weights: "WeightDict",
     *,
     parallel: "ParallelConfig",
@@ -94,8 +95,7 @@ def shard_mixtral_weights(
             out[key] = value
 
     out["_attention_size"] = int(weights["_attention_size"]) // parallel.tp_size
-    out["_moe_intermediate_size"] = (
-        int(weights["_moe_intermediate_size"]) // parallel.tp_size)
+    out["_moe_intermediate_size"] = int(weights["_moe_intermediate_size"]) // parallel.tp_size
     out["_tensor_parallel_size"] = parallel.tp_size
     out["_tensor_parallel_rank"] = parallel.rank
     return out
@@ -110,17 +110,14 @@ def _add_swiglu_expert_tp(
     w_up: np.ndarray,
     w_down: np.ndarray,
 ) -> trt.ITensor:
-    gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate)
-    up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up)
+    gate = graph_ops.add_matmul_rhs_constant(network, inp, hidden_size, intermediate_size, w_gate)
+    up = graph_ops.add_matmul_rhs_constant(network, inp, hidden_size, intermediate_size, w_up)
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
     return graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), intermediate_size, hidden_size, w_down)
+        network, gated.get_output(0), intermediate_size, hidden_size, w_down
+    )
 
 
 def _add_mixtral_moe_tp_block(
@@ -135,47 +132,53 @@ def _add_mixtral_moe_tp_block(
     top_k: int = 2,
 ) -> trt.ITensor:
     router_logits = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, num_experts, weights[f"{prefix}.router"])
+        network, inp, hidden_size, num_experts, weights[f"{prefix}.router"]
+    )
     sm = network.add_softmax(router_logits)
     sm.axes = 1 << 1
     topk = network.add_topk(sm.get_output(0), trt.TopKOperation.MAX, top_k, 1 << 1)
     top_values = topk.get_output(0)
     top_indices = topk.get_output(1)
-    sum_val = network.add_reduce(
-        top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
+    sum_val = network.add_reduce(top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
     norm_weights = network.add_elementwise(
-        top_values, sum_val.get_output(0), trt.ElementWiseOperation.DIV)
+        top_values, sum_val.get_output(0), trt.ElementWiseOperation.DIV
+    )
 
     expert_outputs = []
     for expert_idx in range(num_experts):
-        expert_outputs.append(_add_swiglu_expert_tp(
-            network, inp, hidden_size, moe_intermediate,
-            weights[f"{prefix}.expert.{expert_idx}.w_gate"],
-            weights[f"{prefix}.expert.{expert_idx}.w_up"],
-            weights[f"{prefix}.expert.{expert_idx}.w_down"],
-        ))
+        expert_outputs.append(
+            _add_swiglu_expert_tp(
+                network,
+                inp,
+                hidden_size,
+                moe_intermediate,
+                weights[f"{prefix}.expert.{expert_idx}.w_gate"],
+                weights[f"{prefix}.expert.{expert_idx}.w_up"],
+                weights[f"{prefix}.expert.{expert_idx}.w_down"],
+            )
+        )
 
     stacked = network.add_concatenation(expert_outputs)
     stacked.axis = 0
     stacked_out = stacked.get_output(0)
     result = None
     for top_idx in range(top_k):
-        idx_slice = network.add_slice(
-            top_indices, start=(0, top_idx), shape=(1, 1), stride=(1, 1))
+        idx_slice = network.add_slice(top_indices, start=(0, top_idx), shape=(1, 1), stride=(1, 1))
         idx_flat = network.add_shuffle(idx_slice.get_output(0))
         idx_flat.reshape_dims = (1,)
         w_slice = network.add_slice(
-            norm_weights.get_output(0),
-            start=(0, top_idx), shape=(1, 1), stride=(1, 1))
+            norm_weights.get_output(0), start=(0, top_idx), shape=(1, 1), stride=(1, 1)
+        )
         expert_out = network.add_gather(stacked_out, idx_flat.get_output(0), 0)
         scaled = network.add_elementwise(
-            expert_out.get_output(0), w_slice.get_output(0),
-            trt.ElementWiseOperation.PROD)
+            expert_out.get_output(0), w_slice.get_output(0), trt.ElementWiseOperation.PROD
+        )
         if result is None:
             result = scaled.get_output(0)
         else:
             summed = network.add_elementwise(
-                result, scaled.get_output(0), trt.ElementWiseOperation.SUM)
+                result, scaled.get_output(0), trt.ElementWiseOperation.SUM
+            )
             result = summed.get_output(0)
 
     return add_all_reduce_sum(network, result, tp_size)
@@ -208,22 +211,25 @@ def _add_mixtral_tp_decoder_layer(
 ) -> dict[str, trt.ITensor]:
     attention_window = max_cache_length + 1
     norm1 = _apply_norm(
-        network, hidden, hidden_size,
-        weights[f"{prefix}.input_norm"], None, eps_tensor, "rmsnorm")
+        network, hidden, hidden_size, weights[f"{prefix}.input_norm"], None, eps_tensor, "rmsnorm"
+    )
 
     q = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, attention_size, weights[f"{prefix}.w_q"])
+        network, norm1, hidden_size, attention_size, weights[f"{prefix}.w_q"]
+    )
     k = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"])
+        network, norm1, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"]
+    )
     v = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"])
+        network, norm1, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"]
+    )
 
     q = graph_ops.add_apply_rope_native(
-        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim
+    )
     k = graph_ops.add_apply_rope_native(
-        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim
+    )
 
     present_k = k
     present_v = v
@@ -238,24 +244,39 @@ def _add_mixtral_tp_decoder_layer(
 
     mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
     context_flat = graph_ops.add_attention_from_rows(
-        network, q, all_k.get_output(0), all_v.get_output(0),
-        num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
-        q_seq=1, kv_seq=attention_window, mask=mask_4d)
+        network,
+        q,
+        all_k.get_output(0),
+        all_v.get_output(0),
+        num_heads=num_heads,
+        head_dim=head_dim,
+        num_kv_heads=num_kv_heads,
+        q_seq=1,
+        kv_seq=attention_window,
+        mask=mask_4d,
+    )
 
     attn_out = graph_ops.add_matmul_rhs_constant(
-        network, context_flat, attention_size, hidden_size, weights[f"{prefix}.w_o"])
+        network, context_flat, attention_size, hidden_size, weights[f"{prefix}.w_o"]
+    )
     attn_out = add_all_reduce_sum(network, attn_out, tp_size)
-    residual1 = network.add_elementwise(
-        hidden, attn_out, trt.ElementWiseOperation.SUM)
+    residual1 = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM)
 
     norm2 = _apply_norm(
-        network, residual1.get_output(0), hidden_size,
-        weights[f"{prefix}.post_attn_norm"], None, eps_tensor, "rmsnorm")
+        network,
+        residual1.get_output(0),
+        hidden_size,
+        weights[f"{prefix}.post_attn_norm"],
+        None,
+        eps_tensor,
+        "rmsnorm",
+    )
     moe_out = _add_mixtral_moe_tp_block(
-        network, norm2, weights, prefix,
-        hidden_size, num_experts, moe_intermediate, tp_size, top_k)
+        network, norm2, weights, prefix, hidden_size, num_experts, moe_intermediate, tp_size, top_k
+    )
     residual2 = network.add_elementwise(
-        residual1.get_output(0), moe_out, trt.ElementWiseOperation.SUM)
+        residual1.get_output(0), moe_out, trt.ElementWiseOperation.SUM
+    )
 
     return {
         "hidden": residual2.get_output(0),
@@ -266,7 +287,7 @@ def _add_mixtral_tp_decoder_layer(
 
 
 def build_mixtral_tp_engine(
-    config: "ModelConfig",
+    config: Any,
     weights: "WeightDict",
     max_cache_length: int,
     *,
@@ -297,36 +318,44 @@ def build_mixtral_tp_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
-    attention_mask = network.add_input(
-        "attention_mask", trt.float32, (1, attention_window))
+    attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
     cache_k_inputs = []
     cache_v_inputs = []
     for layer_idx in range(num_layers):
-        cache_k_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cache_k", layer_idx),
-            trt.float32, (max_cache_length, kv_attention_size)))
-        cache_v_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cache_v", layer_idx),
-            trt.float32, (max_cache_length, kv_attention_size)))
+        cache_k_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cache_k", layer_idx),
+                trt.float32,
+                (max_cache_length, kv_attention_size),
+            )
+        )
+        cache_v_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cache_v", layer_idx),
+                trt.float32,
+                (max_cache_length, kv_attention_size),
+            )
+        )
 
-    embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), rank_weights["embedding"])
+    embedding_table = graph_ops.add_constant(network, (vocab, hidden), rank_weights["embedding"])
     graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
     cos_half_np = graph_ops.make_rope_table_half_dim(
-        attention_window, head_dim, config.rope_theta, True)
+        attention_window, head_dim, config.rope_theta, True
+    )
     sin_half_np = graph_ops.make_rope_table_half_dim(
-        attention_window, head_dim, config.rope_theta, False)
+        attention_window, head_dim, config.rope_theta, False
+    )
     cos_half_tensor = graph_ops.add_constant(network, cos_half_np.shape, cos_half_np)
     sin_half_tensor = graph_ops.add_constant(network, sin_half_np.shape, sin_half_np)
     eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32))
+        network, (1, 1), np.array([config.rms_norm_eps], dtype=np.float32)
+    )
 
     hidden_state = network.add_gather(embedding_table, token_id, 0).get_output(0)
     if debug_layer_outputs:
@@ -370,20 +399,19 @@ def build_mixtral_tp_engine(
     final_norm = rank_weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
         hidden_state = _apply_norm(
-            network, hidden_state, hidden, final_norm, None, eps_tensor, "rmsnorm")
+            network, hidden_state, hidden, final_norm, None, eps_tensor, "rmsnorm"
+        )
 
     logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, vocab, rank_weights["w_out"])
-    logits = graph_ops.add_bias_sum(
-        network, logits, vocab, np.zeros(vocab, dtype=np.float32))
+        network, hidden_state, hidden, vocab, rank_weights["w_out"]
+    )
+    logits = graph_ops.add_bias_sum(network, logits, vocab, np.zeros(vocab, dtype=np.float32))
     logits.name = "logits"
     network.mark_output(logits)
 
     for layer_idx in range(num_layers):
-        present_k_outputs[layer_idx].name = graph_ops.layer_tensor_name(
-            "present_k", layer_idx)
-        present_v_outputs[layer_idx].name = graph_ops.layer_tensor_name(
-            "present_v", layer_idx)
+        present_k_outputs[layer_idx].name = graph_ops.layer_tensor_name("present_k", layer_idx)
+        present_v_outputs[layer_idx].name = graph_ops.layer_tensor_name("present_v", layer_idx)
         network.mark_output(present_k_outputs[layer_idx])
         network.mark_output(present_v_outputs[layer_idx])
 

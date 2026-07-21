@@ -31,24 +31,24 @@ from pathlib import Path
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
 )
-from . import graph_ops
-from . import graph_blocks
+from .model import model as graph_ops
+from .model import model as graph_blocks
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .standard_decoder_builder import _apply_norm, _mark_debug_output
+from .model.model import _apply_norm, _mark_debug_output
 
 
 trt = trt_compat.get_trt()
+
 
 class MixtralPlugin:
     name = "mixtral"
@@ -59,7 +59,9 @@ class MixtralPlugin:
         return model_type.lower() == "mixtral"
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -75,7 +77,8 @@ class MixtralPlugin:
         # Embedding
         embedding = _load_tensor(readers, "model.embed_tokens.weight")
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         attention_size = 0
@@ -85,23 +88,17 @@ class MixtralPlugin:
             hf_prefix = f"model.layers.{layer_idx}"
 
             # RMSNorm weights (no biases)
-            input_norm = _load_tensor(
-                readers, f"{hf_prefix}.input_layernorm.weight")
+            input_norm = _load_tensor(readers, f"{hf_prefix}.input_layernorm.weight")
             weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
 
-            post_norm = _load_tensor(
-                readers, f"{hf_prefix}.post_attention_layernorm.weight")
+            post_norm = _load_tensor(readers, f"{hf_prefix}.post_attention_layernorm.weight")
             weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
             # Q/K/V/O projections (separate, no biases)
-            q_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.q_proj.weight")
-            k_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.k_proj.weight")
-            v_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.v_proj.weight")
-            o_raw = _load_tensor(
-                readers, f"{hf_prefix}.self_attn.o_proj.weight")
+            q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
+            k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
+            v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
+            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
 
             if attention_size == 0:
                 attention_size = q_raw.shape[0]
@@ -118,10 +115,8 @@ class MixtralPlugin:
             weights[f"{prefix}.w_o"] = o_t
 
             # Router weight
-            router_raw = _load_tensor(
-                readers, f"{hf_prefix}.block_sparse_moe.gate.weight")
-            weights[f"{prefix}.router"] = _transpose_2d(
-                router_raw, "router")
+            router_raw = _load_tensor(readers, f"{hf_prefix}.block_sparse_moe.gate.weight")
+            weights[f"{prefix}.router"] = _transpose_2d(router_raw, "router")
             del router_raw
 
             # Per-expert weights
@@ -131,53 +126,55 @@ class MixtralPlugin:
                 w3_raw = _load_tensor(readers, f"{exp_prefix}.w3.weight")
                 w2_raw = _load_tensor(readers, f"{exp_prefix}.w2.weight")
 
-                weights[f"{prefix}.expert.{e}.w_gate"] = _transpose_2d(
-                    w1_raw, f"expert_{e}_gate")
-                weights[f"{prefix}.expert.{e}.w_up"] = _transpose_2d(
-                    w3_raw, f"expert_{e}_up")
-                weights[f"{prefix}.expert.{e}.w_down"] = _transpose_2d(
-                    w2_raw, f"expert_{e}_down")
+                weights[f"{prefix}.expert.{e}.w_gate"] = _transpose_2d(w1_raw, f"expert_{e}_gate")
+                weights[f"{prefix}.expert.{e}.w_up"] = _transpose_2d(w3_raw, f"expert_{e}_up")
+                weights[f"{prefix}.expert.{e}.w_down"] = _transpose_2d(w2_raw, f"expert_{e}_down")
                 del w1_raw, w3_raw, w2_raw
 
         # Final norm
         final_norm_key = "model.norm.weight"
         if _has_tensor(readers, final_norm_key):
-            weights["final_norm"] = _load_tensor(
-                readers, final_norm_key).astype(np.float32)
+            weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
         else:
             weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
         # LM head
         lm_head_key = "lm_head.weight"
         if _has_tensor(readers, lm_head_key):
-            weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+            weights["w_out"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
         else:
             weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_num_experts"] = num_experts  # type: ignore[assignment]
         weights["_moe_intermediate_size"] = intermediate_size  # type: ignore[assignment]
-        weights["_num_experts_per_tok"] = config.raw.get(
-            "num_experts_per_tok", 2)  # type: ignore[assignment]
+        weights["_num_experts_per_tok"] = config.raw.get("num_experts_per_tok", 2)  # type: ignore[assignment]
 
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="Mixtral tensor-parallel builds")
-            from .tp_builder import build_mixtral_tp_engine
+                parallel, feature="Mixtral tensor-parallel builds"
+            )
+            from .model.parallel import build_mixtral_tp_engine
 
             return build_mixtral_tp_engine(
-                config, weights, max_cache_length,
+                config,
+                weights,
+                max_cache_length,
                 precision=precision,
                 quant_ctx=quant_ctx,
                 verbose=verbose,
@@ -196,7 +193,8 @@ class MixtralPlugin:
         num_kv_heads = config.num_key_value_heads
         head_dim = attention_size // num_heads
         kv_attention_size = graph_blocks.infer_kv_attention_size(
-            weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
+            weights, num_kv_heads=num_kv_heads, head_dim=head_dim
+        )
         attention_window = max_cache_length + 1
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -230,8 +228,7 @@ class MixtralPlugin:
         # -----------------------------------------------------------
         token_id = network.add_input("token_id", trt.int32, (1,))
         position_id = network.add_input("position_id", trt.int32, (1,))
-        attention_mask = network.add_input(
-            "attention_mask", trt.float32, (1, attention_window))
+        attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
 
         cache_k_inputs = []
         cache_v_inputs = []
@@ -258,7 +255,8 @@ class MixtralPlugin:
 
         graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
         cos_half_np = graph_ops.make_rope_table_half_dim(
-            attention_window, head_dim, config.rope_theta, True)
+            attention_window, head_dim, config.rope_theta, True
+        )
         sin_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, False)
         cos_half_tensor = graph_ops.add_constant(
@@ -336,12 +334,8 @@ class MixtralPlugin:
             present_v_outputs.append(present_v)
 
             if debug_layer_outputs:
-                _mark_debug_output(
-                    network, result["post_attn"],
-                    f"debug_post_attn_{layer_idx}")
-                _mark_debug_output(
-                    network, hidden_state,
-                    f"debug_hidden_{layer_idx}")
+                _mark_debug_output(network, result["post_attn"], f"debug_post_attn_{layer_idx}")
+                _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
 
         # -----------------------------------------------------------
         # Final norm
@@ -383,11 +377,14 @@ class MixtralPlugin:
         # Build engine
         # -----------------------------------------------------------
         if verbose:
-            print(f"[trtmc build] Building Mixtral MoE TRT engine "
-                  f"({num_layers} layers, hidden={hidden}, "
-                  f"attn={attention_size}, experts={num_experts}, "
-                  f"top_k={top_k}, inter={moe_intermediate}, "
-                  f"cache={max_cache_length}) ...", file=sys.stderr)
+            print(
+                f"[trtmc build] Building Mixtral MoE TRT engine "
+                f"({num_layers} layers, hidden={hidden}, "
+                f"attn={attention_size}, experts={num_experts}, "
+                f"top_k={top_k}, inter={moe_intermediate}, "
+                f"cache={max_cache_length}) ...",
+                file=sys.stderr,
+            )
 
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
@@ -413,10 +410,8 @@ def _add_swiglu_expert(
         network, inp, hidden_size, intermediate_size, w_up, dtype=dtype)
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
     down = graph_ops.add_matmul_rhs_constant(
         network, gated.get_output(0), intermediate_size, hidden_size, w_down,
@@ -455,23 +450,24 @@ def _add_mixtral_moe_block(
     sm.axes = 1 << 1
 
     # 3. TopK selection
-    topk = network.add_topk(sm.get_output(0), trt.TopKOperation.MAX,
-                            top_k, 1 << 1)
-    top_values = topk.get_output(0)   # [1, top_k]
+    topk = network.add_topk(sm.get_output(0), trt.TopKOperation.MAX, top_k, 1 << 1)
+    top_values = topk.get_output(0)  # [1, top_k]
     top_indices = topk.get_output(1)  # [1, top_k]
 
     # 4. Renormalize: values / sum(values)
-    sum_val = network.add_reduce(
-        top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
+    sum_val = network.add_reduce(top_values, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True)
     norm_weights = network.add_elementwise(
-        top_values, sum_val.get_output(0),
-        trt.ElementWiseOperation.DIV)  # [1, top_k]
+        top_values, sum_val.get_output(0), trt.ElementWiseOperation.DIV
+    )  # [1, top_k]
 
     # 5. Compute ALL expert outputs and stack
     expert_outputs = []
     for e in range(num_experts):
         exp_out = _add_swiglu_expert(
-            network, inp, hidden_size, moe_intermediate,
+            network,
+            inp,
+            hidden_size,
+            moe_intermediate,
             weights[f"{prefix}.expert.{e}.w_gate"],
             weights[f"{prefix}.expert.{e}.w_up"],
             weights[f"{prefix}.expert.{e}.w_down"],
@@ -488,31 +484,29 @@ def _add_mixtral_moe_block(
     result = None
     for k in range(top_k):
         # Extract index k: [1, 1]
-        idx_slice = network.add_slice(
-            top_indices, start=(0, k), shape=(1, 1), stride=(1, 1))
+        idx_slice = network.add_slice(top_indices, start=(0, k), shape=(1, 1), stride=(1, 1))
         idx_flat = network.add_shuffle(idx_slice.get_output(0))
         idx_flat.reshape_dims = (1,)
 
         # Extract weight k: [1, 1]
         w_slice = network.add_slice(
-            norm_weights.get_output(0),
-            start=(0, k), shape=(1, 1), stride=(1, 1))
+            norm_weights.get_output(0), start=(0, k), shape=(1, 1), stride=(1, 1)
+        )
 
         # Gather expert output
-        expert_out = network.add_gather(
-            stacked_out, idx_flat.get_output(0), 0)
+        expert_out = network.add_gather(stacked_out, idx_flat.get_output(0), 0)
 
         # Scale
         scaled_expert = network.add_elementwise(
-            expert_out.get_output(0), w_slice.get_output(0),
-            trt.ElementWiseOperation.PROD)
+            expert_out.get_output(0), w_slice.get_output(0), trt.ElementWiseOperation.PROD
+        )
 
         if result is None:
             result = scaled_expert.get_output(0)
         else:
             sum_layer = network.add_elementwise(
-                result, scaled_expert.get_output(0),
-                trt.ElementWiseOperation.SUM)
+                result, scaled_expert.get_output(0), trt.ElementWiseOperation.SUM
+            )
             result = sum_layer.get_output(0)
 
     return result
@@ -564,11 +558,11 @@ def _add_mixtral_decoder_layer(
         weights[f"{prefix}.w_v"], dtype=dtype)
 
     q = graph_ops.add_apply_rope_native(
-        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim
+    )
     k = graph_ops.add_apply_rope_native(
-        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim
+    )
 
     # Save present K/V
     present_k = k
@@ -581,19 +575,24 @@ def _add_mixtral_decoder_layer(
     v_reshape.reshape_dims = (1, kv_attention_size)
 
     # Concatenate with cache
-    all_k = network.add_concatenation(
-        [cache_k, k_reshape.get_output(0)])
+    all_k = network.add_concatenation([cache_k, k_reshape.get_output(0)])
     all_k.axis = 0
-    all_v = network.add_concatenation(
-        [cache_v, v_reshape.get_output(0)])
+    all_v = network.add_concatenation([cache_v, v_reshape.get_output(0)])
     all_v.axis = 0
 
     mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
     context_flat = graph_ops.add_attention_from_rows(
-        network, q, all_k.get_output(0), all_v.get_output(0),
-        num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
-        q_seq=1, kv_seq=attention_window,
-        mask=mask_4d)
+        network,
+        q,
+        all_k.get_output(0),
+        all_v.get_output(0),
+        num_heads=num_heads,
+        head_dim=head_dim,
+        num_kv_heads=num_kv_heads,
+        q_seq=1,
+        kv_seq=attention_window,
+        mask=mask_4d,
+    )
 
     # Output projection (no bias)
     attn_out = graph_ops.add_matmul_rhs_constant(
@@ -602,12 +601,13 @@ def _add_mixtral_decoder_layer(
         weights[f"{prefix}.w_o"], dtype=dtype)
 
     # Residual connection
-    residual1 = network.add_elementwise(
-        hidden, attn_out, trt.ElementWiseOperation.SUM)
+    residual1 = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM)
 
     # Post-attention RMSNorm
     norm2 = _apply_norm(
-        network, residual1.get_output(0), hidden_size,
+        network,
+        residual1.get_output(0),
+        hidden_size,
         weights[f"{prefix}.post_attn_norm"],
         None, eps_tensor, "rmsnorm", dtype=dtype)
 
@@ -618,7 +618,8 @@ def _add_mixtral_decoder_layer(
 
     # Residual connection
     residual2 = network.add_elementwise(
-        residual1.get_output(0), moe_out, trt.ElementWiseOperation.SUM)
+        residual1.get_output(0), moe_out, trt.ElementWiseOperation.SUM
+    )
 
     return {
         "hidden": residual2.get_output(0),

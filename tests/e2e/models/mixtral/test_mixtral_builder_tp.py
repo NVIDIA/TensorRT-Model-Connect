@@ -17,7 +17,7 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 try:
     mixtral_module = importlib.import_module(
         "tensorrt_model_connect.families.mixtral.plugin")
-    from tensorrt_model_connect.families.mixtral import tp_builder
+    from tensorrt_model_connect.families.mixtral.model import parallel as tp_builder
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
