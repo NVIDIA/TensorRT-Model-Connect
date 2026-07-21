@@ -12,7 +12,7 @@ from tests.builder.debug_runner_test_support import make_bundle_bytes
 
 
 def test_m2m_100_seq2seq_engine_section_and_communicator_forwarded(tmp_path) -> None:
-    from tensorrt_model_connect.families.m2m_100.debug_runner import (
+    from tensorrt_model_connect.families.m2m_100.model.runtime import (
         load_config_from_bundle,
         load_engine_from_bundle,
         runner_from_bundle,
@@ -38,7 +38,7 @@ def test_m2m_100_seq2seq_engine_section_and_communicator_forwarded(tmp_path) -> 
 
     communicator = object()
     with patch(
-        "tensorrt_model_connect.families.m2m_100.debug_runner.Seq2SeqTrtRunner",
+        "tensorrt_model_connect.families.m2m_100.model.runtime.Seq2SeqTrtRunner",
         return_value="m2m-100-tp-runner",
     ) as mock_runner:
         config_json = load_config_from_bundle(str(path))

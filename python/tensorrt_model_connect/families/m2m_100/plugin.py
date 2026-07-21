@@ -29,15 +29,14 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
 )
-from . import graph_ops
-from . import graph_blocks
+from .model import model as graph_ops
 
 
 trt = trt_compat.get_trt()
@@ -508,8 +507,7 @@ def _build_m2m100_encoder(
                 network, n2, hidden, enc_ffn, weights[f"{pfx}.w_fc1"],
                 dtype=work_np_dtype),
             enc_ffn, weights[f"{pfx}.b_fc1"], dtype=work_np_dtype)
-        act = graph_ops.add_activation(
-            network, fc1, "relu", dtype=work_np_dtype)
+        act = graph_ops.add_relu(network, fc1)
         fc2 = graph_ops.add_bias_sum(
             network,
             graph_ops.add_matmul_rhs_constant(
@@ -614,10 +612,9 @@ def _add_m2m100_decoder_layer(*, network, hidden, cache_k, cache_v,
         network, pca, hidden_size,
         weights[f"{prefix}.post_attn_norm"],
         weights[f"{prefix}.post_attn_norm_beta"], eps, dtype=dtype)
-    mlp = graph_blocks.add_gelu_fc_mlp(
+    mlp = graph_ops.add_relu_mlp(
         network, fn, weights=weights, prefix=prefix,
-        hidden_size=hidden_size, mlp_size=ffn_dim, activation="relu",
-        dtype=dtype)
+        hidden_size=hidden_size, mlp_size=ffn_dim, dtype=dtype)
     out = network.add_elementwise(pca, mlp, trt.ElementWiseOperation.SUM).get_output(0)
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
 
