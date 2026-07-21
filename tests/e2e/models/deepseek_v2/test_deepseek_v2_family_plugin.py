@@ -11,6 +11,10 @@ Postconditions: Bundle config overrides compute correct K-cache head_dim and wei
 
 from __future__ import annotations
 
+import importlib
+import json
+import struct
+
 import numpy as np
 import pytest
 
@@ -19,7 +23,14 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.deepseek_v2 as deepseek_v2
+
+    deepseek_v2 = importlib.import_module(
+        "tensorrt_model_connect.families.deepseek_v2.plugin"
+    )
+    from tensorrt_model_connect.families.deepseek_v2.model.runtime import (
+        load_config_from_bundle,
+        load_engine_from_bundle,
+    )
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -27,6 +38,34 @@ except (ImportError, ModuleNotFoundError):
 def _seq(*shape: int, start: int = 0) -> np.ndarray:
     size = int(np.prod(shape))
     return np.arange(start, start + size, dtype=np.float32).reshape(shape)
+
+
+def test_family_runtime_loads_owned_bundle_sections(tmp_path):
+    config = json.dumps({"runtime_strategy": "deepseek_v2_decoder_kv_cache"}).encode()
+    engine = b"deepseek-v2-engine"
+    header = json.dumps(
+        {
+            "sections": {
+                "config.json": {"offset": 0, "size": len(config)},
+                "engine_plan": {"offset": len(config), "size": len(engine)},
+            }
+        }
+    ).encode()
+    bundle = tmp_path / "deepseek-v2.trtfb"
+    bundle.write_bytes(
+        b"TRTFB\x00\x01\x00"
+        + struct.pack("<Q", len(header))
+        + header
+        + config
+        + engine
+    )
+
+    assert load_config_from_bundle(str(bundle))["runtime_strategy"] == (
+        "deepseek_v2_decoder_kv_cache"
+    )
+    loaded_engine, loaded_header = load_engine_from_bundle(str(bundle))
+    assert loaded_engine == engine
+    assert loaded_header["sections"]["engine_plan"]["size"] == len(engine)
 
 
 def _patch_tensor_io(monkeypatch: pytest.MonkeyPatch,
