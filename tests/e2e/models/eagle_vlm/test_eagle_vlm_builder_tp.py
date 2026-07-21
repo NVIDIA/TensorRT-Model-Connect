@@ -56,7 +56,7 @@ def _weights() -> WeightDict:
 
 
 def test_eagle_vlm_tp_shards_text_backbone_weights() -> None:
-    from tensorrt_model_connect.families.eagle_vlm import tp_builder
+    from tensorrt_model_connect.families.eagle_vlm.model import parallel as tp_builder
 
     sharded = tp_builder.shard_eagle_vlm_weights(
         _Config(),
@@ -80,7 +80,7 @@ def test_eagle_vlm_tp_shards_text_backbone_weights() -> None:
 
 
 def test_eagle_vlm_tp_builder_rejects_single_device_mode() -> None:
-    from tensorrt_model_connect.families.eagle_vlm import tp_builder
+    from tensorrt_model_connect.families.eagle_vlm.model import parallel as tp_builder
 
     with pytest.raises(ValueError, match="requires tensor_parallel"):
         tp_builder.build_eagle_vlm_tp_engine(
@@ -94,7 +94,7 @@ def test_eagle_vlm_tp_builder_rejects_single_device_mode() -> None:
 def test_eagle_vlm_parallel_build_routes_to_tp_builder(monkeypatch) -> None:
     plugin_module = importlib.import_module(
         "tensorrt_model_connect.families.eagle_vlm.plugin")
-    from tensorrt_model_connect.families.eagle_vlm import tp_builder
+    from tensorrt_model_connect.families.eagle_vlm.model import parallel as tp_builder
 
     calls = {}
 
@@ -132,7 +132,7 @@ def test_eagle_vlm_parallel_build_routes_to_tp_builder(monkeypatch) -> None:
 def test_eagle_vlm_parallel_build_preserves_reranking_mode(monkeypatch) -> None:
     plugin_module = importlib.import_module(
         "tensorrt_model_connect.families.eagle_vlm.plugin")
-    from tensorrt_model_connect.families.eagle_vlm import tp_builder
+    from tensorrt_model_connect.families.eagle_vlm.model import parallel as tp_builder
 
     calls = {}
 

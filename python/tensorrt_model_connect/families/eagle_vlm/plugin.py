@@ -21,26 +21,22 @@ Weight prefix: language_model.* (not model.layers.*)
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
-    _open_safetensors,
-    _load_tensor,
     _has_tensor,
+    _load_tensor,
+    _open_safetensors,
     _transpose_2d,
 )
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-
-if TYPE_CHECKING:
-    pass
-
 
 def _is_reranker(config: ModelConfig) -> bool:
     """Detect reranking mode from config."""
@@ -62,7 +58,7 @@ class EagleVLMPlugin:
     @property
     def runtime_strategy(self):
         # Set dynamically based on config during build; default to embedding
-        return getattr(self, '_runtime_strategy', 'eagle_vlm_embedding')
+        return getattr(self, "_runtime_strategy", "eagle_vlm_embedding")
 
     def matches(self, model_type: str) -> bool:
         mt = model_type.lower()
@@ -85,7 +81,7 @@ class EagleVLMPlugin:
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="Eagle VLM tensor-parallel builds")
-            from .tp_builder import build_eagle_vlm_tp_engine
+            from .model.parallel import build_eagle_vlm_tp_engine
             return build_eagle_vlm_tp_engine(
                 config, weights, max_cache_length,
                 is_reranker=is_rerank,
@@ -103,7 +99,7 @@ class EagleVLMPlugin:
         vision_config = config.raw.get("vision_config")
         if vision_config is None:
             return None
-        vision_weights = _load_vision_weights(model_dir, config)
+        vision_weights = _load_vision_weights(model_dir)
         return _build_siglip_vision_engine(
             vision_config, vision_weights, precision=precision, verbose=verbose)
 
@@ -142,8 +138,6 @@ class EagleVLMPlugin:
 
 def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
     """Load Eagle text backbone weights (Llama architecture)."""
-    from pathlib import Path
-
     model_dir_path = Path(model_dir)
     readers = _open_safetensors(model_dir_path)
 
@@ -155,30 +149,20 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
 
     weights = WeightDict()
 
-    # Embedding — detect prefix
-    embed_key = "language_model.embed_tokens.weight"
-    if not _has_tensor(readers, embed_key):
-        embed_key = "model.language_model.embed_tokens.weight"
-    if not _has_tensor(readers, embed_key):
-        embed_key = "language_model.model.embed_tokens.weight"
-    if not _has_tensor(readers, embed_key):
-        embed_key = "model.embed_tokens.weight"
+    # Embedding and reranking releases differ only by the outer ``model.``
+    # wrapper. The flat ``model`` root is retained for the family unit fixture.
+    for model_root in ("language_model", "model.language_model", "model"):
+        embed_key = f"{model_root}.embed_tokens.weight"
+        if _has_tensor(readers, embed_key):
+            break
+    else:
+        raise RuntimeError("Cannot find Eagle text embedding weights")
     embedding = _load_tensor(readers, embed_key)
     assert embedding.shape == (vocab, hidden), (
         f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
     weights["embedding"] = embedding.astype(np.float32)
 
-    # Detect layer prefix
-    if _has_tensor(readers, "language_model.layers.0.input_layernorm.weight"):
-        layer_prefix = "language_model.layers"
-    elif _has_tensor(readers, "model.language_model.layers.0.input_layernorm.weight"):
-        layer_prefix = "model.language_model.layers"
-    elif _has_tensor(readers, "language_model.model.layers.0.input_layernorm.weight"):
-        layer_prefix = "language_model.model.layers"
-    elif _has_tensor(readers, "model.layers.0.input_layernorm.weight"):
-        layer_prefix = "model.layers"
-    else:
-        raise RuntimeError("Cannot find text decoder layer weights")
+    layer_prefix = f"{model_root}.layers"
 
     attention_size = 0
     mlp_size = 0
@@ -203,16 +187,10 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         if attention_size == 0:
             attention_size = q_hidden
 
-        q_t = _transpose_2d(q_raw, "q_proj")
-        k_t = _transpose_2d(k_raw, "k_proj")
-        v_t = _transpose_2d(v_raw, "v_proj")
-        o_t = _transpose_2d(o_raw, "o_proj")
-
-
-        weights[f"{prefix}.w_q"] = q_t
-        weights[f"{prefix}.w_k"] = k_t
-        weights[f"{prefix}.w_v"] = v_t
-        weights[f"{prefix}.w_o"] = o_t
+        weights[f"{prefix}.w_q"] = _transpose_2d(q_raw, "q_proj")
+        weights[f"{prefix}.w_k"] = _transpose_2d(k_raw, "k_proj")
+        weights[f"{prefix}.w_v"] = _transpose_2d(v_raw, "v_proj")
+        weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj")
 
         # SwiGLU MLP
         gate_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_proj.weight")
@@ -226,30 +204,19 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up")
         weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down")
 
-    # Final norm — derive from layer_prefix
-    final_norm_key = f"{layer_prefix.rsplit('.layers', 1)[0]}.norm.weight"
-    if not _has_tensor(readers, final_norm_key):
-        final_norm_key = "language_model.model.norm.weight"
-    if not _has_tensor(readers, final_norm_key):
-        final_norm_key = "model.norm.weight"
+    final_norm_key = f"{model_root}.norm.weight"
     if _has_tensor(readers, final_norm_key):
         weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
 
     # Pooling head / score head (if present)
     # Eagle embedding uses the last hidden state with mean pooling + L2 norm
     # Eagle reranking uses a score head: linear projection from hidden -> 1
-    for key_name in ("score.weight", "model.score.weight",
-                     "classifier.weight", "language_model.score.weight"):
-        if _has_tensor(readers, key_name):
-            score_w = _load_tensor(readers, key_name)
-            weights["score_weight"] = _transpose_2d(score_w, "score")
-            break
-
-    for key_name in ("score.bias", "model.score.bias",
-                     "classifier.bias", "language_model.score.bias"):
-        if _has_tensor(readers, key_name):
-            weights["score_bias"] = _load_tensor(readers, key_name).astype(np.float32)
-            break
+    if _has_tensor(readers, "score.weight"):
+        weights["score_weight"] = _transpose_2d(
+            _load_tensor(readers, "score.weight"), "score"
+        )
+    if _has_tensor(readers, "score.bias"):
+        weights["score_bias"] = _load_tensor(readers, "score.bias").astype(np.float32)
 
     # No LM head needed for embedding/reranking (no token generation)
     # But we need w_out as a placeholder for the standard builder check
@@ -262,30 +229,23 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
     return weights
 
 
-def _load_vision_weights(model_dir: str, config: ModelConfig) -> WeightDict:
+def _load_vision_weights(model_dir: str) -> WeightDict:
     """Load SigLIP-2 vision encoder weights."""
-    from pathlib import Path
-
     model_dir_path = Path(model_dir)
     readers = _open_safetensors(model_dir_path)
 
     weights = WeightDict()
     for reader in readers:
         for key in reader.keys():
-            if key.startswith("vision_model.") or key.startswith("visual."):
-                weights[key] = _load_tensor([reader], key)
+            if key.startswith("vision_model."):
+                weights[key] = _load_tensor(readers, key)
             elif key.startswith("model.vision_model."):
                 # Rerank model uses model.vision_model.* prefix — strip model.
                 canon = key[len("model."):]
-                weights[canon] = _load_tensor([reader], key)
-            elif key.startswith("vision_tower."):
-                canon = key.replace("vision_tower.", "vision_model.")
-                weights[canon] = _load_tensor([reader], key)
-            elif key.startswith("multi_modal_projector."):
-                weights[key] = _load_tensor([reader], key)
+                weights[canon] = _load_tensor(readers, key)
             elif key.startswith("mlp1.") or key.startswith("model.mlp1."):
                 canon = key.replace("model.", "", 1) if key.startswith("model.mlp1.") else key
-                weights[canon] = _load_tensor([reader], key)
+                weights[canon] = _load_tensor(readers, key)
 
     return weights
 
@@ -315,8 +275,8 @@ def _build_eagle_engine(
     """
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from . import graph_ops
-    from . import graph_blocks
+    from .model import model as graph_ops
+    from .model import model as graph_blocks
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
@@ -389,8 +349,10 @@ def _build_eagle_engine(
 
     # --- RoPE tables ---
     graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
-    # Check for Llama3 RoPE scaling (from rope_parameters in llm_config)
-    rope_params = config.raw.get("llm_config", {}).get("rope_parameters", {})
+    # The released checkpoints use ``rope_scaling``; retain the earlier
+    # ``rope_parameters`` spelling for compatible Eagle checkpoint revisions.
+    llm_config = config.raw.get("llm_config", config.raw)
+    rope_params = llm_config.get("rope_scaling") or llm_config.get("rope_parameters", {})
     rope_type = rope_params.get("rope_type", "")
     if rope_type == "llama3":
         cos_half_np = _make_llama3_rope_table_half_dim(
@@ -466,10 +428,10 @@ def _build_eagle_engine(
         prefix = f"layer.{layer_idx}"
 
         # Pre-norm
-        norm1 = graph_blocks.apply_norm(
+        norm1 = graph_blocks.add_rms_norm(
             network, hidden_state, hidden,
             weights[f"{prefix}.input_norm"],
-            None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
+            eps_tensor, dtype=work_np_dtype)
 
         # Self-attention: Q, K, V projections
         q = graph_ops.add_matmul_rhs_constant(
@@ -510,10 +472,10 @@ def _build_eagle_engine(
             trt.ElementWiseOperation.SUM)
 
         # Post-attention norm + MLP
-        norm2 = graph_blocks.apply_norm(
+        norm2 = graph_blocks.add_rms_norm(
             network, residual1.get_output(0), hidden,
             weights[f"{prefix}.post_attn_norm"],
-            None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
+            eps_tensor, dtype=work_np_dtype)
 
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2, weights=weights, prefix=prefix,
@@ -529,9 +491,9 @@ def _build_eagle_engine(
     # --- Final norm ---
     final_norm = weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
-        hidden_state = graph_blocks.apply_norm(
-            network, hidden_state, hidden, final_norm, None,
-            eps_tensor, "rmsnorm", dtype=work_np_dtype)
+        hidden_state = graph_blocks.add_rms_norm(
+            network, hidden_state, hidden, final_norm,
+            eps_tensor, dtype=work_np_dtype)
 
     # --- Output ---
     if is_reranker and "score_weight" in weights:
@@ -589,7 +551,7 @@ def _build_siglip_vision_engine(
     """
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from . import graph_ops
+    from .model import model as graph_ops
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
@@ -623,72 +585,42 @@ def _build_siglip_vision_engine(
     if work_trt_dtype != trt.float32:
         pixel_values = network.add_cast(pixel_values, work_trt_dtype).get_output(0)
 
-    # --- Patch embedding (Conv2D) ---
-    patch_proj_key = None
-    for prefix in ("vision_model.vision_model.embeddings.patch_embedding.weight",
-                    "vision_model.embeddings.patch_embedding.weight",
-                    "visual.patch_embed.proj.weight"):
-        if prefix in weights:
-            patch_proj_key = prefix
-            break
+    # The supported releases both use the SigLIP-2 checkpoint namespace.
+    vision_root = "vision_model.vision_model"
+    patch_root = f"{vision_root}.embeddings.patch_embedding"
+    patch_w = weights[f"{patch_root}.weight"].astype(work_np_dtype)
+    input_4d = network.add_shuffle(pixel_values)
+    input_4d.reshape_dims = (1, 3, image_size, image_size)
+    conv = network.add_convolution_nd(
+        input_4d.get_output(0),
+        vision_hidden,
+        (patch_size, patch_size),
+        trt.Weights(np.ascontiguousarray(patch_w)),
+    )
+    conv.stride_nd = (patch_size, patch_size)
+    bias = weights[f"{patch_root}.bias"].astype(work_np_dtype).reshape(
+        1, vision_hidden, 1, 1
+    )
+    conv.set_input(
+        2,
+        graph_ops.add_constant(
+            network, (1, vision_hidden, 1, 1), bias, dtype=work_np_dtype
+        ),
+    )
+    flatten = network.add_shuffle(conv.get_output(0))
+    flatten.reshape_dims = (vision_hidden, num_patches)
+    flatten.second_transpose = (1, 0)
+    hidden_state = flatten.get_output(0)
 
-    if patch_proj_key is not None:
-        patch_w = weights[patch_proj_key]
-        # Conv2D weight shape: [out_channels, in_channels, kH, kW]
-        if patch_w.ndim == 4:
-            patch_w_flat = patch_w.astype(work_np_dtype)
-        else:
-            patch_w_flat = patch_w.reshape(
-                vision_hidden, 3, patch_size, patch_size).astype(work_np_dtype)
-
-        # Reshape input for Conv2D: [1, 3, H, W]
-        input_4d = network.add_shuffle(pixel_values)
-        input_4d.reshape_dims = (1, 3, image_size, image_size)
-
-        conv = network.add_convolution_nd(
-            input_4d.get_output(0),
-            vision_hidden,
-            (patch_size, patch_size),
-            trt.Weights(np.ascontiguousarray(patch_w_flat)))
-        conv.stride_nd = (patch_size, patch_size)
-
-        # Look for bias (TRT conv expects rank-1 or rank-4 bias)
-        for bias_key in ("vision_model.vision_model.embeddings.patch_embedding.bias",
-                         "vision_model.embeddings.patch_embedding.bias",
-                         "visual.patch_embed.proj.bias"):
-            if bias_key in weights:
-                bias_data = weights[bias_key].astype(work_np_dtype).reshape(
-                    1, vision_hidden, 1, 1)
-                conv.set_input(2, graph_ops.add_constant(
-                    network, (1, vision_hidden, 1, 1), bias_data,
-                    dtype=work_np_dtype))
-                break
-
-        # Conv output: [1, vision_hidden, num_patches_h, num_patches_w]
-        # Reshape to [num_patches, vision_hidden]
-        flatten = network.add_shuffle(conv.get_output(0))
-        flatten.reshape_dims = (vision_hidden, num_patches)
-        flatten.second_transpose = (1, 0)  # [num_patches, vision_hidden]
-        hidden_state = flatten.get_output(0)
-    else:
-        # Fallback: identity (should not happen with valid weights)
-        raise RuntimeError("Missing patch embedding weights for SigLIP-2")
-
-    # --- Position embedding (if present) ---
-    for pos_key in ("vision_model.vision_model.embeddings.position_embedding.weight",
-                     "vision_model.embeddings.position_embedding.weight",
-                     "visual.pos_embed"):
-        if pos_key in weights:
-            pos_w = weights[pos_key].astype(work_np_dtype)
-            if pos_w.shape[0] >= num_patches:
-                pos_w = pos_w[:num_patches, :]
-            pos_const = graph_ops.add_constant(
-                network, (num_patches, vision_hidden), pos_w,
-                dtype=work_np_dtype)
-            pos_add = network.add_elementwise(
-                hidden_state, pos_const, trt.ElementWiseOperation.SUM)
-            hidden_state = pos_add.get_output(0)
-            break
+    position = weights[f"{vision_root}.embeddings.position_embedding.weight"][
+        :num_patches
+    ].astype(work_np_dtype)
+    position = graph_ops.add_constant(
+        network, (num_patches, vision_hidden), position, dtype=work_np_dtype
+    )
+    hidden_state = network.add_elementwise(
+        hidden_state, position, trt.ElementWiseOperation.SUM
+    ).get_output(0)
 
     eps_const = graph_ops.add_constant(
         network, (1, 1),
@@ -696,178 +628,102 @@ def _build_siglip_vision_engine(
 
     # --- Transformer layers ---
     for layer_idx in range(num_vision_layers):
-        # Find layer prefix
-        lp = None
-        for prefix in (f"vision_model.vision_model.encoder.layers.{layer_idx}",
-                       f"vision_model.encoder.layers.{layer_idx}",
-                       f"visual.blocks.{layer_idx}"):
-            # Check if any weight starts with this prefix
-            test_key = f"{prefix}.layer_norm1.weight"
-            alt_key = f"{prefix}.norm1.weight"
-            if test_key in weights or alt_key in weights:
-                lp = prefix
-                break
-
-        if lp is None:
-            continue  # skip missing layers
-
-        # Layer norm 1
+        lp = f"{vision_root}.encoder.layers.{layer_idx}"
         ln1_w_key = f"{lp}.layer_norm1.weight"
-        if ln1_w_key not in weights:
-            ln1_w_key = f"{lp}.norm1.weight"
         ln1_b_key = f"{lp}.layer_norm1.bias"
-        if ln1_b_key not in weights:
-            ln1_b_key = f"{lp}.norm1.bias"
+        normed = _add_layer_norm_vision(
+            network,
+            hidden_state,
+            vision_hidden,
+            weights[ln1_w_key].astype(np.float32),
+            weights[ln1_b_key].astype(np.float32),
+            eps_const,
+            dtype=work_np_dtype,
+        )
 
-        ln1_w = weights.get(ln1_w_key)
-        ln1_b = weights.get(ln1_b_key)
-        if ln1_w is not None:
-            normed = _add_layer_norm_vision(
-                network, hidden_state, vision_hidden,
-                ln1_w.astype(np.float32),
-                ln1_b.astype(np.float32) if ln1_b is not None else np.zeros(vision_hidden, dtype=np.float32),
-                eps_const, dtype=work_np_dtype)
-        else:
-            normed = hidden_state
-
-        # Self-attention (simplified: fused QKV or separate Q/K/V)
-        qkv_key = f"{lp}.self_attn.qkv.weight"
-        if qkv_key not in weights:
-            qkv_key = f"{lp}.attn.qkv.weight"
-
-        if qkv_key in weights:
-            # Fused QKV
-            qkv_w = weights[qkv_key].astype(work_np_dtype)
-            if qkv_w.shape[0] == 3 * vision_hidden:
-                qkv_w_t = np.ascontiguousarray(qkv_w.T)
-                qkv = graph_ops.add_matmul_rhs_constant(
-                    network, normed, vision_hidden, 3 * vision_hidden, qkv_w_t,
-                    dtype=work_np_dtype)
-            else:
-                qkv = graph_ops.add_matmul_rhs_constant(
-                    network, normed, vision_hidden, 3 * vision_hidden,
-                    np.ascontiguousarray(qkv_w.T), dtype=work_np_dtype)
-
-            # Split Q, K, V
-            q_slice = network.add_slice(
-                qkv, (0, 0), (num_patches, vision_hidden), (1, 1))
-            k_slice = network.add_slice(
-                qkv, (0, vision_hidden), (num_patches, vision_hidden), (1, 1))
-            v_slice = network.add_slice(
-                qkv, (0, 2 * vision_hidden), (num_patches, vision_hidden), (1, 1))
-            q_out = q_slice.get_output(0)
-            k_out = k_slice.get_output(0)
-            v_out = v_slice.get_output(0)
-        else:
-            # Separate Q, K, V
-            q_key = f"{lp}.self_attn.q_proj.weight"
-            if q_key not in weights:
-                q_key = f"{lp}.attn.q_proj.weight"
-            k_key = f"{lp}.self_attn.k_proj.weight"
-            if k_key not in weights:
-                k_key = f"{lp}.attn.k_proj.weight"
-            v_key = f"{lp}.self_attn.v_proj.weight"
-            if v_key not in weights:
-                v_key = f"{lp}.attn.v_proj.weight"
-
-            q_w = weights[q_key].astype(work_np_dtype)
-            k_w = weights[k_key].astype(work_np_dtype)
-            v_w = weights[v_key].astype(work_np_dtype)
-
-            q_out = graph_ops.add_matmul_rhs_constant(
-                network, normed, vision_hidden, vision_hidden,
-                np.ascontiguousarray(q_w.T), dtype=work_np_dtype)
-            k_out = graph_ops.add_matmul_rhs_constant(
-                network, normed, vision_hidden, vision_hidden,
-                np.ascontiguousarray(k_w.T), dtype=work_np_dtype)
-            v_out = graph_ops.add_matmul_rhs_constant(
-                network, normed, vision_hidden, vision_hidden,
-                np.ascontiguousarray(v_w.T), dtype=work_np_dtype)
+        projections = []
+        for name in ("q_proj", "k_proj", "v_proj"):
+            weight = weights[f"{lp}.self_attn.{name}.weight"].astype(work_np_dtype)
+            projections.append(
+                graph_ops.add_matmul_rhs_constant(
+                    network,
+                    normed,
+                    vision_hidden,
+                    vision_hidden,
+                    np.ascontiguousarray(weight.T),
+                    dtype=work_np_dtype,
+                )
+            )
+        q_out, k_out, v_out = projections
 
         concat = graph_ops.add_attention_from_rows(
             network, q_out, k_out, v_out,
             num_heads=num_vision_heads, head_dim=head_dim,
             q_seq=num_patches, kv_seq=num_patches)
 
-        # Output projection
         out_key = f"{lp}.self_attn.out_proj.weight"
-        if out_key not in weights:
-            out_key = f"{lp}.attn.out_proj.weight"
-            if out_key not in weights:
-                out_key = f"{lp}.attn.proj.weight"
-
-        if out_key in weights:
-            out_w = weights[out_key].astype(work_np_dtype)
-            proj = graph_ops.add_matmul_rhs_constant(
-                network, concat, vision_hidden, vision_hidden,
-                np.ascontiguousarray(out_w.T), dtype=work_np_dtype)
-        else:
-            proj = concat
+        out_w = weights[out_key].astype(work_np_dtype)
+        proj = graph_ops.add_matmul_rhs_constant(
+            network,
+            concat,
+            vision_hidden,
+            vision_hidden,
+            np.ascontiguousarray(out_w.T),
+            dtype=work_np_dtype,
+        )
 
         # Residual
         res1 = network.add_elementwise(
             hidden_state, proj, trt.ElementWiseOperation.SUM)
 
-        # Layer norm 2
         ln2_w_key = f"{lp}.layer_norm2.weight"
-        if ln2_w_key not in weights:
-            ln2_w_key = f"{lp}.norm2.weight"
         ln2_b_key = f"{lp}.layer_norm2.bias"
-        if ln2_b_key not in weights:
-            ln2_b_key = f"{lp}.norm2.bias"
+        normed2 = _add_layer_norm_vision(
+            network,
+            res1.get_output(0),
+            vision_hidden,
+            weights[ln2_w_key].astype(np.float32),
+            weights[ln2_b_key].astype(np.float32),
+            eps_const,
+            dtype=work_np_dtype,
+        )
 
-        ln2_w = weights.get(ln2_w_key)
-        ln2_b = weights.get(ln2_b_key)
-        if ln2_w is not None:
-            normed2 = _add_layer_norm_vision(
-                network, res1.get_output(0), vision_hidden,
-                ln2_w.astype(np.float32),
-                ln2_b.astype(np.float32) if ln2_b is not None else np.zeros(vision_hidden, dtype=np.float32),
-                eps_const, dtype=work_np_dtype)
-        else:
-            normed2 = res1.get_output(0)
-
-        # MLP: fc1 -> GELU -> fc2
         fc1_key = f"{lp}.mlp.fc1.weight"
-        if fc1_key not in weights:
-            fc1_key = f"{lp}.mlp.fc1.weight"
         fc2_key = f"{lp}.mlp.fc2.weight"
-        if fc2_key not in weights:
-            fc2_key = f"{lp}.mlp.fc2.weight"
-
-        if fc1_key in weights and fc2_key in weights:
-            fc1_w = weights[fc1_key].astype(work_np_dtype)
-            fc2_w = weights[fc2_key].astype(work_np_dtype)
-
-            mlp_hidden = fc1_w.shape[0]
-            fc1_out = graph_ops.add_matmul_rhs_constant(
-                network, normed2, vision_hidden, mlp_hidden,
-                np.ascontiguousarray(fc1_w.T), dtype=work_np_dtype)
-
-            # GELU activation
-            fc1_b_key = f"{lp}.mlp.fc1.bias"
-            if fc1_b_key in weights:
-                fc1_out = graph_ops.add_bias_sum(
-                    network, fc1_out, mlp_hidden,
-                    weights[fc1_b_key].astype(work_np_dtype),
-                    dtype=work_np_dtype)
-
-            # Approximate GELU via TRT
-            gelu_layer = network.add_activation(
-                fc1_out, trt.ActivationType.GELU_ERF)
-
-            fc2_out = graph_ops.add_matmul_rhs_constant(
-                network, gelu_layer.get_output(0), mlp_hidden, vision_hidden,
-                np.ascontiguousarray(fc2_w.T), dtype=work_np_dtype)
-
-            fc2_b_key = f"{lp}.mlp.fc2.bias"
-            if fc2_b_key in weights:
-                fc2_out = graph_ops.add_bias_sum(
-                    network, fc2_out, vision_hidden,
-                    weights[fc2_b_key].astype(work_np_dtype),
-                    dtype=work_np_dtype)
-        else:
-            fc2_out = normed2
+        fc1_w = weights[fc1_key].astype(work_np_dtype)
+        fc2_w = weights[fc2_key].astype(work_np_dtype)
+        mlp_hidden = fc1_w.shape[0]
+        fc1_out = graph_ops.add_matmul_rhs_constant(
+            network,
+            normed2,
+            vision_hidden,
+            mlp_hidden,
+            np.ascontiguousarray(fc1_w.T),
+            dtype=work_np_dtype,
+        )
+        fc1_out = graph_ops.add_bias_sum(
+            network,
+            fc1_out,
+            mlp_hidden,
+            weights[f"{lp}.mlp.fc1.bias"].astype(work_np_dtype),
+            dtype=work_np_dtype,
+        )
+        gelu_layer = network.add_activation(fc1_out, trt.ActivationType.GELU_ERF)
+        fc2_out = graph_ops.add_matmul_rhs_constant(
+            network,
+            gelu_layer.get_output(0),
+            mlp_hidden,
+            vision_hidden,
+            np.ascontiguousarray(fc2_w.T),
+            dtype=work_np_dtype,
+        )
+        fc2_out = graph_ops.add_bias_sum(
+            network,
+            fc2_out,
+            vision_hidden,
+            weights[f"{lp}.mlp.fc2.bias"].astype(work_np_dtype),
+            dtype=work_np_dtype,
+        )
 
         # Residual
         res2 = network.add_elementwise(
@@ -998,7 +854,7 @@ def _add_layer_norm_vision(
     """Add LayerNorm for vision transformer."""
     from tensorrt_model_connect import trt_compat
     trt = trt_compat.get_trt()
-    from . import graph_ops
+    from .model import model as graph_ops
 
     output_dtype = inp.dtype
     if dtype != np.float32:
@@ -1050,47 +906,27 @@ def _make_llama3_rope_table_half_dim(
     high_freq_factor: float,
     original_max_position_embeddings: int,
 ) -> np.ndarray:
-    """Build Llama3-style native RoPE table with frequency scaling.
-
-    Llama3 RoPE applies frequency-dependent scaling to inv_freq:
-    - High-frequency dims (short wavelength): no scaling
-    - Low-frequency dims (long wavelength): scale by 1/factor
-    - Mid-frequency dims: smooth interpolation
-    """
-    half_dim = head_dim // 2
-
-    # Standard inv_freq
-    inv_freq = 1.0 / (rope_theta ** (np.arange(0, head_dim, 2, dtype=np.float64) / head_dim))
-
-    # Llama3 wavelength-based scaling
+    """Build the frequency-scaled Llama 3 RoPE table used by Eagle."""
+    inv_freq = np.power(
+        rope_theta, -np.arange(0, head_dim, 2, dtype=np.float64) / head_dim
+    )
+    wavelength = 2.0 * np.pi / inv_freq
     low_freq_wavelen = original_max_position_embeddings / low_freq_factor
     high_freq_wavelen = original_max_position_embeddings / high_freq_factor
-
-    scaled_inv_freq = np.empty_like(inv_freq)
-    for i, freq in enumerate(inv_freq):
-        wavelen = 2.0 * np.pi / freq
-        if wavelen < high_freq_wavelen:
-            scaled_inv_freq[i] = freq
-        elif wavelen > low_freq_wavelen:
-            scaled_inv_freq[i] = freq / factor
-        else:
-            smooth = (original_max_position_embeddings / wavelen - low_freq_factor) / (
-                high_freq_factor - low_freq_factor)
-            scaled_inv_freq[i] = (1 - smooth) * freq / factor + smooth * freq
-
-    # Build table [max_seq_length, head_dim // 2] for IRotaryEmbeddingLayer.
-    table = np.full(
-        (max_seq_length, half_dim),
-        1.0 if cosine else 0.0,
-        dtype=np.float32,
+    smooth = (original_max_position_embeddings / wavelength - low_freq_factor) / (
+        high_freq_factor - low_freq_factor
     )
-
-    for pos in range(max_seq_length):
-        for dim in range(half_dim):
-            angle = pos * scaled_inv_freq[dim]
-            table[pos, dim] = float(np.cos(angle) if cosine else np.sin(angle))
-
-    return table
+    scaled = np.where(
+        wavelength < high_freq_wavelen,
+        inv_freq,
+        np.where(
+            wavelength > low_freq_wavelen,
+            inv_freq / factor,
+            (1.0 - smooth) * inv_freq / factor + smooth * inv_freq,
+        ),
+    )
+    angles = np.arange(max_seq_length, dtype=np.float64)[:, None] * scaled[None, :]
+    return np.asarray(np.cos(angles) if cosine else np.sin(angles), dtype=np.float32)
 
 
 plugin = EagleVLMPlugin()
