@@ -468,6 +468,7 @@ def test_wan22_premerge_selects_standalone_l0_manifest(tmp_path: Path) -> None:
     assert [case["name"] for case in selection["e2e_cases"]] == ["wan22-ti2v-5b-l0"]
     assert selection["e2e_cases"][0]["model"] == "wan22-ti2v-5b-l0"
     assert selection["e2e_cases"][0]["ci_tier"] == "l0_only"
+    assert "model_reference_cache" not in selection
 
 
 @pytest.mark.parametrize(
@@ -548,10 +549,11 @@ def test_selection_excludes_unselected_sibling_model_tests(
     assert not any(path.startswith(f"{sibling_root}/") for path in selection["python_tests"])
 
 
-def test_sana_selection_declares_its_pinned_model_reference_cache(
-    tmp_path: Path,
+@pytest.mark.parametrize("suite", ("premerge", "nightly"))
+def test_sana_selection_without_suite_scope_declares_its_pinned_model_reference_cache(
+    tmp_path: Path, suite: str
 ) -> None:
-    selection = _run_test_selection(tmp_path, "sana_wm", "premerge")
+    selection = _run_test_selection(tmp_path, "sana_wm", suite)
 
     assert selection["model_reference_cache"] == {
         "repository": "https://github.com/NVlabs/Sana.git",
@@ -559,6 +561,76 @@ def test_sana_selection_declares_its_pinned_model_reference_cache(
         "relative_path": SANA_REFERENCE_RELATIVE_PATH,
         "entrypoint": SANA_REFERENCE_ENTRYPOINT,
     }
+
+
+def test_wan22_nightly_selection_emits_only_the_pinned_source_contract(
+    tmp_path: Path,
+) -> None:
+    selection = _run_test_selection(tmp_path, "wan2_2_ti2v", "nightly")
+
+    assert selection["model_reference_cache"] == {
+        "repository": "https://github.com/Wan-Video/Wan2.2.git",
+        "revision": "42bf4cfaa384bc21833865abc2f9e6c0e67233dc",
+        "relative_path": "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384",
+        "entrypoint": "wan/textimage2video.py",
+    }
+    assert all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in selection["model_reference_cache"].items()
+    )
+
+
+@pytest.mark.parametrize(
+    ("suites", "error"),
+    (
+        ('"nightly"', "must be a non-empty list"),
+        ("[]", "must be a non-empty list"),
+        ("[1]", "entries must be premerge or nightly"),
+        ('["qualification"]', "entries must be premerge or nightly"),
+        ('["nightly", "nightly"]', "duplicate model_reference_cache.suites entry"),
+    ),
+)
+def test_model_reference_cache_rejects_invalid_suite_scopes(
+    tmp_path: Path, suites: str, error: str
+) -> None:
+    def replace_suites(source: Path, _projection: dict[str, object]) -> None:
+        manifest = source / "tests/e2e/models/wan2_2_ti2v/MODEL.toml"
+        text = manifest.read_text(encoding="utf-8")
+        manifest.write_text(
+            text.replace('suites = ["nightly"]', f"suites = {suites}"),
+            encoding="utf-8",
+        )
+
+    with pytest.raises(CiError, match=error):
+        _run_test_selection(
+            tmp_path,
+            "wan2_2_ti2v",
+            "premerge",
+            projection_setup=replace_suites,
+        )
+
+
+def test_unmatched_reference_cache_suite_still_validates_the_source_contract(
+    tmp_path: Path,
+) -> None:
+    def corrupt_revision(source: Path, _projection: dict[str, object]) -> None:
+        manifest = source / "tests/e2e/models/wan2_2_ti2v/MODEL.toml"
+        text = manifest.read_text(encoding="utf-8")
+        manifest.write_text(
+            text.replace(
+                'revision = "42bf4cfaa384bc21833865abc2f9e6c0e67233dc"',
+                'revision = "not-a-full-commit"',
+            ),
+            encoding="utf-8",
+        )
+
+    with pytest.raises(CiError, match="revision must be a full lowercase Git commit"):
+        _run_test_selection(
+            tmp_path,
+            "wan2_2_ti2v",
+            "premerge",
+            projection_setup=corrupt_revision,
+        )
 
 
 def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:

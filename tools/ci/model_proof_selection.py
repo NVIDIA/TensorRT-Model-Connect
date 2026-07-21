@@ -212,6 +212,24 @@ class ModelProofSelector:
         if not isinstance(raw, dict):
             raise CiError(f"model_reference_cache must be a table in {owner_manifest}")
 
+        suites = raw.get("suites")
+        selected_suites: list[str] | None = None
+        if suites is not None:
+            if not isinstance(suites, list) or not suites:
+                raise CiError("model_reference_cache.suites must be a non-empty list")
+            selected_suites = []
+            for suite in suites:
+                if not isinstance(suite, str) or suite not in {"premerge", "nightly"}:
+                    raise CiError(
+                        "model_reference_cache.suites entries must be premerge or nightly"
+                    )
+                if suite in selected_suites:
+                    raise CiError(
+                        f"duplicate model_reference_cache.suites entry in {owner_manifest}: "
+                        f"{suite!r}"
+                    )
+                selected_suites.append(suite)
+
         def relative(field: str) -> str:
             value = raw.get(field)
             if (
@@ -245,12 +263,15 @@ class ModelProofSelector:
             raise CiError(
                 "model_reference_cache.relative_path must be owned by the selected E2E family"
             )
-        return {
+        reference_cache = {
             "repository": repository,
             "revision": revision,
             "relative_path": relative_path,
             "entrypoint": relative("entrypoint"),
         }
+        if selected_suites is not None and self.suite not in selected_suites:
+            return None
+        return reference_cache
 
     def _cases(self, e2e_dir: Path) -> list[dict[str, object]]:
         timing = {}

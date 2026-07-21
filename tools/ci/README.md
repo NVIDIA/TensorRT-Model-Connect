@@ -513,6 +513,12 @@ the producing class remains the source of truth for optional evidence fields.
 
 - **Boundary:** It reads and validates ownership metadata. It does not copy
   caches, acquire a GPU, compile source, or execute tests.
+- **Reference cache suites:** An optional non-empty `suites` list in
+  `[model_reference_cache]` may contain `premerge`, `nightly`, or both. Omitting
+  it preserves the reference cache for every suite. The selector always
+  validates the complete pinned-source contract, then omits an unmatched cache
+  from `selection.json`; `suites` itself is never emitted as part of the cache
+  payload.
 
 ### `model_proof.py`
 

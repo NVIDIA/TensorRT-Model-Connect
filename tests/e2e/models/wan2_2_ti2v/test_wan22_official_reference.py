@@ -116,13 +116,14 @@ def test_both_reference_backends_are_registered() -> None:
     }
 
 
-def test_model_declares_the_exact_pinned_official_wan_source() -> None:
+def test_model_declares_the_exact_pinned_nightly_official_wan_source() -> None:
     owner = tomllib.loads((_MODEL_DIR / "MODEL.toml").read_text(encoding="utf-8"))
     assert owner["model_reference_cache"] == {
         "repository": wan22_official.OFFICIAL_REPOSITORY,
         "revision": wan22_official.OFFICIAL_REVISION,
         "relative_path": wan22_official.OFFICIAL_RELATIVE_PATH,
         "entrypoint": wan22_official.OFFICIAL_ENTRYPOINT,
+        "suites": ["nightly"],
     }
 
 
