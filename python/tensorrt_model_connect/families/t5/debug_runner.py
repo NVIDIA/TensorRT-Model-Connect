@@ -20,6 +20,7 @@ except ImportError:
     except ImportError:  # pragma: no cover - exercised in TRT-free test envs
         cudart = None  # type: ignore[assignment]
 
+
 def _check_cuda(status):
     """Raise on CUDA error."""
     if cudart is None:
@@ -31,6 +32,7 @@ def _check_cuda(status):
     if status != success:
         raise RuntimeError(f"CUDA error: {status}")
 
+
 def _trt_nptype_safe(dtype: trt.DataType):
     """Resolve TRT dtype to a NumPy dtype, including BF16 fallback."""
     try:
@@ -40,14 +42,17 @@ def _trt_nptype_safe(dtype: trt.DataType):
             return np.uint16
         raise
 
+
 def _trt_itemsize(dtype: trt.DataType) -> int:
     return np.dtype(_trt_nptype_safe(dtype)).itemsize
+
 
 def _require_trt_runtime() -> None:
     if trt is None:
         raise ImportError("tensorrt is required for family debug_runner execution")
     if cudart is None:
         raise ImportError("cuda-python is required for family debug_runner execution")
+
 
 def load_vision_engine_from_bundle(bundle_path: str) -> tuple[bytes | None, dict]:
     """Load vision engine plan bytes from this family's .trtfb bundle."""
@@ -70,7 +75,6 @@ def load_vision_engine_from_bundle(bundle_path: str) -> tuple[bytes | None, dict
     return vision_plan, header
 
 
-
 def load_engine_from_bundle(
     bundle_path: str,
     section_name: str = "engine_plan",
@@ -88,12 +92,12 @@ def load_engine_from_bundle(
         sections = header.get("sections", {})
         engine_meta = sections.get(section_name)
         if engine_meta is None:
-            raise KeyError(
-                f"Bundle {bundle_path!r} does not contain section {section_name!r}")
+            raise KeyError(f"Bundle {bundle_path!r} does not contain section {section_name!r}")
         f.seek(16 + header_len + engine_meta["offset"])
         engine_plan = f.read(engine_meta["size"])
 
     return engine_plan, header
+
 
 def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | None:
     """Load a named raw section from this family's .trtfb bundle."""
@@ -112,6 +116,7 @@ def load_section_from_bundle(bundle_path: str, section_name: str) -> bytes | Non
             return None
         f.seek(16 + header_len + meta["offset"])
         return f.read(meta["size"])
+
 
 def load_config_from_bundle(bundle_path: str) -> dict:
     """Load and parse this family's config.json from a .trtfb bundle."""
@@ -201,8 +206,12 @@ class Seq2SeqTrtRunner:
         self._d_present_k = []
         self._d_present_v = []
         for _ in range(num_layers):
-            for lst, sz in [(self._d_cache_k, cache_bytes), (self._d_cache_v, cache_bytes),
-                            (self._d_present_k, row_bytes), (self._d_present_v, row_bytes)]:
+            for lst, sz in [
+                (self._d_cache_k, cache_bytes),
+                (self._d_cache_v, cache_bytes),
+                (self._d_present_k, row_bytes),
+                (self._d_present_v, row_bytes),
+            ]:
                 err, ptr = cudart.cudaMalloc(sz)
                 _check_cuda(err)
                 lst.append(ptr)
@@ -269,10 +278,10 @@ class Seq2SeqTrtRunner:
         enc_mask = np.full((self.max_source_positions,), -1e9, dtype=np.float32)
         enc_mask[:copy_len] = 0.0
 
-        cudart.cudaMemcpyAsync(self._d_enc_input_ids, padded.ctypes.data,
-                               padded.nbytes, H2D, stream)
-        cudart.cudaMemcpyAsync(self._d_enc_mask, enc_mask.ctypes.data,
-                               enc_mask.nbytes, H2D, stream)
+        cudart.cudaMemcpyAsync(
+            self._d_enc_input_ids, padded.ctypes.data, padded.nbytes, H2D, stream
+        )
+        cudart.cudaMemcpyAsync(self._d_enc_mask, enc_mask.ctypes.data, enc_mask.nbytes, H2D, stream)
 
         self.enc_context.set_tensor_address("input_ids", self._d_enc_input_ids)
         # Only set attention_mask if the encoder expects it
@@ -313,7 +322,9 @@ class Seq2SeqTrtRunner:
 
         cudart.cudaMemcpyAsync(self._d_token_id, self._h_token_id.ctypes.data, 4, H2D, stream)
         cudart.cudaMemcpyAsync(self._d_position_id, self._h_position_id.ctypes.data, 4, H2D, stream)
-        cudart.cudaMemcpyAsync(self._d_mask, self._h_mask.ctypes.data, attention_window * 4, H2D, stream)
+        cudart.cudaMemcpyAsync(
+            self._d_mask, self._h_mask.ctypes.data, attention_window * 4, H2D, stream
+        )
 
         # Bind decoder tensors
         self.dec_context.set_tensor_address("token_id", self._d_token_id)
@@ -344,13 +355,19 @@ class Seq2SeqTrtRunner:
                     offset = self.cache_length * row_bytes
                     cudart.cudaMemcpyAsync(cache_buf + offset, present_buf, row_bytes, D2D, stream)
                 else:
-                    cudart.cudaMemcpyAsync(cache_buf, cache_buf + row_bytes,
-                        (self.max_cache_length - 1) * row_bytes, D2D, stream)
+                    cudart.cudaMemcpyAsync(
+                        cache_buf,
+                        cache_buf + row_bytes,
+                        (self.max_cache_length - 1) * row_bytes,
+                        D2D,
+                        stream,
+                    )
                     offset = (self.max_cache_length - 1) * row_bytes
                     cudart.cudaMemcpyAsync(cache_buf + offset, present_buf, row_bytes, D2D, stream)
 
-        cudart.cudaMemcpyAsync(self._h_logits.ctypes.data, self._d_logits,
-            self._logits_numel * 4, D2H, stream)
+        cudart.cudaMemcpyAsync(
+            self._h_logits.ctypes.data, self._d_logits, self._logits_numel * 4, D2H, stream
+        )
         cudart.cudaStreamSynchronize(stream)
         self.cache_length = min(self.cache_length + 1, self.max_cache_length)
 
@@ -385,8 +402,15 @@ class Seq2SeqTrtRunner:
             return
         if not hasattr(self, "_d_token_id"):
             return
-        bufs = [self._d_token_id, self._d_position_id, self._d_mask, self._d_logits,
-                self._d_enc_input_ids, self._d_enc_mask, self._d_enc_out]
+        bufs = [
+            self._d_token_id,
+            self._d_position_id,
+            self._d_mask,
+            self._d_logits,
+            self._d_enc_input_ids,
+            self._d_enc_mask,
+            self._d_enc_out,
+        ]
         bufs.extend(self._d_cache_k)
         bufs.extend(self._d_cache_v)
         bufs.extend(self._d_present_k)
