@@ -404,9 +404,10 @@ def test_image_rate_and_seconds_per_image_account_for_batch_size() -> None:
                 "generated_pixels": 20,
             }
         ],
+        request={"media_type": "image"},
     )
     assert metrics["images_per_s"] == 5.0
-    assert metrics["frames_per_s"] == 5.0
+    assert "frames_per_s" not in metrics
     assert metrics["request_throughput_per_s"] == 2.5
     assert metrics["seconds_per_image_p50"] == 0.2
 
@@ -436,9 +437,13 @@ def test_video_profile_preserves_video_build_shape_and_frame_rate(tmp_path: Path
                 "generated_pixels": 100,
             }
         ],
+        request={"media_type": "video"},
     )
-    assert metrics["images_per_s"] == 1.0
+    assert metrics["videos_per_s"] == 1.0
     assert metrics["frames_per_s"] == 9.0
+    assert metrics["seconds_per_video_p50"] == 1.0
+    assert "images_per_s" not in metrics
+    assert "seconds_per_image_p50" not in metrics
 
 
 def test_transcription_resolves_audio_artifact_and_reports_realtime_factor(

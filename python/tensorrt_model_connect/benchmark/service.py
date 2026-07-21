@@ -93,7 +93,11 @@ class BenchmarkService:
         try:
             with telemetry:
                 worker_result = run_worker(case, case_dir, self.worker)
-            metrics = reduce_metrics(case.operation, worker_result["observations"])
+            metrics = reduce_metrics(
+                case.operation,
+                worker_result["observations"],
+                request=case.request,
+            )
             cell: dict[str, Any] = {
                 "status": "completed",
                 "name": case.name,

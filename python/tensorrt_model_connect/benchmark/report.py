@@ -356,6 +356,7 @@ def _cell_row(cell: Mapping[str, Any]) -> str:
 def _task_rate(metrics: Mapping[str, Any]) -> str:
     choices = (
         ("output_tokens_per_s", " token/s"),
+        ("videos_per_s", " video/s"),
         ("images_per_s", " image/s"),
         ("embedding_vectors_per_s", " vector/s"),
         ("windows_per_s", " window/s"),

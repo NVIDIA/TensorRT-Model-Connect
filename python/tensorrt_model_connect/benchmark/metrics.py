@@ -50,7 +50,12 @@ def _summary(values: Sequence[float]) -> dict[str, float]:
     }
 
 
-def reduce_metrics(operation: str, observations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def reduce_metrics(
+    operation: str,
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    request: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return common latency plus operation-specific rate/stage metrics."""
 
     operation_spec = operation_for_name(operation)
@@ -71,7 +76,8 @@ def reduce_metrics(operation: str, observations: Sequence[Mapping[str, Any]]) ->
         },
     }
 
-    for rate in operation_spec.rate_metrics:
+    rate_metrics, per_item = operation_spec.metrics_for_request(request or {})
+    for rate in rate_metrics:
         values = _numbers(observations, rate.observation_field)
         rate_value = sum(values) / total_seconds
         metrics[rate.result_name] = rate_value
@@ -86,7 +92,6 @@ def reduce_metrics(operation: str, observations: Sequence[Mapping[str, Any]]) ->
     if stages:
         metrics["reported_stages_ms"] = stages
 
-    per_item = operation_spec.per_item_latency
     if per_item is not None:
         counts = _numbers(observations, per_item.count_field)
         seconds_per_item = [

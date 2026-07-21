@@ -32,6 +32,12 @@ class PerItemLatencyMetric:
     result_name: str
 
 
+MetricFactory = Callable[
+    [Mapping[str, Any]],
+    tuple[tuple[RateMetric, ...], PerItemLatencyMetric | None],
+]
+
+
 @dataclass(frozen=True)
 class OperationSpec:
     """One public pipeline operation and its benchmark semantics."""
@@ -44,11 +50,19 @@ class OperationSpec:
     rate_metrics: tuple[RateMetric, ...] = ()
     stage_timings: tuple[str, ...] = ()
     per_item_latency: PerItemLatencyMetric | None = None
+    metric_factory: MetricFactory | None = None
 
     def request_from_testcase(
         self, testcase: Mapping[str, Any], model_root: Path
     ) -> dict[str, Any]:
         return self.request_factory(testcase, model_root)
+
+    def metrics_for_request(
+        self, request: Mapping[str, Any]
+    ) -> tuple[tuple[RateMetric, ...], PerItemLatencyMetric | None]:
+        if self.metric_factory is not None:
+            return self.metric_factory(request)
+        return self.rate_metrics, self.per_item_latency
 
 
 def _prompt(testcase: Mapping[str, Any], operation: str) -> str:
@@ -204,6 +218,26 @@ def _transcribe_request(testcase: Mapping[str, Any], model_root: Path) -> dict[s
     }
 
 
+def _generated_media_metrics(
+    request: Mapping[str, Any],
+) -> tuple[tuple[RateMetric, ...], PerItemLatencyMetric]:
+    media_type = str(request.get("media_type", "image") or "image")
+    if media_type == "image":
+        return (
+            (RateMetric("generated_images", "images_per_s"),),
+            PerItemLatencyMetric("generated_images", "seconds_per_image_p50"),
+        )
+    if media_type == "video":
+        return (
+            (
+                RateMetric("generated_images", "videos_per_s"),
+                RateMetric("generated_frames", "frames_per_s"),
+            ),
+            PerItemLatencyMetric("generated_images", "seconds_per_video_p50"),
+        )
+    raise BenchmarkError(f"unsupported generated media type {media_type!r}")
+
+
 _OPERATIONS = (
     OperationSpec(
         name="generate",
@@ -219,11 +253,9 @@ _OPERATIONS = (
         default_measurement=MeasurementSpec(warmup=1, iterations=5),
         request_factory=_generate_image_request,
         supports_batch=True,
-        rate_metrics=(
-            RateMetric("generated_images", "images_per_s"),
-            RateMetric("generated_frames", "frames_per_s"),
-        ),
+        rate_metrics=(RateMetric("generated_images", "images_per_s"),),
         per_item_latency=PerItemLatencyMetric("generated_images", "seconds_per_image_p50"),
+        metric_factory=_generated_media_metrics,
     ),
     OperationSpec(
         name="encode",
