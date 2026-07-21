@@ -31,20 +31,20 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
 )
-from . import graph_ops
-from . import graph_blocks
+from .model import model as graph_ops
+from .model import model as graph_blocks
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .standard_decoder_builder import _apply_norm, _mark_debug_output
+from .model.model import _apply_norm, _mark_debug_output
 
 
 trt = trt_compat.get_trt()
@@ -214,7 +214,7 @@ class PhiMoEPlugin:
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="Phi-MoE tensor-parallel builds")
-            from .tp_builder import build_phi_moe_tp_engine
+            from .model.parallel import build_phi_moe_tp_engine
             return build_phi_moe_tp_engine(
                 config, weights, max_cache_length,
                 precision=precision,
@@ -688,20 +688,7 @@ def _add_moe_decoder_layer(
     """Add one decoder layer with MoE MLP. Attention is standard."""
 
     # Attention block (pre-norm -> QKV -> RoPE -> cache -> attn -> out proj)
-    attn = graph_blocks.add_attention_block(
-        network, hidden, cache_k, cache_v, attention_mask, position_id,
-        weights=weights, prefix=prefix,
-        hidden_size=hidden_size, attention_size=attention_size,
-        kv_attention_size=kv_attention_size,
-        num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
-        max_cache_length=max_cache_length,
-        eps_tensor=eps_tensor,
-        norm_type=norm_type, position_type="rope",
-        cos_half_tensor=cos_half_tensor,
-        sin_half_tensor=sin_half_tensor,
-        rotary_embedding_dim=head_dim,
-        dtype=dtype,
-    )
+    attn = graph_blocks.add_attention_block(network, hidden, cache_k, cache_v, attention_mask, position_id, weights=weights, prefix=prefix, hidden_size=hidden_size, attention_size=attention_size, kv_attention_size=kv_attention_size, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim, max_cache_length=max_cache_length, eps_tensor=eps_tensor, norm_type=norm_type, cos_half_tensor=cos_half_tensor, sin_half_tensor=sin_half_tensor, rotary_embedding_dim=head_dim, dtype=dtype)
     attn_out = attn["attn_out"]
 
     # Residual connection

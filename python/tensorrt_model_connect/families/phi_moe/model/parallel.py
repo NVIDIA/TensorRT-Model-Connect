@@ -11,16 +11,16 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_blocks, graph_ops
-from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .standard_decoder_builder import _apply_norm, _mark_debug_output
+from . import model as graph_blocks, model as graph_ops
+from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
+from .model import _apply_norm, _mark_debug_output
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-    from .config import ModelConfig
-    from ...parallel_config import ParallelConfig
+    from ..weights import WeightDict
+    from ..config import ModelConfig
+    from ....parallel_config import ParallelConfig
 
 
 def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:

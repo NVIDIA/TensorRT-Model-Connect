@@ -23,26 +23,25 @@ def _load_plugin_module():
     return _plugin
 
 
-def __getattr__(name: str) -> Any:
-    if name.startswith("__"):
-        raise AttributeError(name)
-    plugin_module = _load_plugin_module()
-    if name == "plugin":
-        return getattr(plugin_module, "plugin")
-    try:
-        return getattr(plugin_module, name)
-    except AttributeError:
-        raise AttributeError(name) from None
-
-
-def __dir__() -> list[str]:
-    plugin_module = _load_plugin_module()
-    return sorted(set(globals()) | {
-        _name for _name in vars(plugin_module) if not _name.startswith("__")
-    })
-
-
 class _FamilyModule(types.ModuleType):
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__"):
+            raise AttributeError(name)
+        plugin_module = _load_plugin_module()
+        if name == "plugin":
+            return plugin_module.plugin
+        try:
+            return getattr(plugin_module, name)
+        except AttributeError:
+            raise AttributeError(name) from None
+
+    def __dir__(self) -> list[str]:
+        plugin_module = _load_plugin_module()
+        return sorted(
+            set(globals())
+            | {_name for _name in vars(plugin_module) if not _name.startswith("__")}
+        )
+
     def __setattr__(self, name, value):
         # Importlib publishes a directly imported plugin submodule on its parent.
         # Keep the public package attribute bound to the FamilyPlugin instance.
