@@ -35,12 +35,12 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -48,13 +48,15 @@ from .checkpoint_mapper import (
     _target_np_dtype,
     _transpose_2d,
 )
-from . import graph_ops
-from . import graph_blocks
+from .model import model as graph_ops
+from .model import model as graph_blocks
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .standard_decoder_builder import _apply_norm, _mark_debug_output
+
+if TYPE_CHECKING:
+    from .config import ModelConfig
 
 
 trt = trt_compat.get_trt()
@@ -291,7 +293,7 @@ class Qwen3MoePlugin:
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="Qwen-MoE tensor-parallel builds")
-            from .tp_builder import build_qwen_moe_tp_engine
+            from .model.parallel import build_qwen_moe_tp_engine
             return build_qwen_moe_tp_engine(
                 config, weights, max_cache_length,
                 precision=precision,
@@ -392,7 +394,7 @@ class Qwen3MoePlugin:
         hidden_state = gather.get_output(0)
 
         if debug_layer_outputs:
-            _mark_debug_output(network, hidden_state, "debug_embed")
+            graph_ops._mark_debug_output(network, hidden_state, "debug_embed")
 
         # -----------------------------------------------------------
         # Decoder layers
@@ -438,10 +440,10 @@ class Qwen3MoePlugin:
             present_v_outputs.append(result["present_v"])
 
             if debug_layer_outputs:
-                _mark_debug_output(
+                graph_ops._mark_debug_output(
                     network, result["post_attn"],
                     f"debug_post_attn_{layer_idx}")
-                _mark_debug_output(
+                graph_ops._mark_debug_output(
                     network, hidden_state,
                     f"debug_hidden_{layer_idx}")
 
@@ -450,9 +452,9 @@ class Qwen3MoePlugin:
         # -----------------------------------------------------------
         final_norm = weights.get("final_norm")
         if final_norm is not None and len(final_norm) > 0:
-            hidden_state = _apply_norm(
+            hidden_state = graph_ops._apply_norm(
                 network, hidden_state, hidden, final_norm,
-                None, eps_tensor, "rmsnorm", dtype=work_np_dtype)
+                eps_tensor, dtype=work_np_dtype)
 
         # -----------------------------------------------------------
         # LM head (logits)
@@ -741,18 +743,12 @@ def _add_qwen3_moe_decoder_layer(
     # Attention block (pre-norm -> QKV -> RoPE -> cache -> attn -> out proj)
     attn = graph_blocks.add_attention_block(
         network, hidden, cache_k, cache_v, attention_mask, position_id,
-        weights=weights, prefix=prefix,
-        hidden_size=hidden_size, attention_size=attention_size,
-        kv_attention_size=kv_attention_size,
+        weights=weights, prefix=prefix, hidden_size=hidden_size,
+        attention_size=attention_size, kv_attention_size=kv_attention_size,
         num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim,
-        max_cache_length=max_cache_length,
-        eps_tensor=eps_tensor,
-        norm_type="rmsnorm", position_type="rope",
-        dtype=dtype,
-        cos_half_tensor=cos_half_tensor,
-        sin_half_tensor=sin_half_tensor,
-        rotary_embedding_dim=head_dim,
-    )
+        max_cache_length=max_cache_length, eps_tensor=eps_tensor,
+        cos_half_tensor=cos_half_tensor, sin_half_tensor=sin_half_tensor,
+        dtype=dtype)
     attn_out = attn["attn_out"]
 
     # Residual connection
@@ -760,10 +756,9 @@ def _add_qwen3_moe_decoder_layer(
         hidden, attn_out, trt.ElementWiseOperation.SUM)
 
     # Post-attention RMSNorm
-    norm2 = _apply_norm(
+    norm2 = graph_ops._apply_norm(
         network, residual1.get_output(0), hidden_size,
-        weights[f"{prefix}.post_attn_norm"],
-        None, eps_tensor, "rmsnorm", dtype=dtype)
+        weights[f"{prefix}.post_attn_norm"], eps_tensor, dtype=dtype)
 
     # MLP: either dense SwiGLU or MoE (with optional shared expert)
     if is_dense:

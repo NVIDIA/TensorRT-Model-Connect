@@ -11,16 +11,15 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_blocks, graph_ops
-from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .standard_decoder_builder import _apply_norm, _mark_debug_output
+from . import model as graph_blocks, model as graph_ops
+from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-    from .config import ModelConfig
-    from ...parallel_config import ParallelConfig
+    from ..weights import WeightDict
+    from ..config import ModelConfig
+    from ....parallel_config import ParallelConfig
 
 
 def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
@@ -361,9 +360,9 @@ def _add_qwen_moe_tp_decoder_layer(
     dtype: np.dtype = np.float32,
 ) -> dict[str, trt.ITensor]:
     attention_window = max_cache_length + 1
-    norm1 = _apply_norm(
+    norm1 = graph_ops._apply_norm(
         network, hidden, hidden_size,
-        weights[f"{prefix}.input_norm"], None, eps_tensor, "rmsnorm",
+        weights[f"{prefix}.input_norm"], eps_tensor,
         dtype=dtype)
 
     q = graph_ops.add_matmul_rhs_constant(
@@ -387,10 +386,10 @@ def _add_qwen_moe_tp_decoder_layer(
 
     q = graph_ops.add_apply_rope_native(
         network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        position_id)
     k = graph_ops.add_apply_rope_native(
         network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor,
-        position_id, head_dim)
+        position_id)
 
     present_k = k
     present_v = v
@@ -407,7 +406,7 @@ def _add_qwen_moe_tp_decoder_layer(
     context = graph_ops.add_attention_from_rows(
         network, q, all_k.get_output(0), all_v.get_output(0),
         num_heads=num_heads, head_dim=head_dim, num_kv_heads=num_kv_heads,
-        q_seq=1, kv_seq=attention_window, causal=False, mask=mask_4d)
+        kv_seq=attention_window, mask=mask_4d)
 
     attn_out = graph_ops.add_matmul_rhs_constant(
         network, context, attention_size, hidden_size,
@@ -416,9 +415,9 @@ def _add_qwen_moe_tp_decoder_layer(
     residual1 = network.add_elementwise(
         hidden, attn_out, trt.ElementWiseOperation.SUM)
 
-    norm2 = _apply_norm(
+    norm2 = graph_ops._apply_norm(
         network, residual1.get_output(0), hidden_size,
-        weights[f"{prefix}.post_attn_norm"], None, eps_tensor, "rmsnorm",
+        weights[f"{prefix}.post_attn_norm"], eps_tensor,
         dtype=dtype)
 
     if is_dense:
@@ -534,7 +533,7 @@ def build_qwen_moe_tp_engine(
 
     hidden_state = network.add_gather(embedding_table, token_id, 0).get_output(0)
     if debug_layer_outputs:
-        _mark_debug_output(network, hidden_state, "debug_embed")
+        graph_ops._mark_debug_output(network, hidden_state, "debug_embed")
 
     present_k_outputs = []
     present_v_outputs = []
@@ -572,15 +571,16 @@ def build_qwen_moe_tp_engine(
         present_k_outputs.append(result["present_k"])
         present_v_outputs.append(result["present_v"])
         if debug_layer_outputs:
-            _mark_debug_output(
+            graph_ops._mark_debug_output(
                 network, result["post_attn"], f"debug_post_attn_{layer_idx}")
-            _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
+            graph_ops._mark_debug_output(
+                network, hidden_state, f"debug_hidden_{layer_idx}")
 
     final_norm = rank_weights.get("final_norm")
     if final_norm is not None and len(final_norm) > 0:
-        hidden_state = _apply_norm(
-            network, hidden_state, hidden, final_norm, None, eps_tensor,
-            "rmsnorm", dtype=work_np_dtype)
+        hidden_state = graph_ops._apply_norm(
+            network, hidden_state, hidden, final_norm, eps_tensor,
+            dtype=work_np_dtype)
 
     logits = graph_ops.add_matmul_rhs_constant(
         network, hidden_state, hidden, vocab, rank_weights["w_out"],
