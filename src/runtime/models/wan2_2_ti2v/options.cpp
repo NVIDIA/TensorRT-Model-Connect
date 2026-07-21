@@ -15,23 +15,37 @@
 namespace trtmc {
 namespace {
 
-void validate_bundle_profile(const Wan22TI2VOptions& options) {
-    if (options.num_inference_steps != kWan22OfficialInferenceSteps)
-        throw std::invalid_argument("Wan2.2-TI2V-5B bundle requires 50 inference steps");
-    if (options.guidance_scale != kWan22OfficialGuidanceScale)
+template <typename Profile>
+Wan22TI2VProfileKind require_profile(const Profile& profile, const char* subject) {
+    if (profile.guidance_scale != kWan22OfficialGuidanceScale)
         throw std::invalid_argument("Wan2.2-TI2V-5B bundle requires CFG=5");
-    if (options.flow_shift != kWan22OfficialFlowShift)
+    if (profile.flow_shift != kWan22OfficialFlowShift)
         throw std::invalid_argument("Wan2.2-TI2V-5B bundle requires flow_shift=5");
-    if (options.video_height != kWan22OfficialVideoHeight ||
-        options.video_width != kWan22OfficialVideoWidth ||
-        options.video_num_frames != kWan22OfficialVideoFrames) {
-        throw std::invalid_argument(
-            "Wan2.2-TI2V-5B bundle requires the fixed 1280x704, 121-frame profile");
-    }
-    if (options.frame_rate != kWan22OfficialFrameRate)
+    if (profile.frame_rate != kWan22OfficialFrameRate)
         throw std::invalid_argument("Wan2.2-TI2V-5B bundle requires frame_rate=24");
-    if (options.seed < 0)
+    if (profile.text_seq_len != kWan22TextSequenceLength)
+        throw std::invalid_argument("Wan2.2-TI2V-5B bundle requires text_seq_len=512");
+    if (profile.seed < 0)
         throw std::invalid_argument("Wan2.2-TI2V-5B bundle seed must be non-negative");
+
+    const bool official = profile.num_inference_steps == kWan22OfficialInferenceSteps &&
+                          profile.video_height == kWan22OfficialVideoHeight &&
+                          profile.video_width == kWan22OfficialVideoWidth &&
+                          profile.video_num_frames == kWan22OfficialVideoFrames;
+    if (official)
+        return Wan22TI2VProfileKind::kOfficial;
+
+    const bool l0 = profile.num_inference_steps == kWan22L0InferenceSteps &&
+                    profile.video_height == kWan22L0VideoHeight &&
+                    profile.video_width == kWan22L0VideoWidth &&
+                    profile.video_num_frames == kWan22L0VideoFrames;
+    if (l0)
+        return Wan22TI2VProfileKind::kL0;
+
+    throw std::invalid_argument(
+        std::string("Wan2.2-TI2V-5B ") + subject +
+        " requires one complete qualified profile: 1280x704/121 frames/50 steps or "
+        "672x384/5 frames/15 steps");
 }
 
 void validate_request_overrides(const GenerateConfig& config) {
@@ -60,22 +74,30 @@ Wan22TI2VRequest make_wan22_request(const Wan22TI2VOptions& options, const Gener
     request.video_width = options.video_width;
     request.video_num_frames = options.video_num_frames;
     request.frame_rate = options.frame_rate;
+    request.text_seq_len = options.text_seq_len;
     return request;
 }
 
-void validate_resolved_request(const Wan22TI2VRequest& request, const GenerateConfig& config) {
-    if (request.num_inference_steps != kWan22OfficialInferenceSteps)
-        throw std::invalid_argument("Wan2.2-TI2V-5B requires the official 50-step profile");
-    if (request.guidance_scale != kWan22OfficialGuidanceScale)
-        throw std::invalid_argument("Wan2.2-TI2V-5B requires the official CFG=5 profile");
-    if (config.height != 0 && config.height != request.video_height) {
+void validate_resolved_request(const Wan22TI2VOptions& options, const Wan22TI2VRequest& request,
+                               const GenerateConfig& config) {
+    if (request.num_inference_steps != options.num_inference_steps) {
         throw std::invalid_argument(
-            "Wan2.2-TI2V-5B --height must be 704 for the fixed TensorRT engine");
+            "Wan2.2-TI2V-5B --num-steps must match the bundle's complete profile");
+    }
+    if (request.guidance_scale != options.guidance_scale) {
+        throw std::invalid_argument(
+            "Wan2.2-TI2V-5B --guidance-scale must match the bundle's complete profile");
+    }
+    if (config.height != 0 && config.height != request.video_height) {
+        throw std::invalid_argument("Wan2.2-TI2V-5B --height must match bundle profile height " +
+                                    std::to_string(request.video_height));
     }
     if (config.width != 0 && config.width != request.video_width) {
-        throw std::invalid_argument(
-            "Wan2.2-TI2V-5B --width must be 1280 for the fixed TensorRT engine");
+        throw std::invalid_argument("Wan2.2-TI2V-5B --width must match bundle profile width " +
+                                    std::to_string(request.video_width));
     }
+    if (require_profile(request, "request") != require_profile(options, "bundle"))
+        throw std::invalid_argument("Wan2.2-TI2V-5B request profile differs from its bundle");
 }
 
 } // namespace
@@ -92,18 +114,27 @@ Wan22TI2VOptions parse_wan22_options(const std::string& config_json) {
     options.video_width = parsed.value("video_width", options.video_width);
     options.video_num_frames = parsed.value("video_num_frames", options.video_num_frames);
     options.frame_rate = parsed.value("frame_rate", options.frame_rate);
+    options.text_seq_len = parsed.value("text_seq_len", options.text_seq_len);
     if (options.negative_prompt.empty())
         throw std::runtime_error("Wan2.2 bundle config is missing the official negative prompt");
-    validate_bundle_profile(options);
+    (void)require_wan22_profile(options);
     return options;
+}
+
+Wan22TI2VProfileKind require_wan22_profile(const Wan22TI2VOptions& options) {
+    return require_profile(options, "bundle");
+}
+
+Wan22TI2VProfileKind require_wan22_profile(const Wan22TI2VRequest& request) {
+    return require_profile(request, "request");
 }
 
 Wan22TI2VRequest resolve_wan22_request(const Wan22TI2VOptions& options,
                                        const GenerateConfig& config) {
-    validate_bundle_profile(options);
+    (void)require_wan22_profile(options);
     validate_request_overrides(config);
     auto request = make_wan22_request(options, config);
-    validate_resolved_request(request, config);
+    validate_resolved_request(options, request, config);
     return request;
 }
 

@@ -24,3 +24,9 @@ input_fields = [
   { input = "fps", manifest = "fps" },
   { input = "text_max_length", manifest = "text_max_length" },
 ]
+build_cli_args = [
+  { flag = "--video-height", input = "video_height" },
+  { flag = "--video-width", input = "video_width" },
+  { flag = "--video-num-frames", input = "video_num_frames" },
+  { flag = "--num-inference-steps", input = "num_inference_steps" },
+]

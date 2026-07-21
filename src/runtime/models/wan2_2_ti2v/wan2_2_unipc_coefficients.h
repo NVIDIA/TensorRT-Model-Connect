@@ -13,22 +13,17 @@
 // linear-solve results.
 //
 // Generated artifact:
-//   unipc_coefficients_gb300_gpu3_20260717.json
+//   wan22_unipc_50_fixed_kind_bf16.json
 // Official source revision:
 //   42bf4cfaa384bc21833865abc2f9e6c0e67233dc
 // Official scheduler SHA-256:
 //   0dec8c7ed17f6f2049275c6848113314da6ccec1c8db5bdc89df43c05c6038d9
 // Artifact generator SHA-256:
-//   3160f2edb9b4833d2ce41ce2e3d2c66b3e2e07fc078b8c83a349acaa8dea0113
-// Current reproducer SHA-256:
-//   f5b513be69c6626b5311f57995da574a2c5bc21a785d722910139bc3fd048de6
+//   adb1e0a3839924ed4982c872909ab044335fa22f8319a5048b2e896e61e053bb
 // Canonical numerical payload SHA-256 (sigmas, timesteps, and steps):
 //   742ec7777410d94d73c528432e21c22cb52f021d3fa841b8b942b3f9c51ee2e0
 // Artifact SHA-256:
-//   bb58f81fae759dadeccb5ecaf5fbbf2165c5ead8e8812a21910c591725173caf
-// The current reproducer adds explicit BF16-autocast qualification metadata.
-// With autocast enabled or disabled, its canonical numerical payload is
-// bitwise identical to the historical artifact embedded below.
+//   650f7e64cddb551bd81ee4386857967dcf2a916ea3a04cb97423b74a522cf782
 
 #include <array>
 #include <cstddef>
@@ -45,18 +40,18 @@ inline constexpr std::uint32_t kFlowShiftBits = 0x40a00000U; // 5.0F
 inline constexpr std::uint32_t kNoSigmaIndex = 0xffffffffU;
 
 inline constexpr char kOfficialSourceRevision[] = "42bf4cfaa384bc21833865abc2f9e6c0e67233dc";
-inline constexpr bool kOfficialSourceTrackedDirty = true;
+inline constexpr bool kOfficialSourceTrackedDirty = false;
 inline constexpr char kOfficialSchedulerSha256[] =
     "0dec8c7ed17f6f2049275c6848113314da6ccec1c8db5bdc89df43c05c6038d9";
 inline constexpr char kArtifactGeneratorSha256[] =
-    "3160f2edb9b4833d2ce41ce2e3d2c66b3e2e07fc078b8c83a349acaa8dea0113";
+    "adb1e0a3839924ed4982c872909ab044335fa22f8319a5048b2e896e61e053bb";
 inline constexpr char kCurrentGeneratorSha256[] =
-    "f5b513be69c6626b5311f57995da574a2c5bc21a785d722910139bc3fd048de6";
+    "adb1e0a3839924ed4982c872909ab044335fa22f8319a5048b2e896e61e053bb";
 inline constexpr char kCanonicalNumericalPayloadSha256[] =
     "742ec7777410d94d73c528432e21c22cb52f021d3fa841b8b942b3f9c51ee2e0";
 inline constexpr std::uint64_t kCanonicalNumericalPayloadFnv1a64 = 0xda52883b5a3a3950ULL;
 inline constexpr char kArtifactSha256[] =
-    "bb58f81fae759dadeccb5ecaf5fbbf2165c5ead8e8812a21910c591725173caf";
+    "650f7e64cddb551bd81ee4386857967dcf2a916ea3a04cb97423b74a522cf782";
 
 // Field mapping to each JSON corrector/predictor record:
 //   order                    <- order (zero means the absent step-0 corrector)

@@ -4,6 +4,7 @@
  */
 
 #include "runtime/models/wan2_2_ti2v/wan2_2_unipc_coefficients.h"
+#include "runtime/models/wan2_2_ti2v/wan2_2_unipc_coefficients_15.h"
 #include "runtime/models/wan2_2_ti2v/wan2_2_unipc_cuda.h"
 
 #include <algorithm>
@@ -19,6 +20,36 @@ namespace {
 
 constexpr uint32_t kBlockSize = 256;
 constexpr uint32_t kMaximumGridSize = 65535;
+
+struct CoefficientView {
+    std::size_t step_count;
+    std::size_t sigma_count;
+    const std::uint32_t* timesteps;
+    const std::uint32_t* sigma_bits;
+    const std::uint32_t* conversion_sigma_bits;
+    const unipc_coefficients::UpdateCoefficients* correctors;
+    const unipc_coefficients::UpdateCoefficients* predictors;
+};
+
+constexpr CoefficientView kOfficialCoefficientView = {
+    unipc_coefficients::kStepCount,
+    unipc_coefficients::kSigmaCount,
+    unipc_coefficients::kTimesteps.data(),
+    unipc_coefficients::kSigmaBits.data(),
+    unipc_coefficients::kConversionSigmaBits.data(),
+    unipc_coefficients::kCorrector.data(),
+    unipc_coefficients::kPredictor.data(),
+};
+
+constexpr CoefficientView kL0CoefficientView = {
+    unipc_coefficients_15::kStepCount,
+    unipc_coefficients_15::kSigmaCount,
+    unipc_coefficients_15::kTimesteps.data(),
+    unipc_coefficients_15::kSigmaBits.data(),
+    unipc_coefficients_15::kConversionSigmaBits.data(),
+    unipc_coefficients_15::kCorrector.data(),
+    unipc_coefficients_15::kPredictor.data(),
+};
 
 void check_cuda(cudaError_t status, const char* operation) {
     if (status != cudaSuccess) {
@@ -37,6 +68,21 @@ uint32_t float_bits(float value) {
     uint32_t bits = 0U;
     std::memcpy(&bits, &value, sizeof(bits));
     return bits;
+}
+
+const CoefficientView& select_coefficient_view(float shift, int32_t num_inference_steps,
+                                               int32_t num_train_timesteps) {
+    if (num_train_timesteps != static_cast<int32_t>(unipc_coefficients::kNumTrainTimesteps) ||
+        float_bits(shift) != unipc_coefficients::kFlowShiftBits) {
+        throw std::invalid_argument(
+            "Wan2.2 CUDA UniPC requires 1000 training steps and flow shift 5");
+    }
+    if (num_inference_steps == static_cast<int32_t>(kOfficialCoefficientView.step_count))
+        return kOfficialCoefficientView;
+    if (num_inference_steps == static_cast<int32_t>(kL0CoefficientView.step_count))
+        return kL0CoefficientView;
+    throw std::invalid_argument(
+        "Wan2.2 CUDA UniPC requires a source-qualified 50-step or 15-step profile");
 }
 
 uint32_t grid_size(std::size_t count) {
@@ -177,8 +223,9 @@ __global__ void predict_kernel(const float* sample, const float* newest_model,
     }
 }
 
-CorrectCoefficients make_correct_coefficients(int32_t step_index, int32_t previous_order) {
-    const auto& source = unipc_coefficients::kCorrector.at(static_cast<std::size_t>(step_index));
+CorrectCoefficients make_correct_coefficients(const CoefficientView& view, int32_t step_index,
+                                              int32_t previous_order) {
+    const auto& source = view.correctors[static_cast<std::size_t>(step_index)];
     if (source.order != static_cast<uint32_t>(previous_order))
         throw std::logic_error("Wan2.2 CUDA UniPC corrector order differs from coefficient table");
     const bool has_older = source.order == 2U;
@@ -193,8 +240,9 @@ CorrectCoefficients make_correct_coefficients(int32_t step_index, int32_t previo
     };
 }
 
-PredictCoefficients make_predict_coefficients(int32_t step_index, int32_t order) {
-    const auto& source = unipc_coefficients::kPredictor.at(static_cast<std::size_t>(step_index));
+PredictCoefficients make_predict_coefficients(const CoefficientView& view, int32_t step_index,
+                                              int32_t order) {
+    const auto& source = view.predictors[static_cast<std::size_t>(step_index)];
     if (source.order != static_cast<uint32_t>(order))
         throw std::logic_error("Wan2.2 CUDA UniPC predictor order differs from coefficient table");
     const bool has_previous = source.order == 2U;
@@ -211,8 +259,9 @@ PredictCoefficients make_predict_coefficients(int32_t step_index, int32_t order)
 } // namespace
 
 struct FlowUniPCCuda::Impl {
-    explicit Impl(cudaStream_t supplied_stream, int32_t steps)
-        : stream(supplied_stream), num_steps(steps) {
+    explicit Impl(cudaStream_t supplied_stream, int32_t steps,
+                  const CoefficientView& supplied_coefficients)
+        : stream(supplied_stream), num_steps(steps), coefficients(supplied_coefficients) {
         check_cuda(cudaGetDevice(&device), "cudaGetDevice");
     }
 
@@ -307,8 +356,7 @@ struct FlowUniPCCuda::Impl {
         const std::size_t index = static_cast<std::size_t>(step_index);
         convert_model_output_kernel<<<grid, kBlockSize, 0, stream>>>(
             model_output.get(), sample.get(),
-            float_from_bits(unipc_coefficients::kConversionSigmaBits[index]), converted.get(),
-            count);
+            float_from_bits(coefficients.conversion_sigma_bits[index]), converted.get(), count);
         check_cuda(cudaGetLastError(), "convert kernel launch");
     }
 
@@ -320,7 +368,7 @@ struct FlowUniPCCuda::Impl {
         if (previous_order == 2 && history_size < 2)
             throw std::logic_error("Wan2.2 CUDA UniPC order-2 history is incomplete");
         const CorrectCoefficients coefficients =
-            make_correct_coefficients(step_index, previous_order);
+            make_correct_coefficients(this->coefficients, step_index, previous_order);
         correct_kernel<<<grid, kBlockSize, 0, stream>>>(
             converted.get(), newest(), coefficients.has_older ? older() : nullptr,
             last_sample.get(), sample.get(), count, coefficients);
@@ -358,7 +406,8 @@ struct FlowUniPCCuda::Impl {
 
     void predict_and_download(float* supplied_output, std::size_t count, std::size_t bytes,
                               uint32_t grid, int32_t order) {
-        const PredictCoefficients coefficients = make_predict_coefficients(step_index, order);
+        const PredictCoefficients coefficients =
+            make_predict_coefficients(this->coefficients, step_index, order);
         predict_kernel<<<grid, kBlockSize, 0, stream>>>(sample.get(), newest(),
                                                         order == 2 ? older() : nullptr,
                                                         output.get(), count, coefficients);
@@ -377,6 +426,7 @@ struct FlowUniPCCuda::Impl {
     cudaStream_t stream{nullptr};
     int device{0};
     int32_t num_steps{0};
+    const CoefficientView& coefficients;
     int32_t step_index{0};
     int32_t lower_order_nums{0};
     int32_t previous_order{0};
@@ -400,8 +450,10 @@ FlowUniPCCuda::FlowUniPCCuda(cudaStream_t stream, int32_t num_inference_steps, f
         throw std::invalid_argument("Wan2.2 CUDA UniPC requires at least two training steps");
     if (!(shift > 0.0F))
         throw std::invalid_argument("Wan2.2 CUDA UniPC shift must be positive");
+    const auto& coefficients =
+        select_coefficient_view(shift, num_inference_steps, num_train_timesteps);
     make_schedule(shift, num_inference_steps, num_train_timesteps);
-    impl_ = std::make_unique<Impl>(stream, num_inference_steps);
+    impl_ = std::make_unique<Impl>(stream, num_inference_steps, coefficients);
 }
 
 FlowUniPCCuda::FlowUniPCCuda(int32_t num_inference_steps, float shift, int32_t num_train_timesteps,
@@ -426,18 +478,14 @@ void FlowUniPCCuda::reset() {
 
 void FlowUniPCCuda::make_schedule(float shift, int32_t num_inference_steps,
                                   int32_t num_train_timesteps) {
-    if (num_inference_steps != static_cast<int32_t>(unipc_coefficients::kStepCount) ||
-        num_train_timesteps != static_cast<int32_t>(unipc_coefficients::kNumTrainTimesteps) ||
-        float_bits(shift) != unipc_coefficients::kFlowShiftBits) {
-        throw std::invalid_argument(
-            "Wan2.2 CUDA UniPC requires the source-qualified 50-step, shift-5 profile");
-    }
-    timesteps_.reserve(unipc_coefficients::kStepCount);
-    for (const uint32_t timestep : unipc_coefficients::kTimesteps)
-        timesteps_.push_back(static_cast<int64_t>(timestep));
-    sigmas_.reserve(unipc_coefficients::kSigmaCount);
-    for (const uint32_t bits : unipc_coefficients::kSigmaBits)
-        sigmas_.push_back(float_from_bits(bits));
+    const auto& coefficients =
+        select_coefficient_view(shift, num_inference_steps, num_train_timesteps);
+    timesteps_.reserve(coefficients.step_count);
+    for (std::size_t index = 0; index < coefficients.step_count; ++index)
+        timesteps_.push_back(static_cast<int64_t>(coefficients.timesteps[index]));
+    sigmas_.reserve(coefficients.sigma_count);
+    for (std::size_t index = 0; index < coefficients.sigma_count; ++index)
+        sigmas_.push_back(float_from_bits(coefficients.sigma_bits[index]));
 }
 
 void FlowUniPCCuda::step(const float* model_output, const float* sample, float* output,

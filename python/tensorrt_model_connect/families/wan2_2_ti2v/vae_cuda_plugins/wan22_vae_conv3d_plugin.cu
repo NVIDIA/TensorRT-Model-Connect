@@ -47,6 +47,7 @@ bool isSupportedConfig(const Conv3dConfig& config) {
                              config.output_channels == 256;
     const bool temporal_ok = config.input_depth == 3 || config.input_depth == 6;
     const bool spatial_ok = (config.input_height == 18 && config.input_width == 18) ||
+                            (config.input_height == 194 && config.input_width == 338) ||
                             (config.input_height == 354 && config.input_width == 642);
     return config.batch == 1 && channels_ok && temporal_ok && spatial_ok;
 }
@@ -102,8 +103,12 @@ void reportAlgorithmOnce(const Conv3dConfig& config, cudnnConvolutionFwdAlgo_t a
     // TensorRT clones plugins several times during build.  Report each static
     // contract once per process so target-local selection remains auditable
     // without emitting hundreds of identical lines.
-    static std::array<std::atomic_bool, 8> reported{};
-    const size_t spatial_index = config.input_height == 354 ? 4 : 0;
+    static std::array<std::atomic_bool, 12> reported{};
+    size_t spatial_index = 0;
+    if (config.input_height == 194)
+        spatial_index = 4;
+    else if (config.input_height == 354)
+        spatial_index = 8;
     const size_t channel_index = config.input_channels == 512 ? 2 : 0;
     const size_t temporal_index = config.input_depth == 6 ? 1 : 0;
     const size_t index = spatial_index + channel_index + temporal_index;

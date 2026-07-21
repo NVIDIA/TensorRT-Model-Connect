@@ -6,6 +6,7 @@
 #include "runtime/models/wan2_2_ti2v/artifact_contract.h"
 
 #include "bundle/bundle_format.h"
+#include "runtime/models/wan2_2_ti2v/options.h"
 #include "utils/sha256.h"
 
 #include <algorithm>
@@ -97,12 +98,16 @@ struct PlanBindings {
     bool has_plugin_elf{false};
 };
 
-nlohmann::json make_official_profile() {
+nlohmann::json make_artifact_profile(int32_t video_width, int32_t video_height,
+                                     int32_t video_num_frames, int32_t num_inference_steps) {
+    const int32_t latent_frames = (video_num_frames - 1) / 4 + 1;
+    const int32_t latent_height = video_height / 16;
+    const int32_t latent_width = video_width / 16;
     return {
-        {"video_width", 1280},
-        {"video_height", 704},
-        {"video_num_frames", 121},
-        {"latent_shape", {1, 48, 31, 44, 80}},
+        {"video_width", video_width},
+        {"video_height", video_height},
+        {"video_num_frames", video_num_frames},
+        {"latent_shape", {1, 48, latent_frames, latent_height, latent_width}},
         {"architecture",
          {{"model_type", "ti2v"},
           {"in_channels", 48},
@@ -121,7 +126,7 @@ nlohmann::json make_official_profile() {
           {"scale_factor_temporal", 4},
           {"scale_factor_spatial", 16},
           {"frame_rate", 24},
-          {"num_inference_steps", 50},
+          {"num_inference_steps", num_inference_steps},
           {"guidance_scale", 5.0},
           {"flow_shift", 5.0},
           {"train_timesteps", 1000}}},
@@ -135,6 +140,58 @@ nlohmann::json make_official_profile() {
           {"source_rmsnorm", true}}},
         {"precision", "bf16"},
     };
+}
+
+nlohmann::json make_official_profile() {
+    return make_artifact_profile(kWan22OfficialVideoWidth, kWan22OfficialVideoHeight,
+                                 kWan22OfficialVideoFrames, kWan22OfficialInferenceSteps);
+}
+
+nlohmann::json make_l0_profile() {
+    return make_artifact_profile(kWan22L0VideoWidth, kWan22L0VideoHeight, kWan22L0VideoFrames,
+                                 kWan22L0InferenceSteps);
+}
+
+nlohmann::json make_top_level_profile(const nlohmann::json& config) {
+    int32_t video_width = 0;
+    int32_t video_height = 0;
+    int32_t video_num_frames = 0;
+    int32_t num_inference_steps = 0;
+    int32_t frame_rate = 0;
+    int32_t text_seq_len = 0;
+    double guidance_scale = 0.0;
+    double flow_shift = 0.0;
+    try {
+        video_width = config.value("video_width", kWan22OfficialVideoWidth);
+        video_height = config.value("video_height", kWan22OfficialVideoHeight);
+        video_num_frames = config.value("video_num_frames", kWan22OfficialVideoFrames);
+        num_inference_steps = config.value("num_inference_steps", kWan22OfficialInferenceSteps);
+        frame_rate = config.value("frame_rate", kWan22OfficialFrameRate);
+        text_seq_len = config.value("text_seq_len", kWan22TextSequenceLength);
+        guidance_scale = config.value("guidance_scale", 5.0);
+        flow_shift = config.value("flow_shift", 5.0);
+    } catch (const nlohmann::json::exception&) {
+        throw std::runtime_error("Wan2.2 top-level generation profile is malformed");
+    }
+
+    const bool common = frame_rate == kWan22OfficialFrameRate &&
+                        text_seq_len == kWan22TextSequenceLength && guidance_scale == 5.0 &&
+                        flow_shift == 5.0;
+    const bool official = common && video_width == kWan22OfficialVideoWidth &&
+                          video_height == kWan22OfficialVideoHeight &&
+                          video_num_frames == kWan22OfficialVideoFrames &&
+                          num_inference_steps == kWan22OfficialInferenceSteps;
+    if (official)
+        return make_official_profile();
+
+    const bool l0 =
+        common && video_width == kWan22L0VideoWidth && video_height == kWan22L0VideoHeight &&
+        video_num_frames == kWan22L0VideoFrames && num_inference_steps == kWan22L0InferenceSteps;
+    if (l0)
+        return make_l0_profile();
+
+    throw std::runtime_error(
+        "Wan2.2 top-level generation profile is not one of the qualified profiles");
 }
 
 BundleSectionMap validate_bundle_section_contract(const BundleInfo& info,
@@ -199,9 +256,15 @@ const nlohmann::json& validate_artifact_manifest(const nlohmann::json& config,
         throw std::runtime_error(
             "Wan2.2 v4 artifact manifest requires sha256_size_v1 integrity mode");
     }
-    const auto expected_profile = make_official_profile();
-    if (manifest["profile"] != expected_profile)
-        throw std::runtime_error("Wan2.2 artifact_manifest profile is not the official profile");
+    const auto& profile = manifest["profile"];
+    if (profile != make_official_profile() && profile != make_l0_profile()) {
+        throw std::runtime_error(
+            "Wan2.2 artifact_manifest profile is not one of the qualified profiles");
+    }
+    if (profile != make_top_level_profile(config)) {
+        throw std::runtime_error(
+            "Wan2.2 artifact_manifest profile does not match the top-level generation profile");
+    }
     return manifest;
 }
 

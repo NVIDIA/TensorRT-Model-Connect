@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from tensorrt_model_connect.families.wan2_2_ti2v.vae_step_builder import (
+    L0_VAE_STEP_PROFILE,
     OFFICIAL_VAE_STEP_PROFILE,
     SMALL_VAE_STEP_PROFILE,
     VAE_STEP_CACHE_SPECS,
@@ -32,6 +33,21 @@ def test_vae_step_profiles() -> None:
         4,
         32,
         32,
+    )
+    assert L0_VAE_STEP_PROFILE.latent_shape == (1, 48, 1, 24, 42)
+    assert L0_VAE_STEP_PROFILE.video_shape(first_frame_only=True) == (
+        1,
+        3,
+        1,
+        384,
+        672,
+    )
+    assert L0_VAE_STEP_PROFILE.video_shape(first_frame_only=False) == (
+        1,
+        3,
+        4,
+        384,
+        672,
     )
     assert OFFICIAL_VAE_STEP_PROFILE.latent_shape == (1, 48, 1, 44, 80)
     assert OFFICIAL_VAE_STEP_PROFILE.video_shape(first_frame_only=True) == (
@@ -62,6 +78,7 @@ def test_vae_step_cache_contract_matches_source_order() -> None:
 
 def test_vae_step_cache_footprint() -> None:
     assert vae_step_cache_bytes(SMALL_VAE_STEP_PROFILE) == 7_308_800
+    assert vae_step_cache_bytes(L0_VAE_STEP_PROFILE) == 1_841_817_600
     assert vae_step_cache_bytes(OFFICIAL_VAE_STEP_PROFILE) == 6_431_744_000
 
 

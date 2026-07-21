@@ -1,16 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Authoritative architecture constants for Wan2.2-TI2V-5B.
+"""Authoritative architecture constants and profiles for Wan2.2-TI2V-5B.
 
 The values below are defined by the upstream Wan2.2 ``ti2v_5B`` task and its
 native ``config.json``.  Keeping them in this family makes an accidental match
-to another Wan generation fail loudly at build time.
+to another Wan generation fail loudly at build time.  CI adds one reduced
+generation profile while retaining the exact same checkpoint architecture.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Mapping
 
 
 @dataclass(frozen=True)
@@ -61,12 +63,22 @@ class Wan22TI2VConfig:
 
 
 WAN22_TI2V_5B = Wan22TI2VConfig()
+WAN22_TI2V_5B_L0 = Wan22TI2VConfig(
+    video_height=384,
+    video_width=672,
+    video_num_frames=5,
+    num_inference_steps=15,
+)
+
+SUPPORTED_GENERATION_PROFILES = (
+    WAN22_TI2V_5B,
+    WAN22_TI2V_5B_L0,
+)
 
 
-def official_artifact_profile() -> dict[str, object]:
-    """Return the complete fixed architecture and generation contract."""
+def artifact_profile(arch: Wan22TI2VConfig) -> dict[str, object]:
+    """Return the source-bound artifact contract for one qualified profile."""
 
-    arch = WAN22_TI2V_5B
     return {
         "video_width": arch.video_width,
         "video_height": arch.video_height,
@@ -112,6 +124,50 @@ def official_artifact_profile() -> dict[str, object]:
         },
         "precision": "bf16",
     }
+
+
+def official_artifact_profile() -> dict[str, object]:
+    """Return the complete official 720p architecture and generation contract."""
+
+    return artifact_profile(WAN22_TI2V_5B)
+
+
+def select_generation_profile(raw: Mapping[str, object]) -> Wan22TI2VConfig:
+    """Select one exact qualified generation profile and reject hybrid shapes."""
+
+    official = WAN22_TI2V_5B
+    requested = {
+        "video_width": int(raw.get("video_width", official.video_width)),
+        "video_height": int(raw.get("video_height", official.video_height)),
+        "video_num_frames": int(raw.get("video_num_frames", official.video_num_frames)),
+        "num_inference_steps": int(raw.get("num_inference_steps", official.num_inference_steps)),
+        "guidance_scale": float(raw.get("guidance_scale", official.guidance_scale)),
+        "flow_shift": float(raw.get("flow_shift", official.flow_shift)),
+        "frame_rate": int(raw.get("frame_rate", official.frame_rate)),
+    }
+    for profile in SUPPORTED_GENERATION_PROFILES:
+        expected = {name: getattr(profile, name) for name in requested}
+        if requested == expected:
+            return profile
+
+    supported = ", ".join(
+        f"{profile.video_width}x{profile.video_height}/{profile.video_num_frames} frames/"
+        f"{profile.num_inference_steps} steps"
+        for profile in SUPPORTED_GENERATION_PROFILES
+    )
+    raise ValueError(
+        "Wan2.2-TI2V-5B requires one exact qualified generation profile; "
+        f"requested {requested}. Supported profiles: {supported}"
+    )
+
+
+def validate_artifact_profile(profile: object) -> Wan22TI2VConfig:
+    """Return the qualified config represented by an exact artifact profile."""
+
+    for candidate in SUPPORTED_GENERATION_PROFILES:
+        if profile == artifact_profile(candidate):
+            return candidate
+    raise ValueError("Wan2.2 artifact profile is not one of the qualified profiles")
 
 
 OFFICIAL_NEGATIVE_PROMPT = (

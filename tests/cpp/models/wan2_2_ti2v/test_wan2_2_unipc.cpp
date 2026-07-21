@@ -5,6 +5,7 @@
 
 #include "runtime/models/wan2_2_ti2v/wan2_2_unipc.h"
 #include "runtime/models/wan2_2_ti2v/wan2_2_unipc_coefficients.h"
+#include "runtime/models/wan2_2_ti2v/wan2_2_unipc_coefficients_15.h"
 #include "utils/sha256.h"
 #include "wan2_2_unipc_full_golden.h"
 
@@ -143,6 +144,28 @@ std::vector<std::uint32_t> packed_coefficient_words() {
     return words;
 }
 
+std::vector<std::uint32_t> packed_l0_coefficient_words() {
+    namespace coefficients = trtmc::wan2_2_ti2v::unipc_coefficients_15;
+    std::vector<std::uint32_t> words = {
+        static_cast<std::uint32_t>(coefficients::kStepCount),
+        static_cast<std::uint32_t>(coefficients::kSigmaCount),
+        coefficients::kNumTrainTimesteps,
+        coefficients::kSolverOrder,
+        coefficients::kFlowShiftBits,
+        coefficients::kNoSigmaIndex,
+    };
+    words.reserve(412U);
+    words.insert(words.end(), coefficients::kTimesteps.begin(), coefficients::kTimesteps.end());
+    words.insert(words.end(), coefficients::kSigmaBits.begin(), coefficients::kSigmaBits.end());
+    words.insert(words.end(), coefficients::kConversionSigmaBits.begin(),
+                 coefficients::kConversionSigmaBits.end());
+    for (const auto& corrector : coefficients::kCorrector)
+        append_update_words(words, corrector);
+    for (const auto& predictor : coefficients::kPredictor)
+        append_update_words(words, predictor);
+    return words;
+}
+
 std::string packed_words_sha256(const std::vector<std::uint32_t>& words) {
     trtmc::internal::Sha256 digest;
     for (const auto word : words) {
@@ -158,6 +181,7 @@ std::string packed_words_sha256(const std::vector<std::uint32_t>& words) {
 }
 
 void test_official_coefficient_payload_is_bit_exact() {
+    namespace coefficients = trtmc::wan2_2_ti2v::unipc_coefficients;
     constexpr auto expected = "a86473aed0e63c6e3f2334dafbf7c02de09dfd43f075543cb94478b6c9f19635";
     auto words = packed_coefficient_words();
     check(words.size() == 1357U, "Wan2.2 packed UniPC coefficient word count is exact");
@@ -171,6 +195,41 @@ void test_official_coefficient_payload_is_bit_exact() {
     words.back() ^= 1U;
     check(packed_words_sha256(words) != expected,
           "Wan2.2 coefficient digest detects a last-word bit change");
+    check(!coefficients::kOfficialSourceTrackedDirty,
+          "Wan2.2 official UniPC source provenance is clean");
+    check(std::string_view(coefficients::kArtifactGeneratorSha256) ==
+              "adb1e0a3839924ed4982c872909ab044335fa22f8319a5048b2e896e61e053bb",
+          "Wan2.2 official UniPC generator digest is current");
+    check(std::string_view(coefficients::kArtifactSha256) ==
+              "650f7e64cddb551bd81ee4386857967dcf2a916ea3a04cb97423b74a522cf782",
+          "Wan2.2 official UniPC artifact digest is current");
+}
+
+void test_l0_coefficient_payload_and_provenance_are_exact() {
+    namespace coefficients = trtmc::wan2_2_ti2v::unipc_coefficients_15;
+    constexpr auto expected_packed =
+        "c022a6f1a1061a043ad1951aec928248bae6c5612635427457aadfabc9541239";
+    const auto words = packed_l0_coefficient_words();
+    check(words.size() == 412U, "Wan2.2 L0 packed UniPC coefficient word count is exact");
+    check(packed_words_sha256(words) == expected_packed,
+          "Wan2.2 L0 packed UniPC coefficient payload SHA-256 is exact");
+    check(coefficients::canonical_numerical_payload_fnv1a64() == 0x8d4512f130f834d2ULL,
+          "Wan2.2 L0 UniPC numerical FNV is exact");
+    check(std::string_view(coefficients::kOfficialSourceRevision) ==
+              "42bf4cfaa384bc21833865abc2f9e6c0e67233dc",
+          "Wan2.2 L0 UniPC official source revision is pinned");
+    check(std::string_view(coefficients::kOfficialSchedulerSha256) ==
+              "0dec8c7ed17f6f2049275c6848113314da6ccec1c8db5bdc89df43c05c6038d9",
+          "Wan2.2 L0 UniPC official scheduler digest is pinned");
+    check(std::string_view(coefficients::kGeneratorSha256) ==
+              "adb1e0a3839924ed4982c872909ab044335fa22f8319a5048b2e896e61e053bb",
+          "Wan2.2 L0 UniPC generator digest is pinned");
+    check(std::string_view(coefficients::kArtifactSha256) ==
+              "bcaae1cf25b1b11d35dcb75ab87b8659a4cafa33c63e0a9e68494f1d73060dd4",
+          "Wan2.2 L0 UniPC artifact digest is pinned");
+    check(std::string_view(coefficients::kNormalizedQualificationPayloadSha256) ==
+              "fcc95b5571f76c0f7363624f1124b1bac9174c23c16724d35545b50586bf0e90",
+          "Wan2.2 L0 normalized qualification payload digest is pinned");
 }
 
 void check_full_shape_close(double actual, double expected, double tolerance, int32_t step,
@@ -195,6 +254,14 @@ void test_schedule_matches_upstream_wan22() {
     for (std::size_t i = 0; i < expected_sigmas.size(); ++i)
         check_close(scheduler.sigmas()[i], expected_sigmas[i], 1.0e-7F,
                     "Wan2.2 shifted sigma matches upstream");
+}
+
+void test_l0_schedule_matches_upstream_wan22() {
+    trtmc::wan2_2_ti2v::FlowUniPC scheduler(15, 5.0F, 1000);
+    const std::vector<int64_t> expected = {
+        999, 985, 969, 952, 931, 908, 882, 850, 813, 768, 713, 644, 555, 434, 262,
+    };
+    check(scheduler.timesteps() == expected, "Wan2.2 L0 timesteps match upstream");
 }
 
 void test_updates_match_upstream_cpu_and_cuda() {
@@ -314,7 +381,9 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--stream-full")
         return stream_full_shape_replay();
     test_schedule_matches_upstream_wan22();
+    test_l0_schedule_matches_upstream_wan22();
     test_official_coefficient_payload_is_bit_exact();
+    test_l0_coefficient_payload_and_provenance_are_exact();
     test_updates_match_upstream_cpu_and_cuda();
     test_official_fifty_step_cuda_fixture();
     test_official_full_shape_per_step_metrics();

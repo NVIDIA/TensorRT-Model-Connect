@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -14,16 +15,33 @@ from pathlib import Path
 from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
 
-_OFFICIAL_PROFILE = {
-    "video_width": 1280,
-    "video_height": 704,
-    "video_num_frames": 121,
-    "num_inference_steps": 50,
+_COMMON_PROFILE = {
     "guidance_scale": 5.0,
     "flow_shift": 5.0,
     "fps": 24,
     "seed": 42,
     "text_max_length": 512,
+}
+
+_OFFICIAL_PROFILE = {
+    **_COMMON_PROFILE,
+    "video_width": 1280,
+    "video_height": 704,
+    "video_num_frames": 121,
+    "num_inference_steps": 50,
+}
+
+_L0_PROFILE = {
+    **_COMMON_PROFILE,
+    "video_width": 672,
+    "video_height": 384,
+    "video_num_frames": 5,
+    "num_inference_steps": 15,
+}
+
+_FIXED_PROFILES = {
+    "wan22-ti2v-5b": _OFFICIAL_PROFILE,
+    "wan22-ti2v-5b-l0": _L0_PROFILE,
 }
 
 _STRICT_PLUGIN_PROBE = "runtime.disable_cuda_graph=false"
@@ -41,11 +59,15 @@ def _require_model_plugin_dir(ctx: RunContext) -> str:
 
 
 def validate_official_profile(case: E2ECase) -> None:
-    """Reject E2E requests that the fixed TensorRT engines cannot honor."""
+    """Reject E2E requests that do not match a declared fixed engine profile."""
+
+    expected_profile = _FIXED_PROFILES.get(case.name)
+    if expected_profile is None:
+        raise ValueError(f"Wan2.2 TI2V E2E has no fixed profile for case {case.name!r}")
 
     mismatches = {
         key: (case.inputs.get(key), expected)
-        for key, expected in _OFFICIAL_PROFILE.items()
+        for key, expected in expected_profile.items()
         if case.inputs.get(key) != expected
     }
     if mismatches:
@@ -53,7 +75,9 @@ def validate_official_profile(case: E2ECase) -> None:
             f"{key}={actual!r} (expected {expected!r})"
             for key, (actual, expected) in sorted(mismatches.items())
         )
-        raise ValueError(f"Wan2.2 TI2V E2E requires the official profile: {details}")
+        raise ValueError(
+            f"Wan2.2 TI2V E2E case {case.name!r} requires its fixed profile: {details}"
+        )
 
 
 def build_generate_video_command(case: E2ECase, ctx: RunContext, output_dir: Path) -> list[str]:
@@ -177,12 +201,13 @@ class DiffusionMediaRunner:
         if stage.name == "bundle_contract":
             command = build_bundle_contract_command(case, ctx)
         else:
-            output_dir = Path(
-                tempfile.mkdtemp(
-                    prefix="wan22_ti2v_frames_",
-                    dir=str(artifact_root) if artifact_root is not None else None,
-                )
-            )
+            if artifact_root is None:
+                output_dir = Path(tempfile.mkdtemp(prefix="wan22_ti2v_frames_"))
+            else:
+                output_dir = artifact_root / "frames"
+                if output_dir.exists():
+                    shutil.rmtree(output_dir)
+                output_dir.mkdir(parents=True)
             command = build_generate_video_command(case, ctx, output_dir)
         timeout_s = int(case.metadata.get("runtime_timeout_s", 14400))
         if timeout_s <= 0:

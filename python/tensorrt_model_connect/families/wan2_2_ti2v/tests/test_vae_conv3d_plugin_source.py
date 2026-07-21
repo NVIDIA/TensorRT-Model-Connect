@@ -44,6 +44,7 @@ def test_vae_conv3d_static_contract_is_deliberately_narrow() -> None:
     assert "config.output_channels == 256" in source
     assert "config.input_depth == 3 || config.input_depth == 6" in source
     assert "config.input_height == 18 && config.input_width == 18" in source
+    assert "config.input_height == 194 && config.input_width == 338" in source
     assert "config.input_height == 354 && config.input_width == 642" in source
     assert "for resnet in range(3)" in builder
     assert "for conv in (1, 2)" in builder

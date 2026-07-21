@@ -20,7 +20,9 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
 
 from tensorrt_model_connect.families.wan2_2_ti2v.model_config import (
     WAN22_TI2V_5B,
-    official_artifact_profile,
+    WAN22_TI2V_5B_L0,
+    artifact_profile,
+    select_generation_profile,
     validate_native_config,
 )
 from tensorrt_model_connect.families.wan2_2_ti2v.plugin import (
@@ -32,8 +34,8 @@ from tensorrt_model_connect.families.wan2_2_ti2v.plugin import (
 )
 
 
-def _artifact_profile() -> dict:
-    return official_artifact_profile()
+def _artifact_profile(profile=WAN22_TI2V_5B) -> dict:
+    return artifact_profile(profile)
 
 
 def test_hf_snapshot_required_files_are_family_owned() -> None:
@@ -74,7 +76,7 @@ def _plugin_contract() -> dict:
     }
 
 
-def _bundle_components() -> dict:
+def _bundle_components(profile=WAN22_TI2V_5B) -> dict:
     components = {
         "plugin_contract": _plugin_contract(),
         "plugin_library": b"wan22-plugins-aot",
@@ -119,7 +121,7 @@ def _bundle_components() -> dict:
             source_document = {
                 "family": "wan2_2_ti2v",
                 "component": name,
-                "profile": _artifact_profile(),
+                "profile": _artifact_profile(profile),
                 "inputs": entry["source_inputs"],
             }
             entry["source_sha256"] = hashlib.sha256(
@@ -134,7 +136,7 @@ def _bundle_components() -> dict:
     components["artifact_manifest"] = {
         "schema": "trtmc.wan2_2_ti2v.bundle-artifacts.v4",
         "family": "wan2_2_ti2v",
-        "profile": _artifact_profile(),
+        "profile": _artifact_profile(profile),
         "runtime": "native_cpp_cuda_tensorrt",
         "sections": sections,
     }
@@ -178,6 +180,47 @@ def test_official_profile_geometry() -> None:
     assert arch.num_patches == 27280
     assert arch.num_inference_steps == 50
     assert arch.guidance_scale == 5.0
+
+
+def test_l0_profile_matches_wan21_preview_budget() -> None:
+    arch = WAN22_TI2V_5B_L0
+    assert (arch.video_width, arch.video_height, arch.video_num_frames) == (
+        672,
+        384,
+        5,
+    )
+    assert (arch.latent_frames, arch.latent_height, arch.latent_width) == (
+        2,
+        24,
+        42,
+    )
+    assert arch.num_patches == 504
+    assert arch.num_inference_steps == 15
+    assert arch.guidance_scale == 5.0
+
+
+def test_generation_profile_selection_is_exact() -> None:
+    assert select_generation_profile({}) is WAN22_TI2V_5B
+    assert (
+        select_generation_profile(
+            {
+                "video_width": 672,
+                "video_height": 384,
+                "video_num_frames": 5,
+                "num_inference_steps": 15,
+            }
+        )
+        is WAN22_TI2V_5B_L0
+    )
+    with pytest.raises(ValueError, match="exact qualified generation profile"):
+        select_generation_profile(
+            {
+                "video_width": 672,
+                "video_height": 384,
+                "video_num_frames": 5,
+                "num_inference_steps": 50,
+            }
+        )
 
 
 def test_native_config_validation_is_exact() -> None:
@@ -229,11 +272,23 @@ def test_unipc_header_tracks_the_current_reproducer() -> None:
     header = (
         repo_root / "src/runtime/models/wan2_2_ti2v" / "wan2_2_unipc_coefficients.h"
     ).read_text(encoding="utf-8")
+    l0_header = (
+        repo_root / "src/runtime/models/wan2_2_ti2v" / "wan2_2_unipc_coefficients_15.h"
+    ).read_text(encoding="utf-8")
 
     generator_sha256 = hashlib.sha256(generator.read_bytes()).hexdigest()
-    assert generator_sha256 == "f5b513be69c6626b5311f57995da574a2c5bc21a785d722910139bc3fd048de6"
+    assert generator_sha256 == "adb1e0a3839924ed4982c872909ab044335fa22f8319a5048b2e896e61e053bb"
     assert generator_sha256 in header
+    assert generator_sha256 in l0_header
     assert "742ec7777410d94d73c528432e21c22cb52f021d3fa841b8b942b3f9c51ee2e0" in header
+    assert "650f7e64cddb551bd81ee4386857967dcf2a916ea3a04cb97423b74a522cf782" in header
+    assert "bcaae1cf25b1b11d35dcb75ab87b8659a4cafa33c63e0a9e68494f1d73060dd4" in (l0_header)
+
+    generator_source = generator.read_text(encoding="utf-8")
+    assert "choices=QUALIFIED_INFERENCE_STEPS" in generator_source
+    assert 'f"wan2_2_ti2v_5b_unipc_{num_inference_steps}_step_cuda_coefficients"' in (
+        generator_source
+    )
 
 
 def test_plugin_matches_only_wan22_aliases() -> None:
@@ -271,9 +326,7 @@ def test_load_weights_requires_complete_native_checkpoint(tmp_path) -> None:
         Wan22TI2VPlugin().load_weights(str(model), SimpleNamespace(raw={}))
 
 
-def test_native_vae_loader_accepts_directory_and_resolved_file(
-    tmp_path, monkeypatch
-) -> None:
+def test_native_vae_loader_accepts_directory_and_resolved_file(tmp_path, monkeypatch) -> None:
     from tensorrt_model_connect.families.wan2_2_ti2v import checkpoint_mapper
 
     checkpoint = tmp_path / "Wan2.2_VAE.pth"
@@ -405,7 +458,8 @@ def test_public_builder_routes_native_config_to_exact_component_contract(
         WAN22_REQUIRED_BUNDLE_SECTIONS
     )
     config_section = next(
-        section for section in captured["sections"] if section.name == "config.json")
+        section for section in captured["sections"] if section.name == "config.json"
+    )
     bundled_config = json.loads(config_section.data)
     assert "_trtmc_wan22_plugin_contract" in bundled_config
     assert bundled_config["source_model_id"] == "Wan-AI/Wan2.2-TI2V-5B"
@@ -534,6 +588,29 @@ def test_component_builder_embeds_selected_aot_companion_in_bundle(
     assert "plugin/elf" in text_sources
     assert "plugin/source" in text_sources
 
+    captured.clear()
+    l0_components = trt_builder.build_wan22_components(
+        str(tmp_path),
+        config=_runtime_config(
+            video_width=672,
+            video_height=384,
+            video_num_frames=5,
+            num_inference_steps=15,
+        ),
+        weights={
+            "_text_encoder_checkpoint": str(tmp_path / "models_t5_umt5-xxl-enc-bf16.pth"),
+            "_vae_checkpoint": str(tmp_path / "Wan2.2_VAE.pth"),
+            "_tokenizer_dir": str(tokenizer),
+        },
+    )
+    assert captured["denoiser_kwargs"]["latent_frames"] == 2
+    assert captured["denoiser_kwargs"]["latent_height"] == 24
+    assert captured["denoiser_kwargs"]["latent_width"] == 42
+    assert all(
+        build["profile"].latent_shape == (1, 48, 1, 24, 42) for build in captured["vae_builds"]
+    )
+    assert l0_components["artifact_manifest"]["profile"] == _artifact_profile(WAN22_TI2V_5B_L0)
+
 
 def test_runtime_bundle_contract_is_official_profile() -> None:
     plugin = Wan22TI2VPlugin()
@@ -600,10 +677,41 @@ def test_tokenizer_is_source_bound_in_model_owned_sections(tmp_path) -> None:
     assert bundled["tokenizer.json"] == tokenizer_json
 
 
-def test_runtime_rejects_non_official_output_profile() -> None:
+def test_runtime_accepts_l0_output_profile() -> None:
+    config = Wan22TI2VPlugin().get_diffusion_config(
+        _runtime_config(
+            video_width=672,
+            video_height=384,
+            video_num_frames=5,
+            num_inference_steps=15,
+        )
+    )
+    assert config["video_width"] == 672
+    assert config["video_height"] == 384
+    assert config["video_num_frames"] == 5
+    assert config["num_inference_steps"] == 15
+
+
+def test_runtime_rejects_non_qualified_output_profile() -> None:
     plugin = Wan22TI2VPlugin()
-    with pytest.raises(ValueError, match="fixed to the official"):
+    with pytest.raises(ValueError, match="exact qualified generation profile"):
         plugin.get_diffusion_config(_runtime_config(video_num_frames=81))
+
+
+def test_l0_artifact_manifest_matches_l0_bundle_config() -> None:
+    plugin = Wan22TI2VPlugin()
+    raw = _runtime_config(
+        video_width=672,
+        video_height=384,
+        video_num_frames=5,
+        num_inference_steps=15,
+    )
+    components = _bundle_components(WAN22_TI2V_5B_L0)
+    config = plugin.diffusion_bundle_config(raw, components=components)
+    assert config["artifact_manifest"]["profile"] == _artifact_profile(WAN22_TI2V_5B_L0)
+
+    with pytest.raises(ValueError, match="does not match the requested bundle profile"):
+        plugin.diffusion_bundle_config(_runtime_config(), components=components)
 
 
 @pytest.mark.parametrize("seed", [-2, -1, 2_147_483_648])
@@ -764,6 +872,26 @@ def test_serialized_vae_step_engine_contract_is_exact(
     monkeypatch.setattr(trt_builder, "_inspect_serialized_engine", lambda _plan: wrong)
     with pytest.raises(ValueError, match="I/O contract mismatch"):
         trt_builder._validate_serialized_engine_contract(b"wrong-plan", component)
+
+
+def test_l0_serialized_engine_contract_uses_reduced_static_shapes() -> None:
+    import tensorrt_model_connect.families.wan2_2_ti2v.trt_builder as trt_builder
+
+    denoiser = trt_builder._expected_engine_contract("denoiser_plan", WAN22_TI2V_5B_L0)
+    assert denoiser["latents"] == ("input", (1, 48, 2, 24, 42), "float")
+    assert denoiser["noise_prediction"] == (
+        "output",
+        (1, 48, 2, 24, 42),
+        "float",
+    )
+
+    recurrent = trt_builder._expected_engine_contract("vae_decoder_plan", WAN22_TI2V_5B_L0)
+    initializer = trt_builder._expected_engine_contract(
+        "vae_decoder_first_frame_plan", WAN22_TI2V_5B_L0
+    )
+    assert recurrent["latent_frame"] == ("input", (1, 48, 1, 24, 42), "float")
+    assert recurrent["video_frame"] == ("output", (1, 3, 4, 384, 672), "float")
+    assert initializer["video_frame"] == ("output", (1, 3, 1, 384, 672), "float")
 
 
 def test_bundle_section_and_native_runtime_dependency_metadata_are_exact() -> None:
@@ -933,9 +1061,7 @@ def test_artifact_manifest_rejects_mutated_section_bytes() -> None:
         plugin.diffusion_bundle_sections(components)
 
     components = _bundle_components()
-    denoiser_inputs = components["artifact_manifest"]["sections"]["denoiser_plan"][
-        "source_inputs"
-    ]
+    denoiser_inputs = components["artifact_manifest"]["sections"]["denoiser_plan"]["source_inputs"]
     next(source for source in denoiser_inputs if source["name"] == "plugin/elf")["sha256"] = (
         "0" * 64
     )

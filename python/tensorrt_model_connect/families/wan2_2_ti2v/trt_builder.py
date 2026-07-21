@@ -10,7 +10,7 @@ Model-Connect runtime executes only C++/CUDA/TensorRT.
 Prebuilt plans are deliberately treated as qualified artifacts rather than
 opaque byte strings.  Every prebuilt plan needs a sibling ``.manifest.json``
 that binds its SHA256, component source identity, CUDA plugin bytes, and exact
-1280x704/121-frame I/O contract to the current checkpoint and source tree.
+qualified-profile I/O contract to the current checkpoint and source tree.
 """
 
 from __future__ import annotations
@@ -26,7 +26,13 @@ from typing import Any
 from tensorrt_model_connect import trt_compat
 
 from .cuda_plugin_companion import Wan22PluginCompanion, load_wan22_plugin_companion
-from .model_config import WAN22_TI2V_5B, official_artifact_profile
+from .model_config import (
+    WAN22_TI2V_5B,
+    Wan22TI2VConfig,
+    artifact_profile,
+    official_artifact_profile,
+    select_generation_profile,
+)
 from .plugin import WAN22_MODEL_OWNED_BUNDLE_SECTIONS
 
 
@@ -144,26 +150,18 @@ def official_vae_step_profile():
     return OFFICIAL_VAE_STEP_PROFILE
 
 
+def _vae_step_profile(profile: Wan22TI2VConfig):
+    from .vae_step_builder import Wan22VaeStepProfile
+
+    return Wan22VaeStepProfile(profile.latent_height, profile.latent_width)
+
+
 def _official_profile() -> dict[str, Any]:
     return official_artifact_profile()
 
 
-def _validate_requested_profile(config) -> None:
-    raw = config.raw
-    profile = _official_profile()
-    requested = {
-        "video_width": int(raw.get("video_width", profile["video_width"])),
-        "video_height": int(raw.get("video_height", profile["video_height"])),
-        "video_num_frames": int(raw.get("video_num_frames", profile["video_num_frames"])),
-    }
-    expected = {key: profile[key] for key in requested}
-    if requested != expected:
-        raise ValueError(
-            "Wan2.2-TI2V-5B TensorRT engines are fixed to the official "
-            "1280x704, 121-frame profile; requested "
-            f"{requested['video_width']}x{requested['video_height']}, "
-            f"{requested['video_num_frames']} frames"
-        )
+def _validate_requested_profile(config) -> Wan22TI2VConfig:
+    return select_generation_profile(config.raw)
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -247,6 +245,7 @@ def _component_source_identity(
     plugin_contract: dict[str, Any],
     plugin_elf_sha256: str,
     *,
+    generation_profile: Wan22TI2VConfig = WAN22_TI2V_5B,
     digest_cache: dict[Path, str] | None = None,
 ) -> dict[str, Any]:
     root = Path(model_dir).expanduser().resolve()
@@ -285,7 +284,7 @@ def _component_source_identity(
     identity_document = {
         "family": _FAMILY,
         "component": component,
-        "profile": _official_profile(),
+        "profile": artifact_profile(generation_profile),
         "inputs": inputs,
     }
     return {
@@ -298,12 +297,18 @@ def _prebuilt_manifest_path(plan_path: Path) -> Path:
     return Path(f"{plan_path}.manifest.json")
 
 
-def _prebuilt_manifest_payload(component: str, plan: bytes, source_sha256: str) -> dict[str, Any]:
+def _prebuilt_manifest_payload(
+    component: str,
+    plan: bytes,
+    source_sha256: str,
+    *,
+    generation_profile: Wan22TI2VConfig = WAN22_TI2V_5B,
+) -> dict[str, Any]:
     return {
         "schema": _PREBUILT_MANIFEST_SCHEMA,
         "family": _FAMILY,
         "component": component,
-        "profile": _official_profile(),
+        "profile": artifact_profile(generation_profile),
         "plan_sha256": _sha256_bytes(plan),
         "source_sha256": source_sha256,
     }
@@ -318,6 +323,7 @@ def _read_prebuilt(
     source_sha256: str,
     manifest_config_key: str,
     manifest_environment_key: str,
+    generation_profile: Wan22TI2VConfig = WAN22_TI2V_5B,
 ) -> bytes | None:
     configured = config.raw.get(config_key) or os.environ.get(environment_key)
     if not configured:
@@ -362,7 +368,7 @@ def _read_prebuilt(
         "schema": _PREBUILT_MANIFEST_SCHEMA,
         "family": _FAMILY,
         "component": component,
-        "profile": _official_profile(),
+        "profile": artifact_profile(generation_profile),
         "source_sha256": source_sha256,
     }
     for key, expected in expected_static.items():
@@ -406,8 +412,9 @@ def _inspect_serialized_engine(plan: bytes) -> dict[str, tuple[str, tuple[int, .
 
 def _expected_engine_contract(
     component: str,
+    generation_profile: Wan22TI2VConfig = WAN22_TI2V_5B,
 ) -> dict[str, tuple[str, tuple[int, ...], str]]:
-    arch = WAN22_TI2V_5B
+    arch = generation_profile
     latent_shape = (
         1,
         arch.z_dim,
@@ -439,7 +446,7 @@ def _expected_engine_contract(
     if component in {"vae_decoder_plan", "vae_decoder_first_frame_plan"}:
         from .vae_step_builder import VAE_STEP_CACHE_SPECS
 
-        profile = official_vae_step_profile()
+        profile = _vae_step_profile(generation_profile)
         output_frames = 4 if component == "vae_decoder_plan" else 1
         contract = {
             "latent_frame": ("input", profile.latent_shape, "float"),
@@ -457,9 +464,13 @@ def _expected_engine_contract(
     raise ValueError(f"Unknown Wan2.2 plan component: {component!r}")
 
 
-def _validate_serialized_engine_contract(plan: bytes, component: str) -> None:
+def _validate_serialized_engine_contract(
+    plan: bytes,
+    component: str,
+    generation_profile: Wan22TI2VConfig = WAN22_TI2V_5B,
+) -> None:
     actual = _inspect_serialized_engine(plan)
-    expected = _expected_engine_contract(component)
+    expected = _expected_engine_contract(component, generation_profile)
     if actual != expected:
         raise ValueError(
             f"Wan2.2 {component} TensorRT I/O contract mismatch: "
@@ -510,6 +521,7 @@ def write_wan22_prebuilt_manifest(
     *,
     model_dir: str | Path,
     output_path: str | Path | None = None,
+    generation_profile: Wan22TI2VConfig = WAN22_TI2V_5B,
     verbose: bool = False,
 ) -> Path:
     """Write a source-bound sidecar for a target-qualified prebuilt plan.
@@ -541,11 +553,17 @@ def write_wan22_prebuilt_manifest(
         weights,
         companion.contract,
         companion.elf_sha256,
+        generation_profile=generation_profile,
         digest_cache={},
     )
     plan = plan_file.read_bytes()
-    _validate_serialized_engine_contract(plan, component)
-    manifest = _prebuilt_manifest_payload(component, plan, identity["sha256"])
+    _validate_serialized_engine_contract(plan, component, generation_profile)
+    manifest = _prebuilt_manifest_payload(
+        component,
+        plan,
+        identity["sha256"],
+        generation_profile=generation_profile,
+    )
     destination = (
         Path(output_path).expanduser().resolve()
         if output_path is not None
@@ -558,6 +576,7 @@ def write_wan22_prebuilt_manifest(
 def _artifact_manifest(
     section_payloads: dict[str, bytes],
     source_identities: dict[str, dict[str, Any]],
+    generation_profile: Wan22TI2VConfig = WAN22_TI2V_5B,
 ) -> dict[str, Any]:
     expected_sections = set(WAN22_MODEL_OWNED_BUNDLE_SECTIONS)
     if set(section_payloads) != expected_sections:
@@ -578,7 +597,7 @@ def _artifact_manifest(
     return {
         "schema": _ARTIFACT_MANIFEST_SCHEMA,
         "family": _FAMILY,
-        "profile": _official_profile(),
+        "profile": artifact_profile(generation_profile),
         "runtime": "native_cpp_cuda_tensorrt",
         "sections": sections,
     }
@@ -593,11 +612,11 @@ def build_wan22_components(
     verbose: bool = False,
     **_kwargs,
 ) -> dict:
-    """Build all fixed official-profile engines for the native checkpoint."""
+    """Build all engines for one exact qualified native-checkpoint profile."""
 
     if precision.lower() not in {"bf16", "bfloat16"}:
         raise ValueError("Wan2.2-TI2V-5B requires BF16 DiT/T5 precision")
-    _validate_requested_profile(config)
+    generation_profile = _validate_requested_profile(config)
 
     # Keep all creators registered while building or validating plans. The
     # one AOT companion contract is included in every dependent plan's source
@@ -617,6 +636,7 @@ def build_wan22_components(
             weights,
             plugin_contract,
             plugin_elf_sha256,
+            generation_profile=generation_profile,
             digest_cache=digest_cache,
         )
         for component in _PLAN_COMPONENTS
@@ -630,6 +650,7 @@ def build_wan22_components(
         source_sha256=source_identities["text_encoder_0_plan"]["sha256"],
         manifest_config_key="_wan2_2_prebuilt_text_encoder_manifest",
         manifest_environment_key="WAN22_PREBUILT_TEXT_ENCODER_MANIFEST",
+        generation_profile=generation_profile,
     )
     if text_encoder is None:
         text_encoder = build_native_umt5_encoder_engine(
@@ -648,6 +669,7 @@ def build_wan22_components(
         source_sha256=source_identities["denoiser_plan"]["sha256"],
         manifest_config_key="_wan2_2_prebuilt_denoiser_manifest",
         manifest_environment_key="WAN22_PREBUILT_DENOISER_MANIFEST",
+        generation_profile=generation_profile,
     )
     if denoiser is None:
         # Deliberately omit the old source_attention_plugin argument.  The
@@ -655,10 +677,10 @@ def build_wan22_components(
         # CUDA plugins, but never the former ATen/libtorch plugin.
         denoiser = build_dit_engine(
             model_dir,
-            latent_frames=WAN22_TI2V_5B.latent_frames,
-            latent_height=WAN22_TI2V_5B.latent_height,
-            latent_width=WAN22_TI2V_5B.latent_width,
-            num_layers=WAN22_TI2V_5B.num_layers,
+            latent_frames=generation_profile.latent_frames,
+            latent_height=generation_profile.latent_height,
+            latent_width=generation_profile.latent_width,
+            num_layers=generation_profile.num_layers,
             source_attention_plugin=None,
             cuda_bf16_plugin=str(plugin_path),
             dit_cuda_plugin=str(plugin_path),
@@ -684,6 +706,7 @@ def build_wan22_components(
         source_sha256=source_identities["vae_decoder_plan"]["sha256"],
         manifest_config_key="_wan2_2_prebuilt_vae_decoder_manifest",
         manifest_environment_key="WAN22_PREBUILT_VAE_DECODER_MANIFEST",
+        generation_profile=generation_profile,
     )
     vae_decoder_first_frame = _read_prebuilt(
         config,
@@ -693,10 +716,11 @@ def build_wan22_components(
         source_sha256=source_identities["vae_decoder_first_frame_plan"]["sha256"],
         manifest_config_key="_wan2_2_prebuilt_vae_decoder_first_frame_manifest",
         manifest_environment_key="WAN22_PREBUILT_VAE_DECODER_FIRST_FRAME_MANIFEST",
+        generation_profile=generation_profile,
     )
     if vae_decoder is None or vae_decoder_first_frame is None:
         vae_weights = load_vae_step_weights(weights["_vae_checkpoint"])
-        profile = official_vae_step_profile()
+        profile = _vae_step_profile(generation_profile)
         if vae_decoder is None:
             vae_decoder = build_vae_step_engine(
                 vae_weights,
@@ -719,7 +743,7 @@ def build_wan22_components(
         "vae_decoder_first_frame_plan": bytes(vae_decoder_first_frame),
     }
     for component, plan in plans.items():
-        _validate_serialized_engine_contract(plan, component)
+        _validate_serialized_engine_contract(plan, component, generation_profile)
 
     tokenizer_path = Path(weights["_tokenizer_dir"]) / "tokenizer.json"
     if not tokenizer_path.is_file():
@@ -739,7 +763,11 @@ def build_wan22_components(
         "vae_decoder": plans["vae_decoder_plan"],
         "vae_decoder_first_frame": plans["vae_decoder_first_frame_plan"],
         "tokenizer_json": tokenizer_json,
-        "artifact_manifest": _artifact_manifest(section_payloads, source_identities),
+        "artifact_manifest": _artifact_manifest(
+            section_payloads,
+            source_identities,
+            generation_profile,
+        ),
     }
 
 

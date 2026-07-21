@@ -11,6 +11,7 @@
 #include "trtmc/runtime/trt_backend.h"
 #include "trtmc/tokenizer.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -23,9 +24,28 @@ namespace trtmc {
 using Wan22ModuleLoader = std::function<std::unique_ptr<ITrtModule>(
     const std::string&, cudaStream_t, const std::vector<ModuleExternalBinding>&)>;
 
+struct Wan22TI2VRuntimeShape {
+    int32_t latent_frames{0};
+    int32_t latent_height{0};
+    int32_t latent_width{0};
+    int32_t denoiser_patch_rows{0};
+    int32_t video_frames{0};
+    int32_t video_height{0};
+    int32_t video_width{0};
+    std::size_t latent_count{0};
+    std::size_t context_count{0};
+    std::size_t video_count{0};
+};
+
+Wan22TI2VRuntimeShape make_wan22_runtime_shape(const Wan22TI2VRequest& request);
+
 std::vector<ModuleExternalBinding>
 make_wan22_vae_cache_bindings(const std::vector<void*>& input_addresses,
                               const std::vector<void*>& output_addresses);
+std::vector<ModuleExternalBinding>
+make_wan22_vae_cache_bindings(const std::vector<void*>& input_addresses,
+                              const std::vector<void*>& output_addresses,
+                              const Wan22TI2VRuntimeShape& shape);
 
 class Wan22TI2VPipeline final : public IPipeline {
   public:
@@ -43,8 +63,8 @@ class Wan22TI2VPipeline final : public IPipeline {
     std::vector<float> encode_text(const std::vector<int32_t>& ids, ITrtModule& text_encoder);
     std::vector<float> run_denoiser(const std::vector<float>& latents,
                                     const std::vector<float>& context, int64_t timestep,
-                                    ITrtModule& denoiser);
-    ImageResult decode_video(const std::vector<float>& latents);
+                                    const Wan22TI2VRuntimeShape& shape, ITrtModule& denoiser);
+    ImageResult decode_video(const std::vector<float>& latents, const Wan22TI2VRuntimeShape& shape);
     std::unique_ptr<ITrtModule>
     load_module(const std::string& section_name,
                 const std::vector<ModuleExternalBinding>& external_bindings = {}) const;

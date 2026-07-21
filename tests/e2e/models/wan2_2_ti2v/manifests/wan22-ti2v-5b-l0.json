@@ -17,21 +17,35 @@
       "trace_id": "IT-E2E-WAN22-TI2V-5B-L0-01",
       "model_type": "wan2_2_ti2v",
       "ci_tier": "l0_only",
-      "runtime_timeout_s": 120,
+      "runtime_timeout_s": 14400,
       "reference_backend": "invariant_only",
       "oracle_level": "L4_invariants",
       "user_contract": "diffusion_video",
-      "description": "Wan2.2 TI2V-5B source-bound bundle and native plugin inspection smoke",
+      "description": "Wan2.2 TI2V-5B reduced-profile native video generation contract",
       "test_type": "diffusion",
-      "test_prompt": "Wan2.2 TI2V native bundle inspection smoke",
+      "test_prompt": "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage",
+      "video_num_frames": 5,
+      "video_height": 384,
+      "video_width": 672,
+      "num_inference_steps": 15,
+      "text_max_length": 512,
+      "guidance_scale": 5.0,
+      "flow_shift": 5.0,
+      "fps": 24,
+      "seed": 42,
       "stages": [
         {
-          "name": "bundle_contract",
+          "name": "end_to_end",
           "required": true
         }
       ],
       "skip_text_comparison": true,
-      "notes": "Premerge L0 builds the source-bound bundle and invokes the public native trtmc inspect command while strict-loading the explicitly staged Wan2.2 model DSO. It verifies the runtime strategy and all required bundle sections; it does not run generation or claim accuracy parity."
+      "metadata": {
+        "contract_config": {
+          "video_mode": true
+        }
+      },
+      "notes": "Premerge L0 builds the source-bound bundle and runs the public Python-free native video path at 672x384, five frames, fifteen UniPC steps, CFG 5, flow shift 5, 24 FPS, seed 42, and the fixed 512-token UMT5 profile. The L4 gate verifies exact output shape and non-degenerate pixels; accuracy promotion still requires the separate source-bound official-Wan comparison."
     }
   ]
 }

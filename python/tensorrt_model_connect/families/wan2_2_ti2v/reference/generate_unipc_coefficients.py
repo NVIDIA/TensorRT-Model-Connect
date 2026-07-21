@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Emit source-exact scalar coefficients for Wan2.2's fixed 50-step UniPC run.
+"""Emit source-exact scalar coefficients for qualified Wan2.2 UniPC runs.
 
 This is a qualification utility, not part of the Model-Connect runtime.  In
 particular, the order-two corrector coefficients are solved by the official
@@ -25,7 +25,8 @@ from typing import Any
 import torch
 
 
-NUM_INFERENCE_STEPS = 50
+QUALIFIED_INFERENCE_STEPS = (15, 50)
+DEFAULT_NUM_INFERENCE_STEPS = 50
 NUM_TRAIN_TIMESTEPS = 1000
 FLOW_SHIFT = 5.0
 SOLVER_ORDER = 2
@@ -42,6 +43,13 @@ def _parse_args() -> argparse.Namespace:
         default=Path(os.environ.get("WAN22_OFFICIAL_SOURCE", "/workspace/Wan2.2-official")),
     )
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--num-inference-steps",
+        type=int,
+        choices=QUALIFIED_INFERENCE_STEPS,
+        default=DEFAULT_NUM_INFERENCE_STEPS,
+        help="Qualified generation step count (default: 50)",
+    )
     parser.add_argument(
         "--autocast-bf16",
         action="store_true",
@@ -244,14 +252,15 @@ def _make_payload(
     source_root: Path,
     source_file: Path,
     device: torch.device,
+    num_inference_steps: int,
 ) -> dict[str, Any]:
     sigmas = scheduler.sigmas
     timesteps = scheduler.timesteps
-    if sigmas.dtype != torch.float32 or tuple(sigmas.shape) != (NUM_INFERENCE_STEPS + 1,):
+    if sigmas.dtype != torch.float32 or tuple(sigmas.shape) != (num_inference_steps + 1,):
         raise RuntimeError(
             f"Unexpected official sigma contract: dtype={sigmas.dtype}, shape={tuple(sigmas.shape)}"
         )
-    if timesteps.dtype != torch.int64 or tuple(timesteps.shape) != (NUM_INFERENCE_STEPS,):
+    if timesteps.dtype != torch.int64 or tuple(timesteps.shape) != (num_inference_steps,):
         raise RuntimeError(
             "Unexpected official timestep contract: "
             f"dtype={timesteps.dtype}, shape={tuple(timesteps.shape)}"
@@ -273,7 +282,7 @@ def _make_payload(
                 device=device,
             )
 
-        remaining = NUM_INFERENCE_STEPS - step_index
+        remaining = num_inference_steps - step_index
         available_order = min(SOLVER_ORDER, lower_order_nums + 1)
         predictor_order = min(remaining, available_order)
         predictor_record = _coefficient_record(
@@ -303,9 +312,9 @@ def _make_payload(
     source_status = _git(source_root, "status", "--porcelain", "--untracked-files=no")
     return {
         "schema_version": 1,
-        "kind": "wan2_2_ti2v_5b_unipc_50_step_cuda_coefficients",
+        "kind": f"wan2_2_ti2v_5b_unipc_{num_inference_steps}_step_cuda_coefficients",
         "contract": {
-            "num_inference_steps": NUM_INFERENCE_STEPS,
+            "num_inference_steps": num_inference_steps,
             "num_train_timesteps": NUM_TRAIN_TIMESTEPS,
             "flow_shift": FLOW_SHIFT,
             "solver_order": SOLVER_ORDER,
@@ -390,7 +399,7 @@ def main() -> None:
         solver_type="bh2",
         lower_order_final=True,
     )
-    scheduler.set_timesteps(NUM_INFERENCE_STEPS, device=device, shift=FLOW_SHIFT)
+    scheduler.set_timesteps(args.num_inference_steps, device=device, shift=FLOW_SHIFT)
     qualification_context = (
         torch.amp.autocast("cuda", dtype=torch.bfloat16) if args.autocast_bf16 else nullcontext()
     )
@@ -400,6 +409,7 @@ def main() -> None:
             source_root=source_root,
             source_file=source_file,
             device=device,
+            num_inference_steps=args.num_inference_steps,
         )
     payload["contract"]["autocast_bf16"] = args.autocast_bf16
     torch.cuda.synchronize(device)

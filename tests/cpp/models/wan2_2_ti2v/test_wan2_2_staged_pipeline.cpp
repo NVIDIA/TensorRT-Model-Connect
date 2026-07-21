@@ -85,6 +85,58 @@ bool test_vae_cache_prebindings() {
     return true;
 }
 
+bool test_runtime_shapes_and_l0_cache_prebindings() {
+    const auto official = trtmc::make_wan22_runtime_shape(trtmc::Wan22TI2VRequest{});
+    if (official.latent_frames != 31 || official.latent_height != 44 ||
+        official.latent_width != 80 || official.denoiser_patch_rows != 27280 ||
+        official.video_frames != 121 || official.video_height != 704 ||
+        official.video_width != 1280 || official.latent_count != 5237760U ||
+        official.context_count != 2097152U || official.video_count != 327106560U) {
+        std::cerr << "FAIL: official runtime shape is not derived exactly\n";
+        return false;
+    }
+
+    trtmc::Wan22TI2VRequest l0_request;
+    l0_request.num_inference_steps = trtmc::kWan22L0InferenceSteps;
+    l0_request.video_height = trtmc::kWan22L0VideoHeight;
+    l0_request.video_width = trtmc::kWan22L0VideoWidth;
+    l0_request.video_num_frames = trtmc::kWan22L0VideoFrames;
+    const auto l0 = trtmc::make_wan22_runtime_shape(l0_request);
+    if (l0.latent_frames != 2 || l0.latent_height != 24 || l0.latent_width != 42 ||
+        l0.denoiser_patch_rows != 504 || l0.video_frames != 5 || l0.video_height != 384 ||
+        l0.video_width != 672 || l0.latent_count != 96768U || l0.context_count != 2097152U ||
+        l0.video_count != 3870720U) {
+        std::cerr << "FAIL: L0 runtime shape is not derived exactly\n";
+        return false;
+    }
+
+    constexpr std::size_t kCacheCount = 32;
+    std::vector<void*> inputs;
+    std::vector<void*> outputs;
+    for (std::size_t index = 0; index < kCacheCount; ++index) {
+        inputs.push_back(reinterpret_cast<void*>(static_cast<uintptr_t>(0x3000 + index * 0x20)));
+        outputs.push_back(reinterpret_cast<void*>(static_cast<uintptr_t>(0x4000 + index * 0x20)));
+    }
+    const auto bindings = trtmc::make_wan22_vae_cache_bindings(inputs, outputs, l0);
+    std::size_t input_bank_bytes = 0;
+    for (std::size_t index = 0; index < kCacheCount; ++index)
+        input_bank_bytes += bindings[2 * index].capacity_bytes;
+    if (bindings.front().capacity_bytes != 387072U ||
+        bindings.back().capacity_bytes != 132120576U || input_bank_bytes != 1841817600ULL) {
+        std::cerr << "FAIL: L0 VAE cache capacities do not match profile-derived contracts\n";
+        return false;
+    }
+    try {
+        auto hybrid = l0;
+        hybrid.latent_height = official.latent_height;
+        (void)trtmc::make_wan22_vae_cache_bindings(inputs, outputs, hybrid);
+        std::cerr << "FAIL: VAE cache prebinding accepted a mixed runtime shape\n";
+        return false;
+    } catch (const std::invalid_argument&) {
+    }
+    return true;
+}
+
 bool test_vae_cache_layout_and_policy() {
     using trtmc::wan2_2_ti2v::kVaeCacheAlignment;
     using trtmc::wan2_2_ti2v::make_vae_cache_layout;
@@ -190,6 +242,8 @@ bool test_vae_cache_small_cuda_round_trip() {
 
 int main() {
     if (!test_vae_cache_prebindings())
+        return 1;
+    if (!test_runtime_shapes_and_l0_cache_prebindings())
         return 1;
     if (!test_vae_cache_layout_and_policy())
         return 1;

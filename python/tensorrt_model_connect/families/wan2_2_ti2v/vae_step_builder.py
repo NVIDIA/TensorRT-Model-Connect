@@ -58,6 +58,7 @@ class Wan22VaeStepProfile:
 
 
 SMALL_VAE_STEP_PROFILE = Wan22VaeStepProfile(2, 2)
+L0_VAE_STEP_PROFILE = Wan22VaeStepProfile(24, 42)
 OFFICIAL_VAE_STEP_PROFILE = Wan22VaeStepProfile(44, 80)
 
 
@@ -323,9 +324,14 @@ def build_vae_step_engine(
     from tensorrt_model_connect import trt_compat
     from . import graph_blocks, graph_ops
 
-    if (profile.latent_height, profile.latent_width) not in {(2, 2), (44, 80)}:
+    if (profile.latent_height, profile.latent_width) not in {
+        (2, 2),
+        (24, 42),
+        (44, 80),
+    }:
         raise ValueError(
-            "Wan2.2 VAE step engines are qualified only for 2x2 and 44x80 latent spatial "
+            "Wan2.2 VAE step engines are qualified only for 2x2, 24x42, and 44x80 "
+            "latent spatial "
             f"profiles, got {profile.latent_height}x{profile.latent_width}"
         )
 

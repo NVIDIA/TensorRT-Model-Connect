@@ -52,6 +52,12 @@ trtmc::Wan22TI2VOptions parse_official_options() {
     return trtmc::parse_wan22_options(config);
 }
 
+trtmc::Wan22TI2VOptions parse_l0_options() {
+    constexpr auto config =
+        R"({"negative_prompt":"x","num_inference_steps":15,"guidance_scale":5.0,"flow_shift":5.0,"seed":42,"video_height":384,"video_width":672,"video_num_frames":5,"frame_rate":24,"text_seq_len":512})";
+    return trtmc::parse_wan22_options(config);
+}
+
 void test_official_bundle_contract() {
     constexpr auto official =
         "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，"
@@ -66,8 +72,22 @@ void test_official_bundle_contract() {
               options.flow_shift == 5.0F && options.seed == 42,
           "Wan2.2 numeric bundle options are parsed");
     check(options.video_height == 704 && options.video_width == 1280 &&
-              options.video_num_frames == 121 && options.frame_rate == 24,
+              options.video_num_frames == 121 && options.frame_rate == 24 &&
+              options.text_seq_len == 512,
           "Wan2.2 official video profile is parsed");
+    check(trtmc::require_wan22_profile(options) == trtmc::Wan22TI2VProfileKind::kOfficial,
+          "Wan2.2 identifies the official profile");
+}
+
+void test_l0_bundle_contract() {
+    const auto options = parse_l0_options();
+    check(options.num_inference_steps == 15 && options.guidance_scale == 5.0F &&
+              options.flow_shift == 5.0F && options.video_height == 384 &&
+              options.video_width == 672 && options.video_num_frames == 5 &&
+              options.frame_rate == 24 && options.text_seq_len == 512,
+          "Wan2.2 exact L0 profile is parsed");
+    check(trtmc::require_wan22_profile(options) == trtmc::Wan22TI2VProfileKind::kL0,
+          "Wan2.2 identifies the L0 profile");
 }
 
 void test_bundle_rejects_accuracy_changing_profile() {
@@ -88,7 +108,22 @@ void test_bundle_rejects_accuracy_changing_profile() {
             (void)trtmc::parse_wan22_options(
                 R"({"negative_prompt":"x","video_height":720,"video_width":1280,"video_num_frames":121})");
         },
-        "1280x704", "Wan2.2 rejects mismatched bundle geometry");
+        "one complete qualified profile", "Wan2.2 rejects mismatched bundle geometry");
+    check_throws_with(
+        [] {
+            (void)trtmc::parse_wan22_options(
+                R"({"negative_prompt":"x","num_inference_steps":15,"video_height":704,"video_width":1280,"video_num_frames":121,"frame_rate":24})");
+        },
+        "one complete qualified profile", "Wan2.2 rejects L0 steps with official geometry");
+    check_throws_with(
+        [] {
+            (void)trtmc::parse_wan22_options(
+                R"({"negative_prompt":"x","num_inference_steps":50,"video_height":384,"video_width":672,"video_num_frames":5,"frame_rate":24})");
+        },
+        "one complete qualified profile", "Wan2.2 rejects official steps with L0 geometry");
+    check_throws_with(
+        [] { (void)trtmc::parse_wan22_options(R"({"negative_prompt":"x","text_seq_len":500})"); },
+        "text_seq_len=512", "Wan2.2 rejects a non-512 text contract");
     check_throws_exactly(
         [] { (void)trtmc::parse_wan22_options(R"({"negative_prompt":"x","seed":-2})"); },
         "Wan2.2-TI2V-5B bundle seed must be non-negative",
@@ -116,11 +151,34 @@ void test_request_resolution_and_validation() {
 
     config.height = 720;
     check_throws_with([&] { (void)trtmc::resolve_wan22_request(options, config); },
-                      "--height must be 704", "Wan2.2 rejects unsupported request height");
+                      "--height must match bundle profile height 704",
+                      "Wan2.2 rejects unsupported request height");
     config.height = 704;
     config.width = 720;
     check_throws_with([&] { (void)trtmc::resolve_wan22_request(options, config); },
-                      "--width must be 1280", "Wan2.2 rejects unsupported request width");
+                      "--width must match bundle profile width 1280",
+                      "Wan2.2 rejects unsupported request width");
+}
+
+void test_l0_request_resolution_and_validation() {
+    const auto options = parse_l0_options();
+    trtmc::GenerateConfig config;
+    config.num_steps = 15;
+    config.guidance_scale = 5.0F;
+    config.height = 384;
+    config.width = 672;
+    const auto request = trtmc::resolve_wan22_request(options, config);
+    check(request.video_height == 384 && request.video_width == 672 &&
+              request.video_num_frames == 5 && request.num_inference_steps == 15 &&
+              request.frame_rate == 24 && request.text_seq_len == 512,
+          "Wan2.2 request preserves the complete L0 profile");
+    check(trtmc::require_wan22_profile(request) == trtmc::Wan22TI2VProfileKind::kL0,
+          "Wan2.2 identifies the resolved L0 request");
+
+    config.num_steps = 50;
+    check_throws_with([&] { (void)trtmc::resolve_wan22_request(options, config); },
+                      "--num-steps must match the bundle's complete profile",
+                      "Wan2.2 rejects an official step override on an L0 bundle");
 }
 
 void test_request_rejects_invalid_sentinel_values() {
@@ -169,17 +227,17 @@ void test_request_error_precedence_is_stable() {
     config.height = 720;
     config.width = 720;
     check_throws_exactly([&] { (void)trtmc::resolve_wan22_request(options, config); },
-                         "Wan2.2-TI2V-5B requires the official 50-step profile",
+                         "Wan2.2-TI2V-5B --num-steps must match the bundle's complete profile",
                          "Wan2.2 validates resolved steps before later profile fields");
 
     config.num_steps = 50;
     check_throws_exactly([&] { (void)trtmc::resolve_wan22_request(options, config); },
-                         "Wan2.2-TI2V-5B requires the official CFG=5 profile",
+                         "Wan2.2-TI2V-5B --guidance-scale must match the bundle's complete profile",
                          "Wan2.2 validates resolved guidance before geometry");
 
     config.guidance_scale = 5.0F;
     check_throws_exactly([&] { (void)trtmc::resolve_wan22_request(options, config); },
-                         "Wan2.2-TI2V-5B --height must be 704 for the fixed TensorRT engine",
+                         "Wan2.2-TI2V-5B --height must match bundle profile height 704",
                          "Wan2.2 validates height before width");
 
     auto invalid_options = options;
@@ -193,8 +251,10 @@ void test_request_error_precedence_is_stable() {
 
 int main() {
     test_official_bundle_contract();
+    test_l0_bundle_contract();
     test_bundle_rejects_accuracy_changing_profile();
     test_request_resolution_and_validation();
+    test_l0_request_resolution_and_validation();
     test_request_rejects_invalid_sentinel_values();
     test_request_error_precedence_is_stable();
     return failures == 0 ? 0 : 1;

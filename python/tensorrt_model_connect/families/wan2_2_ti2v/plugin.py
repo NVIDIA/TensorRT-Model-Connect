@@ -12,8 +12,9 @@ from pathlib import Path
 from .checkpoint_mapper import VAE22_CONFIG
 from .model_config import (
     OFFICIAL_NEGATIVE_PROMPT,
-    WAN22_TI2V_5B,
-    official_artifact_profile,
+    artifact_profile,
+    select_generation_profile,
+    validate_artifact_profile,
     validate_native_config,
 )
 
@@ -74,10 +75,6 @@ _PLUGIN_RUNTIME_ABI_KEYS = {
     "cuda_major",
     "cudnn_major",
 }
-
-
-def _official_artifact_profile() -> dict:
-    return official_artifact_profile()
 
 
 def _sha256(payload: bytes) -> str:
@@ -141,8 +138,7 @@ def _validated_plugin_contract(components: dict) -> dict:
     ):
         raise ValueError("Wan2.2 plugin_contract runtime ABI values must be integers")
     if runtime_abi["tensorrt_minor"] < 0 or any(
-        runtime_abi[key] < 1
-        for key in ("tensorrt_major", "cuda_major", "cudnn_major")
+        runtime_abi[key] < 1 for key in ("tensorrt_major", "cuda_major", "cudnn_major")
     ):
         raise ValueError(
             "Wan2.2 plugin_contract ABI majors must be positive and TensorRT minor nonnegative"
@@ -154,7 +150,12 @@ def _validated_plugin_contract(components: dict) -> dict:
     return json.loads(json.dumps(contract, sort_keys=True, separators=(",", ":")))
 
 
-def _validate_artifact_manifest(components: dict, payloads: dict[str, bytes]) -> None:
+def _validate_artifact_manifest(
+    components: dict,
+    payloads: dict[str, bytes],
+    *,
+    expected_profile: dict | None = None,
+) -> None:
     manifest = components["artifact_manifest"]
     if not isinstance(manifest, dict):
         raise TypeError("Wan2.2 artifact_manifest must be a dictionary")
@@ -163,7 +164,6 @@ def _validate_artifact_manifest(components: dict, payloads: dict[str, bytes]) ->
     expected_header = {
         "schema": _ARTIFACT_MANIFEST_SCHEMA,
         "family": "wan2_2_ti2v",
-        "profile": _official_artifact_profile(),
         "runtime": "native_cpp_cuda_tensorrt",
     }
     for key, expected in expected_header.items():
@@ -172,6 +172,14 @@ def _validate_artifact_manifest(components: dict, payloads: dict[str, bytes]) ->
                 f"Wan2.2 artifact_manifest has mismatched {key}: "
                 f"{manifest.get(key)!r}; expected {expected!r}"
             )
+    try:
+        validate_artifact_profile(manifest["profile"])
+    except ValueError as exc:
+        raise ValueError("Wan2.2 artifact_manifest has an unsupported qualified profile") from exc
+    if expected_profile is not None and manifest["profile"] != expected_profile:
+        raise ValueError(
+            "Wan2.2 artifact_manifest profile does not match the requested bundle profile"
+        )
     sections = manifest["sections"]
     if not isinstance(sections, dict) or set(sections) != set(payloads):
         raise ValueError(
@@ -227,17 +235,13 @@ def _validate_artifact_manifest(components: dict, payloads: dict[str, bytes]) ->
             if len(source_digests) != len(source_inputs):
                 raise ValueError(f"Wan2.2 artifact source inputs contain duplicates for {name}")
             if source_digests.get("plugin/contract.json") != plugin_contract_sha256:
-                raise ValueError(
-                    f"Wan2.2 plan is bound to a different AOT plugin contract: {name}"
-                )
+                raise ValueError(f"Wan2.2 plan is bound to a different AOT plugin contract: {name}")
             if source_digests.get("plugin/elf") != plugin_elf_sha256:
-                raise ValueError(
-                    f"Wan2.2 plan is bound to a different AOT plugin ELF: {name}"
-                )
+                raise ValueError(f"Wan2.2 plan is bound to a different AOT plugin ELF: {name}")
             source_document = {
                 "family": "wan2_2_ti2v",
                 "component": name,
-                "profile": _official_artifact_profile(),
+                "profile": manifest["profile"],
                 "inputs": source_inputs,
             }
             canonical_source = json.dumps(
@@ -346,7 +350,12 @@ class Wan22TI2VPlugin:
     def diffusion_bundle_config(self, config, *, components: dict) -> dict:
         payloads = _component_section_payloads(components)
         plugin_contract = _validated_plugin_contract(components)
-        _validate_artifact_manifest(components, payloads)
+        generation_profile = select_generation_profile(config.raw)
+        _validate_artifact_manifest(
+            components,
+            payloads,
+            expected_profile=artifact_profile(generation_profile),
+        )
         result = self.get_diffusion_config(config)
         result["num_text_encoders"] = len(components["text_encoders"])
         result["artifact_manifest"] = components["artifact_manifest"]
@@ -396,37 +405,23 @@ class Wan22TI2VPlugin:
 
     def get_diffusion_config(self, config) -> dict:
         raw = config.raw
-        arch = WAN22_TI2V_5B
-        height = int(raw.get("video_height", arch.video_height))
-        width = int(raw.get("video_width", arch.video_width))
-        frames = int(raw.get("video_num_frames", arch.video_num_frames))
+        arch = select_generation_profile(raw)
         seed = int(raw.get("seed", 42))
-        if (height, width, frames) != (
-            arch.video_height,
-            arch.video_width,
-            arch.video_num_frames,
-        ):
-            raise ValueError(
-                "Initial Wan2.2-TI2V-5B support is fixed to the official "
-                "1280x704, 121-frame profile"
-            )
         if not 0 <= seed <= 2_147_483_647:
-            raise ValueError(
-                "Wan2.2-TI2V-5B bundle seed must be between 0 and 2147483647"
-            )
+            raise ValueError("Wan2.2-TI2V-5B bundle seed must be between 0 and 2147483647")
         return {
             "diffusion_backend_type": "wan2_2_ti2v",
             "scheduler": "unipc_flow",
             "prediction_type": "flow_prediction",
             "num_train_timesteps": arch.train_timesteps,
-            "num_inference_steps": int(raw.get("num_inference_steps", arch.num_inference_steps)),
-            "guidance_scale": float(raw.get("guidance_scale", arch.guidance_scale)),
-            "flow_shift": float(raw.get("flow_shift", arch.flow_shift)),
+            "num_inference_steps": arch.num_inference_steps,
+            "guidance_scale": arch.guidance_scale,
+            "flow_shift": arch.flow_shift,
             "expand_timesteps": True,
-            "video_height": height,
-            "video_width": width,
-            "video_num_frames": frames,
-            "frame_rate": int(raw.get("frame_rate", arch.frame_rate)),
+            "video_height": arch.video_height,
+            "video_width": arch.video_width,
+            "video_num_frames": arch.video_num_frames,
+            "frame_rate": arch.frame_rate,
             "negative_prompt": str(raw.get("negative_prompt", OFFICIAL_NEGATIVE_PROMPT)),
             "z_dim": arch.z_dim,
             "dit_dim": arch.dim,

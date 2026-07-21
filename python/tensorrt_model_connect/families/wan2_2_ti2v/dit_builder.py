@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fixed 1280x704/121-frame TensorRT denoiser for Wan2.2 TI2V-5B."""
+"""Fixed-profile TensorRT denoiser for Wan2.2 TI2V-5B."""
 
 from __future__ import annotations
 

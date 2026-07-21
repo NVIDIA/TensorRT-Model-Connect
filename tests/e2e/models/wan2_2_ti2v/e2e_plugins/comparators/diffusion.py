@@ -97,10 +97,10 @@ class DiffusionComparator:
             status="passed" if passed else "failed",
             metrics=metrics,
             composite_rule=(
-                "native command succeeds AND output is exactly 121 1280x704 frames "
-                "AND pixels are non-degenerate"
+                f"native command succeeds AND output is exactly {expected_frames} "
+                f"{expected_width}x{expected_height} frames AND pixels are non-degenerate"
             ),
-            message=f"Wan2.2 TI2V max-profile invariant contract: {'PASS' if passed else 'FAIL'}",
+            message=f"Wan2.2 TI2V fixed-profile invariant contract: {'PASS' if passed else 'FAIL'}",
         )
 
     def _compare_bundle_contract(

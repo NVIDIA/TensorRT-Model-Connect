@@ -124,13 +124,23 @@ nlohmann::json official_profile() {
     };
 }
 
+nlohmann::json l0_profile() {
+    auto profile = official_profile();
+    profile["video_width"] = 672;
+    profile["video_height"] = 384;
+    profile["video_num_frames"] = 5;
+    profile["latent_shape"] = {1, 48, 2, 24, 42};
+    profile["architecture"]["num_inference_steps"] = 15;
+    return profile;
+}
+
 struct ProvenanceFixture {
     std::vector<std::string> section_order;
     std::map<std::string, std::vector<char>> payloads;
     nlohmann::json config;
 };
 
-ProvenanceFixture make_fixture() {
+ProvenanceFixture make_fixture(nlohmann::json profile = official_profile()) {
     ProvenanceFixture fixture;
     fixture.section_order = required_sections();
     const std::vector<std::string> model_owned(fixture.section_order.begin(),
@@ -140,7 +150,6 @@ ProvenanceFixture make_fixture() {
         fixture.payloads[name] = std::vector<char>(value.begin(), value.end());
     }
 
-    const auto profile = official_profile();
     const nlohmann::json plugin_contract = {
         {"schema", 1},
         {"family", "wan2_2_ti2v"},
@@ -184,6 +193,14 @@ ProvenanceFixture make_fixture() {
 
     fixture.config = {
         {"runtime_strategy", "diffusion_wan2_2_ti2v"},
+        {"video_width", profile["video_width"]},
+        {"video_height", profile["video_height"]},
+        {"video_num_frames", profile["video_num_frames"]},
+        {"num_inference_steps", profile["architecture"]["num_inference_steps"]},
+        {"guidance_scale", profile["architecture"]["guidance_scale"]},
+        {"flow_shift", profile["architecture"]["flow_shift"]},
+        {"frame_rate", profile["architecture"]["frame_rate"]},
+        {"text_seq_len", profile["text_seq_len"]},
         {"_trtmc_wan22_plugin_contract", plugin_contract},
         {"runtime_contract",
          {{"implementation", "native_cpp_cuda_tensorrt"},
@@ -293,6 +310,13 @@ void test_valid_bundle_and_lazy_plan_policy() {
     check(find_materialized(materialized.bundle, "wan2_2_ti2v_plugins.so") == nullptr,
           "preflight-authenticated plugin image is not retained in memory");
 
+    const auto valid_l0_path = std::filesystem::path(temporary.path()) / "valid-l0.trtfb";
+    const auto valid_l0_config = write_fixture(valid_l0_path, make_fixture(l0_profile()));
+    validate_direct(valid_l0_path, valid_l0_config);
+    const auto parsed_l0 = nlohmann::json::parse(valid_l0_config);
+    check(parsed_l0["artifact_manifest"]["profile"] == l0_profile(),
+          "authenticated Wan bundle accepts the exact L0 artifact profile");
+
     auto lazy_tamper = make_fixture();
     lazy_tamper.payloads.at("denoiser_plan").front() ^= 0x01;
     const auto lazy_path = std::filesystem::path(temporary.path()) / "lazy-tamper.trtfb";
@@ -325,8 +349,28 @@ void test_exact_payload_and_identity_errors() {
     auto profile_tamper = make_fixture();
     profile_tamper.config["artifact_manifest"]["profile"]["architecture"]["num_layers"] = 29;
     expect_fixture_error(root / "profile.trtfb", std::move(profile_tamper),
-                         "Wan2.2 artifact_manifest profile is not the official profile",
-                         "official profile error is exact");
+                         "Wan2.2 artifact_manifest profile is not one of the qualified profiles",
+                         "qualified profile error is exact");
+
+    auto official_config_l0_manifest = make_fixture();
+    official_config_l0_manifest.config["artifact_manifest"]["profile"] = l0_profile();
+    expect_fixture_error(
+        root / "official-config-l0-manifest.trtfb", std::move(official_config_l0_manifest),
+        "Wan2.2 artifact_manifest profile does not match the top-level generation profile",
+        "official config rejects an L0 artifact profile");
+
+    auto l0_config_official_manifest = make_fixture(l0_profile());
+    l0_config_official_manifest.config["artifact_manifest"]["profile"] = official_profile();
+    expect_fixture_error(
+        root / "l0-config-official-manifest.trtfb", std::move(l0_config_official_manifest),
+        "Wan2.2 artifact_manifest profile does not match the top-level generation profile",
+        "L0 config rejects an official artifact profile");
+
+    auto hybrid_top_level = make_fixture();
+    hybrid_top_level.config["num_inference_steps"] = 15;
+    expect_fixture_error(root / "hybrid-top-level.trtfb", std::move(hybrid_top_level),
+                         "Wan2.2 top-level generation profile is not one of the qualified profiles",
+                         "top-level config rejects mixed official geometry and L0 steps");
 
     auto schema_tamper = make_fixture();
     schema_tamper.config["artifact_manifest"]["schema"] = "trtmc.wan2_2_ti2v.bundle-artifacts.v3";
@@ -388,7 +432,7 @@ void test_multi_fault_validation_precedence() {
     profile_first.config["artifact_manifest"]["profile"]["architecture"]["num_layers"] = 29;
     profile_first.config.erase("_trtmc_wan22_plugin_contract");
     expect_fixture_error(root / "profile-first.trtfb", std::move(profile_first),
-                         "Wan2.2 artifact_manifest profile is not the official profile",
+                         "Wan2.2 artifact_manifest profile is not one of the qualified profiles",
                          "profile precedes plugin contract");
 
     auto plugin_contract_first = make_fixture();

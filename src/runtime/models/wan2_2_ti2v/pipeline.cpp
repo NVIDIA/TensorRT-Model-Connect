@@ -33,43 +33,29 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr int32_t kTextSequenceLength = 512;
+constexpr int32_t kTextSequenceLength = kWan22TextSequenceLength;
 constexpr int32_t kTextDimension = 4096;
 constexpr int32_t kEosTokenId = 1;
 constexpr int32_t kLatentChannels = 48;
-constexpr int32_t kLatentFrames = 31;
-constexpr int32_t kLatentHeight = 44;
-constexpr int32_t kLatentWidth = 80;
 constexpr int32_t kVideoChannels = 3;
-constexpr int32_t kVideoFrames = kWan22OfficialVideoFrames;
-constexpr int32_t kVideoHeight = kWan22OfficialVideoHeight;
-constexpr int32_t kVideoWidth = kWan22OfficialVideoWidth;
 constexpr int32_t kVaeCacheCount = 32;
 constexpr int32_t kVaeFirstFrameOutputFrames = 1;
 constexpr int32_t kVaeStepOutputFrames = 4;
 
 struct VaeCacheSpec {
     int32_t channels;
-    int32_t height;
-    int32_t width;
+    int32_t spatial_scale;
 };
 
 constexpr std::array<VaeCacheSpec, kVaeCacheCount> kVaeCacheSpecs = {{
-    {48, 44, 80},    {1024, 44, 80},  {1024, 44, 80},  {1024, 44, 80},  {1024, 44, 80},
-    {1024, 44, 80},  {1024, 44, 80},  {1024, 44, 80},  {1024, 44, 80},  {1024, 44, 80},
-    {1024, 44, 80},  {1024, 44, 80},  {1024, 88, 160}, {1024, 88, 160}, {1024, 88, 160},
-    {1024, 88, 160}, {1024, 88, 160}, {1024, 88, 160}, {1024, 88, 160}, {1024, 176, 320},
-    {512, 176, 320}, {512, 176, 320}, {512, 176, 320}, {512, 176, 320}, {512, 176, 320},
-    {512, 352, 640}, {256, 352, 640}, {256, 352, 640}, {256, 352, 640}, {256, 352, 640},
-    {256, 352, 640}, {256, 352, 640},
+    {48, 1},   {1024, 1}, {1024, 1}, {1024, 1}, {1024, 1}, {1024, 1}, {1024, 1}, {1024, 1},
+    {1024, 1}, {1024, 1}, {1024, 1}, {1024, 1}, {1024, 2}, {1024, 2}, {1024, 2}, {1024, 2},
+    {1024, 2}, {1024, 2}, {1024, 2}, {1024, 4}, {512, 4},  {512, 4},  {512, 4},  {512, 4},
+    {512, 4},  {512, 8},  {256, 8},  {256, 8},  {256, 8},  {256, 8},  {256, 8},  {256, 8},
 }};
 
-constexpr std::size_t kLatentCount =
-    static_cast<std::size_t>(kLatentChannels) * kLatentFrames * kLatentHeight * kLatentWidth;
 constexpr std::size_t kContextCount =
     static_cast<std::size_t>(kTextSequenceLength) * kTextDimension;
-constexpr std::size_t kVideoCount =
-    static_cast<std::size_t>(kVideoChannels) * kVideoFrames * kVideoHeight * kVideoWidth;
 
 double milliseconds(Clock::time_point begin, Clock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - begin).count();
@@ -205,13 +191,14 @@ const Tensor& required_output(const TensorMap& outputs,
     throw std::runtime_error(std::string("Wan2.2 ") + component + " output was not found");
 }
 
-std::vector<int64_t> expected_cache_shape(int32_t index) {
+std::vector<int64_t> expected_cache_shape(int32_t index, const Wan22TI2VRuntimeShape& shape) {
     const auto& spec = kVaeCacheSpecs.at(static_cast<std::size_t>(index));
-    return {1, spec.channels, 2, spec.height, spec.width};
+    return {1, spec.channels, 2, shape.latent_height * spec.spatial_scale,
+            shape.latent_width * spec.spatial_scale};
 }
 
-std::size_t expected_cache_nbytes(int32_t index) {
-    const auto shape = expected_cache_shape(index);
+std::size_t expected_cache_nbytes(int32_t index, const Wan22TI2VRuntimeShape& runtime_shape) {
+    const auto shape = expected_cache_shape(index, runtime_shape);
     std::size_t elements = 1;
     for (const int64_t dimension : shape)
         elements *= static_cast<std::size_t>(dimension);
@@ -231,10 +218,11 @@ bool has_output_contract(const ITrtModule& module, const std::string& name,
 }
 
 void validate_vae_module_contract(const ITrtModule& module, int32_t output_frames,
-                                  const char* label) {
-    const std::vector<int64_t> latent_shape = {1, kLatentChannels, 1, kLatentHeight, kLatentWidth};
-    const std::vector<int64_t> video_shape = {1, kVideoChannels, output_frames, kVideoHeight,
-                                              kVideoWidth};
+                                  const Wan22TI2VRuntimeShape& shape, const char* label) {
+    const std::vector<int64_t> latent_shape = {1, kLatentChannels, 1, shape.latent_height,
+                                               shape.latent_width};
+    const std::vector<int64_t> video_shape = {1, kVideoChannels, output_frames, shape.video_height,
+                                              shape.video_width};
     if (!has_input_contract(module, "latent_frame", latent_shape, DType::kFloat32))
         throw std::invalid_argument(std::string("Wan2.2 ") + label +
                                     " VAE has an invalid latent_frame contract");
@@ -244,7 +232,7 @@ void validate_vae_module_contract(const ITrtModule& module, int32_t output_frame
     for (int32_t index = 0; index < kVaeCacheCount; ++index) {
         const auto input_name = "cache_" + std::to_string(index);
         const auto output_name = "cache_out_" + std::to_string(index);
-        const auto expected = expected_cache_shape(index);
+        const auto expected = expected_cache_shape(index, shape);
         if (!has_input_contract(module, input_name, expected, DType::kFloat32) ||
             !has_output_contract(module, output_name, expected, DType::kFloat32))
             throw std::invalid_argument(std::string("Wan2.2 ") + label +
@@ -263,9 +251,9 @@ void validate_text_encoder_contract(const ITrtModule& module) {
     }
 }
 
-void validate_denoiser_contract(const ITrtModule& module) {
-    const std::vector<int64_t> latent_shape = {1, kLatentChannels, kLatentFrames, kLatentHeight,
-                                               kLatentWidth};
+void validate_denoiser_contract(const ITrtModule& module, const Wan22TI2VRuntimeShape& shape) {
+    const std::vector<int64_t> latent_shape = {1, kLatentChannels, shape.latent_frames,
+                                               shape.latent_height, shape.latent_width};
     const std::vector<int64_t> time_shape = {1, 256};
     const std::vector<int64_t> context_shape = {1, kTextSequenceLength, kTextDimension};
     if (!has_input_contract(module, "latents", latent_shape, DType::kFloat32) ||
@@ -281,11 +269,11 @@ struct VaeCacheState {
     wan2_2_ti2v::VaeCacheBank outputs;
 };
 
-VaeCacheState allocate_vae_caches() {
+VaeCacheState allocate_vae_caches(const Wan22TI2VRuntimeShape& shape) {
     std::vector<std::size_t> capacities;
     capacities.reserve(kVaeCacheCount);
     for (int32_t index = 0; index < kVaeCacheCount; ++index)
-        capacities.push_back(expected_cache_nbytes(index));
+        capacities.push_back(expected_cache_nbytes(index, shape));
 
     auto inputs = wan2_2_ti2v::VaeCacheBank::allocate_for_current_device(capacities);
     auto outputs = wan2_2_ti2v::VaeCacheBank::allocate_for_current_device(capacities);
@@ -310,19 +298,22 @@ void carry_vae_caches(VaeCacheState& state, cudaStream_t stream) {
 
 std::vector<float> run_vae_latent(const std::vector<float>& latents,
                                   std::vector<float>& latent_frame, int32_t latent_index,
-                                  int32_t chunk_frames, ITrtModule& module) {
-    const std::size_t spatial = static_cast<std::size_t>(kLatentHeight) * kLatentWidth;
-    const std::size_t frame_plane = static_cast<std::size_t>(kVideoHeight) * kVideoWidth;
+                                  int32_t chunk_frames, const Wan22TI2VRuntimeShape& shape,
+                                  ITrtModule& module) {
+    const std::size_t spatial = static_cast<std::size_t>(shape.latent_height) * shape.latent_width;
+    const std::size_t frame_plane =
+        static_cast<std::size_t>(shape.video_height) * shape.video_width;
     for (int32_t channel = 0; channel < kLatentChannels; ++channel) {
-        const auto source = static_cast<std::size_t>(channel) * kLatentFrames * spatial +
+        const auto source = static_cast<std::size_t>(channel) * shape.latent_frames * spatial +
                             static_cast<std::size_t>(latent_index) * spatial;
         std::copy_n(latents.data() + static_cast<std::ptrdiff_t>(source), spatial,
                     latent_frame.data() + static_cast<std::ptrdiff_t>(channel * spatial));
     }
     TensorMap inputs;
-    inputs.emplace("latent_frame", Tensor{latent_frame.data(),
-                                          {1, kLatentChannels, 1, kLatentHeight, kLatentWidth},
-                                          DType::kFloat32});
+    inputs.emplace("latent_frame",
+                   Tensor{latent_frame.data(),
+                          {1, kLatentChannels, 1, shape.latent_height, shape.latent_width},
+                          DType::kFloat32});
     const auto outputs = module.forward(inputs);
     return copy_as_float(required_output(outputs, {"video_frame"}, "VAE"),
                          static_cast<std::size_t>(kVideoChannels) * chunk_frames * frame_plane,
@@ -330,8 +321,10 @@ std::vector<float> run_vae_latent(const std::vector<float>& latents,
 }
 
 void append_video_chunk(ImageResult& result, int32_t& video_frame_offset,
-                        const std::vector<float>& chunk, int32_t chunk_frames) {
-    const std::size_t frame_plane = static_cast<std::size_t>(kVideoHeight) * kVideoWidth;
+                        const std::vector<float>& chunk, int32_t chunk_frames,
+                        const Wan22TI2VRuntimeShape& shape) {
+    const std::size_t frame_plane =
+        static_cast<std::size_t>(shape.video_height) * shape.video_width;
     for (int32_t frame = 0; frame < chunk_frames; ++frame) {
         for (std::size_t pixel = 0; pixel < frame_plane; ++pixel) {
             const auto destination =
@@ -390,19 +383,68 @@ void trace_step_output(const Wan22TraceConfig& trace, const std::string& prefix,
     write_wan22_trace(trace.directory, prefix + "_output_latents.f32", latents);
 }
 
-std::vector<float> make_initial_latents(const GenerateConfig& config, int64_t seed) {
+std::vector<float> make_initial_latents(const GenerateConfig& config, int64_t seed,
+                                        const Wan22TI2VRuntimeShape& shape) {
     if (config.initial_latents.empty())
-        return wan2_2_ti2v::torch_cuda_normal(kLatentCount, static_cast<uint64_t>(seed));
-    if (config.initial_latents.size() != kLatentCount)
+        return wan2_2_ti2v::torch_cuda_normal(shape.latent_count, static_cast<uint64_t>(seed));
+    if (config.initial_latents.size() != shape.latent_count)
         throw std::invalid_argument("Wan2.2 initial_latents has the wrong size");
     return config.initial_latents;
 }
 
 } // namespace
 
+Wan22TI2VRuntimeShape make_wan22_runtime_shape(const Wan22TI2VRequest& request) {
+    (void)require_wan22_profile(request);
+    Wan22TI2VRuntimeShape shape;
+    shape.latent_frames = (request.video_num_frames - 1) / 4 + 1;
+    shape.latent_height = request.video_height / 16;
+    shape.latent_width = request.video_width / 16;
+    shape.denoiser_patch_rows =
+        shape.latent_frames * (shape.latent_height / 2) * (shape.latent_width / 2);
+    shape.video_frames = request.video_num_frames;
+    shape.video_height = request.video_height;
+    shape.video_width = request.video_width;
+    shape.latent_count = static_cast<std::size_t>(kLatentChannels) * shape.latent_frames *
+                         shape.latent_height * shape.latent_width;
+    shape.context_count = kContextCount;
+    shape.video_count = static_cast<std::size_t>(kVideoChannels) * shape.video_frames *
+                        shape.video_height * shape.video_width;
+    return shape;
+}
+
 std::vector<ModuleExternalBinding>
 make_wan22_vae_cache_bindings(const std::vector<void*>& input_addresses,
                               const std::vector<void*>& output_addresses) {
+    return make_wan22_vae_cache_bindings(input_addresses, output_addresses,
+                                         make_wan22_runtime_shape(Wan22TI2VRequest{}));
+}
+
+std::vector<ModuleExternalBinding>
+make_wan22_vae_cache_bindings(const std::vector<void*>& input_addresses,
+                              const std::vector<void*>& output_addresses,
+                              const Wan22TI2VRuntimeShape& shape) {
+    const auto same_shape = [](const Wan22TI2VRuntimeShape& left,
+                               const Wan22TI2VRuntimeShape& right) {
+        return left.latent_frames == right.latent_frames &&
+               left.latent_height == right.latent_height &&
+               left.latent_width == right.latent_width &&
+               left.denoiser_patch_rows == right.denoiser_patch_rows &&
+               left.video_frames == right.video_frames && left.video_height == right.video_height &&
+               left.video_width == right.video_width && left.latent_count == right.latent_count &&
+               left.context_count == right.context_count && left.video_count == right.video_count;
+    };
+    const auto official_shape = make_wan22_runtime_shape(Wan22TI2VRequest{});
+    Wan22TI2VRequest l0_request;
+    l0_request.num_inference_steps = kWan22L0InferenceSteps;
+    l0_request.video_height = kWan22L0VideoHeight;
+    l0_request.video_width = kWan22L0VideoWidth;
+    l0_request.video_num_frames = kWan22L0VideoFrames;
+    const auto l0_shape = make_wan22_runtime_shape(l0_request);
+    if (!same_shape(shape, official_shape) && !same_shape(shape, l0_shape)) {
+        throw std::invalid_argument(
+            "Wan2.2 VAE prebinding requires an exact qualified runtime shape");
+    }
     if (input_addresses.size() != kVaeCacheCount || output_addresses.size() != kVaeCacheCount) {
         throw std::invalid_argument("Wan2.2 VAE prebinding requires exactly 32 cache pairs");
     }
@@ -413,7 +455,7 @@ make_wan22_vae_cache_bindings(const std::vector<void*>& input_addresses,
         if (!input_addresses[offset] || !output_addresses[offset]) {
             throw std::invalid_argument("Wan2.2 VAE prebinding received a null cache address");
         }
-        const auto capacity_bytes = expected_cache_nbytes(index);
+        const auto capacity_bytes = expected_cache_nbytes(index, shape);
         bindings.push_back(ModuleExternalBinding{"cache_" + std::to_string(index),
                                                  input_addresses[offset], capacity_bytes});
         bindings.push_back(ModuleExternalBinding{"cache_out_" + std::to_string(index),
@@ -507,43 +549,46 @@ std::vector<float> Wan22TI2VPipeline::encode_text(const std::vector<int32_t>& id
 
 std::vector<float> Wan22TI2VPipeline::run_denoiser(const std::vector<float>& latents,
                                                    const std::vector<float>& context,
-                                                   int64_t timestep, ITrtModule& denoiser) {
-    if (latents.size() != kLatentCount || context.size() != kContextCount)
+                                                   int64_t timestep,
+                                                   const Wan22TI2VRuntimeShape& shape,
+                                                   ITrtModule& denoiser) {
+    if (latents.size() != shape.latent_count || context.size() != shape.context_count)
         throw std::invalid_argument("Wan2.2 denoiser input shape is invalid");
     auto time = wan2_2_ti2v::torch_cuda_timestep_features(timestep);
     TensorMap inputs;
-    inputs.emplace("latents",
-                   Tensor{const_cast<float*>(latents.data()),
-                          {1, kLatentChannels, kLatentFrames, kLatentHeight, kLatentWidth},
-                          DType::kFloat32});
+    inputs.emplace("latents", Tensor{const_cast<float*>(latents.data()),
+                                     {1, kLatentChannels, shape.latent_frames, shape.latent_height,
+                                      shape.latent_width},
+                                     DType::kFloat32});
     inputs.emplace("time_features", Tensor{time.data(), {1, 256}, DType::kFloat32});
     inputs.emplace("encoder_hidden_states", Tensor{const_cast<float*>(context.data()),
                                                    {1, kTextSequenceLength, kTextDimension},
                                                    DType::kFloat32});
     const auto outputs = denoiser.forward(inputs);
     return copy_as_float(required_output(outputs, {"noise_prediction", "sample", "output0"}, "DiT"),
-                         kLatentCount, "DiT output");
+                         shape.latent_count, "DiT output");
 }
 
-ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents) {
-    if (latents.size() != kLatentCount)
+ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents,
+                                            const Wan22TI2VRuntimeShape& shape) {
+    if (latents.size() != shape.latent_count)
         throw std::invalid_argument("Wan2.2 VAE latent shape is invalid");
 
-    const std::size_t spatial = static_cast<std::size_t>(kLatentHeight) * kLatentWidth;
+    const std::size_t spatial = static_cast<std::size_t>(shape.latent_height) * shape.latent_width;
     std::vector<float> latent_frame(static_cast<std::size_t>(kLatentChannels) * spatial);
     ImageResult result;
-    result.height = kVideoHeight;
-    result.width = kVideoWidth;
+    result.height = shape.video_height;
+    result.width = shape.video_width;
     result.channels = kVideoChannels;
-    result.num_frames = kVideoFrames;
-    result.pixels.resize(kVideoCount);
+    result.num_frames = shape.video_frames;
+    result.pixels.resize(shape.video_count);
 
     int32_t video_frame_offset = 0;
 
     // Cache storage is generation-local, but all buffers and all staged
     // modules share the pipeline-owned stream.  This preserves recurrent
     // state across engine destruction without retaining any engine weights.
-    auto caches = allocate_vae_caches();
+    auto caches = allocate_vae_caches(shape);
     std::vector<void*> cache_inputs;
     std::vector<void*> cache_outputs;
     cache_inputs.reserve(caches.inputs.size());
@@ -552,18 +597,19 @@ ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents) {
         cache_inputs.push_back(caches.inputs.device_address(index));
     for (std::size_t index = 0; index < caches.outputs.size(); ++index)
         cache_outputs.push_back(caches.outputs.device_address(index));
-    const auto cache_bindings = make_wan22_vae_cache_bindings(cache_inputs, cache_outputs);
+    const auto cache_bindings = make_wan22_vae_cache_bindings(cache_inputs, cache_outputs, shape);
 
     {
         auto initializer = load_module("vae_decoder_first_frame_plan", cache_bindings);
-        validate_vae_module_contract(*initializer, kVaeFirstFrameOutputFrames, "first-frame");
+        validate_vae_module_contract(*initializer, kVaeFirstFrameOutputFrames, shape,
+                                     "first-frame");
         try {
             zero_vae_caches(caches, stream_);
             synchronize_stream("initializing recurrent VAE caches");
-            append_video_chunk(
-                result, video_frame_offset,
-                run_vae_latent(latents, latent_frame, 0, kVaeFirstFrameOutputFrames, *initializer),
-                kVaeFirstFrameOutputFrames);
+            append_video_chunk(result, video_frame_offset,
+                               run_vae_latent(latents, latent_frame, 0, kVaeFirstFrameOutputFrames,
+                                              shape, *initializer),
+                               kVaeFirstFrameOutputFrames, shape);
             carry_vae_caches(caches, stream_);
             synchronize_stream("preserving first-frame VAE cache state");
         } catch (...) {
@@ -571,24 +617,24 @@ ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents) {
             throw;
         }
         initializer.reset();
-        std::cerr << "[wan2.2-ti2v] VAE latent 1/" << kLatentFrames << '\n';
+        std::cerr << "[wan2.2-ti2v] VAE latent 1/" << shape.latent_frames << '\n';
     }
 
     {
         auto recurrent = load_module("vae_decoder_plan", cache_bindings);
-        validate_vae_module_contract(*recurrent, kVaeStepOutputFrames, "step");
+        validate_vae_module_contract(*recurrent, kVaeStepOutputFrames, shape, "step");
         try {
-            for (int32_t latent_index = 1; latent_index < kLatentFrames; ++latent_index) {
+            for (int32_t latent_index = 1; latent_index < shape.latent_frames; ++latent_index) {
                 append_video_chunk(result, video_frame_offset,
                                    run_vae_latent(latents, latent_frame, latent_index,
-                                                  kVaeStepOutputFrames, *recurrent),
-                                   kVaeStepOutputFrames);
-                if (latent_index + 1 < kLatentFrames) {
+                                                  kVaeStepOutputFrames, shape, *recurrent),
+                                   kVaeStepOutputFrames, shape);
+                if (latent_index + 1 < shape.latent_frames) {
                     carry_vae_caches(caches, stream_);
                     synchronize_stream("carrying recurrent VAE cache state");
                 }
                 std::cerr << "[wan2.2-ti2v] VAE latent " << (latent_index + 1) << '/'
-                          << kLatentFrames << '\n';
+                          << shape.latent_frames << '\n';
             }
             synchronize_stream("finishing recurrent VAE decode");
         } catch (...) {
@@ -598,7 +644,7 @@ ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents) {
         recurrent.reset();
     }
 
-    if (video_frame_offset != kVideoFrames)
+    if (video_frame_offset != shape.video_frames)
         throw std::runtime_error("Wan2.2 recurrent VAE produced the wrong frame count");
     return result;
 }
@@ -607,6 +653,7 @@ ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
                                               const GenerateConfig& cfg) {
     std::lock_guard<std::mutex> generation_lock(generation_mutex_);
     const auto request = resolve_wan22_request(options_, cfg);
+    const auto shape = make_wan22_runtime_shape(request);
     const auto trace = make_wan22_trace_config();
 
     const auto total_begin = Clock::now();
@@ -634,11 +681,11 @@ ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
     write_wan22_trace(trace.directory, "prompt_context.f32", prompt_context);
     write_wan22_trace(trace.directory, "negative_context.f32", negative_context);
 
-    auto latents = make_initial_latents(cfg, request.seed);
+    auto latents = make_initial_latents(cfg, request.seed, shape);
     write_wan22_trace(trace.directory, "initial_latents.f32", latents);
 
-    std::vector<float> guided(kLatentCount);
-    std::vector<float> next(kLatentCount);
+    std::vector<float> guided(shape.latent_count);
+    std::vector<float> next(shape.latent_count);
     double denoiser_ms = 0.0;
     double scheduler_ms = 0.0;
     {
@@ -650,7 +697,7 @@ ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
         write_wan22_trace(trace.directory, "timesteps.i64", scheduler.timesteps());
         write_wan22_trace(trace.directory, "sigmas.f32", scheduler.sigmas());
         auto denoiser = load_module("denoiser_plan");
-        validate_denoiser_contract(*denoiser);
+        validate_denoiser_contract(*denoiser, shape);
         try {
             for (int32_t step = 0; step < request.num_inference_steps; ++step) {
                 const int64_t timestep = scheduler.timesteps()[static_cast<std::size_t>(step)];
@@ -659,19 +706,21 @@ ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
                 if (trace_step)
                     trace_step_inputs(trace, trace_prefix, timestep, latents);
                 const auto denoiser_begin = Clock::now();
-                auto conditional = run_denoiser(latents, prompt_context, timestep, *denoiser);
-                auto unconditional = run_denoiser(latents, negative_context, timestep, *denoiser);
+                auto conditional =
+                    run_denoiser(latents, prompt_context, timestep, shape, *denoiser);
+                auto unconditional =
+                    run_denoiser(latents, negative_context, timestep, shape, *denoiser);
                 const auto denoiser_end = Clock::now();
                 denoiser_ms += milliseconds(denoiser_begin, denoiser_end);
 
                 const auto scheduler_begin = Clock::now();
-                for (std::size_t index = 0; index < kLatentCount; ++index)
+                for (std::size_t index = 0; index < shape.latent_count; ++index)
                     guided[index] =
                         unconditional[index] +
                         request.guidance_scale * (conditional[index] - unconditional[index]);
                 if (trace_step)
                     trace_guidance(trace, trace_prefix, conditional, unconditional, guided);
-                scheduler.step(guided.data(), latents.data(), next.data(), kLatentCount);
+                scheduler.step(guided.data(), latents.data(), next.data(), shape.latent_count);
                 latents.swap(next);
                 if (trace_step)
                     trace_step_output(trace, trace_prefix, latents);
@@ -705,7 +754,7 @@ ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
     next.shrink_to_fit();
 
     const auto vae_begin = Clock::now();
-    auto result = decode_video(latents);
+    auto result = decode_video(latents, shape);
     const auto vae_end = Clock::now();
     const auto total_end = Clock::now();
     std::cerr << std::fixed << std::setprecision(3)
