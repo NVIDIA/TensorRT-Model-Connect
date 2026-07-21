@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -36,8 +37,18 @@ def _config() -> SimpleNamespace:
 
 
 def test_opt_plugin_routes_parallel_builds(monkeypatch) -> None:
-    module = importlib.import_module(
-        "tensorrt_model_connect.families.opt.plugin")
+    module = importlib.import_module("tensorrt_model_connect.families.opt.plugin")
+    parallel_module = importlib.import_module("tensorrt_model_connect.families.opt.model.parallel")
+    parameters = inspect.signature(parallel_module.build_dual_profile_tp_decoder_engine).parameters
+    assert "activation" not in parameters
+    assert "mlp_type" not in parameters
+    mlp_source = inspect.getsource(parallel_module._relu_mlp)
+    assert "ActivationType.RELU" in mlp_source
+    assert 'weights[f"{prefix}.w_fc1"]' in mlp_source
+    assert 'weights[f"{prefix}.w_fc2"]' in mlp_source
+    assert ".w_gate" not in mlp_source
+    assert ".w_up" not in mlp_source
+    assert ".w_down" not in mlp_source
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -59,6 +70,6 @@ def test_opt_plugin_routes_parallel_builds(monkeypatch) -> None:
     _, _, max_cache_length, kwargs = calls["build"]
     assert max_cache_length == 23
     assert kwargs["parallel_config"] == parallel
-    assert kwargs["activation"] == "relu"
-    assert kwargs["mlp_type"] == "gelu_fc"
+    assert "activation" not in kwargs
+    assert "mlp_type" not in kwargs
     assert kwargs["verbose"] is True
