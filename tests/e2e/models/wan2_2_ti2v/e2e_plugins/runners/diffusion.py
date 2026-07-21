@@ -80,11 +80,17 @@ def validate_official_profile(case: E2ECase) -> None:
         )
 
 
-def build_generate_video_command(case: E2ECase, ctx: RunContext, output_dir: Path) -> list[str]:
+def build_generate_video_command(
+    case: E2ECase,
+    ctx: RunContext,
+    output_dir: Path,
+    *,
+    bundle_path: str | Path | None = None,
+) -> list[str]:
     """Build the public native-runtime command used by the E2E stage."""
 
     validate_official_profile(case)
-    bundle = _bundle_path(case, ctx)
+    bundle = Path(bundle_path) if bundle_path is not None else _bundle_path(case, ctx)
     model_plugin_dir = _require_model_plugin_dir(ctx)
     command = [
         ctx.binary_path,
