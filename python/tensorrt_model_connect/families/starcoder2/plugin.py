@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -28,8 +28,8 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
-from .standard_decoder_builder import build_standard_decoder_engine
+from .model.model import build_standard_decoder_engine
+from .model.parallel import build_dual_profile_tp_decoder_engine
 
 
 class StarCoder2Plugin:
@@ -192,24 +192,24 @@ class StarCoder2Plugin:
                 raise ValueError(
                     "StarCoder2 tensor-parallel builds do not support debug_layer_outputs")
             return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length,
-                precision=precision, quant_ctx=quant_ctx,
-                norm_type="layernorm",
-                mlp_type="gelu_fc",
-                position_type="rope",
-                activation="gelu_new",
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+            )
 
         return build_standard_decoder_engine(
-            config, weights, max_cache_length,
-            precision=precision, quant_ctx=quant_ctx,
-            norm_type="layernorm",
-            mlp_type="gelu_fc",
-            position_type="rope",
-            activation="gelu_new",
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            debug_layer_outputs=debug_layer_outputs,
+        )
 
 
 plugin = StarCoder2Plugin()

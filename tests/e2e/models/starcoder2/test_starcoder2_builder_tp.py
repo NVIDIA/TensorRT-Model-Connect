@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import pytest
 
@@ -29,10 +30,12 @@ PLUGIN_CLASS = 'StarCoder2Plugin'
 MODEL_TYPE = 'starcoder2'
 TP_SIZE = 2
 RAW = {}
-EXPECTED_KWARGS = {'activation': 'gelu_new',
- 'mlp_type': 'gelu_fc',
- 'norm_type': 'layernorm',
- 'position_type': 'rope'}
+SPECIALIZED_STRATEGY_KWARGS = {
+    "activation",
+    "mlp_type",
+    "norm_type",
+    "position_type",
+}
 
 
 def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfig:
@@ -45,7 +48,6 @@ def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfi
         num_hidden_layers=2,
         num_attention_heads=4,
         num_key_value_heads=kv_heads,
-        max_position_embeddings=64,
         rms_norm_eps=1e-5,
         raw=raw,
     )
@@ -91,8 +93,19 @@ def test_starcoder2_plugin_routes_tp_build(monkeypatch) -> None:
     assert kwargs["quant_ctx"] is None
     assert kwargs["verbose"] is True
     assert kwargs["parallel_config"] == parallel
-    for key, expected in EXPECTED_KWARGS.items():
-        assert kwargs[key] == expected
+    assert SPECIALIZED_STRATEGY_KWARGS.isdisjoint(kwargs)
+
+
+def test_starcoder2_builders_do_not_expose_generic_strategy_switches() -> None:
+    plugin_mod = importlib.import_module(
+        f"tensorrt_model_connect.families.{FAMILY}.plugin")
+
+    for builder in (
+        plugin_mod.build_standard_decoder_engine,
+        plugin_mod.build_dual_profile_tp_decoder_engine,
+    ):
+        assert SPECIALIZED_STRATEGY_KWARGS.isdisjoint(
+            inspect.signature(builder).parameters)
 
 
 def test_starcoder2_plugin_rejects_quantized_tp(monkeypatch) -> None:
