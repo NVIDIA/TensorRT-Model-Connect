@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import pytest
 
@@ -30,6 +31,17 @@ MODEL_TYPE = 'internlm2'
 TP_SIZE = 4
 RAW = {}
 EXPECTED_KWARGS = {}
+FORBIDDEN_STRATEGY_PARAMETERS = {
+    "activation",
+    "dynamic_kv_profile_rows",
+    "interleaved_rope",
+    "mlp_type",
+    "norm_type",
+    "parallel_residual",
+    "partial_rotary_factor",
+    "position_type",
+    "scale_attn_weights",
+}
 
 
 def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfig:
@@ -85,9 +97,9 @@ def test_internlm_plugin_routes_tp_build(monkeypatch) -> None:
     assert captured["max_cache_length"] == 17
     kwargs = captured["kwargs"]
     assert kwargs["precision"] == "fp16"
-    assert kwargs["quant_ctx"] is None
     assert kwargs["verbose"] is True
     assert kwargs["parallel_config"] == parallel
+    assert "quant_ctx" not in kwargs
     for key, expected in EXPECTED_KWARGS.items():
         assert kwargs[key] == expected
 
@@ -110,3 +122,20 @@ def test_internlm_plugin_rejects_quantized_tp(monkeypatch) -> None:
             parallel_config=ParallelConfig(
                 mode="tensor_parallel", tp_size=TP_SIZE, rank=0),
         )
+
+
+def test_internlm_builders_do_not_expose_generic_strategy_switches() -> None:
+    model = importlib.import_module(
+        "tensorrt_model_connect.families.internlm.model.model"
+    )
+    parallel = importlib.import_module(
+        "tensorrt_model_connect.families.internlm.model.parallel"
+    )
+
+    for builder in (
+        model.build_standard_decoder_engine,
+        model.build_dual_profile_decoder_engine,
+        parallel.build_dual_profile_tp_decoder_engine,
+    ):
+        parameters = set(inspect.signature(builder).parameters)
+        assert parameters.isdisjoint(FORBIDDEN_STRATEGY_PARAMETERS)

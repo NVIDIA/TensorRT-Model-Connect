@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -35,8 +35,8 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
-from .standard_decoder_builder import build_standard_decoder_engine
+from .model.parallel import build_dual_profile_tp_decoder_engine
+from .model.model import build_standard_decoder_engine
 
 
 class InternLMPlugin:
@@ -58,7 +58,9 @@ class InternLMPlugin:
         return ensure_tokenizer_json(model_dir, previous_error=previous_error)
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         """Load InternLM2 weights, splitting fused wqkv and mapping key names."""
         model_dir_path = Path(model_dir)
@@ -79,7 +81,8 @@ class InternLMPlugin:
         # Embedding — InternLM2 uses "model.tok_embeddings.weight"
         embedding = _load_tensor(readers, "model.tok_embeddings.weight")
         assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
+            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
+        )
         weights["embedding"] = embedding.astype(np.float32)
 
         mlp_size = 0
@@ -90,10 +93,8 @@ class InternLMPlugin:
             hf_prefix = f"model.layers.{layer_idx}"
 
             # Norms (1D, no transpose)
-            input_norm = _load_tensor(
-                readers, f"{hf_prefix}.attention_norm.weight")
-            post_norm = _load_tensor(
-                readers, f"{hf_prefix}.ffn_norm.weight")
+            input_norm = _load_tensor(readers, f"{hf_prefix}.attention_norm.weight")
+            post_norm = _load_tensor(readers, f"{hf_prefix}.ffn_norm.weight")
             weights[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
             weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
@@ -101,13 +102,13 @@ class InternLMPlugin:
             # InternLM2 interleaves QKV by group:
             #   For each KV group g: [Q_heads_in_group, K_head, V_head]
             # Layout: [Q0,Q1,K0,V0, Q2,Q3,K1,V1, ...] when group_size=2
-            wqkv_raw = _load_tensor(
-                readers, f"{hf_prefix}.attention.wqkv.weight")
+            wqkv_raw = _load_tensor(readers, f"{hf_prefix}.attention.wqkv.weight")
             total_qkv = wqkv_raw.shape[0]
             expected_qkv = q_dim + 2 * kv_dim
             assert total_qkv == expected_qkv, (
                 f"Layer {layer_idx} wqkv rows {total_qkv} != "
-                f"expected {expected_qkv} (q={q_dim}, kv={kv_dim})")
+                f"expected {expected_qkv} (q={q_dim}, kv={kv_dim})"
+            )
 
             group_size = num_heads // num_kv_heads
             rows_per_group = group_size * head_dim + 2 * head_dim
@@ -139,19 +140,15 @@ class InternLMPlugin:
             weights[f"{prefix}.w_v"] = v_t
 
             # Output projection — "attention.wo.weight"
-            o_raw = _load_tensor(
-                readers, f"{hf_prefix}.attention.wo.weight")
+            o_raw = _load_tensor(readers, f"{hf_prefix}.attention.wo.weight")
             weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj")
             del o_raw
 
             # ---- MLP projections ----
             # w1 = gate, w3 = up, w2 = down
-            gate_raw = _load_tensor(
-                readers, f"{hf_prefix}.feed_forward.w1.weight")
-            up_raw = _load_tensor(
-                readers, f"{hf_prefix}.feed_forward.w3.weight")
-            down_raw = _load_tensor(
-                readers, f"{hf_prefix}.feed_forward.w2.weight")
+            gate_raw = _load_tensor(readers, f"{hf_prefix}.feed_forward.w1.weight")
+            up_raw = _load_tensor(readers, f"{hf_prefix}.feed_forward.w3.weight")
+            down_raw = _load_tensor(readers, f"{hf_prefix}.feed_forward.w2.weight")
 
             if mlp_size == 0:
                 mlp_size = gate_raw.shape[0]
@@ -164,16 +161,14 @@ class InternLMPlugin:
         # Final norm
         final_norm_key = "model.norm.weight"
         if _has_tensor(readers, final_norm_key):
-            weights["final_norm"] = _load_tensor(
-                readers, final_norm_key).astype(np.float32)
+            weights["final_norm"] = _load_tensor(readers, final_norm_key).astype(np.float32)
         else:
             weights["final_norm"] = np.ones(hidden, dtype=np.float32)
 
         # LM head — InternLM2 uses "output.weight"
         lm_head_key = "output.weight"
         if _has_tensor(readers, lm_head_key):
-            weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+            weights["w_out"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
         else:
             # Tied embeddings
             weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
@@ -185,31 +180,46 @@ class InternLMPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
-                parallel, feature="InternLM tensor-parallel builds")
+                parallel, feature="InternLM tensor-parallel builds"
+            )
             if quant_ctx is not None:
-                raise ValueError(
-                    "InternLM tensor-parallel builds do not support quantization")
+                raise ValueError("InternLM tensor-parallel builds do not support quantization")
             if debug_layer_outputs:
                 raise ValueError(
-                    "InternLM tensor-parallel builds do not support debug_layer_outputs")
+                    "InternLM tensor-parallel builds do not support debug_layer_outputs"
+                )
             return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length, precision=precision,
-                quant_ctx=quant_ctx, verbose=verbose,
-                parallel_config=parallel)
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                verbose=verbose,
+                parallel_config=parallel,
+            )
 
         return build_standard_decoder_engine(
-            config, weights, max_cache_length, precision=precision,
-            quant_ctx=quant_ctx, verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
+            verbose=verbose,
+            debug_layer_outputs=debug_layer_outputs,
+        )
 
 
 plugin = InternLMPlugin()
