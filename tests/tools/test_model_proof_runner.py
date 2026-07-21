@@ -568,15 +568,6 @@ def test_selection_auto_hands_optimized_adapter_tests_to_their_ci_owner(
     assert selection["python_tests"]
 
 
-def test_qwen_model_proof_does_not_collect_edge_llm_leaf_tests(tmp_path: Path) -> None:
-    selection = _run_test_selection(tmp_path, "qwen", "premerge")
-    root = "tests/e2e/models/qwen/edge_llm_adapter"
-
-    assert selection["independently_routed_test_roots"] == [root]
-    assert not any(path.startswith(f"{root}/") for path in selection["python_tests"])
-    assert "tests/e2e/models/qwen/test_qwen_manifest_contract.py" in selection["python_tests"]
-
-
 @pytest.mark.parametrize(
     ("entry", "message"),
     (

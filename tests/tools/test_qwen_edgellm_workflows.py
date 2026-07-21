@@ -58,16 +58,3 @@ def test_a100_rollout_is_manual_until_an_x86_runner_is_provisioned() -> None:
     assert "_discover_profiles()" in launcher_text
     assert "_run_coexistence_if_complete" in launcher_text
 
-
-def test_qwen_declares_dedicated_edge_test_ownership() -> None:
-    manifest = (REPOSITORY / "tests/e2e/models/qwen/MODEL.toml").read_text(
-        encoding="utf-8"
-    )
-    selector = (REPOSITORY / "tools/ci/model_proof_selection.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert "[ci]" in manifest
-    assert 'independently_routed_test_roots = ["edge_llm_adapter"]' in manifest
-    assert "_independently_routed_test_roots" in selector
-    assert "not any(path.is_relative_to(root)" in selector

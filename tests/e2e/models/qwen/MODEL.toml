@@ -14,11 +14,6 @@ test_manifests = [
   "manifests/qwen3-4b-instruct-2507.json",
 ]
 
-[ci]
-# This subtree has its own leaf-aware CPU and x86/A100 routing. The generic
-# Qwen model proof must not recursively execute sibling optimized-runtime leaves.
-independently_routed_test_roots = ["edge_llm_adapter"]
-
 [e2e_defaults.text_generation_causal]
 reference_backend = "hf_transformers"
 oracle_level = "L1_external_reference"
