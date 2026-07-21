@@ -19,6 +19,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
+HOST_CONFIG="${TRTMC_HOST_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/trtmc/host.env}"
+
+if [ -f "$HOST_CONFIG" ]; then
+    set -a
+    # shellcheck source=/dev/null
+    source "$HOST_CONFIG"
+    set +a
+fi
+
+: "${TRTMC_HOST_ROOT:?Set TRTMC_HOST_ROOT or create $HOST_CONFIG}"
 
 # Defaults
 MIN_DOWNLOADS=10000

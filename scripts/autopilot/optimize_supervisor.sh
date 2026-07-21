@@ -19,7 +19,13 @@ AGENT_ID="${4:-agent-3}"
 SAFE_NAME="$(echo "$MODEL_ID" | tr '/' '_' | tr '.' '_')"
 PROGRESS_FILE="/tmp/optimize_progress_${SAFE_NAME}.json"
 CONTAINER="trtmc-dev-gb300-${AGENT_ID}"
-REPO_DIR="/workspace/users/yifeif/workspaces/${AGENT_ID}/tensorrt-model-connect"
+HOST_CONFIG="${TRTMC_HOST_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/trtmc/host.env}"
+if [ -f "$HOST_CONFIG" ]; then
+    # shellcheck source=/dev/null
+    source "$HOST_CONFIG"
+fi
+: "${TRTMC_HOST_ROOT:?Set TRTMC_HOST_ROOT before running the optimize supervisor}"
+REPO_DIR="${TRTMC_WORKSPACE_ROOT:-${TRTMC_HOST_ROOT%/}/workspaces}/${AGENT_ID}/repo"
 AGENT_BIN="${TRTMC_AGENT_BIN:-codex}"
 read -r -a AGENT_ARGS <<< "${TRTMC_AGENT_ARGS:-exec -s danger-full-access -a never -C {workspace} {prompt}}"
 

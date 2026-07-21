@@ -32,7 +32,11 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Config — edit these to match your setup
 # ---------------------------------------------------------------------------
-WORKSPACE_ROOT = "/workspace/users/yifeif/workspaces"
+HOST_ROOT = os.environ.get("TRTMC_HOST_ROOT", "")
+WORKSPACE_ROOT = os.environ.get(
+    "TRTMC_WORKSPACE_ROOT",
+    str(Path(HOST_ROOT) / "workspaces") if HOST_ROOT else "",
+)
 DISCOVER_CONTAINER = "trtmc-dev-gb300-agent-1"
 DEFAULT_AGENT_BIN = "codex"
 DEFAULT_AGENT_ARGS = [
@@ -148,14 +152,14 @@ WORKER_PROMPT = textwrap.dedent("""\
       "
       ```
     - Read existing family plugins for reference at:
-      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/
+      {workspace}/python/tensorrt_model_connect/families/
     - Read the selected family's model/model.py for graph operations and blocks.
     - Read the HF model's modeling code to understand the EXACT computation.
     - If the model uses a novel attention mechanism (disentangled, sliding
       window, linear, etc.), you MUST implement it correctly in the plugin's
       build_engine() — do not approximate or skip it.
     - Edit the plugin on the HOST at:
-      /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/python/tensorrt_model_connect/families/{family_name}/
+      {workspace}/python/tensorrt_model_connect/families/{family_name}/
       Keep plugin.py and config.py at the root; put weight loading in weights/
       and graph/build/runtime implementation in model/.
 
@@ -166,7 +170,7 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     How to add a C++ runtime plugin:
     1. Read an existing plugin for reference. Key files at:
-       /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/src/runtime/plugins/
+       {workspace}/src/runtime/plugins/
        - decoder_plugin.cpp (decoder-only text gen)
        - a specialized encoder-decoder plugin
        - encoder_plugin.cpp (encoder-only)
@@ -185,7 +189,7 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     ### Done
     When ALL THREE validation gates pass, create the E2E manifest at (HOST path):
-    /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/tests/e2e/models/{family_name}/manifests/{family_name}.json
+    {workspace}/tests/e2e/models/{family_name}/manifests/{family_name}.json
     Also list it in tests/e2e/models/{family_name}/MODEL.toml.
     The manifest must NOT have a "skip" field.
 
@@ -194,7 +198,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     docker exec trtmc-dev-gb300-{agent_id} /opt/venv/bin/python -m pytest \
         tests/e2e/models/{family_name}/test_{family_name}_e2e.py -v \
         --e2e-model {family_name} \
-        --engine-dir /workspace/users/yifeif/tensorrt-model-connect/engines \
+        --engine-dir /work/engines \
         --trtmc-binary ./build/trtmc --hf-python /opt/venv/bin/python \
         --rebuild-engines
     ```
@@ -206,7 +210,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     ### Submit
     After validation passes, prepare a focused commit and GitHub PR:
     ```
-    cd /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect
+    cd {workspace}
     git fetch github main
     git switch -C autopilot/{family_name} github/main
     git status --short
@@ -237,8 +241,8 @@ WORKER_PROMPT = textwrap.dedent("""\
       "
       ```
       The container's /workspace/tensorrt-model-connect/ maps to the host workspace.
-      Do NOT try to write directly to /workspace/users/yifeif/workspaces/{agent_id}/
-      — that path is read-only from the sandbox. Always write via docker exec.
+      Do not write to any other host workspace. Always write through this
+      worktree's matching container.
     - **Decoupling**: Create NEW files for your plugin — do NOT modify existing
       plugins (decoder, encoder, or modality-specific plugins, etc.).
       Each family gets its own isolated Python plugin and (if needed) its own
@@ -349,7 +353,9 @@ _OPTIMIZE_SECTION = """\
 """
 
 
-def build_prompt(task: dict, agent_id: str, *, optimize: bool = False) -> str:
+def build_prompt(
+    task: dict, agent_id: str, workspace: str, *, optimize: bool = False
+) -> str:
     """Fill in the worker prompt template."""
     trust_rc = task.get("trust_remote_code", False)
     optimize_section = ""
@@ -363,6 +369,7 @@ def build_prompt(task: dict, agent_id: str, *, optimize: bool = False) -> str:
         hf_id=task["hf_id"],
         family_name=task["family_name"],
         agent_id=agent_id,
+        workspace=workspace,
         trust_remote_code_line=(
             "- trust_remote_code: yes" if trust_rc else ""),
         trust_flag="--trust-remote-code" if trust_rc else "",
@@ -418,9 +425,13 @@ def launch_batch(
 ) -> dict[str, subprocess.Popen]:
     """Launch the configured agent CLI for each (agent_id, task) pair."""
     procs = {}
+    if not WORKSPACE_ROOT:
+        raise RuntimeError(
+            "Set TRTMC_HOST_ROOT or TRTMC_WORKSPACE_ROOT before launching autopilot agents"
+        )
     for agent_id, task in batch:
-        workspace = f"{WORKSPACE_ROOT}/{agent_id}/tensorrt-model-connect"
-        prompt = build_prompt(task, agent_id, optimize=optimize)
+        workspace = str(Path(WORKSPACE_ROOT) / agent_id / "repo")
+        prompt = build_prompt(task, agent_id, workspace, optimize=optimize)
         family = task["family_name"]
 
         if dry_run:

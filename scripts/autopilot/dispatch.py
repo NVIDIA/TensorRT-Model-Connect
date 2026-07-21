@@ -38,7 +38,11 @@ from pathlib import Path
 # Configuration
 # ---------------------------------------------------------------------------
 
-WORKSPACE_ROOT = "/workspace/users/yifeif/workspaces"
+HOST_ROOT = os.environ.get("TRTMC_HOST_ROOT", "")
+WORKSPACE_ROOT = os.environ.get(
+    "TRTMC_WORKSPACE_ROOT",
+    str(Path(HOST_ROOT) / "workspaces") if HOST_ROOT else "",
+)
 DEFAULT_AGENTS = ["agent-1", "agent-2", "agent-3", "agent-4"]
 DEFAULT_AGENT_BIN = "codex"
 DEFAULT_AGENT_ARGS = [
@@ -137,7 +141,7 @@ WORKER_PROMPT = textwrap.dedent("""\
 
     ## Step 5: Commit, push, and open a PR
     ```
-    cd /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect
+    cd {workspace}
     git fetch github main
     git switch -C autopilot/{family_name} github/main
     git add python/tensorrt_model_connect/families/{family_name}.py
@@ -154,7 +158,7 @@ WORKER_PROMPT = textwrap.dedent("""\
     At the end, write a JSON status file to the WORKSPACE (not container /tmp):
     ```
     echo '{{"family": "{family_name}", "status": "PASS", "branch": "autopilot/{family_name}"}}' \\
-        > /workspace/users/yifeif/workspaces/{agent_id}/tensorrt-model-connect/.autopilot_status.json
+        > {workspace}/.autopilot_status.json
     ```
     If all retries failed, write status "FAIL" with the last error message instead.
     Write this file on the HOST filesystem, not via docker exec.
@@ -186,7 +190,9 @@ _OPTIMIZE_SECTION = """\
 """
 
 
-def build_prompt(task: dict, agent_id: str, *, optimize: bool = False) -> str:
+def build_prompt(
+    task: dict, agent_id: str, workspace: str, *, optimize: bool = False
+) -> str:
     """Fill in the worker prompt template for a specific task."""
     trust_rc = task.get("trust_remote_code", False)
     optimize_section = ""
@@ -198,6 +204,7 @@ def build_prompt(task: dict, agent_id: str, *, optimize: bool = False) -> str:
         hf_id=task["hf_id"],
         family_name=task["family_name"],
         agent_id=agent_id,
+        workspace=workspace,
         trust_remote_code_line=(
             "- trust_remote_code: yes" if trust_rc else ""),
         trust_flag="--trust-remote-code" if trust_rc else "",
@@ -248,8 +255,12 @@ def launch_agent(
     optimize: bool = False,
 ) -> subprocess.Popen | None:
     """Launch an agent CLI session for one task in one agent workspace."""
-    workspace = f"{WORKSPACE_ROOT}/{agent_id}/tensorrt-model-connect"
-    prompt = build_prompt(task, agent_id, optimize=optimize)
+    if not WORKSPACE_ROOT:
+        raise RuntimeError(
+            "Set TRTMC_HOST_ROOT or TRTMC_WORKSPACE_ROOT before launching autopilot agents"
+        )
+    workspace = str(Path(WORKSPACE_ROOT) / agent_id / "repo")
+    prompt = build_prompt(task, agent_id, workspace, optimize=optimize)
 
     if dry_run:
         print(f"\n{'='*60}")
@@ -296,7 +307,7 @@ def wait_for_batch(
                 # Check status file (written to workspace by agent)
                 status_file = (
                     f"{WORKSPACE_ROOT}/{agent_id}/"
-                    f"tensorrt-model-connect/.autopilot_status.json"
+                    f"repo/.autopilot_status.json"
                 )
                 status = {"family": family, "status": "UNKNOWN"}
                 if os.path.exists(status_file):
@@ -455,7 +466,13 @@ def main():
 
     # Verify agent workspaces exist
     for aid in agent_ids:
-        ws = Path(f"{WORKSPACE_ROOT}/{aid}/tensorrt-model-connect")
+        if not WORKSPACE_ROOT:
+            print(
+                "ERROR: Set TRTMC_HOST_ROOT or TRTMC_WORKSPACE_ROOT before dispatch.",
+                file=sys.stderr,
+            )
+            return
+        ws = Path(WORKSPACE_ROOT) / aid / "repo"
         if not ws.is_dir() and args.mode != "dry-run":
             print(f"WARNING: Workspace {ws} does not exist.", file=sys.stderr)
             print(f"  Bootstrap it: ./scripts/bootstrap_workspace.sh "

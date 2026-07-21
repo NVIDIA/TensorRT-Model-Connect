@@ -31,6 +31,24 @@
   test.
 - Never change the test passing criteria for the purpose of passing CI. If you believe the test is faulty, escalate to a human
 
+## Managed GPU Host Workspaces
+
+- On a shared GPU host, use `scripts/manage_gpu_workspace.sh` and the canonical
+  layout documented in `website/docs/operations/managed-gpu-workspaces.md`.
+- Use one stable workspace ID for one deployed worktree, one run directory, one
+  state manifest, and one Docker container. Never reuse a container for a
+  different worktree, even when the image and branch are similar.
+- Put durable outputs under the matching `runs/<workspace-id>/` tree. Only the
+  Hugging Face cache and read-only datasets are shared across workspaces. Do
+  not write new artifacts into a legacy shared engine directory or an ad hoc
+  home, repository, or temporary directory.
+- Keep hostnames, addresses, credentials, and host-specific roots in the
+  machine-local host config, never in tracked repository files.
+- Before proposing cleanup, run the manager's read-only `audit` command and
+  match every candidate to its workspace/container state. Agents must not
+  remove containers, workspaces, run directories, caches, images, or Docker
+  build cache without explicit user approval for the exact targets.
+
 ## Repo Skills
 
 - Codex skills packaged for this repo are registered through

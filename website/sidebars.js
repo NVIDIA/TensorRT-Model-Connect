@@ -114,6 +114,7 @@ const sidebars = {
         'operations/ai-agent-system',
         'operations/ai-local-pipeline',
         'operations/ai-staging',
+        'operations/managed-gpu-workspaces',
         'operations/model-e2e-task-prompt'
       ]
     },
