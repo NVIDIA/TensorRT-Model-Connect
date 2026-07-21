@@ -36,7 +36,16 @@ _EXACT_REQUIREMENT_RE = re.compile(
 
 
 def _absolute_python(path: str) -> str:
-    return str(Path(path).absolute()) if path else ""
+    if not path:
+        return ""
+
+    candidate = Path(path).absolute()
+    if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", candidate.name):
+        environment_root = candidate.parent.parent
+        canonical = candidate.parent / "python"
+        if (environment_root / "pyvenv.cfg").is_file() and canonical.is_file():
+            return str(canonical)
+    return str(candidate)
 
 
 def _normalize_profile_name(profile_name: str | None) -> str:

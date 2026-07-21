@@ -44,6 +44,25 @@ def test_resolve_case_python_profiles_defaults_to_base():
     }
 
 
+def test_python_profile_key_normalizes_virtualenv_interpreter_aliases(tmp_path):
+    environment = tmp_path / "venv"
+    bin_dir = environment / "bin"
+    bin_dir.mkdir(parents=True)
+    (environment / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+    canonical = bin_dir / "python"
+    canonical.write_text("", encoding="utf-8")
+
+    assert shared_profiles._absolute_python(str(canonical)) == str(canonical)
+    assert shared_profiles._absolute_python(str(bin_dir / "python3")) == str(canonical)
+    assert shared_profiles._absolute_python(str(bin_dir / "python3.12")) == str(canonical)
+
+
+def test_python_profile_key_preserves_non_virtualenv_interpreter_path(tmp_path):
+    interpreter = tmp_path / "python3"
+
+    assert shared_profiles._absolute_python(str(interpreter)) == str(interpreter)
+
+
 def test_resolve_case_profile_names_apply_manifest_profiles():
     case = _make_case(
         runtime_strategy="example_decoder_decoder_kv_cache",
