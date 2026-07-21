@@ -120,11 +120,14 @@ def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (catalog_family / "manifests/example.json").write_text(
-        '{"fp8_scales": "data/fp8-scales.json"}\n', encoding="utf-8"
+        '{"fp8_scales": "data/fp8-scales.json", '
+        '"testcases": [{"test_image": "data/test_img.jpeg"}]}\n',
+        encoding="utf-8",
     )
     (catalog_family / "data").mkdir()
     (catalog_family / "data/Recording.wav").write_bytes(b"RIFF-test-audio")
     (catalog_family / "data/fp8-scales.json").write_text("{}\n", encoding="utf-8")
+    (catalog_family / "data/test_img.jpeg").write_bytes(b"test-image")
     recipe = recipe_module.TensorRTModelConnectConan()
     recipe.source_folder = str(source)
     recipe.build_folder = str(build)
@@ -186,6 +189,7 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     assert (catalog / "manifests" / "example.json").is_file()
     assert (catalog / "data/Recording.wav").is_file()
     assert (catalog / "data/fp8-scales.json").is_file()
+    assert (catalog / "data/test_img.jpeg").is_file()
 
 
 def test_package_stages_the_complete_canonical_benchmark_catalog(
@@ -211,6 +215,8 @@ def test_package_stages_the_complete_canonical_benchmark_catalog(
     assert (installed / "gpt2/manifests/distilgpt2.json").is_file()
     assert (installed / "whisper/data/Recording.wav").is_file()
     assert (installed / "flux/data/flux2-fp8-scales.json").is_file()
+    assert (installed / "qwen_image/data/test_img.jpeg").is_file()
+    assert (installed / "sana_wm/assets/demo_0.png").is_file()
 
 
 def test_sdist_appends_only_the_minimal_benchmark_catalog(
@@ -225,11 +231,14 @@ def test_sdist_appends_only_the_minimal_benchmark_catalog(
     (family / "manifests").mkdir(parents=True)
     (family / "MODEL.toml").write_text('id = "example"\n', encoding="utf-8")
     (family / "manifests/example.json").write_text(
-        '{"fp8_scales": "data/fp8-scales.json"}\n', encoding="utf-8"
+        '{"fp8_scales": "data/fp8-scales.json", '
+        '"testcases": [{"test_image": "data/test_img.jpeg"}]}\n',
+        encoding="utf-8",
     )
     (family / "data").mkdir()
     (family / "data/Recording.wav").write_bytes(b"RIFF-test-audio")
     (family / "data/fp8-scales.json").write_text("{}\n", encoding="utf-8")
+    (family / "data/test_img.jpeg").write_bytes(b"test-image")
     (family / "data/not-a-benchmark-input.bin").write_bytes(b"large fixture")
     archive = tmp_path / "example-0.1.0.tar.gz"
     with tarfile.open(archive, "w:gz") as destination:
@@ -245,6 +254,7 @@ def test_sdist_appends_only_the_minimal_benchmark_catalog(
     assert f"{prefix}/manifests/example.json" in names
     assert f"{prefix}/data/Recording.wav" in names
     assert f"{prefix}/data/fp8-scales.json" in names
+    assert f"{prefix}/data/test_img.jpeg" in names
     assert f"{prefix}/data/not-a-benchmark-input.bin" not in names
 
 

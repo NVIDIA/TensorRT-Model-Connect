@@ -298,8 +298,25 @@ Json run_generate_image(trtmc::IPipeline& pipeline, const Json& request, int war
             seeds.push_back(static_cast<std::uint32_t>(config.seed + index));
         }
     }
+    trtmc::io::LoadedImage input_image;
+    if (request.contains("image_path")) {
+        if (batch_size != 1) {
+            throw std::runtime_error("image-conditioned generation supports batch_size=1 only");
+        }
+        input_image = trtmc::io::read_image(request.at("image_path").get<std::string>());
+        if (input_image.empty()) {
+            throw std::runtime_error("cannot decode image-conditioned generation input");
+        }
+    }
     std::vector<trtmc::ImageResult> last;
-    const auto generate = [&]() { return pipeline.generate_image_batch(prompts, seeds, config); };
+    const auto generate = [&]() {
+        if (!input_image.empty()) {
+            return std::vector<trtmc::ImageResult>{
+                pipeline.generate_image(prompts.front(), input_image.pixels.data(),
+                                        input_image.height, input_image.width, config)};
+        }
+        return pipeline.generate_image_batch(prompts, seeds, config);
+    };
     for (int index = 0; index < warmup; ++index) {
         last = generate();
     }

@@ -55,8 +55,7 @@ class ManifestCatalog:
         for path in sorted(self.root.glob("*/manifests/*.json")):
             try:
                 model = self._load(path)
-                operation_for_task_strategy(model.task_strategy)
-                _require_supported_execution(model)
+                _require_supported_model(model)
             except BenchmarkError:
                 continue
             models.append(model)
@@ -66,7 +65,7 @@ class ManifestCatalog:
         direct = Path(selector).expanduser()
         if direct.is_file():
             model = self._load(direct.resolve())
-            _require_supported_execution(model)
+            _require_supported_model(model)
             return model
         if not self.root.is_dir():
             raise BenchmarkError(f"model manifest root does not exist: {self.root}")
@@ -85,7 +84,7 @@ class ManifestCatalog:
             paths = ", ".join(str(item.manifest_path) for item in matches)
             raise BenchmarkError(f"ambiguous model {selector!r}: {paths}")
         model = matches[0]
-        _require_supported_execution(model)
+        _require_supported_model(model)
         return model
 
     @staticmethod
@@ -168,17 +167,18 @@ def _resolve_manifest_asset(path: Path, field: str, value: object) -> Path:
     return resolved
 
 
-def _require_supported_execution(model: ModelDescriptor) -> None:
+def _require_supported_model(model: ModelDescriptor) -> None:
     config = model.distributed_runtime
-    if not config.get("enabled"):
-        return
-    launcher = str(config.get("launcher", "mpirun") or "mpirun")
-    world_size = int(config.get("world_size", config.get("tp_size", 2)) or 2)
-    raise BenchmarkError(
-        f"model profile {model.name!r} requires distributed execution "
-        f"({launcher}, world_size={world_size}), but trtmc-bench currently supports "
-        "single-process benchmark workers only"
-    )
+    if config.get("enabled"):
+        launcher = str(config.get("launcher", "mpirun") or "mpirun")
+        world_size = int(config.get("world_size", config.get("tp_size", 2)) or 2)
+        raise BenchmarkError(
+            f"model profile {model.name!r} requires distributed execution "
+            f"({launcher}, world_size={world_size}), but trtmc-bench currently supports "
+            "single-process benchmark workers only"
+        )
+    operation = operation_for_task_strategy(model.task_strategy)
+    operation.request_from_testcase(model.testcases[0], model.manifest_path.parent.parent)
 
 
 def _model_defaults(path: Path, task_strategy: str) -> Mapping[str, Any]:

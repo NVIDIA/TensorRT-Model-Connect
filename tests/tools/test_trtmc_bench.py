@@ -188,6 +188,7 @@ def test_cli_lists_supported_models(capsys: pytest.CaptureFixture[str]) -> None:
     assert "flux-schnell-l0" in output
     assert "generate_image" in output
     assert "chronos-bolt-tiny-official-tp4" not in output
+    assert "sana-wm-bidirectional" not in output
 
 
 def test_catalog_rejects_distributed_profiles_not_supported_by_worker() -> None:
@@ -300,6 +301,15 @@ def test_batch_two_profile_preserves_manifest_batch_inputs_and_build_shape(
     assert case.request["seeds"] == [42, 42]
     command = list(plan.command)
     assert command[command.index("--max-batch-size") + 1] == "2"
+
+
+def test_image_edit_profile_resolves_built_in_condition_image(tmp_path: Path) -> None:
+    model = ManifestCatalog().resolve("qwen-image-edit-2511")
+    case = resolve_case(model, tmp_path / "pending.trtfb")
+
+    assert case.request["image_path"] == "data/test_img.jpeg"
+    assert len(case.request["image_sha256"]) == 64
+    assert Path(case.worker_request()["request"]["image_path"]).is_file()
 
 
 def test_auto_build_requires_and_passes_manifest_fp8_scales(tmp_path: Path) -> None:

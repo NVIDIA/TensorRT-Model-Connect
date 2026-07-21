@@ -58,6 +58,23 @@ def _prompt(testcase: Mapping[str, Any], operation: str) -> str:
     return prompt
 
 
+def _model_asset(declared: str, model_root: Path, operation: str) -> tuple[Path, Path]:
+    path = Path(declared).expanduser()
+    if path.is_absolute():
+        resolved = path
+        portable = path
+    else:
+        portable = path
+        resolved = model_root / portable
+        source_prefix = Path("tests/e2e/models") / model_root.name
+        if not resolved.is_file() and path.is_relative_to(source_prefix):
+            portable = path.relative_to(source_prefix)
+            resolved = model_root / portable
+    if not resolved.is_file():
+        raise BenchmarkError(f"cannot read {operation} input {resolved}")
+    return portable, resolved
+
+
 def _generate_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[str, Any]:
     return {
         "batch_size": 1,
@@ -70,7 +87,7 @@ def _generate_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[st
     }
 
 
-def _generate_image_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[str, Any]:
+def _generate_image_request(testcase: Mapping[str, Any], model_root: Path) -> dict[str, Any]:
     inputs = testcase.get("inputs", {})
     if not isinstance(inputs, Mapping):
         raise BenchmarkError("generate_image testcase inputs must be an object")
@@ -109,6 +126,14 @@ def _generate_image_request(testcase: Mapping[str, Any], _model_root: Path) -> d
     if prompts is not None and seeds is not None:
         request["prompts"] = prompts
         request["seeds"] = seeds
+    declared_image = testcase.get("test_image")
+    if declared_image is not None:
+        if not isinstance(declared_image, str) or not declared_image:
+            raise BenchmarkError("generate_image test_image must be a non-empty path")
+        image_path, _ = _model_asset(declared_image, model_root, "generate_image")
+        if batch_size != 1:
+            raise BenchmarkError("image-conditioned generate_image supports batch_size=1 only")
+        request["image_path"] = str(image_path)
     return request
 
 

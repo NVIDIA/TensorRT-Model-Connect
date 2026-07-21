@@ -74,19 +74,27 @@ def _stage_benchmark_catalog(recipe: ConanFile, source_folder: str | Path, packa
             raw = json.loads(manifest.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ConanException(f"cannot read benchmark manifest {manifest}: {exc}") from exc
-        if "fp8_scales" not in raw:
-            continue
-        declared = raw["fp8_scales"]
-        if not isinstance(declared, str) or not declared.strip():
-            raise ConanException(f"fp8_scales in benchmark manifest {manifest} must be a path")
-        family = manifest.parent.parent.resolve()
-        asset = (family / declared).resolve()
-        if not asset.is_relative_to(family) or not asset.is_file():
-            raise ConanException(
-                f"fp8_scales in benchmark manifest {manifest} is missing or outside {family}: "
-                f"{asset}"
-            )
-        benchmark_assets.add(asset)
+        references = [("fp8_scales", raw.get("fp8_scales"))]
+        for index, testcase in enumerate(raw.get("testcases", [])):
+            if isinstance(testcase, dict) and "test_image" in testcase:
+                references.append((f"testcases[{index}].test_image", testcase["test_image"]))
+        for field, declared in references:
+            if declared is None:
+                continue
+            if not isinstance(declared, str) or not declared.strip():
+                raise ConanException(f"{field} in benchmark manifest {manifest} must be a path")
+            family = manifest.parent.parent.resolve()
+            declared_path = Path(declared)
+            asset = (family / declared_path).resolve()
+            source_prefix = Path("tests/e2e/models") / family.name
+            if not asset.is_file() and declared_path.is_relative_to(source_prefix):
+                asset = (family / declared_path.relative_to(source_prefix)).resolve()
+            if not asset.is_relative_to(family) or not asset.is_file():
+                raise ConanException(
+                    f"{field} in benchmark manifest {manifest} is missing or outside {family}: "
+                    f"{asset}"
+                )
+            benchmark_assets.add(asset)
     benchmark_assets = sorted(benchmark_assets)
 
     destination = package / "benchmark" / "_catalog"
