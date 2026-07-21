@@ -6,6 +6,8 @@
 
 The dispatcher owns only discovery, change isolation, bounded fan-out, and
 contract validation. Every model/runtime adapter owns its selector and runner.
+
+Boundary: discover, validate, and aggregate CI contracts; never implement an adapter.
 """
 
 from __future__ import annotations
