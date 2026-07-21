@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -21,7 +22,7 @@ except (ImportError, ModuleNotFoundError):
 
 def _config() -> SimpleNamespace:
     return SimpleNamespace(
-        raw={"rotary_pct": 0.25, "use_parallel_residual": True},
+        raw={},
         hidden_size=16,
         vocab_size=32,
         num_hidden_layers=1,
@@ -31,12 +32,14 @@ def _config() -> SimpleNamespace:
         attention_size=16,
         intermediate_size=32,
         rms_norm_eps=1e-5,
-        rope_theta=10000.0,
     )
 
 
 def test_gpt_neo_plugin_routes_parallel_builds(monkeypatch) -> None:
     module = importlib.import_module("tensorrt_model_connect.families.gpt_neo.plugin")
+    strategy_parameters = set(
+        inspect.signature(module.build_dual_profile_tp_decoder_engine).parameters
+    )
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -57,6 +60,20 @@ def test_gpt_neo_plugin_routes_parallel_builds(monkeypatch) -> None:
     assert result == b"gpt-tp-plan"
     _, _, max_cache_length, kwargs = calls["build"]
     assert max_cache_length == 23
-    assert kwargs["parallel_config"] == parallel
-    assert kwargs["mlp_type"] == "gelu_fc"
-    assert kwargs["verbose"] is True
+    assert kwargs == {
+        "precision": "fp32",
+        "quant_ctx": None,
+        "verbose": True,
+        "parallel_config": parallel,
+    }
+    assert strategy_parameters.isdisjoint(
+        {
+            "norm_type",
+            "mlp_type",
+            "position_type",
+            "activation",
+            "partial_rotary_factor",
+            "interleaved_rope",
+            "parallel_residual",
+        }
+    )
