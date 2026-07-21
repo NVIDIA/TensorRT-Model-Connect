@@ -11,16 +11,16 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_blocks, graph_ops
-from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .plugin import _mark_debug_output
+from . import model as graph_blocks, model as graph_ops
+from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
+from ..plugin import _mark_debug_output
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-    from .config import ModelConfig
-    from ...parallel_config import ParallelConfig
+    from ..weights import WeightDict
+    from ..config import ModelConfig
+    from ....parallel_config import ParallelConfig
 
 
 def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
@@ -558,23 +558,7 @@ def build_nemotron_h_tp_engine(
             )
             hidden_state = result["hidden"]
         elif lt == "attention":
-            result = graph_blocks.add_attention_block(
-                network, hidden_state,
-                cache_k_inputs[attn_counter],
-                cache_v_inputs[attn_counter],
-                attention_mask, position_id,
-                weights=rank_weights,
-                prefix=prefix,
-                hidden_size=hidden,
-                attention_size=attention_size,
-                kv_attention_size=kv_attention_size,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                max_cache_length=max_cache_length,
-                eps_tensor=eps_tensor,
-                position_type="none",
-            )
+            result = graph_blocks.add_attention_block(network, hidden_state, cache_k_inputs[attn_counter], cache_v_inputs[attn_counter], attention_mask, position_id, weights=rank_weights, prefix=prefix, hidden_size=hidden, attention_size=attention_size, kv_attention_size=kv_attention_size, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim, max_cache_length=max_cache_length, eps_tensor=eps_tensor)
             attn_out = add_all_reduce_sum(network, result["attn_out"], parallel.tp_size)
             residual = network.add_elementwise(
                 hidden_state, attn_out, trt.ElementWiseOperation.SUM)

@@ -11,6 +11,8 @@ Postconditions: Layer types are correctly parsed and branch-specific weights loa
 
 from __future__ import annotations
 
+import importlib
+
 import numpy as np
 import pytest
 
@@ -19,8 +21,9 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.nemotron_h as nemotron_h
-    from tensorrt_model_connect.families.nemotron_h.plugin import plugin
+    nemotron_h = importlib.import_module(
+        "tensorrt_model_connect.families.nemotron_h.plugin")
+    plugin = nemotron_h.plugin
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 

@@ -50,15 +50,15 @@ import numpy as np
 from tensorrt_model_connect import trt_compat
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
 )
-from . import graph_ops
-from . import graph_blocks
+from .model import model as graph_ops
+from .model import model as graph_blocks
 from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
@@ -259,7 +259,7 @@ class NemotronHPlugin:
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="Nemotron-H tensor-parallel builds")
-            from .tp_builder import build_nemotron_h_tp_engine
+            from .model.parallel import build_nemotron_h_tp_engine
 
             return build_nemotron_h_tp_engine(
                 config, weights, max_cache_length,
@@ -452,24 +452,7 @@ class NemotronHPlugin:
                 if layer_mask.dtype != layer_trt_dtype:
                     layer_mask = network.add_cast(
                         layer_mask, layer_trt_dtype).get_output(0)
-                result = graph_blocks.add_attention_block(
-                    network, layer_hidden,
-                    cache_k,
-                    cache_v,
-                    layer_mask, position_id,
-                    weights=weights,
-                    prefix=prefix,
-                    hidden_size=hidden,
-                    attention_size=attention_size,
-                    kv_attention_size=kv_attention_size,
-                    num_heads=num_heads,
-                    num_kv_heads=num_kv_heads,
-                    head_dim=head_dim,
-                    max_cache_length=max_cache_length,
-                    eps_tensor=layer_eps,
-                    position_type="none",
-                    dtype=layer_np_dtype,
-                )
+                result = graph_blocks.add_attention_block(network, layer_hidden, cache_k, cache_v, layer_mask, position_id, weights=weights, prefix=prefix, hidden_size=hidden, attention_size=attention_size, kv_attention_size=kv_attention_size, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim, max_cache_length=max_cache_length, eps_tensor=layer_eps, dtype=layer_np_dtype)
                 # add_attention_block does NOT apply residual
                 residual = network.add_elementwise(
                     layer_hidden, result["attn_out"],
