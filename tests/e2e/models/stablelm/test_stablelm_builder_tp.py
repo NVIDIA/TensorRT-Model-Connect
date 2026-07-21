@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 
 import pytest
 
@@ -29,10 +30,19 @@ PLUGIN_CLASS = 'StableLMPlugin'
 MODEL_TYPE = 'stablelm'
 TP_SIZE = 4
 RAW = {'partial_rotary_factor': 0.75}
-EXPECTED_KWARGS = {'mlp_type': 'swiglu',
- 'norm_type': 'layernorm',
- 'partial_rotary_factor': 0.75,
- 'position_type': 'rope'}
+EXPECTED_KWARGS = {'partial_rotary_factor': 0.75}
+FORBIDDEN_STRATEGY_PARAMETERS = {
+    "activation",
+    "dynamic_kv_profile_rows",
+    "embed_input",
+    "hidden_state_output",
+    "interleaved_rope",
+    "mlp_type",
+    "norm_type",
+    "parallel_residual",
+    "position_type",
+    "scale_attn_weights",
+}
 
 
 def _config(model_type: str, tp_size: int, raw: dict[str, object]) -> ModelConfig:
@@ -88,9 +98,9 @@ def test_stablelm_plugin_routes_tp_build(monkeypatch) -> None:
     assert captured["max_cache_length"] == 17
     kwargs = captured["kwargs"]
     assert kwargs["precision"] == "fp16"
-    assert kwargs["quant_ctx"] is None
     assert kwargs["verbose"] is True
     assert kwargs["parallel_config"] == parallel
+    assert "quant_ctx" not in kwargs
     for key, expected in EXPECTED_KWARGS.items():
         assert kwargs[key] == expected
 
@@ -113,3 +123,20 @@ def test_stablelm_plugin_rejects_quantized_tp(monkeypatch) -> None:
             parallel_config=ParallelConfig(
                 mode="tensor_parallel", tp_size=TP_SIZE, rank=0),
         )
+
+
+def test_stablelm_builders_do_not_expose_generic_strategy_switches() -> None:
+    model = importlib.import_module(
+        "tensorrt_model_connect.families.stablelm.model.model"
+    )
+    parallel = importlib.import_module(
+        "tensorrt_model_connect.families.stablelm.model.parallel"
+    )
+
+    for builder in (
+        model.build_standard_decoder_engine,
+        model.build_dual_profile_decoder_engine,
+        parallel.build_dual_profile_tp_decoder_engine,
+    ):
+        parameters = set(inspect.signature(builder).parameters)
+        assert parameters.isdisjoint(FORBIDDEN_STRATEGY_PARAMETERS)

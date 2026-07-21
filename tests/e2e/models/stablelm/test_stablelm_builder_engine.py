@@ -60,6 +60,14 @@ class StableLMPluginTester(FamilyPluginTester):
     plugin_module = "tensorrt_model_connect.families.stablelm"
     model_type = "stablelm"
 
+    def get_config_dict(self) -> dict:
+        config = super().get_config_dict()
+        # Production uses 0.25 with head_dim=64; the tiny fixture needs an
+        # even rotary width, so head_dim=4 uses 0.5.
+        config["partial_rotary_factor"] = 0.5
+        config["layer_norm_eps"] = config.pop("rms_norm_eps")
+        return config
+
     def make_hf_tensors(self) -> dict[str, np.ndarray]:
         """Create synthetic HF tensors matching StableLM's weight layout.
 
