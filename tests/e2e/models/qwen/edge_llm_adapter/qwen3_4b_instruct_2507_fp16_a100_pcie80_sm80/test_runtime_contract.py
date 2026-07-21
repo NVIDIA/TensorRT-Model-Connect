@@ -272,6 +272,11 @@ def _staged_capsule(tmp_path: Path, fake_runtime: Path):
             "runtime_library": str(fake_runtime),
             "runtime_plugin": str(plugin),
             "runtime_build": {"fake": True},
+            "public_options": {
+                "precision": "fp32",
+                "max_cache_length": 256,
+                "max_batch_size": 1,
+            },
         },
     )
     probe = run_probe(manifest, request)

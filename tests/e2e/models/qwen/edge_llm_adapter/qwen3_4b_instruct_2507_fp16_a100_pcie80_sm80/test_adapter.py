@@ -76,6 +76,11 @@ RUNTIME_PLUGIN = "libNvInfer_edgellm_plugin.so"
 MANIFEST_PATH = CAPSULE_ROOT / "IMPLEMENTATION.toml"
 PROFILE_PATH = CAPSULE_ROOT / "profiles" / "a100-pcie80-sm80-fp16.toml"
 ADAPTER_PATH = CAPSULE_ROOT / "adapter.py"
+MC_DEFAULT_DEPLOYMENT = {
+    "precision": "fp32",
+    "max_cache_length": 256,
+    "max_batch_size": 1,
+}
 ENGINE_MODEL_CONFIG = {
     "model": "qwen3",
     "spec_decode_type": "none",
@@ -292,11 +297,13 @@ def _request(
     target: dict[str, object] | None = None,
     parameters: dict[str, object] | None = None,
 ) -> ImplementationRequest:
+    request_parameters = dict(parameters or {})
+    request_parameters.setdefault("public_options", dict(MC_DEFAULT_DEPLOYMENT))
     return ImplementationRequest(
         model_id=model_id,
         model_revision=revision,
         target=target or _target(),
-        parameters=parameters,
+        parameters=request_parameters,
     )
 
 
@@ -585,6 +592,58 @@ def test_manifest_profile_and_dependency_pins_are_exact_and_capsule_owned() -> N
     _load_adapter_module()._validate_capsule_data(profile)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("schema_version", True),
+        ("schema_version", 1.0),
+        ("max_cache_length", True),
+        ("max_batch_size", 4.0),
+        ("minimum_memory_mib", 80000.0),
+    ),
+)
+def test_capsule_profile_rejects_cross_type_values(field: str, value: object) -> None:
+    adapter = _load_adapter_module()
+    with PROFILE_PATH.open("rb") as profile_file:
+        profile = tomllib.load(profile_file)
+    profile[field] = value
+
+    with pytest.raises(adapter.AdapterError, match=field):
+        adapter._validate_capsule_data(profile)
+
+
+@pytest.mark.parametrize("schema_version", (True, 1.0))
+def test_capsule_request_rejects_cross_type_schema_version(
+    tmp_path: Path, schema_version: object
+) -> None:
+    adapter = _load_adapter_module()
+    payload = _request().to_json()
+    payload["implementation_id"] = IMPLEMENTATION_ID
+    payload["schema_version"] = schema_version
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match="schema_version"):
+        adapter._load_request(request_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), (("gpu_architecture", 80), ("gpu_name", False))
+)
+def test_capsule_request_rejects_cross_type_target(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    adapter = _load_adapter_module()
+    payload = _request().to_json()
+    payload["implementation_id"] = IMPLEMENTATION_ID
+    payload["target"][field] = value
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match="supported A100 target"):
+        adapter._load_request(request_path)
+
+
 def test_adapter_restores_parent_active_device_for_heterogeneous_visible_gpus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -630,6 +689,23 @@ def test_supported_probe_selects_profile_without_hidden_opt_in(
     assert probe.profile_id == PROFILE_ID
     assert not probe.reason
 
+    default_public_probe = run_probe(
+        manifest,
+        _request(
+            parameters={
+                **parameters,
+                "public_options": {
+                    "precision": "fp32",
+                    "max_cache_length": 256,
+                    "max_batch_size": 1,
+                },
+            }
+        ),
+    )
+    assert default_public_probe.supported
+    assert default_public_probe.profile_id == PROFILE_ID
+    assert not default_public_probe.reason
+
     unsupported = run_probe(
         manifest,
         _request(parameters={**parameters, "precision": "fp32"}),
@@ -642,7 +718,7 @@ def test_supported_probe_selects_profile_without_hidden_opt_in(
         _request(parameters={**parameters, "public_options": {"dynamic_kv_cache": True}}),
     )
     assert not unsupported_option.supported
-    assert "dynamic_kv_cache=true" in unsupported_option.reason
+    assert "dynamic_kv_cache=False" in unsupported_option.reason
 
     with pytest.raises(BuildAdapterError, match="unsupported parameters: deployment"):
         run_probe(
@@ -651,7 +727,7 @@ def test_supported_probe_selects_profile_without_hidden_opt_in(
         )
 
 
-def test_established_mc_defaults_do_not_change_the_requested_profile() -> None:
+def test_established_mc_defaults_select_the_qualified_profile() -> None:
     import inspect
 
     from tensorrt_model_connect.engine_builder import build
@@ -663,12 +739,88 @@ def test_established_mc_defaults_do_not_change_the_requested_profile() -> None:
     }
 
     reason = _load_adapter_module()._public_option_reason(defaults)
-    assert "requires public option max_batch_size=4; got 1" in reason
+    assert defaults["precision"] == "fp32"
+    assert defaults["max_cache_length"] == 256
+    assert defaults["max_batch_size"] == 1
+    assert reason == ""
+
+
+@pytest.mark.parametrize(
+    ("precision", "max_cache_length", "max_batch_size"),
+    (
+        ("fp16", 256, 1),
+        ("fp32", 4096, 1),
+        ("fp32", 256, 4),
+        ("fp16", 4096, 1),
+        ("fp32", 4096, 4),
+        ("fp16", 256, 4),
+        ("fp16", 4096, True),
+    ),
+)
+def test_mixed_or_unqualified_public_profile_tuple_fails_closed(
+    precision: str,
+    max_cache_length: int,
+    max_batch_size: int,
+) -> None:
+    reason = _load_adapter_module()._public_option_reason(
+        {
+            "precision": precision,
+            "max_cache_length": max_cache_length,
+            "max_batch_size": max_batch_size,
+        }
+    )
+
+    assert "unsupported capsule profile tuple" in reason
+    assert "expected the complete MC default tuple" in reason
+
+
+@pytest.mark.parametrize(
+    "partial",
+    (
+        {},
+        {"precision": "fp32"},
+        {"max_cache_length": 256},
+        {"max_batch_size": 1},
+        {"precision": "fp16", "max_cache_length": 4096},
+    ),
+)
+def test_partial_public_profile_tuple_fails_closed(partial: dict[str, object]) -> None:
+    reason = _load_adapter_module()._public_option_reason(partial)
+
+    assert "unsupported capsule profile tuple" in reason
+
+
+@pytest.mark.parametrize(
+    "public_options",
+    (
+        {**MC_DEFAULT_DEPLOYMENT, "tensor_parallel_size": True},
+        {**MC_DEFAULT_DEPLOYMENT, "quant_calibration_samples": 512.0},
+        {**MC_DEFAULT_DEPLOYMENT, "triattention_count_prompt_tokens": 1},
+        {**MC_DEFAULT_DEPLOYMENT, "fp8": 0},
+        {**MC_DEFAULT_DEPLOYMENT, "dynamic_kv_cache": 1},
+        {**MC_DEFAULT_DEPLOYMENT, "verbose": 1},
+        {
+            **MC_DEFAULT_DEPLOYMENT,
+            "parallel_config": {
+                "mode": "single",
+                "rank": -1,
+                "require_mpirun": 1,
+                "tp_size": True,
+            },
+        },
+    ),
+)
+def test_cross_type_public_options_fail_closed(
+    public_options: dict[str, object],
+) -> None:
+    assert _load_adapter_module()._public_option_reason(public_options)
 
 
 @pytest.mark.parametrize("value", (None, False, "", (), [], {}))
 def test_future_inert_public_option_does_not_couple_to_this_adapter(value) -> None:
-    reason = _load_adapter_module()._public_option_reason({"future_option": value})
+    reason = _load_adapter_module()._public_option_reason(
+        {**MC_DEFAULT_DEPLOYMENT, "future_option": value}
+    )
     assert reason == ""
 
 
@@ -677,7 +829,7 @@ def test_future_non_inert_public_option_remains_fail_closed() -> None:
     assert "does not recognize public option(s): future_option" in reason
 
 
-def test_public_cli_requires_the_exact_qualified_profile(
+def test_public_cli_accepts_default_and_explicit_qualified_profiles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import tensorrt_model_connect.build_cli as build_cli
@@ -700,7 +852,10 @@ def test_public_cli_requires_the_exact_qualified_profile(
     assert exit_info.value.code == 0
     options = build_cli._optimized_cli_public_options(captured["args"])
     reason = _load_adapter_module()._public_option_reason(options)
-    assert "requires public option max_batch_size=4; got 1" in reason
+    assert options["precision"] == "fp32"
+    assert options["max_cache_length"] == 256
+    assert options["max_batch_size"] == 1
+    assert reason == ""
 
     monkeypatch.setattr(
         sys,

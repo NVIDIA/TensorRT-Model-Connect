@@ -27,6 +27,7 @@ from tensorrt_model_connect.runtime_provider.target import (
 
 _MODEL_ID = "Qwen/Qwen3-4B-Instruct-2507"
 _IMPLEMENTATION_ID = "qwen3-4b-instruct-2507-fp16.tensorrt-edge-llm-v0.9.trt10.a100-pcie80-sm80"
+_PROFILE_ID = "qwen3-4b-instruct-2507-fp16--a100-pcie80-sm80--edgellm0.9-trt10"
 _PROMPT = "Reply with one short sentence about accelerated computing."
 _MAX_NEW_TOKENS = 32
 _WARMUPS = 5
@@ -384,9 +385,6 @@ if bundle.exists():
 tensorrt_model_connect.build(
     sys.argv[2],
     str(bundle),
-    max_cache_length=4096,
-    precision="fp16",
-    max_batch_size=4,
 )
 if not bundle.is_file():
     raise SystemExit(f"installed Python build produced no bundle: {bundle}")
@@ -664,12 +662,6 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
         _MODEL_ID,
         "-o",
         str(bundle),
-        "--precision",
-        "fp16",
-        "--max-cache-length",
-        "4096",
-        "--max-batch-size",
-        "4",
     ]
     assert not exporter_root.exists()
     _run(build_command, timeout=21_600, cwd=outside_checkout, env=build_env)
@@ -683,6 +675,11 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
     assert header["num_key_value_heads"] == 8
     descriptor = json.loads(_read_bundle_section(bundle, "optimized_runtime.json"))
     assert descriptor["implementation_id"] == _IMPLEMENTATION_ID
+    assert descriptor["profile_id"] == _PROFILE_ID
+    implementation = json.loads(_read_bundle_section(bundle, "implementation.json"))
+    assert implementation["limits"]["max_cache_length"] == 4096
+    assert implementation["limits"]["max_batch_size"] == 4
+    assert implementation["bundle_config"]["precision"] == "fp16"
     inspect = _run(
         [str(binary), "inspect", str(bundle)],
         timeout=60,
@@ -704,8 +701,19 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
         edge_build_inventory = _tree_inventory(configured_edge_build)
         assert edge_build_inventory
     warm_bundle = tmp_path / "qwen3-4b-instruct-2507-edge-warm-profile.trtfb"
-    warm_build_command = list(build_command)
-    warm_build_command[warm_build_command.index(str(bundle))] = str(warm_bundle)
+    warm_build_command = [
+        str(binary),
+        "build",
+        _MODEL_ID,
+        "-o",
+        str(warm_bundle),
+        "--precision",
+        "fp16",
+        "--max-cache-length",
+        "4096",
+        "--max-batch-size",
+        "4",
+    ]
     _run(warm_build_command, timeout=21_600, cwd=outside_checkout, env=build_env)
     warm_exporter_inventory = _verify_exporter_profile(exporter_root)
     assert warm_exporter_inventory == exporter_inventory
@@ -714,6 +722,7 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
         assert _tree_inventory(configured_edge_build) == edge_build_inventory
     warm_descriptor = json.loads(_read_bundle_section(warm_bundle, "optimized_runtime.json"))
     assert warm_descriptor["implementation_id"] == _IMPLEMENTATION_ID
+    assert warm_descriptor["profile_id"] == _PROFILE_ID
 
     load_cache = tmp_path / "load-only-cache"
     expected_load_cache = (
@@ -797,6 +806,7 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
         _read_bundle_section(installed_python_bundle, "optimized_runtime.json")
     )
     assert installed_descriptor["implementation_id"] == _IMPLEMENTATION_ID
+    assert installed_descriptor["profile_id"] == _PROFILE_ID
 
     if configured_edge_build is None:
         pytest.fail(

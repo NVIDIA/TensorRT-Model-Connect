@@ -164,6 +164,9 @@ _EXPECTED_ENGINE_BUILDER_CONFIG = {
     "max_lora_rank": 0,
     "trt_native_ops": False,
 }
+_PUBLIC_PROFILE_TUPLE_FIELDS = ("precision", "max_cache_length", "max_batch_size")
+_MC_PUBLIC_DEFAULT_PROFILE_TUPLE = ("fp32", 256, 1)
+_QUALIFIED_EDGE_PUBLIC_PROFILE_TUPLE = ("fp16", 4096, 4)
 _REQUIRED_TARGET = {
     "os": "linux",
     "architecture": "x86_64",
@@ -465,9 +468,10 @@ def _validate_capsule_data(profile: Mapping[str, Any]) -> None:
         "artifact_layout": "edge_engine_directory_v1",
     }
     for field, expected in expected_profile.items():
-        if profile.get(field) != expected:
+        actual = profile.get(field)
+        if type(actual) is not type(expected) or actual != expected:
             raise AdapterError(
-                f"Capsule profile field {field} must be {expected!r}, got {profile.get(field)!r}"
+                f"Capsule profile field {field} must be {expected!r}, got {actual!r}"
             )
     _pinned_edge_dependency()
 
@@ -512,7 +516,7 @@ def _load_request(path: Path) -> dict[str, Any]:
     unknown = sorted(set(request) - allowed)
     if unknown:
         raise AdapterError(f"Capsule request contains unknown fields: {', '.join(unknown)}")
-    if request.get("schema_version") != 1:
+    if type(request.get("schema_version")) is not int or request["schema_version"] != 1:
         raise AdapterError("Capsule request schema_version must be 1")
     if request.get("implementation_id") != IMPLEMENTATION_ID:
         raise AdapterError("Capsule request implementation_id does not match this capsule")
@@ -613,8 +617,8 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
         "trust_remote_code",
     )
     for field in unsupported_when_true:
-        if options.get(field) is True:
-            return f"Qwen Edge-LLM capsule does not support public option {field}=true"
+        if field in options and options[field] is not False:
+            return f"Qwen Edge-LLM capsule requires public option {field}=False"
 
     exact_defaults = {
         "decoder_engine_layout": "split",
@@ -655,39 +659,85 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
         return "Qwen Edge-LLM capsule does not recognize public option(s): " + ", ".join(unknown)
 
     for field, expected in exact_defaults.items():
-        if field in options and options[field] != expected:
+        if field in options and (
+            type(options[field]) is not type(expected) or options[field] != expected
+        ):
             return (
                 f"Qwen Edge-LLM capsule requires public option {field}={expected!r}; "
                 f"got {options[field]!r}"
             )
 
-    # A qualified profile owns only the exact request it was validated for.
-    # Never reinterpret an explicit MC request as a different Edge engine.
+    if "verbose" in options and type(options["verbose"]) is not bool:
+        return "Qwen Edge-LLM capsule requires public option verbose to be a boolean"
+
     exact_profile_options = {
-        "fp8": (False,),
-        "max_batch_size": (4,),
-        "max_cache_length": (4096,),
-        "method": ("auto",),
-        "precision": ("fp16",),
-        "quantize": (None,),
+        "fp8": False,
+        "method": "auto",
+        "quantize": None,
     }
-    for field, accepted in exact_profile_options.items():
-        if field in options and options[field] not in accepted:
+    for field, expected in exact_profile_options.items():
+        if field in options and (
+            type(options[field]) is not type(expected) or options[field] != expected
+        ):
             return (
                 "Qwen Edge-LLM capsule requires public option "
-                f"{field}={accepted[0]!r}; got {options[field]!r}"
+                f"{field}={expected!r}; got {options[field]!r}"
             )
 
+    profile_tuple_reason = _public_profile_tuple_reason(options)
+    if profile_tuple_reason:
+        return profile_tuple_reason
+
     parallel = options.get("parallel_config")
-    if parallel not in (None, {}):
-        if not isinstance(parallel, dict) or parallel != {
+    if parallel is not None and not (type(parallel) is dict and not parallel):
+        expected_parallel = {
             "mode": "single",
             "rank": -1,
             "require_mpirun": True,
             "tp_size": 1,
-        }:
+        }
+        if type(parallel) is not dict or set(parallel) != set(expected_parallel) or any(
+            type(parallel[field]) is not type(expected)
+            or parallel[field] != expected
+            for field, expected in expected_parallel.items()
+        ):
             return "Qwen Edge-LLM capsule does not support parallel_config"
     return ""
+
+
+def _public_profile_tuple_reason(parameters: Mapping[str, Any]) -> str:
+    """Validate the two complete MC request tuples owned by this profile.
+
+    MC's unchanged public API always forwards its effective defaults. For this
+    exact model, revision, and platform, the complete default tuple is a
+    model-local alias for the qualified EdgeLLM profile. Any partial or mixed
+    tuple remains unsupported so selection fails closed.
+    """
+
+    present = tuple(field for field in _PUBLIC_PROFILE_TUPLE_FIELDS if field in parameters)
+
+    actual = tuple(parameters.get(field) for field in _PUBLIC_PROFILE_TUPLE_FIELDS)
+    supported = (
+        _MC_PUBLIC_DEFAULT_PROFILE_TUPLE,
+        _QUALIFIED_EDGE_PUBLIC_PROFILE_TUPLE,
+    )
+    if len(present) == len(_PUBLIC_PROFILE_TUPLE_FIELDS) and any(
+        all(
+            type(value) is type(expected) and value == expected
+            for value, expected in zip(actual, candidate)
+        )
+        for candidate in supported
+    ):
+        return ""
+
+    formatted_actual = ", ".join(
+        f"{field}={parameters.get(field)!r}" for field in _PUBLIC_PROFILE_TUPLE_FIELDS
+    )
+    return (
+        f"unsupported capsule profile tuple {formatted_actual}; expected the complete MC "
+        f"default tuple {_MC_PUBLIC_DEFAULT_PROFILE_TUPLE!r} or qualified EdgeLLM tuple "
+        f"{_QUALIFIED_EDGE_PUBLIC_PROFILE_TUPLE!r}"
+    )
 
 
 def _profile_parameter_reason(parameters: Mapping[str, Any]) -> str:
