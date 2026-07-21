@@ -32,16 +32,16 @@ def _load_launcher():
 
 
 def _write_tensorrt(
-    root: Path, *, build: int = 113, enterprise_aliases: bool = False
+    root: Path, *, build: int = 11, enterprise_aliases: bool = False
 ) -> tuple[Path, Path, Path]:
     include = root / "include"
-    library = root / "lib/libnvinfer.so.11.2.0"
-    parser = root / "lib/libnvonnxparser.so.11.2.0"
+    library = root / "lib/libnvinfer.so.10.16.1"
+    parser = root / "lib/libnvonnxparser.so.10.16.1"
     include.mkdir(parents=True)
     library.parent.mkdir(parents=True)
     (include / "NvInfer.h").write_text("// TensorRT\n", encoding="utf-8")
     (include / "NvOnnxParser.h").write_text("// parser\n", encoding="utf-8")
-    components = (11, 2, 0, build)
+    components = (10, 16, 1, build)
     public_names = (
         "NV_TENSORRT_MAJOR",
         "NV_TENSORRT_MINOR",
@@ -71,7 +71,7 @@ def _write_tensorrt(
 
 
 def _write_tensorrt_wheel(
-    root: Path, *, version: str = "11.2.0.113", name: str = "tensorrt"
+    root: Path, *, version: str = "10.16.1.11", name: str = "tensorrt"
 ) -> Path:
     distribution = name.replace("-", "_")
     wheel = root / f"{distribution}-{version}-cp312-none-linux_x86_64.whl"
@@ -83,10 +83,10 @@ def _write_tensorrt_wheel(
     return wheel
 
 
-def _write_cuda(root: Path, *, encoded: int = 13030) -> tuple[Path, Path, Path, Path]:
+def _write_cuda(root: Path, *, encoded: int = 12090) -> tuple[Path, Path, Path, Path]:
     include = root / "include"
     compiler = root / "bin/nvcc"
-    cudart = root / "lib64/libcudart.so.13.3"
+    cudart = root / "lib64/libcudart.so.12.2"
     driver = root / "lib64/stubs/libcuda.so"
     include.mkdir(parents=True)
     compiler.parent.mkdir(parents=True)
@@ -248,7 +248,7 @@ def test_exact_tensorrt_and_cuda_inputs_are_accepted(
         launcher,
         "_output",
         lambda command, **_kwargs: (
-            "Cuda compilation tools, release 13.3, V13.3.0"
+            "Cuda compilation tools, release 12.9, V12.9.0"
             if str(command[0]).endswith("nvcc")
             else ""
         ),
@@ -275,18 +275,18 @@ def test_wrong_sdk_versions_fail_before_a_build(
 ) -> None:
     launcher = _load_launcher()
     trt_root = tmp_path / "trt"
-    _write_tensorrt(trt_root, build=114 if wrong_input == "tensorrt" else 113)
+    _write_tensorrt(trt_root, build=12 if wrong_input == "tensorrt" else 11)
     trt_wheel = _write_tensorrt_wheel(
         tmp_path,
-        version="11.2.0.114" if wrong_input == "wheel" else "11.2.0.113",
+        version="10.16.1.12" if wrong_input == "wheel" else "10.16.1.11",
         name="tensorrt-bindings" if wrong_input == "wheel-name" else "tensorrt",
     )
     cuda_root = tmp_path / "cuda"
-    _write_cuda(cuda_root, encoded=13020 if wrong_input == "cuda" else 13030)
+    _write_cuda(cuda_root, encoded=13030 if wrong_input == "cuda" else 12090)
     monkeypatch.setattr(
         launcher,
         "_output",
-        lambda *_args, **_kwargs: "Cuda compilation tools, release 13.3, V13.3.0",
+        lambda *_args, **_kwargs: "Cuda compilation tools, release 12.9, V12.9.0",
     )
 
     with pytest.raises(launcher.QualificationError):
@@ -294,6 +294,17 @@ def test_wrong_sdk_versions_fail_before_a_build(
             launcher._resolve_tensorrt(trt_root, trt_wheel)
         else:
             launcher._resolve_cuda(cuda_root)
+
+
+def test_official_cuda12_binding_wheel_is_accepted(tmp_path: Path) -> None:
+    launcher = _load_launcher()
+    trt_root = tmp_path / "trt"
+    _write_tensorrt(trt_root, build=11)
+    wheel = _write_tensorrt_wheel(tmp_path, name="tensorrt-cu12-bindings")
+
+    resolved = launcher._resolve_tensorrt(trt_root, wheel)
+
+    assert resolved.python_wheel == wheel
 
 
 def test_profile_discovery_is_driven_by_complete_model_owned_leaves(tmp_path: Path) -> None:
@@ -345,7 +356,7 @@ def test_full_wheel_build_uses_same_host_linux_x86_64(
     trt_root.mkdir()
     trt_include = trt_root / "include"
     trt_include.mkdir()
-    trt_library = trt_root / "libnvinfer.so.11"
+    trt_library = trt_root / "libnvinfer.so.10"
     trt_library.write_bytes(b"trt")
     trt_wheel = tmp_path / "trt.whl"
     trt_wheel.write_bytes(b"wheel")
@@ -357,7 +368,7 @@ def test_full_wheel_build_uses_same_host_linux_x86_64(
     compiler.parent.mkdir()
     compiler.write_text("nvcc", encoding="utf-8")
     compiler.chmod(compiler.stat().st_mode | stat.S_IXUSR)
-    cudart = cuda_root / "libcudart.so.13"
+    cudart = cuda_root / "libcudart.so.12"
     cudart.write_bytes(b"cuda")
     driver = cuda_root / "libcuda.so"
     driver.write_bytes(b"driver")
@@ -389,8 +400,143 @@ def test_full_wheel_build_uses_same_host_linux_x86_64(
     assert environment["WHEEL_ABI"] == "none"
     assert environment["WHEEL_ARCH"] == "linux_x86_64"
     assert "TRTMC_CONAN_ENABLE_TEST_TARGETS" not in environment
+    assert environment["TRTMC_CONAN_BUILD_TARGETS"].split() == [
+        "trtmc",
+        "trtmc_backend_trt",
+        "trtmc_model_qwen",
+    ]
     assert environment["TRTMC_TRT_LIBRARY"] == str(trt_library)
     assert environment["TRTMC_CUDART_LIBRARY"] == str(cudart)
+
+
+def test_delegated_environment_accepts_only_its_pinned_tensorrt_binding() -> None:
+    launcher = _load_launcher()
+
+    launcher._validate_delegated_python_distributions(
+        [
+            {"name": "numpy", "version": "2.4.6"},
+            {"name": "tensorrt-model-connect", "version": "0.1.0"},
+            {"name": "tensorrt-cu12-bindings", "version": "10.16.1.11"},
+            {"name": "cuda-python", "version": "12.9.1"},
+            {"name": "cuda-bindings", "version": "12.9.1"},
+            {"name": "cuda-pathfinder", "version": "1.5.6"},
+        ],
+        "tensorrt-cu12-bindings",
+    )
+
+
+@pytest.mark.parametrize(
+    ("package", "version"),
+    [
+        ("tensorrt", "11.2.0.113"),
+        ("tensorrt-cu13-bindings", "11.2.0.113"),
+        ("nvidia-cuda-runtime-cu13", "13.0.96"),
+    ],
+)
+def test_delegated_environment_rejects_native_accelerator_packages(
+    package: str,
+    version: str,
+) -> None:
+    launcher = _load_launcher()
+
+    with pytest.raises(launcher.QualificationError, match=package):
+        launcher._validate_delegated_python_distributions(
+            [
+                {"name": "tensorrt-cu12-bindings", "version": "10.16.1.11"},
+                {"name": "cuda-python", "version": "12.9.1"},
+                {"name": "cuda-bindings", "version": "12.9.1"},
+                {"name": "cuda-pathfinder", "version": "1.5.6"},
+                {"name": package, "version": version},
+            ],
+            "tensorrt-cu12-bindings",
+        )
+
+
+@pytest.mark.parametrize(
+    ("package", "version"),
+    [
+        ("cuda-python", "13.3.1"),
+        ("cuda-bindings", "12.9.7"),
+        ("cuda-pathfinder", "1.5.5"),
+    ],
+)
+def test_delegated_environment_rejects_wrong_cuda_python_closure(
+    package: str,
+    version: str,
+) -> None:
+    launcher = _load_launcher()
+    distributions = [
+        {"name": "tensorrt-model-connect", "version": "0.1.0"},
+        {"name": "tensorrt-cu12-bindings", "version": "10.16.1.11"},
+        {"name": "cuda-python", "version": "12.9.1"},
+        {"name": "cuda-bindings", "version": "12.9.1"},
+        {"name": "cuda-pathfinder", "version": "1.5.6"},
+    ]
+    next(item for item in distributions if item["name"] == package)["version"] = version
+
+    with pytest.raises(launcher.QualificationError, match=package):
+        launcher._validate_delegated_python_distributions(
+            distributions,
+            "tensorrt-cu12-bindings",
+        )
+
+
+def test_delegated_host_accepts_cuda12_and_tensorrt10_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = _load_launcher()
+    host = tmp_path / "trtmc"
+    core = tmp_path / "libtrtmc_core.so"
+    monkeypatch.setattr(
+        launcher,
+        "_output",
+        lambda command, **_kwargs: (
+            "0x1 (NEEDED) Shared library: [libcudart.so.12]\n"
+            "0x1 (NEEDED) Shared library: [libnvinfer.so.10]"
+            if Path(command[-1]) == host
+            else "0x1 (NEEDED) Shared library: [libcublas.so.12]"
+        ),
+    )
+
+    launcher._validate_delegated_host_dependencies((host, core))
+
+
+@pytest.mark.parametrize(
+    "dependency",
+    ["libcudart.so.13", "libcublas.so.13", "libnvinfer.so.11"],
+)
+def test_delegated_host_rejects_cuda13_or_tensorrt11_dependency(
+    dependency: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    launcher = _load_launcher()
+    host = tmp_path / "trtmc"
+    monkeypatch.setattr(
+        launcher,
+        "_output",
+        lambda *_args, **_kwargs: f"0x1 (NEEDED) Shared library: [{dependency}]",
+    )
+
+    with pytest.raises(launcher.QualificationError, match=dependency):
+        launcher._validate_delegated_host_dependencies((host,))
+
+
+def test_clean_first_submodule_line_keeps_its_git_status_prefix() -> None:
+    launcher = _load_launcher()
+
+    assert launcher._invalid_submodule_status(
+        " 1111111111111111111111111111111111111111 3rdParty/one\n"
+        " 2222222222222222222222222222222222222222 3rdParty/two\n"
+    ) == []
+
+
+@pytest.mark.parametrize("prefix", ["-", "+", "U"])
+def test_invalid_submodule_status_is_rejected(prefix: str) -> None:
+    launcher = _load_launcher()
+    line = f"{prefix}1111111111111111111111111111111111111111 3rdParty/one"
+
+    assert launcher._invalid_submodule_status(line + "\n") == [line]
 
 
 def test_launcher_uses_only_the_wheel_bundled_binary_and_core() -> None:
@@ -401,8 +547,15 @@ def test_launcher_uses_only_the_wheel_bundled_binary_and_core() -> None:
     assert 'package / "runtime_provider" / "_sdk" / "include"' in source
     assert 'site_packages / "tensorrt_libs"' in source
     assert "tensorrt_libs.symlink_to(tensorrt.library.parent" in source
-    assert '"import tensorrt; print(tensorrt.__version__)"' in source
-    assert '"--no-deps"' in source
+    assert '"tensorrt_bindings"' in source
+    assert 'else "tensorrt"' in source
+    assert "print(tensorrt.__version__)" in source
+    assert source.count('"--no-deps"') >= 2
+    assert '"--no-deps",\n            wheel,' in source
+    assert "MODEL_CONNECT_DELEGATED_REQUIREMENTS" in source
+    assert '"pip", "list", "--format=json"' in source
+    assert "_validate_delegated_python_distributions" in source
+    assert "_validate_delegated_host_dependencies((binary, core))" in source
     assert '"TRTMC_MC_INCLUDE_DIR": str(installed.sdk_include)' in source
     assert '"WHEEL_ARCH": "linux_x86_64"' in source
     assert '"TRTMC_INSTALLED_PYTHON": str(installed.python)' in source
@@ -448,6 +601,8 @@ def test_coexistence_runs_for_any_two_or_more_discovered_leaves(
     commands: list[list[str]] = []
 
     def fake_run(command, **_kwargs):
+        temporary = Path(command[command.index("--basetemp") + 1])
+        assert temporary.parent.is_dir()
         commands.append([str(item) for item in command])
         return type("Result", (), {"stdout": "", "returncode": 0})()
 
@@ -465,6 +620,37 @@ def test_coexistence_runs_for_any_two_or_more_discovered_leaves(
 
     launcher._run_coexistence_if_complete(tmp_path / "run", profiles, installed, {})
     assert len(commands) == 3
+
+
+def test_profile_pytest_parent_exists_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = _load_launcher()
+    profile = launcher.Profile(
+        "leaf",
+        "Qwen/Qwen3-0.6B",
+        tmp_path / "test_a100_e2e.py",
+        tmp_path / "build_runners.py",
+        "TRTMC_EDGE_LLM_SOURCE_DIR",
+        "TRTMC_EDGE_LLM_BUILD_DIR",
+    )
+    installed = SimpleNamespace(python=tmp_path / "python")
+
+    def fake_run(command, **_kwargs):
+        temporary = Path(command[command.index("--basetemp") + 1])
+        assert temporary.parent.is_dir()
+        return type("Result", (), {"stdout": "", "returncode": 0})()
+
+    monkeypatch.setattr(launcher, "_run", fake_run)
+
+    launcher._run_strict_profile(
+        tmp_path / "run",
+        profile,
+        installed,
+        tmp_path / "direct-runner",
+        tmp_path / "mc-runner",
+        {},
+    )
 
 
 def test_multi_profile_qualification_requires_the_coexistence_test(
@@ -501,14 +687,14 @@ def test_main_orders_installed_seed_runners_profiles_and_coexistence(
     trt = launcher.TensorRtInputs(
         tmp_path / "trt",
         tmp_path / "trt/include",
-        tmp_path / "trt/lib/libnvinfer.so.11",
-        tmp_path / "trt/lib/libnvonnxparser.so.11",
+        tmp_path / "trt/lib/libnvinfer.so.10",
+        tmp_path / "trt/lib/libnvonnxparser.so.10",
         tmp_path / "tensorrt.whl",
     )
     cuda = launcher.CudaInputs(
         tmp_path / "cuda",
         tmp_path / "cuda/include",
-        tmp_path / "cuda/lib64/libcudart.so.13",
+        tmp_path / "cuda/lib64/libcudart.so.12",
         tmp_path / "cuda/lib64/stubs/libcuda.so",
         tmp_path / "cuda/bin/nvcc",
     )

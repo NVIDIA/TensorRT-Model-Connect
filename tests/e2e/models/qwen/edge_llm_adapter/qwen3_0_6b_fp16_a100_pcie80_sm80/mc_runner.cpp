@@ -14,7 +14,7 @@
 
 namespace {
 
-static_assert(CUDART_VERSION == 13030, "qualification requires CUDA 13.3 headers");
+static_assert(CUDART_VERSION == 12090, "qualification requires CUDA 12.9 headers");
 
 void check_cuda(cudaError_t status, const char* operation) {
     if (status != cudaSuccess)
@@ -27,11 +27,11 @@ qwen_edge_qualification::RuntimeVersions observe_runtime_versions() {
     qwen_edge_qualification::RuntimeVersions versions{
         getInferLibMajorVersion(), getInferLibMinorVersion(), getInferLibPatchVersion(),
         getInferLibBuildVersion(), cuda_runtime};
-    if (versions.tensorrt_major != 11 || versions.tensorrt_minor != 2 ||
-        versions.tensorrt_patch != 0 || versions.tensorrt_build != 113)
-        throw std::runtime_error("loaded TensorRT runtime is not 11.2.0.113");
-    if (versions.cuda_runtime != 13030)
-        throw std::runtime_error("loaded CUDA runtime is not 13030");
+    if (versions.tensorrt_major != 10 || versions.tensorrt_minor != 16 ||
+        versions.tensorrt_patch != 1 || versions.tensorrt_build != 11)
+        throw std::runtime_error("loaded TensorRT runtime is not 10.16.1.11");
+    if (versions.cuda_runtime != 12090)
+        throw std::runtime_error("loaded CUDA runtime is not 12090");
     return versions;
 }
 

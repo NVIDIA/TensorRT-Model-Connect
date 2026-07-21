@@ -34,12 +34,39 @@ BUILDER_ROOT = (
 EDGE_SOURCE_URL = "https://github.com/NVIDIA/TensorRT-Edge-LLM.git"
 EDGE_TAG = "v0.9.0"
 EDGE_COMMIT = "1ac0f2b99642045125e1c5ac7b109434ba3b36c7"
-TENSORRT_VERSION = (11, 2, 0, 113)
+TENSORRT_VERSION = (10, 16, 1, 11)
 TENSORRT_VERSION_TEXT = ".".join(str(component) for component in TENSORRT_VERSION)
-CUDA_VERSION = "13.3"
-CUDA_VERSION_ENCODED = 13030
+CUDA_VERSION = "12.9"
+CUDA_VERSION_ENCODED = 12090
 GPU_NAME = "NVIDIA A100 80GB PCIe"
 REQUIRED_TOOLS = ("cc", "c++", "cmake", "git", "ldd", "ninja", "nvidia-smi", "readelf")
+
+# The public Model Connect wheel describes the native TensorRT/CUDA stack in
+# its package metadata.  A delegated EdgeLLM qualification must not resolve
+# those accelerator dependencies into the isolated TensorRT 10 environment.
+# Install the wheel without dependencies, then install only the ordinary
+# Python packages exercised by the unchanged build and runtime entry points.
+MODEL_CONNECT_DELEGATED_REQUIREMENTS = (
+    "safetensors>=0.4",
+    "numpy>=1.24",
+    "ml_dtypes>=0.4",
+    "onnx>=1.16",
+    "onnxscript>=0.2",
+    "transformers>=4.40",
+    "huggingface_hub>=0.23",
+    "sentencepiece>=0.1.99",
+    "apache-tvm-ffi==0.1.12",
+    "PyYAML>=6.0",
+    "cuda-python==12.9.1",
+    "cuda-bindings==12.9.1",
+    "cuda-pathfinder==1.5.6",
+    "pytest>=7",
+)
+DELEGATED_DISTRIBUTION_VERSIONS = {
+    "cuda-python": "12.9.1",
+    "cuda-bindings": "12.9.1",
+    "cuda-pathfinder": "1.5.6",
+}
 
 
 class QualificationError(RuntimeError):
@@ -203,9 +230,10 @@ def _wheel_metadata(path: Path) -> tuple[str, str]:
         raise QualificationError(f"unable to inspect TensorRT Python wheel {wheel}: {exc}") from exc
     name = str(metadata.get("Name", "")).strip().lower().replace("_", "-")
     version = str(metadata.get("Version", "")).strip()
-    if name != "tensorrt" or version != TENSORRT_VERSION_TEXT:
+    if name not in {"tensorrt", "tensorrt-cu12-bindings"} or version != TENSORRT_VERSION_TEXT:
         raise QualificationError(
-            f"TensorRT Python wheel must provide TensorRT {TENSORRT_VERSION_TEXT}; "
+            f"TensorRT Python wheel must provide TensorRT {TENSORRT_VERSION_TEXT} "
+            "from the SDK or official CUDA 12 bindings; "
             f"found {name or '<missing>'} {version or '<missing>'}"
         )
     if "x86_64" not in wheel.name or "cp312" not in wheel.name:
@@ -237,12 +265,12 @@ def _resolve_tensorrt(root: Path, python_wheel: Path) -> TensorRtInputs:
         resolved / "targets" / "x86_64-linux-gnu" / "lib",
     )
     library = _first_file(
-        library_directories, ("libnvinfer.so.11", "libnvinfer.so.11.*"), "libnvinfer.so.11"
+        library_directories, ("libnvinfer.so.10", "libnvinfer.so.10.*"), "libnvinfer.so.10"
     )
     parser = _first_file(
         (library.parent,),
-        ("libnvonnxparser.so.11", "libnvonnxparser.so.11.*"),
-        "libnvonnxparser.so.11 beside libnvinfer",
+        ("libnvonnxparser.so.10", "libnvonnxparser.so.10.*"),
+        "libnvonnxparser.so.10 beside libnvinfer",
     )
     _wheel_metadata(python_wheel)
     return TensorRtInputs(
@@ -287,8 +315,8 @@ def _resolve_cuda(root: Path) -> CudaInputs:
     )
     cudart = _first_file(
         library_directories,
-        ("libcudart.so.13", "libcudart.so.13.*"),
-        "CUDA 13 runtime library",
+        ("libcudart.so.12", "libcudart.so.12.*"),
+        "CUDA 12 runtime library",
     )
     driver = _first_file(
         (
@@ -502,6 +530,11 @@ def _build_model_connect_wheel(
             "WHEEL_PYVER": "py312",
             "WHEEL_ABI": "none",
             "WHEEL_ARCH": "linux_x86_64",
+            # Qualification follows the repository's model-family isolation
+            # contract: build the host, backend DSO, and Qwen plugin only.
+            "TRTMC_CONAN_BUILD_TARGETS": (
+                "trtmc trtmc_backend_trt trtmc_model_qwen"
+            ),
         }
     )
     _run(
@@ -527,6 +560,82 @@ def _build_model_connect_wheel(
     return wheels[0].resolve(strict=True)
 
 
+def _validate_delegated_python_distributions(
+    distributions: Sequence[Mapping[str, object]],
+    binding_distribution: str,
+) -> None:
+    """Reject native accelerator packages accidentally resolved by pip."""
+
+    installed = {
+        str(item.get("name", "")).strip().lower().replace("_", "-"): str(
+            item.get("version", "")
+        ).strip()
+        for item in distributions
+        if isinstance(item, Mapping)
+    }
+    names = set(installed)
+    if binding_distribution not in names:
+        raise QualificationError(
+            f"delegated environment is missing {binding_distribution}"
+        )
+    if installed[binding_distribution] != TENSORRT_VERSION_TEXT:
+        raise QualificationError(
+            f"delegated environment has {binding_distribution} "
+            f"{installed[binding_distribution]}; expected {TENSORRT_VERSION_TEXT}"
+        )
+    for name, expected in DELEGATED_DISTRIBUTION_VERSIONS.items():
+        if installed.get(name) != expected:
+            raise QualificationError(
+                f"delegated environment has {name} {installed.get(name, '<missing>')}; "
+                f"expected {expected}"
+            )
+    forbidden = sorted(
+        name
+        for name in names
+        if (
+            (
+                name.startswith("tensorrt")
+                and name not in {binding_distribution, "tensorrt-model-connect"}
+            )
+            or name == "cuda-toolkit"
+            or name.startswith("nvidia-cuda")
+            or "-cu13" in name
+        )
+    )
+    if forbidden:
+        raise QualificationError(
+            "delegated TensorRT 10 environment contains native TensorRT 11/CUDA 13 "
+            "packages: "
+            + ", ".join(forbidden)
+        )
+
+
+def _validate_delegated_host_dependencies(native_files: Sequence[Path]) -> None:
+    """Ensure the MC host can start inside the CUDA 12 / TensorRT 10 image."""
+
+    forbidden: list[str] = []
+    for native in native_files:
+        dependencies = re.findall(
+            r"Shared library: \[([^]]+)\]",
+            _output(["readelf", "-d", native]),
+        )
+        for dependency in dependencies:
+            wrong_cuda_major = bool(
+                re.fullmatch(r"lib(?:cu|nv)[^.]*\.so\.13(?:\..*)?", dependency)
+            )
+            wrong_tensorrt_major = (
+                dependency.startswith("libnvinfer.so.")
+                and not dependency.startswith("libnvinfer.so.10")
+            )
+            if wrong_cuda_major or wrong_tensorrt_major:
+                forbidden.append(f"{native.name}:{dependency}")
+    if forbidden:
+        raise QualificationError(
+            "Model Connect host has incompatible CUDA 13/TensorRT 11 dependencies: "
+            + ", ".join(sorted(forbidden))
+        )
+
+
 def _install_model_connect(
     run_root: Path,
     wheel: Path,
@@ -547,6 +656,12 @@ def _install_model_connect(
     tensorrt_libs = site_packages / "tensorrt_libs"
     tensorrt_libs.symlink_to(tensorrt.library.parent, target_is_directory=True)
     install_environment = _toolchain_environment(tensorrt, cuda)
+    binding_distribution, _binding_version = _wheel_metadata(tensorrt.python_wheel)
+    binding_module = (
+        "tensorrt_bindings"
+        if binding_distribution == "tensorrt-cu12-bindings"
+        else "tensorrt"
+    )
     _run(
         [
             python,
@@ -564,7 +679,7 @@ def _install_model_connect(
             python,
             "-I",
             "-c",
-            "import tensorrt; print(tensorrt.__version__)",
+            f"import {binding_module} as tensorrt; print(tensorrt.__version__)",
         ],
         env=install_environment,
         capture=True,
@@ -580,10 +695,34 @@ def _install_model_connect(
             "pip",
             "install",
             "--disable-pip-version-check",
+            "--no-deps",
             wheel,
-            "pytest>=7",
         ],
         env=install_environment,
+    )
+    _run(
+        [
+            python,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            *MODEL_CONNECT_DELEGATED_REQUIREMENTS,
+        ],
+        env=install_environment,
+    )
+    installed_distributions = json.loads(
+        _run(
+            [python, "-m", "pip", "list", "--format=json"],
+            env=install_environment,
+            capture=True,
+        ).stdout
+    )
+    if not isinstance(installed_distributions, list):
+        raise QualificationError("pip list did not return a distribution list")
+    _validate_delegated_python_distributions(
+        installed_distributions,
+        binding_distribution,
     )
     result = _run(
         [
@@ -619,6 +758,7 @@ def _install_model_connect(
     for native in (binary, core):
         if package not in native.parents:
             raise QualificationError(f"wheel native payload escaped its package: {native}")
+    _validate_delegated_host_dependencies((binary, core))
     return InstalledModelConnect(python, package, binary, core, sdk_include)
 
 
@@ -642,8 +782,14 @@ def _validate_edge_source(source: Path) -> Path:
     )
     if status:
         raise QualificationError(f"EdgeLLM source is not clean: {resolved}\n{status[:4000]}")
-    submodules = _output(["git", "-C", resolved, "submodule", "status", "--recursive"])
-    invalid = [line for line in submodules.splitlines() if line and not line.startswith(" ")]
+    # The leading byte is semantic: space means clean, '-' uninitialized,
+    # '+' wrong commit, and 'U' conflicted.  Do not pass this output through
+    # _output(), whose whitespace normalization would corrupt the first line.
+    submodules = _run(
+        ["git", "-C", resolved, "submodule", "status", "--recursive"],
+        capture=True,
+    ).stdout
+    invalid = _invalid_submodule_status(submodules)
     if invalid:
         raise QualificationError("EdgeLLM submodules are not pinned: " + "; ".join(invalid))
     required = (
@@ -654,6 +800,14 @@ def _validate_edge_source(source: Path) -> Path:
     for path in required:
         _require_file(path, "pinned EdgeLLM source input")
     return resolved
+
+
+def _invalid_submodule_status(status: str) -> list[str]:
+    return [
+        line
+        for line in status.splitlines()
+        if line and not line.startswith(" ")
+    ]
 
 
 def _acquire_edge_source(work_root: Path) -> Path:
@@ -811,6 +965,7 @@ def _run_strict_profile(
         }
     )
     temporary = run_root / "pytest" / profile.leaf
+    temporary.parent.mkdir(parents=True, exist_ok=True)
     _run(
         [
             installed.python,
@@ -841,6 +996,8 @@ def _run_coexistence_if_complete(
         raise QualificationError(
             f"multi-profile qualification requires the coexistence test: {coexistence}"
         )
+    temporary = run_root / "pytest" / "coexistence"
+    temporary.parent.mkdir(parents=True, exist_ok=True)
     _run(
         [
             installed.python,
@@ -849,7 +1006,7 @@ def _run_coexistence_if_complete(
             "-vv",
             "-s",
             "--basetemp",
-            run_root / "pytest" / "coexistence",
+            temporary,
             coexistence,
         ],
         cwd=REPOSITORY,
@@ -890,7 +1047,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         wheel = _build_model_connect_wheel(run_root, tensorrt, cuda)
         installed = _install_model_connect(run_root, wheel, tensorrt, cuda)
         edge_source = _acquire_edge_source(work_root)
-        edge_build = work_root / "edge" / f"build-{EDGE_COMMIT[:12]}-trt11.2-cuda13.3-sm80"
+        edge_build = work_root / "edge" / f"build-{EDGE_COMMIT[:12]}-trt10.16-cuda12.9-sm80"
         environment = _qualification_environment(
             installed,
             tensorrt,

@@ -50,11 +50,11 @@ from tensorrt_model_connect.runtime_provider.manifest import (  # noqa: E402
 )
 
 
-IMPLEMENTATION_ID = "qwen3-0.6b-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80"
+IMPLEMENTATION_ID = "qwen3-0.6b-fp16.tensorrt-edge-llm-v0.9.trt10.a100-pcie80-sm80"
 MODEL_ID = "Qwen/Qwen3-0.6B"
 MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
-PROFILE_ID = "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt11"
-RUNTIME_LIBRARY = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm_v0_9_trt11.so"
+PROFILE_ID = "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt10"
+RUNTIME_LIBRARY = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm_v0_9_trt10.so"
 
 
 def test_real_runtime_delegates_graph_capture_and_generation_to_edgellm() -> None:
@@ -160,7 +160,7 @@ def _run(command: list[str]) -> None:
 
 
 def _build_fake_runtime(
-    build: Path, *, tensorrt_build: int = 113, cuda_runtime_version: int = 13030
+    build: Path, *, tensorrt_build: int = 11, cuda_runtime_version: int = 12090
 ) -> Path:
     json_include = _nlohmann_json_include()
     manifest = load_implementation_manifest(CAPSULE_ROOT / "IMPLEMENTATION.toml")
@@ -210,7 +210,11 @@ def _fake_engine(root: Path) -> Path:
                 "head_dim": 128,
                 "max_position_embeddings": 40960,
                 "rope_theta": 1000000.0,
-                "rope_scaling": None,
+                "rope_scaling": {
+                    "rope_theta": 1000000,
+                    "rope_type": "default",
+                    "type": "default",
+                },
                 "partial_rotary_factor": 1.0,
                 "num_deepstack_features": 0,
                 "ple_enabled": False,
@@ -317,12 +321,13 @@ def test_fake_runtime_exports_exact_identity_and_validates_create_metadata(
     assert factory.runtime_version == b"0.9.0"
     assert factory.runtime_commit == b"1ac0f2b99642045125e1c5ac7b109434ba3b36c7"
     assert factory.pipeline_abi_version == 1
-    assert factory.pipeline_abi_sha256.decode() == hashlib.sha256(
-        (REPOSITORY_ROOT / "include/trtmc/pipeline.h").read_bytes()
-    ).hexdigest()
+    assert (
+        factory.pipeline_abi_sha256.decode()
+        == hashlib.sha256((REPOSITORY_ROOT / "include/trtmc/pipeline.h").read_bytes()).hexdigest()
+    )
     assert factory.process_compatibility_namespace == b"tensorrt-edge-llm.plugin-registry"
     assert factory.process_compatibility_fingerprint == (
-        b"edgellm-1ac0f2b99642045125e1c5ac7b109434ba3b36c7-trt11.2.0.113-cuda13.3-sm80"
+        b"edgellm-1ac0f2b99642045125e1c5ac7b109434ba3b36c7-trt10.16.1.11-cuda12.9-sm80"
     )
 
     exported = subprocess.run(
@@ -428,20 +433,20 @@ def test_runtime_rejects_nonexact_build_binding_field_set(
 def test_runtime_rejects_the_wrong_loaded_tensorrt_build_before_construction(
     tmp_path: Path,
 ) -> None:
-    wrong_runtime = _build_fake_runtime(tmp_path / "wrong-trt-build", tensorrt_build=112)
+    wrong_runtime = _build_fake_runtime(tmp_path / "wrong-trt-build", tensorrt_build=10)
     artifact, _ = _staged_capsule(tmp_path, wrong_runtime)
     assert _rejected_create(artifact, dict(artifact.descriptor)) == (
-        b"loaded TensorRT runtime version 11.2.0.112 is unsupported; expected 11.2.0.113"
+        b"loaded TensorRT runtime version 10.16.1.10 is unsupported; expected 10.16.1.11"
     )
 
 
 def test_runtime_rejects_wrong_cuda_before_plugin_validation(tmp_path: Path) -> None:
-    wrong_runtime = _build_fake_runtime(tmp_path / "wrong-cuda-runtime", cuda_runtime_version=13020)
+    wrong_runtime = _build_fake_runtime(tmp_path / "wrong-cuda-runtime", cuda_runtime_version=13030)
     artifact, _ = _staged_capsule(tmp_path, wrong_runtime)
     (artifact.artifacts_path / "libNvInfer_edgellm_plugin.so").unlink()
 
     assert _rejected_create(artifact, dict(artifact.descriptor)) == (
-        b"loaded CUDA runtime version 13020 is unsupported; expected 13030 (CUDA 13.3)"
+        b"loaded CUDA runtime version 13030 is unsupported; expected 12090 (CUDA 12.9)"
     )
 
 
@@ -483,11 +488,17 @@ int main(int argc, char** argv) {
     request.struct_size = sizeof(request);
     request.implementation_id = factory->implementation_id;
     request.model_id = "Qwen/Qwen3-0.6B";
-    request.profile_id = "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt11";
+    request.profile_id = "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt10";
     request.bundle_path = "fake.trtfb";
     request.artifact_path = argv[2];
     request.implementation_metadata = metadata.data();
     request.implementation_metadata_size = metadata.size();
+    trtmc::LoadOptions load_options;
+    load_options.hf_python = "native-only-hint";
+    load_options.runtime_cache_path = "already-consumed-by-host";
+    load_options.backend_search_paths = {"native-backend-only"};
+    load_options.model_plugin_search_paths = {"native-model-only"};
+    request.load_options = &load_options;
     char error[2048]{};
     std::unique_ptr<trtmc::IPipeline> pipeline(factory->create(&request, error, sizeof(error)));
     if (!pipeline)
@@ -539,6 +550,31 @@ int main(int argc, char** argv) {
         return 19;
     } catch (const std::invalid_argument&) {
     }
+    auto rejects_options = [&](const trtmc::LoadOptions& rejected, const char* expected) {
+        request.load_options = &rejected;
+        error[0] = '\0';
+        std::unique_ptr<trtmc::IPipeline> candidate(
+            factory->create(&request, error, sizeof(error)));
+        return !candidate && std::string(error) == expected;
+    };
+    trtmc::LoadOptions kv_override;
+    kv_override.kv_cache_size_bytes = 1024;
+    if (!rejects_options(
+            kv_override,
+            "Qwen Edge-LLM profile does not support LoadOptions::kv_cache_size_bytes"))
+        return 20;
+    trtmc::LoadOptions config_override;
+    config_override.config_path = "runtime.json";
+    if (!rejects_options(
+            config_override,
+            "Qwen Edge-LLM profile does not support LoadOptions runtime configuration overrides"))
+        return 21;
+    trtmc::LoadOptions set_override;
+    set_override.set_tokens = {"runtime.disable_cuda_graph=true"};
+    if (!rejects_options(
+            set_override,
+            "Qwen Edge-LLM profile does not support LoadOptions runtime configuration overrides"))
+        return 22;
     std::cout << first.text << "\n" << second.text << "\n";
     return 0;
 }

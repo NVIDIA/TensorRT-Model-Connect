@@ -42,20 +42,20 @@ namespace {
 namespace fs = std::filesystem;
 
 constexpr const char* kImplementationId =
-    "qwen3-0.6b-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80";
+    "qwen3-0.6b-fp16.tensorrt-edge-llm-v0.9.trt10.a100-pcie80-sm80";
 constexpr const char* kModelId = "Qwen/Qwen3-0.6B";
 constexpr const char* kModelRevision = "c1899de289a04d12100db370d81485cdf75e47ca";
-constexpr const char* kProfileId = "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt11";
+constexpr const char* kProfileId = "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt10";
 constexpr const char* kRuntimeLibrary =
-    "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm_v0_9_trt11.so";
+    "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm_v0_9_trt10.so";
 constexpr const char* kPluginLibrary = "libNvInfer_edgellm_plugin.so";
 constexpr const char* kEdgeVersion = "0.9.0";
 constexpr const char* kEdgeCommit = "1ac0f2b99642045125e1c5ac7b109434ba3b36c7";
-constexpr const char* kTensorRtVersion = "11.2.0.113";
-constexpr const char* kCudaVersion = "13.3";
+constexpr const char* kTensorRtVersion = "10.16.1.11";
+constexpr const char* kCudaVersion = "12.9";
 constexpr const char* kProcessCompatibilityNamespace = "tensorrt-edge-llm.plugin-registry";
 constexpr const char* kProcessCompatibilityFingerprint =
-    "edgellm-1ac0f2b99642045125e1c5ac7b109434ba3b36c7-trt11.2.0.113-cuda13.3-sm80";
+    "edgellm-1ac0f2b99642045125e1c5ac7b109434ba3b36c7-trt10.16.1.11-cuda12.9-sm80";
 constexpr int32_t kMaxInputLength = 1024;
 constexpr int32_t kMaxCacheLength = 4096;
 constexpr int32_t kMaxBatchSize = 4;
@@ -93,7 +93,7 @@ TensorRtRuntimeVersion loaded_tensorrt_runtime_version() noexcept {
 
 void require_supported_tensorrt_runtime() {
     const TensorRtRuntimeVersion observed = loaded_tensorrt_runtime_version();
-    constexpr TensorRtRuntimeVersion supported{11, 2, 0, 113};
+    constexpr TensorRtRuntimeVersion supported{10, 16, 1, 11};
     if (observed.major != supported.major || observed.minor != supported.minor ||
         observed.patch != supported.patch || observed.build != supported.build) {
         throw std::runtime_error("loaded TensorRT runtime version " + version_string(observed) +
@@ -113,11 +113,11 @@ int32_t loaded_cuda_runtime_version() {
 }
 
 void require_supported_cuda_runtime() {
-    constexpr int32_t supported = 13030;
+    constexpr int32_t supported = 12090;
     const int32_t observed = loaded_cuda_runtime_version();
     if (observed != supported) {
         throw std::runtime_error("loaded CUDA runtime version " + std::to_string(observed) +
-                                 " is unsupported; expected 13030 (CUDA 13.3)");
+                                 " is unsupported; expected 12090 (CUDA 12.9)");
     }
 }
 
@@ -505,9 +505,25 @@ void require_supported_a100(const cudaDeviceProp& properties, int32_t minimum_me
 void create_edge_runtime(EdgeLlmHandle& handle, const fs::path& engine_directory);
 #endif
 
+void validate_load_options(
+    const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1& request) {
+    if (request.load_options == nullptr)
+        return;
+    const auto& options = *request.load_options;
+    if (options.kv_cache_size_bytes != 0) {
+        throw std::invalid_argument(
+            "Qwen Edge-LLM profile does not support LoadOptions::kv_cache_size_bytes");
+    }
+    if (!options.config_path.empty() || !options.set_tokens.empty()) {
+        throw std::invalid_argument(
+            "Qwen Edge-LLM profile does not support LoadOptions runtime configuration overrides");
+    }
+}
+
 std::unique_ptr<EdgeLlmHandle>
 initialize_edge_handle(const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1& request) {
     const CapsuleMetadata metadata = validate_metadata(request);
+    validate_load_options(request);
     const fs::path artifact_root = require_directory(
         required_c_string(request.artifact_path, "artifact_path"), "capsule artifact root");
     const fs::path engine_directory =

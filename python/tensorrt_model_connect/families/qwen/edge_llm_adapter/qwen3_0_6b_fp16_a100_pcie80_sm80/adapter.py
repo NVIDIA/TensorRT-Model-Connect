@@ -33,10 +33,10 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
 CAPSULE_ROOT = Path(__file__).resolve().parent
 REPOSITORY_ROOT = Path(__file__).resolve().parents[6]
 
-IMPLEMENTATION_ID = "qwen3-0.6b-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80"
+IMPLEMENTATION_ID = "qwen3-0.6b-fp16.tensorrt-edge-llm-v0.9.trt10.a100-pcie80-sm80"
 MODEL_ID = "Qwen/Qwen3-0.6B"
 MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
-RUNTIME_LIBRARY = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm_v0_9_trt11.so"
+RUNTIME_LIBRARY = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm_v0_9_trt10.so"
 EDGE_LLM_PLUGIN = "libNvInfer_edgellm_plugin.so"
 PROFILE_PATH = CAPSULE_ROOT / "profiles" / "a100-pcie80-sm80-fp16.toml"
 DEPENDENCY_PATH = CAPSULE_ROOT / "dependency.lock"
@@ -45,9 +45,9 @@ _EDGE_LLM_SOURCE = "https://github.com/NVIDIA/TensorRT-Edge-LLM.git"
 _EDGE_LLM_COMMIT = "1ac0f2b99642045125e1c5ac7b109434ba3b36c7"
 _EDGE_LLM_TAG = "v0.9.0"
 _EDGE_LLM_VERSION = "0.9.0"
-_TENSORRT_VERSION = (11, 2, 0, 113)
+_TENSORRT_VERSION = (10, 16, 1, 11)
 _TENSORRT_VERSION_TEXT = ".".join(str(component) for component in _TENSORRT_VERSION)
-_CUDA_VERSION = (13, 3)
+_CUDA_VERSION = (12, 9)
 _CUDA_VERSION_TEXT = ".".join(str(component) for component in _CUDA_VERSION)
 _ENGINE_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_ENGINE_DIR"
 _RUNTIME_ENV = "_TRTMC_INTERNAL_QWEN3_06B_EDGE_LLM_RUNTIME_LIBRARY"
@@ -110,6 +110,7 @@ _EXPECTED_EXPORTER_PACKAGES = {
 }
 _MAX_ARTIFACT_ENTRIES = 65536
 _MAX_ARTIFACT_TOTAL_SIZE = 1 << 40
+_SUBPROCESS_FAILURE_TAIL_CHARS = 3500
 _PRIVATE_SDK_HEADERS = (
     "trtmc/pipeline.h",
     "runtime/providers/optimized_runtime_factory.h",
@@ -418,7 +419,7 @@ def _require_mapping(value: Any, description: str) -> Mapping[str, Any]:
 def _validate_capsule_data(profile: Mapping[str, Any]) -> None:
     expected_profile = {
         "schema_version": 1,
-        "profile_id": "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt11",
+        "profile_id": "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt10",
         "operation": "text-generation-v1",
         "precision": "fp16",
         "quantization": "none",
@@ -787,7 +788,11 @@ def _validate_engine_directory(path: Path) -> tuple[Path, int]:
         "head_dim": 128,
         "max_position_embeddings": 40960,
         "rope_theta": 1000000.0,
-        "rope_scaling": None,
+        "rope_scaling": {
+            "rope_theta": 1000000,
+            "rope_type": "default",
+            "type": "default",
+        },
         "partial_rotary_factor": 1.0,
         "num_deepstack_features": 0,
         "ple_enabled": False,
@@ -961,18 +966,32 @@ def _run_tool(
         )
     except OSError as exc:
         raise AdapterError(f"Unable to launch Edge-LLM tool {command[0]!r}: {exc}") from exc
+    if result.returncode != 0:
+        detail = _subprocess_failure_tail(result) or "no subprocess output"
+        raise AdapterError(
+            f"Edge-LLM tool failed with exit code {result.returncode}"
+            f"\n{detail}"
+            f"\nCommand: {' '.join(command)}"
+        )
     if verbose:
         # Adapter stdout is a machine-readable, one-JSON-object protocol. Tool
         # logs always belong on stderr, including in verbose mode.
         for stream in (result.stdout, result.stderr):
             if stream:
                 print(stream, file=sys.stderr, end="" if stream.endswith("\n") else "\n")
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        raise AdapterError(
-            f"Edge-LLM tool failed with exit code {result.returncode}: "
-            f"{' '.join(command)}{': ' + detail if detail else ''}"
-        )
+
+
+def _subprocess_failure_tail(result: subprocess.CompletedProcess[str]) -> str:
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    label, detail = ("stderr", stderr) if stderr else ("stdout", stdout)
+    if not detail:
+        return ""
+    omitted = max(0, len(detail) - _SUBPROCESS_FAILURE_TAIL_CHARS)
+    detail = detail[-_SUBPROCESS_FAILURE_TAIL_CHARS:]
+    if omitted:
+        return f"{label} tail ({omitted} leading characters omitted):\n{detail}"
+    return f"{label}:\n{detail}"
 
 
 def _python_profile_root() -> Path:
@@ -1042,6 +1061,12 @@ def _isolated_python_environment() -> dict[str, str]:
     environment = os.environ.copy()
     for name in ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE"):
         environment.pop(name, None)
+    # PyTorch 2.12 asks getpass for a cache identity even when the exporter
+    # does not compile kernels. Arbitrary container UIDs need not have an
+    # /etc/passwd entry, so give this isolated subprocess a stable identity.
+    build_user = f"trtmc-edgellm-{os.getuid()}"
+    environment["LOGNAME"] = build_user
+    environment["USER"] = build_user
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PIP_CONFIG_FILE"] = os.devnull
@@ -1104,9 +1129,11 @@ def _verify_exporter_python(python: Path) -> None:
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise AdapterError(f"Unable to verify Edge-LLM exporter Python {python}: {exc}") from exc
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
+        detail = _subprocess_failure_tail(result) or "no subprocess output"
         raise AdapterError(
-            f"Unable to inspect Edge-LLM exporter Python {python}: {detail or result.returncode}"
+            f"Unable to inspect Edge-LLM exporter Python {python} "
+            f"(exit code {result.returncode})"
+            f"\n{detail}"
         )
     try:
         actual = json.loads(result.stdout)
@@ -1150,10 +1177,11 @@ def _verify_exporter_python(python: Path) -> None:
             f"Unable to smoke-test Edge-LLM exporter Python {python}: {exc}"
         ) from exc
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
+        detail = _subprocess_failure_tail(result) or "no subprocess output"
         raise AdapterError(
-            f"Edge-LLM exporter Python import smoke failed for {python}: "
-            f"{detail or result.returncode}"
+            f"Edge-LLM exporter Python import smoke failed for {python} "
+            f"(exit code {result.returncode})"
+            f"\n{detail}"
         )
 
 
@@ -1265,6 +1293,7 @@ def _edge_export_command(
     return [
         str(python),
         "-I",
+        "-B",
         "-c",
         _EDGE_EXPORT_BOOTSTRAP,
         str(edge_source),
@@ -1432,11 +1461,8 @@ def _run_checked(
     except OSError as exc:
         raise AdapterError(f"Unable to launch {description}: {exc}") from exc
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        raise AdapterError(
-            f"{description} failed with exit code {result.returncode}"
-            f"{': ' + detail[-4000:] if detail else ''}"
-        )
+        detail = _subprocess_failure_tail(result) or "no subprocess output"
+        raise AdapterError(f"{description} failed with exit code {result.returncode}\n{detail}")
 
 
 def _run_capture(command: list[str], description: str) -> str:
@@ -1445,11 +1471,8 @@ def _run_capture(command: list[str], description: str) -> str:
     except OSError as exc:
         raise AdapterError(f"Unable to launch {description}: {exc}") from exc
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        raise AdapterError(
-            f"{description} failed with exit code {result.returncode}"
-            f"{': ' + detail[-4000:] if detail else ''}"
-        )
+        detail = _subprocess_failure_tail(result) or "no subprocess output"
+        raise AdapterError(f"{description} failed with exit code {result.returncode}\n{detail}")
     # Preserve a leading status byte. In particular, ``git submodule status``
     # uses a leading space to mean that a submodule is initialized at its
     # pinned commit; stripping both ends would turn that valid state into an
@@ -1474,7 +1497,7 @@ def _validate_packaged_elf(path: Path) -> None:
             + ", ".join(search_paths)
         )
     needed = set(re.findall(r"Shared library: \[(.*?)\]", dynamic))
-    required = {"libcuda.so.1", "libcudart.so.13", "libnvinfer.so.11"}
+    required = {"libcuda.so.1", "libcudart.so.12", "libnvinfer.so.10"}
     missing = sorted(required - needed)
     if missing:
         raise AdapterError(
@@ -1484,7 +1507,7 @@ def _validate_packaged_elf(path: Path) -> None:
     wrong_tensorrt = sorted(
         library
         for library in needed
-        if library.startswith("libnvinfer.so.") and library != "libnvinfer.so.11"
+        if library.startswith("libnvinfer.so.") and library != "libnvinfer.so.10"
     )
     if wrong_tensorrt:
         raise AdapterError(
@@ -2088,7 +2111,7 @@ def _resolve_cuda(runtime_build: Mapping[str, Any]) -> _CudaInstallation:
 
     prefixes = _dependency_prefixes(
         ("CUDA_HOME", "CUDA_PATH", "CUDAToolkit_ROOT"),
-        ("/usr/local/cuda", "/usr/local/cuda-13.3", "/opt/cuda"),
+        ("/usr/local/cuda", "/usr/local/cuda-12.9", "/opt/cuda"),
     )
     prefixes = _deduplicate_paths(
         [
@@ -2771,6 +2794,10 @@ def _build(
                 "trt_version": tensorrt_version,
                 "gpu_name": "NVIDIA A100 80GB PCIe",
                 "vocab_size": vocab_size,
+                "hidden_size": 1024,
+                "num_layers": 28,
+                "num_attention_heads": 16,
+                "num_key_value_heads": 8,
                 "max_cache_length": int(profile_data["max_cache_length"]),
                 "runtime_strategy": "text_generation",
                 "precision": str(profile_data["precision"]),
