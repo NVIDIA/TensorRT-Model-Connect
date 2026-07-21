@@ -29,20 +29,23 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
 )
-from . import graph_ops
+from .model import model as graph_ops
 from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
+
+if TYPE_CHECKING:
+    from .config import ModelConfig
 
 
 trt = trt_compat.get_trt()
@@ -154,7 +157,7 @@ class MarianPlugin:
                     "Marian tensor-parallel decoder builds currently require fp32")
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="Marian tensor-parallel decoder builds")
-            from .decoder_tp_builder import build_marian_tp_decoder_engine
+            from .model.parallel import build_marian_tp_decoder_engine
             return build_marian_tp_decoder_engine(
                 config, weights, max_cache_length,
                 verbose=verbose,
@@ -405,8 +408,7 @@ def _build_marian_encoder(config, weights, *, verbose=False, precision="fp32"):
             config.rms_norm_eps, dtype=work_np_dtype)
 
         fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, enc_ffn, weights[f"{pfx}.w_fc1"], dtype=work_np_dtype), enc_ffn, weights[f"{pfx}.b_fc1"], dtype=work_np_dtype)
-        act = graph_ops.add_activation(
-            network, fc1, "silu", dtype=work_np_dtype)
+        act = graph_ops.add_silu(network, fc1)
         fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"], dtype=work_np_dtype), hidden, weights[f"{pfx}.b_fc2"], dtype=work_np_dtype)
 
         hs = network.add_elementwise(hs, fc2, trt.ElementWiseOperation.SUM).get_output(0)
@@ -486,7 +488,7 @@ def _add_marian_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cro
         weights[f"{prefix}.cross_attn_norm_beta"], eps, dtype=dtype)
 
     fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, pca, hidden_size, ffn_dim, weights[f"{prefix}.w_fc1"], dtype=dtype), ffn_dim, weights[f"{prefix}.fc1_bias"], dtype=dtype)
-    act = graph_ops.add_activation(network, fc1, "silu", dtype=dtype)
+    act = graph_ops.add_silu(network, fc1)
     fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"], dtype=dtype), hidden_size, weights[f"{prefix}.fc2_bias"], dtype=dtype)
 
     out = network.add_elementwise(pca, fc2, trt.ElementWiseOperation.SUM).get_output(0)

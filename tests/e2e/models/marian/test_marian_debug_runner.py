@@ -43,7 +43,7 @@ def _make_bundle_bytes(
 
 
 def test_marian_debug_runner_owns_translation_strategy(tmp_path):
-    from tensorrt_model_connect.families.marian.debug_runner import (
+    from tensorrt_model_connect.families.marian.model import (
         load_config_from_bundle,
         load_engine_from_bundle,
         runner_from_bundle,

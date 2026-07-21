@@ -20,16 +20,16 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .plugin import _mark_debug_output
+from . import model as graph_ops
+from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
+from ..plugin import _mark_debug_output
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-    from .config import ModelConfig
-    from ...parallel_config import ParallelConfig
+    from ..weights import WeightDict
+    from ..config import ModelConfig
+    from ....parallel_config import ParallelConfig
 
 
 def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
@@ -259,7 +259,7 @@ def _add_marian_tp_decoder_layer(
         local_ffn_dim,
         weights[f"{prefix}.fc1_bias"],
     )
-    act = graph_ops.add_activation(network, fc1, "silu")
+    act = graph_ops.add_silu(network, fc1)
     fc2 = graph_ops.add_matmul_rhs_constant(
         network, act, local_ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"])
     fc2 = _add_row_parallel_bias(

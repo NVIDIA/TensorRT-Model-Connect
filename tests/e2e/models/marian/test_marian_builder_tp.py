@@ -17,7 +17,9 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 try:
     marian_plugin_module = importlib.import_module(
         "tensorrt_model_connect.families.marian.plugin")
-    from tensorrt_model_connect.families.marian import decoder_tp_builder
+    from tensorrt_model_connect.families.marian.model import (
+        parallel as decoder_tp_builder,
+    )
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
