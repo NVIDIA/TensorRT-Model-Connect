@@ -76,6 +76,16 @@ RUNTIME_PLUGIN = "libNvInfer_edgellm_plugin.so"
 MANIFEST_PATH = CAPSULE_ROOT / "IMPLEMENTATION.toml"
 PROFILE_PATH = CAPSULE_ROOT / "profiles" / "a100-pcie80-sm80-fp16.toml"
 ADAPTER_PATH = CAPSULE_ROOT / "adapter.py"
+MC_DEFAULT_DEPLOYMENT = {
+    "precision": "fp32",
+    "max_cache_length": 256,
+    "max_batch_size": 1,
+}
+QUALIFIED_EDGE_DEPLOYMENT = {
+    "precision": "fp16",
+    "max_cache_length": 4096,
+    "max_batch_size": 4,
+}
 
 
 def test_qwen_adapter_package_inventory_is_model_owned() -> None:
@@ -216,11 +226,13 @@ def _request(
     target: dict[str, object] | None = None,
     parameters: dict[str, object] | None = None,
 ) -> ImplementationRequest:
+    request_parameters = dict(parameters or {})
+    request_parameters.setdefault("public_options", dict(MC_DEFAULT_DEPLOYMENT))
     return ImplementationRequest(
         model_id=model_id,
         model_revision=revision,
         target=target or _target(),
-        parameters=parameters,
+        parameters=request_parameters,
     )
 
 
@@ -533,6 +545,58 @@ def test_manifest_profile_and_dependency_pins_are_exact_and_capsule_owned() -> N
     _load_adapter_module()._validate_capsule_data(profile)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("schema_version", True),
+        ("schema_version", 1.0),
+        ("max_cache_length", True),
+        ("max_batch_size", 4.0),
+        ("minimum_memory_mib", 80000.0),
+    ),
+)
+def test_capsule_profile_rejects_cross_type_values(field: str, value: object) -> None:
+    adapter = _load_adapter_module()
+    with PROFILE_PATH.open("rb") as profile_file:
+        profile = tomllib.load(profile_file)
+    profile[field] = value
+
+    with pytest.raises(adapter.AdapterError, match=field):
+        adapter._validate_capsule_data(profile)
+
+
+@pytest.mark.parametrize("schema_version", (True, 1.0))
+def test_capsule_request_rejects_cross_type_schema_version(
+    tmp_path: Path, schema_version: object
+) -> None:
+    adapter = _load_adapter_module()
+    payload = _request().to_json()
+    payload["implementation_id"] = IMPLEMENTATION_ID
+    payload["schema_version"] = schema_version
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match="schema_version"):
+        adapter._load_request(request_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), (("gpu_architecture", 80), ("gpu_name", False))
+)
+def test_capsule_request_rejects_cross_type_target(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    adapter = _load_adapter_module()
+    payload = _request().to_json()
+    payload["implementation_id"] = IMPLEMENTATION_ID
+    payload["target"][field] = value
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match="supported A100 target"):
+        adapter._load_request(request_path)
+
+
 def test_adapter_restores_parent_active_device_for_heterogeneous_visible_gpus(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -571,12 +635,21 @@ def test_supported_probe_selects_profile_without_hidden_opt_in(
     monkeypatch.setenv("_TRTMC_INTERNAL_QWEN3_06B_ALLOW_FAKE_RUNTIME_BUILD", "1")
     manifest = load_implementation_manifest(MANIFEST_PATH)
     parameters = _prebuilt_runtime_parameters(tmp_path)
+    parameters["public_options"] = MC_DEFAULT_DEPLOYMENT
 
     probe = run_probe(manifest, _request(parameters=parameters))
 
     assert probe.supported
     assert probe.profile_id == PROFILE_ID
     assert not probe.reason
+
+    explicit_probe = run_probe(
+        manifest,
+        _request(parameters={**parameters, "public_options": QUALIFIED_EDGE_DEPLOYMENT}),
+    )
+    assert explicit_probe.supported
+    assert explicit_probe.profile_id == PROFILE_ID
+    assert not explicit_probe.reason
 
     unsupported = run_probe(
         manifest,
@@ -590,7 +663,7 @@ def test_supported_probe_selects_profile_without_hidden_opt_in(
         _request(parameters={**parameters, "public_options": {"dynamic_kv_cache": True}}),
     )
     assert not unsupported_option.supported
-    assert "dynamic_kv_cache=true" in unsupported_option.reason
+    assert "dynamic_kv_cache=False" in unsupported_option.reason
 
     with pytest.raises(BuildAdapterError, match="unsupported parameters: deployment"):
         run_probe(
@@ -599,7 +672,7 @@ def test_supported_probe_selects_profile_without_hidden_opt_in(
         )
 
 
-def test_established_mc_defaults_do_not_change_the_requested_profile() -> None:
+def test_established_mc_defaults_select_the_qualified_profile() -> None:
     import inspect
 
     from tensorrt_model_connect.engine_builder import build
@@ -610,13 +683,89 @@ def test_established_mc_defaults_do_not_change_the_requested_profile() -> None:
         if name not in {"model_id_or_path", "output_path"}
     }
 
-    reason = _load_adapter_module()._public_option_reason(defaults)
-    assert "requires public option max_batch_size=4; got 1" in reason
+    assert {field: defaults[field] for field in MC_DEFAULT_DEPLOYMENT} == MC_DEFAULT_DEPLOYMENT
+    assert _load_adapter_module()._public_option_reason(defaults) == ""
+
+
+def test_public_python_model_id_default_dispatches_without_native_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+
+    bundle = tmp_path / "qwen-default.trtfb"
+    captured: dict[str, object] = {}
+
+    def select_optimized(model_id: str, output_path: str, public_options: dict):
+        captured.update(
+            model_id=model_id,
+            output_path=output_path,
+            public_options=public_options,
+        )
+        bundle.write_bytes(b"delegated")
+        return object()
+
+    monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", select_optimized)
+    monkeypatch.setattr(
+        engine_builder,
+        "_build_native_impl",
+        lambda **_kwargs: pytest.fail("qualified default request must not use MC native"),
+    )
+
+    engine_builder.build(MODEL_ID, str(bundle))
+
+    assert bundle.read_bytes() == b"delegated"
+    assert captured["model_id"] == MODEL_ID
+    assert captured["output_path"] == str(bundle)
+    public_options = captured["public_options"]
+    assert isinstance(public_options, dict)
+    assert {
+        field: public_options[field] for field in MC_DEFAULT_DEPLOYMENT
+    } == MC_DEFAULT_DEPLOYMENT
+    assert _load_adapter_module()._public_option_reason(public_options) == ""
+
+
+@pytest.mark.parametrize(
+    "public_options",
+    (
+        {},
+        {"precision": "fp32", "max_cache_length": 4096, "max_batch_size": 1},
+        {"precision": "fp32", "max_cache_length": 256, "max_batch_size": 4},
+        {"precision": "fp16", "max_cache_length": 256, "max_batch_size": 1},
+        {"precision": "bf16", "max_cache_length": 4096, "max_batch_size": 4},
+        {"precision": "fp32", "max_cache_length": 256},
+        {"precision": "fp16"},
+        {"precision": "fp32", "max_cache_length": 256, "max_batch_size": True},
+        {**MC_DEFAULT_DEPLOYMENT, "tensor_parallel_size": True},
+        {**MC_DEFAULT_DEPLOYMENT, "quant_calibration_samples": 512.0},
+        {**MC_DEFAULT_DEPLOYMENT, "triattention_count_prompt_tokens": 1},
+        {**MC_DEFAULT_DEPLOYMENT, "fp8": 0},
+        {**MC_DEFAULT_DEPLOYMENT, "dynamic_kv_cache": 1},
+        {**MC_DEFAULT_DEPLOYMENT, "verbose": 1},
+        {
+            **MC_DEFAULT_DEPLOYMENT,
+            "parallel_config": {
+                "mode": "single",
+                "rank": -1,
+                "require_mpirun": 1,
+                "tp_size": True,
+            },
+        },
+    ),
+)
+def test_mixed_partial_and_unqualified_public_profiles_fail_closed(
+    public_options: dict[str, object],
+) -> None:
+    reason = _load_adapter_module()._public_option_reason(public_options)
+    assert reason
+    assert "Qwen Edge-LLM capsule" in reason
 
 
 @pytest.mark.parametrize("value", (None, False, "", (), [], {}))
 def test_future_inert_public_option_does_not_couple_to_this_adapter(value) -> None:
-    reason = _load_adapter_module()._public_option_reason({"future_option": value})
+    reason = _load_adapter_module()._public_option_reason(
+        {**MC_DEFAULT_DEPLOYMENT, "future_option": value}
+    )
     assert reason == ""
 
 
@@ -625,7 +774,7 @@ def test_future_non_inert_public_option_remains_fail_closed() -> None:
     assert "does not recognize public option(s): future_option" in reason
 
 
-def test_public_cli_requires_the_exact_qualified_profile(
+def test_public_cli_default_and_explicit_profiles_select_edgellm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import tensorrt_model_connect.build_cli as build_cli
@@ -647,8 +796,8 @@ def test_public_cli_requires_the_exact_qualified_profile(
 
     assert exit_info.value.code == 0
     options = build_cli._optimized_cli_public_options(captured["args"])
-    reason = _load_adapter_module()._public_option_reason(options)
-    assert "requires public option max_batch_size=4; got 1" in reason
+    assert {field: options[field] for field in MC_DEFAULT_DEPLOYMENT} == MC_DEFAULT_DEPLOYMENT
+    assert _load_adapter_module()._public_option_reason(options) == ""
 
     monkeypatch.setattr(
         sys,
@@ -672,7 +821,31 @@ def test_public_cli_requires_the_exact_qualified_profile(
 
     assert exit_info.value.code == 0
     options = build_cli._optimized_cli_public_options(captured["args"])
+    assert {
+        field: options[field] for field in QUALIFIED_EDGE_DEPLOYMENT
+    } == QUALIFIED_EDGE_DEPLOYMENT
     assert _load_adapter_module()._public_option_reason(options) == ""
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "trtmc",
+            "build",
+            MODEL_ID,
+            "-o",
+            "/tmp/qwen-edge-test.trtfb",
+            "--precision",
+            "fp16",
+        ],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        build_cli.main()
+
+    assert exit_info.value.code == 0
+    options = build_cli._optimized_cli_public_options(captured["args"])
+    reason = _load_adapter_module()._public_option_reason(options)
+    assert "does not qualify public deployment tuple" in reason
 
 
 def test_qualified_probe_is_side_effect_free_and_does_not_require_ambient_exporter_packages(
@@ -1029,7 +1202,7 @@ def test_build_stages_test_only_engine_runtime_and_plugin_payloads(
     monkeypatch.setenv("_TRTMC_INTERNAL_QWEN3_06B_ALLOW_FAKE_RUNTIME_BUILD", "1")
     parameters = _prebuilt_runtime_parameters(tmp_path)
     manifest = load_implementation_manifest(MANIFEST_PATH)
-    request = _request(parameters=parameters)
+    request = _request(parameters={**parameters, "public_options": MC_DEFAULT_DEPLOYMENT})
 
     build = _run_build_after_probe(manifest, request, tmp_path / "capsule-output")
 

@@ -238,6 +238,22 @@ def test_a100_gate_requires_installed_and_direct_runtime_surfaces() -> None:
             "def _runner_request("
         )
     ]
+    installed_build = installed_helper[
+        installed_helper.index("tensorrt_model_connect.build(") : installed_helper.index(
+            "if not bundle.is_file():"
+        )
+    ]
+    assert "max_cache_length=" not in installed_build
+    assert "precision=" not in installed_build
+    assert "max_batch_size=" not in installed_build
+    public_cli_build = source[
+        source.index("build_command = [") : source.index(
+            "assert not exporter_root.exists()"
+        )
+    ]
+    assert '"--precision"' not in public_cli_build
+    assert '"--max-cache-length"' not in public_cli_build
+    assert '"--max-batch-size"' not in public_cli_build
     assert "timeout=21_600" in installed_helper
     assert "timeout=900" not in installed_helper
     assert 'clean_env.pop("PYTHONPATH", None)' in source

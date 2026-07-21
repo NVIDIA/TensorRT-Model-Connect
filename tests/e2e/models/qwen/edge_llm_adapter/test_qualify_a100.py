@@ -653,6 +653,43 @@ def test_profile_pytest_parent_exists_before_launch(
     )
 
 
+def test_seed_build_uses_the_unchanged_model_id_only_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = _load_launcher()
+    profile = launcher.Profile(
+        "leaf",
+        "Qwen/Qwen3-0.6B",
+        tmp_path / "test_a100_e2e.py",
+        tmp_path / "build_runners.py",
+        "_SOURCE",
+        "_BUILD",
+    )
+    installed = SimpleNamespace(binary=tmp_path / "package/bin/trtmc")
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    commands: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        normalized = [str(item) for item in command]
+        commands.append(normalized)
+        stdout = "optimized_runtime.json\n" if normalized[1] == "inspect" else ""
+        return type("Result", (), {"stdout": stdout, "returncode": 0})()
+
+    monkeypatch.setattr(launcher, "_run", fake_run)
+
+    bundle = launcher._seed_edge_build(run_root, installed, profile, {})
+
+    assert commands[0] == [
+        str(installed.binary),
+        "build",
+        profile.model_id,
+        "-o",
+        str(bundle),
+    ]
+    assert commands[1] == [str(installed.binary), "inspect", str(bundle)]
+
+
 def test_multi_profile_qualification_requires_the_coexistence_test(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
