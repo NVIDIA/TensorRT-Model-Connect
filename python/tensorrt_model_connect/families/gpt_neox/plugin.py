@@ -18,15 +18,15 @@ from pathlib import Path
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _transpose_2d,
 )
 from ...parallel_config import normalize_parallel_config
-from .standard_decoder_builder import build_standard_decoder_engine
-from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
+from .model.model import build_standard_decoder_engine
+from .model.parallel import build_dual_profile_tp_decoder_engine
 
 
 class GPTNeoXPlugin:
@@ -41,7 +41,9 @@ class GPTNeoXPlugin:
         return not bool(config.raw.get("_fp32_layers"))
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self,
+        model_dir: str,
+        config: ModelConfig,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -67,73 +69,41 @@ class GPTNeoXPlugin:
             hf_prefix = f"gpt_neox.layers.{layer_idx}"
 
             # Input LayerNorm (pre-attention)
-            ln1_w = _load_tensor(
-                readers, f"{hf_prefix}.input_layernorm.weight")
-            ln1_b = _load_tensor(
-                readers, f"{hf_prefix}.input_layernorm.bias")
+            ln1_w = _load_tensor(readers, f"{hf_prefix}.input_layernorm.weight")
+            ln1_b = _load_tensor(readers, f"{hf_prefix}.input_layernorm.bias")
             weights[f"{prefix}.input_norm"] = ln1_w.astype(np.float32)
             weights[f"{prefix}.input_norm_beta"] = ln1_b.astype(np.float32)
 
             # Post-attention LayerNorm (pre-MLP, used in parallel residual)
-            ln2_w = _load_tensor(
-                readers, f"{hf_prefix}.post_attention_layernorm.weight")
-            ln2_b = _load_tensor(
-                readers, f"{hf_prefix}.post_attention_layernorm.bias")
+            ln2_w = _load_tensor(readers, f"{hf_prefix}.post_attention_layernorm.weight")
+            ln2_b = _load_tensor(readers, f"{hf_prefix}.post_attention_layernorm.bias")
             weights[f"{prefix}.post_attn_norm"] = ln2_w.astype(np.float32)
             weights[f"{prefix}.post_attn_norm_beta"] = ln2_b.astype(np.float32)
 
             # Fused QKV: [3*hidden, hidden] — standard Linear layout
-            qkv_w = _load_tensor(
-                readers, f"{hf_prefix}.attention.query_key_value.weight")
-            qkv_b = _load_tensor(
-                readers, f"{hf_prefix}.attention.query_key_value.bias")
+            qkv_w = _load_tensor(readers, f"{hf_prefix}.attention.query_key_value.weight")
+            qkv_b = _load_tensor(readers, f"{hf_prefix}.attention.query_key_value.bias")
 
-            # GPT-NeoX interleaves Q/K/V per head in the output dimension:
-            # For each head h, rows [h*3*hd : h*3*hd+hd] are Q,
-            # [h*3*hd+hd : h*3*hd+2*hd] are K, [h*3*hd+2*hd : h*3*hd+3*hd] are V.
-            q_parts, k_parts, v_parts = [], [], []
-            qb_parts, kb_parts, vb_parts = [], [], []
-            for h in range(num_heads):
-                base = h * 3 * head_dim
-                q_parts.append(qkv_w[base:base+head_dim])
-                k_parts.append(qkv_w[base+head_dim:base+2*head_dim])
-                v_parts.append(qkv_w[base+2*head_dim:base+3*head_dim])
-                qb_parts.append(qkv_b[base:base+head_dim])
-                kb_parts.append(qkv_b[base+head_dim:base+2*head_dim])
-                vb_parts.append(qkv_b[base+2*head_dim:base+3*head_dim])
-
-            q_w = np.concatenate(q_parts, axis=0)  # [hidden, hidden]
-            k_w = np.concatenate(k_parts, axis=0)
-            v_w = np.concatenate(v_parts, axis=0)
-
-            weights[f"{prefix}.w_q"] = _transpose_2d(q_w, "q_proj")
-            weights[f"{prefix}.w_k"] = _transpose_2d(k_w, "k_proj")
-            weights[f"{prefix}.w_v"] = _transpose_2d(v_w, "v_proj")
-
-            weights[f"{prefix}.q_bias"] = np.concatenate(
-                qb_parts).astype(np.float32)
-            weights[f"{prefix}.k_bias"] = np.concatenate(
-                kb_parts).astype(np.float32)
-            weights[f"{prefix}.v_bias"] = np.concatenate(
-                vb_parts).astype(np.float32)
+            # HF stores [Q, K, V] inside each head; flatten each projection
+            # across heads before transposing it to the TRT matmul layout.
+            qkv_w = qkv_w.reshape(num_heads, 3, head_dim, hidden)
+            qkv_b = qkv_b.reshape(num_heads, 3, head_dim)
+            for index, name in enumerate(("q", "k", "v")):
+                projection = qkv_w[:, index].reshape(hidden, hidden)
+                weights[f"{prefix}.w_{name}"] = _transpose_2d(projection, name)
+                weights[f"{prefix}.{name}_bias"] = qkv_b[:, index].reshape(hidden)
 
             # Output projection
-            o_w = _load_tensor(
-                readers, f"{hf_prefix}.attention.dense.weight")
-            o_b = _load_tensor(
-                readers, f"{hf_prefix}.attention.dense.bias")
+            o_w = _load_tensor(readers, f"{hf_prefix}.attention.dense.weight")
+            o_b = _load_tensor(readers, f"{hf_prefix}.attention.dense.bias")
             weights[f"{prefix}.w_o"] = _transpose_2d(o_w, "o_proj")
             weights[f"{prefix}.o_bias"] = o_b.astype(np.float32)
 
             # MLP: dense_h_to_4h (fc1) and dense_4h_to_h (fc2)
-            fc1_w = _load_tensor(
-                readers, f"{hf_prefix}.mlp.dense_h_to_4h.weight")
-            fc1_b = _load_tensor(
-                readers, f"{hf_prefix}.mlp.dense_h_to_4h.bias")
-            fc2_w = _load_tensor(
-                readers, f"{hf_prefix}.mlp.dense_4h_to_h.weight")
-            fc2_b = _load_tensor(
-                readers, f"{hf_prefix}.mlp.dense_4h_to_h.bias")
+            fc1_w = _load_tensor(readers, f"{hf_prefix}.mlp.dense_h_to_4h.weight")
+            fc1_b = _load_tensor(readers, f"{hf_prefix}.mlp.dense_h_to_4h.bias")
+            fc2_w = _load_tensor(readers, f"{hf_prefix}.mlp.dense_4h_to_h.weight")
+            fc2_b = _load_tensor(readers, f"{hf_prefix}.mlp.dense_4h_to_h.bias")
 
             if mlp_size == 0:
                 mlp_size = fc1_w.shape[0]
@@ -160,9 +130,14 @@ class GPTNeoXPlugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
-        max_cache_length: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
@@ -173,27 +148,27 @@ class GPTNeoXPlugin:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length,
-                precision=precision, quant_ctx=quant_ctx,
-                norm_type="layernorm",
-                mlp_type="gelu_fc",
-                position_type="rope",
-                activation="gelu",
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
                 partial_rotary_factor=rotary_pct,
                 parallel_residual=use_parallel,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+            )
         return build_standard_decoder_engine(
-            config, weights, max_cache_length,
-            precision=precision, quant_ctx=quant_ctx,
-            norm_type="layernorm",
-            mlp_type="gelu_fc",
-            position_type="rope",
-            activation="gelu",
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
             partial_rotary_factor=rotary_pct,
             parallel_residual=use_parallel,
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            debug_layer_outputs=debug_layer_outputs,
+        )
 
 
 plugin = GPTNeoXPlugin()
