@@ -5,13 +5,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any
 
 import numpy as np
-
-if TYPE_CHECKING:
-    from .model_config import ModelConfig
-
 
 ELF_VARIANTS: dict[str, tuple[int, int, int]] = {
     "ELF-B": (12, 768, 12),
@@ -20,7 +16,7 @@ ELF_VARIANTS: dict[str, tuple[int, int, int]] = {
 }
 
 
-def resolve_elf_config(config: "ModelConfig", max_seq_length: int | None = None) -> dict:
+def resolve_elf_config(config: Any, max_seq_length: int | None = None) -> dict:
     """Resolve ELF architecture fields from config.json plus upstream defaults."""
     raw = config.raw or {}
     variant = str(raw.get("elf_variant") or raw.get("model") or "ELF-B")

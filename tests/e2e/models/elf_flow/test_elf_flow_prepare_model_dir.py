@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect.config import ModelConfig
-from tensorrt_model_connect.families.elf_flow.prepare_model_dir import (
+from tools.families.elf_flow.prepare_model_dir import (
     prepare_model_dir,
     resolve_model_dir,
 )

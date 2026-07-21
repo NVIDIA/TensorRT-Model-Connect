@@ -21,7 +21,7 @@ from typing import Any
 try:
     from .validate_replay_artifact import validate_artifact
 except ImportError:
-    from tensorrt_model_connect.families.elf_flow.validate_replay_artifact import (
+    from tools.families.elf_flow.validate_replay_artifact import (
         validate_artifact,
     )
 

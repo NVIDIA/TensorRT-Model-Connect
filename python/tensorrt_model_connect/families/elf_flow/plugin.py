@@ -17,14 +17,13 @@ from typing import Any
 
 import numpy as np
 
-from .checkpoint_mapper import WeightDict
-from .model_config import ModelConfig
+from .weights import WeightDict
 from .config import resolve_elf_config
 
 
 class _TensorStore:
     def __init__(self, model_dir: str | Path):
-        from .checkpoint_mapper import _has_tensor, _load_tensor, _open_safetensors
+        from .weights import _has_tensor, _load_tensor, _open_safetensors
 
         self._has_tensor = _has_tensor
         self._load_tensor = _load_tensor
@@ -180,10 +179,6 @@ def _load_local_elf_arrays(model_path: Path) -> dict[str, np.ndarray] | None:
     return None
 
 
-def _target_np_dtype(precision: str) -> np.dtype:
-    return np.float16 if precision in ("fp16", "bf16") else np.float32
-
-
 def _name_variants(name: str) -> list[str]:
     variants = [name]
     if "." in name:
@@ -224,7 +219,7 @@ def _find_encoder_checkpoint(model_dir: str | Path) -> Path | None:
     return None
 
 
-def _elf_encoder_pad_token_id(config: ModelConfig) -> int:
+def _elf_encoder_pad_token_id(config: Any) -> int:
     raw = config.raw or {}
     explicit = raw.get("elf_encoder_pad_token_id", raw.get("encoder_pad_token_id"))
     if explicit is not None:
@@ -249,7 +244,7 @@ class ELFPlugin:
     def load_weights(
         self,
         model_dir: str,
-        config: ModelConfig,
+        config: Any,
         *,
         precision: str = "fp32",
     ) -> WeightDict:
@@ -329,7 +324,7 @@ class ELFPlugin:
 
     def build_engine(
         self,
-        config: ModelConfig,
+        config: Any,
         weights: WeightDict,
         max_cache_length: int,
         *,
@@ -339,7 +334,7 @@ class ELFPlugin:
         debug_layer_outputs: bool = False,
     ) -> bytes:
         del quant_ctx
-        from .builder import build_elf_flow_engine
+        from .model.model import build_elf_flow_engine
 
         return build_elf_flow_engine(
             config, weights, max_cache_length, precision=precision, verbose=verbose,
@@ -347,7 +342,7 @@ class ELFPlugin:
 
     def build_extra_engines(
         self,
-        config: ModelConfig,
+        config: Any,
         weights: WeightDict,
         max_cache_length: int,
         *,
@@ -361,7 +356,7 @@ class ELFPlugin:
             return {}
 
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from .t5_encoder_builder import (
+        from .model.components.text_encoder import (
             build_t5_encoder_engine,
             load_jax_t5_encoder_weights,
         )
@@ -385,7 +380,7 @@ class ELFPlugin:
             )
         return {"elf_text_encoder_plan": t5_plan}
 
-    def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
+    def get_bundle_config_overrides(self, config: Any) -> dict:
         cfg = resolve_elf_config(config)
         raw = config.raw or {}
         return {

@@ -499,7 +499,7 @@ def test_build_extra_engines_compiles_official_jax_t5_encoder(
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.elf_flow.t5_encoder_builder",
+        "tensorrt_model_connect.families.elf_flow.model.components.text_encoder",
         fake_t5_builder,
     )
 
@@ -532,8 +532,10 @@ def test_elf_rope_cache_matches_github_empty_token_semantics() -> None:
 @pytest.mark.trt
 def test_elf_trt_forward_matches_github_numpy_reference(tmp_path: Path) -> None:
     pytest.importorskip("tensorrt")
-    from tensorrt_model_connect.families.elf_flow.debug_runner import VisionTrtRunner
-    from tensorrt_model_connect.families.elf_flow.builder import build_elf_flow_engine
+    from tensorrt_model_connect.families.elf_flow import debug_runner
+
+    VisionTrtRunner = debug_runner.VisionTrtRunner
+    from tensorrt_model_connect.families.elf_flow.model.model import build_elf_flow_engine
 
     cfg = _cfg(num_hidden_layers=1)
     tensors = _elf_tensors(layers=1, scale=0.05)
@@ -579,7 +581,7 @@ def test_elf_trt_forward_matches_github_numpy_reference(tmp_path: Path) -> None:
 def test_elf_trtmc_run_generates_text_from_diffusion_decode(tmp_path: Path) -> None:
     pytest.importorskip("tensorrt")
     from tensorrt_model_connect.bundle_writer import BundleInfo, BundleSection, write_bundle
-    from tensorrt_model_connect.families.elf_flow.builder import build_elf_flow_engine
+    from tensorrt_model_connect.families.elf_flow.model.model import build_elf_flow_engine
 
     trtmc_binary = _find_trtmc_binary()
     if trtmc_binary is None:

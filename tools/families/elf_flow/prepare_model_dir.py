@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Stable ELF Flow model-directory adapter entry point."""
+"""Developer entry point for preparing an ELF Flow model directory."""
 
 from tensorrt_model_connect.families.elf_flow.model.components.prepare_model_dir import (
     main,
