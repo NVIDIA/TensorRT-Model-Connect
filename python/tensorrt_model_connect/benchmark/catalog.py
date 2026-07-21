@@ -56,6 +56,7 @@ class ManifestCatalog:
             try:
                 model = self._load(path)
                 operation_for_task_strategy(model.task_strategy)
+                _require_supported_execution(model)
             except BenchmarkError:
                 continue
             models.append(model)
@@ -64,7 +65,9 @@ class ManifestCatalog:
     def resolve(self, selector: str) -> ModelDescriptor:
         direct = Path(selector).expanduser()
         if direct.is_file():
-            return self._load(direct.resolve())
+            model = self._load(direct.resolve())
+            _require_supported_execution(model)
+            return model
         if not self.root.is_dir():
             raise BenchmarkError(f"model manifest root does not exist: {self.root}")
         matches: list[ModelDescriptor] = []
@@ -81,7 +84,9 @@ class ManifestCatalog:
         if len(identities) > 1 or len(matches) > 1:
             paths = ", ".join(str(item.manifest_path) for item in matches)
             raise BenchmarkError(f"ambiguous model {selector!r}: {paths}")
-        return matches[0]
+        model = matches[0]
+        _require_supported_execution(model)
+        return model
 
     @staticmethod
     def _load(path: Path) -> ModelDescriptor:
@@ -109,6 +114,9 @@ class ManifestCatalog:
             raise BenchmarkError(f"model manifest has no testcases: {path}")
         if not all(isinstance(item, dict) for item in testcases):
             raise BenchmarkError(f"model manifest testcases must be objects: {path}")
+        distributed_runtime = raw.get("distributed_runtime", {})
+        if not isinstance(distributed_runtime, Mapping):
+            raise BenchmarkError(f"distributed_runtime in model manifest {path} must be an object")
         task_strategy = str(raw["task_strategy"])
         model_defaults = _model_defaults(path, task_strategy)
         build_settings = {
@@ -144,6 +152,7 @@ class ManifestCatalog:
             manifest_path=path,
             testcases=tuple(testcases),
             build_settings=build_settings,
+            distributed_runtime=dict(distributed_runtime),
         )
 
 
@@ -156,6 +165,19 @@ def _resolve_manifest_asset(path: Path, field: str, value: object) -> Path:
     if not resolved.is_file():
         raise BenchmarkError(f"{field} file declared by model manifest {path} is missing: {resolved}")
     return resolved
+
+
+def _require_supported_execution(model: ModelDescriptor) -> None:
+    config = model.distributed_runtime
+    if not config.get("enabled"):
+        return
+    launcher = str(config.get("launcher", "mpirun") or "mpirun")
+    world_size = int(config.get("world_size", config.get("tp_size", 2)) or 2)
+    raise BenchmarkError(
+        f"model profile {model.name!r} requires distributed execution "
+        f"({launcher}, world_size={world_size}), but trtmc-bench currently supports "
+        "single-process benchmark workers only"
+    )
 
 
 def _model_defaults(path: Path, task_strategy: str) -> Mapping[str, Any]:

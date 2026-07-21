@@ -28,13 +28,14 @@ class ModelDescriptor:
     manifest_path: Path
     testcases: tuple[Mapping[str, Any], ...]
     build_settings: Mapping[str, Any]
+    distributed_runtime: Mapping[str, Any]
 
     def identity(self) -> dict[str, Any]:
         try:
             manifest_sha256 = hashlib.sha256(self.manifest_path.read_bytes()).hexdigest()
         except OSError as exc:
             raise BenchmarkError(f"cannot hash model manifest {self.manifest_path}: {exc}") from exc
-        return {
+        value = {
             "name": self.name,
             "hf_id": self.hf_id,
             "family": self.family,
@@ -46,6 +47,9 @@ class ModelDescriptor:
             "bundle_name": self.bundle_name,
             "build": dict(self.build_settings),
         }
+        if self.distributed_runtime:
+            value["distributed_runtime"] = dict(self.distributed_runtime)
+        return value
 
     def summary(self) -> dict[str, Any]:
         value = self.identity()

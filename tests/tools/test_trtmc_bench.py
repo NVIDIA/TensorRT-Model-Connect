@@ -187,6 +187,15 @@ def test_cli_lists_supported_models(capsys: pytest.CaptureFixture[str]) -> None:
     assert "distilgpt2" in output
     assert "flux-schnell-l0" in output
     assert "generate_image" in output
+    assert "chronos-bolt-tiny-official-tp4" not in output
+
+
+def test_catalog_rejects_distributed_profiles_not_supported_by_worker() -> None:
+    with pytest.raises(
+        BenchmarkError,
+        match=r"requires distributed execution \(mpirun, world_size=4\).+single-process",
+    ):
+        ManifestCatalog().resolve("chronos-bolt-tiny-official-tp4")
 
 
 def test_model_identity_does_not_depend_on_catalog_install_path(tmp_path: Path) -> None:
