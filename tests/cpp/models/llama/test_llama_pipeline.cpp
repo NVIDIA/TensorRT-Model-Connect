@@ -53,6 +53,21 @@ static void check(bool condition, const char* test_name) {
 
 static trtmc::TrtLogger g_logger;
 
+namespace trtmc {
+
+class TrtModuleImplTestPeer {
+  public:
+    static void set_execution_context_name(TrtModuleImpl& module, const char* name) {
+        module.ctx_->setName(name);
+    }
+
+    static std::string execution_context_name(const TrtModuleImpl& module) {
+        return module.ctx_->getName();
+    }
+};
+
+} // namespace trtmc
+
 class MockTokenizer final : public trtmc::ITokenizer {
   public:
     std::vector<int32_t> encode(const std::string& text) const override {
@@ -353,6 +368,34 @@ static void test_kv_reset_is_logical_and_masks_stale_rows() {
     cudaStreamDestroy(stream);
 }
 
+static void test_generation_reset_reuses_execution_context() {
+    auto engine = build_mock_decoder();
+    if (!engine)
+        return;
+
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+
+    auto* ctx = engine->createExecutionContext();
+    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
+    trtmc::TrtModuleImplTestPeer::set_execution_context_name(module, "generation-context");
+
+    module.reset_execution_context();
+
+    check(trtmc::TrtModuleImplTestPeer::execution_context_name(module) == "generation-context",
+          "generation reset reuses the loaded execution context");
+
+    int32_t token_id = 7;
+    std::vector<float> attention_mask(8, 0.0F);
+    trtmc::TensorMap inputs;
+    inputs["token_id"] = trtmc::Tensor{&token_id, {1}, trtmc::DType::kInt32};
+    inputs["attention_mask"] = trtmc::Tensor{attention_mask.data(), {8}, trtmc::DType::kFloat32};
+    auto outputs = module.forward(inputs);
+    check(outputs.count("logits") == 1, "reused execution context remains executable");
+
+    cudaStreamDestroy(stream);
+}
+
 static void test_stop_on_boxed_answer() {
     auto engine = build_mock_decoder();
     if (!engine)
@@ -396,6 +439,7 @@ int main() {
     test_generate_max_tokens();
     test_zero_max_tokens();
     test_kv_reset_is_logical_and_masks_stale_rows();
+    test_generation_reset_reuses_execution_context();
     test_stop_on_boxed_answer();
 
     if (failures > 0)

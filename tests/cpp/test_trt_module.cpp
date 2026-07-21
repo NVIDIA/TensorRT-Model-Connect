@@ -42,7 +42,6 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
-#include <string>
 #include <vector>
 
 static int failures = 0;
@@ -56,21 +55,6 @@ static void check(bool condition, const char* test_name) {
 
 // Process-wide logger (TRT requires a single logger for all objects).
 static trtmc::TrtLogger g_logger;
-
-namespace trtmc {
-
-class TrtModuleImplTestPeer {
-  public:
-    static void set_execution_context_name(TrtModuleImpl& module, const char* name) {
-        module.ctx_->setName(name);
-    }
-
-    static std::string execution_context_name(const TrtModuleImpl& module) {
-        return module.ctx_->getName();
-    }
-};
-
-} // namespace trtmc
 
 // Build a tiny TRT engine: identity mapping input[4] → output[4] (float32)
 static trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity_engine() {
@@ -331,34 +315,6 @@ static void test_bind_external() {
     cudaStreamDestroy(stream);
 }
 
-static void test_generation_reset_reuses_execution_context() {
-    auto engine = build_identity_engine();
-    if (!engine)
-        return;
-
-    cudaStream_t stream;
-    cudaStreamCreate(&stream);
-
-    auto* ctx = engine->createExecutionContext();
-    trtmc::TrtModuleImpl module(engine.get(), ctx, stream);
-    trtmc::TrtModuleImplTestPeer::set_execution_context_name(module, "generation-context");
-
-    module.reset_execution_context();
-
-    check(trtmc::TrtModuleImplTestPeer::execution_context_name(module) == "generation-context",
-          "generation reset reuses the loaded execution context");
-
-    float data[4] = {11.0f, 12.0f, 13.0f, 14.0f};
-    trtmc::Tensor input;
-    input.data = data;
-    input.shape = {4};
-    input.dtype = trtmc::DType::kFloat32;
-    auto outputs = module.forward({{"x", input}});
-    check(outputs.count("y") == 1, "reused execution context remains executable");
-
-    cudaStreamDestroy(stream);
-}
-
 static void test_unique_ptr_ownership() {
     // Modules now live behind unique_ptr<ITrtModule> — verify ownership transfer
     auto engine = build_identity_engine();
@@ -532,7 +488,6 @@ int main() {
     test_introspection();
     test_device_ptr();
     test_bind_external();
-    test_generation_reset_reuses_execution_context();
     test_unique_ptr_ownership();
     test_keep_alive();
     test_forward_device();
