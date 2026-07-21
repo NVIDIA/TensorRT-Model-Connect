@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Contracts for generic model-owned optimized-runtime CI dispatch."""
+"""Contracts for generic, bounded, model-owned optimized-runtime CI."""
 
 from __future__ import annotations
 
 import importlib.util
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -45,13 +46,19 @@ def _write(repo: Path, relative: str, content: str = "owned\n") -> Path:
     return path
 
 
-def _payload(mode: str = "none", profiles: tuple[str, ...] = ("profile_a",)) -> dict:
+def _payload(
+    mode: str = "none",
+    profiles: tuple[str, ...] = ("profile_a",),
+    *,
+    schema_version: object = 1,
+) -> dict[str, object]:
     selected = list(profiles)
     if mode == "leaf":
         entries = [{"scope": "leaf", "profile": profile} for profile in selected]
     else:
         entries = [{"scope": mode, "profile": ""}]
     return {
+        "schema_version": schema_version,
         "mode": mode,
         "run": mode != "none",
         "profiles": selected,
@@ -72,7 +79,6 @@ def _adapter(repo: Path, family: str, name: str) -> str:
         repo,
         f"{test_root}/ci_impact.py",
         """#!/usr/bin/env python3
-import json
 from pathlib import Path
 print(Path(__file__).with_name("result.json").read_text(encoding="utf-8"))
 """,
@@ -96,20 +102,42 @@ def repository(tmp_path: Path) -> tuple[Path, str, tuple[str, str]]:
     )
     _write(repo, "docs/readme.md")
     _write(repo, ".github/workflows/trtmc-ci.yml")
+    _write(repo, ".github/workflows/nightly.yml")
     _write(repo, "tools/ci/optimized_contracts.py")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "base")
     return repo, _git(repo, "rev-parse", "HEAD"), roots
 
 
-def _select(repo: Path, root: str, payload: dict) -> None:
+def _select(repo: Path, root: str, payload: dict[str, object]) -> None:
     _write(repo, f"{root}/result.json", json.dumps(payload) + "\n")
 
 
 def _commit(repo: Path, message: str = "change") -> str:
-    _git(repo, "add", ".")
+    _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", message)
     return _git(repo, "rev-parse", "HEAD")
+
+
+def _row(
+    kind: str,
+    *,
+    root: str = "",
+    family: str = "",
+    scope: str = "none",
+    profile: str = "",
+    index: int = 0,
+    count: int = 1,
+) -> dict[str, object]:
+    return {
+        "kind": kind,
+        "adapter_root": root,
+        "family": family,
+        "scope": scope,
+        "profile": profile,
+        "shard_index": index,
+        "shard_count": count,
+    }
 
 
 def test_leaf_dispatch_points_only_at_the_selected_model_runner(repository) -> None:
@@ -120,21 +148,13 @@ def test_leaf_dispatch_points_only_at_the_selected_model_runner(repository) -> N
 
     result = dispatcher.calculate(repo, base, head)
 
-    assert result["run"] is True
-    assert result["matrix"] == {
-        "include": [
-            {
-                "adapter_root": second,
-                "runner": f"{second}/ci_run.py",
-                "scope": "leaf",
-                "profile": "profile_a",
-            }
-        ]
-    }
-    assert result["selection"] == [
-        {"adapter_root": first, "mode": "none", "profiles": ["profile_a"]},
-        {"adapter_root": second, "mode": "leaf", "profiles": ["profile_a"]},
+    assert result["matrix"]["include"] == [
+        _row("direct", root=second, scope="leaf", profile="profile_a")
     ]
+    assert result["selection"] == [
+        {"adapter_root": second, "mode": "leaf", "profile_count": 1}
+    ]
+    assert first not in json.dumps(result["matrix"])
 
 
 def test_family_dispatch_does_not_leak_to_a_sibling_model(repository) -> None:
@@ -146,17 +166,12 @@ def test_family_dispatch_does_not_leak_to_a_sibling_model(repository) -> None:
     result = dispatcher.calculate(repo, base, head)
 
     assert result["matrix"]["include"] == [
-        {
-            "adapter_root": first,
-            "runner": f"{first}/ci_run.py",
-            "scope": "family",
-            "profile": "",
-        }
+        _row("direct", root=first, scope="family")
     ]
-    assert not any(second in json.dumps(entry) for entry in result["matrix"]["include"])
+    assert second not in json.dumps(result["matrix"])
 
 
-def test_provider_dispatch_aggregates_every_model_owned_runner(repository) -> None:
+def test_provider_selector_rows_remain_model_owned(repository) -> None:
     dispatcher = _load_dispatcher()
     repo, base, roots = repository
     for root in roots:
@@ -166,19 +181,27 @@ def test_provider_dispatch_aggregates_every_model_owned_runner(repository) -> No
     result = dispatcher.calculate(repo, base, head)
 
     assert [entry["adapter_root"] for entry in result["matrix"]["include"]] == list(roots)
+    assert {entry["kind"] for entry in result["matrix"]["include"]} == {"direct"}
     assert {entry["scope"] for entry in result["matrix"]["include"]} == {"provider"}
 
 
-def test_dispatcher_change_forces_every_adapter_to_provider_scope(repository) -> None:
+def test_dispatcher_change_uses_bounded_provider_shards_and_one_structural_row(
+    repository,
+) -> None:
     dispatcher = _load_dispatcher()
-    repo, base, roots = repository
+    repo, base, _ = repository
     _write(repo, "tools/ci/optimized_contracts.py", "changed\n")
     head = _commit(repo)
 
     result = dispatcher.calculate(repo, base, head)
+    rows = result["matrix"]["include"]
 
-    assert [entry["adapter_root"] for entry in result["matrix"]["include"]] == list(roots)
-    assert {entry["scope"] for entry in result["matrix"]["include"]} == {"provider"}
+    assert len(rows) == 2
+    assert sum(row["kind"] == "structural" for row in rows) == 1
+    shards = [row for row in rows if row["kind"] == "shard"]
+    assert {row["scope"] for row in shards} == {"provider"}
+    assert {row["shard_count"] for row in shards} == {1}
+    assert all(not row["adapter_root"] for row in shards)
 
 
 def test_unrelated_change_returns_a_valid_skipped_matrix(repository) -> None:
@@ -190,20 +213,26 @@ def test_unrelated_change_returns_a_valid_skipped_matrix(repository) -> None:
     result = dispatcher.calculate(repo, base, head)
 
     assert result["run"] is False
-    assert result["matrix"] == {
-        "include": [{"adapter_root": "", "runner": "", "scope": "none", "profile": ""}]
-    }
+    assert result["matrix"] == {"include": [_row("none")]}
+    assert result["selection"] == []
 
 
-def test_nightly_all_mode_dispatches_every_adapter_once(repository) -> None:
+def test_nightly_all_mode_is_selector_free_and_bounded(repository, monkeypatch) -> None:
     dispatcher = _load_dispatcher()
-    repo, revision, roots = repository
+    repo, revision, _ = repository
+    monkeypatch.setattr(
+        dispatcher,
+        "_select",
+        lambda *_args, **_kwargs: pytest.fail("nightly invoked an adapter selector"),
+    )
 
     result = dispatcher.calculate(repo, revision, revision, all_adapters=True)
 
-    assert [entry["adapter_root"] for entry in result["matrix"]["include"]] == list(roots)
-    assert {entry["scope"] for entry in result["matrix"]["include"]} == {"family"}
-    assert {entry["profile"] for entry in result["matrix"]["include"]} == {""}
+    rows = result["matrix"]["include"]
+    assert len(rows) == 1
+    assert {entry["kind"] for entry in rows} == {"shard"}
+    assert {entry["scope"] for entry in rows} == {"family"}
+    assert all(not entry["adapter_root"] for entry in rows)
 
 
 def test_incomplete_three_root_adapter_fails_closed(repository) -> None:
@@ -211,6 +240,17 @@ def test_incomplete_three_root_adapter_fails_closed(repository) -> None:
     repo, base, _ = repository
     _write(repo, "python/tensorrt_model_connect/families/model_c/new_adapter/adapter.py")
     _write(repo, "tests/e2e/models/model_c/new_adapter/ci_impact.py")
+    head = _commit(repo)
+
+    with pytest.raises(dispatcher.ContractError, match="lacks ownership roots"):
+        dispatcher.calculate(repo, base, head)
+
+
+def test_builder_and_runtime_without_test_contracts_fail_closed(repository) -> None:
+    dispatcher = _load_dispatcher()
+    repo, base, _ = repository
+    _write(repo, "python/tensorrt_model_connect/families/model_c/new_adapter/adapter.py")
+    _write(repo, "src/runtime/models/model_c/new_adapter/adapter.cpp")
     head = _commit(repo)
 
     with pytest.raises(dispatcher.ContractError, match="lacks ownership roots"):
@@ -227,6 +267,102 @@ def test_missing_model_owned_runner_fails_closed(repository) -> None:
         dispatcher.calculate(repo, base, head)
 
 
+def test_new_adapter_cannot_select_itself_out_of_ci(repository) -> None:
+    dispatcher = _load_dispatcher()
+    repo, base, _ = repository
+    root = _adapter(repo, "model_c", "new_adapter")
+    head = _commit(repo)
+
+    result = dispatcher.calculate(repo, base, head)
+
+    assert result["matrix"]["include"] == [
+        _row("direct", root=root, scope="family")
+    ]
+
+
+def test_completing_a_preexisting_unregistered_layout_forces_family(
+    repository,
+) -> None:
+    dispatcher = _load_dispatcher()
+    repo, _, _ = repository
+    _write(repo, "python/tensorrt_model_connect/families/model_c/new_adapter/adapter.py")
+    _write(repo, "src/runtime/models/model_c/new_adapter/adapter.cpp")
+    _write(repo, "tests/e2e/models/model_c/new_adapter/placeholder.txt")
+    base = _commit(repo, "partial layout")
+    root = _adapter(repo, "model_c", "new_adapter")
+    head = _commit(repo, "register adapter")
+
+    result = dispatcher.calculate(repo, base, head)
+
+    assert result["inventory"]["added"] == 1
+    assert result["matrix"]["include"] == [
+        _row("direct", root=root, scope="family")
+    ]
+
+
+def test_changed_adapter_returning_none_fails_closed(repository) -> None:
+    dispatcher = _load_dispatcher()
+    repo, base, (first, _) = repository
+    _write(repo, f"{first}/profile_a/test_contract.py")
+    head = _commit(repo)
+
+    with pytest.raises(dispatcher.ContractError, match="selected no optimized-runtime CI"):
+        dispatcher.calculate(repo, base, head)
+
+
+def test_full_deletion_emits_explicit_structural_validation(repository) -> None:
+    dispatcher = _load_dispatcher()
+    repo, base, (first, _) = repository
+    for owner in dispatcher.OWNER_ROOTS:
+        shutil.rmtree(repo / owner / "model_a/fast_adapter")
+    head = _commit(repo)
+
+    result = dispatcher.calculate(repo, base, head)
+
+    assert result["run"] is True
+    assert result["inventory"]["removed"] == 1
+    assert result["matrix"]["include"] == [_row("structural", scope="removal")]
+
+
+def test_deleting_the_last_adapters_never_becomes_a_skip(repository) -> None:
+    dispatcher = _load_dispatcher()
+    repo, base, _ = repository
+    for owner in dispatcher.OWNER_ROOTS:
+        shutil.rmtree(repo / owner / "model_a/fast_adapter")
+        shutil.rmtree(repo / owner / "model_b/vendor_adapter")
+    head = _commit(repo)
+
+    result = dispatcher.calculate(repo, base, head)
+
+    assert result["run"] is True
+    assert result["inventory"] == {"current": 0, "added": 0, "removed": 2}
+    assert result["matrix"]["include"] == [_row("structural", scope="removal")]
+
+
+def test_parent_symlink_cannot_escape_source_ownership(repository, tmp_path: Path) -> None:
+    dispatcher = _load_dispatcher()
+    repo, base, _ = repository
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    family = repo / "python/tensorrt_model_connect/families/escaped"
+    family.symlink_to(outside, target_is_directory=True)
+    head = _commit(repo)
+
+    with pytest.raises(dispatcher.ContractError, match="ownership path is a symlink"):
+        dispatcher.calculate(repo, base, head)
+
+
+@pytest.mark.parametrize("schema", (True, 1.0, 2, None))
+def test_selector_schema_version_is_exact(schema: object, repository) -> None:
+    dispatcher = _load_dispatcher()
+    repo, base, (first, _) = repository
+    _select(repo, first, _payload("leaf", schema_version=schema))
+    head = _commit(repo)
+
+    with pytest.raises(dispatcher.ContractError, match="invalid schema_version"):
+        dispatcher.calculate(repo, base, head)
+
+
 def test_malformed_selector_output_fails_closed(repository) -> None:
     dispatcher = _load_dispatcher()
     repo, base, (first, _) = repository
@@ -237,7 +373,132 @@ def test_malformed_selector_output_fails_closed(repository) -> None:
         dispatcher.calculate(repo, base, head)
 
 
-def test_cli_writes_only_generic_outputs(repository, tmp_path: Path) -> None:
+def test_unrelated_broken_selector_is_not_invoked(repository, monkeypatch) -> None:
+    dispatcher = _load_dispatcher()
+    repo, base, _ = repository
+    _write(repo, "docs/readme.md", "changed\n")
+    head = _commit(repo)
+    monkeypatch.setattr(
+        dispatcher,
+        "_select",
+        lambda *_args, **_kwargs: pytest.fail("unrelated selector was invoked"),
+    )
+
+    assert dispatcher.calculate(repo, base, head)["run"] is False
+
+
+def test_affected_hung_selector_has_a_bounded_timeout(repository, monkeypatch) -> None:
+    dispatcher = _load_dispatcher()
+    repo, _, (first, _) = repository
+    _write(repo, f"{first}/ci_impact.py", "import time\ntime.sleep(60)\n")
+    base = _commit(repo, "hang selector")
+    _write(repo, f"{first}/profile_a/test_contract.py")
+    head = _commit(repo)
+    monkeypatch.setattr(dispatcher, "SELECTOR_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(dispatcher.ContractError, match="exceeded .* seconds"):
+        dispatcher.calculate(repo, base, head)
+
+
+def test_selector_output_is_bounded(repository, monkeypatch) -> None:
+    dispatcher = _load_dispatcher()
+    repo, base, (first, _) = repository
+    _select(repo, first, _payload("leaf"))
+    head = _commit(repo)
+    monkeypatch.setattr(dispatcher, "SELECTOR_OUTPUT_LIMIT", 8)
+
+    with pytest.raises(dispatcher.ContractError, match="output limit"):
+        dispatcher.calculate(repo, base, head)
+
+
+def test_thousand_adapter_nightly_inventory_emits_bounded_shards(monkeypatch) -> None:
+    dispatcher = _load_dispatcher()
+    adapters = tuple(
+        dispatcher.Adapter(f"model_{index:04d}", "fast_adapter")
+        for index in range(1_000)
+    )
+    monkeypatch.setattr(dispatcher, "_revision", lambda _repo, revision: revision)
+    monkeypatch.setattr(
+        dispatcher,
+        "_inventory",
+        lambda _repo, _revision, **_kwargs: adapters,
+    )
+
+    result = dispatcher.calculate(Path("."), "base", "head", all_adapters=True)
+
+    rows = result["matrix"]["include"]
+    assert len(rows) == 125
+    assert len(rows) <= dispatcher.MAX_MATRIX_ROWS == 256
+    assert all(row["kind"] == "shard" for row in rows)
+    assert all(not row["adapter_root"] for row in rows)
+    assert len(json.dumps(result["matrix"])) < 100_000
+
+
+def test_hash_ordered_shards_are_deterministic_bounded_and_complete() -> None:
+    dispatcher = _load_dispatcher()
+    adapters = [
+        dispatcher.Adapter(f"model_{index:04d}", "fast_adapter")
+        for index in range(1_000)
+    ]
+
+    first = sorted(adapters, key=dispatcher._shard_order)
+    second = sorted(adapters, key=dispatcher._shard_order)
+    shards = [
+        first[index : index + dispatcher.ADAPTERS_PER_SHARD]
+        for index in range(0, len(first), dispatcher.ADAPTERS_PER_SHARD)
+    ]
+
+    assert first == second
+    assert all(len(shard) <= dispatcher.ADAPTERS_PER_SHARD for shard in shards)
+    assert [adapter for shard in shards for adapter in shard] == first
+    assert set(first) == set(adapters)
+
+
+def test_fanout_above_bounded_capacity_fails_closed() -> None:
+    dispatcher = _load_dispatcher()
+
+    with pytest.raises(dispatcher.ContractError, match="bounded shard capacity"):
+        dispatcher._shard_rows(
+            dispatcher.MAX_MATRIX_ROWS * dispatcher.ADAPTERS_PER_SHARD + 1,
+            "family",
+        )
+
+
+def test_shard_continues_after_failure_and_aggregates(repository, monkeypatch) -> None:
+    dispatcher = _load_dispatcher()
+    repo, revision, _ = repository
+    adapters = (
+        dispatcher.Adapter("model_a", "fast_adapter"),
+        dispatcher.Adapter("model_b", "vendor_adapter"),
+    )
+    calls = []
+    monkeypatch.setattr(dispatcher, "discover", lambda _repo, _head: adapters)
+    monkeypatch.setattr(
+        dispatcher,
+        "_run_adapter",
+        lambda _repo, adapter, _scope, _profile: calls.append(adapter.key)
+        or ("failed" if adapter.family == "model_a" else None),
+    )
+
+    result = dispatcher.run_matrix_row(
+        repo,
+        revision,
+        revision,
+        kind="shard",
+        adapter_root="",
+        family="",
+        scope="family",
+        profile="",
+        shard_index=0,
+        shard_count=1,
+    )
+
+    assert result == 1
+    assert set(calls) == {adapter.key for adapter in adapters}
+    assert len(calls) == len(adapters)
+
+
+def test_cli_writes_only_compact_generic_outputs(repository, tmp_path: Path) -> None:
     repo, base, (_, second) = repository
     _select(repo, second, _payload("leaf"))
     head = _commit(repo)
@@ -264,9 +525,11 @@ def test_cli_writes_only_generic_outputs(repository, tmp_path: Path) -> None:
     assert json.loads(process.stdout)["run"] is True
     names = [line.split("=", 1)[0] for line in output.read_text().splitlines()]
     assert names == ["run", "matrix", "selection"]
+    assert output.stat().st_size < 10_000
 
 
-def test_premerge_workflow_contains_only_generic_dispatch_contract() -> None:
+def test_premerge_workflow_contains_only_bounded_generic_dispatch() -> None:
+    dispatcher = _load_dispatcher()
     workflow = (DISPATCHER.parents[2] / ".github/workflows/trtmc-ci.yml").read_text(
         encoding="utf-8"
     )
@@ -274,25 +537,26 @@ def test_premerge_workflow_contains_only_generic_dispatch_contract() -> None:
     contracts = workflow.split("\n  optimized-runtime-contracts:", 1)[1].split(
         "\n  model-proof:", 1
     )[0]
-    required = workflow.split("\n  required:", 1)[1]
 
     assert "tools/ci/optimized_contracts.py" in impact
-    assert "optimized_contracts_matrix:" in impact
-    assert (
-        "matrix: ${{ fromJSON(needs.impact.outputs.optimized_contracts_matrix) }}"
-        in contracts
-    )
-    assert "ADAPTER_ROOT: ${{ matrix.adapter_root }}" in contracts
-    assert "RUNNER: ${{ matrix.runner }}" in contracts
-    assert 'test "$RUNNER" = "$ADAPTER_ROOT/ci_run.py"' in contracts
-    assert 'python "$RUNNER"' in contracts
+    assert "matrix.kind" in contracts
+    assert "--run-kind \"$KIND\"" in contracts
+    assert "--shard-index \"$SHARD_INDEX\"" in contracts
+    assert "pytest==9.1.1" in contracts
+    assert "if: ${{ matrix.kind == 'structural' }}" in contracts
+    assert "numpy==2.4.6" in contracts
+    assert "timeout-minutes: 100" in contracts
+    assert "nlohmann" not in contracts
+    assert "matrix.runner" not in contracts
     assert not re.search(r"qwen|edge.?llm", workflow, re.IGNORECASE)
-    assert "- optimized-runtime-contracts" in required
-    assert 'test "$OPTIMIZED_CONTRACT_RESULT" = "success"' in required
-    assert 'test "$OPTIMIZED_CONTRACT_RESULT" = "skipped"' in required
+    assert (
+        dispatcher.ADAPTERS_PER_SHARD * dispatcher.RUNNER_TIMEOUT_SECONDS
+        + 20 * 60
+        <= 100 * 60
+    )
 
 
-def test_nightly_generically_dispatches_every_registered_adapter() -> None:
+def test_nightly_generically_runs_bounded_selector_free_shards() -> None:
     workflow = (DISPATCHER.parents[2] / ".github/workflows/nightly.yml").read_text(
         encoding="utf-8"
     )
@@ -300,21 +564,15 @@ def test_nightly_generically_dispatches_every_registered_adapter() -> None:
     contracts = workflow.split("\n  optimized-runtime-contracts:", 1)[1].split(
         "\n  required:", 1
     )[0]
-    required = workflow.split("\n  required:", 1)[1].split("\n  release:", 1)[0]
 
     assert "tools/ci/optimized_contracts.py" in inventory
     assert "--all" in inventory
-    assert "optimized_contracts_matrix:" in inventory
     assert "fail-fast: false" in contracts
-    assert (
-        "matrix: ${{ fromJSON(needs.inventory.outputs.optimized_contracts_matrix) }}"
-        in contracts
-    )
-    assert "ADAPTER_ROOT: ${{ matrix.adapter_root }}" in contracts
-    assert "RUNNER: ${{ matrix.runner }}" in contracts
-    assert 'test "$RUNNER" = "$ADAPTER_ROOT/ci_run.py"' in contracts
-    assert 'python "$RUNNER"' in contracts
+    assert "--run-kind \"$KIND\"" in contracts
+    assert "--shard-count \"$SHARD_COUNT\"" in contracts
+    assert "pytest==9.1.1" in contracts
+    assert "timeout-minutes: 100" in contracts
+    assert "nlohmann" not in contracts
+    assert "numpy" not in contracts
+    assert "matrix.runner" not in contracts
     assert not re.search(r"qwen|edge.?llm", workflow, re.IGNORECASE)
-    assert "- optimized-runtime-contracts" in required
-    assert 'true) test "$OPTIMIZED_CONTRACT_RESULT" = "success"' in required
-    assert 'false) test "$OPTIMIZED_CONTRACT_RESULT" = "skipped"' in required

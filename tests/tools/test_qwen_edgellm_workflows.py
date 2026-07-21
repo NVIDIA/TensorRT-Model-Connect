@@ -57,4 +57,3 @@ def test_a100_rollout_is_manual_until_an_x86_runner_is_provisioned() -> None:
     assert 'default: ""' in manual
     assert "_discover_profiles()" in launcher_text
     assert "_run_coexistence_if_complete" in launcher_text
-

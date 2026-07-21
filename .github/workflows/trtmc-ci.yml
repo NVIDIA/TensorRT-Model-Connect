@@ -340,7 +340,7 @@ jobs:
           fi
 
   optimized-runtime-contracts:
-    name: Optimized runtime / CPU / ${{ matrix.adapter_root }} / ${{ matrix.profile || matrix.scope }}
+    name: Optimized runtime / CPU / ${{ matrix.kind }} / ${{ matrix.adapter_root || matrix.family || matrix.scope }}
     needs:
       - legal
       - impact
@@ -352,8 +352,8 @@ jobs:
     strategy:
       fail-fast: true
       matrix: ${{ fromJSON(needs.impact.outputs.optimized_contracts_matrix) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
     permissions:
       contents: read
 
@@ -375,25 +375,37 @@ jobs:
       - name: Provision CPU contract harness
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends nlohmann-json3-dev
-          python -m pip install --disable-pip-version-check --quiet numpy pytest
+          python -m pip install --disable-pip-version-check --quiet pytest==9.1.1
+
+      - name: Provision structural test dependencies
+        if: ${{ matrix.kind == 'structural' }}
+        run: python -m pip install --disable-pip-version-check --quiet numpy==2.4.6
 
       - name: Run the selected model-owned contracts
         env:
+          BASE_SHA: ${{ needs.legal.outputs.base_sha }}
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+          KIND: ${{ matrix.kind }}
           ADAPTER_ROOT: ${{ matrix.adapter_root }}
-          RUNNER: ${{ matrix.runner }}
+          FAMILY: ${{ matrix.family }}
           PROFILE: ${{ matrix.profile }}
           SCOPE: ${{ matrix.scope }}
+          SHARD_INDEX: ${{ matrix.shard_index }}
+          SHARD_COUNT: ${{ matrix.shard_count }}
+          TRTMC_OPTIMIZED_CI_PROVISION: "1"
         run: |
           set -euo pipefail
-          test -n "$ADAPTER_ROOT"
-          test -n "$RUNNER"
-          test "$RUNNER" = "$ADAPTER_ROOT/ci_run.py"
-          test -f "$RUNNER"
-          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python:. python "$RUNNER" \
+          PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python:. \
+            python tools/ci/optimized_contracts.py \
+            --base "$BASE_SHA" \
+            --head "$TESTED_SHA" \
+            --run-kind "$KIND" \
+            --adapter-root "$ADAPTER_ROOT" \
+            --family "$FAMILY" \
             --scope "$SCOPE" \
-            --profile "$PROFILE"
+            --profile "$PROFILE" \
+            --shard-index "$SHARD_INDEX" \
+            --shard-count "$SHARD_COUNT"
 
   model-proof:
     name: 4 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]
