@@ -42,9 +42,9 @@ and the ViT at ``vision/model.safetensors``.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     load_standard_weights,
     _open_safetensors,
@@ -52,8 +52,11 @@ from .checkpoint_mapper import (
 )
 # Reuse the Qwen-VL vision encoder shape. The decoder builder is local so the
 # Lance family does not depend on another family's text-builder package.
-from .default_decoder import build_standard_decoder_engine
-from .qwen_vl_vision_builder import build_qwen_vl_vision_engine
+from .model.model import build_standard_decoder_engine
+from .model.components.vision import build_qwen_vl_vision_engine
+
+if TYPE_CHECKING:
+    from .config import ModelConfig
 
 # Standard Qwen2.5-VL ViT input size; the runtime resizes images to this.
 _DEFAULT_FIXED_IMAGE_SIZE = 448
@@ -93,11 +96,7 @@ class LancePlugin:
         debug_layer_outputs: bool = False,
         parallel_config=None,
     ) -> bytes:
-        return build_standard_decoder_engine(
-            config, weights, max_cache_length, precision=precision,
-            verbose=verbose, quant_ctx=quant_ctx, embed_input=True,
-            debug_layer_outputs=debug_layer_outputs,
-        )
+        return build_standard_decoder_engine(config, weights, max_cache_length, precision=precision, verbose=verbose, quant_ctx=quant_ctx, debug_layer_outputs=debug_layer_outputs)
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,

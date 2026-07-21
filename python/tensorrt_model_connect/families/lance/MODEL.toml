@@ -4,7 +4,7 @@
 id = "lance"
 plugin = "lance"
 module = "plugin"
-model_dir_adapter = "prepare_model.py|resolve_model_dir"
+model_dir_adapter = "config.py|resolve_model_dir"
 hf_allow_patterns = [
   "Lance_3B/**",
   "Qwen2.5-VL-ViT/**",

@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -24,7 +25,8 @@ except ImportError:
 
 from safetensors import safe_open
 
-from .config import ModelConfig
+if TYPE_CHECKING:
+    from ..config import ModelConfig
 
 
 def _target_np_dtype(precision: str) -> np.dtype:

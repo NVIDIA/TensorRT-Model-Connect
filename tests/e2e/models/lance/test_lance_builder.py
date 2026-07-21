@@ -12,9 +12,9 @@ import pytest
 pytest.importorskip("tensorrt", reason="TensorRT is required for family builder tests")
 
 
-def test_lance_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> None:
+def test_lance_dispatches_to_dual_profile_builder(monkeypatch) -> None:
     module = importlib.import_module(
-        "tensorrt_model_connect.families.lance.default_decoder")
+        "tensorrt_model_connect.families.lance.model.model")
     calls: dict[str, object] = {}
 
     def fake_build(config, weights, max_cache_length, **kwargs):
@@ -24,7 +24,8 @@ def test_lance_embed_input_dispatches_to_dual_profile_builder(monkeypatch) -> No
     monkeypatch.setattr(module, "build_dual_profile_decoder_engine", fake_build)
     config = type("Config", (), {"raw": {"_decoder_engine_role": "decode"}})()
     result = module.build_standard_decoder_engine(
-        config, {}, 31, precision="fp16", embed_input=True)
+        config, {}, 31, precision="fp16"
+    )
 
     assert result == b"lance-dual-profile-plan"
-    assert calls["build"][3]["embed_input"] is True
+    assert "embed_input" not in calls["build"][3]
