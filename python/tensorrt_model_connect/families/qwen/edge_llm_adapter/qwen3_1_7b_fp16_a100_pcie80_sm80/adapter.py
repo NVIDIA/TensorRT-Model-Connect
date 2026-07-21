@@ -164,6 +164,21 @@ _EXPECTED_ENGINE_BUILDER_CONFIG: dict[str, object] = {
     "max_lora_rank": 0,
     "trt_native_ops": False,
 }
+_PUBLIC_DEPLOYMENT_FIELDS = (
+    "precision",
+    "max_cache_length",
+    "max_batch_size",
+)
+_MC_DEFAULT_DEPLOYMENT = {
+    "precision": "fp32",
+    "max_cache_length": 256,
+    "max_batch_size": 1,
+}
+_QUALIFIED_EDGE_DEPLOYMENT = {
+    "precision": "fp16",
+    "max_cache_length": 4096,
+    "max_batch_size": 4,
+}
 _REQUIRED_TARGET = {
     "os": "linux",
     "architecture": "x86_64",
@@ -465,9 +480,10 @@ def _validate_capsule_data(profile: Mapping[str, Any]) -> None:
         "artifact_layout": "edge_engine_directory_v1",
     }
     for field, expected in expected_profile.items():
-        if profile.get(field) != expected:
+        actual = profile.get(field)
+        if type(actual) is not type(expected) or actual != expected:
             raise AdapterError(
-                f"Capsule profile field {field} must be {expected!r}, got {profile.get(field)!r}"
+                f"Capsule profile field {field} must be {expected!r}, got {actual!r}"
             )
     _pinned_edge_dependency()
 
@@ -512,7 +528,7 @@ def _load_request(path: Path) -> dict[str, Any]:
     unknown = sorted(set(request) - allowed)
     if unknown:
         raise AdapterError(f"Capsule request contains unknown fields: {', '.join(unknown)}")
-    if request.get("schema_version") != 1:
+    if type(request.get("schema_version")) is not int or request["schema_version"] != 1:
         raise AdapterError("Capsule request schema_version must be 1")
     if request.get("implementation_id") != IMPLEMENTATION_ID:
         raise AdapterError("Capsule request implementation_id does not match this capsule")
@@ -613,8 +629,8 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
         "trust_remote_code",
     )
     for field in unsupported_when_true:
-        if options.get(field) is True:
-            return f"Qwen Edge-LLM capsule does not support public option {field}=true"
+        if field in options and options[field] is not False:
+            return f"Qwen Edge-LLM capsule requires public option {field}=False"
 
     exact_defaults = {
         "decoder_engine_layout": "split",
@@ -655,37 +671,72 @@ def _public_option_reason(options: Mapping[str, Any]) -> str:
         return "Qwen Edge-LLM capsule does not recognize public option(s): " + ", ".join(unknown)
 
     for field, expected in exact_defaults.items():
-        if field in options and options[field] != expected:
+        if field in options and (
+            type(options[field]) is not type(expected) or options[field] != expected
+        ):
             return (
                 f"Qwen Edge-LLM capsule requires public option {field}={expected!r}; "
                 f"got {options[field]!r}"
             )
 
-    # A qualified profile owns only the exact request it was validated for.
-    # Never reinterpret an explicit MC request as a different Edge engine.
+    if "verbose" in options and type(options["verbose"]) is not bool:
+        return "Qwen Edge-LLM capsule requires public option verbose to be a boolean"
+
+    # This model leaf treats the complete, unchanged MC default tuple as the
+    # model-ID-only UX for its qualified Edge profile.  The qualified tuple is
+    # also accepted for callers that state the Edge engine capacities
+    # explicitly.  Requiring the complete tuple prevents partial or mixed
+    # requests from being reinterpreted as this profile.
+    present_deployment_fields = tuple(
+        field for field in _PUBLIC_DEPLOYMENT_FIELDS if field in options
+    )
+    if present_deployment_fields != _PUBLIC_DEPLOYMENT_FIELDS:
+        return (
+            "Qwen Edge-LLM capsule requires precision, max_cache_length, and "
+            "max_batch_size as one complete public deployment tuple"
+        )
+
+    def matches(deployment: Mapping[str, Any]) -> bool:
+        return all(
+            type(options[field]) is type(expected) and options[field] == expected
+            for field, expected in deployment.items()
+        )
+
+    if not (matches(_MC_DEFAULT_DEPLOYMENT) or matches(_QUALIFIED_EDGE_DEPLOYMENT)):
+        return (
+            "Qwen Edge-LLM capsule does not qualify public deployment tuple "
+            f"precision={options['precision']!r}, "
+            f"max_cache_length={options['max_cache_length']!r}, "
+            f"max_batch_size={options['max_batch_size']!r}"
+        )
+
     exact_profile_options = {
-        "fp8": (False,),
-        "max_batch_size": (4,),
-        "max_cache_length": (4096,),
-        "method": ("auto",),
-        "precision": ("fp16",),
-        "quantize": (None,),
+        "fp8": False,
+        "method": "auto",
+        "quantize": None,
     }
-    for field, accepted in exact_profile_options.items():
-        if field in options and options[field] not in accepted:
+    for field, expected in exact_profile_options.items():
+        if field in options and (
+            type(options[field]) is not type(expected) or options[field] != expected
+        ):
             return (
                 "Qwen Edge-LLM capsule requires public option "
-                f"{field}={accepted[0]!r}; got {options[field]!r}"
+                f"{field}={expected!r}; got {options[field]!r}"
             )
 
     parallel = options.get("parallel_config")
-    if parallel not in (None, {}):
-        if not isinstance(parallel, dict) or parallel != {
+    if parallel is not None and not (type(parallel) is dict and not parallel):
+        expected_parallel = {
             "mode": "single",
             "rank": -1,
             "require_mpirun": True,
             "tp_size": 1,
-        }:
+        }
+        if type(parallel) is not dict or set(parallel) != set(expected_parallel) or any(
+            type(parallel[field]) is not type(expected)
+            or parallel[field] != expected
+            for field, expected in expected_parallel.items()
+        ):
             return "Qwen Edge-LLM capsule does not support parallel_config"
     return ""
 

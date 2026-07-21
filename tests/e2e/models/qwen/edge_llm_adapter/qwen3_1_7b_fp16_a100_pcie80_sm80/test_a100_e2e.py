@@ -384,9 +384,6 @@ if bundle.exists():
 tensorrt_model_connect.build(
     sys.argv[2],
     str(bundle),
-    max_cache_length=4096,
-    precision="fp16",
-    max_batch_size=4,
 )
 if not bundle.is_file():
     raise SystemExit(f"installed Python build produced no bundle: {bundle}")
@@ -664,12 +661,6 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
         _MODEL_ID,
         "-o",
         str(bundle),
-        "--precision",
-        "fp16",
-        "--max-cache-length",
-        "4096",
-        "--max-batch-size",
-        "4",
     ]
     assert not exporter_root.exists()
     _run(build_command, timeout=21_600, cwd=outside_checkout, env=build_env)
@@ -683,6 +674,11 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
     assert header["num_key_value_heads"] == 8
     descriptor = json.loads(_read_bundle_section(bundle, "optimized_runtime.json"))
     assert descriptor["implementation_id"] == _IMPLEMENTATION_ID
+    assert descriptor["profile_id"] == ("qwen3-1.7b-fp16--a100-pcie80-sm80--edgellm0.9-trt10")
+    implementation = json.loads(_read_bundle_section(bundle, "implementation.json"))
+    assert implementation["limits"]["max_cache_length"] == 4096
+    assert implementation["limits"]["max_batch_size"] == 4
+    assert implementation["bundle_config"]["precision"] == "fp16"
     inspect = _run(
         [str(binary), "inspect", str(bundle)],
         timeout=60,
@@ -704,8 +700,19 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
         edge_build_inventory = _tree_inventory(configured_edge_build)
         assert edge_build_inventory
     warm_bundle = tmp_path / "qwen3-1.7b-edge-warm-profile.trtfb"
-    warm_build_command = list(build_command)
-    warm_build_command[warm_build_command.index(str(bundle))] = str(warm_bundle)
+    warm_build_command = [
+        str(binary),
+        "build",
+        _MODEL_ID,
+        "-o",
+        str(warm_bundle),
+        "--precision",
+        "fp16",
+        "--max-cache-length",
+        "4096",
+        "--max-batch-size",
+        "4",
+    ]
     _run(warm_build_command, timeout=21_600, cwd=outside_checkout, env=build_env)
     warm_exporter_inventory = _verify_exporter_profile(exporter_root)
     assert warm_exporter_inventory == exporter_inventory
