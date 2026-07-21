@@ -175,6 +175,12 @@ def test_reference_uses_official_diffusers_configuration_and_writes_hf_frames(
     assert "torch_dtype=torch.float32" in script
     assert "WanPipeline.from_pretrained" in script
     assert "torch_dtype=torch.bfloat16" in script
+    assert "UMT5 shared and encoder input embedding shapes do not match" in script
+    assert "pipe.text_encoder.set_input_embeddings(pipe.text_encoder.shared)" in script
+    assert "pipe.text_encoder.encoder.embed_tokens is not pipe.text_encoder.shared" in script
+    assert "UMT5 encoder input embedding is not tied to shared.weight" in script
+    assert script.index("shared_embedding_shape") < script.index("set_input_embeddings")
+    assert script.index("set_input_embeddings") < script.index('pipe.to("cuda")')
     assert 'pipe.to("cuda")' in script
     assert "height=16" in script
     assert "width=32" in script

@@ -144,6 +144,16 @@ pipe = WanPipeline.from_pretrained(
     torch_dtype=torch.bfloat16,
     local_files_only=True,
 )
+shared_embedding_shape = tuple(pipe.text_encoder.shared.weight.shape)
+encoder_embedding_shape = tuple(pipe.text_encoder.encoder.embed_tokens.weight.shape)
+if shared_embedding_shape != encoder_embedding_shape:
+    raise RuntimeError(
+        "UMT5 shared and encoder input embedding shapes do not match: "
+        f"{{shared_embedding_shape}} != {{encoder_embedding_shape}}"
+    )
+pipe.text_encoder.set_input_embeddings(pipe.text_encoder.shared)
+if pipe.text_encoder.encoder.embed_tokens is not pipe.text_encoder.shared:
+    raise RuntimeError("UMT5 encoder input embedding is not tied to shared.weight")
 actual_flow_shift = float(pipe.scheduler.config.flow_shift)
 if abs(actual_flow_shift - expected_flow_shift) > 1e-6:
     raise RuntimeError(
