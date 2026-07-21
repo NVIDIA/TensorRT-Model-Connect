@@ -24,7 +24,7 @@ except ImportError:
 
 from safetensors import safe_open
 
-from .config import ModelConfig
+from ..config import ModelConfig
 
 
 def _target_np_dtype(precision: str) -> np.dtype:
