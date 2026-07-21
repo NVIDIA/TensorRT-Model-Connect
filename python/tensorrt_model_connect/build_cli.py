@@ -38,6 +38,13 @@ _OPTIMIZED_ROUTING_INTERNAL_FIELDS = frozenset({
     "output",
 })
 
+_PROFILE_REEXEC_BOOTSTRAP = (
+    "import runpy, sys; "
+    "sys.path.append(sys.argv.pop(1)); "
+    "runpy.run_module("
+    "'tensorrt_model_connect.__main__', run_name='__main__', alter_sys=True)"
+)
+
 
 def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
     """Return the effective public CLI options for model-owned policy.
@@ -300,10 +307,12 @@ def _maybe_reexec_build_in_profile(
         return None
 
     env = os.environ.copy()
+    package_root = str(Path(__file__).resolve().parent.parent)
     cmd = [
         target_python,
-        "-m",
-        "tensorrt_model_connect.__main__",
+        "-c",
+        _PROFILE_REEXEC_BOOTSTRAP,
+        package_root,
         *sys.argv[1:],
         "--active-python-profile",
         required_profile,

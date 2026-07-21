@@ -15,6 +15,9 @@ Postconditions: Parsed arguments match expected values for all subcommands, defa
 from __future__ import annotations
 
 import argparse
+import json
+from pathlib import Path
+import subprocess
 import sys
 from unittest.mock import patch
 
@@ -592,10 +595,15 @@ class TestCmdBuildMocked:
         ):
             assert cli._cmd_build(args) == 0
 
-        assert captured["cmd"] == [
+        command = captured["cmd"]
+        assert command[0:2] == [
             "/tmp/example-profile/bin/python",
-            "-m",
-            "tensorrt_model_connect.__main__",
+            "-c",
+        ]
+        assert "sys.path.append" in command[2]
+        assert "runpy.run_module" in command[2]
+        assert command[3:] == [
+            str(Path(cli.__file__).resolve().parent.parent),
             "build",
             "example-org/profiled-model",
             "-o",
@@ -604,6 +612,41 @@ class TestCmdBuildMocked:
             "example_profile",
         ]
         assert all("ACTIVE_PYTHON_PROFILE" not in key for key in captured["env"])
+
+    def test_profile_reexec_bootstrap_imports_explicit_package_root(self, tmp_path):
+        """A profile can import TRTMC when a baked editable path is unavailable."""
+        import tensorrt_model_connect.build_cli as cli
+
+        package_root = tmp_path / "source"
+        package = package_root / "tensorrt_model_connect"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "__main__.py").write_text(
+            "import json, sys\nprint(json.dumps(sys.argv))\n",
+            encoding="utf-8",
+        )
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                cli._PROFILE_REEXEC_BOOTSTRAP,
+                str(package_root),
+                "build",
+                "example-org/profiled-model",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        assert json.loads(completed.stdout) == [
+            str(package / "__main__.py"),
+            "build",
+            "example-org/profiled-model",
+        ]
 
 
 class TestFriendlyDownloadErrors:
