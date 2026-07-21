@@ -171,6 +171,7 @@ class BundleBuilder:
     def _plan(self, model: ModelDescriptor, cases: Sequence[ResolvedCase]) -> _BuildPlan:
         options = _build_options(model, cases)
         runtime = _resolve_builder_runtime(self.backend_abi)
+        environment = _build_environment(model, runtime)
         identity_options = dict(options)
         if "fp8_scales" in identity_options:
             identity_options["fp8_scales"] = model.build_settings["fp8_scales"]
@@ -179,13 +180,13 @@ class BundleBuilder:
             "model": model.identity(),
             "manifest_sha256": _sha256_file(model.manifest_path),
             "options": identity_options,
+            "build_environment_assets": _build_environment_asset_identity(model, environment),
             "platform": _platform_identity(runtime),
         }
         encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         cache_key = hashlib.sha256(encoded).hexdigest()[:16]
         bundle = self.cache_root / model.name / cache_key / model.bundle_name
         command = _build_command(model, bundle, options, runtime)
-        environment = _build_environment(model, runtime)
         timeout = int(model.build_settings.get("build_timeout_s", 3600))
         if timeout <= 0:
             raise BenchmarkError(f"build_timeout_s for {model.name} must be positive")
@@ -596,6 +597,33 @@ def _build_environment(model: ModelDescriptor, runtime: _BuilderRuntime) -> dict
             text = str(path.resolve())
         environment[name] = text
     return environment
+
+
+def _build_environment_asset_identity(
+    model: ModelDescriptor, environment: Mapping[str, str]
+) -> dict[str, Any]:
+    declared = model.build_settings.get("build_env", {})
+    if not isinstance(declared, Mapping):
+        raise BenchmarkError(f"build_env for {model.name} must be an object")
+    assets: dict[str, Any] = {}
+    for name, spec in declared.items():
+        if not isinstance(name, str) or not name or not isinstance(spec, Mapping):
+            continue
+        path_like = "path" in spec or bool(spec.get("path_like", False))
+        if not path_like:
+            continue
+        value = spec.get("path", spec.get("value", ""))
+        if not isinstance(value, str) or not value:
+            raise BenchmarkError(f"build_env path {name} for {model.name} must be non-empty")
+        resolved = Path(environment[name])
+        if not resolved.is_file():
+            raise BenchmarkError(f"build_env path {name} for {model.name} is missing: {resolved}")
+        assets[name] = {
+            "declared": value,
+            "relative_to": str(spec.get("relative_to", "repo") or "repo"),
+            "sha256": _sha256_file(resolved),
+        }
+    return assets
 
 
 def _platform_identity(runtime: _BuilderRuntime) -> dict[str, Any]:

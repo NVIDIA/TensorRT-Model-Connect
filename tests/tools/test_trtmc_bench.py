@@ -364,6 +364,35 @@ def test_fp8_scale_contents_participate_in_bundle_cache_identity(tmp_path: Path)
     assert first.cache_key != second.cache_key
 
 
+def test_build_environment_asset_contents_participate_in_bundle_cache_identity(
+    tmp_path: Path,
+) -> None:
+    family = tmp_path / "catalog/qwen_image"
+    manifest = family / "manifests/qwen-image-edit-2511.json"
+    manifest.parent.mkdir(parents=True)
+    image = family / "data/test_img.jpeg"
+    image.parent.mkdir()
+    image.write_bytes(b"first-image")
+    source = (
+        REPOSITORY_ROOT
+        / "tests/e2e/models/qwen_image/manifests/qwen-image-edit-2511.json"
+    )
+    manifest.write_bytes(source.read_bytes())
+
+    catalog = ManifestCatalog(tmp_path / "catalog")
+    model = catalog.resolve("qwen-image-edit-2511")
+    case = resolve_case(model, tmp_path / "pending.trtfb")
+    first = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
+
+    image.write_bytes(b"second-image")
+    updated_model = catalog.resolve("qwen-image-edit-2511")
+    updated_case = resolve_case(updated_model, tmp_path / "pending.trtfb")
+    second = BundleBuilder(tmp_path / "cache")._plan(updated_model, (updated_case,))
+
+    assert first.environment["TRTMC_QWEN_IMAGE_EDIT_CONDITION_IMAGE"] == str(image)
+    assert first.cache_key != second.cache_key
+
+
 def test_image_rate_and_seconds_per_image_account_for_batch_size() -> None:
     metrics = reduce_metrics(
         "generate_image",
