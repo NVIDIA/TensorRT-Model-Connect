@@ -33,6 +33,7 @@ class InstalledWheelValidator:
 
     def validate(self, wheel: Path) -> None:
         import tensorrt_model_connect
+        from tensorrt_model_connect.benchmark.catalog import ManifestCatalog
 
         package_file = Path(tensorrt_model_connect.__file__).resolve()
         if package_file.is_relative_to(self.repository):
@@ -46,15 +47,31 @@ class InstalledWheelValidator:
         self.require_elf(script_path)
         native_dir = Path(importlib.resources.files("tensorrt_model_connect").joinpath("bin"))
         native = native_dir / "trtmc"
+        benchmark_worker = native_dir / "trtmc_benchmark_worker"
+        benchmark_script = shutil.which("trtmc-bench")
+        benchmark_catalog = Path(
+            importlib.resources.files("tensorrt_model_connect").joinpath("benchmark", "_catalog")
+        )
         backends = sorted(native_dir.glob("libtrtmc_backend_trt*.so*"))
         if not native.is_file():
             raise CiError(f"packaged native trtmc executable is missing under {native_dir}")
+        if not benchmark_worker.is_file():
+            raise CiError(f"packaged benchmark worker is missing under {native_dir}")
+        if not benchmark_script:
+            raise CiError("wheel did not install trtmc-bench on PATH")
+        if not benchmark_catalog.is_dir():
+            raise CiError(f"packaged benchmark catalog is missing under {benchmark_catalog}")
+        benchmark_model = ManifestCatalog(benchmark_catalog).resolve("distilgpt2")
         if not backends:
             raise CiError(f"packaged TensorRT backend DSO is missing under {native_dir}")
         print(f"installed_wheel={wheel}")
         print(f"imported_package={package_file}")
         print(f"installed_trtmc={script_path}")
         print(f"packaged_native_trtmc={native}")
+        print(f"installed_trtmc_bench={benchmark_script}")
+        print(f"packaged_benchmark_worker={benchmark_worker}")
+        print(f"packaged_benchmark_catalog={benchmark_catalog}")
+        print(f"packaged_benchmark_smoke_model={benchmark_model.name}")
         for backend in backends:
             print(f"packaged_backend={backend}")
 
@@ -88,6 +105,29 @@ class WheelArchiveValidator:
                 raise CiError(f"{wheel}: native wheel must not contain .data/purelib entries")
             binaries = [name for name in names if name.endswith("/bin/trtmc")]
             scripts = [name for name in names if name.endswith(".data/scripts/trtmc")]
+            benchmark_workers = [
+                name for name in names if name.endswith("/bin/trtmc_benchmark_worker")
+            ]
+            benchmark_scripts = [
+                name for name in names if name.endswith(".data/scripts/trtmc-bench")
+            ]
+            benchmark_descriptors = [
+                name
+                for name in names
+                if "/benchmark/_catalog/" in name and name.endswith("/MODEL.toml")
+            ]
+            benchmark_manifests = [
+                name
+                for name in names
+                if "/benchmark/_catalog/" in name
+                and "/manifests/" in name
+                and name.endswith(".json")
+            ]
+            benchmark_audio_assets = [
+                name
+                for name in names
+                if "/benchmark/_catalog/" in name and name.endswith("/data/Recording.wav")
+            ]
             package_cores = [name for name in names if "/bin/libtrtmc_core.so" in name]
             script_cores = [name for name in names if ".data/scripts/libtrtmc_core.so" in name]
             backends = [
@@ -102,6 +142,11 @@ class WheelArchiveValidator:
         checks = (
             (len(binaries) == 1, "expected one packaged trtmc executable"),
             (len(scripts) == 1, "expected one native trtmc script executable"),
+            (len(benchmark_workers) == 1, "expected one native benchmark worker"),
+            (len(benchmark_scripts) == 1, "expected one trtmc-bench script"),
+            (bool(benchmark_descriptors), "packaged benchmark MODEL.toml files are missing"),
+            (bool(benchmark_manifests), "packaged benchmark manifests are missing"),
+            (bool(benchmark_audio_assets), "packaged benchmark audio assets are missing"),
             (bool(package_cores), "packaged core DSO is missing"),
             (bool(script_cores), "core DSO beside native trtmc script is missing"),
             (
@@ -136,7 +181,17 @@ class WheelArchiveValidator:
                 f"manylinux_2_{self.max_glibc_minor}_aarch64 or older"
             )
         print(f"validated wheel={wheel}")
-        for entry in sorted([*binaries, *scripts, *package_cores, *script_cores, *backends]):
+        for entry in sorted(
+            [
+                *binaries,
+                *scripts,
+                *benchmark_workers,
+                *benchmark_scripts,
+                *package_cores,
+                *script_cores,
+                *backends,
+            ]
+        ):
             print(f"  {entry}")
 
 

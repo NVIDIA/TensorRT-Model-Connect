@@ -1730,6 +1730,32 @@ class TestUnitTiers:
         assert match.unit_tiers == ["cpp"]
         assert match.rebuild_cpp is True
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "python/tensorrt_model_connect/benchmark/cli.py",
+            "python/tensorrt_model_connect/benchmark/operations.py",
+        ],
+    )
+    def test_benchmark_python_triggers_owned_units(self, imap, path):
+        """Benchmark orchestration runs builder and tools units without model proofs."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "benchmark_python"
+        assert match.models == []
+        assert match.unit_tiers == ["builder", "tools"]
+        assert match.rebuild_cpp is False
+
+    @pytest.mark.parametrize("path", ["examples/trtmc_bench.yaml", "scripts/trtmc-bench"])
+    def test_benchmark_cli_assets_trigger_tools_tier(self, imap, path):
+        """Benchmark CLI assets run their tools-tier contract tests."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "benchmark_cli_asset"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_e2e_selection_unit(self, imap):
         """E2E selection unit tests run tools-tier validation without E2E."""
         match = test_impact.classify_file("tests/test_e2e_selection.py", imap)

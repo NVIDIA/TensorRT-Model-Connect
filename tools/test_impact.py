@@ -1379,6 +1379,18 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestDeclarativeClassificationRules.test_specialized_builder_rule",),
         ),
         ClassificationRule(
+            priority=95,
+            name="benchmark_python",
+            matcher=_path_startswith("python/tensorrt_model_connect/benchmark/"),
+            resolver=_match_result(
+                "benchmark_python",
+                _no_models,
+                ["builder", "tools"],
+                False,
+            ),
+            covered_by=("TestUnitTiers.test_benchmark_python_triggers_owned_units",),
+        ),
+        ClassificationRule(
             priority=100,
             name="shared_builder_module",
             matcher=_path_startswith("python/tensorrt_model_connect/"),
@@ -1820,6 +1832,13 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             matcher=_regex_rule(r"examples/.+\.cpp$"),
             resolver=_match_result("cpp_example_tool", _no_models, ["cpp"], True),
             covered_by=("TestUnitTiers.test_cpp_example_tool_triggers_cpp_tier",),
+        ),
+        ClassificationRule(
+            priority=456,
+            name="benchmark_cli_asset",
+            matcher=_path_in({"examples/trtmc_bench.yaml", "scripts/trtmc-bench"}),
+            resolver=_match_result("benchmark_cli_asset", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_benchmark_cli_assets_trigger_tools_tier",),
         ),
         ClassificationRule(
             priority=460,

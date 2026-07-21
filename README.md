@@ -90,3 +90,4 @@ native executable is actually checked against that platform floor.
 | Use CLI, Python, or C++ APIs | [API Overview](website/docs/api/overview.md) |
 | Understand internals | [Architecture](website/docs/architecture/overview.md) |
 | Run validation | [Testing](website/docs/reference/testing.md) |
+| Measure model performance | [Performance Benchmarking](website/docs/reference/benchmarking.md) |

@@ -1,0 +1,507 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import subprocess
+
+import pytest
+
+from tensorrt_model_connect.benchmark import builder as benchmark_builder
+from tensorrt_model_connect.benchmark import catalog as benchmark_catalog
+from tensorrt_model_connect.benchmark.builder import BundleBuilder
+from tensorrt_model_connect.benchmark.catalog import (
+    ManifestCatalog,
+    expand_sweeps,
+    resolve_case,
+)
+from tensorrt_model_connect.benchmark.cli import main
+from tensorrt_model_connect.benchmark.metrics import reduce_metrics
+from tensorrt_model_connect.benchmark.operations import registered_operations
+from tensorrt_model_connect.benchmark.types import BenchmarkError
+from tensorrt_model_connect.benchmark.worker import worker_backend_abi
+
+
+pytestmark = pytest.mark.unit
+
+
+def _bundle(tmp_path: Path, name: str = "model.trtfb") -> Path:
+    path = tmp_path / name
+    path.write_bytes(b"bundle")
+    return path
+
+
+def _worker(tmp_path: Path) -> Path:
+    worker = tmp_path / "trtmc_benchmark_worker"
+    worker.write_text(
+        """#!/usr/bin/env python3
+import argparse, json
+p = argparse.ArgumentParser()
+p.add_argument('--request', required=True)
+p.add_argument('--output', required=True)
+a = p.parse_args()
+r = json.load(open(a.request, encoding='utf-8'))
+n = r['measurement']['iterations']
+o = [{
+  'iteration': i,
+  'runtime_e2e_wall_ms': float(i + 1),
+  'output_tokens': 4,
+  'prefill_ms': 0.25,
+  'decode_ms': 0.75,
+} for i in range(n)]
+json.dump({
+  'schema_version': 'trtmc.benchmark-worker-result/v1',
+  'status': 'completed',
+  'case_digest': r['case_digest'],
+  'pipeline_type': 'fake',
+  'load_ms': 10.0,
+  'observations': o,
+  'output_summary': {'text': 'ok', 'token_ids': [1, 2, 3, 4]},
+}, open(a.output, 'w', encoding='utf-8'))
+""",
+        encoding="utf-8",
+    )
+    worker.chmod(0o755)
+    return worker
+
+
+def test_catalog_reuses_existing_model_manifests_for_different_tasks(tmp_path: Path) -> None:
+    catalog = ManifestCatalog()
+    expectations = {
+        "distilgpt2": ("generate", 5, 50),
+        "flux-schnell-l0": ("generate_image", 1, 5),
+        "chronos-bolt-tiny-official": ("solve", 50, 500),
+        "nemotron-embed-vl-1b-v2": ("embed", 50, 500),
+        "whisper-tiny-fp16": ("transcribe", 1, 10),
+    }
+    for model_name, expected in expectations.items():
+        case = resolve_case(catalog.resolve(model_name), _bundle(tmp_path, model_name))
+        assert (case.operation, case.measurement.warmup, case.measurement.iterations) == expected
+
+
+def test_operation_registry_declares_supported_task_semantics() -> None:
+    operations = {operation.name: operation for operation in registered_operations()}
+
+    assert set(operations) == {
+        "generate",
+        "generate_image",
+        "encode",
+        "embed",
+        "solve",
+        "transcribe",
+    }
+    assert operations["generate"].task_strategies == ("text_generation_causal",)
+    assert operations["generate_image"].supports_batch is True
+    assert operations["generate_image"].per_item_latency.result_name == "seconds_per_image_p50"
+    assert [metric.result_name for metric in operations["solve"].rate_metrics] == [
+        "windows_per_s",
+        "forecast_elements_per_s",
+    ]
+    assert operations["transcribe"].rate_metrics[0].inverse_result_name == "realtime_factor"
+
+
+def test_default_catalog_falls_back_to_installed_package_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "site-packages/tensorrt_model_connect/benchmark"
+    installed_catalog = package / "_catalog" / "installed" / "manifests"
+    installed_catalog.mkdir(parents=True)
+    (installed_catalog.parent / "MODEL.toml").write_text(
+        'id = "installed"\ntest_manifests = ["manifests/installed.json"]\n',
+        encoding="utf-8",
+    )
+    (installed_catalog / "installed.json").write_text(
+        json.dumps(
+            {
+                "name": "installed-model",
+                "hf_id": "example/installed-model",
+                "bundle": "installed-model.trtfb",
+                "family": "installed",
+                "task_strategy": "text_generation_causal",
+                "runtime_strategy": "installed_runtime",
+                "precision": "fp16",
+                "testcases": [{"name": "default", "prompt": "hello"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("TRTMC_BENCH_MANIFEST_ROOT", raising=False)
+    monkeypatch.setattr(benchmark_catalog, "__file__", str(package / "catalog.py"))
+
+    model = ManifestCatalog().resolve("installed-model")
+
+    assert model.manifest_path == installed_catalog / "installed.json"
+
+
+def test_model_identity_does_not_depend_on_catalog_install_path(tmp_path: Path) -> None:
+    source = Path("tests/e2e/models/gpt2/manifests/distilgpt2.json")
+    models = []
+    for layout in ("source-checkout", "installed-wheel"):
+        manifest = tmp_path / layout / "gpt2/manifests/distilgpt2.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_bytes(source.read_bytes())
+        models.append(ManifestCatalog._load(manifest))
+
+    bundle = _bundle(tmp_path)
+    source_case = resolve_case(models[0], bundle)
+    installed_case = resolve_case(models[1], bundle)
+
+    assert models[0].identity() == models[1].identity()
+    assert models[0].summary()["manifest_path"] != models[1].summary()["manifest_path"]
+    assert source_case.digest == installed_case.digest
+
+
+def test_named_cases_are_literal_while_sweep_is_cartesian(tmp_path: Path, capsys) -> None:
+    config = tmp_path / "bench.yaml"
+    bundle = _bundle(tmp_path, "flux-schnell-l0.trtfb")
+    config.write_text(
+        f"""
+models:
+  - model: flux-schnell-l0
+    bundle: {bundle}
+    cases:
+      - name: fast
+        set:
+          request.num_inference_steps: 4
+      - name: quality
+        set:
+          request.num_inference_steps: 20
+""",
+        encoding="utf-8",
+    )
+    assert main(["run", str(config), "--dry-run"]) == 0
+    literal = json.loads(capsys.readouterr().out)
+    assert [(case["name"], case["request"]["num_inference_steps"]) for case in literal] == [
+        ("fast", 4),
+        ("quality", 20),
+    ]
+
+    assert (
+        main(
+            [
+                "run",
+                str(config),
+                "--case",
+                "fast",
+                "--sweep",
+                "request.seed=1,2",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    swept = json.loads(capsys.readouterr().out)
+    assert [case["request"]["seed"] for case in swept] == [1, 2]
+
+
+def test_batch_size_fails_closed_instead_of_being_clamped(tmp_path: Path) -> None:
+    catalog = ManifestCatalog()
+    case = resolve_case(catalog.resolve("distilgpt2"), _bundle(tmp_path))
+    with pytest.raises(BenchmarkError, match="supports request.batch_size=1 only"):
+        expand_sweeps(case, {"request.batch_size": [1, 2]})
+
+    image_case = resolve_case(catalog.resolve("flux-schnell-l0"), _bundle(tmp_path, "flux"))
+    batches = expand_sweeps(image_case, {"request.batch_size": [1, 2]})
+    assert [item.request["batch_size"] for item in batches] == [1, 2]
+
+
+def test_auto_build_reuses_model_defaults_and_largest_diffusion_shape(tmp_path: Path) -> None:
+    catalog = ManifestCatalog()
+    model = catalog.resolve("flux-schnell-l0")
+    base = resolve_case(model, tmp_path / "pending.trtfb")
+    cases = expand_sweeps(base, {"request.batch_size": [1, 2]})
+    plan = BundleBuilder(tmp_path / "cache")._plan(model, cases)
+
+    command = list(plan.command)
+    assert command[command.index("--image-height") + 1] == "384"
+    assert command[command.index("--image-width") + 1] == "384"
+    assert command[command.index("--num-inference-steps") + 1] == "20"
+    assert command[command.index("--max-batch-size") + 1] == "2"
+    assert command.count("--max-batch-size") == 1
+
+
+def test_image_rate_and_seconds_per_image_account_for_batch_size() -> None:
+    metrics = reduce_metrics(
+        "generate_image",
+        [
+            {
+                "runtime_e2e_wall_ms": 400.0,
+                "generated_images": 2,
+                "generated_pixels": 20,
+            }
+        ],
+    )
+    assert metrics["images_per_s"] == 5.0
+    assert metrics["request_throughput_per_s"] == 2.5
+    assert metrics["seconds_per_image_p50"] == 0.2
+
+
+def test_transcription_resolves_audio_artifact_and_reports_realtime_factor(
+    tmp_path: Path,
+) -> None:
+    case = resolve_case(
+        ManifestCatalog().resolve("whisper-tiny-fp16"),
+        _bundle(tmp_path, "whisper.trtfb"),
+    )
+
+    assert case.request["audio_path"] == "data/Recording.wav"
+    assert len(case.request["audio_sha256"]) == 64
+    assert Path(case.worker_request()["request"]["audio_path"]).is_file()
+
+    metrics = reduce_metrics(
+        "transcribe",
+        [
+            {
+                "runtime_e2e_wall_ms": 1000.0,
+                "input_audio_seconds": 10.0,
+                "output_tokens": 5,
+                "first_partial_ms": 250.0,
+            },
+            {
+                "runtime_e2e_wall_ms": 1000.0,
+                "input_audio_seconds": 10.0,
+                "output_tokens": 5,
+                "first_partial_ms": 300.0,
+            },
+        ],
+    )
+    assert metrics["audio_seconds_per_s"] == 10.0
+    assert metrics["realtime_factor"] == 0.1
+    assert metrics["output_tokens_per_s"] == 5.0
+    assert metrics["reported_stages_ms"]["first_partial_ms"]["p50"] == 275.0
+
+
+def test_cli_runs_fake_native_worker_and_writes_evidence(tmp_path: Path) -> None:
+    worker = _worker(tmp_path)
+    bundle = _bundle(tmp_path)
+    output = tmp_path / "run"
+    assert (
+        main(
+            [
+                "run",
+                "--model",
+                "distilgpt2",
+                "--bundle",
+                str(bundle),
+                "--iterations",
+                "4",
+                "--warmup",
+                "0",
+                "--telemetry",
+                "off",
+                "--worker",
+                str(worker),
+                "-o",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    result = json.loads((output / "result.json").read_text(encoding="utf-8"))
+    assert result["status"] == "completed"
+    assert result["measurement_policy"]["task_quality_evaluated"] is False
+    assert result["cells"][0]["metrics"]["latency_ms"]["p50"] == 2.5
+    assert (output / "report.html").is_file()
+    artifact_dir = output / result["cells"][0]["artifact_dir"]
+    assert (artifact_dir / "resolved-case.json").is_file()
+    assert (artifact_dir / "worker-result.json").is_file()
+    assert (artifact_dir / "telemetry.json").is_file()
+
+
+def test_cli_replaces_explicit_existing_output_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worker = _worker(tmp_path)
+    bundle = _bundle(tmp_path)
+    output = tmp_path / "run"
+    arguments = [
+        "run",
+        "--model",
+        "distilgpt2",
+        "--bundle",
+        str(bundle),
+        "--iterations",
+        "1",
+        "--warmup",
+        "0",
+        "--telemetry",
+        "off",
+        "--worker",
+        str(worker),
+        "-o",
+        str(output),
+    ]
+
+    assert main(arguments) == 0
+    (output / "obsolete-from-previous-run.txt").write_text("old", encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(arguments) == 0
+
+    assert not (output / "obsolete-from-previous-run.txt").exists()
+    assert (output / "result.json").is_file()
+    assert f"Replacing existing output after run completes: {output}" in capsys.readouterr().err
+    assert not list(tmp_path.glob(".run.trtmc-bench-staging-*"))
+    assert not list(tmp_path.glob(".run.trtmc-bench-backup-*"))
+
+
+def test_cli_refuses_to_replace_symlink_output_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worker = _worker(tmp_path)
+    bundle = _bundle(tmp_path)
+    real_output = tmp_path / "real-output"
+    real_output.mkdir()
+    output = tmp_path / "linked-output"
+    output.symlink_to(real_output, target_is_directory=True)
+
+    with pytest.raises(SystemExit, match="2"):
+        main(
+            [
+                "run",
+                "--model",
+                "distilgpt2",
+                "--bundle",
+                str(bundle),
+                "--worker",
+                str(worker),
+                "-o",
+                str(output),
+            ]
+        )
+
+    assert "refusing to overwrite symlink output directory" in capsys.readouterr().err
+    assert output.is_symlink()
+
+
+def test_cli_refuses_to_replace_non_benchmark_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    worker = _worker(tmp_path)
+    bundle = _bundle(tmp_path)
+    output = tmp_path / "unrelated-data"
+    output.mkdir()
+    marker = output / "keep.txt"
+    marker.write_text("do not delete", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="2"):
+        main(
+            [
+                "run",
+                "--model",
+                "distilgpt2",
+                "--bundle",
+                str(bundle),
+                "--worker",
+                str(worker),
+                "-o",
+                str(output),
+            ]
+        )
+
+    assert "refusing to overwrite a non-benchmark directory" in capsys.readouterr().err
+    assert marker.read_text(encoding="utf-8") == "do not delete"
+
+
+def test_cli_auto_builds_missing_bundle_then_reuses_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = _worker(tmp_path)
+    cache = tmp_path / "cache"
+    commands: list[list[str]] = []
+
+    def fake_build(
+        command: list[str], _environment: dict[str, str], _timeout_s: int
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(list(command))
+        output = Path(command[command.index("-o") + 1])
+        output.write_bytes(b"built bundle")
+        return subprocess.CompletedProcess(command, 0, "builder stdout\n", "")
+
+    monkeypatch.setenv("TRTMC_BENCH_BUILD_PLATFORM", "test-sm80")
+    monkeypatch.setattr(BundleBuilder, "_execute", staticmethod(fake_build))
+
+    common = [
+        "run",
+        "--model",
+        "distilgpt2",
+        "--bundle-cache",
+        str(cache),
+        "--iterations",
+        "1",
+        "--warmup",
+        "0",
+        "--telemetry",
+        "off",
+        "--worker",
+        str(worker),
+    ]
+    first_output = tmp_path / "first"
+    assert main([*common, "-o", str(first_output)]) == 0
+    assert len(commands) == 1
+    assert "distilbert/distilgpt2" in commands[0]
+    assert commands[0][commands[0].index("--precision") + 1] == "fp16"
+    assert commands[0][commands[0].index("--max-cache-length") + 1] == "256"
+    first_result = json.loads((first_output / "result.json").read_text(encoding="utf-8"))
+    build = first_result["preparation"]["bundles"][0]
+    assert build["status"] == "built"
+    assert build["included_in_performance_metrics"] is False
+    assert Path(build["bundle"]).is_file()
+
+    second_output = tmp_path / "second"
+    assert main([*common, "-o", str(second_output)]) == 0
+    assert len(commands) == 1
+    second_result = json.loads((second_output / "result.json").read_text(encoding="utf-8"))
+    cached = second_result["preparation"]["bundles"][0]
+    assert cached["status"] == "cache_hit"
+    assert cached["builder_tensorrt_version"]
+
+
+def test_cli_no_build_fails_closed_when_bundle_is_missing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        main(
+            [
+                "run",
+                "--model",
+                "distilgpt2",
+                "--bundle-cache",
+                str(tmp_path / "cache"),
+                "--no-build",
+                "--dry-run",
+            ]
+        )
+    assert "bundle for distilgpt2 is unavailable and --no-build was set" in capsys.readouterr().err
+
+
+def test_auto_build_selects_python_tensorrt_matching_runtime_backend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system_packages = tmp_path / "system-packages"
+    tensorrt_package = system_packages / "tensorrt"
+    tensorrt_package.mkdir(parents=True)
+    (tensorrt_package / "__init__.py").write_text('__version__ = "10.15.2.7"\n', encoding="utf-8")
+    monkeypatch.setenv("TRTMC_BENCH_TRT_PYTHON_ROOT", str(system_packages))
+    monkeypatch.setenv("TRTMC_BENCH_BUILD_PLATFORM", "test-sm80")
+    monkeypatch.setattr(benchmark_builder.metadata, "version", lambda _name: "10.16.1.11")
+
+    catalog = ManifestCatalog()
+    model = catalog.resolve("distilgpt2")
+    case = resolve_case(model, tmp_path / "pending.trtfb")
+    plan = BundleBuilder(tmp_path / "cache", backend_abi="10.15")._plan(model, (case,))
+
+    assert plan.runtime.version == "10.15.2.7"
+    assert plan.runtime.abi == "10.15"
+    assert plan.runtime.backend_abi == "10.15"
+    assert plan.command[2] == "tensorrt_model_connect.benchmark._build_entry"
+    assert plan.environment["TRTMC_BENCH_TRT_PYTHON_ROOT"] == str(system_packages)
+    assert plan.environment["TRTMC_BENCH_BLOCK_TRT_LIBS_WHEEL"] == "1"
+
+
+def test_worker_backend_abi_uses_packaged_alias(tmp_path: Path) -> None:
+    worker = _worker(tmp_path)
+    (tmp_path / "libtrtmc_backend_trt_10_15.so").touch()
+    assert worker_backend_abi(worker) == "10.15"

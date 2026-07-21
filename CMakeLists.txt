@@ -621,6 +621,17 @@ if(TRTMC_BUILD_BENCHMARKS)
   target_include_directories(trtmc_dataset_benchmark SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/stb
   )
+
+  add_executable(trtmc_benchmark_worker examples/trtmc_benchmark_worker.cpp)
+  target_link_libraries(trtmc_benchmark_worker PRIVATE trtmc_core)
+  target_include_directories(trtmc_benchmark_worker SYSTEM PRIVATE
+    ${_trtmc_nlohmann_json_include}
+  )
+  set_target_properties(trtmc_benchmark_worker PROPERTIES
+    BUILD_RPATH "\$ORIGIN"
+    BUILD_RPATH_USE_ORIGIN TRUE
+    INSTALL_RPATH "\$ORIGIN"
+  )
 endif()
 
 if(TRTMC_BUILD_TESTS)
@@ -963,6 +974,12 @@ install(DIRECTORY include/trtmc/
 install(TARGETS trtmc
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+if(TARGET trtmc_benchmark_worker)
+  install(TARGETS trtmc_benchmark_worker
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+  )
+endif()
 
 # Generate and install CMake config files
 configure_package_config_file(

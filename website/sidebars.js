@@ -91,6 +91,7 @@ const sidebars = {
       items: [
         'reference/source-layout',
         'reference/testing',
+        'reference/benchmarking',
         'reference/profiling',
         'reference/e2e-l0-replacements',
         'reference/documentation-research'

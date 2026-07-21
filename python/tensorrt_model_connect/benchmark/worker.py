@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Protocol adapter for the native TRTMC benchmark worker."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+from typing import Any
+
+from .types import BenchmarkError, ResolvedCase
+
+
+_BACKEND_ABI_PATTERN = re.compile(r"^libtrtmc_backend_trt_(\d+)_(\d+)\.so$")
+
+
+def find_worker(explicit: Path | None = None) -> Path:
+    candidates: list[Path] = []
+    if explicit is not None:
+        candidates.append(explicit.expanduser())
+    configured = os.environ.get("TRTMC_BENCH_WORKER")
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    repository = Path(__file__).resolve().parents[3]
+    candidates.append(repository / "build/trtmc_benchmark_worker")
+    candidates.append(repository / "build-make/trtmc_benchmark_worker")
+    candidates.append(repository / "build-local/trtmc_benchmark_worker")
+    candidates.append(Path(__file__).resolve().parents[1] / "bin/trtmc_benchmark_worker")
+    discovered = shutil.which("trtmc_benchmark_worker")
+    if discovered:
+        candidates.append(Path(discovered))
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return resolved
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise BenchmarkError(f"cannot find executable trtmc_benchmark_worker; searched: {searched}")
+
+
+def worker_backend_abi(worker: Path) -> str | None:
+    """Return the unique standard TensorRT backend ABI beside a worker."""
+    values = {
+        f"{match.group(1)}.{match.group(2)}"
+        for path in worker.expanduser().resolve().parent.glob("libtrtmc_backend_trt_*_*.so")
+        if (match := _BACKEND_ABI_PATTERN.match(path.name)) is not None
+    }
+    if len(values) > 1:
+        raise BenchmarkError(
+            f"multiple TensorRT backend ABIs are installed beside {worker}: "
+            f"{', '.join(sorted(values))}"
+        )
+    return next(iter(values), None)
+
+
+def run_worker(case: ResolvedCase, case_dir: Path, worker: Path) -> dict[str, Any]:
+    request_path = case_dir / "worker-request.json"
+    result_path = case_dir / "worker-result.json"
+    stdout_path = case_dir / "worker.stdout.log"
+    stderr_path = case_dir / "worker.stderr.log"
+    request_path.write_text(
+        json.dumps(case.worker_request(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    with (
+        stdout_path.open("w", encoding="utf-8") as stdout,
+        stderr_path.open("w", encoding="utf-8") as stderr,
+    ):
+        completed = subprocess.run(
+            [str(worker), "--request", str(request_path), "--output", str(result_path)],
+            stdout=stdout,
+            stderr=stderr,
+            check=False,
+        )
+    if not result_path.is_file():
+        raise BenchmarkError(
+            f"worker exited {completed.returncode} without {result_path}; see {stderr_path}"
+        )
+    try:
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise BenchmarkError(f"invalid worker result {result_path}: {exc}") from exc
+    if not isinstance(result, dict):
+        raise BenchmarkError(f"worker result must be an object: {result_path}")
+    if completed.returncode != 0 or result.get("status") != "completed":
+        error = result.get("error", f"exit code {completed.returncode}")
+        raise BenchmarkError(f"worker failed: {error}; see {stderr_path}")
+    if result.get("case_digest") != case.digest:
+        raise BenchmarkError("worker result case_digest does not match the resolved case")
+    if result.get("operation") not in {None, case.operation}:
+        raise BenchmarkError("worker result operation does not match the resolved case")
+    if result.get("timing_scope") not in {None, "public_pipeline_call_wall"}:
+        raise BenchmarkError("worker result has an unsupported timing_scope")
+    observations = result.get("observations")
+    if not isinstance(observations, list) or len(observations) != case.measurement.iterations:
+        raise BenchmarkError("worker observation count does not match measurement.iterations")
+    return result

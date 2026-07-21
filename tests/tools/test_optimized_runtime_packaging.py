@@ -9,10 +9,13 @@ import fnmatch
 import importlib.util
 import shutil
 import sys
+import tarfile
 import types
 from pathlib import Path
 
 import pytest
+
+from _pyproject_backend import _append_benchmark_catalog_to_sdist
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -55,13 +58,11 @@ def _load_conan_recipe(monkeypatch: pytest.MonkeyPatch):
             relative = source.relative_to(source_root)
             relative_name = relative.as_posix()
             if not (
-                fnmatch.fnmatch(source.name, pattern)
-                or fnmatch.fnmatch(relative_name, pattern)
+                fnmatch.fnmatch(source.name, pattern) or fnmatch.fnmatch(relative_name, pattern)
             ):
                 continue
             if any(
-                fnmatch.fnmatch(source.name, excluded)
-                or fnmatch.fnmatch(relative_name, excluded)
+                fnmatch.fnmatch(source.name, excluded) or fnmatch.fnmatch(relative_name, excluded)
                 for excluded in excludes
             ):
                 continue
@@ -95,6 +96,7 @@ def _load_conan_recipe(monkeypatch: pytest.MonkeyPatch):
 def _fake_native_build(build: Path) -> None:
     for relative in (
         "trtmc",
+        "trtmc_benchmark_worker",
         "libtrtmc_core.so",
         "libtrtmc_backend_trt.so",
         "models/example/libtrtmc_model_example.so",
@@ -108,6 +110,18 @@ def _package(recipe_module, source: Path, tmp_path: Path) -> Path:
     build = tmp_path / "build"
     package = tmp_path / "package"
     _fake_native_build(build)
+    benchmark_script = source / "scripts/trtmc-bench"
+    benchmark_script.parent.mkdir(parents=True, exist_ok=True)
+    benchmark_script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    catalog_family = source / "tests/e2e/models/example"
+    (catalog_family / "manifests").mkdir(parents=True)
+    (catalog_family / "MODEL.toml").write_text(
+        'id = "example"\ntest_manifests = ["manifests/example.json"]\n',
+        encoding="utf-8",
+    )
+    (catalog_family / "manifests/example.json").write_text("{}\n", encoding="utf-8")
+    (catalog_family / "data").mkdir()
+    (catalog_family / "data/Recording.wav").write_bytes(b"RIFF-test-audio")
     recipe = recipe_module.TensorRTModelConnectConan()
     recipe.source_folder = str(source)
     recipe.build_folder = str(build)
@@ -161,6 +175,68 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     assert (sdk / "runtime" / "providers" / "optimized_runtime_factory.h").is_file()
     assert (sdk / "trtmc" / "pipeline.h").is_file()
     assert (module / "bin" / "trtmc").is_file()
+    assert (module / "bin" / "trtmc_benchmark_worker").is_file()
+    benchmark_script = module.parent / "tensorrt_model_connect-0.1.0.data/scripts/trtmc-bench"
+    assert benchmark_script.read_bytes().startswith(b"#!python\n")
+    catalog = module / "benchmark" / "_catalog" / "example"
+    assert (catalog / "MODEL.toml").is_file()
+    assert (catalog / "manifests" / "example.json").is_file()
+    assert (catalog / "data/Recording.wav").is_file()
+
+
+def test_package_stages_the_complete_canonical_benchmark_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipe_module = _load_conan_recipe(monkeypatch)
+    package = tmp_path / "tensorrt_model_connect"
+
+    recipe_module._stage_benchmark_catalog(
+        recipe_module.TensorRTModelConnectConan(), REPOSITORY_ROOT, package
+    )
+
+    source = REPOSITORY_ROOT / "tests/e2e/models"
+    installed = package / "benchmark/_catalog"
+    assert len(list(installed.glob("*/MODEL.toml"))) == len(list(source.glob("*/MODEL.toml")))
+    assert len(list(installed.glob("*/manifests/*.json"))) == len(
+        list(source.glob("*/manifests/*.json"))
+    )
+    assert len(list(installed.glob("*/data/Recording.wav"))) == len(
+        list(source.glob("*/data/Recording.wav"))
+    )
+    assert (installed / "gpt2/manifests/distilgpt2.json").is_file()
+    assert (installed / "whisper/data/Recording.wav").is_file()
+
+
+def test_sdist_appends_only_the_minimal_benchmark_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    pyproject = project / "pyproject.toml"
+    pyproject.write_text("[build-system]\n", encoding="utf-8")
+    family = project / "tests/e2e/models/example"
+    (family / "manifests").mkdir(parents=True)
+    (family / "MODEL.toml").write_text('id = "example"\n', encoding="utf-8")
+    (family / "manifests/example.json").write_text("{}\n", encoding="utf-8")
+    (family / "data").mkdir()
+    (family / "data/Recording.wav").write_bytes(b"RIFF-test-audio")
+    (family / "data/not-a-benchmark-input.bin").write_bytes(b"large fixture")
+    archive = tmp_path / "example-0.1.0.tar.gz"
+    with tarfile.open(archive, "w:gz") as destination:
+        destination.add(pyproject, arcname="example-0.1.0/pyproject.toml")
+    monkeypatch.chdir(project)
+
+    _append_benchmark_catalog_to_sdist(archive)
+
+    with tarfile.open(archive, "r:gz") as source:
+        names = set(source.getnames())
+    prefix = "example-0.1.0/tests/e2e/models/example"
+    assert f"{prefix}/MODEL.toml" in names
+    assert f"{prefix}/manifests/example.json" in names
+    assert f"{prefix}/data/Recording.wav" in names
+    assert f"{prefix}/data/not-a-benchmark-input.bin" not in names
 
 
 def test_package_rejects_builder_without_matching_runtime(
