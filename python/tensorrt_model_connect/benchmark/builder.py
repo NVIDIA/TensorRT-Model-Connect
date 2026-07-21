@@ -428,8 +428,6 @@ def _append_image_options(options: dict[str, Any], cases: Sequence[ResolvedCase]
     image_cases = [case for case in cases if case.operation == "generate_image"]
     if image_cases:
         maxima = {
-            "image_height": max(int(case.request.get("height", 0)) for case in image_cases),
-            "image_width": max(int(case.request.get("width", 0)) for case in image_cases),
             "num_inference_steps": max(
                 int(case.request.get("num_inference_steps", -1)) for case in image_cases
             ),
@@ -438,6 +436,20 @@ def _append_image_options(options: dict[str, Any], cases: Sequence[ResolvedCase]
                 max(int(case.request.get("batch_size", 1)) for case in image_cases),
             ),
         }
+        still_image_cases = [
+            case for case in image_cases if case.request.get("media_type", "image") == "image"
+        ]
+        if still_image_cases:
+            maxima.update(
+                {
+                    "image_height": max(
+                        int(case.request.get("height", 0)) for case in still_image_cases
+                    ),
+                    "image_width": max(
+                        int(case.request.get("width", 0)) for case in still_image_cases
+                    ),
+                }
+            )
         options.update({key: value for key, value in maxima.items() if value > 0})
 
 
@@ -481,7 +493,14 @@ def _declared_cli_value(spec: Mapping[str, Any], cases: Sequence[ResolvedCase]) 
         "image_width": "width",
         "max_batch_size": "batch_size",
     }.get(input_name, input_name)
-    values = [case.request[request_name] for case in cases if request_name in case.request]
+    selected_cases = cases
+    if input_name in {"image_height", "image_width"}:
+        selected_cases = tuple(
+            case for case in cases if case.request.get("media_type", "image") == "image"
+        )
+    values = [
+        case.request[request_name] for case in selected_cases if request_name in case.request
+    ]
     if not values:
         return None
     if all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values):

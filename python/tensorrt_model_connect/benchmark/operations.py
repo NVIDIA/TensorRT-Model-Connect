@@ -112,17 +112,35 @@ def _generate_image_request(testcase: Mapping[str, Any], model_root: Path) -> di
         batch_size = expected_batch_size
     else:
         batch_size = int(testcase.get("batch_size", 1))
+    video_height = testcase.get("video_height")
+    video_width = testcase.get("video_width")
+    video_num_frames = int(testcase.get("video_num_frames", 1))
+    is_video = video_height is not None or video_width is not None or video_num_frames > 1
     request: dict[str, Any] = {
         "batch_size": batch_size,
+        "media_type": "video" if is_video else "image",
         "prompt": _prompt(testcase, "generate_image"),
-        "height": int(testcase.get("image_height", 0)),
-        "width": int(testcase.get("image_width", 0)),
+        "height": int(testcase.get("image_height", video_height or 0)),
+        "width": int(testcase.get("image_width", video_width or 0)),
         "num_inference_steps": int(testcase.get("num_inference_steps", -1)),
         "seed": int(testcase.get("seed", 42)),
         "guidance_scale": float(testcase.get("guidance_scale", -1.0)),
         "cfg_scale": float(testcase.get("cfg_scale", -1.0)),
         "negative_prompt": str(testcase.get("negative_prompt", "")),
     }
+    if is_video:
+        if video_height is None or video_width is None or video_num_frames <= 1:
+            raise BenchmarkError(
+                "generate_image video testcase requires video_height, video_width, "
+                "and video_num_frames > 1"
+            )
+        request.update(
+            {
+                "video_height": int(video_height),
+                "video_width": int(video_width),
+                "video_num_frames": video_num_frames,
+            }
+        )
     if prompts is not None and seeds is not None:
         request["prompts"] = prompts
         request["seeds"] = seeds
@@ -201,7 +219,10 @@ _OPERATIONS = (
         default_measurement=MeasurementSpec(warmup=1, iterations=5),
         request_factory=_generate_image_request,
         supports_batch=True,
-        rate_metrics=(RateMetric("generated_images", "images_per_s"),),
+        rate_metrics=(
+            RateMetric("generated_images", "images_per_s"),
+            RateMetric("generated_frames", "frames_per_s"),
+        ),
         per_item_latency=PerItemLatencyMetric("generated_images", "seconds_per_image_p50"),
     ),
     OperationSpec(

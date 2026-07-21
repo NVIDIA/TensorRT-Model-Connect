@@ -329,10 +329,16 @@ Json run_generate_image(trtmc::IPipeline& pipeline, const Json& request, int war
                             [](std::size_t count, const trtmc::ImageResult& image) {
                                 return count + image.pixels.size();
                             });
+        const std::size_t generated_frames = std::accumulate(
+            last.begin(), last.end(), std::size_t{0},
+            [](std::size_t count, const trtmc::ImageResult& image) {
+                return count + static_cast<std::size_t>(std::max<int32_t>(image.num_frames, 1));
+            });
         observations.push_back({
             {"iteration", index},
             {"runtime_e2e_wall_ms", elapsed_milliseconds(start)},
             {"generated_images", last.size()},
+            {"generated_frames", generated_frames},
             {"generated_pixels", generated_pixels},
         });
     }

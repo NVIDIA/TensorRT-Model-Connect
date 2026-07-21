@@ -371,13 +371,45 @@ def test_image_rate_and_seconds_per_image_account_for_batch_size() -> None:
             {
                 "runtime_e2e_wall_ms": 400.0,
                 "generated_images": 2,
+                "generated_frames": 2,
                 "generated_pixels": 20,
             }
         ],
     )
     assert metrics["images_per_s"] == 5.0
+    assert metrics["frames_per_s"] == 5.0
     assert metrics["request_throughput_per_s"] == 2.5
     assert metrics["seconds_per_image_p50"] == 0.2
+
+
+def test_video_profile_preserves_video_build_shape_and_frame_rate(tmp_path: Path) -> None:
+    model = ManifestCatalog().resolve("ltx-video-l0")
+    case = resolve_case(model, tmp_path / "pending.trtfb")
+    plan = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
+
+    assert case.request["media_type"] == "video"
+    assert case.request["height"] == 256
+    assert case.request["width"] == 256
+    assert case.request["video_num_frames"] == 9
+    command = list(plan.command)
+    assert command[command.index("--video-height") + 1] == "256"
+    assert command[command.index("--video-width") + 1] == "256"
+    assert command[command.index("--video-num-frames") + 1] == "9"
+    assert "--image-height" not in command
+
+    metrics = reduce_metrics(
+        "generate_image",
+        [
+            {
+                "runtime_e2e_wall_ms": 1000.0,
+                "generated_images": 1,
+                "generated_frames": 9,
+                "generated_pixels": 100,
+            }
+        ],
+    )
+    assert metrics["images_per_s"] == 1.0
+    assert metrics["frames_per_s"] == 9.0
 
 
 def test_transcription_resolves_audio_artifact_and_reports_realtime_factor(
