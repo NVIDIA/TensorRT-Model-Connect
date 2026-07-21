@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 schema_version = 1
-implementation_id = "qwen3-1.7b-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80"
+implementation_id = "qwen3-1.7b-fp16.tensorrt-edge-llm-v0.9.trt10.a100-pcie80-sm80"
 downstream_runtime = "tensorrt-edge-llm"
 downstream_version = "0.9.0"
 downstream_commit = "1ac0f2b99642045125e1c5ac7b109434ba3b36c7"
@@ -23,5 +23,5 @@ entrypoint = "adapter.py"
 timeout_seconds = 21600
 
 [runtime]
-library = "libtrtmc_impl_qwen3_1_7b_fp16_tensorrt_edge_llm_v0_9_trt11.so"
+library = "libtrtmc_impl_qwen3_1_7b_fp16_tensorrt_edge_llm_v0_9_trt10.so"
 abi = 1

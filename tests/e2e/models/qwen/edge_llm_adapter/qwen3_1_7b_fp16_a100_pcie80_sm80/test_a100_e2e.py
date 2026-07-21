@@ -26,7 +26,7 @@ from tensorrt_model_connect.runtime_provider.target import (
 
 
 _MODEL_ID = "Qwen/Qwen3-1.7B"
-_IMPLEMENTATION_ID = "qwen3-1.7b-fp16.tensorrt-edge-llm-v0.9.trt11.a100-pcie80-sm80"
+_IMPLEMENTATION_ID = "qwen3-1.7b-fp16.tensorrt-edge-llm-v0.9.trt10.a100-pcie80-sm80"
 _PROMPT = "Reply with one short sentence about accelerated computing."
 _MAX_NEW_TOKENS = 32
 _WARMUPS = 5
@@ -524,8 +524,8 @@ def _run_qualification_runner(
     assert result["runtime_kind"] == request["runtime"]["kind"]
     assert result["runtime_initializations"] == 1
     assert result["decoding_cuda_graph_captured"] is True
-    assert result["observed_tensorrt_version"] == "11.2.0.113"
-    assert result["observed_cuda_runtime_version"] == 13030
+    assert result["observed_tensorrt_version"] == "10.16.1.11"
+    assert result["observed_cuda_runtime_version"] == 12090
     assert result["native_token_ids"] is True
     assert result["synchronized_each_request"] is True
     assert result["warmups_completed"] == _WARMUPS
@@ -677,6 +677,10 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
     _header_size, header = _read_bundle_header(bundle)
     assert header["model_type"] == "qwen3"
     assert header["family"] == "qwen"
+    assert header["hidden_size"] == 2048
+    assert header["num_layers"] == 28
+    assert header["num_attention_heads"] == 16
+    assert header["num_key_value_heads"] == 8
     descriptor = json.loads(_read_bundle_section(bundle, "optimized_runtime.json"))
     assert descriptor["implementation_id"] == _IMPLEMENTATION_ID
     inspect = _run(
@@ -687,6 +691,10 @@ def test_public_build_inspect_and_run_delegate_to_edgellm(tmp_path: Path) -> Non
     )
     assert "optimized_runtime.json" in inspect.stdout
     assert "optimized_runtime_artifacts/engine.dir/" in inspect.stdout
+    assert "Hidden size:        2048" in inspect.stdout
+    assert "Layers:             28" in inspect.stdout
+    assert "Attention heads:    16" in inspect.stdout
+    assert "KV heads:           8" in inspect.stdout
 
     exporter_inventory = _verify_exporter_profile(exporter_root)
     edge_build_inventory: dict[str, tuple[int, int]] | None = None
