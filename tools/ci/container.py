@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,6 +75,7 @@ class CiContainer:
 
         options, mounts = self._runtime_boundary()
         self._prepare_host_paths()
+        secret_arguments, secret_directory = self._hugging_face_secret_arguments()
         command = [
             "docker",
             "run",
@@ -87,11 +89,15 @@ class CiContainer:
             "-w",
             str(self.config.workspace),
             *self._environment_arguments(),
+            *secret_arguments,
             self.config.image,
             "sleep",
             "infinity",
         ]
-        self.commands.run(command)
+        try:
+            self.commands.run(command)
+        finally:
+            self._remove_secret_directory(secret_directory)
         if self.config.hardened and self._has_nvidia_devices():
             self.commands.run(
                 ["docker", "rm", "-f", self.config.name], check=False, capture_output=True
@@ -197,6 +203,47 @@ class CiContainer:
                 for item in ("-e", f"{name}={self.env[name]}")
             )
         return arguments
+
+    def _hugging_face_secret_arguments(self) -> tuple[list[str], Path | None]:
+        if self.config.hardened:
+            return [], None
+        primary = self.env.get("HF_TOKEN", "")
+        legacy = self.env.get("HUGGING_FACE_HUB_TOKEN", "")
+        if primary and legacy and primary != legacy:
+            raise CiError("HF token environment values disagree")
+        token = primary or legacy
+        if not token:
+            return [], None
+        runner_temp = Path(self.env.get("RUNNER_TEMP", "/tmp"))
+        if runner_temp.is_symlink() or not runner_temp.is_dir():
+            raise CiError("RUNNER_TEMP must be a safe directory for CI secrets")
+        directory = Path(
+            tempfile.mkdtemp(
+                prefix="trtmc-hf-secret-",
+                dir=runner_temp,
+            )
+        )
+        directory.chmod(0o700)
+        token_file = directory / "token"
+        token_file.write_text(token, encoding="utf-8")
+        token_file.chmod(0o600)
+        return [
+            "--mount",
+            f"type=bind,src={token_file},dst=/run/secrets/hf-token,readonly",
+            "-e",
+            "HF_TOKEN_PATH=/run/secrets/hf-token",
+        ], directory
+
+    @staticmethod
+    def _remove_secret_directory(directory: Path | None) -> None:
+        if directory is None:
+            return
+        token_file = directory / "token"
+        try:
+            token_file.unlink(missing_ok=True)
+            directory.rmdir()
+        except OSError as error:
+            raise CiError("could not remove the temporary Hugging Face token file") from error
 
     def _has_nvidia_devices(self) -> bool:
         result = self.commands.run(

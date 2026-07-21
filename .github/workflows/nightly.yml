@@ -20,15 +20,10 @@ concurrency:
 env:
   ENGINE_DIR: ${{ vars.TRTMC_ENGINE_DIR || '/workspace/users/yifeif/tensorrt-model-connect/engines' }}
   TRTMC_STORAGE_ROOT: ${{ vars.TRTMC_STORAGE_ROOT || '/workspace/users/yifeif/tensorrt-model-connect' }}
-  HF_HOME: ${{ vars.TRTMC_HF_HOME || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}
-  HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || format('{0}/hub', vars.TRTMC_HF_HOME || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}
-  HUGGINGFACE_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || format('{0}/hub', vars.TRTMC_HF_HOME || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}
-  HF_MODULES_CACHE: ${{ vars.TRTMC_HF_MODULES_CACHE || format('{0}/modules', vars.TRTMC_HF_HOME || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}
   TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
   TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CONTAINER_OPTIONS || '--gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
   TRTMC_PACKAGE_PYTHON_TAGS: ${{ vars.TRTMC_PACKAGE_PYTHON_TAGS || 'py310 py312' }}
   TRTMC_PACKAGE_WHEEL_ARCH: ${{ vars.TRTMC_PACKAGE_WHEEL_ARCH || 'manylinux_2_39_aarch64' }}
-  TRTMC_MODEL_PROOF_GPU_LOCK_DIR: ${{ vars.TRTMC_MODEL_PROOF_GPU_LOCK_DIR || '/tmp/trtmc-model-proof-gpu-locks' }}
   TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS: ${{ vars.TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS || '10800' }}
   PYTHONHASHSEED: "0"
 
@@ -133,6 +128,53 @@ jobs:
             echo "- Scope: every ownership model; production single-GPU cases with L0 fallback"
             echo "- Multi-device variants: outside this owner-level suite, matching the prior nightly contract"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  discover-cache-anchors:
+    name: 2 / Discover cache anchors
+    needs: legal
+    if: >-
+      ${{
+        needs.legal.result == 'success' &&
+        github.ref == 'refs/heads/main'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.discover.outputs.matrix }}
+
+    steps:
+      - name: Check out certified nightly snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mint read-only runner inventory token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.TRTMC_RUNNER_DISCOVERY_APP_ID }}
+          private-key: ${{ secrets.TRTMC_RUNNER_DISCOVERY_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Discover and validate one online cache anchor per node
+        id: discover
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          inventory="$RUNNER_TEMP/trtmc-proof-runners.json"
+          gh api --paginate --slurp \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/actions/runners?per_page=100" > "$inventory"
+          python3 -m tools.ci.discover_cache_anchors \
+            --input "$inventory" \
+            --github-output "$GITHUB_OUTPUT"
 
   source-quality:
     name: 3 / Source quality
@@ -272,16 +314,23 @@ jobs:
           fi
 
   cache-warm:
-    name: 3 / HF cache / Active single-GPU nightly cases
+    name: 3 / HF cache / ${{ matrix.node_label }}
     needs:
       - legal
       - inventory
+      - discover-cache-anchors
     if: >-
       ${{
         needs.legal.result == 'success' &&
-        needs.inventory.result == 'success'
+        needs.inventory.result == 'success' &&
+        needs.discover-cache-anchors.result == 'success'
       }}
-    runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover-cache-anchors.outputs.matrix) }}
+    runs-on:
+      - trtmc-cache-anchor
+      - ${{ matrix.node_label }}
     timeout-minutes: 240
     permissions:
       contents: read
@@ -290,12 +339,12 @@ jobs:
       TRTMC_CI_CONTAINER_NAME: trtmc-nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CPU_CONTAINER_OPTIONS || '--ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
+      TRTMC_CACHE_SOURCE_REVISION: ${{ needs.legal.outputs.tested_sha }}
+      TRTMC_CACHE_RECEIPT_DIR: ${{ runner.temp }}/trtmc-cache-receipt-${{ github.run_id }}-${{ github.run_attempt }}
       # The downloader bounds every child process and retries once without Xet
       # after a failure. These values also bound individual Hub requests.
       HF_HUB_DOWNLOAD_TIMEOUT: "60"
       HF_HUB_ETAG_TIMEOUT: "30"
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
       - name: Check out certified nightly snapshot
@@ -307,6 +356,60 @@ jobs:
           persist-credentials: false
           clean: true
           lfs: false
+
+      - name: Validate cache-anchor host policy
+        run: |
+          set -euo pipefail
+          if ! [[ "${TRTMC_NODE_ID:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "::error::Cache anchor has no safe TRTMC_NODE_ID."
+            exit 1
+          fi
+          for name in \
+            HF_HOME HF_HUB_CACHE HUGGINGFACE_HUB_CACHE HF_MODULES_CACHE \
+            TRTMC_HF_CACHE TRTMC_HF_HUB_CACHE \
+            TRTMC_HF_CACHE_LOCK_FILE; do
+            value="${!name:-}"
+            case "$value" in
+              /*) ;;
+              *) echo "::error::$name is not an absolute host path."; exit 1 ;;
+            esac
+            if [ "$value" = "/" ]; then
+              echo "::error::$name must not be the filesystem root."
+              exit 1
+            fi
+          done
+          if [ "$HF_HOME" != "$TRTMC_HF_CACHE" ]; then
+            echo "::error::HF_HOME and TRTMC_HF_CACHE must name the same cache root."
+            exit 1
+          fi
+          if [ "$HF_HUB_CACHE" != "$HUGGINGFACE_HUB_CACHE" ] || \
+             [ "$HF_HUB_CACHE" != "$TRTMC_HF_HUB_CACHE" ]; then
+            echo "::error::All Hugging Face Hub cache variables must name the same directory."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["HF_HOME"]).resolve()
+          hub = Path(os.environ["HF_HUB_CACHE"]).resolve()
+          modules = Path(os.environ["HF_MODULES_CACHE"]).resolve()
+          workspace = Path(os.environ["TRTMC_CI_WORKSPACE"]).resolve()
+
+          def overlaps(left: Path, right: Path) -> bool:
+              return left == right or left in right.parents or right in left.parents
+
+          if root == Path("/") or any(
+              overlaps(path, workspace) for path in (root, hub, modules)
+          ):
+              raise SystemExit("HF_HOME is an unsafe cache root")
+          if hub == root or root not in hub.parents:
+              raise SystemExit("HF_HUB_CACHE must be a strict child of HF_HOME")
+          if modules == root or root not in modules.parents:
+              raise SystemExit("HF_MODULES_CACHE must be a strict child of HF_HOME")
+          if overlaps(hub, modules):
+              raise SystemExit("HF_HUB_CACHE and HF_MODULES_CACHE must not overlap")
+          PY
 
       - name: Log in to GitHub Container Registry
         env:
@@ -330,19 +433,74 @@ jobs:
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         env:
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python3 -m tools.ci container start
 
-      - name: Strictly warm every active single-GPU nightly model
+      - name: Strictly warm and verify every active single-GPU nightly model
         timeout-minutes: 120
+        env:
+          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
         run: |
           set -euo pipefail
-          docker exec \
+          if ! [[ "${TRTMC_NODE_ID:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "::error::Cache anchor has no safe TRTMC_NODE_ID."
+            exit 1
+          fi
+          mkdir -p "$TRTMC_CACHE_RECEIPT_DIR" "$(dirname "$TRTMC_HF_CACHE_LOCK_FILE")"
+          exec 9>"$TRTMC_HF_CACHE_LOCK_FILE"
+          flock --exclusive --timeout 7200 9
+
+          warm_summary="$TRTMC_CI_WORKSPACE/cache-warm-summary.json"
+          verify_summary="$TRTMC_CACHE_RECEIPT_DIR/cache-verify-summary.json"
+          docker exec --user "$(id -u):$(id -g)" \
             -w "$TRTMC_CI_WORKSPACE" \
             "$TRTMC_CI_CONTAINER_NAME" \
-            env -u HF_HUB_OFFLINE python -u scripts/warm_hf_cache.py \
+            env -u HF_HUB_OFFLINE \
+              TRTMC_CACHE_SOURCE_REVISION="$TRTMC_CACHE_SOURCE_REVISION" \
+              python -u scripts/warm_hf_cache.py \
               --exclude-ci-tier multi_device \
               --strict \
-              --attempt-timeout-seconds 600
+              --attempt-timeout-seconds 600 \
+              --summary-output "$warm_summary"
+
+          docker run --rm \
+            --network none \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$TRTMC_CI_WORKSPACE,dst=/src,readonly" \
+            --mount "type=bind,src=$HF_HUB_CACHE,dst=/hf-cache/hub,readonly" \
+            --mount "type=bind,src=$TRTMC_CACHE_RECEIPT_DIR,dst=/receipts" \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,size=1g \
+            --workdir /src \
+            -e HF_HOME=/tmp/hf-home \
+            -e HF_HUB_CACHE=/hf-cache/hub \
+            -e HUGGINGFACE_HUB_CACHE=/hf-cache/hub \
+            -e HF_MODULES_CACHE=/tmp/hf-modules \
+            -e HF_HUB_OFFLINE=1 \
+            -e TRTMC_CACHE_SOURCE_REVISION="$TRTMC_CACHE_SOURCE_REVISION" \
+            "$TRTMC_CI_IMAGE" \
+            python -u scripts/warm_hf_cache.py \
+              --exclude-ci-tier multi_device \
+              --local-only \
+              --strict \
+              --attempt-timeout-seconds 600 \
+              --summary-output /receipts/cache-verify-summary.json
+
+          python3 -m tools.ci.cache_warm_receipt create \
+            --warm-summary "$warm_summary" \
+            --verify-summary "$verify_summary" \
+            --output "$TRTMC_CACHE_RECEIPT_DIR/cache-warm-receipt.json"
+
+      - name: Upload node cache-warm receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-cache-warm-${{ matrix.node_label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ env.TRTMC_CACHE_RECEIPT_DIR }}/cache-warm-receipt.json
 
       - name: Clean cache-warm container
         if: ${{ always() }}
@@ -351,6 +509,63 @@ jobs:
           if [ -n "${DOCKER_CONFIG:-}" ]; then
             rm -rf "$DOCKER_CONFIG"
           fi
+
+  cache-warm-ready:
+    name: 3 / HF cache / Verify every node
+    needs:
+      - legal
+      - discover-cache-anchors
+      - cache-warm
+    if: >-
+      ${{
+        always() &&
+        needs.legal.result == 'success' &&
+        needs.discover-cache-anchors.result == 'success'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Require every node warm to succeed
+        env:
+          CACHE_WARM_RESULT: ${{ needs.cache-warm.result }}
+        run: test "$CACHE_WARM_RESULT" = "success"
+
+      - name: Check out certified nightly snapshot
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.legal.outputs.tested_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Download every node cache-warm receipt
+        uses: actions/download-artifact@v4
+        with:
+          pattern: trtmc-cache-warm-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trtmc-cache-warm-receipts
+          merge-multiple: false
+
+      - name: Verify cache-warm receipt agreement
+        env:
+          EXPECTED_MATRIX: ${{ needs.discover-cache-anchors.outputs.matrix }}
+          SUMMARY: ${{ runner.temp }}/trtmc-cache-warm-summary.json
+        run: |
+          set -euo pipefail
+          python3 -m tools.ci.cache_warm_receipt verify \
+            --receipts-dir "$RUNNER_TEMP/trtmc-cache-warm-receipts" \
+            --expected-matrix-json "$EXPECTED_MATRIX" \
+            --output "$SUMMARY"
+
+      - name: Upload fleet cache readiness summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-cache-warm-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: ${{ runner.temp }}/trtmc-cache-warm-summary.json
 
   package:
     name: 3 / Coverage and wheel package
@@ -378,8 +593,6 @@ jobs:
       CPP_COVERAGE_MIN_FUNCTION: "46"
       CPP_COVERAGE_MIN_BRANCH: "21"
       CPP_COVERAGE_SCOPE: platform
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
       - name: Check out certified nightly snapshot
@@ -468,6 +681,7 @@ jobs:
       - source-quality
       - unit-tests
       - cache-warm
+      - cache-warm-ready
       - package
     if: >-
       ${{
@@ -477,6 +691,7 @@ jobs:
         needs.source-quality.result == 'success' &&
         needs.unit-tests.result == 'success' &&
         needs.cache-warm.result == 'success' &&
+        needs.cache-warm-ready.result == 'success' &&
         needs.package.result == 'success' &&
         needs.inventory.outputs.has_models == 'true'
       }}
@@ -484,7 +699,6 @@ jobs:
       # A failed model invalidates the nightly, but every sibling proof still
       # runs so one nightly captures the complete failure set.
       fail-fast: false
-      max-parallel: 16
       matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
     permissions:
       contents: read
@@ -517,13 +731,9 @@ jobs:
     env:
       TRTMC_CI_CONTAINER_NAME: trtmc-nightly-vlm-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-vlm-${{ github.run_id }}-${{ github.run_attempt }}
-      DIFFUSION_VLM_CONFIG: ${{ vars.TRTMC_DIFFUSION_VLM_CONFIG || '' }}
-      DIFFUSION_VLM_MODEL_ID: ${{ vars.TRTMC_DIFFUSION_VLM_MODEL_ID || '' }}
       DIFFUSION_VLM_MAX_SIDE: ${{ vars.TRTMC_DIFFUSION_VLM_MAX_SIDE || '' }}
       DIFFUSION_VLM_MAX_NEW_TOKENS: ${{ vars.TRTMC_DIFFUSION_VLM_MAX_NEW_TOKENS || '' }}
       DIFFUSION_VLM_TIMEOUT: ${{ vars.TRTMC_DIFFUSION_VLM_TIMEOUT || '' }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
       - name: Check out certified nightly snapshot
@@ -629,6 +839,14 @@ jobs:
             echo "::error::TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS must be a positive integer"
             exit 1
           }
+          case "${TRTMC_MODEL_PROOF_GPU_LOCK_DIR:-}" in
+            /*) ;;
+            *) echo "::error::TRTMC_MODEL_PROOF_GPU_LOCK_DIR must come from the runner as an absolute path"; exit 1 ;;
+          esac
+          [ "$TRTMC_MODEL_PROOF_GPU_LOCK_DIR" != "/" ] || {
+            echo "::error::TRTMC_MODEL_PROOF_GPU_LOCK_DIR must not be the filesystem root"
+            exit 1
+          }
           mkdir -p -- "$TRTMC_MODEL_PROOF_GPU_LOCK_DIR"
           exec 9<>"$TRTMC_MODEL_PROOF_GPU_LOCK_DIR/whole-machine.lock"
           flock -w "$TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS" -x 9 || {
@@ -655,28 +873,22 @@ jobs:
           source_revision = sys.argv[3]
           workflow_run_id = sys.argv[4]
           workflow_run_attempt = int(sys.argv[5])
-          requested = os.environ.get("DIFFUSION_VLM_CONFIG", "").strip()
-          if requested:
-              config = Path(requested)
-              if not config.is_file():
-                  raise SystemExit(f"DIFFUSION_VLM_CONFIG does not exist: {config}")
-          else:
-              configs = sorted(Path("tests/e2e/models").glob("*/diffusion_vlm_assessment.json"))
-              defaults = []
-              for candidate in configs:
-                  payload = json.loads(candidate.read_text(encoding="utf-8"))
-                  if payload.get("default") is True:
-                      defaults.append(candidate)
-              if len(defaults) != 1:
-                  raise SystemExit(
-                      "expected exactly one default model-owned diffusion VLM config; "
-                      f"found {defaults}"
-                  )
-              config = defaults[0]
+          configs = sorted(Path("tests/e2e/models").glob("*/diffusion_vlm_assessment.json"))
+          defaults = []
+          for candidate in configs:
+              payload = json.loads(candidate.read_text(encoding="utf-8"))
+              if payload.get("default") is True:
+                  defaults.append(candidate)
+          if len(defaults) != 1:
+              raise SystemExit(
+                  "expected exactly one default model-owned diffusion VLM config; "
+                  f"found {defaults}"
+              )
+          config = defaults[0]
 
           settings = json.loads(config.read_text(encoding="utf-8"))
           values = {
-              "model_id": os.environ.get("DIFFUSION_VLM_MODEL_ID") or settings.get("model_id"),
+              "model_id": settings.get("model_id"),
               "max_side": os.environ.get("DIFFUSION_VLM_MAX_SIDE") or settings.get("max_side"),
               "max_new_tokens": os.environ.get("DIFFUSION_VLM_MAX_NEW_TOKENS") or settings.get("max_new_tokens"),
               "timeout": os.environ.get("DIFFUSION_VLM_TIMEOUT") or settings.get("timeout"),
@@ -693,9 +905,14 @@ jobs:
               "--model-id", str(values["model_id"]),
               "--max-side", str(values["max_side"]),
               "--max-new-tokens", str(values["max_new_tokens"]),
+              "--local-files-only",
           ]
           environment = os.environ.copy()
-          environment.pop("HF_HUB_OFFLINE", None)
+          for token_name in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HF_TOKEN_PATH"):
+              environment.pop(token_name, None)
+          environment["HF_HUB_OFFLINE"] = "1"
+          environment["TRANSFORMERS_OFFLINE"] = "1"
+          environment["DIFFUSERS_OFFLINE"] = "1"
 
           def duration_seconds(value: object) -> float:
               text = str(value).strip().lower()
@@ -776,7 +993,9 @@ jobs:
       - inventory
       - source-quality
       - unit-tests
+      - discover-cache-anchors
       - cache-warm
+      - cache-warm-ready
       - package
       - model-proof
       - diffusion-vlm
@@ -798,7 +1017,9 @@ jobs:
           INVENTORY_RESULT: ${{ needs.inventory.result }}
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
-          CACHE_RESULT: ${{ needs.cache-warm.result }}
+          DISCOVERY_RESULT: ${{ needs.discover-cache-anchors.result }}
+          CACHE_WARM_RESULT: ${{ needs.cache-warm.result }}
+          CACHE_READY_RESULT: ${{ needs.cache-warm-ready.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
           VLM_RESULT: ${{ needs.diffusion-vlm.result }}
@@ -813,7 +1034,8 @@ jobs:
             "$REPORT_OUTPUT_DIR" "$EXPECTED_MODELS" "$EXPECTED_CASES_BY_MODEL" \
             "$EXPECTED_RESULT_COUNT" "$REVISION" \
             "$LEGAL_RESULT" "$INVENTORY_RESULT" "$SOURCE_QUALITY_RESULT" \
-            "$UNIT_RESULT" "$CACHE_RESULT" "$PACKAGE_RESULT" "$MODEL_RESULT" \
+            "$UNIT_RESULT" "$DISCOVERY_RESULT" "$CACHE_WARM_RESULT" \
+            "$CACHE_READY_RESULT" "$PACKAGE_RESULT" "$MODEL_RESULT" \
             "$VLM_RESULT" <<'PY'
           import html
           import json
@@ -830,7 +1052,9 @@ jobs:
               inventory_result,
               source_quality_result,
               unit_result,
-              cache_result,
+              discovery_result,
+              cache_warm_result,
+              cache_ready_result,
               package_result,
               model_result,
               vlm_result,
@@ -858,7 +1082,9 @@ jobs:
               "inventory": inventory_result,
               "source-quality": source_quality_result,
               "unit-tests": unit_result,
-              "cache-warm": cache_result,
+              "cache-anchor-discovery": discovery_result,
+              "cache-warm": cache_warm_result,
+              "cache-warm-ready": cache_ready_result,
               "package": package_result,
               "model-proof": model_result,
               "diffusion-vlm": vlm_result,
@@ -968,7 +1194,9 @@ jobs:
           INVENTORY_RESULT: ${{ needs.inventory.result }}
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
-          CACHE_RESULT: ${{ needs.cache-warm.result }}
+          DISCOVERY_RESULT: ${{ needs.discover-cache-anchors.result }}
+          CACHE_WARM_RESULT: ${{ needs.cache-warm.result }}
+          CACHE_READY_RESULT: ${{ needs.cache-warm-ready.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
           VLM_RESULT: ${{ needs.diffusion-vlm.result }}
@@ -1040,7 +1268,9 @@ jobs:
                 --upstream-result "inventory=$INVENTORY_RESULT" \
                 --upstream-result "source-quality=$SOURCE_QUALITY_RESULT" \
                 --upstream-result "unit-tests=$UNIT_RESULT" \
-                --upstream-result "cache-warm=$CACHE_RESULT" \
+                --upstream-result "cache-anchor-discovery=$DISCOVERY_RESULT" \
+                --upstream-result "cache-warm=$CACHE_WARM_RESULT" \
+                --upstream-result "cache-warm-ready=$CACHE_READY_RESULT" \
                 --upstream-result "package=$PACKAGE_RESULT" \
                 --upstream-result "model-proof=$MODEL_RESULT" \
                 --upstream-result "diffusion-vlm=$VLM_RESULT" \
@@ -1213,7 +1443,9 @@ jobs:
       - inventory
       - source-quality
       - unit-tests
+      - discover-cache-anchors
       - cache-warm
+      - cache-warm-ready
       - package
       - model-proof
       - diffusion-vlm
@@ -1230,7 +1462,9 @@ jobs:
           INVENTORY_RESULT: ${{ needs.inventory.result }}
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
-          CACHE_RESULT: ${{ needs.cache-warm.result }}
+          DISCOVERY_RESULT: ${{ needs.discover-cache-anchors.result }}
+          CACHE_WARM_RESULT: ${{ needs.cache-warm.result }}
+          CACHE_READY_RESULT: ${{ needs.cache-warm-ready.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
           VLM_RESULT: ${{ needs.diffusion-vlm.result }}
@@ -1244,7 +1478,8 @@ jobs:
           test -n "$TESTED_SHA"
           for result in \
             "$LEGAL_RESULT" "$INVENTORY_RESULT" "$SOURCE_QUALITY_RESULT" \
-            "$UNIT_RESULT" "$CACHE_RESULT" "$PACKAGE_RESULT" \
+            "$UNIT_RESULT" "$DISCOVERY_RESULT" "$CACHE_WARM_RESULT" \
+            "$CACHE_READY_RESULT" "$PACKAGE_RESULT" \
             "$MODEL_RESULT" "$VLM_RESULT" "$REPORT_RESULT"; do
             test "$result" = "success"
           done

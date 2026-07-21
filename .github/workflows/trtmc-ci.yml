@@ -342,7 +342,6 @@ jobs:
       }}
     strategy:
       fail-fast: true
-      max-parallel: 16
       matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}
     permissions:
       contents: read
@@ -352,7 +351,6 @@ jobs:
       model: ${{ matrix.model }}
       revision: ${{ needs.legal.outputs.tested_sha }}
       suite: premerge
-    secrets: inherit
 
   no-model:
     name: 4 / No model changes

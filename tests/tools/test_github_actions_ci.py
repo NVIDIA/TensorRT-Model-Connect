@@ -118,46 +118,40 @@ def test_ci_modules_have_minimal_role_comments_and_a_complete_tutorial() -> None
         assert section in readme
 
 
-def test_workflows_define_shared_hf_cache_env() -> None:
+def test_self_hosted_workflows_inherit_shared_hf_cache_env_from_each_node() -> None:
     nightly = (REPO_ROOT / ".github/workflows/nightly.yml").read_text()
+    nightly_environment = nightly.split("\nenv:", maxsplit=1)[1].split("\njobs:", maxsplit=1)[0]
     for name in (
-        "TRTMC_STORAGE_ROOT",
         "HF_HOME",
         "HF_HUB_CACHE",
         "HUGGINGFACE_HUB_CACHE",
         "HF_MODULES_CACHE",
+        "TRTMC_HF_CACHE_LOCK_FILE",
+        "TRTMC_MODEL_PROOF_GPU_LOCK_DIR",
     ):
-        assert f"{name}:" in nightly
-    assert (
-        "HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || "
-        "format('{0}/hub', vars.TRTMC_HF_HOME || "
-        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}"
-    ) in nightly
-    assert (
-        "HUGGINGFACE_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || "
-        "format('{0}/hub', vars.TRTMC_HF_HOME || "
-        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}"
-    ) in nightly
-    assert (
-        "HF_MODULES_CACHE: ${{ vars.TRTMC_HF_MODULES_CACHE || "
-        "format('{0}/modules', vars.TRTMC_HF_HOME || "
-        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}"
-    ) in nightly
+        assert f"{name}:" not in nightly_environment
+    cache_warm = nightly.split("\n  cache-warm:", maxsplit=1)[1].split(
+        "\n  cache-warm-ready:", maxsplit=1
+    )[0]
+    for name in (
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "HF_MODULES_CACHE",
+        "TRTMC_HF_CACHE_LOCK_FILE",
+    ):
+        assert name in cache_warm
 
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
-    assert (
-        "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || "
-        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}"
-    ) in proof
-    assert (
-        "TRTMC_HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || "
-        "format('{0}/hub', vars.TRTMC_HF_HOME || "
-        "'/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}"
-    ) in proof
+    proof_environment = proof.split("\n    env:", maxsplit=1)[1].split("\n    steps:", maxsplit=1)[
+        0
+    ]
+    assert "TRTMC_HF_CACHE:" not in proof_environment
+    assert "TRTMC_HF_HUB_CACHE:" not in proof_environment
     assert "TRTMC_HF_MODULES_CACHE:" not in proof
     runner = _ci_source("model_proof.py", "model_proof_inner.py")
-    assert ".cache/huggingface" in runner
-    assert 'self.context.env.get("TRTMC_HF_HUB_CACHE"' in runner
+    assert 'self.context.env.get("TRTMC_HF_CACHE", "")' in runner
+    assert 'self.context.env.get("TRTMC_HF_HUB_CACHE", "")' in runner
     assert '"HF_MODULES_CACHE": "/work/hf-modules"' in runner
 
 
@@ -648,7 +642,10 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "name: 4 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]" in model_proof
     assert "fail-fast: true" in model_proof
     assert "continue-on-error" not in model_proof
-    assert "max-parallel: 16" in model_proof
+    # GitHub's runner scheduler, not a workflow-local cap, controls how much of
+    # the generic proof pool this PR can consume.
+    assert "max-parallel:" not in model_proof
+    assert "secrets: inherit" not in model_proof
     assert "matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}" in model_proof
     assert "model: ${{ matrix.model }}" in model_proof
     assert "models: ${{ needs.impact.outputs.affected_models }}" not in model_proof
@@ -930,6 +927,7 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
         "source-quality",
         "unit-tests",
         "cache-warm",
+        "cache-warm-ready",
         "package",
     ):
         assert f"- {dependency}" in model_proof
@@ -939,9 +937,11 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
     assert "needs.unit-tests.result == 'success'" in model_proof
     assert "needs.source-quality.result == 'success'" in model_proof
     assert "needs.cache-warm.result == 'success'" in model_proof
+    assert "needs.cache-warm-ready.result == 'success'" in model_proof
     assert "needs.package.result == 'success'" in model_proof
     assert "fail-fast: false" in model_proof
-    assert "max-parallel: 16" in model_proof
+    assert "max-parallel:" not in model_proof
+    assert "secrets: inherit" not in model_proof
     assert "matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
     assert "model: ${{ matrix.model }}" in model_proof
@@ -954,7 +954,9 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
         "inventory",
         "source-quality",
         "unit-tests",
+        "discover-cache-anchors",
         "cache-warm",
+        "cache-warm-ready",
         "package",
         "model-proof",
         "diffusion-vlm",
@@ -966,7 +968,9 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
         "inventory",
         "source-quality",
         "unit-tests",
+        "discover-cache-anchors",
         "cache-warm",
+        "cache-warm-ready",
         "package",
         "model-proof",
         "diffusion-vlm",
@@ -994,7 +998,7 @@ def test_nightly_source_quality_does_not_use_self_hosted_shared_storage() -> Non
     assert "/workspace/" not in source_quality
 
 
-def test_nightly_self_hosted_stages_use_the_configured_proof_runner_pool() -> None:
+def test_nightly_non_anchor_self_hosted_stages_use_the_configured_proof_runner_pool() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     selector = (
         "runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || "
@@ -1003,7 +1007,6 @@ def test_nightly_self_hosted_stages_use_the_configured_proof_runner_pool() -> No
 
     for start, end in (
         ("unit-tests", "cache-warm"),
-        ("cache-warm", "package"),
         ("package", "model-proof"),
         ("diffusion-vlm", "report"),
     ):
@@ -1011,10 +1014,183 @@ def test_nightly_self_hosted_stages_use_the_configured_proof_runner_pool() -> No
         assert selector in block
 
 
+def test_proof_pool_is_generic_uncapped_and_has_no_workflow_gpu_default() -> None:
+    """Normal proof dispatch must grow when generic listeners are added."""
+    reusable = (REPO_ROOT / ".github" / "workflows" / "model-proof.yml").read_text()
+    premerge = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
+    nightly = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    premerge_proof = premerge.split("\n  model-proof:", maxsplit=1)[1].split(
+        "\n  no-model:", maxsplit=1
+    )[0]
+    nightly_proof = nightly.split("\n  model-proof:", maxsplit=1)[1].split(
+        "\n  diffusion-vlm:", maxsplit=1
+    )[0]
+
+    assert (
+        "runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || '[\"trtmc-gb300-proof\"]') }}"
+    ) in reusable
+    reusable_job = reusable.split("\n  prove:", maxsplit=1)[1]
+    assert "vars.TRTMC_RUNNER_LABELS" not in reusable_job
+    assert "self-hosted" not in reusable_job
+    assert not re.search(r"^\s*TRTMC_MODEL_PROOF_GPU_IDS\s*:", reusable, re.MULTILINE)
+    assert "vars.TRTMC_MODEL_PROOF_GPU_IDS" not in reusable
+
+    for matrix_job in (premerge_proof, nightly_proof):
+        assert "max-parallel:" not in matrix_job
+        assert "secrets: inherit" not in matrix_job
+        assert "uses: ./.github/workflows/model-proof.yml" in matrix_job
+    assert "secrets: inherit" not in premerge
+    assert "secrets: inherit" not in nightly
+
+
+def test_nightly_discovers_and_warms_one_dynamic_anchor_per_node() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    discovery = text.split("\n  discover-cache-anchors:", maxsplit=1)[1].split(
+        "\n  source-quality:", maxsplit=1
+    )[0]
+    warm = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  cache-warm-ready:", maxsplit=1)[
+        0
+    ]
+    ready = text.split("\n  cache-warm-ready:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
+    proof = text.split("\n  model-proof:", maxsplit=1)[1].split("\n  diffusion-vlm:", maxsplit=1)[0]
+
+    assert "runs-on: ubuntu-latest" in discovery
+    assert "actions/create-github-app-token@v2" in discovery
+    assert "tools.ci.discover_cache_anchors" in discovery
+    assert "matrix: ${{ steps.discover.outputs.matrix }}" in discovery
+
+    assert "- discover-cache-anchors" in warm
+    assert "needs.discover-cache-anchors.result == 'success'" in warm
+    assert "matrix: ${{ fromJSON(needs.discover-cache-anchors.outputs.matrix) }}" in warm
+    assert "- trtmc-cache-anchor" in warm
+    assert "- ${{ matrix.node_label }}" in warm
+    assert "self-hosted" not in warm
+    assert "trtmc-gb300-proof" not in warm
+
+    assert "- discover-cache-anchors" in ready
+    assert "- cache-warm" in ready
+    assert "needs.cache-warm.result" in ready
+    assert "tools.ci.cache_warm_receipt verify" in ready
+    assert "--expected-matrix-json" in ready
+    assert "Upload fleet cache readiness summary" in ready
+
+    assert "- cache-warm-ready" in proof
+    assert "needs.cache-warm-ready.result == 'success'" in proof
+
+
+def test_nightly_anchor_warm_is_strict_offline_verified_and_receipted() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    warm = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  cache-warm-ready:", maxsplit=1)[
+        0
+    ]
+
+    assert warm.count("scripts/warm_hf_cache.py") == 2
+    assert warm.count("--strict") == 2
+    assert warm.count("--exclude-ci-tier multi_device") == 2
+    assert "--local-only" in warm
+    assert "--network none" in warm
+    assert "--read-only" in warm
+    assert "HF_HUB_OFFLINE=1" in warm
+    assert "flock --exclusive" in warm
+    assert 'exec 9>"$TRTMC_HF_CACHE_LOCK_FILE"' in warm
+    assert "tools.ci.cache_warm_receipt create" in warm
+    assert "cache-warm-receipt.json" in warm
+    assert "Upload node cache-warm receipt" in warm
+
+
+def test_nightly_hf_token_is_scoped_to_warm_and_consumers_are_offline() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    warm = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  cache-warm-ready:", maxsplit=1)[
+        0
+    ]
+    package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
+
+    assert "HF_TOKEN: ${{ secrets.HF_TOKEN }}" in warm
+    assert "HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}" not in text
+    for job in (package, vlm):
+        assert "secrets.HF_TOKEN" not in job
+    assert '"--local-files-only"' in vlm
+    assert 'environment["HF_HUB_OFFLINE"] = "1"' in vlm
+    assert 'environment["TRANSFORMERS_OFFLINE"] = "1"' in vlm
+    assert 'environment["DIFFUSERS_OFFLINE"] = "1"' in vlm
+    assert "TRTMC_DIFFUSION_VLM_CONFIG" not in vlm
+    assert "TRTMC_DIFFUSION_VLM_MODEL_ID" not in vlm
+    assert '"model_id": settings.get("model_id")' in vlm
+
+
+def test_nightly_cache_aliases_resolve_to_one_host_local_cache() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    warm = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  cache-warm-ready:", maxsplit=1)[
+        0
+    ]
+
+    for name in (
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "HF_MODULES_CACHE",
+        "TRTMC_HF_CACHE",
+        "TRTMC_HF_HUB_CACHE",
+        "TRTMC_HF_CACHE_LOCK_FILE",
+    ):
+        assert name in warm
+    assert '[ "$HF_HOME" != "$TRTMC_HF_CACHE" ]' in warm
+    assert '[ "$HF_HUB_CACHE" != "$HUGGINGFACE_HUB_CACHE" ]' in warm
+    assert '[ "$HF_HUB_CACHE" != "$TRTMC_HF_HUB_CACHE" ]' in warm
+    assert 'Path(os.environ["HF_HOME"]).resolve()' in warm
+    assert "hub == root or root not in hub.parents" in warm
+    assert "modules == root or root not in modules.parents" in warm
+    assert "overlaps(path, workspace)" in warm
+    assert "overlaps(hub, modules)" in warm
+
+
+def test_normal_production_workflows_do_not_encode_current_fleet_topology() -> None:
+    """Capacity values belong to runner services and the separate canary."""
+    normal_workflows = (
+        REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml",
+        REPO_ROOT / ".github" / "workflows" / "nightly.yml",
+        REPO_ROOT / ".github" / "workflows" / "model-proof.yml",
+    )
+    for path in normal_workflows:
+        source = path.read_text(encoding="utf-8")
+        assert not re.search(r"gb300-nvl-[a-zA-Z0-9._-]*compute[0-9]+", source)
+        assert not re.search(r"trtmc-node-[a-zA-Z0-9]", source)
+        assert "vars.TRTMC_MODEL_PROOF_GPU_IDS" not in source
+        # API-version dates are protocol constants, not a pool-size setting.
+        without_api_date = source.replace("2022-11-28", "")
+        assert not re.search(r"\b28\b", without_api_date)
+
+
+def test_proof_workers_fail_closed_on_node_gpu_and_cache_lock_policy() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "model-proof.yml").read_text()
+    validation = workflow.split("- name: Validate host proof policy", maxsplit=1)[1].split(
+        "- name: Check model proof disk headroom", maxsplit=1
+    )[0]
+    runner = _ci_source("model_proof.py", "cache_lock.py", "gpu_lease.py")
+
+    job_environment = workflow.split("\n    env:", maxsplit=1)[1].split("\n    steps:", maxsplit=1)[
+        0
+    ]
+    assert "TRTMC_HF_CACHE_LOCK_FILE:" not in job_environment
+    assert "TRTMC_HF_CACHE_LOCK_FILE" in validation
+    assert "$name is not configured by this proof runner" in validation
+    assert '[[ "${TRTMC_NODE_ID:-}" =~' in validation
+    assert 'if [ -z "${TRTMC_MODEL_PROOF_GPU_IDS:-}" ]; then' in validation
+    assert "TRTMC_MODEL_PROOF_GPU_IDS is not configured by this proof runner" in validation
+    assert "TRTMC_HF_HUB_CACHE must be a strict child of TRTMC_HF_CACHE" in validation
+    assert "must not overlap GITHUB_WORKSPACE" in validation
+    assert "with CacheLock(self.context, shared=True):" in runner
+    assert '"TRTMC_HF_CACHE_LOCK_FILE"' in runner
+    assert "fcntl.LOCK_SH" in runner
+
+
 def test_nightly_strictly_warms_all_active_non_multi_device_cases() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    cache = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
-    assert "Strictly warm every active single-GPU nightly model" in cache
+    cache = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  cache-warm-ready:", maxsplit=1)[
+        0
+    ]
+    assert "Strictly warm and verify every active single-GPU nightly model" in cache
     for argument in (
         "python -u scripts/warm_hf_cache.py",
         "--exclude-ci-tier multi_device",
@@ -1115,7 +1291,9 @@ def test_nightly_all_gpu_gate_uses_the_model_proof_machine_lock() -> None:
     vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
     proof_runner = _ci_source("gpu_lease.py")
 
-    assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR:" in text
+    top_environment = text.split("\nenv:", maxsplit=1)[1].split("\njobs:", maxsplit=1)[0]
+    assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR:" not in top_environment
+    assert "must come from the runner as an absolute path" in vlm
     assert "whole-machine.lock" in vlm
     assert 'flock -w "$TRTMC_WHOLE_MACHINE_GPU_LOCK_TIMEOUT_SECONDS" -x 9' in vlm
     assert 'FileLock(self.lock_dir / "whole-machine.lock")' in proof_runner
@@ -1539,14 +1717,16 @@ def test_model_proof_runs_one_isolated_model_with_unique_complete_evidence() -> 
     assert "python3 -m tools.ci image ensure" in proof
     assert proof.count("actions/checkout@v4") == 1
     assert proof.count("python3 -m tools.ci image ensure") == 1
-    assert "TRTMC_HF_CACHE:" in proof
-    assert "TRTMC_HF_HUB_CACHE:" in proof
+    job_environment = proof.split("\n    env:", maxsplit=1)[1].split("\n    steps:", maxsplit=1)[0]
+    assert "TRTMC_HF_CACHE:" not in job_environment
+    assert "TRTMC_HF_HUB_CACHE:" not in job_environment
     assert "TRTMC_HF_MODULES_CACHE:" not in proof
     assert "TRTMC_MODEL_PROOF_BUILD_JOBS: ${{ vars.TRTMC_MODEL_PROOF_BUILD_JOBS || '2' }}" in proof
-    assert "TRTMC_MODEL_PROOF_SLOTS_PER_GPU:" in proof
-    assert "vars.TRTMC_MODEL_PROOF_SLOTS_PER_GPU || '4'" in proof
-    assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR:" in proof
-    assert "/tmp/trtmc-model-proof-gpu-locks" in proof
+    assert "TRTMC_MODEL_PROOF_SLOTS_PER_GPU:" not in job_environment
+    assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR:" not in job_environment
+    assert "TRTMC_MODEL_PROOF_SLOTS_PER_GPU" in proof
+    assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR" in proof
+    assert "$name is not configured by this proof runner" in proof
     assert "python3 -m tools.ci model-proof" in proof
     assert "run-model-proof-batch.sh" not in proof
     assert "env -u TRTMC_GPU_ID python3 -m tools.ci model-proof" in proof
@@ -1633,9 +1813,7 @@ def test_package_reuses_conan_cmake_build_directory(tmp_path: Path) -> None:
     release.mkdir(parents=True)
     (release / "CMakeCache.txt").touch()
 
-    assert WheelPackageManager(object())._conan_cmake_build_dir(
-        tmp_path / "conan_out"
-    ) == release
+    assert WheelPackageManager(object())._conan_cmake_build_dir(tmp_path / "conan_out") == release
 
 
 def test_package_smoke_default_is_model_owned() -> None:

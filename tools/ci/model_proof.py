@@ -18,6 +18,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .cache_lock import CacheLock
 from .context import CiContext
 from .gpu_lease import GpuLease
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
@@ -290,6 +291,9 @@ class ModelProofRunner:
                 f"expected resource class {expected} does not match selected E2E resource class "
                 f"{selection.resource_class}"
             )
+        lease = GpuLease(
+            self.context, self.request.model, selection.resource_class, self.artifacts_dir
+        )
         models_file = self.artifacts_dir / "cache-check-models.txt"
         models_file.write_text(
             "".join(f"{model}\n" for model in selection.e2e_models), encoding="utf-8"
@@ -313,26 +317,31 @@ class ModelProofRunner:
             task_eval_container,
             self._job_labels(),
         ).prepare()
-        private_hub = self._prepare_hf_cache(projection, work, image, models_file)
+        with CacheLock(self.context, shared=True):
+            private_hub = self._prepare_hf_cache(projection, work, image, models_file)
         (self.artifacts_dir / "gpu-lease-requested.txt").write_text(
             selection.resource_class + "\n", encoding="utf-8"
         )
-        self.lease = GpuLease(
-            self.context, self.request.model, selection.resource_class, self.artifacts_dir
-        ).acquire()
+        self.lease = lease.acquire()
         self._reclaim_orphans()
-        lease_evidence = self.lease.evidence(self.revision)
+        lease_evidence = self._write_lease_evidence()
         (self.artifacts_dir / "gpu-id.txt").write_text(
             str(lease_evidence["gpu_id"]) + "\n", encoding="utf-8"
-        )
-        (self.artifacts_dir / "gpu-lease.json").write_text(
-            json.dumps(lease_evidence, indent=2) + "\n", encoding="utf-8"
         )
         self._run_proof_container(projection, work, private_hub, image, selection, task_eval_dir)
         for name in ("proof.json", "model-proof-report.html"):
             if not (self.artifacts_dir / name).is_file():
                 raise CiError(f"model proof did not emit {name}")
         print(f"Model proof artifacts: {self.artifacts_dir}")
+
+    def _write_lease_evidence(self) -> dict[str, object]:
+        assert self.lease is not None and self.artifacts_dir is not None
+        evidence = self.lease.evidence(self.revision)
+        destination = self.artifacts_dir / "gpu-lease.json"
+        temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+        temporary.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(destination)
+        return evidence
 
     def _project(self, projection: Path) -> None:
         assert self.artifacts_dir is not None
@@ -393,12 +402,19 @@ class ModelProofRunner:
         self, projection: Path, work: Path, image: str, models_file: Path
     ) -> Path:
         assert self.artifacts_dir is not None
-        root = self.context.env.get(
-            "TRTMC_HF_CACHE",
-            self.context.env.get("HF_HOME", str(Path.home() / ".cache/huggingface")),
-        )
-        hub = Path(self.context.env.get("TRTMC_HF_HUB_CACHE", str(Path(root) / "hub"))).resolve()
-        if hub in {Path("/"), self.context.repository}:
+        root = self.context.env.get("TRTMC_HF_CACHE", "")
+        configured_hub = self.context.env.get("TRTMC_HF_HUB_CACHE", "")
+        if not root or not configured_hub:
+            raise CiError("host-local Hugging Face cache paths must be configured")
+        cache_root = Path(root).resolve()
+        hub = Path(configured_hub).resolve()
+        repository = self.context.repository.resolve()
+        if cache_root == Path("/") or any(
+            path == repository or path in repository.parents or repository in path.parents
+            for path in (cache_root, hub)
+        ):
+            raise CiError("unsafe Hugging Face cache root")
+        if hub in {Path("/"), cache_root} or not hub.is_relative_to(cache_root):
             raise CiError("unsafe HF Hub cache path")
         name = self._base_container_name() + "-cache-check"
         self.container_name = name
@@ -671,6 +687,7 @@ class ModelProofRunner:
             "PYTHONHASHSEED": "0",
             "TRTMC_MODEL_PLUGIN_STRICT": "1",
             "TRTMC_MODEL_PROOF_GPU_ID": str(self.lease.gpu_id),
+            "TRTMC_MODEL_PROOF_GPU_UUID": self.lease.gpu_uuid,
             "TRTMC_MODEL_PROOF_GPU_SLOT_IDS": slots,
             "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": str(self.lease.slots_per_gpu),
             "TRTMC_MODEL_PROOF_RESOURCE_CLASS": self.lease.resource_class,
@@ -791,6 +808,9 @@ class ModelProofRunner:
                 ["docker", "rm", "-f", self.container_name], check=False, capture_output=True
             )
         if self.lease:
+            self.lease.mark_released()
+            if self.artifacts_dir and self.lease.gpu_id is not None and self.lease.slot_ids:
+                self._write_lease_evidence()
             self.lease.release()
 
     def _signal(self, number: int, _frame: object) -> None:

@@ -1,0 +1,235 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Model proof capacity canary
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Shared fleet capacity or same-node exclusive-lock safety"
+        required: true
+        default: shared-capacity
+        type: choice
+        options:
+          - shared-capacity
+          - exclusive-safety
+      expected_slots:
+        description: "Shared mode only: slots that must be simultaneously usable"
+        required: true
+        default: 28
+        type: number
+      hold_delay_seconds:
+        description: "Shared mode only: UTC delay used to assemble the first wave"
+        required: true
+        default: 900
+        type: number
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Validate canary and build matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      expected_slots: ${{ steps.matrix.outputs.expected_slots }}
+      barrier_epoch: ${{ steps.matrix.outputs.barrier_epoch }}
+    steps:
+      - name: Require the protected main branch
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::The capacity canary may only run from main."
+            exit 1
+          fi
+
+      - name: Check out canary source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build canary matrix and absolute barrier
+        id: matrix
+        env:
+          MODE: ${{ inputs.mode }}
+          EXPECTED_SLOTS: ${{ inputs.expected_slots }}
+          HOLD_DELAY_SECONDS: ${{ inputs.hold_delay_seconds }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in
+            shared-capacity)
+              if ! [[ "$EXPECTED_SLOTS" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$EXPECTED_SLOTS" -gt 128 ]; then
+                echo "expected_slots must be an integer from 1 to 128" >&2
+                exit 1
+              fi
+              if ! [[ "$HOLD_DELAY_SECONDS" =~ ^[1-9][0-9]{0,3}$ ]] || \
+                 [ "$HOLD_DELAY_SECONDS" -gt 1800 ]; then
+                echo "hold_delay_seconds must be an integer from 1 to 1800" >&2
+                exit 1
+              fi
+              matrix="$(python3 -m tools.ci.capacity_canary matrix --expected-slots "$EXPECTED_SLOTS")"
+              barrier_epoch="$(($(date -u +%s) + HOLD_DELAY_SECONDS))"
+              ;;
+            exclusive-safety)
+              matrix='{"leg":[0]}'
+              barrier_epoch="$(date -u +%s)"
+              ;;
+            *)
+              echo "unsupported canary mode: $MODE" >&2
+              exit 1
+              ;;
+          esac
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "expected_slots=$EXPECTED_SLOTS" >> "$GITHUB_OUTPUT"
+          echo "barrier_epoch=$barrier_epoch" >> "$GITHUB_OUTPUT"
+          echo "Canary barrier epoch: $barrier_epoch"
+
+  exercise:
+    name: ${{ inputs.mode }} ${{ matrix.leg }}
+    needs: prepare
+    runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || '["trtmc-gb300-proof"]') }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
+
+    steps:
+      - name: Check out exact canary revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Acquire, probe, and hold one real shared lease
+        if: ${{ inputs.mode == 'shared-capacity' }}
+        env:
+          LEG_ID: ${{ matrix.leg }}
+          EXPECTED_SLOTS: ${{ needs.prepare.outputs.expected_slots }}
+          BARRIER_EPOCH: ${{ needs.prepare.outputs.barrier_epoch }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${TRTMC_NODE_ID:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "TRTMC_NODE_ID is not configured safely by this proof runner" >&2
+            exit 1
+          fi
+          if [ -z "${TRTMC_MODEL_PROOF_GPU_IDS:-}" ]; then
+            echo "TRTMC_MODEL_PROOF_GPU_IDS is not configured by this proof runner" >&2
+            exit 1
+          fi
+          if [ -z "${TRTMC_MODEL_PROOF_SLOTS_PER_GPU:-}" ]; then
+            echo "TRTMC_MODEL_PROOF_SLOTS_PER_GPU is not configured by this proof runner" >&2
+            exit 1
+          fi
+          if [ -z "${TRTMC_MODEL_PROOF_GPU_LOCK_DIR:-}" ]; then
+            echo "TRTMC_MODEL_PROOF_GPU_LOCK_DIR is not configured by this proof runner" >&2
+            exit 1
+          fi
+          canary_dir="$RUNNER_TEMP/trtmc-capacity-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${LEG_ID}"
+          receipt="$canary_dir/receipt-$LEG_ID.json"
+          mkdir -p "$canary_dir"
+          python3 -m tools.ci.capacity_canary hold \
+            --leg-id "$LEG_ID" \
+            --expected-slots "$EXPECTED_SLOTS" \
+            --barrier-epoch "$BARRIER_EPOCH" \
+            --receipt-output "$receipt"
+          echo "CANARY_RECEIPT=$receipt" >> "$GITHUB_ENV"
+
+      - name: Prove same-GPU exclusive serialization
+        if: ${{ inputs.mode == 'exclusive-safety' }}
+        env:
+          LEG_ID: ${{ matrix.leg }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${TRTMC_NODE_ID:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "TRTMC_NODE_ID is not configured safely by this proof runner" >&2
+            exit 1
+          fi
+          if [ -z "${TRTMC_MODEL_PROOF_GPU_IDS:-}" ] || \
+             [ -z "${TRTMC_MODEL_PROOF_SLOTS_PER_GPU:-}" ] || \
+             [ -z "${TRTMC_MODEL_PROOF_GPU_LOCK_DIR:-}" ]; then
+            echo "runner-local GPU IDs, slots, and lock directory are required" >&2
+            exit 1
+          fi
+          canary_dir="$RUNNER_TEMP/trtmc-exclusive-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${LEG_ID}"
+          receipt="$canary_dir/receipt-$LEG_ID.json"
+          mkdir -p "$canary_dir"
+          python3 -m tools.ci.capacity_canary exclusive-safety \
+            --leg-id "$LEG_ID" \
+            --observation-seconds 3 \
+            --receipt-output "$receipt"
+          echo "CANARY_RECEIPT=$receipt" >> "$GITHUB_ENV"
+
+      - name: Upload capacity receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: capacity-canary-${{ matrix.leg }}
+          path: ${{ env.CANARY_RECEIPT }}
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    name: Verify canary evidence
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    needs:
+      - prepare
+      - exercise
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact canary revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Download all capacity receipts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: capacity-canary-*
+          path: capacity-canary-receipts
+          merge-multiple: true
+
+      - name: Verify first wave and queued extra leg
+        if: ${{ inputs.mode == 'shared-capacity' }}
+        env:
+          EXPECTED_SLOTS: ${{ needs.prepare.outputs.expected_slots }}
+          BARRIER_EPOCH: ${{ needs.prepare.outputs.barrier_epoch }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.ci.capacity_canary verify \
+            --receipts-dir capacity-canary-receipts \
+            --expected-slots "$EXPECTED_SLOTS" \
+            --expected-run-id "$GITHUB_RUN_ID" \
+            --expected-revision "$GITHUB_SHA" \
+            --expected-barrier-epoch "$BARRIER_EPOCH" \
+            --output capacity-canary-verification.json
+
+      - name: Verify exclusive ownership and queued resumption
+        if: ${{ inputs.mode == 'exclusive-safety' }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.ci.capacity_canary verify-exclusive \
+            --receipts-dir capacity-canary-receipts \
+            --expected-run-id "$GITHUB_RUN_ID" \
+            --expected-revision "$GITHUB_SHA" \
+            --output capacity-canary-verification.json
+
+      - name: Require every canary worker to pass
+        if: ${{ always() }}
+        run: |
+          if [ "${{ needs.exercise.result }}" != "success" ]; then
+            echo "One or more capacity workers failed" >&2
+            exit 1
+          fi
+
+      - name: Upload capacity verification
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: capacity-canary-verification
+          path: capacity-canary-verification.json
+          if-no-files-found: error
+          retention-days: 14

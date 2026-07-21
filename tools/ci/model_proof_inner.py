@@ -177,10 +177,25 @@ class ModelProofInnerPipeline:
 
     def _validate_gpu_lease(self) -> dict[str, object]:
         gpu_id = self.context.env.get("TRTMC_MODEL_PROOF_GPU_ID", "")
+        expected_uuid = self.context.env.get("TRTMC_MODEL_PROOF_GPU_UUID", "")
         resource = self.context.env.get("TRTMC_MODEL_PROOF_RESOURCE_CLASS", "")
         capacity_text = self.context.env.get("TRTMC_MODEL_PROOF_SLOTS_PER_GPU", "")
         if not gpu_id.isdigit():
             raise CiError("TRTMC_MODEL_PROOF_GPU_ID must be passed as a non-negative integer")
+        if re.fullmatch(r"GPU-[A-Za-z0-9-]+", expected_uuid) is None:
+            raise CiError("TRTMC_MODEL_PROOF_GPU_UUID must identify the leased host GPU")
+        observed_uuids = [
+            line.strip()
+            for line in self.context.output(
+                ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"]
+            ).splitlines()
+            if line.strip()
+        ]
+        if observed_uuids != [expected_uuid]:
+            raise CiError(
+                "proof container GPU UUID does not match its host lease: "
+                f"expected {expected_uuid}, observed {observed_uuids}"
+            )
         if resource not in {"shared", "exclusive_gpu"}:
             raise CiError("TRTMC_MODEL_PROOF_RESOURCE_CLASS must be shared or exclusive_gpu")
         if not capacity_text.isdigit() or not 1 <= int(capacity_text) <= 16:
@@ -207,6 +222,7 @@ class ModelProofInnerPipeline:
             raise CiError("exclusive_gpu model proof must hold every GPU slot")
         expected = {
             "gpu_id": gpu_id,
+            "gpu_uuid": expected_uuid,
             "gpu_slot": slots[0] if resource == "shared" else None,
             "gpu_slots": slots,
             "gpu_slot_ids": slots,

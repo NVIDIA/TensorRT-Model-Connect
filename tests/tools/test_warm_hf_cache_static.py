@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import hashlib
 import json
 import os
 import pathlib
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -29,14 +31,20 @@ DOWNLOAD_WORKER = REPO_ROOT / "scripts" / "hf_cache_download_worker.py"
 FAMILIES = REPO_ROOT / "python" / "tensorrt_model_connect" / "families"
 HELPER_FUNCTIONS = {
     "_component_has_weight",
+    "_cache_plan_digest",
     "_cache_repository_manifest",
+    "_cached_main_revision",
+    "_cached_revision_state",
+    "_resolve_cached_snapshot",
     "_diffusers_missing_weight_components",
     "_is_hf_file_cached",
+    "_hf_token_available",
     "_is_diffusers_component_enabled",
     "_is_cached",
     "_manifest_has_eligible_testcase",
     "_run_download_attempts",
     "_run_download_worker",
+    "_resolved_cache_digest",
     "_snapshot_has_required_files",
     "_download_validation_error",
     "_warm_file",
@@ -63,10 +71,31 @@ def _family_metadata_specs(field: str) -> list[str]:
     specs: list[str] = []
     for model_toml in sorted(FAMILIES.glob("*/MODEL.toml")):
         data = tomllib.loads(model_toml.read_text(encoding="utf-8"))
-        specs.extend(
-            spec for spec in data.get(field, []) if isinstance(spec, str)
-        )
+        specs.extend(spec for spec in data.get(field, []) if isinstance(spec, str))
     return specs
+
+
+def test_default_diffusion_vlm_model_is_owned_by_the_nightly_cache_plan() -> None:
+    configs = sorted(
+        (REPO_ROOT / "tests" / "e2e" / "models").glob("*/diffusion_vlm_assessment.json")
+    )
+    defaults = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in configs
+        if json.loads(path.read_text(encoding="utf-8")).get("default") is True
+    ]
+    assert len(defaults) == 1
+    model_id = defaults[0].get("model_id")
+    assert isinstance(model_id, str) and model_id
+
+    manifest_ids = {
+        payload["hf_id"]
+        for path in (REPO_ROOT / "tests" / "e2e" / "models").glob("*/manifests/*.json")
+        if not (payload := json.loads(path.read_text(encoding="utf-8"))).get("skip")
+        and isinstance(payload.get("hf_id"), str)
+        and payload.get("testcases")
+    }
+    assert model_id in manifest_ids
 
 
 def _literal_string_list(name: str) -> set[str]:
@@ -74,10 +103,7 @@ def _literal_string_list(name: str) -> set[str]:
     for node in tree.body:
         if not isinstance(node, ast.Assign):
             continue
-        if not any(
-            isinstance(target, ast.Name) and target.id == name
-            for target in node.targets
-        ):
+        if not any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
             continue
         value = ast.literal_eval(node.value)
         return {item for item in value if isinstance(item, str)}
@@ -88,6 +114,7 @@ def _load_cache_helpers() -> dict:
     tree = ast.parse(WARM_HF_CACHE.read_text())
     namespace = {
         "fnmatch": fnmatch,
+        "hashlib": hashlib,
         "json": json,
         "pathlib": pathlib,
         "os": os,
@@ -141,6 +168,7 @@ def _load_cache_helpers() -> dict:
             "tokenizer.json",
             "tokenizer_config.json",
         ],
+        "hf_constants": SimpleNamespace(HF_HUB_CACHE="/tmp/fake-hub"),
         "repo_folder_name": (
             lambda *, repo_id, repo_type: f"{repo_type}s--{repo_id.replace('/', '--')}"
         ),
@@ -167,6 +195,29 @@ def _write_fake_hub_package(root: Path, init_source: str) -> Path:
         encoding="utf-8",
     )
     return package
+
+
+def _write_cached_repo(
+    hub: Path,
+    repo_id: str,
+    current_snapshot: str,
+    *,
+    historical_snapshots: tuple[str, ...] = (),
+    extra_refs: dict[str, str] | None = None,
+) -> None:
+    repository = hub / f"models--{repo_id.replace('/', '--')}"
+    refs = repository / "refs"
+    snapshots = repository / "snapshots"
+    refs.mkdir(parents=True)
+    snapshots.mkdir()
+    (refs / "main").write_text(current_snapshot + "\n", encoding="utf-8")
+    (snapshots / current_snapshot).mkdir()
+    for snapshot in historical_snapshots:
+        (snapshots / snapshot).mkdir()
+    for name, snapshot in (extra_refs or {}).items():
+        reference = refs / name
+        reference.parent.mkdir(parents=True, exist_ok=True)
+        reference.write_text(snapshot + "\n", encoding="utf-8")
 
 
 def test_family_reference_dependencies_are_metadata_driven() -> None:
@@ -274,16 +325,14 @@ def test_family_file_asset_guard_allows_global_filename_collisions() -> None:
     """A generic weight name is not itself family-specific hard-coding."""
     assert "pytorch_model.bin" in _literal_string_list("_HF_ALLOW_PATTERNS")
     assert any(
-        spec.endswith("|pytorch_model.bin")
-        for spec in _family_metadata_specs("hf_warm_files")
+        spec.endswith("|pytorch_model.bin") for spec in _family_metadata_specs("hf_warm_files")
     )
 
 
 def test_nemo_archives_count_as_complete_snapshots() -> None:
     text = WARM_HF_CACHE.read_text()
     assert (
-        'if any(fnmatch.fnmatch(name, "*.nemo") for name in files):\n'
-        "        return True"
+        'if any(fnmatch.fnmatch(name, "*.nemo") for name in files):\n        return True'
     ) in text
 
 
@@ -320,14 +369,18 @@ def test_diffusers_snapshot_requires_component_weights(tmp_path: Path) -> None:
     snapshot = tmp_path / "snapshots" / "abc"
     (snapshot / "text_encoder").mkdir(parents=True)
     (snapshot / "transformer").mkdir()
-    (snapshot / "model_index.json").write_text(json.dumps({
-        "_class_name": "SyntheticDiffusionPipeline",
-        "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
-        "text_encoder": ["transformers", "T5EncoderModel"],
-        "tokenizer": ["transformers", "T5TokenizerFast"],
-        "transformer": ["diffusers", "SyntheticTransformer2DModel"],
-        "vae": ["diffusers", "AutoencoderKL"],
-    }))
+    (snapshot / "model_index.json").write_text(
+        json.dumps(
+            {
+                "_class_name": "SyntheticDiffusionPipeline",
+                "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+                "text_encoder": ["transformers", "T5EncoderModel"],
+                "tokenizer": ["transformers", "T5TokenizerFast"],
+                "transformer": ["diffusers", "SyntheticTransformer2DModel"],
+                "vae": ["diffusers", "AutoencoderKL"],
+            }
+        )
+    )
     (snapshot / "text_encoder" / "model.safetensors").write_bytes(b"weights")
     (snapshot / "transformer" / "config.json").write_text("{}")
 
@@ -344,18 +397,22 @@ def test_diffusers_snapshot_accepts_all_component_weights(tmp_path: Path) -> Non
     (snapshot / "text_encoder").mkdir(parents=True)
     (snapshot / "transformer").mkdir()
     (snapshot / "vae").mkdir()
-    (snapshot / "model_index.json").write_text(json.dumps({
-        "_class_name": "SyntheticDiffusionPipeline",
-        "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
-        "text_encoder": ["transformers", "T5EncoderModel"],
-        "tokenizer": ["transformers", "T5TokenizerFast"],
-        "transformer": ["diffusers", "SyntheticTransformer2DModel"],
-        "vae": ["diffusers", "AutoencoderKL"],
-    }))
+    (snapshot / "model_index.json").write_text(
+        json.dumps(
+            {
+                "_class_name": "SyntheticDiffusionPipeline",
+                "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+                "text_encoder": ["transformers", "T5EncoderModel"],
+                "tokenizer": ["transformers", "T5TokenizerFast"],
+                "transformer": ["diffusers", "SyntheticTransformer2DModel"],
+                "vae": ["diffusers", "AutoencoderKL"],
+            }
+        )
+    )
     (snapshot / "text_encoder" / "model.safetensors").write_bytes(b"weights")
-    (
-        snapshot / "transformer" / "diffusion_pytorch_model-00001-of-00002.safetensors"
-    ).write_bytes(b"weights")
+    (snapshot / "transformer" / "diffusion_pytorch_model-00001-of-00002.safetensors").write_bytes(
+        b"weights"
+    )
     (snapshot / "vae" / "diffusion_pytorch_model.safetensors").write_bytes(b"weights")
 
     assert helpers["_diffusers_missing_weight_components"](snapshot) == []
@@ -369,18 +426,15 @@ def test_snapshot_requires_declared_extra_files(tmp_path: Path) -> None:
     (snapshot / "config.json").write_text("{}")
     (snapshot / "model.safetensors").write_bytes(b"weights")
 
-    assert not helpers["_snapshot_has_required_files"](
-        snapshot, hf_id="org/adapter-model")
+    assert not helpers["_snapshot_has_required_files"](snapshot, hf_id="org/adapter-model")
 
     lora_dir = snapshot / "linear_spec_lora"
     lora_dir.mkdir()
     (lora_dir / "adapter_config.json").write_text("{}")
-    assert not helpers["_snapshot_has_required_files"](
-        snapshot, hf_id="org/adapter-model")
+    assert not helpers["_snapshot_has_required_files"](snapshot, hf_id="org/adapter-model")
 
     (lora_dir / "adapter_model.safetensors").write_bytes(b"weights")
-    assert helpers["_snapshot_has_required_files"](
-        snapshot, hf_id="org/adapter-model")
+    assert helpers["_snapshot_has_required_files"](snapshot, hf_id="org/adapter-model")
 
 
 def test_cache_skip_uses_hf_local_resolution(tmp_path: Path) -> None:
@@ -398,18 +452,20 @@ def test_cache_skip_uses_hf_local_resolution(tmp_path: Path) -> None:
     helpers["snapshot_download"] = fake_snapshot_download
 
     assert helpers["_is_cached"]("org/model")
-    assert calls == [{
-        "args": ("org/model",),
-        "kwargs": {
-            "allow_patterns": [
-                "config.json",
-                "model.safetensors",
-                "nested/**",
-                "*.nemo",
-            ],
-            "local_files_only": True,
-        },
-    }]
+    assert calls == [
+        {
+            "args": ("org/model",),
+            "kwargs": {
+                "allow_patterns": [
+                    "config.json",
+                    "model.safetensors",
+                    "nested/**",
+                    "*.nemo",
+                ],
+                "local_files_only": True,
+            },
+        }
+    ]
 
 
 def test_cache_skip_and_worker_forward_pinned_revision(tmp_path: Path) -> None:
@@ -466,9 +522,7 @@ def test_selective_warm_of_cached_snapshot_makes_no_network_download() -> None:
     helpers = _load_cache_helpers()
     downloads: list[str] = []
     helpers["_is_cached"] = lambda _hf_id, **_kwargs: True
-    helpers["_run_download_attempts"] = (
-        lambda _operation, hf_id, **_kwargs: downloads.append(hf_id)
-    )
+    helpers["_run_download_attempts"] = lambda _operation, hf_id, **_kwargs: downloads.append(hf_id)
 
     status, detail = helpers["_warm_snapshot"](
         "org/model",
@@ -482,13 +536,79 @@ def test_selective_warm_of_cached_snapshot_makes_no_network_download() -> None:
     assert downloads == []
 
 
+def test_full_warm_refreshes_metadata_but_counts_unchanged_revision_as_cached() -> None:
+    helpers = _load_cache_helpers()
+    calls: list[str] = []
+    helpers["_is_cached"] = lambda _hf_id, **_kwargs: True
+    helpers["_cached_revision_state"] = lambda _hf_id, **_kwargs: "same-state"
+    helpers["_run_download_attempts"] = lambda _operation, hf_id, **_kwargs: (
+        calls.append(hf_id) or "/cache/snapshots/same-revision",
+        "metadata refreshed",
+    )
+
+    status, detail = helpers["_warm_snapshot"](
+        "org/model",
+        gated=False,
+        token_available=False,
+        selective=False,
+        local_only=False,
+    )
+
+    assert (status, detail) == ("cached", "metadata refreshed")
+    assert calls == ["org/model"]
+
+
+def test_full_warm_counts_a_changed_resolved_revision_as_downloaded() -> None:
+    helpers = _load_cache_helpers()
+    revisions = iter(("old-state", "new-state"))
+    helpers["_is_cached"] = lambda _hf_id, **_kwargs: True
+    helpers["_cached_revision_state"] = lambda _hf_id, **_kwargs: next(revisions)
+    helpers["_run_download_attempts"] = lambda *_args, **_kwargs: (
+        "/cache/snapshots/new-revision",
+        "updated",
+    )
+
+    assert helpers["_warm_snapshot"](
+        "org/model",
+        gated=False,
+        token_available=False,
+        selective=False,
+        local_only=False,
+    ) == ("downloaded", "updated")
+
+
+def test_full_warm_binds_state_and_download_to_requested_revision() -> None:
+    helpers = _load_cache_helpers()
+    revision = "a" * 40
+    state_revisions: list[str] = []
+    download_revisions: list[str] = []
+    helpers["_is_cached"] = lambda _hf_id, **_kwargs: True
+    helpers["_cached_revision_state"] = lambda _hf_id, **kwargs: (
+        state_revisions.append(str(kwargs.get("revision", ""))) or "same-state"
+    )
+    helpers["_run_download_attempts"] = lambda *_args, **kwargs: (
+        download_revisions.append(str(kwargs.get("revision", "")))
+        or "/cache/snapshots/pinned",
+        "refreshed",
+    )
+
+    assert helpers["_warm_snapshot"](
+        "org/model",
+        revision=revision,
+        gated=False,
+        token_available=False,
+        selective=False,
+        local_only=False,
+    ) == ("cached", "refreshed")
+    assert state_revisions == [revision, revision]
+    assert download_revisions == [revision]
+
+
 def test_uncached_gated_snapshot_without_token_fails_before_download() -> None:
     helpers = _load_cache_helpers()
     downloads: list[str] = []
     helpers["_is_cached"] = lambda _hf_id, **_kwargs: False
-    helpers["_run_download_attempts"] = (
-        lambda _operation, hf_id, **_kwargs: downloads.append(hf_id)
-    )
+    helpers["_run_download_attempts"] = lambda _operation, hf_id, **_kwargs: downloads.append(hf_id)
 
     status, detail = helpers["_warm_snapshot"](
         "org/gated-model",
@@ -503,13 +623,27 @@ def test_uncached_gated_snapshot_without_token_fails_before_download() -> None:
     assert downloads == []
 
 
+def test_hf_token_path_is_accepted_without_a_token_environment_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token = tmp_path / "hf-token"
+    token.write_text("test-token", encoding="utf-8")
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.setenv("HF_TOKEN_PATH", str(token))
+
+    assert _load_cache_helpers()["_hf_token_available"]()
+
+    token.unlink()
+    assert not _load_cache_helpers()["_hf_token_available"]()
+
+
 def test_local_only_uncached_snapshot_never_downloads() -> None:
     helpers = _load_cache_helpers()
     downloads: list[str] = []
     helpers["_is_cached"] = lambda _hf_id, **_kwargs: False
-    helpers["_run_download_attempts"] = (
-        lambda _operation, hf_id, **_kwargs: downloads.append(hf_id)
-    )
+    helpers["_run_download_attempts"] = lambda _operation, hf_id, **_kwargs: downloads.append(hf_id)
 
     status, detail = helpers["_warm_snapshot"](
         "org/model",
@@ -527,9 +661,7 @@ def test_local_only_uncached_snapshot_never_downloads() -> None:
 def test_file_cache_and_local_only_paths_never_launch_worker() -> None:
     helpers = _load_cache_helpers()
     downloads: list[str] = []
-    helpers["_run_download_attempts"] = (
-        lambda _operation, hf_id, **_kwargs: downloads.append(hf_id)
-    )
+    helpers["_run_download_attempts"] = lambda _operation, hf_id, **_kwargs: downloads.append(hf_id)
     helpers["_is_hf_file_cached"] = lambda _hf_id, _filename: True
 
     assert helpers["_warm_file"](
@@ -808,6 +940,126 @@ def test_strict_warm_failure_returns_nonzero() -> None:
     assert "if strict_exit_code:\n    sys.exit(strict_exit_code)" in text
 
 
+def test_cache_plan_digest_changes_when_only_requested_revision_changes() -> None:
+    digest = _load_cache_helpers()["_cache_plan_digest"]
+    files: list[tuple[str, str, str]] = []
+
+    main = digest([("model", "org/model", "", False, True)], files)
+    pinned = digest([("model", "org/model", "a" * 40, False, True)], files)
+
+    assert main != pinned
+
+
+def test_resolved_cache_digest_ignores_unselected_history_and_refs(
+    tmp_path: Path,
+) -> None:
+    digest = _load_cache_helpers()["_resolved_cache_digest"]
+    first_hub = tmp_path / "first" / "hub"
+    second_hub = tmp_path / "second" / "hub"
+    _write_cached_repo(
+        first_hub,
+        "org/one",
+        "current-one",
+        historical_snapshots=("old-one",),
+        extra_refs={"experiment": "old-one"},
+    )
+    _write_cached_repo(first_hub, "org/two", "current-two")
+    _write_cached_repo(
+        second_hub,
+        "org/one",
+        "current-one",
+        historical_snapshots=("different-history",),
+        extra_refs={"pull/17": "different-history"},
+    )
+    _write_cached_repo(
+        second_hub,
+        "org/two",
+        "current-two",
+        historical_snapshots=("old-two-a", "old-two-b"),
+    )
+
+    assert digest(
+        [("org/two", ""), ("org/one", ""), ("org/one", "")],
+        hub_cache=first_hub,
+    ) == digest(
+        [("org/one", ""), ("org/two", "")],
+        hub_cache=second_hub,
+    )
+
+
+def test_resolved_cache_digest_changes_with_selected_snapshot(tmp_path: Path) -> None:
+    digest = _load_cache_helpers()["_resolved_cache_digest"]
+    hub = tmp_path / "hub"
+    _write_cached_repo(hub, "org/model", "revision-one")
+    initial = digest([("org/model", "")], hub_cache=hub)
+
+    repository = hub / "models--org--model"
+    (repository / "snapshots" / "revision-two").mkdir()
+    (repository / "refs" / "main").write_text("revision-two\n", encoding="utf-8")
+
+    assert digest([("org/model", "")], hub_cache=hub) != initial
+
+
+def test_resolved_cache_digest_uses_pinned_snapshot_instead_of_main(tmp_path: Path) -> None:
+    digest = _load_cache_helpers()["_resolved_cache_digest"]
+    hub = tmp_path / "hub"
+    pinned_revision = "a" * 40
+    _write_cached_repo(hub, "org/model", "main-one")
+    repository = hub / "models--org--model"
+    (repository / "snapshots" / pinned_revision).mkdir()
+
+    pinned = digest([("org/model", pinned_revision)], hub_cache=hub)
+    (repository / "snapshots" / "main-two").mkdir()
+    (repository / "refs" / "main").write_text("main-two\n", encoding="utf-8")
+
+    assert digest([("org/model", pinned_revision)], hub_cache=hub) == pinned
+    assert digest([("org/model", "")], hub_cache=hub) != pinned
+
+
+def test_resolved_cache_digest_rejects_missing_pinned_snapshot(tmp_path: Path) -> None:
+    digest = _load_cache_helpers()["_resolved_cache_digest"]
+    hub = tmp_path / "hub"
+    _write_cached_repo(hub, "org/model", "main")
+
+    with pytest.raises(RuntimeError, match="requested revision points to a missing"):
+        digest([("org/model", "a" * 40)], hub_cache=hub)
+
+
+def test_resolved_cache_digest_rejects_missing_or_dangling_default_ref(
+    tmp_path: Path,
+) -> None:
+    digest = _load_cache_helpers()["_resolved_cache_digest"]
+    missing_ref_hub = tmp_path / "missing-ref" / "hub"
+    _write_cached_repo(missing_ref_hub, "org/model", "current")
+    (missing_ref_hub / "models--org--model" / "refs" / "main").unlink()
+
+    with pytest.raises(RuntimeError, match="default ref is missing or unsafe"):
+        digest([("org/model", "")], hub_cache=missing_ref_hub)
+
+    dangling_ref_hub = tmp_path / "dangling-ref" / "hub"
+    _write_cached_repo(dangling_ref_hub, "org/model", "current")
+    (dangling_ref_hub / "models--org--model" / "refs" / "main").write_text(
+        "not-present\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="default ref points to a missing"):
+        digest([("org/model", "")], hub_cache=dangling_ref_hub)
+
+
+def test_resolved_cache_digest_rejects_unsafe_default_ref(tmp_path: Path) -> None:
+    digest = _load_cache_helpers()["_resolved_cache_digest"]
+    hub = tmp_path / "hub"
+    _write_cached_repo(hub, "org/model", "current")
+    (hub / "models--org--model" / "refs" / "main").write_text(
+        "../current\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="unsafe snapshot name"):
+        digest([("org/model", "")], hub_cache=hub)
+
+
 def test_selected_cache_repository_manifest_is_unique_and_canonical(
     tmp_path: Path,
 ) -> None:
@@ -876,13 +1128,15 @@ def test_hf_file_cache_skip_uses_hf_local_resolution() -> None:
     helpers["hf_hub_download"] = fake_hf_hub_download
 
     assert helpers["_is_hf_file_cached"]("org/model", "weights.bin")
-    assert calls == [{
-        "args": ("org/model",),
-        "kwargs": {
-            "filename": "weights.bin",
-            "local_files_only": True,
-        },
-    }]
+    assert calls == [
+        {
+            "args": ("org/model",),
+            "kwargs": {
+                "filename": "weights.bin",
+                "local_files_only": True,
+            },
+        }
+    ]
 
 
 def test_hf_file_cache_skip_rejects_missing_local_file() -> None:

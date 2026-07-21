@@ -27,7 +27,7 @@ permissions:
 jobs:
   prove:
     name: ${{ inputs.model }}
-    runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || '["trtmc-gb300-proof"]') }}
     # Reserve time after the bounded disk/image/proof steps for fallback
     # generation and artifact publication even when a model reaches a timeout.
     timeout-minutes: ${{ inputs.suite == 'nightly' && 540 || 300 }}
@@ -39,13 +39,7 @@ jobs:
     env:
       TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
       TRTMC_CI_IMAGE_LOCK_FILE: ${{ vars.TRTMC_CI_IMAGE_LOCK_FILE || '/tmp/trtmc-ci-docker-image.lock' }}
-      TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache' }}
-      TRTMC_HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || format('{0}/hub', vars.TRTMC_HF_HOME || '/workspace/users/yifeif/tensorrt-model-connect/hf-cache') }}
-      TRTMC_MODEL_REFERENCE_CACHE_ROOT: ${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || '/workspace/users/yifeif/tensorrt-model-connect' }}
       TRTMC_MODEL_PROOF_BUILD_JOBS: ${{ vars.TRTMC_MODEL_PROOF_BUILD_JOBS || '2' }}
-      TRTMC_MODEL_PROOF_GPU_IDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_IDS || '0,1,2,3' }}
-      TRTMC_MODEL_PROOF_SLOTS_PER_GPU: ${{ vars.TRTMC_MODEL_PROOF_SLOTS_PER_GPU || '4' }}
-      TRTMC_MODEL_PROOF_GPU_LOCK_DIR: ${{ vars.TRTMC_MODEL_PROOF_GPU_LOCK_DIR || '/tmp/trtmc-model-proof-gpu-locks' }}
       TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || (inputs.suite == 'nightly' && '5400' || '3600') }}
       TRTMC_MODEL_PROOF_MIN_FREE_GIB: ${{ vars.TRTMC_MODEL_PROOF_MIN_FREE_GIB || '40' }}
       TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS: ${{ vars.TRTMC_MODEL_PROOF_DISK_HEADROOM_TIMEOUT_SECONDS || (inputs.suite == 'nightly' && '3600' || '60') }}
@@ -112,6 +106,87 @@ jobs:
           <p>Suite: <code>{html.escape(suite)}</code></p></body></html>"""
           (root / "model-proof-report.html").write_text(document, encoding="utf-8")
           PY
+
+      - name: Validate host proof policy
+        run: |
+          set -euo pipefail
+          if ! [[ "${TRTMC_NODE_ID:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "::error::TRTMC_NODE_ID is not configured safely by this proof runner."
+            exit 1
+          fi
+          if [ -z "${TRTMC_MODEL_PROOF_GPU_IDS:-}" ]; then
+            echo "::error::TRTMC_MODEL_PROOF_GPU_IDS is not configured by this proof runner."
+            exit 1
+          fi
+          if ! [[ "$TRTMC_MODEL_PROOF_GPU_IDS" =~ ^(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*$ ]]; then
+            echo "::error::TRTMC_MODEL_PROOF_GPU_IDS is not a canonical GPU index list."
+            exit 1
+          fi
+          IFS=',' read -r -a gpu_ids <<< "$TRTMC_MODEL_PROOF_GPU_IDS"
+          declare -A seen_gpu_ids=()
+          for gpu_id in "${gpu_ids[@]}"; do
+            if [ -n "${seen_gpu_ids[$gpu_id]:-}" ]; then
+              echo "::error::TRTMC_MODEL_PROOF_GPU_IDS contains duplicate GPU index $gpu_id."
+              exit 1
+            fi
+            seen_gpu_ids[$gpu_id]=1
+          done
+          for name in \
+            TRTMC_MODEL_PROOF_SLOTS_PER_GPU \
+            TRTMC_MODEL_PROOF_GPU_LOCK_DIR \
+            TRTMC_HF_CACHE \
+            TRTMC_HF_HUB_CACHE \
+            TRTMC_HF_CACHE_LOCK_FILE \
+            TRTMC_MODEL_REFERENCE_CACHE_ROOT; do
+            value="${!name:-}"
+            if [ -z "$value" ]; then
+              echo "::error::$name is not configured by this proof runner."
+              exit 1
+            fi
+          done
+          for name in \
+            TRTMC_MODEL_PROOF_GPU_LOCK_DIR \
+            TRTMC_HF_CACHE \
+            TRTMC_HF_HUB_CACHE \
+            TRTMC_HF_CACHE_LOCK_FILE \
+            TRTMC_MODEL_REFERENCE_CACHE_ROOT; do
+            value="${!name}"
+            case "$value" in
+              /*) ;;
+              *) echo "::error::$name must be an absolute host path."; exit 1 ;;
+            esac
+            if [ "$value" = "/" ]; then
+              echo "::error::$name must not be the filesystem root."
+              exit 1
+            fi
+          done
+          if ! [[ "$TRTMC_MODEL_PROOF_SLOTS_PER_GPU" =~ ^([1-9]|1[0-6])$ ]]; then
+            echo "::error::TRTMC_MODEL_PROOF_SLOTS_PER_GPU must be an integer from 1 to 16."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          cache_root = Path(os.environ["TRTMC_HF_CACHE"]).resolve()
+          hub = Path(os.environ["TRTMC_HF_HUB_CACHE"]).resolve()
+
+          def overlaps(left: Path, right: Path) -> bool:
+              return left == right or left in right.parents or right in left.parents
+
+          if cache_root == Path("/") or hub == cache_root or cache_root not in hub.parents:
+              raise SystemExit("TRTMC_HF_HUB_CACHE must be a strict child of TRTMC_HF_CACHE")
+          for name in (
+              "TRTMC_HF_CACHE",
+              "TRTMC_HF_HUB_CACHE",
+              "TRTMC_MODEL_PROOF_GPU_LOCK_DIR",
+              "TRTMC_MODEL_REFERENCE_CACHE_ROOT",
+          ):
+              if overlaps(Path(os.environ[name]).resolve(), workspace):
+                  raise SystemExit(f"{name} must not overlap GITHUB_WORKSPACE")
+          PY
+          echo "Node-local proof policy: node=$TRTMC_NODE_ID gpus=$TRTMC_MODEL_PROOF_GPU_IDS"
 
       - name: Check model proof disk headroom
         run: |
@@ -365,16 +440,21 @@ jobs:
           test "$CI_IMAGE_OUTCOME" = "success"
           test "$PROOF_OUTCOME" = "success"
           test "$ARTIFACT_UPLOAD_OUTCOME" = "success"
-          python3 - "$MODEL_PROOF_OUTPUT_DIR/artifacts" "$MODEL" "$REVISION" "$SUITE" <<'PY'
+          python3 - \
+            "$MODEL_PROOF_OUTPUT_DIR/artifacts" "$MODEL" "$REVISION" "$SUITE" \
+            "$GITHUB_RUN_ID" "$RUNNER_NAME" "$TRTMC_NODE_ID" <<'PY'
+          import datetime
           import json
+          import re
           import sys
           from pathlib import Path
 
-          root, model, revision, suite = sys.argv[1:]
+          root, model, revision, suite, run_id, runner_name, node_id = sys.argv[1:]
           root = Path(root)
           status = json.loads((root / "model-proof-status.json").read_text(encoding="utf-8"))
           proof = json.loads((root / "proof.json").read_text(encoding="utf-8"))
           selection = json.loads((root / "selection.json").read_text(encoding="utf-8"))
+          lease = json.loads((root / "gpu-lease.json").read_text(encoding="utf-8"))
           errors = []
           for label, payload in (("status", status), ("proof", proof)):
               if payload.get("model") != model:
@@ -387,6 +467,61 @@ jobs:
               errors.append("proof.json does not declare passed=true")
           if selection.get("requested_model") != model:
               errors.append("selection.json does not match the requested model")
+          expected_lease = {
+              "schema_version": 2,
+              "model": model,
+              "source_revision": revision,
+              "run_id": run_id,
+              "runner_name": runner_name,
+              "node_id": node_id,
+              "resource_class": selection.get("resource_class"),
+              "gpu_resource_class": selection.get("resource_class"),
+          }
+          for field, wanted in expected_lease.items():
+              if lease.get(field) != wanted:
+                  errors.append(
+                      f"gpu-lease.{field} is {lease.get(field)!r}; expected {wanted!r}"
+                  )
+          gpu_index = lease.get("gpu_index")
+          if (
+              not isinstance(gpu_index, str)
+              or not gpu_index.isdigit()
+              or lease.get("gpu_id") != gpu_index
+          ):
+              errors.append("gpu-lease GPU index is not a canonical non-negative integer")
+          if not re.fullmatch(r"GPU-[A-Za-z0-9-]+", str(lease.get("gpu_uuid", ""))):
+              errors.append("gpu-lease GPU UUID is missing or malformed")
+          if not re.fullmatch(r"[0-9a-f]{64}", str(lease.get("lock_namespace", ""))):
+              errors.append("gpu-lease lock namespace is missing or malformed")
+          slots_per_gpu = lease.get("slots_per_gpu")
+          slot_ids = lease.get("gpu_slot_ids")
+          if (
+              not isinstance(slots_per_gpu, int)
+              or slots_per_gpu < 1
+              or not isinstance(slot_ids, list)
+              or not slot_ids
+              or any(not isinstance(slot, int) for slot in slot_ids)
+              or lease.get("gpu_slots") != slot_ids
+              or lease.get("gpu_slots_per_device") != slots_per_gpu
+          ):
+              errors.append("gpu-lease slot evidence is inconsistent")
+          elif lease.get("resource_class") == "shared":
+              if len(slot_ids) != 1 or lease.get("gpu_slot") != slot_ids[0]:
+                  errors.append("shared gpu-lease does not identify exactly one slot")
+          elif slot_ids != list(range(slots_per_gpu)) or lease.get("gpu_slot") is not None:
+              errors.append("exclusive gpu-lease does not own every slot")
+          timestamps = []
+          for field in ("acquired_at", "released_at"):
+              try:
+                  timestamp = datetime.datetime.fromisoformat(str(lease.get(field, "")))
+              except ValueError:
+                  errors.append(f"gpu-lease.{field} is not an ISO-8601 timestamp")
+                  continue
+              if timestamp.tzinfo is None:
+                  errors.append(f"gpu-lease.{field} has no timezone")
+              timestamps.append(timestamp)
+          if len(timestamps) == 2 and timestamps[1] < timestamps[0]:
+              errors.append("gpu-lease released_at precedes acquired_at")
           if not (root / "model-proof-report.html").is_file():
               errors.append("model-proof-report.html is missing")
           if errors:

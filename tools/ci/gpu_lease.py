@@ -12,7 +12,9 @@ import fcntl
 import hashlib
 import os
 import re
+import socket
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .context import CiContext
@@ -70,15 +72,30 @@ class GpuLease:
         self.model = model
         self.resource_class = resource_class
         self.artifacts = artifacts
+        self.node_id = context.env.get("TRTMC_NODE_ID", "")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", self.node_id):
+            raise CiError("TRTMC_NODE_ID must be configured safely by the proof runner")
         self.gpu_ids, self.slots_per_gpu, self.timeout, self.poll_interval = self._configuration()
-        configured = context.env.get(
-            "TRTMC_MODEL_PROOF_GPU_LOCK_DIR", "/tmp/trtmc-model-proof-gpu-locks"
-        )
+        configured = context.env.get("TRTMC_MODEL_PROOF_GPU_LOCK_DIR", "")
         if not configured:
             raise CiError("TRTMC_MODEL_PROOF_GPU_LOCK_DIR must not be empty")
         self.lock_dir = Path(configured)
+        if (
+            not self.lock_dir.is_absolute()
+            or self.lock_dir == Path("/")
+            or self.lock_dir.is_symlink()
+        ):
+            raise CiError("TRTMC_MODEL_PROOF_GPU_LOCK_DIR must be a safe absolute directory")
         self.lock_dir.mkdir(parents=True, exist_ok=True)
         self.lock_dir = self.lock_dir.resolve(strict=True)
+        repository = context.repository.resolve()
+        if (
+            self.lock_dir == Path("/")
+            or self.lock_dir == repository
+            or self.lock_dir in repository.parents
+            or repository in self.lock_dir.parents
+        ):
+            raise CiError("TRTMC_MODEL_PROOF_GPU_LOCK_DIR must not overlap the repository")
         stat = self.lock_dir.stat()
         identity = f"{self.lock_dir}\0{stat.st_dev}\0{stat.st_ino}".encode()
         self.lock_namespace = hashlib.sha256(identity).hexdigest()
@@ -88,6 +105,9 @@ class GpuLease:
         self.slots: list[FileLock] = []
         self.gpu_id: int | None = None
         self.slot_ids: list[int] = []
+        self.gpu_uuid = ""
+        self.acquired_at = ""
+        self.released_at: str | None = None
 
     def acquire(self) -> "GpuLease":
         deadline = time.monotonic() + self.timeout
@@ -107,6 +127,7 @@ class GpuLease:
                 if self.resource_class == "shared":
                     if self._try_shared(deadline):
                         self._release_ticket()
+                        self._mark_acquired()
                         print(
                             f"Leased shared model-proof GPU {self.gpu_id} slot {self.slot_ids[0]} "
                             f"via {self.slots[0].path}"
@@ -116,6 +137,7 @@ class GpuLease:
                     if self._reserve_one_gpu(deadline):
                         self._release_ticket()
                         self._drain_reserved_gpu(deadline)
+                        self._mark_acquired()
                         print(
                             f"Leased exclusive model-proof GPU {self.gpu_id} slots "
                             f"{' '.join(map(str, self.slot_ids))}"
@@ -123,6 +145,7 @@ class GpuLease:
                         return self
                 elif self._try_exclusive_any(deadline):
                     self._release_ticket()
+                    self._mark_acquired()
                     print(
                         f"Leased exclusive model-proof GPU {self.gpu_id} slots "
                         f"{' '.join(map(str, self.slot_ids))}"
@@ -138,6 +161,7 @@ class GpuLease:
             raise
 
     def release(self) -> None:
+        self.mark_released()
         self._release_ticket()
         for lock in self.slots:
             lock.close()
@@ -150,14 +174,25 @@ class GpuLease:
             self.machine.close()
             self.machine = None
 
+    def mark_released(self) -> None:
+        if self.acquired_at and self.released_at is None:
+            self.released_at = datetime.now(timezone.utc).isoformat()
+
     def evidence(self, revision: str) -> dict[str, object]:
         if self.gpu_id is None or not self.slot_ids:
             raise CiError("GPU lease evidence requested before acquisition")
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "model": self.model,
             "source_revision": revision,
+            "run_id": self.context.env.get("GITHUB_RUN_ID", "local"),
+            "job_id": self.context.env.get("GITHUB_JOB", "local"),
+            "runner_name": self.context.env.get("RUNNER_NAME", "local"),
+            "node_id": self.node_id,
+            "hostname": socket.gethostname(),
             "gpu_id": str(self.gpu_id),
+            "gpu_index": str(self.gpu_id),
+            "gpu_uuid": self.gpu_uuid,
             "gpu_slot": self.slot_ids[0] if self.resource_class == "shared" else None,
             "gpu_slots": self.slot_ids,
             "gpu_slot_ids": self.slot_ids,
@@ -165,10 +200,32 @@ class GpuLease:
             "gpu_slots_per_device": self.slots_per_gpu,
             "resource_class": self.resource_class,
             "gpu_resource_class": self.resource_class,
+            "lock_namespace": self.lock_namespace,
+            "acquired_at": self.acquired_at,
+            "released_at": self.released_at,
         }
 
+    def _mark_acquired(self) -> None:
+        assert self.gpu_id is not None
+        value = self.context.output(
+            [
+                "nvidia-smi",
+                "--query-gpu=uuid",
+                "--format=csv,noheader",
+                "-i",
+                str(self.gpu_id),
+            ]
+        )
+        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        if len(lines) != 1 or not re.fullmatch(r"GPU-[A-Za-z0-9-]+", lines[0]):
+            raise CiError(f"could not resolve a unique GPU UUID for index {self.gpu_id}")
+        self.gpu_uuid = lines[0]
+        self.acquired_at = datetime.now(timezone.utc).isoformat()
+
     def _configuration(self) -> tuple[list[int], int, int, float]:
-        configured = self.context.env.get("TRTMC_MODEL_PROOF_GPU_IDS", "0,1,2,3")
+        configured = self.context.env.get("TRTMC_MODEL_PROOF_GPU_IDS", "")
+        if not configured:
+            raise CiError("TRTMC_MODEL_PROOF_GPU_IDS must be configured by the proof runner")
         if not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:,(?:0|[1-9][0-9]*))*", configured):
             raise CiError(
                 "TRTMC_MODEL_PROOF_GPU_IDS must be a comma-separated list of unique "
@@ -185,7 +242,7 @@ class GpuLease:
             if int(explicit) not in gpu_ids:
                 raise CiError("TRTMC_GPU_ID must be present in TRTMC_MODEL_PROOF_GPU_IDS")
             gpu_ids = [int(explicit)]
-        slots_text = self.context.env.get("TRTMC_MODEL_PROOF_SLOTS_PER_GPU", "4")
+        slots_text = self.context.env.get("TRTMC_MODEL_PROOF_SLOTS_PER_GPU", "")
         if not slots_text.isdigit() or not 1 <= int(slots_text) <= 16:
             raise CiError("TRTMC_MODEL_PROOF_SLOTS_PER_GPU must be an integer from 1 to 16")
         slots = int(slots_text)

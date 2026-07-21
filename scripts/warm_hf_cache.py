@@ -34,12 +34,14 @@ Pass --strict to fail when a selected snapshot or file cannot be cached.
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import os
 import pathlib
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROOT_PYTHON = ROOT / "python"
@@ -152,9 +154,7 @@ def _family_hf_warm_files(family: object) -> list[tuple[str, str, str]]:
 
 _REQUIRED_FILES_BY_HF_ID = _load_family_hf_required_files_by_id()
 _HF_FAMILY_ALLOW_PATTERNS = _load_family_hf_allow_patterns()
-_HF_DOWNLOAD_PATTERNS = (
-    _HF_ALLOW_PATTERNS + _HF_FAMILY_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS
-)
+_HF_DOWNLOAD_PATTERNS = _HF_ALLOW_PATTERNS + _HF_FAMILY_ALLOW_PATTERNS + _HF_EXTRA_ALLOW_PATTERNS
 _TOKENIZER_DOWNLOAD_PATTERNS = [
     "config.json",
     "tokenizer.json",
@@ -183,15 +183,169 @@ def _is_hf_file_cached(hf_id: str, filename: str) -> bool:
     return True
 
 
-def _manifest_has_eligible_testcase(
-    manifest: dict, excluded_ci_tiers: set[str]
-) -> bool:
+def _resolve_cached_snapshot(
+    hf_id: str,
+    revision: str = "",
+    *,
+    hub_cache: pathlib.Path | None = None,
+) -> tuple[str, pathlib.Path]:
+    """Resolve one requested revision from the local Hub cache without network access."""
+
+    raw_root = hub_cache or pathlib.Path(hf_constants.HF_HUB_CACHE)
+    try:
+        root = raw_root.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError(f"cache root is unavailable: {raw_root}: {exc}") from exc
+    if not root.is_dir():
+        raise RuntimeError(f"cache root is not a directory: {root}")
+
+    raw_repository = root / repo_folder_name(repo_id=hf_id, repo_type="model")
+    try:
+        if raw_repository.is_symlink() or not raw_repository.is_dir():
+            raise RuntimeError(f"cache repository is missing or unsafe: {raw_repository}")
+        repository = raw_repository.resolve(strict=True)
+        repository.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"cache repository is missing or unsafe: {raw_repository}") from exc
+
+    raw_snapshots = repository / "snapshots"
+    try:
+        if raw_snapshots.is_symlink() or not raw_snapshots.is_dir():
+            raise RuntimeError(f"cache snapshots directory is missing or unsafe: {raw_snapshots}")
+        snapshots = raw_snapshots.resolve(strict=True)
+        snapshots.relative_to(repository)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"cache snapshots directory is missing or unsafe: {raw_snapshots}") from exc
+
+    requested = revision.strip()
+    is_commit = len(requested) in {40, 64} and all(
+        character in "0123456789abcdefABCDEF" for character in requested
+    )
+    if requested and is_commit:
+        snapshot_name = requested
+        ref_description = "requested revision"
+    else:
+        reference_name = requested or "main"
+        reference_path = pathlib.PurePosixPath(reference_name)
+        if (
+            reference_path.is_absolute()
+            or not reference_path.parts
+            or any(part in {"", ".", ".."} for part in reference_path.parts)
+            or "\\" in reference_name
+        ):
+            raise RuntimeError(f"cache requested ref is unsafe: {reference_name!r}")
+        raw_refs = repository / "refs"
+        try:
+            if raw_refs.is_symlink() or not raw_refs.is_dir():
+                raise RuntimeError(f"cache refs directory is missing or unsafe: {raw_refs}")
+            refs = raw_refs.resolve(strict=True)
+            refs.relative_to(repository)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"cache refs directory is missing or unsafe: {raw_refs}") from exc
+        reference = raw_refs.joinpath(*reference_path.parts)
+        current = raw_refs
+        for part in reference_path.parts:
+            current /= part
+            if current.is_symlink():
+                raise RuntimeError(f"cache requested ref is missing or unsafe: {reference}")
+        ref_description = "default ref" if not requested else "requested ref"
+        if not reference.is_file():
+            raise RuntimeError(f"cache {ref_description} is missing or unsafe: {reference}")
+        try:
+            snapshot_name = reference.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(f"cache {ref_description} is unreadable: {reference}") from exc
+
+    if (
+        not snapshot_name
+        or snapshot_name in {".", ".."}
+        or "/" in snapshot_name
+        or "\\" in snapshot_name
+    ):
+        raise RuntimeError(
+            f"cache {ref_description} contains an unsafe snapshot name: {snapshot_name!r}"
+        )
+    raw_snapshot = raw_snapshots / snapshot_name
+    try:
+        if raw_snapshot.is_symlink() or not raw_snapshot.is_dir():
+            raise RuntimeError(
+                f"cache {ref_description} points to a missing or unsafe snapshot: "
+                f"{snapshot_name}"
+            )
+        snapshot = raw_snapshot.resolve(strict=True)
+        snapshot.relative_to(snapshots)
+        if snapshot.parent != snapshots:
+            raise RuntimeError(
+                f"cache {ref_description} points outside the snapshot root: {snapshot_name}"
+            )
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"cache {ref_description} points to a missing or unsafe snapshot: {snapshot_name}"
+        ) from exc
+    return snapshot_name, snapshot
+
+
+def _cached_main_revision(hf_id: str) -> str | None:
+    """Return a safe locally resolved main revision without any network call."""
+
+    try:
+        resolved, _ = _resolve_cached_snapshot(hf_id)
+    except RuntimeError:
+        return None
+    return resolved
+
+
+def _cached_revision_state(hf_id: str, revision: str = "") -> str | None:
+    """Hash one requested snapshot's directory entries without reading model weights."""
+
+    try:
+        resolved, snapshot = _resolve_cached_snapshot(hf_id, revision)
+    except RuntimeError:
+        return None
+    entries: list[tuple[str, str, str | int]] = []
+    try:
+        for path in sorted(snapshot.rglob("*")):
+            relative = str(path.relative_to(snapshot))
+            if path.is_symlink():
+                entries.append((relative, "symlink", os.readlink(path)))
+            elif path.is_file():
+                entries.append((relative, "file", path.stat().st_size))
+            elif path.is_dir():
+                entries.append((relative, "directory", 0))
+            else:
+                return None
+    except OSError:
+        return None
+    canonical = json.dumps(
+        {
+            "requested_revision": revision or "main",
+            "resolved_revision": resolved,
+            "entries": entries,
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _hf_token_available() -> bool:
+    if os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"):
+        return True
+    configured = os.environ.get("HF_TOKEN_PATH", "")
+    if not configured:
+        return False
+    path = pathlib.Path(configured)
+    return (
+        path.is_absolute() and path.is_file() and not path.is_symlink() and os.access(path, os.R_OK)
+    )
+
+
+def _manifest_has_eligible_testcase(manifest: dict, excluded_ci_tiers: set[str]) -> bool:
     testcases = manifest.get("testcases")
     if not isinstance(testcases, list) or not testcases:
         return str(manifest.get("ci_tier") or "") not in excluded_ci_tiers
     return any(
-        isinstance(testcase, dict)
-        and str(testcase.get("ci_tier") or "") not in excluded_ci_tiers
+        isinstance(testcase, dict) and str(testcase.get("ci_tier") or "") not in excluded_ci_tiers
         for testcase in testcases
     )
 
@@ -204,16 +358,16 @@ parser.add_argument(
     "--models-file",
     metavar="FILE",
     help="Path to a file with one model name per line (manifest stems). "
-         "When given, only those models are considered and already-cached "
-         "models are skipped (no network call). Intended for PR CI selective "
-         "warm.",
+    "When given, only those models are considered and already-cached "
+    "models are skipped (no network call). Intended for PR CI selective "
+    "warm.",
 )
 parser.add_argument(
     "--exclude-ci-tier",
     action="append",
     default=[],
     help="Exclude manifests with this ci_tier value. Intended for nightly mode "
-         "to skip PR-only representative manifests.",
+    "to skip PR-only representative manifests.",
 )
 parser.add_argument(
     "--strict",
@@ -229,8 +383,8 @@ parser.add_argument(
     "--emit-cache-repos",
     metavar="JSON",
     help="After a successful cache check, write the unique selected Hugging Face "
-         "repository IDs and their canonical cache folders to this JSON file. "
-         "This is used to construct a positive per-model cache view.",
+    "repository IDs and their canonical cache folders to this JSON file. "
+    "This is used to construct a positive per-model cache view.",
 )
 parser.add_argument(
     "--attempt-timeout-seconds",
@@ -240,10 +394,16 @@ parser.add_argument(
     help="Maximum wall time for each online download attempt (default: 600).",
 )
 parser.add_argument(
+    "--summary-output",
+    type=pathlib.Path,
+    metavar="FILE",
+    help="Atomically write a machine-readable cache plan and result summary.",
+)
+parser.add_argument(
     "--fail-fast",
     action="store_true",
     help="Stop after the first failed item. Requires --strict or "
-         "--emit-cache-repos so the early stop cannot report success.",
+    "--emit-cache-repos so the early stop cannot report success.",
 )
 args = parser.parse_args()
 if args.attempt_timeout_seconds <= 0:
@@ -252,10 +412,12 @@ if args.fail_fast and not (args.strict or args.emit_cache_repos):
     parser.error("--fail-fast requires --strict or --emit-cache-repos")
 
 models_dir = ROOT / "tests" / "e2e" / "models"
-manifests = sorted({
-    *models_dir.glob("*.json"),
-    *models_dir.glob("*/manifests/*.json"),
-})
+manifests = sorted(
+    {
+        *models_dir.glob("*.json"),
+        *models_dir.glob("*/manifests/*.json"),
+    }
+)
 
 # Optional filter: only consider models listed in --models-file
 filter_names: set[str] | None = None
@@ -268,8 +430,7 @@ if args.models_file:
 excluded_ci_tiers = set(args.exclude_ci_tier or [])
 if args.strict and filter_names is not None:
     manifest_names = {
-        str(json.loads(manifest.read_text()).get("name") or manifest.stem)
-        for manifest in manifests
+        str(json.loads(manifest.read_text()).get("name") or manifest.stem) for manifest in manifests
     }
     missing_names = sorted(filter_names - manifest_names)
     if missing_names:
@@ -309,9 +470,7 @@ for m in manifests:
             False,
             not dependency_name.endswith("-tokenizer"),
         )
-        for dependency_name, dependency_hf_id in _family_hf_warm_dependencies(
-            d.get("family", "")
-        )
+        for dependency_name, dependency_hf_id in _family_hf_warm_dependencies(d.get("family", ""))
     )
     file_assets.extend(_family_hf_warm_files(d.get("family", "")))
 deduped_entries: list[tuple[str, str, str, bool, bool]] = []
@@ -343,6 +502,74 @@ for asset_name, asset_hf_id, filename in file_assets:
 file_assets = deduped_file_assets
 
 
+def _cache_plan_digest(
+    selected_entries: list[tuple[str, str, str, bool, bool]],
+    selected_files: list[tuple[str, str, str]],
+) -> str:
+    plan = {
+        "snapshots": sorted(
+            (
+                {
+                    "repo_id": hf_id,
+                    "revision": revision or "main",
+                    "gated": gated,
+                    "require_weights": require_weights,
+                }
+                for _, hf_id, revision, gated, require_weights in selected_entries
+            ),
+            key=lambda item: (
+                str(item["repo_id"]),
+                str(item["revision"]),
+                str(item["require_weights"]),
+                str(item["gated"]),
+            ),
+        ),
+        "files": sorted(
+            ({"repo_id": hf_id, "filename": filename} for _, hf_id, filename in selected_files),
+            key=lambda item: (str(item["repo_id"]), str(item["filename"])),
+        ),
+    }
+    canonical = json.dumps(plan, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _resolved_cache_digest(
+    repo_revisions: list[tuple[str, str]],
+    *,
+    hub_cache: pathlib.Path,
+) -> str:
+    """Hash the selected repositories' exact locally resolved revisions.
+
+    Cache repositories can retain snapshots and refs from older or unrelated
+    downloads. Those are not part of this warm plan and can legitimately
+    differ between nodes. Only each requested revision and the snapshot it
+    resolves to define the state that must agree across declared nodes.
+    """
+    state: list[dict[str, object]] = []
+    for repo_id, requested_revision in sorted(set(repo_revisions)):
+        snapshot_name, _ = _resolve_cached_snapshot(
+            repo_id,
+            requested_revision,
+            hub_cache=hub_cache,
+        )
+        state.append(
+            {
+                "repo_id": repo_id,
+                "requested_revision": requested_revision or "main",
+                "resolved_revision": snapshot_name,
+            }
+        )
+    canonical = json.dumps(state, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _write_json_atomic(path: pathlib.Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
 def _is_cached(
     hf_id: str,
     revision: str = "",
@@ -362,9 +589,7 @@ def _is_cached(
         local_dir = snapshot_download(
             hf_id,
             allow_patterns=(
-                _HF_DOWNLOAD_PATTERNS
-                if require_weights
-                else _TOKENIZER_DOWNLOAD_PATTERNS
+                _HF_DOWNLOAD_PATTERNS if require_weights else _TOKENIZER_DOWNLOAD_PATTERNS
             ),
             local_files_only=True,
             **revision_kwargs,
@@ -388,29 +613,26 @@ def _snapshot_has_required_files(
     require_weights: bool = True,
 ) -> bool:
     files = [
-        str(path.relative_to(snapshot_dir))
-        for path in snapshot_dir.rglob("*")
-        if path.is_file()
+        str(path.relative_to(snapshot_dir)) for path in snapshot_dir.rglob("*") if path.is_file()
     ]
     if any(fnmatch.fnmatch(name, "*.nemo") for name in files):
         return True
     has_entrypoint = any(
-        fnmatch.fnmatch(name, pattern)
-        for name in files
-        for pattern in _ENTRYPOINT_PATTERNS
+        fnmatch.fnmatch(name, pattern) for name in files for pattern in _ENTRYPOINT_PATTERNS
     )
     has_weights = any(
-        fnmatch.fnmatch(name, pattern)
-        for name in files
-        for pattern in _WEIGHT_PATTERNS
+        fnmatch.fnmatch(name, pattern) for name in files for pattern in _WEIGHT_PATTERNS
     )
     required_files = _REQUIRED_FILES_BY_HF_ID.get(hf_id, [])
     has_required_files = all((snapshot_dir / name).is_file() for name in required_files)
     if not require_weights:
         return has_entrypoint and has_required_files
     if (snapshot_dir / "model_index.json").is_file():
-        return has_entrypoint and has_weights and has_required_files and not _diffusers_missing_weight_components(
-            snapshot_dir
+        return (
+            has_entrypoint
+            and has_weights
+            and has_required_files
+            and not _diffusers_missing_weight_components(snapshot_dir)
         )
     return has_entrypoint and has_weights and has_required_files
 
@@ -423,14 +645,13 @@ def _diffusers_missing_weight_components(snapshot_dir: pathlib.Path) -> list[str
         return ["model_index.json"]
 
     required_components = sorted(
-        name for name, value in model_index.items()
-        if (
-            name in _DIFFUSERS_WEIGHT_COMPONENTS
-            and _is_diffusers_component_enabled(value)
-        )
+        name
+        for name, value in model_index.items()
+        if (name in _DIFFUSERS_WEIGHT_COMPONENTS and _is_diffusers_component_enabled(value))
     )
     return [
-        component for component in required_components
+        component
+        for component in required_components
         if not _component_has_weight(snapshot_dir, component)
     ]
 
@@ -448,8 +669,7 @@ def _component_has_weight(snapshot_dir: pathlib.Path, component: str) -> bool:
     if not component_dir.is_dir():
         return False
     return any(
-        path.is_file()
-        and any(fnmatch.fnmatch(path.name, pattern) for pattern in _WEIGHT_PATTERNS)
+        path.is_file() and any(fnmatch.fnmatch(path.name, pattern) for pattern in _WEIGHT_PATTERNS)
         for path in component_dir.rglob("*")
     )
 
@@ -588,10 +808,7 @@ def _run_download_attempts(
         )
         elapsed = time.monotonic() - started
         mode = "Xet disabled" if disable_xet else "default transfer backend"
-        prefix = (
-            f"{hf_id}: attempt {attempt}/{_DOWNLOAD_ATTEMPTS} "
-            f"({mode}, {elapsed:.1f}s)"
-        )
+        prefix = f"{hf_id}: attempt {attempt}/{_DOWNLOAD_ATTEMPTS} ({mode}, {elapsed:.1f}s)"
         if error:
             attempt_details.append(f"{prefix} failed: {error}")
             continue
@@ -624,15 +841,21 @@ def _warm_snapshot(
     timeout_seconds: float = _DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
 ) -> tuple[str, str]:
     """Resolve locally first, downloading only when the cache is incomplete."""
-    if (selective or local_only) and _is_cached(
+    was_cached = _is_cached(
         hf_id,
         revision=revision,
         require_weights=require_weights,
-    ):
+    )
+    before_state = (
+        _cached_revision_state(hf_id, revision=revision) if was_cached else None
+    )
+    if (selective or local_only) and was_cached:
         return "cached", ""
     if local_only:
         return "failed", "required snapshot is not available in the local cache"
     if gated and not token_available:
+        if was_cached:
+            return "cached", "cached gated snapshot cannot be refreshed without a token"
         return "failed", "gated model is not cached and no HF token is available"
     local_dir, detail = _run_download_attempts(
         "snapshot",
@@ -646,7 +869,11 @@ def _warm_snapshot(
         ),
         require_weights=require_weights,
     )
-    return ("downloaded", detail) if local_dir else ("failed", detail)
+    if not local_dir:
+        return "failed", detail
+    if before_state and _cached_revision_state(hf_id, revision=revision) == before_state:
+        return "cached", detail
+    return "downloaded", detail
 
 
 def _warm_file(
@@ -657,7 +884,9 @@ def _warm_file(
     local_only: bool,
     timeout_seconds: float = _DEFAULT_ATTEMPT_TIMEOUT_SECONDS,
 ) -> tuple[str, str]:
-    if (selective or local_only) and _is_hf_file_cached(hf_id, filename):
+    was_cached = _is_hf_file_cached(hf_id, filename)
+    before_state = _cached_revision_state(hf_id) if was_cached else None
+    if (selective or local_only) and was_cached:
         return "cached", ""
     if local_only:
         return "failed", "required file is not available in the local cache"
@@ -667,7 +896,11 @@ def _warm_file(
         timeout_seconds=timeout_seconds,
         filename=filename,
     )
-    return ("downloaded", detail) if local_path else ("failed", detail)
+    if not local_path:
+        return "failed", detail
+    if before_state and _cached_revision_state(hf_id) == before_state:
+        return "cached", detail
+    return "downloaded", detail
 
 
 def _warm_exit_code(strict: bool, failures: list[str]) -> int:
@@ -761,13 +994,14 @@ action = "Checking HF cache readiness" if args.local_only else "Warming HF cache
 print(f"{action} — {scope}...")
 print(f"HF Hub cache: {hf_constants.HF_HUB_CACHE}")
 
+started_at = datetime.now(timezone.utc).isoformat()
 warned: list[str] = []
 skipped: list[str] = []
+cached_count = 0
+downloaded_count = 0
 stopped_early = False
 fail_closed = args.strict or bool(args.emit_cache_repos)
-hf_token_available = bool(
-    os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-)
+hf_token_available = _hf_token_available()
 
 for i, (name, hf_id, revision, gated, require_weights) in enumerate(entries, 1):
     status, detail = _warm_snapshot(
@@ -783,9 +1017,11 @@ for i, (name, hf_id, revision, gated, require_weights) in enumerate(entries, 1):
     if status == "cached":
         print(f"  [{i:3d}/{len(entries)}] {name}  CACHED (skip)")
         skipped.append(name)
+        cached_count += 1
         continue
     if status == "downloaded":
         print(f"  [{i:3d}/{len(entries)}] {name}  OK: {detail}")
+        downloaded_count += 1
         # Small inter-request delay to stay well below the API rate limit.
         time.sleep(0.3)
         continue
@@ -820,9 +1056,11 @@ for i, (name, hf_id, filename) in enumerate(file_assets if not stopped_early els
     if status == "cached":
         print(f"  [{i:3d}/{len(file_assets)}] {name}  CACHED (skip)")
         skipped.append(name)
+        cached_count += 1
         continue
     if status == "downloaded":
         print(f"  [{i:3d}/{len(file_assets)}] {name}  OK: {detail}")
+        downloaded_count += 1
         time.sleep(0.3)
         continue
     print(f"  [{i:3d}/{len(file_assets)}] {name}  WARN: {detail}")
@@ -848,11 +1086,16 @@ if warned:
     if not args.local_only:
         print("Parallel E2E phase may re-issue HF cache requests for these item(s).")
 else:
-    downloaded = len(entries) + len(file_assets) - len(skipped)
-    if downloaded == 0:
-        print("All items already cached — zero network calls.")
+    if downloaded_count == 0:
+        if args.local_only or selective:
+            print("All items already cached — zero network calls.")
+        else:
+            print(
+                "All selected cache content is current — online metadata refreshes "
+                "changed no cache items."
+            )
     else:
-        print(f"Downloaded {downloaded} item(s) successfully.")
+        print(f"Updated or downloaded {downloaded_count} cache item(s) successfully.")
 
 if args.emit_cache_repos and not warned:
     selected_repo_ids = [hf_id for _, hf_id, _, _, _ in entries]
@@ -867,6 +1110,45 @@ if args.emit_cache_repos and not warned:
         warned.append("cache-repository-evidence")
     else:
         print(f"Selected cache repository evidence: {args.emit_cache_repos}")
+
+plan_digest = _cache_plan_digest(entries, file_assets)
+resolved_digest = ""
+dependency_failure_count = len(warned)
+if not warned:
+    selected_revisions = [
+        (hf_id, revision) for _, hf_id, revision, _, _ in entries
+    ]
+    selected_revisions.extend((hf_id, "") for _, hf_id, _ in file_assets)
+    try:
+        resolved_digest = _resolved_cache_digest(
+            selected_revisions,
+            hub_cache=pathlib.Path(hf_constants.HF_HUB_CACHE),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: could not resolve selected cache state: {exc}", file=sys.stderr)
+        warned.append("resolved-cache-evidence")
+
+if args.summary_output:
+    expected_count = len(entries) + len(file_assets)
+    _write_json_atomic(
+        args.summary_output,
+        {
+            "schema_version": 1,
+            "source_revision": os.environ.get("TRTMC_CACHE_SOURCE_REVISION", ""),
+            "mode": "local-only" if args.local_only else "warm",
+            "status": "failed" if warned else "passed",
+            "cache_root": str(pathlib.Path(hf_constants.HF_HUB_CACHE)),
+            "cache_plan_digest": plan_digest,
+            "resolved_cache_digest": resolved_digest,
+            "expected_count": expected_count,
+            "present_count": expected_count - dependency_failure_count,
+            "missing_count": dependency_failure_count,
+            "cached_count": cached_count,
+            "downloaded_count": downloaded_count,
+            "started_at": started_at,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
 strict_exit_code = _warm_exit_code(fail_closed, warned)
 if strict_exit_code:

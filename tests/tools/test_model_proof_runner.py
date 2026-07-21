@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 import fcntl
 import json
 import os
@@ -127,6 +128,15 @@ def _write_successful_fake_docker(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     docker.chmod(0o755)
+    nvidia_smi = fake_bin / "nvidia-smi"
+    nvidia_smi.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        'gpu_id="${!#}"\n'
+        'printf "GPU-00000000-0000-0000-0000-%012d\\n" "$gpu_id"\n',
+        encoding="utf-8",
+    )
+    nvidia_smi.chmod(0o755)
     return fake_bin, docker_log
 
 
@@ -146,8 +156,13 @@ def _fake_proof_environment(
             "PATH": f"{fake_bin}:{env['PATH']}",
             "DOCKER_LOG": str(docker_log),
             "FAKE_ARTIFACTS": str(output / "artifacts"),
+            "TRTMC_NODE_ID": "test-node",
             "TRTMC_HF_CACHE": str(tmp_path / "hf-cache"),
+            "TRTMC_HF_HUB_CACHE": str(tmp_path / "hf-cache" / "hub"),
+            "TRTMC_HF_CACHE_LOCK_FILE": str(tmp_path / "cache-locks" / "hf-cache.lock"),
+            "TRTMC_MODEL_PROOF_GPU_IDS": "0,1,2,3",
             "TRTMC_MODEL_PROOF_GPU_LOCK_DIR": str(tmp_path / "gpu-locks"),
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
             "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS": "5",
             # Fast state transitions keep the multi-process coordination tests
             # deterministic without widening their assertion windows.
@@ -818,21 +833,44 @@ def test_runner_warms_the_exact_shared_selection_before_the_proof() -> None:
     assert "offline HF cache readiness check failed" in warm
 
 
-def test_runner_keeps_local_fallback_and_workflow_uses_runner_cache_paths() -> None:
+def test_workflow_inherits_all_node_local_cache_and_gpu_policy() -> None:
     runner = RUNNER.read_text(encoding="utf-8")
     workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
 
-    assert 'self.context.env.get("HF_HOME", str(Path.home() / ".cache/huggingface"))' in runner
-    assert "TRTMC_HF_CACHE: ${{ vars.TRTMC_HF_HOME || " in workflow
-    assert "TRTMC_HF_HUB_CACHE: ${{ vars.TRTMC_HF_HUB_CACHE || " in workflow
-    assert "format('{0}/hub', vars.TRTMC_HF_HOME || " in workflow
-    assert (
-        "TRTMC_MODEL_REFERENCE_CACHE_ROOT: ${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || "
-        in workflow
+    job_environment = workflow.split("\n    steps:", maxsplit=1)[0]
+    host_policy = (
+        "TRTMC_HF_CACHE",
+        "TRTMC_HF_HUB_CACHE",
+        "TRTMC_HF_CACHE_LOCK_FILE",
+        "TRTMC_MODEL_REFERENCE_CACHE_ROOT",
+        "TRTMC_MODEL_PROOF_GPU_IDS",
+        "TRTMC_MODEL_PROOF_SLOTS_PER_GPU",
+        "TRTMC_MODEL_PROOF_GPU_LOCK_DIR",
     )
+    for name in host_policy:
+        assert not re.search(rf"^\s*{name}\s*:", job_environment, re.MULTILINE)
+        assert name in workflow
+    assert "$name is not configured by this proof runner" in workflow
     assert "TRTMC_HF_MODULES_CACHE:" not in workflow
-    assert 'self.context.env.get("TRTMC_HF_HUB_CACHE"' in runner
+    assert 'self.context.env.get("TRTMC_HF_CACHE", "")' in runner
+    assert 'self.context.env.get("TRTMC_HF_HUB_CACHE", "")' in runner
+    assert "host-local Hugging Face cache paths must be configured" in runner
     assert "TRTMC_HF_MODULES_CACHE" not in runner
+
+
+def test_proof_container_certifies_the_host_leased_gpu_uuid() -> None:
+    runner = RUNNER.read_text(encoding="utf-8")
+    inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
+    workflow = PROOF_WORKFLOW.read_text(encoding="utf-8")
+
+    assert '"TRTMC_MODEL_PROOF_GPU_UUID": self.lease.gpu_uuid' in runner
+    assert 'self.context.env.get("TRTMC_MODEL_PROOF_GPU_UUID", "")' in inner
+    assert '["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader"]' in inner
+    assert "observed_uuids != [expected_uuid]" in inner
+    assert '"gpu_uuid": expected_uuid' in inner
+    assert "TRTMC_MODEL_PROOF_GPU_IDS is not a canonical GPU index list" in workflow
+    assert "TRTMC_MODEL_PROOF_GPU_IDS contains duplicate GPU index" in workflow
+    assert "TRTMC_MODEL_PROOF_SLOTS_PER_GPU must be an integer from 1 to 16" in workflow
 
 
 def test_hf_token_is_not_exposed_to_pull_request_model_proof_code() -> None:
@@ -1227,7 +1265,38 @@ def _write_certified_singleton_artifacts(
         ),
         encoding="utf-8",
     )
-    (root / "selection.json").write_text(json.dumps({"requested_model": model}), encoding="utf-8")
+    (root / "selection.json").write_text(
+        json.dumps({"requested_model": model, "resource_class": "shared"}),
+        encoding="utf-8",
+    )
+    (root / "gpu-lease.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "model": model,
+                "source_revision": revision,
+                "run_id": "123",
+                "job_id": "prove",
+                "runner_name": "test-runner",
+                "node_id": "test-node",
+                "hostname": "test-host",
+                "gpu_id": "0",
+                "gpu_index": "0",
+                "gpu_uuid": "GPU-00000000-0000-0000-0000-000000000000",
+                "gpu_slot": 0,
+                "gpu_slots": [0],
+                "gpu_slot_ids": [0],
+                "slots_per_gpu": 4,
+                "gpu_slots_per_device": 4,
+                "resource_class": "shared",
+                "gpu_resource_class": "shared",
+                "lock_namespace": "a" * 64,
+                "acquired_at": "2026-07-21T12:00:00+00:00",
+                "released_at": "2026-07-21T12:01:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
     (root / "model-proof-report.html").write_text(
         "<!doctype html><title>complete proof</title>", encoding="utf-8"
     )
@@ -1248,6 +1317,9 @@ def _run_workflow_singleton_gate(
             model,
             revision,
             "premerge",
+            "123",
+            "test-runner",
+            "test-node",
         ],
         capture_output=True,
         text=True,
@@ -1284,6 +1356,34 @@ def test_workflow_singleton_gate_rejects_invalid_certification(
     artifacts = tmp_path / "artifacts"
     _write_certified_singleton_artifacts(artifacts)
     path = artifacts / filename
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload[field] = value
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    result = _run_workflow_singleton_gate(artifacts)
+
+    assert result.returncode == 1
+    assert message in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("schema_version", 1, "gpu-lease.schema_version"),
+        ("gpu_uuid", "not-a-gpu", "GPU UUID"),
+        ("lock_namespace", "short", "lock namespace"),
+        ("released_at", "2026-07-21T11:59:00+00:00", "precedes acquired_at"),
+    ],
+)
+def test_workflow_singleton_gate_rejects_invalid_gpu_lease_evidence(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    artifacts = tmp_path / "artifacts"
+    _write_certified_singleton_artifacts(artifacts)
+    path = artifacts / "gpu-lease.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload[field] = value
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -1399,9 +1499,7 @@ def _run_model_proof_disk_headroom_check(
 
     fake_sleep = fake_bin / "sleep"
     fake_sleep.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -euo pipefail\n"
-        'printf \'%s\\n\' "${1:?}" >> "$FAKE_SLEEP_LOG"\n',
+        '#!/usr/bin/env bash\nset -euo pipefail\nprintf \'%s\\n\' "${1:?}" >> "$FAKE_SLEEP_LOG"\n',
         encoding="utf-8",
     )
     fake_sleep.chmod(0o755)
@@ -1741,7 +1839,13 @@ def test_strict_cache_warm_failure_stops_before_hermetic_proof(tmp_path: Path) -
         {
             "PATH": f"{fake_bin}:{env['PATH']}",
             "DOCKER_LOG": str(docker_log),
+            "TRTMC_NODE_ID": "test-node",
             "TRTMC_HF_CACHE": str(tmp_path / "hf-cache"),
+            "TRTMC_HF_HUB_CACHE": str(tmp_path / "hf-cache" / "hub"),
+            "TRTMC_HF_CACHE_LOCK_FILE": str(tmp_path / "hf-cache.lock"),
+            "TRTMC_MODEL_PROOF_GPU_IDS": "0",
+            "TRTMC_MODEL_PROOF_GPU_LOCK_DIR": str(tmp_path / "gpu-locks"),
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
         }
     )
 
@@ -1789,7 +1893,9 @@ def test_host_cache_uses_full_hub_only_for_check_and_positive_view_for_proof() -
 
     assert "hub.is_dir()" not in cache_check
     assert "HF Hub cache directory does not exist" not in host
-    assert 'hub in {Path("/"), self.context.repository}' in host
+    assert "repository = self.context.repository.resolve()" in host
+    assert "repository in path.parents" in host
+    assert "not hub.is_relative_to(" in host
     assert "hf_modules_cache" not in host
     assert 'f"type=bind,src={hub},dst=/hf-cache/hub,readonly"' in cache_check
     assert "dst=/hf-cache/modules" not in cache_check
@@ -1952,7 +2058,7 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
     fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
     output = tmp_path / "proof"
     env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
-    hub_cache = tmp_path / "explicit-hub-cache"
+    hub_cache = tmp_path / "hf-cache" / "explicit-hub-cache"
     modules_cache = tmp_path / "explicit-modules-cache"
     selected_repo = hub_cache / "models--fixture--model"
     selected_repo.mkdir(parents=True)
@@ -2010,6 +2116,67 @@ def test_distinct_explicit_hf_cache_paths_reach_both_containers(
     write_probe = private_repo / "test-write-probe"
     write_probe.write_text("writable\n", encoding="utf-8")
     assert write_probe.read_text(encoding="utf-8") == "writable\n"
+
+
+def test_hf_hub_cache_must_be_inside_configured_cache_root(tmp_path: Path) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    escaped_hub = tmp_path / "different-cache" / "hub"
+    escaped_hub.mkdir(parents=True)
+    env["TRTMC_HF_HUB_CACHE"] = str(escaped_hub)
+
+    result = subprocess.run(
+        [
+            *RUNNER_COMMAND,
+            "--model",
+            "convbert",
+            "--revision",
+            "HEAD",
+            "--output-dir",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "unsafe HF Hub cache path" in result.stderr
+    assert "run " not in docker_log.read_text(encoding="utf-8")
+
+
+def test_hf_cache_root_must_not_overlap_the_repository(tmp_path: Path) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    cache_root = REPO_ROOT.parent
+    hub = cache_root / "test-hf-hub-outside-repository"
+    env["TRTMC_HF_CACHE"] = str(cache_root)
+    env["TRTMC_HF_HUB_CACHE"] = str(hub)
+
+    result = subprocess.run(
+        [
+            *RUNNER_COMMAND,
+            "--model",
+            "convbert",
+            "--revision",
+            "HEAD",
+            "--output-dir",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "unsafe Hugging Face cache root" in result.stderr
+    assert "run " not in docker_log.read_text(encoding="utf-8")
 
 
 def test_selected_hf_cache_with_unreadable_file_is_delegated_to_root_helper(
@@ -2164,7 +2331,8 @@ def test_docker_bind_mount_fails_closed_when_host_cache_source_is_absent(
         encoding="utf-8",
     )
     docker.chmod(0o755)
-    hub_cache = tmp_path / "missing-hub-cache"
+    cache_root = tmp_path / "hf-cache"
+    hub_cache = cache_root / "missing-hub-cache"
     assert not hub_cache.exists()
     output = tmp_path / "proof"
     env = os.environ.copy()
@@ -2172,7 +2340,13 @@ def test_docker_bind_mount_fails_closed_when_host_cache_source_is_absent(
         {
             "PATH": f"{fake_bin}:{env['PATH']}",
             "DOCKER_LOG": str(docker_log),
+            "TRTMC_NODE_ID": "test-node",
+            "TRTMC_HF_CACHE": str(cache_root),
             "TRTMC_HF_HUB_CACHE": str(hub_cache),
+            "TRTMC_HF_CACHE_LOCK_FILE": str(tmp_path / "cache-locks" / "hf-cache.lock"),
+            "TRTMC_MODEL_PROOF_GPU_IDS": "0",
+            "TRTMC_MODEL_PROOF_GPU_LOCK_DIR": str(tmp_path / "gpu-locks"),
+            "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": "4",
         }
     )
 
@@ -2239,21 +2413,32 @@ def test_explicit_runner_gpu_id_still_acquires_a_slot_lease(tmp_path: Path) -> N
     assert "Leased shared model-proof GPU 7 slot 0" in result.stdout
     assert _proof_gpu_ids(docker_log) == ["7"]
     assert (output / "artifacts" / "gpu-id.txt").read_text().strip() == "7"
-    assert _gpu_lease(output) == {
-        "schema_version": 1,
-        "model": "convbert",
-        "source_revision": subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
-        ).strip(),
-        "gpu_id": "7",
-        "gpu_slot": 0,
-        "gpu_slots": [0],
-        "gpu_slot_ids": [0],
-        "slots_per_gpu": 4,
-        "gpu_slots_per_device": 4,
-        "resource_class": "shared",
-        "gpu_resource_class": "shared",
-    }
+    lease = _gpu_lease(output)
+    assert lease["schema_version"] == 2
+    assert lease["model"] == "convbert"
+    assert (
+        lease["source_revision"]
+        == subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
+    )
+    assert lease["run_id"] == "local"
+    assert lease["job_id"] == "local"
+    assert lease["runner_name"] == "local"
+    assert lease["node_id"] == "test-node"
+    assert isinstance(lease["hostname"], str) and lease["hostname"]
+    assert lease["gpu_id"] == "7"
+    assert lease["gpu_index"] == "7"
+    assert lease["gpu_uuid"] == "GPU-00000000-0000-0000-0000-000000000007"
+    assert lease["gpu_slot"] == 0
+    assert lease["gpu_slots"] == [0]
+    assert lease["gpu_slot_ids"] == [0]
+    assert lease["slots_per_gpu"] == 4
+    assert lease["gpu_slots_per_device"] == 4
+    assert lease["resource_class"] == "shared"
+    assert lease["gpu_resource_class"] == "shared"
+    assert re.fullmatch(r"[0-9a-f]{64}", lease["lock_namespace"])
+    acquired_at = datetime.fromisoformat(lease["acquired_at"])
+    released_at = datetime.fromisoformat(lease["released_at"])
+    assert released_at >= acquired_at
     assert (tmp_path / "gpu-locks" / "gpu-7-slot-0.lock").is_file()
 
 
@@ -2519,6 +2704,77 @@ def test_automatic_gpu_lease_rejects_invalid_id_configuration(
 
     assert result.returncode != 0
     assert "TRTMC_MODEL_PROOF_GPU_IDS must be a comma-separated list" in result.stderr
+    assert not _proof_gpu_ids_if_present(docker_log)
+
+
+@pytest.mark.parametrize(
+    ("name", "message"),
+    [
+        ("TRTMC_NODE_ID", "TRTMC_NODE_ID must be configured safely"),
+        (
+            "TRTMC_MODEL_PROOF_GPU_IDS",
+            "TRTMC_MODEL_PROOF_GPU_IDS must be configured by the proof runner",
+        ),
+    ],
+)
+def test_gpu_lease_fails_closed_when_host_policy_is_missing(
+    tmp_path: Path,
+    name: str,
+    message: str,
+) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env.pop(name)
+
+    result = subprocess.run(
+        [
+            *RUNNER_COMMAND,
+            "--model",
+            "convbert",
+            "--revision",
+            "HEAD",
+            "--output-dir",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert message in result.stderr
+    assert not _proof_gpu_ids_if_present(docker_log)
+
+
+@pytest.mark.parametrize("lock_dir", ["relative-locks", "/"])
+def test_gpu_lease_rejects_unsafe_lock_directory(tmp_path: Path, lock_dir: str) -> None:
+    fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
+    output = tmp_path / "proof"
+    env = _fake_proof_environment(tmp_path, fake_bin, docker_log, output)
+    env["TRTMC_MODEL_PROOF_GPU_LOCK_DIR"] = lock_dir
+
+    result = subprocess.run(
+        [
+            *RUNNER_COMMAND,
+            "--model",
+            "convbert",
+            "--revision",
+            "HEAD",
+            "--output-dir",
+            str(output),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "TRTMC_MODEL_PROOF_GPU_LOCK_DIR must be a safe absolute directory" in result.stderr
     assert not _proof_gpu_ids_if_present(docker_log)
 
 
@@ -3664,7 +3920,8 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
         "def _proof_environment", maxsplit=1
     )[0]
 
-    assert host.index("_prepare_hf_cache") < host.index("GpuLease(")
+    assert host.index("GpuLease(") < host.index("_prepare_hf_cache")
+    assert host.index("_prepare_hf_cache") < host.index("lease.acquire()")
     assert "--gpus" not in warm
     assert "TRTMC_MODEL_PROOF_GPU_ID" not in warm
     assert '"--gpus"' in proof and 'f"device={self.lease.gpu_id}"' in proof
@@ -3672,7 +3929,7 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     assert '"TRTMC_MODEL_PROOF_GPU_SLOT_IDS": slots' in text
     assert '"TRTMC_MODEL_PROOF_SLOTS_PER_GPU": str(self.lease.slots_per_gpu)' in text
     assert '"TRTMC_MODEL_PROOF_RESOURCE_CLASS": self.lease.resource_class' in text
-    assert '"TRTMC_MODEL_PROOF_SLOTS_PER_GPU"' in allocator and '"4"' in allocator
+    assert 'self.context.env.get("TRTMC_MODEL_PROOF_SLOTS_PER_GPU", "")' in allocator
     assert 'f"gpu-{gpu}-slot-{slot}.lock"' in allocator
     assert 'f"gpu-{gpu}-reservation.lock"' in allocator
     assert "TRTMC_GPU_ID must be present in TRTMC_MODEL_PROOF_GPU_IDS" in allocator
@@ -3685,9 +3942,9 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     assert '"resource_class": self.resource_class' in allocator
     assert '"gpu_resource_class": self.resource_class' in allocator
     assert '"gpu_lease_evidence": "gpu-lease.json"' in inner
-    assert (
-        "TRTMC_MODEL_PROOF_GPU_IDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_IDS || '0,1,2,3' }}" in workflow
-    )
+    assert not re.search(r"^\s*TRTMC_MODEL_PROOF_GPU_IDS\s*:", workflow, re.MULTILINE)
+    assert "vars.TRTMC_MODEL_PROOF_GPU_IDS" not in workflow
+    assert "TRTMC_MODEL_PROOF_GPU_IDS is not configured by this proof runner" in workflow
     assert (
         "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: "
         "${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || "

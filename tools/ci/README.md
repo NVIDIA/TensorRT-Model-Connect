@@ -180,6 +180,10 @@ selection and breadth differ.
 | `e2e_scheduler.py` | Launch workers, enforce timeouts, and merge results | Container |
 | `isolation.py` | Queue projected model groups for isolated validation | Container |
 | `gpu_lease.py` | Allocate FIFO shared slots or exclusive GPUs | Host processes |
+| `capacity_canary.py` | Prove generic shared-slot concurrency and queueing | Host and GitHub-hosted verification |
+| `cache_lock.py` | Coordinate shared cache readers and the Nightly writer | Host processes |
+| `discover_cache_anchors.py` | Validate runner labels and build one warm row per node | GitHub-hosted planning |
+| `cache_warm_receipt.py` | Certify and reconcile per-node cache readiness | Host and GitHub-hosted verification |
 | `model_proof_selection.py` | Resolve and validate one model's proof contract | Projected source |
 | `model_proof.py` | Prepare caches, projection, lease, and proof container | Trusted host |
 | `model_proof_inner.py` | Build, test, compare, and report one model | Hermetic container |
@@ -299,6 +303,9 @@ the producing class remains the source of truth for optional evidence fields.
 - **Outputs:** Returns the container-name string, starts one `sleep infinity`
   Docker container, and exports `TRTMC_CI_CONTAINER_NAME=<name>` through
   `GITHUB_ENV`. Hardened mode mounts source read-only and scratch at `/work`.
+  When a trusted stage needs Hugging Face authentication, it mounts a temporary
+  mode-0600 token file, passes only `HF_TOKEN_PATH`, and unlinks the host path
+  immediately after Docker has created the bind mount.
 - **Boundary:** It owns Docker runtime configuration and mounts. It does not
   execute a pipeline stage or define stage contents.
 
@@ -473,9 +480,11 @@ the producing class remains the source of truth for optional evidence fields.
 
   ```json
   {
-    "schema_version": 1,
+    "schema_version": 2,
     "model": "qwen3_5",
     "source_revision": "<commit>",
+    "node_id": "gb300-node",
+    "gpu_uuid": "GPU-...",
     "gpu_id": "2",
     "gpu_slot": 1,
     "gpu_slot_ids": [1],
@@ -486,6 +495,58 @@ the producing class remains the source of truth for optional evidence fields.
 
 - **Boundary:** It allocates capacity and proves ownership only. It never starts
   a container, builds an engine, or runs a model.
+
+### `capacity_canary.py`
+
+- **Functionality / units:** Acquires one real `GpuLease` per generic worker,
+  verifies its UUID in a short-lived network-free container, holds every lease
+  to one absolute UTC barrier, or starts a pinned child contender against one
+  dynamically selected exclusive GPU.
+- **Inputs:** Manual shared-capacity or exclusive-safety mode, an expected
+  shared-slot count, runner-local GPU and lock policy, the existing CI image,
+  and an absolute UTC barrier for shared mode.
+- **Outputs:** Shared mode proves peak concurrency, unique first-wave slot
+  tuples, dynamic per-node capacity, and queued extra work. Exclusive mode
+  proves both leases own every configured slot, container UUID identity,
+  same-GPU non-overlap, and resumption after the primary release.
+- **Boundary:** It is an explicit admission canary only. It does not discover or
+  label runners, warm model caches, run model code, or alter normal CI routing.
+  Exclusive mode proves the scheduler-selected node only; generic GitHub labels
+  cannot guarantee which fleet node receives that manual job.
+
+### `cache_lock.py`
+
+- **Functionality / units:** `CacheLock` wraps one node-wide advisory flock in
+  shared-reader or exclusive-writer mode.
+- **Inputs:** `CiContext`, lock mode, and optional cache root, lock path, and
+  timeout environment values.
+- **Outputs:** A context manager that holds the selected lock until exit or
+  raises `CiError` on unsafe configuration or timeout.
+- **Boundary:** It coordinates access only. It does not choose dependencies,
+  download models, validate cache content, or create readiness evidence.
+
+### `discover_cache_anchors.py`
+
+- **Functionality / units:** Validates explicit runner labels and produces one
+  sorted cache-warm matrix row per admitted GPU node.
+- **Inputs:** Paginated GitHub repository-runner inventory JSON containing
+  runner IDs, names, status, and labels.
+- **Outputs:** `{\"include\": [{\"node_label\": str,
+  \"anchor_runner\": str}]}` or `CiError` for empty, missing, duplicate,
+  offline, or malformed anchor topology.
+- **Boundary:** It is a pure inventory reader. It never mutates runner labels,
+  starts services, chooses GPUs, or warms a cache.
+
+### `cache_warm_receipt.py`
+
+- **Functionality / units:** Certifies one node's online warm plus
+  network-disabled local-only verification, then reconciles all node receipts.
+- **Inputs:** Structured warm/verify summaries, trusted workflow identity
+  environment, the discovered anchor matrix, and downloaded receipt JSON.
+- **Outputs:** Atomic per-node `cache-warm-receipt.json` files and one fleet
+  readiness summary with common source, plan, and resolved-cache digests.
+- **Boundary:** It validates evidence after cache work. It does not discover
+  runners, download dependencies, or repair a cache.
 
 ### `model_proof_selection.py`
 
