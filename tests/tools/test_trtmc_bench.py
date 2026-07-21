@@ -67,6 +67,48 @@ json.dump({
     return worker
 
 
+def _write_benchmark_result(
+    output: Path,
+    *,
+    run_id: str,
+    model: str,
+    status: str = "completed",
+    started_at: str = "2026-07-21T09:00:00+00:00",
+) -> None:
+    artifact = output / f"001-{model}-default"
+    artifact.mkdir(parents=True)
+    cell: dict[str, object] = {
+        "status": status,
+        "name": "default",
+        "model": model,
+        "operation": "generate",
+        "case_digest": f"digest-{model}",
+        "artifact_dir": artifact.name,
+    }
+    if status == "completed":
+        cell["metrics"] = {
+            "latency_ms": {"p50": 2.5, "p95": 4.0},
+            "output_tokens_per_s": 100.0,
+        }
+    else:
+        cell["error"] = "worker failed"
+    (output / "result.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "trtmc.benchmark-run/v1",
+                "run_id": run_id,
+                "status": status,
+                "started_at": started_at,
+                "finished_at": "2026-07-21T09:01:00+00:00",
+                "measurement_policy": {"timing_scope": "public_pipeline_call_wall"},
+                "environment": {"hostname": "test-host"},
+                "cells": [cell],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_catalog_reuses_existing_model_manifests_for_different_tasks(tmp_path: Path) -> None:
     catalog = ManifestCatalog()
     expectations = {
@@ -133,6 +175,17 @@ def test_default_catalog_falls_back_to_installed_package_data(
     model = ManifestCatalog().resolve("installed-model")
 
     assert model.manifest_path == installed_catalog / "installed.json"
+
+
+def test_cli_lists_supported_models(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["list", "models"]) == 0
+
+    output = capsys.readouterr().out
+    assert "MODEL" in output
+    assert "OPERATION" in output
+    assert "distilgpt2" in output
+    assert "flux-schnell-l0" in output
+    assert "generate_image" in output
 
 
 def test_model_identity_does_not_depend_on_catalog_install_path(tmp_path: Path) -> None:
@@ -300,6 +353,8 @@ def test_cli_runs_fake_native_worker_and_writes_evidence(tmp_path: Path) -> None
         == 0
     )
     result = json.loads((output / "result.json").read_text(encoding="utf-8"))
+    assert isinstance(result["run_id"], str)
+    assert result["run_id"]
     assert result["status"] == "completed"
     assert result["measurement_policy"]["task_quality_evaluated"] is False
     assert result["cells"][0]["metrics"]["latency_ms"]["p50"] == 2.5
@@ -308,6 +363,101 @@ def test_cli_runs_fake_native_worker_and_writes_evidence(tmp_path: Path) -> None
     assert (artifact_dir / "resolved-case.json").is_file()
     assert (artifact_dir / "worker-result.json").is_file()
     assert (artifact_dir / "telemetry.json").is_file()
+
+
+def test_cli_combines_model_result_subdirectories_into_one_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    collection = tmp_path / "result-20260721"
+    _write_benchmark_result(collection / "distilgpt2", run_id="run-text", model="distilgpt2")
+    _write_benchmark_result(
+        collection / "flux-schnell",
+        run_id="run-image",
+        model="flux-schnell-l0",
+        status="failed",
+        started_at="2026-07-21T10:00:00+00:00",
+    )
+
+    assert main(["report", str(collection)]) == 0
+
+    report = json.loads((collection / "report.json").read_text(encoding="utf-8"))
+    assert report["schema_version"] == "trtmc.benchmark-report/v1"
+    assert report["status"] == "failed"
+    assert report["summary"] == {
+        "cases": 2,
+        "completed_runs": 1,
+        "failed_runs": 1,
+        "incomplete_runs": 0,
+        "models": 2,
+        "runs": 2,
+    }
+    assert report["models"] == ["distilgpt2", "flux-schnell-l0"]
+    assert [run["result_path"] for run in report["runs"]] == [
+        "distilgpt2/result.json",
+        "flux-schnell/result.json",
+    ]
+    html = (collection / "report.html").read_text(encoding="utf-8")
+    assert "distilgpt2" in html
+    assert "flux-schnell-l0" in html
+    assert "distilgpt2/001-distilgpt2-default" in html
+    assert "failed: 2 run(s), 2 model(s), 2 case(s)" in capsys.readouterr().out
+
+
+def test_cli_report_rescans_collection_and_atomically_replaces_summary(tmp_path: Path) -> None:
+    collection = tmp_path / "result-20260721"
+    _write_benchmark_result(collection / "first", run_id="run-1", model="distilgpt2")
+    assert main(["report", str(collection)]) == 0
+
+    _write_benchmark_result(collection / "second", run_id="run-2", model="bart-base")
+    assert main(["report", str(collection)]) == 0
+
+    report = json.loads((collection / "report.json").read_text(encoding="utf-8"))
+    assert report["summary"]["runs"] == 2
+    assert report["models"] == ["bart-base", "distilgpt2"]
+    assert not list(collection.glob(".report.*.trtmc-bench-*.tmp"))
+
+
+def test_cli_report_supports_multiple_roots_and_deduplicates_run_id(tmp_path: Path) -> None:
+    first = tmp_path / "gb300"
+    second = tmp_path / "h100"
+    combined = tmp_path / "combined"
+    _write_benchmark_result(first / "model", run_id="same-run", model="distilgpt2")
+    _write_benchmark_result(second / "copied-model", run_id="same-run", model="distilgpt2")
+
+    assert main(["report", str(first), str(second), "-o", str(combined)]) == 0
+
+    report = json.loads((combined / "report.json").read_text(encoding="utf-8"))
+    assert report["summary"]["runs"] == 1
+    assert report["runs"][0]["result_path"].endswith("gb300/model/result.json")
+
+
+def test_cli_report_rejects_run_id_collision(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    collection = tmp_path / "results"
+    _write_benchmark_result(collection / "first", run_id="collision", model="distilgpt2")
+    _write_benchmark_result(collection / "second", run_id="collision", model="bart-base")
+
+    with pytest.raises(SystemExit, match="2"):
+        main(["report", str(collection)])
+
+    assert "run_id collision" in capsys.readouterr().err
+    assert not (collection / "report.json").exists()
+
+
+def test_cli_report_refuses_to_replace_single_run_html(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run = tmp_path / "single-run"
+    _write_benchmark_result(run, run_id="run-1", model="distilgpt2")
+    original = run / "report.html"
+    original.write_text("single run report", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="2"):
+        main(["report", str(run)])
+
+    assert "single-run report" in capsys.readouterr().err
+    assert original.read_text(encoding="utf-8") == "single run report"
 
 
 def test_cli_replaces_explicit_existing_output_directory(

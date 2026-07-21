@@ -5,21 +5,25 @@
 
 from __future__ import annotations
 
+import csv
 from datetime import datetime, timezone
+import io
 import json
 import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import socket
 import subprocess
 from typing import Any, Iterable, Mapping
+import uuid
 
 from .metrics import reduce_metrics
 from .report import write_html_report
 from .telemetry import GpuTelemetry
 from .types import BenchmarkError, ResolvedCase
-from .worker import find_worker, run_worker
+from .worker import find_worker, run_worker, worker_backend_abi
 
 
 class BenchmarkService:
@@ -48,6 +52,7 @@ class BenchmarkService:
         started = _now()
         result: dict[str, Any] = {
             "schema_version": "trtmc.benchmark-run/v1",
+            "run_id": str(uuid.uuid4()),
             "status": "running",
             "started_at": started,
             "measurement_policy": {
@@ -136,16 +141,57 @@ def _environment(worker: Path) -> dict[str, Any]:
         ).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         pass
-    return {
+    environment = {
         "hostname": socket.gethostname(),
         "platform": platform.platform(),
         "python": platform.python_version(),
         "pid": os.getpid(),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "worker": str(worker),
+        "runtime_backend_abi": worker_backend_abi(worker),
         "git_commit": commit,
         "source_revision": explicit_revision or commit,
     }
+    environment.update(_gpu_environment())
+    return environment
+
+
+def _gpu_environment() -> dict[str, Any]:
+    executable = shutil.which("nvidia-smi")
+    if executable is None:
+        return {"gpus": [], "gpu_query_error": "nvidia-smi was not found"}
+    command = [
+        executable,
+        "--query-gpu=index,name,uuid,driver_version",
+        "--format=csv,noheader,nounits",
+    ]
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",", maxsplit=1)[0].strip()
+    if visible:
+        command.extend(["--id", visible])
+    try:
+        completed = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        gpus = []
+        for row in csv.reader(io.StringIO(completed.stdout)):
+            if len(row) != 4:
+                continue
+            index, name, gpu_uuid, driver = (value.strip() for value in row)
+            gpus.append(
+                {
+                    "index": int(index),
+                    "name": name,
+                    "uuid": gpu_uuid,
+                    "driver_version": driver,
+                }
+            )
+        return {"gpus": gpus, "gpu_query_error": None}
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return {"gpus": [], "gpu_query_error": str(exc)}
 
 
 def _now() -> str:

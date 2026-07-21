@@ -47,6 +47,20 @@ class ManifestCatalog:
     def __init__(self, root: Path | None = None) -> None:
         self.root = (root or default_manifest_root()).expanduser().resolve()
 
+    def models(self) -> tuple[ModelDescriptor, ...]:
+        """Return catalog models supported by the benchmark operation registry."""
+        if not self.root.is_dir():
+            raise BenchmarkError(f"model manifest root does not exist: {self.root}")
+        models: list[ModelDescriptor] = []
+        for path in sorted(self.root.glob("*/manifests/*.json")):
+            try:
+                model = self._load(path)
+                operation_for_task_strategy(model.task_strategy)
+            except BenchmarkError:
+                continue
+            models.append(model)
+        return tuple(sorted(models, key=lambda item: (item.name, item.hf_id)))
+
     def resolve(self, selector: str) -> ModelDescriptor:
         direct = Path(selector).expanduser()
         if direct.is_file():

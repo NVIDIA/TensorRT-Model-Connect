@@ -10,6 +10,12 @@ deliberately one command:
 trtmc-bench run --model distilgpt2
 ```
 
+List the model profiles currently supported by the installed benchmark catalog:
+
+```bash
+trtmc-bench list models
+```
+
 ## Install a packaged build
 
 A TRTMC native wheel is the end-user distribution. It contains the Python
@@ -165,6 +171,39 @@ Omit `-o` to create a new timestamped result directory for every invocation.
 The YAML reuses the repository's existing model names, manifests,
 `task_strategy`, `runtime_strategy`, testcase inputs, and `.trtfb` bundle
 names. It does not introduce a second model catalog.
+
+### Combine separate model runs in one report
+
+Separate CLI invocations can share one collection directory while retaining an
+independent result directory per model:
+
+```bash
+trtmc-bench run --model distilgpt2 \
+  -o result-20260721/distilgpt2
+trtmc-bench run --model bart-base \
+  -o result-20260721/bart-base
+trtmc-bench run --model flux-schnell-l0 \
+  -o result-20260721/flux-schnell-l0
+```
+
+Recursively discover their `trtmc.benchmark-run/v1` results and build one
+collection report in place:
+
+```bash
+trtmc-bench report result-20260721
+```
+
+This writes `result-20260721/report.json` and
+`result-20260721/report.html`. The per-model `result.json` files remain the
+authoritative evidence and are not rewritten or copied. Add another model
+subdirectory and run the same report command again to atomically rebuild the
+summary; no append flag or report database is required.
+
+Several result roots can be combined when an explicit report output is given:
+
+```bash
+trtmc-bench report results/gb300 results/h100 -o reports/combined
+```
 
 ## Cases, sweeps, and batches
 

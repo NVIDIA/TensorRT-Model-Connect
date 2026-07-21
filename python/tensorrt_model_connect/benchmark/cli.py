@@ -18,6 +18,8 @@ import yaml
 
 from .builder import BundleBuilder
 from .catalog import ManifestCatalog, expand_sweeps, find_bundle, resolve_case
+from .operations import operation_for_task_strategy
+from .report import generate_collection_report
 from .service import BenchmarkService, default_output_dir
 from .types import BenchmarkError, ResolvedCase
 from .worker import find_worker, worker_backend_abi
@@ -67,6 +69,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="result directory; an existing explicit directory is replaced",
     )
     run.add_argument("--dry-run", action="store_true", help="print resolved cases only")
+
+    list_command = subparsers.add_parser("list", help="list benchmark catalog entries")
+    list_subparsers = list_command.add_subparsers(dest="list_command", required=True)
+    models = list_subparsers.add_parser("models", help="list supported model names")
+    models.add_argument("--manifest-root", type=Path)
+
+    report = subparsers.add_parser(
+        "report", help="combine benchmark runs found below result directories"
+    )
+    report.add_argument("results", nargs="+", type=Path, help="result directory to scan")
+    report.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        help="report directory; defaults to the single scanned result directory",
+    )
     return parser
 
 
@@ -76,9 +94,62 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if arguments.command == "run":
             return _run(arguments)
+        if arguments.command == "list" and arguments.list_command == "models":
+            return _list_models(arguments)
+        if arguments.command == "report":
+            return _report(arguments)
     except BenchmarkError as exc:
         parser.error(str(exc))
     return 2
+
+
+def _list_models(arguments: argparse.Namespace) -> int:
+    catalog = ManifestCatalog(arguments.manifest_root)
+    models = catalog.models()
+    if not models:
+        raise BenchmarkError(f"no supported benchmark models found under {catalog.root}")
+    rows = [
+        (
+            model.name,
+            operation_for_task_strategy(model.task_strategy).name,
+            model.family,
+            model.precision,
+            model.hf_id,
+        )
+        for model in models
+    ]
+    headers = ("MODEL", "OPERATION", "FAMILY", "PRECISION", "HF ID")
+    widths = tuple(
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(len(headers))
+    )
+    print("  ".join(value.ljust(widths[index]) for index, value in enumerate(headers)))
+    for row in rows:
+        print("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
+    return 0
+
+
+def _report(arguments: argparse.Namespace) -> int:
+    roots = tuple(_absolute_path(path) for path in arguments.results)
+    if arguments.output is None:
+        if len(roots) != 1:
+            raise BenchmarkError(
+                "-o/--output is required when scanning multiple result directories"
+            )
+        output = roots[0]
+    else:
+        output = _absolute_path(arguments.output)
+    report, warnings = generate_collection_report(roots, output)
+    for warning in warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    summary = report["summary"]
+    print(
+        f"{report['status']}: {summary['runs']} run(s), "
+        f"{summary['models']} model(s), {summary['cases']} case(s)"
+    )
+    print(f"JSON: {output / 'report.json'}")
+    print(f"HTML: {output / 'report.html'}")
+    return 0
 
 
 def _run(arguments: argparse.Namespace) -> int:
