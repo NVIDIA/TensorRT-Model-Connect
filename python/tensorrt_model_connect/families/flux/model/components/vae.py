@@ -36,7 +36,7 @@ import time
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from ...build_timing import add_trt_compile_timing
+from .....build_timing import add_trt_compile_timing
 
 trt = trt_compat.get_trt()
 
@@ -399,7 +399,7 @@ def _add_self_attention_2d(
     flat = flatten.get_output(0)  # [B*HW, C]
 
     # Q, K, V projections: [B*HW, C] @ [C, C] -> [B*HW, C]
-    from . import graph_ops
+    from .. import model as graph_ops
 
     def _proj(name: str) -> trt.ITensor:
         w = weights[f"{prefix}.{name}.weight"].reshape(c, c)
@@ -517,7 +517,7 @@ def build_flux_vae_decoder_engine(
     """
     if max_batch_size < 1:
         raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
-    from ...build_timing import timed_weight_loading
+    from .....build_timing import timed_weight_loading
 
     total_t0 = time.monotonic()
     weights_before = _timing_phase(build_timing, "weights_loading_s")
@@ -557,7 +557,7 @@ def build_flux_vae_decoder_engine(
     # treats every dim 0 as dynamic and only the VAE attaches a (1, 1, 1)
     # profile.
     if max_batch_size > 1:
-        from ...engine_builder import add_dynamic_batch_profile
+        from .....engine_builder import add_dynamic_batch_profile
 
         latents = network.add_input(
             "latents", trt.float32, (-1, latent_channels, h_lat, w_lat))

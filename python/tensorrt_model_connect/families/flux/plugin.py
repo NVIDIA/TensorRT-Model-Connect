@@ -25,7 +25,7 @@ import sys
 import time
 
 from .config import ModelConfig
-from .checkpoint_mapper import WeightDict
+from .weights import WeightDict
 
 
 def _register_flux2_attention_quantizers() -> None:
@@ -254,10 +254,10 @@ class FluxPlugin:
     ) -> dict:
         """Build FLUX.1 component engines (CLIP + T5 + DiT + VAE)."""
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
-        from .clip_encoder_builder import build_clip_encoder_engine, load_clip_weights
-        from .flux_dit_builder import build_flux_dit_engine, load_flux_dit_weights
-        from .flux_dit_tp_builder import (
+        from .model.components.t5_encoder import build_t5_encoder_engine, load_t5_weights
+        from .model.components.clip_encoder import build_clip_encoder_engine, load_clip_weights
+        from .model.components.flux import build_flux_dit_engine, load_flux_dit_weights
+        from .model.components.flux_parallel import (
             build_flux_dit_engine as build_flux_dit_tp_engine)
         from ...parallel_config import (
             normalize_parallel_config,
@@ -460,7 +460,7 @@ class FluxPlugin:
 
         # 4. VAE decoder - native TRT engine
         # VAE always builds B=1 per Decision E (pipeline slices at runtime).
-        from .flux_vae_builder import build_flux_vae_decoder_engine
+        from .model.components.vae import build_flux_vae_decoder_engine
         vae_plan = build_flux_vae_decoder_engine(
             vae_dir,
             latent_channels=self._VAE_LATENT_CHANNELS,
@@ -510,12 +510,12 @@ class FluxPlugin:
         te_mbs = min(dit_mbs * 2, 8)
         vae_mbs = 1
         from ...build_timing import timed_trt_compile, timed_weight_loading
-        from .mistral_encoder_builder import (
+        from .model.components.mistral_encoder import (
             build_mistral_encoder_engine, load_mistral_encoder_weights)
-        from .flux2_dit_builder import build_flux2_dit_engine, load_flux2_dit_weights
-        from .flux2_dit_tp_builder import (
+        from .model.components.flux2 import build_flux2_dit_engine, load_flux2_dit_weights
+        from .model.components.flux2_parallel import (
             build_flux2_dit_engine as build_flux2_dit_tp_engine)
-        from .flux_vae_builder import build_flux_vae_decoder_engine
+        from .model.components.vae import build_flux_vae_decoder_engine
         from ...parallel_config import (
             normalize_parallel_config,
             require_tensorrt_11_for_tensor_parallel,
@@ -1161,37 +1161,6 @@ def _serialize_flux2_preprocessor(
         result += part
 
     return result
-
-
-def _build_vae_placeholder(latent_channels, h_lat, w_lat, verbose):
-    """Build a minimal VAE placeholder engine.
-
-    Actual VAE decoding for FLUX is done via Python subprocess
-    using diffusers AutoencoderKL. This placeholder engine exists
-    only to satisfy the bundle format requirement for a vae_decoder_plan.
-    """
-    from tensorrt_model_connect import trt_compat
-    trt = trt_compat.get_trt()
-
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
-    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 28)
-
-    # Simple identity: input [C, H, W] -> output [C, H, W]
-    inp = network.add_input("latents", trt.float32, (latent_channels, h_lat, w_lat))
-    identity = network.add_identity(inp)
-    out = identity.get_output(0)
-    cast_out = network.add_cast(out, trt.float32)
-    out_final = cast_out.get_output(0)
-    out_final.name = "output"
-    network.mark_output(out_final)
-
-    plan = builder.build_serialized_network(network, config)
-    if plan is None:
-        raise RuntimeError("VAE placeholder engine build failed")
-    return bytes(plan)
 
 
 def _serialize_flux_preprocessor(dit_weights: dict, guidance_embeds: bool) -> bytes:

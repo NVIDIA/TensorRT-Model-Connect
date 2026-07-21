@@ -30,12 +30,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
+from .. import model as graph_ops
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
+    from ...weights import WeightDict
 
 
 def build_flux_dit_engine(
@@ -672,7 +672,7 @@ def _build_flux_dit_engine_batched(
     verbose: bool,
 ) -> bytes:
     """Build a dynamic-leading-batch FLUX.1 DiT TRT engine."""
-    from ...engine_builder import add_dynamic_batch_profile
+    from .....engine_builder import add_dynamic_batch_profile
 
     if max_batch_size < 1:
         raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
@@ -951,7 +951,7 @@ def load_flux_dit_weights(
 ) -> "WeightDict":
     """Load FLUX DiT weights from diffusers-format transformer directory."""
     from pathlib import Path
-    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
+    from ...weights import WeightDict, _open_safetensors, _load_tensor, _has_tensor
 
     readers = _open_safetensors(Path(model_dir))
     weights = WeightDict()

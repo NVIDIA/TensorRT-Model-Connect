@@ -21,12 +21,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
+from .. import model as graph_ops
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
+    from ...weights import WeightDict
 
 
 def build_t5_encoder_engine(
@@ -302,7 +302,7 @@ def _build_t5_encoder_engine_batched(
     verbose: bool,
 ) -> bytes:
     """Build a dynamic-leading-batch T5 encoder TRT engine."""
-    from ...engine_builder import add_dynamic_batch_profile
+    from .....engine_builder import add_dynamic_batch_profile
 
     opt_batch = min(max_batch_size, 4) if opt_batch_size is None else opt_batch_size
 
@@ -502,7 +502,7 @@ def load_t5_weights(
     import os
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
-    from .checkpoint_mapper import (
+    from ...weights import (
         WeightDict,
         _has_tensor,
         _load_tensor,

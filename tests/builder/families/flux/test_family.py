@@ -15,14 +15,15 @@ import json
 import struct
 import sys
 import types
+from importlib import import_module
 
 import numpy as np
 import pytest
 
 try:
     from tensorrt_model_connect.config import ModelConfig
-    import tensorrt_model_connect.families.flux as flux_mod
     from tensorrt_model_connect.parallel_config import ParallelConfig
+    flux_mod = import_module("tensorrt_model_connect.families.flux.plugin")
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
 
@@ -178,44 +179,44 @@ def test_build_components_with_clip_and_second_t5(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.t5_encoder_builder",
+        "tensorrt_model_connect.families.flux.model.components.t5_encoder",
         _module(
-            "tensorrt_model_connect.families.flux.t5_encoder_builder",
+            "tensorrt_model_connect.families.flux.model.components.t5_encoder",
             load_t5_weights=load_t5_weights,
             build_t5_encoder_engine=build_t5_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.clip_encoder_builder",
+        "tensorrt_model_connect.families.flux.model.components.clip_encoder",
         _module(
-            "tensorrt_model_connect.families.flux.clip_encoder_builder",
+            "tensorrt_model_connect.families.flux.model.components.clip_encoder",
             load_clip_weights=load_clip_weights,
             build_clip_encoder_engine=build_clip_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_dit_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux",
         _module(
-            "tensorrt_model_connect.families.flux.flux_dit_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux",
             load_flux_dit_weights=load_flux_dit_weights,
             build_flux_dit_engine=build_flux_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_dit_tp_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux_parallel",
         _module(
-            "tensorrt_model_connect.families.flux.flux_dit_tp_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux_parallel",
             build_flux_dit_engine=lambda *_a, **_k: b"unused-tp-dit-plan",
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_vae_builder",
+        "tensorrt_model_connect.families.flux.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.flux.flux_vae_builder",
+            "tensorrt_model_connect.families.flux.model.components.vae",
             build_flux_vae_decoder_engine=build_flux_vae_decoder_engine,
         ),
     )
@@ -291,44 +292,44 @@ def test_build_components_builds_rank_local_flux_dit_for_tp(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.t5_encoder_builder",
+        "tensorrt_model_connect.families.flux.model.components.t5_encoder",
         _module(
-            "tensorrt_model_connect.families.flux.t5_encoder_builder",
+            "tensorrt_model_connect.families.flux.model.components.t5_encoder",
             load_t5_weights=lambda *_args, **_kwargs: {},
             build_t5_encoder_engine=lambda *_args, **_kwargs: b"t5-plan",
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.clip_encoder_builder",
+        "tensorrt_model_connect.families.flux.model.components.clip_encoder",
         _module(
-            "tensorrt_model_connect.families.flux.clip_encoder_builder",
+            "tensorrt_model_connect.families.flux.model.components.clip_encoder",
             load_clip_weights=lambda *_args, **_kwargs: {},
             build_clip_encoder_engine=lambda *_args, **_kwargs: b"clip-plan",
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_dit_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux",
         _module(
-            "tensorrt_model_connect.families.flux.flux_dit_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux",
             load_flux_dit_weights=load_flux_dit_weights,
             build_flux_dit_engine=build_flux_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_dit_tp_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux_parallel",
         _module(
-            "tensorrt_model_connect.families.flux.flux_dit_tp_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux_parallel",
             build_flux_dit_engine=build_flux_dit_tp_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_vae_builder",
+        "tensorrt_model_connect.families.flux.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.flux.flux_vae_builder",
+            "tensorrt_model_connect.families.flux.model.components.vae",
             build_flux_vae_decoder_engine=build_flux_vae_decoder_engine,
         ),
     )
@@ -411,44 +412,44 @@ def test_build_components_treats_text_encoder_as_t5_when_not_clip(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.t5_encoder_builder",
+        "tensorrt_model_connect.families.flux.model.components.t5_encoder",
         _module(
-            "tensorrt_model_connect.families.flux.t5_encoder_builder",
+            "tensorrt_model_connect.families.flux.model.components.t5_encoder",
             load_t5_weights=load_t5_weights,
             build_t5_encoder_engine=build_t5_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.clip_encoder_builder",
+        "tensorrt_model_connect.families.flux.model.components.clip_encoder",
         _module(
-            "tensorrt_model_connect.families.flux.clip_encoder_builder",
+            "tensorrt_model_connect.families.flux.model.components.clip_encoder",
             load_clip_weights=load_clip_weights,
             build_clip_encoder_engine=lambda *_a, **_k: b"clip-plan",
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_dit_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux",
         _module(
-            "tensorrt_model_connect.families.flux.flux_dit_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux",
             load_flux_dit_weights=lambda *_a, **_k: {"dit": np.array([2], dtype=np.float32)},
             build_flux_dit_engine=lambda *_a, **_k: b"dit-plan",
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_dit_tp_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux_parallel",
         _module(
-            "tensorrt_model_connect.families.flux.flux_dit_tp_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux_parallel",
             build_flux_dit_engine=lambda *_a, **_k: b"unused-tp-dit-plan",
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_vae_builder",
+        "tensorrt_model_connect.families.flux.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.flux.flux_vae_builder",
+            "tensorrt_model_connect.families.flux.model.components.vae",
             build_flux_vae_decoder_engine=lambda *_a, **_k: b"vae-plan",
         ),
     )
@@ -506,35 +507,35 @@ def test_build_flux2_components_forwards_precision_to_mistral(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+        "tensorrt_model_connect.families.flux.model.components.mistral_encoder",
         _module(
-            "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+            "tensorrt_model_connect.families.flux.model.components.mistral_encoder",
             load_mistral_encoder_weights=load_mistral_encoder_weights,
             build_mistral_encoder_engine=build_mistral_encoder_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux2_dit_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux2",
         _module(
-            "tensorrt_model_connect.families.flux.flux2_dit_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux2",
             load_flux2_dit_weights=load_flux2_dit_weights,
             build_flux2_dit_engine=build_flux2_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux2_parallel",
         _module(
-            "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux2_parallel",
             build_flux2_dit_engine=lambda *_a, **_k: b"unused-tp-dit-plan",
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_vae_builder",
+        "tensorrt_model_connect.families.flux.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.flux.flux_vae_builder",
+            "tensorrt_model_connect.families.flux.model.components.vae",
             build_flux_vae_decoder_engine=build_flux_vae_decoder_engine,
         ),
     )
@@ -622,35 +623,35 @@ def test_build_flux2_components_builds_rank_local_dit_for_tp(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+        "tensorrt_model_connect.families.flux.model.components.mistral_encoder",
         _module(
-            "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+            "tensorrt_model_connect.families.flux.model.components.mistral_encoder",
             load_mistral_encoder_weights=lambda *_a, **_k: {},
             build_mistral_encoder_engine=lambda *_a, **_k: b"mistral-plan",
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux2_dit_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux2",
         _module(
-            "tensorrt_model_connect.families.flux.flux2_dit_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux2",
             load_flux2_dit_weights=load_flux2_dit_weights,
             build_flux2_dit_engine=build_flux2_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux2_parallel",
         _module(
-            "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux2_parallel",
             build_flux2_dit_engine=build_flux2_dit_tp_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_vae_builder",
+        "tensorrt_model_connect.families.flux.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.flux.flux_vae_builder",
+            "tensorrt_model_connect.families.flux.model.components.vae",
             build_flux_vae_decoder_engine=lambda *_a, **_k: b"vae-plan",
         ),
     )
@@ -740,35 +741,35 @@ def test_build_flux2_components_builds_rank_local_fp8_dit_for_tp(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+        "tensorrt_model_connect.families.flux.model.components.mistral_encoder",
         _module(
-            "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+            "tensorrt_model_connect.families.flux.model.components.mistral_encoder",
             load_mistral_encoder_weights=lambda *_a, **_k: {},
             build_mistral_encoder_engine=lambda *_a, **_k: b"mistral-plan",
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux2_dit_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux2",
         _module(
-            "tensorrt_model_connect.families.flux.flux2_dit_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux2",
             load_flux2_dit_weights=load_flux2_dit_weights,
             build_flux2_dit_engine=build_flux2_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux2_parallel",
         _module(
-            "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux2_parallel",
             build_flux2_dit_engine=build_flux2_dit_tp_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_vae_builder",
+        "tensorrt_model_connect.families.flux.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.flux.flux_vae_builder",
+            "tensorrt_model_connect.families.flux.model.components.vae",
             build_flux_vae_decoder_engine=lambda *_a, **_k: b"vae-plan",
         ),
     )
@@ -837,9 +838,9 @@ def test_build_flux2_components_forwards_fp8_scales_to_dit_loader(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+        "tensorrt_model_connect.families.flux.model.components.mistral_encoder",
         _module(
-            "tensorrt_model_connect.families.flux.mistral_encoder_builder",
+            "tensorrt_model_connect.families.flux.model.components.mistral_encoder",
             load_mistral_encoder_weights=lambda *_a, **_k: {},
             build_mistral_encoder_engine=lambda *_a, **_k: b"mistral-plan",
         ),
@@ -855,26 +856,26 @@ def test_build_flux2_components_forwards_fp8_scales_to_dit_loader(
 
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux2_dit_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux2",
         _module(
-            "tensorrt_model_connect.families.flux.flux2_dit_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux2",
             load_flux2_dit_weights=load_flux2_dit_weights,
             build_flux2_dit_engine=build_flux2_dit_engine,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+        "tensorrt_model_connect.families.flux.model.components.flux2_parallel",
         _module(
-            "tensorrt_model_connect.families.flux.flux2_dit_tp_builder",
+            "tensorrt_model_connect.families.flux.model.components.flux2_parallel",
             build_flux2_dit_engine=lambda *_a, **_k: b"unused-tp-dit-plan",
         ),
     )
     monkeypatch.setitem(
         sys.modules,
-        "tensorrt_model_connect.families.flux.flux_vae_builder",
+        "tensorrt_model_connect.families.flux.model.components.vae",
         _module(
-            "tensorrt_model_connect.families.flux.flux_vae_builder",
+            "tensorrt_model_connect.families.flux.model.components.vae",
             build_flux_vae_decoder_engine=lambda *_a, **_k: b"vae-plan",
         ),
     )
@@ -943,18 +944,18 @@ def test_flux2_mha_forwards_fp8_attention_scales(
     monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
     sys.modules.pop("tensorrt_model_connect.graph_ops", None)
     sys.modules.pop(
-        "tensorrt_model_connect.families.flux.flux2_dit_builder", None)
+        "tensorrt_model_connect.families.flux.model.components.flux2", None)
 
     def _cleanup_trt_imports() -> None:
         import tensorrt_model_connect.trt_compat as trt_compat
         trt_compat._module = None
         sys.modules.pop("tensorrt_model_connect.graph_ops", None)
         sys.modules.pop(
-            "tensorrt_model_connect.families.flux.flux2_dit_builder", None)
+            "tensorrt_model_connect.families.flux.model.components.flux2", None)
 
     request.addfinalizer(_cleanup_trt_imports)
 
-    import tensorrt_model_connect.families.flux.flux2_dit_builder as flux2_builder
+    import tensorrt_model_connect.families.flux.model.components.flux2 as flux2_builder
 
     calls: dict[str, object] = {}
 

@@ -20,11 +20,11 @@ Both TRT BF16 and torch.compile produce visually identical cat images.
 
 Usage (inside container):
     # Benchmark denoiser only (requires pre-built bundle):
-    python -m tensorrt_model_connect.families.flux.bench_flux2_perf --bundle /tmp/flux2_bf16.trtfb
+    python -m tools.families.flux.bench_flux2_perf --bundle /tmp/flux2_bf16.trtfb
 
     # Full comparison including torch baselines:
     LD_PRELOAD="/usr/local/cuda/lib64/libcublas.so.13:/usr/local/cuda/lib64/libcublasLt.so.13" \\
-    python -m tensorrt_model_connect.families.flux.bench_flux2_perf \\
+    python -m tools.families.flux.bench_flux2_perf \\
         --bundle /tmp/flux2_bf16.trtfb \\
         --output-dir /tmp/flux2_bench \\
         --backends torch_eager torch_compile trt_denoiser

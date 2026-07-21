@@ -43,12 +43,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
+from .. import model as graph_ops
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
+    from ...weights import WeightDict
 
 
 # --- Helpers for STRONGLY_TYPED reduced-precision networks ---
@@ -84,14 +84,6 @@ def _to_fp32(network, tensor):
     if tensor.dtype == trt.float32:
         return tensor
     return network.add_cast(tensor, trt.float32).get_output(0)
-
-
-def _np_reduced_dtype():
-    """Get numpy dtype matching _CAST_DTYPE."""
-    if _CAST_DTYPE == trt.bfloat16:
-        import ml_dtypes
-        return ml_dtypes.bfloat16
-    return np.float16
 
 
 def _fp16_compute() -> bool:
@@ -697,22 +689,6 @@ def build_flux2_dit_engine(
     return bytes(plan)
 
 
-# ============================================================================
-# Helper functions
-# ============================================================================
-
-def _matmul_bias_1d(network, inp, in_dim, out_dim, weight, bias):
-    """Matmul + bias for 1D input: [in_dim] -> [out_dim]."""
-    inp_2d = network.add_shuffle(inp)
-    inp_2d.reshape_dims = (1, in_dim)
-    out = graph_ops.add_matmul_rhs_constant(
-        network, inp_2d.get_output(0), in_dim, out_dim, weight)
-    out = graph_ops.add_bias_sum(network, out, out_dim, bias)
-    flat = network.add_shuffle(out)
-    flat.reshape_dims = (out_dim,)
-    return flat.get_output(0)
-
-
 def _matmul_bias_1d_opt(network, inp, in_dim, out_dim, weight, bias=None):
     """Matmul + optional bias for 1D input: [in_dim] -> [out_dim]."""
     inp_2d = network.add_shuffle(inp)
@@ -995,7 +971,7 @@ def load_flux2_dit_weights(
     import os
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
-    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
+    from ...weights import WeightDict, _open_safetensors, _load_tensor, _has_tensor
 
     readers = _open_safetensors(Path(model_dir))
     weights = WeightDict()

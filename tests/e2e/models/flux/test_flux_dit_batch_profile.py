@@ -22,7 +22,9 @@ from __future__ import annotations
 import pytest
 
 try:
-    from tensorrt_model_connect.families.flux import flux_dit_builder
+    from tensorrt_model_connect.families.flux.model.components import (
+        flux as flux_dit_builder,
+    )
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt",
                 allow_module_level=True)
@@ -200,5 +202,4 @@ def test_batched_path_attaches_profile_with_expected_shapes(monkeypatch):
     assert by_name["temb"] == (-1, dim)
     assert by_name["rotary_cos"] == (-1, total_seq, head_dim)
     assert by_name["rotary_sin"] == (-1, total_seq, head_dim)
-
 

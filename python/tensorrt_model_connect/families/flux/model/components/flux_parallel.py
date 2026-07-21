@@ -30,8 +30,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from ...parallel_config import (
+from .. import model as graph_ops
+from .....parallel_config import (
     ParallelConfig,
     _slice_first_dim,
     _slice_last_dim,
@@ -43,7 +43,7 @@ from ...parallel_config import (
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
+    from ...weights import WeightDict
 
 
 def build_flux_dit_engine(
@@ -396,16 +396,6 @@ def _layernorm_modulate(network, x, scale, shift, dim, eps_t, seq_len):
     return _adaln_modulate(network, x, scale, shift, dim, eps_t, seq_len)
 
 
-def _linear(network, inp, in_dim, out_dim, weights, prefix):
-    """Linear projection with optional bias."""
-    out = graph_ops.add_matmul_rhs_constant(
-        network, inp, in_dim, out_dim, weights[f"{prefix}.weight"])
-    b = weights.get(f"{prefix}.bias")
-    if b is not None:
-        out = graph_ops.add_bias_sum(network, out, out_dim, b)
-    return out
-
-
 def _linear_col_parallel(
     network,
     inp,
@@ -555,155 +545,3 @@ def _gelu_ffn(network, inp, dim, weights, prefix, parallel: ParallelConfig):
     if fc2_b is not None:
         fc2 = graph_ops.add_bias_sum(network, fc2, dim, fc2_b)
     return fc2
-
-
-def load_flux_dit_weights(
-    model_dir: str,
-    *,
-    dim: int = 3072,
-    num_heads: int = 24,
-    num_layers: int = 19,
-    num_single_layers: int = 38,
-) -> "WeightDict":
-    """Load FLUX DiT weights from diffusers-format transformer directory."""
-    from pathlib import Path
-    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor, _has_tensor
-
-    readers = _open_safetensors(Path(model_dir))
-    weights = WeightDict()
-
-    def _t(name):
-        w = _load_tensor(readers, name)
-        return np.ascontiguousarray(w.T, dtype=np.float32)
-
-    def _f(name):
-        return _load_tensor(readers, name).astype(np.float32)
-
-    def _maybe_f(name):
-        if _has_tensor(readers, name):
-            return _f(name)
-        return None
-
-    def _maybe_t(name):
-        if _has_tensor(readers, name):
-            return _t(name)
-        return None
-
-    # --- Joint transformer blocks ---
-    for i in range(num_layers):
-        p = f"transformer_blocks.{i}"
-        # AdaLN norms
-        weights[f"{p}.norm1.linear.weight"] = _t(f"{p}.norm1.linear.weight")
-        weights[f"{p}.norm1.linear.bias"] = _f(f"{p}.norm1.linear.bias")
-        weights[f"{p}.norm1_context.linear.weight"] = _t(f"{p}.norm1_context.linear.weight")
-        weights[f"{p}.norm1_context.linear.bias"] = _f(f"{p}.norm1_context.linear.bias")
-
-        # Attention projections (image)
-        for proj in ("to_q", "to_k", "to_v"):
-            weights[f"{p}.attn.{proj}.weight"] = _t(f"{p}.attn.{proj}.weight")
-            b = _maybe_f(f"{p}.attn.{proj}.bias")
-            if b is not None:
-                weights[f"{p}.attn.{proj}.bias"] = b
-        weights[f"{p}.attn.to_out.0.weight"] = _t(f"{p}.attn.to_out.0.weight")
-        b = _maybe_f(f"{p}.attn.to_out.0.bias")
-        if b is not None:
-            weights[f"{p}.attn.to_out.0.bias"] = b
-
-        # Attention projections (text "added")
-        for proj in ("add_q_proj", "add_k_proj", "add_v_proj"):
-            weights[f"{p}.attn.{proj}.weight"] = _t(f"{p}.attn.{proj}.weight")
-            b = _maybe_f(f"{p}.attn.{proj}.bias")
-            if b is not None:
-                weights[f"{p}.attn.{proj}.bias"] = b
-        weights[f"{p}.attn.to_add_out.weight"] = _t(f"{p}.attn.to_add_out.weight")
-        b = _maybe_f(f"{p}.attn.to_add_out.bias")
-        if b is not None:
-            weights[f"{p}.attn.to_add_out.bias"] = b
-
-        # QK norms
-        for norm in ("norm_q", "norm_k", "norm_added_q", "norm_added_k"):
-            w = _maybe_f(f"{p}.attn.{norm}.weight")
-            if w is not None:
-                weights[f"{p}.attn.{norm}.weight"] = w
-
-        # FFN (image)
-        weights[f"{p}.ff.net.0.proj.weight"] = _t(f"{p}.ff.net.0.proj.weight")
-        b = _maybe_f(f"{p}.ff.net.0.proj.bias")
-        if b is not None:
-            weights[f"{p}.ff.net.0.proj.bias"] = b
-        weights[f"{p}.ff.net.2.weight"] = _t(f"{p}.ff.net.2.weight")
-        b = _maybe_f(f"{p}.ff.net.2.bias")
-        if b is not None:
-            weights[f"{p}.ff.net.2.bias"] = b
-
-        # FFN (text context)
-        weights[f"{p}.ff_context.net.0.proj.weight"] = _t(f"{p}.ff_context.net.0.proj.weight")
-        b = _maybe_f(f"{p}.ff_context.net.0.proj.bias")
-        if b is not None:
-            weights[f"{p}.ff_context.net.0.proj.bias"] = b
-        weights[f"{p}.ff_context.net.2.weight"] = _t(f"{p}.ff_context.net.2.weight")
-        b = _maybe_f(f"{p}.ff_context.net.2.bias")
-        if b is not None:
-            weights[f"{p}.ff_context.net.2.bias"] = b
-
-    # --- Single transformer blocks ---
-    for i in range(num_single_layers):
-        p = f"single_transformer_blocks.{i}"
-        weights[f"{p}.norm.linear.weight"] = _t(f"{p}.norm.linear.weight")
-        weights[f"{p}.norm.linear.bias"] = _f(f"{p}.norm.linear.bias")
-
-        for proj in ("to_q", "to_k", "to_v"):
-            weights[f"{p}.attn.{proj}.weight"] = _t(f"{p}.attn.{proj}.weight")
-            b = _maybe_f(f"{p}.attn.{proj}.bias")
-            if b is not None:
-                weights[f"{p}.attn.{proj}.bias"] = b
-
-        for norm in ("norm_q", "norm_k"):
-            w = _maybe_f(f"{p}.attn.{norm}.weight")
-            if w is not None:
-                weights[f"{p}.attn.{norm}.weight"] = w
-
-        weights[f"{p}.proj_mlp.weight"] = _t(f"{p}.proj_mlp.weight")
-        b = _maybe_f(f"{p}.proj_mlp.bias")
-        if b is not None:
-            weights[f"{p}.proj_mlp.bias"] = b
-
-        weights[f"{p}.proj_out.weight"] = _t(f"{p}.proj_out.weight")
-        b = _maybe_f(f"{p}.proj_out.bias")
-        if b is not None:
-            weights[f"{p}.proj_out.bias"] = b
-
-    # --- Global ---
-    weights["norm_out.linear.weight"] = _t("norm_out.linear.weight")
-    weights["norm_out.linear.bias"] = _f("norm_out.linear.bias")
-    weights["proj_out.weight"] = _t("proj_out.weight")
-    b = _maybe_f("proj_out.bias")
-    if b is not None:
-        weights["proj_out.bias"] = b
-
-    # Preprocessor weights (external to TRT engine)
-    weights["x_embedder.weight"] = _t("x_embedder.weight")
-    weights["x_embedder.bias"] = _f("x_embedder.bias")
-    weights["context_embedder.weight"] = _t("context_embedder.weight")
-    weights["context_embedder.bias"] = _f("context_embedder.bias")
-
-    # Time-text embedding MLPs
-    for comp in ("timestep_embedder", "text_embedder"):
-        for layer in ("linear_1", "linear_2"):
-            key = f"time_text_embed.{comp}.{layer}"
-            if _has_tensor(readers, f"{key}.weight"):
-                weights[f"{key}.weight"] = _t(f"{key}.weight")
-                b = _maybe_f(f"{key}.bias")
-                if b is not None:
-                    weights[f"{key}.bias"] = b
-
-    # Guidance embedder (optional, only for FLUX.1-dev / guidance_embeds=True)
-    for layer in ("linear_1", "linear_2"):
-        key = f"time_text_embed.guidance_embedder.{layer}"
-        if _has_tensor(readers, f"{key}.weight"):
-            weights[f"{key}.weight"] = _t(f"{key}.weight")
-            b = _maybe_f(f"{key}.bias")
-            if b is not None:
-                weights[f"{key}.bias"] = b
-
-    return weights

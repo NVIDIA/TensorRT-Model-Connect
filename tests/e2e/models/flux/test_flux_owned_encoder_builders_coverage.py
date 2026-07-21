@@ -295,7 +295,7 @@ def test_build_clip_encoder_engine_success_uses_fake_builder_and_marks_outputs(m
     Postconditions: Engine bytes are returned, config flags are set, and both outputs are marked.
     """
     fake_trt = _make_fake_trt()
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.clip_encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.model.components.clip_encoder", fake_trt)
 
     constant_payloads: list[tuple[tuple[int, ...], np.ndarray]] = []
 
@@ -304,9 +304,10 @@ def test_build_clip_encoder_engine_success_uses_fake_builder_and_marks_outputs(m
         return _FakeTensor(f"const_{len(constant_payloads)}")
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_add_constant)
-    monkeypatch.setattr(mod.graph_ops, "add_layer_norm", _fake_tensor_fn("ln"))
+    monkeypatch.setattr(mod.graph_ops, "add_layer_norm_native", _fake_tensor_fn("ln"))
     monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", _fake_tensor_fn("mm"))
     monkeypatch.setattr(mod.graph_ops, "add_bias_sum", _fake_tensor_fn("bias"))
+    monkeypatch.setattr(mod.graph_ops, "add_attention_from_rows", _fake_tensor_fn("attention"))
 
     plan = mod.build_clip_encoder_engine(
         _make_clip_weights(hidden=4, intermediate=8, vocab=16, seq_len=3, num_layers=1),
@@ -337,12 +338,13 @@ def test_build_clip_encoder_engine_raises_when_builder_returns_none(monkeypatch:
     """
     fake_trt = _make_fake_trt()
     fake_trt.Builder.plan_to_return = None
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.clip_encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.model.components.clip_encoder", fake_trt)
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
-    monkeypatch.setattr(mod.graph_ops, "add_layer_norm", _fake_tensor_fn("ln"))
+    monkeypatch.setattr(mod.graph_ops, "add_layer_norm_native", _fake_tensor_fn("ln"))
     monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", _fake_tensor_fn("mm"))
     monkeypatch.setattr(mod.graph_ops, "add_bias_sum", _fake_tensor_fn("bias"))
+    monkeypatch.setattr(mod.graph_ops, "add_attention_from_rows", _fake_tensor_fn("attention"))
 
     with pytest.raises(RuntimeError, match="CLIP encoder"):
         mod.build_clip_encoder_engine(
@@ -364,7 +366,7 @@ def test_load_clip_weights_transposes_projection_matrices_and_keeps_biases() -> 
     Postconditions: Projection matrices are transposed while scalar/vector tensors remain untransformed float32.
     """
     fake_trt = _make_fake_trt()
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.clip_encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.model.components.clip_encoder", fake_trt)
 
     tensors: dict[str, np.ndarray] = {
         "text_model.embeddings.token_embedding.weight": np.arange(32, dtype=np.float32).reshape(8, 4),
@@ -389,7 +391,7 @@ def test_load_clip_weights_transposes_projection_matrices_and_keeps_biases() -> 
         tensors[f"{p}.mlp.fc2.weight"] = np.arange(24, dtype=np.float32).reshape(4, 6) + layer
         tensors[f"{p}.mlp.fc2.bias"] = np.arange(4, dtype=np.float32) + layer
 
-    cm = importlib.import_module("tensorrt_model_connect.families.flux.checkpoint_mapper")
+    cm = importlib.import_module("tensorrt_model_connect.families.flux.weights")
 
     with patch.object(cm, "_open_safetensors", lambda _path: tensors), patch.object(
         cm, "_load_tensor", lambda readers, name: readers[name]
@@ -419,7 +421,7 @@ def test_build_t5_encoder_engine_success_exercises_relative_bias_fallback(monkey
     Postconditions: Engine bytes are returned and each layer emits the expected derived bias constant.
     """
     fake_trt = _make_fake_trt()
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.t5_encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.model.components.t5_encoder", fake_trt)
 
     bucket_indices = np.array([[0, 1], [2, 3]], dtype=np.int32)
     constant_payloads: list[tuple[tuple[int, ...], np.ndarray]] = []
@@ -433,6 +435,7 @@ def test_build_t5_encoder_engine_success_exercises_relative_bias_fallback(monkey
     monkeypatch.setattr(mod.graph_ops, "add_rms_norm", _fake_tensor_fn("rms"))
     monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", _fake_tensor_fn("mm"))
     monkeypatch.setattr(mod.graph_ops, "add_gelu_new", _fake_tensor_fn("gelu"))
+    monkeypatch.setattr(mod.graph_ops, "add_attention_from_rows", _fake_tensor_fn("attention"))
 
     weights = _make_t5_weights(
         d_model=4,
@@ -484,13 +487,14 @@ def test_build_t5_encoder_engine_raises_when_builder_returns_none(monkeypatch: p
     """
     fake_trt = _make_fake_trt()
     fake_trt.Builder.plan_to_return = None
-    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.t5_encoder_builder", fake_trt)
+    mod = _import_with_fake_trt("tensorrt_model_connect.families.flux.model.components.t5_encoder", fake_trt)
 
     monkeypatch.setattr(mod.graph_ops, "add_constant", _fake_tensor_fn("const"))
     monkeypatch.setattr(mod.graph_ops, "make_t5_relative_position_bias", lambda *_a, **_k: np.zeros((2, 2), dtype=np.int32))
     monkeypatch.setattr(mod.graph_ops, "add_rms_norm", _fake_tensor_fn("rms"))
     monkeypatch.setattr(mod.graph_ops, "add_matmul_rhs_constant", _fake_tensor_fn("mm"))
     monkeypatch.setattr(mod.graph_ops, "add_gelu_new", _fake_tensor_fn("gelu"))
+    monkeypatch.setattr(mod.graph_ops, "add_attention_from_rows", _fake_tensor_fn("attention"))
 
     with pytest.raises(RuntimeError, match="T5 encoder"):
         mod.build_t5_encoder_engine(
@@ -511,7 +515,7 @@ def test_load_t5_weights_transposes_and_bias_fallback() -> None:
     """Verify Flux's T5 loader owns its transforms and layer-0 bias fallback."""
     fake_trt = _make_fake_trt()
     mod = _import_with_fake_trt(
-        "tensorrt_model_connect.families.flux.t5_encoder_builder", fake_trt
+        "tensorrt_model_connect.families.flux.model.components.t5_encoder", fake_trt
     )
 
     tensors: dict[str, np.ndarray] = {
@@ -545,7 +549,7 @@ def test_load_t5_weights_transposes_and_bias_fallback() -> None:
         )
 
     checkpoint_mapper = importlib.import_module(
-        "tensorrt_model_connect.families.flux.checkpoint_mapper"
+        "tensorrt_model_connect.families.flux.weights"
     )
 
     def load(precision: str = "fp32"):

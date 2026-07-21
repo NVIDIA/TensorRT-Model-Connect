@@ -22,12 +22,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
+from .. import model as graph_ops
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
+    from ...weights import WeightDict
 
 
 def build_clip_encoder_engine(
@@ -209,7 +209,7 @@ def load_clip_weights(
 ) -> "WeightDict":
     """Load CLIP text encoder weights from safetensors."""
     from pathlib import Path
-    from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor
+    from ...weights import WeightDict, _open_safetensors, _load_tensor
 
     readers = _open_safetensors(Path(model_dir))
     weights = WeightDict()
