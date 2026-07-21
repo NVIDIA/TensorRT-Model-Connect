@@ -57,9 +57,9 @@ def _weights() -> WeightDict:
 
 
 def test_olmo2_tp_shards_post_norm_decoder_weights() -> None:
-    from tensorrt_model_connect.families.olmo2 import tp_builder
+    from tensorrt_model_connect.families.olmo2.model import parallel
 
-    sharded = tp_builder.shard_olmo2_weights(
+    sharded = parallel.shard_olmo2_weights(
         _Config(),
         _weights(),
         parallel=ParallelConfig(mode="tensor_parallel", tp_size=4, rank=2),
@@ -84,10 +84,10 @@ def test_olmo2_tp_shards_post_norm_decoder_weights() -> None:
 
 
 def test_olmo2_tp_builder_rejects_single_device_mode() -> None:
-    from tensorrt_model_connect.families.olmo2 import tp_builder
+    from tensorrt_model_connect.families.olmo2.model import parallel
 
     with pytest.raises(ValueError, match="requires tensor_parallel"):
-        tp_builder.build_olmo2_tp_engine(
+        parallel.build_olmo2_tp_engine(
             _Config(),
             _weights(),
             max_cache_length=4,
@@ -98,7 +98,7 @@ def test_olmo2_tp_builder_rejects_single_device_mode() -> None:
 def test_olmo2_plugin_routes_parallel_builds(monkeypatch) -> None:
     plugin_module = importlib.import_module(
         "tensorrt_model_connect.families.olmo2.plugin")
-    from tensorrt_model_connect.families.olmo2 import tp_builder
+    from tensorrt_model_connect.families.olmo2.model import parallel
 
     calls = {}
 
@@ -116,7 +116,7 @@ def test_olmo2_plugin_routes_parallel_builds(monkeypatch) -> None:
 
     monkeypatch.setattr(
         plugin_module, "require_tensorrt_11_for_tensor_parallel", fake_require)
-    monkeypatch.setattr(tp_builder, "build_olmo2_tp_engine", fake_build)
+    monkeypatch.setattr(parallel, "build_olmo2_tp_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
     result = plugin_module.plugin.build_engine(

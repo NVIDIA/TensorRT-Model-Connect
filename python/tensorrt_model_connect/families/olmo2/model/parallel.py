@@ -6,26 +6,25 @@
 from __future__ import annotations
 
 import sys
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from . import graph_blocks
-from . import graph_ops
-from .checkpoint_mapper import WeightDict
-from ...parallel_config import (
+from . import model as graph_blocks
+from . import model as graph_ops
+from ..weights import WeightDict
+from ....parallel_config import (
     add_all_reduce_sum,
     normalize_parallel_config,
     shard_standard_decoder_weights,
 )
 
 if TYPE_CHECKING:
-    from .config import ModelConfig
-    from ...parallel_config import ParallelConfig
+    from ....parallel_config import ParallelConfig
 
 
 def shard_olmo2_weights(
-    config: "ModelConfig",
+    config: Any,
     weights: WeightDict,
     *,
     parallel: "ParallelConfig",
@@ -80,7 +79,7 @@ def _add_distributed_rms_norm(
 
 
 def build_olmo2_tp_engine(
-    config: "ModelConfig",
+    config: Any,
     weights: WeightDict,
     max_cache_length: int,
     *,

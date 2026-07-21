@@ -27,8 +27,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -51,7 +50,7 @@ class Olmo2Plugin:
     runtime_capabilities = {"decoder_kv"}
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self, model_dir: str, config,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -146,7 +145,7 @@ class Olmo2Plugin:
         return weights
 
     def build_engine(
-        self, config: ModelConfig, weights: WeightDict,
+        self, config, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         verbose: bool = False,
         debug_layer_outputs: bool = False,
@@ -157,7 +156,7 @@ class Olmo2Plugin:
         if parallel.enabled:
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="OLMo2 tensor-parallel builds")
-            from .tp_builder import build_olmo2_tp_engine
+            from .model.parallel import build_olmo2_tp_engine
             return build_olmo2_tp_engine(
                 config, weights, max_cache_length,
                 verbose=verbose,
@@ -166,8 +165,8 @@ class Olmo2Plugin:
         import sys
         from tensorrt_model_connect import trt_compat
         trt = trt_compat.get_trt()
-        from . import graph_ops
-        from . import graph_blocks
+        from .model import model as graph_ops
+        from .model import model as graph_blocks
 
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
