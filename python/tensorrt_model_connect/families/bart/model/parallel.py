@@ -20,16 +20,15 @@ from typing import TYPE_CHECKING
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from . import graph_ops
-from ...parallel_config import add_all_reduce_sum, normalize_parallel_config
-from .plugin import _mark_debug_output
+from . import model as graph_ops
+from ....parallel_config import add_all_reduce_sum, normalize_parallel_config
+from ..plugin import _mark_debug_output
 
 trt = trt_compat.get_trt()
 
 if TYPE_CHECKING:
-    from .checkpoint_mapper import WeightDict
-    from .config import ModelConfig
-    from ...parallel_config import ParallelConfig
+    from ..weights import WeightDict
+    from ....parallel_config import ParallelConfig
 
 
 def _slice_last_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
@@ -41,7 +40,7 @@ def _slice_first_dim(arr: np.ndarray, rank: int, tp_size: int) -> np.ndarray:
 
 
 def _validate_bart_tp(
-    config: "ModelConfig",
+    config,
     weights: "WeightDict",
     parallel: "ParallelConfig",
 ) -> None:
@@ -57,25 +56,35 @@ def _validate_bart_tp(
     dec_ffn = int(weights["_dec_ffn"])
     if hidden % tp != 0:
         raise ValueError(
-            "BART tensor parallel requires hidden size divisible by tp_size "
-            f"({hidden} vs {tp})")
+            f"BART tensor parallel requires hidden size divisible by tp_size ({hidden} vs {tp})"
+        )
     if dec_heads % tp != 0:
         raise ValueError(
             "BART tensor parallel requires decoder_attention_heads divisible by tp_size "
-            f"({dec_heads} vs {tp})")
+            f"({dec_heads} vs {tp})"
+        )
     if dec_ffn % tp != 0:
         raise ValueError(
             "BART tensor parallel requires decoder_ffn_dim divisible by tp_size "
-            f"({dec_ffn} vs {tp})")
+            f"({dec_ffn} vs {tp})"
+        )
 
     column_keys = (
-        ".w_q", ".w_k", ".w_v",
-        ".cross_w_q", ".cross_w_k", ".cross_w_v",
+        ".w_q",
+        ".w_k",
+        ".w_v",
+        ".cross_w_q",
+        ".cross_w_k",
+        ".cross_w_v",
         ".w_fc1",
     )
     column_biases = (
-        ".q_bias", ".k_bias", ".v_bias",
-        ".cross_b_q", ".cross_b_k", ".cross_b_v",
+        ".q_bias",
+        ".k_bias",
+        ".v_bias",
+        ".cross_b_q",
+        ".cross_b_k",
+        ".cross_b_v",
         ".fc1_bias",
     )
     row_keys = (".w_o", ".cross_w_o", ".w_fc2")
@@ -111,14 +120,24 @@ def shard_bart_decoder_weights(
         if not isinstance(value, np.ndarray):
             out[key] = value
             continue
-        if key.endswith((
-            ".w_q", ".w_k", ".w_v",
-            ".cross_w_q", ".cross_w_k", ".cross_w_v",
-            ".w_fc1",
-            ".q_bias", ".k_bias", ".v_bias",
-            ".cross_b_q", ".cross_b_k", ".cross_b_v",
-            ".fc1_bias",
-        )):
+        if key.endswith(
+            (
+                ".w_q",
+                ".w_k",
+                ".w_v",
+                ".cross_w_q",
+                ".cross_w_k",
+                ".cross_w_v",
+                ".w_fc1",
+                ".q_bias",
+                ".k_bias",
+                ".v_bias",
+                ".cross_b_q",
+                ".cross_b_k",
+                ".cross_b_v",
+                ".fc1_bias",
+            )
+        ):
             out[key] = _slice_last_dim(value, rank, tp)
         elif key.endswith((".w_o", ".cross_w_o", ".w_fc2")):
             out[key] = _slice_first_dim(value, rank, tp)
@@ -161,21 +180,24 @@ def _add_bart_tp_decoder_layer(
     q = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(
-            network, hidden, hidden_size, local_attention_size, weights[f"{prefix}.w_q"]),
+            network, hidden, hidden_size, local_attention_size, weights[f"{prefix}.w_q"]
+        ),
         local_attention_size,
         weights[f"{prefix}.q_bias"],
     )
     k = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(
-            network, hidden, hidden_size, local_attention_size, weights[f"{prefix}.w_k"]),
+            network, hidden, hidden_size, local_attention_size, weights[f"{prefix}.w_k"]
+        ),
         local_attention_size,
         weights[f"{prefix}.k_bias"],
     )
     v = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(
-            network, hidden, hidden_size, local_attention_size, weights[f"{prefix}.w_v"]),
+            network, hidden, hidden_size, local_attention_size, weights[f"{prefix}.w_v"]
+        ),
         local_attention_size,
         weights[f"{prefix}.v_bias"],
     )
@@ -193,85 +215,110 @@ def _add_bart_tp_decoder_layer(
     m4 = network.add_shuffle(attention_mask)
     m4.reshape_dims = (1, 1, 1, attention_window)
     cf = graph_ops.add_attention_from_rows(
-        network, q, ak.get_output(0), av.get_output(0),
-        num_heads=local_heads, head_dim=head_dim,
-        q_seq=1, kv_seq=attention_window,
-        mask=m4.get_output(0))
+        network,
+        q,
+        ak.get_output(0),
+        av.get_output(0),
+        num_heads=local_heads,
+        head_dim=head_dim,
+        q_seq=1,
+        kv_seq=attention_window,
+        mask=m4.get_output(0),
+    )
     sa = graph_ops.add_matmul_rhs_constant(
-        network, cf, local_attention_size, hidden_size, weights[f"{prefix}.w_o"])
-    sa = _add_row_parallel_bias(
-        network, sa, hidden_size, weights[f"{prefix}.o_bias"], tp_size)
+        network, cf, local_attention_size, hidden_size, weights[f"{prefix}.w_o"]
+    )
+    sa = _add_row_parallel_bias(network, sa, hidden_size, weights[f"{prefix}.o_bias"], tp_size)
 
     psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
     psa = graph_ops.add_layer_norm_native(
-        network, psa, hidden_size,
-        weights[f"{prefix}.input_norm"], weights[f"{prefix}.input_norm_beta"],
-        eps)
+        network,
+        psa,
+        hidden_size,
+        weights[f"{prefix}.input_norm"],
+        weights[f"{prefix}.input_norm_beta"],
+        eps,
+    )
 
     cq = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(
-            network, psa, hidden_size, local_attention_size,
-            weights[f"{prefix}.cross_w_q"]),
+            network, psa, hidden_size, local_attention_size, weights[f"{prefix}.cross_w_q"]
+        ),
         local_attention_size,
         weights[f"{prefix}.cross_b_q"],
     )
     ck_proj = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(
-            network, cross_k, hidden_size, local_attention_size,
-            weights[f"{prefix}.cross_w_k"]),
+            network, cross_k, hidden_size, local_attention_size, weights[f"{prefix}.cross_w_k"]
+        ),
         local_attention_size,
         weights[f"{prefix}.cross_b_k"],
     )
     cv_proj = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(
-            network, cross_v, hidden_size, local_attention_size,
-            weights[f"{prefix}.cross_w_v"]),
+            network, cross_v, hidden_size, local_attention_size, weights[f"{prefix}.cross_w_v"]
+        ),
         local_attention_size,
         weights[f"{prefix}.cross_b_v"],
     )
 
     ccf = graph_ops.add_attention_from_rows(
-        network, cq, ck_proj, cv_proj,
-        num_heads=local_heads, head_dim=head_dim,
-        q_seq=1, kv_seq=max_enc_seq)
+        network,
+        cq,
+        ck_proj,
+        cv_proj,
+        num_heads=local_heads,
+        head_dim=head_dim,
+        q_seq=1,
+        kv_seq=max_enc_seq,
+    )
     ca = graph_ops.add_matmul_rhs_constant(
-        network, ccf, local_attention_size, hidden_size, weights[f"{prefix}.cross_w_o"])
-    ca = _add_row_parallel_bias(
-        network, ca, hidden_size, weights[f"{prefix}.cross_b_o"], tp_size)
+        network, ccf, local_attention_size, hidden_size, weights[f"{prefix}.cross_w_o"]
+    )
+    ca = _add_row_parallel_bias(network, ca, hidden_size, weights[f"{prefix}.cross_b_o"], tp_size)
 
     pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
     pca = graph_ops.add_layer_norm_native(
-        network, pca, hidden_size,
+        network,
+        pca,
+        hidden_size,
         weights[f"{prefix}.cross_attn_norm"],
-        weights[f"{prefix}.cross_attn_norm_beta"], eps)
+        weights[f"{prefix}.cross_attn_norm_beta"],
+        eps,
+    )
 
     fc1 = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(
-            network, pca, hidden_size, local_ffn_dim, weights[f"{prefix}.w_fc1"]),
+            network, pca, hidden_size, local_ffn_dim, weights[f"{prefix}.w_fc1"]
+        ),
         local_ffn_dim,
         weights[f"{prefix}.fc1_bias"],
     )
-    act = graph_ops.add_activation(network, fc1, "gelu_new")
+    act = graph_ops.add_gelu_new(network, fc1)
     fc2 = graph_ops.add_matmul_rhs_constant(
-        network, act, local_ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"])
-    fc2 = _add_row_parallel_bias(
-        network, fc2, hidden_size, weights[f"{prefix}.fc2_bias"], tp_size)
+        network, act, local_ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"]
+    )
+    fc2 = _add_row_parallel_bias(network, fc2, hidden_size, weights[f"{prefix}.fc2_bias"], tp_size)
 
     out = network.add_elementwise(pca, fc2, trt.ElementWiseOperation.SUM).get_output(0)
     out = graph_ops.add_layer_norm_native(
-        network, out, hidden_size,
+        network,
+        out,
+        hidden_size,
         weights[f"{prefix}.post_attn_norm"],
-        weights[f"{prefix}.post_attn_norm_beta"], eps)
+        weights[f"{prefix}.post_attn_norm_beta"],
+        eps,
+    )
 
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
 
 
 def build_bart_tp_decoder_engine(
-    config: "ModelConfig",
+    config,
     weights: "WeightDict",
     max_cache_length: int,
     *,
@@ -283,7 +330,8 @@ def build_bart_tp_decoder_engine(
     parallel = normalize_parallel_config(parallel_config)
     if not parallel.enabled:
         raise ValueError(
-            "build_bart_tp_decoder_engine requires tensor_parallel mode with tp_size > 1")
+            "build_bart_tp_decoder_engine requires tensor_parallel mode with tp_size > 1"
+        )
     _validate_bart_tp(config, weights, parallel)
 
     rank_weights = shard_bart_decoder_weights(weights, parallel=parallel)
@@ -302,8 +350,7 @@ def build_bart_tp_decoder_engine(
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
     trt_config.clear_flag(trt.BuilderFlag.TF32)
@@ -314,24 +361,41 @@ def build_bart_tp_decoder_engine(
 
     cache_k_inputs, cache_v_inputs = [], []
     for layer_idx in range(dec_layers):
-        cache_k_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cache_k", layer_idx),
-            trt.float32, (max_cache_length, local_attention_size)))
-        cache_v_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cache_v", layer_idx),
-            trt.float32, (max_cache_length, local_attention_size)))
+        cache_k_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cache_k", layer_idx),
+                trt.float32,
+                (max_cache_length, local_attention_size),
+            )
+        )
+        cache_v_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cache_v", layer_idx),
+                trt.float32,
+                (max_cache_length, local_attention_size),
+            )
+        )
 
     cross_k_inputs, cross_v_inputs = [], []
     for layer_idx in range(dec_layers):
-        cross_k_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cross_k", layer_idx),
-            trt.float32, (max_enc_seq, hidden)))
-        cross_v_inputs.append(network.add_input(
-            graph_ops.layer_tensor_name("cross_v", layer_idx),
-            trt.float32, (max_enc_seq, hidden)))
+        cross_k_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cross_k", layer_idx),
+                trt.float32,
+                (max_enc_seq, hidden),
+            )
+        )
+        cross_v_inputs.append(
+            network.add_input(
+                graph_ops.layer_tensor_name("cross_v", layer_idx),
+                trt.float32,
+                (max_enc_seq, hidden),
+            )
+        )
 
     embedding_table = graph_ops.add_constant(
-        network, (vocab, hidden), rank_weights["shared_embedding"])
+        network, (vocab, hidden), rank_weights["shared_embedding"]
+    )
     pos_embed_np = rank_weights["dec_pos_embedding"]
     pos_embedding_table = graph_ops.add_constant(network, pos_embed_np.shape, pos_embed_np)
 
@@ -340,16 +404,22 @@ def build_bart_tp_decoder_engine(
     offset_layer = network.add_constant((1,), offset_weights)
     offset_const = offset_layer.get_output(0)
     offset_pos = network.add_elementwise(
-        position_id, offset_const, trt.ElementWiseOperation.SUM).get_output(0)
+        position_id, offset_const, trt.ElementWiseOperation.SUM
+    ).get_output(0)
     pos_embed = network.add_gather(pos_embedding_table, offset_pos, 0).get_output(0)
     hidden_state = network.add_elementwise(
-        tok_embed, pos_embed, trt.ElementWiseOperation.SUM).get_output(0)
+        tok_embed, pos_embed, trt.ElementWiseOperation.SUM
+    ).get_output(0)
 
     if normalize_embedding:
         hidden_state = graph_ops.add_layer_norm_native(
-            network, hidden_state, hidden,
-            rank_weights["dec_embed_norm"], rank_weights["dec_embed_norm_beta"],
-            config.rms_norm_eps)
+            network,
+            hidden_state,
+            hidden,
+            rank_weights["dec_embed_norm"],
+            rank_weights["dec_embed_norm_beta"],
+            config.rms_norm_eps,
+        )
 
     if debug_layer_outputs:
         _mark_debug_output(network, hidden_state, "debug_embed")
@@ -384,17 +454,15 @@ def build_bart_tp_decoder_engine(
             _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
 
     logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, vocab, rank_weights["w_out"])
-    logits = graph_ops.add_bias_sum(
-        network, logits, vocab, np.zeros(vocab, dtype=np.float32))
+        network, hidden_state, hidden, vocab, rank_weights["w_out"]
+    )
+    logits = graph_ops.add_bias_sum(network, logits, vocab, np.zeros(vocab, dtype=np.float32))
     logits.name = "logits"
     network.mark_output(logits)
 
     for layer_idx in range(dec_layers):
-        present_k_outputs[layer_idx].name = graph_ops.layer_tensor_name(
-            "present_k", layer_idx)
-        present_v_outputs[layer_idx].name = graph_ops.layer_tensor_name(
-            "present_v", layer_idx)
+        present_k_outputs[layer_idx].name = graph_ops.layer_tensor_name("present_k", layer_idx)
+        present_v_outputs[layer_idx].name = graph_ops.layer_tensor_name("present_v", layer_idx)
         network.mark_output(present_k_outputs[layer_idx])
         network.mark_output(present_v_outputs[layer_idx])
 

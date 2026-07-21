@@ -28,15 +28,14 @@ from pathlib import Path
 import numpy as np
 from tensorrt_model_connect import trt_compat
 
-from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
 )
-from . import graph_ops
+from .model import model as graph_ops
 from ...parallel_config import normalize_parallel_config, require_tensorrt_11_for_tensor_parallel
 
 
@@ -49,7 +48,7 @@ class BartPlugin:
     def matches(self, model_type: str) -> bool:
         return model_type.lower() in ("bart", "mbart")
 
-    def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
+    def load_weights(self, model_dir: str, config) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
         raw = config.raw
@@ -59,7 +58,6 @@ class BartPlugin:
         dec_heads = raw.get("decoder_attention_heads", config.num_attention_heads)
         enc_ffn = raw.get("encoder_ffn_dim", config.intermediate_size)
         dec_ffn = raw.get("decoder_ffn_dim", config.intermediate_size)
-        max_position_embeddings = raw.get("max_position_embeddings", 1024)
         normalize_embedding = raw.get("normalize_embedding", True)
 
         weights = WeightDict()
@@ -69,7 +67,6 @@ class BartPlugin:
         weights["_dec_heads"] = dec_heads
         weights["_enc_ffn"] = enc_ffn
         weights["_dec_ffn"] = dec_ffn
-        weights["_max_position_embeddings"] = max_position_embeddings
         weights["_normalize_embedding"] = normalize_embedding
 
         # Shared embedding (used by both encoder and decoder)
@@ -180,7 +177,7 @@ class BartPlugin:
                     "BART tensor-parallel decoder builds currently require fp32")
             require_tensorrt_11_for_tensor_parallel(
                 parallel, feature="BART tensor-parallel decoder builds")
-            from .decoder_tp_builder import build_bart_tp_decoder_engine
+            from .model.parallel import build_bart_tp_decoder_engine
             return build_bart_tp_decoder_engine(
                 config, weights, max_cache_length,
                 verbose=verbose,
@@ -360,7 +357,6 @@ def _build_bart_encoder(
     enc_layers = weights["_enc_layers"]
     enc_heads = weights["_enc_heads"]
     enc_ffn = weights["_enc_ffn"]
-    weights["_max_position_embeddings"]
     normalize_embedding = weights["_normalize_embedding"]
     hidden = config.hidden_size
     vocab = config.vocab_size
@@ -433,8 +429,7 @@ def _build_bart_encoder(
             config.rms_norm_eps, dtype=work_np_dtype)
 
         fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, hs, hidden, enc_ffn, weights[f"{pfx}.w_fc1"], dtype=work_np_dtype), enc_ffn, weights[f"{pfx}.b_fc1"], dtype=work_np_dtype)
-        act = graph_ops.add_activation(
-            network, fc1, "gelu_new", dtype=work_np_dtype)
+        act = graph_ops.add_gelu_new(network, fc1, dtype=work_np_dtype)
         fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"], dtype=work_np_dtype), hidden, weights[f"{pfx}.b_fc2"], dtype=work_np_dtype)
         hs = network.add_elementwise(hs, fc2, trt.ElementWiseOperation.SUM).get_output(0)
         hs = graph_ops.add_layer_norm_native(
@@ -512,7 +507,7 @@ def _add_bart_decoder_layer(*, network, hidden, cache_k, cache_v, cross_k, cross
 
     # MLP (no pre-norm, GELU)
     fc1 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, pca, hidden_size, ffn_dim, weights[f"{prefix}.w_fc1"], dtype=dtype), ffn_dim, weights[f"{prefix}.fc1_bias"], dtype=dtype)
-    act = graph_ops.add_activation(network, fc1, "gelu_new", dtype=dtype)
+    act = graph_ops.add_gelu_new(network, fc1, dtype=dtype)
     fc2 = graph_ops.add_bias_sum(network, graph_ops.add_matmul_rhs_constant(network, act, ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"], dtype=dtype), hidden_size, weights[f"{prefix}.fc2_bias"], dtype=dtype)
     # Residual + post-norm
     out = network.add_elementwise(pca, fc2, trt.ElementWiseOperation.SUM).get_output(0)

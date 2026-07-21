@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,9 +16,9 @@ pytest.importorskip("tensorrt", reason="TensorRT is required for family builder 
 
 
 try:
-    bart_plugin_module = importlib.import_module(
-        "tensorrt_model_connect.families.bart.plugin")
-    from tensorrt_model_connect.families.bart import decoder_tp_builder
+    bart_plugin_module = importlib.import_module("tensorrt_model_connect.families.bart.plugin")
+    from tensorrt_model_connect.families.bart.model import model as bart_model
+    from tensorrt_model_connect.families.bart.model import parallel as decoder_tp_builder
     from tensorrt_model_connect.parallel_config import ParallelConfig
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires tensorrt", allow_module_level=True)
@@ -67,6 +68,35 @@ def _config() -> SimpleNamespace:
     )
 
 
+def test_bart_builders_encode_the_fixed_family_architecture():
+    attention_parameters = set(inspect.signature(bart_model.add_attention_from_rows).parameters)
+    assert attention_parameters == {
+        "network",
+        "q",
+        "k",
+        "v",
+        "num_heads",
+        "head_dim",
+        "q_seq",
+        "kv_seq",
+        "mask",
+    }
+
+    for builder in (
+        bart_plugin_module._add_bart_decoder_layer,
+        decoder_tp_builder._add_bart_tp_decoder_layer,
+    ):
+        parameters = set(inspect.signature(builder).parameters)
+        assert parameters.isdisjoint(
+            {"activation", "mlp_type", "norm_type", "position_type", "num_kv_heads"}
+        )
+        source = inspect.getsource(builder)
+        assert "add_gelu_new" in source
+        assert "add_activation" not in source
+        assert "w_fc1" in source and "w_fc2" in source
+        assert all(name not in source for name in ("w_gate", "w_up", "w_down", "logit_softcap"))
+
+
 def test_bart_tp_slices_projection_columns_rows_and_biases():
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=2)
     weights = _weights()
@@ -75,8 +105,7 @@ def test_bart_tp_slices_projection_columns_rows_and_biases():
     weights["layer.0.w_o"] = np.arange(768 * 768, dtype=np.float32).reshape(768, 768)
     weights["layer.0.o_bias"] = np.arange(768, dtype=np.float32)
 
-    sharded = decoder_tp_builder.shard_bart_decoder_weights(
-        weights, parallel=parallel)
+    sharded = decoder_tp_builder.shard_bart_decoder_weights(weights, parallel=parallel)
 
     np.testing.assert_array_equal(sharded["layer.0.w_q"], weights["layer.0.w_q"][:, 384:576])
     np.testing.assert_array_equal(sharded["layer.0.q_bias"], weights["layer.0.q_bias"][384:576])
@@ -96,7 +125,8 @@ def test_bart_tp_validation_rejects_non_divisible_heads():
 def test_bart_tp_validation_requires_concrete_rank():
     with pytest.raises(ValueError, match="concrete rank"):
         decoder_tp_builder._validate_bart_tp(
-            _config(), _weights(), ParallelConfig(mode="tensor_parallel", tp_size=4, rank=-1))
+            _config(), _weights(), ParallelConfig(mode="tensor_parallel", tp_size=4, rank=-1)
+        )
 
 
 def test_bart_plugin_routes_parallel_builds(monkeypatch):
@@ -109,14 +139,15 @@ def test_bart_plugin_routes_parallel_builds(monkeypatch):
         calls["build"] = (config, weights, max_cache_length, kwargs)
         return b"bart-tp-plan"
 
-    monkeypatch.setattr(
-        bart_plugin_module, "require_tensorrt_11_for_tensor_parallel", fake_require)
+    monkeypatch.setattr(bart_plugin_module, "require_tensorrt_11_for_tensor_parallel", fake_require)
     monkeypatch.setattr(decoder_tp_builder, "build_bart_tp_decoder_engine", fake_build)
 
     parallel = ParallelConfig(mode="tensor_parallel", tp_size=4, rank=1)
     plugin = bart_plugin_module.BartPlugin()
     result = plugin.build_engine(
-        _config(), _weights(), 17,
+        _config(),
+        _weights(),
+        17,
         verbose=True,
         debug_layer_outputs=True,
         parallel_config=parallel,
