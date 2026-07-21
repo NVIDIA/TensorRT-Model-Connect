@@ -362,6 +362,12 @@ def _base_build_options(model: ModelDescriptor, build_args: Mapping[str, Any]) -
         ),
         "trust_remote_code": bool(settings.get("trust_remote_code", False)),
     }
+    declared_max_batch = build_args.get("max_batch_size", settings.get("max_batch_size"))
+    if declared_max_batch is not None:
+        max_batch_size = int(declared_max_batch)
+        if max_batch_size <= 0:
+            raise BenchmarkError(f"max_batch_size for {model.name} must be positive")
+        options["max_batch_size"] = max_batch_size
     for field in (
         "decoder_engine_layout",
         "dynamic_kv_profile_rows",
@@ -427,7 +433,10 @@ def _append_image_options(options: dict[str, Any], cases: Sequence[ResolvedCase]
             "num_inference_steps": max(
                 int(case.request.get("num_inference_steps", -1)) for case in image_cases
             ),
-            "max_batch_size": max(int(case.request.get("batch_size", 1)) for case in image_cases),
+            "max_batch_size": max(
+                int(options.get("max_batch_size", 1)),
+                max(int(case.request.get("batch_size", 1)) for case in image_cases),
+            ),
         }
         options.update({key: value for key, value in maxima.items() if value > 0})
 

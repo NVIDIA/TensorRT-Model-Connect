@@ -132,6 +132,7 @@ class ManifestCatalog:
                     "build_timeout_s",
                     "fp8_scales",
                     "fp32_layers",
+                    "max_batch_size",
                     "max_cache_length",
                     "quantization",
                     "trust_remote_code",

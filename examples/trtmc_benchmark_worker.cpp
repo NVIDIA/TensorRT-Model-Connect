@@ -279,11 +279,24 @@ Json run_generate_image(trtmc::IPipeline& pipeline, const Json& request, int war
     const std::string prompt = request.at("prompt").get<std::string>();
     const trtmc::GenerateConfig config = generate_config(request);
     const int batch_size = optional_value<int>(request, "batch_size", 1);
-    const std::vector<std::string> prompts(static_cast<std::size_t>(batch_size), prompt);
+    const std::vector<std::string> prompts =
+        request.contains("prompts")
+            ? request.at("prompts").get<std::vector<std::string>>()
+            : std::vector<std::string>(static_cast<std::size_t>(batch_size), prompt);
+    if (prompts.size() != static_cast<std::size_t>(batch_size)) {
+        throw std::runtime_error("prompts must match batch_size");
+    }
     std::vector<std::uint32_t> seeds;
-    seeds.reserve(static_cast<std::size_t>(batch_size));
-    for (int index = 0; index < batch_size; ++index) {
-        seeds.push_back(static_cast<std::uint32_t>(config.seed + index));
+    if (request.contains("seeds")) {
+        seeds = request.at("seeds").get<std::vector<std::uint32_t>>();
+        if (seeds.size() != prompts.size()) {
+            throw std::runtime_error("seeds must match prompts");
+        }
+    } else {
+        seeds.reserve(static_cast<std::size_t>(batch_size));
+        for (int index = 0; index < batch_size; ++index) {
+            seeds.push_back(static_cast<std::uint32_t>(config.seed + index));
+        }
     }
     std::vector<trtmc::ImageResult> last;
     const auto generate = [&]() { return pipeline.generate_image_batch(prompts, seeds, config); };

@@ -71,8 +71,32 @@ def _generate_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[st
 
 
 def _generate_image_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[str, Any]:
-    return {
-        "batch_size": 1,
+    inputs = testcase.get("inputs", {})
+    if not isinstance(inputs, Mapping):
+        raise BenchmarkError("generate_image testcase inputs must be an object")
+    declared_prompts = inputs.get("batch_prompts")
+    prompts: list[str] | None = None
+    seeds: list[int] | None = None
+    if declared_prompts is not None:
+        if not isinstance(declared_prompts, list) or not declared_prompts:
+            raise BenchmarkError("generate_image batch_prompts must be a non-empty list")
+        if not all(isinstance(prompt, str) and prompt for prompt in declared_prompts):
+            raise BenchmarkError("generate_image batch_prompts must contain non-empty strings")
+        prompts = list(declared_prompts)
+        declared_seeds = inputs.get("batch_seeds")
+        if not isinstance(declared_seeds, list) or len(declared_seeds) != len(prompts):
+            raise BenchmarkError("generate_image batch_seeds must match batch_prompts")
+        seeds = [int(seed) for seed in declared_seeds]
+        expected_batch_size = int(inputs.get("expected_batch_size", len(prompts)))
+        if expected_batch_size != len(prompts):
+            raise BenchmarkError(
+                "generate_image expected_batch_size must match batch_prompts"
+            )
+        batch_size = expected_batch_size
+    else:
+        batch_size = int(testcase.get("batch_size", 1))
+    request: dict[str, Any] = {
+        "batch_size": batch_size,
         "prompt": _prompt(testcase, "generate_image"),
         "height": int(testcase.get("image_height", 0)),
         "width": int(testcase.get("image_width", 0)),
@@ -82,6 +106,10 @@ def _generate_image_request(testcase: Mapping[str, Any], _model_root: Path) -> d
         "cfg_scale": float(testcase.get("cfg_scale", -1.0)),
         "negative_prompt": str(testcase.get("negative_prompt", "")),
     }
+    if prompts is not None and seeds is not None:
+        request["prompts"] = prompts
+        request["seeds"] = seeds
+    return request
 
 
 def _text_input_request(operation: str, testcase: Mapping[str, Any]) -> dict[str, Any]:

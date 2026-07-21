@@ -285,6 +285,23 @@ def test_auto_build_reuses_model_defaults_and_largest_diffusion_shape(tmp_path: 
     assert command.count("--max-batch-size") == 1
 
 
+def test_batch_two_profile_preserves_manifest_batch_inputs_and_build_shape(
+    tmp_path: Path,
+) -> None:
+    model = ManifestCatalog().resolve("flux-schnell-l0-batch2")
+    case = resolve_case(model, tmp_path / "pending.trtfb")
+    plan = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
+
+    assert case.request["batch_size"] == 2
+    assert case.request["prompts"] == [
+        "A red cube on a white table",
+        "A blue sphere on a white table",
+    ]
+    assert case.request["seeds"] == [42, 42]
+    command = list(plan.command)
+    assert command[command.index("--max-batch-size") + 1] == "2"
+
+
 def test_auto_build_requires_and_passes_manifest_fp8_scales(tmp_path: Path) -> None:
     catalog = ManifestCatalog()
     model = catalog.resolve("flux-2-dev-fp8")
