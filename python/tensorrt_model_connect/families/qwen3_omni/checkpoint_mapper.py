@@ -18,9 +18,9 @@ import numpy as np
 
 # Register bfloat16 dtype with numpy (needed for safetensors without torch).
 try:
-    import ml_dtypes  # noqa: F401
+    import ml_dtypes
 except ImportError:
-    pass
+    ml_dtypes = None
 
 from safetensors import safe_open
 
@@ -29,7 +29,13 @@ from .config import ModelConfig
 
 def _target_np_dtype(precision: str) -> np.dtype:
     """Map precision string to numpy dtype for weight storage."""
-    if precision in ("fp16", "bf16"):
+    if precision == "bf16":
+        # Preserve checkpoint BF16 values until TensorRT casts the constant.
+        # Converting them to FP16 first introduces avoidable double rounding.
+        if ml_dtypes is not None:
+            return np.dtype(ml_dtypes.bfloat16)
+        return np.float32
+    if precision == "fp16":
         return np.float16
     return np.float32
 

@@ -51,6 +51,7 @@ from .checkpoint_mapper import (
     _open_safetensors,
     _load_tensor,
     _has_tensor,
+    _target_np_dtype,
     _transpose_2d,
 )
 from ...build_timing import timed_trt_compile
@@ -91,7 +92,7 @@ class Qwen3OmniPlugin:
         return mt in ("qwen3_omni", "qwen3_omni_moe", "qwen3omni")
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig,
+        self, model_dir: str, config: ModelConfig, *, precision: str = "fp32",
     ) -> WeightDict:
         """Load Qwen3-Omni weights from safetensors.
 
@@ -111,6 +112,7 @@ class Qwen3OmniPlugin:
         num_heads = config.num_attention_heads
         num_kv_heads = config.num_key_value_heads
         head_dim = config.head_dim
+        target_dtype = _target_np_dtype(precision)
 
         # MoE config lives in thinker_config.text_config for Qwen3-Omni
         thinker_text = (config.raw.get("thinker_config", {})
@@ -144,7 +146,7 @@ class Qwen3OmniPlugin:
         embedding = _load_tensor(readers, embed_key)
         assert embedding.shape == (vocab, hidden), (
             f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
-        weights["embedding"] = embedding.astype(np.float32)
+        weights["embedding"] = embedding.astype(target_dtype)
 
         attention_size = 0
 
@@ -187,10 +189,10 @@ class Qwen3OmniPlugin:
             if attention_size == 0:
                 attention_size = q_raw.shape[0]
 
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
-            o_t = _transpose_2d(o_raw, "o_proj")
+            q_t = _transpose_2d(q_raw, "q_proj", precision)
+            k_t = _transpose_2d(k_raw, "k_proj", precision)
+            v_t = _transpose_2d(v_raw, "v_proj", precision)
+            o_t = _transpose_2d(o_raw, "o_proj", precision)
             del q_raw, k_raw, v_raw, o_raw
 
             weights[f"{prefix}.w_q"] = q_t
@@ -220,9 +222,15 @@ class Qwen3OmniPlugin:
                 # MoE layer
                 router_raw = _load_tensor(readers, router_key)
                 weights[f"{prefix}.router"] = _transpose_2d(
-                    router_raw, "router")
+                    router_raw, "router", precision)
                 del router_raw
 
+                expert_gate = np.empty(
+                    (num_experts, hidden, intermediate_size), dtype=target_dtype)
+                expert_up = np.empty(
+                    (num_experts, hidden, intermediate_size), dtype=target_dtype)
+                expert_down = np.empty(
+                    (num_experts, intermediate_size, hidden), dtype=target_dtype)
                 for e in range(num_experts):
                     if moe_expert_fmt == "mlp":
                         # Qwen3-Omni: mlp.experts.{e}.gate_proj/up_proj/down_proj
@@ -244,13 +252,16 @@ class Qwen3OmniPlugin:
                         down_raw = _load_tensor(
                             readers, f"{exp_prefix}.w2.weight")
 
-                    weights[f"{prefix}.expert.{e}.w_gate"] = _transpose_2d(
-                        gate_raw, f"expert_{e}_gate")
-                    weights[f"{prefix}.expert.{e}.w_up"] = _transpose_2d(
-                        up_raw, f"expert_{e}_up")
-                    weights[f"{prefix}.expert.{e}.w_down"] = _transpose_2d(
-                        down_raw, f"expert_{e}_down")
+                    expert_gate[e] = _transpose_2d(
+                        gate_raw, f"expert_{e}_gate", precision)
+                    expert_up[e] = _transpose_2d(
+                        up_raw, f"expert_{e}_up", precision)
+                    expert_down[e] = _transpose_2d(
+                        down_raw, f"expert_{e}_down", precision)
                     del gate_raw, up_raw, down_raw
+                weights[f"{prefix}.experts.w_gate"] = expert_gate
+                weights[f"{prefix}.experts.w_up"] = expert_up
+                weights[f"{prefix}.experts.w_down"] = expert_down
             else:
                 # Dense SwiGLU MLP (some layers may not be MoE)
                 gate_raw = _load_tensor(
@@ -260,9 +271,9 @@ class Qwen3OmniPlugin:
                 down_raw = _load_tensor(
                     readers, f"{hf_prefix}.mlp.down_proj.weight")
 
-                weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate")
-                weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up")
-                weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down")
+                weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate", precision)
+                weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up", precision)
+                weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down", precision)
 
         # Final norm
         final_norm_key = None
@@ -288,10 +299,10 @@ class Qwen3OmniPlugin:
                 break
         if lm_head_key is not None:
             weights["w_out"] = _transpose_2d(
-                _load_tensor(readers, lm_head_key), "lm_head")
+                _load_tensor(readers, lm_head_key), "lm_head", precision)
         else:
             weights["w_out"] = _transpose_2d(
-                embedding.copy(), "embedding_tied")
+                weights["embedding"], "embedding_tied", precision)
 
         weights["_attention_size"] = attention_size
         weights["_num_experts"] = num_experts
@@ -560,6 +571,16 @@ class Qwen3OmniPlugin:
         trt_config = builder.create_builder_config()
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
 
+        if precision == "fp16":
+            work_np_dtype = np.float16
+            work_trt_dtype = trt.float16
+        elif precision == "bf16":
+            work_np_dtype = np.float16
+            work_trt_dtype = trt.bfloat16
+        else:
+            work_np_dtype = np.float32
+            work_trt_dtype = trt.float32
+
         # Inputs
         token_id = network.add_input("token_id", trt.int32, (-1,))
         position_id = network.add_input("position_id", trt.int32, (-1,))
@@ -578,10 +599,10 @@ class Qwen3OmniPlugin:
         for i in range(num_layers):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", i),
-                trt.float32, (max_cache_length, kv_attention_size))
+                work_trt_dtype, (max_cache_length, kv_attention_size))
             cache_k_inputs.append(ck)
             cache_v_inputs.append(cv)
 
@@ -606,7 +627,7 @@ class Qwen3OmniPlugin:
 
         # Shared constants
         embedding_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"])
+            network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
 
         graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
         cos_half_np = graph_ops.make_rope_table_half_dim(
@@ -614,23 +635,41 @@ class Qwen3OmniPlugin:
         sin_half_np = graph_ops.make_rope_table_half_dim(
             attention_window, head_dim, config.rope_theta, False)
         cos_half_tensor = graph_ops.add_constant(
-            network, cos_half_np.shape, cos_half_np)
+            network, cos_half_np.shape, cos_half_np, dtype=work_np_dtype)
         sin_half_tensor = graph_ops.add_constant(
-            network, sin_half_np.shape, sin_half_np)
+            network, sin_half_np.shape, sin_half_np, dtype=work_np_dtype)
 
         eps_tensor = graph_ops.add_constant(
             network, (1, 1),
-            np.array([config.rms_norm_eps], dtype=np.float32))
+            np.array([config.rms_norm_eps], dtype=work_np_dtype),
+            dtype=work_np_dtype)
+
+        if work_trt_dtype != trt.float32:
+            attention_mask = network.add_cast(attention_mask, work_trt_dtype).get_output(0)
+            cos_half_tensor = network.add_cast(cos_half_tensor, work_trt_dtype).get_output(0)
+            sin_half_tensor = network.add_cast(sin_half_tensor, work_trt_dtype).get_output(0)
+            eps_tensor = network.add_cast(eps_tensor, work_trt_dtype).get_output(0)
 
         # Embedding lookup with input_embed override for VL/audio
         gather = network.add_gather(embedding_table, token_id, 0)
         token_embed = gather.get_output(0)
+        if token_embed.dtype != work_trt_dtype:
+            token_embed = network.add_cast(token_embed, work_trt_dtype).get_output(0)
+        if input_embed_tensor.dtype != work_trt_dtype:
+            input_embed_tensor = network.add_cast(
+                input_embed_tensor, work_trt_dtype).get_output(0)
+        if use_input_embed_tensor.dtype != work_trt_dtype:
+            use_input_embed_tensor = network.add_cast(
+                use_input_embed_tensor, work_trt_dtype).get_output(0)
 
         # Conditional: (1 - flag) * token_embed + flag * input_embed
         flag_broadcast = network.add_shuffle(use_input_embed_tensor)
         flag_broadcast.reshape_dims = (-1, 1)
         one_const = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=np.float32))
+            network, (1, 1), np.array([1.0], dtype=work_np_dtype),
+            dtype=work_np_dtype)
+        if one_const.dtype != work_trt_dtype:
+            one_const = network.add_cast(one_const, work_trt_dtype).get_output(0)
         inv_flag = network.add_elementwise(
             one_const, flag_broadcast.get_output(0),
             trt.ElementWiseOperation.SUB)
@@ -670,6 +709,7 @@ class Qwen3OmniPlugin:
                 cos_half_tensor=cos_half_tensor,
                 sin_half_tensor=sin_half_tensor,
                 rotary_embedding_dim=head_dim,
+                dtype=work_np_dtype,
                 dynamic_kv_cache=True,
                 sequence_length=None,
             )
@@ -688,20 +728,22 @@ class Qwen3OmniPlugin:
                 network, post_attn, hidden,
                 weights[f"{prefix}.post_attn_norm"],
                 weights.get(f"{prefix}.post_attn_norm_beta"),
-                eps_tensor, "rmsnorm")
+                eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
             # Check if this is an MoE or dense layer
             if f"{prefix}.router" in weights:
                 # MoE block
                 moe_out = _add_omni_moe_block(
                     network, norm2, weights, prefix,
-                    hidden, num_experts, moe_intermediate, top_k)
+                    hidden, num_experts, top_k,
+                    dtype=work_np_dtype)
             else:
                 # Dense SwiGLU MLP
                 moe_out = graph_blocks.add_swiglu_mlp(
                     network, norm2, weights=weights, prefix=prefix,
                     hidden_size=hidden,
-                    mlp_size=weights[f"{prefix}.w_gate"].shape[1])
+                    mlp_size=weights[f"{prefix}.w_gate"].shape[1],
+                    dtype=work_np_dtype)
 
             # Residual
             residual2 = network.add_elementwise(
@@ -721,7 +763,7 @@ class Qwen3OmniPlugin:
         if final_norm is not None and len(final_norm) > 0:
             hidden_state = graph_blocks.apply_norm(
                 network, hidden_state, hidden, final_norm, None,
-                eps_tensor, "rmsnorm")
+                eps_tensor, "rmsnorm", dtype=work_np_dtype)
 
         # Keep the output contract fixed at one row for both profiles. Only
         # the final prompt row can affect the first generated token.
@@ -744,9 +786,14 @@ class Qwen3OmniPlugin:
 
         # LM head
         logits = graph_ops.add_matmul_rhs_constant(
-            network, last_hidden, hidden, vocab, weights["w_out"])
-        b_out = np.zeros(vocab, dtype=np.float32)
-        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out)
+            network, last_hidden, hidden, vocab, weights["w_out"],
+            dtype=work_np_dtype)
+        b_out = np.zeros(vocab, dtype=work_np_dtype)
+        logits = graph_ops.add_bias_sum(
+            network, logits, vocab, b_out, dtype=work_np_dtype)
+
+        if logits.dtype != trt.float32:
+            logits = network.add_cast(logits, trt.float32).get_output(0)
 
         logits.name = "logits"
         network.mark_output(logits)
@@ -923,7 +970,6 @@ class Qwen3OmniPlugin:
             "num_experts", 8)
         overrides["num_experts_per_tok"] = self._thinker_cfg.get(
             "num_experts_per_tok", 2)
-
         # Audio output config (flat keys matching C++ fast_path_config parser)
         overrides["audio_sample_rate"] = 24000
         overrides["omni_n_codebooks"] = self._talker_cfg.get(
@@ -963,30 +1009,46 @@ class Qwen3OmniPlugin:
 # MoE block for Omni (standard top-k softmax, same as Mixtral pattern)
 # ---------------------------------------------------------------------------
 
-def _add_swiglu_expert(
+def _add_packed_swiglu_experts(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     hidden_size: int,
-    intermediate_size: int,
     w_gate: np.ndarray,
     w_up: np.ndarray,
     w_down: np.ndarray,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
-    gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate)
-    up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up)
+    """Compute every expert with three batched matmuls for a dynamic token count."""
+    num_experts, _, intermediate_size = w_gate.shape
+    inp_4d = network.add_shuffle(inp)
+    inp_4d.reshape_dims = (-1, 1, 1, hidden_size)
 
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
+    def packed_weight(values: np.ndarray) -> trt.ITensor:
+        tensor = graph_ops.add_constant(
+            network, (1, *values.shape), values.reshape(1, *values.shape), dtype=dtype)
+        if tensor.dtype != inp.dtype:
+            tensor = network.add_cast(tensor, inp.dtype).get_output(0)
+        return tensor
+
+    gate = network.add_matrix_multiply(
+        inp_4d.get_output(0), trt.MatrixOperation.NONE,
+        packed_weight(w_gate), trt.MatrixOperation.NONE)
+    up = network.add_matrix_multiply(
+        inp_4d.get_output(0), trt.MatrixOperation.NONE,
+        packed_weight(w_up), trt.MatrixOperation.NONE)
+
+    sigmoid = network.add_activation(gate.get_output(0), trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(
-        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+        gate.get_output(0), sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
     gated = network.add_elementwise(
-        swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+        swish.get_output(0), up.get_output(0), trt.ElementWiseOperation.PROD)
 
-    down = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), intermediate_size, hidden_size, w_down)
-    return down
+    down = network.add_matrix_multiply(
+        gated.get_output(0), trt.MatrixOperation.NONE,
+        packed_weight(w_down), trt.MatrixOperation.NONE)
+    output = network.add_shuffle(down.get_output(0))
+    output.reshape_dims = (-1, num_experts, hidden_size)
+    return output.get_output(0)
 
 
 def _add_omni_moe_block(
@@ -996,14 +1058,14 @@ def _add_omni_moe_block(
     prefix: str,
     hidden_size: int,
     num_experts: int,
-    moe_intermediate: int,
     top_k: int = 2,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Add MoE block with standard top-k softmax routing (same as Mixtral)."""
     # Router logits
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, num_experts,
-        weights[f"{prefix}.router"])
+        weights[f"{prefix}.router"], dtype=dtype)
 
     # Softmax over router logits
     sm = network.add_softmax(router_logits)
@@ -1022,22 +1084,14 @@ def _add_omni_moe_block(
         top_values, sum_val.get_output(0),
         trt.ElementWiseOperation.DIV)
 
-    # Compute all expert outputs and stack as [Sq, E, H].
-    expert_outputs = []
-    for e in range(num_experts):
-        exp_out = _add_swiglu_expert(
-            network, inp, hidden_size, moe_intermediate,
-            weights[f"{prefix}.expert.{e}.w_gate"],
-            weights[f"{prefix}.expert.{e}.w_up"],
-            weights[f"{prefix}.expert.{e}.w_down"],
-        )
-        expert_row = network.add_shuffle(exp_out)
-        expert_row.reshape_dims = (-1, 1, hidden_size)
-        expert_outputs.append(expert_row.get_output(0))
-
-    stacked = network.add_concatenation(expert_outputs)
-    stacked.axis = 1
-    stacked_out = stacked.get_output(0)
+    # Compute all expert outputs as [Sq, E, H] with three packed matmuls.
+    stacked_out = _add_packed_swiglu_experts(
+        network, inp, hidden_size,
+        weights[f"{prefix}.experts.w_gate"],
+        weights[f"{prefix}.experts.w_up"],
+        weights[f"{prefix}.experts.w_down"],
+        dtype=dtype,
+    )
 
     # Build token-row indices [Sq, K] and pair them with the router's expert
     # indices. GatherND then selects K experts independently for every token.

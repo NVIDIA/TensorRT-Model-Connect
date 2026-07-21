@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import io
+import importlib
 import struct
 
 import numpy as np
@@ -172,3 +173,57 @@ def test_bundle_config_persists_portable_talker_locator() -> None:
 
     assert overrides["omni_talker_model_id"] == "Qwen/Qwen3-Omni-30B-A3B-Instruct"
     assert overrides["omni_talker_model_revision"] == "abc123"
+
+
+def test_thinker_load_weights_preserves_bf16_storage(monkeypatch, tmp_path) -> None:
+    plugin_module = importlib.import_module(
+        "tensorrt_model_connect.families.qwen3_omni.plugin")
+    config = ModelConfig.create_tiny("qwen3_omni")
+
+    class FakeReader:
+        @staticmethod
+        def keys() -> list[str]:
+            return []
+
+    def has_tensor(_readers, key: str) -> bool:
+        return (
+            key == "model.thinker.embed_tokens.weight"
+            or key == "model.thinker.norm.weight"
+            or key == "lm_head.weight"
+            or key.startswith("model.thinker.layers.")
+        )
+
+    def load_tensor(_readers, key: str) -> np.ndarray:
+        if key == "model.thinker.embed_tokens.weight":
+            shape = (config.vocab_size, config.hidden_size)
+        elif key == "lm_head.weight":
+            shape = (config.vocab_size, config.hidden_size)
+        elif key.endswith(("input_layernorm.weight", "post_attention_layernorm.weight")):
+            shape = (config.hidden_size,)
+        elif key == "model.thinker.norm.weight":
+            shape = (config.hidden_size,)
+        elif key.endswith("mlp.gate.weight"):
+            shape = (8, config.hidden_size)
+        elif key.endswith(("gate_proj.weight", "up_proj.weight")):
+            shape = (config.intermediate_size, config.hidden_size)
+        elif key.endswith("down_proj.weight"):
+            shape = (config.hidden_size, config.intermediate_size)
+        else:
+            shape = (config.hidden_size, config.hidden_size)
+        return np.ones(shape, dtype=np.float32)
+
+    monkeypatch.setattr(plugin_module, "_open_safetensors", lambda _path: [FakeReader()])
+    monkeypatch.setattr(plugin_module, "_has_tensor", has_tensor)
+    monkeypatch.setattr(plugin_module, "_load_tensor", load_tensor)
+
+    weights = plugin_module.Qwen3OmniPlugin().load_weights(
+        str(tmp_path), config, precision="bf16")
+
+    assert weights["embedding"].dtype.name == "bfloat16"
+    assert weights["layer.0.w_q"].dtype.name == "bfloat16"
+    assert weights["layer.0.router"].dtype.name == "bfloat16"
+    assert weights["layer.0.experts.w_gate"].dtype.name == "bfloat16"
+    assert weights["layer.0.experts.w_gate"].shape == (8, 16, 32)
+    assert weights["layer.0.experts.w_down"].shape == (8, 32, 16)
+    assert weights["w_out"].dtype.name == "bfloat16"
+    assert weights["final_norm"].dtype == np.float32

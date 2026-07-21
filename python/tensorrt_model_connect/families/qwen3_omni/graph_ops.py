@@ -46,7 +46,15 @@ def add_constant(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Add a constant tensor in the given *dtype* (default float32)."""
-    weights = trt.Weights(np.ascontiguousarray(values, dtype=dtype))
+    values_array = np.asarray(values)
+    if values_array.dtype.name == "bfloat16":
+        # TensorRT's Python Weights wrapper cannot consume NumPy BF16 arrays.
+        # Promote exactly-representable BF16 values to FP32, then let the
+        # strongly typed graph cast once to its BF16 runtime dtype.
+        constant_values = np.ascontiguousarray(values_array, dtype=np.float32)
+    else:
+        constant_values = np.ascontiguousarray(values_array, dtype=dtype)
+    weights = trt.Weights(constant_values)
     layer = network.add_constant(shape, weights)
     return layer.get_output(0)
 
