@@ -21,7 +21,7 @@ except (ImportError, ModuleNotFoundError):
 
 def _config() -> SimpleNamespace:
     return SimpleNamespace(
-        raw={"rotary_pct": 0.25, "use_parallel_residual": True},
+        raw={},
         hidden_size=16,
         vocab_size=32,
         num_hidden_layers=1,
@@ -31,7 +31,6 @@ def _config() -> SimpleNamespace:
         attention_size=16,
         intermediate_size=32,
         rms_norm_eps=1e-5,
-        rope_theta=10000.0,
     )
 
 
@@ -57,6 +56,9 @@ def test_gpt2_plugin_routes_parallel_builds(monkeypatch) -> None:
     assert result == b"gpt-tp-plan"
     _, _, max_cache_length, kwargs = calls["build"]
     assert max_cache_length == 23
-    assert kwargs["parallel_config"] == parallel
-    assert kwargs["mlp_type"] == "gelu_fc"
-    assert kwargs["verbose"] is True
+    assert kwargs == {
+        "precision": "fp32",
+        "quant_ctx": None,
+        "verbose": True,
+        "parallel_config": parallel,
+    }

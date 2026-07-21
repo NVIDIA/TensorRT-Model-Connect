@@ -42,6 +42,9 @@ def __dir__() -> list[str]:
     })
 
 
+_LAZY_PACKAGE_PROTOCOL = (__getattr__, __dir__)
+
+
 class _FamilyModule(types.ModuleType):
     def __setattr__(self, name, value):
         # Importlib publishes a directly imported plugin submodule on its parent.
