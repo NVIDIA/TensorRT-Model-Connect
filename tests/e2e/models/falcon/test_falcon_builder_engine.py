@@ -16,6 +16,7 @@ Intent: Validate the Falcon family plugin weight loading including LayerNorm wit
 Preconditions: safetensors and tensorrt_model_connect are importable; TRT+GPU required for engine build tests.
 Postconditions: All weight keys map correctly from Falcon's HF layout, LayerNorm biases are loaded, and FC MLP keys (dense_h_to_4h/dense_4h_to_h) resolve to fc1/fc2.
 """
+import importlib
 import sys
 import types
 
@@ -158,7 +159,9 @@ class TestFalconEngine(FamilyPluginTestMixin):
         monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
         from tensorrt_model_connect import trt_compat
         monkeypatch.setattr(trt_compat, "_module", None)
-        from tensorrt_model_connect.families import falcon as falcon_module
+        falcon_module = importlib.import_module(
+            "tensorrt_model_connect.families.falcon.plugin"
+        )
 
         captured = {}
 

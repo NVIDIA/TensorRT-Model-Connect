@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -27,8 +27,14 @@ from .checkpoint_mapper import (
     _transpose_2d,
 )
 from ...parallel_config import normalize_parallel_config
-from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
-from .standard_decoder_builder import build_standard_decoder_engine
+from .model.parallel import build_dual_profile_tp_decoder_engine
+from .model.model import build_standard_decoder_engine
+
+
+_DECODER_ARCHITECTURE = {
+    "norm_type": "layernorm",
+    "mlp_type": "gelu_fc",
+}
 
 
 class FalconPlugin:
@@ -178,10 +184,7 @@ class FalconPlugin:
                         readers, dense_bias_key).astype(np.float32)
 
             # MLP: Falcon uses dense_h_to_4h / dense_4h_to_h
-            if rw_style:
-                mlp_prefix = f"{hf_prefix}.mlp"
-            else:
-                mlp_prefix = f"{hf_prefix}.mlp"
+            mlp_prefix = f"{hf_prefix}.mlp"
             fc1_raw = _load_tensor(
                 readers, f"{mlp_prefix}.dense_h_to_4h.weight")
             fc2_raw = _load_tensor(
@@ -253,26 +256,32 @@ class FalconPlugin:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length,
-                precision=precision, quant_ctx=quant_ctx,
-                norm_type="layernorm",
-                mlp_type="gelu_fc",
+                config,
+                weights,
+                max_cache_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
                 position_type=position_type,
                 activation=activation,
                 alibi_bias_scale=alibi_bias_scale,
                 verbose=verbose,
-                parallel_config=parallel)
+                parallel_config=parallel,
+                **_DECODER_ARCHITECTURE,
+            )
 
         return build_standard_decoder_engine(
-            config, weights, max_cache_length,
-            precision=precision, quant_ctx=quant_ctx,
-            norm_type="layernorm",
-            mlp_type="gelu_fc",
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
             position_type=position_type,
             activation=activation,
             alibi_bias_scale=alibi_bias_scale,
             verbose=verbose,
-            debug_layer_outputs=debug_layer_outputs)
+            debug_layer_outputs=debug_layer_outputs,
+            **_DECODER_ARCHITECTURE,
+        )
 
 
 plugin = FalconPlugin()
