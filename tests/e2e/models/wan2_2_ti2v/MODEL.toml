@@ -8,6 +8,12 @@ test_manifests = [
   "manifests/wan22-ti2v-5b.json",
 ]
 
+[model_reference_cache]
+repository = "https://github.com/Wan-Video/Wan2.2.git"
+revision = "42bf4cfaa384bc21833865abc2f9e6c0e67233dc"
+relative_path = "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384"
+entrypoint = "wan/textimage2video.py"
+
 [e2e_defaults.diffusion_media_generation]
 reference_backend = "invariant_only"
 oracle_level = "L4_invariants"

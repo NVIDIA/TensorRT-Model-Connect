@@ -122,7 +122,7 @@ class DiffusionComparator:
         reference_rule = ""
         if has_external_reference:
             reference_rule = (
-                f" AND all {expected_frames} HF/TRT frames meet cosine and RMSE thresholds"
+                f" AND all {expected_frames} official-Wan/TRT frames meet cosine and RMSE thresholds"
             )
         return CompareResult(
             stage_name=stage.name,

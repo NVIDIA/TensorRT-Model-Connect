@@ -20,7 +20,7 @@
       "l0_replacement": "wan22-ti2v-5b-l0",
       "l0_replacement_reason": "Premerge runs the same source-bound native video path at 672x384, five frames, and fifteen steps; nightly retains the official 1280x704, 121-frame, fifty-step profile.",
       "runtime_timeout_s": 14400,
-      "reference_backend": "hf_diffusers",
+      "reference_backend": "wan_official",
       "oracle_level": "L1_external_reference",
       "user_contract": "diffusion_video",
       "description": "Wan2.2 TI2V-5B official maximum 720p text-to-video generation contract",
@@ -47,7 +47,7 @@
           "video_mode": true
         }
       },
-      "notes": "Nightly runs the native TensorRT path and an independent Wan-AI/Wan2.2-TI2V-5B-Diffusers reference for the official 1280x704, 121-frame, 50-step, CFG 5, flow-shift 5, 24 FPS, seed-42 profile. TensorRT frames are stored under frames and Hugging Face frames under hf_frames for the required nightly semantic video gate. The public TensorRT runtime command remains Python-free."
+      "notes": "Nightly runs the native TensorRT path and the pinned official Wan source against the original Wan-AI/Wan2.2-TI2V-5B checkpoint for the 1280x704, 121-frame, 50-step, CFG 5, flow-shift 5, 24 FPS, seed-42 profile. All 121 TensorRT and official-Wan frame pairs are checked by the required nightly accuracy gate. The public TensorRT runtime command remains Python-free."
     }
   ]
 }

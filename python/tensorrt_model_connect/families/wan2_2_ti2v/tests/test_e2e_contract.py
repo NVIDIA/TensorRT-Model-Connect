@@ -57,7 +57,7 @@ def test_manifest_is_the_official_max_profile() -> None:
     assert case.hf_id == "Wan-AI/Wan2.2-TI2V-5B"
     assert case.family == "wan2_2_ti2v"
     assert case.runtime_strategy == "diffusion_wan2_2_ti2v"
-    assert case.reference_backend == "hf_diffusers"
+    assert case.reference_backend == "wan_official"
     assert case.oracle_level == "L1_external_reference"
     assert case.metadata["ci_tier"] == "nightly_only"
     assert case.metadata["runtime_timeout_s"] == 14400

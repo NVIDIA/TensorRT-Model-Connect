@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""WAN2.2 nightly Hugging Face Diffusers reference contract tests."""
+"""WAN2.2 pinned official-Wan Nightly reference contract tests."""
 
 from __future__ import annotations
 
 import subprocess
 import struct
 import sys
+import tomllib
 import zlib
 from pathlib import Path
 from types import ModuleType
@@ -18,7 +19,7 @@ from tensorrt_model_connect.families import family_hf_warm_dependencies
 from tensorrt_model_connect.hf_snapshot import hf_snapshot_allow_patterns
 from tests.e2e.models.wan2_2_ti2v.e2e_plugins import reference as reference_plugins
 from tests.e2e.models.wan2_2_ti2v.e2e_plugins.references import (
-    hf_diffusers as wan22_hf_diffusers,
+    official_wan as wan22_official,
 )
 from tests.e2e_harness.contracts import E2ECase, RunContext, StageSpec
 from tests.e2e_harness.manifest_loader import load_manifest
@@ -55,7 +56,7 @@ def _case() -> E2ECase:
         runtime_strategy="diffusion_wan2_2_ti2v",
         inputs={
             "prompt": "A cat wearing boxing gloves",
-            "video_num_frames": 3,
+            "video_num_frames": 5,
             "video_height": 16,
             "video_width": 32,
             "num_inference_steps": 7,
@@ -80,39 +81,58 @@ def _script(command: list[str]) -> str:
     return command[command.index("-c") + 1]
 
 
-def test_only_nightly_selects_the_external_diffusers_reference() -> None:
+def _write_official_source(storage_root: Path) -> Path:
+    source = storage_root / wan22_official.OFFICIAL_RELATIVE_PATH
+    entrypoint = source / wan22_official.OFFICIAL_ENTRYPOINT
+    entrypoint.parent.mkdir(parents=True)
+    entrypoint.write_text("# pinned official Wan entrypoint\n", encoding="utf-8")
+    return source
+
+
+def test_only_nightly_selects_the_external_official_wan_reference() -> None:
     full = load_manifest(_FULL_MANIFEST)
     l0 = load_manifest(_L0_MANIFEST)
 
     assert (full.reference_backend, full.oracle_level) == (
-        "hf_diffusers",
+        "wan_official",
         "L1_external_reference",
     )
     assert (l0.reference_backend, l0.oracle_level) == (
         "invariant_only",
         "L4_invariants",
     )
+    assert (full.inputs["video_width"], full.inputs["video_height"]) == (1280, 704)
     assert full.inputs["video_num_frames"] == 121
     assert full.inputs["num_inference_steps"] == 50
+    assert (l0.inputs["video_width"], l0.inputs["video_height"]) == (672, 384)
     assert l0.inputs["video_num_frames"] == 5
     assert l0.inputs["num_inference_steps"] == 15
 
 
 def test_both_reference_backends_are_registered() -> None:
     assert {plugin.backend_name for plugin in reference_plugins.reference} == {
-        "hf_diffusers",
+        "wan_official",
         "invariant_only",
     }
 
 
-def test_diffusers_reference_is_present_in_the_offline_cache_contract() -> None:
-    assert (
-        dict(family_hf_warm_dependencies("wan2_2_ti2v"))["wan22-ti2v-5b-diffusers-reference"]
-        == wan22_hf_diffusers.HF_REFERENCE_ID
-    )
+def test_model_declares_the_exact_pinned_official_wan_source() -> None:
+    owner = tomllib.loads((_MODEL_DIR / "MODEL.toml").read_text(encoding="utf-8"))
+    assert owner["model_reference_cache"] == {
+        "repository": wan22_official.OFFICIAL_REPOSITORY,
+        "revision": wan22_official.OFFICIAL_REVISION,
+        "relative_path": wan22_official.OFFICIAL_RELATIVE_PATH,
+        "entrypoint": wan22_official.OFFICIAL_ENTRYPOINT,
+    }
 
 
-def test_cached_reference_uses_the_selective_offline_snapshot_contract(
+def test_converted_diffusers_reference_is_not_warmed() -> None:
+    warm = dict(family_hf_warm_dependencies("wan2_2_ti2v"))
+    assert "wan22-ti2v-5b-diffusers-reference" not in warm
+    assert "Wan-AI/Wan2.2-TI2V-5B-Diffusers" not in warm.values()
+
+
+def test_cached_reference_uses_the_raw_selective_offline_snapshot_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     snapshot = tmp_path / "snapshots" / ("a" * 40)
@@ -127,29 +147,33 @@ def test_cached_reference_uses_the_selective_offline_snapshot_contract(
     huggingface_hub.snapshot_download = fake_snapshot_download  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "huggingface_hub", huggingface_hub)
 
-    resolved = wan22_hf_diffusers._resolve_cached_model_ref()
+    resolved = wan22_official._resolve_cached_model_ref()
 
     assert resolved == str(snapshot)
     assert calls == [
         (
-            wan22_hf_diffusers.HF_REFERENCE_ID,
+            wan22_official.HF_REFERENCE_ID,
             {
+                "revision": wan22_official.HF_REFERENCE_REVISION,
                 "allow_patterns": hf_snapshot_allow_patterns(),
                 "local_files_only": True,
             },
         )
     ]
-    assert wan22_hf_diffusers._snapshot_revision(resolved) == "a" * 40
+    assert wan22_official._snapshot_revision(resolved) == "a" * 40
 
 
-def test_reference_uses_official_diffusers_configuration_and_writes_hf_frames(
+def test_reference_uses_official_wan_configuration_and_writes_hf_frames(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     case = _case()
     ctx = _context(case, tmp_path)
-    snapshot = tmp_path / "snapshots" / ("b" * 40)
+    snapshot = tmp_path / "snapshots" / wan22_official.HF_REFERENCE_REVISION
     snapshot.mkdir(parents=True)
-    monkeypatch.setattr(wan22_hf_diffusers, "_resolve_cached_model_ref", lambda: str(snapshot))
+    storage_root = tmp_path / "reference-private"
+    source = _write_official_source(storage_root)
+    monkeypatch.setenv("TRTMC_STORAGE_ROOT", str(storage_root))
+    monkeypatch.setattr(wan22_official, "_resolve_cached_model_ref", lambda: str(snapshot))
     captured: dict[str, object] = {}
 
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
@@ -157,12 +181,12 @@ def test_reference_uses_official_diffusers_configuration_and_writes_hf_frames(
         captured["kwargs"] = kwargs
         frames_dir = tmp_path / case.name / "hf_frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
-        for index in range(3):
+        for index in range(5):
             _write_png(frames_dir / f"frame_{index:04d}.png", 32, 16, index * 40)
-        return subprocess.CompletedProcess(command, 0, stdout="Generated 3 frames\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="Generated 5 frames\n", stderr="")
 
-    monkeypatch.setattr(wan22_hf_diffusers.subprocess, "run", fake_run)
-    output = wan22_hf_diffusers.Wan22HfDiffusersReference().run_stage(
+    monkeypatch.setattr(wan22_official.subprocess, "run", fake_run)
+    output = wan22_official.Wan22OfficialWanReference().run_stage(
         case, StageSpec(name="end_to_end"), ctx
     )
 
@@ -170,35 +194,54 @@ def test_reference_uses_official_diffusers_configuration_and_writes_hf_frames(
     assert isinstance(command, list)
     assert command[:2] == ["/reference/python", "-c"]
     script = _script(command)
-    assert "AutoencoderKLWan.from_pretrained" in script
-    assert 'subfolder="vae"' in script
-    assert "torch_dtype=torch.float32" in script
-    assert "WanPipeline.from_pretrained" in script
-    assert "torch_dtype=torch.bfloat16" in script
-    assert "UMT5 shared and encoder input embedding shapes do not match" in script
-    assert "pipe.text_encoder.set_input_embeddings(pipe.text_encoder.shared)" in script
-    assert "pipe.text_encoder.encoder.embed_tokens is not pipe.text_encoder.shared" in script
-    assert "UMT5 encoder input embedding is not tied to shared.weight" in script
-    assert script.index("shared_embedding_shape") < script.index("set_input_embeddings")
-    assert script.index("set_input_embeddings") < script.index('pipe.to("cuda")')
-    assert 'pipe.to("cuda")' in script
-    assert "height=16" in script
-    assert "width=32" in script
-    assert "num_frames=3" in script
-    assert "num_inference_steps=7" in script
-    assert "guidance_scale=5.0" in script
-    assert "max_sequence_length=512" in script
-    assert 'torch.Generator(device="cuda").manual_seed(42)' in script
-    assert "local_files_only=True" in script
+    assert str(source) in script
+    assert "from wan.textimage2video import WanTI2V" in script
+    assert "from wan.configs.wan_ti2v_5B import ti2v_5B" in script
+    assert "from wan.modules.attention import attention as wan_attention" in script
+    assert "wan_model_module.flash_attention = wan_attention" in script
+    assert 'sys.modules["wan"] = wan' in script
+    assert 'sys.modules["wan.configs"] = wan_configs' in script
+    assert 'sys.modules["easydict"] = easydict' in script
+    assert 'sys.modules["imageio"] = imageio' in script
+    assert "checkpoint_dir=model_ref" in script
+    assert "t5_cpu=False" in script
+    assert "init_on_cpu=True" in script
+    assert "convert_model_dtype=False" in script
+    assert "size=(32, 16)" in script
+    assert "max_area=32 * 16" in script
+    assert "frame_num=5" in script
+    assert "sampling_steps=7" in script
+    assert "guide_scale=5.0" in script
+    assert "shift=5.0" in script
+    assert "sample_solver=\"unipc\"" in script
+    assert "seed=42" in script
+    assert "offload_model=False" in script
+    assert "((video.clamp(-1.0, 1.0) + 1.0) * 127.5)" in script
     assert str(tmp_path / case.name / "hf_frames") in script
-    assert output.data["num_frames"] == 3
+    assert output.data["num_frames"] == 5
     assert output.data["frames_dir"] == str(tmp_path / case.name / "hf_frames")
-    assert output.metadata["model_id"] == wan22_hf_diffusers.HF_REFERENCE_ID
-    assert output.metadata["model_revision"] == "b" * 40
+    assert output.data["reference_implementation"] == "official_wan"
+    assert output.metadata["model_id"] == wan22_official.HF_REFERENCE_ID
+    assert output.metadata["model_revision"] == wan22_official.HF_REFERENCE_REVISION
+    assert output.metadata["expected_model_revision"] == wan22_official.HF_REFERENCE_REVISION
+    assert output.metadata["official_revision"] == wan22_official.OFFICIAL_REVISION
     kwargs = captured["kwargs"]
     assert isinstance(kwargs, dict)
     assert kwargs["timeout"] == 60
     assert kwargs["env"]["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
+    assert kwargs["env"]["HF_HUB_OFFLINE"] == "1"
+    assert kwargs["env"]["TRANSFORMERS_OFFLINE"] == "1"
+
+
+def test_reference_requires_the_pinned_official_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TRTMC_STORAGE_ROOT", raising=False)
+    with pytest.raises(RuntimeError, match="TRTMC_STORAGE_ROOT is required"):
+        wan22_official._resolve_official_source()
+
+    with pytest.raises(RuntimeError, match="Pinned official Wan reference is unavailable"):
+        wan22_official._resolve_official_source(str(tmp_path))
 
 
 def test_reference_fails_closed_on_subprocess_error(
@@ -206,39 +249,52 @@ def test_reference_fails_closed_on_subprocess_error(
 ) -> None:
     case = _case()
     ctx = _context(case, tmp_path)
-    monkeypatch.setattr(wan22_hf_diffusers, "_resolve_cached_model_ref", lambda: "/model")
+    storage_root = tmp_path / "reference-private"
+    _write_official_source(storage_root)
+    monkeypatch.setenv("TRTMC_STORAGE_ROOT", str(storage_root))
+    monkeypatch.setattr(wan22_official, "_resolve_cached_model_ref", lambda: "/model")
     monkeypatch.setattr(
-        wan22_hf_diffusers.subprocess,
+        wan22_official.subprocess,
         "run",
         lambda command, **kwargs: subprocess.CompletedProcess(
-            command, 1, stdout="", stderr="offline cache miss"
+            command, 1, stdout="", stderr="official source failure"
         ),
     )
 
-    with pytest.raises(RuntimeError, match="offline cache miss"):
-        wan22_hf_diffusers.Wan22HfDiffusersReference().run_stage(
+    with pytest.raises(RuntimeError, match="official source failure"):
+        wan22_official.Wan22OfficialWanReference().run_stage(
             case, StageSpec(name="end_to_end"), ctx
         )
-    assert (tmp_path / case.name / "hf_diffusers_end_to_end_stderr.log").read_text(
+    assert (tmp_path / case.name / "official_wan_end_to_end_stderr.log").read_text(
         encoding="utf-8"
-    ) == "offline cache miss"
+    ) == "official source failure"
 
 
-def test_reference_rejects_partial_or_wrong_sized_outputs(tmp_path: Path) -> None:
+def test_reference_rejects_partial_noncontiguous_or_wrong_sized_outputs(tmp_path: Path) -> None:
     frames_dir = tmp_path / "hf_frames"
     frames_dir.mkdir()
     _write_png(frames_dir / "frame_0000.png", 32, 16)
 
     with pytest.raises(RuntimeError, match="1 frames; expected 2"):
-        wan22_hf_diffusers._validate_frames(
+        wan22_official._validate_frames(
             frames_dir,
             expected_count=2,
             expected_width=32,
             expected_height=16,
         )
 
+    _write_png(frames_dir / "frame_0002.png", 32, 16)
+    with pytest.raises(RuntimeError, match="non-contiguous frame sequence"):
+        wan22_official._validate_frames(
+            frames_dir,
+            expected_count=2,
+            expected_width=32,
+            expected_height=16,
+        )
+
+    (frames_dir / "frame_0002.png").unlink()
     with pytest.raises(RuntimeError, match=r"size \(32, 16\); expected \(16, 32\)"):
-        wan22_hf_diffusers._validate_frames(
+        wan22_official._validate_frames(
             frames_dir,
             expected_count=1,
             expected_width=16,
