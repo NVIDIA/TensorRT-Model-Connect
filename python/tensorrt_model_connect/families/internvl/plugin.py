@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .config import ModelConfig
-from .checkpoint_mapper import (
+from .weights import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
@@ -32,7 +32,7 @@ from ...parallel_config import (
     normalize_parallel_config,
     require_tensorrt_11_for_tensor_parallel,
 )
-from .standard_decoder_builder import build_standard_decoder_engine
+from .model.model import build_standard_decoder_engine
 
 if TYPE_CHECKING:
     pass
@@ -73,23 +73,10 @@ class InternVLPlugin:
                 parallel, feature="InternVL tensor-parallel builds")
             if debug_layer_outputs:
                 raise ValueError("InternVL tensor-parallel builds do not support debug layer outputs")
-            from .tp_builder import build_dual_profile_tp_decoder_engine
-            return build_dual_profile_tp_decoder_engine(
-                config, weights, max_cache_length,
-                precision=precision,
-                quant_ctx=quant_ctx,
-                norm_type="rmsnorm",
-                mlp_type="swiglu",
-                position_type="rope",
-                activation="silu",
-                embed_input=True,
-                verbose=verbose,
-                parallel_config=parallel)
+            from .model.parallel import build_dual_profile_tp_decoder_engine
+            return build_dual_profile_tp_decoder_engine(config, weights, max_cache_length, precision=precision, quant_ctx=quant_ctx, verbose=verbose, parallel_config=parallel)
 
-        return build_standard_decoder_engine(
-            config, weights, max_cache_length, precision=precision, verbose=verbose,
-            quant_ctx=quant_ctx, embed_input=True,
-            debug_layer_outputs=debug_layer_outputs)
+        return build_standard_decoder_engine(config, weights, max_cache_length, precision=precision, verbose=verbose, quant_ctx=quant_ctx, debug_layer_outputs=debug_layer_outputs)
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
@@ -101,7 +88,7 @@ class InternVLPlugin:
 
         vision_weights = _load_vision_and_projector_weights(model_dir, config)
 
-        from .internvit_vision_builder import build_internvit_vision_engine
+        from .model.components.vision import build_internvit_vision_engine
         return build_internvit_vision_engine(
             config.raw, vision_config, vision_weights,
             fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
