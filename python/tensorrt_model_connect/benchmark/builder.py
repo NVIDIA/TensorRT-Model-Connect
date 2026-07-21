@@ -171,11 +171,14 @@ class BundleBuilder:
     def _plan(self, model: ModelDescriptor, cases: Sequence[ResolvedCase]) -> _BuildPlan:
         options = _build_options(model, cases)
         runtime = _resolve_builder_runtime(self.backend_abi)
+        identity_options = dict(options)
+        if "fp8_scales" in identity_options:
+            identity_options["fp8_scales"] = model.build_settings["fp8_scales"]
         identity = {
             "schema_version": "trtmc.benchmark-bundle-cache/v1",
             "model": model.identity(),
             "manifest_sha256": _sha256_file(model.manifest_path),
-            "options": options,
+            "options": identity_options,
             "platform": _platform_identity(runtime),
         }
         encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -343,7 +346,7 @@ def _build_options(model: ModelDescriptor, cases: Sequence[ResolvedCase]) -> dic
         raise BenchmarkError(f"build_args for {model.name} must be an object")
     options = _base_build_options(model, build_args)
     _append_parallel_option(options, build_args)
-    _append_precision_options(options, settings)
+    _append_precision_options(options, model)
     _append_quantization_options(options, settings)
     _append_image_options(options, cases)
     _append_declared_cli_options(options, settings, cases)
@@ -383,7 +386,19 @@ def _append_parallel_option(options: dict[str, Any], build_args: Mapping[str, An
             options["tensor_parallel_size"] = int(tp_size)
 
 
-def _append_precision_options(options: dict[str, Any], settings: Mapping[str, Any]) -> None:
+def _append_precision_options(options: dict[str, Any], model: ModelDescriptor) -> None:
+    settings = model.build_settings
+    fp8_scales = settings.get("fp8_scales")
+    if fp8_scales is not None:
+        declared = Path(str(fp8_scales)).expanduser()
+        candidate = (
+            declared if declared.is_absolute() else model.manifest_path.parent.parent / declared
+        )
+        resolved = candidate.resolve()
+        if not resolved.is_file():
+            raise BenchmarkError(f"fp8_scales file is missing: {resolved}")
+        options["fp8_scales"] = str(resolved)
+        options["fp8_scales_sha256"] = _sha256_file(resolved)
     fp32_layers = settings.get("fp32_layers")
     if isinstance(fp32_layers, list) and fp32_layers:
         options["fp32_layers"] = [int(value) for value in fp32_layers]
@@ -500,6 +515,7 @@ def _build_command(
     value_flags = {
         "decoder_engine_layout": "--decoder-engine-layout",
         "dynamic_kv_profile_rows": "--dynamic-kv-profile-rows",
+        "fp8_scales": "--fp8-scales",
         "image_height": "--image-height",
         "image_width": "--image-width",
         "max_batch_size": "--max-batch-size",

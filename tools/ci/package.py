@@ -128,6 +128,12 @@ class WheelArchiveValidator:
                 for name in names
                 if "/benchmark/_catalog/" in name and name.endswith("/data/Recording.wav")
             ]
+            benchmark_fp8_assets = [
+                name
+                for name in names
+                if "/benchmark/_catalog/" in name
+                and name.endswith("/data/flux2-fp8-scales.json")
+            ]
             package_cores = [name for name in names if "/bin/libtrtmc_core.so" in name]
             script_cores = [name for name in names if ".data/scripts/libtrtmc_core.so" in name]
             backends = [
@@ -147,6 +153,7 @@ class WheelArchiveValidator:
             (bool(benchmark_descriptors), "packaged benchmark MODEL.toml files are missing"),
             (bool(benchmark_manifests), "packaged benchmark manifests are missing"),
             (bool(benchmark_audio_assets), "packaged benchmark audio assets are missing"),
+            (bool(benchmark_fp8_assets), "packaged benchmark FP8 scale assets are missing"),
             (bool(package_cores), "packaged core DSO is missing"),
             (bool(script_cores), "core DSO beside native trtmc script is missing"),
             (

@@ -122,6 +122,7 @@ class ManifestCatalog:
                     "build_cli_args",
                     "build_env",
                     "build_timeout_s",
+                    "fp8_scales",
                     "fp32_layers",
                     "max_cache_length",
                     "quantization",
@@ -130,6 +131,8 @@ class ManifestCatalog:
                 if key in raw
             }
         )
+        if "fp8_scales" in build_settings:
+            _resolve_manifest_asset(path, "fp8_scales", build_settings["fp8_scales"])
         return ModelDescriptor(
             name=str(raw["name"]),
             hf_id=str(raw["hf_id"]),
@@ -142,6 +145,17 @@ class ManifestCatalog:
             testcases=tuple(testcases),
             build_settings=build_settings,
         )
+
+
+def _resolve_manifest_asset(path: Path, field: str, value: object) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise BenchmarkError(f"{field} in model manifest {path} must be a non-empty path")
+    declared = Path(value).expanduser()
+    candidate = declared if declared.is_absolute() else path.parent.parent / declared
+    resolved = candidate.resolve()
+    if not resolved.is_file():
+        raise BenchmarkError(f"{field} file declared by model manifest {path} is missing: {resolved}")
+    return resolved
 
 
 def _model_defaults(path: Path, task_strategy: str) -> Mapping[str, Any]:

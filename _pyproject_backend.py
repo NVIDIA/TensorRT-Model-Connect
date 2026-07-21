@@ -7,6 +7,7 @@ import base64
 import csv
 import hashlib
 import io
+import json
 import re
 import tarfile
 import tempfile
@@ -80,9 +81,28 @@ def _append_benchmark_catalog_to_sdist(sdist_path: Path) -> None:
     catalog_root = Path.cwd() / "tests" / "e2e" / "models"
     descriptors = sorted(catalog_root.glob("*/MODEL.toml"))
     manifests = sorted(catalog_root.glob("*/manifests/*.json"))
-    assets = sorted(catalog_root.glob("*/data/Recording.wav"))
+    assets = set(catalog_root.glob("*/data/Recording.wav"))
     if not descriptors or not manifests:
         raise RuntimeError(f"benchmark model catalog is empty or unavailable: {catalog_root}")
+    for manifest in manifests:
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"cannot read benchmark manifest {manifest}: {exc}") from exc
+        if "fp8_scales" not in raw:
+            continue
+        declared = raw["fp8_scales"]
+        if not isinstance(declared, str) or not declared.strip():
+            raise RuntimeError(f"fp8_scales in benchmark manifest {manifest} must be a path")
+        family = manifest.parent.parent.resolve()
+        asset = (family / declared).resolve()
+        if not asset.is_relative_to(family) or not asset.is_file():
+            raise RuntimeError(
+                f"fp8_scales in benchmark manifest {manifest} is missing or outside {family}: "
+                f"{asset}"
+            )
+        assets.add(asset)
+    assets = sorted(assets)
 
     with tempfile.NamedTemporaryFile(
         prefix=f".{sdist_path.name}.", suffix=".tmp", dir=sdist_path.parent, delete=False

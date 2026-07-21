@@ -25,6 +25,7 @@ from tensorrt_model_connect.benchmark.worker import worker_backend_abi
 
 
 pytestmark = pytest.mark.unit
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _bundle(tmp_path: Path, name: str = "model.trtfb") -> Path:
@@ -273,6 +274,58 @@ def test_auto_build_reuses_model_defaults_and_largest_diffusion_shape(tmp_path: 
     assert command[command.index("--num-inference-steps") + 1] == "20"
     assert command[command.index("--max-batch-size") + 1] == "2"
     assert command.count("--max-batch-size") == 1
+
+
+def test_auto_build_requires_and_passes_manifest_fp8_scales(tmp_path: Path) -> None:
+    catalog = ManifestCatalog()
+    model = catalog.resolve("flux-2-dev-fp8")
+    case = resolve_case(model, tmp_path / "pending.trtfb")
+    plan = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
+
+    assert model.build_settings["fp8_scales"] == "data/flux2-fp8-scales.json"
+    expected_scales = (
+        REPOSITORY_ROOT / "tests/e2e/models/flux/data/flux2-fp8-scales.json"
+    ).resolve()
+    assert expected_scales.is_file()
+    command = list(plan.command)
+    assert command[command.index("--fp8-scales") + 1] == str(expected_scales)
+
+
+def test_manifest_declared_fp8_scales_fail_closed_when_missing(tmp_path: Path) -> None:
+    manifest = tmp_path / "flux/manifests/missing-fp8-scales.json"
+    manifest.parent.mkdir(parents=True)
+    raw = json.loads(
+        (REPOSITORY_ROOT / "tests/e2e/models/flux/manifests/flux-2-dev-fp8.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(BenchmarkError, match="fp8_scales file.*is missing"):
+        ManifestCatalog().resolve(str(manifest))
+
+
+def test_fp8_scale_contents_participate_in_bundle_cache_identity(tmp_path: Path) -> None:
+    family = tmp_path / "catalog/flux"
+    manifest = family / "manifests/flux-2-dev-fp8.json"
+    manifest.parent.mkdir(parents=True)
+    scales = family / "data/flux2-fp8-scales.json"
+    scales.parent.mkdir()
+    scales.write_text('{"version": 1}\n', encoding="utf-8")
+    source = REPOSITORY_ROOT / "tests/e2e/models/flux/manifests/flux-2-dev-fp8.json"
+    manifest.write_bytes(source.read_bytes())
+
+    catalog = ManifestCatalog(tmp_path / "catalog")
+    model = catalog.resolve("flux-2-dev-fp8")
+    case = resolve_case(model, tmp_path / "pending.trtfb")
+    first = BundleBuilder(tmp_path / "cache")._plan(model, (case,))
+
+    scales.write_text('{"version": 2}\n', encoding="utf-8")
+    updated_model = catalog.resolve("flux-2-dev-fp8")
+    updated_case = resolve_case(updated_model, tmp_path / "pending.trtfb")
+    second = BundleBuilder(tmp_path / "cache")._plan(updated_model, (updated_case,))
+
+    assert first.cache_key != second.cache_key
 
 
 def test_image_rate_and_seconds_per_image_account_for_batch_size() -> None:

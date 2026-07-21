@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -59,7 +60,7 @@ def _stage_benchmark_catalog(recipe: ConanFile, source_folder: str | Path, packa
     source = Path(source_folder) / "tests" / "e2e" / "models"
     descriptors = sorted(source.glob("*/MODEL.toml"))
     manifests = sorted(source.glob("*/manifests/*.json"))
-    benchmark_assets = sorted(source.glob("*/data/Recording.wav"))
+    benchmark_assets = set(source.glob("*/data/Recording.wav"))
     if not descriptors or not manifests:
         raise ConanException(f"benchmark model catalog is empty or unavailable: {source}")
     missing_descriptors = [
@@ -68,6 +69,25 @@ def _stage_benchmark_catalog(recipe: ConanFile, source_folder: str | Path, packa
     if missing_descriptors:
         paths = ", ".join(str(path) for path in missing_descriptors)
         raise ConanException(f"benchmark manifests have no family MODEL.toml: {paths}")
+    for manifest in manifests:
+        try:
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ConanException(f"cannot read benchmark manifest {manifest}: {exc}") from exc
+        if "fp8_scales" not in raw:
+            continue
+        declared = raw["fp8_scales"]
+        if not isinstance(declared, str) or not declared.strip():
+            raise ConanException(f"fp8_scales in benchmark manifest {manifest} must be a path")
+        family = manifest.parent.parent.resolve()
+        asset = (family / declared).resolve()
+        if not asset.is_relative_to(family) or not asset.is_file():
+            raise ConanException(
+                f"fp8_scales in benchmark manifest {manifest} is missing or outside {family}: "
+                f"{asset}"
+            )
+        benchmark_assets.add(asset)
+    benchmark_assets = sorted(benchmark_assets)
 
     destination = package / "benchmark" / "_catalog"
     for source_path in (*descriptors, *manifests, *benchmark_assets):
@@ -82,17 +102,21 @@ def _stage_benchmark_catalog(recipe: ConanFile, source_folder: str | Path, packa
 
     packaged_descriptors = sorted(destination.glob("*/MODEL.toml"))
     packaged_manifests = sorted(destination.glob("*/manifests/*.json"))
-    packaged_assets = sorted(destination.glob("*/data/Recording.wav"))
+    missing_assets = [
+        source_path
+        for source_path in benchmark_assets
+        if not (destination / source_path.relative_to(source)).is_file()
+    ]
     if (
         len(packaged_descriptors) != len(descriptors)
         or len(packaged_manifests) != len(manifests)
-        or len(packaged_assets) != len(benchmark_assets)
+        or missing_assets
     ):
         raise ConanException(
             "benchmark model catalog staging is incomplete: "
             f"descriptors={len(packaged_descriptors)}/{len(descriptors)}, "
             f"manifests={len(packaged_manifests)}/{len(manifests)}, "
-            f"assets={len(packaged_assets)}/{len(benchmark_assets)}"
+            f"assets={len(benchmark_assets) - len(missing_assets)}/{len(benchmark_assets)}"
         )
 
 
