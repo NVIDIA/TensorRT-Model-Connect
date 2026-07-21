@@ -153,45 +153,38 @@ nlohmann::json make_l0_profile() {
 }
 
 nlohmann::json make_top_level_profile(const nlohmann::json& config) {
-    int32_t video_width = 0;
-    int32_t video_height = 0;
-    int32_t video_num_frames = 0;
-    int32_t num_inference_steps = 0;
-    int32_t frame_rate = 0;
-    int32_t text_seq_len = 0;
-    double guidance_scale = 0.0;
-    double flow_shift = 0.0;
+    Wan22TI2VOptions profile;
+    double guidance_scale = 5.0;
+    double flow_shift = 5.0;
     try {
-        video_width = config.value("video_width", kWan22OfficialVideoWidth);
-        video_height = config.value("video_height", kWan22OfficialVideoHeight);
-        video_num_frames = config.value("video_num_frames", kWan22OfficialVideoFrames);
-        num_inference_steps = config.value("num_inference_steps", kWan22OfficialInferenceSteps);
-        frame_rate = config.value("frame_rate", kWan22OfficialFrameRate);
-        text_seq_len = config.value("text_seq_len", kWan22TextSequenceLength);
-        guidance_scale = config.value("guidance_scale", 5.0);
-        flow_shift = config.value("flow_shift", 5.0);
+        profile.video_width = config.value("video_width", profile.video_width);
+        profile.video_height = config.value("video_height", profile.video_height);
+        profile.video_num_frames = config.value("video_num_frames", profile.video_num_frames);
+        profile.num_inference_steps =
+            config.value("num_inference_steps", profile.num_inference_steps);
+        profile.frame_rate = config.value("frame_rate", profile.frame_rate);
+        profile.text_seq_len = config.value("text_seq_len", profile.text_seq_len);
+        guidance_scale = config.value("guidance_scale", guidance_scale);
+        flow_shift = config.value("flow_shift", flow_shift);
     } catch (const nlohmann::json::exception&) {
         throw std::runtime_error("Wan2.2 top-level generation profile is malformed");
     }
 
-    const bool common = frame_rate == kWan22OfficialFrameRate &&
-                        text_seq_len == kWan22TextSequenceLength && guidance_scale == 5.0 &&
-                        flow_shift == 5.0;
-    const bool official = common && video_width == kWan22OfficialVideoWidth &&
-                          video_height == kWan22OfficialVideoHeight &&
-                          video_num_frames == kWan22OfficialVideoFrames &&
-                          num_inference_steps == kWan22OfficialInferenceSteps;
-    if (official)
-        return make_official_profile();
+    if (guidance_scale != 5.0 || flow_shift != 5.0) {
+        throw std::runtime_error(
+            "Wan2.2 top-level generation profile is not one of the qualified profiles");
+    }
+    profile.guidance_scale = static_cast<float>(guidance_scale);
+    profile.flow_shift = static_cast<float>(flow_shift);
 
-    const bool l0 =
-        common && video_width == kWan22L0VideoWidth && video_height == kWan22L0VideoHeight &&
-        video_num_frames == kWan22L0VideoFrames && num_inference_steps == kWan22L0InferenceSteps;
-    if (l0)
-        return make_l0_profile();
-
-    throw std::runtime_error(
-        "Wan2.2 top-level generation profile is not one of the qualified profiles");
+    try {
+        return require_wan22_profile(profile) == Wan22TI2VProfileKind::kOfficial
+                   ? make_official_profile()
+                   : make_l0_profile();
+    } catch (const std::invalid_argument&) {
+        throw std::runtime_error(
+            "Wan2.2 top-level generation profile is not one of the qualified profiles");
+    }
 }
 
 BundleSectionMap validate_bundle_section_contract(const BundleInfo& info,

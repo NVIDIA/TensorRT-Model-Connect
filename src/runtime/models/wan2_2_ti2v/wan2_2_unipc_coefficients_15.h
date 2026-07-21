@@ -422,33 +422,46 @@ constexpr std::uint64_t canonical_numerical_payload_fnv1a64() {
     return hash;
 }
 
+constexpr bool validate_endpoints() {
+    return kTimesteps.front() == 999U && kTimesteps.back() == 262U &&
+           kSigmaBits.front() == 0x3f7ff2e2U && kSigmaBits.back() == 0U;
+}
+
+constexpr bool validate_schedule_step(std::size_t index) {
+    if (kConversionSigmaBits[index] != kSigmaBits[index])
+        return false;
+    if (kSigmaBits[index] <= kSigmaBits[index + 1U])
+        return false;
+    return index == 0U || kTimesteps[index - 1U] > kTimesteps[index];
+}
+
+constexpr bool validate_corrector(std::size_t index) {
+    const auto& corrector = kCorrector[index];
+    if (index == 0U) {
+        return corrector.order == 0U && corrector.sigma_t_index == kNoSigmaIndex &&
+               corrector.sigma_s0_index == kNoSigmaIndex;
+    }
+    const std::uint32_t order = index == 1U ? 1U : 2U;
+    return corrector.order == order && corrector.sigma_t_index == index &&
+           corrector.sigma_s0_index == index - 1U && corrector.rk_bits[order - 1U] == 0x3f800000U;
+}
+
+constexpr bool validate_predictor(std::size_t index) {
+    const auto& predictor = kPredictor[index];
+    const std::uint32_t order = index == 0U || index + 1U == kStepCount ? 1U : 2U;
+    return predictor.order == order && predictor.sigma_t_index == index + 1U &&
+           predictor.sigma_s0_index == index && predictor.rk_bits[order - 1U] == 0x3f800000U;
+}
+
 constexpr bool validate_tables() {
-    if (kTimesteps.front() != 999U || kTimesteps.back() != 262U ||
-        kSigmaBits.front() != 0x3f7ff2e2U || kSigmaBits.back() != 0U)
+    if (!validate_endpoints())
         return false;
     for (std::size_t index = 0; index < kStepCount; ++index) {
-        if (kConversionSigmaBits[index] != kSigmaBits[index] ||
-            (index > 0U && kTimesteps[index - 1U] <= kTimesteps[index]) ||
-            kSigmaBits[index] <= kSigmaBits[index + 1U])
+        if (!validate_schedule_step(index))
             return false;
-
-        const auto& corrector = kCorrector[index];
-        if (index == 0U) {
-            if (corrector.order != 0U || corrector.sigma_t_index != kNoSigmaIndex ||
-                corrector.sigma_s0_index != kNoSigmaIndex)
-                return false;
-        } else {
-            const std::uint32_t order = index == 1U ? 1U : 2U;
-            if (corrector.order != order || corrector.sigma_t_index != index ||
-                corrector.sigma_s0_index != index - 1U ||
-                corrector.rk_bits[order - 1U] != 0x3f800000U)
-                return false;
-        }
-
-        const auto& predictor = kPredictor[index];
-        const std::uint32_t order = index == 0U || index + 1U == kStepCount ? 1U : 2U;
-        if (predictor.order != order || predictor.sigma_t_index != index + 1U ||
-            predictor.sigma_s0_index != index || predictor.rk_bits[order - 1U] != 0x3f800000U)
+        if (!validate_corrector(index))
+            return false;
+        if (!validate_predictor(index))
             return false;
     }
     return true;

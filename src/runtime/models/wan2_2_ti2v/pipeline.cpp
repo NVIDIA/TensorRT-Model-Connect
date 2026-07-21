@@ -25,6 +25,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -392,6 +393,15 @@ std::vector<float> make_initial_latents(const GenerateConfig& config, int64_t se
     return config.initial_latents;
 }
 
+bool same_runtime_shape(const Wan22TI2VRuntimeShape& left, const Wan22TI2VRuntimeShape& right) {
+    return std::tie(left.latent_frames, left.latent_height, left.latent_width,
+                    left.denoiser_patch_rows, left.video_frames, left.video_height,
+                    left.video_width, left.latent_count, left.context_count, left.video_count) ==
+           std::tie(right.latent_frames, right.latent_height, right.latent_width,
+                    right.denoiser_patch_rows, right.video_frames, right.video_height,
+                    right.video_width, right.latent_count, right.context_count, right.video_count);
+}
+
 } // namespace
 
 Wan22TI2VRuntimeShape make_wan22_runtime_shape(const Wan22TI2VRequest& request) {
@@ -424,16 +434,6 @@ std::vector<ModuleExternalBinding>
 make_wan22_vae_cache_bindings(const std::vector<void*>& input_addresses,
                               const std::vector<void*>& output_addresses,
                               const Wan22TI2VRuntimeShape& shape) {
-    const auto same_shape = [](const Wan22TI2VRuntimeShape& left,
-                               const Wan22TI2VRuntimeShape& right) {
-        return left.latent_frames == right.latent_frames &&
-               left.latent_height == right.latent_height &&
-               left.latent_width == right.latent_width &&
-               left.denoiser_patch_rows == right.denoiser_patch_rows &&
-               left.video_frames == right.video_frames && left.video_height == right.video_height &&
-               left.video_width == right.video_width && left.latent_count == right.latent_count &&
-               left.context_count == right.context_count && left.video_count == right.video_count;
-    };
     const auto official_shape = make_wan22_runtime_shape(Wan22TI2VRequest{});
     Wan22TI2VRequest l0_request;
     l0_request.num_inference_steps = kWan22L0InferenceSteps;
@@ -441,7 +441,7 @@ make_wan22_vae_cache_bindings(const std::vector<void*>& input_addresses,
     l0_request.video_width = kWan22L0VideoWidth;
     l0_request.video_num_frames = kWan22L0VideoFrames;
     const auto l0_shape = make_wan22_runtime_shape(l0_request);
-    if (!same_shape(shape, official_shape) && !same_shape(shape, l0_shape)) {
+    if (!same_runtime_shape(shape, official_shape) && !same_runtime_shape(shape, l0_shape)) {
         throw std::invalid_argument(
             "Wan2.2 VAE prebinding requires an exact qualified runtime shape");
     }

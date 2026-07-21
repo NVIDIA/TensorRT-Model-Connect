@@ -372,6 +372,20 @@ void test_exact_payload_and_identity_errors() {
                          "Wan2.2 top-level generation profile is not one of the qualified profiles",
                          "top-level config rejects mixed official geometry and L0 steps");
 
+    auto near_guidance = make_fixture();
+    near_guidance.config["guidance_scale"] = 5.0000001;
+    expect_fixture_error(
+        root / "near-guidance.trtfb", std::move(near_guidance),
+        "Wan2.2 top-level generation profile is not one of the qualified profiles",
+        "top-level config rejects guidance values that only round to five in float");
+
+    auto near_flow_shift = make_fixture();
+    near_flow_shift.config["flow_shift"] = 5.0000001;
+    expect_fixture_error(
+        root / "near-flow-shift.trtfb", std::move(near_flow_shift),
+        "Wan2.2 top-level generation profile is not one of the qualified profiles",
+        "top-level config rejects flow-shift values that only round to five in float");
+
     auto schema_tamper = make_fixture();
     schema_tamper.config["artifact_manifest"]["schema"] = "trtmc.wan2_2_ti2v.bundle-artifacts.v3";
     expect_fixture_error(root / "schema.trtfb", std::move(schema_tamper),

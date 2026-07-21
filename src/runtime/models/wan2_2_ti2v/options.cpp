@@ -16,7 +16,7 @@ namespace trtmc {
 namespace {
 
 template <typename Profile>
-Wan22TI2VProfileKind require_profile(const Profile& profile, const char* subject) {
+void validate_common_profile(const Profile& profile) {
     if (profile.guidance_scale != kWan22OfficialGuidanceScale)
         throw std::invalid_argument("Wan2.2-TI2V-5B bundle requires CFG=5");
     if (profile.flow_shift != kWan22OfficialFlowShift)
@@ -27,19 +27,30 @@ Wan22TI2VProfileKind require_profile(const Profile& profile, const char* subject
         throw std::invalid_argument("Wan2.2-TI2V-5B bundle requires text_seq_len=512");
     if (profile.seed < 0)
         throw std::invalid_argument("Wan2.2-TI2V-5B bundle seed must be non-negative");
+}
 
-    const bool official = profile.num_inference_steps == kWan22OfficialInferenceSteps &&
-                          profile.video_height == kWan22OfficialVideoHeight &&
-                          profile.video_width == kWan22OfficialVideoWidth &&
-                          profile.video_num_frames == kWan22OfficialVideoFrames;
-    if (official)
+template <typename Profile>
+bool is_official_profile(const Profile& profile) {
+    return profile.num_inference_steps == kWan22OfficialInferenceSteps &&
+           profile.video_height == kWan22OfficialVideoHeight &&
+           profile.video_width == kWan22OfficialVideoWidth &&
+           profile.video_num_frames == kWan22OfficialVideoFrames;
+}
+
+template <typename Profile>
+bool is_l0_profile(const Profile& profile) {
+    return profile.num_inference_steps == kWan22L0InferenceSteps &&
+           profile.video_height == kWan22L0VideoHeight &&
+           profile.video_width == kWan22L0VideoWidth &&
+           profile.video_num_frames == kWan22L0VideoFrames;
+}
+
+template <typename Profile>
+Wan22TI2VProfileKind require_profile(const Profile& profile, const char* subject) {
+    validate_common_profile(profile);
+    if (is_official_profile(profile))
         return Wan22TI2VProfileKind::kOfficial;
-
-    const bool l0 = profile.num_inference_steps == kWan22L0InferenceSteps &&
-                    profile.video_height == kWan22L0VideoHeight &&
-                    profile.video_width == kWan22L0VideoWidth &&
-                    profile.video_num_frames == kWan22L0VideoFrames;
-    if (l0)
+    if (is_l0_profile(profile))
         return Wan22TI2VProfileKind::kL0;
 
     throw std::invalid_argument(
