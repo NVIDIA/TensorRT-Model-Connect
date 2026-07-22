@@ -42,6 +42,8 @@ python3 -m tools.ci --help
 python3 -m tools.ci pipeline source-quality
 python3 -m tools.ci image ensure
 python3 -m tools.ci container start
+python3 -m tools.ci container run -- python -V
+python3 -m tools.ci container cleanup
 python3 -m tools.ci stage premerge-unit
 python3 -m tools.ci model-proof --model patchtsmixer --suite premerge
 ```
@@ -295,17 +297,22 @@ the producing class remains the source of truth for optional evidence fields.
 ### `container.py`
 
 - **Functionality / units:** `ContainerConfig` resolves run identity, workspace,
-  image, and hardening; `CiContainer` constructs and starts the long-lived
-  trusted or GPU-free unit container.
+  image, and hardening; `CiContainer` constructs either a long-lived trusted or
+  GPU-free unit container or one bounded foreground command.
 - **Inputs:** Environment fields including `GITHUB_RUN_ID`,
   `GITHUB_RUN_ATTEMPT`, `TRTMC_CI_IMAGE`, `GITHUB_WORKSPACE`, and
   `TRTMC_CI_HARDENED`, plus the allowlists from `environment.py`.
-- **Outputs:** Returns the container-name string, starts one `sleep infinity`
-  Docker container, and exports `TRTMC_CI_CONTAINER_NAME=<name>` through
-  `GITHUB_ENV`. Hardened mode mounts source read-only and scratch at `/work`.
-  When a trusted stage needs Hugging Face authentication, it mounts a temporary
-  mode-0600 token file, passes only `HF_TOKEN_PATH`, and unlinks the host path
-  immediately after Docker has created the bind mount.
+- **Outputs:** `start` returns the container-name string, starts one
+  `sleep infinity` Docker container, and exports
+  `TRTMC_CI_CONTAINER_NAME=<name>` through `GITHUB_ENV`. `run` executes one
+  foreground command as the host user with `docker run --rm`; `cleanup` verifies
+  that the exact run-owned container is absent before removing its deterministic
+  residue. Hardened mode mounts source read-only and scratch at `/work`. A
+  trusted one-shot command may receive Hugging Face authentication through a
+  run-owned mode-0600 token file and `HF_TOKEN_PATH`. SIGINT/SIGTERM and the
+  Nightly `always()` step use the same fail-closed cleanup ordering. Long-lived
+  containers reject Hugging Face tokens, and Docker subprocesses never inherit
+  their raw values.
 - **Boundary:** It owns Docker runtime configuration and mounts. It does not
   execute a pipeline stage or define stage contents.
 

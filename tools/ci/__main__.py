@@ -28,6 +28,13 @@ class CiCommand:
         container = commands.add_parser("container", help="Manage the run-owned CI container")
         container_commands = container.add_subparsers(dest="container_command", required=True)
         container_commands.add_parser("start", help="Start a clean CI container")
+        container_commands.add_parser(
+            "cleanup", help="Remove the exact run-owned container and secret residue"
+        )
+        container_run = container_commands.add_parser(
+            "run", help="Run one bounded command in a clean CI container"
+        )
+        container_run.add_argument("container_arguments", nargs=argparse.REMAINDER)
         stage = commands.add_parser("stage", help="Run a stage inside the CI container")
         stage.add_argument("name", help="Pipeline stage name")
         pipeline = commands.add_parser("pipeline", help="Execute a named pipeline stage")
@@ -54,6 +61,21 @@ class CiCommand:
             from .container import CiContainer
 
             CiContainer(dict(os.environ)).start()
+            return 0
+        if arguments.command == "container" and arguments.container_command == "cleanup":
+            from .container import CiContainer
+
+            CiContainer(dict(os.environ)).cleanup()
+            return 0
+        if arguments.command == "container" and arguments.container_command == "run":
+            from .container import CiContainer
+
+            command = arguments.container_arguments
+            if command[:1] == ["--"]:
+                command = command[1:]
+            if not command:
+                self.parser.error("container run requires '-- <command>'")
+            CiContainer(dict(os.environ)).run_once(command)
             return 0
         if arguments.command == "stage":
             from .stage import ContainerStageRunner

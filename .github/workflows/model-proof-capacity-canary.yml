@@ -67,6 +67,10 @@ jobs:
             echo "::error::The capacity canary may only run from main."
             exit 1
           fi
+          if [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            echo "::error::Capacity evidence must come from a first-attempt workflow run."
+            exit 1
+          fi
 
       - name: Check out canary source
         uses: actions/checkout@v4
@@ -171,6 +175,13 @@ jobs:
       TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
 
     steps:
+      - name: Reject rerun evidence
+        run: |
+          if [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            echo "::error::Capacity evidence must come from a first-attempt workflow run."
+            exit 1
+          fi
+
       - name: Check out exact canary revision
         uses: actions/checkout@v4
         with:
@@ -257,6 +268,13 @@ jobs:
       actions: read
       contents: read
     steps:
+      - name: Reject rerun verification
+        run: |
+          if [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            echo "::error::Capacity evidence must come from a first-attempt workflow run."
+            exit 1
+          fi
+
       - name: Check out exact canary revision
         uses: actions/checkout@v4
         with:
@@ -270,6 +288,19 @@ jobs:
           pattern: capacity-canary-*
           path: capacity-canary-receipts
           merge-multiple: true
+
+      - name: Authenticate source cohort runs
+        if: ${{ inputs.mode == 'cross-workflow-verify' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_A_ID: ${{ inputs.run_a_id }}
+          RUN_B_ID: ${{ inputs.run_b_id }}
+        run: |
+          set -euo pipefail
+          metadata_dir="$RUNNER_TEMP/trtmc-cross-run-metadata"
+          mkdir -p "$metadata_dir"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_A_ID" > "$metadata_dir/run-a.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_B_ID" > "$metadata_dir/run-b.json"
 
       - name: Download cohort A receipts
         if: ${{ inputs.mode == 'cross-workflow-verify' }}
@@ -341,6 +372,9 @@ jobs:
             --expected-cohort-id "$COHORT_ID" \
             --expected-run-id "$RUN_A_ID" \
             --expected-run-id "$RUN_B_ID" \
+            --run-metadata "$RUNNER_TEMP/trtmc-cross-run-metadata/run-a.json" \
+            --run-metadata "$RUNNER_TEMP/trtmc-cross-run-metadata/run-b.json" \
+            --expected-repository "$GITHUB_REPOSITORY" \
             --expected-revision "$GITHUB_SHA" \
             --expected-barrier-epoch "$BARRIER_EPOCH" \
             --output capacity-canary-verification.json
@@ -368,6 +402,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: capacity-canary-verification
-          path: capacity-canary-verification.json
+          path: |
+            capacity-canary-verification.json
+            ${{ runner.temp }}/trtmc-cross-run-metadata/*.json
           if-no-files-found: error
           retention-days: 14

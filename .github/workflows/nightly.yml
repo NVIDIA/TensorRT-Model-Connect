@@ -427,19 +427,13 @@ jobs:
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         run: python3 -m tools.ci image ensure
 
-      - name: Start cache-warm container
-        timeout-minutes: 5
+      - name: Strictly warm and verify every active single-GPU nightly model
+        timeout-minutes: 120
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         env:
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python3 -m tools.ci container start
-
-      - name: Strictly warm and verify every active single-GPU nightly model
-        timeout-minutes: 120
-        env:
-          TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
           TRTMC_CACHE_RECEIPT_DIR: ${{ runner.temp }}/trtmc-cache-receipt-${{ github.run_id }}-${{ github.run_attempt }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
           if ! [[ "${TRTMC_NODE_ID:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
@@ -452,9 +446,7 @@ jobs:
 
           warm_summary="$TRTMC_CI_WORKSPACE/cache-warm-summary.json"
           verify_summary="$TRTMC_CACHE_RECEIPT_DIR/cache-verify-summary.json"
-          docker exec --user "$(id -u):$(id -g)" \
-            -w "$TRTMC_CI_WORKSPACE" \
-            "$TRTMC_CI_CONTAINER_NAME" \
+          python3 -m tools.ci container run -- \
             env -u HF_HUB_OFFLINE \
               TRTMC_CACHE_SOURCE_REVISION="$TRTMC_CACHE_SOURCE_REVISION" \
               python -u scripts/warm_hf_cache.py \
@@ -462,6 +454,7 @@ jobs:
               --strict \
               --attempt-timeout-seconds 600 \
               --summary-output "$warm_summary"
+          unset HF_TOKEN HUGGING_FACE_HUB_TOKEN
 
           docker run --rm \
             --network none \
@@ -493,6 +486,22 @@ jobs:
             --verify-summary "$verify_summary" \
             --output "$TRTMC_CACHE_RECEIPT_DIR/cache-warm-receipt.json"
 
+      - name: Clean cache-warm container
+        if: ${{ always() }}
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        run: |
+          set -euo pipefail
+          cleanup_status=0
+          python3 -m tools.ci container cleanup || cleanup_status=$?
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            docker_config_status=0
+            rm -rf "$DOCKER_CONFIG" || docker_config_status=$?
+            if [ "$cleanup_status" -eq 0 ]; then
+              cleanup_status=$docker_config_status
+            fi
+          fi
+          exit "$cleanup_status"
+
       - name: Upload node cache-warm receipt
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -501,14 +510,6 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: ${{ runner.temp }}/trtmc-cache-receipt-${{ github.run_id }}-${{ github.run_attempt }}/cache-warm-receipt.json
-
-      - name: Clean cache-warm container
-        if: ${{ always() }}
-        run: |
-          docker rm -f "$TRTMC_CI_CONTAINER_NAME" >/dev/null 2>&1 || true
-          if [ -n "${DOCKER_CONFIG:-}" ]; then
-            rm -rf "$DOCKER_CONFIG"
-          fi
 
   cache-warm-ready:
     name: 3 / HF cache / Verify every node
@@ -557,6 +558,8 @@ jobs:
           python3 -m tools.ci.cache_warm_receipt verify \
             --receipts-dir "$RUNNER_TEMP/trtmc-cache-warm-receipts" \
             --expected-matrix-json "$EXPECTED_MATRIX" \
+            --expected-run-id "$GITHUB_RUN_ID" \
+            --expected-revision "${{ needs.legal.outputs.tested_sha }}" \
             --output "$SUMMARY"
 
       - name: Upload fleet cache readiness summary

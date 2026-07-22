@@ -1072,6 +1072,8 @@ def test_nightly_discovers_and_warms_one_dynamic_anchor_per_node() -> None:
     assert "needs.cache-warm.result" in ready
     assert "tools.ci.cache_warm_receipt verify" in ready
     assert "--expected-matrix-json" in ready
+    assert '--expected-run-id "$GITHUB_RUN_ID"' in ready
+    assert '--expected-revision "${{ needs.legal.outputs.tested_sha }}"' in ready
     assert "Upload fleet cache readiness summary" in ready
 
     assert "- cache-warm-ready" in proof
@@ -1083,6 +1085,11 @@ def test_nightly_anchor_warm_is_strict_offline_verified_and_receipted() -> None:
     warm = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  cache-warm-ready:", maxsplit=1)[
         0
     ]
+    bounded_warm = warm.split(
+        "      - name: Strictly warm and verify every active single-GPU nightly model",
+        maxsplit=1,
+    )[1].split("      - name: Upload node cache-warm receipt", maxsplit=1)[0]
+    cleanup = warm.split("      - name: Clean cache-warm container", maxsplit=1)[1]
 
     assert warm.count("scripts/warm_hf_cache.py") == 2
     assert warm.count("--strict") == 2
@@ -1096,6 +1103,21 @@ def test_nightly_anchor_warm_is_strict_offline_verified_and_receipted() -> None:
     assert "tools.ci.cache_warm_receipt create" in warm
     assert "cache-warm-receipt.json" in warm
     assert "Upload node cache-warm receipt" in warm
+    assert "Start cache-warm container" not in warm
+    assert "python3 -m tools.ci container run --" in warm
+    assert "docker exec --user" not in warm
+    assert "working-directory: ${{ env.TRTMC_CI_WORKSPACE }}" in bounded_warm
+    assert "working-directory: ${{ env.TRTMC_CI_WORKSPACE }}" in cleanup
+    assert "python3 -m tools.ci container cleanup" in cleanup
+    assert 'docker rm -f "$TRTMC_CI_CONTAINER_NAME"' not in cleanup
+    assert "cleanup_status=0" in cleanup
+    assert "container cleanup || cleanup_status=$?" in cleanup
+    assert 'rm -rf "$DOCKER_CONFIG" || docker_config_status=$?' in cleanup
+    assert 'if [ "$cleanup_status" -eq 0 ]; then' in cleanup
+    assert 'exit "$cleanup_status"' in cleanup
+    assert warm.index("      - name: Clean cache-warm container") < warm.index(
+        "      - name: Upload node cache-warm receipt"
+    )
 
 
 def test_nightly_hf_token_is_scoped_to_warm_and_consumers_are_offline() -> None:
@@ -1108,6 +1130,8 @@ def test_nightly_hf_token_is_scoped_to_warm_and_consumers_are_offline() -> None:
 
     assert "HF_TOKEN: ${{ secrets.HF_TOKEN }}" in warm
     assert "HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}" not in text
+    assert warm.count("HF_TOKEN: ${{ secrets.HF_TOKEN }}") == 1
+    assert "unset HF_TOKEN HUGGING_FACE_HUB_TOKEN" in warm
     for job in (package, vlm):
         assert "secrets.HF_TOKEN" not in job
     assert '"--local-files-only"' in vlm

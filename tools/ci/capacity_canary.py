@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ _LOCK_NAMESPACE = re.compile(r"[0-9a-f]{64}")
 _RECEIPT_KIND = "trtmc_capacity_canary"
 _ACQUISITION_MARKER_KIND = "trtmc_capacity_canary_acquired"
 _ACQUISITION_MARKER_PREFIX = "TRTMC_CAPACITY_CANARY_ACQUIRED="
-_CANCELLATION_OBSERVATION_KIND = "trtmc_capacity_canary_cancellation_observation"
+_CAPACITY_WORKFLOW_PATH = ".github/workflows/model-proof-capacity-canary.yml"
 
 
 def _positive_integer(value: str | int, name: str, *, maximum: int) -> int:
@@ -552,6 +552,9 @@ def _validated_receipt(value: Mapping[str, object], *, expected_slots: int) -> d
     node_id = value.get("node_id")
     if not isinstance(node_id, str) or _SAFE_ID.fullmatch(node_id) is None:
         raise CiError("capacity receipt node_id is unsafe")
+    hostname = value.get("hostname")
+    if not isinstance(hostname, str) or _SAFE_ID.fullmatch(hostname) is None:
+        raise CiError("capacity receipt hostname is unsafe")
     gpu_uuid = value.get("gpu_uuid")
     if not isinstance(gpu_uuid, str) or _GPU_UUID.fullmatch(gpu_uuid) is None:
         raise CiError("capacity receipt GPU UUID is invalid")
@@ -583,6 +586,7 @@ def _validated_receipt(value: Mapping[str, object], *, expected_slots: int) -> d
         "barrier_epoch": barrier_epoch,
         "runner_name": runner_name,
         "node_id": node_id,
+        "hostname": hostname,
         "gpu_uuid": gpu_uuid,
         "gpu_slot": gpu_slot,
         "gpu_slots_per_device": slots_per_device,
@@ -612,6 +616,31 @@ def _maximum_concurrency(receipts: Sequence[Mapping[str, Any]]) -> int:
 
 def _slot_tuple(receipt: Mapping[str, Any]) -> tuple[str, str, int]:
     return (receipt["node_id"], receipt["gpu_uuid"], receipt["gpu_slot"])
+
+
+def _validate_topology_identity(receipts: Sequence[Mapping[str, Any]]) -> None:
+    """Require stable physical identity behind every logical node."""
+    node_identities: dict[str, tuple[str, str]] = {}
+    hostname_nodes: dict[str, str] = {}
+    gpu_nodes: dict[str, str] = {}
+    for receipt in receipts:
+        node_id = str(receipt["node_id"])
+        hostname = str(receipt["hostname"])
+        lock_namespace = str(receipt["lock_namespace"])
+        gpu_uuid = str(receipt["gpu_uuid"])
+
+        identity = (hostname, lock_namespace)
+        previous_identity = node_identities.setdefault(node_id, identity)
+        if previous_identity != identity:
+            raise CiError(f"node {node_id} reports inconsistent hostname or lock namespace")
+
+        previous_node = hostname_nodes.setdefault(hostname, node_id)
+        if previous_node != node_id:
+            raise CiError(f"hostname {hostname} maps to multiple node IDs")
+
+        previous_node = gpu_nodes.setdefault(gpu_uuid, node_id)
+        if previous_node != node_id:
+            raise CiError(f"GPU UUID {gpu_uuid} maps to multiple node IDs")
 
 
 def _cohort_node_summaries(
@@ -673,6 +702,7 @@ def _validated_exact_cohort(
     receipts = [_validated_receipt(value, expected_slots=expected) for value in values]
     if {receipt["leg_id"] for receipt in receipts} != set(range(expected)):
         raise CiError("capacity cohort receipts do not contain the exact matrix leg set")
+    _validate_topology_identity(receipts)
 
     run_ids = {str(receipt.get("run_id", "")) for receipt in receipts}
     revisions = {str(receipt.get("source_revision", "")) for receipt in receipts}
@@ -762,20 +792,109 @@ def verify_cohort_receipts(
     }
 
 
+def _validated_source_run_metadata(
+    payloads: Sequence[Mapping[str, object]],
+    *,
+    expected_run_ids: Sequence[str],
+    expected_repository: str,
+    expected_revision: str,
+) -> list[dict[str, object]]:
+    """Authenticate the two source runs whose artifacts are being combined."""
+    run_ids = list(expected_run_ids)
+    if len(payloads) != 2:
+        raise CiError("cross-workflow verification requires exactly two source-run records")
+    if not expected_repository or expected_repository.count("/") != 1:
+        raise CiError("cross-workflow expected repository is invalid")
+    if not expected_revision:
+        raise CiError("cross-workflow expected revision is empty")
+
+    validated: list[dict[str, object]] = []
+    observed_ids: set[str] = set()
+    for payload in payloads:
+        run_id_value = payload.get("id")
+        if isinstance(run_id_value, bool) or not isinstance(run_id_value, int):
+            raise CiError("cross-workflow source run has an invalid run ID")
+        run_id = str(run_id_value)
+        observed_ids.add(run_id)
+
+        repository = payload.get("repository")
+        head_repository = payload.get("head_repository")
+        if (
+            not isinstance(repository, Mapping)
+            or repository.get("full_name") != expected_repository
+        ):
+            raise CiError("cross-workflow source run is from the wrong repository")
+        if (
+            not isinstance(head_repository, Mapping)
+            or head_repository.get("full_name") != expected_repository
+        ):
+            raise CiError("cross-workflow source run has the wrong head repository")
+        run_attempt = payload.get("run_attempt")
+        if isinstance(run_attempt, bool) or not isinstance(run_attempt, int) or run_attempt != 1:
+            raise CiError("cross-workflow source run has the wrong run attempt")
+        workflow_path = payload.get("path")
+        # GitHub has emitted both the unqualified path and its @main form.
+        if workflow_path not in {
+            _CAPACITY_WORKFLOW_PATH,
+            f"{_CAPACITY_WORKFLOW_PATH}@main",
+        }:
+            raise CiError("cross-workflow source run has the wrong workflow path")
+        checks = (
+            ("event", "workflow_dispatch", "event"),
+            ("head_branch", "main", "branch"),
+            ("head_sha", expected_revision, "revision"),
+            ("status", "completed", "status"),
+            ("conclusion", "success", "conclusion"),
+        )
+        for field, expected, description in checks:
+            if payload.get(field) != expected:
+                raise CiError(f"cross-workflow source run has the wrong {description}")
+        validated.append(
+            {
+                "id": run_id_value,
+                "repository": expected_repository,
+                "head_repository": expected_repository,
+                "path": workflow_path,
+                "event": "workflow_dispatch",
+                "head_branch": "main",
+                "head_sha": expected_revision,
+                "status": "completed",
+                "conclusion": "success",
+                "run_attempt": 1,
+            }
+        )
+
+    if observed_ids != set(run_ids):
+        raise CiError("cross-workflow source-run records do not match the requested run IDs")
+    return sorted(validated, key=lambda value: int(value["id"]))
+
+
 def verify_cross_workflow_receipts(
     values: Sequence[Mapping[str, object]],
     *,
     expected_slots_per_run: int,
     expected_run_ids: Sequence[str],
-    expected_revision: str | None = None,
+    run_metadata: Sequence[Mapping[str, object]],
+    expected_repository: str,
+    expected_revision: str,
     expected_barrier_epoch: int | None = None,
     expected_cohort_id: str | None = None,
 ) -> dict[str, object]:
     """Verify two exact cohorts share one combined GPU-slot pool at one barrier."""
     expected = _positive_integer(expected_slots_per_run, "expected_slots_per_run", maximum=128)
     run_ids = list(expected_run_ids)
-    if len(run_ids) != 2 or len(set(run_ids)) != 2 or any(not run_id for run_id in run_ids):
+    if (
+        len(run_ids) != 2
+        or len(set(run_ids)) != 2
+        or any(not run_id.isdigit() or int(run_id) < 1 for run_id in run_ids)
+    ):
         raise CiError("cross-workflow verification requires exactly two distinct run IDs")
+    source_runs = _validated_source_run_metadata(
+        run_metadata,
+        expected_run_ids=run_ids,
+        expected_repository=expected_repository,
+        expected_revision=expected_revision,
+    )
     if len(values) != expected * 2:
         raise CiError(
             f"cross-workflow verification requires exactly {expected * 2} receipts, "
@@ -816,6 +935,7 @@ def verify_cross_workflow_receipts(
         raise CiError("cross-workflow cohorts do not share one absolute barrier epoch")
     if len(cohort_ids) != 1:
         raise CiError("cross-workflow cohorts do not share one cohort ID")
+    _validate_topology_identity(all_receipts)
 
     combined_expected = expected * 2
     combined_tuples = {_slot_tuple(receipt) for receipt in all_receipts}
@@ -851,174 +971,8 @@ def verify_cross_workflow_receipts(
         "runner_count": len(combined_runners),
         "slot_count": len(combined_tuples),
         "runs": run_summaries,
+        "source_runs": source_runs,
         "nodes": nodes,
-    }
-
-
-def parse_acquisition_markers(log_text: str) -> list[dict[str, object]]:
-    """Extract machine-readable acquisition records from a saved Actions log."""
-    markers: list[dict[str, object]] = []
-    for line_number, line in enumerate(log_text.splitlines(), start=1):
-        marker_offset = line.find(_ACQUISITION_MARKER_PREFIX)
-        if marker_offset < 0:
-            continue
-        payload = line[marker_offset + len(_ACQUISITION_MARKER_PREFIX) :].strip()
-        try:
-            value = json.loads(payload)
-        except json.JSONDecodeError as error:
-            raise CiError(
-                f"cancelled-run acquisition marker on log line {line_number} is invalid JSON"
-            ) from error
-        if not isinstance(value, dict):
-            raise CiError(
-                f"cancelled-run acquisition marker on log line {line_number} must be an object"
-            )
-        markers.append(value)
-    return markers
-
-
-def _validated_acquisition_marker(value: Mapping[str, object]) -> dict[str, Any]:
-    if value.get("schema_version") != 1 or value.get("kind") != _ACQUISITION_MARKER_KIND:
-        raise CiError("cancelled-run acquisition marker schema or kind is unsupported")
-    expected_slots = value.get("expected_slots")
-    if isinstance(expected_slots, bool) or not isinstance(expected_slots, int):
-        raise CiError("cancelled-run acquisition marker expected_slots must be an integer")
-    expected_slots = _positive_integer(expected_slots, "expected_slots", maximum=128)
-    cohort_id = _validated_cohort_id(value.get("cohort_id"), required=True)
-    acquired = _timestamp(value.get("acquired_at"), "marker.acquired_at")
-    marker = _validated_receipt(
-        {
-            **value,
-            "kind": _RECEIPT_KIND,
-            "released_at": (acquired + timedelta(microseconds=1)).isoformat(),
-        },
-        expected_slots=expected_slots,
-    )
-    if not 0 <= marker["leg_id"] <= expected_slots:
-        raise CiError("cancelled-run acquisition marker leg_id is invalid")
-    if not str(marker.get("run_id", "")) or not str(marker.get("source_revision", "")):
-        raise CiError("cancelled-run acquisition marker lacks workflow identity")
-    return {
-        **marker,
-        **value,
-        "cohort_id": cohort_id,
-        "_released": None,
-    }
-
-
-def verify_cancellation_recovery(
-    waiter_values: Sequence[Mapping[str, object]],
-    *,
-    cancelled_log: str,
-    observation: Mapping[str, object],
-    recovery_timeout_seconds: int,
-    expected_revision: str | None = None,
-    expected_cohort_id: str | None = None,
-) -> dict[str, object]:
-    """Verify a queued one-slot waiter reused the exact slot freed by cancellation."""
-    timeout = _positive_integer(recovery_timeout_seconds, "recovery_timeout_seconds", maximum=3600)
-    if (
-        observation.get("schema_version") != 1
-        or observation.get("kind") != _CANCELLATION_OBSERVATION_KIND
-    ):
-        raise CiError("cancellation observation schema or kind is unsupported")
-    cancelled_run_id = observation.get("cancelled_run_id")
-    waiter_run_id = observation.get("waiter_run_id")
-    if (
-        not isinstance(cancelled_run_id, str)
-        or not cancelled_run_id
-        or not isinstance(waiter_run_id, str)
-        or not waiter_run_id
-        or cancelled_run_id == waiter_run_id
-    ):
-        raise CiError("cancellation observation must name distinct cancelled and waiter runs")
-    if observation.get("waiter_job_status") != "queued":
-        raise CiError("cancellation observation does not prove the waiter was queued")
-    if observation.get("cancelled_run_conclusion") != "cancelled":
-        raise CiError("cancellation observation does not prove the holder run was cancelled")
-    queued_at = _timestamp(
-        observation.get("waiter_queued_observed_at"),
-        "observation.waiter_queued_observed_at",
-    )
-    cancel_requested_at = _timestamp(
-        observation.get("cancel_requested_at"),
-        "observation.cancel_requested_at",
-    )
-    if queued_at >= cancel_requested_at:
-        raise CiError("the waiter was not observed queued before cancellation")
-
-    markers = parse_acquisition_markers(cancelled_log)
-    if len(markers) != 1:
-        raise CiError(
-            "cancellation recovery requires exactly one acquisition marker in the cancelled log"
-        )
-    marker = _validated_acquisition_marker(markers[0])
-    if marker["run_id"] != cancelled_run_id:
-        raise CiError("cancelled-run acquisition marker run ID does not match the observation")
-    if marker["expected_slots"] != 1 or marker["leg_id"] != 0:
-        raise CiError("cancelled-run acquisition marker must describe one cohort leg")
-    if marker["_acquired"] > queued_at:
-        raise CiError("the cancelled holder had not acquired before the waiter was observed queued")
-    barrier_time = datetime.fromtimestamp(marker["barrier_epoch"], tz=timezone.utc)
-    if cancel_requested_at >= barrier_time:
-        raise CiError("the holder was not cancelled before its absolute barrier")
-    if expected_revision is not None and marker["source_revision"] != expected_revision:
-        raise CiError("cancelled-run acquisition marker revision does not match the expected one")
-    if expected_cohort_id is not None:
-        expected_cohort = _validated_cohort_id(expected_cohort_id, required=True)
-        if marker["cohort_id"] != expected_cohort:
-            raise CiError("cancelled-run acquisition marker cohort does not match the expected one")
-
-    waiter_receipts, actual_waiter_run, revision, barrier_epoch, cohort_id = (
-        _validated_exact_cohort(
-            waiter_values,
-            expected_slots=1,
-            expected_run_id=waiter_run_id,
-            expected_revision=expected_revision or marker["source_revision"],
-            expected_barrier_epoch=marker["barrier_epoch"],
-            expected_cohort_id=expected_cohort_id or marker["cohort_id"],
-        )
-    )
-    waiter = waiter_receipts[0]
-    if revision != marker["source_revision"] or cohort_id != marker["cohort_id"]:
-        raise CiError("cancelled holder and waiter do not share revision and cohort identity")
-    if waiter["_started"] < cancel_requested_at:
-        raise CiError("the queued waiter started before cancellation was requested")
-    if waiter["_acquired"] < cancel_requested_at:
-        raise CiError("the queued waiter acquired before cancellation was requested")
-    recovery_seconds = (waiter["_acquired"] - cancel_requested_at).total_seconds()
-    if recovery_seconds > timeout:
-        raise CiError(
-            f"the queued waiter recovered after {recovery_seconds:.3f}s, exceeding {timeout}s"
-        )
-    if _slot_tuple(waiter) != _slot_tuple(marker):
-        raise CiError("the queued waiter did not reuse the exact cancelled GPU slot tuple")
-    if waiter["lock_namespace"] != marker["lock_namespace"]:
-        raise CiError("the queued waiter did not reuse the cancelled lock namespace")
-
-    return {
-        "schema_version": 1,
-        "kind": "trtmc_capacity_cancellation_recovery_verification",
-        "outcome": "success",
-        "cohort_id": cohort_id,
-        "source_revision": revision,
-        "cancelled_run_id": cancelled_run_id,
-        "waiter_run_id": actual_waiter_run,
-        "barrier_epoch": barrier_epoch,
-        "waiter_was_queued": True,
-        "holder_run_was_cancelled": True,
-        "cancel_requested_at": cancel_requested_at.isoformat(),
-        "waiter_started_at": waiter["_started"].isoformat(),
-        "waiter_acquired_at": waiter["_acquired"].isoformat(),
-        "recovery_seconds": recovery_seconds,
-        "recovery_timeout_seconds": timeout,
-        "reused_cancelled_slot": True,
-        "slot": {
-            "node_id": waiter["node_id"],
-            "gpu_uuid": waiter["gpu_uuid"],
-            "gpu_slot": waiter["gpu_slot"],
-            "lock_namespace": waiter["lock_namespace"],
-        },
     }
 
 
@@ -1037,6 +991,7 @@ def verify_capacity_receipts(
     receipts = [_validated_receipt(value, expected_slots=expected) for value in values]
     if {receipt["leg_id"] for receipt in receipts} != set(range(expected + 1)):
         raise CiError("capacity receipts do not contain the exact matrix leg set")
+    _validate_topology_identity(receipts)
     run_ids = {str(receipt.get("run_id", "")) for receipt in receipts}
     revisions = {str(receipt.get("source_revision", "")) for receipt in receipts}
     barrier_epochs = {receipt["barrier_epoch"] for receipt in receipts}
@@ -1145,6 +1100,9 @@ def _validated_exclusive_lease(value: Mapping[str, object], *, label: str) -> di
     node_id = value.get("node_id")
     if not isinstance(node_id, str) or _SAFE_ID.fullmatch(node_id) is None:
         raise CiError(f"{label} node_id is unsafe")
+    hostname = value.get("hostname")
+    if not isinstance(hostname, str) or _SAFE_ID.fullmatch(hostname) is None:
+        raise CiError(f"{label} hostname is unsafe")
     runner_name = value.get("runner_name")
     if not isinstance(runner_name, str) or not runner_name:
         raise CiError(f"{label} runner_name must not be empty")
@@ -1179,6 +1137,7 @@ def _validated_exclusive_lease(value: Mapping[str, object], *, label: str) -> di
     return {
         **value,
         "node_id": node_id,
+        "hostname": hostname,
         "runner_name": runner_name,
         "gpu_uuid": gpu_uuid,
         "gpu_slots_per_device": slots_per_device,
@@ -1210,6 +1169,7 @@ def verify_exclusive_safety_receipts(
         raise CiError("exclusive-safety receipt must contain two lease records")
     primary = _validated_exclusive_lease(primary_value, label="primary")
     contender = _validated_exclusive_lease(contender_value, label="contender")
+    _validate_topology_identity([primary, contender])
     attempted = _timestamp(contender.get("attempted_at"), "contender.attempted_at")
 
     run_id = str(receipt.get("run_id", ""))
@@ -1332,20 +1292,12 @@ def _parser() -> argparse.ArgumentParser:
     verify_cross.add_argument("--receipts-dir", required=True, type=Path)
     verify_cross.add_argument("--expected-slots-per-run", required=True)
     verify_cross.add_argument("--expected-run-id", action="append", required=True)
-    verify_cross.add_argument("--expected-revision")
+    verify_cross.add_argument("--run-metadata", action="append", required=True, type=Path)
+    verify_cross.add_argument("--expected-repository", required=True)
+    verify_cross.add_argument("--expected-revision", required=True)
     verify_cross.add_argument("--expected-barrier-epoch", type=int)
     verify_cross.add_argument("--expected-cohort-id")
     verify_cross.add_argument("--output", required=True, type=Path)
-    verify_cancellation = commands.add_parser(
-        "verify-cancellation", help="Verify queued work recovered after a holder cancellation"
-    )
-    verify_cancellation.add_argument("--waiter-receipts-dir", required=True, type=Path)
-    verify_cancellation.add_argument("--cancelled-run-log", required=True, type=Path)
-    verify_cancellation.add_argument("--observation", required=True, type=Path)
-    verify_cancellation.add_argument("--recovery-timeout-seconds", required=True)
-    verify_cancellation.add_argument("--expected-revision")
-    verify_cancellation.add_argument("--expected-cohort-id")
-    verify_cancellation.add_argument("--output", required=True, type=Path)
     verify_exclusive = commands.add_parser(
         "verify-exclusive", help="Verify exclusive-safety evidence"
     )
@@ -1444,31 +1396,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     maximum=128,
                 ),
                 expected_run_ids=arguments.expected_run_id,
+                run_metadata=[
+                    _load_json_object(path, "source-run metadata")
+                    for path in arguments.run_metadata
+                ],
+                expected_repository=arguments.expected_repository,
                 expected_revision=arguments.expected_revision,
                 expected_barrier_epoch=arguments.expected_barrier_epoch,
-                expected_cohort_id=arguments.expected_cohort_id,
-            )
-            _atomic_json(arguments.output, summary)
-            print(json.dumps(summary, indent=2, sort_keys=True))
-        elif arguments.command == "verify-cancellation":
-            try:
-                cancelled_log = arguments.cancelled_run_log.read_text(
-                    encoding="utf-8", errors="replace"
-                )
-            except OSError as error:
-                raise CiError(
-                    f"could not read cancelled-run log {arguments.cancelled_run_log}: {error}"
-                ) from error
-            summary = verify_cancellation_recovery(
-                load_receipts(arguments.waiter_receipts_dir),
-                cancelled_log=cancelled_log,
-                observation=_load_json_object(arguments.observation, "cancellation observation"),
-                recovery_timeout_seconds=_positive_integer(
-                    arguments.recovery_timeout_seconds,
-                    "recovery_timeout_seconds",
-                    maximum=3600,
-                ),
-                expected_revision=arguments.expected_revision,
                 expected_cohort_id=arguments.expected_cohort_id,
             )
             _atomic_json(arguments.output, summary)

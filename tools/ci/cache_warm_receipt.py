@@ -21,6 +21,7 @@ from .process import CiError
 
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+_SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _load_object(path: Path, description: str) -> dict[str, object]:
@@ -155,7 +156,14 @@ def create_receipt(
 def verify_receipts(
     receipts: list[dict[str, object]],
     expected_matrix: dict[str, object],
+    *,
+    expected_run_id: str,
+    expected_revision: str,
 ) -> dict[str, object]:
+    if not expected_run_id.isdigit():
+        raise CiError("expected cache-warm workflow run ID is invalid")
+    if not expected_revision:
+        raise CiError("expected cache-warm source revision is empty")
     raw_entries = expected_matrix.get("include")
     if not isinstance(raw_entries, list) or not raw_entries:
         raise CiError("expected cache-anchor matrix is invalid or empty")
@@ -175,6 +183,7 @@ def verify_receipts(
         expected[node_id] = anchor
 
     actual: dict[str, dict[str, object]] = {}
+    hostname_nodes: dict[str, str] = {}
     for receipt in receipts:
         if receipt.get("schema_version") != 1 or receipt.get("status") != "ready":
             raise CiError("cache-warm receipt has an unsupported schema or is not ready")
@@ -186,6 +195,16 @@ def verify_receipts(
             raise CiError(f"duplicate cache-warm receipt for node {node_id!r}")
         if expected.get(node_id) != anchor:
             raise CiError(f"cache-warm receipt identity does not match matrix for {node_id!r}")
+        hostname = receipt.get("hostname")
+        if not isinstance(hostname, str) or _SAFE_ID.fullmatch(hostname) is None:
+            raise CiError(f"cache-warm receipt for {node_id!r} has an unsafe hostname")
+        previous_node = hostname_nodes.setdefault(hostname, node_id)
+        if previous_node != node_id:
+            raise CiError(f"cache-warm hostname {hostname!r} maps to multiple node IDs")
+        if receipt.get("run_id") != expected_run_id:
+            raise CiError(f"cache-warm receipt for {node_id!r} is from the wrong workflow run")
+        if receipt.get("source_revision") != expected_revision:
+            raise CiError(f"cache-warm receipt for {node_id!r} is from the wrong source revision")
         if not isinstance(receipt.get("run_id"), str) or not str(receipt["run_id"]).isdigit():
             raise CiError(f"cache-warm receipt for {node_id!r} has invalid run identity")
         if not isinstance(receipt.get("source_revision"), str) or not receipt["source_revision"]:
@@ -244,6 +263,8 @@ def main() -> int:
     verify = commands.add_parser("verify")
     verify.add_argument("--receipts-dir", type=Path, required=True)
     verify.add_argument("--expected-matrix-json", required=True)
+    verify.add_argument("--expected-run-id", required=True)
+    verify.add_argument("--expected-revision", required=True)
     verify.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
 
@@ -264,6 +285,8 @@ def main() -> int:
         payload = verify_receipts(
             [_load_object(path, "cache-warm receipt") for path in paths],
             expected_matrix,
+            expected_run_id=arguments.expected_run_id,
+            expected_revision=arguments.expected_revision,
         )
     _write_json_atomic(arguments.output, payload)
     print(json.dumps(payload, indent=2, sort_keys=True))

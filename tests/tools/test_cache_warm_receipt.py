@@ -52,11 +52,13 @@ def _environment(node: str, runner: str) -> dict[str, str]:
 
 
 def _receipt(node: str) -> dict[str, object]:
-    return create_receipt(
+    receipt = create_receipt(
         _summary("warm"),
         _summary("local-only"),
         _environment(node, f"{node}-proof-00"),
     )
+    receipt["hostname"] = f"host-{node}"
+    return receipt
 
 
 def _matrix() -> dict[str, object]:
@@ -110,7 +112,12 @@ def test_receipt_rejects_hub_outside_root_or_summary_mismatch() -> None:
 
 
 def test_receipt_verifier_requires_every_expected_node_and_matching_digests() -> None:
-    result = verify_receipts([_receipt("node-a"), _receipt("node-b")], _matrix())
+    result = verify_receipts(
+        [_receipt("node-a"), _receipt("node-b")],
+        _matrix(),
+        expected_run_id="123",
+        expected_revision=REVISION,
+    )
 
     assert result == {
         "schema_version": 1,
@@ -137,7 +144,7 @@ def test_receipt_verifier_requires_every_expected_node_and_matching_digests() ->
         ),
         (
             lambda receipts: receipts[1].update({"run_id": "456"}),
-            "disagree on run_id",
+            "wrong workflow run",
         ),
         (
             lambda receipts: receipts[1].update({"present_count": 9}),
@@ -147,6 +154,10 @@ def test_receipt_verifier_requires_every_expected_node_and_matching_digests() ->
             lambda receipts: receipts.append(deepcopy(receipts[0])),
             "duplicate cache-warm receipt",
         ),
+        (
+            lambda receipts: receipts[1].update({"hostname": "host-node-a"}),
+            "hostname .* maps to multiple node IDs",
+        ),
     ],
 )
 def test_receipt_verifier_fails_closed(mutate, message: str) -> None:
@@ -154,4 +165,28 @@ def test_receipt_verifier_fails_closed(mutate, message: str) -> None:
     mutate(receipts)
 
     with pytest.raises(CiError, match=message):
-        verify_receipts(receipts, _matrix())
+        verify_receipts(
+            receipts,
+            _matrix(),
+            expected_run_id="123",
+            expected_revision=REVISION,
+        )
+
+
+@pytest.mark.parametrize(
+    ("expected_run_id", "expected_revision", "message"),
+    [
+        ("456", REVISION, "wrong workflow run"),
+        ("123", "2" * 40, "wrong source revision"),
+    ],
+)
+def test_receipt_verifier_binds_current_run_and_revision(
+    expected_run_id: str, expected_revision: str, message: str
+) -> None:
+    with pytest.raises(CiError, match=message):
+        verify_receipts(
+            [_receipt("node-a"), _receipt("node-b")],
+            _matrix(),
+            expected_run_id=expected_run_id,
+            expected_revision=expected_revision,
+        )

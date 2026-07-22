@@ -17,9 +17,7 @@ from tools.ci.capacity_canary import (
     cohort_matrix,
     hold_capacity_slot,
     load_receipts,
-    parse_acquisition_markers,
     probe_container_gpu_uuid,
-    verify_cancellation_recovery,
     verify_capacity_receipts,
     verify_cohort_receipts,
     verify_cross_workflow_receipts,
@@ -31,6 +29,7 @@ from tools.ci.process import CiError
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BASE = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+REPOSITORY = "NVIDIA/TensorRT-Model-Connect"
 
 
 def _time(seconds: float) -> str:
@@ -158,69 +157,67 @@ def _cross_cohort_receipts() -> list[dict[str, object]]:
     return receipts
 
 
-def _cancellation_marker() -> dict[str, object]:
+def _small_cross_cohort_receipts() -> list[dict[str, object]]:
+    receipts: list[dict[str, object]] = []
+    for run_id, node, gpu_uuid in (
+        ("100", "node-a", "GPU-a0"),
+        ("200", "node-b", "GPU-b0"),
+    ):
+        for leg in range(2):
+            receipts.append(
+                _receipt(
+                    leg,
+                    started=0.1 * leg,
+                    acquired=1 + 0.1 * leg,
+                    released=10.5 + 0.1 * leg,
+                    node=node,
+                    gpu=gpu_uuid,
+                    slot=leg,
+                    slots_per_gpu=2,
+                    expected_slots=2,
+                    run_id=run_id,
+                    runner_name=f"runner-{run_id}-{leg}",
+                    cohort_id="cross-100-200",
+                )
+            )
+    return receipts
+
+
+def _run_metadata(run_id: str) -> dict[str, object]:
     return {
-        "schema_version": 1,
-        "kind": "trtmc_capacity_canary_acquired",
-        "leg_id": 0,
-        "expected_slots": 1,
-        "barrier_epoch": int(BASE.timestamp()) + 10,
-        "cohort_id": "recovery-300-400",
-        "source_revision": "a" * 40,
-        "run_id": "300",
-        "job_id": "exercise",
-        "runner_name": "runner-cancelled",
-        "node_id": "node-a",
-        "hostname": "host-node-a",
-        "resource_class": "shared",
-        "gpu_index": "0",
-        "gpu_uuid": "GPU-a0",
-        "gpu_slot": 0,
-        "gpu_slots_per_device": 4,
-        "lock_namespace": "1" * 64,
-        "worker_started_at": _time(0),
-        "acquired_at": _time(1),
-        "probe_gpu_uuid": "GPU-a0",
+        "id": int(run_id),
+        "repository": {"full_name": REPOSITORY},
+        "head_repository": {"full_name": REPOSITORY},
+        "path": (
+            ".github/workflows/model-proof-capacity-canary.yml@main"
+            if run_id == "200"
+            else ".github/workflows/model-proof-capacity-canary.yml"
+        ),
+        "event": "workflow_dispatch",
+        "head_branch": "main",
+        "head_sha": "a" * 40,
+        "status": "completed",
+        "conclusion": "success",
+        "run_attempt": 1,
     }
 
 
-def _waiter_receipt() -> dict[str, object]:
-    return _receipt(
-        0,
-        started=3.5,
-        acquired=4,
-        released=10.5,
-        node="node-a",
-        gpu="GPU-a0",
-        slot=0,
-        slots_per_gpu=4,
-        expected_slots=1,
-        run_id="400",
-        runner_name="runner-recovered",
-        cohort_id="recovery-300-400",
-    )
-
-
-def _cancellation_observation() -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "kind": "trtmc_capacity_canary_cancellation_observation",
-        "cancelled_run_id": "300",
-        "cancelled_run_conclusion": "cancelled",
-        "waiter_run_id": "400",
-        "waiter_job_status": "queued",
-        "waiter_queued_observed_at": _time(2),
-        "cancel_requested_at": _time(3),
-    }
-
-
-def _cancelled_log(marker: dict[str, object] | None = None) -> str:
-    value = marker or _cancellation_marker()
-    return (
-        "2026-07-21T12:00:01Z holder output\n"
-        "2026-07-21T12:00:01Z TRTMC_CAPACITY_CANARY_ACQUIRED="
-        + json.dumps(value, sort_keys=True, separators=(",", ":"))
-        + "\n"
+def _verify_cross(
+    receipts: list[dict[str, object]],
+    *,
+    expected_slots_per_run: int,
+    expected_run_ids: list[str],
+    **kwargs: object,
+) -> dict[str, object]:
+    expected_revision = str(kwargs.pop("expected_revision", "a" * 40))
+    return verify_cross_workflow_receipts(
+        receipts,
+        expected_slots_per_run=expected_slots_per_run,
+        expected_run_ids=expected_run_ids,
+        run_metadata=[_run_metadata(run_id) for run_id in expected_run_ids],
+        expected_repository=REPOSITORY,
+        expected_revision=expected_revision,
+        **kwargs,
     )
 
 
@@ -304,8 +301,23 @@ def test_exact_cohort_verifier_rejects_missing_extra_or_unsafe_identity() -> Non
         verify_cohort_receipts(receipts, expected_slots=14)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("hostname", "host-node-a-alias"),
+        ("lock_namespace", "f" * 64),
+    ],
+)
+def test_exact_cohort_verifier_rejects_inconsistent_node_identity(field: str, value: str) -> None:
+    receipts = _cross_cohort_receipts()[:14]
+    receipts[-1][field] = value
+
+    with pytest.raises(CiError, match="inconsistent hostname or lock namespace"):
+        verify_cohort_receipts(receipts, expected_slots=14)
+
+
 def test_cross_workflow_verifier_proves_two_14_job_runs_share_all_28_slots() -> None:
-    summary = verify_cross_workflow_receipts(
+    summary = _verify_cross(
         _cross_cohort_receipts(),
         expected_slots_per_run=14,
         expected_run_ids=["100", "200"],
@@ -333,15 +345,99 @@ def test_cross_workflow_verifier_proves_two_14_job_runs_share_all_28_slots() -> 
             "slot_count": 14,
         },
     }
+    assert [run["id"] for run in summary["source_runs"]] == [100, 200]
+    assert all(run["run_attempt"] == 1 for run in summary["source_runs"])
+    assert {run["path"] for run in summary["source_runs"]} == {
+        ".github/workflows/model-proof-capacity-canary.yml",
+        ".github/workflows/model-proof-capacity-canary.yml@main",
+    }
     assert summary["nodes"]["node-a"]["capacity"] == 16
     assert summary["nodes"]["node-b"]["capacity"] == 12
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("id", 999, "do not match the requested run IDs"),
+        ("repository", {"full_name": "other/repo"}, "wrong repository"),
+        ("head_repository", {"full_name": "fork/repo"}, "wrong head repository"),
+        ("path", ".github/workflows/other.yml", "wrong workflow path"),
+        (
+            "path",
+            ".github/workflows/model-proof-capacity-canary.yml@feature",
+            "wrong workflow path",
+        ),
+        ("event", "pull_request", "wrong event"),
+        ("head_branch", "feature", "wrong branch"),
+        ("head_sha", "b" * 40, "wrong revision"),
+        ("status", "in_progress", "wrong status"),
+        ("conclusion", "failure", "wrong conclusion"),
+        ("run_attempt", 2, "wrong run attempt"),
+        ("run_attempt", True, "wrong run attempt"),
+    ],
+)
+def test_cross_workflow_verifier_authenticates_source_run_metadata(
+    field: str, value: object, message: str
+) -> None:
+    metadata = [_run_metadata("100"), _run_metadata("200")]
+    metadata[1][field] = value
+
+    with pytest.raises(CiError, match=message):
+        verify_cross_workflow_receipts(
+            _cross_cohort_receipts(),
+            expected_slots_per_run=14,
+            expected_run_ids=["100", "200"],
+            run_metadata=metadata,
+            expected_repository=REPOSITORY,
+            expected_revision="a" * 40,
+        )
+
+
+def test_cross_workflow_verifier_requires_exactly_two_source_run_records() -> None:
+    with pytest.raises(CiError, match="exactly two source-run records"):
+        verify_cross_workflow_receipts(
+            _cross_cohort_receipts(),
+            expected_slots_per_run=14,
+            expected_run_ids=["100", "200"],
+            run_metadata=[_run_metadata("100")],
+            expected_repository=REPOSITORY,
+            expected_revision="a" * 40,
+        )
+
+
+@pytest.mark.parametrize(
+    ("identity", "message"),
+    [
+        ("hostname", "hostname .* maps to multiple node IDs"),
+        ("gpu_uuid", "GPU UUID .* maps to multiple node IDs"),
+    ],
+)
+def test_cross_workflow_verifier_rejects_physical_identity_reused_across_runs(
+    identity: str, message: str
+) -> None:
+    receipts = _small_cross_cohort_receipts()
+    for receipt in receipts:
+        if receipt["run_id"] != "200":
+            continue
+        if identity == "hostname":
+            receipt["hostname"] = "host-node-a"
+        else:
+            receipt["gpu_uuid"] = "GPU-a0"
+            receipt["probe_gpu_uuid"] = "GPU-a0"
+
+    with pytest.raises(CiError, match=message):
+        _verify_cross(
+            receipts,
+            expected_slots_per_run=2,
+            expected_run_ids=["100", "200"],
+        )
 
 
 def test_cross_workflow_verifier_rejects_uneven_runs_and_cross_run_duplicates() -> None:
     receipts = _cross_cohort_receipts()
     receipts[0]["run_id"] = "200"
     with pytest.raises(CiError, match="exactly 14 receipts"):
-        verify_cross_workflow_receipts(
+        _verify_cross(
             receipts,
             expected_slots_per_run=14,
             expected_run_ids=["100", "200"],
@@ -351,6 +447,7 @@ def test_cross_workflow_verifier_rejects_uneven_runs_and_cross_run_duplicates() 
     receipts[-1].update(
         {
             "node_id": receipts[0]["node_id"],
+            "hostname": receipts[0]["hostname"],
             "gpu_uuid": receipts[0]["gpu_uuid"],
             "gpu_slot": receipts[0]["gpu_slot"],
             "probe_gpu_uuid": receipts[0]["probe_gpu_uuid"],
@@ -358,7 +455,7 @@ def test_cross_workflow_verifier_rejects_uneven_runs_and_cross_run_duplicates() 
         }
     )
     with pytest.raises(CiError, match="duplicate GPU slot tuples"):
-        verify_cross_workflow_receipts(
+        _verify_cross(
             receipts,
             expected_slots_per_run=14,
             expected_run_ids=["100", "200"],
@@ -367,7 +464,7 @@ def test_cross_workflow_verifier_rejects_uneven_runs_and_cross_run_duplicates() 
     receipts = _cross_cohort_receipts()
     receipts[-1]["runner_name"] = receipts[0]["runner_name"]
     with pytest.raises(CiError, match="unique runner listeners"):
-        verify_cross_workflow_receipts(
+        _verify_cross(
             receipts,
             expected_slots_per_run=14,
             expected_run_ids=["100", "200"],
@@ -379,7 +476,7 @@ def test_cross_workflow_verifier_rejects_identity_timing_and_partial_gpu_coverag
     for receipt in receipts[14:]:
         receipt["cohort_id"] = "other-cohort"
     with pytest.raises(CiError, match="cohort ID"):
-        verify_cross_workflow_receipts(
+        _verify_cross(
             receipts,
             expected_slots_per_run=14,
             expected_run_ids=["100", "200"],
@@ -388,7 +485,7 @@ def test_cross_workflow_verifier_rejects_identity_timing_and_partial_gpu_coverag
     receipts = _cross_cohort_receipts()
     receipts[-1]["released_at"] = _time(9.9)
     with pytest.raises(CiError, match="released before"):
-        verify_cross_workflow_receipts(
+        _verify_cross(
             receipts,
             expected_slots_per_run=14,
             expected_run_ids=["100", "200"],
@@ -398,7 +495,7 @@ def test_cross_workflow_verifier_rejects_identity_timing_and_partial_gpu_coverag
     receipts[-1]["gpu_uuid"] = "GPU-b3"
     receipts[-1]["probe_gpu_uuid"] = "GPU-b3"
     with pytest.raises(CiError, match="did not expose every configured slot"):
-        verify_cross_workflow_receipts(
+        _verify_cross(
             receipts,
             expected_slots_per_run=14,
             expected_run_ids=["100", "200"],
@@ -457,6 +554,30 @@ def test_verifier_rejects_duplicate_first_wave_slot_or_runner() -> None:
         verify_capacity_receipts(receipts, expected_slots=4)
 
 
+@pytest.mark.parametrize(
+    ("identity", "message"),
+    [
+        ("hostname", "hostname .* maps to multiple node IDs"),
+        ("gpu_uuid", "GPU UUID .* maps to multiple node IDs"),
+    ],
+)
+def test_verifier_rejects_physical_identity_reused_by_multiple_nodes(
+    identity: str, message: str
+) -> None:
+    receipts = _valid_receipts()
+    for receipt in receipts:
+        if receipt["node_id"] != "node-b":
+            continue
+        if identity == "hostname":
+            receipt["hostname"] = "host-node-a"
+        else:
+            receipt["gpu_uuid"] = "GPU-aaaa"
+            receipt["probe_gpu_uuid"] = "GPU-aaaa"
+
+    with pytest.raises(CiError, match=message):
+        verify_capacity_receipts(receipts, expected_slots=4)
+
+
 def test_verifier_rejects_partial_gpu_slot_coverage_on_a_node() -> None:
     receipts = _valid_receipts()
     receipts[3]["gpu_uuid"] = "GPU-cccc"
@@ -474,129 +595,10 @@ def test_verifier_rejects_mismatched_container_probe_and_stale_run() -> None:
     with pytest.raises(CiError, match="run ID"):
         verify_capacity_receipts(_valid_receipts(), expected_slots=4, expected_run_id="43")
 
-
-def test_cancellation_recovery_verifier_proves_queue_cancel_and_exact_slot_reuse() -> None:
-    summary = verify_cancellation_recovery(
-        [_waiter_receipt()],
-        cancelled_log=_cancelled_log(),
-        observation=_cancellation_observation(),
-        recovery_timeout_seconds=5,
-        expected_revision="a" * 40,
-        expected_cohort_id="recovery-300-400",
-    )
-    assert summary["outcome"] == "success"
-    assert summary["cancelled_run_id"] == "300"
-    assert summary["waiter_run_id"] == "400"
-    assert summary["waiter_was_queued"] is True
-    assert summary["holder_run_was_cancelled"] is True
-    assert summary["reused_cancelled_slot"] is True
-    assert summary["recovery_seconds"] == 1
-    assert summary["slot"] == {
-        "node_id": "node-a",
-        "gpu_uuid": "GPU-a0",
-        "gpu_slot": 0,
-        "lock_namespace": "1" * 64,
-    }
-
-
-def test_acquisition_marker_parser_handles_timestamped_logs_and_rejects_bad_json() -> None:
-    assert parse_acquisition_markers(_cancelled_log()) == [_cancellation_marker()]
-    with pytest.raises(CiError, match="invalid JSON"):
-        parse_acquisition_markers("prefix TRTMC_CAPACITY_CANARY_ACQUIRED={bad}\n")
-
-
-def test_cancellation_recovery_rejects_missing_or_multiple_holder_markers() -> None:
-    with pytest.raises(CiError, match="exactly one acquisition marker"):
-        verify_cancellation_recovery(
-            [_waiter_receipt()],
-            cancelled_log="no marker\n",
-            observation=_cancellation_observation(),
-            recovery_timeout_seconds=5,
-        )
-
-    with pytest.raises(CiError, match="exactly one acquisition marker"):
-        verify_cancellation_recovery(
-            [_waiter_receipt()],
-            cancelled_log=_cancelled_log() + _cancelled_log(),
-            observation=_cancellation_observation(),
-            recovery_timeout_seconds=5,
-        )
-
-
-def test_cancellation_recovery_rejects_missing_queue_or_cancel_evidence() -> None:
-    observation = _cancellation_observation()
-    observation["waiter_job_status"] = "in_progress"
-    with pytest.raises(CiError, match="waiter was queued"):
-        verify_cancellation_recovery(
-            [_waiter_receipt()],
-            cancelled_log=_cancelled_log(),
-            observation=observation,
-            recovery_timeout_seconds=5,
-        )
-
-    observation = _cancellation_observation()
-    observation["cancelled_run_conclusion"] = "success"
-    with pytest.raises(CiError, match="holder run was cancelled"):
-        verify_cancellation_recovery(
-            [_waiter_receipt()],
-            cancelled_log=_cancelled_log(),
-            observation=observation,
-            recovery_timeout_seconds=5,
-        )
-
-    observation = _cancellation_observation()
-    observation["waiter_queued_observed_at"] = _time(3.1)
-    with pytest.raises(CiError, match="before cancellation"):
-        verify_cancellation_recovery(
-            [_waiter_receipt()],
-            cancelled_log=_cancelled_log(),
-            observation=observation,
-            recovery_timeout_seconds=5,
-        )
-
-
-def test_cancellation_recovery_rejects_early_slow_or_different_slot_waiter() -> None:
-    waiter = _waiter_receipt()
-    waiter["worker_started_at"] = _time(2.9)
-    with pytest.raises(CiError, match="started before cancellation"):
-        verify_cancellation_recovery(
-            [waiter],
-            cancelled_log=_cancelled_log(),
-            observation=_cancellation_observation(),
-            recovery_timeout_seconds=5,
-        )
-
-    waiter = _waiter_receipt()
-    waiter["acquired_at"] = _time(9)
-    with pytest.raises(CiError, match="exceeding 2s"):
-        verify_cancellation_recovery(
-            [waiter],
-            cancelled_log=_cancelled_log(),
-            observation=_cancellation_observation(),
-            recovery_timeout_seconds=2,
-        )
-
-    waiter = _waiter_receipt()
-    waiter["gpu_slot"] = 1
-    with pytest.raises(CiError, match="exact cancelled GPU slot tuple"):
-        verify_cancellation_recovery(
-            [waiter],
-            cancelled_log=_cancelled_log(),
-            observation=_cancellation_observation(),
-            recovery_timeout_seconds=5,
-        )
-
-
-def test_cancellation_recovery_rejects_holder_that_acquired_after_queue_observation() -> None:
-    marker = _cancellation_marker()
-    marker["acquired_at"] = _time(2.1)
-    with pytest.raises(CiError, match="had not acquired"):
-        verify_cancellation_recovery(
-            [_waiter_receipt()],
-            cancelled_log=_cancelled_log(marker),
-            observation=_cancellation_observation(),
-            recovery_timeout_seconds=5,
-        )
+    receipts = _valid_receipts()
+    receipts[0]["hostname"] = "../../unsafe"
+    with pytest.raises(CiError, match="hostname is unsafe"):
+        verify_capacity_receipts(receipts, expected_slots=4)
 
 
 def test_load_receipts_reads_only_receipt_json_files(tmp_path: Path) -> None:
@@ -651,6 +653,18 @@ def test_exclusive_verifier_rejects_uuid_mismatch_and_missing_contention() -> No
     receipt["contender"]["attempted_at"] = _time(5.01)  # type: ignore[index]
     receipt["contender"]["worker_started_at"] = _time(5.01)  # type: ignore[index]
     with pytest.raises(CiError, match="did not attempt while"):
+        verify_exclusive_safety_receipts([receipt])
+
+
+def test_exclusive_verifier_rejects_inconsistent_or_unsafe_hostname() -> None:
+    receipt = _valid_exclusive_receipt()
+    receipt["contender"]["hostname"] = "host-selected-alias"  # type: ignore[index]
+    with pytest.raises(CiError, match="inconsistent hostname or lock namespace"):
+        verify_exclusive_safety_receipts([receipt])
+
+    receipt = _valid_exclusive_receipt()
+    receipt["primary"]["hostname"] = "../../unsafe"  # type: ignore[index]
+    with pytest.raises(CiError, match="primary hostname is unsafe"):
         verify_exclusive_safety_receipts([receipt])
 
 
@@ -742,13 +756,17 @@ def test_holder_emits_acquisition_marker_and_writes_cohort_release_receipt(
             "container_name": "trtmc-capacity-42-1-0",
         }
     ]
-    markers = parse_acquisition_markers(capsys.readouterr().out)
-    assert len(markers) == 1
-    assert markers[0]["kind"] == "trtmc_capacity_canary_acquired"
-    assert markers[0]["cohort_id"] == "cohort-42"
-    assert markers[0]["run_id"] == "42"
-    assert markers[0]["gpu_uuid"] == "GPU-aaaa"
-    assert markers[0]["probe_gpu_uuid"] == "GPU-aaaa"
+    output = capsys.readouterr().out
+    marker_lines = [
+        line for line in output.splitlines() if line.startswith("TRTMC_CAPACITY_CANARY_ACQUIRED=")
+    ]
+    assert len(marker_lines) == 1
+    marker = json.loads(marker_lines[0].split("=", maxsplit=1)[1])
+    assert marker["kind"] == "trtmc_capacity_canary_acquired"
+    assert marker["cohort_id"] == "cohort-42"
+    assert marker["run_id"] == "42"
+    assert marker["gpu_uuid"] == "GPU-aaaa"
+    assert marker["probe_gpu_uuid"] == "GPU-aaaa"
 
 
 def test_holder_rejects_unsafe_cohort_id_before_acquiring(tmp_path: Path) -> None:
@@ -842,6 +860,11 @@ def test_capacity_workflow_is_manual_main_only_and_has_no_model_or_hf_work() -> 
         r"verify-cross[\s\S]*?--expected-revision \"\$GITHUB_SHA\"",
         workflow,
     )
+    assert workflow.count('if [ "$GITHUB_RUN_ATTEMPT" != "1" ]') == 3
+    assert workflow.count('gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_') == 2
+    assert workflow.count("--run-metadata") == 2
+    assert '--expected-repository "$GITHUB_REPOSITORY"' in workflow
+    assert "trtmc-cross-run-metadata/*.json" in workflow
     assert "max-parallel:" not in workflow
     assert "concurrency:" not in workflow
     assert "TRTMC_MODEL_RUNNER_LABELS" in workflow
@@ -860,7 +883,7 @@ def test_capacity_workflow_is_manual_main_only_and_has_no_model_or_hf_work() -> 
     assert "exclusive-safety" in workflow
     assert "exclusive-contender" in source
     assert "TRTMC_CAPACITY_CANARY_ACQUIRED=" in source
-    assert "verify-cancellation" in source
+    assert "verify-cancellation" not in source
     assert "verify-exclusive" in workflow
     assert "one scheduler-selected generic runner" in source
     assert "nohup" not in workflow

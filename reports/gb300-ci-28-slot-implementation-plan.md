@@ -145,14 +145,16 @@ therefore an admission decision into a cooperative trusted queue, not an
 adversarial tenant boundary. Only maintainers may admit same-repository test
 PRs, and they must review workflow and executable changes before labeling.
 
-The implementation injects the HF token only into the default-branch cache
-warm container. Package, VLM assessment, Pre-Merge, model proof, and canary
-containers receive no token; cache consumers run local-only where model access
-is required. The Nightly VLM judge uses its model-owned configuration rather
-than an external model-ID override, so the same dependency is part of the
-per-node warm plan. The temporary read-only token mount prevents accidental
-environment or argv propagation, but a process that already controls the same
-host account or Docker daemon is inside the trusted boundary and could inspect
+The implementation injects the HF token only into one bounded, foreground
+default-branch cache-warm container. Package, VLM assessment, Pre-Merge, model
+proof, and canary containers receive no token; cache consumers run local-only
+where model access is required. The Nightly VLM judge uses its model-owned
+configuration rather than an external model-ID override, so the same dependency
+is part of the per-node warm plan. The temporary read-only token mount keeps the
+raw token out of Docker subprocess and container environments and command-line
+arguments; normal exit, failure, and cancellation remove the exact container
+before deleting the token file. A process that already controls the same host
+account or Docker daemon is inside the trusted boundary and could inspect
 another container. Hostile-PR isolation would require separate Unix users or
 machines and is outside this shared-runner design.
 
@@ -544,7 +546,10 @@ The retained workflow has four manual modes:
 - <code>shared-cohort</code> emits exactly <code>expected_slots</code> jobs and
   accepts a caller-supplied cohort ID and absolute barrier;
 - <code>cross-workflow-verify</code> downloads receipts from two exact run IDs
-  with read-only Actions permission and verifies their combined pool;
+  with read-only Actions permission and verifies their combined pool. It also
+  authenticates both source-run API records as first-attempt, successful manual
+  runs of this exact workflow on <code>main</code>, in this repository, at the
+  verifier's current source revision;
 - <code>exclusive-safety</code> proves same-GPU exclusive serialization.
 
 Only the GitHub-hosted verifier job receives <code>actions: read</code>. GPU
@@ -847,6 +852,8 @@ Pass criteria:
 
 - exactly 28 leases overlap at the barrier;
 - all 28 <code>(node_id, gpu_uuid, slot_id)</code> tuples are unique;
+- each node ID maps to exactly one hostname and lock namespace, each hostname
+  maps to one node ID, and each GPU UUID maps to one node ID;
 - compute01 covers four GPU UUIDs times slots 0 through 3, for 16;
 - compute02 covers three GPU UUIDs times slots 0 through 3, for 12;
 - exactly 28 distinct proof runner names execute during the first wave;
@@ -881,17 +888,22 @@ Execution uses the retained workflow rather than a second scheduler:
    exact run IDs, the same cohort ID, barrier, and 14 slots per run.
 3. For cancellation recovery, dispatch a 27-slot fill run and a separate
    one-slot holder to the same barrier, then dispatch a one-slot waiter.
-4. Record that the waiter job is queued, record the cancellation request time,
-   and regular-cancel only the one-slot holder run.
-5. Save the cancelled holder log and waiter receipt. Run
-   <code>verify-cancellation</code> with the queue/cancel observation. It must
-   prove that the holder had acquired, the waiter started only after cancel,
-   recovery stayed within the configured timeout, and the waiter reused the
-   exact same node, GPU UUID, slot, and lock namespace.
+4. Save the holder and waiter run and job URLs plus raw Actions API JSON proving
+   that the waiter was queued before the cancellation request. Record the
+   regular-cancel command and timestamp, then save raw API JSON showing the
+   holder concluded as <code>cancelled</code>.
+5. Save the cancelled holder log containing exactly one acquisition marker and
+   the completed waiter receipt. Manually compare revision, cohort, node,
+   hostname, GPU UUID, slot, lock namespace, and acquisition timestamps; require
+   the waiter to acquire the released slot within the declared timeout.
+6. Record the evidence URLs and SHA256 digests of every saved API response, log,
+   command transcript, and receipt in the rollout evidence log.
 
 Each holder flushes a compact machine-readable acquisition marker immediately
 after the network-free container UUID probe and before sleeping to the barrier,
-so cancellation cannot erase the evidence needed by the offline verifier.
+so cancellation does not erase the holder identity needed by this study. This
+cancellation check is an explicit operator-reviewed rollout gate, not a
+machine-authenticated verifier or a claim derived from caller-authored JSON.
 
 ### 9.5 Exclusive-GPU safety
 
@@ -927,6 +939,8 @@ For each Nightly cache plan:
 - each node receives the same plan;
 - every receipt has <code>missing_count=0</code>;
 - both receipts have identical plan and resolved-cache digests;
+- node IDs map to distinct physical hostnames, and every receipt is bound to
+  the current Nightly run ID and certified source revision;
 - a second strict local-only run succeeds with network disabled and zero
   downloaded bytes;
 - Nightly model proof starts only after both receipts pass;
