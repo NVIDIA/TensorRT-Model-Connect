@@ -124,7 +124,7 @@ jobs:
     runs-on: ${{ matrix.runner_labels }}
     timeout-minutes: 420
     env:
-      TRTMC_QUALIFICATION_ROOT: ${{ runner.temp }}/trtmc-optimized-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_QUALIFICATION_ROOT: ${{ github.workspace }}/.trtmc-optimized-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_QUALIFICATION_IMAGE: ${{ matrix.container_image }}
       TRTMC_QUALIFICATION_PROFILE_FILES: ${{ matrix.profile_files }}
       TRTMC_QUALIFICATION_BUILD_JOBS: ${{ vars.TRTMC_QUALIFICATION_BUILD_JOBS || '16' }}
