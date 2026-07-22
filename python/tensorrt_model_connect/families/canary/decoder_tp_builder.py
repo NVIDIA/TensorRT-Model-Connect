@@ -397,10 +397,10 @@ def build_canary_tp_decoder_engine(
     for i in range(dec_layers):
         cross_k_inputs.append(network.add_input(
             graph_ops.layer_tensor_name("cross_k", i),
-            trt.float32, (-1, max_source_positions, hidden)))
+            work_trt_dtype, (-1, max_source_positions, hidden)))
         cross_v_inputs.append(network.add_input(
             graph_ops.layer_tensor_name("cross_v", i),
-            trt.float32, (-1, max_source_positions, hidden)))
+            work_trt_dtype, (-1, max_source_positions, hidden)))
 
     profile = builder.create_optimization_profile()
     profile.set_shape(

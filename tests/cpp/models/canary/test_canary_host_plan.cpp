@@ -189,6 +189,14 @@ void test_encoder_mask_and_cross_kv_plan() {
     check(partial_plan.pad_bytes == partial_plan.buffer_bytes - partial_plan.valid_bytes,
           "canary cross-kv plan computes padded byte span");
 
+    const auto fp16_plan = trtmc::make_canary_cross_kv_plan(1500, 4, 1000, 2);
+    check(fp16_plan.buffer_bytes == static_cast<std::size_t>(1500 * 4 * 2),
+          "canary cross-kv plan supports FP16 buffers");
+    check(fp16_plan.valid_bytes == static_cast<std::size_t>(1000 * 4 * 2),
+          "canary cross-kv plan computes the FP16 valid byte span");
+    check(fp16_plan.pad_bytes == static_cast<std::size_t>(500 * 4 * 2),
+          "canary cross-kv plan computes the FP16 padded byte span");
+
     const auto invalid_plan = trtmc::make_canary_cross_kv_plan(0, 4, 0);
     check(invalid_plan.buffer_bytes == 0 && !invalid_plan.zero_pad_encoder_output,
           "canary cross-kv plan returns empty plan for invalid shape");

@@ -901,6 +901,7 @@ class CanaryPlugin:
         else:
             raise ValueError(
                 f"Unsupported Canary precision {precision!r}; expected fp32 or fp16")
+        state_io_trt_dtype = work_trt_dtype
         encoder_layers = int(weights["_enc_layers"])
         decoder_io_component = encoder_layers + dl + 1
         use_fp32_decoder_io = (
@@ -928,10 +929,10 @@ class CanaryPlugin:
             "cross_attention_mask", trt.float32, (-1, 1, es))
         cki, cvi, xki, xvi = [], [], [], []
         for i in range(dl):
-            cki.append(net.add_input(graph_ops.layer_tensor_name("cache_k", i), trt.float32, (-1, max_cache_length, h)))
-            cvi.append(net.add_input(graph_ops.layer_tensor_name("cache_v", i), trt.float32, (-1, max_cache_length, h)))
-            xki.append(net.add_input(graph_ops.layer_tensor_name("cross_k", i), trt.float32, (-1, es, h)))
-            xvi.append(net.add_input(graph_ops.layer_tensor_name("cross_v", i), trt.float32, (-1, es, h)))
+            cki.append(net.add_input(graph_ops.layer_tensor_name("cache_k", i), state_io_trt_dtype, (-1, max_cache_length, h)))
+            cvi.append(net.add_input(graph_ops.layer_tensor_name("cache_v", i), state_io_trt_dtype, (-1, max_cache_length, h)))
+            xki.append(net.add_input(graph_ops.layer_tensor_name("cross_k", i), state_io_trt_dtype, (-1, es, h)))
+            xvi.append(net.add_input(graph_ops.layer_tensor_name("cross_v", i), state_io_trt_dtype, (-1, es, h)))
 
         profile = b.create_optimization_profile()
         batch_shapes = {
@@ -1051,10 +1052,10 @@ class CanaryPlugin:
         logits.name = "logits"
         net.mark_output(logits)
         for i in range(dl):
-            if pko[i].dtype != trt.float32:
-                pko[i] = net.add_cast(pko[i], trt.float32).get_output(0)
-            if pvo[i].dtype != trt.float32:
-                pvo[i] = net.add_cast(pvo[i], trt.float32).get_output(0)
+            if pko[i].dtype != state_io_trt_dtype:
+                pko[i] = net.add_cast(pko[i], state_io_trt_dtype).get_output(0)
+            if pvo[i].dtype != state_io_trt_dtype:
+                pvo[i] = net.add_cast(pvo[i], state_io_trt_dtype).get_output(0)
             pko[i].name = graph_ops.layer_tensor_name("present_k", i)
             pvo[i].name = graph_ops.layer_tensor_name("present_v", i)
             net.mark_output(pko[i])
@@ -1269,8 +1270,8 @@ def _build_encoder(
     output_layer = net.add_shuffle(hs)
     output_layer.reshape_dims = (-1, es, h)
     output = output_layer.get_output(0)
-    if output.dtype != trt.float32:
-        output = net.add_cast(output, trt.float32).get_output(0)
+    if output.dtype != work_trt_dtype:
+        output = net.add_cast(output, work_trt_dtype).get_output(0)
     output.name = "encoder_output"
     net.mark_output(output)
     if verbose:

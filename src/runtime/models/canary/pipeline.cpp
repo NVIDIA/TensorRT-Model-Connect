@@ -491,9 +491,16 @@ void zero_pad_canary_encoder_batch(uint8_t* encoder_output,
                                    const std::vector<int32_t>& actual_encoder_lengths,
                                    int32_t max_source_positions, int32_t hidden_size,
                                    std::size_t sample_bytes, cudaStream_t stream) {
+    if (max_source_positions <= 0 || hidden_size <= 0)
+        return;
+    const std::size_t sample_elements =
+        static_cast<std::size_t>(max_source_positions) * static_cast<std::size_t>(hidden_size);
+    if (sample_bytes == 0 || sample_bytes % sample_elements != 0)
+        throw std::invalid_argument("Canary encoder output has an invalid byte size");
+    const std::size_t element_size = sample_bytes / sample_elements;
     for (std::size_t sample = 0; sample < actual_encoder_lengths.size(); ++sample) {
         const auto plan = make_canary_cross_kv_plan(max_source_positions, hidden_size,
-                                                    actual_encoder_lengths[sample]);
+                                                    actual_encoder_lengths[sample], element_size);
         if (!plan.zero_pad_encoder_output || plan.pad_bytes == 0)
             continue;
         const auto status = cudaMemsetAsync(
@@ -717,8 +724,14 @@ CanaryPipeline::CanaryPipeline(
     // All decoder layers consume the same raw encoder output and perform their
     // own cross-attention projections, so one stable external buffer can back
     // every cross_k/cross_v input.
+    const DType encoder_output_dtype = encoder_->tensor_dtype("encoder_output");
+    const DType cross_input_dtype = decoder_->tensor_dtype("cross_k_0");
+    if (encoder_output_dtype != cross_input_dtype) {
+        throw std::runtime_error(
+            "CanaryPipeline: encoder output and decoder cross-attention dtypes differ");
+    }
     cross_kv_sample_bytes_ = static_cast<std::size_t>(canary_config_.max_source_positions) *
-                             static_cast<std::size_t>(hidden_size_) * sizeof(float);
+                             static_cast<std::size_t>(hidden_size_) * dtype_size(cross_input_dtype);
     const std::size_t cross_bytes =
         static_cast<std::size_t>(decoder_lane_capacity_) * cross_kv_sample_bytes_;
     cross_kv_ptr_ = allocate_canary_cross_kv_buffer(num_decoder_layers_, cross_bytes);
