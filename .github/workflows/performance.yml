@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: TRTMC Performance Matrix
+
+run-name: >-
+  Performance matrix · ${{ inputs.case || inputs.priority || 'fast' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      case:
+        description: Optional exact family.operation case
+        required: false
+        type: string
+      priority:
+        description: Include this priority and faster rows
+        required: true
+        default: fast
+        type: choice
+        options:
+          - fast
+          - normal
+          - slow
+      only:
+        description: Run both sides or debug one side
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - trtmc
+          - baseline
+      max_cases:
+        description: Maximum selected rows
+        required: true
+        default: "100"
+        type: string
+  workflow_call:
+    inputs:
+      case:
+        required: false
+        type: string
+      priority:
+        required: false
+        default: fast
+        type: string
+      only:
+        required: false
+        default: both
+        type: string
+      max_cases:
+        required: false
+        default: "100"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trtmc-performance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  performance:
+    name: Performance / release family matrix
+    runs-on: ${{ fromJSON(vars.TRTMC_PERF_RUNNER_LABELS || vars.TRTMC_MODEL_RUNNER_LABELS || '["self-hosted"]') }}
+    timeout-minutes: 600
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
+      TRTMC_PERF_BUNDLE_CACHE: ${{ vars.TRTMC_PERF_BUNDLE_CACHE }}
+      TRTMC_PERF_BUNDLE_ROOTS: ${{ vars.TRTMC_PERF_BUNDLE_ROOTS }}
+      TRTMC_PERF_RUNTIME_DIRS: ${{ vars.TRTMC_PERF_RUNTIME_DIRS }}
+      TRTMC_PERF_WORKER: ${{ vars.TRTMC_PERF_WORKER }}
+      TRTMC_PYTHON_PROFILE_ROOT: ${{ vars.TRTMC_PYTHON_PROFILE_ROOT }}
+
+    steps:
+      - name: Check out requested snapshot
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          clean: true
+          lfs: false
+
+      - name: Run performance matrix
+        run: >-
+          python3 tools/perf_release.py
+          benchmarks/performance/release.yaml
+          --output artifacts/perf
+          --trtmc-bench "${{ vars.TRTMC_PERF_BENCH || 'trtmc-bench' }}"
+          --case "${{ inputs.case }}"
+          --priority "${{ inputs.priority }}"
+          --only "${{ inputs.only }}"
+          --max-cases "${{ inputs.max_cases }}"
+          --timeout-seconds 7200
+          --ci
+
+      - name: Upload internal evidence and public report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trtmc-performance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/perf/
+          if-no-files-found: error
+          retention-days: 30

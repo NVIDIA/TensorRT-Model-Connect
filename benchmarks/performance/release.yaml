@@ -1,0 +1,698 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version: trtmc.perf-suite/v1
+name: release-family-performance
+
+defaults:
+  measurement:
+    warmup: 3
+    iterations: 10
+  equivalence_margin_percent: 5.0
+  baseline:
+    compile_mode: default
+    fullgraph: false
+    dynamic: true
+
+cases:
+  - id: albert.encode
+    family: albert
+    operation: encode
+    model: albert-base
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: bark.generate_audio
+    family: bark
+    operation: generate_audio
+    model: bark-small
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned text_to_audio baseline runner is implemented yet.
+  - id: bart.generate
+    family: bart
+    operation: generate
+    model: bart-base
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+      output_token_policy: strip-start-and-eos
+  - id: bert.encode
+    family: bert
+    operation: encode
+    model: all-minilm-l6-v2
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: bloom.generate
+    family: bloom
+    operation: generate
+    model: bloom-560m
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: canary.transcribe
+    family: canary
+    operation: transcribe
+    model: canary-1b-v2
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned speech_to_text baseline runner is implemented yet.
+  - id: chronos_bolt.solve
+    family: chronos_bolt
+    operation: solve
+    model: chronos-bolt-tiny-official
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned neural_operator baseline runner is implemented yet.
+  - id: codegen.generate
+    family: codegen
+    operation: generate
+    model: codegen-350m
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: convbert.encode
+    family: convbert
+    operation: encode
+    model: convbert-base
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: deberta.encode
+    family: deberta
+    operation: encode
+    model: deberta-base
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+      precision: fp32
+  - id: deepseek_ocr.generate
+    family: deepseek_ocr
+    operation: generate
+    model: deepseek-ocr
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned vision_language_generation baseline runner is implemented yet.
+  - id: deepseek_v2.generate
+    family: deepseek_v2
+    operation: generate
+    model: deepseek-v2-lite
+    priority: slow
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: distilbert.encode
+    family: distilbert
+    operation: encode
+    model: distilbert-base-uncased
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: dpr.encode
+    family: dpr
+    operation: encode
+    model: dpr-ctx-encoder
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: eagle_vlm.embed
+    family: eagle_vlm
+    operation: embed
+    model: nemotron-embed-vl-1b-v2
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned embedding baseline runner is implemented yet.
+  - id: eagle_vlm.rerank
+    family: eagle_vlm
+    operation: rerank
+    model: nemotron-rerank-vl-1b-v2
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned reranking baseline runner is implemented yet.
+  - id: electra.encode
+    family: electra
+    operation: encode
+    model: electra-base-discriminator
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: elf_flow.generate
+    family: elf_flow
+    operation: generate
+    model: elf-b-de-en-l0
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned diffusion_text_generation baseline runner is implemented yet.
+  - id: falcon.generate
+    family: falcon
+    operation: generate
+    model: falcon-rw-1b
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: flux.generate_image
+    family: flux
+    operation: generate_image
+    model: flux-schnell-l0
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+  - id: fnet.encode
+    family: fnet
+    operation: encode
+    model: fnet-base
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+      precision: fp32
+      padding: max-length
+  - id: gemma.generate
+    family: gemma
+    operation: generate
+    model: gemma-2-2b
+    priority: normal
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: glm.generate
+    family: glm
+    operation: generate
+    model: glm-4-9b
+    priority: slow
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: gpt2.generate
+    family: gpt2
+    operation: generate
+    model: distilgpt2
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: gpt_neo.generate
+    family: gpt_neo
+    operation: generate
+    model: gpt-neo-125m
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: gpt_neox.generate
+    family: gpt_neox
+    operation: generate
+    model: pythia-70m
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: gpt_oss.generate
+    family: gpt_oss
+    operation: generate
+    model: gpt-oss-20b
+    priority: slow
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: granite.generate
+    family: granite
+    operation: generate
+    model: granite-3.1-2b
+    priority: normal
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: internlm.generate
+    family: internlm
+    operation: generate
+    model: internlm2-1.8b
+    priority: normal
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: internvl.generate
+    family: internvl
+    operation: generate
+    model: internvl3-2b
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned vision_language_generation baseline runner is implemented yet.
+  - id: lance.generate
+    family: lance
+    operation: generate
+    model: lance-3b-x2t-image
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned vision_language_generation baseline runner is implemented yet.
+  - id: llama.generate
+    family: llama
+    operation: generate
+    model: falcon3-1b
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: locateanything.generate
+    family: locateanything
+    operation: generate
+    model: locateanything-3b
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned vision_language_generation baseline runner is implemented yet.
+  - id: ltx_video.generate_image
+    family: ltx_video
+    operation: generate_image
+    model: ltx-video-l0
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+  - id: m2m_100.generate
+    family: m2m_100
+    operation: generate
+    model: nllb-200-distilled-600m
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+      output_token_policy: strip-start-and-eos
+  - id: magpie_tts.generate_audio
+    family: magpie_tts
+    operation: generate_audio
+    model: magpie-tts-357m
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned text_to_audio baseline runner is implemented yet.
+  - id: mamba.generate
+    family: mamba
+    operation: generate
+    model: mamba-130m
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: hf-eager
+  - id: marian.generate
+    family: marian
+    operation: generate
+    model: marian-en-ru
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+      output_token_policy: strip-start
+  - id: mistral.generate
+    family: mistral
+    operation: generate
+    model: mistral-7b
+    priority: slow
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: mixtral.generate
+    family: mixtral
+    operation: generate
+    model: mixtral-stories-15m
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+      experts_implementation: batched_mm
+  - id: modernbert.encode
+    family: modernbert
+    operation: encode
+    model: modernbert-base
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: mpnet.encode
+    family: mpnet
+    operation: encode
+    model: all-mpnet-base-v2
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: nemotron.generate
+    family: nemotron
+    operation: generate
+    model: nemotron-hindi-4b
+    priority: slow
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: nemotron_h.generate
+    family: nemotron_h
+    operation: generate
+    model: nemotron-h-nano-9b
+    priority: slow
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: nemotron_labs_diffusion.generate
+    family: nemotron_labs_diffusion
+    operation: generate
+    model: nemotron-labs-diffusion-8b
+    priority: slow
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: nemotron_speech_streaming.transcribe
+    family: nemotron_speech_streaming
+    operation: transcribe
+    model: nemotron-3.5-asr-streaming-0.6b
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned speech_to_text baseline runner is implemented yet.
+  - id: olmo.generate
+    family: olmo
+    operation: generate
+    model: olmo-1b
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: olmo2.generate
+    family: olmo2
+    operation: generate
+    model: olmo2-1b
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: opt.generate
+    family: opt
+    operation: generate
+    model: opt-125m
+    priority: fast
+    request:
+      max_new_tokens: 10
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: patchtsmixer.solve
+    family: patchtsmixer
+    operation: solve
+    model: patchtsmixer-granite-official
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned neural_operator baseline runner is implemented yet.
+  - id: patchtst.solve
+    family: patchtst
+    operation: solve
+    model: patchtst-etth1-regression-distribution
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned neural_operator baseline runner is implemented yet.
+  - id: personaplex.speak
+    family: personaplex
+    operation: speak
+    model: personaplex-7b-l0
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned speech_to_speech baseline runner is implemented yet.
+  - id: phi.generate
+    family: phi
+    operation: generate
+    model: phi3-mini
+    priority: normal
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: phi4_multimodal.generate
+    family: phi4_multimodal
+    operation: generate
+    model: phi4-multimodal
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned vision_language_generation baseline runner is implemented yet.
+  - id: phi_moe.generate
+    family: phi_moe
+    operation: generate
+    model: phi-moe
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+      experts_implementation: batched_mm
+      output_contract: exact-text
+  - id: pixart.generate_image
+    family: pixart
+    operation: generate_image
+    model: pixart-sigma-1024-l0
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+  - id: qwen.generate
+    family: qwen
+    operation: generate
+    model: qwen3-0.6b-fp16
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: qwen3_5.generate
+    family: qwen3_5
+    operation: generate
+    model: qwen35-9b
+    priority: slow
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: qwen3_omni.generate_audio
+    family: qwen3_omni
+    operation: generate_audio
+    model: qwen3-omni-30b-a3b-instruct
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned omni_multimodal baseline runner is implemented yet.
+  - id: qwen_image.generate_image
+    family: qwen_image
+    operation: generate_image
+    model: qwen-image-l0
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+  - id: qwen_moe.generate
+    family: qwen_moe
+    operation: generate
+    model: qwen3-moe-30b-a3b
+    priority: slow
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: qwen_vl.generate
+    family: qwen_vl
+    operation: generate
+    model: qwen3-vl-2b
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned vision_language_generation baseline runner is implemented yet.
+  - id: roberta.encode
+    family: roberta
+    operation: encode
+    model: camembert-base
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: rwkv.generate
+    family: rwkv
+    operation: generate
+    model: rwkv-169m
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: hf-eager
+  - id: sam.segment_prompted
+    family: sam
+    operation: segment_prompted
+    model: sam-vit-base
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned prompted_segmentation baseline runner is implemented yet.
+  - id: sam3.segment_prompted
+    family: sam3
+    operation: segment_prompted
+    model: sam3
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned prompted_segmentation baseline runner is implemented yet.
+  - id: sana_wm.generate_image
+    family: sana_wm
+    operation: generate_image
+    model: sana-wm-bidirectional
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+  - id: segformer.segment
+    family: segformer
+    operation: segment
+    model: segformer-b0-ade
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned segmentation baseline runner is implemented yet.
+  - id: stablelm.generate
+    family: stablelm
+    operation: generate
+    model: stablelm2-1.6b
+    priority: normal
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: starcoder2.generate
+    family: starcoder2
+    operation: generate
+    model: starcoder2-3b
+    priority: normal
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: t5.generate
+    family: t5
+    operation: generate
+    model: t5-small
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+      output_token_policy: strip-start
+  - id: timesfm.solve
+    family: timesfm
+    operation: solve
+    model: timesfm-2.0-500m-official
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned neural_operator baseline runner is implemented yet.
+  - id: timm_vit.classify
+    family: timm_vit
+    operation: classify
+    model: timm-vit-base-p16-224-augreg-in21k-ft-in1k
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned image_classification baseline runner is implemented yet.
+  - id: wan_t2v.generate_image
+    family: wan_t2v
+    operation: generate_image
+    model: wan21-t2v-1.3b-l0
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+  - id: whisper.transcribe
+    family: whisper
+    operation: transcribe
+    model: whisper-tiny-fp16
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned speech_to_text baseline runner is implemented yet.
+  - id: xglm.generate
+    family: xglm
+    operation: generate
+    model: xglm-564m
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: xlnet.encode
+    family: xlnet
+    operation: encode
+    model: xlnet-base
+    priority: fast
+    baseline:
+      runner: hf-transformers
+      mode: torch-compile
+      compile_scope: model.forward
+  - id: z_image.generate_image
+    family: z_image
+    operation: generate_image
+    model: z-image-turbo-l0
+    priority: slow
+    baseline:
+      runner: unsupported
+      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
