@@ -8,7 +8,7 @@ runtime_id = "tensorrt-edge-llm"
 representative = true
 entrypoint = "tests/e2e/models/qwen/edge_llm_adapter/run_a100_ci.sh"
 container_image = "gitlab-master.nvidia.com:5005/dl/transformerengine/transformerengine:te_ci-core-py3.58969074-devel-amd64@sha256:ba20bc3bbf96bd0973fc2a20a803e2c340bc56bf99f8eacf28cf9acbae1e2fa4"
-runner_labels = ["self-hosted", "linux", "x64", "trtmc-a100-80gb-pcie-proof"]
+runner_labels = ["trtmc-a100-80gb-pcie-proof"]
 profile_glob = "python/tensorrt_model_connect/families/qwen/edge_llm_adapter/profiles/*.toml"
 trigger_globs = [
   "python/tensorrt_model_connect/families/qwen/edge_llm_adapter/**",
