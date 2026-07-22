@@ -1,0 +1,10 @@
+{
+  "threshold_overrides": {
+    "exact_num_frames": 5,
+    "exact_video_height": 384,
+    "exact_video_width": 672,
+    "max_pixel_mean": 0.98,
+    "min_pixel_mean": 0.02,
+    "min_pixel_std": 0.01
+  }
+}

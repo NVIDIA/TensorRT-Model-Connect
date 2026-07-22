@@ -8,6 +8,7 @@
 
 #include "trtmc/runtime/trt_backend.h"
 
+#include "runtime/backend/prebound_backend.h"
 #include "runtime/backend/trt_logger.h"
 #include "runtime/core/cuda_common.h"
 #include "trt_module_impl.h"
@@ -55,7 +56,7 @@ void keep_backend_resources(ITrtModule& module,
 
 } // namespace
 
-class TrtBackend final : public IBackend {
+class TrtBackend final : public IBackend, public IPreboundBackend {
   public:
     TrtBackend() : runtime_(create_trt_runtime()) {
         if (!runtime_)
@@ -64,42 +65,16 @@ class TrtBackend final : public IBackend {
 
     std::unique_ptr<ITrtModule> create_module(const void* plan_data, size_t plan_size,
                                               const ModuleCreateOptions& options) override {
-        auto* engine = runtime_->deserializeCudaEngine(plan_data, plan_size);
-        if (!engine)
-            throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
+        return create_module_impl(plan_data, plan_size, options, {});
+    }
 
-        auto* ctx = engine->createExecutionContext();
-        if (!ctx) {
-            delete engine;
-            throw std::runtime_error("[trtmc] Failed to create TRT execution context");
-        }
-
-        cudaStream_t stream = options.stream;
-        std::shared_ptr<void> stream_owner;
-        if (!stream) {
-            auto owned = std::make_shared<CudaStream>();
-            if (!owned->ok()) {
-                delete ctx;
-                delete engine;
-                throw std::runtime_error("[trtmc] Failed to create CUDA stream");
-            }
-            stream = owned->get();
-            stream_owner = owned;
-        }
-
-        auto module = std::make_unique<TrtModuleImpl>(engine, ctx, stream, 0,
-                                                      options.distributed_communicator);
-        if (!module->ok()) {
-            delete engine;
-            throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
-        }
-
-        keep_backend_resources(*module,
-                               std::shared_ptr<nvinfer1::ICudaEngine>(
-                                   engine, [](nvinfer1::ICudaEngine* p) { delete p; }),
-                               stream_owner, options.distributed_owner);
-
-        return module;
+    std::unique_ptr<ITrtModule>
+    create_module_prebound(const void* plan_data, size_t plan_size,
+                           const ModuleCreateOptions& options,
+                           const std::vector<ModuleExternalBinding>& external_bindings) override {
+        if (external_bindings.empty())
+            throw std::invalid_argument("[trtmc] External I/O prebindings must not be empty");
+        return create_module_impl(plan_data, plan_size, options, external_bindings);
     }
 
     BackendDualProfileModules
@@ -229,6 +204,46 @@ class TrtBackend final : public IBackend {
     const char* name() const override { return "trt"; }
 
   private:
+    std::unique_ptr<ITrtModule>
+    create_module_impl(const void* plan_data, size_t plan_size, const ModuleCreateOptions& options,
+                       const std::vector<ModuleExternalBinding>& external_bindings) {
+        auto* engine = runtime_->deserializeCudaEngine(plan_data, plan_size);
+        if (!engine)
+            throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
+
+        auto* ctx = engine->createExecutionContext();
+        if (!ctx) {
+            delete engine;
+            throw std::runtime_error("[trtmc] Failed to create TRT execution context");
+        }
+
+        cudaStream_t stream = options.stream;
+        std::shared_ptr<void> stream_owner;
+        if (!stream) {
+            auto owned = std::make_shared<CudaStream>();
+            if (!owned->ok()) {
+                delete ctx;
+                delete engine;
+                throw std::runtime_error("[trtmc] Failed to create CUDA stream");
+            }
+            stream = owned->get();
+            stream_owner = owned;
+        }
+
+        auto module = std::make_unique<TrtModuleImpl>(
+            engine, ctx, stream, 0, options.distributed_communicator, external_bindings);
+        if (!module->ok()) {
+            delete engine;
+            throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
+        }
+
+        keep_backend_resources(*module,
+                               std::shared_ptr<nvinfer1::ICudaEngine>(
+                                   engine, [](nvinfer1::ICudaEngine* p) { delete p; }),
+                               stream_owner, options.distributed_owner);
+
+        return module;
+    }
     TrtUniquePtr<nvinfer1::IRuntime> runtime_;
 };
 

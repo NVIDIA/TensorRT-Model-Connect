@@ -812,6 +812,7 @@ endfunction()
 
 # Bundle / format
 trtmc_add_test(test_bundle_format)
+trtmc_add_test(test_bundle_materialization)
 trtmc_add_test(test_bundle_e2e          NO_SRC_INCLUDE)
 trtmc_add_test(test_bundle_view)
 trtmc_add_test(test_pipeline_registry)

@@ -1598,10 +1598,10 @@ def test_inference_and_kv_cache_shared_artifacts_are_retired() -> None:
 
 def test_model_cache_state_is_model_owned() -> None:
     """Trace: ARCH-MODPLUG-001
-    Intent: ensure each runtime model owns its state interface and dense KV cache.
-    Preconditions: runtime model folders are the unit of model implementation.
-    Postconditions: every runtime model has local cache/state files with
-    family-prefixed types and no include of retired shared cache/state headers.
+    Intent: ensure runtime models that use cache state own its interface and storage.
+    Preconditions: production sources include inference_state.h or kv_cache.h.
+    Postconditions: every cache-state user has local files with family-prefixed
+    types and no retired shared cache/state includes.
     """
     retired_includes = (
         "trtmc/runtime/inference_state.h",
@@ -1621,6 +1621,17 @@ def test_model_cache_state_is_model_owned() -> None:
         state_header = model_dir / "inference_state.h"
         cache_header = model_dir / "kv_cache.h"
         cache_source = model_dir / "kv_cache.cpp"
+        helper_files = {state_header, cache_header, cache_source}
+        production_sources = [
+            path for path in _cpp_files_under(model_dir) if path not in helper_files
+        ]
+        uses_cache_state = any(
+            "inference_state.h" in path.read_text(encoding="utf-8", errors="ignore")
+            or "kv_cache.h" in path.read_text(encoding="utf-8", errors="ignore")
+            for path in production_sources
+        )
+        if not uses_cache_state:
+            continue
 
         for path in (state_header, cache_header, cache_source):
             if not path.is_file():
@@ -6794,7 +6805,15 @@ def test_non_diffusion_model_plugins_do_not_carry_diffusion_behavior() -> None:
     Preconditions: only diffusion model families own diffusion runner/reference behavior.
     Postconditions: unused diffusion sidecars in other model folders are inert placeholders.
     """
-    diffusion_families = {"flux", "z_image", "pixart", "ltx_video", "qwen_image", "wan_t2v"}
+    diffusion_families = {
+        "flux",
+        "z_image",
+        "pixart",
+        "ltx_video",
+        "qwen_image",
+        "wan_t2v",
+        "wan2_2_ti2v",
+    }
     forbidden = (
         "class DiffusionMediaRunner",
         "class HfDiffusersReference",
@@ -9079,7 +9098,15 @@ def test_generated_e2e_task_sidecars_are_task_owned() -> None:
         "roberta",
         "xlnet",
     }
-    diffusion_owners = {"flux", "ltx_video", "pixart", "qwen_image", "wan_t2v", "z_image"}
+    diffusion_owners = {
+        "flux",
+        "ltx_video",
+        "pixart",
+        "qwen_image",
+        "wan_t2v",
+        "wan2_2_ti2v",
+        "z_image",
+    }
     simple_sidecars = [
         (
             "runners",

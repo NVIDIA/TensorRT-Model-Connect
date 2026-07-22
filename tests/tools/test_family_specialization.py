@@ -318,4 +318,4 @@ def test_repository_registers_all_current_families() -> None:
 
     families = specialization.family_dirs(repo_root, ())
 
-    assert len(families) == 77
+    assert len(families) == 78

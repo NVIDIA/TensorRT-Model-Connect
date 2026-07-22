@@ -17,6 +17,26 @@
 
 namespace trtmc {
 
+namespace {
+
+bool engine_has_io_tensor(nvinfer1::ICudaEngine* engine, const std::string& expected_name) {
+    for (int32_t index = 0; index < engine->getNbIOTensors(); ++index) {
+        const char* name = engine->getIOTensorName(index);
+        if (name != nullptr && expected_name == name)
+            return true;
+    }
+    return false;
+}
+
+void allocate_host_output_staging(
+    std::unordered_map<std::string, std::vector<uint8_t>>& host_output_staging,
+    const std::string& name, std::size_t nbytes, bool is_external) {
+    if (nbytes > 0 && !is_external)
+        host_output_staging[name].resize(nbytes);
+}
+
+} // namespace
+
 // --- DType conversion ---
 
 DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
@@ -40,12 +60,21 @@ DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
 
 TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecutionContext* ctx,
                              cudaStream_t stream, int32_t profile_idx,
-                             void* distributed_communicator)
+                             void* distributed_communicator,
+                             const std::vector<ModuleExternalBinding>& external_bindings)
     : engine_(engine), ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
       distributed_communicator_(distributed_communicator),
       cuda_graph_(std::make_unique<CudaGraphExec>()) {
     if (!ctx_)
         return;
+    try {
+        validate_initial_external_bindings(engine, external_bindings);
+    } catch (const std::exception& error) {
+        std::cerr << "[trt_module] Invalid external binding: " << error.what() << '\n';
+        delete ctx_;
+        ctx_ = nullptr;
+        return;
+    }
     if (!attach_distributed_communicator()) {
         delete ctx_;
         ctx_ = nullptr;
@@ -61,6 +90,37 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
         cudaStreamSynchronize(stream_);
     }
     allocate_buffers(engine);
+}
+
+void TrtModuleImpl::validate_initial_external_bindings(
+    nvinfer1::ICudaEngine* engine, const std::vector<ModuleExternalBinding>& external_bindings) {
+    for (const auto& binding : external_bindings) {
+        if (binding.tensor_name.empty())
+            throw std::invalid_argument("tensor name must not be empty");
+        if (binding.device_ptr == nullptr)
+            throw std::invalid_argument("buffer for '" + binding.tensor_name + "' is null");
+        if (initial_external_bindings_.count(binding.tensor_name) != 0)
+            throw std::invalid_argument("duplicate tensor '" + binding.tensor_name + "'");
+
+        if (!engine_has_io_tensor(engine, binding.tensor_name))
+            throw std::invalid_argument("unknown tensor '" + binding.tensor_name + "'");
+
+        const auto dims = engine->getTensorShape(binding.tensor_name.c_str());
+        if (dims_are_dynamic(dims)) {
+            throw std::invalid_argument("tensor '" + binding.tensor_name +
+                                        "' is dynamic; prebinding requires a static shape");
+        }
+        std::vector<int64_t> shape;
+        const auto required_bytes = compute_alloc_bytes(
+            dims, from_trt_dtype(engine->getTensorDataType(binding.tensor_name.c_str())), shape);
+        if (binding.capacity_bytes < required_bytes) {
+            throw std::invalid_argument("buffer for '" + binding.tensor_name + "' has " +
+                                        std::to_string(binding.capacity_bytes) +
+                                        " bytes; expected at least " +
+                                        std::to_string(required_bytes));
+        }
+        initial_external_bindings_.emplace(binding.tensor_name, binding.device_ptr);
+    }
 }
 
 void TrtModuleImpl::bind_external(const std::string& name, void* ptr,
@@ -239,7 +299,11 @@ void TrtModuleImpl::allocate_single_input(nvinfer1::ICudaEngine* engine, const s
     entry.is_dynamic = is_dynamic;
     entry.shape = is_dynamic ? dims_to_shape(init_dims) : shape;
 
-    if (nbytes > 0) {
+    const auto external = initial_external_bindings_.find(name);
+    if (external != initial_external_bindings_.end()) {
+        entry.d_ptr = external->second;
+        entry.is_external = true;
+    } else if (nbytes > 0) {
         auto err = cudaMalloc(&entry.d_ptr, nbytes);
         if (err != cudaSuccess)
             entry.d_ptr = nullptr;
@@ -295,7 +359,11 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
         entry.nbytes = nbytes;
         entry.is_input = false;
 
-        if (nbytes > 0) {
+        const auto external = initial_external_bindings_.find(name);
+        if (external != initial_external_bindings_.end()) {
+            entry.d_ptr = external->second;
+            entry.is_external = true;
+        } else if (nbytes > 0) {
             auto err = cudaMalloc(&entry.d_ptr, nbytes);
             if (err != cudaSuccess)
                 entry.d_ptr = nullptr;
@@ -306,8 +374,7 @@ void TrtModuleImpl::allocate_output_buffers(nvinfer1::ICudaEngine* engine, int32
         if (entry.d_ptr)
             bind_tensor_address(name, entry);
 
-        if (nbytes > 0)
-            host_output_staging_[name].resize(nbytes);
+        allocate_host_output_staging(host_output_staging_, name, nbytes, entry.is_external);
 
         buffers_[name] = std::move(entry);
     }
@@ -334,6 +401,7 @@ void TrtModuleImpl::allocate_buffers(nvinfer1::ICudaEngine* engine) {
     if (has_dynamic_shapes_ && num_profiles > 0)
         set_dynamic_input_shapes(engine, num_io, nvinfer1::OptProfileSelector::kOPT);
 
+    initial_external_bindings_.clear();
     cudaStreamSynchronize(stream_);
 }
 

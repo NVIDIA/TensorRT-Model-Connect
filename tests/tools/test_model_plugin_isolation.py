@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tools import model_plugin_isolation
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TOOL = REPO_ROOT / "tools" / "model_plugin_isolation.py"
@@ -572,6 +574,7 @@ def _passing_result(model_name: str) -> dict[str, object]:
         "case_name": model_name,
         "status": "pass",
         "failure_type": None,
+        "oracle_level": "L1_external_reference",
         "stages": {
             "full_inference": {
                 "status": "passed",
@@ -617,7 +620,43 @@ def test_verify_results_accepts_complete_passing_result(tmp_path: Path) -> None:
     )
 
     assert "PASS decoder-small" in result.stdout
-    assert json.loads(report_path.read_text(encoding="utf-8"))["passed"] is True
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["passed"] is True
+    assert report["results"][0]["proof_kind"] == "reference"
+
+
+@pytest.mark.parametrize(
+    ("oracle_level", "proof_kind"),
+    [
+        ("L1_external_reference", "reference"),
+        ("L2_internal_reference", "reference"),
+        ("L3_snapshot_regression", "snapshot_regression"),
+        ("L4_invariants", "functional_invariant"),
+        (None, "invalid"),
+        ("", "invalid"),
+        ("L5_unknown", "invalid"),
+    ],
+)
+def test_verify_result_maps_oracle_without_overclaiming_reference_parity(
+    tmp_path: Path,
+    oracle_level: str | None,
+    proof_kind: str,
+) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    result_data = _passing_result("decoder-small")
+    if oracle_level is None:
+        result_data.pop("oracle_level")
+    else:
+        result_data["oracle_level"] = oracle_level
+    _write_result(artifacts_dir, "decoder-small", result_data)
+    verified = model_plugin_isolation._verify_model_result(
+        "decoder-small", "decoder-small", artifacts_dir
+    )
+
+    assert verified["proof_kind"] == proof_kind
+    assert verified["passed"] is (proof_kind != "invalid")
+    if proof_kind == "invalid":
+        assert any("oracle_level is" in error for error in verified["errors"])
 
 
 def test_verify_results_accepts_advisory_metric_failure_in_passing_stage(

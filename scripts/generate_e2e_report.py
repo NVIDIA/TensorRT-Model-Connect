@@ -2790,7 +2790,7 @@ def _proof_context(
         "staged_model_dso_count", "engine_builds_per_model", "engine_build_count",
         "engine_build_verification", "gpu_id", "gpu_resource_class",
         "gpu_slot_ids", "gpu_slots_per_device", "gpu_lease_evidence",
-        "network", "plugin_search", "passed",
+        "network", "plugin_search", "passed", "e2e_proof_kind",
     ):
         if key in proof:
             context[key] = proof[key]
@@ -2919,6 +2919,25 @@ def validate_proof_context(
     if not selection.get("e2e_test") or not selection.get("e2e_cases"):
         issues.append("Test selection does not identify an E2E test and case")
 
+    e2e_proof_kind = proof.get("e2e_proof_kind")
+    if e2e_proof_kind not in {
+        "reference",
+        "snapshot_regression",
+        "functional_invariant",
+    }:
+        issues.append("Final proof JSON has no valid E2E proof-kind classification")
+    if status.get("e2e_proof_kind") != e2e_proof_kind:
+        issues.append("E2E proof kind does not match model-proof status")
+    e2e_reference = (status.get("steps") or {}).get("e2e_reference")
+    expected_reference_status = (
+        "passed" if e2e_proof_kind == "reference" else "skipped"
+    )
+    if (
+        not isinstance(e2e_reference, dict)
+        or e2e_reference.get("status") != expected_reference_status
+    ):
+        issues.append(f"Validation step e2e_reference must be {expected_reference_status}")
+
     for name, step in (status.get("steps") or {}).items():
         if name == "html_report" or not isinstance(step, dict):
             continue
@@ -2997,6 +3016,8 @@ def render_proof_section(context: Dict[str, Any]) -> str:
         ("GPU lease evidence", context.get("gpu_lease_evidence")),
         ("Container network", context.get("network")),
         ("Plugin search", context.get("plugin_search")),
+        ("E2E proof kind", context.get("e2e_proof_kind")),
+        ("E2E reference parity claimed", context.get("e2e_proof_kind") == "reference"),
     )
     for label, value in fields:
         if value is None or value == "":

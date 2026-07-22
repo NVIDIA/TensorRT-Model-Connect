@@ -461,6 +461,15 @@ def test_every_owned_e2e_family_has_one_premerge_case(tmp_path: Path) -> None:
         assert selection["e2e_cases"][0]["ci_tier"] != "nightly_only", family
 
 
+def test_wan22_premerge_selects_standalone_l0_manifest(tmp_path: Path) -> None:
+    selection = _run_test_selection(tmp_path, "wan2_2_ti2v", "premerge")
+
+    assert [case["name"] for case in selection["e2e_cases"]] == ["wan22-ti2v-5b-l0"]
+    assert selection["e2e_cases"][0]["model"] == "wan22-ti2v-5b-l0"
+    assert selection["e2e_cases"][0]["ci_tier"] == "l0_only"
+    assert "model_reference_cache" not in selection
+
+
 @pytest.mark.parametrize(
     ("family", "expected_family_tests"),
     (
@@ -552,6 +561,19 @@ def test_sana_selection_declares_its_pinned_model_reference_cache(
     }
 
 
+def test_wan22_nightly_selection_emits_only_the_pinned_source_contract(
+    tmp_path: Path,
+) -> None:
+    selection = _run_test_selection(tmp_path, "wan2_2_ti2v", "nightly")
+
+    assert selection["model_reference_cache"] == {
+        "repository": "https://github.com/Wan-Video/Wan2.2.git",
+        "revision": "42bf4cfaa384bc21833865abc2f9e6c0e67233dc",
+        "relative_path": "wan2_2_ti2v/reference/Wan2.2-42bf4cfaa384",
+        "entrypoint": "wan/textimage2video.py",
+    }
+
+
 def test_inner_proof_runs_the_exact_model_owned_python_test_selection() -> None:
     selector = (REPO_ROOT / "tools/ci/model_proof_selection.py").read_text(encoding="utf-8")
     inner = (REPO_ROOT / "tools/ci/model_proof_inner.py").read_text(encoding="utf-8")
@@ -632,6 +654,7 @@ def test_inner_selection_records_the_leased_gpu_evidence(tmp_path: Path) -> None
                 "canary-1b-v2-asr-probe08",
             },
         ),
+        ("wan2_2_ti2v", {"wan22-ti2v-5b"}),
     ),
 )
 def test_nightly_selects_production_single_gpu_cases_without_redundant_l0(
@@ -1620,8 +1643,10 @@ def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None
 
     assert runner.index('"verify-results"') < runner.index('"verify-builds"')
     assert runner.index('"verify-results"') < runner.index(
-        'self.status.step("e2e_reference", "passed")'
+        'result.get("proof_kind") for result in e2e_verification.get("results", [])'
     )
+    assert "if len(proof_kinds) != 1:" in runner
+    assert 'self.status.fact("e2e_proof_kind", e2e_proof_kind)' in runner
     assert "self._python()" in runner
     assert '"pytest"' in runner
     assert 'self.source / str(payload["e2e_test"])' in runner

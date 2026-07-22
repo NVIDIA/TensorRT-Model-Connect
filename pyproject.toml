@@ -31,6 +31,9 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7.0", "torch>=2.0"]
+# Build-only dependency for official Wan checkpoints containing T5/VAE .pth
+# files. Kept out of the base install and never required by the C++ runtime.
+wan = ["torch>=2.0"]
 chronos = ["chronos-forecasting>=2.2.2"]
 # clip: required by tests/e2e/models/flux/e2e_plugins/comparators/clip_metrics.py for
 # CLIP-based semantic metrics on diffusion model outputs.  Gracefully skipped

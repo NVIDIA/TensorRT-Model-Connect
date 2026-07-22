@@ -536,6 +536,12 @@ the producing class remains the source of truth for optional evidence fields.
 
 - **Boundary:** It reads and validates ownership metadata. It does not copy
   caches, acquire a GPU, compile source, or execute tests.
+- **Reference cache suites:** An optional non-empty `suites` list in
+  `[model_reference_cache]` may contain `premerge`, `nightly`, or both. Omitting
+  it preserves the reference cache for every suite. The selector always
+  validates the complete pinned-source contract, then omits an unmatched cache
+  from `selection.json`; `suites` itself is never emitted as part of the cache
+  payload.
 
 ### `model_proof.py`
 
@@ -569,6 +575,7 @@ the producing class remains the source of truth for optional evidence fields.
       "source_revision": "<commit>",
       "suite": "premerge",
       "outcome": "passed",
+      "e2e_proof_kind": "reference",
       "steps": {
         "scratch_build": {"status": "passed", "evidence": "build.log"},
         "e2e_reference": {"status": "passed", "evidence": "e2e/junit.xml, e2e/*/result.json"},
@@ -580,6 +587,9 @@ the producing class remains the source of truth for optional evidence fields.
 
   The complete output also includes the single DSO audit, C++/Python JUnit,
   engine-build verification, `proof.json`, and the per-model HTML report.
+  `e2e_reference` is a parity claim only for exclusively L1/L2-selected
+  cases. L3 is reported as snapshot regression and L4 as a functional
+  invariant; neither is promoted to reference parity.
 - **Boundary:** It can see only the projected model and private resources. It
   cannot reach the network, peer model source, or host-wide cache; artifact
   upload and matrix aggregation stay in GitHub Actions.

@@ -104,6 +104,15 @@ class TestBuildArgs:
 
 
 class TestMainParser:
+    def test_build_help_hides_legacy_method_selector(self, monkeypatch, capsys):
+        import tensorrt_model_connect.build_cli as cli
+
+        monkeypatch.setattr(sys, "argv", ["trtmc", "build", "--help"])
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main()
+        assert exit_info.value.code == 0
+        assert "--method" not in capsys.readouterr().out
+
     def test_build_accepts_trust_remote_code(self, monkeypatch, tmp_path):
         """The real build parser accepts E2E manifest trust-remote-code commands."""
         import tensorrt_model_connect.build_cli as cli

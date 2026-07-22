@@ -132,6 +132,7 @@ def _write_part(
         "outcome": "passed",
         "exit_code": 0,
         "validation_exit_code": 0,
+        "e2e_proof_kind": "reference",
         "report_exit_code": 0,
         "gpu_id": "1",
         "steps": steps,
@@ -156,6 +157,7 @@ def _write_part(
         "gpu_id": "1",
         "network": "disabled",
         "plugin_search": "strict",
+        "e2e_proof_kind": "reference",
         **gpu_fields,
     }
     selection = {

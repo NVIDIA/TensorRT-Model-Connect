@@ -103,7 +103,39 @@ If generation fails, classify the failure before changing code:
 | Runtime says no plugin registered | The binary was built without the plugin for the bundle's `runtime_strategy`. |
 | Output differs between runs | Sampling is enabled. Use `--greedy` or a fixed `--seed` for smoke tests. |
 
-## 6. What To Read Next
+## Wan2.2 720p Video In Two Commands
+
+Install the `wan` build extra once (for a source checkout, use
+`pip install -e '.[wan]' -C py-only=true`). It supplies PyTorch only for
+reading the official T5/VAE checkpoint files during bundle creation; the
+generated bundle runs through the native C++/TensorRT runtime.
+
+```bash
+$TRTMC build Wan-AI/Wan2.2-TI2V-5B -o /tmp/wan22-ti2v-5b.trtfb
+
+$TRTMC generate-video /tmp/wan22-ti2v-5b.trtfb \
+  --prompt "Two anthropomorphic cats boxing on a spotlighted stage" \
+  --output /tmp/wan22-frames \
+  --seed 42
+```
+
+No checkpoint path, plugin path, backend directory, or build-method selector
+is required. The first command downloads the checkpoint through the standard
+Hugging Face cache and selects the family-owned BF16 default.
+
+The builder creates TensorRT-native plans for UMT5, DiT, and both VAE stages.
+The `.trtfb` contains those plans, the tokenizer, and its config. The installed
+WAN model DSO adds no direct cuDNN, cuBLASLt, NVRTC, or separately managed
+companion-plugin dependency.
+
+The customer profile is 1280x704, 121 frames, 50 steps, CFG 5, flow shift 5,
+24 FPS, and a 512-token text encoder. Those values come from the bundle, so the
+minimal command does not repeat them. The runtime accepts `--num-steps 50
+--height 704 --width 1280` when an explicit command is useful for a comparison;
+other values are rejected rather than silently running an unqualified shape.
+CI additionally owns a fixed reduced L0 profile for fast smoke coverage.
+
+## What To Read Next
 
 - [Build and Run](build-and-run.md) covers common tasks for text, vision-language, audio, diffusion, segmentation, and time-series bundles.
 - [Model Support](model-support.md) explains the current supported model surface from the manifest set.

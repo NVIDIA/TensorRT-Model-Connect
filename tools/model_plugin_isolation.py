@@ -68,6 +68,13 @@ _MODEL_OWNED_IMPACT_RULES = frozenset(
     }
 )
 
+_ORACLE_PROOF_KINDS = {
+    "L1_external_reference": "reference",
+    "L2_internal_reference": "reference",
+    "L3_snapshot_regression": "snapshot_regression",
+    "L4_invariants": "functional_invariant",
+}
+
 
 def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -669,6 +676,7 @@ def _verify_model_result(
         return {
             "model": model_name,
             "result_path": str(result_path),
+            "proof_kind": "invalid",
             "passed": False,
             "errors": ["result.json is missing"],
         }
@@ -678,6 +686,7 @@ def _verify_model_result(
         return {
             "model": model_name,
             "result_path": str(result_path),
+            "proof_kind": "invalid",
             "passed": False,
             "errors": [f"result.json could not be read: {exc}"],
         }
@@ -691,6 +700,17 @@ def _verify_model_result(
         errors.append(f"status is {result.get('status')!r}, expected 'pass'")
     if result.get("failure_type") not in (None, ""):
         errors.append(f"failure_type is {result.get('failure_type')!r}")
+
+    oracle_level = result.get("oracle_level")
+    proof_kind = (
+        _ORACLE_PROOF_KINDS.get(oracle_level, "invalid")
+        if isinstance(oracle_level, str)
+        else "invalid"
+    )
+    if proof_kind == "invalid":
+        errors.append(
+            f"oracle_level is {oracle_level!r}, expected one of {sorted(_ORACLE_PROOF_KINDS)}"
+        )
 
     optional_stage_names = _optional_stage_names(result)
     stages = result.get("stages")
@@ -730,6 +750,7 @@ def _verify_model_result(
     return {
         "model": model_name,
         "result_path": str(result_path),
+        "proof_kind": proof_kind,
         "passed": not errors,
         "errors": errors,
     }

@@ -36,6 +36,15 @@ trtmc version
 trtmc build --help
 ```
 
+To create Wan2.2 bundles, install the same wheel with its build-only extra:
+
+```bash
+pip install './tensorrt_model_connect-0.1.0-py312-none-manylinux_2_39_aarch64.whl[wan]'
+```
+
+PyTorch reads the official checkpoint during `trtmc build`; it is not used by
+the native C++ video-generation runtime.
+
 Use the TensorRT `cp310` and TensorRT-Model-Connect `py310` wheels with Python
 3.10. Use the `cp312` and `py312` wheels with Python 3.12. The
 TensorRT-Model-Connect wheel installs:

@@ -521,7 +521,7 @@ class TestManifestValidation:
         assert not failures
 
     def test_repo_runtime_models_use_model_local_helpers(self):
-        """Runtime plugin helpers are owned by each runtime model folder."""
+        """Runtime plugin helpers are model-owned when production code uses them."""
         repo_root = Path(__file__).resolve().parents[2]
         runtime_models_dir = repo_root / "src" / "runtime" / "models"
         shared_helpers_dir = repo_root / "src" / "runtime" / "plugins" / "shared"
@@ -539,11 +539,18 @@ class TestManifestValidation:
         for model_dir in sorted(path for path in runtime_models_dir.iterdir() if path.is_dir()):
             if not (model_dir / "MODEL.toml").is_file():
                 continue
-            for helper in ("plugin_helpers.h", "plugin_helpers.cpp"):
-                if not (model_dir / helper).is_file():
-                    missing_helpers.append(f"{model_dir.name}/{helper}")
+            sources = sorted(model_dir.glob("*.[ch]pp")) + sorted(model_dir.glob("*.h"))
+            uses_plugin_helpers = any(
+                path.name not in {"plugin_helpers.h", "plugin_helpers.cpp"}
+                and "plugin_helpers.h" in path.read_text(encoding="utf-8")
+                for path in sources
+            )
+            if uses_plugin_helpers:
+                for helper in ("plugin_helpers.h", "plugin_helpers.cpp"):
+                    if not (model_dir / helper).is_file():
+                        missing_helpers.append(f"{model_dir.name}/{helper}")
 
-            for path in sorted(model_dir.glob("*.[ch]pp")) + sorted(model_dir.glob("*.h")):
+            for path in sources:
                 text = path.read_text(encoding="utf-8")
                 if "runtime/plugins/shared" in text:
                     shared_includes.append(path.relative_to(repo_root).as_posix())

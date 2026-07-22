@@ -486,6 +486,34 @@ def _is_hf_model_dir(path: Path) -> bool:
     return (path / "config.json").exists() or (path / "model_index.json").exists()
 
 
+def _resolve_diffusion_entrypoint(model_dir: Path) -> tuple[dict, object | None] | None:
+    """Resolve a conventional Diffusers index or a family-claimed root config."""
+    index_path = model_dir / "model_index.json"
+    if index_path.is_file():
+        config = json.loads(index_path.read_text())
+        if not isinstance(config, dict):
+            raise ValueError(f"Diffusion model index must be a JSON object: {index_path}")
+        pipeline_class = str(config.get("_class_name", "") or "")
+        return config, find_diffusion_plugin(pipeline_class) or find_plugin(
+            pipeline_class.lower()
+        )
+
+    config_path = model_dir / "config.json"
+    if not config_path.is_file():
+        return None
+    config = json.loads(config_path.read_text())
+    if not isinstance(config, dict):
+        raise ValueError(f"Model config must be a JSON object: {config_path}")
+    pipeline_class = config.get("_class_name")
+    if not isinstance(pipeline_class, str) or not pipeline_class:
+        return None
+
+    plugin = find_diffusion_plugin(pipeline_class) or find_plugin(
+        pipeline_class.lower()
+    )
+    return (config, plugin) if plugin is not None else None
+
+
 def _is_family_model_dir(path: Path) -> bool:
     """Return True when a family-owned config adapter can parse the directory."""
     return path.is_dir() and resolve_config_from_model_dir(path) is not None
@@ -706,7 +734,7 @@ def build_bundle(
     decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
-    precision: str = "fp32",
+    precision: str | None = None,
     fp32_layers: list[int] | None = None,
     quantize: str | None = None,
     quant_scales: str | None = None,
@@ -763,10 +791,13 @@ def build_bundle(
     build_timing["output_path"] = str(output_path)
     _write_build_timing(build_timing)
 
-    # Detect diffusers format (model_index.json present)
-    is_diffusers = (model_dir_path / "model_index.json").exists()
-
-    if is_diffusers:
+    diffusion_entrypoint = _resolve_diffusion_entrypoint(model_dir_path)
+    if diffusion_entrypoint is not None:
+        _, diffusion_plugin = diffusion_entrypoint
+        precision = str(
+            precision
+            or getattr(diffusion_plugin, "default_build_precision", "fp32")
+        ).lower()
         fp8_scales = getattr(build_bundle, '_fp8_scales', None)
         save_fp8_scales = getattr(build_bundle, '_save_fp8_scales', None)
         _build_diffusion_bundle(
@@ -801,6 +832,7 @@ def build_bundle(
             f"Supported: {supported}")
 
     print(f"[trtmc build] Family: {plugin.name}", file=sys.stderr)
+    precision = str(precision or "fp32").lower()
 
     # 3. Load weights
     t1 = time.monotonic()
@@ -1373,19 +1405,17 @@ def _build_diffusion_bundle(
     if build_timing is None:
         build_timing = _new_build_timing()
     parallel = normalize_parallel_config(parallel_config)
-    # Parse model_index.json to determine pipeline type
-    model_index = json.loads(
-        (model_dir_path / "model_index.json").read_text())
-    pipeline_class = model_index.get("_class_name", "")
+    entrypoint = _resolve_diffusion_entrypoint(model_dir_path)
+    if entrypoint is None:
+        raise ValueError(
+            f"No supported diffusion entrypoint found in {model_dir_path}"
+        )
+    pipeline_config, plugin = entrypoint
+    pipeline_class = str(pipeline_config.get("_class_name", "") or "")
 
     print(f"[trtmc build] Diffusion pipeline: {pipeline_class}",
           file=sys.stderr)
 
-    # Auto-discover plugin from pipeline_classes attribute
-    plugin = find_diffusion_plugin(pipeline_class)
-    if plugin is None:
-        # Fallback: try model_type-based lookup with lowercased pipeline class
-        plugin = find_plugin(pipeline_class.lower())
     if plugin is None:
         supported = ", ".join(available_plugin_ids())
         raise ValueError(
@@ -1396,7 +1426,7 @@ def _build_diffusion_bundle(
     if parallel.enabled:
         require_tensorrt_11_for_tensor_parallel(
             parallel, feature="Diffusion tensor-parallel builds")
-    config = ModelConfig(model_type=model_type, raw=model_index)
+    config = ModelConfig(model_type=model_type, raw=dict(pipeline_config))
     config.raw["max_cache_length"] = max_cache_length
     config.raw["_fp32_layers"] = sorted(set(fp32_layers or ()))
     if diffusion_overrides:
@@ -1631,7 +1661,7 @@ def _build_native_impl(
     decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
-    precision: str = "fp32",
+    precision: str | None = None,
     fp32_layers: list[int] | None = None,
     quantize: str | None = None,
     quant_scales: str | None = None,
@@ -1791,7 +1821,7 @@ def build(
     decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
-    precision: str = "fp32",
+    precision: str | None = None,
     fp32_layers: list[int] | None = None,
     quantize: str | None = None,
     quant_scales: str | None = None,
@@ -1817,9 +1847,10 @@ def build(
 ) -> None:
     """Build through a matching model capsule, otherwise use the native path.
 
-    This preserves the established public API exactly. Optimized-runtime
-    selection uses the active platform and forwards the normalized effective
-    public options as opaque data; the model-owned adapter owns all translation.
+    Optimized-runtime selection uses the active platform and forwards the
+    normalized effective public options as opaque data; the model-owned adapter
+    owns all translation. Native families may select their own precision when
+    the caller leaves ``precision`` unset.
     """
 
     build_arguments = dict(locals())
@@ -1828,6 +1859,10 @@ def build(
         for name, value in build_arguments.items()
         if name not in {"model_id_or_path", "model_revision", "output_path"}
     }
+    # Preserve the established optimized-runtime default while allowing the
+    # native builder to resolve a model-owned precision.
+    if public_options["precision"] is None:
+        public_options["precision"] = "fp32"
     revision_kwargs = (
         {"model_revision": model_revision} if model_revision else {}
     )

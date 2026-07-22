@@ -648,8 +648,8 @@ def main() -> None:
              "B=1 (the runtime slices)."
     )
     build_p.add_argument("--precision", choices=["fp32", "fp16", "bf16"],
-                         default="fp32",
-                         help="Engine precision (default: fp32)")
+                         default=None,
+                         help="Engine precision (default: selected by model family)")
     build_p.add_argument(
         "--fp32-layers",
         type=_parse_layer_indices,
@@ -668,7 +668,7 @@ def main() -> None:
                          help="Number of calibration samples for PTQ (default: 512)")
     build_p.add_argument("--method", type=str, default="auto",
                          choices=["auto", "trt"],
-                         help="Engine definition method: auto (default, native TRT) or trt")
+                         help=argparse.SUPPRESS)
     build_p.add_argument("--verbose", action="store_true",
                          help="Verbose TRT builder output")
     build_p.add_argument("--fp8", action="store_true",

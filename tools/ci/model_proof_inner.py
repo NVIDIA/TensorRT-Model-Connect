@@ -396,6 +396,7 @@ class ModelProofInnerPipeline:
                 )
             },
             "e2e_cases": self.selection.e2e_cases,
+            "e2e_proof_kind": verification["e2e_proof_kind"],
             "engine_builds_per_model": verification["builds_per_model"],
             "engine_build_count": len(verification["records"]),
             "engine_build_verification": "engine-build-verification.json",
@@ -594,7 +595,23 @@ class ModelProofInnerPipeline:
                 self.artifacts / "e2e-verification.json",
             ]
         )
-        self.status.step("e2e_reference", "passed")
+        e2e_verification = json.loads(
+            (self.artifacts / "e2e-verification.json").read_text(encoding="utf-8")
+        )
+        proof_kinds = {result.get("proof_kind") for result in e2e_verification.get("results", [])}
+        if len(proof_kinds) != 1:
+            raise CiError(f"Model proof requires one E2E proof kind, found {proof_kinds}")
+        e2e_proof_kind = next(iter(proof_kinds))
+        self.status.fact("e2e_proof_kind", e2e_proof_kind)
+        self.status.step(
+            "e2e_reference",
+            "passed" if e2e_proof_kind == "reference" else "skipped",
+            (
+                "e2e-verification.json (L1/L2 reference oracle)"
+                if e2e_proof_kind == "reference"
+                else f"not claimed: {e2e_proof_kind} oracle"
+            ),
+        )
         self.status.step("result_verification", "passed")
         self.context.run(
             [
@@ -617,6 +634,7 @@ class ModelProofInnerPipeline:
         )
         if verification.get("passed") is not True:
             raise CiError("engine build verification did not pass")
+        verification["e2e_proof_kind"] = e2e_proof_kind
         return verification
 
     def _finalize_report(self, validation_rc: int) -> int:

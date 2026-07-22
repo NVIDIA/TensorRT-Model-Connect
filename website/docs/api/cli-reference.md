@@ -34,11 +34,10 @@ python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 | `--image-height`, `--image-width` | Diffusion image shape overrides. |
 | `--video-height`, `--video-width`, `--video-num-frames` | Diffusion video shape overrides. |
 | `--num-inference-steps N` | Diffusion denoising step override. |
-| `--precision fp32|fp16|bf16` | Build precision. |
+| `--precision fp32|fp16|bf16` | Override the family-selected build precision. Wan2.2 defaults to BF16. |
 | `--quantize fp8|int8|int8_sq|int4|int4_awq|nvfp4|w4a8` | Quantization format. |
 | `--quant-scales PATH` | Load precomputed quantization scales. |
 | `--quant-calibration-samples N` | PTQ calibration sample count. |
-| `--method auto|trt` | Engine definition method. `auto` selects the native TRT builder when a family plugin matches. |
 | `--fp8` | Enable legacy FP8 auto-calibration path. |
 | `--fp8-scales PATH` | Load precomputed FP8 scales. |
 | `--save-fp8-scales PATH` | Save calibrated FP8 scales. |
@@ -48,6 +47,9 @@ python -m tensorrt_model_connect build <hf-repo-or-local-dir> -o <output.trtfb>
 | `--build-timing-json PATH` | Write structured build timing. |
 
 TriAttention options are also exposed for experimental KV compaction: `--triattention-stats`, `--triattention-kv-budget`, `--triattention-divide-length`, `--triattention-recent-window`, score aggregation, prompt-token accounting, prefill protection, and MLR/trig disable flags.
+
+TensorRT is the build backend; there is no public build-method selector. Older
+`--method trt` and `--method auto` spellings remain accepted for compatibility.
 
 ## Runtime commands
 

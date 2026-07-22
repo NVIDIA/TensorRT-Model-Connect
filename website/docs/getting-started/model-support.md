@@ -33,7 +33,7 @@ The E2E manifests are the most concrete proof because they name the model ID, ru
 | Seq2seq and translation | `t5_text_to_text`, `marian_translation`, `bart_seq2seq_encoder_decoder`, `m2m_100_seq2seq_encoder_decoder` | `t5`, `marian`, `bart`, `m2m_100` |
 | Vision-language and OCR | `vision_language`, `omni_multimodal` | `qwen_vl`, `internvl`, `phi4_multimodal`, `deepseek_ocr`, `qwen3_omni` |
 | Speech and audio | `speech_to_text`, `speech_to_text_rnnt`, `text_to_audio_bark`, `text_to_audio_magpie`, `speech_to_speech` | `whisper`, `canary`, `nemotron_speech_streaming`, `bark`, `magpie_tts`, `personaplex` |
-| Diffusion image/video | `diffusion_flux`, `diffusion_wan`, `diffusion_zimage`, `diffusion_pixart` | `flux`, `wan_t2v`, `z_image`, `pixart` |
+| Diffusion image/video | `diffusion_flux`, `diffusion_wan`, `diffusion_wan2_2_ti2v`, `diffusion_zimage`, `diffusion_pixart` | `flux`, `wan_t2v`, `wan2_2_ti2v`, `z_image`, `pixart` |
 | Segmentation and detection | `segmentation`, `prompted_segmentation`, `object_detection` | `segformer`, `sam` |
 | Operators | `neural_operator` | family-specific numeric operator bundles |
 
@@ -49,8 +49,8 @@ internlm, internvl, llama, m2m_100, magpie_tts, mamba, marian, mistral,
 mixtral, modernbert, mpnet, nemotron, nemotron_h, nemotron_speech_streaming,
 olmo, olmo2, opt, personaplex, phi, phi4_multimodal, phi_moe, pixart,
 qwen, qwen3_5, qwen3_omni, qwen_moe, qwen_vl, roberta, rwkv, sam,
-segformer, stablelm, starcoder2, t5, wan_t2v, whisper, xglm, xlnet,
-z_image
+segformer, stablelm, starcoder2, t5, wan2_2_ti2v, wan_t2v, whisper, xglm,
+xlnet, z_image
 ```
 
 ## How support is resolved

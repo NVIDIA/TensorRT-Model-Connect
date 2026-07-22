@@ -22,6 +22,7 @@
 //                        [--task transcribe|translate] [--timestamps]
 //   trtmc speak           <bundle.trtfb> --audio-in INPUT.wav --audio-out OUTPUT.wav
 //   trtmc generate-video  <bundle.trtfb> --prompt "text" --output DIR [--num-steps N]
+//                        [--negative-prompt "text"] [--height N] [--width N]
 //   trtmc classify        <bundle.trtfb> --image PATH [--benchmark N] [--warmup N]
 //   trtmc detect          <bundle.trtfb> --image PATH [--output-json PATH]
 //   trtmc inspect         <bundle.trtfb> [--list-engines]
@@ -718,6 +719,9 @@ int cmd_generate_video(const CliArgs& args) {
     cfg.num_steps = args.num_steps;
     cfg.guidance_scale = args.guidance_scale;
     cfg.seed = args.seed;
+    cfg.negative_prompt = args.negative_prompt;
+    cfg.height = args.diffusion_height;
+    cfg.width = args.diffusion_width;
     if (!args.initial_latents_raw.empty()) {
         std::string error;
         auto latents = read_float32_raw_file(args.initial_latents_raw, error);

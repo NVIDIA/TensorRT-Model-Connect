@@ -168,7 +168,7 @@ def test_python_build_preserves_native_call_when_no_capsule_matches(monkeypatch)
     assert len(native_calls) == 1
     assert native_calls[0]["model_id_or_path"] == "native/model"
     assert native_calls[0]["output_path"] == "native.trtfb"
-    assert native_calls[0]["precision"] == "fp32"
+    assert native_calls[0]["precision"] is None
     assert native_calls[0]["max_cache_length"] == 256
 
 

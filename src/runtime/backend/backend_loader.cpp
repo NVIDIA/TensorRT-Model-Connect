@@ -5,6 +5,8 @@
 
 #include "runtime/backend/backend_loader.h"
 
+#include "runtime/backend/prebound_backend.h"
+
 #include <cstdlib>
 #include <dlfcn.h>
 #include <filesystem>
@@ -19,6 +21,8 @@
 #include <vector>
 
 namespace trtmc {
+
+IPreboundBackend::~IPreboundBackend() = default;
 
 namespace {
 

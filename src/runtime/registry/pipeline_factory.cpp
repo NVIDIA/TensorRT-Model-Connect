@@ -10,6 +10,7 @@
 #include "runtime/backend/trt_version.h"
 #include "runtime/core/trt_common.h"
 #include "runtime/providers/optimized_runtime_host.h"
+#include "runtime/registry/bundle_materialization.h"
 #include "trtmc/config/cli_support.h"
 #include "trtmc/config/config_bundle.h"
 #include "trtmc/config/schema_registry.h"
@@ -21,14 +22,95 @@
 #include "utils/data_dir.h"
 #include "utils/json_helpers.h"
 
+#include <algorithm>
 #include <exception>
 #include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace trtmc {
+
+namespace detail {
+
+namespace {
+
+const BundleSectionInfo* find_nonempty_config_section(const BundleInfo& info) {
+    const auto config_info =
+        std::find_if(info.sections.begin(), info.sections.end(),
+                     [](const BundleSectionInfo& entry) { return entry.name == "config.json"; });
+    if (config_info == info.sections.end() || config_info->size == 0)
+        return nullptr;
+    return &*config_info;
+}
+
+bool contains(const std::vector<std::string>& names, const std::string& name) {
+    return std::find(names.begin(), names.end(), name) != names.end();
+}
+
+void validate_staged_loading_policy(const BundleInfo& info, const std::string& mode,
+                                    const std::vector<std::string>& eager,
+                                    const std::vector<std::string>& lazy) {
+    if (mode != "staged" || eager.empty() || lazy.empty() || !contains(eager, "config.json") ||
+        eager.size() + lazy.size() != info.sections.size()) {
+        throw std::runtime_error("Invalid staged bundle_loading policy");
+    }
+
+    std::unordered_set<std::string> header_names;
+    for (const auto& section : info.sections) {
+        if (!header_names.insert(section.name).second ||
+            std::count(eager.begin(), eager.end(), section.name) +
+                    std::count(lazy.begin(), lazy.end(), section.name) !=
+                1) {
+            throw std::runtime_error(
+                "Staged bundle_loading must partition bundle sections exactly");
+        }
+    }
+}
+
+} // namespace
+
+PipelineBundleMaterialization materialize_pipeline_bundle(const std::string& bundle_path) {
+    const auto info = ReadBundleHeader(bundle_path);
+    const auto* config_info = find_nonempty_config_section(info);
+
+    // Preserve compatibility with legacy bundles that did not carry a
+    // config section (or carried an empty one). PipelineFactory will retain
+    // its existing manifest-default strategy resolution for those bundles.
+    if (config_info == nullptr) {
+        return PipelineBundleMaterialization{ReadBundleFile(bundle_path), {}};
+    }
+
+    auto config_data = ReadBundleSection(bundle_path, *config_info);
+    std::string config_text(config_data.begin(), config_data.end());
+    const std::string policy_text = extract_json_object_text(config_text, "bundle_loading");
+    if (policy_text.empty()) {
+        return PipelineBundleMaterialization{ReadBundleFile(bundle_path), std::move(config_text)};
+    }
+
+    const std::string mode = extract_json_string(policy_text, "mode", "");
+    const auto eager = extract_json_string_array(policy_text, "eager_sections");
+    const auto lazy = extract_json_string_array(policy_text, "lazy_sections");
+    validate_staged_loading_policy(info, mode, eager, lazy);
+
+    BundleFile bundle;
+    bundle.info = info;
+    bundle.sections.reserve(eager.size());
+    for (const auto& section_info : info.sections) {
+        if (!contains(eager, section_info.name))
+            continue;
+        auto data = section_info.name == "config.json"
+                        ? std::move(config_data)
+                        : ReadBundleSection(bundle_path, section_info);
+        bundle.sections.push_back(BundleSection{section_info.name, std::move(data)});
+    }
+    return PipelineBundleMaterialization{std::move(bundle), std::move(config_text)};
+}
+
+} // namespace detail
 
 namespace {
 
@@ -204,18 +286,11 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
         return optimized_runtime_pipeline;
     }
 
-    BundleFile bundle = ReadBundleFile(bundle_path);
+    auto materialized = detail::materialize_pipeline_bundle(bundle_path);
+    BundleFile bundle = std::move(materialized.bundle);
+    std::string config_text = std::move(materialized.config_text);
     if (bundle.sections.empty())
         throw std::runtime_error("Failed to read bundle: " + bundle_path);
-
-    // Extract config JSON from bundle
-    std::string config_text;
-    for (const auto& section : bundle.sections) {
-        if (section.name == "config.json" && !section.data.empty()) {
-            config_text.assign(section.data.begin(), section.data.end());
-            break;
-        }
-    }
 
     // Parse runtime_strategy and normalize legacy strings.
     std::string strategy = resolve_runtime_strategy(config_text);
@@ -266,17 +341,11 @@ std::unique_ptr<IPipeline> PipelineFactory::from_bundle(const std::string& bundl
             try_make_optimized_runtime_pipeline(bundle_path, header, options)) {
         return optimized_runtime_pipeline;
     }
-    BundleFile bundle = ReadBundleFile(bundle_path);
+    auto materialized = detail::materialize_pipeline_bundle(bundle_path);
+    BundleFile bundle = std::move(materialized.bundle);
+    std::string config_text = std::move(materialized.config_text);
     if (bundle.sections.empty())
         throw std::runtime_error("Failed to read bundle: " + bundle_path);
-
-    std::string config_text;
-    for (const auto& section : bundle.sections) {
-        if (section.name == "config.json" && !section.data.empty()) {
-            config_text.assign(section.data.begin(), section.data.end());
-            break;
-        }
-    }
 
     std::string strategy = resolve_runtime_strategy(config_text);
 
@@ -321,17 +390,11 @@ std::unique_ptr<PipelinePool> PipelineFactory::from_bundle_pool(const std::strin
             "PipelineFactory::from_bundle_pool does not support optimized-runtime bundles; use "
             "from_bundle because the delegated runtime owns batching and scheduling");
 
-    BundleFile bundle = ReadBundleFile(bundle_path);
+    auto materialized = detail::materialize_pipeline_bundle(bundle_path);
+    BundleFile bundle = std::move(materialized.bundle);
+    std::string config_text = std::move(materialized.config_text);
     if (bundle.sections.empty())
         throw std::runtime_error("Failed to read bundle: " + bundle_path);
-
-    std::string config_text;
-    for (const auto& section : bundle.sections) {
-        if (section.name == "config.json" && !section.data.empty()) {
-            config_text.assign(section.data.begin(), section.data.end());
-            break;
-        }
-    }
 
     std::string strategy = resolve_runtime_strategy(config_text);
     auto* plugin = lookup_plugin_or_throw(strategy, options.model_plugin_search_paths);
