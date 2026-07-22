@@ -412,6 +412,31 @@ def test_image_rate_and_seconds_per_image_account_for_batch_size() -> None:
     assert metrics["seconds_per_image_p50"] == 0.2
 
 
+def test_text_generation_preserves_sampling_contract(tmp_path: Path) -> None:
+    case = resolve_case(
+        ManifestCatalog().resolve("qwen3-0.6b-topp"),
+        tmp_path / "pending.trtfb",
+    )
+
+    assert case.request["temperature"] == 0.7
+    assert case.request["top_p"] == 0.9
+    assert case.request["top_k"] == 50
+    assert case.request["seed"] == 42
+
+
+def test_text_generation_preserves_mode_and_chat_contract(tmp_path: Path) -> None:
+    case = resolve_case(
+        ManifestCatalog().resolve("nemotron-labs-diffusion-8b-l0"),
+        tmp_path / "pending.trtfb",
+    )
+
+    assert case.request["generation_mode"] == "ar"
+    assert case.request["temperature"] == 0.0
+    assert case.request["seed"] == -1
+    assert case.request["use_chat_template"] is True
+    assert case.request["enable_thinking"] is False
+
+
 def test_video_profile_preserves_video_build_shape_and_frame_rate(tmp_path: Path) -> None:
     model = ManifestCatalog().resolve("ltx-video-l0")
     case = resolve_case(model, tmp_path / "pending.trtfb")

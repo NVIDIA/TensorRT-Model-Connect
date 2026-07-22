@@ -90,15 +90,43 @@ def _model_asset(declared: str, model_root: Path, operation: str) -> tuple[Path,
 
 
 def _generate_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[str, Any]:
-    return {
+    inputs = testcase.get("inputs", {})
+    if not isinstance(inputs, Mapping):
+        raise BenchmarkError("generate testcase inputs must be an object")
+    metadata = testcase.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        raise BenchmarkError("generate testcase metadata must be an object")
+    contract = metadata.get("contract_config", {})
+    if not isinstance(contract, Mapping):
+        raise BenchmarkError("generate testcase contract_config must be an object")
+
+    def value(name: str, default: Any) -> Any:
+        return inputs.get(name, testcase.get(name, default))
+
+    request: dict[str, Any] = {
         "batch_size": 1,
         "prompt": _prompt(testcase, "generate"),
         "max_new_tokens": int(testcase.get("max_new_tokens", 20)),
-        "temperature": 0.0,
-        "top_k": 1,
-        "top_p": 1.0,
-        "seed": int(testcase.get("seed", 42)),
+        "temperature": float(value("temperature", 0.0)),
+        "top_k": int(value("top_k", 1)),
+        "top_p": float(value("top_p", 1.0)),
+        "min_p": float(value("min_p", 0.0)),
+        "seed": int(value("seed", -1)),
+        "use_chat_template": bool(contract.get("use_chat_template", False)),
+        "enable_thinking": bool(contract.get("enable_thinking", True)),
     }
+    generation_mode = value("generation_mode", None)
+    if generation_mode is not None:
+        if not isinstance(generation_mode, str) or not generation_mode:
+            raise BenchmarkError("generate generation_mode must be a non-empty string")
+        request["generation_mode"] = generation_mode
+    block_length = value("block_length", None)
+    if block_length is not None:
+        request["block_length"] = int(block_length)
+    threshold = value("threshold", None)
+    if threshold is not None:
+        request["threshold"] = float(threshold)
+    return request
 
 
 def _generate_image_request(testcase: Mapping[str, Any], model_root: Path) -> dict[str, Any]:

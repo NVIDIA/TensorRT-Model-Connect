@@ -107,13 +107,18 @@ trtmc::GenerateConfig generate_config(const Json& request) {
     config.top_k = optional_value<int32_t>(request, "top_k", 1);
     config.top_p = optional_value<float>(request, "top_p", 1.0F);
     config.min_p = optional_value<float>(request, "min_p", 0.0F);
-    config.seed = optional_value<int32_t>(request, "seed", 42);
+    config.seed = optional_value<int32_t>(request, "seed", -1);
     config.guidance_scale = optional_value<float>(request, "guidance_scale", -1.0F);
     config.cfg_scale = optional_value<float>(request, "cfg_scale", -1.0F);
     config.num_steps = optional_value<int32_t>(request, "num_inference_steps", -1);
     config.negative_prompt = optional_value<std::string>(request, "negative_prompt", "");
     config.height = optional_value<int32_t>(request, "height", 0);
     config.width = optional_value<int32_t>(request, "width", 0);
+    config.text_generation_mode = optional_value<std::string>(request, "generation_mode", "auto");
+    config.block_length = optional_value<int32_t>(request, "block_length", 0);
+    config.confidence_threshold = optional_value<float>(request, "threshold", -1.0F);
+    config.use_chat_template = optional_value<bool>(request, "use_chat_template", false);
+    config.enable_thinking = optional_value<bool>(request, "enable_thinking", true);
     return config;
 }
 
