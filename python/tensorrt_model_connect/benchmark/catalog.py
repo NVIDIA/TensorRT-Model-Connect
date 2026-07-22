@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import hashlib
 import itertools
 import json
@@ -19,10 +19,25 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
     import tomli as tomllib  # type: ignore[no-redef]
 
-from .operations import operation_for_name, operation_for_task_strategy
+from .operations import operation_for_name
+from .task_adapters import adapter_for_task_strategy
 from .types import BenchmarkError, MeasurementSpec, ModelDescriptor, ResolvedCase
 
 _OVERRIDE_NAMESPACES = {"request", "runtime", "measurement", "telemetry"}
+
+
+@dataclass(frozen=True)
+class CatalogEntry:
+    """One manifest exposed by ``trtmc-bench list models``."""
+
+    name: str
+    operation: str
+    family: str
+    precision: str
+    hf_id: str
+    status: str
+    reason: str = ""
+    model: ModelDescriptor | None = None
 
 
 def default_manifest_root() -> Path:
@@ -48,18 +63,84 @@ class ManifestCatalog:
         self.root = (root or default_manifest_root()).expanduser().resolve()
 
     def models(self) -> tuple[ModelDescriptor, ...]:
-        """Return catalog models supported by the benchmark operation registry."""
+        """Return single-process catalog models executable by the benchmark."""
+        return tuple(
+            entry.model
+            for entry in self.entries()
+            if entry.status == "ready" and entry.model is not None
+        )
+
+    def entries(self) -> tuple[CatalogEntry, ...]:
+        """Return every declared model manifest with an explicit support status."""
         if not self.root.is_dir():
             raise BenchmarkError(f"model manifest root does not exist: {self.root}")
-        models: list[ModelDescriptor] = []
-        for path in sorted(self.root.glob("*/manifests/*.json")):
+        entries: list[CatalogEntry] = []
+        for path in self._manifest_paths():
             try:
                 model = self._load(path)
-                _require_supported_model(model)
-            except BenchmarkError:
+            except BenchmarkError as exc:
+                entries.append(
+                    CatalogEntry(
+                        name=path.stem,
+                        operation="-",
+                        family=path.parent.parent.name,
+                        precision="-",
+                        hf_id="-",
+                        status="invalid",
+                        reason=str(exc),
+                    )
+                )
                 continue
-            models.append(model)
-        return tuple(sorted(models, key=lambda item: (item.name, item.hf_id)))
+            try:
+                adapter = adapter_for_task_strategy(model.task_strategy)
+            except BenchmarkError as exc:
+                entries.append(_catalog_entry(model, "unsupported", str(exc), operation="-"))
+                continue
+            config = model.distributed_runtime
+            if config.get("enabled"):
+                launcher = str(config.get("launcher", "mpirun") or "mpirun")
+                world_size = int(config.get("world_size", config.get("tp_size", 2)) or 2)
+                entries.append(
+                    _catalog_entry(
+                        model,
+                        "distributed",
+                        f"requires {launcher}, world_size={world_size}",
+                        operation=adapter.operation,
+                    )
+                )
+                continue
+            try:
+                adapter.resolve_case(model.testcases[0], model.manifest_path.parent.parent)
+            except BenchmarkError as exc:
+                entries.append(
+                    _catalog_entry(model, "invalid", str(exc), operation=adapter.operation)
+                )
+                continue
+            entries.append(_catalog_entry(model, "ready", operation=adapter.operation))
+        return tuple(sorted(entries, key=lambda item: (item.name, item.hf_id)))
+
+    def _manifest_paths(self) -> tuple[Path, ...]:
+        """Read the same manifest declarations used by the E2E model catalog."""
+        paths: list[Path] = []
+        for family_root in sorted(path for path in self.root.iterdir() if path.is_dir()):
+            descriptor = family_root / "MODEL.toml"
+            if not descriptor.is_file():
+                paths.extend(sorted((family_root / "manifests").glob("*.json")))
+                continue
+            try:
+                with descriptor.open("rb") as stream:
+                    raw = tomllib.load(stream)
+            except (OSError, tomllib.TOMLDecodeError) as exc:
+                raise BenchmarkError(f"cannot read model descriptor {descriptor}: {exc}") from exc
+            declared = raw.get("test_manifests")
+            if not isinstance(declared, list) or not all(
+                isinstance(item, str) and item for item in declared
+            ):
+                raise BenchmarkError(
+                    f"model descriptor {descriptor} must declare test_manifests strings"
+                )
+            paths.extend((family_root / item).resolve() for item in declared)
+        return tuple(paths)
 
     def resolve(self, selector: str) -> ModelDescriptor:
         direct = Path(selector).expanduser()
@@ -70,7 +151,7 @@ class ManifestCatalog:
         if not self.root.is_dir():
             raise BenchmarkError(f"model manifest root does not exist: {self.root}")
         matches: list[ModelDescriptor] = []
-        for path in sorted(self.root.glob("*/manifests/*.json")):
+        for path in self._manifest_paths():
             try:
                 model = self._load(path)
             except BenchmarkError:
@@ -102,7 +183,6 @@ class ManifestCatalog:
             "family",
             "task_strategy",
             "runtime_strategy",
-            "precision",
             "testcases",
         }
         missing = sorted(required - set(raw))
@@ -148,7 +228,7 @@ class ManifestCatalog:
             family=str(raw["family"]),
             task_strategy=task_strategy,
             runtime_strategy=str(raw["runtime_strategy"]),
-            precision=str(raw["precision"]),
+            precision=str(raw.get("precision", "fp32")),
             manifest_path=path,
             testcases=tuple(testcases),
             build_settings=build_settings,
@@ -170,6 +250,7 @@ def _resolve_manifest_asset(path: Path, field: str, value: object) -> Path:
 
 
 def _require_supported_model(model: ModelDescriptor) -> None:
+    adapter = adapter_for_task_strategy(model.task_strategy)
     config = model.distributed_runtime
     if config.get("enabled"):
         launcher = str(config.get("launcher", "mpirun") or "mpirun")
@@ -179,8 +260,26 @@ def _require_supported_model(model: ModelDescriptor) -> None:
             f"({launcher}, world_size={world_size}), but trtmc-bench currently supports "
             "single-process benchmark workers only"
         )
-    operation = operation_for_task_strategy(model.task_strategy)
-    operation.request_from_testcase(model.testcases[0], model.manifest_path.parent.parent)
+    adapter.resolve_case(model.testcases[0], model.manifest_path.parent.parent)
+
+
+def _catalog_entry(
+    model: ModelDescriptor,
+    status: str,
+    reason: str = "",
+    *,
+    operation: str | None = None,
+) -> CatalogEntry:
+    return CatalogEntry(
+        name=model.name,
+        operation=operation or adapter_for_task_strategy(model.task_strategy).operation,
+        family=model.family,
+        precision=model.precision,
+        hf_id=model.hf_id,
+        status=status,
+        reason=reason,
+        model=model,
+    )
 
 
 def _model_defaults(path: Path, task_strategy: str) -> Mapping[str, Any]:
@@ -276,18 +375,17 @@ def resolve_case(
     case_name: str | None = None,
     overrides: Mapping[str, Any] | None = None,
 ) -> ResolvedCase:
-    operation = operation_for_task_strategy(model.task_strategy)
+    adapter = adapter_for_task_strategy(model.task_strategy)
     testcase = _select_testcase(model, case_name)
     testcase_name = str(testcase.get("name", "default"))
-    request_resolution = operation.resolve_request_from_testcase(
-        testcase, model.manifest_path.parent.parent
-    )
+    request_resolution = adapter.resolve_case(testcase, model.manifest_path.parent.parent)
     request = dict(request_resolution.request)
-    runtime: dict[str, Any] = {"cuda_graphs": False}
-    measurement = operation.default_measurement
+    runtime: dict[str, Any] = {"cuda_graphs": False, **request_resolution.runtime}
+    measurement = adapter.default_measurement
     sources: dict[str, str] = {
-        **{f"request.{key}": source for key, source in request_resolution.sources.items()},
+        **{f"request.{key}": source for key, source in request_resolution.request_sources.items()},
         "runtime.cuda_graphs": "benchmark default",
+        **{f"runtime.{key}": source for key, source in request_resolution.runtime_sources.items()},
         "measurement.warmup": "task strategy default",
         "measurement.iterations": "task strategy default",
         "telemetry.gpu": "benchmark default",
@@ -298,7 +396,7 @@ def resolve_case(
         model=model,
         testcase_name=testcase_name,
         bundle_path=bundle,
-        operation=operation.name,
+        operation=adapter.operation,
         request=request,
         runtime=runtime,
         measurement=measurement,

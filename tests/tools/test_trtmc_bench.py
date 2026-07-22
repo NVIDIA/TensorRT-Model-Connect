@@ -7,6 +7,11 @@ import json
 from pathlib import Path
 import subprocess
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib
+
 import pytest
 
 from tensorrt_model_connect.benchmark import builder as benchmark_builder
@@ -20,6 +25,7 @@ from tensorrt_model_connect.benchmark.catalog import (
 from tensorrt_model_connect.benchmark.cli import main
 from tensorrt_model_connect.benchmark.metrics import reduce_metrics
 from tensorrt_model_connect.benchmark.operations import registered_operations
+from tensorrt_model_connect.benchmark.task_adapters import registered_task_adapters
 from tensorrt_model_connect.benchmark.types import BenchmarkError
 from tensorrt_model_connect.benchmark.worker import worker_backend_abi
 
@@ -151,16 +157,41 @@ def test_catalog_reuses_existing_model_manifests_for_different_tasks(tmp_path: P
 
 def test_operation_registry_declares_supported_task_semantics() -> None:
     operations = {operation.name: operation for operation in registered_operations()}
+    adapters = {adapter.task_strategy: adapter for adapter in registered_task_adapters()}
 
     assert set(operations) == {
         "generate",
         "generate_image",
+        "generate_audio",
+        "speak",
+        "segment",
+        "segment_prompted",
+        "classify",
+        "detect",
+        "rerank",
         "encode",
         "embed",
         "solve",
         "transcribe",
     }
-    assert operations["generate"].task_strategies == ("text_generation_causal",)
+    assert {name: adapter.operation for name, adapter in adapters.items()} == {
+        "text_generation_causal": "generate",
+        "vision_language_generation": "generate",
+        "diffusion_text_generation": "generate",
+        "diffusion_media_generation": "generate_image",
+        "text_to_audio": "generate_audio",
+        "omni_multimodal": "generate_audio",
+        "speech_to_speech": "speak",
+        "prompted_segmentation": "segment_prompted",
+        "segmentation": "segment",
+        "image_classification": "classify",
+        "object_detection": "detect",
+        "reranking": "rerank",
+        "encoder_only_nlp": "encode",
+        "embedding": "embed",
+        "neural_operator": "solve",
+        "speech_to_text": "transcribe",
+    }
     assert operations["generate_image"].supports_batch is True
     assert operations["generate_image"].per_item_latency.result_name == "seconds_per_image_p50"
     assert [metric.result_name for metric in operations["solve"].rate_metrics] == [
@@ -168,6 +199,15 @@ def test_operation_registry_declares_supported_task_semantics() -> None:
         "forecast_elements_per_s",
     ]
     assert operations["transcribe"].rate_metrics[0].inverse_result_name == "realtime_factor"
+
+
+def test_native_worker_has_a_runner_for_every_advertised_operation() -> None:
+    worker_source = (REPOSITORY_ROOT / "examples/trtmc_benchmark_worker.cpp").read_text(
+        encoding="utf-8"
+    )
+
+    for operation in registered_operations():
+        assert f'{{"{operation.name}", run_' in worker_source, operation.name
 
 
 def test_default_catalog_falls_back_to_installed_package_data(
@@ -212,8 +252,164 @@ def test_cli_lists_supported_models(capsys: pytest.CaptureFixture[str]) -> None:
     assert "distilgpt2" in output
     assert "flux-schnell-l0" in output
     assert "generate_image" in output
-    assert "chronos-bolt-tiny-official-tp4" not in output
-    assert "sana-wm-bidirectional" not in output
+    assert "STATUS" in output
+    assert "chronos-bolt-tiny-official-tp4" in output
+    assert "distributed" in output
+    assert "sana-wm-bidirectional" in output
+    assert "bark-small" in output
+    assert "qwen3-vl-2b" in output
+    assert "sam3" in output
+
+
+def test_catalog_exposes_every_declared_profile_and_family() -> None:
+    entries = ManifestCatalog().entries()
+    expected_manifests: list[Path] = []
+    descriptors = sorted((REPOSITORY_ROOT / "tests/e2e/models").glob("*/MODEL.toml"))
+    for descriptor in descriptors:
+        with descriptor.open("rb") as stream:
+            declared = tomllib.load(stream)["test_manifests"]
+        expected_manifests.extend(descriptor.parent / path for path in declared)
+    expected_distributed = 0
+    for manifest in expected_manifests:
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        expected_distributed += bool(raw.get("distributed_runtime", {}).get("enabled"))
+
+    assert len(entries) == len(expected_manifests)
+    assert len({entry.family for entry in entries}) == len(descriptors)
+    assert sum(entry.status == "ready" for entry in entries) == (
+        len(expected_manifests) - expected_distributed
+    )
+    assert sum(entry.status == "distributed" for entry in entries) == expected_distributed
+    assert not [entry for entry in entries if entry.status in {"invalid", "unsupported"}]
+
+
+@pytest.mark.parametrize(
+    ("model_name", "operation"),
+    [
+        ("bark-small", "generate_audio"),
+        ("deepseek-ocr-l0", "generate"),
+        ("elf-b-owt-l0", "generate"),
+        ("internvl3-2b", "generate"),
+        ("lance-3b-x2t-image", "generate"),
+        ("locateanything-3b", "generate"),
+        ("magpie-tts-357m", "generate_audio"),
+        ("personaplex-7b-l0", "speak"),
+        ("phi4-multimodal", "generate"),
+        ("qwen3-omni-30b-a3b-instruct", "generate_audio"),
+        ("qwen3-vl-2b", "generate"),
+        ("sam-vit-base", "segment_prompted"),
+        ("sam3", "segment_prompted"),
+        ("sana-wm-bidirectional", "generate_image"),
+        ("segformer-b0-ade", "segment"),
+        ("timm-vit-base-p16-224-augreg-in21k-ft-in1k", "classify"),
+    ],
+)
+def test_previously_filtered_families_resolve_without_family_registration(
+    tmp_path: Path, model_name: str, operation: str
+) -> None:
+    model = ManifestCatalog().resolve(model_name)
+    case = resolve_case(model, tmp_path / model.bundle_name)
+
+    assert case.operation == operation
+    assert case.worker_request()["operation"] == operation
+
+
+def test_future_family_reuses_existing_task_adapter_without_benchmark_changes(
+    tmp_path: Path,
+) -> None:
+    family = tmp_path / "catalog/wan2_2_ti2v"
+    manifests = family / "manifests"
+    manifests.mkdir(parents=True)
+    (family / "MODEL.toml").write_text(
+        'id = "wan2_2_ti2v"\n'
+        'plugin = "wan2_2_ti2v"\n'
+        'test_manifests = ["manifests/wan2.2-ti2v-5b.json"]\n'
+        "[e2e_defaults.diffusion_media_generation]\n"
+        "build_cli_args = [\n"
+        '  { flag = "--video-height", input = "video_height" },\n'
+        '  { flag = "--video-width", input = "video_width" },\n'
+        '  { flag = "--video-num-frames", input = "video_num_frames" },\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    manifest = manifests / "wan2.2-ti2v-5b.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "name": "wan2.2-ti2v-5b",
+                "hf_id": "Wan-AI/Wan2.2-TI2V-5B",
+                "bundle": "wan2.2-ti2v-5b.trtfb",
+                "family": "wan2_2_ti2v",
+                "task_strategy": "diffusion_media_generation",
+                "runtime_strategy": "diffusion_wan2_2_ti2v",
+                "precision": "fp16",
+                "testcases": [
+                    {
+                        "name": "default",
+                        "test_prompt": "A boat sailing at sunset.",
+                        "video_num_frames": 17,
+                        "video_height": 256,
+                        "video_width": 448,
+                        "num_inference_steps": 4,
+                        "guidance_scale": 5.0,
+                        "flow_shift": 5.0,
+                        "fps": 16,
+                        "seed": 42,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = ManifestCatalog(tmp_path / "catalog")
+    case = resolve_case(catalog.resolve("wan2.2-ti2v-5b"), tmp_path / "pending.trtfb")
+
+    assert case.operation == "generate_image"
+    assert case.request["media_type"] == "video"
+    assert case.request["video_num_frames"] == 17
+    assert case.request["flow_shift"] == 5.0
+    assert case.request["fps"] == 16
+    command = BundleBuilder(tmp_path / "cache")._plan(case.model, (case,)).command
+    assert command[command.index("--video-height") + 1] == "256"
+    assert command[command.index("--video-width") + 1] == "448"
+    assert command[command.index("--video-num-frames") + 1] == "17"
+
+
+def test_future_object_detection_family_uses_existing_public_capability(tmp_path: Path) -> None:
+    family = tmp_path / "yolox"
+    manifest = family / "manifests/yolox-tiny.json"
+    image = family / "data/test_img.jpeg"
+    manifest.parent.mkdir(parents=True)
+    image.parent.mkdir()
+    image.write_bytes(b"synthetic image for resolution only")
+    manifest.write_text(
+        json.dumps(
+            {
+                "name": "yolox-tiny",
+                "hf_id": "example/yolox-tiny",
+                "bundle": "yolox-tiny.trtfb",
+                "family": "yolox",
+                "task_strategy": "object_detection",
+                "runtime_strategy": "yolox_object_detection",
+                "precision": "fp16",
+                "testcases": [
+                    {
+                        "name": "default",
+                        "test_image": "data/test_img.jpeg",
+                        "score_threshold": 0.3,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    case = resolve_case(ManifestCatalog().resolve(str(manifest)), tmp_path / "pending.trtfb")
+
+    assert case.operation == "detect"
+    assert case.request["score_threshold"] == 0.3
+    assert Path(case.worker_request()["request"]["image_path"]).is_file()
 
 
 def test_catalog_rejects_distributed_profiles_not_supported_by_worker() -> None:
@@ -432,6 +628,76 @@ def test_image_rate_and_seconds_per_image_account_for_batch_size() -> None:
     assert "frames_per_s" not in metrics
     assert metrics["request_throughput_per_s"] == 2.5
     assert metrics["seconds_per_image_p50"] == 0.2
+
+
+def test_audio_and_rerank_operations_report_task_specific_rates() -> None:
+    audio = reduce_metrics(
+        "generate_audio",
+        [
+            {
+                "runtime_e2e_wall_ms": 500.0,
+                "output_audio_seconds": 2.0,
+                "output_samples": 48000,
+            }
+        ],
+    )
+    assert audio["audio_seconds_per_s"] == 4.0
+    assert audio["realtime_factor"] == 0.25
+    assert audio["audio_samples_per_s"] == 96000.0
+
+    rerank = reduce_metrics(
+        "rerank",
+        [{"runtime_e2e_wall_ms": 20.0, "documents": 4}],
+    )
+    assert rerank["documents_per_s"] == 200.0
+
+
+def test_metric_contract_rejects_missing_native_observations() -> None:
+    with pytest.raises(BenchmarkError, match="output_audio_seconds in every observation"):
+        reduce_metrics(
+            "generate_audio",
+            [{"runtime_e2e_wall_ms": 500.0, "output_samples": 48000}],
+        )
+
+
+def test_sana_runtime_config_resolves_manifest_assets_for_native_worker(tmp_path: Path) -> None:
+    case = resolve_case(
+        ManifestCatalog().resolve("sana-wm-bidirectional"),
+        tmp_path / "pending.trtfb",
+    )
+
+    assert case.operation == "generate_image"
+    assert case.request["media_type"] == "video"
+    assert case.runtime["config"]["sana_wm.image_path"] == "assets/demo_0.png"
+    worker_config = case.worker_request()["runtime"]["config"]
+    assert Path(worker_config["sana_wm.image_path"]).is_file()
+
+
+def test_multimodal_and_speech_cases_preserve_required_runtime_inputs(tmp_path: Path) -> None:
+    vlm = resolve_case(
+        ManifestCatalog().resolve("deepseek-ocr-l0"),
+        tmp_path / "deepseek-ocr.trtfb",
+    )
+    assert Path(vlm.worker_request()["request"]["image_path"]).is_file()
+
+    speech = resolve_case(
+        ManifestCatalog().resolve("personaplex-7b-l0"),
+        tmp_path / "personaplex.trtfb",
+    )
+    assert speech.operation == "speak"
+    assert speech.request["max_new_tokens"] == 100
+    assert Path(speech.worker_request()["request"]["audio_path"]).is_file()
+    assert Path(speech.runtime["hf_python"]).is_file()
+
+    magpie = resolve_case(
+        ManifestCatalog().resolve("magpie-tts-357m"),
+        tmp_path / "magpie.trtfb",
+    )
+    assert magpie.runtime["config"] == {
+        "audio_magpie.cfg_scale": 2.5,
+        "audio_magpie.temperature": 0.6,
+        "audio_magpie.seed": 42,
+    }
 
 
 def test_text_generation_preserves_sampling_contract(tmp_path: Path) -> None:

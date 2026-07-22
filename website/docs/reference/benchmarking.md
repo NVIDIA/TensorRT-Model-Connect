@@ -2,9 +2,10 @@
 title: Performance Benchmarking
 ---
 
-`trtmc-bench` measures the public TRTMC pipeline call for text, diffusion,
-encoder, speech-transcription, and neural-operator models. The default path is
-deliberately one command:
+`trtmc-bench` measures public TRTMC pipeline calls across text, vision-language,
+diffusion, audio, segmentation, classification, encoder, reranking,
+speech-transcription, and neural-operator models. The default path is one
+command:
 
 ```bash
 trtmc-bench run --model distilgpt2
@@ -16,10 +17,11 @@ List the model profiles currently supported by the installed benchmark catalog:
 trtmc-bench list models
 ```
 
-The list is capability-based: the task operation and default testcase must be
-representable by the current benchmark worker. Distributed `mpirun` profiles
-remain in the canonical E2E/task-eval catalog but are not advertised until the
-benchmark has a rank-safe launcher and metric aggregation protocol.
+The command lists every profile declared by the canonical `MODEL.toml` files.
+`STATUS=ready` means it can run in the current single-process worker.
+`STATUS=distributed` keeps an MPI/TP profile visible but explains why it cannot
+yet run. Invalid or unknown task contracts are reported explicitly instead of
+silently disappearing from the list.
 
 ## Install a packaged build
 
@@ -147,14 +149,17 @@ engine.
 
 ```mermaid
 flowchart LR
-  CLI[trtmc-bench run] --> Resolver[Manifest + case resolver]
-  Resolver --> Bundle{Bundle available?}
+  CLI[trtmc-bench run] --> Catalog[MODEL.toml + manifest]
+  Catalog --> Adapter[Task adapter]
+  Adapter --> Case[Resolved operation + request]
+  Case --> Bundle{Bundle available?}
   Bundle -->|yes| Service[Python run service]
   Bundle -->|no| Build[Existing trtmc build]
   Build --> Cache[Platform-aware bundle cache]
   Cache --> Service
   Service --> Worker[C++ measurement worker]
-  Worker --> API[TRTMC public IPipeline]
+  Worker --> Runner[Native operation runner]
+  Runner --> API[TRTMC public IPipeline]
   API --> Plugin[Model and backend plugins]
   Worker --> Raw[Raw observations]
   Raw --> Metrics[Task-aware metrics]
@@ -164,10 +169,22 @@ flowchart LR
 
 Python owns configuration, matrix expansion, orchestration, metrics, and
 reporting. The native worker owns the timed loop and calls the same public C++
-pipeline API as an application. A model using a supported `task_strategy`
-requires no second catalog entry when its default testcase can be resolved by
-that operation adapter. New request semantics, such as a specialized video
-control contract, require an operation extension before the profile is listed.
+pipeline API as an application. Model family, task semantics, and public
+operation are separate extension points:
+
+| Change | Benchmark work |
+| --- | --- |
+| New weight/profile in a known family and task | Add the normal manifest and `MODEL.toml.test_manifests` entry; no benchmark code |
+| New family using a known `task_strategy` | Add its normal runtime plugin and manifest; no benchmark code |
+| New task using an existing public `IPipeline` operation | Add one task adapter that translates its testcase contract |
+| New public pipeline capability | Add an operation metric contract and one native runner, then map task adapters to it |
+
+The benchmark never registers individual families or `runtime_strategy`
+values. For example, a new Wan video family using
+`diffusion_media_generation` and `generate_image` is discovered automatically,
+and a new decoder provider behind `generate` remains invisible to the
+benchmark layer. This is the same rule for source checkouts and the catalog
+snapshot packaged in a wheel.
 
 ## Run several models
 
@@ -280,10 +297,15 @@ Task-aware reducers additionally report:
 
 | Operation | Additional metrics |
 | --- | --- |
-| Text generation | output token/s and runtime-reported prefill/decode stages |
+| Text and vision-language generation | output token/s and runtime-reported prefill/decode stages |
 | Image diffusion | image/s and seconds/image |
 | Video diffusion | video/s, frame/s, and seconds/video |
-| Encoder | embedding vector/s and element/s |
+| Audio generation | generated audio seconds/s, sample/s, and real-time factor |
+| Speech-to-speech | consumed and generated audio seconds/s, plus input real-time factor |
+| Segmentation | image/s, mask/s where applicable, and mask pixel/s |
+| Classification and object detection | image/s |
+| Reranking | document/s |
+| Encoder/embedding | embedding vector/s and element/s |
 | Speech transcription | audio seconds/s, real-time factor, output token/s, and streaming first-partial latency |
 | Neural operator | window/s and forecast element/s |
 
@@ -310,16 +332,24 @@ Systems or existing profiling tools as a separate diagnostic pass when a
 baseline exposes a bottleneck. Compute Sanitizer/memcheck is a correctness
 diagnostic and should not be part of a normal performance run.
 
-## Add another task type
+## Add a model, family, or task type
 
-Keep model knowledge in the existing model manifest and runtime plugin. Python
-operation semantics are registered together in `benchmark/operations.py`:
-existing `task_strategy` mapping, default measurement counts, testcase request
-adapter, batch capability, and task-specific metric declarations. The other
-required piece is one public `IPipeline` call handler in the C++ worker that
-emits those declared observations. Unsupported task strategies fail during
-resolution instead of producing generic latency with the wrong workload
-semantics.
+Keep model knowledge in the existing model manifest and runtime plugin. The
+benchmark reads `MODEL.toml.test_manifests`; there is no benchmark-owned model
+allowlist.
+
+For a model or family on an existing task, add the normal model implementation,
+manifest, and `MODEL.toml` entry, then verify that `trtmc-bench list models`
+shows `ready`. No import or `if family == ...` branch belongs in benchmark code.
+
+For a genuinely new task contract, add its testcase translator to
+`benchmark/task_adapters.py`. Reuse an existing operation whenever the task can
+be expressed by an existing public `IPipeline` call. Only a genuinely new
+public capability adds a metric declaration in `benchmark/operations.py` and a
+timed runner in `trtmc_benchmark_worker.cpp`. The registry validates task-to-
+operation references at import time. Unsupported task strategies and malformed
+default testcases remain visible with a reason in `list models` and fail closed
+when selected.
 
 Artifact inputs follow the existing manifest-relative paths. For example,
 speech transcription resolves `test_input_audio` once, hashes it into the case

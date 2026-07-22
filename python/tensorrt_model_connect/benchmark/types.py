@@ -128,14 +128,9 @@ class ResolvedCase:
         return value
 
     def worker_request(self) -> dict[str, Any]:
-        request = dict(self.request)
         model_root = self.model.manifest_path.parent.parent
-        for name, value in tuple(request.items()):
-            if not name.endswith("_path") or not isinstance(value, str):
-                continue
-            path = Path(value).expanduser()
-            if not path.is_absolute():
-                request[name] = str((model_root / path).resolve())
+        request = _absolute_artifact_paths(self.request, model_root)
+        runtime = _absolute_artifact_paths(self.runtime, model_root)
         return {
             "schema_version": 1,
             "case_name": self.name,
@@ -143,7 +138,7 @@ class ResolvedCase:
             "bundle": str(self.bundle_path),
             "operation": self.operation,
             "request": request,
-            "runtime": dict(self.runtime),
+            "runtime": runtime,
             "measurement": {
                 "warmup": self.measurement.warmup,
                 "iterations": self.measurement.iterations,
@@ -169,3 +164,18 @@ class ResolvedCase:
             measurement=self.measurement if measurement is None else measurement,
             sources=self.sources if sources is None else sources,
         )
+
+
+def _absolute_artifact_paths(value: Any, model_root: Path) -> Any:
+    if isinstance(value, Mapping):
+        resolved: dict[str, Any] = {}
+        for name, nested in value.items():
+            if isinstance(nested, str) and name.endswith("_path"):
+                path = Path(nested).expanduser()
+                resolved[name] = str(path if path.is_absolute() else (model_root / path).resolve())
+            else:
+                resolved[name] = _absolute_artifact_paths(nested, model_root)
+        return resolved
+    if isinstance(value, list):
+        return [_absolute_artifact_paths(item, model_root) for item in value]
+    return value

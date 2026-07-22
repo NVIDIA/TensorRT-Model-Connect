@@ -18,7 +18,6 @@ import yaml
 
 from .builder import BundleBuilder
 from .catalog import ManifestCatalog, expand_sweeps, find_bundle, resolve_case
-from .operations import operation_for_task_strategy
 from .report import generate_collection_report
 from .service import BenchmarkService, default_output_dir
 from .types import BenchmarkError, ResolvedCase
@@ -105,20 +104,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _list_models(arguments: argparse.Namespace) -> int:
     catalog = ManifestCatalog(arguments.manifest_root)
-    models = catalog.models()
-    if not models:
-        raise BenchmarkError(f"no supported benchmark models found under {catalog.root}")
+    entries = catalog.entries()
+    if not entries:
+        raise BenchmarkError(f"no benchmark models found under {catalog.root}")
     rows = [
         (
-            model.name,
-            operation_for_task_strategy(model.task_strategy).name,
-            model.family,
-            model.precision,
-            model.hf_id,
+            entry.name,
+            entry.operation,
+            entry.family,
+            entry.precision,
+            entry.status,
+            entry.hf_id,
         )
-        for model in models
+        for entry in entries
     ]
-    headers = ("MODEL", "OPERATION", "FAMILY", "PRECISION", "HF ID")
+    headers = ("MODEL", "OPERATION", "FAMILY", "PRECISION", "STATUS", "HF ID")
     widths = tuple(
         max(len(headers[index]), *(len(row[index]) for row in rows))
         for index in range(len(headers))
@@ -126,6 +126,11 @@ def _list_models(arguments: argparse.Namespace) -> int:
     print("  ".join(value.ljust(widths[index]) for index, value in enumerate(headers)))
     for row in rows:
         print("  ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
+    unavailable = [entry for entry in entries if entry.status != "ready"]
+    if unavailable:
+        print("\nUnavailable profiles:")
+        for entry in unavailable:
+            print(f"  {entry.name}: {entry.status}: {entry.reason}")
     return 0
 
 

@@ -62,6 +62,8 @@ def reduce_metrics(
     latency = _numbers(observations, "runtime_e2e_wall_ms")
     if not latency:
         raise BenchmarkError("worker returned no runtime_e2e_wall_ms observations")
+    if len(latency) != len(observations):
+        raise BenchmarkError("worker must report finite runtime_e2e_wall_ms in every observation")
     total_seconds = sum(latency) / 1000.0
     if total_seconds <= 0:
         raise BenchmarkError("worker returned a non-positive total measured duration")
@@ -79,6 +81,11 @@ def reduce_metrics(
     rate_metrics, per_item = operation_spec.metrics_for_request(request or {})
     for rate in rate_metrics:
         values = _numbers(observations, rate.observation_field)
+        if len(values) != len(latency):
+            raise BenchmarkError(
+                f"worker operation {operation!r} must report finite "
+                f"{rate.observation_field} in every observation"
+            )
         rate_value = sum(values) / total_seconds
         metrics[rate.result_name] = rate_value
         if rate.inverse_result_name is not None and rate_value > 0:
@@ -94,6 +101,11 @@ def reduce_metrics(
 
     if per_item is not None:
         counts = _numbers(observations, per_item.count_field)
+        if len(counts) != len(latency):
+            raise BenchmarkError(
+                f"worker operation {operation!r} must report finite "
+                f"{per_item.count_field} in every observation"
+            )
         seconds_per_item = [
             duration_ms / count / 1000.0
             for duration_ms, count in zip(latency, counts, strict=False)

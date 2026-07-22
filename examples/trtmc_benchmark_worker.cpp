@@ -93,6 +93,16 @@ trtmc::LoadOptions load_options(const Json& runtime) {
     options.kv_cache_size_bytes = optional_value<std::uint64_t>(runtime, "kv_cache_size_bytes", 0);
     options.config_path = optional_value<std::string>(runtime, "config_path", "");
     options.set_tokens = optional_value<std::vector<std::string>>(runtime, "set_tokens", {});
+    if (runtime.contains("config")) {
+        const Json& config = runtime.at("config");
+        if (!config.is_object()) {
+            throw std::runtime_error("runtime.config must be an object");
+        }
+        for (const auto& [name, value] : config.items()) {
+            const std::string encoded = value.is_string() ? value.get<std::string>() : value.dump();
+            options.set_tokens.push_back(name + "=" + encoded);
+        }
+    }
     options.backend_search_paths =
         optional_value<std::vector<std::string>>(runtime, "backend_search_paths", {});
     options.model_plugin_search_paths =
@@ -103,6 +113,7 @@ trtmc::LoadOptions load_options(const Json& runtime) {
 trtmc::GenerateConfig generate_config(const Json& request) {
     trtmc::GenerateConfig config;
     config.max_new_tokens = optional_value<int32_t>(request, "max_new_tokens", 20);
+    config.num_samples = optional_value<int32_t>(request, "num_samples", 1);
     config.temperature = optional_value<float>(request, "temperature", 0.0F);
     config.top_k = optional_value<int32_t>(request, "top_k", 1);
     config.top_p = optional_value<float>(request, "top_p", 1.0F);
@@ -111,12 +122,20 @@ trtmc::GenerateConfig generate_config(const Json& request) {
     config.guidance_scale = optional_value<float>(request, "guidance_scale", -1.0F);
     config.cfg_scale = optional_value<float>(request, "cfg_scale", -1.0F);
     config.num_steps = optional_value<int32_t>(request, "num_inference_steps", -1);
+    config.sde_gamma = optional_value<float>(request, "sde_gamma", -1.0F);
+    config.initial_latents = optional_value<std::vector<float>>(request, "initial_latents", {});
+    config.condition_latents = optional_value<std::vector<float>>(request, "condition_latents", {});
+    config.condition_mask = optional_value<std::vector<float>>(request, "condition_mask", {});
+    config.sampling_steps = optional_value<std::vector<float>>(request, "sampling_steps", {});
+    config.sde_noises = optional_value<std::vector<float>>(request, "sde_noises", {});
     config.negative_prompt = optional_value<std::string>(request, "negative_prompt", "");
     config.height = optional_value<int32_t>(request, "height", 0);
     config.width = optional_value<int32_t>(request, "width", 0);
+    config.eos_token_id = optional_value<int32_t>(request, "eos_token_id", -1);
     config.text_generation_mode = optional_value<std::string>(request, "generation_mode", "auto");
     config.block_length = optional_value<int32_t>(request, "block_length", 0);
     config.confidence_threshold = optional_value<float>(request, "threshold", -1.0F);
+    config.tail_frames = optional_value<int32_t>(request, "tail_frames", 0);
     config.use_chat_template = optional_value<bool>(request, "use_chat_template", false);
     config.enable_thinking = optional_value<bool>(request, "enable_thinking", true);
     return config;
@@ -135,14 +154,28 @@ double finite_sum(const std::vector<float>& values) {
 Json run_generate(trtmc::IPipeline& pipeline, const Json& request, int warmup, int iterations) {
     const std::string prompt = request.at("prompt").get<std::string>();
     const trtmc::GenerateConfig config = generate_config(request);
+    trtmc::io::LoadedImage input_image;
+    if (request.contains("image_path")) {
+        input_image = trtmc::io::read_image(request.at("image_path").get<std::string>());
+        if (input_image.empty()) {
+            throw std::runtime_error("cannot decode generate image input");
+        }
+    }
+    const auto generate = [&]() {
+        if (!input_image.empty()) {
+            return pipeline.generate(prompt, input_image.pixels.data(), input_image.height,
+                                     input_image.width, config);
+        }
+        return pipeline.generate(prompt, config);
+    };
     trtmc::TextResult last;
     for (int index = 0; index < warmup; ++index) {
-        last = pipeline.generate(prompt, config);
+        last = generate();
     }
     Json observations = Json::array();
     for (int index = 0; index < iterations; ++index) {
         const auto start = Clock::now();
-        last = pipeline.generate(prompt, config);
+        last = generate();
         observations.push_back({
             {"iteration", index},
             {"runtime_e2e_wall_ms", elapsed_milliseconds(start)},
@@ -372,6 +405,275 @@ Json run_generate_image(trtmc::IPipeline& pipeline, const Json& request, int war
     };
 }
 
+std::size_t audio_sample_count(const trtmc::AudioResult& audio) {
+    if (!audio.samples.empty()) {
+        return audio.samples.size();
+    }
+    return static_cast<std::size_t>(std::max<int32_t>(audio.num_samples, 0));
+}
+
+double audio_seconds(const trtmc::AudioResult& audio) {
+    if (audio.sample_rate <= 0) {
+        throw std::runtime_error("audio output must have a positive sample rate");
+    }
+    return static_cast<double>(audio_sample_count(audio)) / static_cast<double>(audio.sample_rate);
+}
+
+Json audio_summary(const trtmc::AudioResult& audio) {
+    return {
+        {"num_samples", audio_sample_count(audio)},
+        {"sample_rate", audio.sample_rate},
+        {"audio_seconds", audio_seconds(audio)},
+        {"finite_sum", finite_sum(audio.samples)},
+    };
+}
+
+Json run_generate_audio(trtmc::IPipeline& pipeline, const Json& request, int warmup,
+                        int iterations) {
+    const std::string prompt = request.at("prompt").get<std::string>();
+    const trtmc::GenerateConfig config = generate_config(request);
+    trtmc::AudioResult last;
+    for (int index = 0; index < warmup; ++index) {
+        last = pipeline.generate_audio(prompt, config);
+    }
+    Json observations = Json::array();
+    for (int index = 0; index < iterations; ++index) {
+        const auto start = Clock::now();
+        last = pipeline.generate_audio(prompt, config);
+        observations.push_back({
+            {"iteration", index},
+            {"runtime_e2e_wall_ms", elapsed_milliseconds(start)},
+            {"output_samples", audio_sample_count(last)},
+            {"output_audio_seconds", audio_seconds(last)},
+        });
+    }
+    return {
+        {"observations", std::move(observations)},
+        {"output_summary", audio_summary(last)},
+    };
+}
+
+Json run_speak(trtmc::IPipeline& pipeline, const Json& request, int warmup, int iterations) {
+    const auto audio = trtmc::io::read_wav(request.at("audio_path").get<std::string>());
+    if (audio.samples.empty() || audio.sample_rate <= 0) {
+        throw std::runtime_error("speak audio input must contain samples and a sample rate");
+    }
+    const trtmc::GenerateConfig config = generate_config(request);
+    const double input_seconds =
+        static_cast<double>(audio.samples.size()) / static_cast<double>(audio.sample_rate);
+    trtmc::AudioResult last;
+    for (int index = 0; index < warmup; ++index) {
+        last = pipeline.speak(audio.samples.data(), static_cast<int32_t>(audio.samples.size()),
+                              config, audio.sample_rate);
+    }
+    Json observations = Json::array();
+    for (int index = 0; index < iterations; ++index) {
+        const auto start = Clock::now();
+        last = pipeline.speak(audio.samples.data(), static_cast<int32_t>(audio.samples.size()),
+                              config, audio.sample_rate);
+        observations.push_back({
+            {"iteration", index},
+            {"runtime_e2e_wall_ms", elapsed_milliseconds(start)},
+            {"input_audio_seconds", input_seconds},
+            {"output_audio_seconds", audio_seconds(last)},
+        });
+    }
+    Json summary = audio_summary(last);
+    summary["input_samples"] = audio.samples.size();
+    summary["input_sample_rate"] = audio.sample_rate;
+    summary["input_audio_seconds"] = input_seconds;
+    return {
+        {"observations", std::move(observations)},
+        {"output_summary", std::move(summary)},
+    };
+}
+
+trtmc::io::LoadedImage load_request_image(const Json& request, const std::string& operation) {
+    auto image = trtmc::io::read_image(request.at("image_path").get<std::string>());
+    if (image.empty()) {
+        throw std::runtime_error("cannot decode " + operation + " image input");
+    }
+    return image;
+}
+
+Json run_segment(trtmc::IPipeline& pipeline, const Json& request, int warmup, int iterations) {
+    const auto image = load_request_image(request, "segment");
+    trtmc::SegmentResult last;
+    for (int index = 0; index < warmup; ++index) {
+        last = pipeline.segment(image.pixels.data(), image.height, image.width);
+    }
+    Json observations = Json::array();
+    for (int index = 0; index < iterations; ++index) {
+        const auto start = Clock::now();
+        last = pipeline.segment(image.pixels.data(), image.height, image.width);
+        observations.push_back({
+            {"iteration", index},
+            {"runtime_e2e_wall_ms", elapsed_milliseconds(start)},
+            {"segmented_images", 1},
+            {"mask_pixels", last.mask.size()},
+        });
+    }
+    return {
+        {"observations", std::move(observations)},
+        {"output_summary",
+         {
+             {"height", last.height},
+             {"width", last.width},
+             {"mask_pixels", last.mask.size()},
+         }},
+    };
+}
+
+Json run_segment_prompted(trtmc::IPipeline& pipeline, const Json& request, int warmup,
+                          int iterations) {
+    const auto image = load_request_image(request, "segment_prompted");
+    const auto segment = [&]() {
+        if (request.contains("prompt")) {
+            return pipeline.segment_prompted_text(image.pixels.data(), image.height, image.width,
+                                                  request.at("prompt").get<std::string>());
+        }
+        return pipeline.segment_prompted(image.pixels.data(), image.height, image.width,
+                                         optional_value<float>(request, "point_x", 0.5F),
+                                         optional_value<float>(request, "point_y", 0.5F),
+                                         optional_value<bool>(request, "is_foreground", true));
+    };
+    trtmc::PromptedSegmentationResult last;
+    for (int index = 0; index < warmup; ++index) {
+        last = segment();
+    }
+    Json observations = Json::array();
+    for (int index = 0; index < iterations; ++index) {
+        const auto start = Clock::now();
+        last = segment();
+        observations.push_back({
+            {"iteration", index},
+            {"runtime_e2e_wall_ms", elapsed_milliseconds(start)},
+            {"segmented_images", 1},
+            {"generated_masks", std::max<int32_t>(last.num_masks, 0)},
+            {"mask_pixels", last.masks.size()},
+        });
+    }
+    return {
+        {"observations", std::move(observations)},
+        {"output_summary",
+         {
+             {"height", last.height},
+             {"width", last.width},
+             {"num_masks", last.num_masks},
+             {"mask_elements", last.masks.size()},
+             {"mask_finite_sum", finite_sum(last.masks)},
+         }},
+    };
+}
+
+Json run_classify(trtmc::IPipeline& pipeline, const Json& request, int warmup, int iterations) {
+    const auto image = load_request_image(request, "classify");
+    trtmc::ClassificationResult last;
+    for (int index = 0; index < warmup; ++index) {
+        last = pipeline.classify(image.pixels.data(), image.height, image.width);
+    }
+    Json observations = Json::array();
+    for (int index = 0; index < iterations; ++index) {
+        const auto start = Clock::now();
+        last = pipeline.classify(image.pixels.data(), image.height, image.width);
+        observations.push_back({
+            {"iteration", index},
+            {"runtime_e2e_wall_ms", elapsed_milliseconds(start)},
+            {"classified_images", 1},
+        });
+    }
+    return {
+        {"observations", std::move(observations)},
+        {"output_summary",
+         {
+             {"top_class", last.top_class},
+             {"top_score", last.top_score},
+             {"num_classes", last.logits.size()},
+             {"logits_finite_sum", finite_sum(last.logits)},
+         }},
+    };
+}
+
+std::size_t detection_count(const std::string& payload) {
+    const Json parsed = Json::parse(payload, nullptr, false);
+    if (parsed.is_array()) {
+        return parsed.size();
+    }
+    if (parsed.is_object() && parsed.contains("detections") && parsed.at("detections").is_array()) {
+        return parsed.at("detections").size();
+    }
+    return 0;
+}
+
+Json run_detect(trtmc::IPipeline& pipeline, const Json& request, int warmup, int iterations) {
+    const auto image = load_request_image(request, "detect");
+    const float threshold = optional_value<float>(request, "score_threshold", 0.3F);
+    std::string last;
+    for (int index = 0; index < warmup; ++index) {
+        last = pipeline.detect(image.pixels.data(), image.height, image.width, threshold);
+    }
+    Json observations = Json::array();
+    for (int index = 0; index < iterations; ++index) {
+        const auto start = Clock::now();
+        last = pipeline.detect(image.pixels.data(), image.height, image.width, threshold);
+        observations.push_back({
+            {"iteration", index},
+            {"runtime_e2e_wall_ms", elapsed_milliseconds(start)},
+            {"detected_images", 1},
+            {"detections", detection_count(last)},
+        });
+    }
+    const std::size_t output_limit = 4096;
+    return {
+        {"observations", std::move(observations)},
+        {"output_summary",
+         {
+             {"detections", detection_count(last)},
+             {"json", last.substr(0, output_limit)},
+             {"json_truncated", last.size() > output_limit},
+         }},
+    };
+}
+
+Json run_rerank(trtmc::IPipeline& pipeline, const Json& request, int warmup, int iterations) {
+    const std::string query = request.at("query").get<std::string>();
+    const auto documents = request.at("documents").get<std::vector<std::string>>();
+    if (documents.empty()) {
+        throw std::runtime_error("rerank documents cannot be empty");
+    }
+    std::vector<float> last;
+    const auto rerank = [&]() {
+        std::vector<float> scores;
+        scores.reserve(documents.size());
+        for (const auto& document : documents) {
+            scores.push_back(pipeline.rerank(query, document));
+        }
+        return scores;
+    };
+    for (int index = 0; index < warmup; ++index) {
+        last = rerank();
+    }
+    Json observations = Json::array();
+    for (int index = 0; index < iterations; ++index) {
+        const auto start = Clock::now();
+        last = rerank();
+        observations.push_back({
+            {"iteration", index},
+            {"runtime_e2e_wall_ms", elapsed_milliseconds(start)},
+            {"documents", documents.size()},
+        });
+    }
+    return {
+        {"observations", std::move(observations)},
+        {"output_summary",
+         {
+             {"documents", documents.size()},
+             {"scores", last},
+             {"scores_finite_sum", finite_sum(last)},
+         }},
+    };
+}
+
 Json run_embedding(trtmc::IPipeline& pipeline, const Json& request, int warmup, int iterations,
                    bool pooled) {
     const std::string prompt = request.at("prompt").get<std::string>();
@@ -474,9 +776,19 @@ Json execute(const Json& request) {
 
     using OperationRunner = Json (*)(trtmc::IPipeline&, const Json&, int, int);
     static const std::unordered_map<std::string, OperationRunner> runners = {
-        {"generate", run_generate}, {"generate_image", run_generate_image},
-        {"encode", run_encode},     {"embed", run_embed},
-        {"solve", run_solve},       {"transcribe", run_transcribe},
+        {"generate", run_generate},
+        {"generate_image", run_generate_image},
+        {"generate_audio", run_generate_audio},
+        {"speak", run_speak},
+        {"segment", run_segment},
+        {"segment_prompted", run_segment_prompted},
+        {"classify", run_classify},
+        {"detect", run_detect},
+        {"rerank", run_rerank},
+        {"encode", run_encode},
+        {"embed", run_embed},
+        {"solve", run_solve},
+        {"transcribe", run_transcribe},
     };
     const auto runner = runners.find(operation);
     if (runner == runners.end()) {
