@@ -151,6 +151,8 @@ def _fake_proof_environment(
     (tmp_path / "hf-cache" / "modules").mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.pop("TRTMC_GPU_ID", None)
+    for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_JOB", "RUNNER_NAME"):
+        env.pop(name, None)
     env.update(
         {
             "PATH": f"{fake_bin}:{env['PATH']}",

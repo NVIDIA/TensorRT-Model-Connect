@@ -7,23 +7,45 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Shared fleet capacity or same-node exclusive-lock safety"
+        description: "Capacity, cross-workflow sharing, or exclusive-lock safety"
         required: true
         default: shared-capacity
         type: choice
         options:
           - shared-capacity
+          - shared-cohort
+          - cross-workflow-verify
           - exclusive-safety
       expected_slots:
-        description: "Shared mode only: slots that must be simultaneously usable"
+        description: "Capacity: slots; cohort/verify: slots per workflow run"
         required: true
         default: 28
         type: number
       hold_delay_seconds:
-        description: "Shared mode only: UTC delay used to assemble the first wave"
+        description: "Shared-capacity only: UTC delay used to assemble the first wave"
         required: true
         default: 900
         type: number
+      barrier_epoch:
+        description: "Shared-cohort/verify: caller-selected common UTC epoch"
+        required: false
+        default: 0
+        type: number
+      cohort_id:
+        description: "Shared-cohort/verify: safe identity shared by both runs"
+        required: false
+        default: ""
+        type: string
+      run_a_id:
+        description: "Cross-workflow verify only: first completed cohort run ID"
+        required: false
+        default: ""
+        type: string
+      run_b_id:
+        description: "Cross-workflow verify only: second completed cohort run ID"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -36,6 +58,7 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       expected_slots: ${{ steps.matrix.outputs.expected_slots }}
       barrier_epoch: ${{ steps.matrix.outputs.barrier_epoch }}
+      cohort_id: ${{ steps.matrix.outputs.cohort_id }}
     steps:
       - name: Require the protected main branch
         run: |
@@ -56,14 +79,36 @@ jobs:
           MODE: ${{ inputs.mode }}
           EXPECTED_SLOTS: ${{ inputs.expected_slots }}
           HOLD_DELAY_SECONDS: ${{ inputs.hold_delay_seconds }}
+          REQUESTED_BARRIER_EPOCH: ${{ inputs.barrier_epoch }}
+          REQUESTED_COHORT_ID: ${{ inputs.cohort_id }}
+          RUN_A_ID: ${{ inputs.run_a_id }}
+          RUN_B_ID: ${{ inputs.run_b_id }}
         run: |
           set -euo pipefail
+          validate_expected_slots() {
+            if ! [[ "$EXPECTED_SLOTS" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$EXPECTED_SLOTS" -gt 128 ]; then
+              echo "expected_slots must be an integer from 1 to 128" >&2
+              exit 1
+            fi
+          }
+          validate_cohort() {
+            if ! [[ "$REQUESTED_COHORT_ID" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$ ]]; then
+              echo "cohort_id must be a safe non-empty identifier up to 64 characters" >&2
+              exit 1
+            fi
+          }
+          validate_barrier() {
+            now_epoch="$(date -u +%s)"
+            if ! [[ "$REQUESTED_BARRIER_EPOCH" =~ ^[1-9][0-9]{0,9}$ ]] || \
+               [ "$REQUESTED_BARRIER_EPOCH" -le "$now_epoch" ] || \
+               [ "$REQUESTED_BARRIER_EPOCH" -gt "$((now_epoch + 1800))" ]; then
+              echo "barrier_epoch must be in the next 30 minutes" >&2
+              exit 1
+            fi
+          }
           case "$MODE" in
             shared-capacity)
-              if ! [[ "$EXPECTED_SLOTS" =~ ^[1-9][0-9]{0,2}$ ]] || [ "$EXPECTED_SLOTS" -gt 128 ]; then
-                echo "expected_slots must be an integer from 1 to 128" >&2
-                exit 1
-              fi
+              validate_expected_slots
               if ! [[ "$HOLD_DELAY_SECONDS" =~ ^[1-9][0-9]{0,3}$ ]] || \
                  [ "$HOLD_DELAY_SECONDS" -gt 1800 ]; then
                 echo "hold_delay_seconds must be an integer from 1 to 1800" >&2
@@ -71,10 +116,36 @@ jobs:
               fi
               matrix="$(python3 -m tools.ci.capacity_canary matrix --expected-slots "$EXPECTED_SLOTS")"
               barrier_epoch="$(($(date -u +%s) + HOLD_DELAY_SECONDS))"
+              cohort_id="single-${GITHUB_RUN_ID}"
+              ;;
+            shared-cohort)
+              validate_expected_slots
+              validate_cohort
+              validate_barrier
+              matrix="$(python3 -m tools.ci.capacity_canary cohort-matrix --cohort-slots "$EXPECTED_SLOTS")"
+              barrier_epoch="$REQUESTED_BARRIER_EPOCH"
+              cohort_id="$REQUESTED_COHORT_ID"
+              ;;
+            cross-workflow-verify)
+              validate_expected_slots
+              validate_cohort
+              if ! [[ "$REQUESTED_BARRIER_EPOCH" =~ ^[1-9][0-9]{0,9}$ ]]; then
+                echo "barrier_epoch must be a positive UTC epoch" >&2
+                exit 1
+              fi
+              if ! [[ "$RUN_A_ID" =~ ^[1-9][0-9]*$ ]] || \
+                 ! [[ "$RUN_B_ID" =~ ^[1-9][0-9]*$ ]] || [ "$RUN_A_ID" = "$RUN_B_ID" ]; then
+                echo "run_a_id and run_b_id must be distinct positive workflow run IDs" >&2
+                exit 1
+              fi
+              matrix='{"leg":[0]}'
+              barrier_epoch="$REQUESTED_BARRIER_EPOCH"
+              cohort_id="$REQUESTED_COHORT_ID"
               ;;
             exclusive-safety)
               matrix='{"leg":[0]}'
               barrier_epoch="$(date -u +%s)"
+              cohort_id="exclusive-${GITHUB_RUN_ID}"
               ;;
             *)
               echo "unsupported canary mode: $MODE" >&2
@@ -84,10 +155,12 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "expected_slots=$EXPECTED_SLOTS" >> "$GITHUB_OUTPUT"
           echo "barrier_epoch=$barrier_epoch" >> "$GITHUB_OUTPUT"
+          echo "cohort_id=$cohort_id" >> "$GITHUB_OUTPUT"
           echo "Canary barrier epoch: $barrier_epoch"
 
   exercise:
     name: ${{ inputs.mode }} ${{ matrix.leg }}
+    if: ${{ inputs.mode != 'cross-workflow-verify' }}
     needs: prepare
     runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || '["trtmc-gb300-proof"]') }}
     timeout-minutes: 45
@@ -105,11 +178,12 @@ jobs:
           persist-credentials: false
 
       - name: Acquire, probe, and hold one real shared lease
-        if: ${{ inputs.mode == 'shared-capacity' }}
+        if: ${{ inputs.mode == 'shared-capacity' || inputs.mode == 'shared-cohort' }}
         env:
           LEG_ID: ${{ matrix.leg }}
           EXPECTED_SLOTS: ${{ needs.prepare.outputs.expected_slots }}
           BARRIER_EPOCH: ${{ needs.prepare.outputs.barrier_epoch }}
+          COHORT_ID: ${{ needs.prepare.outputs.cohort_id }}
         run: |
           set -euo pipefail
           if ! [[ "${TRTMC_NODE_ID:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
@@ -131,10 +205,11 @@ jobs:
           canary_dir="$RUNNER_TEMP/trtmc-capacity-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${LEG_ID}"
           receipt="$canary_dir/receipt-$LEG_ID.json"
           mkdir -p "$canary_dir"
-          python3 -m tools.ci.capacity_canary hold \
+          python3 -u -m tools.ci.capacity_canary hold \
             --leg-id "$LEG_ID" \
             --expected-slots "$EXPECTED_SLOTS" \
             --barrier-epoch "$BARRIER_EPOCH" \
+            --cohort-id "$COHORT_ID" \
             --receipt-output "$receipt"
           echo "CANARY_RECEIPT=$receipt" >> "$GITHUB_ENV"
 
@@ -178,6 +253,9 @@ jobs:
       - prepare
       - exercise
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Check out exact canary revision
         uses: actions/checkout@v4
@@ -186,10 +264,33 @@ jobs:
           persist-credentials: false
 
       - name: Download all capacity receipts
+        if: ${{ inputs.mode != 'cross-workflow-verify' }}
         uses: actions/download-artifact@v4
         with:
           pattern: capacity-canary-*
           path: capacity-canary-receipts
+          merge-multiple: true
+
+      - name: Download cohort A receipts
+        if: ${{ inputs.mode == 'cross-workflow-verify' }}
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_a_id }}
+          pattern: capacity-canary-*
+          path: capacity-cross-receipts/run-a
+          merge-multiple: true
+
+      - name: Download cohort B receipts
+        if: ${{ inputs.mode == 'cross-workflow-verify' }}
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_b_id }}
+          pattern: capacity-canary-*
+          path: capacity-cross-receipts/run-b
           merge-multiple: true
 
       - name: Verify first wave and queued extra leg
@@ -207,6 +308,42 @@ jobs:
             --expected-barrier-epoch "$BARRIER_EPOCH" \
             --output capacity-canary-verification.json
 
+      - name: Verify one exact shared cohort
+        if: ${{ inputs.mode == 'shared-cohort' }}
+        env:
+          EXPECTED_SLOTS: ${{ needs.prepare.outputs.expected_slots }}
+          BARRIER_EPOCH: ${{ needs.prepare.outputs.barrier_epoch }}
+          COHORT_ID: ${{ needs.prepare.outputs.cohort_id }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.ci.capacity_canary verify-cohort \
+            --receipts-dir capacity-canary-receipts \
+            --expected-slots "$EXPECTED_SLOTS" \
+            --expected-cohort-id "$COHORT_ID" \
+            --expected-run-id "$GITHUB_RUN_ID" \
+            --expected-revision "$GITHUB_SHA" \
+            --expected-barrier-epoch "$BARRIER_EPOCH" \
+            --output capacity-canary-verification.json
+
+      - name: Verify two workflows share one slot pool
+        if: ${{ inputs.mode == 'cross-workflow-verify' }}
+        env:
+          EXPECTED_SLOTS: ${{ needs.prepare.outputs.expected_slots }}
+          BARRIER_EPOCH: ${{ needs.prepare.outputs.barrier_epoch }}
+          COHORT_ID: ${{ needs.prepare.outputs.cohort_id }}
+          RUN_A_ID: ${{ inputs.run_a_id }}
+          RUN_B_ID: ${{ inputs.run_b_id }}
+        run: |
+          set -euo pipefail
+          python3 -m tools.ci.capacity_canary verify-cross \
+            --receipts-dir capacity-cross-receipts \
+            --expected-slots-per-run "$EXPECTED_SLOTS" \
+            --expected-cohort-id "$COHORT_ID" \
+            --expected-run-id "$RUN_A_ID" \
+            --expected-run-id "$RUN_B_ID" \
+            --expected-barrier-epoch "$BARRIER_EPOCH" \
+            --output capacity-canary-verification.json
+
       - name: Verify exclusive ownership and queued resumption
         if: ${{ inputs.mode == 'exclusive-safety' }}
         run: |
@@ -218,7 +355,7 @@ jobs:
             --output capacity-canary-verification.json
 
       - name: Require every canary worker to pass
-        if: ${{ always() }}
+        if: ${{ always() && inputs.mode != 'cross-workflow-verify' }}
         run: |
           if [ "${{ needs.exercise.result }}" != "success" ]; then
             echo "One or more capacity workers failed" >&2

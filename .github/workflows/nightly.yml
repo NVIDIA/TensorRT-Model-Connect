@@ -340,7 +340,6 @@ jobs:
       TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CPU_CONTAINER_OPTIONS || '--ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
       TRTMC_CACHE_SOURCE_REVISION: ${{ needs.legal.outputs.tested_sha }}
-      TRTMC_CACHE_RECEIPT_DIR: ${{ runner.temp }}/trtmc-cache-receipt-${{ github.run_id }}-${{ github.run_attempt }}
       # The downloader bounds every child process and retries once without Xet
       # after a failure. These values also bound individual Hub requests.
       HF_HUB_DOWNLOAD_TIMEOUT: "60"
@@ -440,6 +439,7 @@ jobs:
         timeout-minutes: 120
         env:
           TRTMC_CI_IMAGE: ${{ steps.ci_image.outputs.image_ref }}
+          TRTMC_CACHE_RECEIPT_DIR: ${{ runner.temp }}/trtmc-cache-receipt-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
           if ! [[ "${TRTMC_NODE_ID:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
@@ -500,7 +500,7 @@ jobs:
           name: trtmc-cache-warm-${{ matrix.node_label }}-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 14
-          path: ${{ env.TRTMC_CACHE_RECEIPT_DIR }}/cache-warm-receipt.json
+          path: ${{ runner.temp }}/trtmc-cache-receipt-${{ github.run_id }}-${{ github.run_attempt }}/cache-warm-receipt.json
 
       - name: Clean cache-warm container
         if: ${{ always() }}

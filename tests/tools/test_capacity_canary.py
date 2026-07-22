@@ -14,10 +14,15 @@ import pytest
 
 from tools.ci.capacity_canary import (
     capacity_matrix,
+    cohort_matrix,
     hold_capacity_slot,
     load_receipts,
+    parse_acquisition_markers,
     probe_container_gpu_uuid,
+    verify_cancellation_recovery,
     verify_capacity_receipts,
+    verify_cohort_receipts,
+    verify_cross_workflow_receipts,
     verify_exclusive_safety_receipts,
 )
 from tools.ci.context import CiContext
@@ -42,17 +47,25 @@ def _receipt(
     gpu: str,
     slot: int,
     slots_per_gpu: int = 2,
+    expected_slots: int = 4,
+    barrier_epoch: int | None = None,
+    run_id: str = "42",
+    runner_name: str | None = None,
+    cohort_id: str | None = None,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
         "kind": "trtmc_capacity_canary",
         "leg_id": leg,
-        "expected_slots": 4,
-        "barrier_epoch": int(BASE.timestamp()) + 10,
+        "expected_slots": expected_slots,
+        "barrier_epoch": (
+            barrier_epoch if barrier_epoch is not None else int(BASE.timestamp()) + 10
+        ),
+        "cohort_id": cohort_id,
         "source_revision": "a" * 40,
-        "run_id": "42",
+        "run_id": run_id,
         "job_id": "exercise",
-        "runner_name": f"runner-{leg}",
+        "runner_name": runner_name or f"runner-{leg}",
         "node_id": node,
         "hostname": f"host-{node}",
         "resource_class": "shared",
@@ -118,6 +131,99 @@ def _valid_receipts() -> list[dict[str, object]]:
     ]
 
 
+def _cross_cohort_receipts() -> list[dict[str, object]]:
+    topology = [("node-a", f"GPU-a{gpu}", slot) for gpu in range(4) for slot in range(4)] + [
+        ("node-b", f"GPU-b{gpu}", slot) for gpu in range(3) for slot in range(4)
+    ]
+    receipts: list[dict[str, object]] = []
+    for index, (node, gpu_uuid, slot) in enumerate(topology):
+        run_id = "100" if index < 14 else "200"
+        leg = index if index < 14 else index - 14
+        receipts.append(
+            _receipt(
+                leg,
+                started=0.01 * index,
+                acquired=1 + 0.01 * index,
+                released=10.5 + 0.01 * index,
+                node=node,
+                gpu=gpu_uuid,
+                slot=slot,
+                slots_per_gpu=4,
+                expected_slots=14,
+                run_id=run_id,
+                runner_name=f"runner-{run_id}-{leg}",
+                cohort_id="cross-100-200",
+            )
+        )
+    return receipts
+
+
+def _cancellation_marker() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "trtmc_capacity_canary_acquired",
+        "leg_id": 0,
+        "expected_slots": 1,
+        "barrier_epoch": int(BASE.timestamp()) + 10,
+        "cohort_id": "recovery-300-400",
+        "source_revision": "a" * 40,
+        "run_id": "300",
+        "job_id": "exercise",
+        "runner_name": "runner-cancelled",
+        "node_id": "node-a",
+        "hostname": "host-node-a",
+        "resource_class": "shared",
+        "gpu_index": "0",
+        "gpu_uuid": "GPU-a0",
+        "gpu_slot": 0,
+        "gpu_slots_per_device": 4,
+        "lock_namespace": "1" * 64,
+        "worker_started_at": _time(0),
+        "acquired_at": _time(1),
+        "probe_gpu_uuid": "GPU-a0",
+    }
+
+
+def _waiter_receipt() -> dict[str, object]:
+    return _receipt(
+        0,
+        started=3.5,
+        acquired=4,
+        released=10.5,
+        node="node-a",
+        gpu="GPU-a0",
+        slot=0,
+        slots_per_gpu=4,
+        expected_slots=1,
+        run_id="400",
+        runner_name="runner-recovered",
+        cohort_id="recovery-300-400",
+    )
+
+
+def _cancellation_observation() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "trtmc_capacity_canary_cancellation_observation",
+        "cancelled_run_id": "300",
+        "cancelled_run_conclusion": "cancelled",
+        "waiter_run_id": "400",
+        "waiter_job_status": "queued",
+        "waiter_queued_observed_at": _time(2),
+        "cancel_requested_at": _time(3),
+    }
+
+
+def _cancelled_log(marker: dict[str, object] | None = None) -> str:
+    value = marker or _cancellation_marker()
+    return (
+        "2026-07-21T12:00:01Z holder output\n"
+        "2026-07-21T12:00:01Z TRTMC_CAPACITY_CANARY_ACQUIRED="
+        + json.dumps(value, sort_keys=True, separators=(",", ":"))
+        + "\n"
+    )
+
+
 def _exclusive_lease(*, started: float, acquired: float, released: float) -> dict[str, object]:
     return {
         "source_revision": "a" * 40,
@@ -161,6 +267,142 @@ def test_matrix_dispatches_exactly_expected_plus_one_generic_legs() -> None:
     assert capacity_matrix(4) == {"leg": [0, 1, 2, 3, 4]}
     with pytest.raises(CiError, match="expected_slots"):
         capacity_matrix(0)
+
+
+def test_cohort_matrix_dispatches_exactly_the_requested_jobs() -> None:
+    assert cohort_matrix(14) == {"leg": list(range(14))}
+    with pytest.raises(CiError, match="cohort_slots"):
+        cohort_matrix(0)
+
+
+def test_exact_cohort_verifier_accepts_partial_per_node_placement() -> None:
+    receipts = _cross_cohort_receipts()[:14]
+    summary = verify_cohort_receipts(
+        receipts,
+        expected_slots=14,
+        expected_run_id="100",
+        expected_revision="a" * 40,
+        expected_barrier_epoch=int(BASE.timestamp()) + 10,
+        expected_cohort_id="cross-100-200",
+    )
+    assert summary["outcome"] == "success"
+    assert summary["receipt_count"] == 14
+    assert summary["maximum_concurrency"] == 14
+    assert summary["runner_count"] == 14
+    assert summary["slot_count"] == 14
+    assert summary["cohort_id"] == "cross-100-200"
+
+
+def test_exact_cohort_verifier_rejects_missing_extra_or_unsafe_identity() -> None:
+    receipts = _cross_cohort_receipts()[:14]
+    with pytest.raises(CiError, match="exactly 14 receipts"):
+        verify_cohort_receipts(receipts[:-1], expected_slots=14)
+
+    receipts = json.loads(json.dumps(receipts))
+    receipts[0]["cohort_id"] = "../../unsafe"
+    with pytest.raises(CiError, match="cohort_id"):
+        verify_cohort_receipts(receipts, expected_slots=14)
+
+
+def test_cross_workflow_verifier_proves_two_14_job_runs_share_all_28_slots() -> None:
+    summary = verify_cross_workflow_receipts(
+        _cross_cohort_receipts(),
+        expected_slots_per_run=14,
+        expected_run_ids=["100", "200"],
+        expected_revision="a" * 40,
+        expected_barrier_epoch=int(BASE.timestamp()) + 10,
+        expected_cohort_id="cross-100-200",
+    )
+    assert summary["outcome"] == "success"
+    assert summary["combined_expected_slots"] == 28
+    assert summary["receipt_count"] == 28
+    assert summary["maximum_concurrency"] == 28
+    assert summary["runner_count"] == 28
+    assert summary["slot_count"] == 28
+    assert summary["runs"] == {
+        "100": {
+            "receipt_count": 14,
+            "maximum_concurrency": 14,
+            "runner_count": 14,
+            "slot_count": 14,
+        },
+        "200": {
+            "receipt_count": 14,
+            "maximum_concurrency": 14,
+            "runner_count": 14,
+            "slot_count": 14,
+        },
+    }
+    assert summary["nodes"]["node-a"]["capacity"] == 16
+    assert summary["nodes"]["node-b"]["capacity"] == 12
+
+
+def test_cross_workflow_verifier_rejects_uneven_runs_and_cross_run_duplicates() -> None:
+    receipts = _cross_cohort_receipts()
+    receipts[0]["run_id"] = "200"
+    with pytest.raises(CiError, match="exactly 14 receipts"):
+        verify_cross_workflow_receipts(
+            receipts,
+            expected_slots_per_run=14,
+            expected_run_ids=["100", "200"],
+        )
+
+    receipts = _cross_cohort_receipts()
+    receipts[-1].update(
+        {
+            "node_id": receipts[0]["node_id"],
+            "gpu_uuid": receipts[0]["gpu_uuid"],
+            "gpu_slot": receipts[0]["gpu_slot"],
+            "probe_gpu_uuid": receipts[0]["probe_gpu_uuid"],
+            "lock_namespace": receipts[0]["lock_namespace"],
+        }
+    )
+    with pytest.raises(CiError, match="duplicate GPU slot tuples"):
+        verify_cross_workflow_receipts(
+            receipts,
+            expected_slots_per_run=14,
+            expected_run_ids=["100", "200"],
+        )
+
+    receipts = _cross_cohort_receipts()
+    receipts[-1]["runner_name"] = receipts[0]["runner_name"]
+    with pytest.raises(CiError, match="unique runner listeners"):
+        verify_cross_workflow_receipts(
+            receipts,
+            expected_slots_per_run=14,
+            expected_run_ids=["100", "200"],
+        )
+
+
+def test_cross_workflow_verifier_rejects_identity_timing_and_partial_gpu_coverage() -> None:
+    receipts = _cross_cohort_receipts()
+    for receipt in receipts[14:]:
+        receipt["cohort_id"] = "other-cohort"
+    with pytest.raises(CiError, match="cohort ID"):
+        verify_cross_workflow_receipts(
+            receipts,
+            expected_slots_per_run=14,
+            expected_run_ids=["100", "200"],
+        )
+
+    receipts = _cross_cohort_receipts()
+    receipts[-1]["released_at"] = _time(9.9)
+    with pytest.raises(CiError, match="released before"):
+        verify_cross_workflow_receipts(
+            receipts,
+            expected_slots_per_run=14,
+            expected_run_ids=["100", "200"],
+        )
+
+    receipts = _cross_cohort_receipts()
+    receipts[-1]["gpu_uuid"] = "GPU-b3"
+    receipts[-1]["probe_gpu_uuid"] = "GPU-b3"
+    with pytest.raises(CiError, match="did not expose every configured slot"):
+        verify_cross_workflow_receipts(
+            receipts,
+            expected_slots_per_run=14,
+            expected_run_ids=["100", "200"],
+        )
 
 
 def test_verifier_proves_concurrency_queueing_and_dynamic_node_capacity() -> None:
@@ -233,6 +475,130 @@ def test_verifier_rejects_mismatched_container_probe_and_stale_run() -> None:
         verify_capacity_receipts(_valid_receipts(), expected_slots=4, expected_run_id="43")
 
 
+def test_cancellation_recovery_verifier_proves_queue_cancel_and_exact_slot_reuse() -> None:
+    summary = verify_cancellation_recovery(
+        [_waiter_receipt()],
+        cancelled_log=_cancelled_log(),
+        observation=_cancellation_observation(),
+        recovery_timeout_seconds=5,
+        expected_revision="a" * 40,
+        expected_cohort_id="recovery-300-400",
+    )
+    assert summary["outcome"] == "success"
+    assert summary["cancelled_run_id"] == "300"
+    assert summary["waiter_run_id"] == "400"
+    assert summary["waiter_was_queued"] is True
+    assert summary["holder_run_was_cancelled"] is True
+    assert summary["reused_cancelled_slot"] is True
+    assert summary["recovery_seconds"] == 1
+    assert summary["slot"] == {
+        "node_id": "node-a",
+        "gpu_uuid": "GPU-a0",
+        "gpu_slot": 0,
+        "lock_namespace": "1" * 64,
+    }
+
+
+def test_acquisition_marker_parser_handles_timestamped_logs_and_rejects_bad_json() -> None:
+    assert parse_acquisition_markers(_cancelled_log()) == [_cancellation_marker()]
+    with pytest.raises(CiError, match="invalid JSON"):
+        parse_acquisition_markers("prefix TRTMC_CAPACITY_CANARY_ACQUIRED={bad}\n")
+
+
+def test_cancellation_recovery_rejects_missing_or_multiple_holder_markers() -> None:
+    with pytest.raises(CiError, match="exactly one acquisition marker"):
+        verify_cancellation_recovery(
+            [_waiter_receipt()],
+            cancelled_log="no marker\n",
+            observation=_cancellation_observation(),
+            recovery_timeout_seconds=5,
+        )
+
+    with pytest.raises(CiError, match="exactly one acquisition marker"):
+        verify_cancellation_recovery(
+            [_waiter_receipt()],
+            cancelled_log=_cancelled_log() + _cancelled_log(),
+            observation=_cancellation_observation(),
+            recovery_timeout_seconds=5,
+        )
+
+
+def test_cancellation_recovery_rejects_missing_queue_or_cancel_evidence() -> None:
+    observation = _cancellation_observation()
+    observation["waiter_job_status"] = "in_progress"
+    with pytest.raises(CiError, match="waiter was queued"):
+        verify_cancellation_recovery(
+            [_waiter_receipt()],
+            cancelled_log=_cancelled_log(),
+            observation=observation,
+            recovery_timeout_seconds=5,
+        )
+
+    observation = _cancellation_observation()
+    observation["cancelled_run_conclusion"] = "success"
+    with pytest.raises(CiError, match="holder run was cancelled"):
+        verify_cancellation_recovery(
+            [_waiter_receipt()],
+            cancelled_log=_cancelled_log(),
+            observation=observation,
+            recovery_timeout_seconds=5,
+        )
+
+    observation = _cancellation_observation()
+    observation["waiter_queued_observed_at"] = _time(3.1)
+    with pytest.raises(CiError, match="before cancellation"):
+        verify_cancellation_recovery(
+            [_waiter_receipt()],
+            cancelled_log=_cancelled_log(),
+            observation=observation,
+            recovery_timeout_seconds=5,
+        )
+
+
+def test_cancellation_recovery_rejects_early_slow_or_different_slot_waiter() -> None:
+    waiter = _waiter_receipt()
+    waiter["worker_started_at"] = _time(2.9)
+    with pytest.raises(CiError, match="started before cancellation"):
+        verify_cancellation_recovery(
+            [waiter],
+            cancelled_log=_cancelled_log(),
+            observation=_cancellation_observation(),
+            recovery_timeout_seconds=5,
+        )
+
+    waiter = _waiter_receipt()
+    waiter["acquired_at"] = _time(9)
+    with pytest.raises(CiError, match="exceeding 2s"):
+        verify_cancellation_recovery(
+            [waiter],
+            cancelled_log=_cancelled_log(),
+            observation=_cancellation_observation(),
+            recovery_timeout_seconds=2,
+        )
+
+    waiter = _waiter_receipt()
+    waiter["gpu_slot"] = 1
+    with pytest.raises(CiError, match="exact cancelled GPU slot tuple"):
+        verify_cancellation_recovery(
+            [waiter],
+            cancelled_log=_cancelled_log(),
+            observation=_cancellation_observation(),
+            recovery_timeout_seconds=5,
+        )
+
+
+def test_cancellation_recovery_rejects_holder_that_acquired_after_queue_observation() -> None:
+    marker = _cancellation_marker()
+    marker["acquired_at"] = _time(2.1)
+    with pytest.raises(CiError, match="had not acquired"):
+        verify_cancellation_recovery(
+            [_waiter_receipt()],
+            cancelled_log=_cancelled_log(marker),
+            observation=_cancellation_observation(),
+            recovery_timeout_seconds=5,
+        )
+
+
 def test_load_receipts_reads_only_receipt_json_files(tmp_path: Path) -> None:
     nested = tmp_path / "one"
     nested.mkdir()
@@ -288,7 +654,9 @@ def test_exclusive_verifier_rejects_uuid_mismatch_and_missing_contention() -> No
         verify_exclusive_safety_receipts([receipt])
 
 
-def test_holder_uses_real_lease_evidence_and_writes_release_receipt(tmp_path: Path) -> None:
+def test_holder_emits_acquisition_marker_and_writes_cohort_release_receipt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     receipt_output = tmp_path / "receipt-0.json"
     events: list[str] = []
 
@@ -353,6 +721,7 @@ def test_holder_uses_real_lease_evidence_and_writes_release_receipt(tmp_path: Pa
         leg_id=0,
         expected_slots=4,
         barrier_epoch=110,
+        cohort_id="cohort-42",
         receipt_output=receipt_output,
         lease_factory=lease_factory,  # type: ignore[arg-type]
         probe=probe,
@@ -361,6 +730,7 @@ def test_holder_uses_real_lease_evidence_and_writes_release_receipt(tmp_path: Pa
     )
     assert receipt_output.is_file()
     assert receipt["barrier_epoch"] == 110
+    assert receipt["cohort_id"] == "cohort-42"
     assert receipt["released_at"] is not None
     assert receipt["probe_gpu_uuid"] == "GPU-aaaa"
     assert events == ["acquire", "mark_released", "release"]
@@ -372,6 +742,35 @@ def test_holder_uses_real_lease_evidence_and_writes_release_receipt(tmp_path: Pa
             "container_name": "trtmc-capacity-42-1-0",
         }
     ]
+    markers = parse_acquisition_markers(capsys.readouterr().out)
+    assert len(markers) == 1
+    assert markers[0]["kind"] == "trtmc_capacity_canary_acquired"
+    assert markers[0]["cohort_id"] == "cohort-42"
+    assert markers[0]["run_id"] == "42"
+    assert markers[0]["gpu_uuid"] == "GPU-aaaa"
+    assert markers[0]["probe_gpu_uuid"] == "GPU-aaaa"
+
+
+def test_holder_rejects_unsafe_cohort_id_before_acquiring(tmp_path: Path) -> None:
+    context = CiContext(repository=tmp_path, env={"GITHUB_SHA": "a" * 40})
+    called = False
+
+    def lease_factory(*_: object, **__: object) -> object:
+        nonlocal called
+        called = True
+        return object()
+
+    with pytest.raises(CiError, match="cohort_id"):
+        hold_capacity_slot(
+            context=context,
+            leg_id=0,
+            expected_slots=1,
+            barrier_epoch=110,
+            cohort_id="../../unsafe",
+            receipt_output=tmp_path / "receipt-0.json",
+            lease_factory=lease_factory,  # type: ignore[arg-type]
+        )
+    assert called is False
 
 
 def test_container_probe_is_network_free_pinned_to_the_leased_device(
@@ -431,10 +830,16 @@ def test_capacity_workflow_is_manual_main_only_and_has_no_model_or_hf_work() -> 
     assert "default: 28" in workflow
     assert "default: 900" in workflow
     assert "default: shared-capacity" in workflow
+    assert "- shared-cohort" in workflow
+    assert "- cross-workflow-verify" in workflow
     assert "- exclusive-safety" in workflow
     assert "matrix='{\"leg\":[0]}'" in workflow
     assert "tools.ci.capacity_canary matrix" in workflow
+    assert "cohort-matrix --cohort-slots" in workflow
+    assert "verify-cohort" in workflow
+    assert "verify-cross" in workflow
     assert "max-parallel:" not in workflow
+    assert "concurrency:" not in workflow
     assert "TRTMC_MODEL_RUNNER_LABELS" in workflow
     for host_policy_name in (
         "TRTMC_NODE_ID",
@@ -450,12 +855,15 @@ def test_capacity_workflow_is_manual_main_only_and_has_no_model_or_hf_work() -> 
     assert "--expected-barrier-epoch" in workflow
     assert "exclusive-safety" in workflow
     assert "exclusive-contender" in source
+    assert "TRTMC_CAPACITY_CANARY_ACQUIRED=" in source
+    assert "verify-cancellation" in source
     assert "verify-exclusive" in workflow
     assert "one scheduler-selected generic runner" in source
     assert "nohup" not in workflow
     assert "release_file" not in source
     assert "GITHUB_TOKEN" not in workflow
-    assert "actions: read" not in workflow
+    assert "actions: read" in workflow
+    assert "actions: write" not in workflow
     assert "actions/download-artifact@v4" in workflow
     assert "--expected-run-id" in workflow
     assert "GpuLease" in source

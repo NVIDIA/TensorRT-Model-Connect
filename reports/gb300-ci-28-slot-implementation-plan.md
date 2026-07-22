@@ -537,6 +537,20 @@ absolute barrier time, and upload a receipt.
 Keep this canary after rollout. It is the fastest repeatable proof when a node
 or runner is added, removed, or restarted.
 
+The retained workflow has four manual modes:
+
+- <code>shared-capacity</code> emits <code>expected_slots + 1</code> jobs for
+  the 28/29 proof;
+- <code>shared-cohort</code> emits exactly <code>expected_slots</code> jobs and
+  accepts a caller-supplied cohort ID and absolute barrier;
+- <code>cross-workflow-verify</code> downloads receipts from two exact run IDs
+  with read-only Actions permission and verifies their combined pool;
+- <code>exclusive-safety</code> proves same-GPU exclusive serialization.
+
+Only the GitHub-hosted verifier job receives <code>actions: read</code>. GPU
+workers receive no Actions-write permission, model input, or Hugging Face
+credential. The workflow contains no <code>concurrency</code> group.
+
 ### 6.8 Tests
 
 Update or add:
@@ -858,6 +872,26 @@ Pass criteria:
 
 Cancel one holder and verify its flock releases automatically and a queued job
 acquires the freed slot within the configured timeout.
+
+Execution uses the retained workflow rather than a second scheduler:
+
+1. Choose one cohort ID and future barrier, then dispatch two
+   <code>shared-cohort</code> runs with <code>expected_slots=14</code>.
+2. After both finish, dispatch <code>cross-workflow-verify</code> with those two
+   exact run IDs, the same cohort ID, barrier, and 14 slots per run.
+3. For cancellation recovery, dispatch a 27-slot fill run and a separate
+   one-slot holder to the same barrier, then dispatch a one-slot waiter.
+4. Record that the waiter job is queued, record the cancellation request time,
+   and regular-cancel only the one-slot holder run.
+5. Save the cancelled holder log and waiter receipt. Run
+   <code>verify-cancellation</code> with the queue/cancel observation. It must
+   prove that the holder had acquired, the waiter started only after cancel,
+   recovery stayed within the configured timeout, and the waiter reused the
+   exact same node, GPU UUID, slot, and lock namespace.
+
+Each holder flushes a compact machine-readable acquisition marker immediately
+after the network-free container UUID probe and before sleeping to the barrier,
+so cancellation cannot erase the evidence needed by the offline verifier.
 
 ### 9.5 Exclusive-GPU safety
 
