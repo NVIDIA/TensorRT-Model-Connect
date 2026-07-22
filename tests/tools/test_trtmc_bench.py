@@ -533,7 +533,34 @@ def test_image_edit_profile_resolves_built_in_condition_image(tmp_path: Path) ->
     assert Path(case.worker_request()["request"]["image_path"]).is_file()
 
 
-def test_auto_build_requires_and_passes_manifest_fp8_scales(tmp_path: Path) -> None:
+@pytest.mark.parametrize("catalog_layout", ["source", "installed"])
+def test_auto_build_requires_and_passes_manifest_fp8_scales(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    catalog_layout: str,
+) -> None:
+    if catalog_layout == "installed":
+        package = tmp_path / "site-packages/tensorrt_model_connect/benchmark"
+        family = package / "_catalog/flux"
+        manifest = family / "manifests/flux-2-dev-fp8.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_bytes(
+            (
+                REPOSITORY_ROOT
+                / "tests/e2e/models/flux/manifests/flux-2-dev-fp8.json"
+            ).read_bytes()
+        )
+        scales = family / "data/flux2-fp8-scales.json"
+        scales.parent.mkdir()
+        scales.write_bytes(
+            (
+                REPOSITORY_ROOT
+                / "tests/e2e/models/flux/data/flux2-fp8-scales.json"
+            ).read_bytes()
+        )
+        monkeypatch.delenv("TRTMC_BENCH_MANIFEST_ROOT", raising=False)
+        monkeypatch.setattr(benchmark_catalog, "__file__", str(package / "catalog.py"))
+
     catalog = ManifestCatalog()
     model = catalog.resolve("flux-2-dev-fp8")
     case = resolve_case(model, tmp_path / "pending.trtfb")
@@ -541,7 +568,7 @@ def test_auto_build_requires_and_passes_manifest_fp8_scales(tmp_path: Path) -> N
 
     assert model.build_settings["fp8_scales"] == "data/flux2-fp8-scales.json"
     expected_scales = (
-        REPOSITORY_ROOT / "tests/e2e/models/flux/data/flux2-fp8-scales.json"
+        model.manifest_path.parent.parent / str(model.build_settings["fp8_scales"])
     ).resolve()
     assert expected_scales.is_file()
     command = list(plan.command)
