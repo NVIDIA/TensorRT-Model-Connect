@@ -230,6 +230,11 @@ def test_suite_has_explicit_eager_rows_and_unsupported_reasons() -> None:
 
     assert rows["mamba.generate"]["baseline"]["mode"] == "hf-eager"
     assert rows["rwkv.generate"]["baseline"]["mode"] == "hf-eager"
+    assert rows["deepseek_v2.generate"]["baseline"] == {
+        "runner": "hf-transformers",
+        "mode": "hf-eager",
+        "experts_implementation": "batched_mm",
+    }
     assert rows["gemma.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["phi.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"

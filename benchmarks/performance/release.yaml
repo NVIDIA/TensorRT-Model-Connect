@@ -119,8 +119,8 @@ cases:
     priority: slow
     baseline:
       runner: hf-transformers
-      mode: torch-compile
-      compile_scope: model.forward
+      mode: hf-eager
+      experts_implementation: batched_mm
   - id: distilbert.encode
     family: distilbert
     operation: encode
