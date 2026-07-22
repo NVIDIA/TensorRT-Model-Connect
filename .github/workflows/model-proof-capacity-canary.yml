@@ -21,6 +21,12 @@ on:
         required: true
         default: 28
         type: number
+      expected_topology:
+        description: >-
+          Trusted JSON contract: slots/GPU and each node label with allowed GPU indices;
+          all counts and capacities are derived
+        required: true
+        type: string
       hold_delay_seconds:
         description: "Shared-capacity only: UTC delay used to assemble the first wave"
         required: true
@@ -57,6 +63,8 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       expected_slots: ${{ steps.matrix.outputs.expected_slots }}
+      expected_topology_json: ${{ steps.matrix.outputs.expected_topology_json }}
+      expected_topology_digest: ${{ steps.matrix.outputs.expected_topology_digest }}
       barrier_epoch: ${{ steps.matrix.outputs.barrier_epoch }}
       cohort_id: ${{ steps.matrix.outputs.cohort_id }}
     steps:
@@ -82,6 +90,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           EXPECTED_SLOTS: ${{ inputs.expected_slots }}
+          EXPECTED_TOPOLOGY: ${{ inputs.expected_topology }}
           HOLD_DELAY_SECONDS: ${{ inputs.hold_delay_seconds }}
           REQUESTED_BARRIER_EPOCH: ${{ inputs.barrier_epoch }}
           REQUESTED_COHORT_ID: ${{ inputs.cohort_id }}
@@ -110,9 +119,17 @@ jobs:
               exit 1
             fi
           }
+          validate_expected_slots
+          topology_input="$RUNNER_TEMP/trtmc-expected-topology-input.json"
+          printf '%s' "$EXPECTED_TOPOLOGY" > "$topology_input"
+          python3 -m tools.ci.capacity_canary topology-contract \
+            --input "$topology_input" \
+            --mode "$MODE" \
+            --requested-slots "$EXPECTED_SLOTS" \
+            --github-output "$GITHUB_OUTPUT"
+
           case "$MODE" in
             shared-capacity)
-              validate_expected_slots
               if ! [[ "$HOLD_DELAY_SECONDS" =~ ^[1-9][0-9]{0,3}$ ]] || \
                  [ "$HOLD_DELAY_SECONDS" -gt 1800 ]; then
                 echo "hold_delay_seconds must be an integer from 1 to 1800" >&2
@@ -123,7 +140,6 @@ jobs:
               cohort_id="single-${GITHUB_RUN_ID}"
               ;;
             shared-cohort)
-              validate_expected_slots
               validate_cohort
               validate_barrier
               matrix="$(python3 -m tools.ci.capacity_canary cohort-matrix --cohort-slots "$EXPECTED_SLOTS")"
@@ -131,7 +147,6 @@ jobs:
               cohort_id="$REQUESTED_COHORT_ID"
               ;;
             cross-workflow-verify)
-              validate_expected_slots
               validate_cohort
               if ! [[ "$REQUESTED_BARRIER_EPOCH" =~ ^[1-9][0-9]{0,9}$ ]]; then
                 echo "barrier_epoch must be a positive UTC epoch" >&2
@@ -173,6 +188,7 @@ jobs:
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     env:
       TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
+      EXPECTED_TOPOLOGY_DIGEST: ${{ needs.prepare.outputs.expected_topology_digest }}
 
     steps:
       - name: Reject rerun evidence
@@ -219,6 +235,7 @@ jobs:
           python3 -u -m tools.ci.capacity_canary hold \
             --leg-id "$LEG_ID" \
             --expected-slots "$EXPECTED_SLOTS" \
+            --expected-topology-digest "$EXPECTED_TOPOLOGY_DIGEST" \
             --barrier-epoch "$BARRIER_EPOCH" \
             --cohort-id "$COHORT_ID" \
             --receipt-output "$receipt"
@@ -246,6 +263,7 @@ jobs:
           python3 -m tools.ci.capacity_canary exclusive-safety \
             --leg-id "$LEG_ID" \
             --observation-seconds 3 \
+            --expected-topology-digest "$EXPECTED_TOPOLOGY_DIGEST" \
             --receipt-output "$receipt"
           echo "CANARY_RECEIPT=$receipt" >> "$GITHUB_ENV"
 
@@ -280,6 +298,15 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Materialize trusted expected topology
+        env:
+          EXPECTED_TOPOLOGY_JSON: ${{ needs.prepare.outputs.expected_topology_json }}
+        run: |
+          set -euo pipefail
+          topology_file="$RUNNER_TEMP/trtmc-expected-topology.json"
+          printf '%s' "$EXPECTED_TOPOLOGY_JSON" > "$topology_file"
+          echo "EXPECTED_TOPOLOGY_FILE=$topology_file" >> "$GITHUB_ENV"
 
       - name: Download all capacity receipts
         if: ${{ inputs.mode != 'cross-workflow-verify' }}
@@ -334,6 +361,7 @@ jobs:
           python3 -m tools.ci.capacity_canary verify \
             --receipts-dir capacity-canary-receipts \
             --expected-slots "$EXPECTED_SLOTS" \
+            --expected-topology "$EXPECTED_TOPOLOGY_FILE" \
             --expected-run-id "$GITHUB_RUN_ID" \
             --expected-revision "$GITHUB_SHA" \
             --expected-barrier-epoch "$BARRIER_EPOCH" \
@@ -350,6 +378,7 @@ jobs:
           python3 -m tools.ci.capacity_canary verify-cohort \
             --receipts-dir capacity-canary-receipts \
             --expected-slots "$EXPECTED_SLOTS" \
+            --expected-topology "$EXPECTED_TOPOLOGY_FILE" \
             --expected-cohort-id "$COHORT_ID" \
             --expected-run-id "$GITHUB_RUN_ID" \
             --expected-revision "$GITHUB_SHA" \
@@ -369,6 +398,7 @@ jobs:
           python3 -m tools.ci.capacity_canary verify-cross \
             --receipts-dir capacity-cross-receipts \
             --expected-slots-per-run "$EXPECTED_SLOTS" \
+            --expected-topology "$EXPECTED_TOPOLOGY_FILE" \
             --expected-cohort-id "$COHORT_ID" \
             --expected-run-id "$RUN_A_ID" \
             --expected-run-id "$RUN_B_ID" \
@@ -385,6 +415,7 @@ jobs:
           set -euo pipefail
           python3 -m tools.ci.capacity_canary verify-exclusive \
             --receipts-dir capacity-canary-receipts \
+            --expected-topology "$EXPECTED_TOPOLOGY_FILE" \
             --expected-run-id "$GITHUB_RUN_ID" \
             --expected-revision "$GITHUB_SHA" \
             --output capacity-canary-verification.json
@@ -404,6 +435,7 @@ jobs:
           name: capacity-canary-verification
           path: |
             capacity-canary-verification.json
+            ${{ runner.temp }}/trtmc-expected-topology.json
             ${{ runner.temp }}/trtmc-cross-run-metadata/*.json
           if-no-files-found: error
           retention-days: 14

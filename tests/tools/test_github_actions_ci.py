@@ -460,6 +460,8 @@ def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> 
     assert "model-proof-report-status.json" in nightly
     assert "retention-days: 14" in nightly
     assert "scripts/generate_model_proof_report.py" in nightly
+    assert '--run-id "$GITHUB_RUN_ID"' in nightly
+    assert '--expected-job-id "prove"' in nightly
     assert "--suite nightly" in nightly
 
     proof = (REPO_ROOT / ".github/workflows/model-proof.yml").read_text()
@@ -478,6 +480,8 @@ def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> 
         "pattern: model-proof-*-${{ needs.legal.outputs.tested_sha || github.sha }}-*" in premerge
     )
     assert "scripts/generate_model_proof_report.py" in premerge
+    assert '--run-id "$GITHUB_RUN_ID"' in premerge
+    assert '--expected-job-id "prove"' in premerge
     assert '--upstream-result "legal=$LEGAL_RESULT"' in premerge
     assert '--upstream-result "impact=$IMPACT_RESULT"' in premerge
     assert "Upload combined model proof HTML report" in premerge
@@ -676,6 +680,8 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert '--upstream-result "model-proof=$MODEL_RESULT"' in report
     assert '--upstream-result "no-model=$NO_MODEL_RESULT"' in report
     assert "scripts/generate_model_proof_report.py" in report
+    assert '--run-id "$GITHUB_RUN_ID"' in report
+    assert '--expected-job-id "prove"' in report
     assert "if python3 scripts/generate_model_proof_report.py" in report
     assert "compose_rc=$?" in report
     assert 'echo "exit_code=$compose_rc" >> "$GITHUB_OUTPUT"' in report
@@ -1073,6 +1079,8 @@ def test_nightly_discovers_and_warms_one_dynamic_anchor_per_node() -> None:
     assert "tools.ci.cache_warm_receipt verify" in ready
     assert "--expected-matrix-json" in ready
     assert '--expected-run-id "$GITHUB_RUN_ID"' in ready
+    assert '--expected-run-attempt "$GITHUB_RUN_ATTEMPT"' in ready
+    assert '--expected-job-id "cache-warm"' in ready
     assert '--expected-revision "${{ needs.legal.outputs.tested_sha }}"' in ready
     assert "Upload fleet cache readiness summary" in ready
 
@@ -1243,6 +1251,7 @@ def test_nightly_report_requires_exact_all_model_results_and_evidence() -> None:
     assert "scripts/generate_model_proof_report.py" in report
     assert '--expected-cases-by-model "$EXPECTED_CASES_BY_MODEL"' in report
     assert '--expected-result-count "$EXPECTED_RESULT_COUNT"' in report
+    assert '--expected-job-id "prove"' in report
     assert "--suite nightly" in report
     for upstream in (
         "legal",

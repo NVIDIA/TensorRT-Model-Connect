@@ -559,6 +559,8 @@ jobs:
             --receipts-dir "$RUNNER_TEMP/trtmc-cache-warm-receipts" \
             --expected-matrix-json "$EXPECTED_MATRIX" \
             --expected-run-id "$GITHUB_RUN_ID" \
+            --expected-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --expected-job-id "cache-warm" \
             --expected-revision "${{ needs.legal.outputs.tested_sha }}" \
             --output "$SUMMARY"
 
@@ -1263,6 +1265,8 @@ jobs:
                 --expected-cases-by-model "$EXPECTED_CASES_BY_MODEL" \
                 --expected-result-count "$EXPECTED_RESULT_COUNT" \
                 --revision "$REVISION" \
+                --run-id "$GITHUB_RUN_ID" \
+                --expected-job-id "prove" \
                 --suite nightly \
                 --project-dir "$GITHUB_WORKSPACE" \
                 --output "$REPORT_OUTPUT_DIR/model-proof-report.html" \

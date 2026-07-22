@@ -1274,10 +1274,11 @@ def _write_certified_singleton_artifacts(
     (root / "gpu-lease.json").write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "model": model,
                 "source_revision": revision,
                 "run_id": "123",
+                "run_attempt": "1",
                 "job_id": "prove",
                 "runner_name": "test-runner",
                 "node_id": "test-node",
@@ -1320,6 +1321,8 @@ def _run_workflow_singleton_gate(
             revision,
             "premerge",
             "123",
+            "1",
+            "prove",
             "test-runner",
             "test-node",
         ],
@@ -2416,13 +2419,14 @@ def test_explicit_runner_gpu_id_still_acquires_a_slot_lease(tmp_path: Path) -> N
     assert _proof_gpu_ids(docker_log) == ["7"]
     assert (output / "artifacts" / "gpu-id.txt").read_text().strip() == "7"
     lease = _gpu_lease(output)
-    assert lease["schema_version"] == 2
+    assert lease["schema_version"] == 3
     assert lease["model"] == "convbert"
     assert (
         lease["source_revision"]
         == subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
     )
     assert lease["run_id"] == "local"
+    assert lease["run_attempt"] == "local"
     assert lease["job_id"] == "local"
     assert lease["runner_name"] == "local"
     assert lease["node_id"] == "test-node"

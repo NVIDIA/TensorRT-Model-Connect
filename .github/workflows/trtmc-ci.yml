@@ -568,6 +568,8 @@ jobs:
                 --parts-dir "$PARTS_DIR" \
                 --expected-models "$EXPECTED_MODELS" \
                 --revision "$REVISION" \
+                --run-id "$GITHUB_RUN_ID" \
+                --expected-job-id "prove" \
                 --suite "$SUITE" \
                 --project-dir "$GITHUB_WORKSPACE" \
                 --output "$REPORT_OUTPUT_DIR/model-proof-report.html" \

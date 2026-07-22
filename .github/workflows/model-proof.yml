@@ -110,6 +110,16 @@ jobs:
       - name: Validate host proof policy
         run: |
           set -euo pipefail
+          forbidden=()
+          for name in HF_TOKEN HUGGING_FACE_HUB_TOKEN HF_TOKEN_PATH; do
+            if [[ -v "$name" ]]; then
+              forbidden+=("$name")
+            fi
+          done
+          if [ "${#forbidden[@]}" -ne 0 ]; then
+            echo "::error::Model proof forbids Hugging Face credential variables: ${forbidden[*]}"
+            exit 1
+          fi
           if ! [[ "${TRTMC_NODE_ID:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
             echo "::error::TRTMC_NODE_ID is not configured safely by this proof runner."
             exit 1
@@ -442,14 +452,25 @@ jobs:
           test "$ARTIFACT_UPLOAD_OUTCOME" = "success"
           python3 - \
             "$MODEL_PROOF_OUTPUT_DIR/artifacts" "$MODEL" "$REVISION" "$SUITE" \
-            "$GITHUB_RUN_ID" "$RUNNER_NAME" "$TRTMC_NODE_ID" <<'PY'
+            "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_JOB" "$RUNNER_NAME" \
+            "$TRTMC_NODE_ID" <<'PY'
           import datetime
           import json
           import re
           import sys
           from pathlib import Path
 
-          root, model, revision, suite, run_id, runner_name, node_id = sys.argv[1:]
+          (
+              root,
+              model,
+              revision,
+              suite,
+              run_id,
+              run_attempt,
+              job_id,
+              runner_name,
+              node_id,
+          ) = sys.argv[1:]
           root = Path(root)
           status = json.loads((root / "model-proof-status.json").read_text(encoding="utf-8"))
           proof = json.loads((root / "proof.json").read_text(encoding="utf-8"))
@@ -468,10 +489,12 @@ jobs:
           if selection.get("requested_model") != model:
               errors.append("selection.json does not match the requested model")
           expected_lease = {
-              "schema_version": 2,
+              "schema_version": 3,
               "model": model,
               "source_revision": revision,
               "run_id": run_id,
+              "run_attempt": run_attempt,
+              "job_id": job_id,
               "runner_name": runner_name,
               "node_id": node_id,
               "resource_class": selection.get("resource_class"),

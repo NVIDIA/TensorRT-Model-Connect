@@ -15,13 +15,49 @@ import os
 import re
 import socket
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .process import CiError
 
 
 _DIGEST = re.compile(r"[0-9a-f]{64}")
+_REVISION = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+_POSITIVE_DECIMAL = re.compile(r"[1-9][0-9]*")
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_RECEIPT_SCHEMA_VERSION = 2
+_LOCAL_ONLY_HUB_CACHE = PurePosixPath("/hf-cache/hub")
+_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "status",
+        "node_id",
+        "hostname",
+        "anchor_runner",
+        "run_id",
+        "run_attempt",
+        "job_id",
+        "source_revision",
+        "cache_plan_digest",
+        "resolved_cache_digest",
+        "expected_count",
+        "present_count",
+        "missing_count",
+        "cached_count",
+        "downloaded_count",
+        "warm_started_at",
+        "warm_completed_at",
+        "verification_status",
+        "verification_present_count",
+        "verification_missing_count",
+        "verification_cached_count",
+        "verification_downloaded_count",
+        "verification_started_at",
+        "verification_completed_at",
+        "cache_root",
+        "hub_cache",
+        "cache_lock_file",
+    }
+)
 
 
 def _load_object(path: Path, description: str) -> dict[str, object]:
@@ -34,20 +70,91 @@ def _load_object(path: Path, description: str) -> dict[str, object]:
     return payload
 
 
+def _validated_digest(value: object, description: str) -> str:
+    if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
+        raise CiError(f"{description} is invalid")
+    return value
+
+
+def _validated_revision(value: object, description: str) -> str:
+    if not isinstance(value, str) or _REVISION.fullmatch(value) is None:
+        raise CiError(f"{description} is invalid")
+    return value
+
+
+def _validated_safe_id(value: object, description: str) -> str:
+    if not isinstance(value, str) or _SAFE_ID.fullmatch(value) is None:
+        raise CiError(f"{description} is invalid")
+    return value
+
+
+def _validated_positive_decimal(value: object, description: str) -> str:
+    if not isinstance(value, str) or _POSITIVE_DECIMAL.fullmatch(value) is None:
+        raise CiError(f"{description} is invalid")
+    return value
+
+
+def _validated_count(
+    value: object,
+    description: str,
+    *,
+    positive: bool = False,
+) -> int:
+    # bool is an int subclass; evidence must not accept true/false as a count.
+    if type(value) is not int or value < (1 if positive else 0):
+        raise CiError(f"{description} is invalid")
+    return value
+
+
+def _validated_timestamp(value: object, description: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise CiError(f"{description} is invalid")
+    try:
+        timestamp = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise CiError(f"{description} is invalid") from error
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise CiError(f"{description} is timezone-free")
+    return timestamp
+
+
+def _validated_path(
+    value: object,
+    description: str,
+    *,
+    file_path: bool = False,
+) -> PurePosixPath:
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise CiError(f"{description} is invalid")
+    path = PurePosixPath(value)
+    if (
+        not path.is_absolute()
+        or path == PurePosixPath("/")
+        or ".." in path.parts
+        or str(path) != value
+        or (file_path and (value.endswith("/") or not path.name))
+    ):
+        raise CiError(f"{description} is invalid")
+    return path
+
+
+def _paths_overlap(left: PurePosixPath, right: PurePosixPath) -> bool:
+    return left == right or left in right.parents or right in left.parents
+
+
 def _validated_summary(payload: dict[str, object], mode: str) -> dict[str, object]:
-    if payload.get("schema_version") != 1 or payload.get("mode") != mode:
+    if (
+        type(payload.get("schema_version")) is not int
+        or payload.get("schema_version") != 1
+        or payload.get("mode") != mode
+    ):
         raise CiError(f"cache {mode} summary has an unsupported schema or mode")
     if payload.get("status") != "passed":
         raise CiError(f"cache {mode} summary did not pass")
     for key in ("cache_plan_digest", "resolved_cache_digest"):
-        value = payload.get(key)
-        if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
-            raise CiError(f"cache {mode} summary has invalid {key}")
-    if not isinstance(payload.get("source_revision"), str) or not payload["source_revision"]:
-        raise CiError(f"cache {mode} summary has no source revision")
-    cache_root = payload.get("cache_root")
-    if not isinstance(cache_root, str) or not Path(cache_root).is_absolute():
-        raise CiError(f"cache {mode} summary has an invalid cache root")
+        _validated_digest(payload.get(key), f"cache {mode} summary {key}")
+    _validated_revision(payload.get("source_revision"), f"cache {mode} summary source revision")
+    _validated_path(payload.get("cache_root"), f"cache {mode} summary cache root")
     for key in (
         "expected_count",
         "present_count",
@@ -55,22 +162,20 @@ def _validated_summary(payload: dict[str, object], mode: str) -> dict[str, objec
         "cached_count",
         "downloaded_count",
     ):
-        if not isinstance(payload.get(key), int) or int(payload[key]) < 0:
-            raise CiError(f"cache {mode} summary has invalid {key}")
+        _validated_count(
+            payload.get(key),
+            f"cache {mode} summary {key}",
+            positive=key == "expected_count",
+        )
     if payload["missing_count"] != 0 or payload["present_count"] != payload["expected_count"]:
         raise CiError(f"cache {mode} summary is incomplete")
     if payload["cached_count"] + payload["downloaded_count"] != payload["expected_count"]:
         raise CiError(f"cache {mode} summary item counts are inconsistent")
-    timestamps: list[datetime] = []
-    for key in ("started_at", "completed_at"):
-        try:
-            value = datetime.fromisoformat(str(payload.get(key, "")))
-        except ValueError as error:
-            raise CiError(f"cache {mode} summary has invalid {key}") from error
-        if value.tzinfo is None:
-            raise CiError(f"cache {mode} summary has timezone-free {key}")
-        timestamps.append(value)
-    if timestamps[1] < timestamps[0]:
+    started_at = _validated_timestamp(payload.get("started_at"), f"cache {mode} summary started_at")
+    completed_at = _validated_timestamp(
+        payload.get("completed_at"), f"cache {mode} summary completed_at"
+    )
+    if completed_at < started_at:
         raise CiError(f"cache {mode} summary completes before it starts")
     return payload
 
@@ -82,7 +187,11 @@ def create_receipt(
 ) -> dict[str, object]:
     warm = _validated_summary(warm_summary, "warm")
     verify = _validated_summary(verify_summary, "local-only")
-    for key in ("source_revision", "cache_plan_digest", "resolved_cache_digest"):
+    for key in (
+        "source_revision",
+        "cache_plan_digest",
+        "resolved_cache_digest",
+    ):
         if warm.get(key) != verify.get(key):
             raise CiError(f"warm and local-only summaries disagree on {key}")
     for key in ("expected_count", "present_count", "missing_count"):
@@ -90,11 +199,20 @@ def create_receipt(
             raise CiError(f"warm and local-only summaries disagree on {key}")
     if verify["downloaded_count"] != 0:
         raise CiError("local-only cache verification must download zero items")
+    warm_completed_at = _validated_timestamp(
+        warm["completed_at"], "cache warm summary completed_at"
+    )
+    verification_started_at = _validated_timestamp(
+        verify["started_at"], "cache local-only summary started_at"
+    )
+    if verification_started_at < warm_completed_at:
+        raise CiError("local-only cache verification starts before cache warm completes")
 
     required_environment = (
         "TRTMC_NODE_ID",
         "RUNNER_NAME",
         "GITHUB_RUN_ID",
+        "GITHUB_RUN_ATTEMPT",
         "GITHUB_JOB",
         "TRTMC_CI_WORKSPACE",
         "TRTMC_CACHE_SOURCE_REVISION",
@@ -105,13 +223,29 @@ def create_receipt(
     missing = [name for name in required_environment if not environment.get(name)]
     if missing:
         raise CiError(f"cache receipt environment is missing: {missing!r}")
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", environment["TRTMC_NODE_ID"]) is None:
-        raise CiError("cache receipt has an unsafe node ID")
-    if not environment["GITHUB_RUN_ID"].isdigit():
-        raise CiError("cache receipt has an invalid workflow run ID")
-    lock_file = Path(environment["TRTMC_HF_CACHE_LOCK_FILE"])
-    if not lock_file.is_absolute() or lock_file == Path("/"):
-        raise CiError("cache receipt has an unsafe cache lock path")
+    node_id = _validated_safe_id(environment["TRTMC_NODE_ID"], "cache receipt node ID")
+    anchor_runner = _validated_safe_id(environment["RUNNER_NAME"], "cache receipt anchor runner")
+    run_id = _validated_positive_decimal(
+        environment["GITHUB_RUN_ID"], "cache receipt workflow run ID"
+    )
+    run_attempt = _validated_positive_decimal(
+        environment["GITHUB_RUN_ATTEMPT"], "cache receipt workflow run attempt"
+    )
+    job_id = _validated_safe_id(environment["GITHUB_JOB"], "cache receipt job ID")
+    hostname = _validated_safe_id(socket.gethostname(), "cache receipt hostname")
+    source_revision = _validated_revision(
+        environment["TRTMC_CACHE_SOURCE_REVISION"],
+        "cache receipt source revision",
+    )
+    _validated_path(environment["TRTMC_CI_WORKSPACE"], "cache receipt workspace")
+    _validated_path(environment["TRTMC_HF_CACHE"], "cache receipt cache root")
+    _validated_path(environment["TRTMC_HF_HUB_CACHE"], "cache receipt Hub cache")
+    _validated_path(
+        environment["TRTMC_HF_CACHE_LOCK_FILE"],
+        "cache receipt cache lock path",
+        file_path=True,
+    )
+    lock_file = Path(environment["TRTMC_HF_CACHE_LOCK_FILE"]).resolve()
     if warm["source_revision"] != environment["TRTMC_CACHE_SOURCE_REVISION"]:
         raise CiError("cache summary source revision does not match the workflow")
     cache_root = Path(environment["TRTMC_HF_CACHE"]).resolve()
@@ -119,22 +253,26 @@ def create_receipt(
     workspace = Path(environment["TRTMC_CI_WORKSPACE"]).resolve()
     if cache_root == Path("/") or hub_cache == cache_root or cache_root not in hub_cache.parents:
         raise CiError("cache receipt environment has an unsafe cache root or hub path")
-    if any(
-        path == workspace or path in workspace.parents or workspace in path.parents
-        for path in (cache_root, hub_cache)
-    ):
+    if lock_file == cache_root or _paths_overlap(lock_file, hub_cache):
+        raise CiError("cache receipt environment has an unsafe cache lock path")
+    if any(_paths_overlap(path, workspace) for path in (cache_root, hub_cache, lock_file)):
         raise CiError("cache receipt paths must not overlap the workflow checkout")
     if Path(str(warm["cache_root"])).resolve() != hub_cache:
         raise CiError("cache warm summary does not describe the configured Hub cache")
+    if PurePosixPath(str(verify["cache_root"])) != _LOCAL_ONLY_HUB_CACHE:
+        raise CiError(
+            "cache local-only summary does not describe the read-only container Hub cache"
+        )
 
     return {
-        "schema_version": 1,
-        "node_id": environment["TRTMC_NODE_ID"],
-        "hostname": socket.gethostname(),
-        "anchor_runner": environment["RUNNER_NAME"],
-        "run_id": environment["GITHUB_RUN_ID"],
-        "job_id": environment["GITHUB_JOB"],
-        "source_revision": warm["source_revision"],
+        "schema_version": _RECEIPT_SCHEMA_VERSION,
+        "node_id": node_id,
+        "hostname": hostname,
+        "anchor_runner": anchor_runner,
+        "run_id": run_id,
+        "run_attempt": run_attempt,
+        "job_id": job_id,
+        "source_revision": source_revision,
         "cache_plan_digest": warm["cache_plan_digest"],
         "resolved_cache_digest": warm["resolved_cache_digest"],
         "expected_count": warm["expected_count"],
@@ -144,30 +282,40 @@ def create_receipt(
         "downloaded_count": warm["downloaded_count"],
         "warm_started_at": warm["started_at"],
         "warm_completed_at": warm["completed_at"],
-        "verified_at": verify["completed_at"],
+        "verification_status": verify["status"],
+        "verification_present_count": verify["present_count"],
+        "verification_missing_count": verify["missing_count"],
+        "verification_cached_count": verify["cached_count"],
         "verification_downloaded_count": verify["downloaded_count"],
+        "verification_started_at": verify["started_at"],
+        "verification_completed_at": verify["completed_at"],
         "cache_root": str(cache_root),
         "hub_cache": str(hub_cache),
-        "cache_lock_file": environment["TRTMC_HF_CACHE_LOCK_FILE"],
+        "cache_lock_file": str(lock_file),
         "status": "ready",
     }
 
 
 def verify_receipts(
     receipts: list[dict[str, object]],
-    expected_matrix: dict[str, object],
+    expected_matrix: object,
     *,
     expected_run_id: str,
+    expected_run_attempt: str,
+    expected_job_id: str,
     expected_revision: str,
 ) -> dict[str, object]:
-    if not expected_run_id.isdigit():
-        raise CiError("expected cache-warm workflow run ID is invalid")
-    if not expected_revision:
-        raise CiError("expected cache-warm source revision is empty")
+    _validated_positive_decimal(expected_run_id, "expected cache-warm workflow run ID")
+    _validated_positive_decimal(expected_run_attempt, "expected cache-warm workflow run attempt")
+    _validated_safe_id(expected_job_id, "expected cache-warm job ID")
+    _validated_revision(expected_revision, "expected cache-warm source revision")
+    if not isinstance(expected_matrix, dict):
+        raise CiError("expected cache-anchor matrix must be a JSON object")
     raw_entries = expected_matrix.get("include")
     if not isinstance(raw_entries, list) or not raw_entries:
         raise CiError("expected cache-anchor matrix is invalid or empty")
     expected: dict[str, str] = {}
+    expected_anchors: set[str] = set()
     for entry in raw_entries:
         if not isinstance(entry, dict):
             raise CiError("expected cache-anchor matrix contains a non-object entry")
@@ -178,50 +326,140 @@ def verify_receipts(
         if not isinstance(anchor, str) or not anchor:
             raise CiError("expected cache-anchor matrix contains an invalid anchor")
         node_id = node_label.removeprefix("trtmc-node-")
+        _validated_safe_id(node_id, "expected cache-anchor matrix node ID")
+        _validated_safe_id(anchor, "expected cache-anchor matrix anchor")
         if node_id in expected:
             raise CiError(f"expected cache-anchor matrix repeats node {node_id!r}")
+        if anchor in expected_anchors:
+            raise CiError(f"expected cache-anchor matrix repeats anchor {anchor!r}")
         expected[node_id] = anchor
+        expected_anchors.add(anchor)
 
     actual: dict[str, dict[str, object]] = {}
     hostname_nodes: dict[str, str] = {}
     for receipt in receipts:
-        if receipt.get("schema_version") != 1 or receipt.get("status") != "ready":
+        if set(receipt) != _RECEIPT_FIELDS:
+            missing_fields = sorted(_RECEIPT_FIELDS - set(receipt))
+            unexpected_fields = sorted(set(receipt) - _RECEIPT_FIELDS)
+            raise CiError(
+                "cache-warm receipt field set is invalid: "
+                f"missing={missing_fields!r}, unexpected={unexpected_fields!r}"
+            )
+        if (
+            receipt.get("schema_version") != _RECEIPT_SCHEMA_VERSION
+            or receipt.get("status") != "ready"
+            or receipt.get("verification_status") != "passed"
+        ):
             raise CiError("cache-warm receipt has an unsupported schema or is not ready")
-        node_id = receipt.get("node_id")
-        anchor = receipt.get("anchor_runner")
-        if not isinstance(node_id, str) or not isinstance(anchor, str):
-            raise CiError("cache-warm receipt has invalid node or anchor identity")
+        node_id = _validated_safe_id(receipt.get("node_id"), "cache-warm receipt node ID")
+        anchor = _validated_safe_id(
+            receipt.get("anchor_runner"), "cache-warm receipt anchor runner"
+        )
         if node_id in actual:
             raise CiError(f"duplicate cache-warm receipt for node {node_id!r}")
         if expected.get(node_id) != anchor:
             raise CiError(f"cache-warm receipt identity does not match matrix for {node_id!r}")
-        hostname = receipt.get("hostname")
-        if not isinstance(hostname, str) or _SAFE_ID.fullmatch(hostname) is None:
-            raise CiError(f"cache-warm receipt for {node_id!r} has an unsafe hostname")
+        hostname = _validated_safe_id(
+            receipt.get("hostname"), f"cache-warm receipt for {node_id!r} hostname"
+        )
         previous_node = hostname_nodes.setdefault(hostname, node_id)
         if previous_node != node_id:
             raise CiError(f"cache-warm hostname {hostname!r} maps to multiple node IDs")
-        if receipt.get("run_id") != expected_run_id:
+        run_id = _validated_positive_decimal(
+            receipt.get("run_id"), f"cache-warm receipt for {node_id!r} run ID"
+        )
+        run_attempt = _validated_positive_decimal(
+            receipt.get("run_attempt"),
+            f"cache-warm receipt for {node_id!r} run attempt",
+        )
+        job_id = _validated_safe_id(
+            receipt.get("job_id"), f"cache-warm receipt for {node_id!r} job ID"
+        )
+        source_revision = _validated_revision(
+            receipt.get("source_revision"),
+            f"cache-warm receipt for {node_id!r} source revision",
+        )
+        if run_id != expected_run_id:
             raise CiError(f"cache-warm receipt for {node_id!r} is from the wrong workflow run")
-        if receipt.get("source_revision") != expected_revision:
+        if run_attempt != expected_run_attempt:
+            raise CiError(
+                f"cache-warm receipt for {node_id!r} is from the wrong workflow run attempt"
+            )
+        if job_id != expected_job_id:
+            raise CiError(f"cache-warm receipt for {node_id!r} is from the wrong job")
+        if source_revision != expected_revision:
             raise CiError(f"cache-warm receipt for {node_id!r} is from the wrong source revision")
-        if not isinstance(receipt.get("run_id"), str) or not str(receipt["run_id"]).isdigit():
-            raise CiError(f"cache-warm receipt for {node_id!r} has invalid run identity")
-        if not isinstance(receipt.get("source_revision"), str) or not receipt["source_revision"]:
-            raise CiError(f"cache-warm receipt for {node_id!r} has no source revision")
         for key in ("cache_plan_digest", "resolved_cache_digest"):
-            value = receipt.get(key)
-            if not isinstance(value, str) or _DIGEST.fullmatch(value) is None:
-                raise CiError(f"cache-warm receipt has invalid {key}")
-        expected_count = receipt.get("expected_count")
+            _validated_digest(receipt.get(key), f"cache-warm receipt {key}")
+        counts = {
+            key: _validated_count(
+                receipt.get(key),
+                f"cache-warm receipt for {node_id!r} {key}",
+                positive=key == "expected_count",
+            )
+            for key in (
+                "expected_count",
+                "present_count",
+                "missing_count",
+                "cached_count",
+                "downloaded_count",
+                "verification_present_count",
+                "verification_missing_count",
+                "verification_cached_count",
+                "verification_downloaded_count",
+            )
+        }
+        expected_count = counts["expected_count"]
         if (
-            not isinstance(expected_count, int)
-            or expected_count < 0
-            or receipt.get("present_count") != expected_count
-            or receipt.get("missing_count") != 0
-            or receipt.get("verification_downloaded_count") != 0
+            counts["present_count"] != expected_count
+            or counts["missing_count"] != 0
+            or counts["cached_count"] + counts["downloaded_count"] != expected_count
+            or counts["verification_present_count"] != expected_count
+            or counts["verification_missing_count"] != 0
+            or counts["verification_cached_count"] != expected_count
+            or counts["verification_downloaded_count"] != 0
         ):
             raise CiError(f"cache-warm receipt for {node_id!r} is incomplete")
+        warm_started_at = _validated_timestamp(
+            receipt.get("warm_started_at"),
+            f"cache-warm receipt for {node_id!r} warm_started_at",
+        )
+        warm_completed_at = _validated_timestamp(
+            receipt.get("warm_completed_at"),
+            f"cache-warm receipt for {node_id!r} warm_completed_at",
+        )
+        verification_started_at = _validated_timestamp(
+            receipt.get("verification_started_at"),
+            f"cache-warm receipt for {node_id!r} verification_started_at",
+        )
+        verification_completed_at = _validated_timestamp(
+            receipt.get("verification_completed_at"),
+            f"cache-warm receipt for {node_id!r} verification_completed_at",
+        )
+        if not (
+            warm_started_at
+            <= warm_completed_at
+            <= verification_started_at
+            <= verification_completed_at
+        ):
+            raise CiError(f"cache-warm receipt for {node_id!r} has invalid timestamp order")
+        cache_root = _validated_path(
+            receipt.get("cache_root"),
+            f"cache-warm receipt for {node_id!r} cache root",
+        )
+        hub_cache = _validated_path(
+            receipt.get("hub_cache"),
+            f"cache-warm receipt for {node_id!r} Hub cache",
+        )
+        cache_lock_file = _validated_path(
+            receipt.get("cache_lock_file"),
+            f"cache-warm receipt for {node_id!r} cache lock file",
+            file_path=True,
+        )
+        if hub_cache == cache_root or cache_root not in hub_cache.parents:
+            raise CiError(f"cache-warm receipt for {node_id!r} has unsafe cache paths")
+        if cache_lock_file == cache_root or _paths_overlap(cache_lock_file, hub_cache):
+            raise CiError(f"cache-warm receipt for {node_id!r} has unsafe cache lock path")
         actual[node_id] = receipt
 
     if set(actual) != set(expected):
@@ -229,20 +467,37 @@ def verify_receipts(
             f"cache-warm receipt node set mismatch: expected {sorted(expected)!r}, "
             f"found {sorted(actual)!r}"
         )
-    for key in ("run_id", "source_revision", "cache_plan_digest", "resolved_cache_digest"):
+    for key in (
+        "run_id",
+        "run_attempt",
+        "job_id",
+        "source_revision",
+        "cache_plan_digest",
+        "resolved_cache_digest",
+        "expected_count",
+        "cache_root",
+        "hub_cache",
+        "cache_lock_file",
+    ):
         values = {str(receipt[key]) for receipt in actual.values()}
         if len(values) != 1:
             raise CiError(f"cache-warm receipts disagree on {key}: {sorted(values)!r}")
 
     first = next(iter(actual.values()))
     return {
-        "schema_version": 1,
+        "schema_version": _RECEIPT_SCHEMA_VERSION,
         "status": "ready",
         "node_count": len(actual),
         "run_id": first["run_id"],
+        "run_attempt": first["run_attempt"],
+        "job_id": first["job_id"],
         "source_revision": first["source_revision"],
         "cache_plan_digest": first["cache_plan_digest"],
         "resolved_cache_digest": first["resolved_cache_digest"],
+        "expected_count": first["expected_count"],
+        "cache_root": first["cache_root"],
+        "hub_cache": first["hub_cache"],
+        "cache_lock_file": first["cache_lock_file"],
     }
 
 
@@ -264,6 +519,8 @@ def main() -> int:
     verify.add_argument("--receipts-dir", type=Path, required=True)
     verify.add_argument("--expected-matrix-json", required=True)
     verify.add_argument("--expected-run-id", required=True)
+    verify.add_argument("--expected-run-attempt", required=True)
+    verify.add_argument("--expected-job-id", required=True)
     verify.add_argument("--expected-revision", required=True)
     verify.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
@@ -286,6 +543,8 @@ def main() -> int:
             [_load_object(path, "cache-warm receipt") for path in paths],
             expected_matrix,
             expected_run_id=arguments.expected_run_id,
+            expected_run_attempt=arguments.expected_run_attempt,
+            expected_job_id=arguments.expected_job_id,
             expected_revision=arguments.expected_revision,
         )
     _write_json_atomic(arguments.output, payload)

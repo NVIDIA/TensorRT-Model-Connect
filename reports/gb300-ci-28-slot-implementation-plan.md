@@ -189,10 +189,16 @@ The number 28 appears in this rollout plan and acceptance canary because it is
 the current acceptance target. Normal Pre-Merge and Nightly workflows derive
 capacity from online matching runners and contain no hardcoded 28.
 
-## 4. Verified Starting Point
+## 4. Historical Audited Starting Point
 
-The following was observed on 2026-07-21 PDT and must be refreshed immediately
-before execution because runner state is live.
+The following was observed on 2026-07-21 PDT before host and label staging. It
+is retained as historical design input, not as a baseline that can be
+reconstructed retroactively. The current sanitized state is recorded in
+<code>reports/gb300-ci-rollout/2026-07-22-pre-merge-current-state.md</code> and
+must be refreshed immediately before each mutating rollout step because runner
+state is live. The current safe rollback baseline is 12 production listeners
+on compute02, with 16 online compute01 listeners still excluded by their
+missing production label.
 
 ### 4.1 GitHub runner registry
 
@@ -210,7 +216,7 @@ before execution because runner state is live.
   <code>self-hosted</code>, OS, or architecture labels. Their scheduling
   contract is therefore intentionally based only on explicit custom labels.
 
-This means the current GitHub-visible pool is not the desired topology:
+At that point, the GitHub-visible pool was not the desired topology:
 compute01 contributes zero active proof listeners, while compute02 advertises
 16 listeners for only 12 allowed shared slots.
 
@@ -255,7 +261,7 @@ host-specific GPU policy.
 - Nightly already has a strict full-cache warm command, but it currently lands
   on only one arbitrary matching runner.
 
-### 4.4 Current rsync
+### 4.4 Historical rsync observation
 
 A one-time compute02-to-compute01 rsync was active at audit time. It was copying
 the approximately 1 TB Hugging Face cache and reporting permission errors for
@@ -270,6 +276,11 @@ first download and unnecessary Hub traffic.
 The rsync is not a readiness signal. It may complete with exit code 23 while
 leaving a mostly useful cache. The node becomes ready only after the repository
 warm script and a second strict local-only verification succeed.
+
+The 2026-07-22 current-state refresh found no rsync process and found the
+representative compute01 cache set complete. Do not restart the copy or perform
+a broad redownload; Nightly's strict warm plus offline verification remains the
+only readiness authority.
 
 ## 5. Target Runner and Label Contract
 
@@ -478,7 +489,8 @@ Do not replace or redesign the allocator. Make only the changes needed to:
 - fail closed when host-local GPU IDs are absent;
 - expose a reusable shared/exclusive cache-file-lock context where appropriate;
 - enrich <code>gpu-lease.json</code> evidence with:
-  - run and job identity;
+  - schema version 3 plus exact workflow run, run attempt, and reusable-workflow
+    job identity;
   - runner name;
   - node ID and hostname;
   - GPU index and GPU UUID;
@@ -496,6 +508,14 @@ The globally unique slot identity in evidence is:
 
 Numeric GPU index alone is not unique across nodes.
 
+The reusable-workflow singleton gate and combined report must bind every lease
+to the real job ID <code>prove</code>, the current run ID, and the artifact's
+run attempt. The combined report normalizes the validated receipts and fails
+closed on runner-to-node movement, node/hostname/lock-namespace drift,
+GPU-UUID/index aliasing, inconsistent per-node slot counts, a reused runner
+during an overlapping interval, or overlapping ownership of the same physical
+slot. Merely checking that these fields are present is not certification.
+
 ### 6.6 Cache receipt
 
 Reuse <code>scripts/warm_hf_cache.py</code> as the only downloader. Its current
@@ -511,20 +531,34 @@ The workflow should create a compact
 <code>cache-warm-receipt.json</code> after successful warm plus local-only
 verification. It must contain:
 
-- node ID, hostname, anchor runner, run ID, and job ID;
+- receipt schema version 2; node ID, hostname, anchor runner, exact run ID,
+  run attempt, and job ID;
 - tested source revision;
 - a cache-plan digest derived from the sorted selected dependency set;
 - a resolved-cache digest derived from repository IDs and resolved local refs;
 - expected, present, and missing counts;
-- warm start and end times;
-- downloaded or already-cached counts;
-- final strict local-only result;
-- cache lock path and cache root.
+- ordered warm and local-only verification start/end times;
+- common expected/present/missing counts, warm downloaded/already-cached
+  counts, and separately prefixed local-verification
+  present/missing/downloaded/already-cached counts;
+- final strict local-only result with zero downloads;
+- canonical host cache root, host Hub-cache path, and cache-lock path. The
+  local-only summary names the fixed read-only container path
+  <code>/hf-cache/hub</code>; it is deliberately not required to equal the host
+  path.
 
 Write the receipt atomically only after success and upload it as an artifact.
 Two node receipts from the same Nightly must have the same source revision,
-cache-plan digest, and resolved-cache digest. A mismatch fails the Nightly
-barrier.
+run ID, run attempt, job ID, cache-plan digest, resolved-cache digest, expected
+count, and standardized host cache paths. The verifier requires the exact
+field set and rejects old schemas, missing/extra fields, unsafe paths, malformed
+counts/timestamps, duplicate identities, or any mismatch before the Nightly
+barrier opens.
+
+Because the attempt binding is exact, a partial cache-warm failure must be
+recovered with GitHub's <code>Re-run all jobs</code>, not
+<code>Re-run failed jobs</code>. Otherwise successful nodes retain receipts
+from the prior attempt and the fleet barrier correctly remains closed.
 
 Do not put a token, signed URL, or command-line secret in a receipt.
 
@@ -535,6 +569,40 @@ Add a trusted, default-branch-only, manually dispatched workflow such as
 download a model or receive an HF token. It should reuse the real
 <code>GpuLease</code>, launch a tiny Docker GPU UUID probe, hold the lease to an
 absolute barrier time, and upload a receipt.
+
+Every dispatch must also provide an <code>expected_topology</code> JSON
+acceptance contract. For the initial admission, use:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "trtmc_capacity_topology",
+  "slots_per_gpu": 4,
+  "nodes": [
+    {
+      "node_label": "trtmc-node-gb300-nvl-019-compute01",
+      "gpu_indices": [0, 1, 2, 3]
+    },
+    {
+      "node_label": "trtmc-node-gb300-nvl-019-compute02",
+      "gpu_indices": [1, 2, 3]
+    }
+  ]
+}
+```
+
+This is verification data, not routing logic. The worker matrix still targets
+only the common generic proof label, and GitHub remains the scheduler. The
+trusted preparation job validates the exact minimal schema, derives seven GPUs
+and the 16 plus 12 capacities from the indices and slots/GPU, canonicalizes
+node order, and hashes the result. Each GPU receipt carries that
+digest; the GitHub-hosted postflight rejects a missing or different digest and
+checks receipts against the normalized contract and exact worker job ID
+<code>exercise</code>. For cross-workflow proof, the
+two authenticated first-attempt source runs and the verifier must all bind to
+the same digest. This prevents a total-only result from passing with the wrong
+node split or with compute02 GPU 0, without putting a hostname branch or a
+fleet-size repository variable in production CI.
 
 Keep this canary after rollout. It is the fastest repeatable proof when a node
 or runner is added, removed, or restarted.
@@ -552,6 +620,14 @@ The retained workflow has four manual modes:
   verifier's current source revision;
 - <code>exclusive-safety</code> proves same-GPU exclusive serialization.
 
+Mode/contract relationships are deliberately small: shared-capacity and
+exclusive-safety require <code>expected_slots == capacity</code>;
+shared-cohort may request any positive subset up to capacity; and
+cross-workflow-verify requires two equal cohorts whose combined size equals
+capacity. A future node is represented by one additional contract row only
+when running the admission canary; normal Pre-Merge and Nightly scheduling do
+not consume this contract.
+
 Only the GitHub-hosted verifier job receives <code>actions: read</code>. GPU
 workers receive no Actions-write permission, model input, or Hugging Face
 credential. The workflow contains no <code>concurrency</code> group.
@@ -563,6 +639,12 @@ Update or add:
 - <code>tests/tools/test_github_actions_ci.py</code>;
 - <code>tests/tools/test_discover_cache_anchors.py</code>;
 - <code>tests/tools/test_model_proof_runner.py</code>;
+- <code>tests/tools/test_model_proof_security.py</code>;
+- <code>tests/tools/test_generate_model_proof_report.py</code>;
+- <code>tests/tools/test_capacity_canary.py</code>;
+- <code>tests/tools/test_cache_warm_receipt.py</code>;
+- <code>tests/tools/test_cache_lock.py</code>;
+- <code>tests/tools/test_ci_container_secrets.py</code>;
 - existing <code>GpuLease</code> fairness/cancellation tests;
 - <code>tests/tools/test_warm_hf_cache_static.py</code>.
 
@@ -570,18 +652,34 @@ Tests must prove:
 
 - neither model matrix has a fixed max-parallel value;
 - both use the common reusable proof workflow;
-- no workflow contains a compute hostname or hardcoded fleet size;
+- no normal Pre-Merge, Nightly, or reusable proof workflow contains a compute
+  hostname or hardcoded fleet size; the manual admission canary may carry an
+  explicit expected-capacity input/contract;
 - GPU IDs come only from the host environment;
 - missing host policy fails;
 - Pre-Merge does not inherit HF secrets;
+- Pre-Merge rejects token variables and token-file indirection before checkout,
+  scrubs them before subprocesses, and proves DNS plus numeric-IP HTTPS
+  transport are unavailable inside the proof container;
 - proof cache access is strict, local-only, and read-only at the shared-cache
   boundary;
 - cache miss occurs before GPU acquisition;
 - discovery rejects missing, duplicate, offline, or malformed anchors;
 - discovery emits one matrix entry per valid node;
 - warm failure blocks Nightly proof;
+- malformed topology contracts, digest substitution, GPU-index/UUID aliasing,
+  compute02 GPU 0, wrong slots per GPU, and a same-total but wrong node split
+  all fail the capacity canary;
+- shared or exclusive lease evidence from any job other than
+  <code>exercise</code> fails the capacity canary;
+- the accepted generic contract proves seven GPUs, four slots per GPU, and the
+  exact 16 plus 12 per-node capacity without hostname-based scheduling;
 - shared and exclusive lease safety, fairness, cancellation, and stale-ticket
-  recovery remain correct.
+  recovery remain correct;
+- cache receipts reject stale schemas and are bound to exact run, attempt, job,
+  source, node/anchor/hostname, paths, counts, timestamps, and digests;
+- combined proof reports reject forged job identity, runner/node movement,
+  topology drift, zero-length leases, and overlapping slot ownership.
 
 Do not weaken any model or comparison acceptance criterion to make CI pass.
 
@@ -617,7 +715,12 @@ This is a GitHub administration checkpoint, not a sudo checkpoint.
 Each phase has an explicit exit gate. Do not skip forward because a runner
 merely appears online.
 
-### Phase 0 — Snapshot and freeze the baseline
+Several labels, user services, and host-policy files are already pre-staged.
+They are not accepted rollout evidence until the current safe baseline and raw
+pre-admission evidence are retained. Phases 2, 3, and 6 therefore revalidate
+and admit existing state instead of restarting services unnecessarily.
+
+### Phase 0 — Snapshot and freeze the current safe rollback baseline
 
 - [ ] Refresh GitHub main SHA and save the runner API JSON.
 - [ ] Record every runner ID, name, status, busy state, and label.
@@ -625,9 +728,11 @@ merely appears online.
 - [ ] Record both nodes' four GPU indices, UUIDs, health, memory, and active
       processes.
 - [ ] Record checksums of the current user unit and any drop-ins.
-- [ ] Record compute02 active/enabled units and compute01 inactive units.
+- [ ] Record compute02 proof-00 through proof-11 as the only production-labeled
+      listeners, compute02 proof-12 through proof-15 as offline standby, and
+      compute01 proof-00 through proof-15 as online but not production-labeled.
 - [ ] Record cache filesystem usage, inode usage, ownership exceptions, and
-      rsync state/exit code.
+      the confirmed absence of an active rsync.
 - [ ] Confirm no current job is using a runner before changing its label or
       service.
 
@@ -649,13 +754,32 @@ Exit gate: the snapshot is saved and can reconstruct the previous safe state.
 - [ ] Run focused tests and lint:
 
 ~~~bash
-python3 -m ruff check tools/ci tests/tools
+python3 -m ruff check --config ruff.toml \
+  tools/ci/cache_warm_receipt.py tools/ci/capacity_canary.py \
+  tools/ci/gpu_lease.py tools/ci/model_proof.py \
+  tools/ci/model_proof_inner.py tools/ci/model_proof_security.py \
+  scripts/generate_model_proof_report.py \
+  tests/tools/test_cache_warm_receipt.py tests/tools/test_capacity_canary.py \
+  tests/tools/test_generate_model_proof_report.py \
+  tests/tools/test_github_actions_ci.py \
+  tests/tools/test_model_proof_runner.py \
+  tests/tools/test_model_proof_security.py
 PYTHONPATH=python:. python3 -m pytest \
+  tests/tools/test_cache_lock.py \
+  tests/tools/test_cache_warm_receipt.py \
+  tests/tools/test_capacity_canary.py \
+  tests/tools/test_ci_container_secrets.py \
   tests/tools/test_github_actions_ci.py \
   tests/tools/test_discover_cache_anchors.py \
   tests/tools/test_model_proof_runner.py \
   tests/tools/test_generate_model_proof_report.py \
+  tests/tools/test_model_proof_security.py \
   tests/tools/test_warm_hf_cache_static.py -q
+git diff --check
+actionlint -ignore 'label "trtmc-cache-anchor" is unknown' \
+  .github/workflows/nightly.yml .github/workflows/trtmc-ci.yml \
+  .github/workflows/model-proof.yml \
+  .github/workflows/model-proof-capacity-canary.yml
 ~~~
 
 - [ ] Push to the <code>github</code> remote and open a PR targeting
@@ -720,12 +844,14 @@ existing compute02 pool remains functional.
 
 ### Phase 5 — Finish cache bootstrap and warm every node
 
-- [ ] Let the one-time rsync finish or stop naturally; record its exit code.
-- [ ] Do not rerun rsync as part of Nightly.
-- [ ] Audit only the exact unreadable/root-owned paths reported by rsync.
+- [ ] Retain the current snapshot showing that no rsync is active; do not start
+      or restart one.
+- [ ] Do not copy or broadly redownload the already complete representative
+      compute01 cache.
+- [ ] On compute02, audit only the measured unreadable/non-user-owned paths.
 - [ ] Do not recursively chown the approximately 1 TB cache.
-- [ ] Use a targeted ownership or ACL repair only if strict warm cannot read or
-      replace a required path.
+- [ ] Run the exact targeted ownership repair in Section 13 and rerun the
+      read/write access audit; do not proceed while measured exceptions remain.
 - [ ] Manually dispatch trusted Nightly cache discovery/warm.
 - [ ] Verify exactly two warm matrix entries, one on each anchor.
 - [ ] Verify both perform the full active single-GPU Nightly plan.
@@ -742,7 +868,8 @@ anchor may now be admitted to production.
 compute01:
 
 - [ ] Add <code>trtmc-gb300-proof</code> to proof-00 only after cache readiness.
-- [ ] Start proof-01 through proof-15.
+- [ ] Revalidate proof-00 through proof-15 as active/enabled with the inherited
+      host-local policy; do not restart them unnecessarily.
 - [ ] Add the common label to each only after its unit, environment, Docker,
       GPU probe, lock path, and workspace checks pass.
 - [ ] Enable proof-00 through proof-15 for user-systemd restart.
@@ -770,6 +897,13 @@ Exit gate: GitHub registry topology and node-local capacity both equal 28.
 Run the tests in Section 9. Any duplicate lease, wrong GPU, wrong node count,
 cache miss, secret exposure, or inability to reach 28 concurrent slots blocks
 completion.
+
+- [ ] Dispatch the 28/29 mode with the exact Section 6.7 topology contract.
+- [ ] Save the normalized contract and digest uploaded with the verification.
+- [ ] Require the result to report seven GPUs, four slots per GPU, and the
+      exact 16 plus 12 node distribution, with compute02 index 0 absent.
+- [ ] Reuse byte-for-byte equivalent contract data for both 14-slot source
+      cohorts and their cross-workflow verifier.
 
 Exit gate: every acceptance artifact passes and the results are linked in this
 document.
@@ -834,6 +968,9 @@ The canary preparation job selects an absolute barrier roughly 15 minutes in
 the future and launches a 29-leg matrix on the common proof label. Run it in a
 declared acceptance window after other jobs using the proof pool have drained;
 otherwise it measures unrelated contention instead of admitted capacity.
+Supply the exact topology contract from Section 6.7 in the dispatch. The
+preparation job must publish only its normalized JSON and digest to downstream
+jobs; workers must record the digest but must not use node rows for routing.
 
 Each leg:
 
@@ -846,16 +983,23 @@ Each leg:
 7. releases and uploads its receipt.
 
 A GitHub-hosted postflight downloads all receipts and verifies their runner,
-lease, barrier, and start/release timestamps.
+lease, barrier, start/release timestamps, and topology-contract digest.
 
 Pass criteria:
 
 - exactly 28 leases overlap at the barrier;
 - all 28 <code>(node_id, gpu_uuid, slot_id)</code> tuples are unique;
+- all receipts contain the canonical digest of the trusted dispatch contract;
 - each node ID maps to exactly one hostname and lock namespace, each hostname
   maps to one node ID, and each GPU UUID maps to one node ID;
-- compute01 covers four GPU UUIDs times slots 0 through 3, for 16;
-- compute02 covers three GPU UUIDs times slots 0 through 3, for 12;
+- each <code>(node_id, gpu_index)</code> maps to exactly one GPU UUID and each
+  <code>(node_id, gpu_uuid)</code> maps to exactly one GPU index;
+- the compute01 node label covers indices 0 through 3, four GPU UUIDs, four
+  slots per GPU, and exactly 16 receipts;
+- the compute02 node label covers only indices 1 through 3, three GPU UUIDs,
+  four slots per GPU, and exactly 12 receipts; index 0 is rejected;
+- the observed node set, seven-GPU total, per-node counts, and 28-slot total
+  exactly equal the contract rather than merely summing to the requested size;
 - exactly 28 distinct proof runner names execute during the first wave;
 - the remaining leg's worker start timestamp is after a first-wave lease
   releases, proving no matching listener was available earlier;
@@ -883,9 +1027,12 @@ acquires the freed slot within the configured timeout.
 Execution uses the retained workflow rather than a second scheduler:
 
 1. Choose one cohort ID and future barrier, then dispatch two
-   <code>shared-cohort</code> runs with <code>expected_slots=14</code>.
+   <code>shared-cohort</code> runs with <code>expected_slots=14</code> and the
+   exact same topology contract.
 2. After both finish, dispatch <code>cross-workflow-verify</code> with those two
-   exact run IDs, the same cohort ID, barrier, and 14 slots per run.
+   exact run IDs, the same cohort ID, barrier, 14 slots per run, and the exact
+   same topology contract. Receipt-digest validation must happen before
+   combined placement is accepted.
 3. For cancellation recovery, dispatch a 27-slot fill run and a separate
    one-slot holder to the same barrier, then dispatch a one-slot waiter.
 4. Save the holder and waiter run and job URLs plus raw Actions API JSON proving
@@ -940,7 +1087,9 @@ For each Nightly cache plan:
 - every receipt has <code>missing_count=0</code>;
 - both receipts have identical plan and resolved-cache digests;
 - node IDs map to distinct physical hostnames, and every receipt is bound to
-  the current Nightly run ID and certified source revision;
+  the current Nightly run ID, run attempt, <code>cache-warm</code> job ID, and
+  certified source revision;
+- host cache root, Hub-cache, and lock paths are canonical and consistent;
 - a second strict local-only run succeeds with network disabled and zero
   downloaded bytes;
 - Nightly model proof starts only after both receipts pass;
@@ -966,7 +1115,7 @@ Inject and verify fail-closed behavior:
 At runtime prove:
 
 - host job and proof container lack <code>HF_TOKEN</code> and
-  <code>HUGGING_FACE_HUB_TOKEN</code>;
+  <code>HUGGING_FACE_HUB_TOKEN</code>, and token-file indirection is rejected;
 - the shared cache cannot be modified through its read-only mount;
 - DNS and HTTPS access fail in the proof container;
 - cached models still pass strict local-only validation and real proof;
@@ -1064,10 +1213,15 @@ admission completes, then CI automatically uses the matching listeners:
     and listener environment.
 11. Add <code>trtmc-gb300-proof</code> and start the calculated number of
     listeners.
-12. Run the capacity canary with the new expected fleet total.
+12. Run the capacity canary with the new expected fleet total and add one
+    generic node-label row containing that node's allowed GPU indices to the
+    dispatch-time topology contract; GPU counts and capacity are derived.
 
 The Nightly discovery matrix automatically gains the new anchor. Pre-Merge and
 Nightly model matrices automatically gain the new matching runner capacity.
+No production workflow, hostname branch, repository capacity variable, or
+runner-selection rule changes. Only this one admission invocation describes
+the new expected physical topology so the proof cannot pass on the old pool.
 
 Starting an arbitrary unconfigured runner is intentionally not sufficient. A
 node must first satisfy the admission contract; otherwise it could expose a
@@ -1118,15 +1272,40 @@ Rollback is successful when:
 
 ## 13. Human and Sudo Checkpoints
 
-No sudo command is required at plan-writing time. Both nodes already report
-<code>Linger=yes</code>, and the planned services and configuration are under
-the user account.
+No sudo is required for linger, the user services, or the runner configuration:
+both nodes already report <code>Linger=yes</code>, and those resources are under
+the user account. A measured compute02 cache-ownership blocker does require one
+narrow repair before strict warm acceptance: 2,781 entries are not owned by
+<code>yifeif</code>, including 110 unreadable files, 1,195 unwritable files,
+and 661 unwritable directories.
+
+Run only on compute02:
+
+~~~bash
+sudo find \
+  /workspace/users/yifeif/.cache/huggingface/hub \
+  /workspace/users/yifeif/.cache/huggingface/modules \
+  -xdev ! -user yifeif \
+  -exec chown --no-dereference yifeif -- {} +
+~~~
+
+This targets only the measured non-user-owned entries. Do not recursively
+change ownership of the full approximately 1 TB cache. Afterward, rerun the
+read/write audit and the strict warm/local-only checks before treating the node
+as ready.
 
 Human GitHub administration is required to:
 
 - create/install the read-only runner-discovery App;
 - add its App ID and private key;
 - approve and merge the repository PR.
+
+Human workload coordination is also required for a declared drained acceptance
+window: compute01 has a root GitLab runner service that could claim all GPUs,
+and compute02 has restartable external Docker GPU claims. The rollout automation
+must not stop, restart, relabel, or otherwise disturb those workloads. Their
+owners must drain or authorize the exact conflict handling before cache warm,
+production admission, or full hardware canaries.
 
 Ask the user for an exact sudo command only if a measured blocker requires it:
 
@@ -1161,6 +1340,8 @@ The Goal is complete only when all boxes below refer to the same merged
 - [ ] Pre-Merge has no HF token, no proof-container network, and no writable
       shared-cache mount.
 - [ ] 28/29 shared canary passes with 16 plus 12 unique slot receipts.
+- [ ] Canary artifact contains the normalized trusted topology and matching
+      receipt digest; exact node indices, seven GPUs, and four slots/GPU pass.
 - [ ] Two concurrent workflows share 28 unique slots without collision.
 - [ ] Cancellation releases a slot and queued work recovers.
 - [ ] Shared/exclusive hardware safety canary passes.
@@ -1181,9 +1362,10 @@ evidence.
 | --- | --- | --- | --- |
 | Baseline runner inventory |  |  |  |
 | Host/GPU baseline |  |  |  |
-| Implementation PR |  |  |  |
+| Pre-merge current-state snapshot (not Phase-0 baseline or 28-slot acceptance) | 2026-07-22T04:52:58Z | <code>reports/gb300-ci-rollout/2026-07-22-pre-merge-current-state.md</code> | Sanitized snapshot retained; admission blockers remain |
+| Implementation PR | Prior head <code>07f86c7e</code>; hardened exact head pending | [Draft PR #519](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/519) | Prior committed head green; hardened exact-head run pending |
 | Merged main SHA |  |  |  |
-| Focused test log |  |  |  |
+| Focused test log | 2026-07-22T05:49:14Z | <code>reports/gb300-ci-rollout/2026-07-22-focused-validation.md</code> | Local repository validation green; hardware/Nightly acceptance pending |
 | compute01 cache receipt |  |  |  |
 | compute02 cache receipt |  |  |  |
 | Final 28-runner inventory |  |  |  |

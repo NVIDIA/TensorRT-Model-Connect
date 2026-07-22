@@ -18,6 +18,13 @@ from pathlib import Path
 
 from .context import CiContext
 from .model_proof import ModelProofRequest
+from .model_proof_security import (
+    HOST_SECURITY_EVIDENCE,
+    HUGGING_FACE_CREDENTIAL_ENVIRONMENT,
+    RUNTIME_SECURITY_EVIDENCE,
+    enforce_runtime_security_policy,
+    host_security_evidence,
+)
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
 from .process import CiError
 from .task_eval import TaskEvalRunner
@@ -27,6 +34,7 @@ class ProofStatus:
     """Persist the status of each proof stage for strict HTML rendering."""
 
     STEPS = {
+        "runtime_security": "host-security-policy.json, runtime-security.json",
         "hf_cache_isolation": "hf-cache-repos.json",
         "model_reference_isolation": "selection.json",
         "projection_validation": "source-projection.json, selection.json",
@@ -120,16 +128,22 @@ class ModelProofInnerPipeline:
         self.artifacts = Path("/artifacts")
         self.status: ProofStatus | None = None
         self.selection: ModelProofSelection | None = None
+        self.runtime_security: dict[str, object] | None = None
 
     def run(self) -> None:
         validation_rc = 0
         error: BaseException | None = None
         try:
+            self._validate_runtime_security()
             self._prepare()
             lease = self._validate_gpu_lease()
             self.status = ProofStatus(
                 self.artifacts / "model-proof-status.json", self.request, lease
             )
+            self.status.step("runtime_security", "passed")
+            self.status.fact("runtime_security", "active-network-none-probes-passed")
+            self.status.fact("runtime_security_evidence", RUNTIME_SECURITY_EVIDENCE)
+            self.status.fact("host_security_policy_evidence", HOST_SECURITY_EVIDENCE)
             count = self._validate_hf_cache()
             self.status.step("hf_cache_isolation", "passed")
             self.status.fact("hf_cache_isolation", "selected-repositories-only")
@@ -153,6 +167,26 @@ class ModelProofInnerPipeline:
             raise error
         if report_rc:
             raise CiError(f"model proof report evidence validation failed (exit {report_rc})")
+
+    def _validate_runtime_security(self) -> None:
+        """Prove credentials and egress are absent before running proof commands."""
+
+        try:
+            self.runtime_security = enforce_runtime_security_policy(
+                self.context.env,
+                self.artifacts / HOST_SECURITY_EVIDENCE,
+                self.artifacts / RUNTIME_SECURITY_EVIDENCE,
+            )
+        finally:
+            # A malformed image or invocation may expose a forbidden variable.
+            # Remove it before failure reporting can launch another subprocess.
+            for environment in (
+                self.context.env,
+                self.context.commands.env,
+                os.environ,
+            ):
+                for name in HUGGING_FACE_CREDENTIAL_ENVIRONMENT:
+                    environment.pop(name, None)
 
     def _prepare(self) -> None:
         if self.request.output_dir != Path("/artifacts"):
@@ -385,6 +419,7 @@ class ModelProofInnerPipeline:
         self._run_python_tests(payload)
         verification = self._run_e2e(payload)
         self._run_task_eval(runtime_model)
+        self._revalidate_runtime_security_evidence()
         digest = hashlib.sha256(dso.read_bytes()).hexdigest()
         proof = {
             "schema_version": 1,
@@ -418,6 +453,10 @@ class ModelProofInnerPipeline:
             "sibling_model_count": 0,
             "model_dso_count": 1,
             "network": "disabled",
+            "runtime_security": "active-network-none-probes-passed",
+            "runtime_security_evidence": RUNTIME_SECURITY_EVIDENCE,
+            "host_security_policy_evidence": HOST_SECURITY_EVIDENCE,
+            "hugging_face_credentials": "absent",
             "plugin_search": "strict",
             "hf_cache_isolation": "selected-repositories-only",
             "hf_cache_repository_count": len(
@@ -434,6 +473,27 @@ class ModelProofInnerPipeline:
         (self.artifacts / "proof.json").write_text(
             json.dumps(proof, indent=2) + "\n", encoding="utf-8"
         )
+
+    def _revalidate_runtime_security_evidence(self) -> None:
+        """Reject proof code that damaged the trusted boundary evidence."""
+
+        assert self.status and self.runtime_security is not None
+        try:
+            runtime = json.loads(
+                (self.artifacts / RUNTIME_SECURITY_EVIDENCE).read_text(encoding="utf-8")
+            )
+            host = json.loads(
+                (self.artifacts / HOST_SECURITY_EVIDENCE).read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            self.status.step("runtime_security", "failed")
+            raise CiError("model-proof security evidence is missing or invalid") from error
+        if runtime != self.runtime_security or runtime.get("passed") is not True:
+            self.status.step("runtime_security", "failed")
+            raise CiError("model-proof runtime security evidence changed during the proof")
+        if host != host_security_evidence({}):
+            self.status.step("runtime_security", "failed")
+            raise CiError("model-proof host security evidence changed during the proof")
 
     def _run_task_eval(self, runtime_model: str) -> None:
         assert self.status
@@ -649,6 +709,15 @@ class ModelProofInnerPipeline:
             }
             self.status = ProofStatus(
                 self.artifacts / "model-proof-status.json", self.request, lease
+            )
+            security_path = self.artifacts / RUNTIME_SECURITY_EVIDENCE
+            try:
+                security = json.loads(security_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                security = {}
+            self.status.step(
+                "runtime_security",
+                "passed" if security.get("passed") is True else "failed",
             )
         self.status.finalize_validation(validation_rc, self.artifacts)
         result = self.context.run(

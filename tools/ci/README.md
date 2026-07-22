@@ -112,26 +112,32 @@ python3 -m tools.ci model-proof \
 
 The host half, `ModelProofRunner`, performs trusted setup:
 
-1. Create a positive source projection with `tools/model_ci.py project`.
-2. Validate that the projection contains the requested model and approved
+1. Reject inherited Hugging Face credential variables and emit a value-free
+   host policy attestation before any checkout or host subprocess.
+2. Create a positive source projection with `tools/model_ci.py project`.
+3. Validate that the projection contains the requested model and approved
    platform files, but no peer model source.
-3. Select the model-owned runtime, Python tests, E2E cases, resource class, and
+4. Select the model-owned runtime, Python tests, E2E cases, resource class, and
    optional reference checkout.
-4. Warm only the selected Hugging Face repositories and reflink them into a
+5. Validate the selected Hugging Face repositories in the node-local cache
+   without network access, then reflink only those repositories into a
    proof-private cache view.
-5. Acquire either shared GPU slots or a whole GPU through `GpuLease`.
-6. Start a read-only, network-disabled proof container.
+6. Acquire either shared GPU slots or a whole GPU through `GpuLease`.
+7. Start a read-only, network-disabled proof container.
 
 The container half, `ModelProofInnerPipeline`, then runs linearly:
 
-1. Revalidate projection, cache, reference, and GPU-lease evidence.
-2. Configure a new build directory from projected source.
-3. Build the requested model plugin DSO once.
-4. Verify that only the requested model DSO was produced and loaded.
-5. Run model-owned C++ and Python tests.
-6. Run the model-owned E2E inference and reference comparison.
-7. Run eligible nightly task evaluation when the suite is `nightly`.
-8. Generate `proof.json`, status evidence, logs, and the per-model HTML report.
+1. Assert all Hugging Face credential variables/files are absent and actively
+   prove both DNS and direct numeric HTTPS transport are blocked.
+2. Revalidate projection, cache, reference, and GPU-lease evidence.
+3. Configure a new build directory from projected source.
+4. Build the requested model plugin DSO once.
+5. Verify that only the requested model DSO was produced and loaded.
+6. Run model-owned C++ and Python tests.
+7. Run the model-owned E2E inference and reference comparison.
+8. Run eligible nightly task evaluation when the suite is `nightly`.
+9. Revalidate the security evidence, then generate `proof.json`, status logs,
+   and the per-model HTML report.
 
 Failure at any step produces a fallback status and HTML artifact before the job
 fails. The L0 premerge matrix uses fail-fast so the first failing model cancels
@@ -146,6 +152,11 @@ per-model artifacts and generates one report. Certification checks require:
 - exactly the expected model set;
 - the pinned source revision and requested suite;
 - a passing proof for every model;
+- one schema-v3 GPU lease per model, bound to the exact workflow run, artifact
+  attempt, and reusable-workflow job, with validated runner, node, hostname,
+  GPU UUID/index, slot, and lock namespace;
+- stable runner/node/GPU identity and no overlapping duplicate slot or runner
+  ownership across the matrix;
 - no missing report sections or evidence.
 
 The report is an Actions artifact. GitHub Pages remains reserved for project
@@ -188,6 +199,7 @@ selection and breadth differ.
 | `cache_warm_receipt.py` | Certify and reconcile per-node cache readiness | Host and GitHub-hosted verification |
 | `model_proof_selection.py` | Resolve and validate one model's proof contract | Projected source |
 | `model_proof.py` | Prepare caches, projection, lease, and proof container | Trusted host |
+| `model_proof_security.py` | Prove credentials and egress are absent without recording secrets | Host and hermetic container |
 | `model_proof_inner.py` | Build, test, compare, and report one model | Hermetic container |
 | `task_eval.py` | Prepare and run eligible nightly ETTh1 parity | Host and container |
 
@@ -483,20 +495,33 @@ the producing class remains the source of truth for optional evidence fields.
   IDs, slots per GPU, lock directory, timeout, and poll interval from the
   environment.
 - **Outputs:** An acquired `GpuLease`, lock files under
-  `TRTMC_MODEL_PROOF_GPU_LOCK_DIR`, and evidence shaped as:
+  `TRTMC_MODEL_PROOF_GPU_LOCK_DIR`, and schema-v3 evidence whose selected
+  fields are shaped as:
 
   ```json
   {
-    "schema_version": 2,
+    "schema_version": 3,
     "model": "qwen3_5",
     "source_revision": "<commit>",
+    "run_id": "123456",
+    "run_attempt": "1",
+    "job_id": "prove",
+    "runner_name": "gb300-proof-00",
     "node_id": "gb300-node",
+    "hostname": "gb300-host",
     "gpu_uuid": "GPU-...",
     "gpu_id": "2",
+    "gpu_index": "2",
     "gpu_slot": 1,
+    "gpu_slots": [1],
     "gpu_slot_ids": [1],
     "slots_per_gpu": 4,
-    "resource_class": "shared"
+    "gpu_slots_per_device": 4,
+    "resource_class": "shared",
+    "gpu_resource_class": "shared",
+    "lock_namespace": "<sha256>",
+    "acquired_at": "<timezone-aware timestamp>",
+    "released_at": "<timezone-aware timestamp>"
   }
   ```
 
@@ -511,15 +536,26 @@ the producing class remains the source of truth for optional evidence fields.
   dynamically selected exclusive GPU.
 - **Inputs:** Manual shared-capacity or exclusive-safety mode, an expected
   shared-slot count, runner-local GPU and lock policy, the existing CI image,
-  and an absolute UTC barrier for shared mode.
-- **Outputs:** Shared mode proves peak concurrency, unique first-wave slot
-  tuples, dynamic per-node capacity, and queued extra work. Exclusive mode
-  proves both leases own every configured slot, container UUID identity,
-  same-GPU non-overlap, and resumption after the primary release.
+  an absolute UTC barrier for shared mode, and a trusted topology contract.
+  The minimal contract declares only acceptance facts: generic
+  `trtmc-node-*` labels, allowed GPU indices, and slots per GPU. Per-node and
+  fleet GPU counts/capacities are derived, so operators cannot enter
+  contradictory totals.
+- **Outputs:** Shared and exclusive modes bind every lease record to the actual
+  worker job ID `exercise`. Shared mode also binds every receipt to the
+  canonical SHA-256 of the topology contract and proves peak concurrency,
+  unique first-wave slot tuples, exact
+  GPU-index-to-UUID identity, exact per-node GPU index/count/capacity, exact
+  fleet GPU count/capacity, and queued extra work. Exclusive mode proves both
+  leases own every configured slot, container UUID identity, same-GPU
+  non-overlap, and resumption after the primary release.
 - **Boundary:** It is an explicit admission canary only. It does not discover or
   label runners, warm model caches, run model code, or alter normal CI routing.
   Exclusive mode proves the scheduler-selected node only; generic GitHub labels
-  cannot guarantee which fleet node receives that manual job.
+  cannot guarantee which fleet node receives that manual job. The topology
+  contract is a required dispatch input, not a repository capacity variable or
+  hostname routing table; adding nodes does not require changing this helper or
+  the production scheduler.
 
 ### `cache_lock.py`
 
@@ -534,8 +570,10 @@ the producing class remains the source of truth for optional evidence fields.
 
 ### `discover_cache_anchors.py`
 
-- **Functionality / units:** Validates explicit runner labels and produces one
-  sorted cache-warm matrix row per admitted GPU node.
+- **Functionality / units:** Validates explicit runner labels, requires every
+  production node to have exactly one anchor, and produces one sorted
+  cache-warm matrix row per online anchor. This includes a staged anchor-only
+  node so its cache can be certified before production admission.
 - **Inputs:** Paginated GitHub repository-runner inventory JSON containing
   runner IDs, names, status, and labels.
 - **Outputs:** `{\"include\": [{\"node_label\": str,
@@ -548,12 +586,21 @@ the producing class remains the source of truth for optional evidence fields.
 
 - **Functionality / units:** Certifies one node's online warm plus
   network-disabled local-only verification, then reconciles all node receipts.
-- **Inputs:** Structured warm/verify summaries, trusted workflow identity
-  environment, the discovered anchor matrix, and downloaded receipt JSON.
-- **Outputs:** Atomic per-node `cache-warm-receipt.json` files and one fleet
-  readiness summary with common source, plan, and resolved-cache digests.
+- **Inputs:** Structured warm/verify summaries, trusted workflow run, attempt,
+  job, node, runner, and source identity, the discovered anchor matrix, and
+  downloaded receipt JSON.
+- **Outputs:** Atomic schema-v2 per-node `cache-warm-receipt.json` files and one
+  fleet readiness summary with an exact field set; validated counts and ordered
+  timestamps; canonical host cache-root, host Hub-cache, and lock paths; and
+  common source, plan, and resolved-cache digests. The local-only input summary
+  instead names the fixed read-only container path `/hf-cache/hub`.
+  Verification rejects old receipt schemas and binds every receipt to the
+  current run, attempt, job, and certified revision.
 - **Boundary:** It validates evidence after cache work. It does not discover
-  runners, download dependencies, or repair a cache.
+  runners, download dependencies, or repair a cache. Receipts are intentionally
+  bound to one exact workflow attempt; after a partial Nightly cache-warm
+  failure, use **Re-run all jobs**, not **Re-run failed jobs**, so every node
+  emits a receipt for the same new attempt.
 
 ### `model_proof_selection.py`
 
@@ -597,6 +644,22 @@ the producing class remains the source of truth for optional evidence fields.
 - **Boundary:** This is the trusted host/security boundary. It may read shared
   caches and Docker state, but model build and inference occur only in the
   network-disabled inner container.
+
+### `model_proof_security.py`
+
+- **Functionality / units:** Rejects inherited `HF_TOKEN`,
+  `HUGGING_FACE_HUB_TOKEN`, and `HF_TOKEN_PATH`; validates the host attestation;
+  checks known token-file locations; and actively proves DNS plus direct numeric
+  HTTPS transport are blocked.
+- **Inputs:** The current host or container environment, the run-owned host
+  attestation path, the runtime evidence path, and fixed non-secret probe targets.
+- **Outputs:** Atomic `host-security-policy.json` and `runtime-security.json`
+  records containing only checked policy names, result codes, and pass/fail state.
+  Credential values, token contents, and host-specific token paths are never read
+  or serialized.
+- **Boundary:** It owns credential and network-isolation proof only. Projection,
+  cache copying, GPU leases, model execution, and report rendering remain with
+  the surrounding model-proof modules.
 
 ### `model_proof_inner.py`
 
@@ -656,6 +719,7 @@ The orchestration favors small files over hidden global state:
 | `impact.json` | `ImpactAnalyzer` | Selective unit/E2E policy |
 | `selection.json` | `ModelProofSelector` | Inner model proof |
 | `gpu-lease.json` | `GpuLease` | Inner lease validation and report |
+| `host-security-policy.json`, `runtime-security.json` | Host and inner security gates | Final proof and artifact audit |
 | `proof.json` | Inner model proof | Per-model and combined certification |
 | `model-proof-report.html` | Report generator | Actions artifact and combined report |
 
@@ -696,11 +760,32 @@ not remove selected models or tests.
 Fast documentation and orchestration checks:
 
 ```bash
-python3 -m ruff check tools/ci tests/tools/test_github_actions_ci.py
-PYTHONPATH=python:. python3 -m pytest \
+python3 -m ruff check --config ruff.toml \
+  tools/ci/cache_warm_receipt.py tools/ci/capacity_canary.py \
+  tools/ci/gpu_lease.py tools/ci/model_proof.py \
+  tools/ci/model_proof_inner.py tools/ci/model_proof_security.py \
+  scripts/generate_model_proof_report.py \
+  tests/tools/test_cache_warm_receipt.py tests/tools/test_capacity_canary.py \
+  tests/tools/test_generate_model_proof_report.py \
   tests/tools/test_github_actions_ci.py \
-  tests/tools/test_schedule_e2e.py \
-  tests/tools/test_model_proof_runner.py -q
+  tests/tools/test_model_proof_runner.py \
+  tests/tools/test_model_proof_security.py
+PYTHONPATH=python:. python3 -m pytest \
+  tests/tools/test_cache_lock.py \
+  tests/tools/test_cache_warm_receipt.py \
+  tests/tools/test_capacity_canary.py \
+  tests/tools/test_ci_container_secrets.py \
+  tests/tools/test_discover_cache_anchors.py \
+  tests/tools/test_generate_model_proof_report.py \
+  tests/tools/test_github_actions_ci.py \
+  tests/tools/test_model_proof_runner.py \
+  tests/tools/test_model_proof_security.py \
+  tests/tools/test_warm_hf_cache_static.py -q
+git diff --check
+actionlint -ignore 'label "trtmc-cache-anchor" is unknown' \
+  .github/workflows/nightly.yml .github/workflows/trtmc-ci.yml \
+  .github/workflows/model-proof.yml \
+  .github/workflows/model-proof-capacity-canary.yml
 ```
 
 Use the container-backed commands for environment-sensitive build, GPU, or E2E

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import struct
@@ -12,8 +13,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 
 REVISION = "a" * 40
+
+
+def _test_gpu_uuid(owner: str) -> str:
+    value = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:32]
+    return f"GPU-{value[:8]}-{value[8:12]}-{value[12:16]}-{value[16:20]}-{value[20:32]}"
 
 
 def _import_composer():
@@ -181,11 +189,28 @@ def _write_part(
     (root / "gpu-lease.json").write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 3,
                 "model": owner,
                 "source_revision": REVISION,
+                "run_id": "42",
+                "run_attempt": str(attempt),
+                "job_id": "prove",
+                "runner_name": f"runner-{owner}",
+                "node_id": f"node-{owner}",
+                "hostname": f"host-{owner}",
                 "gpu_id": "1",
-                **gpu_fields,
+                "gpu_index": "1",
+                "gpu_uuid": _test_gpu_uuid(owner),
+                "gpu_slot": 0,
+                "gpu_slots": [0],
+                "gpu_slot_ids": [0],
+                "slots_per_gpu": 4,
+                "gpu_slots_per_device": 4,
+                "resource_class": "shared",
+                "gpu_resource_class": "shared",
+                "lock_namespace": hashlib.sha256(f"node-{owner}".encode("utf-8")).hexdigest(),
+                "acquired_at": "2026-07-21T12:00:00+00:00",
+                "released_at": "2026-07-21T12:01:00+00:00",
             }
         )
         + "\n",
@@ -262,6 +287,10 @@ def _run(
         raw_expected,
         "--revision",
         REVISION,
+        "--run-id",
+        "42",
+        "--expected-job-id",
+        "prove",
         "--suite",
         suite,
         "--project-dir",
@@ -307,6 +336,220 @@ def test_combines_audio_and_visual_proofs_in_old_style_report(tmp_path: Path) ->
     assert status["expected_count"] == 2
     assert status["result_count"] == 2
     assert [item["status"] for item in status["models"]] == ["passed", "passed"]
+
+
+def test_combined_status_records_authenticated_gpu_lease_identity(tmp_path: Path) -> None:
+    root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+
+    rc, _output, status_path = _run(tmp_path, ["alpha"])
+
+    assert rc == 0
+    status = json.loads(status_path.read_text(encoding="utf-8"))
+    assert status["workflow_run_id"] == "42"
+    assert status["workflow_job_id"] == "prove"
+    assert status["gpu_lease_count"] == 1
+    lease = status["gpu_leases"][0]
+    source = json.loads((root / "gpu-lease.json").read_text(encoding="utf-8"))
+    for field in (
+        "model",
+        "run_id",
+        "job_id",
+        "runner_name",
+        "node_id",
+        "hostname",
+        "gpu_index",
+        "gpu_uuid",
+        "gpu_slot_ids",
+        "slots_per_gpu",
+        "resource_class",
+        "lock_namespace",
+        "acquired_at",
+        "released_at",
+    ):
+        assert lease[field] == source[field]
+    assert lease["run_attempt"] == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("schema_version", 2, "GPU lease schema_version"),
+        ("run_id", "41", "GPU lease run_id"),
+        ("run_attempt", "2", "GPU lease run_attempt"),
+        ("job_id", "other-job", "GPU lease job_id"),
+        ("runner_name", "", "GPU lease runner_name"),
+        ("node_id", "../node", "GPU lease node_id"),
+        ("hostname", "host\nname", "GPU lease hostname"),
+        ("gpu_index", "01", "GPU lease gpu_index"),
+        ("gpu_uuid", "GPU-not-a-uuid", "GPU lease gpu_uuid"),
+        ("slots_per_gpu", True, "slots-per-GPU evidence"),
+        ("gpu_slot_ids", [True], "GPU lease gpu_slot_ids"),
+        ("lock_namespace", "short", "GPU lease lock_namespace"),
+        ("acquired_at", "2026-07-21T12:00:00", "acquired_at has no timezone"),
+        (
+            "released_at",
+            "2026-07-21T11:59:00+00:00",
+            "released_at precedes acquired_at",
+        ),
+        (
+            "released_at",
+            "2026-07-21T12:00:00+00:00",
+            "zero-length ownership interval",
+        ),
+    ],
+)
+def test_combined_report_rejects_malformed_gpu_lease_evidence(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    lease_path = root / "gpu-lease.json"
+    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+    lease[field] = value
+    lease_path.write_text(json.dumps(lease), encoding="utf-8")
+
+    rc, _output, status_path = _run(tmp_path, ["alpha"])
+
+    assert rc == 2
+    issues = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
+    assert message in issues
+
+
+def _copy_lease_topology(source: Path, destination: Path) -> None:
+    source_lease = json.loads((source / "gpu-lease.json").read_text(encoding="utf-8"))
+    destination_path = destination / "gpu-lease.json"
+    destination_lease = json.loads(destination_path.read_text(encoding="utf-8"))
+    for field in (
+        "node_id",
+        "hostname",
+        "gpu_id",
+        "gpu_index",
+        "gpu_uuid",
+        "gpu_slot",
+        "gpu_slots",
+        "gpu_slot_ids",
+        "slots_per_gpu",
+        "gpu_slots_per_device",
+        "lock_namespace",
+    ):
+        destination_lease[field] = source_lease[field]
+    destination_path.write_text(json.dumps(destination_lease), encoding="utf-8")
+
+
+def test_combined_report_rejects_overlapping_duplicate_gpu_slot(tmp_path: Path) -> None:
+    alpha = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    beta = _write_part(tmp_path / "parts", "beta", "beta-case")
+    _copy_lease_topology(alpha, beta)
+
+    rc, _output, status_path = _run(tmp_path, ["alpha", "beta"])
+
+    assert rc == 2
+    issues = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
+    assert "overlapping GPU leases duplicate slot ownership" in issues
+
+
+def test_combined_report_allows_non_overlapping_reuse_of_one_gpu_slot(
+    tmp_path: Path,
+) -> None:
+    alpha = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    beta = _write_part(tmp_path / "parts", "beta", "beta-case")
+    _copy_lease_topology(alpha, beta)
+    alpha_lease = json.loads((alpha / "gpu-lease.json").read_text(encoding="utf-8"))
+    beta_path = beta / "gpu-lease.json"
+    beta_lease = json.loads(beta_path.read_text(encoding="utf-8"))
+    beta_lease["runner_name"] = alpha_lease["runner_name"]
+    beta_lease["acquired_at"] = alpha_lease["released_at"]
+    beta_lease["released_at"] = "2026-07-21T12:02:00+00:00"
+    beta_path.write_text(json.dumps(beta_lease), encoding="utf-8")
+
+    rc, _output, status_path = _run(tmp_path, ["alpha", "beta"])
+
+    assert rc == 0
+    assert json.loads(status_path.read_text(encoding="utf-8"))["outcome"] == "passed"
+
+
+def test_combined_report_rejects_inconsistent_node_identity(tmp_path: Path) -> None:
+    alpha = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    beta = _write_part(tmp_path / "parts", "beta", "beta-case")
+    alpha_lease = json.loads((alpha / "gpu-lease.json").read_text(encoding="utf-8"))
+    beta_path = beta / "gpu-lease.json"
+    beta_lease = json.loads(beta_path.read_text(encoding="utf-8"))
+    beta_lease["node_id"] = alpha_lease["node_id"]
+    beta_lease["acquired_at"] = alpha_lease["released_at"]
+    beta_lease["released_at"] = "2026-07-21T12:02:00+00:00"
+    beta_path.write_text(json.dumps(beta_lease), encoding="utf-8")
+
+    rc, _output, status_path = _run(tmp_path, ["alpha", "beta"])
+
+    assert rc == 2
+    issues = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
+    assert "maps to multiple hostname/lock namespaces" in issues
+
+
+def test_combined_report_rejects_inconsistent_node_slots_per_gpu(tmp_path: Path) -> None:
+    alpha = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    beta = _write_part(tmp_path / "parts", "beta", "beta-case")
+    _copy_lease_topology(alpha, beta)
+    for filename in (
+        "model-proof-status.json",
+        "proof.json",
+        "selection.json",
+        "gpu-lease.json",
+    ):
+        path = beta / filename
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["gpu_slots_per_device"] = 8
+        if filename == "gpu-lease.json":
+            payload["slots_per_gpu"] = 8
+            payload["acquired_at"] = "2026-07-21T12:01:00+00:00"
+            payload["released_at"] = "2026-07-21T12:02:00+00:00"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    rc, _output, status_path = _run(tmp_path, ["alpha", "beta"])
+
+    assert rc == 2
+    issues = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
+    assert "maps to multiple slots-per-GPU values" in issues
+
+
+def test_combined_report_rejects_one_runner_claiming_overlapping_jobs(
+    tmp_path: Path,
+) -> None:
+    alpha = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    beta = _write_part(tmp_path / "parts", "beta", "beta-case")
+    alpha_lease = json.loads((alpha / "gpu-lease.json").read_text(encoding="utf-8"))
+    beta_path = beta / "gpu-lease.json"
+    beta_lease = json.loads(beta_path.read_text(encoding="utf-8"))
+    beta_lease["runner_name"] = alpha_lease["runner_name"]
+    beta_path.write_text(json.dumps(beta_lease), encoding="utf-8")
+
+    rc, _output, status_path = _run(tmp_path, ["alpha", "beta"])
+
+    assert rc == 2
+    issues = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
+    assert "overlapping GPU leases claim the same runner" in issues
+
+
+def test_combined_report_rejects_one_runner_moving_between_nodes(
+    tmp_path: Path,
+) -> None:
+    alpha = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    beta = _write_part(tmp_path / "parts", "beta", "beta-case")
+    alpha_lease = json.loads((alpha / "gpu-lease.json").read_text(encoding="utf-8"))
+    beta_path = beta / "gpu-lease.json"
+    beta_lease = json.loads(beta_path.read_text(encoding="utf-8"))
+    beta_lease["runner_name"] = alpha_lease["runner_name"]
+    beta_lease["acquired_at"] = alpha_lease["released_at"]
+    beta_lease["released_at"] = "2026-07-21T12:02:00+00:00"
+    beta_path.write_text(json.dumps(beta_lease), encoding="utf-8")
+
+    rc, _output, status_path = _run(tmp_path, ["alpha", "beta"])
+
+    assert rc == 2
+    issues = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
+    assert "maps to multiple node/physical identities" in issues
 
 
 def test_nightly_report_uses_nightly_title(tmp_path: Path) -> None:
@@ -734,6 +977,10 @@ def test_exclusive_gpu_proof_requires_every_slot_and_matching_ledgers(
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["gpu_resource_class"] = "exclusive_gpu"
         payload["gpu_slot_ids"] = [0, 1, 2, 3]
+        if filename == "gpu-lease.json":
+            payload["resource_class"] = "exclusive_gpu"
+            payload["gpu_slots"] = [0, 1, 2, 3]
+            payload["gpu_slot"] = None
         path.write_text(json.dumps(payload), encoding="utf-8")
 
     rc, _output, status_path = _run(tmp_path, ["alpha"])

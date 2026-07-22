@@ -16,6 +16,7 @@ machine-readable status have been written.
 from __future__ import annotations
 
 import argparse
+import datetime
 import html
 import json
 import re
@@ -33,6 +34,12 @@ _ARTIFACT_NAME_RE = re.compile(
 )
 _UPSTREAM_NAME_RE = re.compile(r"[a-z][a-z0-9_-]*")
 _UPSTREAM_RESULT_RE = re.compile(r"[a-z][a-z0-9_-]*")
+_SAFE_INFRA_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}")
+_GPU_UUID_RE = re.compile(
+    r"GPU-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+)
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _MAX_EMBED_BYTES = 32 * 1024 * 1024
 
 
@@ -332,6 +339,221 @@ def _check_equal(issues: list[str], model: str, label: str, actual: Any, expecte
         issues.append(f"{model}: {label} must be {expected!r}, found {actual!r}")
 
 
+def _parse_lease_timestamp(
+    value: object,
+    *,
+    model: str,
+    field: str,
+    issues: list[str],
+) -> datetime.datetime | None:
+    if not isinstance(value, str) or not value:
+        issues.append(f"{model}: GPU lease {field} is not a non-empty ISO-8601 timestamp")
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        issues.append(f"{model}: GPU lease {field} is not an ISO-8601 timestamp")
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        issues.append(f"{model}: GPU lease {field} has no timezone")
+        return None
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _validate_lease_evidence(
+    lease: dict[str, Any],
+    *,
+    model: str,
+    revision: str,
+    run_id: str,
+    expected_job_id: str,
+    artifact_attempt: int,
+    proof: dict[str, Any],
+    issues: list[str],
+) -> dict[str, Any] | None:
+    """Validate one runner-authored lease and return a normalized receipt."""
+
+    initial_issue_count = len(issues)
+    expected = {
+        "schema_version": 3,
+        "model": model,
+        "source_revision": revision,
+        "run_id": run_id,
+        "run_attempt": str(artifact_attempt),
+        "job_id": expected_job_id,
+        "gpu_id": proof.get("gpu_id"),
+        "resource_class": proof.get("gpu_resource_class"),
+        "gpu_resource_class": proof.get("gpu_resource_class"),
+        "gpu_slot_ids": proof.get("gpu_slot_ids"),
+        "gpu_slots_per_device": proof.get("gpu_slots_per_device"),
+    }
+    for field, wanted in expected.items():
+        _check_equal(issues, model, f"GPU lease {field}", lease.get(field), wanted)
+
+    for field in ("job_id", "runner_name", "node_id", "hostname"):
+        value = lease.get(field)
+        if not isinstance(value, str) or _SAFE_INFRA_ID_RE.fullmatch(value) is None:
+            issues.append(
+                f"{model}: GPU lease {field} is not a safe non-empty infrastructure identifier"
+            )
+
+    gpu_index = lease.get("gpu_index")
+    if (
+        not isinstance(gpu_index, str)
+        or not gpu_index.isdigit()
+        or str(int(gpu_index)) != gpu_index
+        or lease.get("gpu_id") != gpu_index
+    ):
+        issues.append(f"{model}: GPU lease gpu_index is not a canonical GPU index")
+    gpu_uuid = lease.get("gpu_uuid")
+    if not isinstance(gpu_uuid, str) or _GPU_UUID_RE.fullmatch(gpu_uuid) is None:
+        issues.append(f"{model}: GPU lease gpu_uuid is missing or malformed")
+
+    lock_namespace = lease.get("lock_namespace")
+    if not isinstance(lock_namespace, str) or _SHA256_RE.fullmatch(lock_namespace) is None:
+        issues.append(f"{model}: GPU lease lock_namespace is missing or malformed")
+
+    slots_per_gpu = lease.get("slots_per_gpu")
+    gpu_slots = lease.get("gpu_slots")
+    gpu_slot_ids = lease.get("gpu_slot_ids")
+    if (
+        not isinstance(slots_per_gpu, int)
+        or isinstance(slots_per_gpu, bool)
+        or not 1 <= slots_per_gpu <= 16
+        or lease.get("gpu_slots_per_device") != slots_per_gpu
+    ):
+        issues.append(f"{model}: GPU lease slots-per-GPU evidence is inconsistent")
+    valid_slots = (
+        isinstance(gpu_slot_ids, list)
+        and bool(gpu_slot_ids)
+        and all(isinstance(slot, int) and not isinstance(slot, bool) for slot in gpu_slot_ids)
+        and gpu_slot_ids == sorted(set(gpu_slot_ids))
+        and isinstance(slots_per_gpu, int)
+        and not isinstance(slots_per_gpu, bool)
+        and all(0 <= slot < slots_per_gpu for slot in gpu_slot_ids)
+        and gpu_slots == gpu_slot_ids
+    )
+    if not valid_slots:
+        issues.append(f"{model}: GPU lease slot evidence is inconsistent")
+    elif lease.get("resource_class") == "shared":
+        if len(gpu_slot_ids) != 1 or lease.get("gpu_slot") != gpu_slot_ids[0]:
+            issues.append(f"{model}: shared GPU lease does not identify exactly one slot")
+    elif lease.get("resource_class") == "exclusive_gpu":
+        if gpu_slot_ids != list(range(slots_per_gpu)) or lease.get("gpu_slot") is not None:
+            issues.append(f"{model}: exclusive GPU lease does not own every slot")
+    else:
+        issues.append(f"{model}: GPU lease resource_class is unsupported")
+
+    acquired_at = _parse_lease_timestamp(
+        lease.get("acquired_at"), model=model, field="acquired_at", issues=issues
+    )
+    released_at = _parse_lease_timestamp(
+        lease.get("released_at"), model=model, field="released_at", issues=issues
+    )
+    if acquired_at is not None and released_at is not None:
+        if released_at < acquired_at:
+            issues.append(f"{model}: GPU lease released_at precedes acquired_at")
+        elif released_at == acquired_at:
+            issues.append(f"{model}: GPU lease has a zero-length ownership interval")
+
+    if len(issues) != initial_issue_count:
+        return None
+    assert isinstance(gpu_index, str)
+    assert isinstance(gpu_uuid, str)
+    assert isinstance(lock_namespace, str)
+    assert isinstance(gpu_slot_ids, list)
+    assert acquired_at is not None and released_at is not None
+    return {
+        "model": model,
+        "run_id": run_id,
+        "run_attempt": artifact_attempt,
+        "job_id": lease["job_id"],
+        "runner_name": lease["runner_name"],
+        "node_id": lease["node_id"],
+        "hostname": lease["hostname"],
+        "gpu_index": gpu_index,
+        "gpu_uuid": gpu_uuid,
+        "gpu_slot_ids": gpu_slot_ids,
+        "slots_per_gpu": slots_per_gpu,
+        "resource_class": lease["resource_class"],
+        "lock_namespace": lock_namespace,
+        "acquired_at": acquired_at.isoformat(),
+        "released_at": released_at.isoformat(),
+    }
+
+
+def _intervals_overlap(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    first_start = datetime.datetime.fromisoformat(first["acquired_at"])
+    first_end = datetime.datetime.fromisoformat(first["released_at"])
+    second_start = datetime.datetime.fromisoformat(second["acquired_at"])
+    second_end = datetime.datetime.fromisoformat(second["released_at"])
+    return first_start < second_end and second_start < first_end
+
+
+def _validate_lease_set(receipts: list[dict[str, Any]], issues: list[str]) -> None:
+    """Reject internally inconsistent topology and overlapping slot ownership."""
+
+    node_identity: dict[str, tuple[str, str]] = {}
+    hostname_nodes: dict[str, str] = {}
+    runner_identity: dict[str, tuple[str, str, str]] = {}
+    gpu_identity: dict[str, tuple[str, str]] = {}
+    node_indices: dict[tuple[str, str], str] = {}
+    node_slots_per_gpu: dict[str, int] = {}
+    for receipt in receipts:
+        model = str(receipt["model"])
+        node_id = str(receipt["node_id"])
+        hostname = str(receipt["hostname"])
+        namespace = str(receipt["lock_namespace"])
+        gpu_uuid = str(receipt["gpu_uuid"])
+        gpu_index = str(receipt["gpu_index"])
+        identity = (hostname, namespace)
+        previous_identity = node_identity.setdefault(node_id, identity)
+        if previous_identity != identity:
+            issues.append(f"{model}: node {node_id!r} maps to multiple hostname/lock namespaces")
+        previous_node = hostname_nodes.setdefault(hostname, node_id)
+        if previous_node != node_id:
+            issues.append(f"{model}: hostname {hostname!r} maps to multiple node IDs")
+        runner_name = str(receipt["runner_name"])
+        physical_identity = (node_id, hostname, namespace)
+        previous_runner_identity = runner_identity.setdefault(runner_name, physical_identity)
+        if previous_runner_identity != physical_identity:
+            issues.append(
+                f"{model}: runner {runner_name!r} maps to multiple node/physical identities"
+            )
+        previous_gpu = gpu_identity.setdefault(gpu_uuid, (node_id, gpu_index))
+        if previous_gpu != (node_id, gpu_index):
+            issues.append(f"{model}: GPU UUID {gpu_uuid!r} maps to multiple node/index pairs")
+        previous_uuid = node_indices.setdefault((node_id, gpu_index), gpu_uuid)
+        if previous_uuid != gpu_uuid:
+            issues.append(
+                f"{model}: node/index {(node_id, gpu_index)!r} maps to multiple GPU UUIDs"
+            )
+        slots_per_gpu = int(receipt["slots_per_gpu"])
+        previous_slots = node_slots_per_gpu.setdefault(node_id, slots_per_gpu)
+        if previous_slots != slots_per_gpu:
+            issues.append(f"{model}: node {node_id!r} maps to multiple slots-per-GPU values")
+
+    for index, first in enumerate(receipts):
+        for second in receipts[index + 1 :]:
+            if not _intervals_overlap(first, second):
+                continue
+            if first["runner_name"] == second["runner_name"]:
+                issues.append(
+                    "overlapping GPU leases claim the same runner "
+                    f"{first['runner_name']!r}: {first['model']!r}, {second['model']!r}"
+                )
+            same_gpu = (
+                first["node_id"] == second["node_id"] and first["gpu_uuid"] == second["gpu_uuid"]
+            )
+            shared_slots = sorted(set(first["gpu_slot_ids"]).intersection(second["gpu_slot_ids"]))
+            if same_gpu and shared_slots:
+                issues.append(
+                    "overlapping GPU leases duplicate slot ownership for "
+                    f"node={first['node_id']!r}, gpu_uuid={first['gpu_uuid']!r}, "
+                    f"slots={shared_slots}: {first['model']!r}, {second['model']!r}"
+                )
+
+
 def _missing_context(model: str, revision: str, suite: str, reason: str) -> dict[str, Any]:
     return {
         "model": model,
@@ -384,6 +606,10 @@ def compose(args: argparse.Namespace) -> int:
     parts_dir = args.parts_dir
     if not re.fullmatch(r"[0-9a-f]{40}", args.revision):
         issues.append(f"revision is not a full lowercase Git SHA: {args.revision!r}")
+    if not re.fullmatch(r"[1-9][0-9]*", args.run_id):
+        issues.append(f"workflow run ID is not a positive decimal integer: {args.run_id!r}")
+    if _SAFE_INFRA_ID_RE.fullmatch(args.expected_job_id) is None:
+        issues.append(f"expected workflow job ID is unsafe: {args.expected_job_id!r}")
     if not args.project_dir.is_dir():
         issues.append(f"project directory is missing: {args.project_dir}")
 
@@ -457,6 +683,7 @@ def compose(args: argparse.Namespace) -> int:
     certified_result_count = 0
     case_owners: dict[str, str] = {}
     model_entries: list[dict[str, Any]] = []
+    lease_receipts: list[dict[str, Any]] = []
 
     for model in expected_models:
         entries = discovered.get(model, [])
@@ -558,21 +785,18 @@ def compose(args: argparse.Namespace) -> int:
 
         lease_path = artifacts_root / str(proof.get("gpu_lease_evidence") or "")
         lease = _read_json(lease_path, f"{model}: GPU lease evidence", model_issues)
-        for field, expected in (
-            ("model", model),
-            ("source_revision", args.revision),
-            ("gpu_id", proof.get("gpu_id")),
-            ("gpu_resource_class", proof.get("gpu_resource_class")),
-            ("gpu_slot_ids", proof.get("gpu_slot_ids")),
-            ("gpu_slots_per_device", proof.get("gpu_slots_per_device")),
-        ):
-            _check_equal(
-                model_issues,
-                model,
-                f"GPU lease {field}",
-                lease.get(field),
-                expected,
-            )
+        lease_receipt = _validate_lease_evidence(
+            lease,
+            model=model,
+            revision=args.revision,
+            run_id=args.run_id,
+            expected_job_id=args.expected_job_id,
+            artifact_attempt=artifact_attempt,
+            proof=proof,
+            issues=model_issues,
+        )
+        if lease_receipt is not None:
+            lease_receipts.append(lease_receipt)
 
         report_path = artifacts_root / "model-proof-report.html"
         try:
@@ -665,6 +889,7 @@ def compose(args: argparse.Namespace) -> int:
                 "artifact_attempts": artifact_attempts.get(model, []),
                 "selected_cases": selected_cases,
                 "result_cases": result_cases,
+                "gpu_lease": lease_receipt,
                 "issues": model_issues,
             }
         )
@@ -688,6 +913,8 @@ def compose(args: argparse.Namespace) -> int:
                 "issues": [reason],
             }
         )
+
+    _validate_lease_set(lease_receipts, issues)
 
     if (
         expected_result_count is not None
@@ -732,6 +959,8 @@ def compose(args: argparse.Namespace) -> int:
         "report_kind": "combined_model_proof",
         "outcome": "failed" if issues or not output_written else "passed",
         "source_revision": args.revision,
+        "workflow_run_id": args.run_id,
+        "workflow_job_id": args.expected_job_id,
         "suite": args.suite,
         "upstream_results": upstream_results,
         "expected_models": expected_models,
@@ -749,6 +978,8 @@ def compose(args: argparse.Namespace) -> int:
             entry.get("artifact_root") is not None for entry in model_entries
         ),
         "result_count": certified_result_count,
+        "gpu_lease_count": len(lease_receipts),
+        "gpu_leases": lease_receipts,
         "issue_count": len(issues),
         "issues": issues,
         "report": args.output.name,
@@ -788,6 +1019,16 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Exact sorted nightly E2E case names keyed by ownership model.",
     )
     parser.add_argument("--revision", required=True)
+    parser.add_argument(
+        "--run-id",
+        required=True,
+        help="Exact positive GitHub Actions run ID that produced every lease receipt.",
+    )
+    parser.add_argument(
+        "--expected-job-id",
+        required=True,
+        help="Exact reusable-workflow job ID that produced every lease receipt.",
+    )
     parser.add_argument("--suite", choices=("premerge", "nightly"), required=True)
     parser.add_argument("--project-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)

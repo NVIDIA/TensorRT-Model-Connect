@@ -182,10 +182,11 @@ class GpuLease:
         if self.gpu_id is None or not self.slot_ids:
             raise CiError("GPU lease evidence requested before acquisition")
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "model": self.model,
             "source_revision": revision,
             "run_id": self.context.env.get("GITHUB_RUN_ID", "local"),
+            "run_attempt": self.context.env.get("GITHUB_RUN_ATTEMPT", "local"),
             "job_id": self.context.env.get("GITHUB_JOB", "local"),
             "runner_name": self.context.env.get("RUNNER_NAME", "local"),
             "node_id": self.node_id,

@@ -21,6 +21,11 @@ from pathlib import Path
 from .cache_lock import CacheLock
 from .context import CiContext
 from .gpu_lease import GpuLease
+from .model_proof_security import (
+    HOST_SECURITY_EVIDENCE,
+    HUGGING_FACE_CREDENTIAL_ENVIRONMENT,
+    enforce_host_security_policy,
+)
 from .model_proof_selection import ModelProofSelection, ModelProofSelector
 from .process import CiError
 from .task_eval import TaskEvalDatasetPreparer
@@ -254,11 +259,6 @@ class ModelProofRunner:
                 signal.signal(number, handler)
 
     def _run_host(self) -> None:
-        for executable in ("docker", "git", "tar"):
-            self.context.executable(executable)
-        self.revision = self.context.output(
-            ["git", "rev-parse", f"{self.request.revision}^{{commit}}"]
-        )
         output = (
             self.request.output_dir
             or Path(self.context.env.get("RUNNER_TEMP", "/tmp"))
@@ -274,6 +274,12 @@ class ModelProofRunner:
             if path.exists():
                 shutil.rmtree(path)
             path.mkdir(parents=True)
+        self._enforce_host_security_policy()
+        for executable in ("docker", "git", "tar"):
+            self.context.executable(executable)
+        self.revision = self.context.output(
+            ["git", "rev-parse", f"{self.request.revision}^{{commit}}"]
+        )
         self._project(projection)
         selection = ModelProofSelector(
             self.request.model, self.request.suite, self.revision, projection
@@ -333,6 +339,30 @@ class ModelProofRunner:
             if not (self.artifacts_dir / name).is_file():
                 raise CiError(f"model proof did not emit {name}")
         print(f"Model proof artifacts: {self.artifacts_dir}")
+
+    def _enforce_host_security_policy(self) -> None:
+        """Reject and scrub inherited HF credentials before any host subprocess."""
+
+        assert self.artifacts_dir is not None
+        present = [
+            name
+            for name in HUGGING_FACE_CREDENTIAL_ENVIRONMENT
+            if name in self.context.env
+        ]
+        try:
+            enforce_host_security_policy(
+                self.context.env, self.artifacts_dir / HOST_SECURITY_EVIDENCE
+            )
+        except BaseException:
+            if present:
+                for environment in (
+                    self.context.env,
+                    self.context.commands.env,
+                    os.environ,
+                ):
+                    for name in HUGGING_FACE_CREDENTIAL_ENVIRONMENT:
+                        environment.pop(name, None)
+            raise
 
     def _write_lease_evidence(self) -> dict[str, object]:
         assert self.lease is not None and self.artifacts_dir is not None

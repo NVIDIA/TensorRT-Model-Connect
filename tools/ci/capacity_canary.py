@@ -9,6 +9,7 @@ Boundary: manual capacity admission evidence only; this module never runs model 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -32,6 +33,9 @@ _RECEIPT_KIND = "trtmc_capacity_canary"
 _ACQUISITION_MARKER_KIND = "trtmc_capacity_canary_acquired"
 _ACQUISITION_MARKER_PREFIX = "TRTMC_CAPACITY_CANARY_ACQUIRED="
 _CAPACITY_WORKFLOW_PATH = ".github/workflows/model-proof-capacity-canary.yml"
+_CAPACITY_WORKER_JOB_ID = "exercise"
+_TOPOLOGY_KIND = "trtmc_capacity_topology"
+_NODE_LABEL_PREFIX = "trtmc-node-"
 
 
 def _positive_integer(value: str | int, name: str, *, maximum: int) -> int:
@@ -39,6 +43,153 @@ def _positive_integer(value: str | int, name: str, *, maximum: int) -> int:
     if not text.isdigit() or not 1 <= int(text) <= maximum:
         raise CiError(f"{name} must be an integer from 1 to {maximum}")
     return int(text)
+
+
+def _strict_integer(value: object, name: str, *, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise CiError(f"{name} must be an integer from {minimum} to {maximum}")
+    return value
+
+
+def normalize_topology_contract(value: Mapping[str, object]) -> dict[str, object]:
+    """Validate and canonicalize the operator-declared expected fleet topology.
+
+    Node labels are control-plane identities, not scheduling branches: the same
+    verifier accepts any future node set without source or repository-variable
+    changes. The trusted, first-attempt main workflow binds every receipt to the
+    digest of this exact contract.
+    """
+    required_fields = {
+        "schema_version",
+        "kind",
+        "slots_per_gpu",
+        "nodes",
+    }
+    if set(value) != required_fields:
+        raise CiError("topology contract fields do not match schema version 1")
+    if value.get("schema_version") != 1 or value.get("kind") != _TOPOLOGY_KIND:
+        raise CiError("topology contract schema or kind is unsupported")
+
+    slots_per_gpu = _strict_integer(
+        value.get("slots_per_gpu"),
+        "topology slots_per_gpu",
+        minimum=1,
+        maximum=16,
+    )
+    raw_nodes = value.get("nodes")
+    if not isinstance(raw_nodes, list) or not raw_nodes or len(raw_nodes) > 32:
+        raise CiError("topology nodes must be a non-empty list of at most 32 entries")
+
+    normalized_nodes: list[dict[str, object]] = []
+    node_labels: set[str] = set()
+    node_ids: set[str] = set()
+    for index, raw_node in enumerate(raw_nodes):
+        if not isinstance(raw_node, Mapping):
+            raise CiError(f"topology node {index} must be an object")
+        if set(raw_node) != {"node_label", "gpu_indices"}:
+            raise CiError(f"topology node {index} fields do not match schema version 1")
+        node_label = raw_node.get("node_label")
+        if (
+            not isinstance(node_label, str)
+            or len(node_label) > 120
+            or not node_label.startswith(_NODE_LABEL_PREFIX)
+            or _SAFE_ID.fullmatch(node_label) is None
+        ):
+            raise CiError(f"topology node {index} has an invalid node label")
+        node_id = node_label.removeprefix(_NODE_LABEL_PREFIX)
+        if not node_id or _SAFE_ID.fullmatch(node_id) is None:
+            raise CiError(f"topology node {index} has an invalid node identity")
+        if node_label in node_labels or node_id in node_ids:
+            raise CiError("topology contract contains a duplicate node identity")
+        node_labels.add(node_label)
+        node_ids.add(node_id)
+
+        raw_gpu_indices = raw_node.get("gpu_indices")
+        if (
+            not isinstance(raw_gpu_indices, list)
+            or not raw_gpu_indices
+            or len(raw_gpu_indices) > 16
+        ):
+            raise CiError(
+                f"topology node {node_label} gpu_indices must be a non-empty list "
+                "of at most 16 entries"
+            )
+        gpu_indices = [
+            _strict_integer(
+                gpu_index,
+                f"topology node {node_label} GPU index",
+                minimum=0,
+                maximum=63,
+            )
+            for gpu_index in raw_gpu_indices
+        ]
+        if gpu_indices != sorted(set(gpu_indices)):
+            raise CiError(
+                f"topology node {node_label} GPU indices must be sorted and unique"
+            )
+        normalized_nodes.append(
+            {
+                "node_label": node_label,
+                "gpu_indices": gpu_indices,
+            }
+        )
+
+    normalized_nodes.sort(key=lambda node: str(node["node_label"]))
+    gpu_count = sum(len(node["gpu_indices"]) for node in normalized_nodes)
+    capacity = gpu_count * slots_per_gpu
+    if gpu_count > 64 or capacity > 128:
+        raise CiError("derived topology exceeds 64 GPUs or 128 shared slots")
+    return {
+        "schema_version": 1,
+        "kind": _TOPOLOGY_KIND,
+        "slots_per_gpu": slots_per_gpu,
+        "nodes": normalized_nodes,
+    }
+
+
+def _topology_gpu_count(topology: Mapping[str, object]) -> int:
+    return sum(len(node["gpu_indices"]) for node in topology["nodes"])  # type: ignore[index]
+
+
+def _topology_capacity(topology: Mapping[str, object]) -> int:
+    return _topology_gpu_count(topology) * int(topology["slots_per_gpu"])
+
+
+def topology_contract_digest(value: Mapping[str, object]) -> str:
+    normalized = normalize_topology_contract(value)
+    canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _validated_topology_for_mode(
+    value: Mapping[str, object],
+    *,
+    mode: str,
+    requested_slots: int,
+) -> dict[str, object]:
+    topology = normalize_topology_contract(value)
+    requested = _positive_integer(requested_slots, "expected_slots", maximum=128)
+    capacity = _topology_capacity(topology)
+    if mode in {"shared-capacity", "exclusive-safety"}:
+        if requested != capacity:
+            raise CiError(f"{mode} expected_slots must equal topology capacity")
+    elif mode == "shared-cohort":
+        if requested > capacity:
+            raise CiError("shared-cohort expected_slots exceeds topology capacity")
+    elif mode == "cross-workflow-verify":
+        if requested * 2 != capacity:
+            raise CiError(
+                "cross-workflow expected_slots per run must equal half the topology capacity"
+            )
+    else:
+        raise CiError("unsupported canary mode for topology contract")
+    return topology
+
+
+def _validated_digest(value: object, label: str) -> str:
+    if not isinstance(value, str) or _LOCK_NAMESPACE.fullmatch(value) is None:
+        raise CiError(f"{label} must be a lowercase SHA-256 digest")
+    return value
 
 
 def capacity_matrix(expected_slots: int) -> dict[str, list[int]]:
@@ -124,16 +275,18 @@ def _receipt_from_evidence(
     expected_slots: int,
     barrier_epoch: int,
     cohort_id: str | None,
+    expected_topology_digest: str,
     worker_started_at: str,
     probe_gpu_uuid: str,
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": _RECEIPT_KIND,
         "leg_id": leg_id,
         "expected_slots": expected_slots,
         "barrier_epoch": barrier_epoch,
         "cohort_id": cohort_id,
+        "expected_topology_digest": expected_topology_digest,
         "source_revision": evidence.get("source_revision"),
         "run_id": evidence.get("run_id"),
         "job_id": evidence.get("job_id"),
@@ -160,16 +313,18 @@ def _emit_acquisition_marker(
     expected_slots: int,
     barrier_epoch: int,
     cohort_id: str | None,
+    expected_topology_digest: str,
     worker_started_at: str,
     probe_gpu_uuid: str,
 ) -> dict[str, object]:
     marker = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": _ACQUISITION_MARKER_KIND,
         "leg_id": leg_id,
         "expected_slots": expected_slots,
         "barrier_epoch": barrier_epoch,
         "cohort_id": cohort_id,
+        "expected_topology_digest": expected_topology_digest,
         "source_revision": evidence.get("source_revision"),
         "run_id": evidence.get("run_id"),
         "job_id": evidence.get("job_id"),
@@ -199,6 +354,7 @@ def hold_capacity_slot(
     leg_id: int,
     expected_slots: int,
     barrier_epoch: int,
+    expected_topology_digest: str,
     receipt_output: Path,
     cohort_id: str | None = None,
     lease_factory: Callable[..., GpuLease] = GpuLease,
@@ -213,6 +369,9 @@ def hold_capacity_slot(
         raise CiError(f"leg_id must be between 0 and {expected}")
     barrier = _positive_integer(barrier_epoch, "barrier_epoch", maximum=4_102_444_800)
     cohort = _validated_cohort_id(cohort_id, required=False)
+    topology_digest = _validated_digest(
+        expected_topology_digest, "expected_topology_digest"
+    )
     source_revision = context.env.get("GITHUB_SHA", "")
     if not source_revision:
         raise CiError("GITHUB_SHA is required for capacity-canary evidence")
@@ -247,6 +406,7 @@ def hold_capacity_slot(
             expected_slots=expected,
             barrier_epoch=barrier,
             cohort_id=cohort,
+            expected_topology_digest=topology_digest,
             worker_started_at=worker_started_at,
             probe_gpu_uuid=probed_uuid,
         )
@@ -261,6 +421,7 @@ def hold_capacity_slot(
             expected_slots=expected,
             barrier_epoch=barrier,
             cohort_id=cohort,
+            expected_topology_digest=topology_digest,
             worker_started_at=worker_started_at,
             probe_gpu_uuid=probed_uuid,
         )
@@ -379,11 +540,15 @@ def run_exclusive_safety(
     leg_id: int,
     receipt_output: Path,
     observation_seconds: int,
+    expected_topology_digest: str,
     lease_factory: Callable[..., GpuLease] = GpuLease,
     probe: Callable[..., str] = probe_container_gpu_uuid,
 ) -> dict[str, object]:
     """Prove same-GPU exclusive serialization with a real child contender."""
     observation = _positive_integer(observation_seconds, "observation_seconds", maximum=60)
+    topology_digest = _validated_digest(
+        expected_topology_digest, "expected_topology_digest"
+    )
     if leg_id < 0:
         raise CiError("leg_id must be a non-negative integer")
     source_revision = context.env.get("GITHUB_SHA", "")
@@ -504,8 +669,9 @@ def run_exclusive_safety(
         raise CiError("exclusive contender release evidence has an invalid shape")
     assert primary_record is not None
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "trtmc_exclusive_safety",
+        "expected_topology_digest": topology_digest,
         "placement_scope": "one scheduler-selected generic runner",
         "source_revision": source_revision,
         "run_id": str(primary_record.get("run_id", "")),
@@ -533,8 +699,13 @@ def _timestamp(value: object, field: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _validated_receipt(value: Mapping[str, object], *, expected_slots: int) -> dict[str, Any]:
-    if value.get("schema_version") != 1 or value.get("kind") != _RECEIPT_KIND:
+def _validated_receipt(
+    value: Mapping[str, object],
+    *,
+    expected_slots: int,
+    expected_topology_digest: str,
+) -> dict[str, Any]:
+    if value.get("schema_version") != 2 or value.get("kind") != _RECEIPT_KIND:
         raise CiError("capacity receipt schema or kind is unsupported")
     if value.get("expected_slots") != expected_slots:
         raise CiError("capacity receipt expected_slots does not match the canary")
@@ -546,6 +717,14 @@ def _validated_receipt(value: Mapping[str, object], *, expected_slots: int) -> d
         raise CiError("capacity receipt barrier_epoch must be a positive integer")
     if value.get("resource_class") != "shared":
         raise CiError("capacity receipt must describe a shared GPU slot")
+    if value.get("job_id") != _CAPACITY_WORKER_JOB_ID:
+        raise CiError("capacity receipt job_id does not match the canary worker job")
+    topology_digest = _validated_digest(
+        value.get("expected_topology_digest"),
+        "capacity receipt expected_topology_digest",
+    )
+    if topology_digest != expected_topology_digest:
+        raise CiError("capacity receipt topology digest does not match the trusted contract")
     runner_name = value.get("runner_name")
     if not isinstance(runner_name, str) or not runner_name:
         raise CiError("capacity receipt runner_name must not be empty")
@@ -555,6 +734,14 @@ def _validated_receipt(value: Mapping[str, object], *, expected_slots: int) -> d
     hostname = value.get("hostname")
     if not isinstance(hostname, str) or _SAFE_ID.fullmatch(hostname) is None:
         raise CiError("capacity receipt hostname is unsafe")
+    gpu_index = value.get("gpu_index")
+    if (
+        not isinstance(gpu_index, str)
+        or not gpu_index.isdigit()
+        or str(int(gpu_index)) != gpu_index
+        or not 0 <= int(gpu_index) <= 63
+    ):
+        raise CiError("capacity receipt gpu_index must be a canonical integer from 0 to 63")
     gpu_uuid = value.get("gpu_uuid")
     if not isinstance(gpu_uuid, str) or _GPU_UUID.fullmatch(gpu_uuid) is None:
         raise CiError("capacity receipt GPU UUID is invalid")
@@ -587,10 +774,13 @@ def _validated_receipt(value: Mapping[str, object], *, expected_slots: int) -> d
         "runner_name": runner_name,
         "node_id": node_id,
         "hostname": hostname,
+        "gpu_index": gpu_index,
+        "_gpu_index_int": int(gpu_index),
         "gpu_uuid": gpu_uuid,
         "gpu_slot": gpu_slot,
         "gpu_slots_per_device": slots_per_device,
         "lock_namespace": lock_namespace,
+        "expected_topology_digest": topology_digest,
         "_started": started,
         "_acquired": acquired,
         "_released": released,
@@ -623,11 +813,14 @@ def _validate_topology_identity(receipts: Sequence[Mapping[str, Any]]) -> None:
     node_identities: dict[str, tuple[str, str]] = {}
     hostname_nodes: dict[str, str] = {}
     gpu_nodes: dict[str, str] = {}
+    node_index_uuids: dict[tuple[str, int], str] = {}
+    node_uuid_indices: dict[tuple[str, str], int] = {}
     for receipt in receipts:
         node_id = str(receipt["node_id"])
         hostname = str(receipt["hostname"])
         lock_namespace = str(receipt["lock_namespace"])
         gpu_uuid = str(receipt["gpu_uuid"])
+        gpu_index = int(receipt["_gpu_index_int"])
 
         identity = (hostname, lock_namespace)
         previous_identity = node_identities.setdefault(node_id, identity)
@@ -641,6 +834,13 @@ def _validate_topology_identity(receipts: Sequence[Mapping[str, Any]]) -> None:
         previous_node = gpu_nodes.setdefault(gpu_uuid, node_id)
         if previous_node != node_id:
             raise CiError(f"GPU UUID {gpu_uuid} maps to multiple node IDs")
+
+        previous_uuid = node_index_uuids.setdefault((node_id, gpu_index), gpu_uuid)
+        if previous_uuid != gpu_uuid:
+            raise CiError(f"node {node_id} GPU index {gpu_index} maps to multiple UUIDs")
+        previous_index = node_uuid_indices.setdefault((node_id, gpu_uuid), gpu_index)
+        if previous_index != gpu_index:
+            raise CiError(f"node {node_id} GPU UUID {gpu_uuid} maps to multiple indices")
 
 
 def _cohort_node_summaries(
@@ -687,10 +887,120 @@ def _cohort_node_summaries(
     return summaries
 
 
+def _topology_nodes(
+    topology: Mapping[str, object],
+) -> dict[str, dict[str, object]]:
+    nodes: dict[str, dict[str, object]] = {}
+    for raw_node in topology["nodes"]:  # type: ignore[index]
+        assert isinstance(raw_node, Mapping)
+        node_label = str(raw_node["node_label"])
+        node_id = node_label.removeprefix(_NODE_LABEL_PREFIX)
+        nodes[node_id] = dict(raw_node)
+    return nodes
+
+
+def _validate_topology_member(
+    receipt: Mapping[str, Any],
+    *,
+    expected_nodes: Mapping[str, Mapping[str, object]],
+    slots_per_gpu: int,
+) -> None:
+    node_id = str(receipt["node_id"])
+    if node_id not in expected_nodes:
+        raise CiError(f"capacity receipt node {node_id} is outside the topology")
+    expected_node = expected_nodes[node_id]
+    allowed_indices = set(expected_node["gpu_indices"])  # type: ignore[arg-type]
+    if receipt["gpu_slots_per_device"] != slots_per_gpu:
+        raise CiError(f"node {node_id} receipt slots-per-GPU does not match the topology contract")
+    if receipt["_gpu_index_int"] not in allowed_indices:
+        raise CiError(
+            f"node {node_id} GPU index {receipt['_gpu_index_int']} is not allowed "
+            "by the topology contract"
+        )
+
+
+def _validate_topology_placement(
+    receipts: Sequence[Mapping[str, Any]],
+    *,
+    topology: Mapping[str, object],
+    require_exact: bool,
+) -> dict[str, dict[str, object]]:
+    """Bind observed leases to the declared node labels and GPU indices."""
+    expected_nodes = _topology_nodes(topology)
+    slots_per_gpu = int(topology["slots_per_gpu"])
+    observed_node_ids = {str(receipt["node_id"]) for receipt in receipts}
+    unexpected_nodes = sorted(observed_node_ids - set(expected_nodes))
+    if unexpected_nodes:
+        raise CiError(f"capacity receipts contain nodes outside the topology: {unexpected_nodes}")
+    if require_exact and observed_node_ids != set(expected_nodes):
+        raise CiError("capacity receipts do not cover the exact topology node set")
+
+    for receipt in receipts:
+        _validate_topology_member(
+            receipt,
+            expected_nodes=expected_nodes,
+            slots_per_gpu=slots_per_gpu,
+        )
+
+    summaries = _cohort_node_summaries(
+        receipts,
+        require_full_slot_coverage=require_exact,
+    )
+    for node_id, summary in summaries.items():
+        expected_node = expected_nodes[node_id]
+        expected_indices = list(expected_node["gpu_indices"])  # type: ignore[arg-type]
+        observed_indices = sorted(
+            {int(receipt["_gpu_index_int"]) for receipt in receipts if receipt["node_id"] == node_id}
+        )
+        summary.update(
+            {
+                "node_label": expected_node["node_label"],
+                "gpu_indices": observed_indices,
+                "expected_gpu_count": len(expected_indices),
+                "expected_capacity": len(expected_indices) * slots_per_gpu,
+            }
+        )
+        if not require_exact:
+            continue
+        if observed_indices != expected_indices:
+            raise CiError(f"node {node_id} did not expose the exact allowed GPU index set")
+        if summary["gpu_count"] != len(expected_indices):
+            raise CiError(f"node {node_id} did not expose the expected GPU count")
+        expected_capacity = len(expected_indices) * slots_per_gpu
+        if summary["capacity"] != expected_capacity:
+            raise CiError(f"node {node_id} did not expose the expected capacity")
+        if summary["runner_count"] != expected_capacity:
+            raise CiError(f"node {node_id} did not use one runner per expected slot")
+        node_receipts = [receipt for receipt in receipts if receipt["node_id"] == node_id]
+        for gpu_index in expected_indices:
+            index_receipts = [
+                receipt
+                for receipt in node_receipts
+                if receipt["_gpu_index_int"] == gpu_index
+            ]
+            gpu_uuids = {str(receipt["gpu_uuid"]) for receipt in index_receipts}
+            gpu_slots = {int(receipt["gpu_slot"]) for receipt in index_receipts}
+            if len(gpu_uuids) != 1 or gpu_slots != set(range(slots_per_gpu)):
+                raise CiError(
+                    f"node {node_id} GPU index {gpu_index} does not map to one full GPU"
+                )
+
+    if require_exact:
+        if len({str(receipt["gpu_uuid"]) for receipt in receipts}) != _topology_gpu_count(
+            topology
+        ):
+            raise CiError("capacity receipts do not contain the exact expected GPU count")
+        if len(receipts) != _topology_capacity(topology):
+            raise CiError("capacity receipts do not contain the exact expected topology capacity")
+    return summaries
+
+
 def _validated_exact_cohort(
     values: Sequence[Mapping[str, object]],
     *,
     expected_slots: int,
+    expected_topology: Mapping[str, object],
+    expected_topology_digest: str,
     expected_run_id: str | None,
     expected_revision: str | None,
     expected_barrier_epoch: int | None,
@@ -699,10 +1009,22 @@ def _validated_exact_cohort(
     expected = _positive_integer(expected_slots, "expected_slots", maximum=128)
     if len(values) != expected:
         raise CiError(f"capacity cohort requires exactly {expected} receipts, found {len(values)}")
-    receipts = [_validated_receipt(value, expected_slots=expected) for value in values]
+    receipts = [
+        _validated_receipt(
+            value,
+            expected_slots=expected,
+            expected_topology_digest=expected_topology_digest,
+        )
+        for value in values
+    ]
     if {receipt["leg_id"] for receipt in receipts} != set(range(expected)):
         raise CiError("capacity cohort receipts do not contain the exact matrix leg set")
     _validate_topology_identity(receipts)
+    _validate_topology_placement(
+        receipts,
+        topology=expected_topology,
+        require_exact=False,
+    )
 
     run_ids = {str(receipt.get("run_id", "")) for receipt in receipts}
     revisions = {str(receipt.get("source_revision", "")) for receipt in receipts}
@@ -759,15 +1081,24 @@ def verify_cohort_receipts(
     values: Sequence[Mapping[str, object]],
     *,
     expected_slots: int,
+    expected_topology: Mapping[str, object],
     expected_run_id: str | None = None,
     expected_revision: str | None = None,
     expected_barrier_epoch: int | None = None,
     expected_cohort_id: str | None = None,
 ) -> dict[str, object]:
     """Verify one exact shared cohort held every requested lease at its barrier."""
+    topology = _validated_topology_for_mode(
+        expected_topology,
+        mode="shared-cohort",
+        requested_slots=expected_slots,
+    )
+    topology_digest = topology_contract_digest(topology)
     receipts, run_id, revision, barrier_epoch, cohort_id = _validated_exact_cohort(
         values,
         expected_slots=expected_slots,
+        expected_topology=topology,
+        expected_topology_digest=topology_digest,
         expected_run_id=expected_run_id,
         expected_revision=expected_revision,
         expected_barrier_epoch=expected_barrier_epoch,
@@ -782,13 +1113,19 @@ def verify_cohort_receipts(
         "run_id": run_id,
         "source_revision": revision,
         "expected_slots": expected,
+        "expected_topology_digest": topology_digest,
+        "expected_topology": topology,
         "barrier_epoch": barrier_epoch,
         "barrier_at": datetime.fromtimestamp(barrier_epoch, tz=timezone.utc).isoformat(),
         "receipt_count": len(receipts),
         "maximum_concurrency": _maximum_concurrency(receipts),
         "runner_count": len({receipt["runner_name"] for receipt in receipts}),
         "slot_count": len({_slot_tuple(receipt) for receipt in receipts}),
-        "nodes": _cohort_node_summaries(receipts, require_full_slot_coverage=False),
+        "nodes": _validate_topology_placement(
+            receipts,
+            topology=topology,
+            require_exact=False,
+        ),
     }
 
 
@@ -873,6 +1210,7 @@ def verify_cross_workflow_receipts(
     values: Sequence[Mapping[str, object]],
     *,
     expected_slots_per_run: int,
+    expected_topology: Mapping[str, object],
     expected_run_ids: Sequence[str],
     run_metadata: Sequence[Mapping[str, object]],
     expected_repository: str,
@@ -882,6 +1220,12 @@ def verify_cross_workflow_receipts(
 ) -> dict[str, object]:
     """Verify two exact cohorts share one combined GPU-slot pool at one barrier."""
     expected = _positive_integer(expected_slots_per_run, "expected_slots_per_run", maximum=128)
+    topology = _validated_topology_for_mode(
+        expected_topology,
+        mode="cross-workflow-verify",
+        requested_slots=expected,
+    )
+    topology_digest = topology_contract_digest(topology)
     run_ids = list(expected_run_ids)
     if (
         len(run_ids) != 2
@@ -909,6 +1253,8 @@ def verify_cross_workflow_receipts(
         receipts, actual_run_id, revision, barrier_epoch, cohort_id = _validated_exact_cohort(
             run_values,
             expected_slots=expected,
+            expected_topology=topology,
+            expected_topology_digest=topology_digest,
             expected_run_id=run_id,
             expected_revision=expected_revision,
             expected_barrier_epoch=expected_barrier_epoch,
@@ -950,7 +1296,11 @@ def verify_cross_workflow_receipts(
             f"cross-workflow cohorts observed maximum concurrency {maximum}, "
             f"expected {combined_expected}"
         )
-    nodes = _cohort_node_summaries(all_receipts, require_full_slot_coverage=True)
+    nodes = _validate_topology_placement(
+        all_receipts,
+        topology=topology,
+        require_exact=True,
+    )
     if sum(int(node["capacity"]) for node in nodes.values()) != combined_expected:
         raise CiError("cross-workflow per-node capacities do not sum to the combined cohort")
 
@@ -964,6 +1314,8 @@ def verify_cross_workflow_receipts(
         "source_revision": next(iter(revisions)),
         "expected_slots_per_run": expected,
         "combined_expected_slots": combined_expected,
+        "expected_topology_digest": topology_digest,
+        "expected_topology": topology,
         "barrier_epoch": barrier_epoch,
         "barrier_at": datetime.fromtimestamp(barrier_epoch, tz=timezone.utc).isoformat(),
         "receipt_count": len(all_receipts),
@@ -980,18 +1332,37 @@ def verify_capacity_receipts(
     values: Sequence[Mapping[str, object]],
     *,
     expected_slots: int,
+    expected_topology: Mapping[str, object],
     expected_run_id: str | None = None,
     expected_revision: str | None = None,
     expected_barrier_epoch: int | None = None,
 ) -> dict[str, object]:
     """Verify the full first wave, the queued extra leg, and dynamic node capacity."""
     expected = _positive_integer(expected_slots, "expected_slots", maximum=128)
+    topology = _validated_topology_for_mode(
+        expected_topology,
+        mode="shared-capacity",
+        requested_slots=expected,
+    )
+    topology_digest = topology_contract_digest(topology)
     if len(values) != expected + 1:
         raise CiError(f"capacity canary requires {expected + 1} receipts, found {len(values)}")
-    receipts = [_validated_receipt(value, expected_slots=expected) for value in values]
+    receipts = [
+        _validated_receipt(
+            value,
+            expected_slots=expected,
+            expected_topology_digest=topology_digest,
+        )
+        for value in values
+    ]
     if {receipt["leg_id"] for receipt in receipts} != set(range(expected + 1)):
         raise CiError("capacity receipts do not contain the exact matrix leg set")
     _validate_topology_identity(receipts)
+    _validate_topology_placement(
+        receipts,
+        topology=topology,
+        require_exact=False,
+    )
     run_ids = {str(receipt.get("run_id", "")) for receipt in receipts}
     revisions = {str(receipt.get("source_revision", "")) for receipt in receipts}
     barrier_epochs = {receipt["barrier_epoch"] for receipt in receipts}
@@ -1045,32 +1416,11 @@ def verify_capacity_receipts(
             f"capacity canary observed maximum concurrency {maximum}, expected {expected}"
         )
 
-    node_summaries: dict[str, dict[str, object]] = {}
-    for node_id in sorted({receipt["node_id"] for receipt in first_wave}):
-        node_receipts = [receipt for receipt in first_wave if receipt["node_id"] == node_id]
-        slots_values = {receipt["gpu_slots_per_device"] for receipt in node_receipts}
-        namespaces = {receipt["lock_namespace"] for receipt in node_receipts}
-        if len(slots_values) != 1 or len(namespaces) != 1:
-            raise CiError(f"node {node_id} reports inconsistent slot or lock policy")
-        slots_per_device = next(iter(slots_values))
-        gpu_uuids = sorted({receipt["gpu_uuid"] for receipt in node_receipts})
-        for gpu_uuid in gpu_uuids:
-            observed_slots = {
-                receipt["gpu_slot"] for receipt in node_receipts if receipt["gpu_uuid"] == gpu_uuid
-            }
-            if observed_slots != set(range(slots_per_device)):
-                raise CiError(f"node {node_id} GPU {gpu_uuid} did not expose every configured slot")
-        capacity = len(gpu_uuids) * slots_per_device
-        if capacity != len(node_receipts):
-            raise CiError(f"node {node_id} observed capacity is not unique GPUs x slots")
-        node_summaries[node_id] = {
-            "capacity": capacity,
-            "gpu_count": len(gpu_uuids),
-            "gpu_uuids": gpu_uuids,
-            "slots_per_gpu": slots_per_device,
-            "runner_count": len({item["runner_name"] for item in node_receipts}),
-            "lock_namespace": next(iter(namespaces)),
-        }
+    node_summaries = _validate_topology_placement(
+        first_wave,
+        topology=topology,
+        require_exact=True,
+    )
     if sum(int(node["capacity"]) for node in node_summaries.values()) != expected:
         raise CiError("per-node observed capacities do not sum to expected_slots")
 
@@ -1081,6 +1431,8 @@ def verify_capacity_receipts(
         "run_id": next(iter(run_ids)),
         "source_revision": next(iter(revisions)),
         "expected_slots": expected,
+        "expected_topology_digest": topology_digest,
+        "expected_topology": topology,
         "barrier_epoch": barrier_epoch,
         "barrier_at": barrier_time.isoformat(),
         "receipt_count": len(receipts),
@@ -1097,6 +1449,8 @@ def verify_capacity_receipts(
 def _validated_exclusive_lease(value: Mapping[str, object], *, label: str) -> dict[str, Any]:
     if value.get("resource_class") != "exclusive_gpu":
         raise CiError(f"{label} must use the exclusive_gpu resource class")
+    if value.get("job_id") != _CAPACITY_WORKER_JOB_ID:
+        raise CiError(f"{label} job_id does not match the canary worker job")
     node_id = value.get("node_id")
     if not isinstance(node_id, str) or _SAFE_ID.fullmatch(node_id) is None:
         raise CiError(f"{label} node_id is unsafe")
@@ -1106,6 +1460,14 @@ def _validated_exclusive_lease(value: Mapping[str, object], *, label: str) -> di
     runner_name = value.get("runner_name")
     if not isinstance(runner_name, str) or not runner_name:
         raise CiError(f"{label} runner_name must not be empty")
+    gpu_index = value.get("gpu_index")
+    if (
+        not isinstance(gpu_index, str)
+        or not gpu_index.isdigit()
+        or str(int(gpu_index)) != gpu_index
+        or not 0 <= int(gpu_index) <= 63
+    ):
+        raise CiError(f"{label} gpu_index must be a canonical integer from 0 to 63")
     gpu_uuid = value.get("gpu_uuid")
     if not isinstance(gpu_uuid, str) or _GPU_UUID.fullmatch(gpu_uuid) is None:
         raise CiError(f"{label} GPU UUID is invalid")
@@ -1139,6 +1501,8 @@ def _validated_exclusive_lease(value: Mapping[str, object], *, label: str) -> di
         "node_id": node_id,
         "hostname": hostname,
         "runner_name": runner_name,
+        "gpu_index": gpu_index,
+        "_gpu_index_int": int(gpu_index),
         "gpu_uuid": gpu_uuid,
         "gpu_slots_per_device": slots_per_device,
         "gpu_slot_ids": slot_ids,
@@ -1152,6 +1516,7 @@ def _validated_exclusive_lease(value: Mapping[str, object], *, label: str) -> di
 def verify_exclusive_safety_receipts(
     values: Sequence[Mapping[str, object]],
     *,
+    expected_topology: Mapping[str, object],
     expected_run_id: str | None = None,
     expected_revision: str | None = None,
 ) -> dict[str, object]:
@@ -1160,9 +1525,17 @@ def verify_exclusive_safety_receipts(
         raise CiError(
             "exclusive-safety mode requires exactly one scheduler-selected runner receipt"
         )
+    topology = normalize_topology_contract(expected_topology)
+    topology_digest = topology_contract_digest(topology)
     receipt = values[0]
-    if receipt.get("schema_version") != 1 or receipt.get("kind") != "trtmc_exclusive_safety":
+    if receipt.get("schema_version") != 2 or receipt.get("kind") != "trtmc_exclusive_safety":
         raise CiError("exclusive-safety receipt schema or kind is unsupported")
+    receipt_digest = _validated_digest(
+        receipt.get("expected_topology_digest"),
+        "exclusive-safety expected_topology_digest",
+    )
+    if receipt_digest != topology_digest:
+        raise CiError("exclusive-safety topology digest does not match the trusted contract")
     primary_value = receipt.get("primary")
     contender_value = receipt.get("contender")
     if not isinstance(primary_value, dict) or not isinstance(contender_value, dict):
@@ -1170,6 +1543,13 @@ def verify_exclusive_safety_receipts(
     primary = _validated_exclusive_lease(primary_value, label="primary")
     contender = _validated_exclusive_lease(contender_value, label="contender")
     _validate_topology_identity([primary, contender])
+    expected_nodes = _topology_nodes(topology)
+    for lease in (primary, contender):
+        _validate_topology_member(
+            lease,
+            expected_nodes=expected_nodes,
+            slots_per_gpu=int(topology["slots_per_gpu"]),
+        )
     attempted = _timestamp(contender.get("attempted_at"), "contender.attempted_at")
 
     run_id = str(receipt.get("run_id", ""))
@@ -1208,6 +1588,8 @@ def verify_exclusive_safety_receipts(
         "placement_scope": "one scheduler-selected generic runner; fleet placement is not proven",
         "run_id": run_id,
         "source_revision": revision,
+        "expected_topology_digest": topology_digest,
+        "expected_topology": topology,
         "runner_name": primary["runner_name"],
         "node_id": primary["node_id"],
         "gpu_uuid": primary["gpu_uuid"],
@@ -1247,9 +1629,38 @@ def _load_json_object(path: Path, label: str) -> dict[str, object]:
     return value
 
 
+def _append_github_outputs(path: Path, values: Mapping[str, object]) -> None:
+    lines: list[str] = []
+    for name, value in values.items():
+        rendered = str(value)
+        if "\n" in rendered or "\r" in rendered:
+            raise CiError(f"GitHub output {name} must be one line")
+        lines.append(f"{name}={rendered}\n")
+    with path.open("a", encoding="utf-8") as output:
+        output.writelines(lines)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m tools.ci.capacity_canary")
     commands = parser.add_subparsers(dest="command", required=True)
+    topology = commands.add_parser(
+        "topology-contract",
+        help="Validate and normalize a trusted expected-topology contract",
+    )
+    topology.add_argument("--input", required=True, type=Path)
+    topology.add_argument(
+        "--mode",
+        required=True,
+        choices=(
+            "shared-capacity",
+            "shared-cohort",
+            "cross-workflow-verify",
+            "exclusive-safety",
+        ),
+    )
+    topology.add_argument("--requested-slots", required=True)
+    topology.add_argument("--output", type=Path)
+    topology.add_argument("--github-output", type=Path)
     matrix = commands.add_parser("matrix", help="Emit the expected+1 job matrix")
     matrix.add_argument("--expected-slots", required=True)
     cohort = commands.add_parser("cohort-matrix", help="Emit an exact-size cohort matrix")
@@ -1258,6 +1669,7 @@ def _parser() -> argparse.ArgumentParser:
     hold.add_argument("--leg-id", required=True, type=int)
     hold.add_argument("--expected-slots", required=True)
     hold.add_argument("--barrier-epoch", required=True)
+    hold.add_argument("--expected-topology-digest", required=True)
     hold.add_argument("--cohort-id")
     hold.add_argument("--receipt-output", required=True, type=Path)
     exclusive = commands.add_parser(
@@ -1265,6 +1677,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     exclusive.add_argument("--leg-id", required=True, type=int)
     exclusive.add_argument("--observation-seconds", default="3")
+    exclusive.add_argument("--expected-topology-digest", required=True)
     exclusive.add_argument("--receipt-output", required=True, type=Path)
     contender = commands.add_parser("exclusive-contender", help="Internal pinned contender process")
     contender.add_argument("--leg-id", required=True, type=int)
@@ -1277,6 +1690,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--expected-run-id")
     verify.add_argument("--expected-revision")
     verify.add_argument("--expected-barrier-epoch", type=int)
+    verify.add_argument("--expected-topology", required=True, type=Path)
     verify.add_argument("--output", required=True, type=Path)
     verify_cohort = commands.add_parser("verify-cohort", help="Verify one exact shared cohort")
     verify_cohort.add_argument("--receipts-dir", required=True, type=Path)
@@ -1285,6 +1699,7 @@ def _parser() -> argparse.ArgumentParser:
     verify_cohort.add_argument("--expected-revision")
     verify_cohort.add_argument("--expected-barrier-epoch", type=int)
     verify_cohort.add_argument("--expected-cohort-id")
+    verify_cohort.add_argument("--expected-topology", required=True, type=Path)
     verify_cohort.add_argument("--output", required=True, type=Path)
     verify_cross = commands.add_parser(
         "verify-cross", help="Verify two exact shared cohorts at one barrier"
@@ -1297,6 +1712,7 @@ def _parser() -> argparse.ArgumentParser:
     verify_cross.add_argument("--expected-revision", required=True)
     verify_cross.add_argument("--expected-barrier-epoch", type=int)
     verify_cross.add_argument("--expected-cohort-id")
+    verify_cross.add_argument("--expected-topology", required=True, type=Path)
     verify_cross.add_argument("--output", required=True, type=Path)
     verify_exclusive = commands.add_parser(
         "verify-exclusive", help="Verify exclusive-safety evidence"
@@ -1304,6 +1720,7 @@ def _parser() -> argparse.ArgumentParser:
     verify_exclusive.add_argument("--receipts-dir", required=True, type=Path)
     verify_exclusive.add_argument("--expected-run-id")
     verify_exclusive.add_argument("--expected-revision")
+    verify_exclusive.add_argument("--expected-topology", required=True, type=Path)
     verify_exclusive.add_argument("--output", required=True, type=Path)
     return parser
 
@@ -1312,7 +1729,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     arguments = parser.parse_args(argv)
     try:
-        if arguments.command == "matrix":
+        if arguments.command == "topology-contract":
+            topology = _validated_topology_for_mode(
+                _load_json_object(arguments.input, "topology contract"),
+                mode=arguments.mode,
+                requested_slots=_positive_integer(
+                    arguments.requested_slots,
+                    "expected_slots",
+                    maximum=128,
+                ),
+            )
+            digest = topology_contract_digest(topology)
+            compact = json.dumps(topology, sort_keys=True, separators=(",", ":"))
+            if arguments.output is not None:
+                _atomic_json(arguments.output, topology)
+            if arguments.github_output is not None:
+                _append_github_outputs(
+                    arguments.github_output,
+                    {
+                        "expected_topology_json": compact,
+                        "expected_topology_digest": digest,
+                    },
+                )
+            print(json.dumps(topology, indent=2, sort_keys=True))
+        elif arguments.command == "matrix":
             print(
                 json.dumps(
                     capacity_matrix(
@@ -1340,6 +1780,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 barrier_epoch=_positive_integer(
                     arguments.barrier_epoch, "barrier_epoch", maximum=4_102_444_800
                 ),
+                expected_topology_digest=arguments.expected_topology_digest,
                 cohort_id=arguments.cohort_id,
                 receipt_output=arguments.receipt_output,
             )
@@ -1352,6 +1793,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "observation_seconds",
                     maximum=60,
                 ),
+                expected_topology_digest=arguments.expected_topology_digest,
                 receipt_output=arguments.receipt_output,
             )
         elif arguments.command == "exclusive-contender":
@@ -1368,6 +1810,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 expected_slots=_positive_integer(
                     arguments.expected_slots, "expected_slots", maximum=128
                 ),
+                expected_topology=_load_json_object(
+                    arguments.expected_topology, "topology contract"
+                ),
                 expected_run_id=arguments.expected_run_id,
                 expected_revision=arguments.expected_revision,
                 expected_barrier_epoch=arguments.expected_barrier_epoch,
@@ -1379,6 +1824,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 load_receipts(arguments.receipts_dir),
                 expected_slots=_positive_integer(
                     arguments.expected_slots, "expected_slots", maximum=128
+                ),
+                expected_topology=_load_json_object(
+                    arguments.expected_topology, "topology contract"
                 ),
                 expected_run_id=arguments.expected_run_id,
                 expected_revision=arguments.expected_revision,
@@ -1395,6 +1843,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "expected_slots_per_run",
                     maximum=128,
                 ),
+                expected_topology=_load_json_object(
+                    arguments.expected_topology, "topology contract"
+                ),
                 expected_run_ids=arguments.expected_run_id,
                 run_metadata=[
                     _load_json_object(path, "source-run metadata")
@@ -1410,6 +1861,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "verify-exclusive":
             summary = verify_exclusive_safety_receipts(
                 load_receipts(arguments.receipts_dir),
+                expected_topology=_load_json_object(
+                    arguments.expected_topology, "topology contract"
+                ),
                 expected_run_id=arguments.expected_run_id,
                 expected_revision=arguments.expected_revision,
             )
