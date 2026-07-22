@@ -91,8 +91,11 @@ def _append_benchmark_catalog_to_sdist(sdist_path: Path) -> None:
             raise RuntimeError(f"cannot read benchmark manifest {manifest}: {exc}") from exc
         references = [("fp8_scales", raw.get("fp8_scales"))]
         for index, testcase in enumerate(raw.get("testcases", [])):
-            if isinstance(testcase, dict) and "test_image" in testcase:
-                references.append((f"testcases[{index}].test_image", testcase["test_image"]))
+            if not isinstance(testcase, dict):
+                continue
+            for field in ("test_image", "prompt_file"):
+                if field in testcase:
+                    references.append((f"testcases[{index}].{field}", testcase[field]))
         for field, declared in references:
             if declared is None:
                 continue
