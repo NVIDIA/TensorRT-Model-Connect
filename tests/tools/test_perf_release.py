@@ -319,6 +319,20 @@ def test_hf_runner_bridges_dynamic_cache_method_rename() -> None:
     assert LegacyDynamicCache().get_max_cache_shape() == 17
 
 
+def test_hf_runner_bridges_removed_input_check_decorator() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/hf_transformers.py"))
+
+    class GenericModule:
+        pass
+
+    def forward() -> str:
+        return "ok"
+
+    runner["_ensure_transformers_generic_api"](GenericModule)
+
+    assert GenericModule.check_model_inputs(forward) is forward
+
+
 def test_source_revision_can_be_injected_without_git(monkeypatch) -> None:
     monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
 

@@ -92,6 +92,16 @@ def _ensure_dynamic_cache_api(dynamic_cache: type[Any]) -> None:
         setattr(dynamic_cache, "get_max_cache_shape", dynamic_cache.get_max_length)
 
 
+def _ensure_transformers_generic_api(generic_module: Any) -> None:
+    """Bridge the removed input-check decorator for compatible remote model code."""
+    if not hasattr(generic_module, "check_model_inputs"):
+
+        def check_model_inputs(function: Callable[..., Any]) -> Callable[..., Any]:
+            return function
+
+        setattr(generic_module, "check_model_inputs", check_model_inputs)
+
+
 def _load(arguments: argparse.Namespace) -> tuple[Any, Any, str]:
     import torch
     from transformers import (
@@ -101,8 +111,10 @@ def _load(arguments: argparse.Namespace) -> tuple[Any, Any, str]:
         AutoTokenizer,
     )
     from transformers.cache_utils import DynamicCache
+    from transformers.utils import generic as transformers_generic
 
     _ensure_dynamic_cache_api(DynamicCache)
+    _ensure_transformers_generic_api(transformers_generic)
 
     common: dict[str, Any] = {
         "trust_remote_code": arguments.trust_remote_code,
