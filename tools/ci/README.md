@@ -55,8 +55,10 @@ that enters the run-owned container and invokes `pipeline` there.
 
 Adding the `run-ci` label starts `.github/workflows/trtmc-ci.yml`. The Legal job
 captures one merge commit SHA, removes the one-shot label, checks out that exact
-snapshot, and verifies legal documents and source headers. Every later job uses
-the captured SHA.
+snapshot, requires it to have exactly two parents, and verifies that its second
+parent is the captured PR head. Its first parent is therefore the exact base for
+all diff-based checks. Every later job uses those snapshot-derived SHAs; the
+label event's potentially stale `pull_request.base.sha` is never used.
 
 Commits pushed after the label was consumed do not alter the active run. Add the
 label again to test the newer snapshot.
@@ -501,10 +503,12 @@ the producing class remains the source of truth for optional evidence fields.
   profile, family changes select that family's complete target suite, and shared
   changes select one producer representative per optimized runtime.
 - **Boundary:** It contains no model or optimized-runtime identities and never
-  builds or executes a bundle. The generic workflow invokes each selected
-  model-owned entrypoint, uploads its qualification artifacts, and performs
-  entrypoint-owned cleanup. Artifact format and qualification logic remain
-  model-owned.
+  builds or executes a bundle. The standalone manual/reusable workflow invokes
+  each selected model-owned entrypoint, uploads its qualification artifacts,
+  and performs entrypoint-owned cleanup. Ordinary premerge CI does not call the
+  hardware workflow while no managed target-hardware runner pool exists;
+  integration behavior is covered there by source-only unit and contract tests.
+  Artifact format and qualification logic remain model-owned.
 
 ### `model_proof_selection.py`
 

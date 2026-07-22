@@ -458,7 +458,7 @@ def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> 
     assert "retention-days: 14" in nightly
 
 
-def test_optimized_runtime_proof_is_generic_and_descriptor_driven() -> None:
+def test_optimized_runtime_proof_is_manual_and_not_a_premerge_dependency() -> None:
     workflows = REPO_ROOT / ".github" / "workflows"
     proof_path = workflows / "optimized-runtime-proof.yml"
     assert proof_path.is_file()
@@ -482,19 +482,12 @@ def test_optimized_runtime_proof_is_generic_and_descriptor_driven() -> None:
     assert "EdgeLLM" not in proof
 
     premerge = (workflows / "trtmc-ci.yml").read_text(encoding="utf-8")
-    caller = premerge.split("\n  optimized-runtime-proof:", maxsplit=1)[1].split(
-        "\n  no-model:", maxsplit=1
-    )[0]
     required = premerge.split("\n  required:", maxsplit=1)[1]
-    assert "uses: ./.github/workflows/optimized-runtime-proof.yml" in caller
-    assert "secrets: inherit" not in caller
-    assert "- optimized-runtime-proof" in required
-    assert "OPTIMIZED_RUNTIME_RESULT: ${{ needs.optimized-runtime-proof.result }}" in required
-    assert (
-        "OPTIMIZED_RUNTIME_SELECTED: ${{ needs.optimized-runtime-proof.outputs.selected }}"
-        in required
-    )
-    assert 'test "$OPTIMIZED_RUNTIME_RESULT" = "success"' in required
+    assert "workflow_dispatch:" in proof
+    assert "uses: ./.github/workflows/optimized-runtime-proof.yml" not in premerge
+    assert "optimized-runtime-proof:" not in premerge
+    assert "needs.optimized-runtime-proof" not in required
+    assert "OPTIMIZED_RUNTIME_" not in required
 
 
 def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> None:
@@ -568,12 +561,13 @@ def test_legal_job_pins_snapshot_rejects_forks_and_consumes_run_ci() -> None:
     assert "contents: read" in legal
     assert text.count("pull-requests: write") == 1
     assert "issues: write" not in text
-    for output in ("authorized", "tested_sha", "base_sha", "head_sha"):
-        assert f"{output}: ${{{{ steps.authorize.outputs.{output} }}}}" in legal
+    assert "authorized: ${{ steps.authorize.outputs.authorized }}" in legal
+    for output in ("tested_sha", "base_sha", "head_sha"):
+        assert f"{output}: ${{{{ steps.snapshot.outputs.{output} }}}}" in legal
 
     assert "TESTED_SHA: ${{ github.sha }}" in legal
-    assert "BASE_SHA: ${{ github.event.pull_request.base.sha }}" in legal
     assert "HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in legal
+    assert "github.event.pull_request.base.sha" not in text
     assert "HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}" in legal
     assert 'if [ "$TRIGGER_LABEL" != "run-ci" ]; then' in legal
     assert 'echo "authorized=false" >> "$GITHUB_OUTPUT"' in legal
@@ -839,16 +833,25 @@ def test_premerge_ci_preserves_the_main_ruleset_context_names() -> None:
 
 def test_premerge_ci_compares_the_checked_out_merge_snapshot() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "trtmc-ci.yml").read_text()
-    base_block = text.split("- name: Resolve comparison refs", maxsplit=1)[1].split(
-        "- name: Validate ownership manifests", maxsplit=1
+    snapshot_block = text.split("- name: Resolve pinned PR merge snapshot", maxsplit=1)[1].split(
+        "- name: Set up Python", maxsplit=1
+    )[0]
+    impact_block = text.split("\n  impact:", maxsplit=1)[1].split(
+        "\n  source-quality:", maxsplit=1
     )[0]
 
-    assert "CAPTURED_BASE_SHA: ${{ needs.legal.outputs.base_sha }}" in base_block
-    assert "CAPTURED_TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}" in base_block
-    assert "CAPTURED_HEAD_SHA: ${{ needs.legal.outputs.head_sha }}" in base_block
-    assert 'base_tip_sha="$(git rev-parse "${CAPTURED_BASE_SHA}^{commit}")"' in base_block
-    assert 'base_sha="$(git merge-base "$base_tip_sha" "$tested_sha")"' in base_block
-    assert 'tested_sha="$(git rev-parse "${CAPTURED_TESTED_SHA}^{commit}")"' in base_block
+    assert "CAPTURED_TESTED_SHA: ${{ steps.authorize.outputs.tested_sha }}" in snapshot_block
+    assert "CAPTURED_HEAD_SHA: ${{ steps.authorize.outputs.head_sha }}" in snapshot_block
+    assert 'tested_sha="$(git rev-parse "${CAPTURED_TESTED_SHA}^{commit}")"' in snapshot_block
+    assert 'git rev-list --parents -n 1 "$tested_sha"' in snapshot_block
+    assert '"${#commits[@]}" -ne 3' in snapshot_block
+    assert 'base_sha="$(git rev-parse "${commits[1]}^{commit}")"' in snapshot_block
+    assert 'head_sha="$(git rev-parse "${commits[2]}^{commit}")"' in snapshot_block
+    assert 'if [ "$head_sha" != "$captured_head_sha" ]; then' in snapshot_block
+    assert "github.event.pull_request.base.sha" not in text
+    assert "git merge-base" not in snapshot_block
+    assert "BASE_SHA: ${{ needs.legal.outputs.base_sha }}" in impact_block
+    assert "TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}" in impact_block
     assert '--head "$TESTED_SHA"' in text
 
 

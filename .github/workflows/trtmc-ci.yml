@@ -32,9 +32,9 @@ jobs:
       pull-requests: write
     outputs:
       authorized: ${{ steps.authorize.outputs.authorized }}
-      tested_sha: ${{ steps.authorize.outputs.tested_sha }}
-      base_sha: ${{ steps.authorize.outputs.base_sha }}
-      head_sha: ${{ steps.authorize.outputs.head_sha }}
+      tested_sha: ${{ steps.snapshot.outputs.tested_sha }}
+      base_sha: ${{ steps.snapshot.outputs.base_sha }}
+      head_sha: ${{ steps.snapshot.outputs.head_sha }}
 
     steps:
       - name: Route label, pin snapshot, and consume authorization
@@ -42,7 +42,6 @@ jobs:
         env:
           TRIGGER_LABEL: ${{ github.event.label.name }}
           TESTED_SHA: ${{ github.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -62,13 +61,12 @@ jobs:
           fi
 
           test -n "$TESTED_SHA"
-          test -n "$BASE_SHA"
           test -n "$HEAD_SHA"
 
-          # Record the immutable merge snapshot and audit SHAs before consuming
-          # the one-shot label. Downstream jobs use these outputs exclusively.
+          # Record the immutable event SHAs before consuming the one-shot label.
+          # The checked-out merge snapshot validates and publishes its own
+          # exact base and head parents below.
           echo "tested_sha=$TESTED_SHA" >> "$GITHUB_OUTPUT"
-          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
 
           gh api --silent \
@@ -84,8 +82,7 @@ jobs:
             echo "### One-shot premerge authorization"
             echo
             echo "- Tested merge snapshot: \`$TESTED_SHA\`"
-            echo "- Base audit SHA: \`$BASE_SHA\`"
-            echo "- Head audit SHA: \`$HEAD_SHA\`"
+            echo "- Event PR head SHA: \`$HEAD_SHA\`"
             echo "- Consumed label: \`run-ci\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -96,6 +93,41 @@ jobs:
           ref: ${{ steps.authorize.outputs.tested_sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Resolve pinned PR merge snapshot
+        id: snapshot
+        if: ${{ steps.authorize.outputs.authorized == 'true' }}
+        env:
+          CAPTURED_TESTED_SHA: ${{ steps.authorize.outputs.tested_sha }}
+          CAPTURED_HEAD_SHA: ${{ steps.authorize.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          tested_sha="$(git rev-parse "${CAPTURED_TESTED_SHA}^{commit}")"
+          read -r -a commits <<< "$(git rev-list --parents -n 1 "$tested_sha")"
+          if [ "${#commits[@]}" -ne 3 ] || [ "${commits[0]}" != "$tested_sha" ]; then
+            echo "::error::Expected the tested revision to be a two-parent GitHub PR merge snapshot"
+            exit 1
+          fi
+
+          base_sha="$(git rev-parse "${commits[1]}^{commit}")"
+          head_sha="$(git rev-parse "${commits[2]}^{commit}")"
+          captured_head_sha="$(git rev-parse "${CAPTURED_HEAD_SHA}^{commit}")"
+          if [ "$head_sha" != "$captured_head_sha" ]; then
+            echo "::error::Pinned merge snapshot head $head_sha does not match captured PR head $captured_head_sha"
+            exit 1
+          fi
+
+          echo "tested_sha=$tested_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Pinned PR merge snapshot"
+            echo
+            echo "- Tested merge snapshot: \`$tested_sha\`"
+            echo "- Exact base parent: \`$base_sha\`"
+            echo "- Exact PR head parent: \`$head_sha\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Python
         if: ${{ steps.authorize.outputs.authorized == 'true' }}
@@ -154,35 +186,14 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Resolve comparison refs
-        id: refs
-        env:
-          CAPTURED_BASE_SHA: ${{ needs.legal.outputs.base_sha }}
-          CAPTURED_TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
-          CAPTURED_HEAD_SHA: ${{ needs.legal.outputs.head_sha }}
-        run: |
-          set -euo pipefail
-
-          tested_sha="$(git rev-parse "${CAPTURED_TESTED_SHA}^{commit}")"
-          base_tip_sha="$(git rev-parse "${CAPTURED_BASE_SHA}^{commit}")"
-          base_sha="$(git merge-base "$base_tip_sha" "$tested_sha")"
-          git cat-file -e "${base_tip_sha}^{commit}"
-          git cat-file -e "${base_sha}^{commit}"
-          git cat-file -e "${tested_sha}^{commit}"
-
-          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
-          echo "tested_sha=$tested_sha" >> "$GITHUB_OUTPUT"
-          echo "Comparing merge snapshot $tested_sha against $base_sha"
-          echo "PR head audit SHA: $CAPTURED_HEAD_SHA"
-
       - name: Validate ownership manifests
         run: python3 tools/model_ci.py validate
 
       - name: Select affected models
         id: impact
         env:
-          BASE_SHA: ${{ steps.refs.outputs.base_sha }}
-          TESTED_SHA: ${{ steps.refs.outputs.tested_sha }}
+          BASE_SHA: ${{ needs.legal.outputs.base_sha }}
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
         run: |
           set -euo pipefail
           python3 tools/model_ci.py impact \
@@ -353,30 +364,6 @@ jobs:
       revision: ${{ needs.legal.outputs.tested_sha }}
       suite: premerge
     secrets: inherit
-
-  optimized-runtime-proof:
-    name: 4 / Optimized runtime qualification
-    needs:
-      - legal
-      - impact
-      - unit-tests
-    if: >-
-      ${{
-        always() &&
-        needs.legal.outputs.authorized == 'true' &&
-        (
-          (needs.impact.outputs.run_unit_tests == 'true' &&
-           needs.unit-tests.result == 'success') ||
-          (needs.impact.outputs.run_unit_tests == 'false' &&
-           needs.unit-tests.result == 'skipped')
-        )
-      }}
-    permissions:
-      contents: read
-    uses: ./.github/workflows/optimized-runtime-proof.yml
-    with:
-      base_revision: ${{ needs.legal.outputs.base_sha }}
-      revision: ${{ needs.legal.outputs.tested_sha }}
 
   no-model:
     name: 4 / No model changes
@@ -677,7 +664,6 @@ jobs:
       - source-quality
       - unit-tests
       - model-proof
-      - optimized-runtime-proof
       - no-model
       - report
     if: ${{ always() }}
@@ -696,8 +682,6 @@ jobs:
           UNIT_RESULT: ${{ needs.unit-tests.result }}
           RUN_UNIT_TESTS: ${{ needs.impact.outputs.run_unit_tests }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
-          OPTIMIZED_RUNTIME_RESULT: ${{ needs.optimized-runtime-proof.result }}
-          OPTIMIZED_RUNTIME_SELECTED: ${{ needs.optimized-runtime-proof.outputs.selected }}
           NO_MODEL_RESULT: ${{ needs.no-model.result }}
           REPORT_RESULT: ${{ needs.report.result }}
           HAS_MODELS: ${{ needs.impact.outputs.has_models }}
@@ -750,18 +734,6 @@ jobs:
             echo "::error::Combined HTML report result: $REPORT_RESULT"
             exit 1
           }
-
-          test "$OPTIMIZED_RUNTIME_RESULT" = "success" || {
-            echo "::error::Optimized-runtime qualification result: $OPTIMIZED_RUNTIME_RESULT"
-            exit 1
-          }
-          case "$OPTIMIZED_RUNTIME_SELECTED" in
-            true | false) ;;
-            *)
-              echo "::error::Optimized-runtime selection output is invalid: $OPTIMIZED_RUNTIME_SELECTED"
-              exit 1
-              ;;
-          esac
 
           case "$HAS_MODELS" in
             true)

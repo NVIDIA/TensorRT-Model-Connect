@@ -50,8 +50,9 @@ requires it. It must not add a second optimized-runtime framework.
 - No shared model translation adapter across unrelated families or runtimes.
 - No adapter, DSO, CMake target, or runner per model size or profile.
 - No Edge-LLM dependency for MC native-only builds.
-- No second-GPU hardware qualification lane; unsupported targets remain covered
-  by deterministic contract tests and normal native-path validation.
+- No A100 hardware qualification in ordinary premerge CI until a managed A100
+  runner pool exists; integration remains covered by deterministic contract
+  tests and normal native-path validation.
 - No generic host knowledge of Qwen IDs, Edge-LLM requests, or engine layout.
 - No new process-global compatibility framework or public/private pipeline ABI
   digest as part of this feature. Existing loader and private factory contract
@@ -106,13 +107,15 @@ exported DSO, and one parameterized test harness for the three profiles.
 - delegated artifact materialization and reuse;
 - runtime DSO loading, factory creation, lifecycle, and error boundaries.
 
-The one generic CI dispatcher is also runtime-neutral. It discovers
+The standalone generic hardware-qualification dispatcher is also
+runtime-neutral. It discovers
 `QUALIFICATION.*.toml` descriptors in model-owned Test directories, maps an
 exact Git diff to a hardware qualification matrix, and invokes the declared
 model-owned entrypoints. It contains no Qwen, Edge-LLM, model-ID, profile, or
-GPU table. A new family-runtime integration adds its own descriptor and runner;
-it does not add another top-level workflow or edit the premerge dependency
-graph. Qualifications sharing one downstream `runtime_id` elect exactly one representative.
+GPU table. Ordinary premerge CI does not call this workflow while there is no
+managed target-hardware runner pool. A new family-runtime integration adds its
+own descriptor and runner without adding another top-level workflow.
+Qualifications sharing one downstream `runtime_id` elect exactly one representative.
 Family-owned changes select that family only; shared host, bundle, build, or
 dispatcher changes select the representative once per optimized runtime
 instead of fanning out across every family.
@@ -404,19 +407,24 @@ Deliver one focused replacement feature PR from `github/main`:
    - No unrelated host infrastructure.
 
 4. **Route tests by ownership**
-   - Profile-only change: that profile's schema/match test and target E2E.
+   - Premerge: source-only integration, schema, matching, packaging, dispatch,
+     and lifecycle contract tests; never Edge-LLM E2E on the GB300 pool.
+   - Profile-only hardware qualification: that profile's schema/match test and
+     target E2E after a managed target-hardware runner is available.
    - Qwen x Edge-LLM adapter/runtime change: all Qwen Edge-LLM profiles.
    - Shared Edge-LLM pin change: all adapters using that pin.
    - Generic discovery/bundle change: generic contracts plus one representative
      E2E per optimized runtime.
 
-   Use the permanent generic `optimized-runtime-proof` workflow for this
-   routing. Each model-owned descriptor declares its profile glob, exact target
-   fields, digest-pinned container image, runner labels, trigger globs, and
-   entrypoint. A profile-only diff passes only that qualified profile basename
-   to the model-owned runner. An adapter/runtime or shared-pin diff passes an
-   empty profile filter, meaning every qualified profile for that descriptor's
-   exact target. Profiles for another target are never collected by that job.
+   Keep the generic `optimized-runtime-proof` workflow manual/reusable until a
+   managed target-hardware runner pool exists; it is not a premerge dependency.
+   Each model-owned descriptor declares its profile glob, exact target fields,
+   digest-pinned container image, runner labels, trigger globs, and entrypoint.
+   Once hardware qualification is enabled, a profile-only diff passes only that
+   qualified profile basename to the model-owned runner. An adapter/runtime or
+   shared-pin diff passes an empty profile filter, meaning every qualified
+   profile for that descriptor's exact target. Profiles for another target are
+   never collected by that job.
 
 Adding a fourth Qwen x Edge-LLM profile must be demonstrable by adding one TOML
 file and test data only; it must not require editing generic MC code,
@@ -516,9 +524,13 @@ when any gate fails.
 
 ### CI Evidence
 
-CI must run the parameterized tests selected by the ownership rules. Upload
-command logs, comparison output, and benchmark summaries as workflow artifacts.
-Do not add proof data to the source tree or PR diff.
+Ordinary premerge CI must run the source-only integration and model-owned
+contract tests selected by the ownership rules. It must not dispatch an A100
+job or attempt Edge-LLM E2E on the GB300 runner pool. The manual/reusable
+hardware workflow remains dormant until a managed A100 runner pool exists.
+When hardware qualification is enabled, upload command logs, comparison output,
+and benchmark summaries as workflow artifacts. Do not add proof data to the
+source tree or PR diff.
 
 The model-owned runner must fail before building when the runner GPU does not
 match the descriptor target, build and install a normal release wheel from the
@@ -563,6 +575,8 @@ Adapter, runtime, or shared changes run the full target qualification.
       create/load/materialization behavior.
 - [ ] Direct parity uses Edge-LLM's official `llm_inference` path and the same
       engine and request settings.
+- [ ] Ordinary premerge CI runs integration contracts only and does not invoke
+      optimized-runtime hardware qualification.
 - [ ] Installed-wheel A100 E2E proves the private C++ toolchain/ABI constraint.
 - [ ] All three profiles pass real A100 build, bundle, load, and generation.
 - [ ] Adding a fourth Qwen profile requires only profile and test-data changes.
@@ -578,6 +592,7 @@ Adapter, runtime, or shared changes run the full target qualification.
       stored only as CI artifacts and no `evidence/` directory is committed.
 - [ ] Superseded per-profile adapters and duplicated infrastructure are removed.
 
-The goal is complete only after the current source, not an older per-profile
-revision, satisfies every checked criterion and the real-hardware jobs retain
-their command/output evidence in CI.
+The integration CI change is complete when the current source passes its
+smallest correct unit/model scope without dispatching target-hardware E2E.
+Hardware promotion remains a separate, deferred gate until a managed A100
+runner pool exists and the current source satisfies the A100 criteria above.
