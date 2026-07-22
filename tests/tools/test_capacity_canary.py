@@ -1200,8 +1200,9 @@ def test_capacity_workflow_is_manual_main_only_and_has_no_model_or_hf_work() -> 
     assert "default: 28" not in workflow
     assert "default: 900" in workflow
     assert "default: shared-capacity" in workflow
-    assert "expected_topology:" in workflow
-    assert "cp .github/ci/gb300-pool-topology.json" in workflow
+    assert "      expected_topology:" not in workflow
+    assert "inputs.expected_topology" not in workflow
+    assert "--input .github/ci/gb300-pool-topology.json" in workflow
     assert "tools.ci.capacity_canary topology-contract" in workflow
     assert "expected_topology_digest" in workflow
     assert "--expected-topology-digest" in workflow

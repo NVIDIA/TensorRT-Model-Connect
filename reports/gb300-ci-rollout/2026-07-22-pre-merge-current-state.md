@@ -149,16 +149,19 @@ rewrite of the full cache is not acceptable.
 
 ## Admission blockers at this snapshot
 
-1. **Superseded:** the runner-discovery GitHub App is no longer required.
-2. Repair only the measured compute02 cache ownership/access exceptions and
+The runner-discovery GitHub App listed in the original snapshot is
+**superseded and is not a blocker**. The accepted declarative-topology design
+requires no App or new GitHub credential. Four admission blockers remain:
+
+1. Repair only the measured compute02 cache ownership/access exceptions and
    rerun the strict audit.
-3. Coordinate the compute01 GitLab scheduler and compute02 external Docker GPU
+2. Coordinate the compute01 GitLab scheduler and compute02 external Docker GPU
    claims for a declared drained acceptance window.
-4. Complete review and final-head CI for the hardened draft PR.
-5. Retain the raw pre-admission runner/host snapshot with hashes in the
+3. Complete review and final-head CI for the hardened draft PR.
+4. Retain the raw pre-admission runner/host snapshot with hashes in the
    access-controlled rollout evidence store.
 
-Until all five blockers are cleared, keep PR #519 in draft, keep compute01
+Until all four blockers are cleared, keep PR #519 in draft, keep compute01
 without the production label, and do not merge or dispatch the full hardware
 canaries.
 

@@ -113,7 +113,8 @@ Build one matrix row for every declared node label
 GitHub schedules that row on any listener carrying that node label
                 |
                 v
-Each node performs an offline strict verification and emits a receipt
+Each node performs an online strict warm, then a network-disabled strict
+local-only verification, and emits a receipt
                 |
                 v
 All node receipts pass
@@ -207,8 +208,10 @@ The number 28 appears in this rollout plan and acceptance canary because it is
 the current acceptance target. Normal Pre-Merge and Nightly model-proof
 workflows derive usable concurrency from online matching production runners
 and contain no hardcoded 28. The topology file declaratively records the
-currently admitted physical pool so Nightly can warm each node and canaries can
-verify the exact node/GPU split; it is data, not a scheduler.
+physical nodes targeted for warm and admission so Nightly can warm each node
+and canaries can verify the exact node/GPU split. During a controlled expansion
+it may temporarily include a staged node that is not yet in the production
+runner pool; it is data, not a live runner inventory or scheduler.
 
 ## 4. Historical Audited Starting Point
 
@@ -490,10 +493,12 @@ warm and exact capacity verification:
 }
 ~~~
 
-This file is the only checked-in current-fleet declaration. Do not duplicate
-its node list in workflow YAML, repository variables, a runner name list, or a
-second cache configuration. A pure subcommand in the existing
-<code>tools/ci/capacity_canary.py</code> validator derives the Nightly matrix:
+This file is the only checked-in warm-and-admission target declaration. It may
+temporarily include a staged node before that node receives the production
+label. Do not duplicate its node list in workflow YAML, repository variables,
+a runner name list, or a second cache configuration. A pure subcommand in the
+existing <code>tools/ci/capacity_canary.py</code> validator derives the Nightly
+matrix:
 
 ~~~json
 {
@@ -616,7 +621,7 @@ download a model or receive an HF token. It should reuse the real
 <code>GpuLease</code>, launch a tiny Docker GPU UUID probe, hold the lease to an
 absolute barrier time, and upload a receipt.
 
-By default every dispatch reads the checked-in
+Every dispatch reads the checked-in
 <code>.github/ci/gb300-pool-topology.json</code> from the protected main-branch
 revision as its expected topology. The initial admission file is:
 
@@ -676,10 +681,11 @@ capacity. A future node is represented by one additional row in the topology
 data PR before it is warmed or admitted. Normal Pre-Merge and Nightly model
 jobs do not consume the node rows for routing; Nightly cache planning does.
 
-The optional manual JSON override is reserved for trusted evidence replay or
-failure-injection studies. Initial admission and normal post-rollout canaries
-must leave it empty and use the checked-in file, preventing a dispatch-time
-copy from becoming a second current-fleet source of truth.
+The manual workflow exposes no topology override. Every capacity canary reads
+the checked-in file from its protected-main checkout, preventing a
+dispatch-time copy from becoming a second topology source of truth. Unit tests
+cover synthetic contracts and failure injection without adding a production
+workflow input.
 
 Only the GitHub-hosted verifier job receives <code>actions: read</code>. GPU
 workers receive no Actions-write permission, model input, or Hugging Face
@@ -745,7 +751,7 @@ The user-approved design is semi-automatic. It deliberately does not inspect
 the repository runner inventory and therefore needs no GitHub App, App ID,
 private-key secret, administration permission, or extra token.
 
-The only current-fleet declaration is
+The only warm-and-admission target declaration is
 <code>.github/ci/gb300-pool-topology.json</code>. A topology-only PR is required
 when any of these physical-capacity facts change:
 
@@ -848,9 +854,9 @@ production runners have a compatible host environment.
 
 ### Phase 2 — Stage the declarative node-label contract
 
-- [ ] Confirm the PR contains exactly one current-fleet declaration at
-      <code>.github/ci/gb300-pool-topology.json</code> and that it encodes the
-      exact 16 plus 12 target from Section 6.3.
+- [ ] Confirm the PR contains exactly one warm-and-admission target declaration
+      at <code>.github/ci/gb300-pool-topology.json</code> and that it encodes
+      the exact 16 plus 12 target from Section 6.3.
 - [ ] Add exactly one node label to every current proof registration.
 - [ ] Remove the common production label from all compute01 proof
       registrations before starting any compute01 proof service.
@@ -983,7 +989,7 @@ cache miss, secret exposure, or inability to reach 28 concurrent slots blocks
 completion.
 
 - [ ] Dispatch the 28/29 mode using the exact checked-in Section 6.3 topology
-      file with no manual override.
+      file; the workflow exposes no topology override.
 - [ ] Save the normalized contract and digest uploaded with the verification.
 - [ ] Require the result to report seven GPUs, four slots per GPU, and the
       exact 16 plus 12 node distribution, with compute02 index 0 absent.
@@ -1053,8 +1059,8 @@ The canary preparation job selects an absolute barrier roughly 15 minutes in
 the future and launches a 29-leg matrix on the common proof label. Run it in a
 declared acceptance window after other jobs using the proof pool have drained;
 otherwise it measures unrelated contention instead of admitted capacity.
-Use the exact checked-in topology contract from Section 6.3 with no manual
-override. The
+Use the exact checked-in topology contract from Section 6.3. The workflow
+exposes no manual topology override. The
 preparation job must publish only its normalized JSON and digest to downstream
 jobs; workers must record the digest but must not use node rows for routing.
 
@@ -1114,7 +1120,7 @@ Execution uses the retained workflow rather than a second scheduler:
 
 1. Choose one cohort ID and future barrier, then dispatch two
    <code>shared-cohort</code> runs with <code>expected_slots=14</code> and the
-   topology override left empty, from the same main revision.
+   checked-in topology, from the same main revision.
 2. After both finish, dispatch <code>cross-workflow-verify</code> with those two
    exact run IDs, the same cohort ID, barrier, 14 slots per run, and the exact
    same checked-in topology. Receipt-digest validation must happen before
@@ -1300,8 +1306,9 @@ by warm verification and production admission:
 5. Register
    <code>allowed GPU count × slots_per_gpu</code> generic proof listeners
    without <code>trtmc-gb300-proof</code>.
-6. Give every listener exactly one unique <code>trtmc-node-*</code> label and
-   start enough node-labelled listeners for host validation and cache warm.
+6. Choose one <code>trtmc-node-*</code> label that is unique to the physical
+   node, give that same label to every listener on the node, and start enough
+   node-labelled listeners for host validation and cache warm.
 7. Submit a topology-only PR adding one sorted node row with that node label
    and its allowed GPU indices to
    <code>.github/ci/gb300-pool-topology.json</code>. Change no workflow YAML and
@@ -1314,8 +1321,8 @@ by warm verification and production admission:
     verify its cache receipt, GPU UUID probes, lock namespace, disk headroom,
     and listener environment.
 11. Add <code>trtmc-gb300-proof</code> to exactly the calculated listener count.
-12. Run the capacity canary from main with no topology override and require the
-    new exact node distribution and fleet total.
+12. Run the capacity canary from main and require the new exact node
+    distribution and fleet total from the checked-in topology.
 
 After admission, Pre-Merge and Nightly model matrices automatically use the new
 matching runner capacity. The Nightly warm matrix continues to generate one
@@ -1474,9 +1481,10 @@ evidence.
 | Baseline runner inventory |  |  |  |
 | Host/GPU baseline |  |  |  |
 | Pre-merge current-state snapshot (not Phase-0 baseline or 28-slot acceptance) | 2026-07-22T04:52:58Z | <code>reports/gb300-ci-rollout/2026-07-22-pre-merge-current-state.md</code> | Sanitized snapshot retained; admission blockers remain |
-| Implementation PR | Prior head <code>07f86c7e</code>; hardened exact head pending | [Draft PR #519](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/519) | Prior committed head green; hardened exact-head run pending |
+| Implementation PR | Prior head <code>07f86c7e</code>; rebased topology-design exact head pending | [Draft PR #519](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/519) | Prior committed head green; current exact-head run pending |
 | Merged main SHA |  |  |  |
-| Focused test log | 2026-07-22T05:49:14Z | <code>reports/gb300-ci-rollout/2026-07-22-focused-validation.md</code> | Local repository validation green; hardware/Nightly acceptance pending |
+| Historical focused test log | 2026-07-22T05:49:14Z | <code>reports/gb300-ci-rollout/2026-07-22-focused-validation.md</code> | Superseded anchor-design repository evidence; not current topology-design proof |
+| Topology-design focused test log | 2026-07-22 | <code>reports/gb300-ci-rollout/2026-07-22-topology-validation.md</code> | Rebased local repository validation green; exact-head GitHub CI and hardware/Nightly acceptance pending |
 | compute01 cache receipt |  |  |  |
 | compute02 cache receipt |  |  |  |
 | Final 28-runner inventory |  |  |  |

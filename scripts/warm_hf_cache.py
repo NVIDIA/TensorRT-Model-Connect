@@ -18,19 +18,19 @@ Nightly mode (no --models-file):
     that node's label, and this script warms the node-local cache shared by its
     runners.
 
-PR CI selective mode (--models-file FILE):
+Online selective mode (--models-file FILE):
     For each model in FILE:
       - Already in cache → skip entirely (zero network calls).
       - Not in cache     → call snapshot_download() to download it.
-    This handles newly added model families whose weights are not yet in the
-    persistent cache without making unnecessary API calls for the majority of
-    models that are already cached.
+    This is available for an explicit trusted warm operation. Normal
+    Pre-Merge model-proof jobs pass --local-only and never download from
+    Hugging Face.
 
 Usage:
     # Nightly — warm all non-skipped E2E models:
     python scripts/warm_hf_cache.py
 
-    # PR CI — only download models missing from cache:
+    # Explicit trusted selective warm — only download models missing from cache:
     python scripts/warm_hf_cache.py --models-file e2e_models.txt
 
 By default, partial failures remain warnings for existing nightly behavior.
@@ -364,8 +364,8 @@ parser.add_argument(
     metavar="FILE",
     help="Path to a file with one model name per line (manifest stems). "
     "When given, only those models are considered and already-cached "
-    "models are skipped (no network call). Intended for PR CI selective "
-    "warm.",
+    "models are skipped (no network call). Intended for an explicit trusted "
+    "selective warm; normal Pre-Merge proof jobs use --local-only.",
 )
 parser.add_argument(
     "--exclude-ci-tier",

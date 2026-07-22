@@ -20,12 +20,6 @@ on:
         description: "Capacity: slots; cohort/verify: slots per workflow run"
         required: true
         type: number
-      expected_topology:
-        description: >-
-          Optional trusted JSON override; empty uses the repository GB300 pool topology
-        required: false
-        default: ""
-        type: string
       hold_delay_seconds:
         description: "Shared-capacity only: UTC delay used to assemble the first wave"
         required: true
@@ -89,7 +83,6 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           EXPECTED_SLOTS: ${{ inputs.expected_slots }}
-          EXPECTED_TOPOLOGY: ${{ inputs.expected_topology }}
           HOLD_DELAY_SECONDS: ${{ inputs.hold_delay_seconds }}
           REQUESTED_BARRIER_EPOCH: ${{ inputs.barrier_epoch }}
           REQUESTED_COHORT_ID: ${{ inputs.cohort_id }}
@@ -119,14 +112,8 @@ jobs:
             fi
           }
           validate_expected_slots
-          topology_input="$RUNNER_TEMP/trtmc-expected-topology-input.json"
-          if [ -n "$EXPECTED_TOPOLOGY" ]; then
-            printf '%s' "$EXPECTED_TOPOLOGY" > "$topology_input"
-          else
-            cp .github/ci/gb300-pool-topology.json "$topology_input"
-          fi
           python3 -m tools.ci.capacity_canary topology-contract \
-            --input "$topology_input" \
+            --input .github/ci/gb300-pool-topology.json \
             --mode "$MODE" \
             --requested-slots "$EXPECTED_SLOTS" \
             --github-output "$GITHUB_OUTPUT"

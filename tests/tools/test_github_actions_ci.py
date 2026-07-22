@@ -1118,7 +1118,9 @@ def test_nightly_per_node_warm_is_strict_offline_verified_and_receipted() -> Non
     assert "--read-only" in warm
     assert "HF_HUB_OFFLINE=1" in warm
     assert "flock --exclusive" in warm
-    assert 'exec 9>"$TRTMC_HF_CACHE_LOCK_FILE"' in warm
+    assert 'exec 9>>"$TRTMC_HF_CACHE_LOCK_FILE"' in warm
+    assert 'exec 9>"$TRTMC_HF_CACHE_LOCK_FILE"' not in warm
+    assert "Append-open" in warm
     assert "tools.ci.cache_warm_receipt create" in warm
     assert "cache-warm-receipt.json" in warm
     assert "Upload node cache-warm receipt" in warm

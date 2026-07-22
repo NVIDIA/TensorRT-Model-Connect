@@ -1,4 +1,9 @@
-# GB300 CI Trust-Hardening Focused Validation
+# GB300 CI Trust-Hardening Focused Validation (Historical)
+
+> This receipt covers the superseded fixed-anchor discovery design. It remains
+> historical evidence for that source tree, but it is not validation of the
+> accepted declarative-topology implementation. See
+> `2026-07-22-topology-validation.md` for the current design.
 
 Validation completed at `2026-07-22T05:49:14Z` in the isolated worktree on
 branch `ci/gb300-28-slot-pool`. The branch was based on GitHub main

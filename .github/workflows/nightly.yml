@@ -431,8 +431,10 @@ jobs:
             echo "::error::Cache-warm runner node identity does not match the declared topology."
             exit 1
           fi
+          # The lock path is runner-owned trusted configuration. Append-open
+          # avoids truncating an existing file before flock acquires it.
           mkdir -p "$TRTMC_CACHE_RECEIPT_DIR" "$(dirname "$TRTMC_HF_CACHE_LOCK_FILE")"
-          exec 9>"$TRTMC_HF_CACHE_LOCK_FILE"
+          exec 9>>"$TRTMC_HF_CACHE_LOCK_FILE"
           flock --exclusive --timeout 7200 9
 
           warm_summary="$TRTMC_CI_WORKSPACE/cache-warm-summary.json"
