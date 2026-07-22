@@ -247,6 +247,7 @@ def _case_to_dict(case: E2ECase) -> dict[str, Any]:
     return {
         "name": case.name,
         "hf_id": case.hf_id,
+        "hf_revision": case.hf_revision or None,
         "family": case.family,
         "runtime_strategy": case.runtime_strategy,
         "task_strategy": case.task_strategy,

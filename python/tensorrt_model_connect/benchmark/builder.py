@@ -541,6 +541,8 @@ def _build_command(
         "--precision",
         str(options["precision"]),
     ]
+    if model.hf_revision:
+        command.extend(["--model-revision", model.hf_revision])
     value_flags = {
         "decoder_engine_layout": "--decoder-engine-layout",
         "dynamic_kv_profile_rows": "--dynamic-kv-profile-rows",

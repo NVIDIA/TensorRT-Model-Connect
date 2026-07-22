@@ -57,6 +57,7 @@ Classifier-Free Guidance (CFG):
 from __future__ import annotations
 
 import io
+import re
 import sys
 import tarfile
 from pathlib import Path
@@ -94,6 +95,36 @@ def _t2d(tensor) -> np.ndarray:
     if a.ndim == 2:
         return np.ascontiguousarray(a.T)
     return a
+
+
+def _validate_supported_checkpoint_architecture(state_dict) -> None:
+    """Reject upstream Magpie architectures the current runtime cannot execute."""
+    codebooks = {
+        int(match.group(1))
+        for key in state_dict
+        if (match := re.fullmatch(r"audio_embeddings\.(\d+)\.weight", key))
+    }
+    local_layers = {
+        int(match.group(1))
+        for key in state_dict
+        if (match := re.match(r"local_transformer\.layers\.(\d+)\.", key))
+    }
+    projection_keys = {
+        "local_transformer_in_projection.weight",
+        "local_transformer_in_projection.bias",
+    }
+    if (
+        codebooks != set(range(8))
+        or local_layers != {0}
+        or not projection_keys.issubset(state_dict)
+    ):
+        raise ValueError(
+            "This Magpie runtime supports 8 codebooks and one local-transformer "
+            "layer with an input projection; the selected checkpoint has "
+            f"{len(codebooks)} codebooks and local-transformer layers "
+            f"{sorted(local_layers)}. Pin a compatible checkpoint with the "
+            "model manifest hf_revision field or trtmc build --model-revision."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +468,7 @@ class MagpieTTSPlugin:
         self._nemo_path = str(nemo_path)
 
         state_dict, nemo_cfg = _load_nemo_archive(model_dir)
+        _validate_supported_checkpoint_architecture(state_dict)
 
         # Extract config from model_config.yaml
         enc_cfg = nemo_cfg.get("encoder", {})

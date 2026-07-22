@@ -79,6 +79,31 @@ class TestResolveModel:
         assert result == str(dl_dir)
         assert called["nemo"] is False
 
+    def test_download_forwards_requested_model_revision(self, tmp_path, monkeypatch):
+        """A pinned Hub revision is part of model resolution, not plugin policy."""
+        dl_dir = tmp_path / "dl"
+        dl_dir.mkdir()
+        (dl_dir / "config.json").write_text('{"model_type": "example_decoder"}')
+        captured = {}
+
+        fake_hf = types.ModuleType("huggingface_hub")
+
+        def snapshot_download(**kwargs):
+            captured.update(kwargs)
+            return str(dl_dir)
+
+        fake_hf.snapshot_download = snapshot_download
+        monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf)
+
+        result = _resolve_model(
+            "example-org/pinned-model",
+            revision="0123456789abcdef0123456789abcdef01234567",
+        )
+
+        assert result == str(dl_dir)
+        assert captured["repo_id"] == "example-org/pinned-model"
+        assert captured["revision"] == "0123456789abcdef0123456789abcdef01234567"
+
     def test_download_uses_nemo_when_no_hf_config(self, tmp_path, monkeypatch):
         """NeMo fallback remains active for snapshots that are .nemo-only."""
         dl_dir = tmp_path / "dl"

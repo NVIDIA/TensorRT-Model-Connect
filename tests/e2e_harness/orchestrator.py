@@ -139,13 +139,13 @@ def _check_hf_auth(ctx: RunContext, req: PreflightRequirement) -> tuple[bool, st
                 hf_snapshot_allow_patterns,
             )
 
-            snapshot = Path(
-                snapshot_download(
-                    hf_id,
-                    allow_patterns=hf_snapshot_allow_patterns(),
-                    local_files_only=True,
-                )
-            )
+            snapshot_kwargs = {
+                "allow_patterns": hf_snapshot_allow_patterns(),
+                "local_files_only": True,
+            }
+            if ctx.case.hf_revision:
+                snapshot_kwargs["revision"] = ctx.case.hf_revision
+            snapshot = Path(snapshot_download(hf_id, **snapshot_kwargs))
             if snapshot.is_dir():
                 return True, f"HF snapshot available offline: {hf_id}"
         except Exception:
@@ -349,6 +349,8 @@ def _resolve_bundle(
         "--max-cache-length",
         str(max_cache),
     ]
+    if case.hf_revision:
+        cmd.extend(["--model-revision", case.hf_revision])
     _append_declared_build_cli_args(cmd, case)
     if build_method:
         cmd.extend(["--method", build_method])
@@ -738,6 +740,8 @@ def _build_repro_commands(
         "--max-cache-length",
         str(max_cache),
     ]
+    if case.hf_revision:
+        build_parts.extend(["--model-revision", case.hf_revision])
     build_method = _manifest_build_method(case.metadata.get("build_args", {}))
     if build_method:
         build_parts.extend(["--method", build_method])

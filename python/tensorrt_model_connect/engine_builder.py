@@ -491,7 +491,7 @@ def _is_family_model_dir(path: Path) -> bool:
     return path.is_dir() and resolve_config_from_model_dir(path) is not None
 
 
-def _resolve_model(model_id_or_path: str) -> str:
+def _resolve_model(model_id_or_path: str, *, revision: str | None = None) -> str:
     """Resolve a HuggingFace repo ID or local path to a local directory.
 
     If model_id_or_path is an existing directory with config.json, returns it
@@ -529,6 +529,7 @@ def _resolve_model(model_id_or_path: str) -> str:
     try:
         local_dir = snapshot_download(
             repo_id=model_id_or_path,
+            revision=revision,
             allow_patterns=hf_snapshot_allow_patterns(),
         )
     except Exception as exc:
@@ -1626,6 +1627,7 @@ def _build_native_impl(
     output_path: str,
     max_cache_length: int = 256,
     *,
+    model_revision: str | None = None,
     decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
@@ -1662,13 +1664,15 @@ def _build_native_impl(
     Args:
         model_id_or_path: HF repo ID or local directory with config.json + safetensors.
         output_path: Where to write the .trtfb bundle.
+        model_revision: Optional Hugging Face revision to resolve for remote model IDs.
         max_cache_length: KV cache length for the engine.
         decoder_engine_layout: ``"split"`` or ``"dual_profile"``.
         verbose: Print detailed TRT builder logs.
         fp8_scales: Per-layer FP8 scales dict, or ``"auto"`` for auto-calibration.
         save_fp8_scales: Path to save calibrated FP8 scales JSON.
     """
-    model_dir = _resolve_model(model_id_or_path)
+    revision_kwargs = {"revision": model_revision} if model_revision else {}
+    model_dir = _resolve_model(model_id_or_path, **revision_kwargs)
     build_bundle._model_id_or_path_orig = model_id_or_path
     build_bundle._fp8_scales = fp8_scales
     build_bundle._save_fp8_scales = save_fp8_scales
@@ -1730,6 +1734,8 @@ def _try_build_optimized_runtime(
     model_id_or_path: str,
     output_path: str | Path,
     public_options: dict,
+    *,
+    model_revision: str | None = None,
 ):
     """Try a model-family-owned integration for the current platform.
 
@@ -1742,7 +1748,8 @@ def _try_build_optimized_runtime(
 
     resolved_model_ref = model_id_or_path
     try:
-        resolved_model_ref = _resolve_model(model_id_or_path)
+        revision_kwargs = {"revision": model_revision} if model_revision else {}
+        resolved_model_ref = _resolve_model(model_id_or_path, **revision_kwargs)
         model_dir = Path(resolved_model_ref)
         if (model_dir / "model_index.json").exists():
             model_index = json.loads((model_dir / "model_index.json").read_text())
@@ -1780,6 +1787,7 @@ def build(
     output_path: str,
     max_cache_length: int = 256,
     *,
+    model_revision: str | None = None,
     decoder_engine_layout: str = "split",
     dynamic_kv_cache: bool = False,
     dynamic_kv_profile_rows_override: list[int] | None = None,
@@ -1818,12 +1826,17 @@ def build(
     public_options = {
         name: value
         for name, value in build_arguments.items()
-        if name not in {"model_id_or_path", "output_path"}
+        if name not in {"model_id_or_path", "model_revision", "output_path"}
     }
-    if _try_build_optimized_runtime(
+    revision_kwargs = (
+        {"model_revision": model_revision} if model_revision else {}
+    )
+    optimized = _try_build_optimized_runtime(
         model_id_or_path,
         output_path,
         public_options,
-    ) is not None:
+        **revision_kwargs,
+    )
+    if optimized is not None:
         return
     _build_native_impl(**build_arguments)

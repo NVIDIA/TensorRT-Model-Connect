@@ -28,6 +28,7 @@ def test_acceptance_build_uses_verified_gb300_timing_cache() -> None:
 
     assert manifest["precision"] == "fp16"
     assert build_env["TRTMC_BARK_TIMING_CACHE_MODE"] == "verified"
+    assert cache_path.name == "bark-small-gb300-trt11.2-cuda13.3-fp16.cache"
     assert cache_spec["relative_to"] == "model"
     assert cache_digest == build_env["TRTMC_BARK_TIMING_CACHE_SHA256"]
     assert "TRTMC_BUILDER_OPTIMIZATION_LEVEL" not in build_env

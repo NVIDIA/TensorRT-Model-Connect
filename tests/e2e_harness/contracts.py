@@ -384,6 +384,7 @@ class E2ECase:
     hf_id: str
     family: str
     runtime_strategy: str
+    hf_revision: str = ""
     task_strategy: str = ""
     reference_backend: str = "hf_transformers"
     oracle_level: str = OracleLevel.L1_EXTERNAL_REFERENCE.value
@@ -414,6 +415,7 @@ class E2EModel:
     hf_id: str
     family: str
     bundle: str
+    hf_revision: str = ""
     testcases: List[E2ECase] = field(default_factory=list)
     manifest_path: str = ""
 

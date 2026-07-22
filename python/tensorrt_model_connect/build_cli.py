@@ -35,6 +35,7 @@ _OPTIMIZED_ROUTING_INTERNAL_FIELDS = frozenset({
     "active_python_profile",
     "command",
     "model",
+    "model_revision",
     "output",
 })
 
@@ -78,10 +79,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
     try:
         from .engine_builder import _try_build_optimized_runtime
 
+        model_revision = getattr(args, "model_revision", None)
+        revision_kwargs = (
+            {"model_revision": model_revision} if model_revision else {}
+        )
         optimized = _try_build_optimized_runtime(
             args.model,
             args.output,
             _optimized_cli_public_options(args),
+            **revision_kwargs,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -99,7 +105,10 @@ def _cmd_build(args: argparse.Namespace) -> int:
     method_name = getattr(args, 'method', 'auto')
     if method_name == 'auto':
         try:
-            method_name, build_model_ref = _auto_select_build_backend(args.model)
+            method_name, build_model_ref = _auto_select_build_backend(
+                args.model,
+                **revision_kwargs,
+            )
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
             if args.verbose:
@@ -112,6 +121,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
             build_model_ref, build_family = _resolve_build_model_metadata(
                 build_model_ref,
                 method_name,
+                **revision_kwargs,
             )
         except Exception as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -190,6 +200,7 @@ def _cmd_build(args: argparse.Namespace) -> int:
     try:
         build(
             model_id_or_path=build_model_ref,
+            model_revision=getattr(args, "model_revision", None),
             output_path=args.output,
             max_cache_length=args.max_cache_length,
             decoder_engine_layout=getattr(args, "decoder_engine_layout", "split"),
@@ -257,13 +268,19 @@ def _resolved_config_values(bundle) -> dict:
     }
 
 
-def _resolve_build_model_metadata(model_ref: str, method_name: str) -> tuple[str, str]:
+def _resolve_build_model_metadata(
+    model_ref: str,
+    method_name: str,
+    *,
+    model_revision: str | None = None,
+) -> tuple[str, str]:
     """Return (resolved_model_ref, family_name) for the selected build backend."""
     del method_name
     from .config import ModelConfig
     from .engine_builder import _resolve_model, find_diffusion_plugin, find_plugin
 
-    resolved_model_ref = _resolve_model(model_ref)
+    revision_kwargs = {"revision": model_revision} if model_revision else {}
+    resolved_model_ref = _resolve_model(model_ref, **revision_kwargs)
     model_dir = Path(resolved_model_ref)
 
     if (model_dir / "model_index.json").exists():
@@ -325,7 +342,11 @@ def _maybe_reexec_build_in_profile(
     return subprocess.run(cmd, env=env).returncode
 
 
-def _auto_select_build_backend(model_ref: str) -> tuple[str, str]:
+def _auto_select_build_backend(
+    model_ref: str,
+    *,
+    model_revision: str | None = None,
+) -> tuple[str, str]:
     """Return (method_name, resolved_model_ref) for the best available backend.
 
     The selection rule is:
@@ -335,7 +356,8 @@ def _auto_select_build_backend(model_ref: str) -> tuple[str, str]:
     from .config import ModelConfig
     from .engine_builder import _resolve_model, find_plugin, find_diffusion_plugin
 
-    resolved_model_ref = _resolve_model(model_ref)
+    revision_kwargs = {"revision": model_revision} if model_revision else {}
+    resolved_model_ref = _resolve_model(model_ref, **revision_kwargs)
     model_dir = Path(resolved_model_ref)
 
     if (model_dir / "model_index.json").exists():
@@ -569,6 +591,11 @@ def main() -> None:
     build_p = subparsers.add_parser("build", help="Build a .trtfb bundle")
     build_p.add_argument("model",
                          help="HF repo ID (for example, org/model-name) or local directory")
+    build_p.add_argument(
+        "--model-revision",
+        default=None,
+        help="Hugging Face model revision (commit, tag, or branch) to build",
+    )
     build_p.add_argument("-o", "--output", required=True,
                          help="Output .trtfb file path")
     build_p.add_argument("--trust-remote-code", action="store_true",

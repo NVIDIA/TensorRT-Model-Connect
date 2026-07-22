@@ -78,6 +78,7 @@ class NemoReference:
     ) -> StageOutput:
         """Run MagpieTTS inference via NeMo as ground-truth reference."""
         model_id = case.hf_id
+        model_revision = case.hf_revision or None
         prompt = case.inputs.get("prompt", "Hello, this is a test.")
         python = ctx.reference_python_path() or sys.executable
 
@@ -137,7 +138,13 @@ class NemoReference:
                 from nemo.collections.tts.models import (
                     MagpieTTS_Model as MagpieTTSModel,
                 )
-            model = MagpieTTSModel.from_pretrained({model_id!r})
+            model_archive = hf_hub_download(
+                repo_id={model_id!r},
+                filename="magpie_tts_multilingual_357m.nemo",
+                revision={model_revision!r},
+                local_files_only=True,
+            )
+            model = MagpieTTSModel.restore_from(restore_path=model_archive)
             model.eval()
             device = "cuda" if torch.cuda.is_available() else "cpu"
             model = model.to(device)

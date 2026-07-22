@@ -311,6 +311,21 @@ def test_auto_build_reuses_model_defaults_and_largest_diffusion_shape(tmp_path: 
     assert command.count("--max-batch-size") == 1
 
 
+def test_pinned_hf_revision_is_auditable_and_forwarded_to_builder(tmp_path: Path) -> None:
+    manifest = (
+        REPOSITORY_ROOT
+        / "tests/e2e/models/magpie_tts/manifests/magpie-tts-357m.json"
+    )
+    model = ManifestCatalog._load(manifest)
+    plan = BundleBuilder(tmp_path / "cache")._plan(model, ())
+
+    expected = "34d7e40da85cabc97f92198889b65cea27bc7fd1"
+    assert model.hf_revision == expected
+    assert model.identity()["hf_revision"] == expected
+    command = list(plan.command)
+    assert command[command.index("--model-revision") + 1] == expected
+
+
 def test_batch_two_profile_preserves_manifest_batch_inputs_and_build_shape(
     tmp_path: Path,
 ) -> None:

@@ -20,6 +20,7 @@ class BenchmarkError(RuntimeError):
 class ModelDescriptor:
     name: str
     hf_id: str
+    hf_revision: str
     bundle_name: str
     family: str
     task_strategy: str
@@ -47,6 +48,8 @@ class ModelDescriptor:
             "bundle_name": self.bundle_name,
             "build": dict(self.build_settings),
         }
+        if self.hf_revision:
+            value["hf_revision"] = self.hf_revision
         if self.distributed_runtime:
             value["distributed_runtime"] = dict(self.distributed_runtime)
         return value

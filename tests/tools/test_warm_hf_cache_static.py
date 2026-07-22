@@ -412,6 +412,32 @@ def test_cache_skip_uses_hf_local_resolution(tmp_path: Path) -> None:
     }]
 
 
+def test_cache_skip_and_worker_forward_pinned_revision(tmp_path: Path) -> None:
+    helpers = _load_cache_helpers()
+    snapshot = tmp_path / "snapshots" / "abc"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    calls: list[dict] = []
+
+    def fake_snapshot_download(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return str(snapshot)
+
+    helpers["snapshot_download"] = fake_snapshot_download
+    revision = "0123456789abcdef0123456789abcdef01234567"
+
+    assert helpers["_is_cached"]("org/model", revision=revision)
+    assert calls[0]["kwargs"]["revision"] == revision
+    command = helpers["_worker_command"](
+        "snapshot",
+        "org/model",
+        revision=revision,
+        allow_patterns=["config.json"],
+    )
+    assert command[command.index("--revision") + 1] == revision
+
+
 def test_cache_skip_rejects_unresolvable_local_revision() -> None:
     helpers = _load_cache_helpers()
 

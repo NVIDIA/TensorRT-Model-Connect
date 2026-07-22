@@ -116,6 +116,9 @@ class ManifestCatalog:
         distributed_runtime = raw.get("distributed_runtime", {})
         if not isinstance(distributed_runtime, Mapping):
             raise BenchmarkError(f"distributed_runtime in model manifest {path} must be an object")
+        hf_revision = raw.get("hf_revision", "")
+        if not isinstance(hf_revision, str):
+            raise BenchmarkError(f"hf_revision in model manifest {path} must be a string")
         task_strategy = str(raw["task_strategy"])
         model_defaults = _model_defaults(path, task_strategy)
         build_settings = {
@@ -144,6 +147,7 @@ class ManifestCatalog:
         return ModelDescriptor(
             name=str(raw["name"]),
             hf_id=str(raw["hf_id"]),
+            hf_revision=hf_revision.strip(),
             bundle_name=str(raw["bundle"]),
             family=str(raw["family"]),
             task_strategy=task_strategy,

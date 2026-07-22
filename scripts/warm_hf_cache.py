@@ -279,7 +279,7 @@ if args.strict and filter_names is not None:
         )
         sys.exit(1)
 
-entries: list[tuple[str, str, bool, bool]] = []
+entries: list[tuple[str, str, str, bool, bool]] = []
 file_assets: list[tuple[str, str, str]] = []
 for m in manifests:
     d = json.loads(m.read_text())
@@ -292,11 +292,20 @@ for m in manifests:
         continue
     if filter_names is not None and name not in filter_names:
         continue
-    entries.append((name, d["hf_id"], bool(d.get("gated")), True))
+    entries.append(
+        (
+            name,
+            d["hf_id"],
+            str(d.get("hf_revision", "") or "").strip(),
+            bool(d.get("gated")),
+            True,
+        )
+    )
     entries.extend(
         (
             dependency_name,
             dependency_hf_id,
+            "",
             False,
             not dependency_name.endswith("-tokenizer"),
         )
@@ -305,18 +314,20 @@ for m in manifests:
         )
     )
     file_assets.extend(_family_hf_warm_files(d.get("family", "")))
-deduped_entries: list[tuple[str, str, bool, bool]] = []
-entry_indexes: dict[str, int] = {}
-for name, hf_id, gated, require_weights in entries:
-    existing_index = entry_indexes.get(hf_id)
+deduped_entries: list[tuple[str, str, str, bool, bool]] = []
+entry_indexes: dict[tuple[str, str], int] = {}
+for name, hf_id, revision, gated, require_weights in entries:
+    entry_key = (hf_id, revision)
+    existing_index = entry_indexes.get(entry_key)
     if existing_index is None:
-        entry_indexes[hf_id] = len(deduped_entries)
-        deduped_entries.append((name, hf_id, gated, require_weights))
+        entry_indexes[entry_key] = len(deduped_entries)
+        deduped_entries.append((name, hf_id, revision, gated, require_weights))
         continue
-    old_name, _, old_gated, old_require_weights = deduped_entries[existing_index]
+    old_name, _, _, old_gated, old_require_weights = deduped_entries[existing_index]
     deduped_entries[existing_index] = (
         old_name,
         hf_id,
+        revision,
         old_gated or gated,
         old_require_weights or require_weights,
     )
@@ -332,7 +343,11 @@ for asset_name, asset_hf_id, filename in file_assets:
 file_assets = deduped_file_assets
 
 
-def _is_cached(hf_id: str, require_weights: bool = True) -> bool:
+def _is_cached(
+    hf_id: str,
+    revision: str = "",
+    require_weights: bool = True,
+) -> bool:
     """Return True if the model has a usable local snapshot.
 
     A snapshot directory alone is not enough: partial cache entries can contain
@@ -343,6 +358,7 @@ def _is_cached(hf_id: str, require_weights: bool = True) -> bool:
     offline builder.
     """
     try:
+        revision_kwargs = {"revision": revision} if revision else {}
         local_dir = snapshot_download(
             hf_id,
             allow_patterns=(
@@ -351,6 +367,7 @@ def _is_cached(hf_id: str, require_weights: bool = True) -> bool:
                 else _TOKENIZER_DOWNLOAD_PATTERNS
             ),
             local_files_only=True,
+            **revision_kwargs,
         )
     except Exception:
         return False
@@ -441,6 +458,7 @@ def _worker_command(
     operation: str,
     hf_id: str,
     *,
+    revision: str = "",
     allow_patterns: list[str] | None = None,
     filename: str = "",
 ) -> list[str]:
@@ -452,6 +470,8 @@ def _worker_command(
         "--repo-id",
         hf_id,
     ]
+    if revision:
+        command.extend(["--revision", revision])
     if operation == "snapshot":
         command.extend(["--allow-patterns-json", json.dumps(allow_patterns or [])])
     elif operation == "file":
@@ -475,6 +495,7 @@ def _run_download_worker(
     *,
     timeout_seconds: float,
     disable_xet: bool,
+    revision: str = "",
     allow_patterns: list[str] | None = None,
     filename: str = "",
 ) -> tuple[str | None, str]:
@@ -489,6 +510,7 @@ def _run_download_worker(
     command = _worker_command(
         operation,
         hf_id,
+        revision=revision,
         allow_patterns=allow_patterns,
         filename=filename,
     )
@@ -546,6 +568,7 @@ def _run_download_attempts(
     hf_id: str,
     *,
     timeout_seconds: float,
+    revision: str = "",
     allow_patterns: list[str] | None = None,
     filename: str = "",
     require_weights: bool = True,
@@ -559,6 +582,7 @@ def _run_download_attempts(
             hf_id,
             timeout_seconds=timeout_seconds,
             disable_xet=disable_xet,
+            revision=revision,
             allow_patterns=allow_patterns,
             filename=filename,
         )
@@ -591,6 +615,7 @@ def _run_download_attempts(
 def _warm_snapshot(
     hf_id: str,
     *,
+    revision: str = "",
     gated: bool,
     token_available: bool,
     selective: bool,
@@ -601,6 +626,7 @@ def _warm_snapshot(
     """Resolve locally first, downloading only when the cache is incomplete."""
     if (selective or local_only) and _is_cached(
         hf_id,
+        revision=revision,
         require_weights=require_weights,
     ):
         return "cached", ""
@@ -612,6 +638,7 @@ def _warm_snapshot(
         "snapshot",
         hf_id,
         timeout_seconds=timeout_seconds,
+        revision=revision,
         allow_patterns=(
             _HF_DOWNLOAD_PATTERNS
             if require_weights
@@ -742,9 +769,10 @@ hf_token_available = bool(
     os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
 )
 
-for i, (name, hf_id, gated, require_weights) in enumerate(entries, 1):
+for i, (name, hf_id, revision, gated, require_weights) in enumerate(entries, 1):
     status, detail = _warm_snapshot(
         hf_id,
+        revision=revision,
         gated=gated,
         token_available=hf_token_available,
         selective=selective,
@@ -827,7 +855,7 @@ else:
         print(f"Downloaded {downloaded} item(s) successfully.")
 
 if args.emit_cache_repos and not warned:
-    selected_repo_ids = [hf_id for _, hf_id, _, _ in entries]
+    selected_repo_ids = [hf_id for _, hf_id, _, _, _ in entries]
     selected_repo_ids.extend(hf_id for _, hf_id, _ in file_assets)
     try:
         _write_cache_repository_manifest(

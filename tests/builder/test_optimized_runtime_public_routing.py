@@ -236,6 +236,36 @@ def test_cli_delegation_preserves_explicit_default_options(monkeypatch) -> None:
     ]
 
 
+def test_cli_treats_model_revision_as_identity_not_plugin_option(monkeypatch) -> None:
+    import tensorrt_model_connect.build_cli as build_cli
+    import tensorrt_model_connect.engine_builder as engine_builder
+
+    captured: dict[str, object] = {}
+
+    def delegated(model: str, output: str, options: dict, *, model_revision: str):
+        captured.update(
+            model=model,
+            output=output,
+            options=options,
+            model_revision=model_revision,
+        )
+        return object()
+
+    monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", delegated)
+    args = argparse.Namespace(
+        command="build",
+        model="example/model",
+        model_revision="0123456789abcdef0123456789abcdef01234567",
+        output="model.trtfb",
+        precision="fp32",
+        max_cache_length=256,
+    )
+
+    assert build_cli._cmd_build(args) == 0
+    assert captured["model_revision"] == args.model_revision
+    assert "model_revision" not in captured["options"]
+
+
 def test_cli_native_fallback_does_not_probe_capsules_twice(monkeypatch) -> None:
     import tensorrt_model_connect.build_cli as build_cli
     import tensorrt_model_connect.engine_builder as engine_builder

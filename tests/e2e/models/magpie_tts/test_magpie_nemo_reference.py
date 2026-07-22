@@ -20,6 +20,7 @@ def test_magpie_reference_maps_upstream_url_to_pre_warmed_file(monkeypatch, tmp_
     case = E2ECase(
         name="magpie-case",
         hf_id="nvidia/magpie_tts_multilingual_357m",
+        hf_revision="34d7e40da85cabc97f92198889b65cea27bc7fd1",
         family="magpie_tts",
         runtime_strategy="text_to_audio_magpie",
         task_strategy="text_to_audio",
@@ -68,7 +69,9 @@ def test_magpie_reference_maps_upstream_url_to_pre_warmed_file(monkeypatch, tmp_
     assert "local_files_only=True" in script
     assert f"speaker_checkpoint_url = {MAGPIE_SPEAKER_ENCODER_URL!r}" in script
     assert "path = speaker_checkpoint" in script
-    model_load = script.index("model = MagpieTTSModel.from_pretrained")
+    assert "revision='34d7e40da85cabc97f92198889b65cea27bc7fd1'" in script
+    assert 'filename="magpie_tts_multilingual_357m.nemo"' in script
+    model_load = script.index("model = MagpieTTSModel.restore_from")
     device_transfer = script.index("model = model.to(device)")
     generation_seed = script.rindex("torch.manual_seed(42)")
     generation = script.index("audio_tensor, audio_len = model.do_tts")

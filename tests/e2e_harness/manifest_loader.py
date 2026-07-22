@@ -601,6 +601,7 @@ def _build_metadata(manifest: dict, defaults: dict[str, Any]) -> dict:
     standard_fields = {
         "name",
         "hf_id",
+        "hf_revision",
         "model_id",
         "bundle",
         "family",
@@ -822,6 +823,14 @@ def _validate_manifest(raw: dict, path: str) -> None:
                 f"required field 'runtime_strategy' (and no 'skip' is set)"
             )
 
+    hf_revision = raw.get("hf_revision")
+    if hf_revision is not None and (
+        not isinstance(hf_revision, str) or not hf_revision.strip()
+    ):
+        raise TypeError(
+            f"Manifest {path!r}: 'hf_revision' must be a non-empty string"
+        )
+
     # 3. Type checks for int fields
     for field_name in ("max_new_tokens", "max_cache_length"):
         if field_name in raw:
@@ -940,6 +949,7 @@ def _validate_manifest(raw: dict, path: str) -> None:
 _MODEL_ONLY_FIELDS = frozenset(
     {
         "hf_id",
+        "hf_revision",
         "model_id",
         "bundle",
         "family",
@@ -1000,6 +1010,7 @@ def _load_case(raw: dict[str, Any], path: Path, model_name: str) -> E2ECase:
     return E2ECase(
         name=raw["name"],
         hf_id=raw.get("hf_id", raw.get("model_id", "")),
+        hf_revision=str(raw.get("hf_revision", "") or "").strip(),
         family=raw.get("family", ""),
         runtime_strategy=str(raw.get("runtime_strategy") or ""),
         task_strategy=task_strategy,
@@ -1071,6 +1082,7 @@ def load_model_manifest(manifest_path: str | Path) -> E2EModel:
     return E2EModel(
         name=model_name,
         hf_id=build_case.hf_id,
+        hf_revision=build_case.hf_revision,
         family=build_case.family,
         bundle=build_case.bundle,
         testcases=loaded_cases,

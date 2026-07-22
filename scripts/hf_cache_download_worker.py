@@ -27,6 +27,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--operation", choices=("snapshot", "file"), required=True)
     parser.add_argument("--repo-id", required=True)
+    parser.add_argument("--revision")
     parser.add_argument("--allow-patterns-json")
     parser.add_argument("--filename")
     return parser.parse_args()
@@ -37,6 +38,7 @@ def _download(args: argparse.Namespace) -> str:
     # package initializes its constants and transfer backend.
     _set_request_timeout_defaults()
     from huggingface_hub import hf_hub_download, snapshot_download
+    revision_kwargs = {"revision": args.revision} if args.revision else {}
 
     if args.operation == "snapshot":
         if not args.allow_patterns_json:
@@ -46,11 +48,17 @@ def _download(args: argparse.Namespace) -> str:
             isinstance(pattern, str) for pattern in allow_patterns
         ):
             raise ValueError("--allow-patterns-json must encode a list of strings")
-        return snapshot_download(args.repo_id, allow_patterns=allow_patterns)
+        return snapshot_download(args.repo_id,
+            allow_patterns=allow_patterns,
+            **revision_kwargs,
+        )
 
     if not args.filename:
         raise ValueError("file operation requires --filename")
-    return hf_hub_download(args.repo_id, filename=args.filename)
+    return hf_hub_download(args.repo_id,
+        filename=args.filename,
+        **revision_kwargs,
+    )
 
 
 def main() -> int:

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "artifact": "bark-small-gb300-trt11.2-cuda13.3-fp16.cache",
+  "sha256": "fd5877cddb8c989017f18ee1084c6d2f4f2c69e89027e21803931f4e26ba14bc",
+  "generated_at": "2026-07-22T12:27:21Z",
+  "target": {
+    "gpu": "NVIDIA GB300",
+    "tensorrt": "11.2.0.113",
+    "cuda": "13.3",
+    "driver": "595.58.03",
+    "precision": "fp16"
+  },
+  "recording": {
+    "model": "suno/bark-small",
+    "seed_cache_sha256": "c07a25e04c06374b847092c1d3accacb482c25da96276e13a9e8775e6aba78ca",
+    "added_tactic_keys": 27,
+    "removed_tactic_keys": 0,
+    "changed_tactic_keys": 0
+  },
+  "qualification": {
+    "mode": "verified",
+    "result": "full bundle build succeeded without added, removed, or changed tactics"
+  }
+}

@@ -32,8 +32,8 @@ source = "https://github.com/NVIDIA/TensorRT-Model-Connect/blob/c6462c95d2acec3e
 sha256 = "0ef45969c39ffae1bc760860f84a9cc0b9bb296cd6e45e7ad5a5dcf0aff15236"
 
 [[exceptions]]
-path = "tests/e2e/models/bark/data/timing_cache/bark-small-gb300-trt11.2-fp16.cache"
-reason = "Generated TensorRT timing-cache test data is binary and cannot carry an SPDX comment; preserve the CI-recorded bytes unchanged."
+path = "tests/e2e/models/bark/data/timing_cache/bark-small-gb300-trt11.2-cuda13.3-fp16.cache"
+reason = "Generated TensorRT timing-cache test data is binary and cannot carry an SPDX comment; preserve the GB300-qualified bytes unchanged."
 license = "Apache-2.0"
-source = "https://github.com/NVIDIA/TensorRT-Model-Connect/actions/runs/29229851009"
-sha256 = "c07a25e04c06374b847092c1d3accacb482c25da96276e13a9e8775e6aba78ca"
+source = "tests/e2e/models/bark/data/timing_cache/bark-small-gb300-trt11.2-cuda13.3-fp16.provenance.json"
+sha256 = "fd5877cddb8c989017f18ee1084c6d2f4f2c69e89027e21803931f4e26ba14bc"
