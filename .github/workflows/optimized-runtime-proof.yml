@@ -124,13 +124,20 @@ jobs:
     runs-on: ${{ matrix.runner_labels }}
     timeout-minutes: 420
     env:
-      TRTMC_QUALIFICATION_ROOT: ${{ github.workspace }}/../trtmc-optimized-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_QUALIFICATION_IMAGE: ${{ matrix.container_image }}
       TRTMC_QUALIFICATION_PROFILE_FILES: ${{ matrix.profile_files }}
       TRTMC_QUALIFICATION_BUILD_JOBS: ${{ vars.TRTMC_QUALIFICATION_BUILD_JOBS || '16' }}
       TRTMC_QUALIFICATION_ENTRYPOINT: ${{ matrix.entrypoint }}
 
     steps:
+      - name: Configure qualification scratch
+        id: scratch
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/trtmc-optimized-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "TRTMC_QUALIFICATION_ROOT=$root" >> "$GITHUB_ENV"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+
       - name: Check out exact source revision
         uses: actions/checkout@v4
         with:
@@ -150,7 +157,7 @@ jobs:
           name: optimized-runtime-${{ matrix.id }}-${{ needs.select.outputs.tested_revision }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
-          path: ${{ env.TRTMC_QUALIFICATION_ROOT }}/artifacts
+          path: ${{ steps.scratch.outputs.root }}/artifacts
 
       - name: Clean qualification scratch
         if: ${{ always() }}

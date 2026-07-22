@@ -82,7 +82,7 @@ run_in_container() {
         "pip==${PIP_VERSION}" "build==${BUILD_VERSION}" "auditwheel==${AUDITWHEEL_VERSION}"
 
     export CONAN_PY_BUILD_PROFILE_AUTODETECT=1
-    export TRTMC_CONAN_BUILD_TARGETS="trtmc trtmc_backend_trt trtmc_model_qwen"
+    export TRTMC_CONAN_BUILD_TARGETS="trtmc trtmc_benchmark_worker trtmc_backend_trt trtmc_model_qwen"
     export TRTMC_TRT_INCLUDE_DIR=/usr/include/x86_64-linux-gnu
     export TRTMC_TRT_LIBRARY=/usr/lib/x86_64-linux-gnu/libnvinfer.so
     export TRTMC_CUDA_INCLUDE_DIR=/usr/local/cuda/include

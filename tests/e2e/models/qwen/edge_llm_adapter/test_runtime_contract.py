@@ -68,7 +68,10 @@ def test_a100_ci_entrypoint_builds_only_qwen_and_is_valid_bash() -> None:
         descriptor = tomllib.load(descriptor_stream)
 
     assert descriptor["runner_labels"] == ["trtmc-a100-80gb-pcie-proof"]
-    assert 'TRTMC_CONAN_BUILD_TARGETS="trtmc trtmc_backend_trt trtmc_model_qwen"' in runner
+    assert (
+        'TRTMC_CONAN_BUILD_TARGETS="trtmc trtmc_benchmark_worker '
+        'trtmc_backend_trt trtmc_model_qwen"' in runner
+    )
     assert runner.count("tests/e2e/models/qwen/edge_llm_adapter/test_a100_e2e.py") == 1
     assert "docker_args=(\n    docker run --rm" in runner
     assert "TRTMC_QUALIFICATION_PROFILE_FILES" in runner
