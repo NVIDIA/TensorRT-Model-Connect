@@ -838,6 +838,10 @@ def test_capacity_workflow_is_manual_main_only_and_has_no_model_or_hf_work() -> 
     assert "cohort-matrix --cohort-slots" in workflow
     assert "verify-cohort" in workflow
     assert "verify-cross" in workflow
+    assert re.search(
+        r"verify-cross[\s\S]*?--expected-revision \"\$GITHUB_SHA\"",
+        workflow,
+    )
     assert "max-parallel:" not in workflow
     assert "concurrency:" not in workflow
     assert "TRTMC_MODEL_RUNNER_LABELS" in workflow

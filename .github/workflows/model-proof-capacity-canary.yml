@@ -341,6 +341,7 @@ jobs:
             --expected-cohort-id "$COHORT_ID" \
             --expected-run-id "$RUN_A_ID" \
             --expected-run-id "$RUN_B_ID" \
+            --expected-revision "$GITHUB_SHA" \
             --expected-barrier-epoch "$BARRIER_EPOCH" \
             --output capacity-canary-verification.json
 
