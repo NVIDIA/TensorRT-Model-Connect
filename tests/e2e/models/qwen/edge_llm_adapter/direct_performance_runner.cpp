@@ -23,10 +23,9 @@ using qwen_edge_performance::Configuration;
 using qwen_edge_performance::Sample;
 namespace edge = trt_edgellm::rt;
 
-#if !defined(TRTMC_EXPECTED_TENSORRT_MAJOR) || !defined(TRTMC_EXPECTED_TENSORRT_MINOR) ||            \
-    !defined(TRTMC_EXPECTED_TENSORRT_PATCH) || !defined(TRTMC_EXPECTED_TENSORRT_BUILD) ||            \
-    !defined(TRTMC_EXPECTED_TENSORRT_VERSION) ||                                                     \
-    !defined(TRTMC_EXPECTED_CUDA_RUNTIME_VERSION)
+#if !defined(TRTMC_EXPECTED_TENSORRT_MAJOR) || !defined(TRTMC_EXPECTED_TENSORRT_MINOR) ||          \
+    !defined(TRTMC_EXPECTED_TENSORRT_PATCH) || !defined(TRTMC_EXPECTED_TENSORRT_BUILD) ||          \
+    !defined(TRTMC_EXPECTED_TENSORRT_VERSION) || !defined(TRTMC_EXPECTED_CUDA_RUNTIME_VERSION)
 #error "performance dependency pins must be supplied by CMake"
 #endif
 
@@ -61,8 +60,7 @@ qwen_edge_performance::RuntimeVersions observe_runtime_versions() {
         versions.tensorrt_minor != TRTMC_EXPECTED_TENSORRT_MINOR ||
         versions.tensorrt_patch != TRTMC_EXPECTED_TENSORRT_PATCH ||
         versions.tensorrt_build != TRTMC_EXPECTED_TENSORRT_BUILD)
-        throw std::runtime_error("loaded TensorRT runtime is not "
-                                 TRTMC_EXPECTED_TENSORRT_VERSION);
+        throw std::runtime_error("loaded TensorRT runtime is not " TRTMC_EXPECTED_TENSORRT_VERSION);
     if (versions.cuda_runtime != TRTMC_EXPECTED_CUDA_RUNTIME_VERSION)
         throw std::runtime_error("loaded CUDA runtime does not match the dependency lock");
     return versions;

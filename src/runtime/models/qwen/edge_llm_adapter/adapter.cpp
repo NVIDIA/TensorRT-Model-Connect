@@ -763,8 +763,7 @@ bool uses_nucleus_sampling(const trtmc::GenerateConfig& config) noexcept {
 }
 
 bool uses_greedy_sampling(const trtmc::GenerateConfig& config, bool nucleus) noexcept {
-    return config.temperature <= 0.0F || config.top_p <= 0.0F ||
-           (config.top_k == 1 && !nucleus);
+    return config.temperature <= 0.0F || config.top_p <= 0.0F || (config.top_k == 1 && !nucleus);
 }
 
 void validate_edge_sampling_support(const trtmc::GenerateConfig& config, bool nucleus) {
