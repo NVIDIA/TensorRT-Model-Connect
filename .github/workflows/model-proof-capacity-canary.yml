@@ -19,13 +19,12 @@ on:
       expected_slots:
         description: "Capacity: slots; cohort/verify: slots per workflow run"
         required: true
-        default: 28
         type: number
       expected_topology:
         description: >-
-          Trusted JSON contract: slots/GPU and each node label with allowed GPU indices;
-          all counts and capacities are derived
-        required: true
+          Optional trusted JSON override; empty uses the repository GB300 pool topology
+        required: false
+        default: ""
         type: string
       hold_delay_seconds:
         description: "Shared-capacity only: UTC delay used to assemble the first wave"
@@ -121,7 +120,11 @@ jobs:
           }
           validate_expected_slots
           topology_input="$RUNNER_TEMP/trtmc-expected-topology-input.json"
-          printf '%s' "$EXPECTED_TOPOLOGY" > "$topology_input"
+          if [ -n "$EXPECTED_TOPOLOGY" ]; then
+            printf '%s' "$EXPECTED_TOPOLOGY" > "$topology_input"
+          else
+            cp .github/ci/gb300-pool-topology.json "$topology_input"
+          fi
           python3 -m tools.ci.capacity_canary topology-contract \
             --input "$topology_input" \
             --mode "$MODE" \

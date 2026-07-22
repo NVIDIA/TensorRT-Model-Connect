@@ -129,8 +129,8 @@ jobs:
             echo "- Multi-device variants: outside this owner-level suite, matching the prior nightly contract"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  discover-cache-anchors:
-    name: 2 / Discover cache anchors
+  cache-warm-plan:
+    name: 2 / Plan per-node cache warm
     needs: legal
     if: >-
       ${{
@@ -142,7 +142,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      matrix: ${{ steps.discover.outputs.matrix }}
+      matrix: ${{ steps.plan.outputs.matrix }}
 
     steps:
       - name: Check out certified nightly snapshot
@@ -152,28 +152,12 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Mint read-only runner inventory token
-        id: app-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ vars.TRTMC_RUNNER_DISCOVERY_APP_ID }}
-          private-key: ${{ secrets.TRTMC_RUNNER_DISCOVERY_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-
-      - name: Discover and validate one online cache anchor per node
-        id: discover
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Build one cache-warm row per declared node
+        id: plan
         run: |
           set -euo pipefail
-          inventory="$RUNNER_TEMP/trtmc-proof-runners.json"
-          gh api --paginate --slurp \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "repos/$GITHUB_REPOSITORY/actions/runners?per_page=100" > "$inventory"
-          python3 -m tools.ci.discover_cache_anchors \
-            --input "$inventory" \
+          python3 -m tools.ci.capacity_canary cache-warm-matrix \
+            --input .github/ci/gb300-pool-topology.json \
             --github-output "$GITHUB_OUTPUT"
 
   source-quality:
@@ -318,19 +302,17 @@ jobs:
     needs:
       - legal
       - inventory
-      - discover-cache-anchors
+      - cache-warm-plan
     if: >-
       ${{
         needs.legal.result == 'success' &&
         needs.inventory.result == 'success' &&
-        needs.discover-cache-anchors.result == 'success'
+        needs.cache-warm-plan.result == 'success'
       }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.discover-cache-anchors.outputs.matrix) }}
-    runs-on:
-      - trtmc-cache-anchor
-      - ${{ matrix.node_label }}
+      matrix: ${{ fromJSON(needs.cache-warm-plan.outputs.matrix) }}
+    runs-on: ${{ matrix.node_label }}
     timeout-minutes: 240
     permissions:
       contents: read
@@ -338,6 +320,7 @@ jobs:
     env:
       TRTMC_CI_CONTAINER_NAME: trtmc-nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_CACHE_NODE_LABEL: ${{ matrix.node_label }}
       TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CPU_CONTAINER_OPTIONS || '--ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
       TRTMC_CACHE_SOURCE_REVISION: ${{ needs.legal.outputs.tested_sha }}
       # The downloader bounds every child process and retries once without Xet
@@ -356,11 +339,15 @@ jobs:
           clean: true
           lfs: false
 
-      - name: Validate cache-anchor host policy
+      - name: Validate per-node cache host policy
         run: |
           set -euo pipefail
           if ! [[ "${TRTMC_NODE_ID:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
-            echo "::error::Cache anchor has no safe TRTMC_NODE_ID."
+            echo "::error::Cache-warm runner has no safe TRTMC_NODE_ID."
+            exit 1
+          fi
+          if [ "trtmc-node-$TRTMC_NODE_ID" != "$TRTMC_CACHE_NODE_LABEL" ]; then
+            echo "::error::Cache-warm runner node identity does not match the declared topology."
             exit 1
           fi
           for name in \
@@ -437,7 +424,11 @@ jobs:
         run: |
           set -euo pipefail
           if ! [[ "${TRTMC_NODE_ID:-}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
-            echo "::error::Cache anchor has no safe TRTMC_NODE_ID."
+            echo "::error::Cache-warm runner has no safe TRTMC_NODE_ID."
+            exit 1
+          fi
+          if [ "trtmc-node-$TRTMC_NODE_ID" != "$TRTMC_CACHE_NODE_LABEL" ]; then
+            echo "::error::Cache-warm runner node identity does not match the declared topology."
             exit 1
           fi
           mkdir -p "$TRTMC_CACHE_RECEIPT_DIR" "$(dirname "$TRTMC_HF_CACHE_LOCK_FILE")"
@@ -515,13 +506,13 @@ jobs:
     name: 3 / HF cache / Verify every node
     needs:
       - legal
-      - discover-cache-anchors
+      - cache-warm-plan
       - cache-warm
     if: >-
       ${{
         always() &&
         needs.legal.result == 'success' &&
-        needs.discover-cache-anchors.result == 'success'
+        needs.cache-warm-plan.result == 'success'
       }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -551,7 +542,7 @@ jobs:
 
       - name: Verify cache-warm receipt agreement
         env:
-          EXPECTED_MATRIX: ${{ needs.discover-cache-anchors.outputs.matrix }}
+          EXPECTED_MATRIX: ${{ needs.cache-warm-plan.outputs.matrix }}
           SUMMARY: ${{ runner.temp }}/trtmc-cache-warm-summary.json
         run: |
           set -euo pipefail
@@ -998,7 +989,7 @@ jobs:
       - inventory
       - source-quality
       - unit-tests
-      - discover-cache-anchors
+      - cache-warm-plan
       - cache-warm
       - cache-warm-ready
       - package
@@ -1022,7 +1013,7 @@ jobs:
           INVENTORY_RESULT: ${{ needs.inventory.result }}
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
-          DISCOVERY_RESULT: ${{ needs.discover-cache-anchors.result }}
+          CACHE_PLAN_RESULT: ${{ needs.cache-warm-plan.result }}
           CACHE_WARM_RESULT: ${{ needs.cache-warm.result }}
           CACHE_READY_RESULT: ${{ needs.cache-warm-ready.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
@@ -1039,7 +1030,7 @@ jobs:
             "$REPORT_OUTPUT_DIR" "$EXPECTED_MODELS" "$EXPECTED_CASES_BY_MODEL" \
             "$EXPECTED_RESULT_COUNT" "$REVISION" \
             "$LEGAL_RESULT" "$INVENTORY_RESULT" "$SOURCE_QUALITY_RESULT" \
-            "$UNIT_RESULT" "$DISCOVERY_RESULT" "$CACHE_WARM_RESULT" \
+            "$UNIT_RESULT" "$CACHE_PLAN_RESULT" "$CACHE_WARM_RESULT" \
             "$CACHE_READY_RESULT" "$PACKAGE_RESULT" "$MODEL_RESULT" \
             "$VLM_RESULT" <<'PY'
           import html
@@ -1057,7 +1048,7 @@ jobs:
               inventory_result,
               source_quality_result,
               unit_result,
-              discovery_result,
+              cache_plan_result,
               cache_warm_result,
               cache_ready_result,
               package_result,
@@ -1087,7 +1078,7 @@ jobs:
               "inventory": inventory_result,
               "source-quality": source_quality_result,
               "unit-tests": unit_result,
-              "cache-anchor-discovery": discovery_result,
+              "cache-warm-plan": cache_plan_result,
               "cache-warm": cache_warm_result,
               "cache-warm-ready": cache_ready_result,
               "package": package_result,
@@ -1199,7 +1190,7 @@ jobs:
           INVENTORY_RESULT: ${{ needs.inventory.result }}
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
-          DISCOVERY_RESULT: ${{ needs.discover-cache-anchors.result }}
+          CACHE_PLAN_RESULT: ${{ needs.cache-warm-plan.result }}
           CACHE_WARM_RESULT: ${{ needs.cache-warm.result }}
           CACHE_READY_RESULT: ${{ needs.cache-warm-ready.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
@@ -1275,7 +1266,7 @@ jobs:
                 --upstream-result "inventory=$INVENTORY_RESULT" \
                 --upstream-result "source-quality=$SOURCE_QUALITY_RESULT" \
                 --upstream-result "unit-tests=$UNIT_RESULT" \
-                --upstream-result "cache-anchor-discovery=$DISCOVERY_RESULT" \
+                --upstream-result "cache-warm-plan=$CACHE_PLAN_RESULT" \
                 --upstream-result "cache-warm=$CACHE_WARM_RESULT" \
                 --upstream-result "cache-warm-ready=$CACHE_READY_RESULT" \
                 --upstream-result "package=$PACKAGE_RESULT" \
@@ -1450,7 +1441,7 @@ jobs:
       - inventory
       - source-quality
       - unit-tests
-      - discover-cache-anchors
+      - cache-warm-plan
       - cache-warm
       - cache-warm-ready
       - package
@@ -1469,7 +1460,7 @@ jobs:
           INVENTORY_RESULT: ${{ needs.inventory.result }}
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}
           UNIT_RESULT: ${{ needs.unit-tests.result }}
-          DISCOVERY_RESULT: ${{ needs.discover-cache-anchors.result }}
+          CACHE_PLAN_RESULT: ${{ needs.cache-warm-plan.result }}
           CACHE_WARM_RESULT: ${{ needs.cache-warm.result }}
           CACHE_READY_RESULT: ${{ needs.cache-warm-ready.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
@@ -1485,7 +1476,7 @@ jobs:
           test -n "$TESTED_SHA"
           for result in \
             "$LEGAL_RESULT" "$INVENTORY_RESULT" "$SOURCE_QUALITY_RESULT" \
-            "$UNIT_RESULT" "$DISCOVERY_RESULT" "$CACHE_WARM_RESULT" \
+            "$UNIT_RESULT" "$CACHE_PLAN_RESULT" "$CACHE_WARM_RESULT" \
             "$CACHE_READY_RESULT" "$PACKAGE_RESULT" \
             "$MODEL_RESULT" "$VLM_RESULT" "$REPORT_RESULT"; do
             test "$result" = "success"

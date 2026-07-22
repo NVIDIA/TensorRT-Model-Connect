@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prove the effective shared-GPU capacity exposed by generic proof runners.
+"""Validate the declared GPU pool and prove its effective shared capacity.
 
-Boundary: manual capacity admission evidence only; this module never runs model code.
+Boundary: topology planning and manual admission evidence only; this module never runs model code.
 """
 
 from __future__ import annotations
@@ -54,10 +54,9 @@ def _strict_integer(value: object, name: str, *, minimum: int, maximum: int) -> 
 def normalize_topology_contract(value: Mapping[str, object]) -> dict[str, object]:
     """Validate and canonicalize the operator-declared expected fleet topology.
 
-    Node labels are control-plane identities, not scheduling branches: the same
-    verifier accepts any future node set without source or repository-variable
-    changes. The trusted, first-attempt main workflow binds every receipt to the
-    digest of this exact contract.
+    Node labels are control-plane identities, not scheduling branches. Operators
+    scale the pool by changing the declarative topology, while the same generic
+    verifier binds every trusted receipt to the digest of that exact contract.
     """
     required_fields = {
         "schema_version",
@@ -159,6 +158,18 @@ def topology_contract_digest(value: Mapping[str, object]) -> str:
     normalized = normalize_topology_contract(value)
     canonical = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(canonical).hexdigest()
+
+
+def cache_warm_matrix(value: Mapping[str, object]) -> dict[str, list[dict[str, str]]]:
+    """Build exactly one cache-warm job per declared physical node."""
+
+    topology = normalize_topology_contract(value)
+    return {
+        "include": [
+            {"node_label": str(node["node_label"])}
+            for node in topology["nodes"]  # type: ignore[index]
+        ]
+    }
 
 
 def _validated_topology_for_mode(
@@ -1661,6 +1672,12 @@ def _parser() -> argparse.ArgumentParser:
     topology.add_argument("--requested-slots", required=True)
     topology.add_argument("--output", type=Path)
     topology.add_argument("--github-output", type=Path)
+    warm_matrix = commands.add_parser(
+        "cache-warm-matrix",
+        help="Emit one cache-warm matrix row per declared physical node",
+    )
+    warm_matrix.add_argument("--input", required=True, type=Path)
+    warm_matrix.add_argument("--github-output", type=Path)
     matrix = commands.add_parser("matrix", help="Emit the expected+1 job matrix")
     matrix.add_argument("--expected-slots", required=True)
     cohort = commands.add_parser("cohort-matrix", help="Emit an exact-size cohort matrix")
@@ -1752,6 +1769,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     },
                 )
             print(json.dumps(topology, indent=2, sort_keys=True))
+        elif arguments.command == "cache-warm-matrix":
+            matrix = cache_warm_matrix(
+                _load_json_object(arguments.input, "pool topology contract")
+            )
+            compact = json.dumps(matrix, sort_keys=True, separators=(",", ":"))
+            if arguments.github_output is not None:
+                _append_github_outputs(arguments.github_output, {"matrix": compact})
+            print(compact)
         elif arguments.command == "matrix":
             print(
                 json.dumps(

@@ -104,10 +104,13 @@ Neither one alone proves usable capacity.
 Nightly legal + model inventory
                 |
                 v
-Read-only runner inventory discovers one cache anchor per node
+Read the checked-in GB300 pool topology
                 |
                 v
-Dynamic matrix runs the existing strict warm stage on every node
+Build one matrix row for every declared node label
+                |
+                v
+GitHub schedules that row on any listener carrying that node label
                 |
                 v
 Each node performs an offline strict verification and emits a receipt
@@ -119,9 +122,20 @@ All node receipts pass
 Nightly model-proof matrix may start on the common 28-runner pool
 ~~~
 
-No model job decides which node to warm. No hostname list is stored in the
-workflow. Each admitted node has one anchor label, so adding a correctly
-bootstrapped node adds one cache-warm matrix entry automatically.
+No model job decides which node to warm. The single declarative source of truth
+is <code>.github/ci/gb300-pool-topology.json</code>; the workflow contains no
+separate hostname list. A declared node produces exactly one warm job, even
+though every listener on that node may carry the node label. The warm job uses
+only <code>runs-on: ${{ matrix.node_label }}</code>: it does not require
+<code>self-hosted</code>, the common production label, or a fixed cache-anchor
+runner. GitHub may choose any online listener on that node, and all listeners
+on the node share the same host cache and cache lock.
+
+Adding a physical node is intentionally semi-automatic: bootstrap its
+node-labelled listeners outside the production pool, merge one topology-data
+PR, warm and verify the declared node, and only then add the common production
+label. Restarting or replacing a listener on an already-declared node does not
+require a repository change.
 
 ### 2.3 What “slot” does and does not mean
 
@@ -164,13 +178,15 @@ This plan uses the smallest architecture that satisfies the requirements:
 
 - One common production label: <code>trtmc-gb300-proof</code>.
 - One unique identity label per node: <code>trtmc-node-*</code>.
-- One existing proof runner per node also acts as its cache anchor.
+- One declarative topology file:
+  <code>.github/ci/gb300-pool-topology.json</code>.
+- One Nightly warm matrix row per declared node.
 - The existing GitHub scheduler selects a runner.
 - The existing node-local <code>GpuLease</code> selects a GPU slot.
 - The existing strict Hugging Face warm script remains the downloader and
   validator.
-- One small read-only discovery helper converts runner labels into a Nightly
-  node matrix.
+- The existing topology validator derives both cache-warm rows and capacity
+  expectations from the same file.
 - One node-wide file lock coordinates cache writers and readers.
 
 The design intentionally does not add:
@@ -179,6 +195,8 @@ The design intentionally does not add:
 - a database or queue service;
 - a dedicated cache daemon;
 - a hostname conditional in YAML;
+- a runner-inventory API call, GitHub App, or discovery credential;
+- a fixed cache-anchor runner or cache-anchor label;
 - a per-model cache-warm job;
 - a recurring rsync between nodes;
 - a literal fleet size of 28 in production workflows;
@@ -186,8 +204,11 @@ The design intentionally does not add:
 - runner deletion during rollout.
 
 The number 28 appears in this rollout plan and acceptance canary because it is
-the current acceptance target. Normal Pre-Merge and Nightly workflows derive
-capacity from online matching runners and contain no hardcoded 28.
+the current acceptance target. Normal Pre-Merge and Nightly model-proof
+workflows derive usable concurrency from online matching production runners
+and contain no hardcoded 28. The topology file declaratively records the
+currently admitted physical pool so Nightly can warm each node and canaries can
+verify the exact node/GPU split; it is data, not a scheduler.
 
 ## 4. Historical Audited Starting Point
 
@@ -294,19 +315,23 @@ Every production proof runner has:
 Do not assume that <code>self-hosted</code>, <code>Linux</code>, or
 <code>ARM64</code> is present. The current proof registrations were created
 with default labels disabled. Normal proof jobs use only the common pool
-label; cache-warm jobs use the anchor label plus the discovered node label.
+label; each cache-warm matrix row uses only its declared node label.
 
 Node labels are:
 
 - <code>trtmc-node-gb300-nvl-019-compute01</code>;
 - <code>trtmc-node-gb300-nvl-019-compute02</code>.
 
-Exactly one production runner per node also has:
+Every proof listener on a node may carry that node label. A Nightly creates
+only one matrix row for the label, so GitHub selects any one online listener
+on the node to perform the node-wide warm. There is no
+<code>trtmc-cache-anchor</code> label, no designated <code>proof-00</code>
+runner, and no runner name in the routing contract.
 
-- <code>trtmc-cache-anchor</code>.
-
-Use proof-00 as the anchor on both current nodes. The anchor remains one of the
-28 production listeners after admission; it is not additional capacity.
+The earlier fixed-anchor proposal is superseded by this declarative design.
+A stale <code>trtmc-cache-anchor</code> label from pre-staging is inert because
+no workflow selects it. Its eventual cleanup is optional and is not an
+admission gate or a reason to mutate live runners during this rollout.
 
 The four compute02 standby registrations, proof-12 through proof-15, must:
 
@@ -395,26 +420,28 @@ listener without a workflow edit when capacity changes.
 
 ### 6.2 <code>.github/workflows/nightly.yml</code>
 
-Add a GitHub-hosted <code>discover-cache-anchors</code> job that:
+Add a GitHub-hosted <code>cache-warm-plan</code> job that checks out the exact
+certified Nightly revision and reads
+<code>.github/ci/gb300-pool-topology.json</code>. It must:
 
-1. obtains a short-lived read-only GitHub App token;
-2. reads the repository runner inventory;
-3. validates every production proof runner has exactly one node label;
-4. validates every production node has exactly one cache anchor;
-5. validates every anchor has exactly one node label and is online;
-6. rejects two anchors with the same node label;
-7. rejects an anchor with multiple node labels;
-8. rejects an empty anchor set;
-9. emits one sorted matrix row per validated anchor.
+1. validate the topology's exact minimal schema;
+2. reject an empty node set, duplicate or malformed node labels, unsorted or
+   duplicate GPU indices, an invalid slot count, and extra fields;
+3. normalize nodes in a deterministic order;
+4. emit exactly one matrix row containing only <code>node_label</code> for each
+   declared node.
 
-There is no silent deduplication. A repeated node label is a configuration
-error, not something the workflow repairs.
+There is no runner-inventory API call, GitHub App, private-key secret, or
+online-runner preflight. GitHub's normal job scheduling is the availability
+check: if no listener with a declared node label is online, that node's warm
+job cannot complete and the Nightly barrier remains closed.
 
 Convert <code>cache-warm</code> into a dynamic per-node matrix:
 
 - <code>fail-fast: false</code>, so all node failures are visible in one run;
-- run on the conjunction of <code>trtmc-cache-anchor</code> and the matrix node
-  label;
+- use only <code>runs-on: ${{ matrix.node_label }}</code>; do not add
+  <code>self-hosted</code>, <code>trtmc-gb300-proof</code>, or a fixed runner
+  selector;
 - run the full active single-GPU Nightly cache plan on every node, not only
   models that later happen to land there;
 - acquire the node-wide cache lock exclusively for warm and verification;
@@ -438,31 +465,49 @@ replace it with 28. Preserve <code>fail-fast: false</code> so Nightly still
 captures the complete model failure set.
 
 The report, required gate, and any release/publish stage must continue to fail
-closed when discovery or any cache-warm entry fails.
+closed when topology planning or any cache-warm entry fails.
 
-### 6.3 <code>tools/ci/discover_cache_anchors.py</code>
+### 6.3 <code>.github/ci/gb300-pool-topology.json</code>
 
-Add one small, pure, testable helper instead of embedding substantial JSON and
-label validation in YAML. Its input is the runner inventory JSON and its output
-is a matrix like:
+Keep one checked-in declarative file as the source of truth for per-node cache
+warm and exact capacity verification:
 
 ~~~json
 {
-  "include": [
+  "schema_version": 1,
+  "kind": "trtmc_capacity_topology",
+  "slots_per_gpu": 4,
+  "nodes": [
     {
       "node_label": "trtmc-node-gb300-nvl-019-compute01",
-      "anchor_runner": "gb300-nvl-019-compute01-proof-00"
+      "gpu_indices": [0, 1, 2, 3]
     },
     {
       "node_label": "trtmc-node-gb300-nvl-019-compute02",
-      "anchor_runner": "gb300-nvl-019-compute02-proof-00"
+      "gpu_indices": [1, 2, 3]
     }
   ]
 }
 ~~~
 
-The helper must not contain either current hostname or the number 28. Its
-behavior is entirely label-driven.
+This file is the only checked-in current-fleet declaration. Do not duplicate
+its node list in workflow YAML, repository variables, a runner name list, or a
+second cache configuration. A pure subcommand in the existing
+<code>tools/ci/capacity_canary.py</code> validator derives the Nightly matrix:
+
+~~~json
+{
+  "include": [
+    {"node_label": "trtmc-node-gb300-nvl-019-compute01"},
+    {"node_label": "trtmc-node-gb300-nvl-019-compute02"}
+  ]
+}
+~~~
+
+The node label is a declarative scheduling label, while
+<code>gpu_indices</code> and <code>slots_per_gpu</code> are the acceptance
+contract. Production model jobs still route only through the common generic
+pool label; they never select a node from this file.
 
 ### 6.4 <code>.github/workflows/model-proof.yml</code>
 
@@ -531,8 +576,9 @@ The workflow should create a compact
 <code>cache-warm-receipt.json</code> after successful warm plus local-only
 verification. It must contain:
 
-- receipt schema version 2; node ID, hostname, anchor runner, exact run ID,
-  run attempt, and job ID;
+- receipt schema version 2; node ID, hostname, the runner that actually
+  executed the warm, exact run ID, run attempt, and job ID. The runner name is
+  evidence only and is not a fixed routing identity;
 - tested source revision;
 - a cache-plan digest derived from the sorted selected dependency set;
 - a resolved-cache digest derived from repository IDs and resolved local refs;
@@ -570,8 +616,9 @@ download a model or receive an HF token. It should reuse the real
 <code>GpuLease</code>, launch a tiny Docker GPU UUID probe, hold the lease to an
 absolute barrier time, and upload a receipt.
 
-Every dispatch must also provide an <code>expected_topology</code> JSON
-acceptance contract. For the initial admission, use:
+By default every dispatch reads the checked-in
+<code>.github/ci/gb300-pool-topology.json</code> from the protected main-branch
+revision as its expected topology. The initial admission file is:
 
 ```json
 {
@@ -591,11 +638,12 @@ acceptance contract. For the initial admission, use:
 }
 ```
 
-This is verification data, not routing logic. The worker matrix still targets
-only the common generic proof label, and GitHub remains the scheduler. The
-trusted preparation job validates the exact minimal schema, derives seven GPUs
-and the 16 plus 12 capacities from the indices and slots/GPU, canonicalizes
-node order, and hashes the result. Each GPU receipt carries that
+This is verification data and the Nightly per-node warm declaration, not
+production model routing logic. The worker matrix still targets only the common
+generic proof label, and GitHub remains the scheduler. The trusted preparation
+job validates the exact minimal schema, derives seven GPUs and the 16 plus 12
+capacities from the indices and slots/GPU, canonicalizes node order, and hashes
+the result. Each GPU receipt carries that
 digest; the GitHub-hosted postflight rejects a missing or different digest and
 checks receipts against the normalized contract and exact worker job ID
 <code>exercise</code>. For cross-workflow proof, the
@@ -624,9 +672,14 @@ Mode/contract relationships are deliberately small: shared-capacity and
 exclusive-safety require <code>expected_slots == capacity</code>;
 shared-cohort may request any positive subset up to capacity; and
 cross-workflow-verify requires two equal cohorts whose combined size equals
-capacity. A future node is represented by one additional contract row only
-when running the admission canary; normal Pre-Merge and Nightly scheduling do
-not consume this contract.
+capacity. A future node is represented by one additional row in the topology
+data PR before it is warmed or admitted. Normal Pre-Merge and Nightly model
+jobs do not consume the node rows for routing; Nightly cache planning does.
+
+The optional manual JSON override is reserved for trusted evidence replay or
+failure-injection studies. Initial admission and normal post-rollout canaries
+must leave it empty and use the checked-in file, preventing a dispatch-time
+copy from becoming a second current-fleet source of truth.
 
 Only the GitHub-hosted verifier job receives <code>actions: read</code>. GPU
 workers receive no Actions-write permission, model input, or Hugging Face
@@ -637,7 +690,6 @@ credential. The workflow contains no <code>concurrency</code> group.
 Update or add:
 
 - <code>tests/tools/test_github_actions_ci.py</code>;
-- <code>tests/tools/test_discover_cache_anchors.py</code>;
 - <code>tests/tools/test_model_proof_runner.py</code>;
 - <code>tests/tools/test_model_proof_security.py</code>;
 - <code>tests/tools/test_generate_model_proof_report.py</code>;
@@ -652,9 +704,9 @@ Tests must prove:
 
 - neither model matrix has a fixed max-parallel value;
 - both use the common reusable proof workflow;
-- no normal Pre-Merge, Nightly, or reusable proof workflow contains a compute
-  hostname or hardcoded fleet size; the manual admission canary may carry an
-  explicit expected-capacity input/contract;
+- no normal Pre-Merge, Nightly model-proof, or reusable proof workflow contains
+  a compute hostname or hardcoded fleet size; the single declarative topology
+  file carries node labels and GPU indices for cache planning and acceptance;
 - GPU IDs come only from the host environment;
 - missing host policy fails;
 - Pre-Merge does not inherit HF secrets;
@@ -664,8 +716,11 @@ Tests must prove:
 - proof cache access is strict, local-only, and read-only at the shared-cache
   boundary;
 - cache miss occurs before GPU acquisition;
-- discovery rejects missing, duplicate, offline, or malformed anchors;
-- discovery emits one matrix entry per valid node;
+- topology parsing rejects an empty set, duplicate or malformed nodes,
+  duplicate/unsorted GPU indices, invalid slot density, and extra fields;
+- cache planning emits exactly one node-label-only matrix entry per declared
+  node and never requires <code>self-hosted</code>, a production label, a
+  runner-inventory API, or a fixed runner name;
 - warm failure blocks Nightly proof;
 - malformed topology contracts, digest substitution, GPU-index/UUID aliasing,
   compute02 GPU 0, wrong slots per GPU, and a same-total but wrong node split
@@ -677,38 +732,42 @@ Tests must prove:
 - shared and exclusive lease safety, fairness, cancellation, and stale-ticket
   recovery remain correct;
 - cache receipts reject stale schemas and are bound to exact run, attempt, job,
-  source, node/anchor/hostname, paths, counts, timestamps, and digests;
+  source, node/executing-runner/hostname, paths, counts, timestamps, and
+  digests;
 - combined proof reports reject forged job identity, runner/node movement,
   topology drift, zero-length leases, and overlapping slot ownership.
 
 Do not weaken any model or comparison acceptance criterion to make CI pass.
 
-## 7. Read-Only Runner Inventory Credential
+## 7. Declarative Topology Change Contract
 
-The default GitHub Actions token cannot be assumed to list repository
-self-hosted runners. Create a repository-scoped GitHub App:
+The user-approved design is semi-automatic. It deliberately does not inspect
+the repository runner inventory and therefore needs no GitHub App, App ID,
+private-key secret, administration permission, or extra token.
 
-- suggested name: <code>trtmc-runner-discovery</code>;
-- installation scope: only <code>NVIDIA/TensorRT-Model-Connect</code>;
-- repository permission: Administration, read-only;
-- no organization permission;
-- no write permission.
+The only current-fleet declaration is
+<code>.github/ci/gb300-pool-topology.json</code>. A topology-only PR is required
+when any of these physical-capacity facts change:
 
-Store:
+- a new GPU node is added or an admitted node is removed;
+- the allowed GPU indices on a node change;
+- <code>slots_per_gpu</code> changes.
 
-- App ID as <code>TRTMC_RUNNER_DISCOVERY_APP_ID</code>;
-- private key as the secret
-  <code>TRTMC_RUNNER_DISCOVERY_PRIVATE_KEY</code>.
+No topology PR is required to restart an existing listener, replace one runner
+registration with the same node label and host policy, or change how many of
+the already-authorized listeners are temporarily online. GitHub automatically
+uses all online listeners carrying <code>trtmc-gb300-proof</code>.
 
-The discovery job runs on <code>ubuntu-latest</code>, mints a short-lived token,
-uses it only for the runner inventory call, and never passes it to a
-self-hosted job or artifact.
+The topology PR must be declarative data only unless the schema itself is
+intentionally changing. CI validates it, derives one Nightly cache-warm row per
+node, derives expected capacity, and rejects malformed or duplicate entries.
+After merge, the new node must pass strict warm and local-only verification
+before its listeners receive the common production label.
 
-Protect this credential so only the trusted default-branch Nightly workflow can
-use it. If organization policy prefers a protected GitHub Environment, place
-the private key there and restrict deployment branches to <code>main</code>.
-
-This is a GitHub administration checkpoint, not a sudo checkpoint.
+GitHub Actions still provides its normal per-job
+<code>${{ github.token }}</code> where existing workflow operations require it;
+that built-in token is unrelated to node discovery and this design adds no new
+GitHub credential.
 
 ## 8. Safe Rollout Sequence
 
@@ -770,14 +829,12 @@ PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_capacity_canary.py \
   tests/tools/test_ci_container_secrets.py \
   tests/tools/test_github_actions_ci.py \
-  tests/tools/test_discover_cache_anchors.py \
   tests/tools/test_model_proof_runner.py \
   tests/tools/test_generate_model_proof_report.py \
   tests/tools/test_model_proof_security.py \
   tests/tools/test_warm_hf_cache_static.py -q
 git diff --check
-actionlint -ignore 'label "trtmc-cache-anchor" is unknown' \
-  .github/workflows/nightly.yml .github/workflows/trtmc-ci.yml \
+actionlint .github/workflows/nightly.yml .github/workflows/trtmc-ci.yml \
   .github/workflows/model-proof.yml \
   .github/workflows/model-proof-capacity-canary.yml
 ~~~
@@ -789,22 +846,24 @@ actionlint -ignore 'label "trtmc-cache-anchor" is unknown' \
 Exit gate: PR code is green and reviewable, but it is not merged until current
 production runners have a compatible host environment.
 
-### Phase 2 — Install the control-plane contract
+### Phase 2 — Stage the declarative node-label contract
 
-- [ ] Create and install the read-only GitHub App.
-- [ ] Add its App ID and private-key secret.
+- [ ] Confirm the PR contains exactly one current-fleet declaration at
+      <code>.github/ci/gb300-pool-topology.json</code> and that it encodes the
+      exact 16 plus 12 target from Section 6.3.
 - [ ] Add exactly one node label to every current proof registration.
-- [ ] Add <code>trtmc-cache-anchor</code> only to proof-00 on each node.
 - [ ] Remove the common production label from all compute01 proof
       registrations before starting any compute01 proof service.
 - [ ] Remove the common production label from compute02 proof-12 through
       proof-15, wait for <code>busy=false</code>, then stop and disable them.
 - [ ] Give compute02 proof-12 through proof-15 only the standby label.
 - [ ] Remove the legacy compute02-specific label after verifying the new labels.
+- [ ] Confirm any pre-staged <code>trtmc-cache-anchor</code> label is inert;
+      defer optional cleanup rather than mutate live runners for this rollout.
 
-Exit gate: labels describe nodes and anchors unambiguously; compute02 exposes no
-more than 12 production listeners; compute01 exposes no production capacity
-yet.
+Exit gate: labels describe nodes unambiguously; compute02 exposes no more than
+12 production listeners; compute01 exposes no production capacity yet; and no
+fixed runner is required for cache routing.
 
 ### Phase 3 — Install and verify host-local policy
 
@@ -818,14 +877,16 @@ On both nodes:
 - [ ] Verify <code>Linger=yes</code>; do not rerun sudo merely for reassurance.
 - [ ] On compute02, drain production listeners one at a time, restart each,
       inspect the listener process environment, and restore its common label.
-- [ ] Start compute01 proof-00 as anchor-only and inspect its inherited
-      environment. It must still lack the common production label.
+- [ ] Start or select at least one compute01 node-labelled listener and inspect
+      its inherited environment. It must still lack the common production
+      label; it need not be proof-00.
 - [ ] Query GPU UUIDs from the exact indices named in each node policy.
 - [ ] Confirm all same-node listeners resolve the same GPU-lock directory inode
       and lock namespace.
 
 Exit gate: every active production listener has the correct host-local GPU
-policy, and the compute01 anchor is online without advertising proof capacity.
+policy, and at least one compute01 node-labelled listener can accept its future
+warm row without advertising proof capacity.
 
 ### Phase 4 — Clear every pre-merge gate, then merge the scheduling and cache PR
 
@@ -835,8 +896,8 @@ policy, and the compute01 anchor is online without advertising proof capacity.
       Do not recursively chown the approximately 1 TB cache.
 - [ ] Retain the raw pre-admission runner and host snapshot, including hashes,
       in the access-controlled rollout evidence store.
-- [ ] Confirm the runner-discovery App is installed and its repository
-      variable and secret are configured without exposing their values.
+- [ ] Confirm no runner-discovery App variable, private-key secret, or runner
+      inventory permission is required by the patch.
 - [ ] Obtain the workload owners' confirmation of a declared drained
       acceptance window for the compute01 GitLab scheduler and compute02
       external Docker GPU claims. The rollout must not stop or reconfigure
@@ -870,8 +931,12 @@ the PR remains draft and unmerged.
 - [ ] Reconfirm that the pre-merge compute02 ownership/read-write audit remains
       clean; any new exception stops rollout and returns to the targeted repair
       gate in Phase 4.
-- [ ] Manually dispatch trusted Nightly cache discovery/warm.
-- [ ] Verify exactly two warm matrix entries, one on each anchor.
+- [ ] Manually dispatch trusted Nightly cache planning/warm from the merged
+      main revision.
+- [ ] Verify the checked-in topology produces exactly two warm matrix entries,
+      one for each declared node label.
+- [ ] Verify each warm job was scheduled by its node label alone and may use any
+      listener on that physical node.
 - [ ] Verify both perform the full active single-GPU Nightly plan.
 - [ ] Verify strict warm succeeds on both nodes.
 - [ ] Verify the second network-disabled local-only check downloads zero bytes.
@@ -879,13 +944,13 @@ the PR remains draft and unmerged.
       resolved-cache digests.
 
 Exit gate: both node caches are strict-ready for the same plan. The compute01
-anchor may now be admitted to production.
+node listeners may now be admitted to production.
 
 ### Phase 6 — Admit exactly 28 production listeners
 
 compute01:
 
-- [ ] Add <code>trtmc-gb300-proof</code> to proof-00 only after cache readiness.
+- [ ] Add <code>trtmc-gb300-proof</code> only after node cache readiness.
 - [ ] Revalidate proof-00 through proof-15 as active/enabled with the inherited
       host-local policy; do not restart them unnecessarily.
 - [ ] Add the common label to each only after its unit, environment, Docker,
@@ -904,8 +969,9 @@ Fleet:
 - [ ] Require exactly 28 online production-labeled runners, regardless of
       whether an individual runner is idle or busy at the snapshot instant:
       16 on compute01 and 12 on compute02.
-- [ ] Require exactly one anchor per node.
 - [ ] Require no 29th production-labeled runner, whether online or offline.
+- [ ] Require every production runner to have exactly one node label and no
+      routing dependency on a fixed cache runner.
 - [ ] Confirm the compute01 generic runner remains separate and healthy.
 
 Exit gate: GitHub registry topology and node-local capacity both equal 28.
@@ -916,7 +982,8 @@ Run the tests in Section 9. Any duplicate lease, wrong GPU, wrong node count,
 cache miss, secret exposure, or inability to reach 28 concurrent slots blocks
 completion.
 
-- [ ] Dispatch the 28/29 mode with the exact Section 6.7 topology contract.
+- [ ] Dispatch the 28/29 mode using the exact checked-in Section 6.3 topology
+      file with no manual override.
 - [ ] Save the normalized contract and digest uploaded with the verification.
 - [ ] Require the result to report seven GPUs, four slots per GPU, and the
       exact 16 plus 12 node distribution, with compute02 index 0 absent.
@@ -973,9 +1040,9 @@ One runner API snapshot must show:
 | Production proof runners | Exactly 28 registered and online |
 | compute01 production runners | Exactly 16 |
 | compute02 production runners | Exactly 12 |
-| compute01 anchor | Exactly one |
-| compute02 anchor | Exactly one |
 | Node labels | Exactly one on every production runner |
+| Declared warm nodes | Exactly compute01 and compute02 in the topology file |
+| Cache-warm selector | Node label only; no fixed runner or default label |
 | compute02 proof-12..15 | Standby-labeled, disabled, no production label |
 | compute02 GPU 0 | Absent from policy and all receipts |
 | Generic compute01 runner | Online if desired, never production-labeled |
@@ -986,7 +1053,8 @@ The canary preparation job selects an absolute barrier roughly 15 minutes in
 the future and launches a 29-leg matrix on the common proof label. Run it in a
 declared acceptance window after other jobs using the proof pool have drained;
 otherwise it measures unrelated contention instead of admitted capacity.
-Supply the exact topology contract from Section 6.7 in the dispatch. The
+Use the exact checked-in topology contract from Section 6.3 with no manual
+override. The
 preparation job must publish only its normalized JSON and digest to downstream
 jobs; workers must record the digest but must not use node rows for routing.
 
@@ -1007,7 +1075,7 @@ Pass criteria:
 
 - exactly 28 leases overlap at the barrier;
 - all 28 <code>(node_id, gpu_uuid, slot_id)</code> tuples are unique;
-- all receipts contain the canonical digest of the trusted dispatch contract;
+- all receipts contain the canonical digest of the checked-in topology file;
 - each node ID maps to exactly one hostname and lock namespace, each hostname
   maps to one node ID, and each GPU UUID maps to one node ID;
 - each <code>(node_id, gpu_index)</code> maps to exactly one GPU UUID and each
@@ -1046,11 +1114,11 @@ Execution uses the retained workflow rather than a second scheduler:
 
 1. Choose one cohort ID and future barrier, then dispatch two
    <code>shared-cohort</code> runs with <code>expected_slots=14</code> and the
-   exact same topology contract.
+   topology override left empty, from the same main revision.
 2. After both finish, dispatch <code>cross-workflow-verify</code> with those two
    exact run IDs, the same cohort ID, barrier, 14 slots per run, and the exact
-   same topology contract. Receipt-digest validation must happen before
-   combined placement is accepted.
+   same checked-in topology. Receipt-digest validation must happen before
+   combined placement is accepted; all three runs must bind to its same digest.
 3. For cancellation recovery, dispatch a 27-slot fill run and a separate
    one-slot holder to the same barrier, then dispatch a one-slot waiter.
 4. Save the holder and waiter run and job URLs plus raw Actions API JSON proving
@@ -1100,7 +1168,9 @@ GitHub.
 
 For each Nightly cache plan:
 
-- discovery returns exactly one entry per admitted node;
+- the checked-in topology produces exactly one entry per declared node;
+- each entry selects only its node label, with no fixed runner name,
+  <code>self-hosted</code>, or common production label;
 - each node receives the same plan;
 - every receipt has <code>missing_count=0</code>;
 - both receipts have identical plan and resolved-cache digests;
@@ -1119,9 +1189,9 @@ Inject and verify fail-closed behavior:
 
 | Injected failure | Required result |
 | --- | --- |
-| Missing or duplicate anchor | Discovery fails; no silent repair |
-| Anchor offline while node proof runners are online | Fleet preflight fails |
-| Anchor has zero or two node labels | Discovery fails |
+| Empty, duplicate, or malformed topology node | Planning fails; no warm starts |
+| Declared node has no online node-labelled listener | Its warm cannot complete; Nightly barrier stays closed |
+| Warm lands on a runner whose host node ID differs from the label | Host-policy validation fails |
 | Hugging Face 401/403 or missing dependency | Warm fails; no new ready receipt |
 | Disk full | Warm fails; previous receipt is not overwritten |
 | Corrupt or incomplete cache entry | Strict local-only validation fails |
@@ -1140,9 +1210,10 @@ At runtime prove:
 - an intentionally absent canary dependency fails rather than downloading,
   skipping, or warning-pass.
 
-### 9.8 Auto-scaling acceptance
+### 9.8 Semi-automatic scale acceptance
 
-Without changing a workflow, repository variable, or hostname list:
+First prove that listener availability on an already-declared node needs no
+repository change:
 
 1. drain and stop one admitted production listener;
 2. verify fleet audit reports 27;
@@ -1150,7 +1221,14 @@ Without changing a workflow, repository variable, or hostname list:
 4. verify GitHub reports 28;
 5. rerun the 28/29 canary and recover the full result.
 
-This proves CI capacity follows matching online admitted listeners.
+Then review or rehearse the new-node path: bootstrap node-labelled listeners
+without the production label, add exactly one node row in a declarative
+topology PR, merge it, require that node's Nightly warm receipt, and only then
+add the production label. No workflow code, repository secret, GitHub App, or
+runner-name list changes.
+
+This proves CI capacity follows matching online admitted listeners while a new
+physical node requires only one explicit, reviewable topology-data change.
 
 ### 9.9 Test-specific PR acceptance
 
@@ -1210,9 +1288,9 @@ Do not hide the problem by changing model pass criteria.
 
 ## 11. Future Node Scale-Out Contract
 
-After this design is merged, adding a node does not require editing a workflow
-or a hostname list. “Automatic scale-out” means the following standard
-admission completes, then CI automatically uses the matching listeners:
+After this design is merged, adding a physical node requires no workflow-code
+or credential change. It requires one reviewable declarative-data PR, followed
+by warm verification and production admission:
 
 1. Verify GPU, driver, Docker, storage, network, and runner prerequisites.
 2. Choose allowed GPU indices.
@@ -1220,34 +1298,44 @@ admission completes, then CI automatically uses the matching listeners:
 4. Install <code>proof-node.env</code> with a unique
    <code>TRTMC_NODE_ID</code>.
 5. Register
-   <code>allowed GPU count × 4</code> generic proof listeners without the
-   production label.
-6. Give all of them exactly one unique <code>trtmc-node-*</code> label.
-7. Give exactly one listener <code>trtmc-cache-anchor</code>.
-8. Start the anchor only.
-9. Let the next Nightly discovery warm and strictly verify that node, or run the
-   trusted warm workflow manually.
-10. Verify its cache receipt, GPU UUID probes, lock namespace, disk headroom,
+   <code>allowed GPU count × slots_per_gpu</code> generic proof listeners
+   without <code>trtmc-gb300-proof</code>.
+6. Give every listener exactly one unique <code>trtmc-node-*</code> label and
+   start enough node-labelled listeners for host validation and cache warm.
+7. Submit a topology-only PR adding one sorted node row with that node label
+   and its allowed GPU indices to
+   <code>.github/ci/gb300-pool-topology.json</code>. Change no workflow YAML and
+   add no runner name, GitHub App, or secret.
+8. Let CI validate the topology schema, derived capacity, and Nightly matrix;
+   then merge the PR through the normal ruleset.
+9. Run trusted Nightly cache warm from the merged revision. The single new
+   matrix row lands on any online listener carrying the new node label.
+10. Require strict warm and network-disabled local-only verification, then
+    verify its cache receipt, GPU UUID probes, lock namespace, disk headroom,
     and listener environment.
-11. Add <code>trtmc-gb300-proof</code> and start the calculated number of
-    listeners.
-12. Run the capacity canary with the new expected fleet total and add one
-    generic node-label row containing that node's allowed GPU indices to the
-    dispatch-time topology contract; GPU counts and capacity are derived.
+11. Add <code>trtmc-gb300-proof</code> to exactly the calculated listener count.
+12. Run the capacity canary from main with no topology override and require the
+    new exact node distribution and fleet total.
 
-The Nightly discovery matrix automatically gains the new anchor. Pre-Merge and
-Nightly model matrices automatically gain the new matching runner capacity.
-No production workflow, hostname branch, repository capacity variable, or
-runner-selection rule changes. Only this one admission invocation describes
-the new expected physical topology so the proof cannot pass on the old pool.
+After admission, Pre-Merge and Nightly model matrices automatically use the new
+matching runner capacity. The Nightly warm matrix continues to generate one
+row for every node in the same topology file. No production hostname branch,
+repository capacity variable, runner-inventory API, fixed cache runner, or
+runner-selection rule changes.
+
+Adding, restarting, or replacing a listener on an already-declared node does
+not need another PR as long as its node label and host policy are unchanged and
+the number of production listeners never exceeds the declared slot capacity.
+Changing the physical node set, allowed GPU indices, or slots per GPU does need
+another topology-data PR.
 
 Starting an arbitrary unconfigured runner is intentionally not sufficient. A
 node must first satisfy the admission contract; otherwise it could expose a
 cold cache, wrong GPU set, wrong lock directory, or false listener count.
 
-If onboarding becomes frequent, package steps 1 through 8 and the local
-preflight as one idempotent host bootstrap script. That script is a convenience,
-not a new scheduler and not required for the initial 28-slot rollout.
+If onboarding becomes frequent, package the host bootstrap and local preflight
+as one idempotent script. That script is a convenience, not a new scheduler and
+not required for the initial 28-slot rollout.
 
 ## 12. Rollback
 
@@ -1257,8 +1345,8 @@ Rollback is label-first and non-destructive:
    dispatch new work.
 2. Wait for every affected runner to report <code>busy=false</code>.
 3. Stop and disable only the affected proof user units.
-4. Preserve runner registrations, runner directories, cache, anchors, and
-   evidence.
+4. Preserve runner registrations, runner directories, cache, topology history,
+   and evidence.
 5. Keep compute02 proof-00 through proof-11 as the known 12-slot safe pool.
 6. Revert repository workflow code through a normal GitHub PR if the defect is
    in code.
@@ -1314,9 +1402,11 @@ as ready.
 
 Human GitHub administration is required to:
 
-- create/install the read-only runner-discovery App;
-- add its App ID and private key;
-- approve and merge the repository PR.
+- approve and merge the repository PR under the normal ruleset;
+- administer runner labels during staged admission.
+
+No GitHub App, runner-inventory permission, App ID, or new private-key secret is
+required by this semi-automatic topology design.
 
 Human workload coordination is also required for a declared drained acceptance
 window: compute01 has a root GitLab runner service that could claim all GPUs,
@@ -1348,7 +1438,10 @@ The Goal is complete only when all boxes below refer to the same merged
 - [ ] Repository changes merged to GitHub <code>main</code>.
 - [ ] Focused static and unit tests green.
 - [ ] Exactly 28 production proof runners online: compute01 16, compute02 12.
-- [ ] Exactly one cache anchor on each node.
+- [ ] The single topology file declares exactly compute01 GPUs 0..3 and
+      compute02 GPUs 1..3 at four slots per GPU.
+- [ ] Nightly derives exactly one node-label-only warm row per declared node,
+      with no fixed runner or runner-inventory credential.
 - [ ] All seven allowed GB300 UUIDs healthy.
 - [ ] compute02 GPU 0 absent from policy and proof receipts.
 - [ ] Every node's listener count equals allowed GPUs times four.

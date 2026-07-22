@@ -4,6 +4,13 @@ This report freezes the sanitized state observed immediately before the
 28-slot implementation PR is eligible for review. It is rollout evidence, not
 a reconstruction of the original pre-change baseline.
 
+> **Subsequent design decision:** The App-based dynamic-discovery design
+> described in this historical snapshot was superseded before merge. The
+> approved implementation uses a checked-in declarative topology and schedules
+> one warm job per declared node label. The absent GitHub App is therefore no
+> longer an admission blocker, and the recorded `trtmc-cache-anchor` labels are
+> historical state rather than a workflow dependency.
+
 ## Scope and limitations
 
 - Collection window: `2026-07-22T04:52:58Z` through
@@ -64,9 +71,9 @@ verified host-local policy.
 | Runner discovery private-key secret | **Absent** |
 | Existing Hugging Face secret metadata | Present; value not queried |
 
-The missing App configuration blocks trusted default-branch discovery. The
-App must be repository-scoped, installed only for this repository, and have
-read-only Repository Administration permission.
+At collection time, the then-current dynamic-discovery design treated the
+missing App as a blocker. That requirement was subsequently retired in favor
+of the declarative topology described above.
 
 ## Host-local policy
 
@@ -142,8 +149,7 @@ rewrite of the full cache is not acceptable.
 
 ## Admission blockers at this snapshot
 
-1. Configure and install the read-only runner-discovery GitHub App, then add
-   its App ID variable and private-key secret.
+1. **Superseded:** the runner-discovery GitHub App is no longer required.
 2. Repair only the measured compute02 cache ownership/access exceptions and
    rerun the strict audit.
 3. Coordinate the compute01 GitLab scheduler and compute02 external Docker GPU

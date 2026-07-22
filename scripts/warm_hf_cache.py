@@ -13,6 +13,11 @@ Nightly mode (no --models-file):
     Sequential with a 0.3 s inter-request delay to stay below the HF API rate
     limit (10 k requests / 5 min).
 
+    The Nightly workflow derives one job per physical node from
+    .github/ci/gb300-pool-topology.json.  GitHub selects any runner carrying
+    that node's label, and this script warms the node-local cache shared by its
+    runners.
+
 PR CI selective mode (--models-file FILE):
     For each model in FILE:
       - Already in cache → skip entirely (zero network calls).
@@ -543,7 +548,8 @@ def _resolved_cache_digest(
     Cache repositories can retain snapshots and refs from older or unrelated
     downloads. Those are not part of this warm plan and can legitimately
     differ between nodes. Only each requested revision and the snapshot it
-    resolves to define the state that must agree across declared nodes.
+    resolves to define the state that must agree across declared physical
+    nodes.
     """
     state: list[dict[str, object]] = []
     for repo_id, requested_revision in sorted(set(repo_revisions)):

@@ -84,14 +84,8 @@ def _receipt(node: str) -> dict[str, object]:
 def _matrix() -> dict[str, object]:
     return {
         "include": [
-            {
-                "node_label": "trtmc-node-node-a",
-                "anchor_runner": "node-a-proof-00",
-            },
-            {
-                "node_label": "trtmc-node-node-b",
-                "anchor_runner": "node-b-proof-00",
-            },
+            {"node_label": "trtmc-node-node-a"},
+            {"node_label": "trtmc-node-node-b"},
         ]
     }
 
@@ -282,6 +276,23 @@ def test_receipt_verifier_requires_every_expected_node_and_matching_digests() ->
     }
 
 
+def test_receipt_verifier_accepts_any_safe_runner_selected_on_the_declared_node() -> None:
+    receipts = [_receipt("node-a"), _receipt("node-b")]
+    receipts[0]["anchor_runner"] = "node-a-proof-09"
+
+    result = verify_receipts(
+        receipts,
+        _matrix(),
+        expected_run_id="123",
+        expected_run_attempt="1",
+        expected_job_id="cache-warm",
+        expected_revision=REVISION,
+    )
+
+    assert result["status"] == "ready"
+    assert result["node_count"] == 2
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -291,8 +302,8 @@ def test_receipt_verifier_requires_every_expected_node_and_matching_digests() ->
             "disagree on cache_plan_digest",
         ),
         (
-            lambda receipts: receipts[1].update({"anchor_runner": "wrong"}),
-            "identity does not match",
+            lambda receipts: receipts[1].update({"anchor_runner": "node-a-proof-00"}),
+            "runner .* maps to multiple node IDs",
         ),
         (
             lambda receipts: receipts[1].update({"run_id": "456"}),
@@ -498,11 +509,26 @@ def test_receipt_verifier_binds_current_attempt_and_job(
         )
 
 
-def test_receipt_verifier_rejects_duplicate_anchor_in_expected_matrix() -> None:
+def test_receipt_verifier_rejects_duplicate_node_in_expected_matrix() -> None:
     matrix = _matrix()
-    matrix["include"][1]["anchor_runner"] = "node-a-proof-00"
+    matrix["include"][1]["node_label"] = "trtmc-node-node-a"
 
-    with pytest.raises(CiError, match="repeats anchor"):
+    with pytest.raises(CiError, match="repeats node"):
+        verify_receipts(
+            [_receipt("node-a"), _receipt("node-b")],
+            matrix,
+            expected_run_id="123",
+            expected_run_attempt="1",
+            expected_job_id="cache-warm",
+            expected_revision=REVISION,
+        )
+
+
+def test_receipt_verifier_rejects_legacy_runner_identity_in_expected_matrix() -> None:
+    matrix = _matrix()
+    matrix["include"][0]["anchor_runner"] = "node-a-proof-00"
+
+    with pytest.raises(CiError, match="entry fields are invalid"):
         verify_receipts(
             [_receipt("node-a"), _receipt("node-b")],
             matrix,

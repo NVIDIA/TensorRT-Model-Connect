@@ -3,7 +3,7 @@
 
 """Create and verify fail-closed per-node Nightly cache-warm receipts.
 
-Boundary: evidence validation only; runner discovery and cache warming stay elsewhere.
+Boundary: evidence validation only; topology planning and cache warming stay elsewhere.
 """
 
 from __future__ import annotations
@@ -310,33 +310,30 @@ def verify_receipts(
     _validated_safe_id(expected_job_id, "expected cache-warm job ID")
     _validated_revision(expected_revision, "expected cache-warm source revision")
     if not isinstance(expected_matrix, dict):
-        raise CiError("expected cache-anchor matrix must be a JSON object")
+        raise CiError("expected cache-warm matrix must be a JSON object")
+    if set(expected_matrix) != {"include"}:
+        raise CiError("expected cache-warm matrix fields are invalid")
     raw_entries = expected_matrix.get("include")
     if not isinstance(raw_entries, list) or not raw_entries:
-        raise CiError("expected cache-anchor matrix is invalid or empty")
-    expected: dict[str, str] = {}
-    expected_anchors: set[str] = set()
+        raise CiError("expected cache-warm matrix is invalid or empty")
+    expected: set[str] = set()
     for entry in raw_entries:
         if not isinstance(entry, dict):
-            raise CiError("expected cache-anchor matrix contains a non-object entry")
+            raise CiError("expected cache-warm matrix contains a non-object entry")
+        if set(entry) != {"node_label"}:
+            raise CiError("expected cache-warm matrix entry fields are invalid")
         node_label = entry.get("node_label")
-        anchor = entry.get("anchor_runner")
         if not isinstance(node_label, str) or not node_label.startswith("trtmc-node-"):
-            raise CiError("expected cache-anchor matrix contains an invalid node label")
-        if not isinstance(anchor, str) or not anchor:
-            raise CiError("expected cache-anchor matrix contains an invalid anchor")
+            raise CiError("expected cache-warm matrix contains an invalid node label")
         node_id = node_label.removeprefix("trtmc-node-")
-        _validated_safe_id(node_id, "expected cache-anchor matrix node ID")
-        _validated_safe_id(anchor, "expected cache-anchor matrix anchor")
+        _validated_safe_id(node_id, "expected cache-warm matrix node ID")
         if node_id in expected:
-            raise CiError(f"expected cache-anchor matrix repeats node {node_id!r}")
-        if anchor in expected_anchors:
-            raise CiError(f"expected cache-anchor matrix repeats anchor {anchor!r}")
-        expected[node_id] = anchor
-        expected_anchors.add(anchor)
+            raise CiError(f"expected cache-warm matrix repeats node {node_id!r}")
+        expected.add(node_id)
 
     actual: dict[str, dict[str, object]] = {}
     hostname_nodes: dict[str, str] = {}
+    runner_nodes: dict[str, str] = {}
     for receipt in receipts:
         if set(receipt) != _RECEIPT_FIELDS:
             missing_fields = sorted(_RECEIPT_FIELDS - set(receipt))
@@ -357,8 +354,11 @@ def verify_receipts(
         )
         if node_id in actual:
             raise CiError(f"duplicate cache-warm receipt for node {node_id!r}")
-        if expected.get(node_id) != anchor:
-            raise CiError(f"cache-warm receipt identity does not match matrix for {node_id!r}")
+        if node_id not in expected:
+            raise CiError(f"cache-warm receipt node {node_id!r} is not declared")
+        previous_runner_node = runner_nodes.setdefault(anchor, node_id)
+        if previous_runner_node != node_id:
+            raise CiError(f"cache-warm runner {anchor!r} maps to multiple node IDs")
         hostname = _validated_safe_id(
             receipt.get("hostname"), f"cache-warm receipt for {node_id!r} hostname"
         )
@@ -462,7 +462,7 @@ def verify_receipts(
             raise CiError(f"cache-warm receipt for {node_id!r} has unsafe cache lock path")
         actual[node_id] = receipt
 
-    if set(actual) != set(expected):
+    if set(actual) != expected:
         raise CiError(
             f"cache-warm receipt node set mismatch: expected {sorted(expected)!r}, "
             f"found {sorted(actual)!r}"
@@ -535,7 +535,7 @@ def main() -> int:
         try:
             expected_matrix = json.loads(arguments.expected_matrix_json)
         except json.JSONDecodeError as error:
-            raise CiError(f"expected cache-anchor matrix is invalid: {error}") from error
+            raise CiError(f"expected cache-warm matrix is invalid: {error}") from error
         paths = sorted(arguments.receipts_dir.rglob("cache-warm-receipt.json"))
         if not paths:
             raise CiError("no cache-warm receipts were downloaded")

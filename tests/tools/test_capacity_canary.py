@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for the manual shared-GPU capacity canary."""
+"""Tests for declared GPU topology and the manual shared-capacity canary."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from tools.ci.capacity_canary import (
+    cache_warm_matrix,
     capacity_matrix,
     cohort_matrix,
     hold_capacity_slot,
@@ -476,6 +477,50 @@ def test_topology_contract_cli_binds_mode_capacity_and_emits_canonical_outputs(
         == 1
     )
     assert "expected_slots must equal topology capacity" in capsys.readouterr().err
+
+
+def test_cache_warm_matrix_emits_one_sorted_node_only_row_per_declared_node() -> None:
+    reversed_contract = _json_copy(FULL_TOPOLOGY)
+    assert isinstance(reversed_contract, dict)
+    reversed_nodes = reversed_contract["nodes"]
+    assert isinstance(reversed_nodes, list)
+    reversed_nodes.reverse()
+
+    normalized = normalize_topology_contract(reversed_contract)
+    assert cache_warm_matrix(reversed_contract) == {
+        "include": [
+            {"node_label": node["node_label"]} for node in normalized["nodes"]  # type: ignore[index]
+        ]
+    }
+
+
+def test_cache_warm_matrix_cli_reads_repository_manifest_and_emits_github_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    topology_path = REPO_ROOT / ".github/ci/gb300-pool-topology.json"
+    topology = json.loads(topology_path.read_text(encoding="utf-8"))
+    assert topology == normalize_topology_contract(topology)
+    expected = cache_warm_matrix(topology)
+    github_output = tmp_path / "github-output"
+
+    assert (
+        capacity_canary_main(
+            [
+                "cache-warm-matrix",
+                "--input",
+                str(topology_path),
+                "--github-output",
+                str(github_output),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == expected
+    outputs = dict(
+        line.split("=", maxsplit=1)
+        for line in github_output.read_text(encoding="utf-8").splitlines()
+    )
+    assert json.loads(outputs["matrix"]) == expected
 
 
 def test_matrix_dispatches_exactly_expected_plus_one_generic_legs() -> None:
@@ -1152,10 +1197,11 @@ def test_capacity_workflow_is_manual_main_only_and_has_no_model_or_hf_work() -> 
     assert "pull_request:" not in workflow
     assert "schedule:" not in workflow
     assert "refs/heads/main" in workflow
-    assert "default: 28" in workflow
+    assert "default: 28" not in workflow
     assert "default: 900" in workflow
     assert "default: shared-capacity" in workflow
     assert "expected_topology:" in workflow
+    assert "cp .github/ci/gb300-pool-topology.json" in workflow
     assert "tools.ci.capacity_canary topology-contract" in workflow
     assert "expected_topology_digest" in workflow
     assert "--expected-topology-digest" in workflow

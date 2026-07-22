@@ -960,7 +960,7 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
         "inventory",
         "source-quality",
         "unit-tests",
-        "discover-cache-anchors",
+        "cache-warm-plan",
         "cache-warm",
         "cache-warm-ready",
         "package",
@@ -974,7 +974,7 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
         "inventory",
         "source-quality",
         "unit-tests",
-        "discover-cache-anchors",
+        "cache-warm-plan",
         "cache-warm",
         "cache-warm-ready",
         "package",
@@ -1004,7 +1004,7 @@ def test_nightly_source_quality_does_not_use_self_hosted_shared_storage() -> Non
     assert "/workspace/" not in source_quality
 
 
-def test_nightly_non_anchor_self_hosted_stages_use_the_configured_proof_runner_pool() -> None:
+def test_nightly_non_warm_self_hosted_stages_use_the_configured_proof_runner_pool() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     selector = (
         "runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || "
@@ -1049,9 +1049,9 @@ def test_proof_pool_is_generic_uncapped_and_has_no_workflow_gpu_default() -> Non
     assert "secrets: inherit" not in nightly
 
 
-def test_nightly_discovers_and_warms_one_dynamic_anchor_per_node() -> None:
+def test_nightly_derives_one_cache_warm_job_per_declared_node_without_runner_api() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    discovery = text.split("\n  discover-cache-anchors:", maxsplit=1)[1].split(
+    plan = text.split("\n  cache-warm-plan:", maxsplit=1)[1].split(
         "\n  source-quality:", maxsplit=1
     )[0]
     warm = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  cache-warm-ready:", maxsplit=1)[
@@ -1060,20 +1060,31 @@ def test_nightly_discovers_and_warms_one_dynamic_anchor_per_node() -> None:
     ready = text.split("\n  cache-warm-ready:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
     proof = text.split("\n  model-proof:", maxsplit=1)[1].split("\n  diffusion-vlm:", maxsplit=1)[0]
 
-    assert "runs-on: ubuntu-latest" in discovery
-    assert "actions/create-github-app-token@v2" in discovery
-    assert "tools.ci.discover_cache_anchors" in discovery
-    assert "matrix: ${{ steps.discover.outputs.matrix }}" in discovery
+    assert "runs-on: ubuntu-latest" in plan
+    assert "ref: ${{ needs.legal.outputs.tested_sha }}" in plan
+    assert "tools.ci.capacity_canary cache-warm-matrix" in plan
+    assert "--input .github/ci/gb300-pool-topology.json" in plan
+    assert "matrix: ${{ steps.plan.outputs.matrix }}" in plan
 
-    assert "- discover-cache-anchors" in warm
-    assert "needs.discover-cache-anchors.result == 'success'" in warm
-    assert "matrix: ${{ fromJSON(needs.discover-cache-anchors.outputs.matrix) }}" in warm
-    assert "- trtmc-cache-anchor" in warm
-    assert "- ${{ matrix.node_label }}" in warm
+    for forbidden in (
+        "actions/create-github-app-token",
+        "TRTMC_RUNNER_DISCOVERY_APP_ID",
+        "TRTMC_RUNNER_DISCOVERY_PRIVATE_KEY",
+        "actions/runners?per_page",
+        "tools.ci.discover_cache_anchors",
+    ):
+        assert forbidden not in text
+
+    assert "- cache-warm-plan" in warm
+    assert "needs.cache-warm-plan.result == 'success'" in warm
+    assert "matrix: ${{ fromJSON(needs.cache-warm-plan.outputs.matrix) }}" in warm
+    assert "runs-on: ${{ matrix.node_label }}" in warm
+    assert "trtmc-cache-anchor" not in warm
     assert "self-hosted" not in warm
     assert "trtmc-gb300-proof" not in warm
+    assert '"trtmc-node-$TRTMC_NODE_ID" != "$TRTMC_CACHE_NODE_LABEL"' in warm
 
-    assert "- discover-cache-anchors" in ready
+    assert "- cache-warm-plan" in ready
     assert "- cache-warm" in ready
     assert "needs.cache-warm.result" in ready
     assert "tools.ci.cache_warm_receipt verify" in ready
@@ -1088,7 +1099,7 @@ def test_nightly_discovers_and_warms_one_dynamic_anchor_per_node() -> None:
     assert "needs.cache-warm-ready.result == 'success'" in proof
 
 
-def test_nightly_anchor_warm_is_strict_offline_verified_and_receipted() -> None:
+def test_nightly_per_node_warm_is_strict_offline_verified_and_receipted() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     warm = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  cache-warm-ready:", maxsplit=1)[
         0

@@ -169,6 +169,29 @@ proof, scheduling, and reporting classes. It broadens selection to the full
 model inventory and adds package, coverage, full-E2E, semantic media assessment,
 and eligible task-evaluation work.
 
+Nightly cache warming is driven by the declarative topology in
+`.github/ci/gb300-pool-topology.json`. The file lists each physical node's
+node label and eligible GPU indices plus the common slots-per-GPU value. The
+GitHub-hosted planning job runs:
+
+```bash
+python3 -m tools.ci.capacity_canary cache-warm-matrix \
+  --input .github/ci/gb300-pool-topology.json
+```
+
+That command emits exactly one matrix row per declared node. Each row uses the
+node label as `runs-on`, so GitHub may select any online runner on that node.
+The selected runner records its actual runner, node, and hostname identity in
+the per-node receipt. Fleet
+verification then requires the exact declared node set and matching source,
+plan, and resolved-cache digests before model work starts.
+
+Normal pre-merge and nightly model jobs continue to use the generic production
+pool label. To add a physical node, operators start and validate its runners,
+then update only the topology data in a normal PR before admitting those
+runners to the production pool. No workflow-code or credential change is
+needed for that expansion.
+
 Pre-merge and nightly therefore exercise the same implementation; only their
 selection and breadth differ.
 
@@ -193,9 +216,8 @@ selection and breadth differ.
 | `e2e_scheduler.py` | Launch workers, enforce timeouts, and merge results | Container |
 | `isolation.py` | Queue projected model groups for isolated validation | Container |
 | `gpu_lease.py` | Allocate FIFO shared slots or exclusive GPUs | Host processes |
-| `capacity_canary.py` | Prove generic shared-slot concurrency and queueing | Host and GitHub-hosted verification |
+| `capacity_canary.py` | Validate declared topology, plan one cache warm per node, and prove generic capacity | Host and GitHub-hosted planning/verification |
 | `cache_lock.py` | Coordinate shared cache readers and the Nightly writer | Host processes |
-| `discover_cache_anchors.py` | Validate runner labels and build one warm row per node | GitHub-hosted planning |
 | `cache_warm_receipt.py` | Certify and reconcile per-node cache readiness | Host and GitHub-hosted verification |
 | `model_proof_selection.py` | Resolve and validate one model's proof contract | Projected source |
 | `model_proof.py` | Prepare caches, projection, lease, and proof container | Trusted host |
@@ -530,32 +552,40 @@ the producing class remains the source of truth for optional evidence fields.
 
 ### `capacity_canary.py`
 
-- **Functionality / units:** Acquires one real `GpuLease` per generic worker,
-  verifies its UUID in a short-lived network-free container, holds every lease
-  to one absolute UTC barrier, or starts a pinned child contender against one
-  dynamically selected exclusive GPU.
-- **Inputs:** Manual shared-capacity or exclusive-safety mode, an expected
-  shared-slot count, runner-local GPU and lock policy, the existing CI image,
-  an absolute UTC barrier for shared mode, and a trusted topology contract.
+- **Functionality / units:** Validates and normalizes the declarative topology,
+  derives one `cache-warm-matrix` row per physical node, acquires one real
+  `GpuLease` per generic canary worker, verifies its UUID in a short-lived
+  network-free container, holds every lease to one absolute UTC barrier, or
+  starts a pinned child contender against one dynamically selected exclusive
+  GPU.
+- **Inputs:** The trusted `.github/ci/gb300-pool-topology.json` contract is used
+  for planning and canary verification. Canary execution also accepts manual
+  shared-capacity or exclusive-safety mode, an expected shared-slot count,
+  runner-local GPU and lock policy, the existing CI image, and an absolute UTC
+  barrier for shared mode.
   The minimal contract declares only acceptance facts: generic
   `trtmc-node-*` labels, allowed GPU indices, and slots per GPU. Per-node and
   fleet GPU counts/capacities are derived, so operators cannot enter
   contradictory totals.
-- **Outputs:** Shared and exclusive modes bind every lease record to the actual
-  worker job ID `exercise`. Shared mode also binds every receipt to the
-  canonical SHA-256 of the topology contract and proves peak concurrency,
+- **Outputs:** `cache-warm-matrix` emits one `node_label` row per declared node
+  in canonical sorted node-label order. Shared and exclusive modes bind every
+  lease record to the actual worker job ID `exercise`. Shared mode also binds
+  every receipt to the canonical SHA-256 of the topology contract and proves
+  peak concurrency,
   unique first-wave slot tuples, exact
   GPU-index-to-UUID identity, exact per-node GPU index/count/capacity, exact
   fleet GPU count/capacity, and queued extra work. Exclusive mode proves both
   leases own every configured slot, container UUID identity, same-GPU
   non-overlap, and resumption after the primary release.
-- **Boundary:** It is an explicit admission canary only. It does not discover or
-  label runners, warm model caches, run model code, or alter normal CI routing.
+- **Boundary:** Topology normalization and cache-warm matrix generation are pure
+  planning; canary execution remains an explicit admission operation. The
+  module does not query GitHub for runner state, label runners, warm model
+  caches, run model code, or alter normal CI routing.
   Exclusive mode proves the scheduler-selected node only; generic GitHub labels
   cannot guarantee which fleet node receives that manual job. The topology
-  contract is a required dispatch input, not a repository capacity variable or
-  hostname routing table; adding nodes does not require changing this helper or
-  the production scheduler.
+  contract declares the expected acceptance footprint and per-node cache
+  routing, while normal model scheduling remains generic. Adding nodes changes
+  contract data, not this helper or the production scheduler.
 
 ### `cache_lock.py`
 
@@ -568,32 +598,19 @@ the producing class remains the source of truth for optional evidence fields.
 - **Boundary:** It coordinates access only. It does not choose dependencies,
   download models, validate cache content, or create readiness evidence.
 
-### `discover_cache_anchors.py`
-
-- **Functionality / units:** Validates explicit runner labels, requires every
-  production node to have exactly one anchor, and produces one sorted
-  cache-warm matrix row per online anchor. This includes a staged anchor-only
-  node so its cache can be certified before production admission.
-- **Inputs:** Paginated GitHub repository-runner inventory JSON containing
-  runner IDs, names, status, and labels.
-- **Outputs:** `{\"include\": [{\"node_label\": str,
-  \"anchor_runner\": str}]}` or `CiError` for empty, missing, duplicate,
-  offline, or malformed anchor topology.
-- **Boundary:** It is a pure inventory reader. It never mutates runner labels,
-  starts services, chooses GPUs, or warms a cache.
-
 ### `cache_warm_receipt.py`
 
 - **Functionality / units:** Certifies one node's online warm plus
   network-disabled local-only verification, then reconciles all node receipts.
 - **Inputs:** Structured warm/verify summaries, trusted workflow run, attempt,
-  job, node, runner, and source identity, the discovered anchor matrix, and
-  downloaded receipt JSON.
+  job, node, source identity, the topology-derived node matrix, the identity of
+  the actual runner selected for that node's job, and downloaded receipt JSON.
 - **Outputs:** Atomic schema-v2 per-node `cache-warm-receipt.json` files and one
   fleet readiness summary with an exact field set; validated counts and ordered
-  timestamps; canonical host cache-root, host Hub-cache, and lock paths; and
-  common source, plan, and resolved-cache digests. The local-only input summary
-  instead names the fixed read-only container path `/hf-cache/hub`.
+  timestamps; actual runner/node/hostname provenance; canonical host
+  cache-root, host Hub-cache, and lock paths; and common source, plan, and
+  resolved-cache digests. The local-only input summary instead names the fixed
+  read-only container path `/hf-cache/hub`.
   Verification rejects old receipt schemas and binds every receipt to the
   current run, attempt, job, and certified revision.
 - **Boundary:** It validates evidence after cache work. It does not discover
@@ -764,7 +781,7 @@ python3 -m ruff check --config ruff.toml \
   tools/ci/cache_warm_receipt.py tools/ci/capacity_canary.py \
   tools/ci/gpu_lease.py tools/ci/model_proof.py \
   tools/ci/model_proof_inner.py tools/ci/model_proof_security.py \
-  scripts/generate_model_proof_report.py \
+  scripts/generate_model_proof_report.py scripts/warm_hf_cache.py \
   tests/tools/test_cache_warm_receipt.py tests/tools/test_capacity_canary.py \
   tests/tools/test_generate_model_proof_report.py \
   tests/tools/test_github_actions_ci.py \
@@ -775,15 +792,19 @@ PYTHONPATH=python:. python3 -m pytest \
   tests/tools/test_cache_warm_receipt.py \
   tests/tools/test_capacity_canary.py \
   tests/tools/test_ci_container_secrets.py \
-  tests/tools/test_discover_cache_anchors.py \
   tests/tools/test_generate_model_proof_report.py \
   tests/tools/test_github_actions_ci.py \
   tests/tools/test_model_proof_runner.py \
   tests/tools/test_model_proof_security.py \
   tests/tools/test_warm_hf_cache_static.py -q
+python3 -m tools.ci.capacity_canary cache-warm-matrix \
+  --input .github/ci/gb300-pool-topology.json
+python3 -m tools.ci.capacity_canary topology-contract \
+  --input .github/ci/gb300-pool-topology.json \
+  --mode shared-capacity \
+  --requested-slots 28
 git diff --check
-actionlint -ignore 'label "trtmc-cache-anchor" is unknown' \
-  .github/workflows/nightly.yml .github/workflows/trtmc-ci.yml \
+actionlint .github/workflows/nightly.yml .github/workflows/trtmc-ci.yml \
   .github/workflows/model-proof.yml \
   .github/workflows/model-proof-capacity-canary.yml
 ```
