@@ -62,6 +62,7 @@ def normalize_topology_contract(value: Mapping[str, object]) -> dict[str, object
         "schema_version",
         "kind",
         "slots_per_gpu",
+        "rollback_baseline_node_label",
         "nodes",
     }
     if set(value) != required_fields:
@@ -134,6 +135,16 @@ def normalize_topology_contract(value: Mapping[str, object]) -> dict[str, object
         )
 
     normalized_nodes.sort(key=lambda node: str(node["node_label"]))
+    rollback_baseline_node_label = value.get("rollback_baseline_node_label")
+    if (
+        not isinstance(rollback_baseline_node_label, str)
+        or len(rollback_baseline_node_label) > 120
+        or not rollback_baseline_node_label.startswith(_NODE_LABEL_PREFIX)
+        or _SAFE_ID.fullmatch(rollback_baseline_node_label) is None
+    ):
+        raise CiError("topology rollback baseline node label is invalid")
+    if rollback_baseline_node_label not in node_labels:
+        raise CiError("topology rollback baseline must identify a declared node")
     gpu_count = sum(len(node["gpu_indices"]) for node in normalized_nodes)
     capacity = gpu_count * slots_per_gpu
     if gpu_count > 64 or capacity > 128:
@@ -142,6 +153,7 @@ def normalize_topology_contract(value: Mapping[str, object]) -> dict[str, object
         "schema_version": 1,
         "kind": _TOPOLOGY_KIND,
         "slots_per_gpu": slots_per_gpu,
+        "rollback_baseline_node_label": rollback_baseline_node_label,
         "nodes": normalized_nodes,
     }
 
@@ -172,6 +184,26 @@ def cache_warm_matrix(value: Mapping[str, object]) -> dict[str, list[dict[str, s
     }
 
 
+def _rollback_baseline_topology(topology: Mapping[str, object]) -> dict[str, object]:
+    """Derive the exact protected rollback baseline from a normalized topology."""
+
+    node_label = str(topology["rollback_baseline_node_label"])
+    nodes = [
+        dict(node)
+        for node in topology["nodes"]  # type: ignore[index]
+        if node["node_label"] == node_label
+    ]
+    if len(nodes) != 1:  # Defensive: normalize_topology_contract owns this invariant.
+        raise CiError("topology rollback baseline must identify exactly one declared node")
+    return {
+        "schema_version": topology["schema_version"],
+        "kind": topology["kind"],
+        "slots_per_gpu": topology["slots_per_gpu"],
+        "rollback_baseline_node_label": node_label,
+        "nodes": nodes,
+    }
+
+
 def _validated_topology_for_mode(
     value: Mapping[str, object],
     *,
@@ -180,6 +212,13 @@ def _validated_topology_for_mode(
 ) -> dict[str, object]:
     topology = normalize_topology_contract(value)
     requested = _positive_integer(requested_slots, "expected_slots", maximum=128)
+    if mode == "rollback-capacity":
+        topology = _rollback_baseline_topology(topology)
+        if requested != _topology_capacity(topology):
+            raise CiError(
+                "rollback-capacity expected_slots must equal rollback baseline capacity"
+            )
+        return topology
     capacity = _topology_capacity(topology)
     if mode in {"shared-capacity", "exclusive-safety"}:
         if requested != capacity:
@@ -1664,6 +1703,7 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         choices=(
             "shared-capacity",
+            "rollback-capacity",
             "shared-cohort",
             "cross-workflow-verify",
             "exclusive-safety",

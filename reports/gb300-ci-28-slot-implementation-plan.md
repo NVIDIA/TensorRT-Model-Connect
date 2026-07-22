@@ -30,8 +30,10 @@ runner listeners and exactly 28 node-local shared GPU slots:
 
 The existing generic runner at
 <code>/workspace/users/yifeif/model-connect-runner</code> on compute01 remains
-online and remains outside this count. It must not receive the production proof
-label.
+outside this count. It may remain online only if it is technically CPU-only or
+lease-aware. It must not receive the production proof label; otherwise it must
+be stopped/reconfigured with the other conflicting schedulers before durable
+28-slot admission.
 
 “28 slots are available” means:
 
@@ -47,6 +49,9 @@ label.
    admitted GPU node before Nightly model proofs begin.
 7. Pre-Merge and model-proof jobs never repair a cache by downloading from
    Hugging Face.
+8. No scheduler or container outside the same <code>GpuLease</code> namespace
+   can claim any of the seven CI GPUs while the 28 production listeners are
+   admitted.
 
 If a matrix contains fewer than 28 entries, it naturally uses fewer than 28
 slots. If another trusted CI job is already consuming a matching runner, jobs
@@ -152,6 +157,21 @@ fleet-global packing scheduler: seven arbitrary exclusive jobs can be placed
 unevenly by GitHub and are not guaranteed to immediately occupy all seven
 physical GPUs.
 
+<code>GpuLease</code> coordinates only cooperative participants. A GitLab
+runner or Docker container that can launch CUDA work without taking the same
+lock can collide with CI even when no process was visible during admission.
+Therefore a temporary drain is enough to run a canary, but not enough to claim
+durable 28-slot capacity.
+
+For the initial rollout, the KISS final state dedicates compute01 GPUs 0
+through 3 and compute02 GPUs 1 through 3 to the GitHub proof pool. Conflicting
+external schedulers must remain disabled, be reconfigured away from those
+GPUs, or be made to acquire the same exclusive lease before the 28 labels can
+remain admitted. This includes the compute01 GitLab scheduler, the generic
+compute01 GitHub runner if it can launch GPU work, and the four compute02
+overlap containers. If owners restore an uncoordinated workload, first remove
+the affected GitHub production labels and treat capacity as rolled back.
+
 ### 2.4 Trust boundary
 
 All proof listeners on a node intentionally share the <code>yifeif</code>
@@ -220,9 +240,10 @@ is retained as historical design input, not as a baseline that can be
 reconstructed retroactively. The current sanitized state is recorded in
 <code>reports/gb300-ci-rollout/2026-07-22-pre-merge-current-state.md</code> and
 must be refreshed immediately before each mutating rollout step because runner
-state is live. The current safe rollback baseline is 12 production listeners
-on compute02, with 16 online compute01 listeners still excluded by their
-missing production label.
+state is live. The prior production baseline is 12 listeners on compute02,
+with 16 online compute01 listeners still excluded by their missing production
+label. Those 12 listeners are a safe rollback target only while overlapping
+external compute02 workloads remain stopped, reconfigured, or lease-aware.
 
 ### 4.1 GitHub runner registry
 
@@ -480,6 +501,7 @@ warm and exact capacity verification:
   "schema_version": 1,
   "kind": "trtmc_capacity_topology",
   "slots_per_gpu": 4,
+  "rollback_baseline_node_label": "trtmc-node-gb300-nvl-019-compute02",
   "nodes": [
     {
       "node_label": "trtmc-node-gb300-nvl-019-compute01",
@@ -513,6 +535,10 @@ The node label is a declarative scheduling label, while
 <code>gpu_indices</code> and <code>slots_per_gpu</code> are the acceptance
 contract. Production model jobs still route only through the common generic
 pool label; they never select a node from this file.
+<code>rollback_baseline_node_label</code> identifies the protected prior
+production node for a data-derived rollback canary; it is not used by normal
+scheduling or Nightly cache routing. Its 12-slot result is safe only while
+external overlap workloads remain excluded from those GPUs.
 
 ### 6.4 <code>.github/workflows/model-proof.yml</code>
 
@@ -630,6 +656,7 @@ revision as its expected topology. The initial admission file is:
   "schema_version": 1,
   "kind": "trtmc_capacity_topology",
   "slots_per_gpu": 4,
+  "rollback_baseline_node_label": "trtmc-node-gb300-nvl-019-compute02",
   "nodes": [
     {
       "node_label": "trtmc-node-gb300-nvl-019-compute01",
@@ -660,10 +687,13 @@ fleet-size repository variable in production CI.
 Keep this canary after rollout. It is the fastest repeatable proof when a node
 or runner is added, removed, or restarted.
 
-The retained workflow has four manual modes:
+The retained workflow has five manual modes:
 
 - <code>shared-capacity</code> emits <code>expected_slots + 1</code> jobs for
   the 28/29 proof;
+- <code>rollback-capacity</code> derives the single protected rollback node
+  from <code>rollback_baseline_node_label</code> and emits
+  <code>expected_slots + 1</code> jobs for its exact 12/13 proof;
 - <code>shared-cohort</code> emits exactly <code>expected_slots</code> jobs and
   accepts a caller-supplied cohort ID and absolute barrier;
 - <code>cross-workflow-verify</code> downloads receipts from two exact run IDs
@@ -674,12 +704,14 @@ The retained workflow has four manual modes:
 - <code>exclusive-safety</code> proves same-GPU exclusive serialization.
 
 Mode/contract relationships are deliberately small: shared-capacity and
-exclusive-safety require <code>expected_slots == capacity</code>;
-shared-cohort may request any positive subset up to capacity; and
-cross-workflow-verify requires two equal cohorts whose combined size equals
-capacity. A future node is represented by one additional row in the topology
-data PR before it is warmed or admitted. Normal Pre-Merge and Nightly model
-jobs do not consume the node rows for routing; Nightly cache planning does.
+exclusive-safety require <code>expected_slots == full capacity</code>;
+rollback-capacity requires <code>expected_slots == protected rollback-node
+capacity</code>; shared-cohort may request any positive subset up to full
+capacity; and cross-workflow-verify requires two equal cohorts whose combined
+size equals full capacity. A future node is represented by one additional row
+in the topology data PR before it is warmed or admitted. Normal Pre-Merge and
+Nightly model jobs do not consume the node rows for routing; Nightly cache
+planning does.
 
 The manual workflow exposes no topology override. Every capacity canary reads
 the checked-in file from its protected-main checkout, preventing a
@@ -757,6 +789,7 @@ when any of these physical-capacity facts change:
 
 - a new GPU node is added or an admitted node is removed;
 - the allowed GPU indices on a node change;
+- <code>rollback_baseline_node_label</code> changes;
 - <code>slots_per_gpu</code> changes.
 
 No topology PR is required to restart an existing listener, replace one runner
@@ -785,7 +818,7 @@ They are not accepted rollout evidence until the current safe baseline and raw
 pre-admission evidence are retained. Phases 2, 3, and 6 therefore revalidate
 and admit existing state instead of restarting services unnecessarily.
 
-### Phase 0 — Snapshot and freeze the current safe rollback baseline
+### Phase 0 — Snapshot and freeze the prior 12-slot production baseline
 
 - [ ] Refresh GitHub main SHA and save the runner API JSON.
 - [ ] Record every runner ID, name, status, busy state, and label.
@@ -896,31 +929,49 @@ warm row without advertising proof capacity.
 
 ### Phase 4 — Clear every pre-merge gate, then merge the scheduling and cache PR
 
-- [ ] On compute02, rerun the measured ownership/read-write audit, run the
-      exact targeted repair in Section 13, and require zero ownership,
-      unreadable-file, unwritable-file, and unwritable-directory exceptions.
-      Do not recursively chown the approximately 1 TB cache.
+- [ ] On compute02, rerun the measured ownership/read-write audit and require
+      zero ownership, unreadable-file, unwritable-file, and
+      unwritable-directory exceptions. Run the exact targeted repair in
+      Section 13 only if that fresh audit finds an exception; do not
+      recursively chown the approximately 1 TB cache.
 - [ ] Retain the raw pre-admission runner and host snapshot, including hashes,
       in the access-controlled rollout evidence store.
 - [ ] Confirm no runner-discovery App variable, private-key secret, or runner
       inventory permission is required by the patch.
 - [ ] Obtain the workload owners' confirmation of a declared drained
       acceptance window for the compute01 GitLab scheduler and compute02
-      external Docker GPU claims. The rollout must not stop or reconfigure
-      those workloads itself, and the window must be able to begin immediately
-      after merge.
+      external Docker GPU claims. The same approval must select a durable
+      post-acceptance state: dedicate the seven GPUs to GitHub CI, reconfigure
+      the workloads away from them, or make every workload lease-aware. A
+      bounded drain followed by uncoordinated restoration is not sufficient.
+- [ ] Confirm the generic compute01 GitHub runner is technically CPU-only or
+      include it in the same owner-approved drain/reconfiguration plan; its
+      absence from the proof label alone does not prevent Docker GPU access.
 - [ ] Rebase the implementation branch on current <code>github/main</code>.
 - [ ] Rerun focused tests and CI.
 - [ ] Require exact-head CI to be green and resolve all review feedback while
       the PR remains draft.
 - [ ] Only after every pre-merge gate above passes, mark the PR ready for
       review/merge and obtain the required approvals.
+- [ ] Refresh the immutable runner/host/container snapshot and exact drain
+      manifest. Freeze new <code>run-ci</code> authorizations and manual
+      Nightly/canary dispatches, avoid the scheduled Nightly window, and
+      require zero nonterminal Pre-Merge, Nightly, or capacity-canary runs that
+      could later enqueue proof work. Require the production pool to report 12
+      online and zero busy in two polls, no proof container or held GPU/cache
+      lock, and no CI-GPU process.
+- [ ] After review and workload-owner approval, start the same bounded
+      acceptance window before merge: stop the compute01 GitLab scheduler,
+      stop only the freshly validated compute02 overlap containers, and prove
+      that all seven CI GPUs have no external compute process.
 - [ ] Merge through the normal GitHub ruleset using squash or rebase.
 - [ ] Record the merged main SHA.
-- [ ] Delete the repository-level
-      <code>TRTMC_MODEL_PROOF_GPU_IDS</code> variable only after the merged
-      workflow has stopped injecting it and every production runner has the
-      host-local value.
+- [ ] Retain the repository-level
+      <code>TRTMC_MODEL_PROOF_GPU_IDS=1,2,3</code> variable as a compatibility
+      guard for old-ref workflow dispatches and reruns. The merged workflow
+      must not reference it and must use host-local policy. Deleting it would
+      make an old workflow fall back to GPU 0 on compute02, so removal requires
+      a separate fail-closed compatibility change rather than this rollout.
 - [ ] Confirm an existing compute02 proof still selects only GPU 1, 2, or 3.
 
 Exit gate: every documented pre-merge blocker is cleared, the acceptance
@@ -939,6 +990,11 @@ the PR remains draft and unmerged.
       gate in Phase 4.
 - [ ] Manually dispatch trusted Nightly cache planning/warm from the merged
       main revision.
+- [ ] Treat this as a full Nightly, not a warm-only operation: the workflow has
+      no cache-only dispatch. Do not cancel it after the cache-ready barrier.
+      Keep compute01 unlabelled until this run is terminal, so all model jobs
+      use the existing 12-slot pool. This is pre-admission bootstrap evidence,
+      not the final clean 28-slot Nightly.
 - [ ] Verify the checked-in topology produces exactly two warm matrix entries,
       one for each declared node label.
 - [ ] Verify each warm job was scheduled by its node label alone and may use any
@@ -948,11 +1004,27 @@ the PR remains draft and unmerged.
 - [ ] Verify the second network-disabled local-only check downloads zero bytes.
 - [ ] Compare the two cache receipts and require identical source, plan, and
       resolved-cache digests.
+- [ ] Let the bootstrap Nightly finish and retain its result separately before
+      draining the proof pool for hardware canaries. Do not count it as the
+      clean 28-slot acceptance Nightly.
 
 Exit gate: both node caches are strict-ready for the same plan. The compute01
 node listeners may now be admitted to production.
 
 ### Phase 6 — Admit exactly 28 production listeners
+
+Durable external ownership, before adding any compute01 production label:
+
+- [ ] Activate the workload-owner-approved final state: the compute01 GitLab
+      scheduler is disabled, GPU-inaccessible, or lease-aware; the generic
+      compute01 runner is proven CPU-only/lease-aware or stopped; and the
+      compute02 overlap workloads are stopped with their deployment/restart
+      source made unable to reacquire GPUs 1 through 3, reconfigured to GPU 0,
+      or lease-aware.
+- [ ] Exercise every relevant restart source—or perform an owner-approved host
+      reboot—and prove that none can regain an unleased CI GPU. Record service,
+      deployment, process, and GPU state. If this cannot be proved, keep
+      compute01 unlabelled and do not claim durable 28-slot capacity.
 
 compute01:
 
@@ -978,9 +1050,12 @@ Fleet:
 - [ ] Require no 29th production-labeled runner, whether online or offline.
 - [ ] Require every production runner to have exactly one node label and no
       routing dependency on a fixed cache runner.
-- [ ] Confirm the compute01 generic runner remains separate and healthy.
+- [ ] Confirm the compute01 generic runner remains separate and is either
+      healthy under proven CPU-only/lease-aware enforcement or intentionally
+      stopped.
 
-Exit gate: GitHub registry topology and node-local capacity both equal 28.
+Exit gate: durable external ownership is active, and GitHub registry topology
+and node-local capacity both equal 28.
 
 ### Phase 7 — Hardware and concurrency acceptance
 
@@ -995,6 +1070,8 @@ completion.
       exact 16 plus 12 node distribution, with compute02 index 0 absent.
 - [ ] Reuse byte-for-byte equivalent contract data for both 14-slot source
       cohorts and their cross-workflow verifier.
+- [ ] After the primary canaries pass, perform the protected 12/13 rollback
+      rehearsal from Section 9.8, restore exact 28, and rerun the 28/29 proof.
 
 Exit gate: every acceptance artifact passes and the results are linked in this
 document.
@@ -1010,6 +1087,9 @@ document.
       have been recorded; do not merge test-only payloads into
       <code>main</code> unless they are independently useful repository tests.
 - [ ] Run one complete Nightly on the same main-line design.
+- [ ] Start this acceptance Nightly only after all 28 production labels are
+      admitted and the durable external-workload ownership state is active;
+      do not count the bootstrap Nightly from Phase 5 as this run.
 - [ ] Confirm Nightly warmed each node before any Nightly model proof.
 - [ ] Confirm Nightly model proofs consume the same generic pool used by the
       test-specific Pre-Merge PRs, rather than a separate host-specific path.
@@ -1031,7 +1111,8 @@ also confirm:
 
 - no hidden matrix cap below fleet capacity;
 - no hostname routing;
-- no global GPU-ID topology;
+- no current workflow reference to the compatibility-only global GPU-ID
+  variable;
 - no HF token in Pre-Merge or reusable model proof;
 - warm failure is a required Nightly failure;
 - every cache read happens before GPU acquisition;
@@ -1051,7 +1132,7 @@ One runner API snapshot must show:
 | Cache-warm selector | Node label only; no fixed runner or default label |
 | compute02 proof-12..15 | Standby-labeled, disabled, no production label |
 | compute02 GPU 0 | Absent from policy and all receipts |
-| Generic compute01 runner | Online if desired, never production-labeled |
+| Generic compute01 runner | Online only if CPU-only or lease-aware; never production-labeled |
 
 ### 9.3 28/29 shared-slot canary
 
@@ -1227,6 +1308,24 @@ repository change:
 4. verify GitHub reports 28;
 5. rerun the 28/29 canary and recover the full result.
 
+Then rehearse the complete known-safe rollback without a topology override:
+
+1. freeze new dispatch and wait for the production pool to become idle;
+2. remove the common production label from all 16 compute01 proof listeners;
+3. require a single runner snapshot with exactly the 12 compute02 production
+   listeners and no other production-labelled registration;
+4. dispatch <code>rollback-capacity</code> with
+   <code>expected_slots=12</code>. The protected topology selector must derive
+   exactly compute02 GPUs 1 through 3, the first wave must contain 12 unique
+   slots/runners, and the 13th leg must start only after a release;
+5. preflight and re-add the 16 compute01 production labels, require exact
+   16 plus 12 capacity, then rerun <code>shared-capacity</code> with 28.
+
+Any unrelated production-labelled runner, compute02 GPU 0 receipt, unexpected
+node, or inability to recover exact 28 fails the rehearsal. The workflow has
+no node or topology input; the protected main-branch topology selects both the
+full fleet and rollback baseline.
+
 Then review or rehearse the new-node path: bootstrap node-labelled listeners
 without the production label, add exactly one node row in a declarative
 topology PR, merge it, require that node's Nightly warm receipt, and only then
@@ -1354,11 +1453,27 @@ Rollback is label-first and non-destructive:
 3. Stop and disable only the affected proof user units.
 4. Preserve runner registrations, runner directories, cache, topology history,
    and evidence.
-5. Keep compute02 proof-00 through proof-11 as the known 12-slot safe pool.
+5. Keep compute02 proof-00 through proof-11 as the prior 12-slot production
+   baseline only if every overlapping external workload remains stopped,
+   reconfigured, or lease-aware.
 6. Revert repository workflow code through a normal GitHub PR if the defect is
    in code.
-7. Restore the global GPU-ID repository variable only if the old workflow that
-   depends on it is also restored.
+7. Keep the compatibility-only global GPU-ID repository variable unchanged;
+   both the 28-slot rollout and its rollback leave it in place for old refs.
+
+External-workload restoration is conditional, not automatic. Restore the
+compute01 GitLab scheduler or a compute02 overlap container only after the
+GitHub production labels that protect its GPUs have been withdrawn, unless
+the workload was reconfigured away from those GPUs or now acquires the same
+lease. Restoring an uncoordinated workload while retaining all 28 production
+labels is an immediate rollback failure.
+
+There are therefore two explicit rollback outcomes. A CI-only rollback keeps
+the overlap workloads excluded, retains the 12 compute02 labels, and proves
+that pool with <code>rollback-capacity</code>. A full external-workload
+restoration first withdraws every production label whose GPU can be reached by
+the restored workload; it may leave fewer than 12 CI slots and is not accepted
+as the 12-slot rollback canary state.
 
 Do not delete the approximately 1 TB cache. Do not delete runner registrations
 to roll back capacity.
@@ -1375,22 +1490,31 @@ Immediate rollback triggers:
 - 28/29 canary cannot prove the 16 plus 12 distribution;
 - normal CI shows a new infrastructure regression.
 
-Rollback is successful when:
+The CI-only 12-slot rollback rehearsal is successful when:
 
 - compute02 has exactly 12 production runners online;
-- a 12/13 shared canary passes;
+- <code>rollback-capacity</code> passes with
+  <code>expected_slots=12</code>, proving the exact 12/13 behavior;
 - existing Pre-Merge can proceed;
 - no stale lock prevents subsequent work;
 - compute01 proof registrations and cache remain available for diagnosis.
 
+A full external-workload restoration is successful only when all conflicting
+production labels are absent before those workloads restart and the resulting
+smaller CI capacity is reported honestly.
+
 ## 13. Human and Sudo Checkpoints
 
-No sudo is required for linger, the user services, or the runner configuration:
-both nodes already report <code>Linger=yes</code>, and those resources are under
-the user account. A measured compute02 cache-ownership blocker does require one
-narrow repair before strict warm acceptance: 2,781 entries are not owned by
+No sudo is required for linger, the user proof services, or the runner
+configuration: both nodes already report <code>Linger=yes</code>, and those
+resources are under the user account.
+
+The initial compute02 cache audit found 2,781 entries not owned by
 <code>yifeif</code>, including 110 unreadable files, 1,195 unwritable files,
-and 661 unwritable directories.
+and 661 unwritable directories. The narrow repair below was completed. A fresh
+audit now reports zero exceptions in all four categories, and both nodes pass
+the same 113-entry local-only plan with zero downloads. Do not rerun the repair
+unless a later measured audit finds a new non-user-owned entry.
 
 Run only on compute02:
 
@@ -1402,9 +1526,9 @@ sudo find \
   -exec chown --no-dereference yifeif -- {} +
 ~~~
 
-This targets only the measured non-user-owned entries. Do not recursively
-change ownership of the full approximately 1 TB cache. Afterward, rerun the
-read/write audit and the strict warm/local-only checks before treating the node
+This targets only measured non-user-owned entries. Do not recursively change
+ownership of the full approximately 1 TB cache. After any future repair, rerun
+the read/write audit and strict warm/local-only checks before treating the node
 as ready.
 
 Human GitHub administration is required to:
@@ -1417,12 +1541,64 @@ required by this semi-automatic topology design.
 
 Human workload coordination is also required for a declared drained acceptance
 window: compute01 has a root GitLab runner service that could claim all GPUs,
-and compute02 has restartable external Docker GPU claims. The rollout automation
-must not stop, restart, relabel, or otherwise disturb those workloads. Their
-owners must drain or authorize the exact conflict handling before cache warm,
-production admission, or full hardware canaries.
+and compute02 has restartable external Docker GPU claims. Their owners must
+approve the exact conflict set, bounded window, and restoration path before
+cache warm, production admission, or full hardware canaries.
 
-Ask the user for an exact sudo command only if a measured blocker requires it:
+The retained preparatory acceptance-window runbook predates the declarative
+topology design: it still names the removed GitHub App gate and its manifest
+has <code>execution_authorized=false</code>. Treat it only as historical target
+evidence. After final review and owner approval, regenerate a fresh immutable
+manifest and runbook without the App condition, bind them to the current PR
+head and live container device requests, and set execution authorization
+explicitly. Never execute the retained draft as-is.
+
+After that approval, the first temporary sudo operation is the reversible stop
+of the compute01 system-level GitLab scheduler. Run this on compute01 at the
+start of the accepted window, then verify that it is inactive:
+
+~~~bash
+sudo systemctl stop gitlab-runner.service
+systemctl is-active gitlab-runner.service | grep -Fx inactive
+~~~
+
+Do not disable the service merely to run the acceptance window. If the rollout
+fails or is cancelled before durable ownership is established, first withdraw
+the affected GitHub production labels, then restore the service and verify
+both active and enabled state:
+
+~~~bash
+sudo systemctl start gitlab-runner.service
+systemctl is-active gitlab-runner.service | grep -Fx active
+systemctl is-enabled gitlab-runner.service | grep -Fx enabled
+~~~
+
+If the workload owner approves dedicating compute01 to the 28-slot GitHub
+pool, convert the temporary stop into a reboot-safe final state before claiming
+completion:
+
+~~~bash
+sudo systemctl disable --now gitlab-runner.service
+systemctl is-active gitlab-runner.service | grep -Fx inactive
+systemctl is-enabled gitlab-runner.service | grep -Fx disabled
+~~~
+
+That change is reversible with
+<code>sudo systemctl enable --now gitlab-runner.service</code>, but only after
+withdrawing the compute01 production labels or installing and validating an
+equivalent shared-lease integration.
+
+The four compute02 containers whose device requests overlap CI GPUs 1 through
+3 are a separate non-sudo drain owned by that node's workload owners. Rebuild
+and revalidate the exact container manifest immediately before the window;
+never stop the two GPU0-only containers or widen the target set by hand. A
+successful permanent 28-slot rollout must also change the overlap containers'
+owner-controlled restart/deployment policy so a Docker or host restart cannot
+reintroduce access to GPUs 1 through 3. Otherwise keep them stopped only during
+the window and withdraw the affected production labels before restoration.
+
+Outside that approved GitLab-service drain, ask the user for another exact sudo
+command only if a new measured blocker requires it:
 
 - a required cache path is owned by root and strict warm cannot read, replace,
   or repair it;
@@ -1467,7 +1643,12 @@ The Goal is complete only when all boxes below refer to the same merged
       queueing, cache reuse, and shared/exclusive safety on the common pool.
 - [ ] One complete Nightly succeeds after warming both nodes.
 - [ ] An unchanged following Nightly downloads zero cache bytes.
-- [ ] Rollback to the compute02 12-slot safe pool has been rehearsed.
+- [ ] The conditional compute02 12-slot rollback baseline has been rehearsed
+      with <code>rollback-capacity</code>, then exact 28 has been restored.
+- [ ] No scheduler or container outside the shared lease namespace can regain
+      access to the seven CI GPUs after reboot while 28 production labels are
+      admitted; owner approval and the durable host/deployment state are
+      recorded.
 - [ ] Run URLs, runner snapshots, receipts, and canary artifacts are recorded
       below.
 
@@ -1480,13 +1661,15 @@ evidence.
 | --- | --- | --- | --- |
 | Baseline runner inventory |  |  |  |
 | Host/GPU baseline |  |  |  |
-| Pre-merge current-state snapshot (not Phase-0 baseline or 28-slot acceptance) | 2026-07-22T04:52:58Z | <code>reports/gb300-ci-rollout/2026-07-22-pre-merge-current-state.md</code> | Sanitized snapshot retained; admission blockers remain |
-| Implementation PR | Prior head <code>07f86c7e</code>; rebased topology-design exact head pending | [Draft PR #519](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/519) | Prior committed head green; current exact-head run pending |
+| Pre-merge current-state snapshot (not Phase-0 baseline or 28-slot acceptance) | 2026-07-22T04:52:58Z | <code>reports/gb300-ci-rollout/2026-07-22-pre-merge-current-state.md</code> | Historical sanitized snapshot retained; current supersession note records cleared cache/CI blockers |
+| Implementation PR | <code>c200eed7</code> before the latest review/hardening delta | [Draft PR #519](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/519) | Attempt-1 exact-head CI green; every later pushed head still requires exact-head CI |
 | Merged main SHA |  |  |  |
 | Historical focused test log | 2026-07-22T05:49:14Z | <code>reports/gb300-ci-rollout/2026-07-22-focused-validation.md</code> | Superseded anchor-design repository evidence; not current topology-design proof |
-| Topology-design focused test log | 2026-07-22 | <code>reports/gb300-ci-rollout/2026-07-22-topology-validation.md</code> | Rebased local repository validation green; exact-head GitHub CI and hardware/Nightly acceptance pending |
+| Topology-design focused test log | 2026-07-22 | <code>reports/gb300-ci-rollout/2026-07-22-topology-validation.md</code> | Repository validation, <code>c200eed7</code> exact-head CI, and two-node local-only cache readiness green; hardware/Nightly acceptance pending |
 | compute01 cache receipt |  |  |  |
 | compute02 cache receipt |  |  |  |
+| Bootstrap pre-admission Nightly |  |  |  |
+| Durable external GPU ownership and restart/reboot proof |  |  |  |
 | Final 28-runner inventory |  |  |  |
 | 28/29 shared canary |  |  |  |
 | Cross-workflow canary |  |  |  |
@@ -1499,6 +1682,8 @@ evidence.
 | Zero-download following Nightly |  |  |  |
 | Rollback rehearsal |  |  |  |
 
-The decisive terminal evidence is one trusted 29-leg shared canary with 28
-unique real GPU-slot receipts overlapping at one barrier, followed by a real
-Pre-Merge and a complete Nightly using the same common runner pool.
+Terminal evidence requires the durable ownership/restart proof, exact 28-runner
+snapshot, 28/29 and paired cross-workflow canaries, cancellation and exclusive
+safety, a protected 12/13 rollback rehearsal followed by recovered 28/29,
+three real test PRs, and both a complete post-admission Nightly and its
+unchanged zero-download successor on the same common runner pool.

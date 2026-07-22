@@ -2,6 +2,7 @@
   "schema_version": 1,
   "kind": "trtmc_capacity_topology",
   "slots_per_gpu": 4,
+  "rollback_baseline_node_label": "trtmc-node-gb300-nvl-019-compute02",
   "nodes": [
     {
       "node_label": "trtmc-node-gb300-nvl-019-compute01",

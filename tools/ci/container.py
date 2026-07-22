@@ -30,6 +30,7 @@ from .process import CiError, CommandRunner, GitHubFiles
 
 _SAFE_CONTAINER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 _HUGGING_FACE_TOKEN_NAMES = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN")
+_HOST_SECRET_ROOT = Path("/tmp")
 
 
 class _ContainerInterrupted(CiError):
@@ -168,7 +169,9 @@ class CiContainer:
         self._prepare_host_paths()
         with _cleanup_on_interrupt(self._cleanup_owned_resources) as interruption:
             try:
-                secret_arguments = self._hugging_face_secret_arguments()
+                secret_arguments = self._hugging_face_secret_arguments(
+                    [*options, *mounts, "-v", self._workspace_mount()]
+                )
                 docker_command = [
                     "docker",
                     "run",
@@ -361,7 +364,7 @@ class CiContainer:
             )
         return arguments
 
-    def _hugging_face_secret_arguments(self) -> list[str]:
+    def _hugging_face_secret_arguments(self, bind_arguments: Sequence[str]) -> list[str]:
         if self.config.hardened:
             return []
         primary = self.env.get("HF_TOKEN", "")
@@ -372,12 +375,13 @@ class CiContainer:
         if not token:
             return []
         directory = self._secret_directory()
+        token_file = directory / "token"
+        self._verify_secret_is_not_aliased(token_file, bind_arguments)
         try:
             directory.mkdir(mode=0o700)
         except FileExistsError as error:
             raise CiError(f"Run-owned CI secret directory already exists: {directory}") from error
         directory.chmod(0o700)
-        token_file = directory / "token"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -393,14 +397,100 @@ class CiContainer:
         ]
 
     def _secret_directory(self) -> Path:
-        runner_temp_input = Path(self.env.get("RUNNER_TEMP", "/tmp"))
-        if runner_temp_input.is_symlink() or not runner_temp_input.is_dir():
-            raise CiError("RUNNER_TEMP must be a safe directory for CI secrets")
-        runner_temp = runner_temp_input.resolve()
-        directory = runner_temp / f"trtmc-hf-secret-{self.config.name}"
-        if directory.parent != runner_temp:
-            raise CiError("Run-owned CI secret directory escapes RUNNER_TEMP")
+        secret_root_input = _HOST_SECRET_ROOT
+        try:
+            secret_root_stat = secret_root_input.lstat()
+        except OSError as error:
+            raise CiError("Host CI secret root is unavailable") from error
+        if (
+            not secret_root_input.is_absolute()
+            or secret_root_input.is_symlink()
+            or not stat.S_ISDIR(secret_root_stat.st_mode)
+        ):
+            raise CiError("Host CI secret root must be an absolute, real directory")
+        if secret_root_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH) and not (
+            secret_root_stat.st_mode & stat.S_ISVTX
+        ):
+            raise CiError("Writable host CI secret root must have the sticky bit")
+        secret_root = secret_root_input.resolve()
+        directory = secret_root / f"trtmc-hf-secret-{self.config.name}"
+        if directory.parent != secret_root:
+            raise CiError("Run-owned CI secret directory escapes the host secret root")
         return directory
+
+    def _verify_secret_is_not_aliased(
+        self, token_file: Path, bind_arguments: Sequence[str]
+    ) -> None:
+        """Reject an ordinary bind that would expose the token by a second path."""
+        try:
+            token_path = token_file.resolve()
+            bind_sources = self._bind_mount_sources(bind_arguments)
+        except CiError:
+            raise
+        except (OSError, RuntimeError) as error:
+            raise CiError("Could not validate CI container bind sources") from error
+        for source in bind_sources:
+            if token_path == source or source in token_path.parents:
+                raise CiError(
+                    f"Hugging Face token path would be exposed by container bind source: {source}"
+                )
+
+    @staticmethod
+    def _bind_mount_sources(arguments: Sequence[str]) -> list[Path]:
+        """Return canonical host paths from Docker volume and bind-mount options."""
+        sources: list[Path] = []
+        index = 0
+        while index < len(arguments):
+            argument = arguments[index]
+            volume_spec: str | None = None
+            mount_spec: str | None = None
+            if argument == "--volumes-from" or argument.startswith("--volumes-from="):
+                raise CiError(
+                    "Credentialed CI containers cannot inherit unverified container volumes"
+                )
+            if argument in ("-v", "--volume", "--mount"):
+                index += 1
+                if index >= len(arguments):
+                    raise CiError(f"Docker {argument} option is missing its value")
+                if argument == "--mount":
+                    mount_spec = arguments[index]
+                else:
+                    volume_spec = arguments[index]
+            elif argument.startswith("--volume="):
+                volume_spec = argument.removeprefix("--volume=")
+            elif argument.startswith("--mount="):
+                mount_spec = argument.removeprefix("--mount=")
+            elif argument.startswith("-v") and argument != "-v":
+                volume_spec = argument[2:]
+
+            if volume_spec is not None:
+                source_text, separator, _destination = volume_spec.partition(":")
+                if separator and source_text:
+                    source = Path(source_text)
+                    if source.is_absolute():
+                        sources.append(source.resolve())
+                    elif "/" in source_text or source_text.startswith("."):
+                        raise CiError(
+                            f"Docker bind source must be an absolute host path: {source_text!r}"
+                        )
+            if mount_spec is not None:
+                fields: dict[str, str] = {}
+                for field in mount_spec.split(","):
+                    key, separator, value = field.partition("=")
+                    if separator:
+                        fields[key.lower()] = value
+                if fields.get("type", "").lower() == "bind":
+                    source_text = fields.get("src") or fields.get("source")
+                    if not source_text:
+                        raise CiError("Docker bind mount is missing its host source")
+                    source = Path(source_text)
+                    if not source.is_absolute():
+                        raise CiError(
+                            f"Docker bind source must be an absolute host path: {source_text!r}"
+                        )
+                    sources.append(source.resolve())
+            index += 1
+        return sources
 
     def _remove_secret_directory(self) -> None:
         directory = self._secret_directory()

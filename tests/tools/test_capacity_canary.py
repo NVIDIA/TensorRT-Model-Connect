@@ -40,6 +40,7 @@ def _topology(
     *,
     slots_per_gpu: int,
     nodes: list[tuple[str, list[int]]],
+    rollback_baseline_node: str | None = None,
 ) -> dict[str, object]:
     node_values = [
         {
@@ -52,6 +53,9 @@ def _topology(
         "schema_version": 1,
         "kind": "trtmc_capacity_topology",
         "slots_per_gpu": slots_per_gpu,
+        "rollback_baseline_node_label": (
+            f"trtmc-node-{rollback_baseline_node or nodes[-1][0]}"
+        ),
         "nodes": node_values,
     }
 
@@ -63,6 +67,10 @@ SMALL_TOPOLOGY = _topology(
 FULL_TOPOLOGY = _topology(
     slots_per_gpu=4,
     nodes=[("node-a", [0, 1, 2, 3]), ("node-b", [1, 2, 3])],
+)
+ROLLBACK_TOPOLOGY = _topology(
+    slots_per_gpu=4,
+    nodes=[("node-b", [1, 2, 3])],
 )
 EXCLUSIVE_TOPOLOGY = _topology(
     slots_per_gpu=4,
@@ -121,6 +129,21 @@ def _malformed_topology_cases() -> list[tuple[dict[str, object], str]]:
     assert isinstance(label_nodes[0], dict)
     label_nodes[0]["node_label"] = "trtmc-node-../../host"
     cases.append((unsafe_label, "invalid node label"))
+
+    unsafe_baseline = _json_copy(FULL_TOPOLOGY)
+    assert isinstance(unsafe_baseline, dict)
+    unsafe_baseline["rollback_baseline_node_label"] = "trtmc-node-../../host"
+    cases.append((unsafe_baseline, "rollback baseline node label is invalid"))
+
+    unknown_baseline = _json_copy(FULL_TOPOLOGY)
+    assert isinstance(unknown_baseline, dict)
+    unknown_baseline["rollback_baseline_node_label"] = "trtmc-node-node-c"
+    cases.append((unknown_baseline, "rollback baseline must identify a declared node"))
+
+    missing_baseline = _json_copy(FULL_TOPOLOGY)
+    assert isinstance(missing_baseline, dict)
+    del missing_baseline["rollback_baseline_node_label"]
+    cases.append((missing_baseline, "fields do not match"))
     return cases
 
 
@@ -227,6 +250,46 @@ def _valid_receipts() -> list[dict[str, object]]:
             slot=0,
         ),
     ]
+
+
+def _rollback_receipts() -> list[dict[str, object]]:
+    placement = [
+        (gpu_index, f"GPU-b{gpu_index}", slot)
+        for gpu_index in (1, 2, 3)
+        for slot in range(4)
+    ]
+    receipts = [
+        _receipt(
+            leg,
+            started=0.01 * leg,
+            acquired=1 + 0.01 * leg,
+            released=10.2 + 0.001 * leg,
+            node="node-b",
+            gpu=gpu_uuid,
+            slot=slot,
+            slots_per_gpu=4,
+            expected_slots=12,
+            gpu_index=gpu_index,
+            topology=ROLLBACK_TOPOLOGY,
+        )
+        for leg, (gpu_index, gpu_uuid, slot) in enumerate(placement)
+    ]
+    receipts.append(
+        _receipt(
+            12,
+            started=10.201,
+            acquired=10.202,
+            released=12,
+            node="node-b",
+            gpu="GPU-b1",
+            slot=0,
+            slots_per_gpu=4,
+            expected_slots=12,
+            gpu_index=1,
+            topology=ROLLBACK_TOPOLOGY,
+        )
+    )
+    return receipts
 
 
 def _cross_cohort_receipts() -> list[dict[str, object]]:
@@ -404,6 +467,7 @@ def test_topology_contract_normalizes_exact_generic_16_plus_12_shape() -> None:
     reversed_nodes.reverse()
 
     assert normalized["slots_per_gpu"] == 4
+    assert normalized["rollback_baseline_node_label"] == "trtmc-node-node-b"
     assert normalized["nodes"][0]["gpu_indices"] == [0, 1, 2, 3]  # type: ignore[index]
     assert normalized["nodes"][1]["gpu_indices"] == [1, 2, 3]  # type: ignore[index]
     assert 0 not in normalized["nodes"][1]["gpu_indices"]  # type: ignore[index,operator]
@@ -477,6 +541,60 @@ def test_topology_contract_cli_binds_mode_capacity_and_emits_canonical_outputs(
         == 1
     )
     assert "expected_slots must equal topology capacity" in capsys.readouterr().err
+
+
+def test_topology_contract_cli_derives_only_the_protected_rollback_baseline(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    input_path = tmp_path / "input.json"
+    output_path = tmp_path / "rollback.json"
+    github_output = tmp_path / "github-output"
+    input_path.write_text(json.dumps(FULL_TOPOLOGY), encoding="utf-8")
+
+    assert (
+        capacity_canary_main(
+            [
+                "topology-contract",
+                "--input",
+                str(input_path),
+                "--mode",
+                "rollback-capacity",
+                "--requested-slots",
+                "12",
+                "--output",
+                str(output_path),
+                "--github-output",
+                str(github_output),
+            ]
+        )
+        == 0
+    )
+    expected = normalize_topology_contract(ROLLBACK_TOPOLOGY)
+    assert json.loads(output_path.read_text(encoding="utf-8")) == expected
+    outputs = dict(
+        line.split("=", maxsplit=1)
+        for line in github_output.read_text(encoding="utf-8").splitlines()
+    )
+    assert json.loads(outputs["expected_topology_json"]) == expected
+    assert outputs["expected_topology_digest"] == topology_contract_digest(expected)
+    capsys.readouterr()
+
+    for wrong_slots in ("11", "13", "28"):
+        assert (
+            capacity_canary_main(
+                [
+                    "topology-contract",
+                    "--input",
+                    str(input_path),
+                    "--mode",
+                    "rollback-capacity",
+                    "--requested-slots",
+                    wrong_slots,
+                ]
+            )
+            == 1
+        )
+        assert "expected_slots must equal rollback baseline capacity" in capsys.readouterr().err
 
 
 def test_cache_warm_matrix_emits_one_sorted_node_only_row_per_declared_node() -> None:
@@ -871,6 +989,49 @@ def test_verifier_proves_concurrency_queueing_and_dynamic_node_capacity() -> Non
     assert summary["nodes"]["node-b"]["gpu_indices"] == [1]  # type: ignore[index]
 
 
+def test_rollback_verifier_proves_exact_compute02_equivalent_12_plus_1_capacity() -> None:
+    summary = verify_capacity_receipts(
+        _rollback_receipts(),
+        expected_slots=12,
+        expected_topology=ROLLBACK_TOPOLOGY,
+        expected_run_id="42",
+        expected_revision="a" * 40,
+    )
+
+    assert summary["outcome"] == "success"
+    assert summary["maximum_concurrency"] == 12
+    assert summary["first_wave_runner_count"] == 12
+    assert summary["first_wave_slot_count"] == 12
+    assert summary["extra_leg_id"] == 12
+    assert summary["expected_topology"] == normalize_topology_contract(ROLLBACK_TOPOLOGY)
+    assert list(summary["nodes"]) == ["node-b"]  # type: ignore[arg-type]
+    assert summary["nodes"]["node-b"]["capacity"] == 12  # type: ignore[index]
+    assert summary["nodes"]["node-b"]["gpu_indices"] == [1, 2, 3]  # type: ignore[index]
+
+
+def test_rollback_verifier_rejects_gpu_zero_and_non_baseline_nodes() -> None:
+    receipts = _rollback_receipts()
+    for receipt in receipts:
+        if receipt["gpu_uuid"] == "GPU-b1":
+            receipt["gpu_index"] = "0"
+    with pytest.raises(CiError, match="GPU index 0 is not allowed"):
+        verify_capacity_receipts(
+            receipts,
+            expected_slots=12,
+            expected_topology=ROLLBACK_TOPOLOGY,
+        )
+
+    receipts = _rollback_receipts()
+    for receipt in receipts:
+        receipt["node_id"] = "node-a"
+    with pytest.raises(CiError, match="outside the topology"):
+        verify_capacity_receipts(
+            receipts,
+            expected_slots=12,
+            expected_topology=ROLLBACK_TOPOLOGY,
+        )
+
+
 def test_verifier_rejects_an_extra_leg_that_started_before_release() -> None:
     receipts = _valid_receipts()
     receipts[-1]["worker_started_at"] = _time(9)
@@ -1200,8 +1361,13 @@ def test_capacity_workflow_is_manual_main_only_and_has_no_model_or_hf_work() -> 
     assert "default: 28" not in workflow
     assert "default: 900" in workflow
     assert "default: shared-capacity" in workflow
+    assert "- rollback-capacity" in workflow
+    assert "shared-capacity|rollback-capacity)" in workflow
     assert "      expected_topology:" not in workflow
     assert "inputs.expected_topology" not in workflow
+    assert "      node_label:" not in workflow
+    assert "inputs.node_label" not in workflow
+    assert "inputs.rollback_baseline" not in workflow
     assert "--input .github/ci/gb300-pool-topology.json" in workflow
     assert "tools.ci.capacity_canary topology-contract" in workflow
     assert "expected_topology_digest" in workflow
@@ -1213,6 +1379,7 @@ def test_capacity_workflow_is_manual_main_only_and_has_no_model_or_hf_work() -> 
     assert "- exclusive-safety" in workflow
     assert "matrix='{\"leg\":[0]}'" in workflow
     assert "tools.ci.capacity_canary matrix" in workflow
+    assert "inputs.mode == 'rollback-capacity'" in workflow
     assert "cohort-matrix --cohort-slots" in workflow
     assert "verify-cohort" in workflow
     assert "verify-cross" in workflow
@@ -1228,6 +1395,11 @@ def test_capacity_workflow_is_manual_main_only_and_has_no_model_or_hf_work() -> 
     assert "max-parallel:" not in workflow
     assert "concurrency:" not in workflow
     assert "TRTMC_MODEL_RUNNER_LABELS" in workflow
+    assert (
+        "runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || "
+        "'[\"trtmc-gb300-proof\"]') }}" in workflow
+    )
+    assert "runs-on: ${{ inputs" not in workflow
     for host_policy_name in (
         "TRTMC_NODE_ID",
         "TRTMC_MODEL_PROOF_GPU_IDS",

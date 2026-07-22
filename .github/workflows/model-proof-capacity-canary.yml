@@ -7,21 +7,22 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Capacity, cross-workflow sharing, or exclusive-lock safety"
+        description: "Full, rollback, cross-workflow, or exclusive-lock capacity proof"
         required: true
         default: shared-capacity
         type: choice
         options:
           - shared-capacity
+          - rollback-capacity
           - shared-cohort
           - cross-workflow-verify
           - exclusive-safety
       expected_slots:
-        description: "Capacity: slots; cohort/verify: slots per workflow run"
+        description: "Full/rollback capacity: slots; cohort/verify: slots per workflow run"
         required: true
         type: number
       hold_delay_seconds:
-        description: "Shared-capacity only: UTC delay used to assemble the first wave"
+        description: "Full/rollback capacity: UTC delay used to assemble the first wave"
         required: true
         default: 900
         type: number
@@ -119,7 +120,7 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
           case "$MODE" in
-            shared-capacity)
+            shared-capacity|rollback-capacity)
               if ! [[ "$HOLD_DELAY_SECONDS" =~ ^[1-9][0-9]{0,3}$ ]] || \
                  [ "$HOLD_DELAY_SECONDS" -gt 1800 ]; then
                 echo "hold_delay_seconds must be an integer from 1 to 1800" >&2
@@ -195,7 +196,12 @@ jobs:
           persist-credentials: false
 
       - name: Acquire, probe, and hold one real shared lease
-        if: ${{ inputs.mode == 'shared-capacity' || inputs.mode == 'shared-cohort' }}
+        if: >-
+          ${{
+            inputs.mode == 'shared-capacity' ||
+            inputs.mode == 'rollback-capacity' ||
+            inputs.mode == 'shared-cohort'
+          }}
         env:
           LEG_ID: ${{ matrix.leg }}
           EXPECTED_SLOTS: ${{ needs.prepare.outputs.expected_slots }}
@@ -342,7 +348,7 @@ jobs:
           merge-multiple: true
 
       - name: Verify first wave and queued extra leg
-        if: ${{ inputs.mode == 'shared-capacity' }}
+        if: ${{ inputs.mode == 'shared-capacity' || inputs.mode == 'rollback-capacity' }}
         env:
           EXPECTED_SLOTS: ${{ needs.prepare.outputs.expected_slots }}
           BARRIER_EPOCH: ${{ needs.prepare.outputs.barrier_epoch }}

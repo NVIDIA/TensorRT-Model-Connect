@@ -171,8 +171,9 @@ and eligible task-evaluation work.
 
 Nightly cache warming is driven by the declarative topology in
 `.github/ci/gb300-pool-topology.json`. The file lists each physical node's
-node label and eligible GPU indices plus the common slots-per-GPU value. The
-GitHub-hosted planning job runs:
+node label and eligible GPU indices, the common slots-per-GPU value, and the
+single node that defines the protected rollback baseline. The GitHub-hosted
+planning job runs:
 
 ```bash
 python3 -m tools.ci.capacity_canary cache-warm-matrix \
@@ -191,6 +192,13 @@ pool label. To add a physical node, operators start and validate its runners,
 then update only the topology data in a normal PR before admitting those
 runners to the production pool. No workflow-code or credential change is
 needed for that expansion.
+
+The retained capacity workflow also has a `rollback-capacity` mode. It derives
+the baseline node and its slot count from this same protected file, emits one
+more generic worker than that capacity, and verifies the exact baseline GPU
+indices and queued extra worker. The workflow accepts no topology or node
+override; its numeric `expected_slots` input must equal the derived baseline
+capacity.
 
 Pre-merge and nightly therefore exercise the same implementation; only their
 selection and breadth differ.
@@ -343,7 +351,9 @@ the producing class remains the source of truth for optional evidence fields.
   that the exact run-owned container is absent before removing its deterministic
   residue. Hardened mode mounts source read-only and scratch at `/work`. A
   trusted one-shot command may receive Hugging Face authentication through a
-  run-owned mode-0600 token file and `HF_TOKEN_PATH`. SIGINT/SIGTERM and the
+  run-owned mode-0600 token file outside all ordinary container bind sources;
+  the container receives only its read-only secret mount and `HF_TOKEN_PATH`.
+  SIGINT/SIGTERM and the
   Nightly `always()` step use the same fail-closed cleanup ordering. Long-lived
   containers reject Hugging Face tokens, and Docker subprocesses never inherit
   their raw values.
@@ -560,13 +570,15 @@ the producing class remains the source of truth for optional evidence fields.
   GPU.
 - **Inputs:** The trusted `.github/ci/gb300-pool-topology.json` contract is used
   for planning and canary verification. Canary execution also accepts manual
-  shared-capacity or exclusive-safety mode, an expected shared-slot count,
-  runner-local GPU and lock policy, the existing CI image, and an absolute UTC
-  barrier for shared mode.
+  `shared-capacity`, protected `rollback-capacity`, `shared-cohort`,
+  `cross-workflow-verify`, or `exclusive-safety` mode, an expected shared-slot
+  count, runner-local GPU and lock policy, the existing CI image, and an
+  absolute UTC barrier for shared mode.
   The minimal contract declares only acceptance facts: generic
-  `trtmc-node-*` labels, allowed GPU indices, and slots per GPU. Per-node and
-  fleet GPU counts/capacities are derived, so operators cannot enter
-  contradictory totals.
+  `trtmc-node-*` labels, allowed GPU indices, slots per GPU, and one protected
+  rollback baseline node label. Per-node, baseline, and fleet GPU
+  counts/capacities are derived, so operators cannot enter contradictory
+  totals.
 - **Outputs:** `cache-warm-matrix` emits one `node_label` row per declared node
   in canonical sorted node-label order. Shared and exclusive modes bind every
   lease record to the actual worker job ID `exercise`. Shared mode also binds
@@ -574,9 +586,10 @@ the producing class remains the source of truth for optional evidence fields.
   peak concurrency,
   unique first-wave slot tuples, exact
   GPU-index-to-UUID identity, exact per-node GPU index/count/capacity, exact
-  fleet GPU count/capacity, and queued extra work. Exclusive mode proves both
-  leases own every configured slot, container UUID identity, same-GPU
-  non-overlap, and resumption after the primary release.
+  fleet GPU count/capacity, and queued extra work. Rollback-capacity uses the
+  same strict verifier against the exact protected baseline subset. Exclusive
+  mode proves both leases own every configured slot, container UUID identity,
+  same-GPU non-overlap, and resumption after the primary release.
 - **Boundary:** Topology normalization and cache-warm matrix generation are pure
   planning; canary execution remains an explicit admission operation. The
   module does not query GitHub for runner state, label runners, warm model
@@ -803,6 +816,10 @@ python3 -m tools.ci.capacity_canary topology-contract \
   --input .github/ci/gb300-pool-topology.json \
   --mode shared-capacity \
   --requested-slots 28
+python3 -m tools.ci.capacity_canary topology-contract \
+  --input .github/ci/gb300-pool-topology.json \
+  --mode rollback-capacity \
+  --requested-slots 12
 git diff --check
 actionlint .github/workflows/nightly.yml .github/workflows/trtmc-ci.yml \
   .github/workflows/model-proof.yml \

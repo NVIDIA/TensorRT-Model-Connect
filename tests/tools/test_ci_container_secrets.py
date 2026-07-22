@@ -75,10 +75,15 @@ def _container(tmp_path: Path, **extra: str) -> CiContainer:
     runner_temp = tmp_path / "runner-temp"
     workspace.mkdir()
     runner_temp.mkdir()
+    test_name = "".join(
+        character if character.isalnum() or character in "_-" else "-"
+        for character in tmp_path.name
+    )
     environment = {
         "GITHUB_WORKSPACE": str(workspace),
         "RUNNER_TEMP": str(runner_temp),
         "TRTMC_CI_IMAGE": "ci-image",
+        "TRTMC_CI_CONTAINER_NAME": f"trtmc-test-{os.getpid()}-{test_name}",
         **extra,
     }
     return CiContainer(environment)
@@ -222,6 +227,7 @@ def test_cli_sigterm_cleans_a_real_blocking_docker_child_promptly(tmp_path: Path
     assert "interrupted by SIGTERM" in stderr
     assert not container_state.exists()
     assert not (runner_temp / f"trtmc-hf-secret-{container_name}").exists()
+    assert not (Path("/tmp") / f"trtmc-hf-secret-{container_name}").exists()
     assert not raw_token_leaked.exists()
     assert f"rm -f {container_name}" in docker_log.read_text(encoding="utf-8")
 
@@ -269,8 +275,13 @@ def test_always_cleanup_removes_deterministic_current_run_residue(tmp_path: Path
     assert not secret_directory.exists()
 
 
-def test_secret_cleanup_rejects_a_symlink_without_touching_its_target(tmp_path: Path) -> None:
+def test_secret_cleanup_rejects_a_symlink_without_touching_its_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     container = _container(tmp_path)
+    secret_root = tmp_path / "secret-root"
+    secret_root.mkdir()
+    monkeypatch.setattr("tools.ci.container._HOST_SECRET_ROOT", secret_root)
     victim = tmp_path / "victim"
     victim.mkdir()
     victim_token = victim / "token"
@@ -284,24 +295,88 @@ def test_secret_cleanup_rejects_a_symlink_without_touching_its_target(tmp_path: 
     assert victim_token.read_text(encoding="utf-8") == "do-not-delete"
 
 
-def test_secret_path_rejects_a_symlinked_runner_temp(tmp_path: Path) -> None:
+def test_secret_path_rejects_a_symlinked_host_secret_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    real_temp = tmp_path / "real-temp"
-    real_temp.mkdir()
-    linked_temp = tmp_path / "linked-temp"
-    linked_temp.symlink_to(real_temp, target_is_directory=True)
+    real_root = tmp_path / "real-root"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked-root"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+    monkeypatch.setattr("tools.ci.container._HOST_SECRET_ROOT", linked_root)
     container = CiContainer(
         {
             "GITHUB_WORKSPACE": str(workspace),
-            "RUNNER_TEMP": str(linked_temp),
             "TRTMC_CI_IMAGE": "ci-image",
         }
     )
     container.commands = _Commands()
 
-    with pytest.raises(CiError, match="RUNNER_TEMP must be a safe directory"):
+    with pytest.raises(CiError, match="Host CI secret root must be an absolute, real directory"):
         container.cleanup()
+
+
+def test_realistic_runner_temp_secret_has_no_shared_users_alias(tmp_path: Path) -> None:
+    container = _container(
+        tmp_path,
+        RUNNER_TEMP="/workspace/users/yifeif/actions-runner/_work/_temp",
+        HF_TOKEN="hf_no_shared_mount_alias",
+        TRTMC_CONTAINER_OPTIONS="-v /workspace/users/yifeif:/workspace/users/yifeif",
+    )
+    commands = _Commands()
+    container.commands = commands
+
+    container.run_once(["python", "-V"])
+
+    docker_run = next(call for call in commands.calls if call[:3] == ["docker", "run", "--rm"])
+    assert "/workspace/users/yifeif:/workspace/users/yifeif" in docker_run
+    assert commands.secret_source is not None
+    assert Path("/workspace/users/yifeif") not in commands.secret_source.parents
+    assert container.config.workspace not in commands.secret_source.parents
+    assert commands.secret_source.parent.parent == Path("/tmp")
+    assert not commands.secret_source.exists()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        "-v /tmp:/host-tmp",
+        "--volume=/tmp:/host-tmp:ro",
+        "--mount type=bind,src=/tmp,dst=/host-tmp,readonly",
+        "--mount=type=bind,source=/tmp,destination=/host-tmp,readonly",
+    ],
+)
+def test_secret_fails_closed_when_an_ordinary_bind_covers_it(tmp_path: Path, options: str) -> None:
+    container = _container(
+        tmp_path,
+        HF_TOKEN="hf_must_not_have_a_mount_alias",
+        TRTMC_CONTAINER_OPTIONS=options,
+    )
+    commands = _Commands()
+    container.commands = commands
+
+    with pytest.raises(CiError, match="would be exposed by container bind source: /tmp"):
+        container.run_once(["python", "-V"])
+
+    assert not any(call[:2] == ["docker", "run"] for call in commands.calls)
+    assert not container._secret_directory().exists()
+
+
+def test_secret_fails_closed_for_inherited_container_volumes(tmp_path: Path) -> None:
+    container = _container(
+        tmp_path,
+        HF_TOKEN="hf_must_not_inherit_an_unknown_bind",
+        TRTMC_CONTAINER_OPTIONS="--volumes-from another-container:ro",
+    )
+    commands = _Commands()
+    container.commands = commands
+
+    with pytest.raises(CiError, match="cannot inherit unverified container volumes"):
+        container.run_once(["python", "-V"])
+
+    assert not any(call[:2] == ["docker", "run"] for call in commands.calls)
+    assert not container._secret_directory().exists()
 
 
 def test_no_token_one_shot_keeps_the_plain_cli_boundary(tmp_path: Path) -> None:
@@ -317,7 +392,7 @@ def test_no_token_one_shot_keeps_the_plain_cli_boundary(tmp_path: Path) -> None:
         "run",
         "--rm",
         "--name",
-        "trtmc-ci-local-0",
+        container.config.name,
         "--user",
         f"{os.getuid()}:{os.getgid()}",
     ]

@@ -10,6 +10,16 @@ a reconstruction of the original pre-change baseline.
 > one warm job per declared node label. The absent GitHub App is therefore no
 > longer an admission blocker, and the recorded `trtmc-cache-anchor` labels are
 > historical state rather than a workflow dependency.
+>
+> **Post-snapshot status:** The targeted compute02 ownership repair and fresh
+> audit are complete, both nodes pass the same 113-entry local-only cache plan
+> with zero downloads, exact-head Pre-Merge run
+> [29941192864](https://github.com/NVIDIA/TensorRT-Model-Connect/actions/runs/29941192864)
+> passed, and the raw evidence bundle was retained with verified hashes. The
+> `c200eed7` remaining pre-merge gates were human review and an owner-approved
+> controlled drain window. Any later pushed head must first pass exact-head CI
+> again. The tables and blocker list below deliberately preserve the earlier
+> collection-time state rather than rewriting historical evidence.
 
 ## Scope and limitations
 
@@ -57,16 +67,17 @@ Additional invariants observed:
 
 ## Repository control plane
 
-The repository still had the existing common proof selector and the temporary
-global GPU topology variables. The global GPU-ID variable must remain until
-the merged workflow has stopped injecting it and every admitted listener has
-verified host-local policy.
+The repository still had the existing common proof selector and global GPU
+topology variables. The merged workflow stops reading the global GPU-ID value
+and uses host-local policy. The value remains as a compatibility guard for
+old-ref workflow dispatches and reruns, whose fallback would otherwise include
+compute02 GPU 0.
 
 | Contract | Snapshot result |
 | --- | --- |
 | Model runner selector | `["trtmc-gb300-proof"]` |
 | Slots per GPU | `4` |
-| Global GPU IDs | `1,2,3` (not yet removed) |
+| Global GPU IDs | `1,2,3` (retained for old-ref compatibility) |
 | Runner discovery App ID variable | **Absent** |
 | Runner discovery private-key secret | **Absent** |
 | Existing Hugging Face secret metadata | Present; value not queried |
