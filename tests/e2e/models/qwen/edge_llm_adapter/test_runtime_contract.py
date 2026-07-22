@@ -50,8 +50,6 @@ ALLOW_TEST_PAYLOAD_ENV = "_TRTMC_INTERNAL_QWEN_EDGE_LLM_ALLOW_FAKE_RUNTIME_BUILD
 PROFILE_PATH = CAPSULE_ROOT / "profiles" / "qwen3-0.6b-a100-sm80-fp16.toml"
 CI_RUNNER = Path(__file__).resolve().parent / "run_a100_ci.sh"
 A100_QUALIFICATION_DESCRIPTOR = Path(__file__).resolve().parent / "QUALIFICATION.a100.toml"
-WRONG_PLATFORM_CI_RUNNER = Path(__file__).resolve().parent / "run_wrong_platform_ci.sh"
-WRONG_PLATFORM_DESCRIPTOR = Path(__file__).resolve().parent / "QUALIFICATION.rtx5090.toml"
 DEPENDENCY_LOCK_PATH = CAPSULE_ROOT / "dependency.lock"
 with DEPENDENCY_LOCK_PATH.open("rb") as _dependency_lock_source:
     DEPENDENCY_LOCK = tomllib.load(_dependency_lock_source)
@@ -71,9 +69,6 @@ def test_a100_ci_entrypoint_builds_only_qwen_and_is_valid_bash() -> None:
     assert runner.count("tests/e2e/models/qwen/edge_llm_adapter/test_a100_e2e.py") == 1
     assert "docker_args=(\n    docker run --rm" in runner
     assert "TRTMC_QUALIFICATION_PROFILE_FILES" in runner
-    assert "TRTMC_QUALIFICATION_EXPORT_BUNDLE" in runner
-    assert "TRTMC_QUALIFICATION_EXPORT_DIR" in runner
-    assert "TRTMC_QUALIFICATION_WHEEL" in runner
     assert "TRTMC_QWEN_EDGELLM_" not in runner
     assert "patchelf=${PATCHELF_VERSION}" in runner
     assert "python3.12-venv=${PYTHON_VENV_VERSION}" in runner
@@ -101,42 +96,6 @@ def test_a100_ci_entrypoint_builds_only_qwen_and_is_valid_bash() -> None:
     subdirectory_creation = runner.index('mkdir -p \\\n    "$resolved_root/artifacts"')
     assert root_creation < marker_creation < subdirectory_creation
     subprocess.run(["bash", "-n", CI_RUNNER], check=True)
-
-
-def test_wrong_platform_ci_uses_real_producer_artifacts_without_generation() -> None:
-    runner = WRONG_PLATFORM_CI_RUNNER.read_text(encoding="utf-8")
-    with WRONG_PLATFORM_DESCRIPTOR.open("rb") as stream:
-        descriptor = tomllib.load(stream)
-
-    assert descriptor["kind"] == "consumer"
-    assert descriptor["producer_id"] == "qwen-tensorrt-edge-llm-a100-sm80"
-    assert descriptor["runner_target"] == {
-        "os": "linux",
-        "architecture": "x86_64",
-        "platform_kind": "discrete",
-        "gpu_architecture": "sm120",
-        "gpu_name": "NVIDIA GeForce RTX 5090",
-    }
-    assert "TRTMC_QUALIFICATION_INPUT_DIR" in runner
-    assert "TRTMC_QUALIFICATION_RUNNER_TARGET_JSON" in runner
-    assert "transfer-manifest.json" in runner
-    assert "sha256sum --check --strict" in runner
-    assert 'trtmc build "$model_id" -o "$native_bundle" 2>&1' in runner
-    assert "--precision fp16 --max-cache-length" not in runner
-    assert "optimized_runtime.json" in runner
-    assert "trtmc_create_pipeline_ex" in runner
-    assert "active CUDA device does not match the bundle's qualified deployment target" in runner
-    assert "trtmc run" not in runner
-    assert "generate(" not in runner
-    assert "DEFAULT_IMAGE" not in runner
-    assert runner.index("--query-gpu=name,compute_cap") < runner.index('mkdir -p "$resolved_root"')
-    python_snippets = [
-        section.split("\nPY", maxsplit=1)[0] for section in runner.split("<<'PY'\n")[1:]
-    ]
-    assert len(python_snippets) == 4
-    for index, snippet in enumerate(python_snippets):
-        compile(snippet, f"{WRONG_PLATFORM_CI_RUNNER}:heredoc-{index}", "exec")
-    subprocess.run(["bash", "-n", WRONG_PLATFORM_CI_RUNNER], check=True)
 
 
 def _ci_runner_fixture(tmp_path: Path, gpu_identity: str = "NVIDIA A100 80GB PCIe, 8.0"):
@@ -183,9 +142,6 @@ if arguments and arguments[0] == "run":
         if argument != "-v":
             continue
         host, _separator, container = arguments[index + 1].partition(":")
-        if container == "/workspace/transfer":
-            (Path(host) / "producer-transfer-fixture").write_text("ok\\n", encoding="utf-8")
-            continue
         if container != "/workspace/qualification-root":
             continue
         root = Path(host)
@@ -238,23 +194,7 @@ def test_a100_ci_forwards_generic_qualification_inputs(tmp_path: Path) -> None:
     assert "TRTMC_QUALIFICATION_IN_CONTAINER=1" in run
     assert "TRTMC_QUALIFICATION_BUILD_JOBS=3" in run
     assert "TRTMC_QUALIFICATION_PROFILE_FILES=qwen3-1.7b-a100-sm80-fp16.toml" in run
-    assert "TRTMC_QUALIFICATION_EXPORT_BUNDLE=0" in run
     assert (root / "artifacts/a100-ci.log").is_file()
-
-
-def test_a100_ci_exports_only_when_selected_consumer_requires_it(tmp_path: Path) -> None:
-    runner, root, docker_log, environment = _ci_runner_fixture(tmp_path)
-    environment["TRTMC_QUALIFICATION_EXPORT_BUNDLE"] = "1"
-    environment["TRTMC_QUALIFICATION_EXPORT_DIR"] = str(root / "transfer")
-
-    result = _run_ci_runner(runner, environment)
-
-    assert result.returncode == 0, result.stderr
-    commands = [json.loads(line) for line in docker_log.read_text(encoding="utf-8").splitlines()]
-    run = next(command for command in commands if command and command[0] == "run")
-    assert "TRTMC_QUALIFICATION_EXPORT_BUNDLE=1" in run
-    assert "TRTMC_QUALIFICATION_EXPORT_DIR=/workspace/transfer" in run
-    assert f"{root / 'transfer'}:/workspace/transfer" in run
 
 
 @pytest.mark.parametrize(
@@ -288,9 +228,7 @@ def test_a100_ci_requires_an_explicit_image_before_docker(tmp_path: Path) -> Non
 
 
 def test_a100_ci_rejects_wrong_gpu_before_scratch_or_docker(tmp_path: Path) -> None:
-    runner, root, docker_log, environment = _ci_runner_fixture(
-        tmp_path, "NVIDIA GeForce RTX 5090, 12.0"
-    )
+    runner, root, docker_log, environment = _ci_runner_fixture(tmp_path, "NVIDIA H100, 9.0")
     result = _run_ci_runner(runner, environment)
     assert result.returncode != 0
     assert "requires exactly NVIDIA A100 80GB PCIe, 8.0" in result.stderr

@@ -452,8 +452,8 @@ def _write_qualification_profile(
         ("os", "windows"),
         ("architecture", "aarch64"),
         ("platform_kind", "integrated"),
-        ("gpu_architecture", "sm120"),
-        ("gpu_name", "NVIDIA GeForce RTX 5090"),
+        ("gpu_architecture", "sm90"),
+        ("gpu_name", "NVIDIA H100 80GB HBM3"),
     ),
 )
 def test_a100_profile_selection_uses_exact_target_and_qualified_state(
@@ -529,37 +529,6 @@ def test_a100_profile_selection_and_coexistence_fail_closed(tmp_path: Path) -> N
     assert len(full) >= 2
     assert test_a100_e2e._coexistence_profiles(full, "") == full[:2]
     assert test_a100_e2e._coexistence_profiles(full, full[0].file_name) == ()
-
-
-def test_a100_producer_exports_one_source_bound_consumer_transfer(tmp_path: Path) -> None:
-    profile = test_a100_e2e._PROFILES[0]
-    bundle = tmp_path / "source.trtfb"
-    bundle.write_bytes(b"real-producer-bundle-fixture")
-    wheel = tmp_path / "tensorrt_model_connect-1.0.0-py3-none-any.whl"
-    wheel.write_bytes(b"exact-wheel-fixture")
-    export = tmp_path / "transfer"
-
-    test_a100_e2e._export_consumer_transfer(profile, bundle, wheel, export, "a" * 40)
-
-    assert sorted(path.name for path in export.iterdir()) == [
-        "SHA256SUMS",
-        "delegated.trtfb",
-        "tensorrt_model_connect-1.0.0-py3-none-any.whl",
-        "transfer-manifest.json",
-    ]
-    manifest = json.loads((export / "transfer-manifest.json").read_text(encoding="utf-8"))
-    assert manifest["source_revision"] == "a" * 40
-    assert manifest["model_id"] == profile.model_id
-    assert manifest["model_revision"] == profile.revision
-    assert manifest["profile_id"] == profile.profile_id
-    assert manifest["bundle_sha256"] == test_a100_e2e._sha256(export / "delegated.trtfb")
-    subprocess.run(
-        ["sha256sum", "--check", "--strict", "SHA256SUMS"],
-        cwd=export,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
 
 
 def test_family_performance_test_is_parameterized_by_selected_a100_profiles() -> None:

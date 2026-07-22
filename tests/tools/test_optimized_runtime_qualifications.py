@@ -78,38 +78,6 @@ gpu = "{gpu}"
     return relative
 
 
-def _consumer(
-    repository: Path,
-    family: str,
-    adapter: str,
-    producer_id: str,
-    gpu: str = "rtx5090",
-    *,
-    runtime_id: str | None = None,
-) -> str:
-    root = f"tests/e2e/models/{family}/{adapter}"
-    entrypoint = f"{root}/run_{gpu}.sh"
-    _write(repository / entrypoint, "#!/bin/sh\n").chmod(0o755)
-    relative = f"{root}/QUALIFICATION.consumer-{gpu}.toml"
-    _write(
-        repository / relative,
-        f"""
-schema_version = 2
-kind = "consumer"
-id = "{family}-{adapter}-{gpu}-consumer"
-runtime_id = "{runtime_id or adapter}"
-producer_id = "{producer_id}"
-entrypoint = "{entrypoint}"
-container_image = "{_DIGEST_IMAGE}"
-runner_labels = ["self-hosted", "{gpu}"]
-
-[runner_target]
-gpu = "{gpu}"
-""".lstrip(),
-    )
-    return relative
-
-
 @pytest.fixture
 def repository(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     _descriptor(tmp_path, "family-a", "runtime-a")
@@ -125,10 +93,6 @@ def repository(tmp_path: Path) -> tuple[Path, dict[str, str]]:
 
 def _selection(repository: Path, *paths: str) -> list[dict[str, object]]:
     return qualifications.select_qualifications(repository, paths)["producers"]["include"]
-
-
-def _matrices(repository: Path, *paths: str) -> dict[str, object]:
-    return qualifications.select_qualifications(repository, paths)
 
 
 def test_adapter_or_generic_change_selects_the_whole_target_suite(
@@ -151,9 +115,6 @@ def test_family_resolver_change_selects_the_runtime_representative() -> None:
     assert [item["id"] for item in matrix["producers"]["include"]] == [
         "qwen-tensorrt-edge-llm-a100-sm80"
     ]
-    assert [item["id"] for item in matrix["consumers"]["include"]] == [
-        "qwen-tensorrt-edge-llm-rtx5090-sm120-rejection"
-    ]
 
 
 def test_profile_only_change_selects_only_that_target_profile(
@@ -163,51 +124,6 @@ def test_profile_only_change_selects_only_that_target_profile(
     selected = _selection(root, paths["target_b"])
     assert len(selected) == 1
     assert selected[0]["profile_files"] == "target-b.toml"
-
-
-def test_full_producer_selection_schedules_its_consumers(tmp_path: Path) -> None:
-    repository = tmp_path
-    producer = _descriptor(repository, "family-a", "runtime-a")
-    _profile(repository, "family-a", "runtime-a", "a")
-    _consumer(
-        repository,
-        "family-a",
-        "runtime-a",
-        "family-a-runtime-a-a100",
-    )
-
-    matrix = _matrices(repository, "src/runtime/models/family-a/runtime-a/adapter.cpp")
-    assert matrix["producers"]["include"][0]["export_bundle"] is True
-    assert matrix["consumers"]["include"] == [
-        {
-            "id": "family-a-runtime-a-rtx5090-consumer",
-            "runtime_id": "runtime-a",
-            "producer_id": "family-a-runtime-a-a100",
-            "descriptor": (
-                "tests/e2e/models/family-a/runtime-a/QUALIFICATION.consumer-rtx5090.toml"
-            ),
-            "entrypoint": "tests/e2e/models/family-a/runtime-a/run_rtx5090.sh",
-            "container_image": _DIGEST_IMAGE,
-            "runner_labels": ["self-hosted", "rtx5090"],
-            "runner_target": {"gpu": "rtx5090"},
-        }
-    ]
-    assert producer == "tests/e2e/models/family-a/runtime-a/QUALIFICATION.a100.toml"
-
-
-def test_profile_only_selection_does_not_schedule_consumers(tmp_path: Path) -> None:
-    _descriptor(tmp_path, "family-a", "runtime-a")
-    profile = _profile(tmp_path, "family-a", "runtime-a", "a")
-    _consumer(
-        tmp_path,
-        "family-a",
-        "runtime-a",
-        "family-a-runtime-a-a100",
-    )
-
-    matrix = _matrices(tmp_path, profile)
-    assert matrix["producers"]["include"][0]["export_bundle"] is False
-    assert matrix["consumers"]["include"] == []
 
 
 def test_non_target_profile_and_unrelated_changes_select_nothing(
@@ -388,52 +304,17 @@ def test_select_all_schedules_every_descriptor_without_fake_paths(
         ("family-a-runtime-a-a100", ""),
         ("family-b-runtime-b-h100", ""),
     ]
-    assert matrix["consumers"]["include"] == []
     assert qualifications.main(["--repository", str(tmp_path), "--all"]) == 0
     output = capsys.readouterr().out
     assert '"producers":{"include":' in output
     assert '"profile_files":""' in output
 
 
-def test_consumer_reference_and_ownership_fail_closed(tmp_path: Path) -> None:
-    _descriptor(tmp_path, "family-a", "runtime-a")
-    _profile(tmp_path, "family-a", "runtime-a", "a")
-    consumer = _consumer(tmp_path, "family-a", "runtime-a", "missing")
-    with pytest.raises(qualifications.QualificationError, match="does not name a producer"):
-        _selection(tmp_path, consumer)
-
-    path = tmp_path / consumer
-    text = path.read_text(encoding="utf-8").replace(
-        'producer_id = "missing"',
-        'producer_id = "family-a-runtime-a-a100"',
-    )
-    path.write_text(
-        text.replace('runtime_id = "runtime-a"', 'runtime_id = "other"'),
-        encoding="utf-8",
-    )
-    with pytest.raises(qualifications.QualificationError, match="runtime_id must match"):
-        _selection(tmp_path, consumer)
-
-    path.unlink()
-    cross = _consumer(
-        tmp_path,
-        "family-b",
-        "runtime-a",
-        "family-a-runtime-a-a100",
-    )
-    with pytest.raises(qualifications.QualificationError, match="owned beside"):
-        _selection(tmp_path, cross)
-
-
 def test_matrix_limit_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _descriptor(tmp_path, "family-a", "runtime-a")
     _profile(tmp_path, "family-a", "runtime-a", "a")
-    _consumer(
-        tmp_path,
-        "family-a",
-        "runtime-a",
-        "family-a-runtime-a-a100",
-    )
+    _descriptor(tmp_path, "family-b", "runtime-b")
+    _profile(tmp_path, "family-b", "runtime-b", "b")
     monkeypatch.setattr(qualifications, "_MAX_MATRIX_ENTRIES", 1)
     with pytest.raises(qualifications.QualificationError, match="GitHub matrix limit"):
         qualifications.select_qualifications(tmp_path, (), select_all=True)

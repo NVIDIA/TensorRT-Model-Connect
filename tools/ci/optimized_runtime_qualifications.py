@@ -3,9 +3,9 @@
 
 """Select model-owned optimized-runtime qualifications for a source diff.
 
-Boundary: discover and validate generic qualification descriptors and emit
-producer/consumer GitHub matrices; model/runtime-specific execution remains in
-each descriptor's entrypoint.
+Boundary: discover and validate generic producer descriptors and emit one
+GitHub matrix; model/runtime-specific execution remains in each descriptor's
+entrypoint.
 """
 
 from __future__ import annotations
@@ -38,31 +38,18 @@ class QualificationError(ValueError):
 
 
 @dataclass(frozen=True)
-class QualificationBase:
+class ProducerQualification:
     path: str
     id: str
     runtime_id: str
     entrypoint: str
     container_image: str
     runner_labels: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class ProducerQualification(QualificationBase):
     representative: bool
     profile_glob: str
     trigger_globs: tuple[str, ...]
     representative_trigger_globs: tuple[str, ...]
     profile_target: dict[str, object]
-
-
-@dataclass(frozen=True)
-class ConsumerQualification(QualificationBase):
-    producer_id: str
-    runner_target: dict[str, object]
-
-
-QualificationDescriptor = ProducerQualification | ConsumerQualification
 
 
 def _relative_path(value: object, field: str, *, allow_glob: bool = False) -> str:
@@ -168,7 +155,7 @@ def _common_fields(repository: Path, relative: str, data: dict[str, object]) -> 
     }
 
 
-def _load_descriptor(repository: Path, path: Path) -> QualificationDescriptor:
+def _load_descriptor(repository: Path, path: Path) -> ProducerQualification:
     relative = path.relative_to(repository).as_posix()
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -188,31 +175,14 @@ def _load_descriptor(repository: Path, path: Path) -> QualificationDescriptor:
         "representative_trigger_globs",
         "profile_target",
     }
-    consumer_fields = {
-        "schema_version",
-        "kind",
-        "id",
-        "runtime_id",
-        "producer_id",
-        "entrypoint",
-        "container_image",
-        "runner_labels",
-        "runner_target",
-    }
     kind = data.get("kind")
-    expected = producer_fields if kind == "producer" else consumer_fields
-    if data.get("schema_version") != 2 or kind not in {"producer", "consumer"}:
-        raise QualificationError(f"{relative} must use qualification schema version 2")
-    if set(data) != expected:
+    if data.get("schema_version") != 2 or kind != "producer":
+        raise QualificationError(
+            f"{relative} must use producer qualification schema version 2"
+        )
+    if set(data) != producer_fields:
         raise QualificationError(f"{relative}: fields do not match {kind} schema")
     common = _common_fields(repository, relative, data)
-    if kind == "consumer":
-        return ConsumerQualification(
-            **common,
-            producer_id=_identifier(data["producer_id"], relative, "producer_id"),
-            runner_target=_target_table(data["runner_target"], relative, "runner_target"),
-        )
-
     representative = data["representative"]
     if not isinstance(representative, bool):
         raise QualificationError(f"{relative}: representative must be Boolean")
@@ -325,7 +295,7 @@ def _validate_qualified_profile_ownership(
             )
 
 
-def discover_descriptors(repository: Path) -> list[QualificationDescriptor]:
+def discover_descriptors(repository: Path) -> list[ProducerQualification]:
     repository = repository.resolve()
     descriptors = [
         _load_descriptor(repository, path)
@@ -335,12 +305,7 @@ def discover_descriptors(repository: Path) -> list[QualificationDescriptor]:
     identifiers = [descriptor.id for descriptor in descriptors]
     if len(set(identifiers)) != len(identifiers):
         raise QualificationError("qualification descriptor ids must be repository-unique")
-    producers = [
-        descriptor for descriptor in descriptors if isinstance(descriptor, ProducerQualification)
-    ]
-    consumers = [
-        descriptor for descriptor in descriptors if isinstance(descriptor, ConsumerQualification)
-    ]
+    producers = descriptors
     for runtime_id in sorted({descriptor.runtime_id for descriptor in producers}):
         representatives = [
             descriptor
@@ -351,23 +316,8 @@ def discover_descriptors(repository: Path) -> list[QualificationDescriptor]:
             raise QualificationError(
                 f"runtime_id {runtime_id!r} must have exactly one representative descriptor"
             )
-    producers_by_id = {descriptor.id: descriptor for descriptor in producers}
-    for consumer in consumers:
-        producer = producers_by_id.get(consumer.producer_id)
-        if producer is None:
-            raise QualificationError(
-                f"{consumer.path}: producer_id does not name a producer descriptor"
-            )
-        if consumer.runtime_id != producer.runtime_id:
-            raise QualificationError(
-                f"{consumer.path}: consumer and producer runtime_id must match"
-            )
-        if PurePosixPath(consumer.path).parent != PurePosixPath(producer.path).parent:
-            raise QualificationError(
-                f"{consumer.path}: consumer and producer must be owned beside each other"
-            )
     _validate_qualified_profile_ownership(repository, producers)
-    return descriptors
+    return producers
 
 
 def _profiles(repository: Path, descriptor: ProducerQualification) -> dict[str, bool]:
@@ -408,14 +358,7 @@ def select_qualifications(
     )
     descriptors = discover_descriptors(repository)
     producers: list[dict[str, object]] = []
-    selected_full: set[str] = set()
-    producer_descriptors = [
-        descriptor for descriptor in descriptors if isinstance(descriptor, ProducerQualification)
-    ]
-    consumer_descriptors = [
-        descriptor for descriptor in descriptors if isinstance(descriptor, ConsumerQualification)
-    ]
-    for descriptor in producer_descriptors:
+    for descriptor in descriptors:
         profiles = _profiles(repository, descriptor)
         profile_changes = [path for path in changed if _matches(path, descriptor.profile_glob)]
         family_change = any(
@@ -452,43 +395,15 @@ def select_qualifications(
                 "container_image": descriptor.container_image,
                 "runner_labels": list(descriptor.runner_labels),
                 "profile_files": profile_files,
-                "export_bundle": False,
             }
         )
-        if profile_files == "":
-            selected_full.add(descriptor.id)
-
-    consumers: list[dict[str, object]] = []
-    selected_producer_ids = {item["id"] for item in producers}
-    for descriptor in consumer_descriptors:
-        if (
-            descriptor.producer_id not in selected_producer_ids
-            or descriptor.producer_id not in selected_full
-        ):
-            continue
-        consumers.append(
-            {
-                "id": descriptor.id,
-                "runtime_id": descriptor.runtime_id,
-                "producer_id": descriptor.producer_id,
-                "descriptor": descriptor.path,
-                "entrypoint": descriptor.entrypoint,
-                "container_image": descriptor.container_image,
-                "runner_labels": list(descriptor.runner_labels),
-                "runner_target": descriptor.runner_target,
-            }
-        )
-    consumer_producers = {item["producer_id"] for item in consumers}
-    for producer in producers:
-        producer["export_bundle"] = producer["id"] in consumer_producers
-
-    selected_count = len(producers) + len(consumers)
+    selected_count = len(producers)
     if selected_count > _MAX_MATRIX_ENTRIES:
         raise QualificationError(
             f"selected {selected_count} qualifications; GitHub matrix limit is "
             f"{_MAX_MATRIX_ENTRIES}"
         )
-    return {"producers": {"include": producers}, "consumers": {"include": consumers}}
+    return {"producers": {"include": producers}}
 
 
 def git_changed_paths(repository: Path, base: str, head: str) -> list[str]:

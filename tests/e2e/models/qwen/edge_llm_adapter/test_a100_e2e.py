@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -40,9 +39,6 @@ _PROFILES_ROOT = (
 )
 _QUALIFICATION_DESCRIPTOR = Path(__file__).with_name("QUALIFICATION.a100.toml")
 _PROFILE_FILES_ENV = "TRTMC_QUALIFICATION_PROFILE_FILES"
-_EXPORT_BUNDLE_ENV = "TRTMC_QUALIFICATION_EXPORT_BUNDLE"
-_EXPORT_DIR_ENV = "TRTMC_QUALIFICATION_EXPORT_DIR"
-_WHEEL_ENV = "TRTMC_QUALIFICATION_WHEEL"
 with _QUALIFICATION_DESCRIPTOR.open("rb") as _descriptor_stream:
     _A100_TARGET = dict(tomllib.load(_descriptor_stream)["profile_target"])
 
@@ -200,66 +196,6 @@ def _required_path(environment_name: str, description: str) -> Path:
     return Path(value).resolve(strict=True)
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _export_consumer_transfer(
-    profile: _Profile,
-    bundle: Path,
-    wheel: Path,
-    export_directory: Path,
-    source_revision: str,
-) -> None:
-    """Export one real producer bundle and wheel for wrong-platform qualification."""
-
-    if not re.fullmatch(r"[0-9a-f]{40}", source_revision):
-        raise RuntimeError("consumer transfer requires an exact source revision")
-    if export_directory.is_symlink():
-        raise RuntimeError("consumer transfer directory must not be a symlink")
-    if export_directory.exists() and any(export_directory.iterdir()):
-        raise RuntimeError("consumer transfer directory must be empty")
-    export_directory.mkdir(parents=True, exist_ok=True)
-    with _QUALIFICATION_DESCRIPTOR.open("rb") as stream:
-        producer_id = str(tomllib.load(stream)["id"])
-
-    delegated = export_directory / "delegated.trtfb"
-    exported_wheel = export_directory / wheel.name
-    if not re.fullmatch(r"tensorrt_model_connect-[A-Za-z0-9_.+-]+\.whl", wheel.name):
-        raise RuntimeError(f"consumer transfer wheel name is invalid: {wheel.name}")
-    shutil.copy2(bundle, delegated)
-    shutil.copy2(wheel, exported_wheel)
-    manifest = {
-        "schema_version": 1,
-        "source_revision": source_revision,
-        "producer_id": producer_id,
-        "model_id": profile.model_id,
-        "model_revision": profile.revision,
-        "profile_id": profile.profile_id,
-        "bundle_file": delegated.name,
-        "bundle_sha256": _sha256(delegated),
-        "wheel_file": exported_wheel.name,
-        "wheel_sha256": _sha256(exported_wheel),
-    }
-    manifest_path = export_directory / "transfer-manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    checksums = {
-        delegated.name: manifest["bundle_sha256"],
-        exported_wheel.name: manifest["wheel_sha256"],
-        manifest_path.name: _sha256(manifest_path),
-    }
-    (export_directory / "SHA256SUMS").write_text(
-        "".join(f"{digest}  {name}\n" for name, digest in sorted(checksums.items())),
-        encoding="utf-8",
-    )
-
-
 def _read_json_section(bundle: Path, name: str) -> dict[str, object]:
     with bundle.open("rb") as source:
         assert source.read(8) == BUNDLE_MAGIC
@@ -362,28 +298,6 @@ def qualified_bundles(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Pat
         bundle = root / f"{profile.profile_id}.trtfb"
         _build_bundle(binary, profile, bundle)
         bundles[profile.profile_id] = bundle
-    if os.environ.get(_EXPORT_BUNDLE_ENV, "") == "1":
-        if _PROFILE_FILE_SELECTION:
-            raise RuntimeError("consumer transfer requires the complete producer qualification")
-        profile = min(_QUALIFIED_PROFILES, key=lambda item: item.file_name)
-        export_path = os.environ.get(_EXPORT_DIR_ENV, "").strip()
-        if not export_path:
-            raise RuntimeError(f"{_EXPORT_DIR_ENV} is required")
-        export_directory = Path(export_path)
-        wheel = _required_path(_WHEEL_ENV, "the exact producer wheel transfer")
-        source_revision = subprocess.run(
-            ["git", "-C", str(_REPO_ROOT), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        _export_consumer_transfer(
-            profile,
-            bundles[profile.profile_id],
-            wheel,
-            export_directory,
-            source_revision,
-        )
     return bundles
 
 

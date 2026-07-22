@@ -491,27 +491,20 @@ the producing class remains the source of truth for optional evidence fields.
 ### `optimized_runtime_qualifications.py`
 
 - **Functionality / units:** Discovers model-owned `QUALIFICATION.*.toml`
-  producer and consumer descriptors, validates their generic fields and
-  ownership links, and selects hardware proofs from an exact source diff.
+  producer descriptors, validates their generic fields and profile ownership,
+  and selects hardware proofs from an exact source diff.
 - **Inputs:** A repository plus base/head Git revisions, explicit changed paths,
-  or `--all` for manual dispatch. Producers declare profile selection and
-  triggers; consumers name a producer whose portable bundle they validate on a
-  second target. Both declare model-owned entrypoints, digest-pinned images, and
-  runner labels.
-- **Outputs:** Deterministic `producers` and `consumers` GitHub matrices.
-  Producer entries contain selected profile basenames and whether a transfer
-  bundle is required. Consumer entries name the producer artifact they consume.
-  Profile-only changes remain producer-only; full family or shared changes add
-  linked consumers. Shared changes select one producer representative per
-  optimized runtime.
+  or `--all` for manual dispatch. Each producer declares profile selection,
+  triggers, a model-owned entrypoint, a digest-pinned image, and runner labels.
+- **Outputs:** One deterministic `producers` GitHub matrix. Entries contain the
+  selected profile basenames. Profile-only changes select that exact qualified
+  profile, family changes select that family's complete target suite, and shared
+  changes select one producer representative per optimized runtime.
 - **Boundary:** It contains no model or optimized-runtime identities and never
-  builds, transfers, or executes a bundle. The generic workflow moves opaque
-  artifacts; each model-owned entrypoint owns their format and qualification.
-  A selected producer with `export_bundle = true` must write at least one file
-  below `TRTMC_QUALIFICATION_EXPORT_DIR`. The linked consumer receives those
-  files below `TRTMC_QUALIFICATION_INPUT_DIR` and its declared target as JSON in
-  `TRTMC_QUALIFICATION_RUNNER_TARGET_JSON`; filenames, contents, and target
-  validation remain a model-owned contract between those two entrypoints.
+  builds or executes a bundle. The generic workflow invokes each selected
+  model-owned entrypoint, uploads its qualification artifacts, and performs
+  entrypoint-owned cleanup. Artifact format and qualification logic remain
+  model-owned.
 
 ### `model_proof_selection.py`
 

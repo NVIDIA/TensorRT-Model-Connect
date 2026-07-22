@@ -50,6 +50,8 @@ requires it. It must not add a second optimized-runtime framework.
 - No shared model translation adapter across unrelated families or runtimes.
 - No adapter, DSO, CMake target, or runner per model size or profile.
 - No Edge-LLM dependency for MC native-only builds.
+- No second-GPU hardware qualification lane; unsupported targets remain covered
+  by deterministic contract tests and normal native-path validation.
 - No generic host knowledge of Qwen IDs, Edge-LLM requests, or engine layout.
 - No new process-global compatibility framework or public/private pipeline ABI
   digest as part of this feature. Existing loader and private factory contract
@@ -82,12 +84,10 @@ src/runtime/models/qwen/edge_llm_adapter/
 # Test
 tests/e2e/models/qwen/edge_llm_adapter/
 ├── QUALIFICATION.a100.toml
-├── QUALIFICATION.rtx5090.toml
 ├── CMakeLists.txt
 ├── performance_harness.py
 ├── performance_runner.h and two private runner sources
 ├── run_a100_ci.sh
-├── run_wrong_platform_ci.sh
 ├── test_performance_contract.py
 ├── test_adapter.py
 ├── test_runtime_contract.py
@@ -108,13 +108,11 @@ exported DSO, and one parameterized test harness for the three profiles.
 
 The one generic CI dispatcher is also runtime-neutral. It discovers
 `QUALIFICATION.*.toml` descriptors in model-owned Test directories, maps an
-exact Git diff to producer and consumer hardware matrices, and invokes the
-declared model-owned entrypoints. It contains no Qwen, Edge-LLM, model-ID,
-profile, or GPU table. A producer performs positive qualification and may pass
-an opaque bundle/wheel artifact to a linked wrong-platform consumer. A new
-family-runtime integration adds its own descriptors and runners; it does not
-add another top-level workflow or edit the premerge dependency graph.
-Producers sharing one downstream `runtime_id` elect exactly one representative.
+exact Git diff to a hardware qualification matrix, and invokes the declared
+model-owned entrypoints. It contains no Qwen, Edge-LLM, model-ID, profile, or
+GPU table. A new family-runtime integration adds its own descriptor and runner;
+it does not add another top-level workflow or edit the premerge dependency
+graph. Qualifications sharing one downstream `runtime_id` elect exactly one representative.
 Family-owned changes select that family only; shared host, bundle, build, or
 dispatcher changes select the representative once per optimized runtime
 instead of fanning out across every family.
@@ -492,10 +490,6 @@ Qwen3-1.7B, and Qwen3-4B:
 11. Force one unsupported Edge-LLM deployment tuple through the native Qwen
     builder and runtime, proving that the process-wide x86 TensorRT 11.1 cohort
     preserves native execution as well as delegated execution.
-12. When a linked consumer is selected, export the deterministic smallest real
-    delegated bundle, exact installed wheel, source/profile manifest, and SHA
-    file as a one-day CI transfer artifact.
-
 The profile remains `candidate` if any required functional, accuracy,
 packaging, lifecycle, or agreed performance qualification fails. Functional
 and direct-runtime parity results must be reported separately from performance
@@ -520,18 +514,6 @@ runners are test-only sources: they are compiled by the A100 test, are not
 installed, and are not part of any public API. A profile remains `candidate`
 when any gate fails.
 
-### Wrong-Platform Validation on RTX 5090
-
-On the x86 RTX 5090 node:
-
-- verify the downloaded wheel and real A100-produced bundle against the
-  producer's exact source-bound SHA manifest;
-- building the same model through the unchanged public CLI must use the native
-  path and must not contain `optimized_runtime.json`;
-- loading the real A100 delegated bundle through the public C ABI must return
-  the exact target-mismatch error before Edge-LLM runtime initialization or
-  generation, and must not execute the A100 engine or fall back to native.
-
 ### CI Evidence
 
 CI must run the parameterized tests selected by the ownership rules. Upload
@@ -541,11 +523,10 @@ Do not add proof data to the source tree or PR diff.
 The model-owned runner must fail before building when the runner GPU does not
 match the descriptor target, build and install a normal release wheel from the
 exact clean revision, and clean root-owned container scratch through its
-digest-pinned container. The generic workflow only selects, invokes, transfers
-opaque artifacts, uploads, and gates; all family/runtime artifact formats and
-test logic stay in the model Test directory. Profile-only changes run only the
-producer shard. Adapter, runtime, or shared changes run the full producer and
-its linked wrong-platform consumer.
+digest-pinned container. The generic workflow only selects, invokes, uploads,
+and gates; all family/runtime artifact formats and test logic stay in the model
+Test directory. Profile-only changes run only the matching profile shard.
+Adapter, runtime, or shared changes run the full target qualification.
 
 ## Exit Criteria
 
@@ -584,15 +565,12 @@ its linked wrong-platform consumer.
       engine and request settings.
 - [ ] Installed-wheel A100 E2E proves the private C++ toolchain/ABI constraint.
 - [ ] All three profiles pass real A100 build, bundle, load, and generation.
-- [ ] The A100 bundle is rejected before generation on the RTX 5090.
 - [ ] Adding a fourth Qwen profile requires only profile and test-data changes.
 - [ ] Qwen x another runtime and another family x Edge-LLM can be added in
       sibling family-owned directories without modifying this adapter.
 - [ ] Adding another family-runtime qualification requires only its model-owned
       descriptor and runner; no new top-level workflow or premerge job is
       required.
-- [ ] A full producer selection transfers one source-bound real bundle to each
-      linked wrong-platform consumer; a profile-only shard transfers nothing.
 - [ ] Profile-only CI selects only that qualified target profile, while
       adapter/runtime changes select all qualified profiles for the descriptor's
       exact target and never profiles for a different GPU.

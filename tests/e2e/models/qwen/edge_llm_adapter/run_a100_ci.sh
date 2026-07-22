@@ -102,7 +102,6 @@ run_in_container() {
     mapfile -t wheels < <(find /workspace/wheels -maxdepth 1 -type f -name '*.whl' -print)
     test "${#wheels[@]}" -eq 1
     readonly wheel="${wheels[0]}"
-    export TRTMC_QUALIFICATION_WHEEL="$wheel"
     sha256sum "$wheel" | tee /workspace/artifacts/wheel.sha256
     /workspace/build-tools/venv/bin/python -m auditwheel show "$wheel" \
         | tee /workspace/artifacts/auditwheel-show.log
@@ -208,15 +207,6 @@ esac
 readonly image="${TRTMC_QUALIFICATION_IMAGE:?set TRTMC_QUALIFICATION_IMAGE to an image pinned by sha256 digest}"
 validate_image "$image"
 readonly scratch_marker="$resolved_root/$SCRATCH_MARKER_NAME"
-readonly export_bundle="${TRTMC_QUALIFICATION_EXPORT_BUNDLE:-0}"
-if [[ "$export_bundle" != "0" && "$export_bundle" != "1" ]]; then
-    fail "TRTMC_QUALIFICATION_EXPORT_BUNDLE must be 0 or 1."
-fi
-readonly export_dir="${TRTMC_QUALIFICATION_EXPORT_DIR:-$resolved_root/transfer}"
-readonly resolved_export_dir="$(realpath -m "$export_dir")"
-if [[ "$resolved_export_dir" != "$resolved_root/transfer" ]]; then
-    fail "TRTMC_QUALIFICATION_EXPORT_DIR must be the qualification root's transfer directory."
-fi
 
 cleanup_root() {
     if [[ ! -e "$resolved_root" ]]; then
@@ -292,9 +282,6 @@ mkdir -p \
     "$resolved_root/tmp" \
     "$resolved_root/wheels" \
     "$resolved_root/xdg-cache"
-if [[ "$export_bundle" == "1" ]]; then
-    mkdir "$resolved_export_dir"
-fi
 printf '%s\n' "$gpu_identity" > "$resolved_root/artifacts/host-gpu-identity.txt"
 git -C "$repository" archive --format=tar "$tested_revision" \
     | tar -xf - -C "$resolved_root/build-source"
@@ -323,7 +310,6 @@ docker_args+=(
     -e TRTMC_QUALIFICATION_IN_CONTAINER=1
     -e TRTMC_QUALIFICATION_BUILD_JOBS="${TRTMC_QUALIFICATION_BUILD_JOBS:-16}"
     -e TRTMC_QUALIFICATION_PROFILE_FILES="${TRTMC_QUALIFICATION_PROFILE_FILES:-}"
-    -e TRTMC_QUALIFICATION_EXPORT_BUNDLE="$export_bundle"
     -v "$repository:/workspace/source:ro"
     -v "$resolved_root/artifacts:/workspace/artifacts"
     -v "$resolved_root/build-source:/workspace/build-source"
@@ -337,19 +323,9 @@ docker_args+=(
     -v "$resolved_root/wheels:/workspace/wheels"
     -v "$resolved_root/xdg-cache:/workspace/xdg-cache"
 )
-if [[ "$export_bundle" == "1" ]]; then
-    docker_args+=(
-        -e TRTMC_QUALIFICATION_EXPORT_DIR=/workspace/transfer
-        -v "$resolved_export_dir:/workspace/transfer"
-    )
-fi
 docker_args+=(
     "$image"
     bash /workspace/source/tests/e2e/models/qwen/edge_llm_adapter/run_a100_ci.sh
 )
 
 "${docker_args[@]}" 2>&1 | tee "$resolved_root/artifacts/a100-ci.log"
-if [[ "$export_bundle" == "1" ]] && \
-   [[ -z "$(find "$resolved_export_dir" -mindepth 1 -maxdepth 1 -type f -print -quit)" ]]; then
-    fail "The selected producer did not export its delegated transfer artifact."
-fi

@@ -467,26 +467,17 @@ def test_optimized_runtime_proof_is_generic_and_descriptor_driven() -> None:
     proof = proof_path.read_text(encoding="utf-8")
     assert "python3 tools/ci/optimized_runtime_qualifications.py" in proof
     assert "matrix: ${{ fromJSON(needs.select.outputs.producer_matrix) }}" in proof
-    assert "matrix: ${{ fromJSON(needs.select.outputs.consumer_matrix) }}" in proof
     assert "runs-on: ${{ matrix.runner_labels }}" in proof
     assert "TRTMC_QUALIFICATION_PROFILE_FILES: ${{ matrix.profile_files }}" in proof
-    assert "TRTMC_QUALIFICATION_EXPORT_DIR:" in proof
-    assert "TRTMC_QUALIFICATION_EXPORT_BUNDLE: ${{ matrix.export_bundle && '1' || '0' }}" in proof
-    assert "TRTMC_QUALIFICATION_INPUT_DIR:" in proof
-    assert "TRTMC_QUALIFICATION_RUNNER_TARGET_JSON:" in proof
-    assert "needs: [select, produce]" in proof
     assert '"$TRTMC_QUALIFICATION_ENTRYPOINT" --cleanup' in proof
     assert "actions/upload-artifact@v4" in proof
-    assert "actions/download-artifact@v4" in proof
-    transfer_name = (
-        "optimized-runtime-transfer-${{ matrix.producer_id }}-"
-        "${{ needs.select.outputs.tested_revision }}"
-    )
-    assert transfer_name in proof
-    assert "if: ${{ matrix.export_bundle }}" in proof
-    assert "compression-level: 0" in proof
     assert "if-no-files-found: error" in proof
     assert "retention-days: 7" in proof
+    assert "consumer_matrix" not in proof
+    assert "TRTMC_QUALIFICATION_EXPORT_" not in proof
+    assert "TRTMC_QUALIFICATION_INPUT_DIR" not in proof
+    assert "actions/download-artifact@v4" not in proof
+    assert "optimized-runtime-transfer-" not in proof
     assert "Qwen" not in proof
     assert "EdgeLLM" not in proof
 
