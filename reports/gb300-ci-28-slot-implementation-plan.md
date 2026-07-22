@@ -844,7 +844,10 @@ policy, and the compute01 anchor is online without advertising proof capacity.
       after merge.
 - [ ] Rebase the implementation branch on current <code>github/main</code>.
 - [ ] Rerun focused tests and CI.
-- [ ] Require exact-head CI and review to be green while the PR remains draft.
+- [ ] Require exact-head CI to be green and resolve all review feedback while
+      the PR remains draft.
+- [ ] Only after every pre-merge gate above passes, mark the PR ready for
+      review/merge and obtain the required approvals.
 - [ ] Merge through the normal GitHub ruleset using squash or rebase.
 - [ ] Record the merged main SHA.
 - [ ] Delete the repository-level
