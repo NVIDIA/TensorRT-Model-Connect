@@ -73,9 +73,24 @@ class WorkflowImageLock:
         self.timeout = timeout
         self.handle = None
 
+    def _open(self):
+        """Open a shared lock without O_CREAT when it already exists.
+
+        Hardened Linux rejects O_CREAT for another user's file directly under
+        a sticky directory such as /tmp, even when a shared group can write it.
+        """
+        try:
+            return self.path.open("r+", encoding="utf-8")
+        except FileNotFoundError:
+            try:
+                return self.path.open("x+", encoding="utf-8")
+            except FileExistsError:
+                # Another runner created the lock between the two opens.
+                return self.path.open("r+", encoding="utf-8")
+
     def __enter__(self) -> "WorkflowImageLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = self.path.open("a+", encoding="utf-8")
+        self.handle = self._open()
         deadline = time.monotonic() + self.timeout
         while True:
             try:

@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tools.ci.docker_image import WorkflowImageLock
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPT = REPO_ROOT / "tools" / "ci" / "docker_image.py"
@@ -19,6 +21,57 @@ DEFAULT_PROFILES = (
     "chronos,deepseek_ocr,elf_flow,internlm,magpie_tts_reference,"
     "nemotron_h_reference,phi4_multimodal"
 )
+
+
+def _record_lock_open_modes(monkeypatch, lock_path: Path, *, lose_create_race=False) -> list[str]:
+    modes: list[str] = []
+    path_open = Path.open
+
+    def traced_open(path: Path, mode: str = "r", *args, **kwargs):
+        if path == lock_path:
+            modes.append(mode)
+            if mode == "x+" and lose_create_race:
+                path_open(path, mode, *args, **kwargs).close()
+                raise FileExistsError(lock_path)
+        return path_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", traced_open)
+    return modes
+
+
+def test_workflow_image_lock_opens_existing_file_without_create(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lock_path = tmp_path / "ci-image.lock"
+    lock_path.touch()
+    modes = _record_lock_open_modes(monkeypatch, lock_path)
+
+    with WorkflowImageLock(lock_path, timeout=1):
+        pass
+
+    assert modes == ["r+"]
+
+
+def test_workflow_image_lock_creates_missing_file(tmp_path: Path, monkeypatch) -> None:
+    lock_path = tmp_path / "ci-image.lock"
+    modes = _record_lock_open_modes(monkeypatch, lock_path)
+
+    with WorkflowImageLock(lock_path, timeout=1):
+        assert lock_path.is_file()
+
+    assert modes == ["r+", "x+"]
+
+
+def test_workflow_image_lock_retries_when_another_runner_creates_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lock_path = tmp_path / "ci-image.lock"
+    modes = _record_lock_open_modes(monkeypatch, lock_path, lose_create_race=True)
+
+    with WorkflowImageLock(lock_path, timeout=1):
+        pass
+
+    assert modes == ["r+", "x+", "r+"]
 
 
 def _write_fake_docker(tmp_path: Path, existing_images: dict[str, str]) -> tuple[Path, Path]:

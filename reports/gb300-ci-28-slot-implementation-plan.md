@@ -49,6 +49,19 @@ Runner labels have two purposes:
 - `trtmc-gb300-proof`: generic production scheduling.
 - `trtmc-node-<hostname>`: route the one-per-node Nightly cache warm.
 
+Compute01 has runner services under both `gh-runner-mc` and `yifeif` sharing
+one Docker daemon. Its persistent tmpfiles configuration therefore keeps the
+daemon-wide image state writable by their shared `docker` group:
+
+```text
+d /tmp/trtmc-ci-image-verifications 2775 gh-runner-mc docker -
+f /tmp/trtmc-ci-docker-image.lock 0664 gh-runner-mc docker -
+```
+
+Apply the same shared-group invariant when a future node mixes service users.
+Do not use a per-user image lock: all runners on one host must serialize image
+verification and rebuilds against that host's single Docker daemon.
+
 ## Safe rollout
 
 1. Keep the 16 compute01 proof runners online with only their node label while
