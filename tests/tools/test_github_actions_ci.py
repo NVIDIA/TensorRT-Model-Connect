@@ -1542,10 +1542,9 @@ def test_model_proof_runs_one_isolated_model_with_unique_complete_evidence() -> 
     assert "TRTMC_CI_IMAGE:" in proof
     assert "vars.TRTMC_MANYLINUX_CI_IMAGE" in proof
     assert "trtmc-dev-gb300:manylinux_2_39" in proof
-    assert (
-        "TRTMC_CI_IMAGE_LOCK_FILE: ${{ vars.TRTMC_CI_IMAGE_LOCK_FILE || "
-        "'/tmp/trtmc-ci-docker-image.lock' }}"
-    ) in proof
+    assert "TRTMC_CI_IMAGE_LOCK_FILE:" not in proof
+    image_manager = _ci_source("docker_image.py")
+    assert 'env.get("TRTMC_CI_IMAGE_LOCK_FILE", "/tmp/trtmc-ci-docker-image.lock")' in image_manager
     assert "Ensure CI Docker image" in proof
     assert "python3 -m tools.ci image ensure" in proof
     assert proof.count("actions/checkout@v4") == 1
