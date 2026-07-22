@@ -16,6 +16,11 @@ List the model profiles currently supported by the installed benchmark catalog:
 trtmc-bench list models
 ```
 
+The list is capability-based: the task operation and default testcase must be
+representable by the current benchmark worker. Distributed `mpirun` profiles
+remain in the canonical E2E/task-eval catalog but are not advertised until the
+benchmark has a rank-safe launcher and metric aggregation protocol.
+
 ## Install a packaged build
 
 A TRTMC native wheel is the end-user distribution. It contains the Python
@@ -138,8 +143,10 @@ flowchart LR
 
 Python owns configuration, matrix expansion, orchestration, metrics, and
 reporting. The native worker owns the timed loop and calls the same public C++
-pipeline API as an application. Adding a model that already uses a supported
-`task_strategy` therefore requires no benchmark-specific model entry.
+pipeline API as an application. A model using a supported `task_strategy`
+requires no second catalog entry when its default testcase can be resolved by
+that operation adapter. New request semantics, such as a specialized video
+control contract, require an operation extension before the profile is listed.
 
 ## Run several models
 
@@ -230,8 +237,10 @@ trtmc-bench run --model flux-schnell-l0 \
 
 Batch behavior follows the public pipeline capability. Diffusion uses
 `generate_image_batch`, so `request.batch_size` measures one batch call and
-reports images/s. Operations without a public batch API reject batch sizes
-above one instead of silently simulating a batch with sequential requests.
+reports generated samples/s. Built-in batch profiles preserve their individual
+prompts and seeds rather than cloning one scalar request. Operations without a
+public batch API reject batch sizes above one instead of silently simulating a
+batch with sequential requests.
 
 ## Defaults and metrics
 
@@ -251,10 +260,16 @@ Task-aware reducers additionally report:
 | Operation | Additional metrics |
 | --- | --- |
 | Text generation | output token/s and runtime-reported prefill/decode stages |
-| Diffusion | image/s and seconds/image |
+| Image diffusion | image/s and seconds/image |
+| Video diffusion | video/s, frame/s, and seconds/video |
 | Encoder | embedding vector/s and element/s |
 | Speech transcription | audio seconds/s, real-time factor, output token/s, and streaming first-partial latency |
 | Neural operator | window/s and forecast element/s |
+
+Text requests preserve the selected testcase's sampling parameters, text
+generation mode, and chat-template contract. Greedy cases without an explicit
+seed use the public pipeline default of `-1`; seeded sampling cases retain their
+declared seed.
 
 Some metrics cannot share a valid measurement boundary. For example, a long
 profiler capture perturbs baseline latency, and model loading is not request
@@ -288,5 +303,7 @@ semantics.
 Artifact inputs follow the existing manifest-relative paths. For example,
 speech transcription resolves `test_input_audio` once, hashes it into the case
 identity, decodes WAV outside the timed region, and measures only offline or
-streaming public pipeline calls. Packaged default assets are copied from the
-canonical E2E model directory with the catalog snapshot.
+streaming public pipeline calls. Image-conditioned generation resolves and
+hashes `test_image` the same way. Packaged default audio, image, and FP8 scale
+assets are copied from the canonical E2E model directory with the catalog
+snapshot.
