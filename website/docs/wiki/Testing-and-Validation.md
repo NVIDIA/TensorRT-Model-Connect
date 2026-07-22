@@ -840,7 +840,7 @@ pytest tests/builder/ -m trt -v
 ## CI orchestration
 
 The class-based CI control flow is documented in the
-[CI orchestration tutorial](../../../tools/ci/README.md). Start there to follow
+[CI orchestration tutorial](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/tools/ci/README.md). Start there to follow
 the `run-ci` trigger through impact analysis, unit gates, isolated model proofs,
 GPU scheduling, and the combined HTML report.
 
