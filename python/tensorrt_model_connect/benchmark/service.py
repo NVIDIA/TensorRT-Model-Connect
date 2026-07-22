@@ -23,7 +23,12 @@ from .metrics import reduce_metrics
 from .report import write_html_report
 from .telemetry import GpuTelemetry
 from .types import BenchmarkError, ResolvedCase
-from .worker import find_worker, run_worker, worker_backend_abi
+from .worker import (
+    discard_success_protocol_evidence,
+    find_worker,
+    run_worker,
+    worker_backend_abi,
+)
 
 
 class BenchmarkService:
@@ -93,6 +98,7 @@ class BenchmarkService:
         try:
             with telemetry:
                 worker_result = run_worker(case, case_dir, self.worker)
+            _write_jsonl(case_dir / "observations.jsonl", worker_result["observations"])
             metrics = reduce_metrics(
                 case.operation,
                 worker_result["observations"],
@@ -110,6 +116,7 @@ class BenchmarkService:
                 "pipeline_type": worker_result.get("pipeline_type"),
                 "load_ms": worker_result.get("load_ms"),
             }
+            discard_success_protocol_evidence(case_dir)
         except (BenchmarkError, OSError, subprocess.SubprocessError) as exc:
             cell = {
                 "status": "failed",
@@ -120,8 +127,8 @@ class BenchmarkService:
                 "artifact_dir": directory_name,
                 "error": str(exc),
             }
-        _write_json(case_dir / "telemetry.json", telemetry.result())
-        _write_json(case_dir / "cell-result.json", cell)
+        if case.measurement.telemetry != "off":
+            _write_json(case_dir / "telemetry.json", telemetry.result())
         return cell
 
 
@@ -204,6 +211,12 @@ def _now() -> str:
 
 def _write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _write_jsonl(path: Path, values: Iterable[Any]) -> None:
+    with path.open("w", encoding="utf-8") as stream:
+        for value in values:
+            stream.write(json.dumps(value, sort_keys=True) + "\n")
 
 
 def _slug(value: str) -> str:

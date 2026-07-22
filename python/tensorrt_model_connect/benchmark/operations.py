@@ -12,7 +12,23 @@ from typing import Any, Callable, Mapping
 from .types import BenchmarkError, MeasurementSpec
 
 
-RequestFactory = Callable[[Mapping[str, Any], Path], dict[str, Any]]
+_MODEL_TESTCASE = "model testcase"
+_OPERATION_DEFAULT = "operation default"
+
+
+@dataclass(frozen=True)
+class RequestResolution:
+    """A task-aware request plus field-level provenance."""
+
+    request: Mapping[str, Any]
+    sources: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        if set(self.request) != set(self.sources):
+            raise RuntimeError("benchmark request fields and sources must match")
+
+
+RequestFactory = Callable[[Mapping[str, Any], Path], RequestResolution]
 
 
 @dataclass(frozen=True)
@@ -55,6 +71,11 @@ class OperationSpec:
     def request_from_testcase(
         self, testcase: Mapping[str, Any], model_root: Path
     ) -> dict[str, Any]:
+        return dict(self.resolve_request_from_testcase(testcase, model_root).request)
+
+    def resolve_request_from_testcase(
+        self, testcase: Mapping[str, Any], model_root: Path
+    ) -> RequestResolution:
         return self.request_factory(testcase, model_root)
 
     def metrics_for_request(
@@ -89,7 +110,25 @@ def _model_asset(declared: str, model_root: Path, operation: str) -> tuple[Path,
     return portable, resolved
 
 
-def _generate_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[str, Any]:
+def _testcase_value(testcase: Mapping[str, Any], name: str, default: Any) -> tuple[Any, str]:
+    if name in testcase:
+        return testcase[name], _MODEL_TESTCASE
+    return default, _OPERATION_DEFAULT
+
+
+def _input_or_testcase_value(
+    inputs: Mapping[str, Any], testcase: Mapping[str, Any], name: str, default: Any
+) -> tuple[Any, str]:
+    if name in inputs:
+        return inputs[name], _MODEL_TESTCASE
+    return _testcase_value(testcase, name, default)
+
+
+def _resolution(request: Mapping[str, Any], sources: Mapping[str, str]) -> RequestResolution:
+    return RequestResolution(request=dict(request), sources=dict(sources))
+
+
+def _generate_request(testcase: Mapping[str, Any], _model_root: Path) -> RequestResolution:
     inputs = testcase.get("inputs", {})
     if not isinstance(inputs, Mapping):
         raise BenchmarkError("generate testcase inputs must be an object")
@@ -100,36 +139,63 @@ def _generate_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[st
     if not isinstance(contract, Mapping):
         raise BenchmarkError("generate testcase contract_config must be an object")
 
-    def value(name: str, default: Any) -> Any:
-        return inputs.get(name, testcase.get(name, default))
+    max_new_tokens, max_new_tokens_source = _testcase_value(testcase, "max_new_tokens", 20)
+    temperature, temperature_source = _input_or_testcase_value(inputs, testcase, "temperature", 0.0)
+    top_k, top_k_source = _input_or_testcase_value(inputs, testcase, "top_k", 1)
+    top_p, top_p_source = _input_or_testcase_value(inputs, testcase, "top_p", 1.0)
+    min_p, min_p_source = _input_or_testcase_value(inputs, testcase, "min_p", 0.0)
+    seed, seed_source = _input_or_testcase_value(inputs, testcase, "seed", -1)
+    use_chat_template, use_chat_template_source = _testcase_value(
+        contract, "use_chat_template", False
+    )
+    enable_thinking, enable_thinking_source = _testcase_value(contract, "enable_thinking", True)
 
     request: dict[str, Any] = {
         "batch_size": 1,
         "prompt": _prompt(testcase, "generate"),
-        "max_new_tokens": int(testcase.get("max_new_tokens", 20)),
-        "temperature": float(value("temperature", 0.0)),
-        "top_k": int(value("top_k", 1)),
-        "top_p": float(value("top_p", 1.0)),
-        "min_p": float(value("min_p", 0.0)),
-        "seed": int(value("seed", -1)),
-        "use_chat_template": bool(contract.get("use_chat_template", False)),
-        "enable_thinking": bool(contract.get("enable_thinking", True)),
+        "max_new_tokens": int(max_new_tokens),
+        "temperature": float(temperature),
+        "top_k": int(top_k),
+        "top_p": float(top_p),
+        "min_p": float(min_p),
+        "seed": int(seed),
+        "use_chat_template": bool(use_chat_template),
+        "enable_thinking": bool(enable_thinking),
     }
-    generation_mode = value("generation_mode", None)
+    sources = {
+        "batch_size": _OPERATION_DEFAULT,
+        "prompt": _MODEL_TESTCASE,
+        "max_new_tokens": max_new_tokens_source,
+        "temperature": temperature_source,
+        "top_k": top_k_source,
+        "top_p": top_p_source,
+        "min_p": min_p_source,
+        "seed": seed_source,
+        "use_chat_template": use_chat_template_source,
+        "enable_thinking": enable_thinking_source,
+    }
+    generation_mode, generation_mode_source = _input_or_testcase_value(
+        inputs, testcase, "generation_mode", None
+    )
     if generation_mode is not None:
         if not isinstance(generation_mode, str) or not generation_mode:
             raise BenchmarkError("generate generation_mode must be a non-empty string")
         request["generation_mode"] = generation_mode
-    block_length = value("block_length", None)
+        sources["generation_mode"] = generation_mode_source
+    block_length, block_length_source = _input_or_testcase_value(
+        inputs, testcase, "block_length", None
+    )
     if block_length is not None:
         request["block_length"] = int(block_length)
-    threshold = value("threshold", None)
+        sources["block_length"] = block_length_source
+    threshold, threshold_source = _input_or_testcase_value(inputs, testcase, "threshold", None)
     if threshold is not None:
         request["threshold"] = float(threshold)
-    return request
+        sources["threshold"] = threshold_source
+    return _resolution(request, sources)
 
 
-def _generate_image_request(testcase: Mapping[str, Any], model_root: Path) -> dict[str, Any]:
+def _generate_image_request(testcase: Mapping[str, Any], model_root: Path) -> RequestResolution:
     inputs = testcase.get("inputs", {})
     if not isinstance(inputs, Mapping):
         raise BenchmarkError("generate_image testcase inputs must be an object")
@@ -148,27 +214,58 @@ def _generate_image_request(testcase: Mapping[str, Any], model_root: Path) -> di
         seeds = [int(seed) for seed in declared_seeds]
         expected_batch_size = int(inputs.get("expected_batch_size", len(prompts)))
         if expected_batch_size != len(prompts):
-            raise BenchmarkError(
-                "generate_image expected_batch_size must match batch_prompts"
-            )
+            raise BenchmarkError("generate_image expected_batch_size must match batch_prompts")
         batch_size = expected_batch_size
+        batch_size_source = _MODEL_TESTCASE
     else:
-        batch_size = int(testcase.get("batch_size", 1))
+        batch_size_value, batch_size_source = _testcase_value(testcase, "batch_size", 1)
+        batch_size = int(batch_size_value)
     video_height = testcase.get("video_height")
     video_width = testcase.get("video_width")
     video_num_frames = int(testcase.get("video_num_frames", 1))
     is_video = video_height is not None or video_width is not None or video_num_frames > 1
+    if "image_height" in testcase:
+        height, height_source = testcase["image_height"], _MODEL_TESTCASE
+    elif video_height is not None:
+        height, height_source = video_height, _MODEL_TESTCASE
+    else:
+        height, height_source = 0, _OPERATION_DEFAULT
+    if "image_width" in testcase:
+        width, width_source = testcase["image_width"], _MODEL_TESTCASE
+    elif video_width is not None:
+        width, width_source = video_width, _MODEL_TESTCASE
+    else:
+        width, width_source = 0, _OPERATION_DEFAULT
+    num_inference_steps, num_inference_steps_source = _testcase_value(
+        testcase, "num_inference_steps", -1
+    )
+    seed, seed_source = _testcase_value(testcase, "seed", 42)
+    guidance_scale, guidance_scale_source = _testcase_value(testcase, "guidance_scale", -1.0)
+    cfg_scale, cfg_scale_source = _testcase_value(testcase, "cfg_scale", -1.0)
+    negative_prompt, negative_prompt_source = _testcase_value(testcase, "negative_prompt", "")
     request: dict[str, Any] = {
         "batch_size": batch_size,
         "media_type": "video" if is_video else "image",
         "prompt": _prompt(testcase, "generate_image"),
-        "height": int(testcase.get("image_height", video_height or 0)),
-        "width": int(testcase.get("image_width", video_width or 0)),
-        "num_inference_steps": int(testcase.get("num_inference_steps", -1)),
-        "seed": int(testcase.get("seed", 42)),
-        "guidance_scale": float(testcase.get("guidance_scale", -1.0)),
-        "cfg_scale": float(testcase.get("cfg_scale", -1.0)),
-        "negative_prompt": str(testcase.get("negative_prompt", "")),
+        "height": int(height),
+        "width": int(width),
+        "num_inference_steps": int(num_inference_steps),
+        "seed": int(seed),
+        "guidance_scale": float(guidance_scale),
+        "cfg_scale": float(cfg_scale),
+        "negative_prompt": str(negative_prompt),
+    }
+    sources = {
+        "batch_size": batch_size_source,
+        "media_type": _MODEL_TESTCASE if is_video else _OPERATION_DEFAULT,
+        "prompt": _MODEL_TESTCASE,
+        "height": height_source,
+        "width": width_source,
+        "num_inference_steps": num_inference_steps_source,
+        "seed": seed_source,
+        "guidance_scale": guidance_scale_source,
+        "cfg_scale": cfg_scale_source,
+        "negative_prompt": negative_prompt_source,
     }
     if is_video:
         if video_height is None or video_width is None or video_num_frames <= 1:
@@ -183,9 +280,18 @@ def _generate_image_request(testcase: Mapping[str, Any], model_root: Path) -> di
                 "video_num_frames": video_num_frames,
             }
         )
+        sources.update(
+            {
+                "video_height": _MODEL_TESTCASE,
+                "video_width": _MODEL_TESTCASE,
+                "video_num_frames": _MODEL_TESTCASE,
+            }
+        )
     if prompts is not None and seeds is not None:
         request["prompts"] = prompts
         request["seeds"] = seeds
+        sources["prompts"] = _MODEL_TESTCASE
+        sources["seeds"] = _MODEL_TESTCASE
     declared_image = testcase.get("test_image")
     if declared_image is not None:
         if not isinstance(declared_image, str) or not declared_image:
@@ -194,26 +300,31 @@ def _generate_image_request(testcase: Mapping[str, Any], model_root: Path) -> di
         if batch_size != 1:
             raise BenchmarkError("image-conditioned generate_image supports batch_size=1 only")
         request["image_path"] = str(image_path)
-    return request
+        sources["image_path"] = _MODEL_TESTCASE
+    return _resolution(request, sources)
 
 
-def _text_input_request(operation: str, testcase: Mapping[str, Any]) -> dict[str, Any]:
-    return {"batch_size": 1, "prompt": _prompt(testcase, operation)}
+def _text_input_request(operation: str, testcase: Mapping[str, Any]) -> RequestResolution:
+    return _resolution(
+        {"batch_size": 1, "prompt": _prompt(testcase, operation)},
+        {"batch_size": _OPERATION_DEFAULT, "prompt": _MODEL_TESTCASE},
+    )
 
 
-def _encode_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[str, Any]:
+def _encode_request(testcase: Mapping[str, Any], _model_root: Path) -> RequestResolution:
     return _text_input_request("encode", testcase)
 
 
-def _embed_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[str, Any]:
+def _embed_request(testcase: Mapping[str, Any], _model_root: Path) -> RequestResolution:
     return _text_input_request("embed", testcase)
 
 
-def _solve_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[str, Any]:
+def _solve_request(testcase: Mapping[str, Any], _model_root: Path) -> RequestResolution:
     inputs = testcase.get("inputs")
     if not isinstance(inputs, Mapping):
         raise BenchmarkError("solve testcase requires an inputs object")
     request: dict[str, Any] = {"batch_size": 1}
+    sources = {"batch_size": _OPERATION_DEFAULT}
     for key in ("field_input", "branch_input", "trunk_input"):
         if key not in inputs:
             continue
@@ -221,12 +332,13 @@ def _solve_request(testcase: Mapping[str, Any], _model_root: Path) -> dict[str, 
         if not isinstance(values, list):
             raise BenchmarkError(f"solve input {key} must be a list")
         request[key] = [float(value) for value in values]
+        sources[key] = _MODEL_TESTCASE
     if "field_input" not in request and "branch_input" not in request:
         raise BenchmarkError("solve testcase requires field_input or branch_input")
-    return request
+    return _resolution(request, sources)
 
 
-def _transcribe_request(testcase: Mapping[str, Any], model_root: Path) -> dict[str, Any]:
+def _transcribe_request(testcase: Mapping[str, Any], model_root: Path) -> RequestResolution:
     declared_audio = testcase.get("test_input_audio")
     if not isinstance(declared_audio, str) or not declared_audio:
         raise BenchmarkError("transcribe testcase requires test_input_audio")
@@ -237,13 +349,25 @@ def _transcribe_request(testcase: Mapping[str, Any], model_root: Path) -> dict[s
     streaming = testcase.get("streaming", {})
     if not isinstance(streaming, Mapping):
         raise BenchmarkError("transcribe testcase streaming configuration must be an object")
-    return {
-        "batch_size": 1,
-        "audio_path": str(audio_path),
-        "max_new_tokens": int(testcase.get("max_new_tokens", 224)),
-        "language": str(testcase.get("language", "")),
-        "streaming": dict(streaming),
-    }
+    max_new_tokens, max_new_tokens_source = _testcase_value(testcase, "max_new_tokens", 224)
+    language, language_source = _testcase_value(testcase, "language", "")
+    streaming_source = _MODEL_TESTCASE if "streaming" in testcase else _OPERATION_DEFAULT
+    return _resolution(
+        {
+            "batch_size": 1,
+            "audio_path": str(audio_path),
+            "max_new_tokens": int(max_new_tokens),
+            "language": str(language),
+            "streaming": dict(streaming),
+        },
+        {
+            "batch_size": _OPERATION_DEFAULT,
+            "audio_path": _MODEL_TESTCASE,
+            "max_new_tokens": max_new_tokens_source,
+            "language": language_source,
+            "streaming": streaming_source,
+        },
+    )
 
 
 def _generated_media_metrics(

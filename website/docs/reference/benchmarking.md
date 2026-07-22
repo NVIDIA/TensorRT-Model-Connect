@@ -44,6 +44,27 @@ low-frequency GPU telemetry into one new result directory. Bundle building,
 model loading, and warmup are excluded from the reported latency. The timed
 boundary is named `public_pipeline_call_wall` in the machine-readable result.
 
+A successful case keeps a small, user-facing evidence set:
+
+```text
+<result-dir>/
+├── result.json
+├── report.html
+└── 001-<model>-<case>/
+    ├── resolved-case.json
+    ├── observations.jsonl
+    ├── telemetry.json       # only when telemetry is enabled
+    └── worker.log
+```
+
+`result.json` contains the reduced metrics used by reports.
+`resolved-case.json` records the effective request and the source of every
+field. `observations.jsonl` keeps one raw timed observation per line.
+`worker.log` combines worker stdout and stderr. A failed worker additionally
+retains its internal `worker-request.json` and, when produced,
+`worker-result.json` protocol files for diagnosis; successful cases remove
+those redundant intermediates.
+
 ## Build from source
 
 In a prepared development environment that already contains the repository's

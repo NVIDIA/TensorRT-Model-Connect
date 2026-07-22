@@ -68,6 +68,31 @@ json.dump({
     return worker
 
 
+def _failing_worker(tmp_path: Path) -> Path:
+    worker = tmp_path / "failing_trtmc_benchmark_worker"
+    worker.write_text(
+        """#!/usr/bin/env python3
+import argparse, json, sys
+p = argparse.ArgumentParser()
+p.add_argument('--request', required=True)
+p.add_argument('--output', required=True)
+a = p.parse_args()
+r = json.load(open(a.request, encoding='utf-8'))
+print('intentional worker failure', file=sys.stderr)
+json.dump({
+  'schema_version': 'trtmc.benchmark-worker-result/v1',
+  'status': 'failed',
+  'case_digest': r['case_digest'],
+  'error': 'intentional failure',
+}, open(a.output, 'w', encoding='utf-8'))
+raise SystemExit(1)
+""",
+        encoding="utf-8",
+    )
+    worker.chmod(0o755)
+    return worker
+
+
 def _write_benchmark_result(
     output: Path,
     *,
@@ -373,10 +398,7 @@ def test_build_environment_asset_contents_participate_in_bundle_cache_identity(
     image = family / "data/test_img.jpeg"
     image.parent.mkdir()
     image.write_bytes(b"first-image")
-    source = (
-        REPOSITORY_ROOT
-        / "tests/e2e/models/qwen_image/manifests/qwen-image-edit-2511.json"
-    )
+    source = REPOSITORY_ROOT / "tests/e2e/models/qwen_image/manifests/qwen-image-edit-2511.json"
     manifest.write_bytes(source.read_bytes())
 
     catalog = ManifestCatalog(tmp_path / "catalog")
@@ -422,6 +444,50 @@ def test_text_generation_preserves_sampling_contract(tmp_path: Path) -> None:
     assert case.request["top_p"] == 0.9
     assert case.request["top_k"] == 50
     assert case.request["seed"] == 42
+
+    for field in ("temperature", "top_p", "top_k", "seed"):
+        assert case.sources[f"request.{field}"] == "model testcase"
+
+
+def test_text_generation_distinguishes_testcase_and_operation_defaults(
+    tmp_path: Path,
+) -> None:
+    case = resolve_case(
+        ManifestCatalog().resolve("glm-4-9b"),
+        tmp_path / "pending.trtfb",
+    )
+
+    assert case.sources["request.prompt"] == "model testcase"
+    assert case.sources["request.max_new_tokens"] == "model testcase"
+    for field in (
+        "batch_size",
+        "enable_thinking",
+        "min_p",
+        "seed",
+        "temperature",
+        "top_k",
+        "top_p",
+        "use_chat_template",
+    ):
+        assert case.sources[f"request.{field}"] == "operation default"
+
+    overridden = benchmark_catalog.apply_overrides(
+        case,
+        {"request.temperature": 0.5, "measurement.iterations": 7},
+    )
+    assert overridden.sources["request.temperature"] == "user override"
+    assert overridden.sources["measurement.iterations"] == "user override"
+
+
+def test_all_advertised_defaults_explain_every_request_field(tmp_path: Path) -> None:
+    for model in ManifestCatalog().models():
+        case = resolve_case(model, tmp_path / f"{model.name}.trtfb")
+        request_sources = {
+            name.removeprefix("request."): source
+            for name, source in case.sources.items()
+            if name.startswith("request.")
+        }
+        assert request_sources.keys() == case.request.keys(), model.name
 
 
 def test_text_generation_preserves_mode_and_chat_contract(tmp_path: Path) -> None:
@@ -481,7 +547,18 @@ def test_transcription_resolves_audio_artifact_and_reports_realtime_factor(
 
     assert case.request["audio_path"] == "data/Recording.wav"
     assert len(case.request["audio_sha256"]) == 64
+    assert case.sources["request.audio_path"] == "model testcase"
+    assert case.sources["request.audio_sha256"] == "derived from model testcase"
     assert Path(case.worker_request()["request"]["audio_path"]).is_file()
+
+    replacement_audio = tmp_path / "replacement.wav"
+    replacement_audio.write_bytes(b"replacement audio")
+    overridden = benchmark_catalog.apply_overrides(
+        case, {"request.audio_path": str(replacement_audio)}
+    )
+    assert overridden.sources["request.audio_path"] == "user override"
+    assert overridden.sources["request.audio_sha256"] == "derived from user override"
+    assert overridden.request["audio_sha256"] != case.request["audio_sha256"]
 
     metrics = reduce_metrics(
         "transcribe",
@@ -540,9 +617,51 @@ def test_cli_runs_fake_native_worker_and_writes_evidence(tmp_path: Path) -> None
     assert result["cells"][0]["metrics"]["latency_ms"]["p50"] == 2.5
     assert (output / "report.html").is_file()
     artifact_dir = output / result["cells"][0]["artifact_dir"]
-    assert (artifact_dir / "resolved-case.json").is_file()
-    assert (artifact_dir / "worker-result.json").is_file()
-    assert (artifact_dir / "telemetry.json").is_file()
+    assert sorted(path.name for path in artifact_dir.iterdir()) == [
+        "observations.jsonl",
+        "resolved-case.json",
+        "worker.log",
+    ]
+    observations = [
+        json.loads(line)
+        for line in (artifact_dir / "observations.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(observations) == 4
+    assert observations[0]["iteration"] == 0
+
+
+def test_failed_worker_keeps_protocol_evidence_without_cell_duplicate(tmp_path: Path) -> None:
+    worker = _failing_worker(tmp_path)
+    output = tmp_path / "failed-run"
+
+    assert (
+        main(
+            [
+                "run",
+                "--model",
+                "distilgpt2",
+                "--bundle",
+                str(_bundle(tmp_path)),
+                "--telemetry",
+                "off",
+                "--worker",
+                str(worker),
+                "-o",
+                str(output),
+            ]
+        )
+        == 1
+    )
+
+    result = json.loads((output / "result.json").read_text(encoding="utf-8"))
+    artifact_dir = output / result["cells"][0]["artifact_dir"]
+    assert sorted(path.name for path in artifact_dir.iterdir()) == [
+        "resolved-case.json",
+        "worker-request.json",
+        "worker-result.json",
+        "worker.log",
+    ]
+    assert "intentional worker failure" in (artifact_dir / "worker.log").read_text(encoding="utf-8")
 
 
 def test_cli_combines_model_result_subdirectories_into_one_report(

@@ -163,7 +163,9 @@ def _resolve_manifest_asset(path: Path, field: str, value: object) -> Path:
     candidate = declared if declared.is_absolute() else path.parent.parent / declared
     resolved = candidate.resolve()
     if not resolved.is_file():
-        raise BenchmarkError(f"{field} file declared by model manifest {path} is missing: {resolved}")
+        raise BenchmarkError(
+            f"{field} file declared by model manifest {path} is missing: {resolved}"
+        )
     return resolved
 
 
@@ -277,11 +279,14 @@ def resolve_case(
     operation = operation_for_task_strategy(model.task_strategy)
     testcase = _select_testcase(model, case_name)
     testcase_name = str(testcase.get("name", "default"))
-    request = operation.request_from_testcase(testcase, model.manifest_path.parent.parent)
+    request_resolution = operation.resolve_request_from_testcase(
+        testcase, model.manifest_path.parent.parent
+    )
+    request = dict(request_resolution.request)
     runtime: dict[str, Any] = {"cuda_graphs": False}
     measurement = operation.default_measurement
     sources: dict[str, str] = {
-        **{f"request.{key}": "model testcase" for key in request},
+        **{f"request.{key}": source for key, source in request_resolution.sources.items()},
         "runtime.cuda_graphs": "benchmark default",
         "measurement.warmup": "task strategy default",
         "measurement.iterations": "task strategy default",
@@ -326,6 +331,12 @@ def apply_overrides(case: ResolvedCase, overrides: Mapping[str, Any]) -> Resolve
             measurement_values[mapped] = value
         sources[dotted] = "user override"
     request = _with_artifact_digests(request, case.model.manifest_path.parent.parent)
+    for path_name in (name for name in request if name.endswith("_path")):
+        digest_name = f"{path_name.removesuffix('_path')}_sha256"
+        if digest_name not in request:
+            continue
+        path_source = sources.get(f"request.{path_name}", "resolved request")
+        sources[f"request.{digest_name}"] = f"derived from {path_source}"
     measurement = MeasurementSpec(
         warmup=int(measurement_values["warmup"]),
         iterations=int(measurement_values["iterations"]),

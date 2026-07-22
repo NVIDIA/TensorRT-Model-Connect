@@ -60,24 +60,20 @@ def worker_backend_abi(worker: Path) -> str | None:
 def run_worker(case: ResolvedCase, case_dir: Path, worker: Path) -> dict[str, Any]:
     request_path = case_dir / "worker-request.json"
     result_path = case_dir / "worker-result.json"
-    stdout_path = case_dir / "worker.stdout.log"
-    stderr_path = case_dir / "worker.stderr.log"
+    log_path = case_dir / "worker.log"
     request_path.write_text(
         json.dumps(case.worker_request(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    with (
-        stdout_path.open("w", encoding="utf-8") as stdout,
-        stderr_path.open("w", encoding="utf-8") as stderr,
-    ):
+    with log_path.open("w", encoding="utf-8") as log:
         completed = subprocess.run(
             [str(worker), "--request", str(request_path), "--output", str(result_path)],
-            stdout=stdout,
-            stderr=stderr,
+            stdout=log,
+            stderr=subprocess.STDOUT,
             check=False,
         )
     if not result_path.is_file():
         raise BenchmarkError(
-            f"worker exited {completed.returncode} without {result_path}; see {stderr_path}"
+            f"worker exited {completed.returncode} without {result_path}; see {log_path}"
         )
     try:
         result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -87,7 +83,7 @@ def run_worker(case: ResolvedCase, case_dir: Path, worker: Path) -> dict[str, An
         raise BenchmarkError(f"worker result must be an object: {result_path}")
     if completed.returncode != 0 or result.get("status") != "completed":
         error = result.get("error", f"exit code {completed.returncode}")
-        raise BenchmarkError(f"worker failed: {error}; see {stderr_path}")
+        raise BenchmarkError(f"worker failed: {error}; see {log_path}")
     if result.get("case_digest") != case.digest:
         raise BenchmarkError("worker result case_digest does not match the resolved case")
     if result.get("operation") not in {None, case.operation}:
@@ -98,3 +94,12 @@ def run_worker(case: ResolvedCase, case_dir: Path, worker: Path) -> dict[str, An
     if not isinstance(observations, list) or len(observations) != case.measurement.iterations:
         raise BenchmarkError("worker observation count does not match measurement.iterations")
     return result
+
+
+def discard_success_protocol_evidence(case_dir: Path) -> None:
+    """Remove worker protocol intermediates after user evidence is durable."""
+    for path in (case_dir / "worker-request.json", case_dir / "worker-result.json"):
+        try:
+            path.unlink()
+        except OSError:
+            pass
