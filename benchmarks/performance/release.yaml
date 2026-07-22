@@ -412,8 +412,9 @@ cases:
     priority: slow
     baseline:
       runner: hf-transformers
-      mode: torch-compile
-      compile_scope: model.forward
+      mode: hf-eager
+      model_class: auto
+      generation_method: ar-generate
   - id: nemotron_speech_streaming.transcribe
     family: nemotron_speech_streaming
     operation: transcribe

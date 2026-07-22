@@ -33,6 +33,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-length", required=True, type=int)
     parser.add_argument("--padding", default="longest", choices=("longest", "max-length"))
     parser.add_argument("--mode", required=True, choices=("torch-compile", "hf-eager"))
+    parser.add_argument(
+        "--model-class",
+        default="task",
+        choices=("task", "auto"),
+        help="Use the task AutoClass or the model repository's generic AutoModel registration.",
+    )
+    parser.add_argument(
+        "--generation-method",
+        default="generate",
+        choices=("generate", "ar-generate"),
+        help="Public generation method to time after loading the model.",
+    )
     parser.add_argument("--compile-mode", default="default")
     parser.add_argument("--compile-fullgraph", action="store_true")
     parser.add_argument("--compile-dynamic", action="store_true")
@@ -101,11 +113,13 @@ def _load(arguments: argparse.Namespace) -> tuple[Any, Any, str]:
     tokenizer = AutoTokenizer.from_pretrained(arguments.model, **common)
     if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
         tokenizer.pad_token = tokenizer.eos_token
-    model_class = {
-        "encoder": AutoModel,
-        "causal-lm": AutoModelForCausalLM,
-        "seq2seq-lm": AutoModelForSeq2SeqLM,
-    }[arguments.task]
+    model_class = AutoModel
+    if arguments.model_class == "task":
+        model_class = {
+            "encoder": AutoModel,
+            "causal-lm": AutoModelForCausalLM,
+            "seq2seq-lm": AutoModelForSeq2SeqLM,
+        }[arguments.task]
     model_options = {
         "torch_dtype": _dtype(torch, arguments.precision),
         "low_cpu_mem_usage": True,
@@ -216,6 +230,7 @@ def _generation_call(
     task: str,
     output_token_policy: str,
     precision: str,
+    generation_method: str,
 ) -> tuple[Callable[[], Any], Callable[[Any], dict[str, Any]]]:
     import torch
 
@@ -270,7 +285,17 @@ def _generation_call(
                 enabled=precision != "fp32",
             ),
         ):
-            generated = model.generate(**gpu_inputs, **generation)
+            if generation_method == "ar-generate":
+                generated = model.ar_generate(
+                    gpu_inputs["input_ids"],
+                    max_new_tokens=max_new_tokens,
+                    temperature=float(request.get("temperature", 0.0)),
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+                if isinstance(generated, tuple):
+                    generated = generated[0]
+            else:
+                generated = model.generate(**gpu_inputs, **generation)
         input_length = 0 if task == "seq2seq-lm" else int(gpu_inputs["input_ids"].shape[-1])
         token_ids = generated[0, input_length:].detach().to("cpu", dtype=torch.int64).tolist()
         if task == "seq2seq-lm":
@@ -418,6 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.task,
             arguments.output_token_policy,
             arguments.precision,
+            arguments.generation_method,
         )
     samples, output_summary = _measure(invoke, summarize, arguments.warmup, arguments.iterations)
     if compile_evidence is not None:
@@ -428,6 +454,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "status": "completed",
         "backend": "hf-transformers",
         "mode": arguments.mode,
+        "model_class": arguments.model_class,
+        "generation_method": arguments.generation_method,
         "compile_scope": "model.forward" if arguments.mode == "torch-compile" else None,
         "compile_evidence": compile_evidence,
         "model": arguments.model,

@@ -85,6 +85,7 @@ p.add_argument('--warmup'); p.add_argument('--iterations', type=int)
 p.add_argument('--workload-digest'); p.add_argument('--output', type=Path)
 p.add_argument('--output-token-policy')
 p.add_argument('--experts-implementation')
+p.add_argument('--model-class', default='task'); p.add_argument('--generation-method', default='generate')
 p.add_argument('--revision'); p.add_argument('--compile-mode'); p.add_argument('--compile-dynamic', action='store_true')
 p.add_argument('--compile-fullgraph', action='store_true'); p.add_argument('--trust-remote-code', action='store_true')
 p.add_argument('--local-files-only', action='store_true')
@@ -92,6 +93,7 @@ a=p.parse_args()
 compiled=a.mode == 'torch-compile'
 value={'schema_version':'trtmc.perf-baseline/v1','status':'completed','backend':'hf-transformers',
  'mode':a.mode,'precision':a.precision,'padding':a.padding,
+ 'model_class':a.model_class,'generation_method':a.generation_method,
  'experts_implementation':a.experts_implementation,
  'compile_scope':'model.forward' if compiled else None,
  'compile_evidence':{'applied':True,'timed_callable_uses_compiled_target':True} if compiled else None,
@@ -119,6 +121,10 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     assert by_id["phi_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
     assert by_id["opt.generate"]["request"]["max_new_tokens"] == 10
+    diffusion_baseline = by_id["nemotron_labs_diffusion.generate"]["baseline"]
+    assert diffusion_baseline["mode"] == "hf-eager"
+    assert diffusion_baseline["model_class"] == "auto"
+    assert diffusion_baseline["generation_method"] == "ar-generate"
 
 
 def test_compile_contract_cannot_silently_fall_back_to_eager() -> None:
@@ -234,6 +240,12 @@ def test_suite_has_explicit_eager_rows_and_unsupported_reasons() -> None:
         "runner": "hf-transformers",
         "mode": "hf-eager",
         "experts_implementation": "batched_mm",
+    }
+    assert rows["nemotron_labs_diffusion.generate"]["baseline"] == {
+        "runner": "hf-transformers",
+        "mode": "hf-eager",
+        "model_class": "auto",
+        "generation_method": "ar-generate",
     }
     assert rows["gemma.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["phi.generate"]["baseline"]["output_contract"] == "exact-text"

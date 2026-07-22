@@ -223,6 +223,10 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         raise PerfReleaseError(f"case {case['id']} baseline padding is invalid")
     if baseline.get("precision") not in {None, "fp16", "fp32", "bf16"}:
         raise PerfReleaseError(f"case {case['id']} baseline precision is invalid")
+    if baseline.get("model_class", "task") not in {"task", "auto"}:
+        raise PerfReleaseError(f"case {case['id']} baseline model class is invalid")
+    if baseline.get("generation_method", "generate") not in {"generate", "ar-generate"}:
+        raise PerfReleaseError(f"case {case['id']} baseline generation method is invalid")
     if baseline.get("experts_implementation") not in {
         None,
         "eager",
@@ -587,6 +591,10 @@ def _baseline_argv(
         argv.append("--trust-remote-code")
     if baseline.get("experts_implementation"):
         argv.extend(["--experts-implementation", str(baseline["experts_implementation"])])
+    if baseline.get("model_class"):
+        argv.extend(["--model-class", str(baseline["model_class"])])
+    if baseline.get("generation_method"):
+        argv.extend(["--generation-method", str(baseline["generation_method"])])
     if options.local_files_only:
         argv.append("--local-files-only")
     if mode == "torch-compile":
@@ -759,6 +767,16 @@ def _baseline_contract_mismatch(
     expected_experts = case["baseline"].get("experts_implementation")
     if baseline.get("experts_implementation") != expected_experts:
         return "baseline experts implementation differs from the suite"
+    if (
+        "model_class" in case["baseline"]
+        and baseline.get("model_class") != case["baseline"]["model_class"]
+    ):
+        return "baseline model class differs from the suite"
+    if (
+        "generation_method" in case["baseline"]
+        and baseline.get("generation_method") != case["baseline"]["generation_method"]
+    ):
+        return "baseline generation method differs from the suite"
     digest = candidate.get("workload_digest")
     if not digest or baseline.get("workload_digest") != digest:
         return "candidate and baseline workload differ"
@@ -947,6 +965,10 @@ def _baseline_label(row: Mapping[str, Any]) -> str:
         details.append(str(contract["precision"]))
     if contract.get("experts_implementation"):
         details.append(f"experts={contract['experts_implementation']}")
+    if contract.get("model_class"):
+        details.append(f"loader={contract['model_class']}")
+    if contract.get("generation_method"):
+        details.append(f"generate={contract['generation_method']}")
     suffix = f", {', '.join(details)}" if details else ""
     return f"torch.compile ({scope}{suffix})" if mode == "torch-compile" else f"HF eager{suffix}"
 
