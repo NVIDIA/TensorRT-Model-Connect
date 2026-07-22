@@ -230,6 +230,9 @@ def test_suite_has_explicit_eager_rows_and_unsupported_reasons() -> None:
 
     assert rows["mamba.generate"]["baseline"]["mode"] == "hf-eager"
     assert rows["rwkv.generate"]["baseline"]["mode"] == "hf-eager"
+    assert rows["gemma.generate"]["baseline"]["output_contract"] == "exact-text"
+    assert rows["phi.generate"]["baseline"]["output_contract"] == "exact-text"
+    assert rows["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["flux.generate_image"]["baseline"]["runner"] == "unsupported"
     assert rows["flux.generate_image"]["baseline"]["reason"]
 
@@ -285,6 +288,18 @@ def test_seq2seq_token_framing_is_explicit_and_exact() -> None:
     assert normalize([2, 0, 11, 2], 2, 2, "strip-start-and-eos") == [0, 11]
     assert normalize([0, 11, 1], 0, 1, "strip-start") == [11, 1]
     assert normalize([0, 11, 1], 0, 1, "new-tokens") == [0, 11, 1]
+
+
+def test_hf_runner_bridges_dynamic_cache_method_rename() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/hf_transformers.py"))
+
+    class LegacyDynamicCache:
+        def get_max_length(self) -> int:
+            return 17
+
+    runner["_ensure_dynamic_cache_api"](LegacyDynamicCache)
+
+    assert LegacyDynamicCache().get_max_cache_shape() == 17
 
 
 def test_source_revision_can_be_injected_without_git(monkeypatch) -> None:

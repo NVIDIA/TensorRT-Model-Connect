@@ -72,6 +72,14 @@ def _dtype(torch_module: Any, precision: str) -> Any:
     }[precision]
 
 
+def _ensure_dynamic_cache_api(dynamic_cache: type[Any]) -> None:
+    """Bridge the Transformers DynamicCache method rename for remote model code."""
+    if not hasattr(dynamic_cache, "get_max_cache_shape") and hasattr(
+        dynamic_cache, "get_max_length"
+    ):
+        setattr(dynamic_cache, "get_max_cache_shape", dynamic_cache.get_max_length)
+
+
 def _load(arguments: argparse.Namespace) -> tuple[Any, Any, str]:
     import torch
     from transformers import (
@@ -80,6 +88,9 @@ def _load(arguments: argparse.Namespace) -> tuple[Any, Any, str]:
         AutoModelForSeq2SeqLM,
         AutoTokenizer,
     )
+    from transformers.cache_utils import DynamicCache
+
+    _ensure_dynamic_cache_api(DynamicCache)
 
     common: dict[str, Any] = {
         "trust_remote_code": arguments.trust_remote_code,

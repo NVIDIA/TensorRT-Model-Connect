@@ -209,6 +209,7 @@ cases:
       runner: hf-transformers
       mode: torch-compile
       compile_scope: model.forward
+      output_contract: exact-text
   - id: glm.generate
     family: glm
     operation: generate
@@ -483,6 +484,7 @@ cases:
       runner: hf-transformers
       mode: torch-compile
       compile_scope: model.forward
+      output_contract: exact-text
   - id: phi4_multimodal.generate
     family: phi4_multimodal
     operation: generate
