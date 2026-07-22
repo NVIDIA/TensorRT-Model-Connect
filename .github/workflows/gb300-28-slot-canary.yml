@@ -1,0 +1,588 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# TEMPORARY ACCEPTANCE WORKFLOW: run from its same-repository test PR only.
+# Never merge this file into main.
+name: TEMP GB300 28-slot capacity canary
+
+run-name: >-
+  TEMP GB300 capacity · PR #${{ github.event.pull_request.number }} · ${{ github.event.pull_request.head.sha }}
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - labeled
+
+permissions: {}
+
+jobs:
+  prepare:
+    name: Validate test-only trigger
+    if: >-
+      ${{
+        github.event.label.name == 'run-gb300-capacity-canary' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.head.ref == 'test/gb300-28-slot-canary'
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      barrier_epoch: ${{ steps.barrier.outputs.barrier_epoch }}
+
+    steps:
+      - name: Require a first-attempt same-repository PR run
+        env:
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          TRIGGER_LABEL: ${{ github.event.label.name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_RUN_ATTEMPT" = "1"
+          test "$HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
+          test "$HEAD_REF" = "test/gb300-28-slot-canary"
+          test "$TRIGGER_LABEL" = "run-gb300-capacity-canary"
+
+      - name: Set one shared lease-overlap barrier
+        id: barrier
+        run: |
+          set -euo pipefail
+          barrier_epoch="$(($(date -u +%s) + 600))"
+          echo "barrier_epoch=$barrier_epoch" >> "$GITHUB_OUTPUT"
+          echo "All first-wave leases must cover UTC epoch $barrier_epoch."
+
+  capacity:
+    name: Capacity leg ${{ matrix.leg }}
+    needs: prepare
+    runs-on: trtmc-gb300-proof
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        leg:
+          - 0
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+          - 6
+          - 7
+          - 8
+          - 9
+          - 10
+          - 11
+          - 12
+          - 13
+          - 14
+          - 15
+          - 16
+          - 17
+          - 18
+          - 19
+          - 20
+          - 21
+          - 22
+          - 23
+          - 24
+          - 25
+          - 26
+          - 27
+          - 28
+    permissions:
+      contents: read
+    env:
+      BARRIER_EPOCH: ${{ needs.prepare.outputs.barrier_epoch }}
+      LEG_ID: ${{ matrix.leg }}
+      SOURCE_REVISION: ${{ github.event.pull_request.head.sha }}
+      TRTMC_CI_IMAGE: ${{ vars.TRTMC_MANYLINUX_CI_IMAGE || 'trtmc-dev-gb300:manylinux_2_39' }}
+      TRTMC_MODEL_PROOF_GPU_LOCK_DIR: ${{ vars.TRTMC_MODEL_PROOF_GPU_LOCK_DIR || '/tmp/trtmc-model-proof-gpu-locks' }}
+      TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: "120"
+      TRTMC_MODEL_PROOF_SLOTS_PER_GPU: ${{ vars.TRTMC_MODEL_PROOF_SLOTS_PER_GPU || '4' }}
+
+    steps:
+      - name: Check out exact canary revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: capacity-source
+          persist-credentials: false
+          clean: true
+          lfs: false
+
+      - name: Acquire, probe, and hold one real shared lease
+        working-directory: ${{ github.workspace }}/capacity-source
+        run: |
+          set -euo pipefail
+          env -u TRTMC_GPU_ID python3 -u <<'PY'
+          import json
+          import os
+          import re
+          import socket
+          import subprocess
+          import time
+          from datetime import datetime, timezone
+          from email.utils import parsedate_to_datetime
+          from pathlib import Path
+          from urllib.error import HTTPError
+          from urllib.request import Request, urlopen
+
+          from tools.ci.context import CiContext
+          from tools.ci.gpu_lease import GpuLease
+
+
+          GPU_UUID = re.compile(r"GPU-[A-Za-z0-9-]+")
+
+
+          def utc_now() -> str:
+              return datetime.now(timezone.utc).isoformat()
+
+
+          def atomic_json(path: Path, value: dict[str, object]) -> None:
+              temporary = path.with_suffix(".tmp")
+              temporary.write_text(
+                  json.dumps(value, indent=2, sort_keys=True) + "\n",
+                  encoding="utf-8",
+              )
+              temporary.replace(path)
+
+
+          def one_gpu_uuid(command: list[str], source: str) -> str:
+              value = subprocess.check_output(command, text=True).strip()
+              if GPU_UUID.fullmatch(value) is None:
+                  raise SystemExit(f"{source} did not report exactly one GPU UUID: {value!r}")
+              return value
+
+
+          def github_clock_skew() -> tuple[float, float]:
+              request = Request(
+                  "https://api.github.com",
+                  method="HEAD",
+                  headers={"User-Agent": "trtmc-gb300-capacity-canary"},
+              )
+              started = time.time()
+              try:
+                  with urlopen(request, timeout=15) as response:
+                      date_header = response.headers.get("Date", "")
+              except HTTPError as error:
+                  # A rate-limit response still carries GitHub's trusted Date header.
+                  date_header = error.headers.get("Date", "")
+              finished = time.time()
+              if not date_header:
+                  raise SystemExit("GitHub did not return an HTTP Date header")
+              server_epoch = parsedate_to_datetime(date_header).timestamp()
+              round_trip = finished - started
+              skew = ((started + finished) / 2) - server_epoch
+              # Date has one-second precision. Include half the network round trip
+              # and one second of header quantization in the five-second bound.
+              if round_trip > 15 or abs(skew) > 5 + (round_trip / 2) + 1:
+                  raise SystemExit(
+                      "host UTC clock is not sufficiently synchronized with GitHub: "
+                      f"skew={skew:.3f}s round_trip={round_trip:.3f}s"
+                  )
+              return skew, round_trip
+
+
+          leg_id = int(os.environ["LEG_ID"])
+          barrier_epoch = int(os.environ["BARRIER_EPOCH"])
+          node_id = os.environ.get("TRTMC_NODE_ID", "")
+          runner_name = os.environ.get("RUNNER_NAME", "")
+          gpu_ids = os.environ.get("TRTMC_MODEL_PROOF_GPU_IDS", "")
+          slots_per_gpu = os.environ.get("TRTMC_MODEL_PROOF_SLOTS_PER_GPU", "")
+          lock_dir = os.environ.get("TRTMC_MODEL_PROOF_GPU_LOCK_DIR", "")
+          image = os.environ.get("TRTMC_CI_IMAGE", "")
+          if node_id not in {
+              "gb300-nvl-019-compute01",
+              "gb300-nvl-019-compute02",
+          }:
+              raise SystemExit(f"unexpected TRTMC_NODE_ID: {node_id!r}")
+          expected_gpu_ids = {
+              "gb300-nvl-019-compute01": "0,1,2,3",
+              "gb300-nvl-019-compute02": "1,2,3",
+          }
+          if gpu_ids != expected_gpu_ids[node_id]:
+              raise SystemExit(f"unexpected TRTMC_MODEL_PROOF_GPU_IDS: {gpu_ids!r}")
+          if slots_per_gpu != "4":
+              raise SystemExit(
+                  "TRTMC_MODEL_PROOF_SLOTS_PER_GPU must be exactly 4 for this canary"
+              )
+          if not lock_dir:
+              raise SystemExit("TRTMC_MODEL_PROOF_GPU_LOCK_DIR is not configured")
+          if not image or any(character.isspace() for character in image):
+              raise SystemExit("TRTMC_CI_IMAGE is empty or unsafe")
+
+          receipt_path = Path(os.environ["RUNNER_TEMP"]) / f"capacity-{leg_id}.json"
+          clock_skew_seconds, clock_round_trip_seconds = github_clock_skew()
+          context = CiContext(Path.cwd())
+          lease = GpuLease(
+              context,
+              f"capacity-{os.environ['GITHUB_RUN_ID']}-{leg_id}",
+              "shared",
+          ).acquire()
+          receipt: dict[str, object] | None = None
+          try:
+              evidence = lease.evidence(os.environ["SOURCE_REVISION"])
+              gpu_id = str(evidence["gpu_id"])
+              gpu_slot = int(evidence["gpu_slot"])
+              host_uuid = one_gpu_uuid(
+                  [
+                      "nvidia-smi",
+                      f"--id={gpu_id}",
+                      "--query-gpu=uuid",
+                      "--format=csv,noheader",
+                  ],
+                  "host nvidia-smi",
+              )
+              container_name = (
+                  f"trtmc-capacity-{os.environ['GITHUB_RUN_ID']}-"
+                  f"{os.environ['GITHUB_RUN_ATTEMPT']}-{leg_id}"
+              )
+              try:
+                  container_uuid = one_gpu_uuid(
+                      [
+                          "docker",
+                          "run",
+                          "--rm",
+                          "--pull=never",
+                          "--network=none",
+                          "--read-only",
+                          "--cap-drop=ALL",
+                          "--security-opt=no-new-privileges",
+                          "--name",
+                          container_name,
+                          "--gpus",
+                          f"device={gpu_id}",
+                          "--entrypoint=nvidia-smi",
+                          image,
+                          "--query-gpu=uuid",
+                          "--format=csv,noheader",
+                      ],
+                      "container nvidia-smi",
+                  )
+              finally:
+                  subprocess.run(
+                      ["docker", "rm", "--force", container_name],
+                      check=False,
+                      stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL,
+                  )
+              if container_uuid != host_uuid:
+                  raise SystemExit(
+                      "the network-disabled container did not see the leased host GPU"
+                  )
+
+              acquired_epoch = time.time()
+              receipt = {
+                  "schema_version": 1,
+                  "kind": "trtmc_gb300_capacity_canary",
+                  "run_id": int(os.environ["GITHUB_RUN_ID"]),
+                  "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                  "leg_id": leg_id,
+                  "source_revision": os.environ["SOURCE_REVISION"],
+                  "runner_name": runner_name,
+                  "node_id": node_id,
+                  "hostname": socket.gethostname(),
+                  "resource_class": evidence["resource_class"],
+                  "gpu_id": int(gpu_id),
+                  "gpu_slot": gpu_slot,
+                  "gpu_slots_per_device": int(evidence["gpu_slots_per_device"]),
+                  "lock_namespace": lease.lock_namespace,
+                  "host_gpu_uuid": host_uuid,
+                  "container_gpu_uuid": container_uuid,
+                  "github_clock_skew_seconds": clock_skew_seconds,
+                  "github_clock_round_trip_seconds": clock_round_trip_seconds,
+                  "barrier_epoch": barrier_epoch,
+                  "acquired_epoch": acquired_epoch,
+                  "acquired_at": utc_now(),
+                  "last_held_epoch": None,
+                  "released_epoch": None,
+                  "released_at": None,
+              }
+              atomic_json(receipt_path, receipt)
+              print(
+                  "TRTMC_CAPACITY_ACQUIRED="
+                  + json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+                  flush=True,
+              )
+              while time.time() < barrier_epoch:
+                  time.sleep(min(1.0, max(0.0, barrier_epoch - time.time())))
+          finally:
+              last_held_epoch = time.time()
+              lease.release()
+
+          assert receipt is not None
+          receipt["last_held_epoch"] = last_held_epoch
+          receipt["released_epoch"] = time.time()
+          receipt["released_at"] = utc_now()
+          atomic_json(receipt_path, receipt)
+          print(f"Released capacity leg {leg_id} after the shared barrier.")
+          PY
+
+      - name: Upload capacity receipt
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: gb300-capacity-receipt-${{ matrix.leg }}
+          path: ${{ runner.temp }}/capacity-${{ matrix.leg }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    name: Verify 28-slot topology and queued overflow
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    needs:
+      - prepare
+      - capacity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+
+    steps:
+      - name: Download all capacity receipts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gb300-capacity-receipt-*
+          path: capacity-receipts
+          merge-multiple: true
+
+      - name: Download current-attempt job metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
+            > "$RUNNER_TEMP/capacity-jobs.json"
+
+      - name: Verify first-wave capacity evidence
+        env:
+          BARRIER_EPOCH: ${{ needs.prepare.outputs.barrier_epoch }}
+          CAPACITY_RESULT: ${{ needs.capacity.result }}
+          SOURCE_REVISION: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from datetime import datetime
+          from pathlib import Path
+
+
+          JOB_NAME = re.compile(r"Capacity leg ([0-9]+)")
+          GPU_UUID = re.compile(r"GPU-[A-Za-z0-9-]+")
+          LOCK_NAMESPACE = re.compile(r"[0-9a-f]{64}")
+          EXPECTED_NODES = {
+              "gb300-nvl-019-compute01": range(4),
+              "gb300-nvl-019-compute02": range(1, 4),
+          }
+          EXPECTED_TUPLES = {
+              (node, gpu_id, slot)
+              for node, gpu_ids in EXPECTED_NODES.items()
+              for gpu_id in gpu_ids
+              for slot in range(4)
+          }
+
+
+          def fail(message: str) -> None:
+              raise SystemExit(message)
+
+
+          def timestamp(value: object, label: str) -> datetime:
+              if not isinstance(value, str) or not value:
+                  fail(f"{label} is missing")
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+          if os.environ["CAPACITY_RESULT"] != "success":
+              fail(f"capacity matrix result was {os.environ['CAPACITY_RESULT']!r}")
+          barrier_epoch = int(os.environ["BARRIER_EPOCH"])
+          run_id = int(os.environ["GITHUB_RUN_ID"])
+          run_attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+          source_revision = os.environ["SOURCE_REVISION"]
+
+          receipt_paths = sorted(Path("capacity-receipts").glob("capacity-*.json"))
+          if len(receipt_paths) != 29:
+              fail(f"expected 29 capacity receipts, found {len(receipt_paths)}")
+          receipts = [
+              json.loads(path.read_text(encoding="utf-8"))
+              for path in receipt_paths
+          ]
+          receipts_by_leg = {receipt.get("leg_id"): receipt for receipt in receipts}
+          if set(receipts_by_leg) != set(range(29)) or len(receipts_by_leg) != 29:
+              fail("capacity receipts do not contain exactly legs 0 through 28")
+
+          jobs_payload = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "capacity-jobs.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          jobs_by_leg = {}
+          for job in jobs_payload.get("jobs", []):
+              match = JOB_NAME.fullmatch(str(job.get("name", "")))
+              if match:
+                  leg_id = int(match.group(1))
+                  if leg_id in jobs_by_leg:
+                      fail(f"duplicate Actions job metadata for capacity leg {leg_id}")
+                  jobs_by_leg[leg_id] = job
+          if set(jobs_by_leg) != set(range(29)):
+              fail("Actions jobs do not contain exactly capacity legs 0 through 28")
+          if any(job.get("conclusion") != "success" for job in jobs_by_leg.values()):
+              fail("one or more capacity jobs did not conclude successfully")
+
+          earliest_completion = min(
+              timestamp(job.get("completed_at"), f"leg {leg_id} completed_at")
+              for leg_id, job in jobs_by_leg.items()
+          )
+          first_wave_legs = {
+              leg_id
+              for leg_id, job in jobs_by_leg.items()
+              if timestamp(job.get("started_at"), f"leg {leg_id} started_at")
+              < earliest_completion
+          }
+          overflow_legs = set(range(29)) - first_wave_legs
+          if len(first_wave_legs) != 28 or len(overflow_legs) != 1:
+              fail(
+                  "expected exactly 28 jobs to start before the earliest capacity "
+                  f"completion and one queued overflow; found {len(first_wave_legs)} "
+                  f"and {len(overflow_legs)}"
+              )
+          overflow_leg = next(iter(overflow_legs))
+          overflow_started_at = timestamp(
+              jobs_by_leg[overflow_leg].get("started_at"),
+              f"overflow leg {overflow_leg} started_at",
+          )
+          if overflow_started_at < earliest_completion:
+              fail("the overflow capacity job did not wait for a first-wave completion")
+
+          first_wave_jobs = [jobs_by_leg[leg_id] for leg_id in first_wave_legs]
+          runner_ids = [job.get("runner_id") for job in first_wave_jobs]
+          runner_names = [str(job.get("runner_name", "")) for job in first_wave_jobs]
+          if (
+              any(not isinstance(runner_id, int) or runner_id <= 0 for runner_id in runner_ids)
+              or len(set(runner_ids)) != 28
+              or len(set(runner_names)) != 28
+              or any(not runner_name for runner_name in runner_names)
+          ):
+              fail("the first wave did not use exactly 28 unique registered runners")
+          all_runner_ids = {job.get("runner_id") for job in jobs_by_leg.values()}
+          if all_runner_ids != set(runner_ids):
+              fail("the overflow job did not reuse one of the 28 first-wave runners")
+
+          first_wave_receipts = [receipts_by_leg[leg_id] for leg_id in first_wave_legs]
+          actual_tuples = set()
+          lock_namespaces: dict[str, set[str]] = {
+              node: set() for node in EXPECTED_NODES
+          }
+          for receipt in receipts:
+              leg_id = receipt.get("leg_id")
+              if receipt.get("schema_version") != 1:
+                  fail(f"leg {leg_id} has an unsupported receipt schema")
+              if receipt.get("kind") != "trtmc_gb300_capacity_canary":
+                  fail(f"leg {leg_id} has an invalid receipt kind")
+              if (
+                  receipt.get("run_id") != run_id
+                  or receipt.get("run_attempt") != run_attempt
+                  or receipt.get("source_revision") != source_revision
+                  or receipt.get("barrier_epoch") != barrier_epoch
+              ):
+                  fail(f"leg {leg_id} receipt is not bound to this exact run")
+              if receipt.get("resource_class") != "shared":
+                  fail(f"leg {leg_id} did not acquire a shared lease")
+              if receipt.get("gpu_slots_per_device") != 4:
+                  fail(f"leg {leg_id} did not use four slots per GPU")
+              node = receipt.get("node_id")
+              if node not in EXPECTED_NODES or receipt.get("hostname") != node:
+                  fail(f"leg {leg_id} has an unexpected node identity")
+              runner_name = receipt.get("runner_name")
+              if runner_name != jobs_by_leg[int(leg_id)].get("runner_name"):
+                  fail(f"leg {leg_id} runner name differs between API and receipt")
+              if re.fullmatch(rf"{re.escape(str(node))}-proof-[0-9]{{2}}", str(runner_name)) is None:
+                  fail(f"leg {leg_id} has an unexpected proof runner name")
+              namespace = receipt.get("lock_namespace")
+              if not isinstance(namespace, str) or LOCK_NAMESPACE.fullmatch(namespace) is None:
+                  fail(f"leg {leg_id} has an invalid lock namespace")
+              lock_namespaces[str(node)].add(namespace)
+              host_uuid = receipt.get("host_gpu_uuid")
+              container_uuid = receipt.get("container_gpu_uuid")
+              if (
+                  not isinstance(host_uuid, str)
+                  or GPU_UUID.fullmatch(host_uuid) is None
+                  or host_uuid != container_uuid
+              ):
+                  fail(f"leg {leg_id} did not prove the leased container GPU UUID")
+              acquired_epoch = receipt.get("acquired_epoch")
+              last_held_epoch = receipt.get("last_held_epoch")
+              released_epoch = receipt.get("released_epoch")
+              if (
+                  not isinstance(acquired_epoch, (int, float))
+                  or not isinstance(last_held_epoch, (int, float))
+                  or not isinstance(released_epoch, (int, float))
+                  or not acquired_epoch < last_held_epoch <= released_epoch
+              ):
+                  fail(f"leg {leg_id} has an invalid lease interval")
+              clock_skew = receipt.get("github_clock_skew_seconds")
+              clock_round_trip = receipt.get("github_clock_round_trip_seconds")
+              if (
+                  not isinstance(clock_skew, (int, float))
+                  or not isinstance(clock_round_trip, (int, float))
+                  or clock_round_trip < 0
+                  or clock_round_trip > 15
+                  or abs(clock_skew) > 5 + (clock_round_trip / 2) + 1
+              ):
+                  fail(f"leg {leg_id} did not prove bounded GitHub clock skew")
+
+          for receipt in first_wave_receipts:
+              leg_id = receipt["leg_id"]
+              if not (
+                  float(receipt["acquired_epoch"]) <= barrier_epoch - 60
+                  <= float(receipt["last_held_epoch"])
+              ):
+                  fail(
+                      f"first-wave leg {leg_id} did not cover the 60-second "
+                      "shared overlap window"
+                  )
+              actual_tuples.add(
+                  (
+                      str(receipt["node_id"]),
+                      int(receipt["gpu_id"]),
+                      int(receipt["gpu_slot"]),
+                  )
+              )
+          if actual_tuples != EXPECTED_TUPLES:
+              missing = sorted(EXPECTED_TUPLES - actual_tuples)
+              extra = sorted(actual_tuples - EXPECTED_TUPLES)
+              fail(f"first-wave GPU tuple topology mismatch; missing={missing}, extra={extra}")
+          if any(len(namespaces) != 1 for namespaces in lock_namespaces.values()):
+              fail("all listeners on each node did not share one lock namespace")
+
+          node_counts = {
+              node: sum(receipt["node_id"] == node for receipt in first_wave_receipts)
+              for node in EXPECTED_NODES
+          }
+          if node_counts != {
+              "gb300-nvl-019-compute01": 16,
+              "gb300-nvl-019-compute02": 12,
+          }:
+              fail(f"first-wave node distribution is incorrect: {node_counts}")
+          if float(receipts_by_leg[overflow_leg]["acquired_epoch"]) < barrier_epoch:
+              fail("the overflow leg acquired a GPU lease before the shared barrier")
+
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          summary.write_text(
+              "### GB300 capacity canary passed\n\n"
+              "- First wave: 28 unique runners and 28 overlapping real GPU leases\n"
+              "- Node distribution: compute01 = 16, compute02 = 12\n"
+              "- Topology: compute01 GPUs 0-3 x slots 0-3; "
+              "compute02 GPUs 1-3 x slots 0-3\n"
+              f"- Queued overflow leg: {overflow_leg}\n"
+              f"- Shared overlap barrier: {barrier_epoch}\n",
+              encoding="utf-8",
+          )
+          print("Verified 28-slot GB300 topology and one queued overflow job.")
+          PY

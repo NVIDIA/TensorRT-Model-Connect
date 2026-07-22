@@ -39,6 +39,24 @@ def _single_default_model_config(filename: str) -> tuple[Path, dict]:
     return defaults[0]
 
 
+def test_temporary_gb300_capacity_canary_uses_the_live_generic_label() -> None:
+    workflow = (
+        REPO_ROOT / ".github" / "workflows" / "gb300-28-slot-canary.yml"
+    ).read_text(encoding="utf-8")
+    capacity = workflow.split("\n  capacity:", maxsplit=1)[1].split(
+        "\n  verify:", maxsplit=1
+    )[0]
+
+    assert "runs-on: trtmc-gb300-proof" in capacity
+    assert "self-hosted" not in capacity
+    assert workflow.count("${{ github.event.pull_request.head.sha }}") == 4
+    assert "${{ github.sha }}" not in workflow
+    assert "path: capacity-source" in capacity
+    assert "working-directory: ${{ github.workspace }}/capacity-source" in capacity
+    assert 'lease.evidence(os.environ["SOURCE_REVISION"])' in capacity
+    assert '"source_revision": os.environ["SOURCE_REVISION"]' in capacity
+
+
 def test_ci_orchestration_uses_the_class_based_python_entrypoint() -> None:
     legacy_scripts = (
         ".github/scripts/ensure-ci-docker-image.sh",
