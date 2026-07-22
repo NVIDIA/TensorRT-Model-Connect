@@ -295,6 +295,7 @@ def _public_reason(options: dict[str, object]) -> str:
 
 def _qualify_exporter_host(adapter, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(adapter.platform, "machine", lambda: "x86_64")
+    monkeypatch.delenv("TRTMC_PYTHON_PROFILE_PREBUILT_ONLY", raising=False)
 
 
 def _target(**changes: object) -> dict[str, object]:
