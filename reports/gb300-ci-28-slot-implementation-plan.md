@@ -827,10 +827,24 @@ On both nodes:
 Exit gate: every active production listener has the correct host-local GPU
 policy, and the compute01 anchor is online without advertising proof capacity.
 
-### Phase 4 — Merge the scheduling and cache PR
+### Phase 4 — Clear every pre-merge gate, then merge the scheduling and cache PR
 
+- [ ] On compute02, rerun the measured ownership/read-write audit, run the
+      exact targeted repair in Section 13, and require zero ownership,
+      unreadable-file, unwritable-file, and unwritable-directory exceptions.
+      Do not recursively chown the approximately 1 TB cache.
+- [ ] Retain the raw pre-admission runner and host snapshot, including hashes,
+      in the access-controlled rollout evidence store.
+- [ ] Confirm the runner-discovery App is installed and its repository
+      variable and secret are configured without exposing their values.
+- [ ] Obtain the workload owners' confirmation of a declared drained
+      acceptance window for the compute01 GitLab scheduler and compute02
+      external Docker GPU claims. The rollout must not stop or reconfigure
+      those workloads itself, and the window must be able to begin immediately
+      after merge.
 - [ ] Rebase the implementation branch on current <code>github/main</code>.
 - [ ] Rerun focused tests and CI.
+- [ ] Require exact-head CI and review to be green while the PR remains draft.
 - [ ] Merge through the normal GitHub ruleset using squash or rebase.
 - [ ] Record the merged main SHA.
 - [ ] Delete the repository-level
@@ -839,8 +853,10 @@ policy, and the compute01 anchor is online without advertising proof capacity.
       host-local value.
 - [ ] Confirm an existing compute02 proof still selects only GPU 1, 2, or 3.
 
-Exit gate: production workflow code uses host-local GPU topology and the
-existing compute02 pool remains functional.
+Exit gate: every documented pre-merge blocker is cleared, the acceptance
+window is active, production workflow code uses host-local GPU topology, and
+the existing compute02 pool remains functional. Until this gate is satisfied,
+the PR remains draft and unmerged.
 
 ### Phase 5 — Finish cache bootstrap and warm every node
 
@@ -848,10 +864,9 @@ existing compute02 pool remains functional.
       or restart one.
 - [ ] Do not copy or broadly redownload the already complete representative
       compute01 cache.
-- [ ] On compute02, audit only the measured unreadable/non-user-owned paths.
-- [ ] Do not recursively chown the approximately 1 TB cache.
-- [ ] Run the exact targeted ownership repair in Section 13 and rerun the
-      read/write access audit; do not proceed while measured exceptions remain.
+- [ ] Reconfirm that the pre-merge compute02 ownership/read-write audit remains
+      clean; any new exception stops rollout and returns to the targeted repair
+      gate in Phase 4.
 - [ ] Manually dispatch trusted Nightly cache discovery/warm.
 - [ ] Verify exactly two warm matrix entries, one on each anchor.
 - [ ] Verify both perform the full active single-GPU Nightly plan.
