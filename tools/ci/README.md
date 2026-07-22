@@ -180,6 +180,7 @@ selection and breadth differ.
 | `e2e_scheduler.py` | Launch workers, enforce timeouts, and merge results | Container |
 | `isolation.py` | Queue projected model groups for isolated validation | Container |
 | `gpu_lease.py` | Allocate FIFO shared slots or exclusive GPUs | Host processes |
+| `optimized_runtime_qualifications.py` | Select model-owned optimized-runtime hardware proofs | Trusted host |
 | `model_proof_selection.py` | Resolve and validate one model's proof contract | Projected source |
 | `model_proof.py` | Prepare caches, projection, lease, and proof container | Trusted host |
 | `model_proof_inner.py` | Build, test, compare, and report one model | Hermetic container |
@@ -486,6 +487,31 @@ the producing class remains the source of truth for optional evidence fields.
 
 - **Boundary:** It allocates capacity and proves ownership only. It never starts
   a container, builds an engine, or runs a model.
+
+### `optimized_runtime_qualifications.py`
+
+- **Functionality / units:** Discovers model-owned `QUALIFICATION.*.toml`
+  producer and consumer descriptors, validates their generic fields and
+  ownership links, and selects hardware proofs from an exact source diff.
+- **Inputs:** A repository plus base/head Git revisions, explicit changed paths,
+  or `--all` for manual dispatch. Producers declare profile selection and
+  triggers; consumers name a producer whose portable bundle they validate on a
+  second target. Both declare model-owned entrypoints, digest-pinned images, and
+  runner labels.
+- **Outputs:** Deterministic `producers` and `consumers` GitHub matrices.
+  Producer entries contain selected profile basenames and whether a transfer
+  bundle is required. Consumer entries name the producer artifact they consume.
+  Profile-only changes remain producer-only; full family or shared changes add
+  linked consumers. Shared changes select one producer representative per
+  optimized runtime.
+- **Boundary:** It contains no model or optimized-runtime identities and never
+  builds, transfers, or executes a bundle. The generic workflow moves opaque
+  artifacts; each model-owned entrypoint owns their format and qualification.
+  A selected producer with `export_bundle = true` must write at least one file
+  below `TRTMC_QUALIFICATION_EXPORT_DIR`. The linked consumer receives those
+  files below `TRTMC_QUALIFICATION_INPUT_DIR` and its declared target as JSON in
+  `TRTMC_QUALIFICATION_RUNNER_TARGET_JSON`; filenames, contents, and target
+  validation remain a model-owned contract between those two entrypoints.
 
 ### `model_proof_selection.py`
 

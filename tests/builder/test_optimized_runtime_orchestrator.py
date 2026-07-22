@@ -13,11 +13,15 @@ import pytest
 from tensorrt_model_connect.runtime_provider.manifest import (
     AmbiguousImplementationError,
     ImplementationRequest,
-    ManifestValidationError,
     load_implementation_manifest,
 )
+from tensorrt_model_connect.runtime_provider.provider_process import (
+    BuildAdapterError,
+    ProbeResult,
+)
 from tensorrt_model_connect.runtime_provider.orchestrator import (
-    discover_family_implementations_for_model,
+    build_selected_implementation,
+    discover_family_implementations,
     select_delegated_build,
     try_build_optimized_runtime,
 )
@@ -66,6 +70,11 @@ parser.add_argument("--request", required=True)
 parser.add_argument("--output")
 args = parser.parse_args()
 request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+profile_matches = (
+    request["model"]["id"] == "__SUPPORTED_MODEL_ID__"
+    and request["model"]["revision"] == "__SUPPORTED_REVISION__"
+    and request["parameters"].get("precision") == "fp16"
+)
 if request["parameters"].get("verify_launch_context"):
     assert os.environ.get("TRTMC_INTERNAL_OPTIMIZED_RUNTIME_CUDA_DEVICE") == "1"
     assert "active_device_ordinal" not in request["target"]
@@ -73,11 +82,12 @@ if request["parameters"].get("verify_launch_context"):
 if args.operation == "probe":
     print(json.dumps({
         "schema_version": 1,
-        "supported": request["parameters"].get("precision") == "fp16",
+        "supported": profile_matches,
         **({
             "profile_id": "a100-fp16-b4",
-        } if request["parameters"].get("precision") == "fp16" else {
-            "reason": "only the fp16 profile is supported",
+            "profile_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        } if profile_matches else {
+            "reason": "no qualified profile matches this request",
         }),
     }))
 elif args.operation == "build":
@@ -112,27 +122,40 @@ def _capsule(
     *,
     name: str = "fake",
     implementation_id: str = "fake-a100-runtime",
+    downstream_runtime: str = "fake-runtime",
     model_id: str = "Example/Model",
+    revision: str = _REVISION,
 ) -> Path:
     capsule = root / name
     (capsule / "builder").mkdir(parents=True)
-    (capsule / "builder" / "adapter.py").write_text(_ADAPTER, encoding="utf-8")
-    manifest = capsule / "IMPLEMENTATION.toml"
-    manifest.write_text(
+    (capsule / "builder" / "adapter.py").write_text(
+        _ADAPTER.replace("__SUPPORTED_MODEL_ID__", model_id).replace(
+            "__SUPPORTED_REVISION__", revision
+        ),
+        encoding="utf-8",
+    )
+    profiles = capsule / "profiles"
+    profiles.mkdir()
+    (profiles / "a100-fp16.toml").write_text(
         f'''schema_version = 1
-implementation_id = "{implementation_id}"
-downstream_runtime = "fake-runtime"
-downstream_version = "1.2.3"
-downstream_commit = "0123456789abcdef"
+profile_id = "a100-fp16-b4"
 
 [model]
 id = "{model_id}"
-revisions = ["0123456789abcdef0123456789abcdef01234567"]
+revisions = ["{revision}"]
 
 [target]
-os = "linux"
-architecture = "x86_64"
 gpu_architecture = "sm80"
+''',
+        encoding="utf-8",
+    )
+    manifest = capsule / "IMPLEMENTATION.toml"
+    manifest.write_text(
+        f'''schema_version = 2
+implementation_id = "{implementation_id}"
+downstream_runtime = "{downstream_runtime}"
+downstream_version = "1.2.3"
+downstream_commit = "0123456789abcdef"
 
 [build]
 entrypoint = "builder/adapter.py"
@@ -180,7 +203,22 @@ def test_family_discovery_ignores_nested_non_adapter_layout(
         lambda _family: family_root,
     )
 
-    assert not discover_family_implementations_for_model("example_family", "Example/Model")
+    assert not discover_family_implementations("example_family")
+
+
+def test_family_discovery_uses_the_already_selected_family_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    family_root = tmp_path / "example"
+    manifest = _capsule(family_root)
+    monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)
+
+    discovered = discover_family_implementations("example")
+
+    assert [item.path for item in discovered] == [manifest.resolve()]
 
 
 def test_full_generic_build_writes_self_contained_delegated_bundle(
@@ -282,9 +320,10 @@ def test_current_target_preserves_active_device_ordinal_only_as_launch_context(
     assert b"TRTMC_INTERNAL_OPTIMIZED_RUNTIME_CUDA_DEVICE" not in output.read_bytes()
 
 
-def test_malformed_unrelated_sibling_does_not_break_requested_model(
+def test_malformed_sibling_in_the_same_family_is_isolated_before_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
@@ -322,6 +361,78 @@ def test_malformed_unrelated_sibling_does_not_break_requested_model(
 
     assert selection is not None
     assert selection.manifest.implementation_id == "requested-runtime"
+    assert "Ignoring invalid optimized-runtime manifest" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        "probe response returned invalid JSON",
+        "probe timed out after 30s",
+    ),
+)
+def test_probe_failure_or_timeout_is_isolated_from_supported_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    broken = load_implementation_manifest(
+        _capsule(tmp_path, name="broken", implementation_id="broken-runtime")
+    )
+    healthy = load_implementation_manifest(
+        _capsule(tmp_path, name="healthy", implementation_id="healthy-runtime")
+    )
+    request = ImplementationRequest(
+        model_id="Example/Model",
+        model_revision=_REVISION,
+        target=_target(),
+        parameters={"precision": "fp16"},
+    )
+
+    def probe(manifest, _request, **_kwargs):
+        if manifest is broken:
+            raise BuildAdapterError(failure)
+        return ProbeResult(
+            supported=True,
+            profile_id="a100-fp16-b4",
+            profile_sha256="a" * 64,
+        )
+
+    monkeypatch.setattr(orchestrator, "run_probe", probe)
+
+    selection = select_delegated_build((broken, healthy), request)
+
+    assert selection is not None
+    assert selection.manifest is healthy
+    assert failure in caplog.text
+
+
+def test_selected_adapter_build_failure_remains_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
+
+    manifest = load_implementation_manifest(_capsule(tmp_path))
+    request = ImplementationRequest(
+        model_id="Example/Model",
+        model_revision=_REVISION,
+        target=_target(),
+        parameters={"precision": "fp16"},
+    )
+    selection = select_delegated_build((manifest,), request)
+    assert selection is not None
+
+    def fail_build(*_args, **_kwargs):
+        raise BuildAdapterError("selected adapter build failed")
+
+    monkeypatch.setattr(orchestrator, "run_build", fail_build)
+
+    with pytest.raises(BuildAdapterError, match="selected adapter build failed"):
+        build_selected_implementation(selection, tmp_path / "model.trtfb")
 
 
 def test_public_native_build_without_an_owning_family_skips_adapter_discovery(
@@ -349,9 +460,10 @@ def test_public_native_build_without_an_owning_family_skips_adapter_discovery(
     assert selection is None
 
 
-def test_public_build_fails_closed_for_malformed_model_candidate(
+def test_malformed_unselected_capsule_preserves_native_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     import tensorrt_model_connect.runtime_provider.orchestrator as orchestrator
 
@@ -367,13 +479,15 @@ def test_public_build_fails_closed_for_malformed_model_candidate(
     )
     monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: root)
 
-    with pytest.raises(ManifestValidationError, match="invalid TOML"):
-        try_build_optimized_runtime(
-            str(model_source),
-            tmp_path / "model.trtfb",
-            family_name="example",
-            parameters={"precision": "fp16"},
-        )
+    selection = try_build_optimized_runtime(
+        str(model_source),
+        tmp_path / "model.trtfb",
+        family_name="example",
+        parameters={"precision": "fp16"},
+    )
+
+    assert selection is None
+    assert "Ignoring invalid optimized-runtime manifest" in caplog.text
 
 
 def test_unsupported_probe_returns_native_fallback_without_building(
@@ -427,16 +541,15 @@ def test_snapshot_selects_only_its_exact_revision_with_multiple_capsules(
         family_root,
         name="first",
         implementation_id="first-revision-runtime",
+        downstream_runtime="first-runtime",
     )
-    second_path = _capsule(
+    second_revision = "abcdef0123456789abcdef0123456789abcdef01"
+    _capsule(
         family_root,
         name="second",
         implementation_id="second-revision-runtime",
-    )
-    second_revision = "abcdef0123456789abcdef0123456789abcdef01"
-    second_path.write_text(
-        second_path.read_text(encoding="utf-8").replace(_REVISION, second_revision),
-        encoding="utf-8",
+        downstream_runtime="second-runtime",
+        revision=second_revision,
     )
     model_source = _snapshot(tmp_path / "cache", revision=second_revision)
     monkeypatch.setattr(orchestrator, "family_implementation_root", lambda _family: family_root)

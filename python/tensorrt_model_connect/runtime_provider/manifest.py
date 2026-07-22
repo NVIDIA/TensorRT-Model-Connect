@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping
+from typing import Any, Mapping
 
 try:
     import tomllib
@@ -21,8 +22,10 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility.
 
 
 MANIFEST_NAME = "IMPLEMENTATION.toml"
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 RUNTIME_ABI_VERSIONS = frozenset({1})
+
+_LOGGER = logging.getLogger(__name__)
 
 _IDENTIFIER_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
 _TARGET_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
@@ -33,12 +36,9 @@ _TOP_LEVEL_KEYS = {
     "downstream_runtime",
     "downstream_version",
     "downstream_commit",
-    "model",
-    "target",
     "build",
     "runtime",
 }
-_MODEL_KEYS = {"id", "revisions"}
 _BUILD_KEYS = {"entrypoint", "timeout_seconds"}
 _RUNTIME_KEYS = {"library", "abi"}
 
@@ -100,26 +100,6 @@ def _require_exact_int(value: Any, path: Path, field: str) -> int:
     if type(value) is not int:
         raise _fail(path, f"{field} must be an integer")
     return value
-
-
-def _require_string_list(
-    value: Any,
-    path: Path,
-    field: str,
-    *,
-    item_pattern: re.Pattern[str] | None = None,
-) -> tuple[str, ...]:
-    if not isinstance(value, list) or not value:
-        raise _fail(path, f"{field} must be a non-empty array of strings")
-    values: list[str] = []
-    for index, item in enumerate(value):
-        text = _require_string(item, path, f"{field}[{index}]")
-        if item_pattern is not None and item_pattern.fullmatch(text) is None:
-            raise _fail(path, f"{field}[{index}] has an invalid identifier")
-        values.append(text)
-    if len(values) != len(set(values)):
-        raise _fail(path, f"{field} must not contain duplicate values")
-    return tuple(values)
 
 
 def _validate_target_scalar(value: Any, path: Path, field: str) -> TargetScalar:
@@ -250,7 +230,7 @@ class ImplementationRequest:
 
 @dataclass(frozen=True)
 class ImplementationManifest:
-    """Validated declaration for one isolated optimized implementation."""
+    """Validated declaration for one model-family/runtime adapter."""
 
     path: Path
     capsule_root: Path
@@ -258,27 +238,10 @@ class ImplementationManifest:
     downstream_runtime: str
     downstream_version: str
     downstream_commit: str
-    model_id: str
-    model_revisions: tuple[str, ...]
-    target: Mapping[str, TargetScalar]
     build_entrypoint: Path
     build_timeout_seconds: int
     runtime_library: str
     runtime_abi: int
-
-    def matches_target(self, target: Mapping[str, TargetScalar]) -> bool:
-        for key, required in self.target.items():
-            actual = target.get(key)
-            if type(actual) is not type(required) or actual != required:
-                return False
-        return True
-
-    def matches(self, request: ImplementationRequest) -> bool:
-        return (
-            self.model_id == request.model_id
-            and request.model_revision in self.model_revisions
-            and self.matches_target(request.target)
-        )
 
 
 def manifest_contract_sha256(manifest: ImplementationManifest) -> str:
@@ -339,16 +302,6 @@ def load_implementation_manifest(path: str | Path) -> ImplementationManifest:
     downstream_commit = _require_string(
         raw["downstream_commit"], resolved_path, "downstream_commit"
     )
-    model = _require_table(raw["model"], resolved_path, "model")
-    _reject_unknown_keys(model, _MODEL_KEYS, resolved_path, "model")
-    missing_model = sorted(_MODEL_KEYS - set(model))
-    if missing_model:
-        raise _fail(resolved_path, f"model is missing field(s): {', '.join(missing_model)}")
-    model_id = _require_string(model["id"], resolved_path, "model.id")
-    revisions = _require_string_list(model["revisions"], resolved_path, "model.revisions")
-
-    target = _validate_target(raw["target"], resolved_path)
-
     build = _require_table(raw["build"], resolved_path, "build")
     _reject_unknown_keys(build, _BUILD_KEYS, resolved_path, "build")
     if "entrypoint" not in build:
@@ -383,9 +336,6 @@ def load_implementation_manifest(path: str | Path) -> ImplementationManifest:
         downstream_runtime=downstream_runtime,
         downstream_version=downstream_version,
         downstream_commit=downstream_commit,
-        model_id=model_id,
-        model_revisions=revisions,
-        target=target,
         build_entrypoint=entrypoint,
         build_timeout_seconds=timeout,
         runtime_library=runtime_library,
@@ -406,80 +356,50 @@ def _manifest_paths(root: str | Path) -> tuple[Path, ...]:
     return tuple(sorted(resolved.glob(f"*/{MANIFEST_NAME}"), key=lambda path: str(path)))
 
 
-def _reject_duplicate_implementation_ids(
-    manifests: Iterable[ImplementationManifest],
-) -> None:
-    by_id: dict[str, list[Path]] = {}
-    for manifest in manifests:
-        by_id.setdefault(manifest.implementation_id, []).append(manifest.path)
-    duplicates = {identifier: paths for identifier, paths in by_id.items() if len(paths) > 1}
-    if duplicates:
-        details = "; ".join(
-            f"{identifier}: {', '.join(str(path) for path in sorted(paths))}"
-            for identifier, paths in sorted(duplicates.items())
-        )
-        raise ManifestDiscoveryError(f"Duplicate implementation_id declarations: {details}")
+def discover_implementations(root: str | Path) -> tuple[ImplementationManifest, ...]:
+    """Load model-family/runtime adapters below one selected family root."""
 
-
-def _declared_model_id(path: Path) -> str | None:
-    """Read only the manifest's model index before validating a candidate.
-
-    A model family may contain many independently owned adapters. A syntax
-    error in an adapter for another model must not disable the requested model.
-    The small ``[model]`` table is therefore the discovery index; only an exact
-    model match is subjected to full manifest validation.
-    """
-
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError):
-        # A capsule that cannot declare its model does not participate in
-        # discovery.  In particular, it must not disable a sibling model.
-        return None
-    starts = [index for index, line in enumerate(lines) if line.strip() == "[model]"]
-    if len(starts) != 1:
-        return None
-    start = starts[0]
-    end = next(
-        (
-            index
-            for index in range(start + 1, len(lines))
-            if lines[index].lstrip().startswith("[")
-        ),
-        len(lines),
-    )
-    matches: list[str] = []
-    for line in lines[start + 1 : end]:
-        match = re.fullmatch(
-            r'''\s*id\s*=\s*(?:"([^"\\\r\n]+)"|'([^'\r\n]+)')\s*(?:#.*)?''',
-            line,
-        )
-        if match is not None:
-            matches.append(match.group(1) or match.group(2))
-    if len(matches) != 1:
-        return None
-    model_id = matches[0]
-    if not model_id or model_id != model_id.strip():
-        return None
-    return model_id
-
-
-def discover_implementations_for_model(
-    root: str | Path,
-    model_id: str,
-) -> tuple[ImplementationManifest, ...]:
-    """Load exact-model implementations below already selected family roots.
-
-    Discovery reads only each sibling's ``[model]`` index. Full parsing and
-    strict validation are intentionally limited to the requested model.
-    """
-
-    if not isinstance(model_id, str) or not model_id.strip():
-        raise ValueError("model_id must be a non-empty string")
-    manifests = tuple(
-        load_implementation_manifest(path)
-        for path in _manifest_paths(root)
-        if _declared_model_id(path) == model_id
-    )
-    _reject_duplicate_implementation_ids(manifests)
-    return manifests
+    paths = _manifest_paths(root)
+    resolved_root = Path(root).resolve(strict=True)
+    manifests: list[ImplementationManifest] = []
+    implementation_ids: dict[str, Path] = {}
+    downstream_runtimes: dict[str, Path] = {}
+    for path in paths:
+        try:
+            manifest = load_implementation_manifest(path)
+        except ManifestValidationError as exc:
+            # A capsule has not claimed support until its probe succeeds. Keep
+            # pre-selection failures local so one independently owned adapter
+            # cannot disable its siblings. Changed-capsule CI validates each
+            # manifest strictly through ``load_implementation_manifest``.
+            _LOGGER.warning(
+                "Ignoring invalid optimized-runtime manifest %s: %s",
+                path,
+                exc,
+            )
+            continue
+        try:
+            manifest.capsule_root.relative_to(resolved_root)
+        except ValueError:
+            _LOGGER.warning(
+                "Ignoring optimized-runtime manifest outside discovery root %s: %s",
+                resolved_root,
+                manifest.path,
+            )
+            continue
+        duplicate_id = implementation_ids.get(manifest.implementation_id)
+        if duplicate_id is not None:
+            raise ManifestDiscoveryError(
+                f"Duplicate implementation_id {manifest.implementation_id!r} in "
+                f"{duplicate_id} and {manifest.path}"
+            )
+        duplicate_runtime = downstream_runtimes.get(manifest.downstream_runtime)
+        if duplicate_runtime is not None:
+            raise ManifestDiscoveryError(
+                f"Duplicate downstream_runtime {manifest.downstream_runtime!r} in "
+                f"{duplicate_runtime} and {manifest.path}"
+            )
+        implementation_ids[manifest.implementation_id] = manifest.path
+        downstream_runtimes[manifest.downstream_runtime] = manifest.path
+        manifests.append(manifest)
+    return tuple(manifests)

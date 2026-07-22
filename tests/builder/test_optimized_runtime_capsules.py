@@ -21,7 +21,7 @@ from tensorrt_model_connect.runtime_provider.manifest import (
     ImplementationRequest,
     ManifestDiscoveryError,
     ManifestValidationError,
-    discover_implementations_for_model,
+    discover_implementations,
     load_implementation_manifest,
 )
 
@@ -41,6 +41,7 @@ if operation == "probe":
             "schema_version": 1,
             "supported": True,
             "profile_id": "a100-fp16",
+            "profile_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         }))
     else:
         print(json.dumps({
@@ -84,9 +85,7 @@ def _write_capsule(
     *,
     capsule_name: str = "example-optimized-a100",
     implementation_id: str = "example-model.acme-runtime.a100-fp16",
-    model_id: str = "Example/Optimized-Model",
-    revisions: tuple[str, ...] = ("revision-a",),
-    target: dict[str, object] | None = None,
+    downstream_runtime: str = "acme-optimized-runtime",
     adapter: str = _DEFAULT_ADAPTER,
     timeout_seconds: int = 30,
 ) -> Path:
@@ -96,26 +95,13 @@ def _write_capsule(
     adapter_path = builder_dir / "adapter.py"
     adapter_path.write_text(adapter, encoding="utf-8")
 
-    target = target or {
-        "os": "linux",
-        "architecture": "x86_64",
-        "gpu_architecture": "sm80",
-    }
-    target_lines = "\n".join(f"{key} = {_toml_value(value)}" for key, value in target.items())
     manifest = capsule / "IMPLEMENTATION.toml"
     manifest.write_text(
-        f"""schema_version = 1
+        f"""schema_version = 2
 implementation_id = {_toml_value(implementation_id)}
-downstream_runtime = "acme-optimized-runtime"
+downstream_runtime = {_toml_value(downstream_runtime)}
 downstream_version = "1.2.3"
 downstream_commit = "0123456789abcdef"
-
-[model]
-id = {_toml_value(model_id)}
-revisions = {_toml_value(list(revisions))}
-
-[target]
-{target_lines}
 
 [build]
 entrypoint = "builder/adapter.py"
@@ -153,25 +139,28 @@ def _supported_probe() -> ProbeResult:
     return ProbeResult(
         supported=True,
         profile_id="a100-fp16",
+        profile_sha256="a" * 64,
     )
 
 
-def test_model_scoped_discovery_is_stable_and_uncached(tmp_path: Path) -> None:
+def test_adapter_discovery_is_stable_and_uncached(tmp_path: Path) -> None:
     root = tmp_path / "family"
     first = _write_capsule(
         root,
         capsule_name="z-capsule",
         implementation_id="z-runtime",
+        downstream_runtime="z-downstream-runtime",
     )
-    discovered = discover_implementations_for_model(root, "Example/Optimized-Model")
+    discovered = discover_implementations(root)
     assert [manifest.path for manifest in discovered] == [first.resolve()]
 
     _write_capsule(
         root,
         capsule_name="a-capsule",
         implementation_id="a-runtime",
+        downstream_runtime="a-downstream-runtime",
     )
-    discovered = discover_implementations_for_model(root, "Example/Optimized-Model")
+    discovered = discover_implementations(root)
     assert [manifest.implementation_id for manifest in discovered] == [
         "a-runtime",
         "z-runtime",
@@ -179,142 +168,103 @@ def test_model_scoped_discovery_is_stable_and_uncached(tmp_path: Path) -> None:
 
 
 def test_discovery_rejects_duplicate_implementation_ids(tmp_path: Path) -> None:
-    _write_capsule(tmp_path, capsule_name="one", implementation_id="duplicate")
-    _write_capsule(tmp_path, capsule_name="two", implementation_id="duplicate")
-
-    with pytest.raises(ManifestDiscoveryError, match="duplicate.*one.*two"):
-        discover_implementations_for_model(tmp_path, "Example/Optimized-Model")
-
-
-def test_model_scoped_discovery_filters_valid_family_owned_adapters(tmp_path: Path) -> None:
-    requested = _write_capsule(
+    first = _write_capsule(
         tmp_path,
-        capsule_name="requested",
-        implementation_id="requested-runtime",
-        model_id="Example/Requested-Model",
+        capsule_name="one",
+        implementation_id="duplicate",
+        downstream_runtime="first-runtime",
     )
-    unrelated = _write_capsule(
+    second = _write_capsule(
         tmp_path,
-        capsule_name="unrelated",
-        implementation_id="unrelated-runtime",
-        model_id="Example/Unrelated-Model",
+        capsule_name="two",
+        implementation_id="duplicate",
+        downstream_runtime="second-runtime",
     )
-    discovered = discover_implementations_for_model(tmp_path, "Example/Requested-Model")
 
-    assert [manifest.path for manifest in discovered] == [requested.resolve()]
-    assert unrelated.resolve() not in {manifest.path for manifest in discovered}
+    with pytest.raises(
+        ManifestDiscoveryError, match="Duplicate implementation_id 'duplicate'"
+    ) as error:
+        discover_implementations(tmp_path)
+
+    assert str(first.resolve()) in str(error.value)
+    assert str(second.resolve()) in str(error.value)
 
 
-def test_model_scoped_discovery_accepts_literal_string_indexes(
-    tmp_path: Path,
+def test_discovery_rejects_duplicate_downstream_runtimes(tmp_path: Path) -> None:
+    first = _write_capsule(tmp_path, capsule_name="one", implementation_id="first-adapter")
+    second = _write_capsule(tmp_path, capsule_name="two", implementation_id="second-adapter")
+
+    with pytest.raises(
+        ManifestDiscoveryError,
+        match="Duplicate downstream_runtime 'acme-optimized-runtime'",
+    ) as error:
+        discover_implementations(tmp_path)
+
+    assert str(first.resolve()) in str(error.value)
+    assert str(second.resolve()) in str(error.value)
+
+
+def test_adapter_discovery_returns_every_runtime_owned_by_the_family(tmp_path: Path) -> None:
+    first = _write_capsule(
+        tmp_path,
+        capsule_name="edge-adapter",
+        implementation_id="example.edge-runtime",
+        downstream_runtime="edge-runtime",
+    )
+    second = _write_capsule(
+        tmp_path,
+        capsule_name="other-adapter",
+        implementation_id="example.other-runtime",
+        downstream_runtime="other-runtime",
+    )
+    discovered = discover_implementations(tmp_path)
+
+    assert [manifest.path for manifest in discovered] == [first.resolve(), second.resolve()]
+
+
+def test_adapter_discovery_isolates_malformed_sibling(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    requested = _write_capsule(
+    _write_capsule(
         tmp_path,
-        capsule_name="requested",
-        implementation_id="requested-runtime",
-        model_id="Example/Requested-Model",
+        capsule_name="valid",
+        implementation_id="valid-runtime",
     )
-    unrelated = _write_capsule(
+    malformed = _write_capsule(
         tmp_path,
-        capsule_name="unrelated",
-        implementation_id="unrelated-runtime",
-        model_id="Example/Unrelated-Model",
+        capsule_name="malformed",
+        implementation_id="valid-runtime",
     )
-    unrelated.write_text(
-        unrelated.read_text(encoding="utf-8").replace(
-            'id = "Example/Unrelated-Model"',
-            "id = 'Example/Unrelated-Model'",
-        ),
+    malformed.write_text(
+        malformed.read_text(encoding="utf-8") + "\nbroken = [\n",
         encoding="utf-8",
     )
 
-    discovered = discover_implementations_for_model(tmp_path, "Example/Requested-Model")
+    discovered = discover_implementations(tmp_path)
 
-    assert [manifest.path for manifest in discovered] == [requested.resolve()]
-
-
-def test_model_scoped_discovery_ignores_malformed_unrelated_sibling(
-    tmp_path: Path,
-) -> None:
-    requested = _write_capsule(
-        tmp_path,
-        capsule_name="requested",
-        implementation_id="requested-runtime",
-        model_id="Example/Requested-Model",
-    )
-    unrelated = _write_capsule(
-        tmp_path,
-        capsule_name="unrelated",
-        implementation_id="unrelated-runtime",
-        model_id="Example/Unrelated-Model",
-    )
-    unrelated.write_text(
-        unrelated.read_text(encoding="utf-8").replace(
-            'revisions = ["revision-a"]',
-            'revisions = [',
-        ),
-        encoding="utf-8",
-    )
-
-    discovered = discover_implementations_for_model(tmp_path, "Example/Requested-Model")
-
-    assert [manifest.path for manifest in discovered] == [requested.resolve()]
+    assert [manifest.implementation_id for manifest in discovered] == ["valid-runtime"]
+    assert "Ignoring invalid optimized-runtime manifest" in caplog.text
 
 
-def test_model_scoped_discovery_ignores_noncanonical_unrelated_model_id(
-    tmp_path: Path,
-) -> None:
-    requested = _write_capsule(
-        tmp_path,
-        capsule_name="requested",
-        implementation_id="requested-runtime",
-        model_id="Example/Requested-Model",
-    )
-    unrelated = _write_capsule(
-        tmp_path,
-        capsule_name="unrelated",
-        implementation_id="unrelated-runtime",
-        model_id="Example/Unrelated-Model",
-    )
-    unrelated.write_text(
-        unrelated.read_text(encoding="utf-8").replace(
-            'id = "Example/Unrelated-Model"',
-            'id = " Bad "',
-        ),
-        encoding="utf-8",
-    )
-
-    discovered = discover_implementations_for_model(tmp_path, "Example/Requested-Model")
-
-    assert [manifest.path for manifest in discovered] == [requested.resolve()]
-
-
-def test_model_scoped_discovery_fails_closed_for_malformed_candidate(
-    tmp_path: Path,
-) -> None:
-    requested = _write_capsule(
-        tmp_path,
-        capsule_name="requested",
-        implementation_id="requested-runtime",
-        model_id="Example/Requested-Model",
-    )
-    requested.write_text(
-        requested.read_text(encoding="utf-8") + "\nbroken = [\n",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ManifestValidationError, match="invalid TOML"):
-        discover_implementations_for_model(tmp_path, "Example/Requested-Model")
-
-
-def test_model_discovery_uses_one_family_directory(tmp_path: Path) -> None:
+def test_adapter_discovery_ignores_nested_noncanonical_layout(tmp_path: Path) -> None:
     manifest = _write_capsule(
-        tmp_path,
+        tmp_path / "nested",
         implementation_id="requested-runtime",
-        model_id="Example/Requested-Model",
     )
-    discovered = discover_implementations_for_model(tmp_path, "Example/Requested-Model")
-    assert [item.path for item in discovered] == [manifest.resolve()]
+    assert manifest.is_file()
+    assert discover_implementations(tmp_path) == ()
+
+
+def test_adapter_discovery_isolates_symlinked_capsule_outside_family_root(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    family_root = tmp_path / "family"
+    family_root.mkdir()
+    outside_manifest = _write_capsule(tmp_path / "outside")
+    (family_root / "escaped").symlink_to(outside_manifest.parent, target_is_directory=True)
+
+    assert discover_implementations(family_root) == ()
+    assert "outside discovery root" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -369,35 +319,42 @@ def test_manifest_rejects_entrypoint_symlink_escape(tmp_path: Path) -> None:
         load_implementation_manifest(path)
 
 
-def test_exact_matching_has_no_cross_model_or_cross_target_leakage(
-    tmp_path: Path,
-) -> None:
+def test_manifest_declares_only_generic_runtime_identity(tmp_path: Path) -> None:
     manifest = load_implementation_manifest(_write_capsule(tmp_path))
 
-    assert manifest.matches(_request())
-    assert not manifest.matches(_request(model_id="Example/Other-Model"))
-    assert not manifest.matches(_request(revision="revision-b"))
-    assert not manifest.matches(
-        _request(
-            target={
-                "os": "linux",
-                "architecture": "x86_64",
-                "gpu_architecture": "sm90",
-            }
-        )
-    )
+    assert manifest.downstream_runtime == "acme-optimized-runtime"
+    assert not hasattr(manifest, "model_family")
+    assert not hasattr(manifest, "profiles_directory")
 
 
-def test_target_matching_is_type_strict(tmp_path: Path) -> None:
-    path = _write_capsule(
-        tmp_path,
-        target={"sm": 80, "integrated": False},
-    )
+def test_manifest_does_not_interpret_adapter_private_profile_layout(tmp_path: Path) -> None:
+    path = _write_capsule(tmp_path)
+    private_layout = path.parent / "runtime-owned-layout"
+    private_layout.mkdir()
+    (private_layout / "selection.json").write_text("not generic host data\n", encoding="utf-8")
+
     manifest = load_implementation_manifest(path)
+    assert manifest.capsule_root == path.parent.resolve()
+    assert not (path.parent / "profiles").exists()
 
-    assert manifest.matches_target({"sm": 80, "integrated": False})
-    assert not manifest.matches_target({"sm": 80.0, "integrated": False})
-    assert not manifest.matches_target({"sm": 80, "integrated": 0})
+
+def test_manifest_rejects_legacy_model_and_target_tables(tmp_path: Path) -> None:
+    path = _write_capsule(tmp_path)
+    path.write_text(
+        path.read_text(encoding="utf-8")
+        + """
+[model]
+id = "Example/Legacy"
+revisions = ["revision-a"]
+
+[target]
+gpu_architecture = "sm80"
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ManifestValidationError, match="unknown field"):
+        load_implementation_manifest(path)
 
 
 def test_probe_and_build_use_versioned_json_protocol(tmp_path: Path) -> None:
@@ -503,16 +460,27 @@ def test_build_requires_the_supported_probe_selected_by_the_router(tmp_path: Pat
     assert not (tmp_path / "staging").exists()
 
 
-def test_adapter_is_not_invoked_for_a_nonmatching_request(tmp_path: Path) -> None:
+def test_adapter_owns_profile_matching_for_a_nonmatching_request(tmp_path: Path) -> None:
     marker = tmp_path / "invoked"
-    adapter = f"""import pathlib
+    adapter = f"""import json
+import pathlib
+import sys
+
 pathlib.Path({str(marker)!r}).write_text("invoked", encoding="utf-8")
+assert sys.argv[1] == "probe"
+print(json.dumps({{
+    "schema_version": 1,
+    "supported": False,
+    "reason": "no qualified profile matches the requested revision",
+}}))
 """
     manifest = load_implementation_manifest(_write_capsule(tmp_path, adapter=adapter))
 
-    with pytest.raises(BuildAdapterError, match="does not match"):
-        run_probe(manifest, _request(revision="other"))
-    assert not marker.exists()
+    result = run_probe(manifest, _request(revision="other"))
+
+    assert not result.supported
+    assert result.reason == "no qualified profile matches the requested revision"
+    assert marker.is_file()
 
 
 @pytest.mark.parametrize(
@@ -593,7 +561,12 @@ def test_build_descriptor_rejects_nonfinite_json(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="optimized-runtime capsules target Linux")
-def test_probe_timeout_terminates_adapter_process_group(tmp_path: Path) -> None:
+def test_probe_timeout_is_short_and_independent_from_build_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tensorrt_model_connect.runtime_provider.provider_process as provider_process
+
+    monkeypatch.setattr(provider_process, "_PROBE_TIMEOUT_SECONDS", 1)
     ready = tmp_path / "child-ready"
     terminated = tmp_path / "child-terminated"
     child = f"""import pathlib
@@ -623,7 +596,7 @@ while not ready.exists():
 time.sleep(60)
 """
     manifest = load_implementation_manifest(
-        _write_capsule(tmp_path, adapter=adapter, timeout_seconds=1)
+        _write_capsule(tmp_path, adapter=adapter, timeout_seconds=600)
     )
 
     with pytest.raises(BuildAdapterError, match="timed out after 1s"):

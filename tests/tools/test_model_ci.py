@@ -411,6 +411,11 @@ def test_impact_selects_only_model_a(tmp_path: Path) -> None:
             'MODEL = "model_b"\n',
         ),
         (
+            "python/tensorrt_model_connect/families/model_b/optimized_adapter/"
+            "profiles/example.toml",
+            'profile_id = "example"\n',
+        ),
+        (
             "src/runtime/models/model_b/optimized_adapter/adapter.cpp",
             "// model_b optimized runtime adapter\n",
         ),
@@ -1010,6 +1015,7 @@ def test_projection_includes_only_the_selected_family_adapter_subtrees(
     selected_paths = (
         "python/tensorrt_model_connect/families/model_b/optimized_adapter/adapter.py",
         "python/tensorrt_model_connect/families/model_b/optimized_adapter/dependency.lock",
+        "python/tensorrt_model_connect/families/model_b/optimized_adapter/profiles/example.toml",
         "src/runtime/models/model_b/optimized_adapter/adapter.cpp",
         "tests/e2e/models/model_b/optimized_adapter/test_contract.py",
     )

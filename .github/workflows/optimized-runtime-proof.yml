@@ -1,0 +1,251 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Optimized runtime qualification
+
+on:
+  workflow_call:
+    inputs:
+      base_revision:
+        description: "Base revision used to select model-owned qualifications"
+        required: false
+        default: ""
+        type: string
+      revision:
+        description: "Exact source revision to qualify"
+        required: true
+        type: string
+    outputs:
+      selected:
+        description: "Whether the source diff selected any hardware qualification"
+        value: ${{ jobs.select.outputs.has_jobs }}
+      selected_count:
+        description: "Number of selected model-owned qualification jobs"
+        value: ${{ jobs.select.outputs.selected_count }}
+  workflow_dispatch:
+    inputs:
+      base_revision:
+        description: "Optional base revision; omit to run every qualification"
+        required: false
+        default: ""
+        type: string
+      revision:
+        description: "Revision to qualify; defaults to the triggering revision"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  select:
+    name: Select model-owned qualifications
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      has_jobs: ${{ steps.select.outputs.has_jobs }}
+      has_consumers: ${{ steps.select.outputs.has_consumers }}
+      producer_matrix: ${{ steps.select.outputs.producer_matrix }}
+      consumer_matrix: ${{ steps.select.outputs.consumer_matrix }}
+      selected_count: ${{ steps.select.outputs.selected_count }}
+      tested_revision: ${{ steps.refs.outputs.tested_revision }}
+
+    steps:
+      - name: Check out requested source revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve immutable comparison revisions
+        id: refs
+        env:
+          REQUESTED_BASE: ${{ inputs.base_revision }}
+        run: |
+          set -euo pipefail
+          tested_revision="$(git rev-parse --verify 'HEAD^{commit}')"
+          test "${#tested_revision}" -eq 40
+          echo "tested_revision=$tested_revision" >> "$GITHUB_OUTPUT"
+          if [ -n "$REQUESTED_BASE" ]; then
+            base_revision="$(git rev-parse --verify "${REQUESTED_BASE}^{commit}")"
+            test "${#base_revision}" -eq 40
+            echo "base_revision=$base_revision" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Select exact qualification matrix
+        id: select
+        env:
+          BASE_REVISION: ${{ steps.refs.outputs.base_revision }}
+          TESTED_REVISION: ${{ steps.refs.outputs.tested_revision }}
+        run: |
+          set -euo pipefail
+          if [ -n "$BASE_REVISION" ]; then
+            selection="$(python3 tools/ci/optimized_runtime_qualifications.py \
+              --base "$BASE_REVISION" --head "$TESTED_REVISION")"
+          else
+            selection="$(python3 tools/ci/optimized_runtime_qualifications.py --all)"
+          fi
+          producer_matrix="$(python3 -c \
+            'import json,sys; print(json.dumps(json.loads(sys.argv[1])["producers"],separators=(",",":")))' \
+            "$selection")"
+          consumer_matrix="$(python3 -c \
+            'import json,sys; print(json.dumps(json.loads(sys.argv[1])["consumers"],separators=(",",":")))' \
+            "$selection")"
+          producer_count="$(python3 -c \
+            'import json,sys; print(len(json.loads(sys.argv[1])["producers"]["include"]))' \
+            "$selection")"
+          consumer_count="$(python3 -c \
+            'import json,sys; print(len(json.loads(sys.argv[1])["consumers"]["include"]))' \
+            "$selection")"
+          selected_count="$((producer_count + consumer_count))"
+          if [ "$producer_count" -gt 0 ]; then
+            has_jobs=true
+          else
+            has_jobs=false
+          fi
+          if [ "$consumer_count" -gt 0 ]; then
+            has_consumers=true
+          else
+            has_consumers=false
+          fi
+          echo "producer_matrix=$producer_matrix" >> "$GITHUB_OUTPUT"
+          echo "consumer_matrix=$consumer_matrix" >> "$GITHUB_OUTPUT"
+          echo "selected_count=$selected_count" >> "$GITHUB_OUTPUT"
+          echo "has_jobs=$has_jobs" >> "$GITHUB_OUTPUT"
+          echo "has_consumers=$has_consumers" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Optimized-runtime qualification selection"
+            echo
+            echo "- Tested revision: \`$TESTED_REVISION\`"
+            echo "- Producer jobs: \`$producer_count\`"
+            echo "- Consumer jobs: \`$consumer_count\`"
+            echo "- Producer matrix: \`$producer_matrix\`"
+            echo "- Consumer matrix: \`$consumer_matrix\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  produce:
+    name: ${{ matrix.id }}
+    needs: select
+    if: ${{ needs.select.outputs.has_jobs == 'true' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.select.outputs.producer_matrix) }}
+    runs-on: ${{ matrix.runner_labels }}
+    timeout-minutes: 420
+    env:
+      TRTMC_QUALIFICATION_ROOT: ${{ runner.temp }}/trtmc-optimized-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_QUALIFICATION_IMAGE: ${{ matrix.container_image }}
+      TRTMC_QUALIFICATION_PROFILE_FILES: ${{ matrix.profile_files }}
+      TRTMC_QUALIFICATION_BUILD_JOBS: ${{ vars.TRTMC_QUALIFICATION_BUILD_JOBS || '16' }}
+      TRTMC_QUALIFICATION_ENTRYPOINT: ${{ matrix.entrypoint }}
+      TRTMC_QUALIFICATION_EXPORT_BUNDLE: ${{ matrix.export_bundle && '1' || '0' }}
+      TRTMC_QUALIFICATION_EXPORT_DIR: ${{ runner.temp }}/trtmc-optimized-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}/transfer
+
+    steps:
+      - name: Check out exact source revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.select.outputs.tested_revision }}
+          persist-credentials: false
+
+      - name: Run model-owned qualification
+        run: |
+          set -euo pipefail
+          test -x "$TRTMC_QUALIFICATION_ENTRYPOINT"
+          "$TRTMC_QUALIFICATION_ENTRYPOINT"
+
+      - name: Upload qualification artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimized-runtime-${{ matrix.id }}-${{ needs.select.outputs.tested_revision }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ env.TRTMC_QUALIFICATION_ROOT }}/artifacts
+
+      - name: Upload delegated bundle for consumer qualification
+        if: ${{ matrix.export_bundle }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimized-runtime-transfer-${{ matrix.id }}-${{ needs.select.outputs.tested_revision }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          path: ${{ env.TRTMC_QUALIFICATION_EXPORT_DIR }}
+
+      - name: Clean qualification scratch
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          if [ -x "$TRTMC_QUALIFICATION_ENTRYPOINT" ]; then
+            "$TRTMC_QUALIFICATION_ENTRYPOINT" --cleanup
+          elif [ -e "$TRTMC_QUALIFICATION_ROOT" ]; then
+            echo "::error::Qualification entrypoint is unavailable; refusing unsafe host cleanup."
+            exit 1
+          fi
+
+  consume:
+    name: ${{ matrix.id }}
+    needs: [select, produce]
+    if: ${{ always() && needs.select.outputs.has_consumers == 'true' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.select.outputs.consumer_matrix) }}
+    runs-on: ${{ matrix.runner_labels }}
+    timeout-minutes: 420
+    env:
+      TRTMC_QUALIFICATION_ROOT: ${{ runner.temp }}/trtmc-optimized-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_QUALIFICATION_INPUT_DIR: ${{ runner.temp }}/trtmc-optimized-input-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+      TRTMC_QUALIFICATION_IMAGE: ${{ matrix.container_image }}
+      TRTMC_QUALIFICATION_BUILD_JOBS: ${{ vars.TRTMC_QUALIFICATION_BUILD_JOBS || '16' }}
+      TRTMC_QUALIFICATION_ENTRYPOINT: ${{ matrix.entrypoint }}
+      TRTMC_QUALIFICATION_RUNNER_TARGET_JSON: ${{ toJSON(matrix.runner_target) }}
+
+    steps:
+      - name: Check out exact source revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.select.outputs.tested_revision }}
+          persist-credentials: false
+
+      - name: Download delegated bundle from producer qualification
+        uses: actions/download-artifact@v4
+        with:
+          name: optimized-runtime-transfer-${{ matrix.producer_id }}-${{ needs.select.outputs.tested_revision }}-${{ github.run_attempt }}
+          path: ${{ env.TRTMC_QUALIFICATION_INPUT_DIR }}
+
+      - name: Run model-owned consumer qualification
+        run: |
+          set -euo pipefail
+          test -x "$TRTMC_QUALIFICATION_ENTRYPOINT"
+          test -d "$TRTMC_QUALIFICATION_INPUT_DIR"
+          "$TRTMC_QUALIFICATION_ENTRYPOINT"
+
+      - name: Upload qualification artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: optimized-runtime-${{ matrix.id }}-${{ needs.select.outputs.tested_revision }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: ${{ env.TRTMC_QUALIFICATION_ROOT }}/artifacts
+
+      - name: Clean qualification scratch
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          if [ -x "$TRTMC_QUALIFICATION_ENTRYPOINT" ]; then
+            "$TRTMC_QUALIFICATION_ENTRYPOINT" --cleanup
+          elif [ -e "$TRTMC_QUALIFICATION_ROOT" ]; then
+            echo "::error::Qualification entrypoint is unavailable; refusing unsafe host cleanup."
+            exit 1
+          fi

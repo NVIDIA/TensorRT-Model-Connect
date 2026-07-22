@@ -458,6 +458,54 @@ def test_github_workflows_keep_e2e_artifact_retention_aligned_with_ci_mode() -> 
     assert "retention-days: 14" in nightly
 
 
+def test_optimized_runtime_proof_is_generic_and_descriptor_driven() -> None:
+    workflows = REPO_ROOT / ".github" / "workflows"
+    proof_path = workflows / "optimized-runtime-proof.yml"
+    assert proof_path.is_file()
+    assert not (workflows / "qwen-edgellm-a100.yml").exists()
+
+    proof = proof_path.read_text(encoding="utf-8")
+    assert "python3 tools/ci/optimized_runtime_qualifications.py" in proof
+    assert "matrix: ${{ fromJSON(needs.select.outputs.producer_matrix) }}" in proof
+    assert "matrix: ${{ fromJSON(needs.select.outputs.consumer_matrix) }}" in proof
+    assert "runs-on: ${{ matrix.runner_labels }}" in proof
+    assert "TRTMC_QUALIFICATION_PROFILE_FILES: ${{ matrix.profile_files }}" in proof
+    assert "TRTMC_QUALIFICATION_EXPORT_DIR:" in proof
+    assert "TRTMC_QUALIFICATION_EXPORT_BUNDLE: ${{ matrix.export_bundle && '1' || '0' }}" in proof
+    assert "TRTMC_QUALIFICATION_INPUT_DIR:" in proof
+    assert "TRTMC_QUALIFICATION_RUNNER_TARGET_JSON:" in proof
+    assert "needs: [select, produce]" in proof
+    assert '"$TRTMC_QUALIFICATION_ENTRYPOINT" --cleanup' in proof
+    assert "actions/upload-artifact@v4" in proof
+    assert "actions/download-artifact@v4" in proof
+    transfer_name = (
+        "optimized-runtime-transfer-${{ matrix.producer_id }}-"
+        "${{ needs.select.outputs.tested_revision }}"
+    )
+    assert transfer_name in proof
+    assert "if: ${{ matrix.export_bundle }}" in proof
+    assert "compression-level: 0" in proof
+    assert "if-no-files-found: error" in proof
+    assert "retention-days: 7" in proof
+    assert "Qwen" not in proof
+    assert "EdgeLLM" not in proof
+
+    premerge = (workflows / "trtmc-ci.yml").read_text(encoding="utf-8")
+    caller = premerge.split("\n  optimized-runtime-proof:", maxsplit=1)[1].split(
+        "\n  no-model:", maxsplit=1
+    )[0]
+    required = premerge.split("\n  required:", maxsplit=1)[1]
+    assert "uses: ./.github/workflows/optimized-runtime-proof.yml" in caller
+    assert "secrets: inherit" not in caller
+    assert "- optimized-runtime-proof" in required
+    assert "OPTIMIZED_RUNTIME_RESULT: ${{ needs.optimized-runtime-proof.result }}" in required
+    assert (
+        "OPTIMIZED_RUNTIME_SELECTED: ${{ needs.optimized-runtime-proof.outputs.selected }}"
+        in required
+    )
+    assert 'test "$OPTIMIZED_RUNTIME_RESULT" = "success"' in required
+
+
 def test_github_workflows_publish_html_reports_for_nightly_and_model_proof() -> None:
     nightly = (REPO_ROOT / ".github/workflows/nightly.yml").read_text()
     assert "Upload combined nightly HTML report" in nightly

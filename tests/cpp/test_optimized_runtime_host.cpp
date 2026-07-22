@@ -298,6 +298,29 @@ void test_legacy_load_overload_delegates_to_optimized_runtime() {
           "legacy public C++ load overload initializes the optimized runtime");
 }
 
+void test_c_abi_create_loads_optimized_runtime_bundle() {
+    trtmc_test::TempDirGuard temporary;
+    const fs::path root(temporary.path());
+    const fs::path bundle = root / "c-abi-load.trtfb";
+    const fs::path events = root / "events.txt";
+    const std::string runtime_cache = (root / "cache").string();
+    write_bundle(bundle, text_spec());
+    trtmc_test::EnvVarGuard event_guard("TRTMC_FAKE_OPTIMIZED_EVENTS", events.c_str());
+
+    TrtmcPipelineOptions options{};
+    options.runtime_cache = runtime_cache.c_str();
+    trtmc::IPipeline* pipeline = trtmc_create_pipeline_ex(bundle.string().c_str(), &options);
+    if (pipeline == nullptr)
+        std::cerr << "C ABI optimized-runtime load error: " << trtmc_last_error() << '\n';
+    check(pipeline != nullptr, "C ABI creates a delegated pipeline");
+    if (pipeline != nullptr)
+        delete pipeline;
+
+    const auto loaded_events = read_lines(events);
+    check(count_line(loaded_events, "create") == 1,
+          "C ABI delegates pipeline creation to the model-owned DSO");
+}
+
 void test_non_text_pipeline_uses_same_host() {
     trtmc_test::TempDirGuard temporary;
     const fs::path root(temporary.path());
@@ -547,6 +570,7 @@ int main(int argc, char** argv) {
     test_toolchain_abi_fails_before_create();
     test_model_owned_text_pipeline_and_eager_load();
     test_legacy_load_overload_delegates_to_optimized_runtime();
+    test_c_abi_create_loads_optimized_runtime_bundle();
     test_concurrent_repeated_loads_share_published_cache_and_dso();
     test_public_pipeline_pool_fails_before_loading_optimized_runtime();
     test_non_text_pipeline_uses_same_host();

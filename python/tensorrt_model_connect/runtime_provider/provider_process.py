@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -25,10 +26,12 @@ from .manifest import (
 
 
 PROTOCOL_SCHEMA_VERSION = 1
+_PROBE_TIMEOUT_SECONDS = 30
 _PROBE_KEYS = {
     "schema_version",
     "supported",
     "profile_id",
+    "profile_sha256",
     "reason",
 }
 _BUILD_KEYS = {"schema_version", "descriptor", "artifacts"}
@@ -39,6 +42,7 @@ _BUILD_BINDING_KEYS = {
     "manifest_sha256",
     "request_sha256",
     "profile_id",
+    "profile_sha256",
 }
 _ACTIVE_CUDA_DEVICE_ENV = "TRTMC_INTERNAL_OPTIMIZED_RUNTIME_CUDA_DEVICE"
 _ADAPTER_ENVIRONMENT_KEYS = frozenset({_ACTIVE_CUDA_DEVICE_ENV})
@@ -52,6 +56,7 @@ class BuildAdapterError(RuntimeError):
 class ProbeResult:
     supported: bool
     profile_id: str = ""
+    profile_sha256: str = ""
     reason: str = ""
 
 
@@ -141,17 +146,23 @@ def _expected_build_binding(
 ) -> dict[str, Any]:
     if probe.supported is not True:
         raise BuildAdapterError("build requires a supported probe result")
-    for field, value in (("profile_id", probe.profile_id),):
+    for field, value in (
+        ("profile_id", probe.profile_id),
+        ("profile_sha256", probe.profile_sha256),
+    ):
         if not isinstance(value, str) or not value.strip() or value != value.strip():
             raise BuildAdapterError(
                 f"supported probe result {field} must be a non-empty trimmed string"
             )
+    if re.fullmatch(r"[0-9a-f]{64}", probe.profile_sha256) is None:
+        raise BuildAdapterError("supported probe result profile_sha256 must be a lowercase SHA-256")
     return {
         "schema_version": PROTOCOL_SCHEMA_VERSION,
         "implementation_id": manifest.implementation_id,
         "manifest_sha256": manifest_contract_sha256(manifest),
         "request_sha256": _canonical_digest(_request_payload(manifest, request)),
         "profile_id": probe.profile_id,
+        "profile_sha256": probe.profile_sha256,
     }
 
 
@@ -239,11 +250,7 @@ def _run_adapter(
     build_binding: Mapping[str, Any] | None = None,
     _adapter_environment: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    if not manifest.matches(request):
-        raise BuildAdapterError(
-            f"Request does not match implementation {manifest.implementation_id}"
-        )
-    timeout = manifest.build_timeout_seconds
+    timeout = _PROBE_TIMEOUT_SECONDS if operation == "probe" else manifest.build_timeout_seconds
 
     with tempfile.TemporaryDirectory(prefix="trtmc-optimized-request-") as temp_dir:
         request_path = Path(temp_dir) / "request.json"
@@ -349,17 +356,27 @@ def run_probe(
     if type(supported) is not bool:
         raise BuildAdapterError("probe response supported must be a boolean")
     profile_id = _response_string(response, "profile_id", operation="probe", required=supported)
+    profile_sha256 = _response_string(
+        response, "profile_sha256", operation="probe", required=supported
+    )
     reason = _response_string(response, "reason", operation="probe", required=not supported)
     if supported:
         if reason:
             raise BuildAdapterError("supported probe response must not include a non-empty reason")
+        if re.fullmatch(r"[0-9a-f]{64}", profile_sha256) is None:
+            raise BuildAdapterError(
+                "supported probe response profile_sha256 must be a lowercase SHA-256"
+            )
         return ProbeResult(
             supported=True,
             profile_id=profile_id,
+            profile_sha256=profile_sha256,
         )
 
-    if profile_id:
-        raise BuildAdapterError("unsupported probe response must not include a profile ID")
+    if profile_id or profile_sha256:
+        raise BuildAdapterError(
+            "unsupported probe response must not include a profile ID or digest"
+        )
     return ProbeResult(supported=False, reason=reason)
 
 

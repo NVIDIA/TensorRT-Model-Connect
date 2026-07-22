@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// This file is owned by this exact model/runtime capsule. It intentionally
-// duplicates the downstream translation instead of importing a shared Edge
-// adapter from Model Connect.
+// This file is owned by the Qwen family / TensorRT Edge-LLM adapter. It
+// intentionally duplicates downstream translation instead of importing a
+// shared optimized-runtime adapter from Model Connect.
 
 #include "runtime/providers/optimized_runtime_factory.h"
 
@@ -41,24 +41,17 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr const char* kImplementationId = "qwen3-0.6b-fp16.tensorrt-edge-llm.a100-pcie80-sm80";
-constexpr const char* kModelId = "Qwen/Qwen3-0.6B";
-constexpr const char* kModelRevision = "c1899de289a04d12100db370d81485cdf75e47ca";
-constexpr const char* kProfileId = "qwen3-0.6b-fp16--a100-pcie80-sm80";
-constexpr const char* kRuntimeLibrary = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm.so";
+constexpr const char* kImplementationId = "qwen.tensorrt-edge-llm";
+constexpr const char* kRuntimeLibrary = "libtrtmc_impl_qwen_tensorrt_edge_llm.so";
 constexpr const char* kPluginLibrary = "libNvInfer_edgellm_plugin.so";
-constexpr const char* kEdgeVersion = "0.6.1";
-constexpr const char* kEdgeCommit = "2620a9768022f25dff18912db2fb92b2ef264a70";
-constexpr const char* kTensorRtVersion = "10.14.1.48";
-constexpr const char* kCudaVersion = "12.8";
-constexpr int32_t kMaxInputLength = 1024;
-constexpr int32_t kMaxCacheLength = 4096;
-constexpr int32_t kMaxBatchSize = 4;
+constexpr const char* kEdgeVersion = TRTMC_QWEN_EDGE_VERSION;
+constexpr const char* kEdgeCommit = TRTMC_QWEN_EDGE_COMMIT;
+constexpr const char* kTensorRtVersion = TRTMC_QWEN_EDGE_TENSORRT_VERSION;
+constexpr const char* kCudaVersion = TRTMC_QWEN_EDGE_CUDA_VERSION;
 // Edge-LLM's sampling implementation bounds top-k scratch space at 1024 for
-// this supported profile. This is capsule policy, not part of the generic MC
-// package-private factory contract.
+// the qualified Qwen profiles. This is adapter policy, not part of the generic
+// MC package-private factory contract.
 constexpr int32_t kMaxTopK = 1024;
-constexpr int32_t kMinimumMemoryMiB = 80000;
 constexpr std::size_t kMaxMetadataBytes = 16U * 1024U * 1024U;
 
 struct TensorRtRuntimeVersion {
@@ -87,7 +80,9 @@ TensorRtRuntimeVersion loaded_tensorrt_runtime_version() noexcept {
 
 void require_supported_tensorrt_runtime() {
     const TensorRtRuntimeVersion observed = loaded_tensorrt_runtime_version();
-    constexpr TensorRtRuntimeVersion supported{10, 14, 1, 48};
+    constexpr TensorRtRuntimeVersion supported{
+        TRTMC_QWEN_EDGE_TENSORRT_MAJOR, TRTMC_QWEN_EDGE_TENSORRT_MINOR,
+        TRTMC_QWEN_EDGE_TENSORRT_PATCH, TRTMC_QWEN_EDGE_TENSORRT_BUILD};
     if (observed.major != supported.major || observed.minor != supported.minor ||
         observed.patch != supported.patch || observed.build != supported.build) {
         throw std::runtime_error("loaded TensorRT runtime version " + version_string(observed) +
@@ -107,11 +102,12 @@ int32_t loaded_cuda_runtime_version() {
 }
 
 void require_supported_cuda_runtime() {
-    constexpr int32_t supported = 12080;
+    constexpr int32_t supported = TRTMC_QWEN_EDGE_CUDA_RUNTIME_VERSION;
     const int32_t observed = loaded_cuda_runtime_version();
     if (observed != supported) {
         throw std::runtime_error("loaded CUDA runtime version " + std::to_string(observed) +
-                                 " is unsupported; expected 12080 (CUDA 12.8)");
+                                 " is unsupported; expected " + std::to_string(supported) +
+                                 " (CUDA " + kCudaVersion + ")");
     }
 }
 
@@ -195,13 +191,21 @@ int32_t require_int32(const nlohmann::json& object, const char* field, const std
     return static_cast<int32_t>(parsed);
 }
 
-void require_string_value(const nlohmann::json& object, const char* field, const char* expected,
-                          const std::string& context) {
+void require_string_value(const nlohmann::json& object, const char* field,
+                          const std::string& expected, const std::string& context) {
     const std::string actual = require_string(object, field, context);
     if (actual != expected) {
         throw std::runtime_error(context + " field '" + field + "' mismatch: expected '" +
                                  expected + "', got '" + actual + "'");
     }
+}
+
+int32_t require_positive_int32(const nlohmann::json& object, const char* field,
+                               const std::string& context) {
+    const int32_t value = require_int32(object, field, context);
+    if (value <= 0)
+        throw std::runtime_error(context + " field '" + field + "' must be positive");
+    return value;
 }
 
 void require_int_value(const nlohmann::json& object, const char* field, int32_t expected,
@@ -225,18 +229,21 @@ void require_sha256(const nlohmann::json& object, const char* field, const std::
 }
 
 struct CapsuleMetadata {
+    std::string gpu_architecture;
+    std::string gpu_name;
+    int32_t gpu_memory_mib{0};
+    int32_t max_cache_length{0};
     int32_t vocab_size{0};
-    int32_t minimum_memory_mib{0};
 };
 
 CapsuleMetadata
 validate_metadata(const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1& request) {
-    if (required_c_string(request.implementation_id, "implementation_id") != kImplementationId)
+    const std::string request_implementation_id =
+        required_c_string(request.implementation_id, "implementation_id");
+    const std::string request_profile_id = required_c_string(request.profile_id, "profile_id");
+    const std::string request_model_id = required_c_string(request.model_id, "model_id");
+    if (request_implementation_id != kImplementationId)
         throw std::runtime_error("create request implementation_id does not match this capsule");
-    if (required_c_string(request.profile_id, "profile_id") != kProfileId)
-        throw std::runtime_error("create request profile_id does not match this capsule");
-    if (required_c_string(request.model_id, "model_id") != kModelId)
-        throw std::runtime_error("create request model_id does not match this capsule");
     if (request.implementation_metadata == nullptr || request.implementation_metadata_size == 0)
         throw std::runtime_error("create request requires implementation_metadata");
     const nlohmann::json root = parse_metadata(
@@ -247,40 +254,42 @@ validate_metadata(const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1
                         "versions", "bundle_info", "bundle_config"},
                        "implementation metadata");
     require_int_value(root, "schema_version", 1, "implementation metadata");
-    require_string_value(root, "implementation_id", kImplementationId, "implementation metadata");
-    require_string_value(root, "profile_id", kProfileId, "implementation metadata");
+    require_string_value(root, "implementation_id", request_implementation_id,
+                         "implementation metadata");
+    require_string_value(root, "profile_id", request_profile_id, "implementation metadata");
     require_string_value(root, "operation", "text-generation-v1", "implementation metadata");
 
     const auto& build_binding = require_object(root, "build_binding", "implementation metadata");
-    require_exact_keys(
-        build_binding,
-        {"schema_version", "implementation_id", "manifest_sha256", "request_sha256", "profile_id"},
-        "implementation metadata build_binding");
+    require_exact_keys(build_binding,
+                       {"schema_version", "implementation_id", "manifest_sha256", "request_sha256",
+                        "profile_id", "profile_sha256"},
+                       "implementation metadata build_binding");
     require_int_value(build_binding, "schema_version", 1, "implementation metadata build_binding");
-    require_string_value(build_binding, "implementation_id", kImplementationId,
+    require_string_value(build_binding, "implementation_id", request_implementation_id,
                          "implementation metadata build_binding");
     require_string_value(build_binding, "manifest_sha256", TRTMC_QWEN_EDGE_MANIFEST_SHA256,
                          "implementation metadata build_binding");
     require_sha256(build_binding, "request_sha256", "implementation metadata build_binding");
-    require_string_value(build_binding, "profile_id", kProfileId,
+    require_string_value(build_binding, "profile_id", request_profile_id,
                          "implementation metadata build_binding");
+    require_sha256(build_binding, "profile_sha256", "implementation metadata build_binding");
 
     const auto& model = require_object(root, "model", "implementation metadata");
     require_exact_keys(model, {"id", "revision"}, "implementation metadata model");
-    require_string_value(model, "id", kModelId, "implementation metadata model");
-    require_string_value(model, "revision", kModelRevision, "implementation metadata model");
+    require_string_value(model, "id", request_model_id, "implementation metadata model");
+    const std::string model_revision =
+        require_string(model, "revision", "implementation metadata model");
 
     const auto& target = require_object(root, "target", "implementation metadata");
     require_string_value(target, "os", "linux", "implementation metadata target");
     require_string_value(target, "architecture", "x86_64", "implementation metadata target");
     require_string_value(target, "platform_kind", "discrete", "implementation metadata target");
-    require_string_value(target, "gpu_architecture", "sm80", "implementation metadata target");
-    require_string_value(target, "gpu_name", "NVIDIA A100 80GB PCIe",
-                         "implementation metadata target");
-    const int32_t observed_memory =
-        require_int32(target, "gpu_memory_mib", "implementation metadata target");
-    if (observed_memory < kMinimumMemoryMiB)
-        throw std::runtime_error("implementation metadata target memory is below profile minimum");
+    const std::string gpu_architecture =
+        require_string(target, "gpu_architecture", "implementation metadata target");
+    const std::string gpu_name =
+        require_string(target, "gpu_name", "implementation metadata target");
+    const int32_t gpu_memory_mib =
+        require_positive_int32(target, "gpu_memory_mib", "implementation metadata target");
 
     const auto& runtime = require_object(root, "runtime", "implementation metadata");
     require_exact_keys(runtime, {"abi", "library", "plugin"}, "implementation metadata runtime");
@@ -302,21 +311,23 @@ validate_metadata(const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1
     require_exact_keys(limits,
                        {"max_input_length", "max_cache_length", "max_batch_size", "vocab_size"},
                        "implementation metadata limits");
-    require_int_value(limits, "max_input_length", kMaxInputLength,
-                      "implementation metadata limits");
-    require_int_value(limits, "max_cache_length", kMaxCacheLength,
-                      "implementation metadata limits");
-    require_int_value(limits, "max_batch_size", kMaxBatchSize, "implementation metadata limits");
+    const int32_t max_input_length =
+        require_positive_int32(limits, "max_input_length", "implementation metadata limits");
+    const int32_t max_cache_length =
+        require_positive_int32(limits, "max_cache_length", "implementation metadata limits");
+    (void)require_positive_int32(limits, "max_batch_size", "implementation metadata limits");
     const int32_t vocab_size =
-        require_int32(limits, "vocab_size", "implementation metadata limits");
-    if (vocab_size <= 0)
-        throw std::runtime_error("implementation metadata vocab_size must be positive");
+        require_positive_int32(limits, "vocab_size", "implementation metadata limits");
+    if (max_input_length > max_cache_length) {
+        throw std::runtime_error(
+            "implementation metadata max_input_length exceeds max_cache_length");
+    }
 
     const auto& versions = require_object(root, "versions", "implementation metadata");
     require_exact_keys(versions,
                        {"model_revision", "edge_llm", "edge_llm_commit", "tensorrt", "cuda"},
                        "implementation metadata versions");
-    require_string_value(versions, "model_revision", kModelRevision,
+    require_string_value(versions, "model_revision", model_revision,
                          "implementation metadata versions");
     require_string_value(versions, "edge_llm", kEdgeVersion, "implementation metadata versions");
     require_string_value(versions, "edge_llm_commit", kEdgeCommit,
@@ -325,7 +336,29 @@ validate_metadata(const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1
                          "implementation metadata versions");
     require_string_value(versions, "cuda", kCudaVersion, "implementation metadata versions");
 
-    return CapsuleMetadata{vocab_size, kMinimumMemoryMiB};
+    const auto& bundle_info = require_object(root, "bundle_info", "implementation metadata");
+    require_string_value(bundle_info, "model_type", "qwen3", "implementation metadata bundle_info");
+    require_string_value(bundle_info, "family", "qwen", "implementation metadata bundle_info");
+    require_string_value(bundle_info, "gpu_name", gpu_name, "implementation metadata bundle_info");
+    require_int_value(bundle_info, "vocab_size", vocab_size, "implementation metadata bundle_info");
+    require_int_value(bundle_info, "max_cache_length", max_cache_length,
+                      "implementation metadata bundle_info");
+
+    const auto& bundle_config = require_object(root, "bundle_config", "implementation metadata");
+    require_string_value(bundle_config, "model_id", request_model_id,
+                         "implementation metadata bundle_config");
+    require_string_value(bundle_config, "model_revision", model_revision,
+                         "implementation metadata bundle_config");
+    require_string_value(bundle_config, "model_type", "qwen3",
+                         "implementation metadata bundle_config");
+    require_string_value(bundle_config, "family", "qwen", "implementation metadata bundle_config");
+    require_string_value(bundle_config, "runtime_provider", request_implementation_id,
+                         "implementation metadata bundle_config");
+    require_int_value(bundle_config, "max_cache_length", max_cache_length,
+                      "implementation metadata bundle_config");
+
+    return CapsuleMetadata{gpu_architecture, gpu_name, gpu_memory_mib, max_cache_length,
+                           vocab_size};
 }
 
 fs::path require_directory(const fs::path& path, const std::string& description) {
@@ -368,7 +401,7 @@ void open_edge_plugin(ProcessPluginLibrary& plugin) {
     const fs::file_status status = fs::symlink_status(plugin_path, status_error);
     if (status_error || fs::is_symlink(status) || !fs::is_regular_file(status))
         throw std::runtime_error("capsule plugin is unavailable: " + plugin_path.string());
-    int flags = RTLD_LAZY | RTLD_LOCAL;
+    int flags = RTLD_NOW | RTLD_LOCAL;
 #ifdef RTLD_NODELETE
     flags |= RTLD_NODELETE;
 #endif
@@ -393,12 +426,21 @@ void initialize_edge_plugin(ProcessPluginLibrary& plugin) {
         throw std::runtime_error("initEdgellmPlugins returned false");
 }
 
+void configure_edge_logging() noexcept {
+    // MC's public CLI reserves stdout for the generated result. The pinned Edge-LLM API
+    // sends INFO messages to stdout by default, which would make the unchanged
+    // Python wrapper return runtime logs as part of the generated text. Keep
+    // warnings and errors, but suppress INFO and VERBOSE output.
+    trt_edgellm::gLogger.setLevel(nvinfer1::ILogger::Severity::kWARNING);
+}
+
 void ensure_edge_plugin_loaded() {
     static std::once_flag once;
     static std::exception_ptr initialization_error;
     static ProcessPluginLibrary plugin;
     std::call_once(once, [] {
         try {
+            configure_edge_logging();
             open_edge_plugin(plugin);
             initialize_edge_plugin(plugin);
         } catch (...) {
@@ -407,15 +449,6 @@ void ensure_edge_plugin_loaded() {
     });
     if (initialization_error)
         std::rethrow_exception(initialization_error);
-}
-
-void configure_edge_logging() noexcept {
-    // MC's public CLI reserves stdout for the generated result. Edge-LLM 0.6.1
-    // sends INFO messages to stdout by default, which would make the unchanged
-    // Python wrapper return runtime logs as part of the generated text. Keep
-    // warnings and errors (which Edge writes to stderr), but suppress INFO and
-    // VERBOSE output for this model-owned integration.
-    trt_edgellm::gLogger.setLevel(nvinfer1::ILogger::Severity::kWARNING);
 }
 
 class CudaDeviceGuard {
@@ -488,21 +521,65 @@ cudaDeviceProp query_active_cuda_device(EdgeLlmHandle& handle) {
     return properties;
 }
 
-void require_supported_a100(const cudaDeviceProp& properties, int32_t minimum_memory_mib) {
+std::pair<int32_t, int32_t> parse_compute_capability(const std::string& architecture) {
+    if (architecture.size() < 4 || architecture.rfind("sm", 0) != 0 ||
+        !std::all_of(architecture.begin() + 2, architecture.end(),
+                     [](char character) { return character >= '0' && character <= '9'; })) {
+        throw std::runtime_error(
+            "implementation metadata target gpu_architecture must use canonical smNN form");
+    }
+    int32_t capability = 0;
+    for (auto character = architecture.begin() + 2; character != architecture.end(); ++character) {
+        if (capability > (std::numeric_limits<int32_t>::max() - (*character - '0')) / 10) {
+            throw std::runtime_error(
+                "implementation metadata target gpu_architecture is outside int32 range");
+        }
+        capability = capability * 10 + (*character - '0');
+    }
+    const int32_t major = capability / 10;
+    const int32_t minor = capability % 10;
+    if (major <= 0 || architecture != "sm" + std::to_string(major) + std::to_string(minor)) {
+        throw std::runtime_error(
+            "implementation metadata target gpu_architecture must use canonical smNN form");
+    }
+    return {major, minor};
+}
+
+void require_supported_target(const cudaDeviceProp& properties, const CapsuleMetadata& metadata) {
+    const auto [expected_major, expected_minor] =
+        parse_compute_capability(metadata.gpu_architecture);
     const std::string gpu_name(properties.name);
     const auto memory_mib = properties.totalGlobalMem / (1024ULL * 1024ULL);
-    if (properties.major != 8 || properties.minor != 0 || gpu_name != "NVIDIA A100 80GB PCIe" ||
-        memory_mib < static_cast<std::uint64_t>(minimum_memory_mib)) {
-        throw std::runtime_error("active CUDA device does not match the supported A100 target");
+    if (properties.major != expected_major || properties.minor != expected_minor ||
+        gpu_name != metadata.gpu_name ||
+        memory_mib < static_cast<std::uint64_t>(metadata.gpu_memory_mib)) {
+        throw std::runtime_error(
+            "active CUDA device does not match the bundle's qualified deployment target");
     }
 }
 
 void create_edge_runtime(EdgeLlmHandle& handle, const fs::path& engine_directory);
 #endif
 
+void validate_load_options(
+    const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1& request) {
+    if (request.load_options == nullptr)
+        return;
+    const auto& options = *request.load_options;
+    if (options.kv_cache_size_bytes != 0) {
+        throw std::invalid_argument(
+            "Qwen Edge-LLM does not support LoadOptions::kv_cache_size_bytes");
+    }
+    if (!options.config_path.empty() || !options.set_tokens.empty()) {
+        throw std::invalid_argument(
+            "Qwen Edge-LLM does not support LoadOptions runtime configuration overrides");
+    }
+}
+
 std::unique_ptr<EdgeLlmHandle>
 initialize_edge_handle(const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1& request) {
     const CapsuleMetadata metadata = validate_metadata(request);
+    validate_load_options(request);
     const fs::path artifact_root = require_directory(
         required_c_string(request.artifact_path, "artifact_path"), "capsule artifact root");
     const fs::path engine_directory =
@@ -512,16 +589,15 @@ initialize_edge_handle(const trtmc::internal::OptimizedRuntimePipelineCreateRequ
     require_supported_tensorrt_runtime();
     require_supported_cuda_runtime();
     auto handle = std::make_unique<EdgeLlmHandle>();
-    handle->max_cache_length = kMaxCacheLength;
+    handle->max_cache_length = metadata.max_cache_length;
     handle->vocab_size = metadata.vocab_size;
 #ifdef TRTMC_QWEN_EDGE_FAKE_RUNTIME
     require_fake_plugin_payload();
     (void)engine_directory;
 #else
-    configure_edge_logging();
-    ensure_edge_plugin_loaded();
     const cudaDeviceProp properties = query_active_cuda_device(*handle);
-    require_supported_a100(properties, metadata.minimum_memory_mib);
+    require_supported_target(properties, metadata);
+    ensure_edge_plugin_loaded();
     create_edge_runtime(*handle, engine_directory);
 #endif
     return handle;
@@ -534,6 +610,10 @@ void create_edge_runtime(EdgeLlmHandle& handle, const fs::path& engine_directory
     handle.runtime = std::make_unique<trt_edgellm::rt::LLMInferenceRuntime>(
         engine_directory.string(), std::string{}, std::unordered_map<std::string, std::string>{},
         handle.stream);
+    // Match Edge-LLM's own long-lived inference entry point. Graph capture is
+    // part of this adapter's qualified performance path.
+    if (!handle.runtime->captureDecodingCUDAGraph(handle.stream))
+        throw std::runtime_error("Qwen Edge-LLM decoding CUDA graph capture failed");
 }
 #endif
 
@@ -556,7 +636,7 @@ struct CapsuleGenerationRequest {
 bool valid_sampling_numbers(const CapsuleGenerationRequest& request) noexcept {
     return std::isfinite(request.temperature) && request.temperature >= 0.0F &&
            std::isfinite(request.top_p) && request.top_p >= 0.0F && request.top_p <= 1.0F &&
-           (request.top_k > 0 || request.top_p < 1.0F);
+           request.top_k >= 0;
 }
 
 bool valid_sampling_limits(const EdgeLlmHandle& handle,
@@ -569,11 +649,6 @@ bool valid_sampling_limits(const EdgeLlmHandle& handle,
 
 void validate_sampling_request(const EdgeLlmHandle& handle,
                                const CapsuleGenerationRequest& request) {
-    if (request.top_k == 0 && request.top_p == 1.0F) {
-        throw std::invalid_argument(
-            "Qwen Edge-LLM 0.6.1 cannot represent top_k <= 0 with top_p == 1.0 "
-            "because it requires at least one sampling filter");
-    }
     if (!valid_sampling_numbers(request) || !valid_sampling_limits(handle, request))
         throw std::invalid_argument("invalid Qwen Edge-LLM sampling request");
 }
@@ -610,6 +685,11 @@ EdgeLlmResponse execute_one(EdgeLlmHandle& handle, const CapsuleGenerationReques
     const std::string prompt = request.prompt == nullptr
                                    ? std::string{}
                                    : std::string(request.prompt, request.prompt_size);
+    if (prompt == "inspect-sampling") {
+        result.text =
+            "fake-sampling:" + std::to_string(request.top_k) + ":" + std::to_string(request.top_p);
+        return result;
+    }
     result.text = "fake:" + prompt;
     const std::size_t count =
         std::min<std::size_t>(prompt.size(), static_cast<std::size_t>(request.max_new_tokens));
@@ -632,8 +712,8 @@ EdgeLlmResponse execute_one(EdgeLlmHandle& handle, const CapsuleGenerationReques
 
 bool uses_default_generation_scalars(const trtmc::GenerateConfig& config) noexcept {
     return config.num_samples == 1 && config.min_p == 0.0F && config.seed == -1 &&
-           config.guidance_scale == -1.0F && config.cfg_scale == -1.0F && config.num_steps == -1 &&
-           config.sde_gamma == -1.0F;
+           config.guidance_scale == -1.0F && config.cfg_scale < 0.0F && config.num_steps == -1 &&
+           config.sde_gamma < 0.0F;
 }
 
 bool uses_no_diffusion_payload(const trtmc::GenerateConfig& config) noexcept {
@@ -643,14 +723,15 @@ bool uses_no_diffusion_payload(const trtmc::GenerateConfig& config) noexcept {
 }
 
 bool uses_default_output_shape(const trtmc::GenerateConfig& config) noexcept {
-    return config.height == 0 && config.width == 0;
+    return config.height <= 0 && config.width <= 0;
 }
 
 bool uses_supported_text_mode(const trtmc::GenerateConfig& config) noexcept {
-    const bool supported_mode =
-        config.text_generation_mode == "auto" || config.text_generation_mode == "ar";
-    return config.eos_token_id == -1 && supported_mode && config.block_length == 0 &&
-           config.confidence_threshold == -1.0F && config.lora_adapter_id.empty();
+    const bool supported_mode = config.text_generation_mode.empty() ||
+                                config.text_generation_mode == "auto" ||
+                                config.text_generation_mode == "ar";
+    return config.eos_token_id == -1 && supported_mode && config.block_length <= 0 &&
+           config.confidence_threshold < 0.0F && config.lora_adapter_id.empty();
 }
 
 bool uses_default_stop_options(const trtmc::GenerateConfig& config) noexcept {
@@ -667,24 +748,68 @@ void validate_generate_config(const trtmc::GenerateConfig& config) {
     }
 }
 
+struct EdgeSamplingParameters {
+    int32_t top_k;
+    float top_p;
+};
+
+bool has_invalid_sampling_range(const trtmc::GenerateConfig& config) noexcept {
+    return !std::isfinite(config.temperature) || config.temperature < 0.0F ||
+           !std::isfinite(config.top_p) || config.top_p < 0.0F || config.top_p > 1.0F;
+}
+
+bool uses_nucleus_sampling(const trtmc::GenerateConfig& config) noexcept {
+    return config.top_p > 0.0F && config.top_p < 1.0F;
+}
+
+bool uses_greedy_sampling(const trtmc::GenerateConfig& config, bool nucleus) noexcept {
+    return config.temperature <= 0.0F || config.top_p <= 0.0F ||
+           (config.top_k == 1 && !nucleus);
+}
+
+void validate_edge_sampling_support(const trtmc::GenerateConfig& config, bool nucleus) {
+    constexpr float epsilon = 1.0e-6F;
+    constexpr float edge_minimum_sampling_temperature = 1.0e-3F;
+    if (nucleus && config.top_p >= 1.0F - epsilon) {
+        throw std::invalid_argument(
+            "TensorRT Edge-LLM 0.9 cannot preserve top-p values within 1e-6 of 1.0");
+    }
+    if (config.temperature < edge_minimum_sampling_temperature) {
+        throw std::invalid_argument(
+            "TensorRT Edge-LLM 0.9 cannot preserve sampling below temperature 0.001");
+    }
+    if (config.top_k <= 0 && !nucleus) {
+        throw std::invalid_argument(
+            "TensorRT Edge-LLM 0.9 cannot express unbounded full-vocabulary sampling");
+    }
+}
+
+EdgeSamplingParameters edge_sampling_parameters(const trtmc::GenerateConfig& config) {
+    if (has_invalid_sampling_range(config)) {
+        throw std::invalid_argument("invalid Qwen Edge-LLM sampling parameters");
+    }
+    const bool nucleus = uses_nucleus_sampling(config);
+    if (uses_greedy_sampling(config, nucleus))
+        return {1, 1.0F};
+    validate_edge_sampling_support(config, nucleus);
+    return {config.top_k <= 1 ? 0 : config.top_k, config.top_p};
+}
+
 CapsuleGenerationRequest capsule_request(const std::string& prompt,
                                          const trtmc::GenerateConfig& config) {
     validate_generate_config(config);
-    return CapsuleGenerationRequest{prompt.data(),
-                                    prompt.size(),
-                                    config.max_new_tokens,
-                                    config.temperature,
-                                    std::max(config.top_k, int32_t{0}),
-                                    config.top_p,
-                                    config.use_chat_template,
-                                    config.enable_thinking};
+    const EdgeSamplingParameters sampling = edge_sampling_parameters(config);
+    return CapsuleGenerationRequest{
+        prompt.data(),  prompt.size(),  config.max_new_tokens,    config.temperature,
+        sampling.top_k, sampling.top_p, config.use_chat_template, config.enable_thinking};
 }
 
 class QwenEdgeLlmPipeline final : public trtmc::IPipeline {
   public:
     explicit QwenEdgeLlmPipeline(
         const trtmc::internal::OptimizedRuntimePipelineCreateRequestV1& request)
-        : handle_(initialize_edge_handle(request)) {}
+        : model_id_(required_c_string(request.model_id, "model_id")),
+          handle_(initialize_edge_handle(request)) {}
 
     trtmc::TextResult generate(const std::string& prompt,
                                const trtmc::GenerateConfig& config) override {
@@ -692,15 +817,16 @@ class QwenEdgeLlmPipeline final : public trtmc::IPipeline {
         validate_sampling_request(*handle_, request);
         std::lock_guard<std::mutex> lock(mutex_);
         EdgeLlmResponse response = execute_one(*handle_, request);
-        // Edge-LLM 0.6.1 does not expose a trustworthy prefill/decode split.
+        // The pinned Edge-LLM API does not expose a trustworthy prefill/decode split.
         // Report both metrics as unavailable instead of mislabeling wall time.
         return trtmc::TextResult(std::move(response.text), std::move(response.token_ids), 0.0, 0.0);
     }
 
     const char* pipeline_type() const override { return "QwenTextGenerationPipeline"; }
-    const char* model_id() const override { return kModelId; }
+    const char* model_id() const override { return model_id_.c_str(); }
 
   private:
+    std::string model_id_;
     std::unique_ptr<EdgeLlmHandle> handle_;
     std::mutex mutex_;
 };

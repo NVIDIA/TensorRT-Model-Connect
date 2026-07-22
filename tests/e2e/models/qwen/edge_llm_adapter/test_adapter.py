@@ -1,16 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Model-local contracts for the Qwen3-0.6B TensorRT Edge-LLM capsule."""
+"""Model-local contracts for the Qwen-family TensorRT Edge-LLM adapter."""
 
 from __future__ import annotations
 
+import concurrent.futures
+import contextlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -44,22 +48,72 @@ from tensorrt_model_connect.runtime_provider.manifest import (  # noqa: E402
     manifest_contract_sha256,
 )
 from tensorrt_model_connect.runtime_provider.orchestrator import (  # noqa: E402
-    discover_family_implementations_for_model,
+    discover_family_implementations,
     family_implementation_root,
 )
 
 
 MODEL_ID = "Qwen/Qwen3-0.6B"
 MODEL_REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
-IMPLEMENTATION_ID = "qwen3-0.6b-fp16.tensorrt-edge-llm.a100-pcie80-sm80"
-PROFILE_ID = "qwen3-0.6b-fp16--a100-pcie80-sm80"
-EDGE_COMMIT = "2620a9768022f25dff18912db2fb92b2ef264a70"
-EDGE_SOURCE = "https://github.com/NVIDIA/TensorRT-Edge-LLM.git"
-RUNTIME_LIBRARY = "libtrtmc_impl_qwen3_0_6b_fp16_tensorrt_edge_llm.so"
+IMPLEMENTATION_ID = "qwen.tensorrt-edge-llm"
+PROFILE_ID = "qwen3-0.6b-fp16--a100-pcie80-sm80--edgellm0.9-trt11.1"
+RUNTIME_LIBRARY = "libtrtmc_impl_qwen_tensorrt_edge_llm.so"
 RUNTIME_PLUGIN = "libNvInfer_edgellm_plugin.so"
 MANIFEST_PATH = CAPSULE_ROOT / "IMPLEMENTATION.toml"
-PROFILE_PATH = CAPSULE_ROOT / "profiles" / "a100-pcie80-sm80-fp16.toml"
+DEPENDENCY_PATH = CAPSULE_ROOT / "dependency.lock"
+PROFILE_PATH = CAPSULE_ROOT / "profiles" / "qwen3-0.6b-a100-sm80-fp16.toml"
 ADAPTER_PATH = CAPSULE_ROOT / "adapter.py"
+RUNTIME_SEMANTIC_FILES = (
+    "CMakeLists.txt",
+    "adapter.cpp",
+    "device_link_stub.cu",
+    "exports.map",
+)
+
+with DEPENDENCY_PATH.open("rb") as dependency_file:
+    DEPENDENCY_LOCK = tomllib.load(dependency_file)
+EDGE_DEPENDENCY = DEPENDENCY_LOCK["downstream"]
+EDGE_SOURCE = EDGE_DEPENDENCY["source"]
+EDGE_VERSION = EDGE_DEPENDENCY["version"]
+EDGE_TAG = EDGE_DEPENDENCY["tag"]
+EDGE_COMMIT = EDGE_DEPENDENCY["commit"]
+TENSORRT_VERSION = DEPENDENCY_LOCK["tensorrt"]["version"]
+TENSORRT_VERSION_COMPONENTS = tuple(int(component) for component in TENSORRT_VERSION.split("."))
+CUDA_VERSION = DEPENDENCY_LOCK["cuda"]["version"]
+CUDA_VERSION_COMPONENTS = tuple(int(component) for component in CUDA_VERSION.split("."))
+CUDA_RUNTIME_VERSION = CUDA_VERSION_COMPONENTS[0] * 1000 + CUDA_VERSION_COMPONENTS[1] * 10
+HOST_TOOLCHAIN_FAMILY = DEPENDENCY_LOCK["host_toolchain"]["family"]
+HOST_TOOLCHAIN_MAJOR = DEPENDENCY_LOCK["host_toolchain"]["major"]
+EXPORTER_PYTHON_LOCK = DEPENDENCY_LOCK["exporter_python"]
+GLIBC_FLOOR = tuple(
+    int(component)
+    for component in EXPORTER_PYTHON_LOCK["wheel_target"].rsplit("manylinux_", 1)[1].split("_")
+)
+
+
+def _profile_cases() -> tuple[tuple[str, str, str], ...]:
+    cases = []
+    for path in sorted((CAPSULE_ROOT / "profiles").glob("*.toml")):
+        with path.open("rb") as source:
+            data = tomllib.load(source)
+        revisions = tuple(data["model"]["revisions"])
+        if len(revisions) != 1:
+            raise RuntimeError(f"test profile must declare one exact revision: {path}")
+        cases.append((data["model"]["id"], revisions[0], data["profile_id"]))
+    return tuple(cases)
+
+
+PROFILE_CASES = _profile_cases()
+MC_DEFAULT_DEPLOYMENT = {
+    "precision": "fp32",
+    "max_cache_length": 256,
+    "max_batch_size": 1,
+}
+QUALIFIED_EDGE_DEPLOYMENT = {
+    "precision": "fp16",
+    "max_cache_length": 4096,
+    "max_batch_size": 4,
+}
 
 
 def test_qwen_adapter_package_inventory_is_model_owned() -> None:
@@ -70,22 +124,23 @@ def test_qwen_adapter_package_inventory_is_model_owned() -> None:
             if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
         }
 
+    profile_files = {f"profiles/{path.name}" for path in (CAPSULE_ROOT / "profiles").glob("*.toml")}
     assert source_files(CAPSULE_ROOT) | {
         f"runtime/{relative}" for relative in source_files(RUNTIME_ROOT)
-    } == {
+    } == profile_files | {
         "IMPLEMENTATION.toml",
         "adapter.py",
         "dependency.lock",
-        "profiles/a100-pcie80-sm80-fp16.toml",
         "runtime/CMakeLists.txt",
         "runtime/adapter.cpp",
+        "runtime/device_link_stub.cu",
         "runtime/exports.map",
     }
 
 
 def test_source_checkout_discovers_edge_llm_only_from_qwen_builder() -> None:
     root = family_implementation_root("qwen")
-    discovered = discover_family_implementations_for_model("qwen", MODEL_ID)
+    discovered = discover_family_implementations("qwen")
 
     assert root == CAPSULE_ROOT.parent
     assert [manifest.implementation_id for manifest in discovered] == [IMPLEMENTATION_ID]
@@ -95,6 +150,56 @@ def test_runtime_source_resolves_from_qwen_runtime_folder_in_a_checkout() -> Non
     adapter = _load_adapter_module()
 
     assert adapter._runtime_source_root() == RUNTIME_ROOT
+
+
+def test_semantic_source_digest_uses_stable_runtime_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _load_adapter_module()
+    profile = _profile(adapter)
+    expected = adapter._semantic_source_sha256(profile)
+    relocated = tmp_path / "relocated-runtime"
+    shutil.copytree(RUNTIME_ROOT, relocated)
+    monkeypatch.setattr(adapter, "_runtime_source_root", lambda: relocated)
+
+    assert adapter._semantic_source_sha256(profile) == expected
+
+
+@pytest.mark.parametrize("relative", RUNTIME_SEMANTIC_FILES)
+def test_semantic_source_digest_includes_every_runtime_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    adapter = _load_adapter_module()
+    profile = _profile(adapter)
+    relocated = tmp_path / "runtime"
+    shutil.copytree(RUNTIME_ROOT, relocated)
+    monkeypatch.setattr(adapter, "_runtime_source_root", lambda: relocated)
+    baseline = adapter._semantic_source_sha256(profile)
+    source = relocated / relative
+    source.write_bytes(source.read_bytes() + b"\nsemantic mutation\n")
+
+    assert adapter._semantic_source_sha256(profile) != baseline
+
+
+@pytest.mark.parametrize("entry_kind", ("regular", "symlink", "fifo"))
+def test_semantic_source_inventory_rejects_unqualified_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry_kind: str
+) -> None:
+    adapter = _load_adapter_module()
+    relocated = tmp_path / "runtime"
+    shutil.copytree(RUNTIME_ROOT, relocated)
+    unexpected = relocated / "nested" / "unexpected.cpp"
+    unexpected.parent.mkdir()
+    if entry_kind == "regular":
+        unexpected.write_text("// unexpected\n", encoding="utf-8")
+    elif entry_kind == "symlink":
+        unexpected.symlink_to(relocated / "adapter.cpp")
+    else:
+        os.mkfifo(unexpected)
+    monkeypatch.setattr(adapter, "_runtime_source_root", lambda: relocated)
+
+    with pytest.raises(adapter.AdapterError, match="semantic source"):
+        adapter._semantic_source_sha256(_profile(adapter))
 
 
 def test_installed_layout_compiles_the_packaged_qwen_runtime(
@@ -118,9 +223,10 @@ def test_installed_layout_compiles_the_packaged_qwen_runtime(
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
 
+    profile = adapter._load_profiles()[0]
     monkeypatch.setattr(adapter, "CAPSULE_ROOT", packaged_builder)
     monkeypatch.setattr(adapter, "REPOSITORY_ROOT", package)
-    monkeypatch.setenv("_TRTMC_INTERNAL_QWEN3_06B_ALLOW_FAKE_RUNTIME_BUILD", "1")
+    monkeypatch.setenv("_TRTMC_INTERNAL_QWEN_EDGE_LLM_ALLOW_FAKE_RUNTIME_BUILD", "1")
     manifest = load_implementation_manifest(MANIFEST_PATH)
     runtime, plugin, dependency = adapter._build_runtime_dso(
         tmp_path / "output",
@@ -132,6 +238,7 @@ def test_installed_layout_compiles_the_packaged_qwen_runtime(
             }
         },
         manifest_contract_sha256(manifest),
+        profile,
     )
 
     assert adapter._runtime_source_root() == packaged_runtime
@@ -142,7 +249,7 @@ def test_installed_layout_compiles_the_packaged_qwen_runtime(
 
 
 def _nlohmann_json_include() -> Path:
-    configured = os.environ.get("_TRTMC_INTERNAL_QWEN3_06B_NLOHMANN_JSON_INCLUDE_DIR", "")
+    configured = os.environ.get("_TRTMC_INTERNAL_QWEN_EDGE_LLM_NLOHMANN_JSON_INCLUDE_DIR", "")
     trtmc_binary = os.environ.get("TRTMC_BINARY", "")
     candidates = (
         ([Path(configured)] if configured else [])
@@ -159,7 +266,7 @@ def _nlohmann_json_include() -> Path:
             return candidate.resolve()
     pytest.fail(
         "Qwen fake-runtime tests require MC's provisioned nlohmann_json include; "
-        "set _TRTMC_INTERNAL_QWEN3_06B_NLOHMANN_JSON_INCLUDE_DIR"
+        "set _TRTMC_INTERNAL_QWEN_EDGE_LLM_NLOHMANN_JSON_INCLUDE_DIR"
     )
 
 
@@ -171,6 +278,23 @@ def _load_adapter_module():
     sys.modules[name] = module
     specification.loader.exec_module(module)
     return module
+
+
+def _profile(adapter, model_id: str = MODEL_ID):
+    return next(profile for profile in adapter._load_profiles() if profile.model_id == model_id)
+
+
+def _fake_edge_toolchain(adapter, path: Path):
+    return adapter._EdgeBuildToolchain(path, path, path, path, path, "0" * 64, "x86_64")
+
+
+def _public_reason(options: dict[str, object]) -> str:
+    adapter = _load_adapter_module()
+    return adapter._public_option_reason(options, _profile(adapter))
+
+
+def _qualify_exporter_host(adapter, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(adapter.platform, "machine", lambda: "x86_64")
 
 
 def _target(**changes: object) -> dict[str, object]:
@@ -194,28 +318,68 @@ def _request(
     target: dict[str, object] | None = None,
     parameters: dict[str, object] | None = None,
 ) -> ImplementationRequest:
+    request_parameters = dict(parameters or {})
+    request_parameters.setdefault("public_options", dict(MC_DEFAULT_DEPLOYMENT))
     return ImplementationRequest(
         model_id=model_id,
         model_revision=revision,
         target=target or _target(),
-        parameters=parameters,
+        parameters=request_parameters,
     )
 
 
-def _fake_engine(root: Path) -> Path:
+def _fake_engine_config(profile=None) -> dict[str, object]:
+    if profile is not None:
+        return {
+            **{
+                field: dict(value) if isinstance(value, dict) else value
+                for field, value in profile.engine.items()
+            },
+            "rope_scaling": dict(profile.engine["rope_scaling"]),
+            "edgellm_version": EDGE_VERSION,
+            "builder_config": dict(profile.builder),
+        }
+    return {
+        "model": "qwen3",
+        "spec_decode_type": "none",
+        "engine_role": "llm",
+        "edgellm_version": EDGE_VERSION,
+        "vocab_size": 151936,
+        "hidden_size": 1024,
+        "intermediate_size": 3072,
+        "num_hidden_layers": 28,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "max_position_embeddings": 40960,
+        "rope_theta": 1000000.0,
+        "rope_scaling": {
+            "rope_theta": 1000000,
+            "rope_type": "default",
+            "type": "default",
+        },
+        "partial_rotary_factor": 1.0,
+        "num_deepstack_features": 0,
+        "ple_enabled": False,
+        "num_ple_inputs": 0,
+        "ple_hidden_size": 0,
+        "kv_cache_dtype": "fp16",
+        "builder_config": {
+            "max_input_len": 1024,
+            "max_kv_cache_capacity": 4096,
+            "max_batch_size": 4,
+            "spec_draft": False,
+            "spec_base": False,
+            "max_lora_rank": 0,
+            "trt_native_ops": False,
+        },
+    }
+
+
+def _fake_engine(root: Path, profile=None) -> Path:
     root.mkdir()
     (root / "config.json").write_text(
-        json.dumps(
-            {
-                "vocab_size": 151936,
-                "edgellm_version": "0.6.1",
-                "builder_config": {
-                    "max_input_len": 1024,
-                    "max_kv_cache_capacity": 4096,
-                    "max_batch_size": 4,
-                },
-            }
-        ),
+        json.dumps(_fake_engine_config(profile)),
         encoding="utf-8",
     )
     for filename in (
@@ -229,21 +393,157 @@ def _fake_engine(root: Path) -> Path:
     return root
 
 
-def _prebuilt_runtime_parameters(tmp_path: Path) -> dict[str, object]:
+def _prebuilt_runtime_parameters(tmp_path: Path, profile=None) -> dict[str, object]:
     runtime = tmp_path / "runtime-source.so"
     plugin = tmp_path / "plugin-source.so"
     runtime.write_bytes(b"fake-runtime-dso")
     plugin.write_bytes(b"fake-edge-plugin")
     return {
-        "engine_dir": str(_fake_engine(tmp_path / "prebuilt-engine")),
+        "engine_dir": str(_fake_engine(tmp_path / "prebuilt-engine", profile)),
         "runtime_library": str(runtime),
         "runtime_plugin": str(plugin),
+        "runtime_build": {"fake": True},
         "precision": "fp16",
         "quantization": "none",
         "max_input_length": 1024,
         "max_cache_length": 4096,
         "max_batch_size": 4,
     }
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("model", "qwen3_moe"),
+        ("spec_decode_type", "eagle3"),
+        ("engine_role", "base"),
+        ("edgellm_version", "0.9.1"),
+        ("vocab_size", True),
+        ("hidden_size", 2048),
+        ("intermediate_size", 6144),
+        ("num_hidden_layers", 29),
+        ("num_attention_heads", 32),
+        ("num_key_value_heads", 4),
+        ("head_dim", 64),
+        ("max_position_embeddings", 262144),
+        ("rope_theta", 1000000),
+        ("rope_scaling", {}),
+        ("partial_rotary_factor", 0.5),
+        ("num_deepstack_features", 1),
+        ("ple_enabled", 0),
+        ("num_ple_inputs", 1),
+        ("ple_hidden_size", 1024),
+        ("kv_cache_dtype", "fp8"),
+    ),
+)
+def test_engine_model_fingerprint_is_exact(
+    tmp_path: Path, field: str, invalid_value: object
+) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "engine")
+    config_path = engine / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config[field] = invalid_value
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match=rf"config\.{field}"):
+        adapter._validate_engine_directory(engine, _profile(adapter))
+
+
+def test_engine_rejects_a_qwen3_1_7b_sibling_fingerprint(tmp_path: Path) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "engine")
+    config_path = engine / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.update(
+        {
+            "hidden_size": 2048,
+            "intermediate_size": 6144,
+            "num_attention_heads": 16,
+        }
+    )
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match=r"config\.hidden_size"):
+        adapter._validate_engine_directory(engine, _profile(adapter))
+
+
+@pytest.mark.parametrize("field", ("model", "rope_scaling", "kv_cache_dtype"))
+def test_engine_rejects_missing_required_model_fields(tmp_path: Path, field: str) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "engine")
+    config_path = engine / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    del config[field]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match=rf"config\.{field}"):
+        adapter._validate_engine_directory(engine, _profile(adapter))
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    (
+        ("max_input_len", 2048),
+        ("max_kv_cache_capacity", 8192),
+        ("max_batch_size", 1),
+        ("spec_draft", True),
+        ("spec_base", True),
+        ("max_lora_rank", 8),
+        ("trt_native_ops", True),
+    ),
+)
+def test_engine_builder_fingerprint_is_exact(
+    tmp_path: Path, field: str, invalid_value: object
+) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "engine")
+    config_path = engine / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["builder_config"][field] = invalid_value
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match=rf"builder_config\.{field}"):
+        adapter._validate_engine_directory(engine, _profile(adapter))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), (("reduced_vocab_size", 32000), ("tp_size", 2), ("tp_rank", 0))
+)
+def test_engine_rejects_incompatible_optional_features(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "engine")
+    config_path = engine / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config[field] = value
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match=rf"config\.{field}"):
+        adapter._validate_engine_directory(engine, _profile(adapter))
+
+
+@pytest.mark.parametrize(
+    "library_name",
+    (
+        "libcuda.so.1",
+        "libcudart.so.13",
+        "libnvinfer.so.11",
+        "libnvonnxparser.so.11.1.0",
+    ),
+)
+def test_engine_rejects_nested_tensor_rt_and_cuda_runtime_copies(
+    tmp_path: Path, library_name: str
+) -> None:
+    adapter = _load_adapter_module()
+    engine = _fake_engine(tmp_path / "engine")
+    nested = engine / "nested" / library_name
+    nested.parent.mkdir()
+    nested.write_bytes(b"forbidden runtime copy")
+
+    with pytest.raises(adapter.AdapterError, match="must not package TensorRT or CUDA"):
+        adapter._validate_engine_directory(engine, _profile(adapter))
 
 
 def _run_build_after_probe(manifest, request, output: Path):
@@ -255,9 +555,9 @@ def _run_build_after_probe(manifest, request, output: Path):
 def _make_cuda_toolkit(
     root: Path,
     *,
-    encoded_header_version: int = 12080,
-    compiler_version: str = "12.8",
-) -> tuple[Path, Path, Path]:
+    encoded_header_version: int = CUDA_RUNTIME_VERSION,
+    compiler_version: str = CUDA_VERSION,
+) -> tuple[Path, Path, Path, Path]:
     include = root / "include"
     include.mkdir(parents=True)
     (include / "cuda_runtime_api.h").write_text("/* fixture */\n", encoding="utf-8")
@@ -276,7 +576,10 @@ def _make_cuda_toolkit(
     cudart = root / "lib64" / "libcudart.so"
     cudart.parent.mkdir()
     cudart.write_bytes(b"test cudart")
-    return include, compiler, cudart
+    driver = root / "lib64" / "stubs" / "libcuda.so"
+    driver.parent.mkdir()
+    driver.write_bytes(b"test CUDA driver stub")
+    return include, compiler, cudart, driver
 
 
 def _make_edge_source(root: Path) -> Path:
@@ -284,7 +587,7 @@ def _make_edge_source(root: Path) -> Path:
         "CMakeLists.txt",
         "cpp/common/version.h",
         "3rdParty/nlohmannJson/include/nlohmann/json.hpp",
-        "tensorrt_edgellm/scripts/export_llm.py",
+        "tensorrt_edgellm/scripts/export.py",
     ):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -294,37 +597,178 @@ def _make_edge_source(root: Path) -> Path:
 
 def test_manifest_profile_and_dependency_pins_are_exact_and_capsule_owned() -> None:
     manifest = load_implementation_manifest(MANIFEST_PATH)
-    with PROFILE_PATH.open("rb") as profile_file:
-        profile = tomllib.load(profile_file)
     with (CAPSULE_ROOT / "dependency.lock").open("rb") as dependency_file:
         dependency = tomllib.load(dependency_file)
+    with (REPOSITORY_ROOT / "pyproject.toml").open("rb") as project_file:
+        project_dependencies = set(tomllib.load(project_file)["project"]["dependencies"])
+    adapter = _load_adapter_module()
+    dependency_spec = adapter._load_dependency_spec()
+    profiles = adapter._load_profiles()
 
     assert manifest.implementation_id == IMPLEMENTATION_ID
     assert manifest.runtime_library == RUNTIME_LIBRARY
     assert manifest.runtime_abi == 1
-    assert manifest.matches(_request())
-    assert manifest.matches(_request(target=_target(gpu_count=8)))
-    assert not manifest.matches(_request(model_id="Qwen/Qwen3-1.7B"))
-    assert not manifest.matches(_request(revision="0" * 40))
-    assert not manifest.matches(_request(target=_target(gpu_architecture="sm90")))
-    assert not manifest.matches(_request(target=_target(platform_kind="soc")))
-    assert not manifest.matches(_request(target=_target(gpu_name="NVIDIA A100-SXM4-80GB")))
+    assert {
+        (profile.model_id, profile.revisions[0], profile.profile_id) for profile in profiles
+    } == set(PROFILE_CASES)
+    assert all(
+        profile.qualified_semantic_sha256 == adapter._semantic_source_sha256(profile)
+        for profile in profiles
+    )
 
-    assert dependency["downstream"] == {
-        "name": "tensorrt-edge-llm",
-        "source": EDGE_SOURCE,
-        "version": "0.6.1",
-        "tag": "v0.6.1",
-        "commit": EDGE_COMMIT,
-        "source_mode": "git",
+    assert set(dependency["downstream"]) == {
+        "name",
+        "source",
+        "version",
+        "tag",
+        "commit",
+        "source_mode",
     }
-    assert dependency["tensorrt"] == {"version": "10.14.1.48"}
-    assert dependency["cuda"] == {"version": "12.8"}
-    assert profile["profile_id"] == PROFILE_ID
-    assert "model" not in profile
-    assert "target" not in profile
-    assert "versions" not in profile
-    _load_adapter_module()._validate_capsule_data(profile)
+    assert dependency_spec.downstream_name == dependency["downstream"]["name"]
+    assert dependency_spec.downstream_source == dependency["downstream"]["source"]
+    assert dependency_spec.downstream_version == dependency["downstream"]["version"]
+    assert dependency_spec.downstream_tag == dependency["downstream"]["tag"]
+    assert dependency_spec.downstream_commit == dependency["downstream"]["commit"]
+    assert dependency_spec.tensorrt_version_text == dependency["tensorrt"]["version"]
+    assert dependency_spec.cuda_version_text == dependency["cuda"]["version"]
+    assert adapter._pinned_host_toolchain() == (
+        dependency["host_toolchain"]["family"],
+        dependency["host_toolchain"]["major"],
+    )
+    assert (
+        f"tensorrt=={dependency_spec.tensorrt_version_text}; platform_machine == 'x86_64'"
+        in project_dependencies
+    )
+    assert "tensorrt==11.2.0.113; platform_machine == 'aarch64'" in project_dependencies
+    exporter_python = dependency["exporter_python"]
+    exporter_spec = dependency_spec.exporter_python
+    assert exporter_spec.implementation == exporter_python["implementation"]
+    assert exporter_spec.version_text == exporter_python["version"]
+    assert exporter_spec.platform == exporter_python["platform"]
+    assert exporter_spec.architecture == exporter_python["architecture"]
+    assert exporter_spec.abi == exporter_python["abi"]
+    assert exporter_spec.wheel_target == exporter_python["wheel_target"]
+    locked_requirements, locked_packages = adapter._parse_exporter_lock(exporter_python)
+    assert locked_requirements == exporter_python["requirements"].strip() + "\n"
+    assert locked_packages
+    assert list(locked_packages) == sorted(locked_packages)
+    selected, reason = adapter._select_profile(_request().to_json(), profiles)
+    assert reason == ""
+    assert selected is not None and selected.profile_id == PROFILE_ID
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("schema_version", True),
+        ("schema_version", 1.0),
+        ("max_cache_length", True),
+        ("max_batch_size", 4.0),
+        ("minimum_memory_mib", 80000.0),
+    ),
+)
+def test_capsule_profile_rejects_cross_type_values(field: str, value: object) -> None:
+    adapter = _load_adapter_module()
+    with PROFILE_PATH.open("rb") as profile_file:
+        profile = tomllib.load(profile_file)
+    profile[field] = value
+
+    with pytest.raises(adapter.AdapterError, match=field):
+        adapter._profile_from_data(PROFILE_PATH, profile)
+
+
+def test_candidate_profile_is_never_selected() -> None:
+    adapter = _load_adapter_module()
+    with PROFILE_PATH.open("rb") as profile_file:
+        data = tomllib.load(profile_file)
+    data["qualification_state"] = "candidate"
+    data.pop("qualified_semantic_sha256")
+    candidate = adapter._profile_from_data(PROFILE_PATH, data)
+
+    selected, reason = adapter._select_profile(_request().to_json(), (candidate,))
+
+    assert selected is None
+    assert candidate.qualified_semantic_sha256 is None
+    assert "is not qualified" in reason
+
+
+def test_qualified_profile_requires_semantic_source_pin() -> None:
+    adapter = _load_adapter_module()
+    with PROFILE_PATH.open("rb") as profile_file:
+        data = tomllib.load(profile_file)
+    data.pop("qualified_semantic_sha256")
+
+    with pytest.raises(adapter.AdapterError, match="must pin qualified_semantic_sha256"):
+        adapter._profile_from_data(PROFILE_PATH, data)
+
+
+def test_candidate_state_and_qualification_pin_are_not_semantic_profile_data(
+    tmp_path: Path,
+) -> None:
+    adapter = _load_adapter_module()
+    qualified = _profile(adapter)
+    profile_text = PROFILE_PATH.read_text(encoding="utf-8")
+    candidate_text = re.sub(
+        r'^qualification_state = "qualified"\n'
+        r'^qualified_semantic_sha256 = "[0-9a-f]{64}"\n',
+        'qualification_state = "candidate"\n',
+        profile_text,
+        flags=re.MULTILINE,
+    )
+    candidate_path = tmp_path / "candidate.toml"
+    candidate_path.write_text(candidate_text, encoding="utf-8")
+    with candidate_path.open("rb") as profile_file:
+        candidate = adapter._profile_from_data(candidate_path, tomllib.load(profile_file))
+
+    assert adapter._semantic_source_sha256(candidate) == adapter._semantic_source_sha256(qualified)
+
+
+def test_model_source_architecture_is_bound_to_the_selected_profile(tmp_path: Path) -> None:
+    adapter = _load_adapter_module()
+    profile = _profile(adapter)
+    snapshot = tmp_path / "models--Qwen--Qwen3-0.6B" / "snapshots" / MODEL_REVISION
+    snapshot.mkdir(parents=True)
+    config = snapshot / "config.json"
+    config.write_text(json.dumps({"architectures": ["Qwen3ForCausalLM"]}), encoding="utf-8")
+
+    assert adapter._materialize_model_source(str(snapshot), profile, MODEL_REVISION) == snapshot
+
+    config.write_text(json.dumps({"architectures": ["DifferentArchitecture"]}), encoding="utf-8")
+    with pytest.raises(adapter.AdapterError, match="architectures do not match"):
+        adapter._materialize_model_source(str(snapshot), profile, MODEL_REVISION)
+
+
+@pytest.mark.parametrize("schema_version", (True, 1.0))
+def test_capsule_request_rejects_cross_type_schema_version(
+    tmp_path: Path, schema_version: object
+) -> None:
+    adapter = _load_adapter_module()
+    payload = _request().to_json()
+    payload["implementation_id"] = IMPLEMENTATION_ID
+    payload["schema_version"] = schema_version
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(adapter.AdapterError, match="schema_version"):
+        adapter._load_request(request_path)
+
+
+@pytest.mark.parametrize(("field", "value"), (("gpu_architecture", 80), ("gpu_name", False)))
+def test_capsule_probe_treats_cross_type_target_as_an_unsupported_profile(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    adapter = _load_adapter_module()
+    payload = _request().to_json()
+    payload["implementation_id"] = IMPLEMENTATION_ID
+    payload["target"][field] = value
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    request = adapter._load_request(request_path)
+    selected, reason = adapter._select_profile(request, adapter._load_profiles())
+
+    assert selected is None
+    assert "target does not match" in reason
 
 
 def test_adapter_restores_parent_active_device_for_heterogeneous_visible_gpus(
@@ -359,15 +803,27 @@ def test_adapter_restores_parent_active_device_for_heterogeneous_visible_gpus(
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "GPU-a100"
 
 
-def test_supported_probe_selects_profile_without_hidden_opt_in(tmp_path: Path) -> None:
+def test_supported_probe_selects_profile_without_hidden_opt_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("_TRTMC_INTERNAL_QWEN_EDGE_LLM_ALLOW_FAKE_RUNTIME_BUILD", "1")
     manifest = load_implementation_manifest(MANIFEST_PATH)
     parameters = _prebuilt_runtime_parameters(tmp_path)
+    parameters["public_options"] = MC_DEFAULT_DEPLOYMENT
 
     probe = run_probe(manifest, _request(parameters=parameters))
 
     assert probe.supported
     assert probe.profile_id == PROFILE_ID
     assert not probe.reason
+
+    explicit_probe = run_probe(
+        manifest,
+        _request(parameters={**parameters, "public_options": QUALIFIED_EDGE_DEPLOYMENT}),
+    )
+    assert explicit_probe.supported
+    assert explicit_probe.profile_id == PROFILE_ID
+    assert not explicit_probe.reason
 
     unsupported = run_probe(
         manifest,
@@ -381,16 +837,219 @@ def test_supported_probe_selects_profile_without_hidden_opt_in(tmp_path: Path) -
         _request(parameters={**parameters, "public_options": {"dynamic_kv_cache": True}}),
     )
     assert not unsupported_option.supported
-    assert "dynamic_kv_cache=true" in unsupported_option.reason
+    assert "dynamic_kv_cache=False" in unsupported_option.reason
 
-    with pytest.raises(BuildAdapterError, match="unsupported parameters: deployment"):
-        run_probe(
-            manifest,
-            _request(parameters={**parameters, "deployment": {"target": "current"}}),
+    unknown_parameter = run_probe(
+        manifest,
+        _request(parameters={**parameters, "deployment": {"target": "current"}}),
+    )
+    assert not unknown_parameter.supported
+    assert "unsupported Qwen Edge-LLM parameter" in unknown_parameter.reason
+
+
+@pytest.mark.parametrize(("model_id", "revision", "profile_id"), PROFILE_CASES)
+def test_one_qwen_edge_adapter_selects_every_qualified_profile(
+    model_id: str,
+    revision: str,
+    profile_id: str,
+) -> None:
+    manifest = load_implementation_manifest(MANIFEST_PATH)
+
+    probe = run_probe(
+        manifest,
+        _request(model_id=model_id, revision=revision),
+    )
+
+    assert probe.supported
+    assert probe.profile_id == profile_id
+
+
+def test_a_fourth_qwen_profile_is_data_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _load_adapter_module()
+    model_id = "Qwen/Qwen3-Profile-Only-Fixture"
+    revision = "f" * 40
+    profile_id = "qwen3-profile-only-fixture-fp16-sm80-edgellm0.9"
+    profile_text = PROFILE_PATH.read_text(encoding="utf-8")
+    profile_text = profile_text.replace(PROFILE_ID, profile_id)
+    profile_text = profile_text.replace(MODEL_ID, model_id)
+    profile_text = profile_text.replace(MODEL_REVISION, revision)
+    placeholder = "0" * 64
+    profile_text = re.sub(
+        r'qualified_semantic_sha256 = "[0-9a-f]{64}"',
+        f'qualified_semantic_sha256 = "{placeholder}"',
+        profile_text,
+    )
+    profile_path = tmp_path / "fourth-profile.toml"
+    profile_path.write_text(profile_text, encoding="utf-8")
+    monkeypatch.setattr(adapter, "PROFILES_ROOT", tmp_path)
+    provisional = adapter._load_profiles()[0]
+    profile_path.write_text(
+        profile_text.replace(placeholder, adapter._semantic_source_sha256(provisional)),
+        encoding="utf-8",
+    )
+
+    profiles = adapter._load_profiles()
+    selected, reason = adapter._select_profile(
+        _request(model_id=model_id, revision=revision).to_json(), profiles
+    )
+
+    assert reason == ""
+    assert len(profiles) == 1
+    assert selected is not None
+    assert selected.profile_id == profile_id
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("manifest", "profile", "adapter", "dependency-lock", "runtime-source"),
+)
+def test_build_rejects_semantic_source_changed_after_probe(tmp_path: Path, mutation: str) -> None:
+    capsule = tmp_path / "edge_llm_adapter"
+    shutil.copytree(CAPSULE_ROOT, capsule)
+    shutil.copytree(RUNTIME_ROOT, capsule / "runtime")
+    manifest = load_implementation_manifest(capsule / "IMPLEMENTATION.toml")
+    request = _request()
+    probe = run_probe(manifest, request)
+    assert probe.supported
+
+    source = {
+        "manifest": capsule / "IMPLEMENTATION.toml",
+        "profile": capsule / "profiles" / PROFILE_PATH.name,
+        "adapter": capsule / "adapter.py",
+        "dependency-lock": capsule / "dependency.lock",
+        "runtime-source": capsule / "runtime" / "adapter.cpp",
+    }[mutation]
+    if mutation == "profile":
+        source.write_text(
+            source.read_text(encoding="utf-8").replace(
+                "minimum_memory_mib = 80000", "minimum_memory_mib = 80001"
+            ),
+            encoding="utf-8",
         )
+    else:
+        comment = (
+            b"// changed after probe\n"
+            if mutation == "runtime-source"
+            else b"# changed after probe\n"
+        )
+        source.write_bytes(source.read_bytes() + b"\n" + comment)
+
+    with pytest.raises(BuildAdapterError, match="semantic source|profile_sha256"):
+        run_build(manifest, request, tmp_path / "output", probe=probe)
 
 
-def test_established_mc_defaults_do_not_change_the_requested_profile() -> None:
+def test_probe_demotes_source_that_no_longer_matches_qualification(tmp_path: Path) -> None:
+    capsule = tmp_path / "edge_llm_adapter"
+    shutil.copytree(CAPSULE_ROOT, capsule)
+    shutil.copytree(RUNTIME_ROOT, capsule / "runtime")
+    adapter_path = capsule / "adapter.py"
+    adapter_path.write_bytes(adapter_path.read_bytes() + b"\n# unqualified source\n")
+    manifest = load_implementation_manifest(capsule / "IMPLEMENTATION.toml")
+
+    probe = run_probe(manifest, _request())
+
+    assert not probe.supported
+    assert "semantic source is not qualified" in probe.reason
+
+
+@pytest.mark.parametrize(("model_id", "revision", "profile_id"), PROFILE_CASES)
+def test_each_profile_validates_its_own_engine_fingerprint(
+    tmp_path: Path,
+    model_id: str,
+    revision: str,
+    profile_id: str,
+) -> None:
+    del revision, profile_id
+    adapter = _load_adapter_module()
+    profile = _profile(adapter, model_id)
+    engine = _fake_engine(tmp_path / "engine", profile)
+
+    validated, vocab_size = adapter._validate_engine_directory(engine, profile)
+
+    assert validated == engine.resolve()
+    assert vocab_size == profile.engine["vocab_size"]
+
+
+@pytest.mark.parametrize(
+    ("engine_model_id", "selected_model_id"),
+    tuple(
+        (engine_model_id, selected_model_id)
+        for engine_model_id, _revision, _profile_id in PROFILE_CASES
+        for selected_model_id, _other_revision, _other_profile_id in PROFILE_CASES
+        if engine_model_id != selected_model_id
+    ),
+)
+def test_profile_engine_fingerprints_cannot_leak_between_qwen_models(
+    tmp_path: Path,
+    engine_model_id: str,
+    selected_model_id: str,
+) -> None:
+    adapter = _load_adapter_module()
+    engine_profile = _profile(adapter, engine_model_id)
+    selected_profile = _profile(adapter, selected_model_id)
+    engine = _fake_engine(tmp_path / "engine", engine_profile)
+
+    with pytest.raises(adapter.AdapterError, match="Edge-LLM engine config"):
+        adapter._validate_engine_directory(engine, selected_profile)
+
+
+@pytest.mark.parametrize(("model_id", "revision", "profile_id"), PROFILE_CASES)
+def test_one_builder_emits_a_profile_bound_descriptor_for_every_qwen_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_id: str,
+    revision: str,
+    profile_id: str,
+) -> None:
+    adapter = _load_adapter_module()
+    profile = _profile(adapter, model_id)
+    monkeypatch.setenv("_TRTMC_INTERNAL_QWEN_EDGE_LLM_ALLOW_FAKE_RUNTIME_BUILD", "1")
+    parameters = _prebuilt_runtime_parameters(tmp_path, profile)
+    request = _request(model_id=model_id, revision=revision, parameters=parameters)
+    manifest = load_implementation_manifest(MANIFEST_PATH)
+
+    build = _run_build_after_probe(manifest, request, tmp_path / "capsule-output")
+
+    assert build.descriptor["implementation_id"] == IMPLEMENTATION_ID
+    assert build.descriptor["profile_id"] == profile_id
+    assert build.descriptor["model"] == {"id": model_id, "revision": revision}
+    assert build.descriptor["runtime"]["library"] == RUNTIME_LIBRARY
+    assert build.descriptor["bundle_info"]["hidden_size"] == profile.engine["hidden_size"]
+    assert build.descriptor["bundle_info"]["num_layers"] == profile.engine["num_hidden_layers"]
+
+
+@pytest.mark.parametrize(
+    ("model_id", "revision", "target_change"),
+    (
+        ("Qwen/Unsupported", "0" * 40, {}),
+        (MODEL_ID, "0" * 40, {}),
+        (MODEL_ID, MODEL_REVISION, {"gpu_architecture": "sm90"}),
+    ),
+)
+def test_unqualified_qwen_requests_return_native_fallback_without_adapter_error(
+    model_id: str,
+    revision: str,
+    target_change: dict[str, object],
+) -> None:
+    manifest = load_implementation_manifest(MANIFEST_PATH)
+
+    probe = run_probe(
+        manifest,
+        _request(
+            model_id=model_id,
+            revision=revision,
+            target=_target(**target_change),
+        ),
+    )
+
+    assert not probe.supported
+    assert "No qualified Qwen Edge-LLM profile matches" in probe.reason
+
+
+def test_established_mc_defaults_select_the_qualified_profile() -> None:
     import inspect
 
     from tensorrt_model_connect.engine_builder import build
@@ -401,22 +1060,96 @@ def test_established_mc_defaults_do_not_change_the_requested_profile() -> None:
         if name not in {"model_id_or_path", "output_path"}
     }
 
-    reason = _load_adapter_module()._public_option_reason(defaults)
-    assert "requires public option max_batch_size=4; got 1" in reason
+    assert {field: defaults[field] for field in MC_DEFAULT_DEPLOYMENT} == MC_DEFAULT_DEPLOYMENT
+    assert _public_reason(defaults) == ""
+
+
+def test_public_python_model_id_default_dispatches_without_native_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tensorrt_model_connect.engine_builder as engine_builder
+
+    bundle = tmp_path / "qwen-default.trtfb"
+    captured: dict[str, object] = {}
+
+    def select_optimized(model_id: str, output_path: str, public_options: dict):
+        captured.update(
+            model_id=model_id,
+            output_path=output_path,
+            public_options=public_options,
+        )
+        bundle.write_bytes(b"delegated")
+        return object()
+
+    monkeypatch.setattr(engine_builder, "_try_build_optimized_runtime", select_optimized)
+    monkeypatch.setattr(
+        engine_builder,
+        "_build_native_impl",
+        lambda **_kwargs: pytest.fail("qualified default request must not use MC native"),
+    )
+
+    engine_builder.build(MODEL_ID, str(bundle))
+
+    assert bundle.read_bytes() == b"delegated"
+    assert captured["model_id"] == MODEL_ID
+    assert captured["output_path"] == str(bundle)
+    public_options = captured["public_options"]
+    assert isinstance(public_options, dict)
+    assert {
+        field: public_options[field] for field in MC_DEFAULT_DEPLOYMENT
+    } == MC_DEFAULT_DEPLOYMENT
+    assert _public_reason(public_options) == ""
+
+
+@pytest.mark.parametrize(
+    "public_options",
+    (
+        {},
+        {"precision": "fp32", "max_cache_length": 4096, "max_batch_size": 1},
+        {"precision": "fp32", "max_cache_length": 256, "max_batch_size": 4},
+        {"precision": "fp16", "max_cache_length": 256, "max_batch_size": 1},
+        {"precision": "bf16", "max_cache_length": 4096, "max_batch_size": 4},
+        {"precision": "fp32", "max_cache_length": 256},
+        {"precision": "fp16"},
+        {"precision": "fp32", "max_cache_length": 256, "max_batch_size": True},
+        {**MC_DEFAULT_DEPLOYMENT, "tensor_parallel_size": True},
+        {**MC_DEFAULT_DEPLOYMENT, "quant_calibration_samples": 512.0},
+        {**MC_DEFAULT_DEPLOYMENT, "triattention_count_prompt_tokens": 1},
+        {**MC_DEFAULT_DEPLOYMENT, "fp8": 0},
+        {**MC_DEFAULT_DEPLOYMENT, "dynamic_kv_cache": 1},
+        {**MC_DEFAULT_DEPLOYMENT, "verbose": 1},
+        {
+            **MC_DEFAULT_DEPLOYMENT,
+            "parallel_config": {
+                "mode": "single",
+                "rank": -1,
+                "require_mpirun": 1,
+                "tp_size": True,
+            },
+        },
+    ),
+)
+def test_mixed_partial_and_unqualified_public_profiles_fail_closed(
+    public_options: dict[str, object],
+) -> None:
+    reason = _public_reason(public_options)
+    assert reason
+    assert "Qwen Edge-LLM capsule" in reason
 
 
 @pytest.mark.parametrize("value", (None, False, "", (), [], {}))
 def test_future_inert_public_option_does_not_couple_to_this_adapter(value) -> None:
-    reason = _load_adapter_module()._public_option_reason({"future_option": value})
+    reason = _public_reason({**MC_DEFAULT_DEPLOYMENT, "future_option": value})
     assert reason == ""
 
 
 def test_future_non_inert_public_option_remains_fail_closed() -> None:
-    reason = _load_adapter_module()._public_option_reason({"future_option": "requested"})
+    reason = _public_reason({"future_option": "requested"})
     assert "does not recognize public option(s): future_option" in reason
 
 
-def test_public_cli_requires_the_exact_qualified_profile(
+def test_public_cli_default_and_explicit_profiles_select_edgellm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import tensorrt_model_connect.build_cli as build_cli
@@ -438,8 +1171,8 @@ def test_public_cli_requires_the_exact_qualified_profile(
 
     assert exit_info.value.code == 0
     options = build_cli._optimized_cli_public_options(captured["args"])
-    reason = _load_adapter_module()._public_option_reason(options)
-    assert "requires public option max_batch_size=4; got 1" in reason
+    assert {field: options[field] for field in MC_DEFAULT_DEPLOYMENT} == MC_DEFAULT_DEPLOYMENT
+    assert _public_reason(options) == ""
 
     monkeypatch.setattr(
         sys,
@@ -463,23 +1196,46 @@ def test_public_cli_requires_the_exact_qualified_profile(
 
     assert exit_info.value.code == 0
     options = build_cli._optimized_cli_public_options(captured["args"])
-    assert _load_adapter_module()._public_option_reason(options) == ""
+    assert {
+        field: options[field] for field in QUALIFIED_EDGE_DEPLOYMENT
+    } == QUALIFIED_EDGE_DEPLOYMENT
+    assert _public_reason(options) == ""
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "trtmc",
+            "build",
+            MODEL_ID,
+            "-o",
+            "/tmp/qwen-edge-test.trtfb",
+            "--precision",
+            "fp16",
+        ],
+    )
+    with pytest.raises(SystemExit) as exit_info:
+        build_cli.main()
+
+    assert exit_info.value.code == 0
+    options = build_cli._optimized_cli_public_options(captured["args"])
+    reason = _public_reason(options)
+    assert "does not qualify public deployment tuple" in reason
 
 
-@pytest.mark.parametrize("missing_module", ("modelopt", "onnx_graphsurgeon", "torch"))
-def test_qualified_probe_reports_missing_exporter_prerequisite(
+def test_qualified_probe_is_side_effect_free_and_does_not_require_ambient_exporter_packages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    missing_module: str,
 ) -> None:
     adapter = _load_adapter_module()
+    _qualify_exporter_host(adapter, monkeypatch)
     monkeypatch.setattr(adapter, "_select_parent_active_cuda_device", lambda: None)
     monkeypatch.setattr(adapter.shutil, "which", lambda command: f"/usr/bin/{command}")
     monkeypatch.setattr(
         adapter.importlib.util,
         "find_spec",
-        lambda module: None if module == missing_module else object(),
+        lambda module: object() if module in {"venv", "ensurepip"} else None,
     )
     monkeypatch.setattr(adapter, "_resolve_tensorrt", lambda _settings: object())
     monkeypatch.setattr(adapter, "_resolve_cuda", lambda _settings: object())
@@ -489,26 +1245,389 @@ def test_qualified_probe_reports_missing_exporter_prerequisite(
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert adapter.main(["probe", "--request", str(request_path)]) == 1
-    captured = capsys.readouterr()
-    assert not captured.out
-    assert (
-        f"Qwen Edge-LLM build prerequisites are unavailable: {missing_module}"
-        in captured.err
+    profile_root = tmp_path / "python-profiles"
+    monkeypatch.setenv("TRTMC_PYTHON_PROFILE_ROOT", str(profile_root))
+    monkeypatch.setattr(
+        adapter,
+        "_materialize_exporter_python",
+        lambda: pytest.fail("probe must not materialize the exporter environment"),
     )
 
+    assert adapter.main(["probe", "--request", str(request_path)]) == 0
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {
+        "profile_id": PROFILE_ID,
+        "profile_sha256": adapter._semantic_source_sha256(_profile(adapter)),
+        "schema_version": 1,
+        "supported": True,
+    }
+    assert not captured.err
+    assert not profile_root.exists()
 
-def test_build_stages_explicit_engine_runtime_and_plugin_payloads(tmp_path: Path) -> None:
-    parameters = _prebuilt_runtime_parameters(tmp_path)
+
+def test_exporter_profile_identity_binds_the_exact_leaf_dependency_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _load_adapter_module()
+    lock = tmp_path / "dependency.lock"
+    lock.write_bytes((CAPSULE_ROOT / "dependency.lock").read_bytes())
+    monkeypatch.setattr(adapter, "DEPENDENCY_PATH", lock)
+
+    first = adapter._exporter_profile_identity()
+    lock.write_bytes(lock.read_bytes() + b"\n# identity mutation\n")
+    second = adapter._exporter_profile_identity()
+
+    assert first != second
+
+
+def test_exporter_profile_materializes_atomically_once_and_reuses_the_ready_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _load_adapter_module()
+    _qualify_exporter_host(adapter, monkeypatch)
+    monkeypatch.setenv("TRTMC_PYTHON_PROFILE_ROOT", str(tmp_path / "profiles"))
+    calls: list[list[str]] = []
+    verified: list[Path] = []
+
+    def fake_run(
+        command: list[str],
+        _description: str,
+        *,
+        environment=None,
+        cwd=None,
+    ) -> None:
+        assert environment is not None
+        assert cwd is not None
+        calls.append(command)
+        if command[1:4] == ["-I", "-m", "venv"]:
+            python = Path(command[-1]) / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_text("#!/bin/sh\n", encoding="utf-8")
+            python.chmod(0o755)
+
+    monkeypatch.setattr(adapter, "_run_checked", fake_run)
+    monkeypatch.setattr(
+        adapter,
+        "_verify_exporter_python",
+        lambda python: verified.append(python),
+    )
+
+    cold = adapter._materialize_exporter_python()
+    warm = adapter._materialize_exporter_python()
+
+    assert cold == warm
+    assert cold.is_file()
+    assert (cold.parents[1] / ".ready").is_file()
+    assert len(calls) == 2
+    assert calls[0][1:4] == ["-I", "-m", "venv"]
+    assert calls[1][1:6] == ["-I", "-m", "pip", "--isolated", "install"]
+    assert {"--only-binary=:all:", "--require-hashes", "--no-deps"} <= set(calls[1])
+    requirements = cold.parents[1] / "requirements.lock.txt"
+    assert "filelock==3.31.1 --hash=sha256:" in requirements.read_text(encoding="utf-8")
+    assert len(verified) == 2
+    assert not list((tmp_path / "profiles").glob(f"{adapter._EXPORTER_PROFILE_NAME}-*/.ready.tmp"))
+
+
+def test_concurrent_exporter_profile_materialization_publishes_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _load_adapter_module()
+    _qualify_exporter_host(adapter, monkeypatch)
+    monkeypatch.setenv("TRTMC_PYTHON_PROFILE_ROOT", str(tmp_path / "profiles"))
+    venv_started = threading.Event()
+    finish_first = threading.Event()
+    calls: list[list[str]] = []
+
+    def fake_run(
+        command: list[str],
+        _description: str,
+        *,
+        environment=None,
+        cwd=None,
+    ) -> None:
+        del environment, cwd
+        calls.append(command)
+        if command[1:4] == ["-I", "-m", "venv"]:
+            python = Path(command[-1]) / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_text("#!/bin/sh\n", encoding="utf-8")
+            python.chmod(0o755)
+            venv_started.set()
+            assert finish_first.wait(timeout=10)
+
+    monkeypatch.setattr(adapter, "_run_checked", fake_run)
+    monkeypatch.setattr(adapter, "_verify_exporter_python", lambda _python: None)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(adapter._materialize_exporter_python)
+        assert venv_started.wait(timeout=10)
+        second = executor.submit(adapter._materialize_exporter_python)
+        finish_first.set()
+        resolved = [first.result(timeout=10), second.result(timeout=10)]
+
+    assert resolved[0] == resolved[1]
+    assert sum(command[1:4] == ["-I", "-m", "venv"] for command in calls) == 1
+    assert sum("install" in command for command in calls) == 1
+    profile_root = tmp_path / "profiles"
+    assert len(list(profile_root.glob(f"{adapter._EXPORTER_PROFILE_NAME}-*/.ready"))) == 1
+    assert not [
+        path for path in profile_root.iterdir() if path.is_dir() and not (path / ".ready").is_file()
+    ]
+
+
+def test_exporter_profile_install_failure_never_publishes_a_ready_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _load_adapter_module()
+    _qualify_exporter_host(adapter, monkeypatch)
+    monkeypatch.setenv("TRTMC_PYTHON_PROFILE_ROOT", str(tmp_path / "profiles"))
+
+    attempts = {"pip": 0}
+
+    def fail_install(
+        command: list[str],
+        _description: str,
+        *,
+        environment=None,
+        cwd=None,
+    ) -> None:
+        del environment, cwd
+        if command[1:4] == ["-I", "-m", "venv"]:
+            python = Path(command[-1]) / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_text("#!/bin/sh\n", encoding="utf-8")
+            python.chmod(0o755)
+            return
+        attempts["pip"] += 1
+        if attempts["pip"] == 1:
+            raise adapter.AdapterError("synthetic pip failure")
+
+    monkeypatch.setattr(adapter, "_run_checked", fail_install)
+    monkeypatch.setattr(adapter, "_verify_exporter_python", lambda _python: None)
+
+    with pytest.raises(adapter.AdapterError, match="synthetic pip failure"):
+        adapter._materialize_exporter_python()
+
+    profile_root = tmp_path / "profiles"
+    assert not list(profile_root.glob("*/.ready"))
+    assert not [path for path in profile_root.iterdir() if path.is_dir()]
+
+    recovered = adapter._materialize_exporter_python()
+
+    assert recovered.is_file()
+    assert (recovered.parents[1] / ".ready").is_file()
+    assert attempts["pip"] == 2
+
+
+def test_exporter_profile_prebuilt_only_materialization_is_read_only_and_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _load_adapter_module()
+    _qualify_exporter_host(adapter, monkeypatch)
+    profile_root = tmp_path / "profiles"
+    monkeypatch.setenv("TRTMC_PYTHON_PROFILE_ROOT", str(profile_root))
+    monkeypatch.setenv("TRTMC_PYTHON_PROFILE_PREBUILT_ONLY", "1")
+
+    with pytest.raises(adapter.AdapterError, match="not prebuilt or is corrupt"):
+        adapter._materialize_exporter_python()
+
+    assert not profile_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("libc", "confstr", "accepted"),
+    (
+        (("glibc", ".".join(map(str, GLIBC_FLOOR))), None, True),
+        (("", ""), f"glibc {GLIBC_FLOOR[0] + 1}.0", True),
+        (("glibc", f"{GLIBC_FLOOR[0]}.{GLIBC_FLOOR[1] - 1}"), None, False),
+        (("", ""), None, False),
+    ),
+)
+def test_exporter_host_enforces_locked_glibc_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    libc: tuple[str, str],
+    confstr: str | None,
+    accepted: bool,
+) -> None:
+    adapter = _load_adapter_module()
+    _qualify_exporter_host(adapter, monkeypatch)
+    monkeypatch.setattr(adapter.platform, "libc_ver", lambda: libc)
+    monkeypatch.setattr(adapter.os, "confstr", lambda _name: confstr)
+
+    if accepted:
+        adapter._validate_exporter_host()
+    else:
+        with pytest.raises(adapter.AdapterError, match=r"does not match dependency\.lock"):
+            adapter._validate_exporter_host()
+
+
+def test_exporter_python_is_independent_of_the_model_connect_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _load_adapter_module()
+    monkeypatch.setattr(adapter.sys, "version_info", (3, 10, 0))
+    monkeypatch.setattr(
+        adapter.shutil,
+        "which",
+        lambda name: sys.executable if name == f"python{EXPORTER_PYTHON_LOCK['version']}" else None,
+    )
+
+    assert adapter._exporter_base_python() == Path(sys.executable).resolve()
+
+
+def test_exporter_python_inspection_timeout_is_an_adapter_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _load_adapter_module()
+
+    def time_out(*args, **_kwargs):
+        raise subprocess.TimeoutExpired(args[0], timeout=30)
+
+    monkeypatch.setattr(adapter.subprocess, "run", time_out)
+
+    with pytest.raises(adapter.AdapterError, match="timed out after 30 seconds"):
+        adapter._exporter_base_python()
+
+
+def test_exporter_python_rejects_wrong_exact_package_versions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _load_adapter_module()
+    _requirements, actual = adapter._load_exporter_lock()
+    actual["transformers"] = "5.2.0"
+    monkeypatch.setattr(
+        adapter.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["python"], 0, json.dumps(actual), ""
+        ),
+    )
+
+    with pytest.raises(adapter.AdapterError, match='"actual": "5.2.0"'):
+        adapter._verify_exporter_python(Path(sys.executable))
+
+
+def test_exporter_python_rejects_transitive_dependency_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _load_adapter_module()
+    _requirements, actual = adapter._load_exporter_lock()
+    actual["filelock"] = "999.0"
+    monkeypatch.setattr(
+        adapter.subprocess,
+        "run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            ["python"], 0, json.dumps(actual), ""
+        ),
+    )
+
+    with pytest.raises(adapter.AdapterError, match='"filelock"'):
+        adapter._verify_exporter_python(Path(sys.executable))
+
+
+def test_edge_export_bootstrap_ignores_caller_cwd_and_pythonpath_poison(
+    tmp_path: Path,
+) -> None:
+    adapter = _load_adapter_module()
+    pinned_source = tmp_path / "pinned-edge"
+    poison_source = tmp_path / "caller-cwd"
+    output = tmp_path / "output"
+    output.mkdir()
+
+    for source, selected in ((pinned_source, "pinned"), (poison_source, "poison")):
+        package = source / "tensorrt_edgellm" / "scripts"
+        package.mkdir(parents=True)
+        (package.parent / "__init__.py").write_text("", encoding="utf-8")
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "export.py").write_text(
+            "from pathlib import Path\n"
+            "import sys\n"
+            f"Path(sys.argv[2], 'selected.txt').write_text('{selected}', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+
+    command = adapter._edge_export_command(
+        Path(sys.executable),
+        pinned_source,
+        tmp_path / "model",
+        output,
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(poison_source)
+    environment["PYTHONHOME"] = str(poison_source)
+
+    result = subprocess.run(
+        command,
+        cwd=poison_source,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert command[1:4] == ["-I", "-B", "-c"]
+    assert (output / "selected.txt").read_text(encoding="utf-8") == "pinned"
+    assert not list(pinned_source.rglob("__pycache__"))
+
+
+def test_production_probe_rejects_unqualified_prebuilt_payload_overrides(
+    tmp_path: Path,
+) -> None:
     manifest = load_implementation_manifest(MANIFEST_PATH)
-    request = _request(parameters=parameters)
+    with pytest.raises(BuildAdapterError, match="payload overrides are test-only"):
+        run_probe(manifest, _request(parameters=_prebuilt_runtime_parameters(tmp_path)))
+
+
+def test_probe_qualifies_profile_but_build_requires_internal_fake_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _load_adapter_module()
+    monkeypatch.delenv("_TRTMC_INTERNAL_QWEN_EDGE_LLM_ALLOW_FAKE_RUNTIME_BUILD", raising=False)
+    reason = "Fake runtime builds require _TRTMC_INTERNAL_QWEN_EDGE_LLM_ALLOW_FAKE_RUNTIME_BUILD=1"
+    manifest = load_implementation_manifest(MANIFEST_PATH)
+    probe = run_probe(
+        manifest,
+        _request(parameters={"runtime_build": {"fake": True}}),
+    )
+    assert probe.supported
+    assert probe.profile_id == PROFILE_ID
+    with pytest.raises(adapter.AdapterError, match=reason):
+        adapter._build_runtime_dso(
+            tmp_path / "output",
+            {"runtime_build": {"fake": True}},
+            "0" * 64,
+            _profile(adapter),
+        )
+
+
+@pytest.mark.parametrize(("model_id", "revision", "profile_id"), PROFILE_CASES)
+def test_build_stages_one_common_runtime_and_profile_bound_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_id: str,
+    revision: str,
+    profile_id: str,
+) -> None:
+    adapter = _load_adapter_module()
+    profile = _profile(adapter, model_id)
+    monkeypatch.setenv("_TRTMC_INTERNAL_QWEN_EDGE_LLM_ALLOW_FAKE_RUNTIME_BUILD", "1")
+    parameters = _prebuilt_runtime_parameters(tmp_path, profile)
+    manifest = load_implementation_manifest(MANIFEST_PATH)
+    request = _request(
+        model_id=model_id,
+        revision=revision,
+        parameters={**parameters, "public_options": MC_DEFAULT_DEPLOYMENT},
+    )
 
     build = _run_build_after_probe(manifest, request, tmp_path / "capsule-output")
 
     assert (build.artifacts_path / "engine.dir" / "llm.engine").read_bytes() == (b"fake-llm.engine")
     assert (build.artifacts_path / RUNTIME_LIBRARY).read_bytes() == b"fake-runtime-dso"
     assert (build.artifacts_path / RUNTIME_PLUGIN).read_bytes() == b"fake-edge-plugin"
-    assert build.descriptor["profile_id"] == PROFILE_ID
+    assert build.descriptor["implementation_id"] == IMPLEMENTATION_ID
+    assert build.descriptor["profile_id"] == profile_id
+    assert build.descriptor["model"] == {"id": model_id, "revision": revision}
     assert build.descriptor["operation"] == "text-generation-v1"
     assert build.descriptor["runtime"] == {
         "abi": 1,
@@ -521,30 +1640,42 @@ def test_build_stages_explicit_engine_runtime_and_plugin_payloads(tmp_path: Path
         "max_input_length": 1024,
         "vocab_size": 151936,
     }
-    assert build.descriptor["versions"]["edge_llm"] == "0.6.1"
-    assert build.descriptor["versions"]["cuda"] == "12.8"
+    assert build.descriptor["versions"]["edge_llm"] == EDGE_VERSION
+    assert build.descriptor["versions"]["cuda"] == CUDA_VERSION
+    assert build.descriptor["bundle_info"]["family"] == "qwen"
+    assert build.descriptor["bundle_info"]["model_type"] == "qwen3"
+    assert build.descriptor["bundle_info"]["hidden_size"] == profile.engine["hidden_size"]
+    assert build.descriptor["bundle_info"]["num_layers"] == profile.engine["num_hidden_layers"]
+    assert (
+        build.descriptor["bundle_info"]["num_attention_heads"]
+        == profile.engine["num_attention_heads"]
+    )
+    assert (
+        build.descriptor["bundle_info"]["num_key_value_heads"]
+        == profile.engine["num_key_value_heads"]
+    )
+    assert build.descriptor["bundle_config"]["family"] == "qwen"
+    assert build.descriptor["bundle_config"]["model_type"] == "qwen3"
     assert build.descriptor["bundle_config"]["runtime_provider"] == IMPLEMENTATION_ID
     assert "metadata" not in build.descriptor
 
-    bundle = write_optimized_bundle(tmp_path / "qwen3-edge.trtfb", manifest, request, build)
+    bundle = write_optimized_bundle(tmp_path / f"{profile_id}.trtfb", manifest, request, build)
     assert bundle.is_file()
     assert bundle.stat().st_size > sum(
         path.stat().st_size for path in build.artifacts_path.rglob("*") if path.is_file()
     )
 
 
-def test_qualified_probe_reports_wrong_tensorrt_without_bootstrapping(
+def test_qualified_probe_does_not_inspect_or_bootstrap_tensorrt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     adapter = _load_adapter_module()
-
-    def wrong_tensorrt(_runtime_build):
-        raise adapter.AdapterError("found TensorRT 11.2.0.113, not 10.14.1.48")
+    _qualify_exporter_host(adapter, monkeypatch)
 
     def forbidden_bootstrap(*_args, **_kwargs):
-        raise AssertionError("unsupported probe must not bootstrap Edge-LLM")
+        raise AssertionError("profile qualification must not inspect build software")
 
-    monkeypatch.setattr(adapter, "_resolve_tensorrt", wrong_tensorrt)
+    monkeypatch.setattr(adapter, "_resolve_tensorrt", forbidden_bootstrap)
     monkeypatch.setattr(adapter.shutil, "which", lambda command: f"/usr/bin/{command}")
     monkeypatch.setattr(adapter.importlib.util, "find_spec", lambda _module: object())
     monkeypatch.setattr(adapter, "_resolve_cuda", forbidden_bootstrap)
@@ -557,10 +1688,15 @@ def test_qualified_probe_reports_wrong_tensorrt_without_bootstrapping(
     request_path = tmp_path / "request.json"
     request_path.write_text(json.dumps(payload), encoding="utf-8")
 
-    assert adapter.main(["probe", "--request", str(request_path)]) == 1
+    assert adapter.main(["probe", "--request", str(request_path)]) == 0
     captured = capsys.readouterr()
-    assert not captured.out
-    assert "TensorRT 11.2.0.113" in captured.err
+    assert json.loads(captured.out) == {
+        "profile_id": PROFILE_ID,
+        "profile_sha256": adapter._semantic_source_sha256(_profile(adapter)),
+        "schema_version": 1,
+        "supported": True,
+    }
+    assert not captured.err
 
 
 def test_tensorrt_resolution_requires_one_exact_core_and_parser_installation(
@@ -571,18 +1707,20 @@ def test_tensorrt_resolution_requires_one_exact_core_and_parser_installation(
     include.mkdir()
     (include / "NvInfer.h").write_text("// fixture\n", encoding="utf-8")
     version_header = include / "NvInferVersion.h"
+    trt_major, trt_minor, trt_patch, trt_build = TENSORRT_VERSION_COMPONENTS
     version_header.write_text(
-        "#define NV_TENSORRT_MAJOR 10\n"
-        "#define NV_TENSORRT_MINOR 14\n"
-        "#define NV_TENSORRT_PATCH 1\n"
-        "#define NV_TENSORRT_BUILD 48\n",
+        f"#define NV_TENSORRT_MAJOR {trt_major}\n"
+        f"#define NV_TENSORRT_MINOR {trt_minor}\n"
+        f"#define NV_TENSORRT_PATCH {trt_patch}\n"
+        f"#define NV_TENSORRT_BUILD {trt_build}\n",
         encoding="utf-8",
     )
     (include / "NvOnnxParser.h").write_text("// fixture\n", encoding="utf-8")
     library_dir = tmp_path / "lib"
     library_dir.mkdir()
-    core = library_dir / "libnvinfer.so.10.14.1.48"
-    parser = library_dir / "libnvonnxparser.so.10"
+    core = library_dir / f"libnvinfer.so.{TENSORRT_VERSION}"
+    parser_version = f"{trt_major}.{trt_minor}.{trt_patch}"
+    parser = library_dir / f"libnvonnxparser.so.{parser_version}"
     core.write_bytes(b"exact TensorRT core")
     parser.write_bytes(b"exact TensorRT parser")
     runtime_build = {
@@ -591,25 +1729,46 @@ def test_tensorrt_resolution_requires_one_exact_core_and_parser_installation(
         "onnx_parser_include_dir": str(include),
         "onnx_parser_library": str(parser),
     }
-    monkeypatch.setattr(adapter, "_library_tensorrt_version", lambda _library: (10, 14, 1, 48))
+    monkeypatch.setattr(
+        adapter, "_library_tensorrt_version", lambda _library: TENSORRT_VERSION_COMPONENTS
+    )
 
     resolved = adapter._resolve_tensorrt(runtime_build)
     assert resolved.library == core
     assert resolved.onnx_parser_library == parser
 
+    mixed_parser_version = f"{trt_major}.{trt_minor + 1}.{trt_patch}"
+    mixed_parser = library_dir / f"libnvonnxparser.so.{mixed_parser_version}"
+    mixed_parser.write_bytes(b"mixed TensorRT parser")
+    runtime_build["onnx_parser_library"] = str(mixed_parser)
+    with pytest.raises(
+        adapter.AdapterError,
+        match=rf"is {re.escape(mixed_parser_version)}, not {re.escape(parser_version)}",
+    ):
+        adapter._resolve_tensorrt(runtime_build)
+    runtime_build["onnx_parser_library"] = str(parser)
+
     version_header.write_text(
         version_header.read_text(encoding="utf-8").replace(
-            "#define NV_TENSORRT_BUILD 48", "#define NV_TENSORRT_BUILD 47"
+            f"#define NV_TENSORRT_BUILD {trt_build}",
+            f"#define NV_TENSORRT_BUILD {trt_build - 1}",
         ),
         encoding="utf-8",
     )
-    with pytest.raises(adapter.AdapterError, match="10.14.1.47, not 10.14.1.48"):
+    observed = f"{trt_major}.{trt_minor}.{trt_patch}.{trt_build - 1}"
+    with pytest.raises(
+        adapter.AdapterError,
+        match=rf"{re.escape(observed)}, not {re.escape(TENSORRT_VERSION)}",
+    ):
         adapter._resolve_tensorrt(runtime_build)
 
 
 @pytest.mark.parametrize(
     ("header_version", "compiler_version"),
-    ((13000, "12.8"), (12080, "13.0")),
+    (
+        (CUDA_RUNTIME_VERSION - 10, CUDA_VERSION),
+        (CUDA_RUNTIME_VERSION, f"{CUDA_VERSION_COMPONENTS[0]}.{CUDA_VERSION_COMPONENTS[1] - 1}"),
+    ),
 )
 def test_cuda_resolution_rejects_unsupported_toolkit_components(
     tmp_path: Path,
@@ -617,20 +1776,20 @@ def test_cuda_resolution_rejects_unsupported_toolkit_components(
     compiler_version: str,
 ) -> None:
     adapter = _load_adapter_module()
-    include, _compiler, cudart = _make_cuda_toolkit(
+    include, _compiler, cudart, _driver = _make_cuda_toolkit(
         tmp_path / "cuda",
         encoded_header_version=header_version,
         compiler_version=compiler_version,
     )
 
-    with pytest.raises(adapter.AdapterError, match=r"not 12\.8"):
+    with pytest.raises(adapter.AdapterError, match=rf"not {re.escape(CUDA_VERSION)}"):
         adapter._resolve_cuda({"cuda_include_dir": str(include), "cudart_library": str(cudart)})
 
 
-def test_cuda_resolution_pins_one_coherent_12_8_toolkit(tmp_path: Path) -> None:
+def test_cuda_resolution_pins_one_coherent_locked_toolkit(tmp_path: Path) -> None:
     adapter = _load_adapter_module()
     cuda_root = tmp_path / "cuda"
-    include, compiler, cudart = _make_cuda_toolkit(cuda_root)
+    include, compiler, cudart, driver = _make_cuda_toolkit(cuda_root)
 
     resolved = adapter._resolve_cuda(
         {"cuda_include_dir": str(include), "cudart_library": str(cudart)}
@@ -639,51 +1798,134 @@ def test_cuda_resolution_pins_one_coherent_12_8_toolkit(tmp_path: Path) -> None:
     assert resolved.root == cuda_root.resolve()
     assert resolved.include_dir == include.resolve()
     assert resolved.cudart_library == cudart.resolve()
+    assert resolved.driver_library == driver.resolve()
     assert resolved.compiler == compiler.resolve()
-    assert resolved.version == "12.8"
+    assert resolved.version == CUDA_VERSION
+
+    explicit_driver = cuda_root / "lib64" / "libcuda.so"
+    explicit_driver.write_bytes(b"explicit CUDA driver library")
+    explicitly_resolved = adapter._resolve_cuda(
+        {
+            "cuda_include_dir": str(include),
+            "cudart_library": str(cudart),
+            "cuda_driver_library": str(explicit_driver),
+        }
+    )
+    assert explicitly_resolved.driver_library == explicit_driver.resolve()
 
     other_root = tmp_path / "other-cuda"
-    _other_include, _other_compiler, other_cudart = _make_cuda_toolkit(other_root)
-    with pytest.raises(adapter.AdapterError, match="same exact CUDA 12.8 toolkit"):
+    _other_include, _other_compiler, other_cudart, other_driver = _make_cuda_toolkit(other_root)
+    with pytest.raises(
+        adapter.AdapterError, match=rf"same exact CUDA {re.escape(CUDA_VERSION)} toolkit"
+    ):
         adapter._resolve_cuda(
             {"cuda_include_dir": str(include), "cudart_library": str(other_cudart)}
         )
+    with pytest.raises(
+        adapter.AdapterError, match=rf"same exact CUDA {re.escape(CUDA_VERSION)} toolkit"
+    ):
+        adapter._resolve_cuda(
+            {
+                "cuda_include_dir": str(include),
+                "cudart_library": str(cudart),
+                "cuda_driver_library": str(other_driver),
+            }
+        )
 
 
-def test_selected_build_lazily_clones_exact_edge_tag_and_commit(
+def test_cuda_resolution_requires_toolkit_driver_payload(tmp_path: Path) -> None:
+    adapter = _load_adapter_module()
+    include, _compiler, cudart, driver = _make_cuda_toolkit(tmp_path / "cuda")
+    driver.unlink()
+
+    with pytest.raises(adapter.AdapterError, match="CUDA driver stub or library"):
+        adapter._resolve_cuda({"cuda_include_dir": str(include), "cudart_library": str(cudart)})
+
+
+def test_selected_build_lazily_caches_exact_edge_source_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("_TRTMC_INTERNAL_OPTIMIZED_RUNTIME_DEPENDENCY_ROOT", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
     adapter = _load_adapter_module()
-    output = tmp_path / "output"
-    output.mkdir()
-    acquired = output / ".edge-source"
+    acquired = (
+        tmp_path
+        / "xdg-cache"
+        / "tensorrt-model-connect"
+        / "optimized-runtimes"
+        / "tensorrt-edge-llm"
+        / EDGE_COMMIT
+    )
     commands: list[list[str]] = []
+    clone_started = threading.Event()
+    second_lock_attempted = threading.Event()
+    finish_clone = threading.Event()
+    pause_clone = {"value": False}
+    clone_owner: dict[str, int | None] = {"thread": None}
 
     def validate(path: Path) -> Path:
-        if path == acquired and len(commands) == 3:
-            return acquired
+        if (path / ".fixture-ready").is_file():
+            return path.resolve()
         raise adapter.AdapterError("source not present")
 
+    def fake_run(command: list[str], _description: str) -> None:
+        commands.append(command)
+        if command[1] == "clone":
+            if pause_clone["value"]:
+                clone_owner["thread"] = threading.get_ident()
+                clone_started.set()
+                assert finish_clone.wait(timeout=10)
+            return
+        if "submodule" in command:
+            (Path(command[2]) / ".fixture-ready").write_text("ready\n", encoding="utf-8")
+
     monkeypatch.setattr(adapter, "_validate_edge_source", validate)
-    monkeypatch.setattr(
-        adapter, "_run_checked", lambda command, _description: commands.append(command)
-    )
+    monkeypatch.setattr(adapter, "_run_checked", fake_run)
 
     assert commands == []
-    assert adapter._resolve_edge_source(output, {}) == acquired
-    assert commands[0] == [
+    cold = adapter._resolve_edge_source({})
+    warm = adapter._resolve_edge_source({})
+    assert cold == warm == acquired.resolve()
+    assert commands[0][:-1] == [
         "git",
         "clone",
         "--branch",
-        "v0.6.1",
+        EDGE_TAG,
         "--single-branch",
         "--no-checkout",
         EDGE_SOURCE,
-        str(acquired),
     ]
+    assert Path(commands[0][-1]).parent == acquired.parent
     assert commands[1][-2:] == ["--detach", EDGE_COMMIT]
     assert commands[2][-4:] == ["submodule", "update", "--init", "--recursive"]
+    assert len(commands) == 3
+
+    shutil.rmtree(acquired)
+    commands.clear()
+    pause_clone["value"] = True
+    original_cache_lock = adapter._edge_cache_lock
+
+    @contextlib.contextmanager
+    def observed_cache_lock(entry: Path):
+        owner = clone_owner["thread"]
+        if owner is not None and threading.get_ident() != owner:
+            second_lock_attempted.set()
+        with original_cache_lock(entry):
+            yield
+
+    monkeypatch.setattr(adapter, "_edge_cache_lock", observed_cache_lock)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(adapter._resolve_edge_source, {})
+        assert clone_started.wait(timeout=10)
+        second = executor.submit(adapter._resolve_edge_source, {})
+        assert second_lock_attempted.wait(timeout=10)
+        finish_clone.set()
+        resolved = [first.result(timeout=10), second.result(timeout=10)]
+
+    assert resolved == [acquired.resolve(), acquired.resolve()]
+    assert sum(command[1] == "clone" for command in commands) == 1
+    assert len(commands) == 3
+    assert [path for path in acquired.parent.iterdir() if path.is_dir()] == [acquired]
 
 
 def test_selected_build_uses_ci_staged_pinned_dependency(
@@ -701,7 +1943,7 @@ def test_selected_build_uses_ci_staged_pinned_dependency(
         lambda *_args: pytest.fail("a staged CI dependency must not be fetched again"),
     )
 
-    assert adapter._resolve_edge_source(tmp_path / "output", {}) == cached.resolve()
+    assert adapter._resolve_edge_source({}) == cached.resolve()
 
 
 def test_edge_source_requires_the_pinned_clean_source_tree(
@@ -734,7 +1976,7 @@ def test_build_can_compile_the_capsule_runtime_only_after_selection(
     engine = _fake_engine(tmp_path / "prebuilt-engine")
     plugin = tmp_path / "plugin-source.so"
     plugin.write_bytes(b"fake-edge-plugin")
-    monkeypatch.setenv("_TRTMC_INTERNAL_QWEN3_06B_ALLOW_FAKE_RUNTIME_BUILD", "1")
+    monkeypatch.setenv("_TRTMC_INTERNAL_QWEN_EDGE_LLM_ALLOW_FAKE_RUNTIME_BUILD", "1")
     manifest = load_implementation_manifest(MANIFEST_PATH)
     request = _request(
         parameters={
@@ -756,34 +1998,229 @@ def test_build_can_compile_the_capsule_runtime_only_after_selection(
     assert not (output / ".runtime-build").exists()
 
 
+@pytest.mark.parametrize(
+    "reported",
+    (
+        f"{HOST_TOOLCHAIN_MAJOR - 1}.4.0",
+        f"{HOST_TOOLCHAIN_MAJOR + 1}.1.0",
+        f"clang version {HOST_TOOLCHAIN_MAJOR}",
+        "",
+    ),
+)
+def test_host_compiler_rejects_versions_outside_locked_gcc_cohort(
+    monkeypatch: pytest.MonkeyPatch, reported: str
+) -> None:
+    adapter = _load_adapter_module()
+    monkeypatch.setattr(adapter, "_run_capture", lambda *_args: reported)
+
+    with pytest.raises(adapter.AdapterError, match=rf"require GCC {HOST_TOOLCHAIN_MAJOR}"):
+        adapter._require_host_compiler(
+            Path("/usr/bin/cc"), "C", HOST_TOOLCHAIN_FAMILY, HOST_TOOLCHAIN_MAJOR
+        )
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    (
+        (f'family = "{HOST_TOOLCHAIN_FAMILY}"', 'family = "clang"'),
+        (f"major = {HOST_TOOLCHAIN_MAJOR}", "major = 0"),
+    ),
+)
+def test_dependency_lock_rejects_invalid_host_toolchain_cohorts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old: str, new: str
+) -> None:
+    adapter = _load_adapter_module()
+    lock = tmp_path / "dependency.lock"
+    lock.write_text(
+        DEPENDENCY_PATH.read_text(encoding="utf-8").replace(old, new),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(adapter, "DEPENDENCY_PATH", lock)
+
+    with pytest.raises(adapter.AdapterError, match="requires a positive GCC toolchain major"):
+        adapter._pinned_host_toolchain()
+
+
+def test_dependency_lock_selects_the_declared_positive_gcc_major(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _load_adapter_module()
+    alternate_major = HOST_TOOLCHAIN_MAJOR + 1
+    lock = tmp_path / "dependency.lock"
+    lock.write_text(
+        DEPENDENCY_PATH.read_text(encoding="utf-8").replace(
+            f"major = {HOST_TOOLCHAIN_MAJOR}", f"major = {alternate_major}"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(adapter, "DEPENDENCY_PATH", lock)
+
+    assert adapter._pinned_host_toolchain() == (HOST_TOOLCHAIN_FAMILY, alternate_major)
+
+
+def test_host_compiler_accepts_pinned_gcc_cohort(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = _load_adapter_module()
+    reported = f"{HOST_TOOLCHAIN_MAJOR}.3.0"
+    monkeypatch.setattr(adapter, "_run_capture", lambda *_args: reported)
+
+    assert (
+        adapter._require_host_compiler(
+            Path("/usr/bin/c++"), "C++", HOST_TOOLCHAIN_FAMILY, HOST_TOOLCHAIN_MAJOR
+        )
+        == reported
+    )
+
+
+def test_host_toolchain_rejects_cmake_toolchain_file_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _load_adapter_module()
+    monkeypatch.setenv("CMAKE_TOOLCHAIN_FILE", "/tmp/unqualified-toolchain.cmake")
+    monkeypatch.setattr(
+        adapter,
+        "_resolved_compiler",
+        lambda *_args: pytest.fail("toolchain resolution must not start"),
+    )
+
+    with pytest.raises(adapter.AdapterError, match="do not allow CMAKE_TOOLCHAIN_FILE"):
+        adapter._host_toolchain_identity(Path("unused"), None, None)
+
+
+def test_edge_toolchain_identity_hashes_tools_dependencies_headers_and_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _load_adapter_module()
+
+    def fixture(path: Path, content: bytes | None = None) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content or path.name.encode("utf-8"))
+        return path
+
+    source = tmp_path / "edge"
+    for relative in (
+        "CMakeLists.txt",
+        "cpp/runtime/llmInferenceRuntime.h",
+        "cpp/common/version.h",
+    ):
+        fixture(source / relative)
+    trt_include = tmp_path / "trt" / "include"
+    for name in ("NvInfer.h", "NvInferVersion.h", "NvOnnxParser.h"):
+        fixture(trt_include / name)
+    cuda_root = tmp_path / "cuda"
+    cuda_include = cuda_root / "include"
+    for name in ("cuda.h", "cuda_runtime_api.h"):
+        fixture(cuda_include / name)
+
+    cc = fixture(tmp_path / "tools" / "cc")
+    cxx = fixture(tmp_path / "tools" / "c++")
+    cmake = fixture(tmp_path / "tools" / "cmake")
+    linker = fixture(tmp_path / "tools" / "ld")
+    archiver = fixture(tmp_path / "tools" / "ar")
+    libstdcxx = fixture(tmp_path / "tools" / "libstdc++.so")
+    nvcc = fixture(cuda_root / "bin" / "nvcc", b"nvcc-v1")
+    trt_library = fixture(tmp_path / "trt" / "libnvinfer.so.11")
+    onnx_library = fixture(tmp_path / "trt" / "libnvonnxparser.so.11")
+    cudart = fixture(cuda_root / "libcudart.so")
+    driver = fixture(cuda_root / "libcuda.so")
+    tensorrt = adapter._TensorRtInstallation(trt_include, trt_library, trt_include, onnx_library)
+    cuda = adapter._CudaInstallation(cuda_root, cuda_include, cudart, driver, nvcc, CUDA_VERSION)
+
+    def resolved_compiler(environment: str, _default: str) -> Path:
+        return {"CC": cc, "CXX": cxx, "CMAKE_COMMAND": cmake}[environment]
+
+    monkeypatch.setattr(adapter, "_resolved_compiler", resolved_compiler)
+    monkeypatch.setattr(
+        adapter,
+        "_resolved_build_tool",
+        lambda _environment, _compiler, program: {"ld": linker, "ar": archiver}[program],
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_run_capture",
+        lambda command, _description: (
+            str(libstdcxx)
+            if "-print-file-name=libstdc++.so" in command
+            else ("13.3.0" if "-dumpfullversion" in command else "version")
+        ),
+    )
+
+    baseline = adapter._host_toolchain_identity(source, tensorrt, cuda)
+    monkeypatch.setenv("PATH", "/not/a/semantic/build/input")
+    monkeypatch.setenv("CMAKE_BUILD_PARALLEL_LEVEL", "99")
+    assert adapter._host_toolchain_identity(source, tensorrt, cuda).sha256 == baseline.sha256
+
+    nvcc.write_bytes(b"nvcc-v2")
+    assert adapter._host_toolchain_identity(source, tensorrt, cuda).sha256 != baseline.sha256
+
+    nvcc.write_bytes(b"nvcc-v1")
+    (trt_include / "NvInfer.h").write_bytes(b"mutated header")
+    assert adapter._host_toolchain_identity(source, tensorrt, cuda).sha256 != baseline.sha256
+
+    (trt_include / "NvInfer.h").write_bytes(b"NvInfer.h")
+    monkeypatch.setenv("CXXFLAGS", "-fno-semantic-interposition")
+    assert adapter._host_toolchain_identity(source, tensorrt, cuda).sha256 != baseline.sha256
+
+
 def test_selected_build_builds_only_required_edge_targets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = _load_adapter_module()
+    monkeypatch.delenv("_TRTMC_INTERNAL_OPTIMIZED_RUNTIME_DEPENDENCY_ROOT", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    dependency_root = tmp_path / "xdg-cache" / "tensorrt-model-connect" / "optimized-runtimes"
     source = tmp_path / "edge-source"
     source.mkdir()
     trt_include = tmp_path / "trt-include"
     trt_include.mkdir()
-    trt_library = tmp_path / "libnvinfer.so.10"
+    trt_library = tmp_path / "libnvinfer.so.11"
     trt_library.write_bytes(b"trt")
-    onnx_library = tmp_path / "libnvonnxparser.so.10"
+    onnx_library = tmp_path / "libnvonnxparser.so.11"
     onnx_library.write_bytes(b"onnx")
     cuda_root = tmp_path / "cuda"
     cuda_include = cuda_root / "include"
     cuda_include.mkdir(parents=True)
     cudart = cuda_root / "libcudart.so"
     cudart.write_bytes(b"cudart")
+    cuda_driver = cuda_root / "libcuda.so"
+    cuda_driver.write_bytes(b"cuda driver")
     cuda_compiler = cuda_root / "bin" / "nvcc"
     cuda_compiler.parent.mkdir()
     cuda_compiler.write_bytes(b"nvcc")
     tensorrt = adapter._TensorRtInstallation(trt_include, trt_library, trt_include, onnx_library)
-    cuda = adapter._CudaInstallation(cuda_root, cuda_include, cudart, cuda_compiler, "12.8")
+    cuda = adapter._CudaInstallation(
+        cuda_root, cuda_include, cudart, cuda_driver, cuda_compiler, CUDA_VERSION
+    )
     calls: list[list[str]] = []
     validated_sources: list[Path] = []
+    configure_started = threading.Event()
+    second_lock_attempted = threading.Event()
+    finish_configure = threading.Event()
+    pause_configure = {"value": False}
+    configure_owner: dict[str, int | None] = {"thread": None}
+    cc = Path(shutil.which("cc") or "/usr/bin/cc").resolve()
+    cxx = Path(shutil.which("c++") or "/usr/bin/c++").resolve()
+    linker = Path(shutil.which("ld") or "/usr/bin/ld").resolve()
+    archiver = Path(shutil.which("ar") or "/usr/bin/ar").resolve()
+    toolchain_identity = "1" * 64
+    architecture = "x86_64"
+    toolchain = adapter._EdgeBuildToolchain(
+        cc,
+        cxx,
+        linker,
+        archiver,
+        Path("cmake"),
+        toolchain_identity,
+        architecture,
+    )
 
     monkeypatch.setattr(adapter, "_resolve_edge_source", lambda *_args: source)
     monkeypatch.setattr(adapter, "_resolve_tensorrt", lambda _settings: tensorrt)
     monkeypatch.setattr(adapter, "_resolve_cuda", lambda _settings: cuda)
+    monkeypatch.setattr(
+        adapter,
+        "_host_toolchain_identity",
+        lambda _source, _tensorrt, _cuda: toolchain,
+    )
     monkeypatch.setattr(
         adapter,
         "_validate_edge_source",
@@ -792,29 +2229,31 @@ def test_selected_build_builds_only_required_edge_targets(
 
     def fake_run(command: list[str], _description: str) -> None:
         calls.append(command)
-        build_dir = tmp_path / "output" / ".edge-dependency-build"
         if command[:2] == ["cmake", "-S"]:
+            build_dir = Path(command[command.index("-B") + 1])
+            if pause_configure["value"]:
+                configure_owner["thread"] = threading.get_ident()
+                configure_started.set()
+                assert finish_configure.wait(timeout=10)
             build_dir.mkdir(parents=True)
+            definitions = {
+                argument[2:].split("=", 1)[0]: argument[2:].split("=", 1)[1]
+                for argument in command
+                if argument.startswith("-D") and "=" in argument
+            }
             (build_dir / "CMakeCache.txt").write_text(
                 "\n".join(
-                    (
+                    [
                         f"CMAKE_HOME_DIRECTORY:INTERNAL={source}",
-                        "CMAKE_BUILD_TYPE:STRING=Release",
-                        f"TRT_INCLUDE_DIR:PATH={trt_include}",
-                        f"NVINFER_LIB:FILEPATH={trt_library}",
-                        f"ONNX_PARSER_INCLUDE_DIR:PATH={trt_include}",
-                        f"NV_ONNX_PARSER_LIB:FILEPATH={onnx_library}",
-                        f"CUDA_RUNTIME_API_INCLUDE_DIR:PATH={cuda_include}",
-                        f"CUDART_LIB:FILEPATH={cudart}",
-                        f"CMAKE_CUDA_COMPILER:FILEPATH={cuda_compiler}",
-                    )
+                        *(f"{name}:STRING={value}" for name, value in definitions.items()),
+                    ]
                 ),
                 encoding="utf-8",
             )
             return
+        build_dir = Path(command[2])
         for product in (
             build_dir / "cpp" / "libedgellmCore.a",
-            build_dir / "cpp" / "libedgellmTokenizer.a",
             build_dir / "libNvInfer_edgellm_plugin.so.1.0",
             build_dir / "examples" / "llm" / "llm_build",
         ):
@@ -822,27 +2261,215 @@ def test_selected_build_builds_only_required_edge_targets(
             product.write_bytes(b"product")
 
     monkeypatch.setattr(adapter, "_run_checked", fake_run)
-    output = tmp_path / "output"
+    profile = _profile(adapter)
 
     assert calls == []
-    dependency = adapter._resolve_edge_dependency(output, {"parallel": 3})
+    dependency = adapter._resolve_edge_dependency({"parallel": 3}, profile)
 
     assert dependency.source_dir == source
+    assert (
+        dependency.build_dir.parent == (dependency_root / adapter._EDGE_BUILD_CACHE_NAME).resolve()
+    )
+    assert dependency.build_dir.name == adapter._canonical_sha256(
+        adapter._edge_build_recipe(source, tensorrt, cuda, toolchain, profile)
+    )
     assert dependency.build_tool.name == "llm_build"
     assert validated_sources == [source, source]
-    assert calls[1][-5:] == [
+    configure = calls[0]
+    assert "-DCMAKE_CUDA_ARCHITECTURES=80" in configure
+    assert "-DAARCH64_BUILD=OFF" in configure
+    assert "-DCMAKE_SKIP_RPATH=ON" in configure
+    assert "-DBUILD_PYTHON_BINDINGS=OFF" in configure
+    assert "-DENABLE_CUTE_DSL=OFF" in configure
+    assert f"-DTensorRT_INCLUDE_DIR={trt_include}" in configure
+    assert f"-DTensorRT_LIBRARY={trt_library}" in configure
+    assert f"-DTensorRT_OnnxParser_INCLUDE_DIR={trt_include}" in configure
+    assert f"-DTensorRT_OnnxParser_LIBRARY={onnx_library}" in configure
+    assert f"-DCUDA_CTK_VERSION={CUDA_VERSION}" in configure
+    assert f"-DCUDA_DRIVER_LIB={cuda_driver}" in configure
+    assert f"-DCMAKE_AR={archiver}" in configure
+    assert f"-DCMAKE_LINKER={linker}" in configure
+    assert calls[1][-4:] == [
         "--target",
         "edgellmCore",
-        "edgellmTokenizer",
         "NvInfer_edgellm_plugin",
         "llm_build",
     ]
-    reused = adapter._resolve_edge_dependency(
-        output,
-        {"parallel": 3, "edge_llm_build_dir": str(dependency.build_dir)},
-    )
+    reused = adapter._resolve_edge_dependency({"parallel": 3}, profile)
     assert reused.build_dir == dependency.build_dir
     assert len(calls) == 2
+
+    shutil.rmtree(dependency.build_dir)
+    calls.clear()
+    pause_configure["value"] = True
+    original_cache_lock = adapter._edge_cache_lock
+
+    @contextlib.contextmanager
+    def observed_cache_lock(entry: Path):
+        owner = configure_owner["thread"]
+        if owner is not None and threading.get_ident() != owner:
+            second_lock_attempted.set()
+        with original_cache_lock(entry):
+            yield
+
+    monkeypatch.setattr(adapter, "_edge_cache_lock", observed_cache_lock)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(adapter._resolve_edge_dependency, {"parallel": 3}, profile)
+        assert configure_started.wait(timeout=10)
+        second = executor.submit(adapter._resolve_edge_dependency, {"parallel": 3}, profile)
+        assert second_lock_attempted.wait(timeout=10)
+        finish_configure.set()
+        resolved = [first.result(timeout=10), second.result(timeout=10)]
+
+    assert resolved[0].build_dir == resolved[1].build_dir == dependency.build_dir
+    assert sum(command[:2] == ["cmake", "-S"] for command in calls) == 1
+    assert sum(command[:2] == ["cmake", "--build"] for command in calls) == 1
+    dependency = resolved[0]
+    explicitly_reused = adapter._resolve_edge_dependency(
+        {"parallel": 3, "edge_llm_build_dir": str(dependency.build_dir)},
+        profile,
+    )
+    assert explicitly_reused.build_dir == dependency.build_dir
+    assert len(calls) == 2
+
+    stamp = dependency.build_dir / adapter._EDGE_BUILD_STAMP
+    stamp_text = stamp.read_text(encoding="utf-8")
+    stamp_data = json.loads(stamp_text)
+    assert set(stamp_data["products"]) == {
+        "cpp/libedgellmCore.a",
+        "examples/llm/llm_build",
+        "libNvInfer_edgellm_plugin.so.1.0",
+    }
+    assert stamp_data["recipe_sha256"] == adapter._canonical_sha256(stamp_data["recipe"])
+
+    products = adapter._edge_products(dependency.build_dir)
+    assert products is not None
+    plugin = products[1]
+    plugin.write_bytes(b"mutated plugin")
+    with pytest.raises(adapter.AdapterError, match="does not match the pinned source"):
+        adapter._resolve_edge_dependency(
+            {"parallel": 3, "edge_llm_build_dir": str(dependency.build_dir)},
+            profile,
+        )
+    plugin.write_bytes(b"product")
+
+    stamp.unlink()
+    with pytest.raises(adapter.AdapterError, match="does not match the pinned source"):
+        adapter._resolve_edge_dependency(
+            {"parallel": 3, "edge_llm_build_dir": str(dependency.build_dir)},
+            profile,
+        )
+    stamp.write_text(stamp_text, encoding="utf-8")
+
+    mutated_stamp = json.loads(stamp_text)
+    mutated_stamp["recipe_sha256"] = "0" * 64
+    stamp.write_text(json.dumps(mutated_stamp), encoding="utf-8")
+    with pytest.raises(adapter.AdapterError, match="does not match the pinned source"):
+        adapter._resolve_edge_dependency(
+            {"parallel": 3, "edge_llm_build_dir": str(dependency.build_dir)},
+            profile,
+        )
+    stamp.write_text(stamp_text, encoding="utf-8")
+
+
+def test_runtime_dso_build_receives_exact_cuda_driver_library(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _load_adapter_module()
+    source = tmp_path / "edge-source"
+    source.mkdir()
+    edge_build = tmp_path / "edge-build"
+    edge_build.mkdir()
+    include = tmp_path / "include"
+    include.mkdir()
+    placeholder = tmp_path / "placeholder"
+    placeholder.write_bytes(b"fixture")
+    driver = tmp_path / "cuda" / "lib64" / "stubs" / "libcuda.so"
+    driver.parent.mkdir(parents=True)
+    driver.write_bytes(b"CUDA driver stub")
+    selected_cc = Path(shutil.which("cc") or "/usr/bin/cc").resolve()
+    selected_cxx = Path(shutil.which("c++") or "/usr/bin/c++").resolve()
+    toolchain = adapter._EdgeBuildToolchain(
+        selected_cc,
+        selected_cxx,
+        Path(shutil.which("ld") or "/usr/bin/ld").resolve(),
+        Path(shutil.which("ar") or "/usr/bin/ar").resolve(),
+        Path("cmake"),
+        "2" * 64,
+        "x86_64",
+    )
+    dependency = adapter._EdgeDependency(
+        source,
+        edge_build,
+        placeholder,
+        adapter._TensorRtInstallation(include, placeholder, include, placeholder),
+        adapter._CudaInstallation(
+            tmp_path / "cuda", include, placeholder, driver, placeholder, CUDA_VERSION
+        ),
+        toolchain,
+    )
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(adapter, "_resolve_edge_dependency", lambda *_args: dependency)
+    monkeypatch.setattr(adapter, "_validate_edge_source", lambda path: path)
+    monkeypatch.setattr(adapter, "_validate_packaged_elf", lambda _path: None)
+
+    def fake_run(command: list[str], _description: str) -> None:
+        calls.append(command)
+        if command[:2] != ["cmake", "--build"]:
+            return
+        runtime_build = tmp_path / "output" / ".runtime-build"
+        runtime_build.mkdir(parents=True)
+        (runtime_build / RUNTIME_LIBRARY).write_bytes(b"runtime")
+        (runtime_build / RUNTIME_PLUGIN).write_bytes(b"plugin")
+
+    monkeypatch.setattr(adapter, "_run_checked", fake_run)
+    runtime, plugin, resolved = adapter._build_runtime_dso(
+        tmp_path / "output",
+        {
+            "runtime_build": {
+                "sdk_include_dir": str(tmp_path / "sdk"),
+                "nlohmann_json_include_dir": str(tmp_path / "json"),
+            }
+        },
+        "0" * 64,
+        _profile(adapter),
+    )
+
+    assert runtime.name == RUNTIME_LIBRARY
+    assert plugin is not None and plugin.name == RUNTIME_PLUGIN
+    assert resolved is dependency
+    assert f"-DTRTMC_CUDA_DRIVER_LIBRARY={driver}" in calls[0]
+    assert f"-DCMAKE_C_COMPILER={selected_cc}" in calls[0]
+    assert f"-DCMAKE_CXX_COMPILER={selected_cxx}" in calls[0]
+    assert f"-DCMAKE_CUDA_HOST_COMPILER={selected_cxx}" in calls[0]
+
+
+@pytest.mark.parametrize("runpath", ("/build/tensorrt", "$ORIGIN", "../lib"))
+def test_real_payload_validation_rejects_every_runpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runpath: str
+) -> None:
+    adapter = _load_adapter_module()
+    payload = tmp_path / "runtime.so"
+    payload.write_bytes(b"ELF fixture")
+    header = """
+  Class:                             ELF64
+  Machine:                           Advanced Micro Devices X86-64
+"""
+    dynamic = f"""
+ 0x0000000000000001 (NEEDED) Shared library: [libcuda.so.1]
+ 0x0000000000000001 (NEEDED) Shared library: [libcudart.so.13]
+ 0x0000000000000001 (NEEDED) Shared library: [libnvinfer.so.11]
+ 0x000000000000001d (RUNPATH) Library runpath: [{runpath}]
+"""
+    monkeypatch.setattr(
+        adapter,
+        "_run_capture",
+        lambda command, _description: header if "-h" in command else dynamic,
+    )
+
+    with pytest.raises(adapter.AdapterError, match="forbidden RPATH/RUNPATH"):
+        adapter._validate_packaged_elf(payload)
 
 
 def test_engine_export_uses_pinned_dependency_tools_despite_ambient_poison(
@@ -850,7 +2477,7 @@ def test_engine_export_uses_pinned_dependency_tools_despite_ambient_poison(
 ) -> None:
     adapter = _load_adapter_module()
     source = tmp_path / "edge-source"
-    export_script = source / "tensorrt_edgellm" / "scripts" / "export_llm.py"
+    export_script = source / "tensorrt_edgellm" / "scripts" / "export.py"
     export_script.parent.mkdir(parents=True)
     export_script.write_text("# pinned exporter\n", encoding="utf-8")
     build_dir = tmp_path / "edge-build"
@@ -867,15 +2494,17 @@ def test_engine_export_uses_pinned_dependency_tools_despite_ambient_poison(
         source,
         build_dir,
         build_tool,
-        plugin,
         adapter._TensorRtInstallation(include, placeholder, include, placeholder),
-        adapter._CudaInstallation(tmp_path, include, placeholder, placeholder, "12.8"),
+        adapter._CudaInstallation(
+            tmp_path, include, placeholder, placeholder, placeholder, CUDA_VERSION
+        ),
+        _fake_edge_toolchain(adapter, placeholder),
     )
     model_source = tmp_path / "model"
     model_source.mkdir()
     poison_bin = tmp_path / "poison-bin"
     poison_bin.mkdir()
-    for name in ("tensorrt-edgellm-export-llm", "llm_build"):
+    for name in ("tensorrt-edgellm-export", "llm_build"):
         poison_tool = poison_bin / name
         poison_tool.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
         poison_tool.chmod(0o755)
@@ -883,11 +2512,14 @@ def test_engine_export_uses_pinned_dependency_tools_despite_ambient_poison(
     ambient_package = ambient_python / "tensorrt_edgellm" / "__init__.py"
     ambient_package.parent.mkdir(parents=True)
     ambient_package.write_text("raise RuntimeError('ambient poison')\n", encoding="utf-8")
-    invocations: list[tuple[list[str], object]] = []
+    invocations: list[tuple[list[str], object, Path | None]] = []
     validated_sources: list[Path] = []
 
-    monkeypatch.setattr(adapter, "_probe_build_device", lambda: None)
-    monkeypatch.setattr(adapter, "_materialize_model_source", lambda _source: model_source)
+    monkeypatch.setattr(adapter, "_probe_build_device", lambda _profile: None)
+    monkeypatch.setattr(adapter, "_materialize_exporter_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(
+        adapter, "_materialize_model_source", lambda _source, _profile, _revision: model_source
+    )
     monkeypatch.setattr(
         adapter,
         "_validate_edge_source",
@@ -896,22 +2528,14 @@ def test_engine_export_uses_pinned_dependency_tools_despite_ambient_poison(
     monkeypatch.setenv("PATH", str(poison_bin))
     monkeypatch.setenv("PYTHONPATH", str(ambient_python))
 
-    def fake_tool(command, *, verbose, environment=None):
+    def fake_tool(command, *, verbose, environment=None, cwd=None):
         del verbose
-        invocations.append((command, environment))
+        invocations.append((command, environment, cwd))
         engine_argument = next((item for item in command if item.startswith("--engineDir=")), None)
         if engine_argument is None:
             return
         engine = Path(engine_argument.split("=", 1)[1])
-        _fake_engine_contents = {
-            "vocab_size": 151936,
-            "edgellm_version": "0.6.1",
-            "builder_config": {
-                "max_input_len": 1024,
-                "max_kv_cache_capacity": 4096,
-                "max_batch_size": 4,
-            },
-        }
+        _fake_engine_contents = _fake_engine_config()
         (engine / "config.json").write_text(json.dumps(_fake_engine_contents), encoding="utf-8")
         for filename in (
             "llm.engine",
@@ -924,19 +2548,27 @@ def test_engine_export_uses_pinned_dependency_tools_despite_ambient_poison(
 
     monkeypatch.setattr(adapter, "_run_tool", fake_tool)
     engine, _vocab_size, attempt = adapter._build_or_resolve_engine(
-        {}, tmp_path / "output", dependency, plugin
+        {}, tmp_path / "output", dependency, plugin, _profile(adapter), MODEL_REVISION
     )
 
     assert engine.name == "engine.dir"
-    assert invocations[0][0][:2] == [sys.executable, str(export_script)]
-    assert invocations[0][1]["PYTHONPATH"] == str(source)
-    assert str(ambient_python) not in invocations[0][1]["PYTHONPATH"]
+    assert attempt is not None
+    assert invocations[0][0] == adapter._edge_export_command(
+        Path(sys.executable), source, model_source, attempt / "output_root"
+    )
+    assert invocations[0][0][1:3] == ["-I", "-B"]
+    assert "PYTHONPATH" not in invocations[0][1]
+    assert invocations[0][1]["LOGNAME"] == f"trtmc-edgellm-{os.getuid()}"
+    assert invocations[0][1]["USER"] == f"trtmc-edgellm-{os.getuid()}"
     assert invocations[0][1]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert invocations[0][1]["PYTHONNOUSERSITE"] == "1"
+    assert invocations[0][1]["PIP_CONFIG_FILE"] == os.devnull
+    assert invocations[0][2] == attempt / ".tool-cwd"
     assert invocations[1][0][0] == str(build_tool)
+    assert f"--onnxDir={attempt / 'output_root' / 'llm'}" in invocations[1][0]
     assert invocations[1][1]["EDGELLM_PLUGIN_PATH"] == str(plugin)
+    assert invocations[1][2] == attempt / ".tool-cwd"
     assert validated_sources == [source, source, source]
-    assert attempt is not None
 
 
 def test_engine_build_revalidates_source_after_each_tool(
@@ -944,7 +2576,7 @@ def test_engine_build_revalidates_source_after_each_tool(
 ) -> None:
     adapter = _load_adapter_module()
     source = tmp_path / "edge-source"
-    export_script = source / "tensorrt_edgellm" / "scripts" / "export_llm.py"
+    export_script = source / "tensorrt_edgellm" / "scripts" / "export.py"
     export_script.parent.mkdir(parents=True)
     export_script.write_text("# pinned exporter\n", encoding="utf-8")
     build_dir = tmp_path / "edge-build"
@@ -961,9 +2593,11 @@ def test_engine_build_revalidates_source_after_each_tool(
         source,
         build_dir,
         build_tool,
-        plugin,
         adapter._TensorRtInstallation(include, placeholder, include, placeholder),
-        adapter._CudaInstallation(tmp_path, include, placeholder, placeholder, "12.8"),
+        adapter._CudaInstallation(
+            tmp_path, include, placeholder, placeholder, placeholder, CUDA_VERSION
+        ),
+        _fake_edge_toolchain(adapter, placeholder),
     )
     model_source = tmp_path / "model"
     model_source.mkdir()
@@ -971,8 +2605,11 @@ def test_engine_build_revalidates_source_after_each_tool(
     validations: list[Path] = []
     tool_calls: list[list[str]] = []
 
-    monkeypatch.setattr(adapter, "_probe_build_device", lambda: None)
-    monkeypatch.setattr(adapter, "_materialize_model_source", lambda _source: model_source)
+    monkeypatch.setattr(adapter, "_probe_build_device", lambda _profile: None)
+    monkeypatch.setattr(adapter, "_materialize_exporter_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(
+        adapter, "_materialize_model_source", lambda _source, _profile, _revision: model_source
+    )
 
     def validate(path: Path) -> Path:
         validations.append(path)
@@ -980,8 +2617,8 @@ def test_engine_build_revalidates_source_after_each_tool(
             raise adapter.AdapterError("post-build pinned-source mutation")
         return path
 
-    def mutate_after_build(command, *, verbose, environment=None):
-        del verbose, environment
+    def mutate_after_build(command, *, verbose, environment=None, cwd=None):
+        del verbose, environment, cwd
         tool_calls.append(command)
         if command[0] == str(build_tool):
             mutation.write_text("poison\n", encoding="utf-8")
@@ -991,7 +2628,9 @@ def test_engine_build_revalidates_source_after_each_tool(
 
     output = tmp_path / "output"
     with pytest.raises(adapter.AdapterError, match="post-build pinned-source mutation"):
-        adapter._build_or_resolve_engine({}, output, dependency, plugin)
+        adapter._build_or_resolve_engine(
+            {}, output, dependency, plugin, _profile(adapter), MODEL_REVISION
+        )
 
     assert len(tool_calls) == 2
     assert validations == [source, source, source]
@@ -1017,3 +2656,37 @@ def test_verbose_edge_tool_logs_never_pollute_json_stdout(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "child stdout\nchild stderr\n"
+
+
+@pytest.mark.parametrize("failure_stream", ("stderr", "stdout"))
+@pytest.mark.parametrize("verbose", (False, True))
+def test_failed_edge_tool_exposes_bounded_output_tail_before_transport_limit(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure_stream: str,
+    verbose: bool,
+) -> None:
+    adapter = _load_adapter_module()
+    leading = f"{failure_stream.upper()}-LEADING-NOISE"
+    trailing = f"{failure_stream.upper()}-FINAL-TRACEBACK"
+    failure_output = f"{leading}\n{'x' * 5000}\n{trailing}\n"
+    completed = subprocess.CompletedProcess(
+        ["edge-tool", "--flag"],
+        returncode=17,
+        stdout=failure_output if failure_stream == "stdout" else "ignored stdout\n",
+        stderr=failure_output if failure_stream == "stderr" else " \n",
+    )
+    monkeypatch.setattr(adapter.subprocess, "run", lambda *_args, **_kwargs: completed)
+
+    with pytest.raises(adapter.AdapterError) as failure:
+        adapter._run_tool(["edge-tool", "--flag"], verbose=verbose)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == ""
+    message = str(failure.value)
+    assert leading not in message
+    assert f"{failure_stream} tail" in message
+    assert "leading characters omitted" in message
+    assert "Command: edge-tool --flag" in message
+    assert trailing in ("Qwen adapter error: " + message)[:4000]

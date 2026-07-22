@@ -354,6 +354,30 @@ jobs:
       suite: premerge
     secrets: inherit
 
+  optimized-runtime-proof:
+    name: 4 / Optimized runtime qualification
+    needs:
+      - legal
+      - impact
+      - unit-tests
+    if: >-
+      ${{
+        always() &&
+        needs.legal.outputs.authorized == 'true' &&
+        (
+          (needs.impact.outputs.run_unit_tests == 'true' &&
+           needs.unit-tests.result == 'success') ||
+          (needs.impact.outputs.run_unit_tests == 'false' &&
+           needs.unit-tests.result == 'skipped')
+        )
+      }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/optimized-runtime-proof.yml
+    with:
+      base_revision: ${{ needs.legal.outputs.base_sha }}
+      revision: ${{ needs.legal.outputs.tested_sha }}
+
   no-model:
     name: 4 / No model changes
     needs:
@@ -653,6 +677,7 @@ jobs:
       - source-quality
       - unit-tests
       - model-proof
+      - optimized-runtime-proof
       - no-model
       - report
     if: ${{ always() }}
@@ -671,6 +696,8 @@ jobs:
           UNIT_RESULT: ${{ needs.unit-tests.result }}
           RUN_UNIT_TESTS: ${{ needs.impact.outputs.run_unit_tests }}
           MODEL_RESULT: ${{ needs.model-proof.result }}
+          OPTIMIZED_RUNTIME_RESULT: ${{ needs.optimized-runtime-proof.result }}
+          OPTIMIZED_RUNTIME_SELECTED: ${{ needs.optimized-runtime-proof.outputs.selected }}
           NO_MODEL_RESULT: ${{ needs.no-model.result }}
           REPORT_RESULT: ${{ needs.report.result }}
           HAS_MODELS: ${{ needs.impact.outputs.has_models }}
@@ -723,6 +750,18 @@ jobs:
             echo "::error::Combined HTML report result: $REPORT_RESULT"
             exit 1
           }
+
+          test "$OPTIMIZED_RUNTIME_RESULT" = "success" || {
+            echo "::error::Optimized-runtime qualification result: $OPTIMIZED_RUNTIME_RESULT"
+            exit 1
+          }
+          case "$OPTIMIZED_RUNTIME_SELECTED" in
+            true | false) ;;
+            *)
+              echo "::error::Optimized-runtime selection output is invalid: $OPTIMIZED_RUNTIME_SELECTED"
+              exit 1
+              ;;
+          esac
 
           case "$HAS_MODELS" in
             true)

@@ -68,18 +68,11 @@ print(json.dumps({{
 
         manifest_path = capsule / "IMPLEMENTATION.toml"
         manifest_path.write_text(
-            f'''schema_version = 1
+            f'''schema_version = 2
 implementation_id = "{IMPLEMENTATION_ID}"
 downstream_runtime = "test-optimized-runtime"
 downstream_version = "test-runtime-1.0"
 downstream_commit = "test-runtime-commit"
-
-[model]
-id = "{MODEL_ID}"
-revisions = ["0123456789abcdef"]
-
-[target]
-os = "linux"
 
 [build]
 entrypoint = "builder/adapter.py"
@@ -103,6 +96,7 @@ abi = 1
         probe = ProbeResult(
             supported=True,
             profile_id="a100-fp16-b4",
+            profile_sha256="a" * 64,
         )
         build = run_build(manifest, request, root / "build", probe=probe)
         bundle = root / "writer-output.trtfb"

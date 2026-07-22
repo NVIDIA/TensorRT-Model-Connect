@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version = 2
+kind = "producer"
+id = "qwen-tensorrt-edge-llm-a100-sm80"
+runtime_id = "tensorrt-edge-llm"
+representative = true
+entrypoint = "tests/e2e/models/qwen/edge_llm_adapter/run_a100_ci.sh"
+container_image = "gitlab-master.nvidia.com:5005/dl/transformerengine/transformerengine:te_ci-core-py3.58969074-devel-amd64@sha256:ba20bc3bbf96bd0973fc2a20a803e2c340bc56bf99f8eacf28cf9acbae1e2fa4"
+runner_labels = ["self-hosted", "linux", "x64", "trtmc-a100-80gb-pcie-proof"]
+profile_glob = "python/tensorrt_model_connect/families/qwen/edge_llm_adapter/profiles/*.toml"
+trigger_globs = [
+  "python/tensorrt_model_connect/families/qwen/edge_llm_adapter/**",
+  "src/runtime/models/qwen/edge_llm_adapter/**",
+  "tests/e2e/models/qwen/edge_llm_adapter/**",
+]
+representative_trigger_globs = [
+  ".github/workflows/optimized-runtime-proof.yml",
+  ".github/workflows/trtmc-ci.yml",
+  "CMakeLists.txt",
+  "_pyproject_backend.py",
+  "cmake/**",
+  "conanfile.py",
+  "include/trtmc/**",
+  "pyproject.toml",
+  "python/tensorrt_model_connect/__init__.py",
+  "python/tensorrt_model_connect/__main__.py",
+  "python/tensorrt_model_connect/build_cli.py",
+  "python/tensorrt_model_connect/bundle_writer.py",
+  "python/tensorrt_model_connect/config.py",
+  "python/tensorrt_model_connect/engine_builder.py",
+  "python/tensorrt_model_connect/families/__init__.py",
+  "python/tensorrt_model_connect/pipeline.py",
+  "python/tensorrt_model_connect/runtime_provider/**",
+  "src/bundle/**",
+  "src/runtime/backend/**",
+  "src/runtime/config/**",
+  "src/runtime/core/**",
+  "src/runtime/providers/optimized_runtime_**",
+  "src/runtime/registry/**",
+  "src/utils/sha256.h",
+  "tools/ci/optimized_runtime_qualifications.py",
+]
+
+[profile_target]
+os = "linux"
+architecture = "x86_64"
+platform_kind = "discrete"
+gpu_architecture = "sm80"
+gpu_name = "NVIDIA A100 80GB PCIe"

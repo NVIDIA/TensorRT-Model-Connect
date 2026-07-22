@@ -3,9 +3,5 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-TRTMC_QWEN_EDGE_FACTORY_1 {
-  global:
-    trtmc_get_optimized_runtime_factory_v1;
-  local:
-    *;
-};
+// Force CUDA device linking for the edgellmCore static archive embedded in
+// this otherwise C++-only runtime DSO.

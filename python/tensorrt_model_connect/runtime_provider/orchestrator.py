@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Any, Iterable, Mapping
 
 from .provider_process import (
     _ACTIVE_CUDA_DEVICE_ENV,
+    BuildAdapterError,
     ProbeResult,
     run_build,
     run_probe,
@@ -21,13 +23,15 @@ from .manifest import (
     AmbiguousImplementationError,
     ImplementationManifest,
     ImplementationRequest,
-    ManifestDiscoveryError,
-    discover_implementations_for_model,
+    discover_implementations,
 )
 from .target import (
     TargetResolutionError,
     _probe_current_target_with_device,
 )
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -60,25 +64,15 @@ def family_implementation_root(family_name: str) -> Path | None:
     return family_root
 
 
-def discover_family_implementations_for_model(
+def discover_family_implementations(
     family_name: str,
-    model_id: str,
 ) -> tuple[ImplementationManifest, ...]:
-    """Discover candidates only inside the request's owning model family."""
+    """Discover runtime adapters only inside the request's owning model family."""
 
     family_root = family_implementation_root(family_name)
     if family_root is None:
         return ()
-    manifests = discover_implementations_for_model(family_root, model_id)
-    resolved_family_root = family_root.resolve()
-    for manifest in manifests:
-        try:
-            manifest.path.relative_to(resolved_family_root)
-        except ValueError as exc:  # Defensive; discovery is rooted above.
-            raise ManifestDiscoveryError(
-                f"Model-family adapter manifest escapes {resolved_family_root}: {manifest.path}"
-            ) from exc
-    return manifests
+    return discover_implementations(family_root)
 
 
 def _model_source_identity(model_ref: str) -> tuple[str, str] | None:
@@ -113,16 +107,27 @@ def select_delegated_build(
     """Probe exact candidates and enforce one authoritative production path."""
 
     candidates = sorted(
-        (manifest for manifest in manifests if manifest.matches(request)),
+        manifests,
         key=lambda manifest: (manifest.implementation_id, str(manifest.path)),
     )
     supported: list[DelegatedBuildSelection] = []
     for manifest in candidates:
-        probe = run_probe(
-            manifest,
-            request,
-            _adapter_environment=_adapter_environment,
-        )
+        try:
+            probe = run_probe(
+                manifest,
+                request,
+                _adapter_environment=_adapter_environment,
+            )
+        except BuildAdapterError as exc:
+            # Probe is the support-claim boundary. Before a successful claim,
+            # keep a broken capsule isolated from independently owned sibling
+            # adapters. Once selected, build failures remain terminal.
+            _LOGGER.warning(
+                "Ignoring optimized-runtime adapter %s after probe failure: %s",
+                manifest.implementation_id,
+                exc,
+            )
+            continue
         if probe.supported:
             supported.append(
                 DelegatedBuildSelection(
@@ -186,7 +191,7 @@ def try_build_optimized_runtime(
     if identity is None:
         return None
     model_id, model_revision = identity
-    available = discover_family_implementations_for_model(family_name, model_id)
+    available = discover_family_implementations(family_name)
     if not available:
         return None
     try:
