@@ -648,7 +648,7 @@ def test_premerge_ci_exposes_the_model_owned_dependency_graph() -> None:
     assert "name: 4 / Model / ${{ matrix.model }} [${{ matrix.selection_kind }}]" in model_proof
     assert "fail-fast: true" in model_proof
     assert "continue-on-error" not in model_proof
-    assert "max-parallel: 16" in model_proof
+    assert "max-parallel:" not in model_proof
     assert "matrix: ${{ fromJSON(needs.impact.outputs.matrix) }}" in model_proof
     assert "model: ${{ matrix.model }}" in model_proof
     assert "models: ${{ needs.impact.outputs.affected_models }}" not in model_proof
@@ -941,7 +941,7 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
     assert "needs.cache-warm.result == 'success'" in model_proof
     assert "needs.package.result == 'success'" in model_proof
     assert "fail-fast: false" in model_proof
-    assert "max-parallel: 16" in model_proof
+    assert "max-parallel:" not in model_proof
     assert "matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
     assert "model: ${{ matrix.model }}" in model_proof
@@ -1003,12 +1003,23 @@ def test_nightly_self_hosted_stages_use_the_configured_proof_runner_pool() -> No
 
     for start, end in (
         ("unit-tests", "cache-warm"),
-        ("cache-warm", "package"),
         ("package", "model-proof"),
         ("diffusion-vlm", "report"),
     ):
         block = text.split(f"\n  {start}:", maxsplit=1)[1].split(f"\n  {end}:", maxsplit=1)[0]
         assert selector in block
+
+
+def test_nightly_warms_the_shared_cache_once_on_each_gpu_node() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    cache = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
+
+    assert "name: 3 / HF cache / ${{ matrix.node_label }}" in cache
+    assert "fail-fast: false" in cache
+    assert "runs-on: ${{ matrix.node_label }}" in cache
+    assert cache.count("- trtmc-node-") == 2
+    for node in ("gb300-nvl-019-compute01", "gb300-nvl-019-compute02"):
+        assert f"trtmc-node-{node}" in cache
 
 
 def test_nightly_strictly_warms_all_active_non_multi_device_cases() -> None:

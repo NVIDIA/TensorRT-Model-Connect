@@ -272,7 +272,7 @@ jobs:
           fi
 
   cache-warm:
-    name: 3 / HF cache / Active single-GPU nightly cases
+    name: 3 / HF cache / ${{ matrix.node_label }}
     needs:
       - legal
       - inventory
@@ -281,7 +281,13 @@ jobs:
         needs.legal.result == 'success' &&
         needs.inventory.result == 'success'
       }}
-    runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        node_label:
+          - trtmc-node-gb300-nvl-019-compute01
+          - trtmc-node-gb300-nvl-019-compute02
+    runs-on: ${{ matrix.node_label }}
     timeout-minutes: 240
     permissions:
       contents: read
@@ -484,7 +490,6 @@ jobs:
       # A failed model invalidates the nightly, but every sibling proof still
       # runs so one nightly captures the complete failure set.
       fail-fast: false
-      max-parallel: 16
       matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
     permissions:
       contents: read

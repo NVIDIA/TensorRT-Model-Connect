@@ -3685,9 +3685,9 @@ def test_gpu_mapping_exists_only_on_the_hermetic_proof_container() -> None:
     assert '"resource_class": self.resource_class' in allocator
     assert '"gpu_resource_class": self.resource_class' in allocator
     assert '"gpu_lease_evidence": "gpu-lease.json"' in inner
-    assert (
-        "TRTMC_MODEL_PROOF_GPU_IDS: ${{ vars.TRTMC_MODEL_PROOF_GPU_IDS || '0,1,2,3' }}" in workflow
-    )
+    assert "vars.TRTMC_MODEL_PROOF_GPU_IDS" not in workflow
+    assert "\n      TRTMC_MODEL_PROOF_GPU_IDS:" not in workflow
+    assert "TRTMC_MODEL_PROOF_SLOTS_PER_GPU" in workflow
     assert (
         "TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS: "
         "${{ vars.TRTMC_MODEL_PROOF_GPU_LEASE_TIMEOUT_SECONDS || "
