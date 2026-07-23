@@ -44,7 +44,7 @@ jobs:
   inventory:
     name: 2 / All-model inventory
     needs: legal
-    if: ${{ needs.legal.result == 'success' }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -59,22 +59,24 @@ jobs:
       mode: ${{ steps.inventory.outputs.mode }}
 
     steps:
-      - name: Check out certified nightly snapshot
+      - name: Check out exact nightly snapshot
+        id: checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.legal.outputs.tested_sha }}
+          ref: ${{ needs.legal.outputs.tested_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Validate ownership manifests
         env:
-          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha || github.sha }}
         run: python3 tools/model_ci.py validate --revision "$TESTED_SHA"
 
       - name: Select every ownership model
         id: inventory
+        if: ${{ !cancelled() && steps.checkout.outcome == 'success' }}
         env:
-          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha || github.sha }}
         run: |
           set -euo pipefail
           python3 tools/model_ci.py all \
@@ -82,8 +84,9 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
       - name: Verify and summarize full inventory
+        if: ${{ !cancelled() && steps.inventory.outcome == 'success' }}
         env:
-          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha || github.sha }}
           HAS_MODELS: ${{ steps.inventory.outputs.has_models }}
           EXPECTED_COUNT: ${{ steps.inventory.outputs.expected_count }}
           EXPECTED_CASES_BY_MODEL: ${{ steps.inventory.outputs.expected_cases_by_model }}
@@ -139,11 +142,7 @@ jobs:
     needs:
       - legal
       - inventory
-    if: >-
-      ${{
-        needs.legal.result == 'success' &&
-        needs.inventory.result == 'success'
-      }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -160,16 +159,16 @@ jobs:
       HF_MODULES_CACHE: ""
 
     steps:
-      - name: Check out certified nightly snapshot
+      - name: Check out exact nightly snapshot
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.legal.outputs.tested_sha }}
+          ref: ${{ needs.legal.outputs.tested_sha || github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Resolve source-quality comparison base
         env:
-          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha || github.sha }}
         run: |
           set -euo pipefail
           tested_sha="$(git rev-parse "${TESTED_SHA}^{commit}")"
@@ -202,18 +201,14 @@ jobs:
     needs:
       - legal
       - inventory
-    if: >-
-      ${{
-        needs.legal.result == 'success' &&
-        needs.inventory.result == 'success'
-      }}
+    if: ${{ !cancelled() }}
     runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 180
     permissions:
       contents: read
       packages: read
     env:
-      CI_BASE_REF: ${{ needs.legal.outputs.tested_sha }}
+      CI_BASE_REF: ${{ needs.legal.outputs.tested_sha || github.sha }}
       TRTMC_CI_CONTAINER_NAME: trtmc-nightly-unit-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-unit-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CI_HARDENED: "true"
@@ -222,10 +217,10 @@ jobs:
       TRTMC_PREMERGE_UNIT_SCOPE: all
 
     steps:
-      - name: Check out certified nightly snapshot
+      - name: Check out exact nightly snapshot
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.legal.outputs.tested_sha }}
+          ref: ${{ needs.legal.outputs.tested_sha || github.sha }}
           path: nightly-unit-${{ github.run_id }}-${{ github.run_attempt }}
           fetch-depth: 0
           persist-credentials: false
@@ -276,11 +271,7 @@ jobs:
     needs:
       - legal
       - inventory
-    if: >-
-      ${{
-        needs.legal.result == 'success' &&
-        needs.inventory.result == 'success'
-      }}
+    if: ${{ !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -304,10 +295,10 @@ jobs:
       HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
-      - name: Check out certified nightly snapshot
+      - name: Check out exact nightly snapshot
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.legal.outputs.tested_sha }}
+          ref: ${{ needs.legal.outputs.tested_sha || github.sha }}
           path: nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
           fetch-depth: 1
           persist-credentials: false
@@ -363,11 +354,7 @@ jobs:
     needs:
       - legal
       - inventory
-    if: >-
-      ${{
-        needs.legal.result == 'success' &&
-        needs.inventory.result == 'success'
-      }}
+    if: ${{ !cancelled() }}
     runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 330
     permissions:
@@ -388,10 +375,10 @@ jobs:
       HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
-      - name: Check out certified nightly snapshot
+      - name: Check out exact nightly snapshot
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.legal.outputs.tested_sha }}
+          ref: ${{ needs.legal.outputs.tested_sha || github.sha }}
           path: nightly-package-${{ github.run_id }}-${{ github.run_attempt }}
           fetch-depth: 1
           persist-credentials: false
@@ -477,13 +464,7 @@ jobs:
       - package
     if: >-
       ${{
-        always() &&
-        needs.legal.result == 'success' &&
-        needs.inventory.result == 'success' &&
-        needs.source-quality.result == 'success' &&
-        needs.unit-tests.result == 'success' &&
-        needs.cache-warm.result == 'success' &&
-        needs.package.result == 'success' &&
+        !cancelled() &&
         needs.inventory.outputs.has_models == 'true'
       }}
     strategy:
@@ -497,7 +478,7 @@ jobs:
     uses: ./.github/workflows/model-proof.yml
     with:
       model: ${{ matrix.model }}
-      revision: ${{ needs.legal.outputs.tested_sha }}
+      revision: ${{ needs.legal.outputs.tested_sha || github.sha }}
       suite: nightly
 
   diffusion-vlm:
@@ -508,10 +489,8 @@ jobs:
       - model-proof
     if: >-
       ${{
-        always() &&
-        needs.legal.result == 'success' &&
-        needs.inventory.result == 'success' &&
-        needs.model-proof.result == 'success'
+        !cancelled() &&
+        needs.inventory.outputs.has_models == 'true'
       }}
     runs-on: ${{ fromJSON(vars.TRTMC_MODEL_RUNNER_LABELS || vars.TRTMC_RUNNER_LABELS || '["self-hosted"]') }}
     timeout-minutes: 420
@@ -531,10 +510,10 @@ jobs:
       HUGGING_FACE_HUB_TOKEN: ${{ secrets.HF_TOKEN }}
 
     steps:
-      - name: Check out certified nightly snapshot
+      - name: Check out exact nightly snapshot
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.legal.outputs.tested_sha }}
+          ref: ${{ needs.legal.outputs.tested_sha || github.sha }}
           path: nightly-vlm-${{ github.run_id }}-${{ github.run_attempt }}
           fetch-depth: 1
           persist-credentials: false
@@ -544,7 +523,7 @@ jobs:
       - name: Download isolated nightly model proof artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: model-proof-*-${{ needs.legal.outputs.tested_sha }}-*
+          pattern: model-proof-*-${{ needs.legal.outputs.tested_sha || github.sha }}-*
           path: ${{ env.TRTMC_CI_WORKSPACE }}/model-proof-parts
           merge-multiple: false
 
@@ -646,7 +625,7 @@ jobs:
             python - \
               "$TRTMC_CI_WORKSPACE/e2e_artifacts/artifacts" \
               "$TRTMC_CI_WORKSPACE/e2e_artifacts/diffusion_vlm_assessment.json" \
-              "${{ needs.legal.outputs.tested_sha }}" \
+              "${{ needs.legal.outputs.tested_sha || github.sha }}" \
               "${{ github.run_id }}" \
               "${{ github.run_attempt }}" <<'PY'
           import json
@@ -761,7 +740,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: trtmc-nightly-vlm-${{ github.run_id }}-${{ needs.legal.outputs.tested_sha }}-${{ github.run_attempt }}
+          name: trtmc-nightly-vlm-${{ github.run_id }}-${{ needs.legal.outputs.tested_sha || github.sha }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 14
           path: ${{ env.TRTMC_CI_WORKSPACE }}/e2e_artifacts/diffusion_vlm_assessment.json
@@ -929,7 +908,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: model-proof-*-${{ needs.legal.outputs.tested_sha }}-*
+          pattern: model-proof-*-${{ needs.legal.outputs.tested_sha || github.sha }}-*
           path: ${{ runner.temp }}/nightly-model-parts-${{ github.run_id }}-${{ github.run_attempt }}
           merge-multiple: false
 
@@ -939,7 +918,7 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:
-          pattern: trtmc-nightly-vlm-${{ github.run_id }}-${{ needs.legal.outputs.tested_sha }}-*
+          pattern: trtmc-nightly-vlm-${{ github.run_id }}-${{ needs.legal.outputs.tested_sha || github.sha }}-*
           path: ${{ runner.temp }}/nightly-vlm-parts-${{ github.run_id }}-${{ github.run_attempt }}
           merge-multiple: false
 
@@ -950,7 +929,7 @@ jobs:
         run: |
           python3 tools/select_latest_attempt_artifact.py \
             --parts-dir "${{ runner.temp }}/nightly-vlm-parts-${{ github.run_id }}-${{ github.run_attempt }}" \
-            --artifact-prefix "trtmc-nightly-vlm-${{ github.run_id }}-${{ needs.legal.outputs.tested_sha }}-" \
+            --artifact-prefix "trtmc-nightly-vlm-${{ github.run_id }}-${{ needs.legal.outputs.tested_sha || github.sha }}-" \
             --max-attempt "${{ github.run_attempt }}" \
             --required-glob diffusion_vlm_assessment.json \
             --github-output "$GITHUB_OUTPUT"
@@ -1230,7 +1209,7 @@ jobs:
     steps:
       - name: Verify every nightly gate
         env:
-          TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}
+          TESTED_SHA: ${{ needs.legal.outputs.tested_sha || github.sha }}
           LEGAL_RESULT: ${{ needs.legal.result }}
           INVENTORY_RESULT: ${{ needs.inventory.result }}
           SOURCE_QUALITY_RESULT: ${{ needs.source-quality.result }}

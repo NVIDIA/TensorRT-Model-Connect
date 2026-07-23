@@ -892,12 +892,25 @@ def test_reusable_legal_outputs_the_immutable_checked_out_sha() -> None:
     assert 'echo "tested_sha=$tested_sha" >> "$GITHUB_OUTPUT"' in text
 
 
-def test_nightly_reuses_the_legal_certified_sha_for_all_downstream_work() -> None:
+def test_nightly_reuses_the_resolved_sha_with_a_trigger_sha_fallback() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
-    assert text.count("ref: ${{ needs.legal.outputs.tested_sha }}") >= 5
-    assert "revision: ${{ needs.legal.outputs.tested_sha }}" in text
-    assert "pattern: model-proof-*-${{ needs.legal.outputs.tested_sha }}-*" in text
-    assert "TESTED_SHA: ${{ needs.legal.outputs.tested_sha }}" in text
+    validation, promotion = text.split("\n  release:", maxsplit=1)
+    release = promotion.split("\n  nightly-issue:", maxsplit=1)[0]
+    revision = "${{ needs.legal.outputs.tested_sha || github.sha }}"
+
+    sha_consumers = [
+        line
+        for line in validation.splitlines()
+        if "needs.legal.outputs.tested_sha" in line
+    ]
+    assert sha_consumers
+    assert all("|| github.sha" in line for line in sha_consumers)
+    assert f"revision: {revision}" in validation
+    assert f"pattern: model-proof-*-{revision}-*" in validation
+    assert f"TESTED_SHA: {revision}" in validation
+    assert "needs.required.result == 'success'" in release
+    assert "ref: ${{ needs.legal.outputs.tested_sha }}" in release
+    assert "|| github.sha" not in release
 
 
 def test_workflow_dispatch_lint_uses_resolved_ci_base_ref() -> None:
@@ -920,7 +933,7 @@ def test_manual_branch_nightly_lints_the_complete_main_diff() -> None:
     assert 'base_sha="$(git rev-parse "${tested_sha}^"' in comparison
 
 
-def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
+def test_nightly_runs_every_runnable_stage_after_an_upstream_failure() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     inventory = text.split("\n  inventory:", maxsplit=1)[1].split(
         "\n  source-quality:", maxsplit=1
@@ -931,15 +944,26 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
     unit_tests = text.split("\n  unit-tests:", maxsplit=1)[1].split("\n  cache-warm:", maxsplit=1)[
         0
     ]
-    model_proof = text.split("\n  model-proof:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
+    cache_warm = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
+    package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
+    model_proof = text.split("\n  model-proof:", maxsplit=1)[1].split(
+        "\n  diffusion-vlm:", maxsplit=1
+    )[0]
+    diffusion_vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split(
+        "\n  report:", maxsplit=1
+    )[0]
     report = text.split("\n  report:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
     required = text.split("\n  required:", maxsplit=1)[1].split("\n  release:", maxsplit=1)[0]
 
     assert "needs: legal" in inventory
+    assert "if: ${{ !cancelled() }}" in inventory
+    assert "ref: ${{ needs.legal.outputs.tested_sha || github.sha }}" in inventory
     assert 'python3 tools/model_ci.py validate --revision "$TESTED_SHA"' in inventory
     assert "python3 tools/model_ci.py all" in inventory
     assert '--revision "$TESTED_SHA"' in inventory
     assert '--github-output "$GITHUB_OUTPUT"' in inventory
+    assert "!cancelled() && steps.checkout.outcome == 'success'" in inventory
+    assert "!cancelled() && steps.inventory.outcome == 'success'" in inventory
     for output in (
         "has_models",
         "matrix",
@@ -965,6 +989,11 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
     assert "python3 -m tools.ci stage premerge-unit" in unit_tests
     assert "TRTMC_PREMERGE_UNIT_SCOPE: all" in unit_tests
     assert 'TRTMC_CI_HARDENED: "true"' in unit_tests
+    for independent_stage in (source_quality, unit_tests, cache_warm, package):
+        assert "!cancelled()" in independent_stage
+        assert "needs.legal.result == 'success'" not in independent_stage
+        assert "needs.inventory.result == 'success'" not in independent_stage
+        assert "needs.legal.outputs.tested_sha || github.sha" in independent_stage
 
     for dependency in (
         "legal",
@@ -975,20 +1004,34 @@ def test_nightly_exposes_the_staged_all_model_dependency_graph() -> None:
         "package",
     ):
         assert f"- {dependency}" in model_proof
-    assert "always()" in model_proof
-    assert "needs.legal.result == 'success'" in model_proof
-    assert "needs.inventory.result == 'success'" in model_proof
-    assert "needs.unit-tests.result == 'success'" in model_proof
-    assert "needs.source-quality.result == 'success'" in model_proof
-    assert "needs.cache-warm.result == 'success'" in model_proof
-    assert "needs.package.result == 'success'" in model_proof
+    assert "!cancelled()" in model_proof
+    assert "needs.legal.result == 'success'" not in model_proof
+    assert "needs.inventory.outputs.has_models == 'true'" in model_proof
+    for upstream in (
+        "inventory",
+        "source-quality",
+        "unit-tests",
+        "cache-warm",
+        "package",
+    ):
+        assert f"needs.{upstream}.result == 'success'" not in model_proof
     assert "fail-fast: false" in model_proof
     assert "max-parallel:" not in model_proof
     assert "matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}" in model_proof
     assert "uses: ./.github/workflows/model-proof.yml" in model_proof
     assert "model: ${{ matrix.model }}" in model_proof
-    assert "revision: ${{ needs.legal.outputs.tested_sha }}" in model_proof
+    assert "revision: ${{ needs.legal.outputs.tested_sha || github.sha }}" in model_proof
     assert "suite: nightly" in model_proof
+
+    assert "- legal" in diffusion_vlm
+    assert "- inventory" in diffusion_vlm
+    assert "- model-proof" in diffusion_vlm
+    assert "!cancelled()" in diffusion_vlm
+    assert "needs.legal.result == 'success'" not in diffusion_vlm
+    assert "needs.inventory.outputs.has_models == 'true'" in diffusion_vlm
+    assert "needs.inventory.result == 'success'" not in diffusion_vlm
+    assert "needs.model-proof.result == 'success'" not in diffusion_vlm
+    assert "needs.legal.outputs.tested_sha || github.sha" in diffusion_vlm
 
     assert "if: ${{ always() }}" in report
     for dependency in (
@@ -1034,6 +1077,13 @@ def test_nightly_source_quality_does_not_use_self_hosted_shared_storage() -> Non
     ):
         assert f'{variable}: ""' in source_quality
     assert "/workspace/" not in source_quality
+
+
+def test_nightly_has_no_fail_fast_validation_matrix_or_cache_warm() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+
+    assert "fail-fast: true" not in text
+    assert "--fail-fast" not in text
 
 
 def test_nightly_self_hosted_stages_use_the_configured_proof_runner_pool() -> None:
@@ -1091,7 +1141,7 @@ def test_nightly_report_requires_exact_all_model_results_and_evidence() -> None:
         "EXPECTED_CASES_BY_MODEL: ${{ needs.inventory.outputs.expected_cases_by_model }}" in report
     )
     assert "REVISION: ${{ needs.legal.outputs.tested_sha || github.sha }}" in report
-    assert "pattern: model-proof-*-${{ needs.legal.outputs.tested_sha }}-*" in report
+    assert "pattern: model-proof-*-${{ needs.legal.outputs.tested_sha || github.sha }}-*" in report
     assert "merge-multiple: false" in report
     assert "scripts/generate_model_proof_report.py" in report
     assert '--expected-cases-by-model "$EXPECTED_CASES_BY_MODEL"' in report
@@ -1129,7 +1179,7 @@ def test_nightly_preserves_diffusion_vlm_gate_and_injects_it_into_the_html() -> 
     vlm = text.split("\n  diffusion-vlm:", maxsplit=1)[1].split("\n  report:", maxsplit=1)[0]
     report = text.split("\n  report:", maxsplit=1)[1].split("\n  required:", maxsplit=1)[0]
     assert "needs:" in vlm and "- model-proof" in vlm
-    assert "always()" in vlm
+    assert "!cancelled()" in vlm
     assert "tools/count_diffusion_frame_pairs.py" in vlm
     assert "--require-complete" in vlm
     assert "No complete TRT/reference diffusion frame pairs were produced" in vlm
@@ -1140,17 +1190,17 @@ def test_nightly_preserves_diffusion_vlm_gate_and_injects_it_into_the_html() -> 
     assert 'assessment["source_revision"] = source_revision' in vlm
     assert 'assessment["workflow_run_id"] = workflow_run_id' in vlm
     assert 'assessment["workflow_run_attempt"] = workflow_run_attempt' in vlm
-    assert "needs.model-proof.result == 'success'" in vlm
+    assert "needs.model-proof.result == 'success'" not in vlm
     assert "does not exactly cover current frame pairs" in vlm
     assert "Upload diffusion semantic assessment" in vlm
     assert (
         "trtmc-nightly-vlm-${{ github.run_id }}-"
-        "${{ needs.legal.outputs.tested_sha }}-${{ github.run_attempt }}" in vlm
+        "${{ needs.legal.outputs.tested_sha || github.sha }}-${{ github.run_attempt }}" in vlm
     )
     assert "Download diffusion semantic assessment" in report
     assert (
         "pattern: trtmc-nightly-vlm-${{ github.run_id }}-"
-        "${{ needs.legal.outputs.tested_sha }}-*" in report
+        "${{ needs.legal.outputs.tested_sha || github.sha }}-*" in report
     )
     assert "merge-multiple: false" in report
     assert "Select latest diffusion semantic assessment attempt" in report

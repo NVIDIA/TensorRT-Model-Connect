@@ -135,8 +135,13 @@ The container half, `ModelProofInnerPipeline`, then runs linearly:
 
 Failure at any step produces a fallback status and HTML artifact before the job
 fails. The L0 premerge matrix uses fail-fast so the first failing model cancels
-its peers. The nightly matrix and cache warm continue through every model and
-asset so a single run captures the complete failure set.
+its peers. The nightly matrix and cache warm attempt every independent model
+and asset. Nightly job dependencies also wait for upstream work to finish
+without requiring it to succeed, so an earlier validation failure, including a
+legal-check failure, does not suppress later runnable stages. Hard-dependent
+phases may remain not-run when their required input could not be produced.
+The combined report and scheduled failure-issue reconciliation are still
+attempted, while publication remains gated on complete success.
 
 ### 5. Compose one report
 

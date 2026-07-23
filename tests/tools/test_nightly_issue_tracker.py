@@ -666,3 +666,23 @@ def test_cli_manual_branch_guard_exits_before_token_or_network() -> None:
 
     assert result.returncode == 0, result.stderr
     assert '"action": "disabled-non-production-context"' in result.stdout
+
+
+def test_cli_official_scheduled_run_fails_loudly_without_token() -> None:
+    env = os.environ.copy()
+    env.update(BASE_ENV)
+    env.pop("GITHUB_TOKEN", None)
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--apply"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert (
+        "::error::GITHUB_TOKEN must be a non-empty single-line token"
+        in result.stderr
+    )
