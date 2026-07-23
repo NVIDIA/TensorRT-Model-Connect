@@ -216,6 +216,26 @@ def _cached_snapshot_revision(repo_id: str, requested: str | None) -> str:
     return str(matches[0].commit_hash) if len(matches) == 1 else ""
 
 
+def _cached_snapshot_path(
+    repo_id: str, requested: str | None, marker_file: str
+) -> Path | None:
+    if Path(repo_id).exists():
+        return Path(repo_id).resolve()
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        cached = try_to_load_from_cache(
+            repo_id=repo_id,
+            filename=marker_file,
+            revision=requested or "main",
+        )
+    except (ImportError, OSError, ValueError):
+        return None
+    if isinstance(cached, str) and Path(cached).is_file():
+        return Path(cached).resolve().parent
+    return None
+
+
 def _resolved_revision(arguments: argparse.Namespace, model: Any) -> str:
     revision = _model_revision(model, arguments.revision)
     if revision != "unresolved":
@@ -1018,6 +1038,12 @@ def _diffusion_pipeline(
         "wan_t2v": ("WanPipeline", "DiffusionPipeline"),
         "z_image": ("ZImagePipeline", "DiffusionPipeline"),
     }[arguments.family]
+    model_source: str | Path = arguments.model
+    if arguments.local_files_only:
+        model_source = (
+            _cached_snapshot_path(arguments.model, arguments.revision, "model_index.json")
+            or model_source
+        )
     errors = []
     for name in classes:
         pipeline_class = getattr(diffusers, name, None)
@@ -1025,9 +1051,13 @@ def _diffusion_pipeline(
             continue
         try:
             return pipeline_class.from_pretrained(
-                arguments.model,
+                model_source,
                 torch_dtype=_torch_dtype(torch_module, arguments.precision),
-                **({"revision": arguments.revision} if arguments.revision else {}),
+                **(
+                    {"revision": arguments.revision}
+                    if arguments.revision and model_source == arguments.model
+                    else {}
+                ),
                 trust_remote_code=bool(
                     options.get("trust_remote_code", arguments.trust_remote_code)
                 ),

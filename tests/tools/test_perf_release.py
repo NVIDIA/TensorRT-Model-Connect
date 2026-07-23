@@ -508,6 +508,38 @@ def test_task_reference_resolves_revision_from_hugging_face_cache(monkeypatch) -
     assert runner["_cached_snapshot_revision"]("nvidia/canary-1b-v2", None) == "abc123"
 
 
+def test_diffusers_local_mode_loads_resolved_snapshot_path(tmp_path: Path, monkeypatch) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    snapshot = tmp_path / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True)
+    (snapshot / "model_index.json").write_text("{}", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        @classmethod
+        def from_pretrained(cls, model, **kwargs):
+            captured.update(model=model, kwargs=kwargs)
+            return cls()
+
+    monkeypatch.setitem(sys.modules, "diffusers", Namespace(FluxPipeline=FakePipeline))
+    globals_ = runner["_diffusion_pipeline"].__globals__
+    globals_["_cached_snapshot_path"] = lambda *_args: snapshot
+    arguments = Namespace(
+        family="flux",
+        local_files_only=True,
+        model="black-forest-labs/FLUX.1-schnell",
+        precision="fp16",
+        revision=None,
+        trust_remote_code=False,
+    )
+    torch_module = Namespace(float16="fp16", float32="fp32", bfloat16="bf16")
+
+    runner["_diffusion_pipeline"](arguments, torch_module, {})
+
+    assert captured["model"] == snapshot
+    assert captured["kwargs"]["local_files_only"] is True
+
+
 def test_diffusers_adapter_uses_resolved_sana_runtime_controls(tmp_path: Path) -> None:
     from PIL import Image
 
