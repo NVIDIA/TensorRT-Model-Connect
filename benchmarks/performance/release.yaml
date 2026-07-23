@@ -355,7 +355,7 @@ cases:
       adapter: hf-transformers-vlm
       mode: hf-eager
       reference_backend: hf_transformers
-      output_contract: exact-text
+      output_contract: exact-token-ids
   - id: ltx_video.generate_image
     family: ltx_video
     operation: generate_image

@@ -1184,8 +1184,8 @@ def _load_diffusers(
         media = getattr(result, "images", None)
         if media is None:
             media = getattr(result, "frames", None)
-        count = len(media[0]) if media and isinstance(media[0], list) else len(media or [])
-        return {"media_type": str(request.get("media_type", "image")), "media_count": count}
+        media_type = str(request.get("media_type", "image"))
+        return {"media_type": media_type, "media_count": _media_count(media, media_type)}
 
     revision = _resolved_revision(arguments, getattr(pipeline, "transformer", pipeline))
     return Session(
@@ -1195,6 +1195,22 @@ def _load_diffusers(
         timing_scope="task-pipeline-call-wall",
         input_preparation_included=True,
     )
+
+
+def _media_count(media: Any, media_type: str) -> int:
+    """Count image batches or video frames without coercing arrays to bool."""
+    if media is None:
+        return 0
+    try:
+        outer_count = len(media)
+    except TypeError:
+        return 1
+    if outer_count == 0 or media_type != "video":
+        return outer_count
+    try:
+        return len(media[0])
+    except TypeError:
+        return outer_count
 
 
 def _numeric_values(request: Mapping[str, Any], key: str) -> list[float]:
@@ -1521,7 +1537,9 @@ def _load_personaplex(
         str(options.get("reference_commit", "")),
         repository="https://github.com/NVIDIA/personaplex",
     )
-    sys.path.insert(0, official_repo)
+    # The official checkout vendors the importable package below ``moshi/``.
+    # Keep the checkout root too so sibling repository modules remain visible.
+    sys.path[:0] = [str(Path(official_repo) / "moshi"), official_repo]
     import torch
     from huggingface_hub import hf_hub_download
     from moshi.models import LMGen, loaders

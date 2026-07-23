@@ -154,6 +154,10 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
     assert by_id["fnet.encode"]["baseline"]["padding"] == "max-length"
     assert by_id["lance.generate"]["baseline"]["python_profile"] == "lance_reference"
+    assert (
+        by_id["locateanything.generate"]["baseline"]["output_contract"]
+        == "exact-token-ids"
+    )
     assert by_id["mixtral.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["phi_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["qwen_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
@@ -787,6 +791,32 @@ def test_diffusers_adapter_uses_resolved_sana_runtime_controls(tmp_path: Path) -
     assert captured["num_frames"] == 321
     assert captured["step"] == 60
     assert summary == {"media_type": "video", "media_count": 2}
+
+
+def test_diffusers_media_count_accepts_array_like_video_frames() -> None:
+    runner = runpy.run_path(
+        str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py")
+    )
+
+    class Frames:
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index):
+            assert index == 0
+            return [object()] * 5
+
+        def __bool__(self):
+            raise ValueError("array truth value is ambiguous")
+
+    assert runner["_media_count"](Frames(), "video") == 5
+    assert runner["_media_count"](Frames(), "image") == 1
+
+
+def test_personaplex_loader_adds_vendored_moshi_package_root() -> None:
+    source = (REPOSITORY / "benchmarks/performance/baselines/task_reference.py").read_text()
+
+    assert 'str(Path(official_repo) / "moshi")' in source
 
 
 def test_patchtst_reference_runs_model_under_precision_autocast(monkeypatch) -> None:
