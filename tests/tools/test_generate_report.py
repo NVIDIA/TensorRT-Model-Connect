@@ -1465,6 +1465,56 @@ class TestRenderDiffusionModel:
         assert "4.5000" in html
         assert "same main subject" in html
 
+    def test_native_visual_acceptance_is_truthful_and_requires_reference_frames(self, tmp_path):
+        mod = _import_report()
+        model_dir = tmp_path / "wan22-ti2v-5b"
+        for dirname in ("frames", "ref_frames"):
+            frame_dir = model_dir / dirname
+            frame_dir.mkdir(parents=True)
+            _make_tiny_png(frame_dir / "frame_0000.png")
+        result = _make_result(
+            name="wan22-ti2v-5b",
+            task_strategy="diffusion_media_generation",
+            artifacts={"trt_frames": "frames", "ref_frames": "ref_frames"},
+            metrics={
+                "cosine_uint8": {
+                    "value": 0.95,
+                    "threshold": 0.998,
+                    "operator": ">=",
+                    "passed": False,
+                    "note": (
+                        "diagnostic under native visual semantic acceptance; threshold unchanged"
+                    ),
+                }
+            },
+        )
+        result["oracle_level"] = "L4_invariants"
+        result["case_config"]["oracle_level"] = "L4_invariants"
+        result["case_config"]["reference_backend"] = "wan_official"
+        result["case_config"]["metadata"]["native_acceptance"] = {
+            "kind": "native_visual_semantic_acceptance",
+            "decision_record": "NVIDIA/TensorRT-Model-Connect#520",
+            "rationale": "Maintainer-reviewed visual acceptance.",
+            "reference_role": "diagnostic",
+            "requires_nightly_vlm": True,
+            "vlm_frame_samples": 6,
+        }
+        result["_artifact_dir"] = str(model_dir)
+
+        assert mod._uses_external_reference(result) is False
+        assert mod.validate_evidence([result], project_dir=tmp_path) == []
+        rendered = mod.render_model_section(result, project_dir=tmp_path)
+        assert "Native visual semantic acceptance policy" in rendered
+        assert "Official reference pixel parity: diagnostic, not claimed" in rendered
+        assert "All-frame temporal activity/cadence alignment: required" in rendered
+        assert "Six-frame Nightly VLM semantic gate: required" in rendered
+        assert "threshold unchanged" in rendered
+
+        result["artifacts"].pop("ref_frames")
+        (model_dir / "ref_frames" / "frame_0000.png").unlink()
+        issues = mod.validate_evidence([result], project_dir=tmp_path)
+        assert any("missing reference image or video frames" in issue for issue in issues)
+
     def test_vlm_assessment_shows_failed_gate_even_if_artifact_has_legacy_waive(self):
         mod = _import_report()
         r = _make_result(

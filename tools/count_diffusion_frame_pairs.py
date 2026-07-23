@@ -27,6 +27,42 @@ def _select_frame(frames: list[Path]) -> Path | None:
     return frames[(len(frames) - 1) // 2]
 
 
+def _sample_indices(frame_count: int, sample_count: int) -> list[int]:
+    if frame_count <= 0:
+        return []
+    if sample_count > frame_count:
+        raise ValueError(f"cannot select {sample_count} VLM samples from {frame_count} frames")
+    if sample_count <= 1:
+        return [(frame_count - 1) // 2]
+    return [round(index * (frame_count - 1) / (sample_count - 1)) for index in range(sample_count)]
+
+
+def _vlm_frame_contract(result: dict[str, Any]) -> tuple[int, int | None]:
+    case = result.get("case_config")
+    if not isinstance(case, dict):
+        return 1, None
+    metadata = case.get("metadata")
+    if not isinstance(metadata, dict):
+        return 1, None
+    policy = metadata.get("native_acceptance")
+    if policy is None:
+        return 1, None
+    if not isinstance(policy, dict):
+        raise ValueError("native_acceptance must be an object")
+    requested = policy.get("vlm_frame_samples")
+    if not isinstance(requested, int) or isinstance(requested, bool) or not 1 <= requested <= 6:
+        raise ValueError("native_acceptance.vlm_frame_samples must be an integer from 1 to 6")
+    inputs = case.get("inputs")
+    expected_frames = inputs.get("video_num_frames") if isinstance(inputs, dict) else None
+    if (
+        not isinstance(expected_frames, int)
+        or isinstance(expected_frames, bool)
+        or expected_frames < requested
+    ):
+        raise ValueError("native_acceptance requires a valid case_config.inputs.video_num_frames")
+    return requested, expected_frames
+
+
 def _load_result(path: Path) -> dict[str, Any] | None:
     try:
         result = json.loads(path.read_text(encoding="utf-8"))
@@ -50,22 +86,54 @@ def discover_diffusion_frame_pairs(artifacts_dir: Path) -> list[dict[str, Any]]:
             continue
 
         model_dir = result_path.parent
-        trt_frame = _select_frame(_frames_in(model_dir / "frames"))
-        hf_frame = _select_frame(_frames_in(model_dir / "hf_frames"))
-        if hf_frame is None:
-            hf_frame = _select_frame(_frames_in(model_dir / "ref_frames"))
+        trt_frames = _frames_in(model_dir / "frames")
+        hf_frames = _frames_in(model_dir / "hf_frames")
+        if not hf_frames:
+            hf_frames = _frames_in(model_dir / "ref_frames")
+        if not trt_frames or len(trt_frames) != len(hf_frames):
+            continue
+        sample_count, expected_frame_count = _vlm_frame_contract(result)
+        if expected_frame_count is not None:
+            expected_names = [f"frame_{index:04d}.png" for index in range(expected_frame_count)]
+            trt_names = [path.name for path in trt_frames]
+            hf_names = [path.name for path in hf_frames]
+            if (
+                len(trt_frames) != expected_frame_count
+                or trt_names != expected_names
+                or hf_names != expected_names
+            ):
+                raise ValueError(
+                    "native_acceptance requires complete contiguous TRT/reference "
+                    f"frame sequences: expected={expected_frame_count}, "
+                    f"TRT={len(trt_frames)}, reference={len(hf_frames)}"
+                )
+        sample_indices = _sample_indices(
+            len(trt_frames),
+            sample_count,
+        )
+        trt_samples = [trt_frames[index] for index in sample_indices]
+        hf_samples = [hf_frames[index] for index in sample_indices]
+        trt_frame = _select_frame(trt_frames)
+        hf_frame = _select_frame(hf_frames)
         if trt_frame is None or hf_frame is None:
             continue
 
         inputs = case.get("inputs", {})
         if not isinstance(inputs, dict):
             inputs = {}
-        pairs.append({
+        pair = {
             "case_name": result.get("case_name") or case.get("name") or model_dir.name,
             "prompt": inputs.get("prompt", ""),
             "trt_image": str(trt_frame),
             "hf_image": str(hf_frame),
-        })
+        }
+        if sample_count > 1:
+            pair.update({
+                "trt_images": [str(path) for path in trt_samples],
+                "hf_images": [str(path) for path in hf_samples],
+                "frame_indices": sample_indices,
+            })
+        pairs.append(pair)
     return pairs
 
 

@@ -7,10 +7,13 @@ import json
 
 import pytest
 
+import tools.evaluate_diffusion_vlm_similarity as vlm_similarity
 from tools.evaluate_diffusion_vlm_similarity import (
     _LoadingWeightsProgressFilter,
+    _aggregate_sample_results,
     _apply_gate,
     _discover_pairs,
+    _expand_pair_samples,
     _load_assessment_config,
     _normalize_judgment_consistency,
     _parse_json,
@@ -218,6 +221,97 @@ def test_discover_pairs_accepts_ref_frames_alias(tmp_path):
     assert len(pairs) == 1
     assert pairs[0]["case_name"] == "image-diffusion"
     assert pairs[0]["hf_image"].endswith("ref_frames/frame_0000.png")
+
+
+def test_expand_pair_samples_preserves_frame_order():
+    pair = {
+        "case_name": "wan22",
+        "prompt": "cats boxing",
+        "trt_images": [f"trt-{index}.png" for index in (0, 24, 48, 72, 96, 120)],
+        "hf_images": [f"hf-{index}.png" for index in (0, 24, 48, 72, 96, 120)],
+        "frame_indices": [0, 24, 48, 72, 96, 120],
+    }
+
+    samples = _expand_pair_samples(pair)
+
+    assert [sample["frame_index"] for sample in samples] == [0, 24, 48, 72, 96, 120]
+    assert samples[3]["trt_image"] == "trt-72.png"
+    assert samples[3]["hf_image"] == "hf-72.png"
+    assert all(sample["case_name"] == "wan22" for sample in samples)
+
+
+def test_single_frame_judgment_preserves_legacy_output_schema(monkeypatch):
+    pair = {
+        "case_name": "image-diffusion",
+        "prompt": "a cat",
+        "trt_image": "trt.png",
+        "hf_image": "reference.png",
+    }
+
+    def judge(_model, _processor, _device, sample, **_kwargs):
+        return {
+            **sample,
+            "vlm_judgment": {
+                "reason": "same subject",
+                "vlm_gate": {"failed": False, "reasons": []},
+            },
+        }
+
+    monkeypatch.setattr(vlm_similarity, "_judge_pair", judge)
+
+    result = vlm_similarity._judge_pair_samples(
+        None,
+        None,
+        "cpu",
+        pair,
+        max_side=256,
+        max_new_tokens=128,
+    )
+
+    assert result["trt_image"] == "trt.png"
+    assert result["hf_image"] == "reference.png"
+    assert result["vlm_judgment"]["reason"] == "same subject"
+    assert "sampled_frame_indices" not in result
+    assert "sample_assessments" not in result
+
+
+def test_aggregate_sample_results_fails_if_any_sample_fails():
+    passing = {
+        "semantic_similarity_0_to_5": 4.0,
+        "trt_prompt_alignment_0_to_5": 4.0,
+        "hf_prompt_alignment_0_to_5": 4.0,
+        "trt_visual_quality_0_to_5": 4.0,
+        "hf_visual_quality_0_to_5": 4.0,
+        "is_regression": False,
+        "reason": "coherent",
+        "vlm_gate": {"failed": False, "reasons": []},
+    }
+    failing = {
+        **passing,
+        "semantic_similarity_0_to_5": 1.0,
+        "is_regression": True,
+        "reason": "corrupted frame",
+        "vlm_gate": {
+            "failed": True,
+            "reasons": ["semantic_similarity_0_to_5=1.00 < 3.0"],
+        },
+    }
+    samples = [
+        {"frame_index": 0, "vlm_judgment": passing},
+        {"frame_index": 24, "vlm_judgment": passing},
+        {"frame_index": 48, "vlm_judgment": failing},
+    ]
+
+    aggregate = _aggregate_sample_results(
+        {"case_name": "wan22", "prompt": "cats boxing"},
+        samples,
+    )
+
+    assert aggregate["sampled_frame_indices"] == [0, 24, 48]
+    assert aggregate["vlm_judgment"]["vlm_gate"]["failed"]
+    assert aggregate["vlm_judgment"]["is_regression"] is True
+    assert aggregate["vlm_judgment"]["semantic_similarity_0_to_5"] == 1.0
+    assert "frame 48" in aggregate["vlm_judgment"]["vlm_gate"]["reasons"][0]
 
 
 def test_vlm_assessment_config_loader_uses_explicit_config(tmp_path):

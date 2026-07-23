@@ -124,6 +124,39 @@ def _discover_pairs(artifacts_dir: Path) -> list[dict[str, Any]]:
     return discover_diffusion_frame_pairs(artifacts_dir)
 
 
+def _expand_pair_samples(pair: dict[str, Any]) -> list[dict[str, Any]]:
+    trt_paths = pair.get("trt_images")
+    hf_paths = pair.get("hf_images")
+    frame_indices = pair.get("frame_indices")
+    if not isinstance(trt_paths, list) or not trt_paths:
+        trt_paths = [pair.get("trt_image")]
+    if not isinstance(hf_paths, list) or not hf_paths:
+        hf_paths = [pair.get("hf_image")]
+    if not isinstance(frame_indices, list) or not frame_indices:
+        frame_indices = list(range(len(trt_paths)))
+    if (
+        len(trt_paths) != len(hf_paths)
+        or len(trt_paths) != len(frame_indices)
+        or any(not isinstance(path, str) or not path for path in [*trt_paths, *hf_paths])
+    ):
+        raise ValueError("diffusion VLM frame sample lists are incomplete or mismatched")
+
+    shared = {
+        key: value
+        for key, value in pair.items()
+        if key not in {"trt_image", "hf_image", "trt_images", "hf_images", "frame_indices"}
+    }
+    return [
+        {
+            **shared,
+            "trt_image": trt_path,
+            "hf_image": hf_path,
+            "frame_index": frame_index,
+        }
+        for trt_path, hf_path, frame_index in zip(trt_paths, hf_paths, frame_indices)
+    ]
+
+
 def _parse_json(text: str) -> dict[str, Any]:
     match = _JSON_RE.search(text)
     if not match:
@@ -301,10 +334,12 @@ def _judge_pair(
     trt_image = _load_image(Path(pair["trt_image"]), max_side)
     hf_image = _load_image(Path(pair["hf_image"]), max_side)
     prompt = pair.get("prompt") or ""
+    frame_index = pair.get("frame_index")
+    frame_note = f"\nThis is sampled video frame {frame_index}." if frame_index is not None else ""
 
     question = f"""You are comparing two diffusion pipeline outputs for the same prompt.
-Image 1 is TensorRT/TRT output. Image 2 is Hugging Face Diffusers reference.
-Prompt: {prompt}
+Image 1 is TensorRT/TRT output. Image 2 is the configured reference output.
+Prompt: {prompt}{frame_note}
 
 Compare Image 1 to Image 2. Focus on semantic content, scene layout, prompt alignment,
 major missing objects, visible artifacts, reference validity, and whether Image 1 is a
@@ -362,6 +397,101 @@ Keep "reason" under 30 words."""
     judged = _normalize_judgment_consistency(_parse_json(answer.strip()), prompt=prompt)
     judged["vlm_gate"] = _apply_gate(judged, prompt=prompt)
     return {**pair, "vlm_judgment": judged}
+
+
+def _aggregate_sample_results(
+    pair: dict[str, Any],
+    sample_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not sample_results:
+        raise ValueError("diffusion VLM produced no sampled-frame judgments")
+
+    def score(result: dict[str, Any], key: str) -> float:
+        value = _as_float(result["vlm_judgment"].get(key))
+        return value if value is not None else float("-inf")
+
+    failed_samples = [
+        result
+        for result in sample_results
+        if result["vlm_judgment"].get("vlm_gate", {}).get("failed") is not False
+    ]
+    worst = min(
+        failed_samples or sample_results,
+        key=lambda result: (
+            score(result, "semantic_similarity_0_to_5"),
+            score(result, "trt_prompt_alignment_0_to_5"),
+            score(result, "trt_visual_quality_0_to_5"),
+        ),
+    )
+    aggregate = dict(worst["vlm_judgment"])
+    for key in (
+        "semantic_similarity_0_to_5",
+        "trt_prompt_alignment_0_to_5",
+        "hf_prompt_alignment_0_to_5",
+        "trt_visual_quality_0_to_5",
+        "hf_visual_quality_0_to_5",
+    ):
+        values = [
+            value
+            for result in sample_results
+            if (value := _as_float(result["vlm_judgment"].get(key))) is not None
+        ]
+        if values:
+            aggregate[key] = min(values)
+    aggregate["is_regression"] = any(
+        _as_bool(result["vlm_judgment"].get("is_regression")) is True for result in sample_results
+    )
+    reasons = []
+    for result in failed_samples:
+        frame_index = result.get("frame_index")
+        for reason in result["vlm_judgment"].get("vlm_gate", {}).get("reasons", []):
+            reasons.append(f"frame {frame_index}: {reason}")
+    aggregate["vlm_gate"] = {
+        "failed": bool(failed_samples),
+        "rule": _GATE_RULE,
+        "reasons": reasons,
+    }
+    aggregate["reason"] = (
+        f"{len(sample_results)} sampled frames assessed; "
+        f"worst frame {worst.get('frame_index')}: "
+        f"{worst['vlm_judgment'].get('reason', '')}"
+    )
+    return {
+        "case_name": pair.get("case_name"),
+        "prompt": pair.get("prompt", ""),
+        "sampled_frame_indices": [result.get("frame_index") for result in sample_results],
+        "sample_assessments": sample_results,
+        "vlm_judgment": aggregate,
+    }
+
+
+def _judge_pair_samples(
+    model: Any,
+    processor: Any,
+    device: str,
+    pair: dict[str, Any],
+    *,
+    max_side: int,
+    max_new_tokens: int,
+) -> dict[str, Any]:
+    trt_paths = pair.get("trt_images")
+    if not isinstance(trt_paths, list) or len(trt_paths) <= 1:
+        return _judge_pair(
+            model, processor, device, pair,
+            max_side=max_side, max_new_tokens=max_new_tokens)
+    samples = _expand_pair_samples(pair)
+    sample_results = [
+        _judge_pair(
+            model,
+            processor,
+            device,
+            sample,
+            max_side=max_side,
+            max_new_tokens=max_new_tokens,
+        )
+        for sample in samples
+    ]
+    return _aggregate_sample_results(pair, sample_results)
 
 
 def main() -> int:
@@ -426,9 +556,14 @@ def main() -> int:
     results = []
     any_gate_failed = False
     for pair in pairs:
-        result = _judge_pair(
-            model, processor, args.device, pair,
-            max_side=max_side, max_new_tokens=max_new_tokens)
+        result = _judge_pair_samples(
+            model,
+            processor,
+            args.device,
+            pair,
+            max_side=max_side,
+            max_new_tokens=max_new_tokens,
+        )
         results.append(result)
         judgment = result["vlm_judgment"]
         gate = judgment.get("vlm_gate", {})

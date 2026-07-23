@@ -5,9 +5,13 @@
     "exact_video_width": 1280,
     "max_rmse_uint8": 1.0,
     "max_pixel_mean": 0.98,
+    "max_temporal_motion_ratio": 2.0,
+    "min_active_transition_fraction": 0.9,
     "min_cosine_uint8": 0.998,
     "min_frame_cosine_uint8": 0.998,
     "min_pixel_mean": 0.02,
-    "min_pixel_std": 0.01
+    "min_pixel_std": 0.01,
+    "min_temporal_motion_ratio": 0.5,
+    "min_temporal_profile_correlation": 0.75
   }
 }

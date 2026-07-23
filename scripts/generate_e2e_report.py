@@ -2293,11 +2293,45 @@ def _uses_external_reference(result: Dict[str, Any]) -> bool:
     return backend != "invariant_only" and not oracle_level.startswith("L4")
 
 
+def _native_visual_acceptance(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    cc = result.get("case_config") or {}
+    metadata = cc.get("metadata") or {}
+    policy = metadata.get("native_acceptance")
+    if not isinstance(policy, dict):
+        return None
+    expected = {
+        "kind": "native_visual_semantic_acceptance",
+        "reference_role": "diagnostic",
+        "requires_nightly_vlm": True,
+        "vlm_frame_samples": 6,
+    }
+    if any(policy.get(key) != value for key, value in expected.items()):
+        return None
+    if not all(
+        isinstance(policy.get(key), str) and bool(policy[key].strip())
+        for key in ("decision_record", "rationale")
+    ):
+        return None
+    return policy
+
+
 def _render_oracle_context(result: Dict[str, Any]) -> str:
     cc = result.get("case_config") or {}
     backend = str(cc.get("reference_backend") or "unspecified")
     oracle_level = str(result.get("oracle_level") or cc.get("oracle_level") or "unspecified")
     css_class = "oracle-external" if _uses_external_reference(result) else "oracle-invariant"
+    native_acceptance = _native_visual_acceptance(result)
+    if native_acceptance is not None:
+        evidence = str(native_acceptance["decision_record"])
+        return (
+            f'<div class="oracle-context {css_class}">'
+            "<strong>Native visual semantic acceptance policy</strong><br>"
+            f"Oracle: {_esc(oracle_level)} via {_esc(backend)}<br>"
+            "Official reference pixel parity: diagnostic, not claimed.<br>"
+            "All-frame temporal activity/cadence alignment: required.<br>"
+            "Six-frame Nightly VLM semantic gate: required.<br>"
+            f"Decision record: {_esc(evidence)}</div>"
+        )
     note = "External/reference output comparison is configured."
     if not _uses_external_reference(result):
         ref_audio = _find_output_media(
@@ -3206,7 +3240,7 @@ def validate_evidence(
             ref_frames = _resolve_frame_paths(
                 artifacts.get("ref_frames", []), art_dir, "ref_frames")
             require(bool(trt_frames), "missing TRT/base image or video frames")
-            if external_reference:
+            if external_reference or _native_visual_acceptance(result) is not None:
                 require(bool(ref_frames), "missing reference image or video frames")
             require(all(_embeddable(path) for path in _select_frames(
                 trt_frames, _MAX_DIFFUSION_FRAMES)),

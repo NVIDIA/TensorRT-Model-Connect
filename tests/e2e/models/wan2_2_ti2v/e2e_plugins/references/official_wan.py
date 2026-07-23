@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 from .. import save_full_stderr
 from ..contracts import E2ECase, RunContext, StageOutput, StageSpec
@@ -29,6 +30,32 @@ DEFAULT_NEGATIVE_PROMPT = (
     "形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，"
     "背景人很多，倒着走"
 )
+
+_NATIVE_ACCEPTANCE_VALUES = {
+    "kind": "native_visual_semantic_acceptance",
+    "reference_role": "diagnostic",
+    "requires_nightly_vlm": True,
+    "vlm_frame_samples": 6,
+}
+
+
+def _native_acceptance_policy(metadata: dict[str, Any]) -> dict[str, Any] | None:
+    policy = metadata.get("native_acceptance")
+    if policy is None:
+        return None
+    if not isinstance(policy, dict):
+        raise ValueError("Wan2.2 native_acceptance must be an object")
+    invalid = {
+        key: (policy.get(key), expected)
+        for key, expected in _NATIVE_ACCEPTANCE_VALUES.items()
+        if policy.get(key) != expected
+    }
+    for key in ("decision_record", "rationale"):
+        if not isinstance(policy.get(key), str) or not policy[key].strip():
+            invalid[key] = (policy.get(key), "non-empty string")
+    if invalid:
+        raise ValueError(f"Wan2.2 native_acceptance policy is invalid: {invalid}")
+    return dict(policy)
 
 
 def _resolve_cached_model_ref() -> str:
@@ -123,6 +150,7 @@ class Wan22OfficialWanReference:
                 data={"error": f"Unsupported Wan2.2 reference stage: {stage.name}"},
             )
 
+        native_acceptance = _native_acceptance_policy(case.metadata)
         model_ref = _resolve_cached_model_ref()
         model_revision = _snapshot_revision(model_ref)
         if model_revision != HF_REFERENCE_REVISION:
@@ -319,6 +347,8 @@ print(f"Generated {{len(frames)}} frames with pinned official Wan")
         }
         if stderr_log:
             data["stderr_log"] = stderr_log
+        if native_acceptance is not None:
+            data["native_acceptance"] = native_acceptance
         return StageOutput(
             stage_name=stage.name,
             data=data,

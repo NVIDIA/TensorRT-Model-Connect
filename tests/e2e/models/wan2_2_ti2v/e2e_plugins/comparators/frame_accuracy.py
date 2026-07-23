@@ -12,10 +12,33 @@ from typing import Sequence
 import numpy as np
 
 
+_ACTIVE_TRANSITION_MAE_UINT8 = 0.5
+
+
 def _cosine(dot_product: int, reference_square_sum: int, actual_square_sum: int) -> float:
     if reference_square_sum == 0 or actual_square_sum == 0:
         return 1.0 if reference_square_sum == actual_square_sum else 0.0
     return dot_product / math.sqrt(reference_square_sum * actual_square_sum)
+
+
+def _profile_correlation(reference: Sequence[float], actual: Sequence[float]) -> float:
+    if len(reference) != len(actual) or not reference:
+        raise ValueError("temporal activity profiles are empty or mismatched")
+    reference_mean = sum(reference) / len(reference)
+    actual_mean = sum(actual) / len(actual)
+    reference_centered = [value - reference_mean for value in reference]
+    actual_centered = [value - actual_mean for value in actual]
+    numerator = sum(
+        reference_value * actual_value
+        for reference_value, actual_value in zip(reference_centered, actual_centered)
+    )
+    denominator = math.sqrt(
+        sum(value * value for value in reference_centered)
+        * sum(value * value for value in actual_centered)
+    )
+    if denominator == 0:
+        return 1.0 if reference == actual else 0.0
+    return numerator / denominator
 
 
 def _validated_paths(paths: Sequence[str], *, label: str) -> list[Path]:
@@ -62,6 +85,10 @@ def compare_png_sequences(
     dot_product = 0
     minimum_frame_cosine = 1.0
     maximum_frame_rmse = 0.0
+    reference_temporal_profile: list[float] = []
+    actual_temporal_profile: list[float] = []
+    previous_reference: np.ndarray | None = None
+    previous_actual: np.ndarray | None = None
 
     for index, (reference_path, actual_path) in enumerate(zip(references, actuals)):
         reference = _load_rgb(reference_path)
@@ -71,6 +98,19 @@ def compare_png_sequences(
                 f"Wan2.2 frame {index} shape mismatch: "
                 f"reference={reference.shape}, TensorRT={actual.shape}"
             )
+
+        if previous_reference is not None and previous_actual is not None:
+            reference_delta = np.subtract(
+                reference, previous_reference, dtype=np.int16)
+            actual_delta = np.subtract(actual, previous_actual, dtype=np.int16)
+            reference_temporal_profile.append(
+                float(np.abs(reference_delta).sum(dtype=np.int64) / reference.size)
+            )
+            actual_temporal_profile.append(
+                float(np.abs(actual_delta).sum(dtype=np.int64) / actual.size)
+            )
+        previous_reference = reference
+        previous_actual = actual
 
         reference_i64 = reference.astype(np.int64)
         actual_i64 = actual.astype(np.int64)
@@ -94,10 +134,32 @@ def compare_png_sequences(
             math.sqrt(frame_squared_error / difference.size),
         )
 
+    if not reference_temporal_profile:
+        raise ValueError("Wan2.2 temporal comparison requires at least two frames")
+    reference_temporal_mae = (
+        sum(reference_temporal_profile) / len(reference_temporal_profile)
+    )
+    actual_temporal_mae = sum(actual_temporal_profile) / len(actual_temporal_profile)
+    if reference_temporal_mae == 0:
+        raise ValueError("Wan2.2 reference video has no temporal activity")
+
     return {
         "frame_count": float(len(references)),
         "cosine_uint8": _cosine(dot_product, reference_square_sum, actual_square_sum),
         "minimum_frame_cosine_uint8": minimum_frame_cosine,
         "rmse_uint8": math.sqrt(squared_error_sum / total_values),
         "maximum_frame_rmse_uint8": maximum_frame_rmse,
+        "reference_temporal_mae_uint8": reference_temporal_mae,
+        "trt_temporal_mae_uint8": actual_temporal_mae,
+        "reference_active_transition_fraction": sum(
+            value > _ACTIVE_TRANSITION_MAE_UINT8
+            for value in reference_temporal_profile
+        ) / len(reference_temporal_profile),
+        "trt_active_transition_fraction": sum(
+            value > _ACTIVE_TRANSITION_MAE_UINT8
+            for value in actual_temporal_profile
+        ) / len(actual_temporal_profile),
+        "temporal_motion_ratio": actual_temporal_mae / reference_temporal_mae,
+        "temporal_profile_correlation": _profile_correlation(
+            reference_temporal_profile, actual_temporal_profile),
     }

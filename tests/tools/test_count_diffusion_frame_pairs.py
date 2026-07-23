@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -54,6 +55,9 @@ def test_counts_frames_plus_hf_frames(tmp_path) -> None:
     assert pairs[0]["case_name"] == "video-diffusion"
     assert pairs[0]["trt_image"].endswith("frames/frame_0000.png")
     assert pairs[0]["hf_image"].endswith("hf_frames/frame_0000.png")
+    assert "frame_indices" not in pairs[0]
+    assert "trt_images" not in pairs[0]
+    assert "hf_images" not in pairs[0]
 
 
 def test_counts_frames_plus_ref_frames(tmp_path) -> None:
@@ -135,3 +139,64 @@ def test_complete_mode_returns_the_exact_unique_case_inventory(tmp_path, capsys)
     assert [pair["case_name"] for pair in pairs] == ["alpha", "beta"]
     assert main([str(artifacts_dir), "--require-complete"]) == 0
     assert capsys.readouterr().out.strip() == "2"
+
+
+def test_native_visual_policy_selects_six_evenly_spaced_video_frames(tmp_path) -> None:
+    model_dir = tmp_path / "artifacts" / "wan22-ti2v-5b"
+    _write_result(model_dir, case_name="wan22-ti2v-5b")
+    result_path = model_dir / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["case_config"]["inputs"]["video_num_frames"] = 121
+    result["case_config"]["metadata"] = {"native_acceptance": {"vlm_frame_samples": 6}}
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    for dirname in ("frames", "hf_frames"):
+        frame_dir = model_dir / dirname
+        frame_dir.mkdir()
+        for index in range(121):
+            (frame_dir / f"frame_{index:04d}.png").write_bytes(b"frame")
+
+    pair = discover_diffusion_frame_pairs(tmp_path / "artifacts")[0]
+
+    assert pair["frame_indices"] == [0, 24, 48, 72, 96, 120]
+    assert [Path(path).name for path in pair["trt_images"]] == [
+        f"frame_{index:04d}.png" for index in pair["frame_indices"]
+    ]
+    assert [Path(path).name for path in pair["hf_images"]] == [
+        f"frame_{index:04d}.png" for index in pair["frame_indices"]
+    ]
+
+
+@pytest.mark.parametrize("sample_count", [0, 7, True, "6"])
+def test_native_visual_policy_rejects_invalid_sample_counts(tmp_path, sample_count) -> None:
+    model_dir = tmp_path / "artifacts" / "invalid"
+    _write_result(model_dir, case_name="invalid")
+    result_path = model_dir / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["case_config"]["inputs"]["video_num_frames"] = 1
+    result["case_config"]["metadata"] = {"native_acceptance": {"vlm_frame_samples": sample_count}}
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    _write_frame_pair(model_dir, "hf_frames")
+
+    with pytest.raises(ValueError, match="vlm_frame_samples"):
+        discover_diffusion_frame_pairs(tmp_path / "artifacts")
+
+
+def test_native_visual_policy_rejects_missing_sample_count_and_truncated_frames(
+    tmp_path,
+) -> None:
+    model_dir = tmp_path / "artifacts" / "truncated"
+    _write_result(model_dir, case_name="truncated")
+    result_path = model_dir / "result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["case_config"]["inputs"]["video_num_frames"] = 121
+    result["case_config"]["metadata"] = {"native_acceptance": {}}
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    _write_frame_pair(model_dir, "hf_frames")
+
+    with pytest.raises(ValueError, match="vlm_frame_samples"):
+        discover_diffusion_frame_pairs(tmp_path / "artifacts")
+
+    result["case_config"]["metadata"]["native_acceptance"]["vlm_frame_samples"] = 6
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    with pytest.raises(ValueError, match="complete contiguous"):
+        discover_diffusion_frame_pairs(tmp_path / "artifacts")

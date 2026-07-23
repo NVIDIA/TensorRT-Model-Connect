@@ -26,6 +26,18 @@ from tests.e2e_harness.manifest_loader import load_manifest
 _MODEL_DIR = Path(__file__).resolve().parent
 _FULL_MANIFEST = _MODEL_DIR / "manifests/wan22-ti2v-5b.json"
 _L0_MANIFEST = _MODEL_DIR / "manifests/wan22-ti2v-5b-l0.json"
+_NATIVE_ACCEPTANCE = {
+    "kind": "native_visual_semantic_acceptance",
+    "decision_record": "NVIDIA/TensorRT-Model-Connect#520",
+    "rationale": (
+        "Native TensorRT preserves prompt semantics and visual quality across sampled "
+        "frames, with all-frame temporal activity and cadence aligned to the official "
+        "output, while diffusion backend numerics do not provide pixel identity."
+    ),
+    "reference_role": "diagnostic",
+    "requires_nightly_vlm": True,
+    "vlm_frame_samples": 6,
+}
 
 
 def _write_png(path: Path, width: int, height: int, value: int = 0) -> None:
@@ -64,7 +76,10 @@ def _case() -> E2ECase:
             "text_max_length": 512,
             "seed": 42,
         },
-        metadata={"runtime_timeout_s": 60},
+        metadata={
+            "runtime_timeout_s": 60,
+            "native_acceptance": _NATIVE_ACCEPTANCE,
+        },
     )
 
 
@@ -94,7 +109,7 @@ def test_only_nightly_selects_the_external_official_wan_reference() -> None:
 
     assert (full.reference_backend, full.oracle_level) == (
         "wan_official",
-        "L1_external_reference",
+        "L4_invariants",
     )
     assert (l0.reference_backend, l0.oracle_level) == (
         "invariant_only",
@@ -119,6 +134,7 @@ def test_only_nightly_selects_the_external_official_wan_reference() -> None:
     assert full.threshold_overrides["min_cosine_uint8"] == 0.998
     assert full.threshold_overrides["min_frame_cosine_uint8"] == 0.998
     assert full.threshold_overrides["max_rmse_uint8"] == 1.0
+    assert full.metadata["native_acceptance"] == _NATIVE_ACCEPTANCE
 
 
 def test_both_reference_backends_are_registered() -> None:
@@ -222,6 +238,7 @@ def test_reference_uses_official_wan_configuration_and_writes_hf_frames(
     assert str(tmp_path / case.name / "hf_frames") in script
     assert output.data["num_frames"] == 5
     assert output.data["frames_dir"] == str(tmp_path / case.name / "hf_frames")
+    assert output.data["native_acceptance"] == _NATIVE_ACCEPTANCE
     assert output.metadata["model_id"] == wan22_official.HF_REFERENCE_ID
     assert output.metadata["model_revision"] == wan22_official.HF_REFERENCE_REVISION
     assert output.metadata["expected_model_revision"] == wan22_official.HF_REFERENCE_REVISION
@@ -232,6 +249,13 @@ def test_reference_uses_official_wan_configuration_and_writes_hf_frames(
     assert kwargs["env"]["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
     assert kwargs["env"]["HF_HUB_OFFLINE"] == "1"
     assert kwargs["env"]["TRANSFORMERS_OFFLINE"] == "1"
+
+
+def test_reference_rejects_an_invalid_native_acceptance_policy() -> None:
+    metadata = {"native_acceptance": {**_NATIVE_ACCEPTANCE, "requires_nightly_vlm": False}}
+
+    with pytest.raises(ValueError, match="native_acceptance policy is invalid"):
+        wan22_official._native_acceptance_policy(metadata)
 
 
 def test_reference_requires_the_pinned_official_source(

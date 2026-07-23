@@ -219,7 +219,13 @@ def _append_result_case(root: Path, owner: str, case: str) -> None:
     )
 
 
-def _write_vlm_assessment(root: Path, cases: list[str], *, revision: str = REVISION) -> None:
+def _write_vlm_assessment(
+    root: Path,
+    cases: list[str],
+    *,
+    revision: str = REVISION,
+    frame_indices_by_case: dict[str, list[int]] | None = None,
+) -> None:
     (root / "diffusion_vlm_assessment.json").write_text(
         json.dumps(
             {
@@ -233,6 +239,25 @@ def _write_vlm_assessment(root: Path, cases: list[str], *, revision: str = REVIS
                 "results": [
                     {
                         "case_name": case,
+                        **(
+                            {
+                                "sampled_frame_indices": frame_indices_by_case[case],
+                                "sample_assessments": [
+                                    {
+                                        "frame_index": frame_index,
+                                        "vlm_judgment": {
+                                            "vlm_gate": {
+                                                "failed": False,
+                                                "reasons": [],
+                                            }
+                                        },
+                                    }
+                                    for frame_index in frame_indices_by_case[case]
+                                ],
+                            }
+                            if frame_indices_by_case and case in frame_indices_by_case
+                            else {}
+                        ),
                         "vlm_judgment": {"vlm_gate": {"failed": False}},
                     }
                     for case in cases
@@ -503,6 +528,73 @@ def test_nightly_diffusion_report_requires_current_complete_vlm_provenance(
         "diffusion assessment source_revision" in issue
         for issue in status["issues"]
     )
+
+
+def test_nightly_native_visual_policy_requires_every_sampled_frame_judgment(
+    tmp_path: Path,
+) -> None:
+    parts = tmp_path / "parts"
+    root = _write_part(
+        parts,
+        "wan2_2_ti2v",
+        "wan22-ti2v-5b",
+        strategy="diffusion_media_generation",
+        suite="nightly",
+    )
+    result_path = root / "e2e/wan22-ti2v-5b/result.json"
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result["case_config"]["inputs"]["video_num_frames"] = 121
+    result["case_config"]["metadata"]["native_acceptance"] = {
+        "kind": "native_visual_semantic_acceptance",
+        "decision_record": "NVIDIA/TensorRT-Model-Connect#520",
+        "rationale": "Native output is accepted by semantic visual review.",
+        "reference_role": "diagnostic",
+        "requires_nightly_vlm": True,
+        "vlm_frame_samples": 6,
+    }
+    result_path.write_text(json.dumps(result), encoding="utf-8")
+    expected_indices = [0, 24, 48, 72, 96, 120]
+    _write_vlm_assessment(
+        root,
+        ["wan22-ti2v-5b"],
+        frame_indices_by_case={"wan22-ti2v-5b": expected_indices},
+    )
+    inventory = {
+        "suite": "nightly",
+        "expected_result_count": 1,
+        "expected_cases_by_model": {"wan2_2_ti2v": ["wan22-ti2v-5b"]},
+    }
+
+    rc, _, status_path = _run(tmp_path, ["wan2_2_ti2v"], **inventory)
+    assert rc == 0
+
+    _write_vlm_assessment(
+        root,
+        ["wan22-ti2v-5b"],
+        frame_indices_by_case={"wan22-ti2v-5b": [60]},
+    )
+    rc, _, status_path = _run(tmp_path, ["wan2_2_ti2v"], **inventory)
+    issues = json.loads(status_path.read_text(encoding="utf-8"))["issues"]
+    assert rc != 0
+    assert any("sampled_frame_indices" in issue for issue in issues)
+    assert any("6 sampled-frame judgments" in issue for issue in issues)
+
+    _write_vlm_assessment(
+        root,
+        ["wan22-ti2v-5b"],
+        frame_indices_by_case={"wan22-ti2v-5b": expected_indices},
+    )
+    assessment_path = root / "diffusion_vlm_assessment.json"
+    assessment = json.loads(assessment_path.read_text(encoding="utf-8"))
+    assessment["results"][0]["sample_assessments"][-1]["vlm_judgment"]["vlm_gate"] = {
+        "failed": True,
+        "reasons": ["visual corruption"],
+    }
+    assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
+    rc, _, status_path = _run(tmp_path, ["wan2_2_ti2v"], **inventory)
+    issues = json.loads(status_path.read_text(encoding="utf-8"))["issues"]
+    assert rc != 0
+    assert any("sampled frame 120 semantic gate is not passing" in issue for issue in issues)
 
 
 def test_combined_report_rebases_isolated_src_input_media(tmp_path: Path) -> None:

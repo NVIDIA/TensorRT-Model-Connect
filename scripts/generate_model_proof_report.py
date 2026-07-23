@@ -297,6 +297,90 @@ def _validate_nightly_diffusion_assessments(
         if not isinstance(gate, dict) or gate.get("failed") is not False:
             issues.append(f"{case_name}: nightly diffusion semantic gate is not passing")
 
+        case_config = result.get("case_config") or {}
+        metadata = case_config.get("metadata") or {}
+        policy = metadata.get("native_acceptance")
+        if policy is not None:
+            if not isinstance(policy, dict):
+                issues.append(f"{case_name}: native_acceptance policy is invalid")
+            else:
+                required_policy = {
+                    "kind": "native_visual_semantic_acceptance",
+                    "reference_role": "diagnostic",
+                    "requires_nightly_vlm": True,
+                }
+                if any(policy.get(key) != value for key, value in required_policy.items()) or any(
+                    not isinstance(policy.get(key), str) or not policy[key].strip()
+                    for key in ("decision_record", "rationale")
+                ):
+                    issues.append(f"{case_name}: native_acceptance policy is invalid")
+                sample_count = policy.get("vlm_frame_samples")
+                inputs = case_config.get("inputs") or {}
+                frame_count = inputs.get("video_num_frames")
+                if (
+                    not isinstance(sample_count, int)
+                    or isinstance(sample_count, bool)
+                    or not 1 <= sample_count <= 6
+                    or not isinstance(frame_count, int)
+                    or isinstance(frame_count, bool)
+                    or frame_count < sample_count
+                ):
+                    issues.append(f"{case_name}: native VLM frame-sampling contract is invalid")
+                else:
+                    expected_indices = (
+                        [
+                            round(index * (frame_count - 1) / (sample_count - 1))
+                            for index in range(sample_count)
+                        ]
+                        if sample_count > 1
+                        else [(frame_count - 1) // 2]
+                    )
+                    sampled_indices = assessment.get("sampled_frame_indices")
+                    if sampled_indices != expected_indices:
+                        issues.append(
+                            f"{case_name}: diffusion assessment sampled_frame_indices "
+                            f"is {sampled_indices!r}, expected {expected_indices!r}"
+                        )
+                    sample_assessments = assessment.get("sample_assessments")
+                    if (
+                        not isinstance(sample_assessments, list)
+                        or len(sample_assessments) != sample_count
+                    ):
+                        issues.append(
+                            f"{case_name}: diffusion assessment must contain "
+                            f"{sample_count} sampled-frame judgments"
+                        )
+                    else:
+                        assessed_indices = [
+                            sample.get("frame_index") if isinstance(sample, dict) else None
+                            for sample in sample_assessments
+                        ]
+                        if assessed_indices != expected_indices:
+                            issues.append(
+                                f"{case_name}: sampled-frame judgment indices are "
+                                f"{assessed_indices!r}, expected {expected_indices!r}"
+                            )
+                        for sample in sample_assessments:
+                            sample_judgment = (
+                                sample.get("vlm_judgment") if isinstance(sample, dict) else None
+                            )
+                            sample_gate = (
+                                sample_judgment.get("vlm_gate")
+                                if isinstance(sample_judgment, dict)
+                                else None
+                            )
+                            if (
+                                not isinstance(sample_gate, dict)
+                                or sample_gate.get("failed") is not False
+                            ):
+                                frame_index = (
+                                    sample.get("frame_index") if isinstance(sample, dict) else None
+                                )
+                                issues.append(
+                                    f"{case_name}: sampled frame {frame_index} "
+                                    "semantic gate is not passing"
+                                )
+
         provenance = assessment.get("_assessment_provenance")
         if not isinstance(provenance, dict):
             issues.append(f"{case_name}: diffusion assessment provenance is missing")
