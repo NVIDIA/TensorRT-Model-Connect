@@ -623,12 +623,19 @@ if benchmark_output:
 
 module.main()
     """
-    subprocess.run(
+    completed = subprocess.run(
         [sys.executable, "-c", runner, str(script_path), *external_args],
-        check=True,
+        check=False,
         cwd=repo_root,
         env=env,
+        capture_output=True,
+        text=True,
     )
+    if completed.returncode:
+        raise RuntimeError(
+            "Official SANA-WM reference failed with "
+            f"rc={completed.returncode}: {completed.stderr[-8000:]}"
+        )
 
 
 def _load_pipeline():
