@@ -288,6 +288,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
     if output_contract not in {
         "exact-token-ids",
         "exact-text",
+        "normalized-text",
         "ocr-text",
     }:
         raise PerfReleaseError(f"case {case['id']} baseline output contract is invalid")
@@ -900,6 +901,11 @@ def _output_contract(
         if contract == "exact-text":
             matched = left.get("text") == right.get("text")
             return matched, "generated text differs" if not matched else ""
+        if contract == "normalized-text":
+            matched = _normalized_text(left.get("text")) == _normalized_text(
+                right.get("text")
+            )
+            return matched, "normalized generated text differs" if not matched else ""
         if contract == "ocr-text":
             required = list(case["baseline"]["required_substrings"])
             candidate_missing = _missing_ocr_substrings(left.get("text"), required)

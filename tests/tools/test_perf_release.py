@@ -157,6 +157,7 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     assert by_id["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
     assert by_id["opt.generate"]["request"]["max_new_tokens"] == 10
     assert by_id["deepseek_ocr.generate"]["baseline"]["precision"] == "bf16"
+    assert by_id["nemotron_h.generate"]["baseline"]["mode"] == "hf-eager"
     nemotron_baseline = by_id["nemotron_speech_streaming.transcribe"]["baseline"]
     assert {
         key: nemotron_baseline[key] for key in ("runner", "adapter", "mode", "reference_backend")
@@ -253,6 +254,23 @@ def test_ocr_text_contract_preserves_required_content_and_allows_format_variatio
     assert reason == "TRTMC OCR text misses required content"
 
 
+def test_normalized_text_contract_allows_only_case_and_whitespace_variation() -> None:
+    case = {
+        "operation": "generate",
+        "baseline": {"output_contract": "normalized-text"},
+    }
+    candidate = {"output_summary": {"text": "Paris\n</think>\n"}}
+    reference = {"output_summary": {"text": "paris  </think>"}}
+
+    assert perf_release._output_contract(case, candidate, reference) == (True, "")
+
+    reference["output_summary"]["text"] = "London </think>"
+    assert perf_release._output_contract(case, candidate, reference) == (
+        False,
+        "normalized generated text differs",
+    )
+
+
 def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path) -> None:
     fake_trtmc = tmp_path / "trtmc-bench"
     fake_baseline = tmp_path / "hf_transformers.py"
@@ -318,6 +336,7 @@ def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
         "mode": "hf-eager",
         "model_class": "auto",
         "generation_method": "ar-generate",
+        "output_contract": "normalized-text",
     }
     assert rows["gemma.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["phi.generate"]["baseline"]["output_contract"] == "exact-text"

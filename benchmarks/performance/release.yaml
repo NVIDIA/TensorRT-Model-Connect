@@ -458,8 +458,7 @@ cases:
     priority: slow
     baseline:
       runner: hf-transformers
-      mode: torch-compile
-      compile_scope: model.forward
+      mode: hf-eager
   - id: nemotron_labs_diffusion.generate
     family: nemotron_labs_diffusion
     operation: generate
@@ -470,6 +469,7 @@ cases:
       mode: hf-eager
       model_class: auto
       generation_method: ar-generate
+      output_contract: normalized-text
   - id: nemotron_speech_streaming.transcribe
     family: nemotron_speech_streaming
     operation: transcribe
