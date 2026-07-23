@@ -35,28 +35,21 @@ matrix. An explicit `--case` takes precedence over the priority ceiling. `--only
 `--only baseline` are debugging modes. `--dry-run` resolves and records both commands without
 loading a model.
 
-The command writes only three persistent files:
+The command writes only two persistent files:
 
 ```text
 artifacts/perf/results.json
 artifacts/perf/report.html
-artifacts/perf/reproduce.py
 ```
 
 `results.json` is internal evidence and contains raw samples. `report.html` intentionally
 contains only green/yellow/red/white categories. Temporary per-backend files are merged into
 `results.json` and removed after the run.
 
-Replay a recorded command without the matrix orchestrator:
-
-```bash
-python3 artifacts/perf/reproduce.py gpt2.generate
-python3 artifacts/perf/reproduce.py gpt2.generate baseline
-python3 artifacts/perf/reproduce.py gpt2.generate trtmc --print
-```
-
-The generated replay program uses only the Python standard library and directly executes the
-recorded `trtmc-bench` or baseline argv.
+Expand `Commands` for any row in `report.html` to see the original `trtmc-bench` and baseline
+commands exactly as they were executed. The report also shows the recorded working directory;
+copy either command directly into that environment without going through the matrix
+orchestrator or a generated replay script.
 
 For a non-text row the baseline command is equally explicit. For example:
 
@@ -65,17 +58,16 @@ python3 tools/perf_release.py benchmarks/performance/release.yaml \
   --case whisper.transcribe \
   --output artifacts/perf \
   --dry-run
-python3 artifacts/perf/reproduce.py whisper.transcribe baseline --print
 ```
 
-Remove `--print` to execute that baseline command without the matrix orchestrator. The command
-contains the adapter, model, manifest, exact resolved request JSON, precision, warmup/iteration
-counts, resolved runtime JSON, workload digest, and output path.
+Open the resulting report and expand that row. The raw baseline command contains the adapter,
+model, manifest, exact resolved request JSON, precision, warmup/iteration counts, resolved
+runtime JSON, workload digest, and output path.
 
 ## CI runs
 
 The `TRTMC Performance Matrix` workflow is callable and manually dispatchable. It runs the
-same Python entry point with `--ci`, then uploads the three result files even when a row fails.
+same Python entry point with `--ci`, then uploads both result files even when a row fails.
 Red and yellow comparisons are valid data and do not fail CI. Unexpected command failures,
 workload/output mismatches, or an eager fallback from a declared `torch.compile` baseline do.
 

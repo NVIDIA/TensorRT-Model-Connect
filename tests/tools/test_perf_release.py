@@ -7,7 +7,6 @@ import json
 from argparse import Namespace
 from pathlib import Path
 import runpy
-import shlex
 import subprocess
 import sys
 
@@ -254,7 +253,6 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     assert exit_code == 0
     assert sorted(path.name for path in output.iterdir()) == [
         "report.html",
-        "reproduce.py",
         "results.json",
     ]
     results = json.loads((output / "results.json").read_text(encoding="utf-8"))
@@ -265,22 +263,17 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     assert rows["gpt2.generate"]["baseline"]["mode"] == "torch-compile"
     assert rows["mamba.generate"]["baseline_contract"]["mode"] == "hf-eager"
     report = (output / "report.html").read_text(encoding="utf-8")
-    assert "gpt2.generate" in report
+    assert ">gpt2<" in report
     assert "HF eager" in report
     assert ">10.5<" not in report
     assert ">20.0<" not in report
+    assert "Show raw commands" in report
+    assert str(fake_trtmc) in report
+    assert str(fake_baseline) in report
+    assert "reproduce.py" not in report
 
-    replay = subprocess.run(
-        [sys.executable, output / "reproduce.py", "gpt2.generate", "baseline", "--print"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert replay.returncode == 0
-    assert str(fake_baseline) in replay.stdout
-    assert "tools/perf_release.py" not in replay.stdout
-    printed_argv = shlex.split(replay.stdout.strip())
-    request = printed_argv[printed_argv.index("--request-json") + 1]
+    baseline_argv = rows["gpt2.generate"]["commands"]["baseline"]["argv"]
+    request = baseline_argv[baseline_argv.index("--request-json") + 1]
     assert json.loads(request)["prompt"] == "Hello, I'm a language model"
 
 
@@ -477,6 +470,17 @@ def test_vlm_adapter_routes_non_generic_families_to_owned_loaders() -> None:
 
     assert runner["_load_vlm"](Namespace(family="deepseek_ocr"), {}, {}) is deepseek
     assert runner["_load_vlm"](Namespace(family="locateanything"), {}, {}) is locateanything
+
+
+def test_task_reference_resolves_revision_from_hugging_face_cache(monkeypatch) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    revision = Namespace(commit_hash="abc123", refs=frozenset({"main"}))
+    repository = Namespace(repo_id="nvidia/canary-1b-v2", revisions=[revision])
+    cache = Namespace(repos=[repository])
+    fake_hub = Namespace(scan_cache_dir=lambda: cache)
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+
+    assert runner["_cached_snapshot_revision"]("nvidia/canary-1b-v2", None) == "abc123"
 
 
 def test_diffusers_adapter_uses_resolved_sana_runtime_controls(tmp_path: Path) -> None:

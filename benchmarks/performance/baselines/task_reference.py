@@ -191,6 +191,31 @@ def _snapshot_revision(path: str | Path) -> str:
     return parts[index + 1] if index + 1 < len(parts) else ""
 
 
+def _cached_snapshot_revision(repo_id: str, requested: str | None) -> str:
+    try:
+        from huggingface_hub import scan_cache_dir
+
+        repository = next(
+            (repo for repo in scan_cache_dir().repos if repo.repo_id == repo_id), None
+        )
+    except (ImportError, OSError, ValueError):
+        return ""
+    if repository is None:
+        return ""
+    revisions = list(repository.revisions)
+    if requested:
+        matches = [
+            revision
+            for revision in revisions
+            if revision.commit_hash == requested or requested in revision.refs
+        ]
+    else:
+        matches = [revision for revision in revisions if "main" in revision.refs]
+        if not matches and len(revisions) == 1:
+            matches = revisions
+    return str(matches[0].commit_hash) if len(matches) == 1 else ""
+
+
 def _resolved_revision(arguments: argparse.Namespace, model: Any) -> str:
     revision = _model_revision(model, arguments.revision)
     if revision != "unresolved":
@@ -225,7 +250,7 @@ def _resolved_revision(arguments: argparse.Namespace, model: Any) -> str:
             pass
     except ImportError:
         pass
-    return "unresolved"
+    return _cached_snapshot_revision(arguments.model, arguments.revision) or "unresolved"
 
 
 def _to_device(value: Any, device: Any, dtype: Any = None) -> Any:

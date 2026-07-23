@@ -1127,6 +1127,39 @@ def _report_note(row: Mapping[str, Any]) -> str:
     return str(row.get("reason", ""))
 
 
+def _raw_commands_html(row: Mapping[str, Any], default_cwd: str) -> str:
+    commands = row.get("commands", {})
+    if not isinstance(commands, Mapping):
+        return "—"
+    recorded = []
+    for side, label in (("trtmc", "TRTMC"), ("baseline", "Baseline")):
+        command = commands.get(side)
+        if not isinstance(command, Mapping) or not command.get("rendered"):
+            continue
+        recorded.append((label, command))
+    if not recorded:
+        return "—"
+    working_directories = {
+        str(command.get("cwd") or default_cwd) for _, command in recorded
+    }
+    parts = ["<details><summary>Show raw commands</summary>"]
+    if len(working_directories) == 1:
+        cwd = next(iter(working_directories))
+        parts.append(
+            "<div class='command-label'>Working directory</div>"
+            f"<pre><code>{html.escape(cwd)}</code></pre>"
+        )
+    for label, command in recorded:
+        cwd = str(command.get("cwd") or default_cwd)
+        command_label = label if len(working_directories) == 1 else f"{label} (cwd: {cwd})"
+        parts.append(
+            f"<div class='command-label'>{html.escape(command_label)}</div>"
+            f"<pre><code>{html.escape(str(command['rendered']))}</code></pre>"
+        )
+    parts.append("</details>")
+    return "".join(parts)
+
+
 def _report_html(results: Mapping[str, Any]) -> str:
     rows = list(results["cases"])
     counts = {
@@ -1134,13 +1167,11 @@ def _report_html(results: Mapping[str, Any]) -> str:
         for status in ("green", "yellow", "red")
     }
     body = []
+    default_cwd = str(results.get("repository_root", ""))
     for row in rows:
         status = str(row.get("status", "pending"))
         reason = html.escape(_report_note(row))
-        if any(name in row.get("commands", {}) for name in ("trtmc", "baseline")):
-            reproduce = f"python3 reproduce.py {shlex.quote(str(row['id']))}"
-        else:
-            reproduce = "—"
+        commands = _raw_commands_html(row, default_cwd)
         body.append(
             "<tr>"
             f"<td>{html.escape(str(row['family']))}</td>"
@@ -1150,7 +1181,7 @@ def _report_html(results: Mapping[str, Any]) -> str:
             f"<td class='light'>{_light(status)}</td>"
             f"<td>{html.escape(status)}</td>"
             f"<td>{reason}</td>"
-            f"<td><code>{html.escape(reproduce)}</code></td>"
+            f"<td>{commands}</td>"
             "</tr>"
         )
     generated = html.escape(str(results.get("finished_at", results.get("started_at", ""))))
@@ -1163,89 +1194,24 @@ body{{font-family:Arial,sans-serif;margin:28px;color:#1f2937}} h1{{margin-bottom
 .meta{{color:#4b5563;margin:4px 0 18px}} table{{border-collapse:collapse;width:100%}}
 th,td{{border:1px solid #9ca3af;padding:7px;text-align:left;vertical-align:top}}
 th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-size:12px}}
+.command-label{{font-weight:600;margin-top:8px}} pre{{margin:4px 0 10px;max-width:720px;white-space:pre-wrap;overflow-wrap:anywhere}}
 .light{{font-size:20px;text-align:center}}
 </style></head><body>
 <h1>TRTMC release performance matrix</h1>
 <p class="meta">Generated {generated}. Categories compare TRTMC public-pipeline latency with the explicitly named baseline. Raw performance numbers are intentionally omitted.</p>
 <p><strong>{summary}</strong></p>
-<table><thead><tr><th>Family</th><th>Operation</th><th>Model</th><th>Baseline</th><th>Light</th><th>Status</th><th>Note</th><th>Reproduce</th></tr></thead>
+<table><thead><tr><th>Family</th><th>Operation</th><th>Model</th><th>Baseline</th><th>Light</th><th>Status</th><th>Note</th><th>Commands</th></tr></thead>
 <tbody>{"".join(body)}</tbody></table>
-<p class="meta">Green: TRTMC is more than the configured margin faster. Yellow: within the margin. Red: TRTMC is more than the margin slower. White: not run, partial, or invalid comparison.</p>
+<p class="meta">Green: TRTMC is more than the configured margin faster. Yellow: within the margin. Red: TRTMC is more than the margin slower. White: not run, partial, or invalid comparison. Commands are the original recorded argv and must be run from the displayed working directory with the same model cache and dependencies.</p>
 </body></html>"""
-
-
-REPRODUCE_SOURCE = r'''#!/usr/bin/env python3
-"""Replay commands recorded by one TRTMC performance release run."""
-from __future__ import annotations
-import argparse, json, os, pathlib, shlex, subprocess, sys
-
-HERE = pathlib.Path(__file__).resolve().parent
-
-def replace_output(argv, output):
-    values = list(argv)
-    for flag in ("--output", "-o"):
-        if flag in values:
-            values[values.index(flag) + 1] = str(output)
-            return values
-    return values
-
-def relocate_repo_paths(argv, original_repo, repo):
-    values = []
-    for value in argv:
-        path = pathlib.Path(value)
-        if not path.is_absolute():
-            values.append(value)
-            continue
-        try:
-            relative = path.relative_to(original_repo)
-        except ValueError:
-            values.append(value)
-        else:
-            values.append(str(repo / relative))
-    return values
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("case")
-    parser.add_argument("side", nargs="?", choices=("trtmc", "baseline", "both"), default="both")
-    parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("/tmp/trtmc-perf-reproduce"))
-    parser.add_argument("--repo", type=pathlib.Path)
-    parser.add_argument("--print", action="store_true", dest="print_only")
-    args = parser.parse_args()
-    results = json.loads((HERE / "results.json").read_text(encoding="utf-8"))
-    rows = {row["id"]: row for row in results["cases"]}
-    if args.case not in rows:
-        parser.error(f"unknown case {args.case!r}")
-    row = rows[args.case]
-    original_repo = pathlib.Path(results["repository_root"]).resolve()
-    repo = (args.repo or original_repo).resolve()
-    selected = ("trtmc", "baseline") if args.side == "both" else (args.side,)
-    for side in selected:
-        command = row.get("commands", {}).get(side)
-        if not command or not command.get("argv"):
-            parser.error(f"{args.case} has no recorded {side} command")
-        target = args.output / args.case / ("trtmc" if side == "trtmc" else "baseline.json")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        argv = relocate_repo_paths(command["argv"], original_repo, repo)
-        argv = replace_output(argv, target)
-        print(shlex.join(argv), flush=True)
-        if not args.print_only:
-            completed = subprocess.run(argv, cwd=repo, env=os.environ.copy(), check=False)
-            if completed.returncode:
-                return completed.returncode
-    return 0
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-'''
 
 
 def _write_artifacts(output: Path, results: Mapping[str, Any]) -> None:
     _write_json(output / "results.json", results)
     (output / "report.html").write_text(_report_html(results), encoding="utf-8")
-    reproduce = output / "reproduce.py"
-    reproduce.write_text(REPRODUCE_SOURCE, encoding="utf-8")
-    reproduce.chmod(0o755)
+    legacy_replay = output / "reproduce.py"
+    if legacy_replay.is_file():
+        legacy_replay.unlink()
 
 
 def _prepare_output(
