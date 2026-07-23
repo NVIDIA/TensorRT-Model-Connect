@@ -141,32 +141,19 @@ class GpuLease:
                             f"{' '.join(map(str, self.slot_ids))}"
                         )
                         return self
-                else:
-                    if len(capacity_rejected) == len(self.gpu_ids):
-                        if all(
-                            self.last_observed_total_mib.get(gpu, 0)
-                            < self.min_free_gpu_memory_mib
-                            for gpu in self.gpu_ids
-                        ):
-                            totals = ", ".join(
-                                f"GPU {gpu}={self.last_observed_total_mib[gpu]} MiB"
-                                for gpu in self.gpu_ids
-                            )
-                            raise CiError(
-                                "configured GPUs cannot meet the model-proof minimum free "
-                                f"memory requirement of {self.min_free_gpu_memory_mib} MiB "
-                                f"(total memory: {totals})"
-                            )
-                        self._requeue_after_capacity_rejection(deadline)
-                        capacity_rejected.clear()
-                        continue
-                    if self._try_exclusive_any(deadline, exclude=capacity_rejected):
+                elif self.min_free_gpu_memory_mib:
+                    if self._reserve_capacity_candidate(deadline, exclude=capacity_rejected):
                         candidate_gpu = self.gpu_id
                         assert candidate_gpu is not None
+                        self._release_ticket()
+                        self._drain_reserved_gpu(deadline)
                         if prepare_candidate:
                             prepare_candidate()
-                        if self._candidate_has_capacity():
-                            self._release_ticket()
+                        candidates_remaining = len(self.gpu_ids) - len(capacity_rejected)
+                        if self._candidate_has_capacity(
+                            deadline,
+                            candidates_remaining=candidates_remaining,
+                        ):
                             print(
                                 f"Leased exclusive model-proof GPU {self.gpu_id} slots "
                                 f"{' '.join(map(str, self.slot_ids))}"
@@ -174,10 +161,37 @@ class GpuLease:
                             return self
                         capacity_rejected.add(candidate_gpu)
                         self._release_gpu()
+                        if len(capacity_rejected) == len(self.gpu_ids):
+                            if all(
+                                gpu in self.last_observed_total_mib
+                                and self.last_observed_total_mib[gpu] < self.min_free_gpu_memory_mib
+                                for gpu in self.gpu_ids
+                            ):
+                                totals = ", ".join(
+                                    f"GPU {gpu}={self.last_observed_total_mib[gpu]} MiB"
+                                    for gpu in self.gpu_ids
+                                )
+                                raise CiError(
+                                    "configured GPUs cannot meet the model-proof minimum free "
+                                    f"memory requirement of {self.min_free_gpu_memory_mib} MiB "
+                                    f"(total memory: {totals})"
+                                )
+                            capacity_rejected.clear()
+                        self._requeue_after_capacity_rejection(deadline)
+                        continue
                     elif capacity_rejected:
                         self._requeue_after_capacity_rejection(deadline)
                         capacity_rejected.clear()
                         continue
+                elif self._try_exclusive_any(deadline):
+                    if prepare_candidate:
+                        prepare_candidate()
+                    self._release_ticket()
+                    print(
+                        f"Leased exclusive model-proof GPU {self.gpu_id} slots "
+                        f"{' '.join(map(str, self.slot_ids))}"
+                    )
+                    return self
                 time.sleep(min(self.poll_interval, max(0.0, deadline - time.monotonic())))
             raise CiError(
                 f"timed out after {self.timeout}s waiting for a {self.resource_class} "
@@ -397,6 +411,53 @@ class GpuLease:
         finally:
             allocator.close()
 
+    def _reserve_capacity_candidate(
+        self,
+        deadline: float,
+        *,
+        exclude: set[int],
+    ) -> bool:
+        """Reserve the least-busy eligible GPU before waiting for it to drain."""
+        allocator = self._allocator(deadline)
+        try:
+            best_gpu: int | None = None
+            best_available_slots = -1
+            for gpu in self.gpu_ids:
+                if gpu in exclude:
+                    continue
+                reservation = FileLock(self.lock_dir / f"gpu-{gpu}-reservation.lock")
+                if not reservation.try_lock():
+                    reservation.handle.close()
+                    continue
+                available_slots = 0
+                for slot in range(self.slots_per_gpu):
+                    candidate = FileLock(self.lock_dir / f"gpu-{gpu}-slot-{slot}.lock")
+                    if candidate.try_lock():
+                        available_slots += 1
+                        candidate.close()
+                    else:
+                        candidate.handle.close()
+                reservation.close()
+                if available_slots > best_available_slots:
+                    best_gpu = gpu
+                    best_available_slots = available_slots
+                if available_slots == self.slots_per_gpu:
+                    break
+            if best_gpu is None:
+                return False
+            reservation = FileLock(self.lock_dir / f"gpu-{best_gpu}-reservation.lock")
+            if not reservation.try_lock():
+                reservation.handle.close()
+                return False
+            self.gpu_id, self.reservation = best_gpu, reservation
+            print(
+                f"Reserved GPU {best_gpu} for capacity-gated exclusive admission "
+                f"with {best_available_slots}/{self.slots_per_gpu} slots already idle"
+            )
+            return True
+        finally:
+            allocator.close()
+
     def _drain_reserved_gpu(self, deadline: float) -> None:
         assert self.gpu_id is not None
         for slot in range(self.slots_per_gpu):
@@ -410,33 +471,66 @@ class GpuLease:
             self.slots.append(candidate)
             self.slot_ids.append(slot)
 
-    def _candidate_has_capacity(self) -> bool:
+    def _candidate_has_capacity(
+        self,
+        deadline: float,
+        *,
+        candidates_remaining: int,
+    ) -> bool:
         if not self.min_free_gpu_memory_mib:
             return True
         assert self.gpu_id is not None
-        snapshot = self._gpu_memory_snapshot(self.gpu_id)
-        self.last_observed_total_mib[self.gpu_id] = snapshot["total_mib"]
-        self.last_observed_free_mib[self.gpu_id] = snapshot["free_mib"]
-        if snapshot["free_mib"] < self.min_free_gpu_memory_mib:
+        now = time.monotonic()
+        settle_deadline = now + max(0.0, deadline - now) / max(1, candidates_remaining)
+        settle_poll_interval = max(0.25, min(5.0, self.poll_interval))
+        while time.monotonic() < settle_deadline:
+            try:
+                snapshot = self._gpu_memory_snapshot(
+                    self.gpu_id,
+                    timeout_seconds=max(0.001, settle_deadline - time.monotonic()),
+                )
+            except CiError:
+                if time.monotonic() >= settle_deadline:
+                    return False
+                raise
+            if time.monotonic() >= settle_deadline:
+                return False
+            self.last_observed_total_mib[self.gpu_id] = snapshot["total_mib"]
+            self.last_observed_free_mib[self.gpu_id] = snapshot["free_mib"]
+            if snapshot["free_mib"] >= self.min_free_gpu_memory_mib:
+                self.gpu_memory_admission = {
+                    "source": "nvidia-smi",
+                    "required_free_mib": self.min_free_gpu_memory_mib,
+                    "observed_total_mib": snapshot["total_mib"],
+                    "observed_used_mib": snapshot["used_mib"],
+                    "observed_free_mib": snapshot["free_mib"],
+                }
+                print(
+                    f"GPU {self.gpu_id} memory admission passed: "
+                    f"{snapshot['free_mib']} MiB free; "
+                    f"{self.min_free_gpu_memory_mib} MiB required"
+                )
+                return True
             print(
                 f"GPU {self.gpu_id} has {snapshot['free_mib']} MiB free; "
                 f"{self.model} requires {self.min_free_gpu_memory_mib} MiB"
             )
-            return False
-        self.gpu_memory_admission = {
-            "source": "nvidia-smi",
-            "required_free_mib": self.min_free_gpu_memory_mib,
-            "observed_total_mib": snapshot["total_mib"],
-            "observed_used_mib": snapshot["used_mib"],
-            "observed_free_mib": snapshot["free_mib"],
-        }
-        print(
-            f"GPU {self.gpu_id} memory admission passed: {snapshot['free_mib']} MiB free; "
-            f"{self.min_free_gpu_memory_mib} MiB required"
-        )
-        return True
+            if snapshot["total_mib"] < self.min_free_gpu_memory_mib:
+                return False
+            time.sleep(
+                min(
+                    settle_poll_interval,
+                    max(0.0, settle_deadline - time.monotonic()),
+                )
+            )
+        return False
 
-    def _gpu_memory_snapshot(self, gpu: int) -> dict[str, int]:
+    def _gpu_memory_snapshot(
+        self,
+        gpu: int,
+        *,
+        timeout_seconds: float = 10.0,
+    ) -> dict[str, int]:
         executable = self.context.executable("nvidia-smi")
         result = self.context.run(
             [
@@ -444,7 +538,7 @@ class GpuLease:
                 "--query-gpu=index,memory.total,memory.used,memory.free",
                 "--format=csv,noheader,nounits",
             ],
-            limit="10s",
+            limit=f"{min(10.0, timeout_seconds):.6f}s",
             capture_output=True,
         )
         snapshots: dict[int, dict[str, int]] = {}

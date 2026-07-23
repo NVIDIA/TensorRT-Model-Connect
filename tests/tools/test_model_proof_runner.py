@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from pathlib import Path
 
@@ -2655,12 +2656,13 @@ def test_capacity_gated_exclusive_lease_skips_a_memory_busy_gpu(
         assert not _lock_is_busy(lease.lock_dir / f"gpu-{gpu}-slot-1.lock")
 
 
-def test_capacity_gated_lease_resamples_after_memory_is_reclaimed(
+def test_capacity_gated_lease_waits_for_memory_reclaim_without_requeueing(
     tmp_path: Path,
 ) -> None:
     context = _fake_gpu_lease_context(
         tmp_path,
         "2, 284208, 184208, 100000\n3, 284208, 174208, 110000",
+        timeout_seconds=2,
     )
     lease = GpuLease(
         context,
@@ -2669,19 +2671,47 @@ def test_capacity_gated_lease_resamples_after_memory_is_reclaimed(
         min_free_gpu_memory_mib=240000,
     )
     prepared: list[int] = []
+    snapshots = iter(
+        (
+            {"total_mib": 284208, "used_mib": 184208, "free_mib": 100000},
+            {"total_mib": 284208, "used_mib": 34208, "free_mib": 250000},
+        )
+    )
+    sampled: list[int] = []
+
+    def memory_snapshot(
+        gpu: int,
+        *,
+        timeout_seconds: float = 10.0,
+    ) -> dict[str, int]:
+        assert gpu == 2
+        assert timeout_seconds <= 1
+        sampled.append(gpu)
+        assert _lock_is_busy(lease.lock_dir / "gpu-2-reservation.lock")
+        assert all(
+            _lock_is_busy(lease.lock_dir / f"gpu-2-slot-{slot}.lock")
+            for slot in range(lease.slots_per_gpu)
+        )
+        assert not list(lease.lock_dir.glob("admission-global-*.lock"))
+        return next(snapshots)
+
+    lease._gpu_memory_snapshot = memory_snapshot  # type: ignore[method-assign]
 
     def prepare_candidate() -> None:
         assert lease.gpu_id is not None
         prepared.append(lease.gpu_id)
-        if prepared == [2, 3, 2]:
-            context.env["FAKE_NVIDIA_SMI_ROWS"] = (
-                "2, 284208, 34208, 250000\n3, 284208, 174208, 110000"
-            )
+        assert _lock_is_busy(lease.lock_dir / "gpu-2-reservation.lock")
+        assert all(
+            _lock_is_busy(lease.lock_dir / f"gpu-2-slot-{slot}.lock")
+            for slot in range(lease.slots_per_gpu)
+        )
+        assert not list(lease.lock_dir.glob("admission-global-*.lock"))
 
     try:
         lease.acquire(prepare_candidate=prepare_candidate)
 
-        assert prepared == [2, 3, 2]
+        assert prepared == [2]
+        assert sampled == [2, 2]
         assert lease.gpu_id == 2
         assert lease.gpu_memory_admission
         assert lease.gpu_memory_admission["observed_free_mib"] == 250000
@@ -2689,7 +2719,86 @@ def test_capacity_gated_lease_resamples_after_memory_is_reclaimed(
         lease.release()
 
 
-def test_capacity_gated_lease_resamples_while_another_gpu_stays_busy(
+@pytest.mark.model_proof_allocator
+def test_capacity_waiter_reserves_one_gpu_without_blocking_other_gpu(
+    tmp_path: Path,
+) -> None:
+    context = _fake_gpu_lease_context(
+        tmp_path,
+        "2, 284208, 34208, 250000\n3, 284208, 34208, 250000",
+        timeout_seconds=10,
+    )
+    capacity_lease = GpuLease(
+        context,
+        "qwen3_omni",
+        "exclusive_gpu",
+        min_free_gpu_memory_mib=240000,
+    )
+    lock_dir = capacity_lease.lock_dir
+    gpu2_holder = lock_dir / "gpu-2-slot-0.lock"
+    gpu3_holder = lock_dir / "gpu-3-slot-0.lock"
+    gpu2_holder.parent.mkdir(parents=True, exist_ok=True)
+    acquired = threading.Event()
+    failure: list[BaseException] = []
+    capacity_thread: threading.Thread | None = None
+
+    def acquire_capacity() -> None:
+        try:
+            capacity_lease.acquire()
+            acquired.set()
+        except BaseException as error:
+            failure.append(error)
+            acquired.set()
+
+    try:
+        with (
+            gpu2_holder.open("w", encoding="utf-8") as gpu2_stream,
+            gpu3_holder.open("w", encoding="utf-8") as gpu3_stream,
+        ):
+            fcntl.flock(gpu2_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(gpu3_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            capacity_thread = threading.Thread(target=acquire_capacity)
+            capacity_thread.start()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not (
+                _lock_is_busy(lock_dir / "gpu-2-reservation.lock")
+                and not list(lock_dir.glob("admission-global-*.lock"))
+            ):
+                time.sleep(0.01)
+            assert _lock_is_busy(lock_dir / "gpu-2-reservation.lock")
+            assert not _lock_is_busy(lock_dir / "gpu-3-reservation.lock")
+            assert not list(lock_dir.glob("admission-global-*.lock"))
+
+            younger_env = context.env.copy()
+            younger = GpuLease(CiContext(REPO_ROOT, younger_env), "convbert", "shared")
+            try:
+                younger.acquire()
+                assert younger.gpu_id == 3
+                assert younger.slot_ids == [1]
+                assert not acquired.is_set()
+            finally:
+                younger.release()
+
+            fcntl.flock(gpu2_stream, fcntl.LOCK_UN)
+            capacity_thread.join(timeout=5)
+            assert not capacity_thread.is_alive()
+            assert not failure
+            assert acquired.is_set()
+            assert capacity_lease.gpu_id == 2
+            assert capacity_lease.slot_ids == [0, 1]
+    finally:
+        if capacity_thread is not None:
+            capacity_thread.join(timeout=11)
+        capacity_lease.release()
+
+    for gpu in (2, 3):
+        assert not _lock_is_busy(lock_dir / f"gpu-{gpu}-reservation.lock")
+        assert not _lock_is_busy(lock_dir / f"gpu-{gpu}-slot-0.lock")
+        assert not _lock_is_busy(lock_dir / f"gpu-{gpu}-slot-1.lock")
+
+
+@pytest.mark.model_proof_allocator
+def test_capacity_waiter_reconsiders_recovered_gpu_when_other_gpu_is_reserved(
     tmp_path: Path,
 ) -> None:
     context = _fake_gpu_lease_context(
@@ -2702,30 +2811,49 @@ def test_capacity_gated_lease_resamples_while_another_gpu_stays_busy(
         "exclusive_gpu",
         min_free_gpu_memory_mib=240000,
     )
-    busy_slot = lease.lock_dir / "gpu-3-slot-0.lock"
-    busy_slot.parent.mkdir(parents=True, exist_ok=True)
-    prepared: list[int] = []
+    gpu3_reservation = lease.lock_dir / "gpu-3-reservation.lock"
+    gpu3_reservation.parent.mkdir(parents=True, exist_ok=True)
+    sampled: list[int] = []
 
-    with busy_slot.open("w", encoding="utf-8") as busy_stream:
-        fcntl.flock(busy_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    def candidate_has_capacity(
+        deadline: float,
+        *,
+        candidates_remaining: int,
+    ) -> bool:
+        assert lease.gpu_id == 2
+        assert deadline > time.monotonic()
+        assert candidates_remaining == 2
+        sampled.append(2)
+        lease.last_observed_total_mib[2] = 284208
+        lease.last_observed_free_mib[2] = 100000
+        if len(sampled) == 1:
+            return False
+        lease.gpu_memory_admission = {
+            "source": "nvidia-smi",
+            "required_free_mib": 240000,
+            "observed_total_mib": 284208,
+            "observed_used_mib": 34208,
+            "observed_free_mib": 250000,
+        }
+        return True
 
-        def prepare_candidate() -> None:
-            assert lease.gpu_id is not None
-            prepared.append(lease.gpu_id)
-            if prepared == [2, 2]:
-                context.env["FAKE_NVIDIA_SMI_ROWS"] = (
-                    "2, 284208, 34208, 250000\n3, 284208, 174208, 110000"
-                )
+    lease._candidate_has_capacity = candidate_has_capacity  # type: ignore[method-assign]
 
+    with gpu3_reservation.open("w", encoding="utf-8") as reservation_stream:
+        fcntl.flock(reservation_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
-            lease.acquire(prepare_candidate=prepare_candidate)
-
-            assert prepared == [2, 2]
+            lease.acquire()
+            assert sampled == [2, 2]
             assert lease.gpu_id == 2
             assert lease.gpu_memory_admission
             assert lease.gpu_memory_admission["observed_free_mib"] == 250000
         finally:
             lease.release()
+
+    assert not list(lease.lock_dir.glob("admission-global-*.lock"))
+    assert not _lock_is_busy(lease.lock_dir / "gpu-2-reservation.lock")
+    assert not _lock_is_busy(lease.lock_dir / "gpu-2-slot-0.lock")
+    assert not _lock_is_busy(lease.lock_dir / "gpu-2-slot-1.lock")
 
 
 def test_capacity_gated_lease_times_out_with_last_observed_memory(
@@ -2734,7 +2862,7 @@ def test_capacity_gated_lease_times_out_with_last_observed_memory(
     context = _fake_gpu_lease_context(
         tmp_path,
         "2, 284208, 184208, 100000\n3, 284208, 174208, 110000",
-        timeout_seconds=1,
+        timeout_seconds=3,
     )
     lease = GpuLease(
         context,
@@ -2748,7 +2876,7 @@ def test_capacity_gated_lease_times_out_with_last_observed_memory(
         lease.acquire()
     elapsed = time.monotonic() - started
 
-    assert elapsed < 3
+    assert elapsed < 5
     assert not list(lease.lock_dir.glob("admission-global-*.lock"))
     for gpu in (2, 3):
         assert not _lock_is_busy(lease.lock_dir / f"gpu-{gpu}-reservation.lock")
@@ -2856,6 +2984,55 @@ def test_capacity_candidate_callback_failure_releases_every_lock(
         assert not _lock_is_busy(lease.lock_dir / f"gpu-{gpu}-reservation.lock")
         assert not _lock_is_busy(lease.lock_dir / f"gpu-{gpu}-slot-0.lock")
         assert not _lock_is_busy(lease.lock_dir / f"gpu-{gpu}-slot-1.lock")
+
+
+@pytest.mark.model_proof_allocator
+def test_capacity_drain_and_probe_share_one_deadline(
+    tmp_path: Path,
+) -> None:
+    context = _fake_gpu_lease_context(
+        tmp_path,
+        "2, 284208, 1000, 283208",
+        timeout_seconds=3,
+    )
+    context.env["TRTMC_MODEL_PROOF_GPU_IDS"] = "2"
+    context.env["FAKE_NVIDIA_SMI_DELAY_SECONDS"] = "1.5"
+    lease = GpuLease(
+        context,
+        "qwen3_omni",
+        "exclusive_gpu",
+        min_free_gpu_memory_mib=240000,
+    )
+    busy_slot = lease.lock_dir / "gpu-2-slot-0.lock"
+    busy_slot.parent.mkdir(parents=True, exist_ok=True)
+
+    with busy_slot.open("w", encoding="utf-8") as busy_stream:
+        fcntl.flock(busy_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        def finish_existing_work() -> None:
+            time.sleep(2)
+            fcntl.flock(busy_stream, fcntl.LOCK_UN)
+
+        holder = threading.Thread(target=finish_existing_work)
+        holder.start()
+        started = time.monotonic()
+        try:
+            with pytest.raises(CiError, match="timed out after 3s"):
+                lease.acquire()
+        finally:
+            holder.join(timeout=5)
+            lease.release()
+        elapsed = time.monotonic() - started
+
+    assert not holder.is_alive()
+    assert 2.5 <= elapsed < 4.2
+    assert lease.gpu_id is None
+    assert lease.gpu_memory_admission is None
+    assert not lease.last_observed_total_mib
+    assert not list(lease.lock_dir.glob("admission-global-*.lock"))
+    assert not _lock_is_busy(lease.lock_dir / "gpu-2-reservation.lock")
+    assert not _lock_is_busy(lease.lock_dir / "gpu-2-slot-0.lock")
+    assert not _lock_is_busy(lease.lock_dir / "gpu-2-slot-1.lock")
 
 
 @pytest.mark.model_proof_allocator
