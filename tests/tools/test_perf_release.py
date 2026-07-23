@@ -44,7 +44,7 @@ TASK_ADAPTERS = {
     "qwen_vl.generate": "hf-transformers-vlm",
     "sam.segment_prompted": "hf-transformers-vision",
     "sam3.segment_prompted": "hf-transformers-vision",
-    "sana_wm.generate_image": "hf-diffusers",
+    "sana_wm.generate_image": "upstream-sana-wm",
     "segformer.segment": "hf-transformers-vision",
     "timesfm.solve": "pytorch-timeseries",
     "timm_vit.classify": "hf-transformers-vision",
@@ -169,6 +169,14 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
         "condition_mask_path": "data/elf-b-de-en-replay/condition_mask.f32",
     }
     assert by_id["lance.generate"]["baseline"]["python_profile"] == "lance_reference"
+    assert by_id["sana_wm.generate_image"]["baseline"]["adapter_options"] == {
+        "reference_commit": "59629fdf790850797cb657bad014fce432bd713d",
+        "intrinsics": "assets/demo_0_intrinsics.npy",
+    }
+    assert (
+        by_id["sana_wm.generate_image"]["baseline"]["python_profile"]
+        == "sana_wm_reference"
+    )
     assert (
         by_id["locateanything.generate"]["baseline"]["output_contract"]
         == "exact-token-ids"
@@ -384,6 +392,7 @@ def test_task_reference_commands_record_external_checkout_paths(
 ) -> None:
     monkeypatch.setenv("TRTMC_ELF_REFERENCE_REPO", "/references/ELF")
     monkeypatch.setenv("TRTMC_LANCE_REFERENCE_REPO", "/references/Lance")
+    monkeypatch.setenv("TRTMC_SANA_WM_REFERENCE_REPO", "/references/Sana")
     monkeypatch.setenv("PERSONAPLEX_OFFICIAL_REPO", "/references/PersonaPlex")
 
     assert perf_release._resolved_adapter_options({"adapter": "upstream-elf"}) == {
@@ -391,6 +400,9 @@ def test_task_reference_commands_record_external_checkout_paths(
     }
     assert perf_release._resolved_adapter_options({"adapter": "upstream-lance"}) == {
         "reference_repo": "/references/Lance"
+    }
+    assert perf_release._resolved_adapter_options({"adapter": "upstream-sana-wm"}) == {
+        "reference_repo": "/references/Sana"
     }
     assert perf_release._resolved_adapter_options({"adapter": "pytorch-personaplex"}) == {
         "official_repo": "/references/PersonaPlex"
@@ -1191,3 +1203,86 @@ def test_lance_adapter_records_pinned_upstream_and_model_revisions(
     assert result[6]["revision"] == "upstream-commit"
     assert str(REPOSITORY / "tools/lance_reference.py") in captured[0]
     assert captured[0][captured[0].index("--max-new-tokens") + 1] == "10"
+
+
+def test_sana_wm_adapter_runs_pinned_official_pipeline_with_resolved_inputs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    model_root = tmp_path / "sana_wm"
+    manifest = model_root / "manifests" / "model.json"
+    assets = model_root / "assets"
+    manifest.parent.mkdir(parents=True)
+    assets.mkdir()
+    manifest.write_text("{}", encoding="utf-8")
+    (assets / "image.png").write_bytes(b"image")
+    (assets / "prompt.txt").write_text("prompt", encoding="utf-8")
+    (assets / "intrinsics.npy").write_bytes(b"intrinsics")
+    reference_repo = tmp_path / "Sana"
+    reference_repo.mkdir()
+    captured: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        command = [str(value) for value in command]
+        if command[0] == "git":
+            return subprocess.CompletedProcess(command, 0, "pinned-commit\n", "")
+        captured.update(command=command, kwargs=kwargs)
+        output = Path(kwargs["env"]["TRTMC_SANA_WM_BENCHMARK_OUTPUT"])
+        output.write_text(
+            json.dumps(
+                {
+                    "samples_ms": [101.0, 102.0],
+                    "output_summary": {"frame_count": 321, "shape": [321, 704, 1280, 3]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runner["subprocess"], "run", fake_run)
+    arguments = Namespace(
+        manifest=manifest,
+        resolved_runtime={
+            "config": {
+                "sana_wm.action": "w-80,jw-40",
+                "sana_wm.translation_speed": 0.055,
+                "sana_wm.rotation_speed_deg": 1.2,
+            }
+        },
+        warmup=1,
+        iterations=2,
+    )
+
+    result = runner["_run_sana_wm"](
+        arguments,
+        {
+            "image_path": "assets/image.png",
+            "prompt_path": "assets/prompt.txt",
+            "video_num_frames": 321,
+            "fps": 16,
+            "num_inference_steps": 60,
+            "cfg_scale": 5.0,
+            "flow_shift": 9.8,
+            "seed": 42,
+        },
+        {
+            "reference_repo": str(reference_repo),
+            "reference_commit": "pinned-commit",
+            "intrinsics": "assets/intrinsics.npy",
+        },
+    )
+
+    assert result[:6] == (
+        [101.0, 102.0],
+        {"frame_count": 321, "shape": [321, 704, 1280, 3]},
+        "pinned-commit",
+        "sana-wm-pytorch",
+        "task-pipeline-call-wall",
+        False,
+    )
+    command = captured["command"]
+    assert command[command.index("--num_frames") + 1] == "321"
+    assert command[command.index("--step") + 1] == "60"
+    assert captured["kwargs"]["cwd"] == str(reference_repo)
+    assert captured["kwargs"]["env"]["TRTMC_SANA_WM_BENCHMARK_WARMUP"] == "1"
+    assert captured["kwargs"]["env"]["TRTMC_SANA_WM_BENCHMARK_ITERATIONS"] == "2"

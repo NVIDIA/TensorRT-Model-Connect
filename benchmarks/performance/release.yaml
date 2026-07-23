@@ -702,18 +702,13 @@ cases:
     priority: slow
     baseline:
       runner: task-reference
-      adapter: hf-diffusers
-      mode: hf-eager
-      reference_backend: hf_diffusers
+      adapter: upstream-sana-wm
+      mode: pytorch-eager
+      reference_backend: official_sana
+      python_profile: sana_wm_reference
       adapter_options:
-        trust_remote_code: true
-        required_call_arguments:
-          - image
-          - action
-          - intrinsics
-          - translation_speed
-          - rotation_speed_deg
-          - num_frames
+        reference_commit: 59629fdf790850797cb657bad014fce432bd713d
+        intrinsics: assets/demo_0_intrinsics.npy
   - id: segformer.segment
     family: segformer
     operation: segment

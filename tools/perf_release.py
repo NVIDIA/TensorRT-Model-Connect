@@ -67,6 +67,7 @@ TASK_REFERENCE_ADAPTERS = {
     "pytorch-timeseries",
     "upstream-elf",
     "upstream-lance",
+    "upstream-sana-wm",
 }
 
 
@@ -259,6 +260,7 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
                 "pytorch-timeseries",
                 "upstream-elf",
                 "upstream-lance",
+                "upstream-sana-wm",
             }
             else "hf-eager"
         )
@@ -773,6 +775,10 @@ def _resolved_adapter_options(baseline: Mapping[str, Any]) -> dict[str, Any]:
     external_checkout = {
         "upstream-elf": ("reference_repo", "TRTMC_ELF_REFERENCE_REPO"),
         "upstream-lance": ("reference_repo", "TRTMC_LANCE_REFERENCE_REPO"),
+        "upstream-sana-wm": (
+            "reference_repo",
+            "TRTMC_SANA_WM_REFERENCE_REPO",
+        ),
         "pytorch-personaplex": ("official_repo", "PERSONAPLEX_OFFICIAL_REPO"),
     }.get(adapter)
     if external_checkout is not None:

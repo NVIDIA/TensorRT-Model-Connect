@@ -3,6 +3,12 @@
 
 id = "sana_wm"
 plugin = "sana_wm"
+python_profile_specs = [
+  "sana_wm_reference|families/sana_wm/python_profile_requirements/sana_wm_reference.lock.txt|families/sana_wm/python_profile_reference_verify.py|true",
+]
+default_execution_profiles = [
+  "reference|sana_wm_reference",
+]
 module = "plugin"
 config_adapter = "model_config.py|config_from_dir"
 aliases = [

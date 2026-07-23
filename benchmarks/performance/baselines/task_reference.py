@@ -65,6 +65,7 @@ ADAPTERS = (
     "pytorch-timeseries",
     "upstream-elf",
     "upstream-lance",
+    "upstream-sana-wm",
 )
 PYTORCH_ADAPTERS = {
     "nemo-asr",
@@ -73,6 +74,7 @@ PYTORCH_ADAPTERS = {
     "pytorch-timeseries",
     "upstream-elf",
     "upstream-lance",
+    "upstream-sana-wm",
 }
 
 
@@ -1877,6 +1879,126 @@ def _run_lance(
     )
 
 
+def _run_sana_wm(
+    arguments: argparse.Namespace,
+    request: Mapping[str, Any],
+    options: Mapping[str, Any],
+) -> tuple[list[float], dict[str, Any], str, str, str, bool, dict[str, str]]:
+    reference_repo = str(
+        options.get("reference_repo", "")
+        or os.environ.get("TRTMC_SANA_WM_REFERENCE_REPO", "")
+    )
+    if not reference_repo:
+        raise ValueError(
+            "upstream-sana-wm requires baseline.adapter_options.reference_repo or "
+            "TRTMC_SANA_WM_REFERENCE_REPO"
+        )
+    reference_commit = str(options.get("reference_commit", ""))
+    if not reference_commit:
+        raise ValueError("upstream-sana-wm requires adapter_options.reference_commit")
+    reference_revision = _pinned_checkout_revision(
+        reference_repo,
+        reference_commit,
+        repository="https://github.com/NVlabs/Sana",
+    )
+    runtime = getattr(arguments, "resolved_runtime", {})
+    config = runtime.get("config", {}) if isinstance(runtime, Mapping) else {}
+    if not isinstance(config, Mapping):
+        config = {}
+
+    model_root = arguments.manifest.resolve().parent.parent
+
+    def model_input(value: object) -> Path:
+        path = Path(str(value))
+        return path if path.is_absolute() else (model_root / path).resolve()
+
+    image = model_input(request["image_path"])
+    prompt = model_input(request["prompt_path"])
+    intrinsics = model_input(options.get("intrinsics", "assets/demo_0_intrinsics.npy"))
+    for label, path in (("image", image), ("prompt", prompt), ("intrinsics", intrinsics)):
+        if not path.is_file():
+            raise FileNotFoundError(f"SANA-WM {label} input does not exist: {path}")
+
+    with tempfile.TemporaryDirectory(prefix="trtmc-perf-sana-wm-") as temporary:
+        root = Path(temporary)
+        output = root / "benchmark.json"
+        command = [
+            sys.executable,
+            str(
+                REPOSITORY
+                / "tests/e2e/models/sana_wm/reference/inference_sana_wm.py"
+            ),
+            "--image",
+            str(image),
+            "--prompt",
+            str(prompt),
+            "--action",
+            str(config.get("sana_wm.action", options.get("action", ""))),
+            "--intrinsics",
+            str(intrinsics),
+            "--translation_speed",
+            str(config.get("sana_wm.translation_speed", 0.055)),
+            "--rotation_speed_deg",
+            str(config.get("sana_wm.rotation_speed_deg", 1.2)),
+            "--num_frames",
+            str(request.get("video_num_frames", config.get("sana_wm.num_frames", 321))),
+            "--fps",
+            str(request.get("fps", config.get("sana_wm.fps", 16))),
+            "--step",
+            str(request.get("num_inference_steps", 60)),
+            "--cfg_scale",
+            str(request.get("cfg_scale", 5.0)),
+            "--flow_shift",
+            str(request.get("flow_shift", config.get("sana_wm.flow_shift", 9.8))),
+            "--seed",
+            str(request.get("seed", 42)),
+            "--output_dir",
+            str(root / "frames"),
+            "--no_action_overlay",
+        ]
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "SANA_REPO": reference_repo,
+                "TRTMC_SANA_WM_BENCHMARK_OUTPUT": str(output),
+                "TRTMC_SANA_WM_BENCHMARK_WARMUP": str(arguments.warmup),
+                "TRTMC_SANA_WM_BENCHMARK_ITERATIONS": str(arguments.iterations),
+            }
+        )
+        completed = subprocess.run(
+            command,
+            cwd=reference_repo,
+            env=environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode:
+            raise RuntimeError(
+                "SANA-WM reference failed with "
+                f"rc={completed.returncode}: {completed.stderr[-4000:]}"
+            )
+        payload = json.loads(output.read_text(encoding="utf-8"))
+    samples = [float(value) for value in payload.get("samples_ms", [])]
+    if len(samples) != arguments.iterations:
+        raise RuntimeError(
+            f"SANA-WM reference returned {len(samples)} samples; "
+            f"expected {arguments.iterations}"
+        )
+    return (
+        samples,
+        dict(payload.get("output_summary", {})),
+        reference_revision,
+        "sana-wm-pytorch",
+        "task-pipeline-call-wall",
+        False,
+        {
+            "repository": "https://github.com/NVlabs/Sana",
+            "revision": reference_revision,
+        },
+    )
+
+
 def _environment() -> dict[str, Any]:
     value: dict[str, Any] = {
         "platform": platform.platform(),
@@ -1928,6 +2050,16 @@ def run(arguments: argparse.Namespace) -> int:
             input_included,
             reference_source,
         ) = _run_lance(arguments, request, options)
+    elif arguments.adapter == "upstream-sana-wm":
+        (
+            samples,
+            output_summary,
+            revision,
+            framework,
+            timing_scope,
+            input_included,
+            reference_source,
+        ) = _run_sana_wm(arguments, request, options)
     else:
         session = LOADERS[arguments.adapter](arguments, request, options)
         load_seconds = time.perf_counter() - load_started

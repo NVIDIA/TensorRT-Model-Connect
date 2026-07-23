@@ -200,9 +200,11 @@ def _run_external_script(script_path: Path) -> None:
 import importlib.util
 import dataclasses
 import enum
+import json
 import os
 import pickle
 import sys
+import time
 import types
 import typing
 from pathlib import Path
@@ -553,6 +555,72 @@ def _write_png_frames(output_dir, name, video_hwc, fps, logger):
     return output_dir
 
 module.write_video = _write_png_frames
+
+benchmark_output = os.environ.get("TRTMC_SANA_WM_BENCHMARK_OUTPUT", "")
+if benchmark_output:
+    warmup = int(os.environ.get("TRTMC_SANA_WM_BENCHMARK_WARMUP", "0"))
+    iterations = int(os.environ.get("TRTMC_SANA_WM_BENCHMARK_ITERATIONS", "1"))
+    if warmup < 0 or iterations <= 0:
+        raise ValueError("SANA-WM benchmark warmup/iterations are invalid")
+
+    original_pipeline_class = module.SanaWMPipeline
+
+    def _benchmark_pipeline(*args, **kwargs):
+        pipeline = original_pipeline_class(*args, **kwargs)
+        original_generate = pipeline.generate
+
+        def _timed_generate(*generate_args, **generate_kwargs):
+            import torch
+
+            output = None
+            for _ in range(warmup):
+                output = original_generate(*generate_args, **generate_kwargs)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+
+            samples_ms = []
+            for _ in range(iterations):
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                started = time.perf_counter()
+                output = original_generate(*generate_args, **generate_kwargs)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                samples_ms.append((time.perf_counter() - started) * 1000.0)
+
+            if output is None:
+                raise RuntimeError("SANA-WM benchmark produced no output")
+            video = output.get("video")
+            shape = [int(value) for value in getattr(video, "shape", ())]
+            frame_count = shape[0] if shape else len(video)
+            Path(benchmark_output).write_text(
+                json.dumps(
+                    {
+                        "samples_ms": samples_ms,
+                        "output_summary": {
+                            "frame_count": frame_count,
+                            "shape": shape,
+                        },
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\\n",
+                encoding="utf-8",
+            )
+            return output
+
+        pipeline.generate = _timed_generate
+        return pipeline
+
+    module.SanaWMPipeline = _benchmark_pipeline
+
+    def _skip_video_write(output_dir, name, video_hwc, fps, logger):
+        del output_dir, video_hwc, fps
+        logger.info(f"Skipped video write for measured benchmark output {name}")
+
+    module.write_video = _skip_video_write
+
 module.main()
     """
     subprocess.run(
