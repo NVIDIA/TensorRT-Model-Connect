@@ -75,7 +75,7 @@ def _recovery_request() -> tuple[int, int] | None:
 
 
 def _pid_is_alive(pid: object) -> bool:
-    if not isinstance(pid, int) or pid < 1:
+    if type(pid) is not int or pid < 1:
         return False
     try:
         os.kill(pid, 0)
@@ -117,6 +117,9 @@ def _recover_interrupted_claim(
         "command": command,
     }
     mismatches = [key for key, value in expected.items() if payload.get(key) != value]
+    for field in ("invocation_count", "attempt_count"):
+        if type(payload.get(field)) is not int:
+            mismatches.append(field)
     recoveries = payload.get("recovery_attempts", [])
     if not isinstance(recoveries, list) or len(recoveries) != previous_attempt - 1:
         mismatches.append("recovery_attempts")

@@ -174,6 +174,40 @@ def test_guard_recovers_one_abandoned_sigsegv_attempt(
     ] == [(1, -signal.SIGSEGV, signal.SIGSEGV)]
 
 
+@pytest.mark.parametrize("field", ["invocation_count", "attempt_count"])
+def test_guard_recovery_rejects_boolean_ledger_counts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+) -> None:
+    guard_dir = _enable_guard(monkeypatch, tmp_path)
+    bundle_path = tmp_path / "unit.trtfb"
+    timing_path = tmp_path / "build_timing.json"
+    process = multiprocessing.Process(
+        target=_leave_started_build_ledger,
+        args=("/models/unit", str(bundle_path), str(timing_path)),
+    )
+    process.start()
+    process.join(timeout=10)
+    assert process.exitcode == 91
+    record_path = next(guard_dir.glob("*.json"))
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record[field] = True
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_RECOVERY_ATTEMPT", "2")
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_RECOVERY_SIGNAL", str(signal.SIGSEGV))
+    calls: list[str] = []
+
+    with pytest.raises(RuntimeError, match=field):
+        _guarded_builder(calls)(
+            "/models/unit",
+            str(bundle_path),
+            build_timing_path=str(timing_path),
+        )
+
+    assert calls == []
+
+
 def test_guard_allows_only_one_concurrent_recovery(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

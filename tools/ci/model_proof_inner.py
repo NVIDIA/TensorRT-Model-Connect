@@ -179,12 +179,22 @@ class ModelProofInnerPipeline:
         gpu_id = self.context.env.get("TRTMC_MODEL_PROOF_GPU_ID", "")
         resource = self.context.env.get("TRTMC_MODEL_PROOF_RESOURCE_CLASS", "")
         capacity_text = self.context.env.get("TRTMC_MODEL_PROOF_SLOTS_PER_GPU", "")
+        min_free_text = self.context.env.get(
+            "TRTMC_MODEL_PROOF_MIN_FREE_GPU_MEMORY_MIB", ""
+        )
         if not gpu_id.isdigit():
             raise CiError("TRTMC_MODEL_PROOF_GPU_ID must be passed as a non-negative integer")
         if resource not in {"shared", "exclusive_gpu"}:
             raise CiError("TRTMC_MODEL_PROOF_RESOURCE_CLASS must be shared or exclusive_gpu")
         if not capacity_text.isdigit() or not 1 <= int(capacity_text) <= 16:
             raise CiError("TRTMC_MODEL_PROOF_SLOTS_PER_GPU must be an integer from 1 to 16")
+        if not min_free_text.isdigit():
+            raise CiError(
+                "TRTMC_MODEL_PROOF_MIN_FREE_GPU_MEMORY_MIB must be a non-negative integer"
+            )
+        min_free_gpu_memory_mib = int(min_free_text)
+        if min_free_gpu_memory_mib and resource != "exclusive_gpu":
+            raise CiError("minimum free GPU memory requires an exclusive_gpu model proof")
         try:
             slots = [
                 int(value)
@@ -214,8 +224,47 @@ class ModelProofInnerPipeline:
             "gpu_slots_per_device": capacity,
             "resource_class": resource,
             "gpu_resource_class": resource,
+            "min_free_gpu_memory_mib": min_free_gpu_memory_mib,
         }
         evidence = json.loads((self.artifacts / "gpu-lease.json").read_text(encoding="utf-8"))
+        schema_version = evidence.get("schema_version")
+        if (
+            not isinstance(schema_version, int)
+            or isinstance(schema_version, bool)
+            or schema_version != 1
+        ):
+            raise CiError("GPU lease evidence has an unsupported schema")
+        for field in ("gpu_slots", "gpu_slot_ids"):
+            evidence_slots = evidence.get(field)
+            if (
+                not isinstance(evidence_slots, list)
+                or not evidence_slots
+                or any(
+                    not isinstance(slot, int) or isinstance(slot, bool)
+                    for slot in evidence_slots
+                )
+            ):
+                raise CiError(f"GPU lease evidence has invalid {field}")
+        for field in ("slots_per_gpu", "gpu_slots_per_device"):
+            evidence_capacity = evidence.get(field)
+            if (
+                not isinstance(evidence_capacity, int)
+                or isinstance(evidence_capacity, bool)
+            ):
+                raise CiError(f"GPU lease evidence has invalid {field}")
+        evidence_slot = evidence.get("gpu_slot")
+        if resource == "shared":
+            if not isinstance(evidence_slot, int) or isinstance(evidence_slot, bool):
+                raise CiError("GPU lease evidence has an invalid gpu_slot")
+        elif evidence_slot is not None:
+            raise CiError("GPU lease evidence has an invalid gpu_slot")
+        evidence_minimum = evidence.get("min_free_gpu_memory_mib")
+        if (
+            not isinstance(evidence_minimum, int)
+            or isinstance(evidence_minimum, bool)
+            or evidence_minimum != min_free_gpu_memory_mib
+        ):
+            raise CiError("GPU lease evidence has an invalid minimum free GPU memory")
         for key, value in {
             "model": self.request.model,
             "source_revision": self.request.revision,
@@ -223,6 +272,52 @@ class ModelProofInnerPipeline:
         }.items():
             if evidence.get(key) != value:
                 raise CiError(f"GPU lease evidence mismatch for {key}")
+        admission = evidence.get("gpu_memory_admission")
+        if min_free_gpu_memory_mib:
+            if not isinstance(admission, dict):
+                raise CiError("GPU lease evidence is missing GPU memory admission")
+            admission_fields = {
+                "source",
+                "required_free_mib",
+                "observed_total_mib",
+                "observed_used_mib",
+                "observed_free_mib",
+            }
+            if set(admission) != admission_fields:
+                raise CiError("GPU memory admission has unexpected or missing fields")
+            if admission.get("source") != "nvidia-smi":
+                raise CiError("GPU memory admission has an invalid source")
+            required_free_mib = admission.get("required_free_mib")
+            if (
+                not isinstance(required_free_mib, int)
+                or isinstance(required_free_mib, bool)
+                or required_free_mib != min_free_gpu_memory_mib
+            ):
+                raise CiError("GPU memory admission requirement does not match the model proof")
+            for field in (
+                "observed_total_mib",
+                "observed_used_mib",
+                "observed_free_mib",
+            ):
+                value = admission.get(field)
+                if (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                ):
+                    raise CiError(f"GPU memory admission has an invalid {field}")
+            if (
+                admission["observed_used_mib"] > admission["observed_total_mib"]
+                or admission["observed_free_mib"] > admission["observed_total_mib"]
+            ):
+                raise CiError("GPU memory admission has inconsistent memory values")
+            if admission["observed_free_mib"] < min_free_gpu_memory_mib:
+                raise CiError("GPU memory admission did not satisfy the required free memory")
+            expected["gpu_memory_admission"] = {
+                field: admission[field] for field in sorted(admission_fields)
+            }
+        elif admission is not None:
+            raise CiError("GPU memory admission is present without a selected requirement")
         return expected
 
     def _validate_hf_cache(self) -> int:
@@ -391,6 +486,7 @@ class ModelProofInnerPipeline:
                     "gpu_slots_per_device",
                     "resource_class",
                     "gpu_resource_class",
+                    "min_free_gpu_memory_mib",
                     "gpu_lease_evidence",
                     "suite",
                 )
@@ -413,6 +509,8 @@ class ModelProofInnerPipeline:
                 "selected-pinned-private" if self.selection.reference_cache else "not-required"
             ),
         }
+        if self.selection.min_free_gpu_memory_mib:
+            proof["gpu_memory_admission"] = payload["gpu_memory_admission"]
         if self.selection.reference_cache:
             proof["model_reference_revision"] = self.selection.reference_cache["revision"]
             proof["model_reference_evidence"] = "model-reference-cache.json"

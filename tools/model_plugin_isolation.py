@@ -826,15 +826,19 @@ def command_verify_builds(args: argparse.Namespace) -> int:
         record_errors: list[str] = []
         if not identity:
             record_errors.append("identity is missing")
-        if record.get("invocation_count") != 1:
+        invocation_count = record.get("invocation_count")
+        if type(invocation_count) is not int or invocation_count != 1:
             record_errors.append(
-                f"invocation_count is {record.get('invocation_count')!r}, expected 1"
+                f"invocation_count is {invocation_count!r}, expected 1"
             )
         attempt_count = record.get("attempt_count")
-        if not isinstance(attempt_count, int) or not 1 <= attempt_count <= 2:
+        valid_attempt_count = (
+            type(attempt_count) is int and 1 <= attempt_count <= 2
+        )
+        if not valid_attempt_count:
             record_errors.append(f"attempt_count is {attempt_count!r}, expected 1 or 2")
         recovery_attempts = record.get("recovery_attempts")
-        expected_recoveries = attempt_count - 1 if isinstance(attempt_count, int) else -1
+        expected_recoveries = attempt_count - 1 if valid_attempt_count else -1
         if not isinstance(recovery_attempts, list) or len(recovery_attempts) != expected_recoveries:
             record_errors.append("recovery_attempts does not match attempt_count")
         elif any(

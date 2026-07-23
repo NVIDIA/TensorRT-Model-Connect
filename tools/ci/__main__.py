@@ -42,6 +42,23 @@ class CiCommand:
         proof.add_argument("--output-dir", type=Path)
         proof.add_argument("--inner", action="store_true")
         proof.add_argument("--cleanup-containers", action="store_true")
+        reference_cache = commands.add_parser(
+            "model-reference-cache",
+            help="Manage pinned model-reference source checkouts",
+        )
+        reference_cache_commands = reference_cache.add_subparsers(
+            dest="reference_cache_command",
+            required=True,
+        )
+        reference_cache_warm = reference_cache_commands.add_parser(
+            "warm",
+            help="Warm every declared reference for one suite",
+        )
+        reference_cache_warm.add_argument(
+            "--suite",
+            choices=("premerge", "nightly"),
+            default="nightly",
+        )
 
     def run(self) -> int:
         arguments, remaining = self.parser.parse_known_args()
@@ -84,6 +101,21 @@ class CiCommand:
                 if remaining:
                     self.parser.error(f"unrecognized combined coverage arguments: {remaining}")
                 coverage_runner.all_reports()
+            return 0
+        if (
+            arguments.command == "model-reference-cache"
+            and arguments.reference_cache_command == "warm"
+        ):
+            if remaining:
+                self.parser.error(
+                    f"unrecognized model reference cache arguments: {' '.join(remaining)}"
+                )
+            from .context import CiContext
+            from .model_reference_cache import ModelReferenceCacheWarmer
+
+            ModelReferenceCacheWarmer(CiContext(env=dict(os.environ))).warm(
+                arguments.suite
+            )
             return 0
         if arguments.command == "model-proof":
             from .context import CiContext

@@ -67,6 +67,7 @@ class TestManifestValidation:
             "build_args",
             "build_env",
             "e2e_parallel_resource",
+            "e2e_min_free_gpu_memory_mib",
             "e2e_size",
             "distributed_runtime",
         }
@@ -140,6 +141,54 @@ class TestManifestValidation:
         }
         with pytest.raises(TypeError, match="max_cache_length"):
             _validate_manifest(data, "test.json")
+
+    @pytest.mark.parametrize("value", [None, True, 0, -1, 1.5, "240000"])
+    def test_min_free_gpu_memory_requires_a_positive_integer(self, tmp_path, value):
+        data = {
+            "name": "test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+            "e2e_parallel_resource": "exclusive_gpu",
+            "e2e_min_free_gpu_memory_mib": value,
+        }
+
+        with pytest.raises(TypeError, match="e2e_min_free_gpu_memory_mib"):
+            _validate_manifest(data, "test.json")
+
+    def test_min_free_gpu_memory_requires_exclusive_gpu(self):
+        data = {
+            "name": "test",
+            "hf_id": EXAMPLE_MODEL_ID,
+            "family": EXAMPLE_FAMILY,
+            "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+            "e2e_parallel_resource": "shared",
+            "e2e_min_free_gpu_memory_mib": 240000,
+        }
+
+        with pytest.raises(ValueError, match="requires.*exclusive_gpu"):
+            _validate_manifest(data, "test.json")
+
+    def test_min_free_gpu_memory_is_model_only(self, tmp_path):
+        path = self._write_manifest(
+            tmp_path,
+            {
+                "name": "test",
+                "hf_id": EXAMPLE_MODEL_ID,
+                "family": EXAMPLE_FAMILY,
+                "runtime_strategy": EXAMPLE_RUNTIME_STRATEGY,
+                "e2e_parallel_resource": "exclusive_gpu",
+                "testcases": [
+                    {
+                        "name": "test",
+                        "e2e_min_free_gpu_memory_mib": 240000,
+                    }
+                ],
+            },
+        )
+
+        with pytest.raises(ValueError, match="model-level field"):
+            load_model_manifest(path)
 
     def test_unknown_runtime_strategy_warns(self, tmp_path):
         """Unknown runtime_strategy should emit a warning."""

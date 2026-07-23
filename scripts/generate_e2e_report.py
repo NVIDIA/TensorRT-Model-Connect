@@ -2821,6 +2821,7 @@ def _proof_context(
         "staged_model_dso_count", "engine_builds_per_model", "engine_build_count",
         "engine_build_verification", "gpu_id", "gpu_resource_class",
         "gpu_slot_ids", "gpu_slots_per_device", "gpu_lease_evidence",
+        "min_free_gpu_memory_mib", "gpu_memory_admission",
         "network", "plugin_search", "passed", "e2e_proof_kind",
     ):
         if key in proof:
@@ -2861,6 +2862,19 @@ def validate_proof_context(
     if issues:
         return issues
 
+    raw_e2e_cases = selection.get("e2e_cases")
+    if not isinstance(raw_e2e_cases, list):
+        issues.append("Test selection e2e_cases must be a list")
+        e2e_cases: List[Dict[str, Any]] = []
+    else:
+        e2e_cases = raw_e2e_cases
+    raw_steps = status.get("steps")
+    if not isinstance(raw_steps, dict):
+        issues.append("Model-proof status steps must be an object")
+        steps: Dict[str, Any] = {}
+    else:
+        steps = raw_steps
+
     if proof.get("passed") is not True:
         issues.append("Final proof JSON does not declare passed=true")
     for key in ("model", "source_revision", "runtime_model", "runtime_library"):
@@ -2884,7 +2898,7 @@ def validate_proof_context(
         issues.append("Final proof JSON does not prove one full bundle build per model")
     selected_build_models = {
         str(case.get("model") or case.get("name") or "")
-        for case in selection.get("e2e_cases", [])
+        for case in e2e_cases
         if isinstance(case, dict) and (case.get("model") or case.get("name"))
     }
     if proof.get("engine_build_count") != len(selected_build_models):
@@ -2904,7 +2918,10 @@ def validate_proof_context(
     slot_ids = proof.get("gpu_slot_ids")
     slots_per_device = proof.get("gpu_slots_per_device")
     lease_evidence = proof.get("gpu_lease_evidence")
-    if resource_class not in {"shared", "exclusive_gpu"}:
+    if (
+        not isinstance(resource_class, str)
+        or resource_class not in {"shared", "exclusive_gpu"}
+    ):
         issues.append("Final proof JSON has no valid GPU resource class")
     if not isinstance(slots_per_device, int) or isinstance(slots_per_device, bool) \
             or slots_per_device < 1:
@@ -2931,6 +2948,27 @@ def validate_proof_context(
         issues.append("Exclusive GPU proof must hold every slot on its GPU")
     if lease_evidence != "gpu-lease.json":
         issues.append("Final proof JSON does not identify GPU lease evidence")
+    for label, payload in (
+        ("Model-proof status", status),
+        ("Test selection", selection),
+    ):
+        payload_slot_ids = payload.get("gpu_slot_ids")
+        payload_slots_per_device = payload.get("gpu_slots_per_device")
+        if (
+            not isinstance(payload_slots_per_device, int)
+            or isinstance(payload_slots_per_device, bool)
+            or payload_slots_per_device < 1
+        ):
+            issues.append(f"{label} has no valid GPU slots-per-device value")
+        if (
+            not isinstance(payload_slot_ids, list)
+            or not payload_slot_ids
+            or any(
+                not isinstance(slot, int) or isinstance(slot, bool)
+                for slot in payload_slot_ids
+            )
+        ):
+            issues.append(f"{label} has no valid GPU slot IDs")
     for field in (
         "gpu_resource_class", "gpu_slot_ids", "gpu_slots_per_device",
         "gpu_lease_evidence",
@@ -2939,6 +2977,231 @@ def validate_proof_context(
             issues.append(f"Proof {field} does not match model-proof status")
         if proof.get(field) != selection.get(field):
             issues.append(f"Proof {field} does not match test selection")
+    case_requirements: List[int] = []
+    case_resource_classes: List[str] = []
+    for index, case in enumerate(e2e_cases):
+        if not isinstance(case, dict):
+            issues.append(f"Selected E2E case {index} must be an object")
+            continue
+        case_resource = case.get("resource_class")
+        case_gpu_resource = case.get("gpu_resource_class")
+        for field, value in (
+            ("resource_class", case_resource),
+            ("gpu_resource_class", case_gpu_resource),
+        ):
+            if (
+                not isinstance(value, str)
+                or value not in {"shared", "exclusive_gpu"}
+            ):
+                issues.append(f"Selected E2E case has an invalid {field}")
+        if (
+            isinstance(case_resource, str)
+            and case_resource in {"shared", "exclusive_gpu"}
+            and isinstance(case_gpu_resource, str)
+            and case_gpu_resource in {"shared", "exclusive_gpu"}
+        ):
+            if case_resource != case_gpu_resource:
+                issues.append("Selected E2E case GPU resource classes do not match")
+            else:
+                case_resource_classes.append(case_resource)
+        if "min_free_gpu_memory_mib" not in case:
+            issues.append("Selected E2E case is missing minimum free GPU memory")
+        requirement = case.get("min_free_gpu_memory_mib", 0)
+        if (
+            not isinstance(requirement, int)
+            or isinstance(requirement, bool)
+            or requirement < 0
+        ):
+            issues.append("Selected E2E case has an invalid minimum free GPU memory value")
+        else:
+            case_requirements.append(requirement)
+            if requirement and case_gpu_resource != "exclusive_gpu":
+                issues.append(
+                    "Selected E2E case requires free GPU memory without exclusive GPU access"
+                )
+    selection_resource = selection.get("resource_class")
+    selection_gpu_resource = selection.get("gpu_resource_class")
+    for field, value in (
+        ("resource_class", selection_resource),
+        ("gpu_resource_class", selection_gpu_resource),
+    ):
+        if (
+            not isinstance(value, str)
+            or value not in {"shared", "exclusive_gpu"}
+        ):
+            issues.append(f"Test selection has an invalid {field}")
+    if (
+        isinstance(selection_resource, str)
+        and selection_resource in {"shared", "exclusive_gpu"}
+        and isinstance(selection_gpu_resource, str)
+        and selection_gpu_resource in {"shared", "exclusive_gpu"}
+    ):
+        if selection_resource != selection_gpu_resource:
+            issues.append("Test selection GPU resource classes do not match")
+        if case_resource_classes:
+            required_resource = (
+                "exclusive_gpu"
+                if "exclusive_gpu" in case_resource_classes
+                else "shared"
+            )
+            if selection_resource != required_resource:
+                issues.append(
+                    "Test selection GPU resource class does not match selected cases"
+                )
+    if "min_free_gpu_memory_mib" not in selection:
+        issues.append("Test selection is missing minimum free GPU memory")
+    min_free_gpu_memory_mib = selection.get("min_free_gpu_memory_mib", 0)
+    if (
+        not isinstance(min_free_gpu_memory_mib, int)
+        or isinstance(min_free_gpu_memory_mib, bool)
+        or min_free_gpu_memory_mib < 0
+    ):
+        issues.append("Test selection has no valid minimum free GPU memory value")
+    elif min_free_gpu_memory_mib:
+        if min_free_gpu_memory_mib != max(case_requirements, default=0):
+            issues.append(
+                "Test selection minimum free GPU memory does not match its selected cases"
+            )
+        if resource_class != "exclusive_gpu":
+            issues.append("Minimum free GPU memory requires an exclusive GPU proof")
+        for label, payload in (("Proof", proof), ("Model-proof status", status)):
+            payload_minimum = payload.get("min_free_gpu_memory_mib")
+            if (
+                not isinstance(payload_minimum, int)
+                or isinstance(payload_minimum, bool)
+                or payload_minimum != min_free_gpu_memory_mib
+            ):
+                issues.append(
+                    f"{label} minimum free GPU memory does not match test selection"
+                )
+        admission_fields = {
+            "source",
+            "required_free_mib",
+            "observed_total_mib",
+            "observed_used_mib",
+            "observed_free_mib",
+        }
+        admission = proof.get("gpu_memory_admission")
+        if not isinstance(admission, dict):
+            issues.append("Proof has no GPU memory admission evidence")
+        else:
+            if set(admission) != admission_fields:
+                issues.append("Proof GPU memory admission has unexpected or missing fields")
+            if admission.get("source") != "nvidia-smi":
+                issues.append("Proof GPU memory admission has an invalid source")
+            required_free_mib = admission.get("required_free_mib")
+            if (
+                not isinstance(required_free_mib, int)
+                or isinstance(required_free_mib, bool)
+                or required_free_mib != min_free_gpu_memory_mib
+            ):
+                issues.append(
+                    "Proof GPU memory admission requirement does not match test selection"
+                )
+            observations = {
+                field: admission.get(field)
+                for field in (
+                    "observed_total_mib",
+                    "observed_used_mib",
+                    "observed_free_mib",
+                )
+            }
+            if any(
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                for value in observations.values()
+            ):
+                issues.append("Proof GPU memory admission has invalid observed memory values")
+            else:
+                if (
+                    observations["observed_used_mib"]
+                    > observations["observed_total_mib"]
+                    or observations["observed_free_mib"]
+                    > observations["observed_total_mib"]
+                ):
+                    issues.append("Proof GPU memory admission values are inconsistent")
+                if observations["observed_free_mib"] < min_free_gpu_memory_mib:
+                    issues.append(
+                        "Proof GPU memory admission is below the selected requirement"
+                    )
+        for label, payload in (
+            ("Model-proof status", status),
+            ("Test selection", selection),
+        ):
+            payload_admission = payload.get("gpu_memory_admission")
+            if not isinstance(payload_admission, dict):
+                issues.append(f"{label} has no GPU memory admission evidence")
+            else:
+                if set(payload_admission) != admission_fields:
+                    issues.append(
+                        f"{label} GPU memory admission has unexpected or missing fields"
+                    )
+                if payload_admission.get("source") != "nvidia-smi":
+                    issues.append(
+                        f"{label} GPU memory admission has an invalid source"
+                    )
+                payload_requirement = payload_admission.get("required_free_mib")
+                if (
+                    not isinstance(payload_requirement, int)
+                    or isinstance(payload_requirement, bool)
+                    or payload_requirement != min_free_gpu_memory_mib
+                ):
+                    issues.append(
+                        f"{label} GPU memory admission requirement does not match "
+                        "test selection"
+                    )
+                payload_observations = {
+                    field: payload_admission.get(field)
+                    for field in (
+                        "observed_total_mib",
+                        "observed_used_mib",
+                        "observed_free_mib",
+                    )
+                }
+                if any(
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                    for value in payload_observations.values()
+                ):
+                    issues.append(
+                        f"{label} GPU memory admission has invalid observed memory values"
+                    )
+                elif (
+                    payload_observations["observed_used_mib"]
+                    > payload_observations["observed_total_mib"]
+                    or payload_observations["observed_free_mib"]
+                    > payload_observations["observed_total_mib"]
+                    or payload_observations["observed_free_mib"]
+                    < min_free_gpu_memory_mib
+                ):
+                    issues.append(
+                        f"{label} GPU memory admission has inconsistent memory values"
+                    )
+            if payload_admission != admission:
+                issues.append(f"{label} GPU memory admission does not match final proof")
+    else:
+        if max(case_requirements, default=0) != 0:
+            issues.append(
+                "Test selection minimum free GPU memory does not match its selected cases"
+            )
+        for label, payload in (("Proof", proof), ("Model-proof status", status)):
+            if "min_free_gpu_memory_mib" not in payload:
+                issues.append(f"{label} is missing minimum free GPU memory")
+            payload_minimum = payload.get("min_free_gpu_memory_mib")
+            if (
+                not isinstance(payload_minimum, int)
+                or isinstance(payload_minimum, bool)
+                or payload_minimum < 0
+            ):
+                issues.append(f"{label} has an invalid minimum free GPU memory value")
+            elif payload_minimum != 0:
+                issues.append(f"{label} has an unexpected minimum free GPU memory value")
+            if payload.get("gpu_memory_admission") is not None:
+                issues.append(f"{label} has unexpected GPU memory admission evidence")
+        if selection.get("gpu_memory_admission") is not None:
+            issues.append("Test selection has unexpected GPU memory admission evidence")
     if proof.get("network") != "disabled" or proof.get("plugin_search") != "strict":
         issues.append("Final proof JSON is missing hermetic network/plugin guarantees")
     if proof.get("model") != status.get("model"):
@@ -2947,19 +3210,23 @@ def validate_proof_context(
         issues.append("Proof revision does not match the pinned model-proof revision")
     if selection.get("requested_model") != status.get("model"):
         issues.append("Selected model does not match model-proof status")
-    if not selection.get("e2e_test") or not selection.get("e2e_cases"):
+    if not selection.get("e2e_test") or not e2e_cases:
         issues.append("Test selection does not identify an E2E test and case")
 
     e2e_proof_kind = proof.get("e2e_proof_kind")
-    if e2e_proof_kind not in {
-        "reference",
-        "snapshot_regression",
-        "functional_invariant",
-    }:
+    if (
+        not isinstance(e2e_proof_kind, str)
+        or e2e_proof_kind
+        not in {
+            "reference",
+            "snapshot_regression",
+            "functional_invariant",
+        }
+    ):
         issues.append("Final proof JSON has no valid E2E proof-kind classification")
     if status.get("e2e_proof_kind") != e2e_proof_kind:
         issues.append("E2E proof kind does not match model-proof status")
-    e2e_reference = (status.get("steps") or {}).get("e2e_reference")
+    e2e_reference = steps.get("e2e_reference")
     expected_reference_status = (
         "passed" if e2e_proof_kind == "reference" else "skipped"
     )
@@ -2969,10 +3236,14 @@ def validate_proof_context(
     ):
         issues.append(f"Validation step e2e_reference must be {expected_reference_status}")
 
-    for name, step in (status.get("steps") or {}).items():
+    for name, step in steps.items():
         if name == "html_report" or not isinstance(step, dict):
             continue
-        if step.get("status") not in {"passed", "skipped"}:
+        step_status = step.get("status")
+        if (
+            not isinstance(step_status, str)
+            or step_status not in {"passed", "skipped"}
+        ):
             issues.append(f"Validation step {name} is not complete")
     return issues
 
@@ -3023,6 +3294,13 @@ def render_proof_section(context: Dict[str, Any]) -> str:
     if not context:
         return ""
     selection = context.get("selection") or {}
+    admission = context.get("gpu_memory_admission")
+    admission_summary = None
+    if isinstance(admission, dict):
+        admission_summary = (
+            f"{admission.get('observed_free_mib')} MiB free / "
+            f"{admission.get('required_free_mib')} MiB required"
+        )
     rows = []
     fields = (
         ("Model ownership ID", context.get("model")),
@@ -3044,6 +3322,8 @@ def render_proof_section(context: Dict[str, Any]) -> str:
         ("GPU resource class", context.get("gpu_resource_class")),
         ("GPU slot IDs", context.get("gpu_slot_ids")),
         ("GPU slots per device", context.get("gpu_slots_per_device")),
+        ("Minimum free GPU memory", context.get("min_free_gpu_memory_mib")),
+        ("GPU memory admission", admission_summary),
         ("GPU lease evidence", context.get("gpu_lease_evidence")),
         ("Container network", context.get("network")),
         ("Plugin search", context.get("plugin_search")),

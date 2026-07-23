@@ -8,6 +8,7 @@ Boundary: cross-process fairness and locking only; this module never runs a mode
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import fcntl
 import hashlib
 import os
@@ -63,13 +64,24 @@ class GpuLease:
         model: str,
         resource_class: str,
         artifacts: Path | None = None,
+        *,
+        min_free_gpu_memory_mib: int = 0,
     ):
         if resource_class not in {"shared", "exclusive_gpu"}:
             raise CiError("model-proof resource class must be shared or exclusive_gpu")
+        if (
+            isinstance(min_free_gpu_memory_mib, bool)
+            or not isinstance(min_free_gpu_memory_mib, int)
+            or min_free_gpu_memory_mib < 0
+        ):
+            raise CiError("minimum free GPU memory must be a non-negative integer MiB value")
+        if min_free_gpu_memory_mib and resource_class != "exclusive_gpu":
+            raise CiError("minimum free GPU memory can only be required by exclusive_gpu proofs")
         self.context = context
         self.model = model
         self.resource_class = resource_class
         self.artifacts = artifacts
+        self.min_free_gpu_memory_mib = min_free_gpu_memory_mib
         self.gpu_ids, self.slots_per_gpu, self.timeout, self.poll_interval = self._configuration()
         configured = context.env.get(
             "TRTMC_MODEL_PROOF_GPU_LOCK_DIR", "/tmp/trtmc-model-proof-gpu-locks"
@@ -88,9 +100,17 @@ class GpuLease:
         self.slots: list[FileLock] = []
         self.gpu_id: int | None = None
         self.slot_ids: list[int] = []
+        self.gpu_memory_admission: dict[str, object] | None = None
+        self.last_observed_free_mib: dict[int, int] = {}
+        self.last_observed_total_mib: dict[int, int] = {}
 
-    def acquire(self) -> "GpuLease":
+    def acquire(
+        self,
+        *,
+        prepare_candidate: Callable[[], None] | None = None,
+    ) -> "GpuLease":
         deadline = time.monotonic() + self.timeout
+        capacity_rejected: set[int] = set()
         self.machine = FileLock(self.lock_dir / "whole-machine.lock")
         if not self._wait_lock(self.machine, deadline, shared=True):
             raise CiError(f"timed out after {self.timeout}s waiting for the whole-machine GPU lock")
@@ -112,7 +132,7 @@ class GpuLease:
                             f"via {self.slots[0].path}"
                         )
                         return self
-                elif len(self.gpu_ids) == 1:
+                elif len(self.gpu_ids) == 1 and not self.min_free_gpu_memory_mib:
                     if self._reserve_one_gpu(deadline):
                         self._release_ticket()
                         self._drain_reserved_gpu(deadline)
@@ -121,17 +141,48 @@ class GpuLease:
                             f"{' '.join(map(str, self.slot_ids))}"
                         )
                         return self
-                elif self._try_exclusive_any(deadline):
-                    self._release_ticket()
-                    print(
-                        f"Leased exclusive model-proof GPU {self.gpu_id} slots "
-                        f"{' '.join(map(str, self.slot_ids))}"
-                    )
-                    return self
+                else:
+                    if len(capacity_rejected) == len(self.gpu_ids):
+                        if all(
+                            self.last_observed_total_mib.get(gpu, 0)
+                            < self.min_free_gpu_memory_mib
+                            for gpu in self.gpu_ids
+                        ):
+                            totals = ", ".join(
+                                f"GPU {gpu}={self.last_observed_total_mib[gpu]} MiB"
+                                for gpu in self.gpu_ids
+                            )
+                            raise CiError(
+                                "configured GPUs cannot meet the model-proof minimum free "
+                                f"memory requirement of {self.min_free_gpu_memory_mib} MiB "
+                                f"(total memory: {totals})"
+                            )
+                        self._requeue_after_capacity_rejection(deadline)
+                        capacity_rejected.clear()
+                        continue
+                    if self._try_exclusive_any(deadline, exclude=capacity_rejected):
+                        candidate_gpu = self.gpu_id
+                        assert candidate_gpu is not None
+                        if prepare_candidate:
+                            prepare_candidate()
+                        if self._candidate_has_capacity():
+                            self._release_ticket()
+                            print(
+                                f"Leased exclusive model-proof GPU {self.gpu_id} slots "
+                                f"{' '.join(map(str, self.slot_ids))}"
+                            )
+                            return self
+                        capacity_rejected.add(candidate_gpu)
+                        self._release_gpu()
+                    elif capacity_rejected:
+                        self._requeue_after_capacity_rejection(deadline)
+                        capacity_rejected.clear()
+                        continue
                 time.sleep(min(self.poll_interval, max(0.0, deadline - time.monotonic())))
             raise CiError(
                 f"timed out after {self.timeout}s waiting for a {self.resource_class} "
                 f"model-proof GPU lease from: {' '.join(map(str, self.gpu_ids))}"
+                f"{self._capacity_timeout_detail()}"
             )
         except Exception:
             self.release()
@@ -139,6 +190,12 @@ class GpuLease:
 
     def release(self) -> None:
         self._release_ticket()
+        self._release_gpu()
+        if self.machine:
+            self.machine.close()
+            self.machine = None
+
+    def _release_gpu(self) -> None:
         for lock in self.slots:
             lock.close()
         self.slots.clear()
@@ -146,14 +203,13 @@ class GpuLease:
         if self.reservation:
             self.reservation.close()
             self.reservation = None
-        if self.machine:
-            self.machine.close()
-            self.machine = None
+        self.gpu_id = None
+        self.gpu_memory_admission = None
 
     def evidence(self, revision: str) -> dict[str, object]:
         if self.gpu_id is None or not self.slot_ids:
             raise CiError("GPU lease evidence requested before acquisition")
-        return {
+        evidence: dict[str, object] = {
             "schema_version": 1,
             "model": self.model,
             "source_revision": revision,
@@ -165,7 +221,13 @@ class GpuLease:
             "gpu_slots_per_device": self.slots_per_gpu,
             "resource_class": self.resource_class,
             "gpu_resource_class": self.resource_class,
+            "min_free_gpu_memory_mib": self.min_free_gpu_memory_mib,
         }
+        if self.min_free_gpu_memory_mib:
+            if not self.gpu_memory_admission:
+                raise CiError("GPU memory admission evidence requested before capacity validation")
+            evidence["gpu_memory_admission"] = self.gpu_memory_admission
+        return evidence
 
     def _configuration(self) -> tuple[list[int], int, int, float]:
         configured = self.context.env.get("TRTMC_MODEL_PROOF_GPU_IDS", "0,1,2,3")
@@ -348,10 +410,102 @@ class GpuLease:
             self.slots.append(candidate)
             self.slot_ids.append(slot)
 
-    def _try_exclusive_any(self, deadline: float) -> bool:
+    def _candidate_has_capacity(self) -> bool:
+        if not self.min_free_gpu_memory_mib:
+            return True
+        assert self.gpu_id is not None
+        snapshot = self._gpu_memory_snapshot(self.gpu_id)
+        self.last_observed_total_mib[self.gpu_id] = snapshot["total_mib"]
+        self.last_observed_free_mib[self.gpu_id] = snapshot["free_mib"]
+        if snapshot["free_mib"] < self.min_free_gpu_memory_mib:
+            print(
+                f"GPU {self.gpu_id} has {snapshot['free_mib']} MiB free; "
+                f"{self.model} requires {self.min_free_gpu_memory_mib} MiB"
+            )
+            return False
+        self.gpu_memory_admission = {
+            "source": "nvidia-smi",
+            "required_free_mib": self.min_free_gpu_memory_mib,
+            "observed_total_mib": snapshot["total_mib"],
+            "observed_used_mib": snapshot["used_mib"],
+            "observed_free_mib": snapshot["free_mib"],
+        }
+        print(
+            f"GPU {self.gpu_id} memory admission passed: {snapshot['free_mib']} MiB free; "
+            f"{self.min_free_gpu_memory_mib} MiB required"
+        )
+        return True
+
+    def _gpu_memory_snapshot(self, gpu: int) -> dict[str, int]:
+        executable = self.context.executable("nvidia-smi")
+        result = self.context.run(
+            [
+                executable,
+                "--query-gpu=index,memory.total,memory.used,memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            limit="10s",
+            capture_output=True,
+        )
+        snapshots: dict[int, dict[str, int]] = {}
+        for line in result.stdout.splitlines():
+            fields = [field.strip() for field in line.split(",")]
+            if len(fields) != 4 or any(not field.isdigit() for field in fields):
+                raise CiError(f"invalid nvidia-smi GPU memory row: {line!r}")
+            index, total_mib, used_mib, free_mib = map(int, fields)
+            if index in snapshots:
+                raise CiError(f"nvidia-smi returned duplicate GPU index: {index}")
+            if used_mib > total_mib or free_mib > total_mib:
+                raise CiError(f"nvidia-smi returned invalid GPU memory values for GPU {index}")
+            snapshots[index] = {
+                "total_mib": total_mib,
+                "used_mib": used_mib,
+                "free_mib": free_mib,
+            }
+        if gpu not in snapshots:
+            raise CiError(f"nvidia-smi did not report configured GPU {gpu}")
+        return snapshots[gpu]
+
+    def _capacity_timeout_detail(self) -> str:
+        if not self.min_free_gpu_memory_mib:
+            return ""
+        observed = ", ".join(
+            f"GPU {gpu}={free_mib} MiB"
+            for gpu, free_mib in sorted(self.last_observed_free_mib.items())
+        )
+        suffix = f"; last observed free memory: {observed}" if observed else ""
+        return (
+            f" requiring at least {self.min_free_gpu_memory_mib} MiB free GPU memory"
+            f"{suffix}"
+        )
+
+    def _requeue_after_capacity_rejection(self, deadline: float) -> bool:
+        self._release_ticket()
+        print("Yielding the GPU admission queue after a memory-capacity rejection")
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+        if time.monotonic() >= deadline:
+            return False
+        try:
+            self.ticket = self._create_ticket("global", deadline)
+            self._wait_for_queue_head("global", deadline)
+        except CiError:
+            if time.monotonic() < deadline:
+                raise
+            self._release_ticket()
+            return False
+        return True
+
+    def _try_exclusive_any(
+        self,
+        deadline: float,
+        *,
+        exclude: set[int] | None = None,
+    ) -> bool:
         allocator = self._allocator(deadline)
         try:
             for gpu in self.gpu_ids:
+                if exclude and gpu in exclude:
+                    continue
                 slots = []
                 for slot in range(self.slots_per_gpu):
                     candidate = FileLock(self.lock_dir / f"gpu-{gpu}-slot-{slot}.lock")

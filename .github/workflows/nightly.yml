@@ -267,7 +267,7 @@ jobs:
           fi
 
   cache-warm:
-    name: 3 / HF cache / ${{ matrix.node_label }}
+    name: 3 / Model caches / ${{ matrix.node_label }}
     needs:
       - legal
       - inventory
@@ -279,7 +279,7 @@ jobs:
           - trtmc-node-gb300-nvl-019-compute01
           - trtmc-node-gb300-nvl-019-compute02
     runs-on: ${{ matrix.node_label }}
-    timeout-minutes: 240
+    timeout-minutes: 270
     permissions:
       contents: read
       packages: read
@@ -287,6 +287,7 @@ jobs:
       TRTMC_CI_CONTAINER_NAME: trtmc-nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CI_WORKSPACE: ${{ github.workspace }}/nightly-cache-${{ github.run_id }}-${{ github.run_attempt }}
       TRTMC_CONTAINER_OPTIONS: ${{ vars.TRTMC_CPU_CONTAINER_OPTIONS || '--ipc=host --ulimit memlock=-1 --ulimit stack=67108864' }}
+      TRTMC_MODEL_REFERENCE_CACHE_ROOT: ${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || '/workspace/users/yifeif/tensorrt-model-connect' }}
       # The downloader bounds every child process and retries once without Xet
       # after a failure. These values also bound individual Hub requests.
       HF_HUB_DOWNLOAD_TIMEOUT: "60"
@@ -340,6 +341,12 @@ jobs:
               --exclude-ci-tier multi_device \
               --strict \
               --attempt-timeout-seconds 600
+
+      - name: Strictly warm declared Nightly model references
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        run: python3 -m tools.ci model-reference-cache warm --suite nightly
 
       - name: Clean cache-warm container
         if: ${{ always() }}

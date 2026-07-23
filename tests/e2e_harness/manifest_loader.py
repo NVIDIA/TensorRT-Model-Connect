@@ -899,6 +899,22 @@ def _validate_manifest(raw: dict, path: str) -> None:
             f"Manifest {path!r}: build_timeout_s must be a positive integer"
         )
 
+    if "e2e_min_free_gpu_memory_mib" in raw:
+        min_free_gpu_memory_mib = raw["e2e_min_free_gpu_memory_mib"]
+        if (
+            not isinstance(min_free_gpu_memory_mib, int)
+            or isinstance(min_free_gpu_memory_mib, bool)
+            or min_free_gpu_memory_mib <= 0
+        ):
+            raise TypeError(
+                f"Manifest {path!r}: e2e_min_free_gpu_memory_mib must be a positive integer"
+            )
+        if raw.get("e2e_parallel_resource") != "exclusive_gpu":
+            raise ValueError(
+                f"Manifest {path!r}: e2e_min_free_gpu_memory_mib requires "
+                "e2e_parallel_resource='exclusive_gpu'"
+            )
+
     required_gpu_count = 1
     build_args = raw.get("build_args", {})
     if not isinstance(build_args, dict):
@@ -965,6 +981,7 @@ _MODEL_ONLY_FIELDS = frozenset(
         "build_env",
         "build_timeout_s",
         "e2e_parallel_resource",
+        "e2e_min_free_gpu_memory_mib",
         "e2e_size",
         "distributed_runtime",
     }

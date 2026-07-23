@@ -2146,6 +2146,7 @@ class TestEvidenceCompleteness:
             "gpu_resource_class": "shared",
             "gpu_slot_ids": [1],
             "gpu_slots_per_device": 4,
+            "min_free_gpu_memory_mib": 0,
             "gpu_lease_evidence": "gpu-lease.json",
             "network": "disabled",
             "plugin_search": "strict",
@@ -2154,7 +2155,13 @@ class TestEvidenceCompleteness:
             "selection": {
                 "runtime_tests": ["test_alpha"],
                 "python_tests": ["tests/e2e/models/alpha/test_alpha_unit.py"],
-                "e2e_cases": [{"name": "alpha-small"}],
+                "e2e_cases": [
+                    {
+                        "name": "alpha-small",
+                        "gpu_resource_class": "shared",
+                        "min_free_gpu_memory_mib": 0,
+                    }
+                ],
                 "e2e_test": "tests/e2e/models/alpha/test_alpha_e2e.py",
             },
         }
@@ -2196,6 +2203,7 @@ class TestEvidenceCompleteness:
             "gpu_resource_class": "shared",
             "gpu_slot_ids": [1],
             "gpu_slots_per_device": 4,
+            "min_free_gpu_memory_mib": 0,
             "gpu_lease_evidence": "gpu-lease.json",
             "validation_exit_code": 0,
             "e2e_proof_kind": "reference",
@@ -2219,6 +2227,7 @@ class TestEvidenceCompleteness:
             "gpu_resource_class": "shared",
             "gpu_slot_ids": [1],
             "gpu_slots_per_device": 4,
+            "min_free_gpu_memory_mib": 0,
             "gpu_lease_evidence": "gpu-lease.json",
             "network": "disabled",
             "plugin_search": "strict",
@@ -2228,10 +2237,19 @@ class TestEvidenceCompleteness:
             "requested_model": "alpha",
             "gpu_id": "2",
             "e2e_test": "tests/e2e/models/alpha/test_alpha_e2e.py",
-            "e2e_cases": [{"name": "alpha-small"}],
+            "e2e_cases": [
+                {
+                    "name": "alpha-small",
+                    "resource_class": "shared",
+                    "gpu_resource_class": "shared",
+                    "min_free_gpu_memory_mib": 0,
+                }
+            ],
+            "resource_class": "shared",
             "gpu_resource_class": "shared",
             "gpu_slot_ids": [1],
             "gpu_slots_per_device": 4,
+            "min_free_gpu_memory_mib": 0,
             "gpu_lease_evidence": "gpu-lease.json",
         }
 
@@ -2257,6 +2275,98 @@ class TestEvidenceCompleteness:
         status["steps"]["e2e_reference"] = {"status": "passed"}
         issues = mod.validate_proof_context(status, proof, selection)
         assert any("e2e_reference must be skipped" in issue for issue in issues)
+
+        status["steps"]["e2e_reference"] = {"status": "skipped"}
+        proof["min_free_gpu_memory_mib"] = True
+        assert (
+            "Proof has an invalid minimum free GPU memory value"
+            in mod.validate_proof_context(status, proof, selection)
+        )
+        proof["min_free_gpu_memory_mib"] = 0
+        admission = {
+            "source": "nvidia-smi",
+            "required_free_mib": 240000,
+            "observed_total_mib": 284208,
+            "observed_used_mib": 34208,
+            "observed_free_mib": 250000,
+        }
+        for payload in (status, proof, selection):
+            payload["gpu_resource_class"] = "exclusive_gpu"
+            payload["gpu_slot_ids"] = [0, 1, 2, 3]
+            payload["min_free_gpu_memory_mib"] = 240000
+            payload["gpu_memory_admission"] = dict(admission)
+        selection["resource_class"] = "exclusive_gpu"
+        selection["e2e_cases"][0]["resource_class"] = "exclusive_gpu"
+        selection["e2e_cases"][0]["gpu_resource_class"] = "exclusive_gpu"
+        selection["e2e_cases"][0]["min_free_gpu_memory_mib"] = 240000
+        assert mod.validate_proof_context(status, proof, selection) == []
+
+        status["gpu_slot_ids"] = [0, True, 2, 3]
+        assert (
+            "Model-proof status has no valid GPU slot IDs"
+            in mod.validate_proof_context(status, proof, selection)
+        )
+        status["gpu_slot_ids"] = [0, 1, 2, 3]
+
+        selection["gpu_slots_per_device"] = True
+        assert (
+            "Test selection has no valid GPU slots-per-device value"
+            in mod.validate_proof_context(status, proof, selection)
+        )
+        selection["gpu_slots_per_device"] = 4
+
+        selection.pop("min_free_gpu_memory_mib")
+        assert "Test selection is missing minimum free GPU memory" in mod.validate_proof_context(
+            status, proof, selection
+        )
+        selection["min_free_gpu_memory_mib"] = 240000
+
+        selection["e2e_cases"][0].pop("min_free_gpu_memory_mib")
+        assert (
+            "Selected E2E case is missing minimum free GPU memory"
+            in mod.validate_proof_context(status, proof, selection)
+        )
+        selection["e2e_cases"][0]["min_free_gpu_memory_mib"] = 240000
+
+        proof["gpu_memory_admission"]["unexpected"] = 1
+        assert (
+            "Proof GPU memory admission has unexpected or missing fields"
+            in mod.validate_proof_context(status, proof, selection)
+        )
+        proof["gpu_memory_admission"].pop("unexpected")
+
+        proof["gpu_memory_admission"].pop("observed_used_mib")
+        assert (
+            "Proof GPU memory admission has unexpected or missing fields"
+            in mod.validate_proof_context(status, proof, selection)
+        )
+        proof["gpu_memory_admission"]["observed_used_mib"] = 34208
+
+        proof["gpu_memory_admission"]["required_free_mib"] = True
+        assert (
+            "Proof GPU memory admission requirement does not match test selection"
+            in mod.validate_proof_context(status, proof, selection)
+        )
+        proof["gpu_memory_admission"]["required_free_mib"] = 240000
+
+        proof.pop("gpu_memory_admission")
+        assert "Proof has no GPU memory admission evidence" in mod.validate_proof_context(
+            status, proof, selection
+        )
+        proof["gpu_memory_admission"] = dict(admission)
+
+        status["gpu_memory_admission"]["observed_free_mib"] = 260000
+        assert (
+            "Model-proof status GPU memory admission does not match final proof"
+            in mod.validate_proof_context(status, proof, selection)
+        )
+        status["gpu_memory_admission"]["observed_free_mib"] = 250000
+
+        selection.pop("gpu_memory_admission")
+        assert (
+            "Test selection GPU memory admission does not match final proof"
+            in mod.validate_proof_context(status, proof, selection)
+        )
 
     def test_proof_diagnostics_embed_bounded_log_and_junit_failure(self, tmp_path):
         mod = _import_report()

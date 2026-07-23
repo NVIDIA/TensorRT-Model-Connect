@@ -318,9 +318,19 @@ class ModelProofRunner:
             selection.resource_class + "\n", encoding="utf-8"
         )
         self.lease = GpuLease(
-            self.context, self.request.model, selection.resource_class, self.artifacts_dir
-        ).acquire()
-        self._reclaim_orphans()
+            self.context,
+            self.request.model,
+            selection.resource_class,
+            self.artifacts_dir,
+            min_free_gpu_memory_mib=selection.min_free_gpu_memory_mib,
+        )
+        self.lease.acquire(
+            prepare_candidate=self._reclaim_orphans
+            if selection.min_free_gpu_memory_mib
+            else None
+        )
+        if not selection.min_free_gpu_memory_mib:
+            self._reclaim_orphans()
         lease_evidence = self.lease.evidence(self.revision)
         (self.artifacts_dir / "gpu-id.txt").write_text(
             str(lease_evidence["gpu_id"]) + "\n", encoding="utf-8"
@@ -674,6 +684,9 @@ class ModelProofRunner:
             "TRTMC_MODEL_PROOF_GPU_SLOT_IDS": slots,
             "TRTMC_MODEL_PROOF_SLOTS_PER_GPU": str(self.lease.slots_per_gpu),
             "TRTMC_MODEL_PROOF_RESOURCE_CLASS": self.lease.resource_class,
+            "TRTMC_MODEL_PROOF_MIN_FREE_GPU_MEMORY_MIB": str(
+                self.lease.min_free_gpu_memory_mib
+            ),
             "TRTMC_MODEL_PROOF_BUILD_JOBS": self.context.env.get(
                 "TRTMC_MODEL_PROOF_BUILD_JOBS", "2"
             ),

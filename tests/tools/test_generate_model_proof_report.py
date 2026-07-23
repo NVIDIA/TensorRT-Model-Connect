@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 
 REVISION = "a" * 40
 
@@ -106,6 +108,7 @@ def _write_part(
         "gpu_resource_class": "shared",
         "gpu_slot_ids": [0],
         "gpu_slots_per_device": 4,
+        "min_free_gpu_memory_mib": 0,
         "gpu_lease_evidence": "gpu-lease.json",
     }
     steps = {
@@ -167,7 +170,16 @@ def _write_part(
         "gpu_id": "1",
         "runtime_library": proof["runtime_library"],
         "e2e_test": f"tests/e2e/models/{owner}/test_{owner}_e2e.py",
-        "e2e_cases": [{"name": case, "model": owner}],
+        "e2e_cases": [
+            {
+                "name": case,
+                "model": owner,
+                "resource_class": "shared",
+                "gpu_resource_class": "shared",
+                "min_free_gpu_memory_mib": 0,
+            }
+        ],
+        "resource_class": "shared",
         **gpu_fields,
     }
     for filename, payload in (
@@ -187,6 +199,10 @@ def _write_part(
                 "model": owner,
                 "source_revision": REVISION,
                 "gpu_id": "1",
+                "gpu_slot": 0,
+                "gpu_slots": [0],
+                "slots_per_gpu": 4,
+                "resource_class": "shared",
                 **gpu_fields,
             }
         )
@@ -205,7 +221,15 @@ def _append_result_case(root: Path, owner: str, case: str) -> None:
 
     selection_path = root / "selection.json"
     selection = json.loads(selection_path.read_text(encoding="utf-8"))
-    selection["e2e_cases"].append({"name": case, "model": owner})
+    selection["e2e_cases"].append(
+        {
+            "name": case,
+            "model": owner,
+            "resource_class": "shared",
+            "gpu_resource_class": "shared",
+            "min_free_gpu_memory_mib": 0,
+        }
+    )
     selection_path.write_text(json.dumps(selection, indent=2) + "\n", encoding="utf-8")
 
     junit_path = root / "e2e" / "junit.xml"
@@ -827,6 +851,14 @@ def test_exclusive_gpu_proof_requires_every_slot_and_matching_ledgers(
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["gpu_resource_class"] = "exclusive_gpu"
         payload["gpu_slot_ids"] = [0, 1, 2, 3]
+        if filename == "selection.json":
+            payload["resource_class"] = "exclusive_gpu"
+            payload["e2e_cases"][0]["resource_class"] = "exclusive_gpu"
+            payload["e2e_cases"][0]["gpu_resource_class"] = "exclusive_gpu"
+        elif filename == "gpu-lease.json":
+            payload["resource_class"] = "exclusive_gpu"
+            payload["gpu_slot"] = None
+            payload["gpu_slots"] = [0, 1, 2, 3]
         path.write_text(json.dumps(payload), encoding="utf-8")
 
     rc, _output, status_path = _run(tmp_path, ["alpha"])
@@ -842,6 +874,321 @@ def test_exclusive_gpu_proof_requires_every_slot_and_matching_ledgers(
     assert rc == 2
     errors = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
     assert "does not match test selection" in errors
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_error"),
+    (
+        ("schema_version", True, "unsupported schema"),
+        ("gpu_slots", [True], "invalid gpu_slots"),
+        ("gpu_slot_ids", [True], "invalid gpu_slot_ids"),
+        ("slots_per_gpu", True, "invalid slots_per_gpu"),
+        ("gpu_slots_per_device", True, "invalid gpu_slots_per_device"),
+        ("gpu_slot", True, "invalid gpu_slot"),
+    ),
+)
+def test_gpu_lease_rejects_boolean_integer_evidence(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    expected_error: str,
+) -> None:
+    root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    lease_path = root / "gpu-lease.json"
+    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+    lease[field] = value
+    lease_path.write_text(json.dumps(lease), encoding="utf-8")
+
+    rc, _output, status_path = _run(tmp_path, ["alpha"])
+
+    assert rc == 2
+    errors = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
+    assert expected_error in errors
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    (
+        ("case-resource-mismatch", "case GPU resource classes do not match"),
+        ("invalid-case-resource", "case has an invalid resource_class"),
+        ("invalid-case-gpu-resource", "case has an invalid gpu_resource_class"),
+        ("top-resource-mismatch", "selection GPU resource classes do not match"),
+        (
+            "understated-top-resource",
+            "selection GPU resource class does not match selected cases",
+        ),
+    ),
+)
+def test_gpu_resource_evidence_is_strictly_reconciled(
+    tmp_path: Path,
+    mutation: str,
+    expected_error: str,
+) -> None:
+    root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    selection_path = root / "selection.json"
+    selection = json.loads(selection_path.read_text(encoding="utf-8"))
+    case = selection["e2e_cases"][0]
+    if mutation == "case-resource-mismatch":
+        case["resource_class"] = "exclusive_gpu"
+    elif mutation == "invalid-case-resource":
+        case["resource_class"] = {}
+    elif mutation == "invalid-case-gpu-resource":
+        case["gpu_resource_class"] = {}
+    elif mutation == "top-resource-mismatch":
+        selection["resource_class"] = "exclusive_gpu"
+    else:
+        case["resource_class"] = "exclusive_gpu"
+        case["gpu_resource_class"] = "exclusive_gpu"
+    selection_path.write_text(json.dumps(selection), encoding="utf-8")
+
+    rc, output, status_path = _run(tmp_path, ["alpha"])
+
+    assert rc == 2
+    assert output.is_file()
+    assert status_path.is_file()
+    errors = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
+    assert expected_error in errors
+
+
+@pytest.mark.parametrize(
+    ("filename", "field", "value", "expected_error"),
+    (
+        ("selection.json", "e2e_cases", None, "e2e_cases must be a list"),
+        (
+            "selection.json",
+            "e2e_cases",
+            {"name": "alpha-case"},
+            "e2e_cases must be a list",
+        ),
+        (
+            "model-proof-status.json",
+            "steps",
+            [{"e2e_reference": {"status": "passed"}}],
+            "status steps must be an object",
+        ),
+        (
+            "proof.json",
+            "gpu_resource_class",
+            {},
+            "no valid GPU resource class",
+        ),
+        (
+            "proof.json",
+            "e2e_proof_kind",
+            [],
+            "no valid E2E proof-kind classification",
+        ),
+        (
+            "model-proof-status.json",
+            "steps",
+            {"e2e_reference": {"status": {}}},
+            "Validation step e2e_reference is not complete",
+        ),
+    ),
+)
+def test_invalid_proof_collection_types_fail_closed_with_outputs(
+    tmp_path: Path,
+    filename: str,
+    field: str,
+    value: object,
+    expected_error: str,
+) -> None:
+    root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    payload_path = root / filename
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    payload[field] = value
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    rc, output, status_path = _run(tmp_path, ["alpha"])
+
+    assert rc == 2
+    assert output.is_file()
+    assert status_path.is_file()
+    errors = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
+    assert expected_error in errors
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    (
+        ("missing", "no memory admission evidence"),
+        ("extra-field", "unexpected or missing fields"),
+        ("missing-field", "unexpected or missing fields"),
+        ("bool-requirement", "requirement"),
+        ("bool-observation", "invalid observed_free_mib"),
+        ("missing-selection-minimum", "Test selection is missing minimum free GPU memory"),
+        ("missing-case-minimum", "Selected E2E case is missing minimum free GPU memory"),
+        ("missing-proof-admission", "Proof has no GPU memory admission evidence"),
+        (
+            "missing-status-admission",
+            "Model-proof status GPU memory admission does not match final proof",
+        ),
+        (
+            "missing-selection-admission",
+            "Test selection GPU memory admission does not match final proof",
+        ),
+        ("under-threshold", "below the selected requirement"),
+        ("wrong-requirement", "requirement"),
+        ("different-valid-value", "GPU lease memory admission must be"),
+    ),
+)
+def test_gpu_memory_admission_is_strictly_reconciled(
+    tmp_path: Path,
+    mutation: str,
+    expected_error: str,
+) -> None:
+    root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    admission = {
+        "source": "nvidia-smi",
+        "required_free_mib": 240000,
+        "observed_total_mib": 284208,
+        "observed_used_mib": 34208,
+        "observed_free_mib": 250000,
+    }
+    for filename in (
+        "model-proof-status.json",
+        "proof.json",
+        "selection.json",
+        "gpu-lease.json",
+    ):
+        path = root / filename
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["gpu_resource_class"] = "exclusive_gpu"
+        payload["gpu_slot_ids"] = [0, 1, 2, 3]
+        payload["min_free_gpu_memory_mib"] = 240000
+        payload["gpu_memory_admission"] = dict(admission)
+        if filename == "selection.json":
+            payload["resource_class"] = "exclusive_gpu"
+            payload["e2e_cases"][0]["resource_class"] = "exclusive_gpu"
+            payload["e2e_cases"][0]["min_free_gpu_memory_mib"] = 240000
+            payload["e2e_cases"][0]["gpu_resource_class"] = "exclusive_gpu"
+        elif filename == "gpu-lease.json":
+            payload["resource_class"] = "exclusive_gpu"
+            payload["gpu_slot"] = None
+            payload["gpu_slots"] = [0, 1, 2, 3]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    rc, _output, status_path = _run(tmp_path, ["alpha"])
+    assert rc == 0
+    assert json.loads(status_path.read_text(encoding="utf-8"))["outcome"] == "passed"
+
+    lease_path = root / "gpu-lease.json"
+    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+    if mutation == "missing":
+        lease.pop("gpu_memory_admission")
+    elif mutation == "extra-field":
+        lease["gpu_memory_admission"]["unexpected"] = 1
+    elif mutation == "missing-field":
+        lease["gpu_memory_admission"].pop("observed_used_mib")
+    elif mutation == "bool-requirement":
+        lease["gpu_memory_admission"]["required_free_mib"] = True
+    elif mutation == "bool-observation":
+        lease["gpu_memory_admission"]["observed_free_mib"] = True
+    elif mutation == "under-threshold":
+        lease["gpu_memory_admission"]["observed_free_mib"] = 239999
+    elif mutation == "different-valid-value":
+        lease["gpu_memory_admission"]["observed_free_mib"] = 260000
+    elif mutation == "wrong-requirement":
+        lease["gpu_memory_admission"]["required_free_mib"] = 230000
+    elif mutation == "missing-selection-minimum":
+        selection_path = root / "selection.json"
+        selection = json.loads(selection_path.read_text(encoding="utf-8"))
+        selection.pop("min_free_gpu_memory_mib")
+        selection_path.write_text(json.dumps(selection), encoding="utf-8")
+    elif mutation == "missing-case-minimum":
+        selection_path = root / "selection.json"
+        selection = json.loads(selection_path.read_text(encoding="utf-8"))
+        selection["e2e_cases"][0].pop("min_free_gpu_memory_mib")
+        selection_path.write_text(json.dumps(selection), encoding="utf-8")
+    else:
+        filename = {
+            "missing-proof-admission": "proof.json",
+            "missing-status-admission": "model-proof-status.json",
+            "missing-selection-admission": "selection.json",
+        }[mutation]
+        payload_path = root / filename
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        payload.pop("gpu_memory_admission")
+        payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    if mutation in {
+        "missing",
+        "extra-field",
+        "missing-field",
+        "bool-requirement",
+        "bool-observation",
+        "under-threshold",
+        "different-valid-value",
+        "wrong-requirement",
+    }:
+        lease_path.write_text(json.dumps(lease), encoding="utf-8")
+
+    rc, _output, status_path = _run(tmp_path, ["alpha"])
+    assert rc == 2
+    errors = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
+    assert expected_error in errors
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_error"),
+    (
+        (
+            "model-proof-status.json",
+            "Model-proof status GPU memory admission has invalid observed memory values",
+        ),
+        (
+            "selection.json",
+            "Test selection GPU memory admission has invalid observed memory values",
+        ),
+    ),
+)
+def test_gpu_memory_admission_rejects_boolean_ledger_observations(
+    tmp_path: Path,
+    filename: str,
+    expected_error: str,
+) -> None:
+    root = _write_part(tmp_path / "parts", "alpha", "alpha-case")
+    admission = {
+        "source": "nvidia-smi",
+        "required_free_mib": 240000,
+        "observed_total_mib": 284208,
+        "observed_used_mib": 0,
+        "observed_free_mib": 280000,
+    }
+    for evidence_file in (
+        "model-proof-status.json",
+        "proof.json",
+        "selection.json",
+        "gpu-lease.json",
+    ):
+        path = root / evidence_file
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["gpu_resource_class"] = "exclusive_gpu"
+        payload["gpu_slot_ids"] = [0, 1, 2, 3]
+        payload["min_free_gpu_memory_mib"] = 240000
+        payload["gpu_memory_admission"] = dict(admission)
+        if evidence_file == "selection.json":
+            payload["resource_class"] = "exclusive_gpu"
+            payload["e2e_cases"][0]["resource_class"] = "exclusive_gpu"
+            payload["e2e_cases"][0]["gpu_resource_class"] = "exclusive_gpu"
+            payload["e2e_cases"][0]["min_free_gpu_memory_mib"] = 240000
+        elif evidence_file == "gpu-lease.json":
+            payload["resource_class"] = "exclusive_gpu"
+            payload["gpu_slot"] = None
+            payload["gpu_slots"] = [0, 1, 2, 3]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    ledger_path = root / filename
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    ledger["gpu_memory_admission"]["observed_used_mib"] = False
+    ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+
+    rc, output, status_path = _run(tmp_path, ["alpha"])
+
+    assert rc == 2
+    assert output.is_file()
+    assert status_path.is_file()
+    errors = "\n".join(json.loads(status_path.read_text(encoding="utf-8"))["issues"])
+    assert expected_error in errors
 
 
 def test_invalid_expected_json_still_writes_both_outputs(tmp_path: Path) -> None:

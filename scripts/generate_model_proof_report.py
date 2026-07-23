@@ -643,6 +643,75 @@ def compose(args: argparse.Namespace) -> int:
 
         lease_path = artifacts_root / str(proof.get("gpu_lease_evidence") or "")
         lease = _read_json(lease_path, f"{model}: GPU lease evidence", model_issues)
+        lease_schema = lease.get("schema_version")
+        if (
+            not isinstance(lease_schema, int)
+            or isinstance(lease_schema, bool)
+            or lease_schema != 1
+        ):
+            model_issues.append(f"{model}: GPU lease has an unsupported schema")
+        for field in ("gpu_slots", "gpu_slot_ids"):
+            slots = lease.get(field)
+            if (
+                not isinstance(slots, list)
+                or not slots
+                or any(
+                    not isinstance(slot, int) or isinstance(slot, bool)
+                    for slot in slots
+                )
+            ):
+                model_issues.append(f"{model}: GPU lease has invalid {field}")
+        for field in ("slots_per_gpu", "gpu_slots_per_device"):
+            capacity = lease.get(field)
+            if (
+                not isinstance(capacity, int)
+                or isinstance(capacity, bool)
+                or capacity < 1
+            ):
+                model_issues.append(f"{model}: GPU lease has invalid {field}")
+        _check_equal(
+            model_issues,
+            model,
+            "GPU lease slot lists",
+            lease.get("gpu_slots"),
+            lease.get("gpu_slot_ids"),
+        )
+        _check_equal(
+            model_issues,
+            model,
+            "GPU lease slot capacities",
+            lease.get("slots_per_gpu"),
+            lease.get("gpu_slots_per_device"),
+        )
+        _check_equal(
+            model_issues,
+            model,
+            "GPU lease resource classes",
+            lease.get("resource_class"),
+            lease.get("gpu_resource_class"),
+        )
+        proof_slot_ids = proof.get("gpu_slot_ids")
+        expected_gpu_slot = (
+            proof_slot_ids[0]
+            if (
+                proof.get("gpu_resource_class") == "shared"
+                and isinstance(proof_slot_ids, list)
+                and proof_slot_ids
+            )
+            else None
+        )
+        lease_gpu_slot = lease.get("gpu_slot")
+        if expected_gpu_slot is not None and (
+            not isinstance(lease_gpu_slot, int) or isinstance(lease_gpu_slot, bool)
+        ):
+            model_issues.append(f"{model}: GPU lease has an invalid gpu_slot")
+        _check_equal(
+            model_issues,
+            model,
+            "GPU lease gpu_slot",
+            lease_gpu_slot,
+            expected_gpu_slot,
+        )
         for field, expected in (
             ("model", model),
             ("source_revision", args.revision),
@@ -658,6 +727,103 @@ def compose(args: argparse.Namespace) -> int:
                 lease.get(field),
                 expected,
             )
+        min_free_gpu_memory_mib = selection.get("min_free_gpu_memory_mib", 0)
+        if (
+            not isinstance(min_free_gpu_memory_mib, int)
+            or isinstance(min_free_gpu_memory_mib, bool)
+            or min_free_gpu_memory_mib < 0
+        ):
+            model_issues.append(
+                f"{model}: selection has an invalid minimum free GPU memory value"
+            )
+            min_free_gpu_memory_mib = 0
+        lease_minimum = lease.get("min_free_gpu_memory_mib")
+        if not isinstance(lease_minimum, int) or isinstance(lease_minimum, bool):
+            model_issues.append(
+                f"{model}: GPU lease has an invalid minimum free memory value"
+            )
+        _check_equal(
+            model_issues,
+            model,
+            "GPU lease minimum free memory",
+            lease.get("min_free_gpu_memory_mib"),
+            min_free_gpu_memory_mib,
+        )
+        admission = lease.get("gpu_memory_admission")
+        if min_free_gpu_memory_mib:
+            if not isinstance(admission, dict):
+                model_issues.append(f"{model}: GPU lease has no memory admission evidence")
+            else:
+                admission_fields = {
+                    "source",
+                    "required_free_mib",
+                    "observed_total_mib",
+                    "observed_used_mib",
+                    "observed_free_mib",
+                }
+                if set(admission) != admission_fields:
+                    model_issues.append(
+                        f"{model}: GPU memory admission has unexpected or missing fields"
+                    )
+                _check_equal(
+                    model_issues,
+                    model,
+                    "GPU memory admission source",
+                    admission.get("source"),
+                    "nvidia-smi",
+                )
+                _check_equal(
+                    model_issues,
+                    model,
+                    "GPU memory admission requirement",
+                    (
+                        admission.get("required_free_mib")
+                        if isinstance(admission.get("required_free_mib"), int)
+                        and not isinstance(admission.get("required_free_mib"), bool)
+                        else None
+                    ),
+                    min_free_gpu_memory_mib,
+                )
+                for field in (
+                    "observed_total_mib",
+                    "observed_used_mib",
+                    "observed_free_mib",
+                ):
+                    value = admission.get(field)
+                    if (
+                        not isinstance(value, int)
+                        or isinstance(value, bool)
+                        or value < 0
+                    ):
+                        model_issues.append(
+                            f"{model}: GPU memory admission has an invalid {field}"
+                        )
+                total = admission.get("observed_total_mib")
+                used = admission.get("observed_used_mib")
+                free = admission.get("observed_free_mib")
+                if all(
+                    isinstance(value, int) and not isinstance(value, bool)
+                    for value in (total, used, free)
+                ):
+                    if used > total or free > total:
+                        model_issues.append(
+                            f"{model}: GPU memory admission values are inconsistent"
+                        )
+                    if free < min_free_gpu_memory_mib:
+                        model_issues.append(
+                            f"{model}: GPU memory admission is below the selected requirement"
+                        )
+        elif admission is not None:
+            model_issues.append(
+                f"{model}: GPU lease has memory admission evidence without a requirement"
+            )
+        _check_equal(
+            model_issues,
+            model,
+            "GPU lease memory admission",
+            admission,
+            proof.get("gpu_memory_admission"),
+        )
 
         report_path = artifacts_root / "model-proof-report.html"
         try:

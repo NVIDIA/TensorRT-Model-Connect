@@ -1106,9 +1106,10 @@ def test_nightly_warms_the_shared_cache_once_on_each_gpu_node() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     cache = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
 
-    assert "name: 3 / HF cache / ${{ matrix.node_label }}" in cache
+    assert "name: 3 / Model caches / ${{ matrix.node_label }}" in cache
     assert "fail-fast: false" in cache
     assert "runs-on: ${{ matrix.node_label }}" in cache
+    assert "timeout-minutes: 270" in cache
     assert cache.count("- trtmc-node-") == 2
     for node in ("gb300-nvl-019-compute01", "gb300-nvl-019-compute02"):
         assert f"trtmc-node-{node}" in cache
@@ -1130,6 +1131,26 @@ def test_nightly_strictly_warms_all_active_non_multi_device_cases() -> None:
     assert 'HF_HUB_ETAG_TIMEOUT: "30"' in cache
     assert "--exclude-ci-tier l0_only" not in cache
     assert "--exclude-ci-tier nightly_only" not in cache
+
+
+def test_nightly_strictly_warms_declared_model_references_on_every_node() -> None:
+    text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
+    cache = text.split("\n  cache-warm:", maxsplit=1)[1].split("\n  package:", maxsplit=1)[0]
+    reference_warm = cache.split(
+        "- name: Strictly warm declared Nightly model references", maxsplit=1
+    )[1].split("- name: Clean cache-warm container", maxsplit=1)[0]
+
+    assert (
+        "TRTMC_MODEL_REFERENCE_CACHE_ROOT: "
+        "${{ vars.TRTMC_MODEL_REFERENCE_CACHE_ROOT || "
+        "'/workspace/users/yifeif/tensorrt-model-connect' }}" in cache
+    )
+    assert "if: ${{ !cancelled() }}" in reference_warm
+    assert "working-directory: ${{ env.TRTMC_CI_WORKSPACE }}" in reference_warm
+    assert (
+        "python3 -m tools.ci model-reference-cache warm --suite nightly"
+        in reference_warm
+    )
 
 
 def test_nightly_report_requires_exact_all_model_results_and_evidence() -> None:

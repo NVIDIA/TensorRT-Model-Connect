@@ -985,6 +985,7 @@ def test_verify_builds_accepts_one_recorded_sigsegv_recovery(
 @pytest.mark.parametrize(
     ("attempt_count", "recovery_attempts", "expected_error"),
     [
+        (True, [], "attempt_count is True, expected 1 or 2"),
         (3, [], "attempt_count is 3, expected 1 or 2"),
         (2, [], "recovery_attempts does not match attempt_count"),
         (
@@ -1031,6 +1032,36 @@ def test_verify_builds_rejects_invalid_recovery_records(
     assert result.returncode == 1
     assert "FAIL decoder-small" in result.stdout
     assert expected_error in result.stderr
+
+
+def test_verify_builds_rejects_boolean_invocation_count(tmp_path: Path) -> None:
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("decoder-small\n", encoding="utf-8")
+    ledger_dir = tmp_path / "engine-builds"
+    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path.write_bytes(b"bundle")
+    timing_path = tmp_path / "decoder-small-timing.json"
+    timing_path.write_text("{}\n", encoding="utf-8")
+    _write_build_ledger(
+        ledger_dir,
+        "decoder-small",
+        bundle_path,
+        timing_path,
+        invocation_count=True,
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        _run(
+            "verify-builds",
+            "--models-file",
+            str(models_file),
+            "--ledger-dir",
+            str(ledger_dir),
+            "--source-revision",
+            "abc123",
+        )
+
+    assert "invocation_count is True, expected 1" in exc_info.value.stderr
 
 
 def test_verify_builds_rejects_a_missing_or_failed_build(tmp_path: Path) -> None:

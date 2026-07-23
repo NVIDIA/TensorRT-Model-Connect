@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
+from .model_reference_cache import parse_model_reference_contract
 from .process import CiError
 
 
@@ -27,6 +27,10 @@ class ModelProofSelection:
     @property
     def resource_class(self) -> str:
         return str(self.payload["resource_class"])
+
+    @property
+    def min_free_gpu_memory_mib(self) -> int:
+        return int(self.payload["min_free_gpu_memory_mib"])
 
     @property
     def e2e_models(self) -> list[str]:
@@ -74,7 +78,12 @@ class ModelProofSelector:
             if any(case["resource_class"] == "exclusive_gpu" for case in selected_cases)
             else "shared"
         )
-        lease_fields = self._validate_lease(lease, resource) if lease else {}
+        min_free_gpu_memory_mib = max(
+            int(case["min_free_gpu_memory_mib"]) for case in selected_cases
+        )
+        lease_fields = (
+            self._validate_lease(lease, resource, min_free_gpu_memory_mib) if lease else {}
+        )
         e2e_tests = sorted(e2e_dir.glob("test_*_e2e.py"))
         if len(e2e_tests) != 1:
             raise CiError(
@@ -103,6 +112,7 @@ class ModelProofSelector:
             "suite": self.suite,
             "resource_class": resource,
             "gpu_resource_class": resource,
+            "min_free_gpu_memory_mib": min_free_gpu_memory_mib,
             "e2e_cases": selected_cases,
             "e2e_test": str(e2e_tests[0].relative_to(self.source)),
             **lease_fields,
@@ -180,69 +190,13 @@ class ModelProofSelector:
     def _reference_cache(
         self, owner: dict[str, object], family: str, owner_manifest: Path
     ) -> dict[str, str] | None:
-        raw = owner.get("model_reference_cache")
-        if raw is None:
-            return None
-        if not isinstance(raw, dict):
-            raise CiError(f"model_reference_cache must be a table in {owner_manifest}")
-
-        suites = raw.get("suites")
-        if suites is not None and (
-            not isinstance(suites, list)
-            or not suites
-            or any(
-                not isinstance(suite, str) or suite not in {"premerge", "nightly"}
-                for suite in suites
-            )
-            or len(suites) != len(set(suites))
-        ):
-            raise CiError(
-                "model_reference_cache.suites must be a unique non-empty list of "
-                "premerge or nightly"
-            )
-
-        def relative(field: str) -> str:
-            value = raw.get(field)
-            if (
-                not isinstance(value, str)
-                or not value
-                or "\\" in value
-                or any(character in value for character in "\r\n\t")
-            ):
-                raise CiError(f"model_reference_cache.{field} must be a non-empty POSIX path")
-            path = PurePosixPath(value)
-            if (
-                path.is_absolute()
-                or path.as_posix() != value
-                or any(part in {"", ".", ".."} for part in path.parts)
-            ):
-                raise CiError(f"model_reference_cache.{field} must be a canonical relative path")
-            return value
-
-        revision = raw.get("revision")
-        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
-            raise CiError("model_reference_cache.revision must be a full lowercase Git commit")
-        repository = raw.get("repository")
-        if (
-            not isinstance(repository, str)
-            or not repository
-            or any(character in repository for character in "\r\n\t")
-        ):
-            raise CiError("model_reference_cache.repository must be a non-empty single-line string")
-        relative_path = relative("relative_path")
-        if PurePosixPath(relative_path).parts[0] != family:
-            raise CiError(
-                "model_reference_cache.relative_path must be owned by the selected E2E family"
-            )
-        reference_cache = {
-            "repository": repository,
-            "revision": revision,
-            "relative_path": relative_path,
-            "entrypoint": relative("entrypoint"),
-        }
-        if suites is not None and self.suite not in suites:
-            return None
-        return reference_cache
+        contract = parse_model_reference_contract(
+            owner,
+            family,
+            owner_manifest,
+            self.suite,
+        )
+        return contract.as_payload() if contract else None
 
     def _cases(self, e2e_dir: Path) -> list[dict[str, object]]:
         timing = {}
@@ -257,6 +211,24 @@ class ModelProofSelector:
             resource = str(data.get("e2e_parallel_resource") or "shared")
             if resource not in {"shared", "exclusive_gpu"}:
                 raise CiError(f"E2E manifest has invalid e2e_parallel_resource: {path}")
+            min_free_gpu_memory_mib = 0
+            if "e2e_min_free_gpu_memory_mib" in data:
+                raw_minimum = data["e2e_min_free_gpu_memory_mib"]
+                if (
+                    isinstance(raw_minimum, bool)
+                    or not isinstance(raw_minimum, int)
+                    or raw_minimum <= 0
+                ):
+                    raise CiError(
+                        "E2E manifest e2e_min_free_gpu_memory_mib must be a positive "
+                        f"integer: {path}"
+                    )
+                if resource != "exclusive_gpu":
+                    raise CiError(
+                        "E2E manifest e2e_min_free_gpu_memory_mib requires "
+                        f"e2e_parallel_resource='exclusive_gpu': {path}"
+                    )
+                min_free_gpu_memory_mib = raw_minimum
             model = str(data.get("name") or path.stem)
             testcases = data.get("testcases")
             if not isinstance(testcases, list) or not testcases:
@@ -264,6 +236,11 @@ class ModelProofSelector:
             for testcase in testcases:
                 if not isinstance(testcase, dict):
                     raise CiError(f"E2E manifest has an invalid testcase: {path}")
+                if "e2e_min_free_gpu_memory_mib" in testcase:
+                    raise CiError(
+                        "E2E manifest e2e_min_free_gpu_memory_mib is model-only: "
+                        f"{path}"
+                    )
                 if testcase.get("skip_reason") or testcase.get("skip"):
                     continue
                 name = str(testcase.get("name") or "")
@@ -282,6 +259,7 @@ class ModelProofSelector:
                         "estimated_seconds": timing.get(name),
                         "resource_class": resource,
                         "gpu_resource_class": resource,
+                        "min_free_gpu_memory_mib": min_free_gpu_memory_mib,
                     }
                 )
         return sorted(cases, key=lambda case: (case["name"], case["model"], case["manifest"]))
@@ -317,7 +295,11 @@ class ModelProofSelector:
         return candidates[:1]
 
     @staticmethod
-    def _validate_lease(lease: dict[str, object], resource: str) -> dict[str, object]:
+    def _validate_lease(
+        lease: dict[str, object],
+        resource: str,
+        min_free_gpu_memory_mib: int,
+    ) -> dict[str, object]:
         slots = list(lease["gpu_slot_ids"])
         capacity = int(lease["slots_per_gpu"])
         if lease["resource_class"] != resource:
@@ -329,7 +311,16 @@ class ModelProofSelector:
             raise CiError("shared selection must hold exactly one GPU slot")
         if resource == "exclusive_gpu" and slots != list(range(capacity)):
             raise CiError("exclusive_gpu selection must hold every GPU slot")
-        return {
+        lease_minimum = lease.get("min_free_gpu_memory_mib")
+        if (
+            not isinstance(lease_minimum, int)
+            or isinstance(lease_minimum, bool)
+            or lease_minimum != min_free_gpu_memory_mib
+        ):
+            raise CiError(
+                "leased minimum free GPU memory does not match selected E2E requirements"
+            )
+        lease_fields: dict[str, object] = {
             "gpu_id": str(lease["gpu_id"]),
             "gpu_slot": slots[0] if resource == "shared" else None,
             "gpu_slots": slots,
@@ -337,5 +328,14 @@ class ModelProofSelector:
             "slots_per_gpu": capacity,
             "gpu_slots_per_device": capacity,
             "gpu_resource_class": resource,
+            "min_free_gpu_memory_mib": min_free_gpu_memory_mib,
             "gpu_lease_evidence": "gpu-lease.json",
         }
+        admission = lease.get("gpu_memory_admission")
+        if min_free_gpu_memory_mib:
+            if not isinstance(admission, dict):
+                raise CiError("capacity-gated selection requires GPU memory admission evidence")
+            lease_fields["gpu_memory_admission"] = dict(admission)
+        elif admission is not None:
+            raise CiError("GPU memory admission is present without a selected requirement")
+        return lease_fields

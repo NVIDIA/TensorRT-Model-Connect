@@ -515,6 +515,24 @@ the producing class remains the source of truth for optional evidence fields.
   integration behavior is covered there by source-only unit and contract tests.
   Artifact format and qualification logic remain model-owned.
 
+### `model_reference_cache.py`
+
+- **Functionality / units:** `ModelReferenceCacheWarmer` discovers every
+  suite-selected `[model_reference_cache]` in E2E ownership manifests, verifies
+  an existing checkout or fetches its exact commit into a temporary directory,
+  and publishes it atomically under a per-path lock.
+- **Inputs:** The repository's `tests/e2e/models/*/MODEL.toml` files, the
+  `premerge` or `nightly` suite, `TRTMC_MODEL_REFERENCE_CACHE_ROOT`, and Git
+  network access for a missing checkout. The CLI is
+  `python3 -m tools.ci model-reference-cache warm --suite nightly`.
+- **Outputs:** One host-local checkout per selected declarative contract. Every
+  accepted checkout has the exact declared `remote.origin.url`, `HEAD` commit,
+  and entrypoint; partial or mismatched destinations fail closed.
+- **Boundary:** This is the trusted online cache-warm phase. It does not expose
+  the shared checkout to a proof: `model_proof.py` still verifies it, copies the
+  pinned commit privately with `git archive`, and runs the proof without a
+  network.
+
 ### `model_proof_selection.py`
 
 - **Functionality / units:** `ModelProofSelector` validates a positive
