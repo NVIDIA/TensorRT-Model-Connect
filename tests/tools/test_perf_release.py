@@ -461,6 +461,36 @@ def test_hf_runner_bridges_removed_input_check_decorator() -> None:
     assert GenericModule.check_model_inputs(forward) is forward
 
 
+def test_hf_runner_closes_ignored_disabled_thinking_prompt() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/hf_transformers.py"))
+    captured: dict[str, object] = {}
+
+    class FakeTokenizer:
+        def apply_chat_template(self, _messages, **kwargs):
+            captured["template_kwargs"] = kwargs
+            return "<SPECIAL_11>Assistant\n<think>\n"
+
+        def __call__(self, text, **kwargs):
+            captured.update(text=text, tokenizer_kwargs=kwargs)
+            return {"input_ids": "encoded"}
+
+    encoded = runner["_chat_prompt_inputs"](
+        FakeTokenizer(), "hello", enable_thinking=False
+    )
+
+    assert encoded == {"input_ids": "encoded"}
+    assert captured["text"] == "<SPECIAL_11>Assistant\n<think></think>"
+    assert captured["template_kwargs"] == {
+        "add_generation_prompt": True,
+        "tokenize": False,
+        "enable_thinking": False,
+    }
+    assert captured["tokenizer_kwargs"] == {
+        "return_tensors": "pt",
+        "add_special_tokens": False,
+    }
+
+
 def test_source_revision_can_be_injected_without_git(monkeypatch) -> None:
     monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
 
@@ -879,6 +909,15 @@ def test_qwen3_omni_supplies_text_chat_template_when_snapshot_omits_it() -> None
     assert kwargs["add_generation_prompt"] is True
     assert kwargs["tokenize"] is True
     assert kwargs["return_tensors"] == "pt"
+
+
+def test_qwen3_omni_uses_installed_generation_speaker_argument() -> None:
+    source = (
+        REPOSITORY / "benchmarks/performance/baselines/task_reference.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'speaker=str(options.get("speaker", "Ethan"))' in source
+    assert 'spk=str(options.get("speaker", "Ethan"))' not in source
 
 
 def test_lance_reference_builds_repeated_official_x2t_dataset(tmp_path: Path) -> None:

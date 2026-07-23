@@ -1492,7 +1492,7 @@ def _load_qwen3_omni(
                 talker_max_new_tokens=talker_tokens,
                 thinker_do_sample=False,
                 talker_do_sample=False,
-                spk=str(options.get("speaker", "Ethan")),
+                speaker=str(options.get("speaker", "Ethan")),
             )
         return {
             "text": processor.batch_decode(text_ids, skip_special_tokens=True)[0],

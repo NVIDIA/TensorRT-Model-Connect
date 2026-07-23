@@ -259,11 +259,9 @@ def _generation_call(
         if use_chat_template:
             if not getattr(tokenizer, "chat_template", None):
                 raise ValueError("request requires a chat template but tokenizer has none")
-            return tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}],
-                add_generation_prompt=True,
-                return_tensors="pt",
-                return_dict=True,
+            return _chat_prompt_inputs(
+                tokenizer,
+                prompt,
                 enable_thinking=bool(request.get("enable_thinking", True)),
             )
         return tokenizer(prompt, return_tensors="pt")
@@ -329,6 +327,27 @@ def _generation_call(
         }
 
     return invoke, summarize
+
+
+def _chat_prompt_inputs(tokenizer: Any, prompt: str, *, enable_thinking: bool) -> Any:
+    messages = [{"role": "user", "content": prompt}]
+    if enable_thinking:
+        return tokenizer.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True,
+            enable_thinking=True,
+        )
+    rendered = tokenizer.apply_chat_template(
+        messages,
+        add_generation_prompt=True,
+        tokenize=False,
+        enable_thinking=False,
+    )
+    if rendered.endswith("<think>\n"):
+        rendered = rendered[: -len("<think>\n")] + "<think></think>"
+    return tokenizer(rendered, return_tensors="pt", add_special_tokens=False)
 
 
 def _normalize_seq2seq_tokens(
