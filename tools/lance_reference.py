@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -157,6 +158,10 @@ def _decord_image_only_stub() -> dict[str, types.ModuleType]:
 
     decord = types.ModuleType("decord")
     video_reader = types.ModuleType("decord.video_reader")
+    decord.__spec__ = importlib.machinery.ModuleSpec("decord", loader=None, is_package=True)
+    video_reader.__spec__ = importlib.machinery.ModuleSpec(
+        "decord.video_reader", loader=None
+    )
     decord.VideoReader = VideoReader
     decord.video_reader = video_reader
     video_reader.VideoReader = VideoReader

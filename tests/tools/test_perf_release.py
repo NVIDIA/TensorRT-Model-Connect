@@ -153,6 +153,12 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     by_id = {case["id"]: case for case in cases}
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
     assert by_id["fnet.encode"]["baseline"]["padding"] == "max-length"
+    assert by_id["elf_flow.generate"]["baseline"]["python_profile"] == (
+        "elf_flow_reference"
+    )
+    assert by_id["elf_flow.generate"]["baseline"]["adapter_options"][
+        "reference_commit"
+    ] == "b29d8833609e9ab7f67cd9da39435ac5cea04837"
     assert by_id["lance.generate"]["baseline"]["python_profile"] == "lance_reference"
     assert (
         by_id["locateanything.generate"]["baseline"]["output_contract"]
@@ -993,6 +999,7 @@ def test_lance_image_only_decord_stub_rejects_video_use() -> None:
     modules = runner["_decord_image_only_stub"]()
 
     assert modules["decord"].VideoReader is modules["decord.video_reader"].VideoReader
+    assert modules["decord"].__spec__.name == "decord"
     with pytest.raises(RuntimeError, match="video workloads require"):
         modules["decord"].VideoReader("video.mp4")
 

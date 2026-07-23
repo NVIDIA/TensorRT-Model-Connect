@@ -1676,6 +1676,14 @@ def _run_elf(
             "upstream-elf requires baseline.adapter_options.reference_repo or "
             "TRTMC_ELF_REFERENCE_REPO"
         )
+    reference_commit = str(options.get("reference_commit", ""))
+    if not reference_commit:
+        raise ValueError("upstream-elf requires adapter_options.reference_commit")
+    reference_revision = _pinned_checkout_revision(
+        reference_repo,
+        reference_commit,
+        repository="https://github.com/lillian039/ELF",
+    )
     count = arguments.warmup + arguments.iterations
     prompt = str(request.get("prompt", ""))
     with tempfile.TemporaryDirectory(prefix="trtmc-perf-elf-") as temporary:
@@ -1743,25 +1751,10 @@ def _run_elf(
         "token_ids": summary_row.get("generated_token_ids", []),
         "output_tokens": len(summary_row.get("generated_token_ids", [])),
     }
-    reference_path = Path(reference_repo).resolve()
-    revision = subprocess.run(
-        [
-            "git",
-            "-c",
-            f"safe.directory={reference_path}",
-            "-C",
-            str(reference_path),
-            "rev-parse",
-            "HEAD",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
     return (
         samples,
         summary,
-        revision or "unresolved",
+        reference_revision,
         "elf-pytorch",
         "task-pipeline-call-wall",
         False,

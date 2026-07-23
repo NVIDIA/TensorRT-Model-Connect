@@ -196,9 +196,10 @@ cases:
       adapter: upstream-elf
       mode: pytorch-eager
       reference_backend: torch_reference
-      python_profile: elf_flow
+      python_profile: elf_flow_reference
       output_contract: exact-text
       adapter_options:
+        reference_commit: b29d8833609e9ab7f67cd9da39435ac5cea04837
         checkpoint: embedded-language-flows/ELF-B-de-en-torch
         config: src/configs/training_configs/train_de-en_ELF-B.yml
         sampling_method: ode
