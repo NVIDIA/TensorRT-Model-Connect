@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 from typing import Any, Iterator, Sequence
 
 
@@ -144,7 +145,34 @@ def _dataset_payload(*, image: Path, prompt: str, instruction: str, count: int) 
     return {f"{index:04d}": dict(sample) for index in range(count)}
 
 
+def _decord_image_only_stub() -> dict[str, types.ModuleType]:
+    """Provide import compatibility while rejecting unsupported video use."""
+
+    class VideoReader:
+        def __init__(self, *_args, **_kwargs):
+            raise RuntimeError(
+                "The aarch64 Lance x2t-image reference does not provide decord; "
+                "video workloads require an official decord build"
+            )
+
+    decord = types.ModuleType("decord")
+    video_reader = types.ModuleType("decord.video_reader")
+    decord.VideoReader = VideoReader
+    decord.video_reader = video_reader
+    video_reader.VideoReader = VideoReader
+
+    def unsupported_cpu(*_args, **_kwargs):
+        raise RuntimeError("decord CPU contexts are unavailable for this image-only reference")
+
+    decord.cpu = unsupported_cpu
+    return {"decord": decord, "decord.video_reader": video_reader}
+
+
 def _load_upstream(reference_repo: Path) -> Any:
+    try:
+        import decord  # noqa: F401
+    except ImportError:
+        sys.modules.update(_decord_image_only_stub())
     source = reference_repo / "inference_lance.py"
     spec = importlib.util.spec_from_file_location("trtmc_lance_upstream", source)
     if spec is None or spec.loader is None:

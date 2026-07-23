@@ -203,12 +203,14 @@ def _model_revision(model: Any, requested: str | None) -> str:
 
 
 def _snapshot_revision(path: str | Path) -> str:
-    parts = Path(path).resolve().parts
-    try:
-        index = parts.index("snapshots")
-    except ValueError:
-        return ""
-    return parts[index + 1] if index + 1 < len(parts) else ""
+    candidate = Path(path)
+    for parts in (candidate.parts, candidate.resolve().parts):
+        try:
+            index = parts.index("snapshots")
+        except ValueError:
+            continue
+        return parts[index + 1] if index + 1 < len(parts) else ""
+    return ""
 
 
 def _cached_snapshot_revision(repo_id: str, requested: str | None) -> str:

@@ -9,3 +9,6 @@ etils==1.13.0
 importlib_resources==6.5.2
 tensorstore==0.1.73
 PyYAML==6.0.2
+chex==0.1.90
+numpy==1.26.4
+optax==0.2.5

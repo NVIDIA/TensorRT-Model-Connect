@@ -631,6 +631,21 @@ def test_task_reference_resolves_revision_from_hugging_face_cache(monkeypatch) -
     assert runner["_cached_snapshot_revision"]("nvidia/canary-1b-v2", None) == "abc123"
 
 
+def test_snapshot_revision_keeps_revision_from_symlink_path(tmp_path: Path) -> None:
+    runner = runpy.run_path(
+        str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py")
+    )
+    blob = tmp_path / "blobs" / "weights"
+    blob.parent.mkdir()
+    blob.write_bytes(b"weights")
+    snapshot = tmp_path / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True)
+    checkpoint = snapshot / "model.safetensors"
+    checkpoint.symlink_to(blob)
+
+    assert runner["_snapshot_revision"](checkpoint) == "abc123"
+
+
 def test_task_reference_pinned_checkout_scopes_safe_directory(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -971,6 +986,15 @@ def test_lance_reference_builds_repeated_official_x2t_dataset(tmp_path: Path) ->
         "element_dtype_array": ["image", "text"],
         "istarget_in_interleave": [0, 1],
     }
+
+
+def test_lance_image_only_decord_stub_rejects_video_use() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
+    modules = runner["_decord_image_only_stub"]()
+
+    assert modules["decord"].VideoReader is modules["decord.video_reader"].VideoReader
+    with pytest.raises(RuntimeError, match="video workloads require"):
+        modules["decord"].VideoReader("video.mp4")
 
 
 def test_lance_git_revision_scopes_safe_directory(tmp_path: Path, monkeypatch) -> None:
