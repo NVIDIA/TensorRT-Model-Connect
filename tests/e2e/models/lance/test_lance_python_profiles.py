@@ -17,6 +17,6 @@ def test_lance_reference_profile_pins_upstream_transformers_stack() -> None:
     assert "huggingface-hub==0.29.1" in requirements
     assert "imageio==2.34.0" in requirements
     assert "numpy==1.26.4" in requirements
-    assert "opencv-python==4.7.0.72" in requirements
+    assert "opencv-python-headless==4.7.0.72" in requirements
     assert "tokenizers==0.21.4" in requirements
     assert "transformers==4.49.0" in requirements
