@@ -16,6 +16,7 @@ import math
 import os
 import random
 import re
+import shlex
 import shutil
 import struct
 import traceback
@@ -8161,6 +8162,8 @@ def run_trtfb(args: argparse.Namespace) -> None:
         env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
     log_path = work_dir / (args.log or "trtfb_run.log")
     with log_path.open("w", encoding="utf-8") as log_f:
+        log_f.write(f"$ {shlex.join(cmd)}\n")
+        log_f.flush()
         proc = subprocess.run(
             cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env
         )
@@ -8323,6 +8326,8 @@ def ensure_bundle(
     log_path = log_path or bundle_path.with_suffix(".build.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log_f:
+        log_f.write(f"$ {shlex.join(cmd)}\n")
+        log_f.flush()
         proc = subprocess.run(cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT)
     if proc.returncode != 0:
         raise RuntimeError(
@@ -8506,6 +8511,8 @@ def run_hf_reference_subprocess(
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
     env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     with log_path.open("w", encoding="utf-8") as log_f:
+        log_f.write(f"$ {shlex.join(cmd)}\n")
+        log_f.flush()
         proc = subprocess.run(
             cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT, env=env
         )

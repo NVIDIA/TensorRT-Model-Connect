@@ -1,0 +1,382 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+version: 1
+
+# Model-first validation bindings. Workload names other than "e2e" refer to
+# dataset preparation and comparison contracts in
+# tests/task_eval/validation_suites.yaml. "e2e" reuses the model-owned E2E
+# cases when no compatible dataset-backed workload exists yet.
+models:
+  albert-base:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  all-minilm-l6-v2:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  all-mpnet-base-v2:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  bark-large:
+    default: seedtts_en_tts_intelligibility
+    workloads: [seedtts_en_tts_intelligibility]
+  bark-small:
+    default: seedtts_en_tts_intelligibility
+    workloads: [seedtts_en_tts_intelligibility]
+  bart-base:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  bert-base-uncased:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  bge-small-en-v1.5:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  bloom-560m:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  camembert-base:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  canary-1b-v2:
+    default: librispeech_clean_asr
+    workloads: [librispeech_clean_asr]
+  chronos-bolt-tiny-official:
+    default: etth1_time_series_parity
+    workloads: [etth1_time_series_parity]
+  codegen-350m:
+    default: humaneval_code_continuation_parity
+    workloads: [humaneval_code_continuation_parity]
+  convbert-base:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  deberta-base:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  deepseek-ocr:
+    default: ocrbench_v2_unified
+    workloads: [ocrbench_v2_unified]
+  deepseek-ocr-l0:
+    default: ocrbench_v2_unified
+    workloads: [ocrbench_v2_unified]
+  deepseek-v2-lite:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  deepseek-v2-tiny:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  distilbert-base-uncased:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  distilgpt2:
+    default: wikitext103_distilgpt2_continuation_parity
+    workloads: [wikitext103_distilgpt2_continuation_parity]
+  dpr-ctx-encoder:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  electra-base-discriminator:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  elf-b-de-en-l0:
+    default: wmt14_de_en_elf_diffusion_text
+    workloads: [wmt14_de_en_elf_diffusion_text]
+  elf-b-owt-l0:
+    default: openwebtext_elf_diffusion_text
+    workloads: [openwebtext_elf_diffusion_text]
+  elf-b-xsum-l0:
+    default: xsum_elf_diffusion_text
+    workloads: [xsum_elf_diffusion_text]
+  falcon-rw-1b:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  falcon3-1b:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  flux-2-dev:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  flux-2-dev-fp8:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  flux-2-dev-fp8-l0:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  flux-2-dev-l0:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  flux-schnell:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  flux-schnell-l0:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  flux-schnell-l0-batch2:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  fnet-base:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  gemma-2-2b:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  glm-4-9b:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  glm-4-9b-l0:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  gpt-neo-125m:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  gpt-oss-20b:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  gpt-oss-20b-l0:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  gpt2-125m:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  granite-3.1-2b:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  internlm2-1.8b:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  internvl3-2b:
+    default: vlm_mmmu_pro_vision_fixed_mcq
+    workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
+  internvl3-8b:
+    default: vlm_mmmu_pro_vision_fixed_mcq
+    workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
+  lance-3b-x2t-image:
+    default: e2e
+    workloads: [e2e]
+  locateanything-3b:
+    default: e2e
+    workloads: [e2e]
+  ltx-video-l0:
+    default: vbench_t2v_diffusion_video
+    workloads: [vbench_t2v_diffusion_video]
+  magpie-tts-357m:
+    default: seedtts_en_tts_intelligibility
+    workloads: [seedtts_en_tts_intelligibility]
+  mamba-130m:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  marian-en-ru:
+    default: newstest2019_en_ru_marian_translation_parity
+    workloads: [newstest2019_en_ru_marian_translation_parity]
+  minitron-4b-depth:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  minitron-4b-width:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  minitron-4b-width-l0:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  mistral-7b:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  mistral-7b-l0:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  mixtral-stories-15m:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  modernbert-base:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  nemotron-3.5-asr-streaming-0.6b:
+    default: librispeech_clean_asr_streaming
+    workloads: [librispeech_clean_asr_streaming]
+  nemotron-embed-vl-1b-v2:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  nemotron-h-nano-9b:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  nemotron-hindi-4b:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  nemotron-labs-diffusion-8b:
+    default: e2e
+    workloads: [e2e]
+  nemotron-labs-diffusion-8b-l0:
+    default: e2e
+    workloads: [e2e]
+  nemotron-mini-4b:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  nemotron-nano-4b:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  nemotron-rerank-vl-1b-v2:
+    default: beir_scifact_reranking
+    workloads: [beir_scifact_reranking]
+  nemotron-speech-streaming-en-0.6b:
+    default: librispeech_clean_asr_streaming
+    workloads: [librispeech_clean_asr_streaming]
+  nllb-200-distilled-600m:
+    default: e2e
+    workloads: [e2e]
+  olmo-1b:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  olmo2-1b:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  opt-125m:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  paraphrase-multilingual-minilm-l12-v2:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  patchtsmixer-granite-official:
+    default: etth1_time_series_parity
+    workloads: [etth1_time_series_parity]
+  patchtst-etth1-regression-distribution:
+    default: etth1_time_series_parity
+    workloads: [etth1_time_series_parity]
+  patchtst-granite-official:
+    default: etth1_time_series_parity
+    workloads: [etth1_time_series_parity]
+  personaplex-7b:
+    default: e2e
+    workloads: [e2e]
+  personaplex-7b-l0:
+    default: e2e
+    workloads: [e2e]
+  phi-moe:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  phi-moe-l0:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  phi3-mini:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  phi4-multimodal:
+    default: e2e
+    workloads: [e2e]
+  pixart-sigma-1024:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  pixart-sigma-1024-l0:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  pythia-70m:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  qwen-image:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  qwen-image-2512:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  qwen-image-edit-2511:
+    default: gedit_bench_image_edit
+    workloads: [gedit_bench_image_edit]
+  qwen-image-l0:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  qwen25vl-3b:
+    default: vlm_mmmu_pro_vision_fixed_mcq
+    workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
+  qwen3-0.6b-fp16:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  qwen3-0.6b-fp8:
+    default: e2e
+    workloads: [e2e]
+  qwen3-0.6b-topp:
+    default: e2e
+    workloads: [e2e]
+  qwen3-4b-instruct-2507:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  qwen3-moe-30b-a3b:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  qwen3-moe-tiny-random:
+    default: e2e
+    workloads: [e2e]
+  qwen3-omni-30b-a3b-instruct:
+    default: e2e
+    workloads: [e2e]
+  qwen3-vl-2b:
+    default: vlm_mmmu_pro_vision_fixed_mcq
+    workloads: [vlm_mmmu_pro_vision_fixed_mcq, vlm_mmmu_pro_vision_mcq]
+  qwen35-9b:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  riva-translate-4b:
+    default: flores200_en_fr_riva_translation_parity
+    workloads: [flores200_en_fr_riva_translation_parity]
+  roberta-base:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  roberta-large:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  rwkv-169m:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  sam-vit-base:
+    default: coco2017_prompted_segmentation
+    workloads: [coco2017_prompted_segmentation]
+  sam3:
+    default: coco2017_prompted_segmentation
+    workloads: [coco2017_prompted_segmentation]
+  sana-wm-bidirectional:
+    default: sana_wm_benchmark_diffusion_video
+    workloads: [sana_wm_benchmark_diffusion_video]
+  segformer-b0-ade:
+    default: ade20k_semantic_segmentation
+    workloads: [ade20k_semantic_segmentation]
+  stablelm2-1.6b:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  starcoder2-3b:
+    default: humaneval_code_continuation_parity
+    workloads: [humaneval_code_continuation_parity]
+  t5-small:
+    default: wmt14_en_de_t5_translation_parity
+    workloads: [wmt14_en_de_t5_translation_parity]
+  timesfm-2.0-500m-official:
+    default: etth1_time_series_parity
+    workloads: [etth1_time_series_parity]
+  timm-vit-base-p16-224-augreg-in21k-ft-in1k:
+    default: imagenette_image_classification
+    workloads: [imagenette_image_classification]
+  tinyllama-1.1b:
+    default: mmlu_five_shot_mcq
+    workloads: [mmlu_five_shot_mcq]
+  wan21-t2v-1.3b:
+    default: e2e
+    workloads: [e2e]
+  wan21-t2v-1.3b-l0:
+    default: vbench_t2v_diffusion_video
+    workloads: [vbench_t2v_diffusion_video]
+  whisper-large-v3-turbo:
+    default: librispeech_clean_asr
+    workloads: [librispeech_clean_asr]
+  whisper-tiny-fp16:
+    default: librispeech_clean_asr
+    workloads: [librispeech_clean_asr]
+  xglm-564m:
+    default: mmlu_continuation_parity
+    workloads: [mmlu_continuation_parity]
+  xlm-roberta-base:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  xlnet-base:
+    default: stsbenchmark_encoder_embedding_parity
+    workloads: [stsbenchmark_encoder_embedding_parity]
+  z-image-turbo:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]
+  z-image-turbo-l0:
+    default: dpg_bench_diffusion_image
+    workloads: [dpg_bench_diffusion_image]

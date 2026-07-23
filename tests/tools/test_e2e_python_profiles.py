@@ -119,12 +119,26 @@ def test_resolve_profile_python_materializes_declared_venv(monkeypatch, tmp_path
         },
     )
 
-    python = shared_profiles.resolve_profile_python("custom", sys.executable)
+    created = []
+    python = shared_profiles.resolve_profile_python(
+        "custom",
+        sys.executable,
+        on_create=created.append,
+    )
     ready = Path(python).parent.parent / ".ready"
 
     assert Path(python).is_file()
     assert ready.is_file()
-    assert shared_profiles.resolve_profile_python("custom", sys.executable) == python
+    assert created == ["custom"]
+    assert (
+        shared_profiles.resolve_profile_python(
+            "custom",
+            sys.executable,
+            on_create=created.append,
+        )
+        == python
+    )
+    assert created == ["custom"]
 
 
 def test_family_profile_registry_is_fully_exact_pinned():
@@ -140,6 +154,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "personaplex_reference",
         "phi4_multimodal",
         "sana_wm_reference",
+        "reference_common",
     }
     profiles = shared_profiles.load_python_profile_registry()["profiles"]
 
