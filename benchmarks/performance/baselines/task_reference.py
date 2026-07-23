@@ -74,6 +74,7 @@ class Session:
     timing_scope: str = "task-model-call-wall"
     input_preparation_included: bool = False
     reference_dependencies: Mapping[str, str] | None = None
+    reference_source: Mapping[str, str] | None = None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -107,6 +108,32 @@ def _json_object(raw: str, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must contain an object")
     return value
+
+
+def _pinned_checkout_revision(
+    checkout: str, expected_revision: str, *, repository: str
+) -> str:
+    path = Path(checkout).resolve()
+    if not path.is_dir():
+        raise ValueError(f"{repository} checkout does not exist: {path}")
+    if not expected_revision:
+        raise ValueError(f"{repository} requires a pinned reference_commit")
+    completed = subprocess.run(
+        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    revision = completed.stdout.strip()
+    if completed.returncode or not revision:
+        detail = completed.stderr.strip() or "git rev-parse returned no revision"
+        raise ValueError(f"cannot resolve {repository} checkout revision: {detail}")
+    if revision != expected_revision:
+        raise ValueError(
+            f"{repository} checkout revision mismatch: expected "
+            f"{expected_revision}, got {revision}"
+        )
+    return revision
 
 
 def _torch_dtype(torch_module: Any, precision: str) -> Any:
@@ -1379,8 +1406,17 @@ def _load_personaplex(
     official_repo = str(
         options.get("official_repo", "") or os.environ.get("PERSONAPLEX_OFFICIAL_REPO", "")
     )
-    if official_repo:
-        sys.path.insert(0, official_repo)
+    if not official_repo:
+        raise ValueError(
+            "pytorch-personaplex requires baseline.adapter_options.official_repo or "
+            "PERSONAPLEX_OFFICIAL_REPO"
+        )
+    reference_revision = _pinned_checkout_revision(
+        official_repo,
+        str(options.get("reference_commit", "")),
+        repository="https://github.com/NVIDIA/personaplex",
+    )
+    sys.path.insert(0, official_repo)
     import torch
     from huggingface_hub import hf_hub_download
     from moshi.models import LMGen, loaders
@@ -1452,6 +1488,10 @@ def _load_personaplex(
         "moshi",
         timing_scope="task-pipeline-call-wall",
         input_preparation_included=True,
+        reference_source={
+            "repository": "https://github.com/NVIDIA/personaplex",
+            "revision": reference_revision,
+        },
     )
 
 
@@ -1748,6 +1788,7 @@ def run(arguments: argparse.Namespace) -> int:
         timing_scope = session.timing_scope
         input_included = session.input_preparation_included
         reference_dependencies = session.reference_dependencies
+        reference_source = session.reference_source
     result = {
         "schema_version": "trtmc.perf-baseline/v1",
         "status": "completed",

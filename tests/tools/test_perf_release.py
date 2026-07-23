@@ -169,6 +169,9 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     assert by_id["magpie_tts.generate_audio"]["baseline"]["adapter_options"] == {
         "speaker_encoder_revision": "e9124b5364a2c3e9b4f78da429a33cbca8f8c22b"
     }
+    assert by_id["personaplex.speak"]["baseline"]["adapter_options"] == {
+        "reference_commit": "3428dfd95309a7f3c84fd93259ded0f810d1ff91"
+    }
     diffusion_baseline = by_id["nemotron_labs_diffusion.generate"]["baseline"]
     assert diffusion_baseline["mode"] == "hf-eager"
     assert diffusion_baseline["model_class"] == "auto"
@@ -409,7 +412,12 @@ def test_task_reference_runner_measures_loaded_public_operation(
             calls.append(1)
             return {"text": "ok", "output_tokens": 1}
 
-        return runner["Session"](invoke, "revision", "fake-framework")
+        return runner["Session"](
+            invoke,
+            "revision",
+            "fake-framework",
+            reference_source={"repository": "official", "revision": "source-revision"},
+        )
 
     runner["LOADERS"]["hf-transformers-asr"] = load_session
     runner["_synchronize"] = lambda: None
@@ -453,6 +461,10 @@ def test_task_reference_runner_measures_loaded_public_operation(
     assert result["model_load_included"] is False
     assert result["measurement"] == {"warmup": 1, "iterations": 2}
     assert len(result["samples_ms"]) == 2
+    assert result["reference_source"] == {
+        "repository": "official",
+        "revision": "source-revision",
+    }
 
 
 def test_vlm_adapter_routes_non_generic_families_to_owned_loaders() -> None:

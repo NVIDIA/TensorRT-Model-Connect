@@ -531,6 +531,8 @@ cases:
       adapter: pytorch-personaplex
       mode: pytorch-eager
       reference_backend: torch_reference
+      adapter_options:
+        reference_commit: 3428dfd95309a7f3c84fd93259ded0f810d1ff91
   - id: phi.generate
     family: phi
     operation: generate
