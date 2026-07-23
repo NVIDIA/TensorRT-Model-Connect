@@ -54,6 +54,9 @@ void validate_profile(const Wan22TI2VOptions& profile, const char* subject) {
 }
 
 void validate_request_overrides(const GenerateConfig& config) {
+    if (!config.initial_latents.empty()) {
+        throw std::invalid_argument("Wan2.2-TI2V-5B does not support --initial-latents-raw");
+    }
     if (config.num_steps != -1 && config.num_steps <= 0)
         throw std::invalid_argument("Wan2.2-TI2V-5B num_steps must be -1 or a positive integer");
     if (!std::isfinite(config.guidance_scale) ||

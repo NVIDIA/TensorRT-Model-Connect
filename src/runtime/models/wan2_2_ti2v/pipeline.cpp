@@ -192,15 +192,6 @@ void append_video_chunk(ImageResult& result, int32_t& video_frame_offset,
     video_frame_offset += chunk_frames;
 }
 
-std::vector<float> make_initial_latents(const GenerateConfig& config, int64_t seed,
-                                        const Wan22TI2VRuntimeShape& shape) {
-    if (config.initial_latents.empty())
-        return wan2_2_ti2v::torch_cuda_normal(shape.latent_count, static_cast<uint64_t>(seed));
-    if (config.initial_latents.size() != shape.latent_count)
-        throw std::invalid_argument("Wan2.2 initial_latents has the wrong size");
-    return config.initial_latents;
-}
-
 bool same_runtime_shape(const Wan22TI2VRuntimeShape& left, const Wan22TI2VRuntimeShape& right) {
     return std::tie(left.latent_frames, left.latent_height, left.latent_width, left.video_frames,
                     left.video_height, left.video_width, left.latent_count) ==
@@ -484,7 +475,8 @@ ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
     }
     const auto text_end = Clock::now();
 
-    auto latents = make_initial_latents(cfg, request.seed, shape);
+    auto latents =
+        wan2_2_ti2v::torch_cuda_normal(shape.latent_count, static_cast<uint64_t>(request.seed));
 
     std::vector<float> guided(shape.latent_count);
     std::vector<float> next(shape.latent_count);

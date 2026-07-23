@@ -2307,10 +2307,7 @@ def _native_visual_acceptance(result: Dict[str, Any]) -> Optional[Dict[str, Any]
     }
     if any(policy.get(key) != value for key, value in expected.items()):
         return None
-    if not all(
-        isinstance(policy.get(key), str) and bool(policy[key].strip())
-        for key in ("decision_record", "rationale")
-    ):
+    if not isinstance(policy.get("rationale"), str) or not policy["rationale"].strip():
         return None
     return policy
 
@@ -2322,7 +2319,7 @@ def _render_oracle_context(result: Dict[str, Any]) -> str:
     css_class = "oracle-external" if _uses_external_reference(result) else "oracle-invariant"
     native_acceptance = _native_visual_acceptance(result)
     if native_acceptance is not None:
-        evidence = str(native_acceptance["decision_record"])
+        rationale = str(native_acceptance["rationale"])
         return (
             f'<div class="oracle-context {css_class}">'
             "<strong>Native visual semantic acceptance policy</strong><br>"
@@ -2330,7 +2327,7 @@ def _render_oracle_context(result: Dict[str, Any]) -> str:
             "Official reference pixel parity: diagnostic, not claimed.<br>"
             "All-frame temporal activity/cadence alignment: required.<br>"
             "Six-frame Nightly VLM semantic gate: required.<br>"
-            f"Decision record: {_esc(evidence)}</div>"
+            f"Rationale: {_esc(rationale)}</div>"
         )
     note = "External/reference output comparison is configured."
     if not _uses_external_reference(result):

@@ -546,7 +546,6 @@ def test_nightly_native_visual_policy_requires_every_sampled_frame_judgment(
     result["case_config"]["inputs"]["video_num_frames"] = 121
     result["case_config"]["metadata"]["native_acceptance"] = {
         "kind": "native_visual_semantic_acceptance",
-        "decision_record": "NVIDIA/TensorRT-Model-Connect#520",
         "rationale": "Native output is accepted by semantic visual review.",
         "reference_role": "diagnostic",
         "requires_nightly_vlm": True,

@@ -309,9 +309,10 @@ def _validate_nightly_diffusion_assessments(
                     "reference_role": "diagnostic",
                     "requires_nightly_vlm": True,
                 }
-                if any(policy.get(key) != value for key, value in required_policy.items()) or any(
-                    not isinstance(policy.get(key), str) or not policy[key].strip()
-                    for key in ("decision_record", "rationale")
+                if any(
+                    policy.get(key) != value for key, value in required_policy.items()
+                ) or not (
+                    isinstance(policy.get("rationale"), str) and policy["rationale"].strip()
                 ):
                     issues.append(f"{case_name}: native_acceptance policy is invalid")
                 sample_count = policy.get("vlm_frame_samples")

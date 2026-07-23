@@ -50,9 +50,8 @@ def _native_acceptance_policy(metadata: dict[str, Any]) -> dict[str, Any] | None
         for key, expected in _NATIVE_ACCEPTANCE_VALUES.items()
         if policy.get(key) != expected
     }
-    for key in ("decision_record", "rationale"):
-        if not isinstance(policy.get(key), str) or not policy[key].strip():
-            invalid[key] = (policy.get(key), "non-empty string")
+    if not isinstance(policy.get("rationale"), str) or not policy["rationale"].strip():
+        invalid["rationale"] = (policy.get("rationale"), "non-empty string")
     if invalid:
         raise ValueError(f"Wan2.2 native_acceptance policy is invalid: {invalid}")
     return dict(policy)

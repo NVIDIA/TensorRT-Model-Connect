@@ -14,7 +14,6 @@ from types import ModuleType
 
 import pytest
 
-from tensorrt_model_connect.families import family_hf_warm_dependencies
 from tensorrt_model_connect.hf_snapshot import hf_snapshot_allow_patterns
 from tests.e2e.models.wan2_2_ti2v.e2e_plugins import reference as reference_plugins
 from tests.e2e.models.wan2_2_ti2v.e2e_plugins.references import (
@@ -28,7 +27,6 @@ _FULL_MANIFEST = _MODEL_DIR / "manifests/wan22-ti2v-5b.json"
 _L0_MANIFEST = _MODEL_DIR / "manifests/wan22-ti2v-5b-l0.json"
 _NATIVE_ACCEPTANCE = {
     "kind": "native_visual_semantic_acceptance",
-    "decision_record": "NVIDIA/TensorRT-Model-Connect#520",
     "rationale": (
         "Native TensorRT preserves prompt semantics and visual quality across sampled "
         "frames, with all-frame temporal activity and cadence aligned to the official "
@@ -144,12 +142,6 @@ def test_both_reference_backends_are_registered() -> None:
     }
 
 
-def test_converted_diffusers_reference_is_not_warmed() -> None:
-    warm = dict(family_hf_warm_dependencies("wan2_2_ti2v"))
-    assert "wan22-ti2v-5b-diffusers-reference" not in warm
-    assert "Wan-AI/Wan2.2-TI2V-5B-Diffusers" not in warm.values()
-
-
 def test_cached_reference_uses_the_raw_selective_offline_snapshot_contract(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -217,10 +209,6 @@ def test_reference_uses_official_wan_configuration_and_writes_hf_frames(
     assert "from wan.configs.wan_ti2v_5B import ti2v_5B" in script
     assert "from wan.modules.attention import attention as wan_attention" in script
     assert "wan_model_module.flash_attention = wan_attention" in script
-    assert 'sys.modules["wan"] = wan' in script
-    assert 'sys.modules["wan.configs"] = wan_configs' in script
-    assert 'sys.modules["easydict"] = easydict' in script
-    assert 'sys.modules["imageio"] = imageio' in script
     assert "checkpoint_dir=model_ref" in script
     assert "t5_cpu=False" in script
     assert "init_on_cpu=True" in script

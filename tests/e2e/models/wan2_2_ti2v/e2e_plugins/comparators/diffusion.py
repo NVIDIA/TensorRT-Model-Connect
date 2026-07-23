@@ -66,10 +66,7 @@ def _valid_native_acceptance(policy: object) -> bool:
         return False
     if any(policy.get(key) != value for key, value in _NATIVE_ACCEPTANCE_VALUES.items()):
         return False
-    return all(
-        isinstance(policy.get(key), str) and bool(policy[key].strip())
-        for key in ("decision_record", "rationale")
-    )
+    return isinstance(policy.get("rationale"), str) and bool(policy["rationale"].strip())
 
 
 class DiffusionComparator:

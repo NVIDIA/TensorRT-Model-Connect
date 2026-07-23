@@ -1493,7 +1493,6 @@ class TestRenderDiffusionModel:
         result["case_config"]["reference_backend"] = "wan_official"
         result["case_config"]["metadata"]["native_acceptance"] = {
             "kind": "native_visual_semantic_acceptance",
-            "decision_record": "NVIDIA/TensorRT-Model-Connect#520",
             "rationale": "Maintainer-reviewed visual acceptance.",
             "reference_role": "diagnostic",
             "requires_nightly_vlm": True,

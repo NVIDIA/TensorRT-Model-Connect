@@ -159,6 +159,12 @@ void test_request_rejects_invalid_sentinel_values() {
     const auto options = parse_official_options();
     trtmc::GenerateConfig config;
 
+    config.initial_latents = {0.0F};
+    check_throws([&] { (void)trtmc::resolve_wan22_request(options, config); },
+                 "does not support --initial-latents-raw",
+                 "Wan2.2 rejects the validation-only latent override");
+    config.initial_latents.clear();
+
     config.num_steps = 0;
     check_throws([&] { (void)trtmc::resolve_wan22_request(options, config); }, "num_steps must be",
                  "Wan2.2 rejects zero steps instead of defaulting");

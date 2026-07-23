@@ -34,7 +34,6 @@
       "seed": 42,
       "native_acceptance": {
         "kind": "native_visual_semantic_acceptance",
-        "decision_record": "NVIDIA/TensorRT-Model-Connect#520",
         "rationale": "Native TensorRT preserves prompt semantics and visual quality across sampled frames, with all-frame temporal activity and cadence aligned to the official output, while diffusion backend numerics do not provide pixel identity.",
         "reference_role": "diagnostic",
         "requires_nightly_vlm": true,
