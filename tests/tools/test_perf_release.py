@@ -714,6 +714,99 @@ def test_diffusers_adapter_uses_resolved_sana_runtime_controls(tmp_path: Path) -
     assert summary == {"media_type": "video", "media_count": 2}
 
 
+def test_patchtst_reference_runs_model_under_precision_autocast(monkeypatch) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+
+    class FakeTensor:
+        shape = (1, 1)
+
+        def reshape(self, *_shape):
+            return self
+
+        def gt(self, _value):
+            return self
+
+        def numel(self):
+            return 1
+
+        def isfinite(self):
+            return self
+
+        def all(self):
+            return self
+
+        def item(self):
+            return True
+
+    class Context:
+        def __init__(self, torch_module, *, autocast=False):
+            self.torch_module = torch_module
+            self.autocast = autocast
+
+        def __enter__(self):
+            if self.autocast:
+                self.torch_module.autocast_active = True
+
+        def __exit__(self, *_args):
+            if self.autocast:
+                self.torch_module.autocast_active = False
+
+    fake_torch = ModuleType("torch")
+    fake_torch.float16 = "fp16"
+    fake_torch.float32 = "fp32"
+    fake_torch.bfloat16 = "bf16"
+    fake_torch.autocast_active = False
+    fake_torch.device = lambda value: value
+    fake_torch.tensor = lambda *_args, **_kwargs: FakeTensor()
+    fake_torch.inference_mode = lambda: Context(fake_torch)
+    fake_torch.autocast = lambda *_args, **_kwargs: Context(fake_torch, autocast=True)
+    fake_torch.stack = lambda values, dim: FakeTensor()
+
+    class FakePatchTST:
+        config = Namespace(_commit_hash="snapshot")
+
+        @classmethod
+        def from_pretrained(cls, _model, **kwargs):
+            assert kwargs["torch_dtype"] == "fp16"
+            return cls()
+
+        def eval(self):
+            return self
+
+        def to(self, _device):
+            return self
+
+        def __call__(self, **_kwargs):
+            assert fake_torch.autocast_active
+            return Namespace(regression_outputs=FakeTensor())
+
+    fake_transformers = ModuleType("transformers")
+    fake_transformers.AutoConfig = Namespace(
+        from_pretrained=lambda *_args, **_kwargs: Namespace(
+            context_length=2, num_input_channels=1
+        )
+    )
+    fake_transformers.PatchTSTForRegression = FakePatchTST
+    fake_transformers.PatchTSMixerForPrediction = object
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    session = runner["_load_timeseries"](
+        Namespace(
+            family="patchtst",
+            local_files_only=True,
+            model="ibm/patchtst",
+            precision="fp16",
+            revision=None,
+            trust_remote_code=False,
+        ),
+        {"field_input": [1.0, 2.0]},
+        {},
+    )
+
+    assert session.invoke() == {"shape": [1, 1], "element_count": 1, "finite": True}
+
+
 def test_lance_reference_builds_repeated_official_x2t_dataset(tmp_path: Path) -> None:
     runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
     image = tmp_path / "input.png"

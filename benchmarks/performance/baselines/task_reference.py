@@ -1300,7 +1300,11 @@ def _load_timeseries(
         ).reshape(1, length, channels)
 
         def invoke() -> Mapping[str, Any]:
-            with torch.inference_mode():
+            with torch.inference_mode(), torch.autocast(
+                device_type="cuda",
+                dtype=dtype,
+                enabled=dtype != torch.float32,
+            ):
                 if is_mixer:
                     outputs = model(
                         past_values=values * observed,
