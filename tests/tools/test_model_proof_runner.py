@@ -2282,6 +2282,7 @@ def test_explicit_runner_gpu_id_still_acquires_a_slot_lease(tmp_path: Path) -> N
     assert (tmp_path / "gpu-locks" / "gpu-7-slot-0.lock").is_file()
 
 
+@pytest.mark.model_proof_allocator
 def test_explicit_runner_gpu_id_cannot_bypass_a_busy_slot(tmp_path: Path) -> None:
     fake_bin, docker_log = _write_successful_fake_docker(tmp_path)
     output = tmp_path / "proof"
@@ -2298,7 +2299,7 @@ def test_explicit_runner_gpu_id_cannot_bypass_a_busy_slot(tmp_path: Path) -> Non
     lock_dir.mkdir()
     with (lock_dir / "gpu-7-slot-0.lock").open("w", encoding="utf-8") as lock_stream:
         fcntl.flock(lock_stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result = subprocess.run(
+        process = subprocess.Popen(
             [
                 *RUNNER_COMMAND,
                 "--model",
@@ -2310,18 +2311,27 @@ def test_explicit_runner_gpu_id_cannot_bypass_a_busy_slot(tmp_path: Path) -> Non
             ],
             cwd=REPO_ROOT,
             env=env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            check=False,
-            # Source projection and cache preparation happen before GPU
-            # admission so queued jobs do not hold scarce slots during CPU
-            # setup. Allow that setup to finish on a loaded CI host; the
-            # in-runner lease timeout remains one second and is asserted below.
-            timeout=60,
         )
+        try:
+            requested = output / "artifacts" / "gpu-lease-requested.txt"
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline and not requested.is_file():
+                if process.poll() is not None:
+                    break
+                time.sleep(0.05)
+            assert requested.is_file(), "proof never reached GPU lease acquisition"
+            started = time.monotonic()
+            stdout, stderr = process.communicate(timeout=15)
+            lease_elapsed = time.monotonic() - started
+        finally:
+            _finish_proof_cases([process])
 
-    assert result.returncode != 0
-    assert "waiting for a shared model-proof GPU lease from: 7" in result.stderr
+    assert process.returncode != 0, stdout + stderr
+    assert lease_elapsed < 5
+    assert "timed out after 1s waiting for a shared model-proof GPU lease from: 7" in stderr
     assert not _proof_gpu_ids_if_present(docker_log)
 
 
