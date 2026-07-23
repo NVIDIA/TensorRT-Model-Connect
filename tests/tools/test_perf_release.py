@@ -1029,6 +1029,70 @@ def test_qwen3_omni_uses_installed_generation_speaker_argument() -> None:
     assert 'spk=str(options.get("speaker", "Ethan"))' not in source
 
 
+def test_qwen3_omni_uses_visible_single_gpu_placement(monkeypatch) -> None:
+    runner = runpy.run_path(
+        str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py")
+    )
+    captured: dict[str, object] = {}
+
+    class FakeInputs:
+        def to(self, device):
+            captured["input_device"] = device
+            return self
+
+    class FakeProcessor:
+        chat_template = "{{ messages }}"
+        tokenizer = Namespace(chat_template=None)
+
+        @classmethod
+        def from_pretrained(cls, _model, **_kwargs):
+            return cls()
+
+        def apply_chat_template(self, _conversation, **_kwargs):
+            return FakeInputs()
+
+    class FakeModel:
+        config = Namespace(_commit_hash="snapshot")
+        device = "cuda:0"
+
+        @classmethod
+        def from_pretrained(cls, _model, **kwargs):
+            captured["load_options"] = kwargs
+            return cls()
+
+        def eval(self):
+            return self
+
+    fake_torch = ModuleType("torch")
+    fake_torch.float16 = "fp16"
+    fake_torch.float32 = "fp32"
+    fake_torch.bfloat16 = "bf16"
+    fake_transformers = ModuleType("transformers")
+    fake_transformers.Qwen3OmniMoeForConditionalGeneration = FakeModel
+    fake_transformers.Qwen3OmniMoeProcessor = FakeProcessor
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    cases = perf_release._cases(perf_release._read_yaml(SUITE))
+    case = next(case for case in cases if case["id"] == "qwen3_omni.generate_audio")
+    options = case["baseline"]["adapter_options"]
+    runner["_load_qwen3_omni"](
+        Namespace(
+            local_files_only=True,
+            model="Qwen/Qwen3-Omni-30B-A3B-Instruct",
+            precision="bf16",
+            revision=None,
+            trust_remote_code=True,
+        ),
+        {"prompt": "hello", "max_new_tokens": 16},
+        options,
+    )
+
+    assert options["device_map"] == "cuda:0"
+    assert captured["load_options"]["device_map"] == "cuda:0"
+    assert captured["input_device"] == "cuda:0"
+
+
 def test_lance_reference_builds_repeated_official_x2t_dataset(tmp_path: Path) -> None:
     runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
     image = tmp_path / "input.png"

@@ -1491,7 +1491,12 @@ def _load_qwen3_omni(
         arguments.model, **_processor_kwargs(arguments)
     )
     load_options = _load_kwargs(arguments, torch)
-    load_options.update({"device_map": "auto", "enable_audio_output": True})
+    load_options.update(
+        {
+            "device_map": str(options.get("device_map", "cuda:0")),
+            "enable_audio_output": True,
+        }
+    )
     model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
         arguments.model, **load_options
     ).eval()

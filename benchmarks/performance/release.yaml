@@ -623,6 +623,7 @@ cases:
       mode: hf-eager
       reference_backend: hf_transformers
       adapter_options:
+        device_map: cuda:0
         speaker: Ethan
         talker_max_new_tokens: 32
   - id: qwen_image.generate_image
