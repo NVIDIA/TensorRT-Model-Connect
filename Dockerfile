@@ -177,6 +177,12 @@ FROM ci-base AS python-profile-builder
 
 ENV PYTHONPATH=/opt/trtmc-profile-source
 ENV TRTMC_PYTHON_PROFILE_ROOT=/opt/trtmc-python-profiles
+# sphn publishes no aarch64 wheel. Keep its Rust build toolchain in this
+# throwaway builder stage; ci-runtime receives only the verified profile.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends cargo rustc && \
+    rm -rf /var/lib/apt/lists/* && \
+    pip install "maturin==1.14.1"
 # This image targets the GB300/Blackwell runners. Avoid compiling profile-local
 # CUDA extensions for every architecture known to a GPU-less Docker build.
 ENV TORCH_CUDA_ARCH_LIST=10.0

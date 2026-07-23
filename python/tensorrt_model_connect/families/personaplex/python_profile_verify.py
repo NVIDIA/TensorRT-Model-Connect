@@ -5,6 +5,6 @@ import importlib.metadata as metadata
 
 import sphn
 
-assert metadata.version("sphn") == "0.1.12"
+assert metadata.version("sphn") == "0.1.4"
 assert callable(sphn.read)
 print(f"sphn={metadata.version('sphn')}")
