@@ -1686,6 +1686,15 @@ def _run_elf(
     )
     count = arguments.warmup + arguments.iterations
     prompt = str(request.get("prompt", ""))
+
+    def repository_input(name: str) -> str:
+        value = str(request.get(name, "") or "")
+        if not value:
+            return ""
+        path = Path(value)
+        model_root = arguments.manifest.resolve().parent.parent
+        return str(path if path.is_absolute() else (model_root / path).resolve())
+
     with tempfile.TemporaryDirectory(prefix="trtmc-perf-elf-") as temporary:
         root = Path(temporary)
         dataset = root / "dataset.jsonl"
@@ -1726,7 +1735,20 @@ def _run_elf(
             str(options.get("sde_gamma", 0.0)),
             "--seed",
             str(options.get("seed", 42)),
+            "--precision",
+            arguments.precision,
         ]
+        replay_inputs = (
+            ("initial_latents_path", "--initial-latents"),
+            ("sampling_steps_path", "--sampling-steps"),
+            ("condition_latents_path", "--condition-latents"),
+            ("condition_mask_path", "--condition-mask"),
+            ("sde_noises_path", "--sde-noises"),
+        )
+        for request_name, flag in replay_inputs:
+            value = repository_input(request_name)
+            if value:
+                command.extend([flag, value])
         if arguments.local_files_only:
             command.append("--local-files-only")
         completed = subprocess.run(

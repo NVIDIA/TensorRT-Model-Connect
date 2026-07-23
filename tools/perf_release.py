@@ -290,8 +290,20 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "exact-text",
         "normalized-text",
         "ocr-text",
+        "token-agreement",
     }:
         raise PerfReleaseError(f"case {case['id']} baseline output contract is invalid")
+    if output_contract == "token-agreement":
+        for name in ("min_positional_token_agreement", "max_normalized_edit_distance"):
+            value = baseline.get(name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                raise PerfReleaseError(
+                    f"case {case['id']} token-agreement contract has invalid {name}"
+                )
     if output_contract == "ocr-text":
         required = baseline.get("required_substrings")
         if (
@@ -924,6 +936,25 @@ def _output_contract(
                 right.get("text")
             )
             return matched, "normalized generated text differs" if not matched else ""
+        if contract == "token-agreement":
+            left_tokens = left.get("token_ids")
+            right_tokens = right.get("token_ids")
+            if not isinstance(left_tokens, list) or not isinstance(right_tokens, list):
+                return False, "token-agreement output is missing token ids"
+            token_count = max(len(left_tokens), len(right_tokens))
+            agreement = (
+                sum(a == b for a, b in zip(left_tokens, right_tokens, strict=False)) / token_count
+                if token_count
+                else 1.0
+            )
+            minimum = float(case["baseline"]["min_positional_token_agreement"])
+            if agreement < minimum:
+                return False, "positional token agreement is below the configured contract"
+            distance = _normalized_text_edit_distance(left.get("text"), right.get("text"))
+            limit = float(case["baseline"]["max_normalized_edit_distance"])
+            if distance > limit:
+                return False, "normalized text distance exceeds the configured contract"
+            return True, ""
         if contract == "ocr-text":
             required = list(case["baseline"]["required_substrings"])
             candidate_missing = _missing_ocr_substrings(left.get("text"), required)

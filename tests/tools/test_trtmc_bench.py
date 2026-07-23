@@ -209,6 +209,15 @@ def test_native_worker_has_a_runner_for_every_advertised_operation() -> None:
     for operation in registered_operations():
         assert f'{{"{operation.name}", run_' in worker_source, operation.name
 
+    for replay_input in (
+        "initial_latents_path",
+        "sampling_steps_path",
+        "condition_latents_path",
+        "condition_mask_path",
+        "sde_noises_path",
+    ):
+        assert replay_input in worker_source
+
 
 def test_default_catalog_falls_back_to_installed_package_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

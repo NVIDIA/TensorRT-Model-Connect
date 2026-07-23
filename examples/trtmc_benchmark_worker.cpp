@@ -85,6 +85,38 @@ Value optional_value(const Json& object, const std::string& key, Value fallback)
     return object.at(key).get<Value>();
 }
 
+std::vector<float> read_float32_values(const std::string& path) {
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    if (!stream) {
+        throw std::runtime_error("cannot open float32 request input: " + path);
+    }
+    const std::streamoff byte_count = stream.tellg();
+    if (byte_count < 0 || byte_count % static_cast<std::streamoff>(sizeof(float)) != 0) {
+        throw std::runtime_error("float32 request input has an invalid byte size: " + path);
+    }
+    std::vector<float> values(static_cast<std::size_t>(byte_count) / sizeof(float));
+    stream.seekg(0);
+    if (!values.empty()) {
+        stream.read(reinterpret_cast<char*>(values.data()),
+                    static_cast<std::streamsize>(byte_count));
+    }
+    if (!stream) {
+        throw std::runtime_error("cannot read float32 request input: " + path);
+    }
+    return values;
+}
+
+std::vector<float> optional_float32_values(const Json& request, const std::string& value_key,
+                                           const std::string& path_key) {
+    if (request.contains(value_key) && request.contains(path_key)) {
+        throw std::runtime_error("request cannot set both " + value_key + " and " + path_key);
+    }
+    if (request.contains(path_key)) {
+        return read_float32_values(request.at(path_key).get<std::string>());
+    }
+    return optional_value<std::vector<float>>(request, value_key, {});
+}
+
 trtmc::LoadOptions load_options(const Json& runtime) {
     trtmc::LoadOptions options;
     options.hf_python = optional_value<std::string>(runtime, "hf_python", "");
@@ -123,11 +155,15 @@ trtmc::GenerateConfig generate_config(const Json& request) {
     config.cfg_scale = optional_value<float>(request, "cfg_scale", -1.0F);
     config.num_steps = optional_value<int32_t>(request, "num_inference_steps", -1);
     config.sde_gamma = optional_value<float>(request, "sde_gamma", -1.0F);
-    config.initial_latents = optional_value<std::vector<float>>(request, "initial_latents", {});
-    config.condition_latents = optional_value<std::vector<float>>(request, "condition_latents", {});
-    config.condition_mask = optional_value<std::vector<float>>(request, "condition_mask", {});
-    config.sampling_steps = optional_value<std::vector<float>>(request, "sampling_steps", {});
-    config.sde_noises = optional_value<std::vector<float>>(request, "sde_noises", {});
+    config.initial_latents =
+        optional_float32_values(request, "initial_latents", "initial_latents_path");
+    config.condition_latents =
+        optional_float32_values(request, "condition_latents", "condition_latents_path");
+    config.condition_mask =
+        optional_float32_values(request, "condition_mask", "condition_mask_path");
+    config.sampling_steps =
+        optional_float32_values(request, "sampling_steps", "sampling_steps_path");
+    config.sde_noises = optional_float32_values(request, "sde_noises", "sde_noises_path");
     config.negative_prompt = optional_value<std::string>(request, "negative_prompt", "");
     config.height = optional_value<int32_t>(request, "height", 0);
     config.width = optional_value<int32_t>(request, "width", 0);

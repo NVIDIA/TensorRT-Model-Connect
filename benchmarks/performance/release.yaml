@@ -191,13 +191,22 @@ cases:
     operation: generate
     model: elf-b-de-en-l0
     priority: slow
+    request:
+      seed: 42
+      initial_latents_path: data/elf-b-de-en-replay/initial_latents.f32
+      sampling_steps_path: data/elf-b-de-en-replay/sampling_steps.f32
+      condition_latents_path: data/elf-b-de-en-replay/condition_latents.f32
+      condition_mask_path: data/elf-b-de-en-replay/condition_mask.f32
     baseline:
       runner: task-reference
       adapter: upstream-elf
       mode: pytorch-eager
+      precision: bf16
       reference_backend: torch_reference
       python_profile: elf_flow_reference
-      output_contract: exact-text
+      output_contract: token-agreement
+      min_positional_token_agreement: 0.85
+      max_normalized_edit_distance: 0.2
       adapter_options:
         reference_commit: b29d8833609e9ab7f67cd9da39435ac5cea04837
         checkpoint: embedded-language-flows/ELF-B-de-en-torch

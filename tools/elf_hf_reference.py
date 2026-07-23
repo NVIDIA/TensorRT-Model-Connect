@@ -33,6 +33,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--self-cond-cfg-scale", type=float, required=True)
     parser.add_argument("--sde-gamma", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--precision", choices=("fp16", "fp32", "bf16"), default="bf16")
+    parser.add_argument("--initial-latents", type=Path)
+    parser.add_argument("--sampling-steps", type=Path)
+    parser.add_argument("--condition-latents", type=Path)
+    parser.add_argument("--condition-mask", type=Path)
+    parser.add_argument("--sde-noises", type=Path)
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
@@ -56,8 +62,28 @@ def _trim_terminal(token_ids: list[int], terminal_ids: set[int]) -> list[int]:
     return token_ids[:end]
 
 
+def _read_float32(path: Path, *, expected: int | None = None) -> torch.Tensor:
+    values = np.fromfile(path, dtype=np.float32)
+    if expected is not None and values.size != expected:
+        raise ValueError(f"{path} contains {values.size} float32 values; expected {expected}")
+    return torch.from_numpy(values.copy())
+
+
+def _validate_replay_arguments(args: argparse.Namespace) -> bool:
+    sampling_paths = (args.initial_latents, args.sampling_steps)
+    if any(sampling_paths) and not all(sampling_paths):
+        raise ValueError("--initial-latents and --sampling-steps must be provided together")
+    condition_paths = (args.condition_latents, args.condition_mask)
+    if any(condition_paths) and not all(condition_paths):
+        raise ValueError("--condition-latents and --condition-mask must be provided together")
+    if args.generation_mode == "conditional" and args.initial_latents and not all(condition_paths):
+        raise ValueError("conditional replay requires condition latents and condition mask")
+    return bool(args.initial_latents)
+
+
 def main() -> int:
     args = _parse_args()
+    replay_inputs = _validate_replay_arguments(args)
     reference_src = Path(args.reference_repo).resolve() / "src"
     sys.path.insert(0, str(reference_src))
 
@@ -87,7 +113,7 @@ def main() -> int:
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
     config = load_config_from_yaml(args.config)
-    config.use_bf16 = True
+    config.use_bf16 = args.precision == "bf16"
     config.use_compile = False
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda":
@@ -106,7 +132,12 @@ def main() -> int:
     terminal_ids = {int(pad_token_id), int(tokenizer.eos_token_id)}
 
     encoder = None
-    if args.generation_mode == "conditional":
+    if replay_inputs:
+        replay_initial = _read_float32(args.initial_latents)
+        if replay_initial.numel() % int(config.max_length) != 0:
+            raise ValueError("initial replay latents do not divide evenly by config.max_length")
+        text_encoder_dim = replay_initial.numel() // int(config.max_length)
+    elif args.generation_mode == "conditional":
         encoder_config, encoder = get_encoder(config.encoder_model_name, torch.float32)
         encoder = encoder.to(device).eval()
         for parameter in encoder.parameters():
@@ -139,10 +170,15 @@ def main() -> int:
     state, _ = load_checkpoint(args.checkpoint, state)
     model = _build_eval_model(state, use_compile=False).to(device).eval()
     dtype = next(model.parameters()).dtype
+    autocast_dtype = {
+        "fp16": torch.float16,
+        "bf16": torch.bfloat16,
+        "fp32": torch.float32,
+    }[args.precision]
 
     rows = _load_rows(Path(args.dataset))
     conditional_batches = None
-    if args.generation_mode == "conditional":
+    if args.generation_mode == "conditional" and not replay_inputs:
         dataset = load_jsonl_dataset(
             args.dataset, tokenizer, input_key="input", output_key="output"
         )
@@ -167,32 +203,53 @@ def main() -> int:
         sample_id = str(row.get("id", f"elf_{index:06d}"))
         sample_dir = shared_root / sample_id
         sample_dir.mkdir(parents=True, exist_ok=True)
-        generator = torch.Generator(device="cpu").manual_seed(args.seed + index)
-        t_steps = _sampling_steps(
-            torch,
-            count=args.num_steps,
-            mean=float(config.denoiser_p_mean),
-            std=float(config.denoiser_p_std),
-            generator=generator,
-        )
-        z = torch.randn(
-            (1, config.max_length, text_encoder_dim),
-            generator=generator,
-            dtype=torch.float32,
-        ) * float(config.denoiser_noise_scale)
-        sde_noises = []
-        if args.sampling_method == "sde":
-            for _ in range(args.num_steps - 1):
-                sde_noises.append(
-                    torch.randn(z.shape, generator=generator, dtype=torch.float32)
-                    * float(config.denoiser_noise_scale)
+        if replay_inputs:
+            latent_count = int(config.max_length) * int(text_encoder_dim)
+            z = replay_initial.reshape(1, config.max_length, text_encoder_dim).clone()
+            t_steps = _read_float32(args.sampling_steps, expected=args.num_steps + 1)
+            sde_noises = []
+            if args.sde_noises:
+                noise = _read_float32(args.sde_noises)
+                sde_noises = list(
+                    noise.reshape(-1, config.max_length, text_encoder_dim).unbind(0)
                 )
-        z.numpy().tofile(sample_dir / "initial_latents.f32")
-        t_steps.numpy().tofile(sample_dir / "sampling_steps.f32")
-        if sde_noises:
-            torch.stack(sde_noises).numpy().tofile(sample_dir / "sde_noises.f32")
+            if args.generation_mode == "conditional":
+                cond_seq = _read_float32(
+                    args.condition_latents, expected=latent_count
+                ).reshape(1, config.max_length, text_encoder_dim)
+                cond_mask = _read_float32(
+                    args.condition_mask, expected=int(config.max_length)
+                ).reshape(1, config.max_length)
+            else:
+                cond_seq = torch.zeros_like(z)
+                cond_mask = torch.zeros((1, config.max_length), dtype=torch.float32)
+        else:
+            generator = torch.Generator(device="cpu").manual_seed(args.seed + index)
+            t_steps = _sampling_steps(
+                torch,
+                count=args.num_steps,
+                mean=float(config.denoiser_p_mean),
+                std=float(config.denoiser_p_std),
+                generator=generator,
+            )
+            z = torch.randn(
+                (1, config.max_length, text_encoder_dim),
+                generator=generator,
+                dtype=torch.float32,
+            ) * float(config.denoiser_noise_scale)
+            sde_noises = []
+            if args.sampling_method == "sde":
+                for _ in range(args.num_steps - 1):
+                    sde_noises.append(
+                        torch.randn(z.shape, generator=generator, dtype=torch.float32)
+                        * float(config.denoiser_noise_scale)
+                    )
+            z.numpy().tofile(sample_dir / "initial_latents.f32")
+            t_steps.numpy().tofile(sample_dir / "sampling_steps.f32")
+            if sde_noises:
+                torch.stack(sde_noises).numpy().tofile(sample_dir / "sde_noises.f32")
 
-        if args.generation_mode == "conditional":
+        if args.generation_mode == "conditional" and not replay_inputs:
             batch = next(conditional_batches)
             input_ids = torch.from_numpy(np.asarray(batch["input_ids"])).to(device).long()
             encoder_mask = (
@@ -206,7 +263,7 @@ def main() -> int:
                 latent_mean=config.latent_mean,
                 latent_std=config.latent_std,
             ).to(dtype)
-        else:
+        elif not replay_inputs:
             cond_seq = torch.zeros_like(z, dtype=dtype, device=device)
             cond_mask = torch.zeros((1, config.max_length), dtype=dtype, device=device)
 
@@ -227,7 +284,11 @@ def main() -> int:
         started = time.perf_counter()
         with (
             torch.no_grad(),
-            torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"),
+            torch.amp.autocast(
+                "cuda",
+                dtype=autocast_dtype,
+                enabled=device.type == "cuda" and args.precision != "fp32",
+            ),
         ):
             for step_index in range(len(t_steps) - 2):
                 t = float(t_steps[step_index].item())
@@ -254,9 +315,32 @@ def main() -> int:
                 x_pred_prev=x_pred,
                 **step_kwargs,
             )
-        predicted = _dlm_decode_batch(
-            z, model, float(t_steps[-1].item()), config, args.self_cond_cfg_scale
-        )
+        if args.precision == "fp16" and device.type == "cuda":
+            batch_size = z.shape[0]
+            t_final = torch.full(
+                (batch_size,), float(t_steps[-1].item()), dtype=z.dtype, device=device
+            )
+            scale = (
+                torch.full(
+                    (batch_size,), args.self_cond_cfg_scale, dtype=z.dtype, device=device
+                )
+                if config.num_self_cond_cfg_tokens > 0
+                else None
+            )
+            z_input = torch.cat([z, torch.zeros_like(z)], dim=-1)
+            with torch.amp.autocast("cuda", dtype=torch.float16):
+                _, decoder_logits = model(
+                    z_input,
+                    t_final,
+                    deterministic=True,
+                    self_cond_cfg_scale=scale,
+                    decoder_step_active=True,
+                )
+            predicted = decoder_logits.argmax(dim=-1)
+        else:
+            predicted = _dlm_decode_batch(
+                z, model, float(t_steps[-1].item()), config, args.self_cond_cfg_scale
+            )
         if args.generation_mode == "conditional":
             cond_len = cond_mask.to(torch.int32).sum(dim=1)
             predicted = shift_left(predicted, cond_len, 0)[
@@ -278,8 +362,12 @@ def main() -> int:
                 "source": "hf_elf_torch",
                 "shared_inputs_dir": str(sample_dir),
                 "shared_sampling_inputs": {
-                    "initial_latents": str(sample_dir / "initial_latents.f32"),
-                    "sampling_steps": str(sample_dir / "sampling_steps.f32"),
+                    "initial_latents": str(
+                        args.initial_latents or sample_dir / "initial_latents.f32"
+                    ),
+                    "sampling_steps": str(
+                        args.sampling_steps or sample_dir / "sampling_steps.f32"
+                    ),
                     **({"sde_noises": str(sample_dir / "sde_noises.f32")} if sde_noises else {}),
                 },
             }

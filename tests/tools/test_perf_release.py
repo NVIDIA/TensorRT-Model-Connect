@@ -159,6 +159,15 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     assert by_id["elf_flow.generate"]["baseline"]["adapter_options"][
         "reference_commit"
     ] == "b29d8833609e9ab7f67cd9da39435ac5cea04837"
+    assert by_id["elf_flow.generate"]["baseline"]["precision"] == "bf16"
+    assert by_id["elf_flow.generate"]["baseline"]["output_contract"] == "token-agreement"
+    assert by_id["elf_flow.generate"]["request"] == {
+        "seed": 42,
+        "initial_latents_path": "data/elf-b-de-en-replay/initial_latents.f32",
+        "sampling_steps_path": "data/elf-b-de-en-replay/sampling_steps.f32",
+        "condition_latents_path": "data/elf-b-de-en-replay/condition_latents.f32",
+        "condition_mask_path": "data/elf-b-de-en-replay/condition_mask.f32",
+    }
     assert by_id["lance.generate"]["baseline"]["python_profile"] == "lance_reference"
     assert (
         by_id["locateanything.generate"]["baseline"]["output_contract"]
@@ -282,6 +291,43 @@ def test_normalized_text_contract_allows_only_case_and_whitespace_variation() ->
         False,
         "normalized generated text differs",
     )
+
+
+def test_token_agreement_contract_bounds_cross_precision_drift() -> None:
+    case = {
+        "operation": "generate",
+        "baseline": {
+            "output_contract": "token-agreement",
+            "min_positional_token_agreement": 0.85,
+            "max_normalized_edit_distance": 0.2,
+        },
+    }
+    candidate = {
+        "output_summary": {
+            "text": "used Iran force as words is used",
+            "token_ids": [261, 7449, 2054, 38, 1234, 19, 261],
+        }
+    }
+    reference = {
+        "output_summary": {
+            "text": "expression Iran force as words are used",
+            "token_ids": [3893, 7449, 2054, 38, 1234, 33, 261],
+        }
+    }
+
+    assert perf_release._output_contract(case, candidate, reference) == (
+        False,
+        "positional token agreement is below the configured contract",
+    )
+
+    case["baseline"]["min_positional_token_agreement"] = 0.7
+    assert perf_release._output_contract(case, candidate, reference) == (
+        False,
+        "normalized text distance exceeds the configured contract",
+    )
+
+    case["baseline"]["max_normalized_edit_distance"] = 0.4
+    assert perf_release._output_contract(case, candidate, reference) == (True, "")
 
 
 def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path) -> None:
