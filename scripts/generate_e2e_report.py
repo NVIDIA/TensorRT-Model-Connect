@@ -99,6 +99,7 @@ _TASK_STRATEGY_TO_MODALITY = {
     "embedding": "numeric",
     "reranking": "reranking",
     "neural_operator": "neural_operator",
+    "robot_action_generation": "neural_operator",
     "omni_multimodal": "omni",
     # Kept explicit for forward-compatible manifests.  Unknown strategies
     # still receive the structured TRT/reference fallback renderer.
@@ -3630,7 +3631,7 @@ def validate_evidence(
             if external_reference:
                 require(bool(_first_stage_value(result, "ref", ("scores",))),
                         "missing reference reranking scores")
-        elif strategy == "neural_operator":
+        elif strategy in {"neural_operator", "robot_action_generation"}:
             trt_field = _first_stage_value(
                 result, "trt", ("output_field", "field", "prediction", "forecast",
                                 "output_field_preview"))

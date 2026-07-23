@@ -6,6 +6,11 @@
 #include "trtmc/pipeline.h"
 #include "trtmc/trtmc_io.hpp"
 
+#if __has_include("runtime/models/openpi/benchmark_worker_adapter.h")
+#include "runtime/models/openpi/benchmark_worker_adapter.h"
+using trtmc::openpi::benchmark::run_predict_actions;
+#endif
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -788,6 +793,9 @@ Json execute(const Json& request) {
         {"encode", run_encode},
         {"embed", run_embed},
         {"solve", run_solve},
+#if __has_include("runtime/models/openpi/benchmark_worker_adapter.h")
+        {"predict_actions", run_predict_actions},
+#endif
         {"transcribe", run_transcribe},
     };
     const auto runner = runners.find(operation);

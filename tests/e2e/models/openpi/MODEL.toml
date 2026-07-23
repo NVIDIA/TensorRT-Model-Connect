@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "openpi"
+plugin = "openpi"
+test_manifests = [
+  "manifests/pi05-droid.json",
+]
+
+[e2e_defaults.robot_action_generation]
+reference_backend = "upstream_replay"
+oracle_level = "L1_external_reference"
+stages = [
+  { name = "preprocess", required = true, artifact_type = "token_ids", comparison_mode = "token_exact" },
+  { name = "vision", required = true, artifact_type = "embedding", comparison_mode = "numeric_tensor" },
+  { name = "prefix", required = true, artifact_type = "embedding", comparison_mode = "numeric_tensor" },
+  { name = "flow", required = true, artifact_type = "embedding", comparison_mode = "numeric_tensor" },
+  { name = "actions", required = true, artifact_type = "embedding", comparison_mode = "numeric_tensor" },
+]

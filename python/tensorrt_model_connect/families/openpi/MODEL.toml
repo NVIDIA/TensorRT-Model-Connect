@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "openpi"
+plugin = "openpi"
+module = "plugin"
+config_adapter = "model_config.py|config_from_dir"
+hf_allow_patterns = [
+  "openpi_config.json",
+  "openpi_conversion_manifest.json",
+  "tokenizer.model",
+  "preprocessor_config.json",
+  "assets/paligemma_tokenizer.trtmcbpe",
+  "assets/droid/norm_stats.json",
+  "trtmc_openpi/**",
+]
+hf_required_files = [
+  "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID|config.json",
+  "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID|model.safetensors",
+  "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID|openpi_config.json",
+  "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID|openpi_conversion_manifest.json",
+  "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID|tokenizer.model",
+  "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID|preprocessor_config.json",
+  "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID|assets/paligemma_tokenizer.trtmcbpe",
+  "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID|assets/droid/norm_stats.json",
+  "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID|trtmc_openpi/reference/reference-set.json",
+  "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID|trtmc_openpi/request/request.json",
+  "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID|trtmc_openpi/performance/pytorch-eager.json",
+]
+aliases = [
+  "openpi",
+  "openpi_pi05_flow",
+  "pi05_droid",
+]
+prefixes = [
+  "openpi",
+  "pi05",
+]

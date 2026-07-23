@@ -63,7 +63,8 @@
     "patchtsmixer_trt",
     "timesfm_trt",
     "chronos_bolt_trt",
-    "diffusion_wan2_2_ti2v"
+    "diffusion_wan2_2_ti2v",
+    "openpi_vla"
   ],
   "runtime_strategies": {
     "qwen_decoder_kv_cache": {
@@ -1100,6 +1101,17 @@
       "diff_framework_check_classes": [],
       "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['torchtrt_diffusion'].",
       "performance_mode": "diffusion"
+    },
+    "openpi_vla": {
+      "task_strategy": "robot_action_generation",
+      "cli_commands": [
+        "trtmc-openpi"
+      ],
+      "runner_class": "robot_action.RobotActionGenerationRunner",
+      "comparator_class": "robot_action.RobotActionGenerationComparator",
+      "diff_framework_check_classes": [],
+      "diff_framework_exemption": "No diff_framework check currently registers runtime_strategies=['openpi_vla']; pinned 512-case stagewise and action parity is enforced by the OpenPI model-owned E2E plugins and qualification artifacts.",
+      "performance_mode": "multi_stage"
     }
   }
 }

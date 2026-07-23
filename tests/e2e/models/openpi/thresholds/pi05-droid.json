@@ -1,0 +1,18 @@
+{
+  "threshold_overrides": {
+    "image_uint8_max_lsb": 1,
+    "normalization_max_abs": 1e-6,
+    "stage_velocity_cosine_min": 0.9995,
+    "stage_velocity_rmse_max": 0.005,
+    "stage_velocity_max_abs_max": 0.05,
+    "normalized_action_cosine_min": 0.9995,
+    "normalized_action_mae_max": 0.003,
+    "normalized_action_p99_abs_max": 0.01,
+    "normalized_action_max_abs_max": 0.02,
+    "physical_action_p99_span_fraction_max": 0.01,
+    "native_latency_p50_ms_max": 50.0,
+    "native_latency_p95_ms_max": 60.0,
+    "torch_eager_speedup_p50_min": 5.0,
+    "torch_eager_speedup_p95_min": 5.0
+  }
+}

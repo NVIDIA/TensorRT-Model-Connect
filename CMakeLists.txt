@@ -28,6 +28,11 @@ set(TRTMC_MODEL_PROOF_MODEL "" CACHE STRING
   "Require the source tree to contain exactly this runtime model (CI isolation proof mode).")
 set(TRTMC_TRT_BACKEND_ABI "" CACHE STRING
   "TensorRT ABI suffix for the standard backend DSO, e.g. 10_15. Empty means auto-detect from headers.")
+file(GLOB _trtmc_model_option_files
+  "${PROJECT_SOURCE_DIR}/src/runtime/models/*/model_options.cmake")
+foreach(_trtmc_model_option_file IN LISTS _trtmc_model_option_files)
+  include("${_trtmc_model_option_file}")
+endforeach()
 
 # CUDA is required by the core runtime. TensorRT is optional at core build time:
 # concrete TRT runtimes live in backend DSOs.
@@ -459,6 +464,7 @@ foreach(_trtmc_model IN LISTS TRTMC_RUNTIME_MODEL_IDS)
   install(TARGETS trtmc_model_${_trtmc_model}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/trtmc/models/${_trtmc_model}
   )
+  include("${PROJECT_SOURCE_DIR}/src/runtime/models/${_trtmc_model}/model.cmake" OPTIONAL)
 endforeach()
 
 # Build the TVM-FFI TensorRT plugin as a standalone shared library.
@@ -624,6 +630,7 @@ if(TRTMC_BUILD_BENCHMARKS)
 
   add_executable(trtmc_benchmark_worker examples/trtmc_benchmark_worker.cpp)
   target_link_libraries(trtmc_benchmark_worker PRIVATE trtmc_core)
+  target_include_directories(trtmc_benchmark_worker PRIVATE ${PROJECT_SOURCE_DIR}/src)
   target_include_directories(trtmc_benchmark_worker SYSTEM PRIVATE
     ${_trtmc_nlohmann_json_include}
   )

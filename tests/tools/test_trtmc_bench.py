@@ -148,6 +148,7 @@ def test_catalog_reuses_existing_model_manifests_for_different_tasks(tmp_path: P
         "flux-schnell-l0": ("generate_image", 1, 5),
         "chronos-bolt-tiny-official": ("solve", 50, 500),
         "nemotron-embed-vl-1b-v2": ("embed", 50, 500),
+        "pi05-droid": ("predict_actions", 5, 50),
         "whisper-tiny-fp16": ("transcribe", 1, 10),
     }
     for model_name, expected in expectations.items():
@@ -172,6 +173,7 @@ def test_operation_registry_declares_supported_task_semantics() -> None:
         "encode",
         "embed",
         "solve",
+        "predict_actions",
         "transcribe",
     }
     assert {name: adapter.operation for name, adapter in adapters.items()} == {
@@ -190,6 +192,7 @@ def test_operation_registry_declares_supported_task_semantics() -> None:
         "encoder_only_nlp": "encode",
         "embedding": "embed",
         "neural_operator": "solve",
+        "robot_action_generation": "predict_actions",
         "speech_to_text": "transcribe",
     }
     assert operations["generate_image"].supports_batch is True

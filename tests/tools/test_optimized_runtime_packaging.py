@@ -96,6 +96,7 @@ def _load_conan_recipe(monkeypatch: pytest.MonkeyPatch):
 def _fake_native_build(build: Path) -> None:
     for relative in (
         "trtmc",
+        "trtmc-example",
         "trtmc_benchmark_worker",
         "libtrtmc_core.so",
         "libtrtmc_backend_trt.so",
@@ -183,9 +184,13 @@ def test_package_stages_a_model_owned_adapter_as_inert_source(
     assert (sdk / "runtime" / "providers" / "optimized_runtime_factory.h").is_file()
     assert (sdk / "trtmc" / "pipeline.h").is_file()
     assert (module / "bin" / "trtmc").is_file()
+    assert (module / "bin" / "trtmc-example").is_file()
     assert (module / "bin" / "trtmc_benchmark_worker").is_file()
     benchmark_script = module.parent / "tensorrt_model_connect-0.1.0.data/scripts/trtmc-bench"
     assert benchmark_script.read_bytes().startswith(b"#!python\n")
+    model_script = module.parent / "tensorrt_model_connect-0.1.0.data/scripts/trtmc-example"
+    assert model_script.is_file()
+    assert model_script.stat().st_mode & 0o111
     catalog = module / "benchmark" / "_catalog" / "example"
     assert (catalog / "MODEL.toml").is_file()
     assert (catalog / "manifests" / "example.json").is_file()

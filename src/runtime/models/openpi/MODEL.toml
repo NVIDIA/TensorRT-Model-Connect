@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+id = "openpi"
+runtime_library = "libtrtmc_model_openpi.so"
+runtime_plugins = ["plugin.cpp|register_openpi_plugin"]
+runtime_strategies = ["openpi_vla"]
+task_strategy = "robot_action_generation"
+runtime_tests = [
+  "test_openpi_action_request_json|test_openpi_action_request_json.cpp|nlohmann_json::nlohmann_json|tool/action_request_json.cpp|_",
+  "test_openpi_data_plane|test_openpi_data_plane.cpp|_|openpi_data_plane.cpp|_",
+  "test_paligemma_bpe|test_paligemma_bpe.cpp|_|openpi_data_plane.cpp,paligemma_bpe.cpp|_",
+  "test_openpi_pipeline|test_openpi_pipeline.cpp|trtmc_model_openpi|_|_",
+  "test_openpi_qualification_diagnostics|test_openpi_qualification_diagnostics.cpp|nlohmann_json::nlohmann_json|tool/qualification_diagnostics.cpp|_",
+]

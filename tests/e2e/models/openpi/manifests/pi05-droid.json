@@ -1,0 +1,72 @@
+{
+  "name": "pi05-droid",
+  "hf_id": "NVIDIA/TensorRT-Model-Connect-OpenPI-Pi05-DROID",
+  "hf_revision": "59205df7225305b0a6680dd8fe9a064cfec774d7",
+  "bundle": "pi05-droid.trtfb",
+  "family": "openpi",
+  "runtime_strategy": "openpi_vla",
+  "task_strategy": "robot_action_generation",
+  "precision": "bf16",
+  "build_timeout_s": 14400,
+  "e2e_parallel_resource": "exclusive_gpu",
+  "testcases": [
+    {
+      "name": "pi05-droid",
+      "trace_id": "IT-E2E-OPENPI-PI05-DROID-01",
+      "reference_backend": "upstream_replay",
+      "oracle_level": "L1_external_reference",
+      "reference_family": "openpi_flow_policy",
+      "user_contract": "robot_action_chunk",
+      "preflight_requirements": [
+        {"kind": "binary_exists", "args": {}, "gating": true},
+        {"kind": "gpu_count_min", "args": {"count": 1}, "gating": true}
+      ],
+      "inputs": {
+        "profile": "pi05_droid",
+        "reference_case_id": "droid_iris_20231204154425_f000005",
+        "contract": "contracts/pi05_droid.json",
+        "camera_order": ["base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"],
+        "camera_validity": [true, true, false],
+        "image_shape_hwc": [224, 224, 3],
+        "state_dim": 8,
+        "internal_action_dim": 32,
+        "output_action_dim": 8,
+        "action_horizon": 15,
+        "max_prompt_tokens": 200,
+        "flow_steps": 10,
+        "flow_dt": -0.1,
+        "fixed_external_noise": true
+      },
+      "stages": [
+        {"name": "preprocess", "required": true, "artifact_type": "token_ids", "comparison_mode": "token_exact"},
+        {"name": "vision", "required": true, "artifact_type": "embedding", "comparison_mode": "numeric_tensor"},
+        {"name": "prefix", "required": true, "artifact_type": "embedding", "comparison_mode": "numeric_tensor"},
+        {"name": "flow", "required": true, "artifact_type": "embedding", "comparison_mode": "numeric_tensor"},
+        {"name": "actions", "required": true, "artifact_type": "embedding", "comparison_mode": "numeric_tensor"}
+      ],
+      "determinism": {"seed": 42, "reruns": 100},
+      "metadata": {
+        "upstream_repository": "https://github.com/Physical-Intelligence/openpi.git",
+        "upstream_commit": "15a9616a00943ada6c20a0f158e3adb39df2ccac",
+        "checkpoint_digest_required": true,
+        "qualified_platform": {
+          "gpu": "NVIDIA GB300",
+          "compute_capability": "sm103",
+          "os": "Linux",
+          "cpu_architecture": "aarch64",
+          "tensorrt": "11.2.0.113"
+        },
+        "runtime_dependency_contract": "TensorRT, CUDA, Model-Connect C++, and standard system libraries only",
+        "performance_qualification": {
+          "native_backend": "tensorrt_cpp",
+          "baseline_backend": "pytorch_eager",
+          "baseline_artifact": "performance/pytorch-eager.json",
+          "baseline_sha256": "3cd217412ddbe931e179038f39c74ffc4b7b35675132eb739370dc42dc53a8d8",
+          "iterations": 1000,
+          "warmups": 100
+        },
+        "onnx_prohibited": true
+      }
+    }
+  ]
+}

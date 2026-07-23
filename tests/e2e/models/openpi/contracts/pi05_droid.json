@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "profile_name": "pi05_droid",
+  "variant": "pi05_flow",
+  "upstream": {
+    "repository": "https://github.com/Physical-Intelligence/openpi.git",
+    "commit": "15a9616a00943ada6c20a0f158e3adb39df2ccac",
+    "checkpoint_uri": "gs://openpi-assets/checkpoints/pi05_droid",
+    "checkpoint_digest_policy": "required_in_reference_artifact"
+  },
+  "precision": {
+    "network": "bfloat16",
+    "sensitive_accumulation": "float32"
+  },
+  "images": {
+    "order": ["base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"],
+    "validity": [true, true, false],
+    "shape_hwc": [224, 224, 3],
+    "tokens_per_image": 256,
+    "embedding_width": 2048
+  },
+  "prompt": {
+    "max_tokens": 200,
+    "discrete_state_input": true,
+    "vocab_size": 257152
+  },
+  "state": {
+    "external_dim": 8,
+    "internal_dim": 32,
+    "normalization": "quantile_q01_q99"
+  },
+  "actions": {
+    "horizon": 15,
+    "external_dim": 8,
+    "internal_dim": 32,
+    "normalization": "quantile_q01_q99"
+  },
+  "prefix": {
+    "max_physical_tokens": 968,
+    "layers": 18,
+    "query_heads": 8,
+    "kv_heads": 1,
+    "head_dim": 256
+  },
+  "flow": {
+    "steps": 10,
+    "initial_t": 1.0,
+    "dt": -0.1,
+    "external_noise_required_for_parity": true,
+    "timestep_injection": "adaptive_rms_norm"
+  },
+  "runtime": {
+    "language": "c++",
+    "engine_api": "tensorrt",
+    "onnx_allowed": false,
+    "python_allowed": false,
+    "additional_frameworks_allowed": false
+  }
+}

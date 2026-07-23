@@ -217,6 +217,8 @@ class TensorRTModelConnectConan(ConanFile):
             keep_path=False,
         )
         for destination in (package_bin, wheel_data_scripts):
+            copy(self, "trtmc-*", src=self.build_folder, dst=str(destination), keep_path=False)
+        for destination in (package_bin, wheel_data_scripts):
             copy(
                 self,
                 "libtrtmc_core.so*",
@@ -305,7 +307,9 @@ class TensorRTModelConnectConan(ConanFile):
             raise ConanException("TRTMC TensorRT backend DSO was not staged into the wheel package")
         if not model_plugins:
             raise ConanException("TRTMC model plugin DSOs were not staged into the wheel package")
-
-        for executable in (native, installed_script, benchmark_worker, benchmark_script):
+        executables = [native, installed_script, benchmark_worker, benchmark_script]
+        executables.extend(sorted(package_bin.glob("trtmc-*")))
+        executables.extend(sorted(wheel_data_scripts.glob("trtmc-*")))
+        for executable in executables:
             mode = executable.stat().st_mode
             executable.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)

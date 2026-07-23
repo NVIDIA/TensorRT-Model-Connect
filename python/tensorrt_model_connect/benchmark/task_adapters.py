@@ -581,6 +581,32 @@ def _solve_request(testcase: Mapping[str, Any], _model_root: Path) -> CaseResolu
     return _resolution(request, sources, testcase=testcase)
 
 
+def _robot_action_request(testcase: Mapping[str, Any], _model_root: Path) -> CaseResolution:
+    determinism = testcase.get("determinism", {})
+    if not isinstance(determinism, Mapping):
+        raise BenchmarkError("robot_action_generation determinism must be an object")
+    prompt = testcase.get("prompt", testcase.get("test_prompt", "pick up the object"))
+    if not isinstance(prompt, str) or not prompt:
+        raise BenchmarkError("robot_action_generation prompt must be non-empty")
+    return _resolution(
+        {
+            "batch_size": 1,
+            "prompt": prompt,
+            "seed": int(determinism.get("seed", 0)),
+        },
+        {
+            "batch_size": _TASK_DEFAULT,
+            "prompt": (
+                _MODEL_TESTCASE
+                if "prompt" in testcase or "test_prompt" in testcase
+                else _TASK_DEFAULT
+            ),
+            "seed": _MODEL_TESTCASE if "seed" in determinism else _TASK_DEFAULT,
+        },
+        testcase=testcase,
+    )
+
+
 def _transcribe_request(testcase: Mapping[str, Any], model_root: Path) -> CaseResolution:
     streaming = testcase.get("streaming", {})
     if not isinstance(streaming, Mapping):
@@ -696,6 +722,12 @@ _TASK_ADAPTERS = (
         "solve",
         MeasurementSpec(warmup=50, iterations=500),
         _solve_request,
+    ),
+    TaskAdapter(
+        "robot_action_generation",
+        "predict_actions",
+        MeasurementSpec(warmup=5, iterations=50),
+        _robot_action_request,
     ),
     TaskAdapter(
         "speech_to_text",

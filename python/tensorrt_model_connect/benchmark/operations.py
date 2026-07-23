@@ -162,6 +162,14 @@ _OPERATIONS = (
         ),
     ),
     OperationSpec(
+        name="predict_actions",
+        rate_metrics=(
+            RateMetric("action_chunks", "action_chunks_per_s"),
+            RateMetric("action_steps", "action_steps_per_s"),
+        ),
+        stage_timings=("preprocess_ms", "prefill_ms", "denoise_ms", "postprocess_ms"),
+    ),
+    OperationSpec(
         name="transcribe",
         rate_metrics=(
             RateMetric(
