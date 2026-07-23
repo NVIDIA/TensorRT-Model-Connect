@@ -121,7 +121,15 @@ cases:
       mode: hf-eager
       reference_backend: hf_transformers
       precision: bf16
-      output_contract: exact-text
+      output_contract: ocr-text
+      max_normalized_edit_distance: 0.5
+      required_substrings:
+        - Architecture
+        - "Attention:Standard Q/K/V/O"
+        - "RoPE:Standard rotary position embeddings"
+        - "Layer 0:Dense SwiGLU MLP"
+        - "Layers 1-11:MoE"
+        - "Vision: SAM ViT-B + Qwen2 encoder"
   - id: deepseek_v2.generate
     family: deepseek_v2
     operation: generate

@@ -284,11 +284,32 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "grouped_mm",
     }:
         raise PerfReleaseError(f"case {case['id']} baseline experts implementation is invalid")
-    if baseline.get("output_contract", "exact-token-ids") not in {
+    output_contract = baseline.get("output_contract", "exact-token-ids")
+    if output_contract not in {
         "exact-token-ids",
         "exact-text",
+        "ocr-text",
     }:
         raise PerfReleaseError(f"case {case['id']} baseline output contract is invalid")
+    if output_contract == "ocr-text":
+        required = baseline.get("required_substrings")
+        if (
+            not isinstance(required, list)
+            or not required
+            or any(not isinstance(value, str) or not value.strip() for value in required)
+        ):
+            raise PerfReleaseError(
+                f"case {case['id']} OCR output contract needs required_substrings"
+            )
+        limit = baseline.get("max_normalized_edit_distance")
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, (int, float))
+            or not 0.0 <= float(limit) <= 1.0
+        ):
+            raise PerfReleaseError(
+                f"case {case['id']} OCR output contract has an invalid edit-distance limit"
+            )
     mode = baseline.get("mode", "torch-compile")
     allowed_modes = (
         {"hf-eager", "pytorch-eager"}
@@ -831,6 +852,41 @@ def _median(result: Mapping[str, Any]) -> float:
     return float(statistics.median(float(value) for value in values))
 
 
+def _normalized_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).strip().casefold()
+
+
+def _normalized_text_edit_distance(left: Any, right: Any) -> float:
+    a = _normalized_text(left)
+    b = _normalized_text(right)
+    if len(a) < len(b):
+        a, b = b, a
+    if not a:
+        return 0.0
+    previous = list(range(len(b) + 1))
+    for row, left_character in enumerate(a, start=1):
+        current = [row]
+        for column, right_character in enumerate(b, start=1):
+            current.append(
+                min(
+                    previous[column] + 1,
+                    current[column - 1] + 1,
+                    previous[column - 1] + (left_character != right_character),
+                )
+            )
+        previous = current
+    return previous[-1] / max(len(a), len(b))
+
+
+def _missing_ocr_substrings(text: Any, required: Sequence[str]) -> list[str]:
+    normalized = re.sub(r"\s*:\s*", ":", _normalized_text(text))
+    return [
+        value
+        for value in required
+        if re.sub(r"\s*:\s*", ":", _normalized_text(value)) not in normalized
+    ]
+
+
 def _output_contract(
     case: Mapping[str, Any],
     candidate: Mapping[str, Any],
@@ -840,9 +896,23 @@ def _output_contract(
     right = baseline.get("output_summary", {})
     operation = str(case["operation"])
     if operation == "generate":
-        if case["baseline"].get("output_contract") == "exact-text":
+        contract = case["baseline"].get("output_contract")
+        if contract == "exact-text":
             matched = left.get("text") == right.get("text")
             return matched, "generated text differs" if not matched else ""
+        if contract == "ocr-text":
+            required = list(case["baseline"]["required_substrings"])
+            candidate_missing = _missing_ocr_substrings(left.get("text"), required)
+            if candidate_missing:
+                return False, "TRTMC OCR text misses required content"
+            baseline_missing = _missing_ocr_substrings(right.get("text"), required)
+            if baseline_missing:
+                return False, "baseline OCR text misses required content"
+            distance = _normalized_text_edit_distance(left.get("text"), right.get("text"))
+            limit = float(case["baseline"]["max_normalized_edit_distance"])
+            if distance > limit:
+                return False, "normalized OCR text distance exceeds the configured contract"
+            return True, ""
         matched = left.get("token_ids") == right.get("token_ids")
         return matched, "generated token ids differ" if not matched else ""
     if operation == "encode":

@@ -228,6 +228,30 @@ def test_exact_text_contract_is_explicit_and_still_strict() -> None:
     assert status == "green"
 
 
+def test_ocr_text_contract_preserves_required_content_and_allows_format_variation() -> None:
+    baseline = {
+        "output_contract": "ocr-text",
+        "max_normalized_edit_distance": 0.5,
+        "required_substrings": ["Architecture", "Attention:Standard Q/K/V/O"],
+    }
+    case = {"operation": "generate", "baseline": baseline}
+    candidate = {
+        "output_summary": {
+            "text": "OCR title\nArchitecture:\nAttention: Standard Q/K/V/O (no biases)"
+        }
+    }
+    reference = {
+        "output_summary": {"text": "Architecture:\nAttention:Standard Q/K/V/O"}
+    }
+
+    assert perf_release._output_contract(case, candidate, reference) == (True, "")
+
+    candidate["output_summary"]["text"] = "OCR title only"
+    matched, reason = perf_release._output_contract(case, candidate, reference)
+    assert not matched
+    assert reason == "TRTMC OCR text misses required content"
+
+
 def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path) -> None:
     fake_trtmc = tmp_path / "trtmc-bench"
     fake_baseline = tmp_path / "hf_transformers.py"
@@ -297,6 +321,7 @@ def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
     assert rows["gemma.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["phi.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
+    assert rows["deepseek_ocr.generate"]["baseline"]["output_contract"] == "ocr-text"
     assert not any(row["baseline"]["runner"] == "unsupported" for row in rows.values())
     assert {
         case_id: row["baseline"].get("adapter")
