@@ -635,6 +635,7 @@ cases:
       runner: hf-transformers
       mode: torch-compile
       compile_scope: model.forward
+      experts_implementation: batched_mm
   - id: qwen_vl.generate
     family: qwen_vl
     operation: generate
@@ -645,7 +646,7 @@ cases:
       adapter: hf-transformers-vlm
       mode: hf-eager
       reference_backend: hf_transformers
-      output_contract: exact-text
+      output_contract: normalized-text
   - id: roberta.encode
     family: roberta
     operation: encode

@@ -154,6 +154,7 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     assert by_id["fnet.encode"]["baseline"]["padding"] == "max-length"
     assert by_id["mixtral.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["phi_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
+    assert by_id["qwen_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
     assert by_id["opt.generate"]["request"]["max_new_tokens"] == 10
     assert by_id["deepseek_ocr.generate"]["baseline"]["precision"] == "bf16"
@@ -342,6 +343,7 @@ def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
     assert rows["phi.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["deepseek_ocr.generate"]["baseline"]["output_contract"] == "ocr-text"
+    assert rows["qwen_vl.generate"]["baseline"]["output_contract"] == "normalized-text"
     assert not any(row["baseline"]["runner"] == "unsupported" for row in rows.values())
     assert {
         case_id: row["baseline"].get("adapter")
