@@ -9,6 +9,7 @@ from pathlib import Path
 import runpy
 import subprocess
 import sys
+from types import ModuleType
 
 import yaml
 
@@ -497,6 +498,47 @@ def test_vlm_adapter_routes_non_generic_families_to_owned_loaders() -> None:
     assert runner["_load_vlm"](Namespace(family="locateanything"), {}, {}) is locateanything
 
 
+def test_locateanything_fallback_tokenizer_supports_batch_decode(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import transformers
+
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    (tmp_path / "tokenizer.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "tokenizer_config.json").write_text(
+        '{"model_max_length": 2048}', encoding="utf-8"
+    )
+
+    def fail_auto_tokenizer(*_args, **_kwargs):
+        raise OSError("unsupported tokenizer class")
+
+    class FakeRawTokenizer:
+        def decode(self, token_ids, *, skip_special_tokens):
+            suffix = "clean" if skip_special_tokens else "raw"
+            return f"{','.join(str(token) for token in token_ids)}:{suffix}"
+
+    auto_tokenizer = transformers.AutoTokenizer
+    fake_tokenizers = ModuleType("tokenizers")
+    fake_tokenizers.Tokenizer = Namespace(from_file=lambda _path: FakeRawTokenizer())
+    monkeypatch.setitem(sys.modules, "tokenizers", fake_tokenizers)
+    monkeypatch.setattr(auto_tokenizer, "from_pretrained", fail_auto_tokenizer)
+    torch_module = Namespace(is_tensor=lambda _value: False)
+    arguments = Namespace(
+        local_files_only=True,
+        model=str(tmp_path),
+        revision=None,
+        trust_remote_code=True,
+    )
+
+    tokenizer = runner["_locateanything_tokenizer"](arguments, torch_module)
+
+    assert tokenizer.model_max_length == 2048
+    assert tokenizer.batch_decode([[1, 2], [3]], skip_special_tokens=False) == [
+        "1,2:raw",
+        "3:raw",
+    ]
+
+
 def test_task_reference_resolves_revision_from_hugging_face_cache(monkeypatch) -> None:
     runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
     revision = Namespace(commit_hash="abc123", refs=frozenset({"main"}))
@@ -506,6 +548,32 @@ def test_task_reference_resolves_revision_from_hugging_face_cache(monkeypatch) -
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
 
     assert runner["_cached_snapshot_revision"]("nvidia/canary-1b-v2", None) == "abc123"
+
+
+def test_task_reference_pinned_checkout_scopes_safe_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    captured: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        captured.extend(str(value) for value in command)
+        return subprocess.CompletedProcess(command, 0, "abc123\n", "")
+
+    monkeypatch.setattr(runner["subprocess"], "run", fake_run)
+
+    assert (
+        runner["_pinned_checkout_revision"](
+            str(tmp_path), "abc123", repository="official reference"
+        )
+        == "abc123"
+    )
+    assert captured[:4] == [
+        "git",
+        "-c",
+        f"safe.directory={tmp_path.resolve()}",
+        "-C",
+    ]
 
 
 def test_diffusers_local_mode_loads_resolved_snapshot_path(tmp_path: Path, monkeypatch) -> None:
@@ -648,6 +716,25 @@ def test_lance_reference_builds_repeated_official_x2t_dataset(tmp_path: Path) ->
         "element_dtype_array": ["image", "text"],
         "istarget_in_interleave": [0, 1],
     }
+
+
+def test_lance_git_revision_scopes_safe_directory(tmp_path: Path, monkeypatch) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
+    captured: list[str] = []
+
+    def fake_run(command, **_kwargs):
+        captured.extend(str(value) for value in command)
+        return subprocess.CompletedProcess(command, 0, "abc123\n", "")
+
+    monkeypatch.setattr(runner["subprocess"], "run", fake_run)
+
+    assert runner["_git_revision"](tmp_path) == "abc123"
+    assert captured[:4] == [
+        "git",
+        "-c",
+        f"safe.directory={tmp_path.resolve()}",
+        "-C",
+    ]
 
 
 def test_lance_reference_loads_once_then_measures_each_dataset_row(

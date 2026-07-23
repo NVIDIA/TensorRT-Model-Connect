@@ -45,8 +45,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _git_revision(repository: Path) -> str:
+    repository = repository.resolve()
     completed = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        [
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "-C",
+            str(repository),
+            "rev-parse",
+            "HEAD",
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -57,6 +66,7 @@ def _git_revision(repository: Path) -> str:
 
 
 def _check_reference(repository: Path, expected_commit: str) -> str:
+    repository = repository.resolve()
     source = repository / "inference_lance.py"
     if not source.is_file():
         raise FileNotFoundError(f"Lance checkout has no inference_lance.py: {repository}")
@@ -68,7 +78,14 @@ def _check_reference(repository: Path, expected_commit: str) -> str:
         )
     for arguments in (("diff", "--quiet"), ("diff", "--cached", "--quiet")):
         completed = subprocess.run(
-            ["git", "-C", str(repository), *arguments],
+            [
+                "git",
+                "-c",
+                f"safe.directory={repository}",
+                "-C",
+                str(repository),
+                *arguments,
+            ],
             check=False,
             capture_output=True,
             text=True,

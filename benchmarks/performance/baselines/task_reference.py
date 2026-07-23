@@ -119,7 +119,15 @@ def _pinned_checkout_revision(
     if not expected_revision:
         raise ValueError(f"{repository} requires a pinned reference_commit")
     completed = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "HEAD"],
+        [
+            "git",
+            "-c",
+            f"safe.directory={path}",
+            "-C",
+            str(path),
+            "rev-parse",
+            "HEAD",
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -710,6 +718,16 @@ def _locateanything_tokenizer(arguments: argparse.Namespace, torch_module: Any) 
                     [int(token) for token in ids],
                     skip_special_tokens=skip_special_tokens,
                 )
+
+            def batch_decode(
+                self, batch_ids: Any, skip_special_tokens: bool = True
+            ) -> list[str]:
+                if torch_module.is_tensor(batch_ids):
+                    batch_ids = batch_ids.detach().cpu().tolist()
+                return [
+                    self.decode(ids, skip_special_tokens=skip_special_tokens)
+                    for ids in batch_ids
+                ]
 
         print(
             f"warning: AutoTokenizer failed ({auto_error}); using tokenizer.json",
@@ -1673,8 +1691,17 @@ def _run_elf(
         "token_ids": summary_row.get("generated_token_ids", []),
         "output_tokens": len(summary_row.get("generated_token_ids", [])),
     }
+    reference_path = Path(reference_repo).resolve()
     revision = subprocess.run(
-        ["git", "-C", reference_repo, "rev-parse", "HEAD"],
+        [
+            "git",
+            "-c",
+            f"safe.directory={reference_path}",
+            "-C",
+            str(reference_path),
+            "rev-parse",
+            "HEAD",
+        ],
         check=False,
         capture_output=True,
         text=True,
