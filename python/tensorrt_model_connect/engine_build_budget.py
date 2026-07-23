@@ -41,6 +41,65 @@ def _jsonable_arguments(arguments: dict[str, object]) -> dict[str, object]:
     return json.loads(json.dumps(arguments, sort_keys=True, default=str))
 
 
+def _stable_model_dir_argument(model_dir: object) -> object:
+    """Return a stable identity for a verified synthetic NeMo model directory.
+
+    Family-owned NeMo adapters stage a synthetic config beside one archive
+    symlink.  The staging directory is intentionally temporary, so a fresh
+    recovery process receives a different path for the same archive.  Only
+    canonicalize that path when both independent declarations resolve to the
+    same real archive; every malformed or ordinary model directory retains its
+    exact original identity and therefore fails closed if it changes.
+    """
+    try:
+        staged_dir = Path(str(model_dir))
+        config_path = staged_dir / "config.json"
+        if (
+            staged_dir.is_symlink()
+            or not staged_dir.is_dir()
+            or config_path.is_symlink()
+            or not config_path.is_file()
+        ):
+            return model_dir
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            return model_dir
+        raw_archive = config.get("_nemo_archive_path")
+        if not isinstance(raw_archive, str) or not raw_archive.strip():
+            return model_dir
+        declared_archive = Path(raw_archive)
+        if declared_archive.suffix != ".nemo":
+            return model_dir
+        staged_archive = staged_dir / declared_archive.name
+        if {entry.name for entry in staged_dir.iterdir()} != {
+            "config.json",
+            declared_archive.name,
+        }:
+            return model_dir
+        if not staged_archive.is_symlink():
+            return model_dir
+        declared_target = declared_archive.resolve(strict=True)
+        staged_target = staged_archive.resolve(strict=True)
+        if declared_target != staged_target or not declared_target.is_file():
+            return model_dir
+        archive_stat = declared_target.stat()
+        stable_config = dict(config)
+        stable_config["_nemo_archive_path"] = {
+            "device": archive_stat.st_dev,
+            "inode": archive_stat.st_ino,
+            "modified_ns": archive_stat.st_mtime_ns,
+            "path": str(declared_target),
+            "size_bytes": archive_stat.st_size,
+            "status_changed_ns": archive_stat.st_ctime_ns,
+        }
+        return {
+            "kind": "verified_nemo_staging",
+            "config": stable_config,
+        }
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return model_dir
+
+
 @contextmanager
 def _locked_claim(claim_path: Path):
     import fcntl
@@ -178,6 +237,10 @@ def _claim_build(
     claim_path = _ledger_path(guard_dir, identity)
     recovery = _recovery_request()
     normalized_arguments = _jsonable_arguments(arguments)
+    if "model_dir" in normalized_arguments:
+        normalized_arguments["model_dir"] = _stable_model_dir_argument(
+            normalized_arguments["model_dir"]
+        )
     encoded_arguments = json.dumps(
         normalized_arguments, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -226,8 +289,7 @@ def _claim_build(
             fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError as exc:
             raise RuntimeError(
-                f"full TensorRT bundle build budget already consumed for "
-                f"{identity!r}: {claim_path}"
+                f"full TensorRT bundle build budget already consumed for {identity!r}: {claim_path}"
             ) from exc
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as claim_file:
