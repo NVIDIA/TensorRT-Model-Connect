@@ -2996,7 +2996,7 @@ def test_capacity_drain_and_probe_share_one_deadline(
         timeout_seconds=3,
     )
     context.env["TRTMC_MODEL_PROOF_GPU_IDS"] = "2"
-    context.env["FAKE_NVIDIA_SMI_DELAY_SECONDS"] = "1.5"
+    context.env["FAKE_NVIDIA_SMI_DELAY_SECONDS"] = "2"
     lease = GpuLease(
         context,
         "qwen3_omni",
@@ -3025,7 +3025,7 @@ def test_capacity_drain_and_probe_share_one_deadline(
         elapsed = time.monotonic() - started
 
     assert not holder.is_alive()
-    assert 2.5 <= elapsed < 4.2
+    assert 2.5 <= elapsed < 3.7
     assert lease.gpu_id is None
     assert lease.gpu_memory_admission is None
     assert not lease.last_observed_total_mib
