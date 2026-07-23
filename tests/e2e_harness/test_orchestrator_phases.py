@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import subprocess
 import sys
 import types
@@ -219,6 +220,181 @@ def test_ci_engine_build_guard_passes_manifest_identity_to_builder(
     assert build_env["TRTMC_ENGINE_BUILD_REVISION"] == "abc123"
     command = json.loads(build_env["TRTMC_ENGINE_BUILD_COMMAND_JSON"])
     assert command[command.index("-o") + 1] == str(Path(ctx.engine_dir) / case.bundle)
+
+
+def test_ci_bundle_build_recovers_one_sigsegv_in_a_fresh_process(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("unit-build")
+    case.metadata["model_name"] = "unit-model-config"
+    ctx = _make_ctx(tmp_path, case)
+    monkeypatch.setenv(
+        "TRTMC_ENGINE_BUILD_GUARD_DIR",
+        str(tmp_path / "engine-builds"),
+    )
+    case.metadata["build_timeout_s"] = 100
+    build_environments: list[dict[str, str]] = []
+    build_timeouts: list[float] = []
+    clock = {"now": 0.0}
+    monkeypatch.setattr(orchestrator.time, "monotonic", lambda: clock["now"])
+
+    def fake_run(cmd, **kwargs):
+        build_environments.append(dict(kwargs["env"]))
+        build_timeouts.append(kwargs["timeout"])
+        bundle_path = Path(cmd[cmd.index("-o") + 1])
+        timing_path = Path(cmd[cmd.index("--build-timing-json") + 1])
+        if len(build_environments) == 1:
+            bundle_path.write_bytes(b"partial")
+            timing_path.write_text('{"partial": true}\n', encoding="utf-8")
+            clock["now"] = 90.0
+            return subprocess.CompletedProcess(
+                cmd,
+                -signal.SIGSEGV,
+                stdout="",
+                stderr="native builder crashed",
+            )
+        assert not bundle_path.exists()
+        assert not timing_path.exists()
+        bundle_path.write_bytes(b"bundle")
+        timing_path.write_text('{"total_s": 1.0}\n', encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="built", stderr="")
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+
+    bundle, _elapsed, error, build_info = orchestrator._resolve_bundle(case, ctx)
+
+    assert bundle == str(Path(ctx.engine_dir) / case.bundle)
+    assert error == ""
+    assert len(build_environments) == 2
+    assert "TRTMC_ENGINE_BUILD_RECOVERY_ATTEMPT" not in build_environments[0]
+    assert build_environments[1]["TRTMC_ENGINE_BUILD_RECOVERY_ATTEMPT"] == "2"
+    assert build_environments[1]["TRTMC_ENGINE_BUILD_RECOVERY_SIGNAL"] == str(signal.SIGSEGV)
+    assert build_timeouts == [100, 10.0]
+    assert build_info["attempt_count"] == 2
+    assert [
+        (attempt["attempt"], attempt["returncode"], attempt["signal"])
+        for attempt in build_info["recovery_attempts"]
+    ] == [(1, -signal.SIGSEGV, signal.SIGSEGV)]
+    recovery_timing = (
+        Path(ctx.artifacts_dir) / case.name / "build_timing.attempt-1.json"
+    )
+    assert json.loads(recovery_timing.read_text(encoding="utf-8")) == {
+        "partial": True
+    }
+    assert build_info["recovery_attempts"][0]["timing_path"] == str(
+        recovery_timing
+    )
+
+
+def test_ci_bundle_build_does_not_retry_an_ordinary_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("unit-build")
+    case.metadata["model_name"] = "unit-model-config"
+    ctx = _make_ctx(tmp_path, case)
+    monkeypatch.setenv(
+        "TRTMC_ENGINE_BUILD_GUARD_DIR",
+        str(tmp_path / "engine-builds"),
+    )
+    calls = 0
+
+    def fake_run(cmd, **kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            stdout="",
+            stderr="deterministic build failure",
+        )
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+
+    bundle, _elapsed, error, build_info = orchestrator._resolve_bundle(case, ctx)
+
+    assert bundle is None
+    assert "rc=1" in error
+    assert calls == 1
+    assert build_info["attempt_count"] == 1
+    assert build_info["recovery_attempts"] == []
+
+
+def test_ci_bundle_build_fails_after_a_second_sigsegv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("unit-build")
+    case.metadata["model_name"] = "unit-model-config"
+    ctx = _make_ctx(tmp_path, case)
+    monkeypatch.setenv(
+        "TRTMC_ENGINE_BUILD_GUARD_DIR",
+        str(tmp_path / "engine-builds"),
+    )
+    calls = 0
+
+    def fake_run(cmd, **kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            cmd,
+            -signal.SIGSEGV,
+            stdout="",
+            stderr=f"native builder crash {calls}",
+        )
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+
+    bundle, _elapsed, error, build_info = orchestrator._resolve_bundle(case, ctx)
+
+    assert bundle is None
+    assert f"rc={-signal.SIGSEGV}" in error
+    assert calls == 2
+    assert build_info["attempt_count"] == 2
+    assert len(build_info["recovery_attempts"]) == 1
+
+
+def test_ci_bundle_build_does_not_claim_a_retry_without_time_remaining(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("unit-build")
+    case.metadata.update(
+        {
+            "model_name": "unit-model-config",
+            "build_timeout_s": 100,
+        }
+    )
+    ctx = _make_ctx(tmp_path, case)
+    monkeypatch.setenv(
+        "TRTMC_ENGINE_BUILD_GUARD_DIR",
+        str(tmp_path / "engine-builds"),
+    )
+    clock = {"now": 0.0}
+    monkeypatch.setattr(orchestrator.time, "monotonic", lambda: clock["now"])
+    calls = 0
+
+    def fake_run(cmd, **kwargs):
+        nonlocal calls
+        calls += 1
+        clock["now"] = 100.0
+        return subprocess.CompletedProcess(
+            cmd,
+            -signal.SIGSEGV,
+            stdout="",
+            stderr="native builder crash at deadline",
+        )
+
+    monkeypatch.setattr(orchestrator.subprocess, "run", fake_run)
+
+    bundle, _elapsed, error, build_info = orchestrator._resolve_bundle(case, ctx)
+
+    assert bundle is None
+    assert f"rc={-signal.SIGSEGV}" in error
+    assert calls == 1
+    assert build_info["attempt_count"] == 1
+    assert build_info["recovery_attempts"] == []
 
 
 def test_hf_auth_preflight_accepts_a_warmed_offline_snapshot(
@@ -467,6 +643,54 @@ def test_run_returns_build_failure_and_logs_build_command(
     assert data["commands"][0]["command"] == build_info["command"]
     assert data["timing"]["bundle_build_s"] == 0.25
     assert "repro_commands" in data
+
+
+def test_run_preserves_recovered_build_attempt_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("recovered-build-failure")
+    ctx = _make_ctx(tmp_path, case)
+    model_artifacts = Path(ctx.artifacts_dir) / case.name
+    model_artifacts.mkdir(parents=True)
+    recovery_timing = model_artifacts / "build_timing.attempt-1.json"
+    recovery_timing.write_text('{"partial": true}\n', encoding="utf-8")
+    command = [sys.executable, "-m", "builder"]
+    build_info = {
+        "command": command,
+        "returncode": 2,
+        "stdout": "",
+        "stderr": "final build failure",
+        "recovery_attempts": [
+            {
+                "attempt": 1,
+                "returncode": -signal.SIGSEGV,
+                "stdout": "",
+                "stderr": "native builder crashed",
+                "timing_path": str(recovery_timing),
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_bundle",
+        lambda case, ctx: (None, 0.25, "build exploded", build_info),
+    )
+
+    result = E2EOrchestrator().run(case, ctx)
+
+    assert result.status == E2EStatus.FAIL.value
+    data = _read_result_json(ctx, case)
+    assert [entry["returncode"] for entry in data["commands"]] == [
+        -signal.SIGSEGV,
+        2,
+    ]
+    assert data["artifacts"]["build_recovery_attempt_1_timing_json"] == (
+        "build_timing.attempt-1.json"
+    )
+    log_text = (model_artifacts / "e2e_run.log").read_text(encoding="utf-8")
+    assert "[build_recovery_attempt_1] rc=-11" in log_text
+    assert "native builder crashed" in log_text
 
 
 def test_run_classifies_trt_stage_error(

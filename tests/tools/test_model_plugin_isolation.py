@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -891,6 +892,8 @@ def _write_build_ledger(
         "identity": model_name,
         "status": "passed",
         "invocation_count": 1,
+        "attempt_count": 1,
+        "recovery_attempts": [],
         "returncode": 0,
         "source_revision": "abc123",
         "bundle_path": str(bundle_path),
@@ -938,6 +941,96 @@ def test_verify_builds_accepts_exactly_one_completed_build_per_model(
     assert report["passed"] is True
     assert report["builds_per_model"] == 1
     assert report["expected_models"] == ["decoder-small", "encoder-small"]
+
+
+def test_verify_builds_accepts_one_recorded_sigsegv_recovery(
+    tmp_path: Path,
+) -> None:
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("decoder-small\n", encoding="utf-8")
+    ledger_dir = tmp_path / "engine-builds"
+    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path.write_bytes(b"bundle")
+    timing_path = tmp_path / "decoder-small-timing.json"
+    timing_path.write_text("{}\n", encoding="utf-8")
+    _write_build_ledger(
+        ledger_dir,
+        "decoder-small",
+        bundle_path,
+        timing_path,
+        attempt_count=2,
+        recovery_attempts=[
+            {
+                "attempt": 1,
+                "returncode": -signal.SIGSEGV,
+                "signal": signal.SIGSEGV,
+            }
+        ],
+    )
+
+    result = _run(
+        "verify-builds",
+        "--models-file",
+        str(models_file),
+        "--ledger-dir",
+        str(ledger_dir),
+        "--source-revision",
+        "abc123",
+    )
+
+    assert result.returncode == 0
+    assert "PASS decoder-small" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("attempt_count", "recovery_attempts", "expected_error"),
+    [
+        (3, [], "attempt_count is 3, expected 1 or 2"),
+        (2, [], "recovery_attempts does not match attempt_count"),
+        (
+            2,
+            [{"attempt": 1, "returncode": -signal.SIGABRT, "signal": signal.SIGABRT}],
+            "recovery_attempts must contain only ordered SIGSEGV recoveries",
+        ),
+    ],
+)
+def test_verify_builds_rejects_invalid_recovery_records(
+    tmp_path: Path,
+    attempt_count: int,
+    recovery_attempts: list[dict[str, int]],
+    expected_error: str,
+) -> None:
+    models_file = tmp_path / "models.txt"
+    models_file.write_text("decoder-small\n", encoding="utf-8")
+    ledger_dir = tmp_path / "engine-builds"
+    bundle_path = tmp_path / "decoder-small.trtfb"
+    bundle_path.write_bytes(b"bundle")
+    timing_path = tmp_path / "decoder-small-timing.json"
+    timing_path.write_text("{}\n", encoding="utf-8")
+    _write_build_ledger(
+        ledger_dir,
+        "decoder-small",
+        bundle_path,
+        timing_path,
+        attempt_count=attempt_count,
+        recovery_attempts=recovery_attempts,
+    )
+
+    with pytest.raises(subprocess.CalledProcessError) as exc_info:
+        _run(
+            "verify-builds",
+            "--models-file",
+            str(models_file),
+            "--ledger-dir",
+            str(ledger_dir),
+            "--source-revision",
+            "abc123",
+        )
+    result = exc_info.value
+
+    assert result.returncode == 1
+    assert "FAIL decoder-small" in result.stdout
+    assert expected_error in result.stderr
 
 
 def test_verify_builds_rejects_a_missing_or_failed_build(tmp_path: Path) -> None:

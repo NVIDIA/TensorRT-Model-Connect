@@ -11,7 +11,9 @@ import inspect
 import json
 import os
 import re
+import signal
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, ParamSpec, TypeVar
@@ -21,6 +23,9 @@ _GUARD_DIR_ENV = "TRTMC_ENGINE_BUILD_GUARD_DIR"
 _IDENTITY_ENV = "TRTMC_ENGINE_BUILD_IDENTITY"
 _REVISION_ENV = "TRTMC_ENGINE_BUILD_REVISION"
 _COMMAND_ENV = "TRTMC_ENGINE_BUILD_COMMAND_JSON"
+_RECOVERY_ATTEMPT_ENV = "TRTMC_ENGINE_BUILD_RECOVERY_ATTEMPT"
+_RECOVERY_SIGNAL_ENV = "TRTMC_ENGINE_BUILD_RECOVERY_SIGNAL"
+_RECOVERABLE_SIGNALS = frozenset({signal.SIGSEGV})
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -34,6 +39,122 @@ def _ledger_path(guard_dir: Path, identity: str) -> Path:
 
 def _jsonable_arguments(arguments: dict[str, object]) -> dict[str, object]:
     return json.loads(json.dumps(arguments, sort_keys=True, default=str))
+
+
+@contextmanager
+def _locked_claim(claim_path: Path):
+    import fcntl
+
+    lock_path = claim_path.with_suffix(".lock")
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _recovery_request() -> tuple[int, int] | None:
+    raw_attempt = os.environ.get(_RECOVERY_ATTEMPT_ENV, "").strip()
+    raw_signal = os.environ.get(_RECOVERY_SIGNAL_ENV, "").strip()
+    if not raw_attempt and not raw_signal:
+        return None
+    if not raw_attempt.isdigit() or not raw_signal.isdigit():
+        raise RuntimeError(
+            f"{_RECOVERY_ATTEMPT_ENV} and {_RECOVERY_SIGNAL_ENV} must both be integers"
+        )
+    attempt = int(raw_attempt)
+    signal_number = int(raw_signal)
+    if attempt != 2:
+        raise RuntimeError(f"{_RECOVERY_ATTEMPT_ENV} must be 2")
+    if signal_number not in _RECOVERABLE_SIGNALS:
+        raise RuntimeError(
+            f"{_RECOVERY_SIGNAL_ENV}={signal_number} is not a recoverable native signal"
+        )
+    return attempt, signal_number
+
+
+def _pid_is_alive(pid: object) -> bool:
+    if not isinstance(pid, int) or pid < 1:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _recover_interrupted_claim(
+    claim_path: Path,
+    *,
+    identity: str,
+    arguments_sha256: str,
+    output_path: Path,
+    build_timing_path: str,
+    source_revision: str,
+    command: object,
+    recovery: tuple[int, int],
+) -> tuple[Path, float]:
+    attempt, signal_number = recovery
+    try:
+        payload = json.loads(claim_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"cannot recover unreadable full bundle build ledger for {identity!r}: {claim_path}"
+        ) from exc
+    previous_attempt = attempt - 1
+    expected = {
+        "identity": identity,
+        "status": "started",
+        "invocation_count": 1,
+        "attempt_count": previous_attempt,
+        "source_revision": source_revision,
+        "bundle_path": str(output_path),
+        "build_timing_path": build_timing_path,
+        "arguments_sha256": arguments_sha256,
+        "command": command,
+    }
+    mismatches = [key for key, value in expected.items() if payload.get(key) != value]
+    recoveries = payload.get("recovery_attempts", [])
+    if not isinstance(recoveries, list) or len(recoveries) != previous_attempt - 1:
+        mismatches.append("recovery_attempts")
+    previous_pid = payload.get("builder_pid")
+    if _pid_is_alive(previous_pid):
+        mismatches.append("builder_pid")
+    if output_path.exists():
+        mismatches.append("bundle_path_exists")
+    if mismatches:
+        raise RuntimeError(
+            f"cannot recover full bundle build for {identity!r}; "
+            f"ledger mismatch: {', '.join(sorted(set(mismatches)))}"
+        )
+
+    recovered_at = datetime.now(timezone.utc).isoformat()
+    recoveries.append(
+        {
+            "attempt": previous_attempt,
+            "returncode": -signal_number,
+            "signal": signal_number,
+            "builder_pid": previous_pid,
+            "started_at": payload.get("started_at", ""),
+            "recovered_at": recovered_at,
+        }
+    )
+    payload.update(
+        {
+            "status": "started",
+            "attempt_count": attempt,
+            "builder_pid": os.getpid(),
+            "started_at": recovered_at,
+            "recovery_attempts": recoveries,
+        }
+    )
+    temporary = claim_path.with_suffix(f".json.tmp-{os.getpid()}")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, claim_path)
+    return claim_path, time.monotonic()
 
 
 def _claim_build(
@@ -52,40 +173,66 @@ def _claim_build(
     guard_dir = Path(raw_guard_dir)
     guard_dir.mkdir(parents=True, exist_ok=True)
     claim_path = _ledger_path(guard_dir, identity)
+    recovery = _recovery_request()
     normalized_arguments = _jsonable_arguments(arguments)
     encoded_arguments = json.dumps(
         normalized_arguments, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
+    arguments_sha256 = hashlib.sha256(encoded_arguments).hexdigest()
     raw_command = os.environ.get(_COMMAND_ENV, "")
     try:
         command = json.loads(raw_command) if raw_command else []
     except json.JSONDecodeError:
         command = [raw_command]
-    payload = {
-        "schema_version": 1,
-        "identity": identity,
-        "status": "started",
-        "invocation_count": 1,
-        "source_revision": os.environ.get(_REVISION_ENV, ""),
-        "bundle_path": str(output_path),
-        "build_timing_path": str(arguments.get("build_timing_path") or ""),
-        "arguments_sha256": hashlib.sha256(encoded_arguments).hexdigest(),
-        "command": command,
-        "started_at": datetime.now(timezone.utc).isoformat(),
-    }
-    try:
-        fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError as exc:
-        raise RuntimeError(
-            f"full TensorRT bundle build budget already consumed for {identity!r}: {claim_path}"
-        ) from exc
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as claim_file:
-            json.dump(payload, claim_file, indent=2)
-            claim_file.write("\n")
-    except BaseException:
-        claim_path.unlink(missing_ok=True)
-        raise
+    build_timing_path = str(arguments.get("build_timing_path") or "")
+    source_revision = os.environ.get(_REVISION_ENV, "")
+    with _locked_claim(claim_path):
+        if recovery is not None:
+            if not claim_path.is_file():
+                raise RuntimeError(
+                    f"cannot recover full bundle build for {identity!r}; "
+                    f"ledger is missing: {claim_path}"
+                )
+            return _recover_interrupted_claim(
+                claim_path,
+                identity=identity,
+                arguments_sha256=arguments_sha256,
+                output_path=output_path,
+                build_timing_path=build_timing_path,
+                source_revision=source_revision,
+                command=command,
+                recovery=recovery,
+            )
+
+        payload = {
+            "schema_version": 1,
+            "identity": identity,
+            "status": "started",
+            "invocation_count": 1,
+            "attempt_count": 1,
+            "builder_pid": os.getpid(),
+            "source_revision": source_revision,
+            "bundle_path": str(output_path),
+            "build_timing_path": build_timing_path,
+            "arguments_sha256": arguments_sha256,
+            "command": command,
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "recovery_attempts": [],
+        }
+        try:
+            fd = os.open(claim_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as exc:
+            raise RuntimeError(
+                f"full TensorRT bundle build budget already consumed for "
+                f"{identity!r}: {claim_path}"
+            ) from exc
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as claim_file:
+                json.dump(payload, claim_file, indent=2)
+                claim_file.write("\n")
+        except BaseException:
+            claim_path.unlink(missing_ok=True)
+            raise
     return claim_path, time.monotonic()
 
 
@@ -118,7 +265,7 @@ def _finish_build(
 
 
 def enforce_single_full_bundle_build(func: Callable[P, R]) -> Callable[P, R]:
-    """Allow one guarded invocation per manifest model identity and CI attempt."""
+    """Allow one guarded logical build, with one verified SIGSEGV recovery."""
     signature = inspect.signature(func)
 
     @functools.wraps(func)

@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -31,6 +34,28 @@ def _guarded_builder(calls: list[str]):
             Path(build_timing_path).write_text("{}\n", encoding="utf-8")
 
     return build_bundle
+
+
+def _leave_started_build_ledger(
+    model_dir: str,
+    output_path: str,
+    timing_path: str,
+) -> None:
+    @enforce_single_full_bundle_build
+    def build_bundle(
+        model_dir: str,
+        output_path: str,
+        *,
+        build_timing_path: str | None = None,
+    ) -> None:
+        del model_dir, output_path, build_timing_path
+        os._exit(91)
+
+    build_bundle(
+        model_dir,
+        output_path,
+        build_timing_path=timing_path,
+    )
 
 
 def _enable_guard(
@@ -71,6 +96,8 @@ def test_guard_allows_one_full_bundle_build_and_rejects_the_second(
     assert record["identity"] == "unit-model-config"
     assert record["status"] == "passed"
     assert record["invocation_count"] == 1
+    assert record["attempt_count"] == 1
+    assert record["recovery_attempts"] == []
     assert record["returncode"] == 0
     assert record["source_revision"] == "abc123"
     assert record["bundle_path"] == str(bundle_path)
@@ -107,6 +134,91 @@ def test_guard_rejects_concurrent_duplicate_builds_atomically(
     assert sum("build budget already consumed" in item for item in outcomes) == 1
     assert len(calls) == 1
     assert len(list(guard_dir.glob("*.json"))) == 1
+
+
+def test_guard_recovers_one_abandoned_sigsegv_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    guard_dir = _enable_guard(monkeypatch, tmp_path)
+    bundle_path = tmp_path / "unit.trtfb"
+    timing_path = tmp_path / "build_timing.json"
+    process = multiprocessing.Process(
+        target=_leave_started_build_ledger,
+        args=("/models/unit", str(bundle_path), str(timing_path)),
+    )
+    process.start()
+    process.join(timeout=10)
+
+    assert process.exitcode == 91
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_RECOVERY_ATTEMPT", "2")
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_RECOVERY_SIGNAL", str(signal.SIGSEGV))
+    calls: list[str] = []
+    _guarded_builder(calls)(
+        "/models/unit",
+        str(bundle_path),
+        build_timing_path=str(timing_path),
+    )
+
+    assert calls == ["/models/unit"]
+    records = list(guard_dir.glob("*.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text(encoding="utf-8"))
+    assert record["status"] == "passed"
+    assert record["invocation_count"] == 1
+    assert record["attempt_count"] == 2
+    assert record["returncode"] == 0
+    assert [
+        (attempt["attempt"], attempt["returncode"], attempt["signal"])
+        for attempt in record["recovery_attempts"]
+    ] == [(1, -signal.SIGSEGV, signal.SIGSEGV)]
+
+
+def test_guard_allows_only_one_concurrent_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    guard_dir = _enable_guard(monkeypatch, tmp_path)
+    bundle_path = tmp_path / "unit.trtfb"
+    timing_path = tmp_path / "build_timing.json"
+    process = multiprocessing.Process(
+        target=_leave_started_build_ledger,
+        args=("/models/unit", str(bundle_path), str(timing_path)),
+    )
+    process.start()
+    process.join(timeout=10)
+    assert process.exitcode == 91
+
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_RECOVERY_ATTEMPT", "2")
+    monkeypatch.setenv("TRTMC_ENGINE_BUILD_RECOVERY_SIGNAL", str(signal.SIGSEGV))
+    calls: list[str] = []
+    build_bundle = _guarded_builder(calls)
+    barrier = threading.Barrier(3)
+
+    def recover() -> str:
+        barrier.wait()
+        try:
+            build_bundle(
+                "/models/unit",
+                str(bundle_path),
+                build_timing_path=str(timing_path),
+            )
+        except RuntimeError as exc:
+            return str(exc)
+        return "passed"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(recover) for _ in range(2)]
+        barrier.wait()
+        outcomes = [future.result() for future in futures]
+
+    assert outcomes.count("passed") == 1
+    assert len(calls) == 1
+    records = list(guard_dir.glob("*.json"))
+    assert len(records) == 1
+    record = json.loads(records[0].read_text(encoding="utf-8"))
+    assert record["status"] == "passed"
+    assert record["attempt_count"] == 2
 
 
 def test_guard_fails_closed_without_manifest_identity(

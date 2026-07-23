@@ -16,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -829,6 +830,21 @@ def command_verify_builds(args: argparse.Namespace) -> int:
             record_errors.append(
                 f"invocation_count is {record.get('invocation_count')!r}, expected 1"
             )
+        attempt_count = record.get("attempt_count")
+        if not isinstance(attempt_count, int) or not 1 <= attempt_count <= 2:
+            record_errors.append(f"attempt_count is {attempt_count!r}, expected 1 or 2")
+        recovery_attempts = record.get("recovery_attempts")
+        expected_recoveries = attempt_count - 1 if isinstance(attempt_count, int) else -1
+        if not isinstance(recovery_attempts, list) or len(recovery_attempts) != expected_recoveries:
+            record_errors.append("recovery_attempts does not match attempt_count")
+        elif any(
+            not isinstance(recovery, dict)
+            or recovery.get("attempt") != index
+            or recovery.get("returncode") != -signal.SIGSEGV
+            or recovery.get("signal") != signal.SIGSEGV
+            for index, recovery in enumerate(recovery_attempts, start=1)
+        ):
+            record_errors.append("recovery_attempts must contain only ordered SIGSEGV recoveries")
         if record.get("status") != "passed":
             record_errors.append(
                 f"status is {record.get('status')!r}, expected 'passed'"

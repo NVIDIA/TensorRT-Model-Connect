@@ -31,6 +31,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -87,6 +88,8 @@ _TRTMC_ENGINE_TIMING_RE = re.compile(
 
 _NEW_RUNTIME_MARKER = "backend=trt_new_runtime"
 _LEGACY_RUNTIME_MARKER = "Runtime path: compatibility factory mode"
+_BUILD_RECOVERY_ATTEMPT_ENV = "TRTMC_ENGINE_BUILD_RECOVERY_ATTEMPT"
+_BUILD_RECOVERY_SIGNAL_ENV = "TRTMC_ENGINE_BUILD_RECOVERY_SIGNAL"
 
 
 # ---------------------------------------------------------------------------
@@ -423,62 +426,111 @@ def _resolve_bundle(
             )
         env["TRTMC_ENGINE_BUILD_IDENTITY"] = build_identity
         env["TRTMC_ENGINE_BUILD_COMMAND_JSON"] = json.dumps(cmd)
+    env.pop(_BUILD_RECOVERY_ATTEMPT_ENV, None)
+    env.pop(_BUILD_RECOVERY_SIGNAL_ENV, None)
     build_timeout_s = int(case.metadata.get("build_timeout_s", 3600))
     if build_timeout_s <= 0:
         raise ValueError("build_timeout_s must be positive")
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=build_timeout_s,
-            env=env,
-        )
-        elapsed = time.monotonic() - t0
-    except subprocess.TimeoutExpired:
-        build_timing = _load_build_timing(build_timing_path)
-        build_info = {
-            "command": cmd,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": "timeout",
+    build_deadline = time.monotonic() + build_timeout_s
+    max_attempts = 2 if env.get("TRTMC_ENGINE_BUILD_GUARD_DIR") else 1
+    recovery_attempts: list[dict[str, Any]] = []
+    pending_recovery: dict[str, Any] | None = None
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            assert pending_recovery is not None
+            attempt_timeout_s = build_deadline - time.monotonic()
+            if attempt_timeout_s <= 0:
+                break
+            if build_timing_path.is_file():
+                recovery_timing_path = build_timing_path.with_name(
+                    f"build_timing.attempt-{attempt - 1}.json"
+                )
+                shutil.copy2(build_timing_path, recovery_timing_path)
+                pending_recovery["timing"] = _load_build_timing(
+                    recovery_timing_path
+                )
+                pending_recovery["timing_path"] = str(recovery_timing_path)
+            attempt_timeout_s = build_deadline - time.monotonic()
+            if attempt_timeout_s <= 0:
+                break
+            bundle_path.unlink(missing_ok=True)
+            build_timing_path.unlink(missing_ok=True)
+            env[_BUILD_RECOVERY_ATTEMPT_ENV] = str(attempt)
+            env[_BUILD_RECOVERY_SIGNAL_ENV] = str(signal.SIGSEGV)
+            recovery_attempts.append(pending_recovery)
+            logger.warning(
+                "Bundle build for %s exited with SIGSEGV; "
+                "retrying once in a fresh process",
+                hf_id,
+            )
+        else:
+            attempt_timeout_s = build_timeout_s
+        attempt_started = time.monotonic()
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=attempt_timeout_s,
+                env=env,
+            )
+        except subprocess.TimeoutExpired:
+            build_timing = _load_build_timing(build_timing_path)
+            build_info = {
+                "command": cmd,
+                "returncode": -1,
+                "stdout": "",
+                "stderr": "timeout",
+                "attempt_count": attempt,
+                "recovery_attempts": recovery_attempts,
+            }
+            if build_timing:
+                build_info["timing"] = build_timing
+                build_info["timing_path"] = str(build_timing_path)
+            return (
+                None,
+                None,
+                f"Bundle build timed out after {build_timeout_s}s for {hf_id}",
+                build_info,
+            )
+        except Exception as e:
+            build_timing = _load_build_timing(build_timing_path)
+            build_info = {
+                "command": cmd,
+                "returncode": -1,
+                "stdout": "",
+                "stderr": str(e),
+                "attempt_count": attempt,
+                "recovery_attempts": recovery_attempts,
+            }
+            if build_timing:
+                build_info["timing"] = build_timing
+                build_info["timing_path"] = str(build_timing_path)
+            return (
+                None,
+                None,
+                f"Bundle build failed for {hf_id}: {e}",
+                build_info,
+            )
+        if result.returncode != -signal.SIGSEGV or attempt == max_attempts:
+            break
+        pending_recovery = {
+            "attempt": attempt,
+            "returncode": result.returncode,
+            "signal": signal.SIGSEGV,
+            "elapsed_s": time.monotonic() - attempt_started,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
         }
-        if build_timing:
-            build_info["timing"] = build_timing
-            build_info["timing_path"] = str(build_timing_path)
-        return (
-            None,
-            None,
-            f"Bundle build timed out after {build_timeout_s}s for {hf_id}",
-            {
-                **build_info,
-            },
-        )
-    except Exception as e:
-        build_timing = _load_build_timing(build_timing_path)
-        build_info = {
-            "command": cmd,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": str(e),
-        }
-        if build_timing:
-            build_info["timing"] = build_timing
-            build_info["timing_path"] = str(build_timing_path)
-        return (
-            None,
-            None,
-            f"Bundle build failed for {hf_id}: {e}",
-            {
-                **build_info,
-            },
-        )
+    elapsed = time.monotonic() - t0
 
     build_info: dict[str, Any] = {
         "command": cmd,
         "returncode": result.returncode,
         "stdout": result.stdout,
         "stderr": result.stderr,
+        "attempt_count": 1 + len(recovery_attempts),
+        "recovery_attempts": recovery_attempts,
     }
     build_timing = _load_build_timing(build_timing_path)
     if build_timing:
@@ -1469,6 +1521,28 @@ class E2EOrchestrator:
         build_info = state.build_info
         if not build_info:
             return
+
+        for recovery in build_info.get("recovery_attempts", []):
+            attempt = recovery.get("attempt", "unknown")
+            state.sink.log_command(
+                command=build_info.get("command", []),
+                rc=recovery.get("returncode", -1),
+                stdout=recovery.get("stdout", ""),
+                stderr=recovery.get("stderr", ""),
+                label=f"build_recovery_attempt_{attempt}",
+            )
+            recovery_timing_path = recovery.get("timing_path")
+            if isinstance(recovery_timing_path, str) and recovery_timing_path:
+                try:
+                    recovery_timing_path = str(
+                        Path(recovery_timing_path).relative_to(state.sink.base_dir)
+                    )
+                except ValueError:
+                    pass
+                state.sink.register_artifact(
+                    f"build_recovery_attempt_{attempt}_timing_json",
+                    recovery_timing_path,
+                )
 
         state.sink.log_command(
             command=build_info.get("command", []),
