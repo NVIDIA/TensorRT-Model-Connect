@@ -46,13 +46,28 @@ TERMINAL_STATUSES = {
     "green",
     "yellow",
     "red",
-    "unsupported",
     "failed",
     "contract-mismatch",
     "partial",
 }
 PRIORITIES = {"fast": 0, "normal": 1, "slow": 2}
 SEQUENCE_RUNTIME_MARKERS = ("bart_", "marian_", "m2m_100_", "t5_")
+TASK_REFERENCE_ADAPTERS = {
+    "hf-diffusers",
+    "hf-qwen3-omni",
+    "hf-transformers-asr",
+    "hf-transformers-embedding",
+    "hf-transformers-reranking",
+    "hf-transformers-tts",
+    "hf-transformers-vision",
+    "hf-transformers-vlm",
+    "nemo-asr",
+    "nemo-tts",
+    "pytorch-personaplex",
+    "pytorch-timeseries",
+    "upstream-elf",
+    "upstream-lance",
+}
 
 
 class PerfReleaseError(RuntimeError):
@@ -65,6 +80,7 @@ class RunOptions:
     trtmc_bench: str
     trtmc_worker: Path | None
     hf_transformers_runner: Path
+    task_reference_runner: Path
     bundle_cache: Path | None
     bundle_roots: tuple[Path, ...]
     runtime_dirs: tuple[Path, ...]
@@ -105,6 +121,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--hf-transformers-runner",
         type=Path,
         default=REPOSITORY / "benchmarks/performance/baselines/hf_transformers.py",
+    )
+    parser.add_argument(
+        "--task-reference-runner",
+        type=Path,
+        default=REPOSITORY / "benchmarks/performance/baselines/task_reference.py",
     )
     parser.add_argument(
         "--bundle-cache",
@@ -211,11 +232,40 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
     baseline = case["baseline"]
     if not isinstance(baseline, Mapping) or baseline.get("runner") not in {
         "hf-transformers",
-        "unsupported",
+        "task-reference",
     }:
         raise PerfReleaseError(f"case {case['id']} has an unsupported baseline runner")
-    if baseline.get("runner") == "unsupported" and not baseline.get("reason"):
-        raise PerfReleaseError(f"case {case['id']} unsupported baseline needs a reason")
+    if baseline.get("runner") == "task-reference":
+        adapter = str(baseline.get("adapter", ""))
+        if adapter not in TASK_REFERENCE_ADAPTERS:
+            raise PerfReleaseError(
+                f"case {case['id']} has an unsupported task-reference adapter: {adapter}"
+            )
+        if not baseline.get("reference_backend"):
+            raise PerfReleaseError(
+                f"case {case['id']} task-reference baseline needs a reference_backend"
+            )
+        if not isinstance(baseline.get("adapter_options", {}), Mapping):
+            raise PerfReleaseError(
+                f"case {case['id']} task-reference adapter_options must be an object"
+            )
+        expected_mode = (
+            "pytorch-eager"
+            if adapter
+            in {
+                "nemo-asr",
+                "nemo-tts",
+                "pytorch-personaplex",
+                "pytorch-timeseries",
+                "upstream-elf",
+                "upstream-lance",
+            }
+            else "hf-eager"
+        )
+        if baseline.get("mode") != expected_mode:
+            raise PerfReleaseError(
+                f"case {case['id']} adapter {adapter} requires mode {expected_mode}"
+            )
     token_policy = baseline.get("output_token_policy", "new-tokens")
     if token_policy not in {"new-tokens", "strip-start", "strip-start-and-eos"}:
         raise PerfReleaseError(f"case {case['id']} baseline output token policy is invalid")
@@ -239,6 +289,14 @@ def _validate_baseline(case: Mapping[str, Any]) -> None:
         "exact-text",
     }:
         raise PerfReleaseError(f"case {case['id']} baseline output contract is invalid")
+    mode = baseline.get("mode", "torch-compile")
+    allowed_modes = (
+        {"hf-eager", "pytorch-eager"}
+        if baseline.get("runner") == "task-reference"
+        else {"torch-compile", "hf-eager"}
+    )
+    if mode not in allowed_modes:
+        raise PerfReleaseError(f"case {case['id']} baseline mode is invalid: {mode}")
 
 
 def _validate_unique_ids(cases: Sequence[Mapping[str, Any]]) -> None:
@@ -535,7 +593,7 @@ def _reference_python(resolved: Mapping[str, Any], baseline: Mapping[str, Any]) 
         or default_execution_profiles(
             family=str(model["family"]),
             runtime_strategy=str(model["runtime_strategy"]),
-            reference_backend="hf_transformers",
+            reference_backend=str(baseline.get("reference_backend", "hf_transformers")),
         )["reference"]
     )
     return profile, resolve_profile_python(profile, sys.executable)
@@ -552,8 +610,17 @@ def _baseline_argv(
     model = resolved["model"]
     manifest = _manifest_values(resolved)
     mode = str(baseline.get("mode", "torch-compile"))
-    if mode not in {"torch-compile", "hf-eager"}:
-        raise PerfReleaseError(f"case {case['id']} baseline mode is invalid: {mode}")
+    if baseline.get("runner") == "task-reference":
+        return _task_reference_argv(
+            case=case,
+            resolved=resolved,
+            manifest=manifest,
+            output=output,
+            options=options,
+            profile=profile,
+            python=python,
+            mode=mode,
+        ), profile
     build = model.get("build", {})
     max_length = int(baseline.get("max_length", build.get("max_cache_length", 256)))
     argv = [
@@ -604,6 +671,64 @@ def _baseline_argv(
         if bool(baseline.get("dynamic", True)):
             argv.append("--compile-dynamic")
     return argv, profile
+
+
+def _task_reference_argv(
+    *,
+    case: Mapping[str, Any],
+    resolved: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    output: Path,
+    options: RunOptions,
+    profile: str,
+    python: str,
+    mode: str,
+) -> list[str]:
+    del profile
+    baseline = case["baseline"]
+    model = resolved["model"]
+    argv = [
+        python,
+        str(options.task_reference_runner.resolve()),
+        "--adapter",
+        str(baseline["adapter"]),
+        "--family",
+        str(model["family"]),
+        "--operation",
+        str(resolved["operation"]),
+        "--model",
+        str(model["hf_id"]),
+        "--manifest",
+        str(model["manifest_path"]),
+        "--request-json",
+        json.dumps(resolved["request"], ensure_ascii=True, separators=(",", ":")),
+        "--runtime-json",
+        json.dumps(resolved.get("runtime", {}), ensure_ascii=True, separators=(",", ":")),
+        "--adapter-options-json",
+        json.dumps(baseline.get("adapter_options", {}), ensure_ascii=True, separators=(",", ":")),
+        "--precision",
+        str(baseline.get("precision", model["precision"])),
+        "--mode",
+        mode,
+        "--padding",
+        str(baseline.get("padding", "longest")),
+        "--warmup",
+        str(case["measurement"]["warmup"]),
+        "--iterations",
+        str(case["measurement"]["iterations"]),
+        "--workload-digest",
+        _workload_digest(resolved),
+        "--output",
+        str(output),
+    ]
+    revision = baseline.get("revision", manifest.get("hf_revision"))
+    if revision:
+        argv.extend(["--revision", str(revision)])
+    if bool(manifest.get("trust_remote_code", False)):
+        argv.append("--trust-remote-code")
+    if options.local_files_only:
+        argv.append("--local-files-only")
+    return argv
 
 
 def _run_command(
@@ -767,6 +892,9 @@ def _baseline_contract_mismatch(
     expected_experts = case["baseline"].get("experts_implementation")
     if baseline.get("experts_implementation") != expected_experts:
         return "baseline experts implementation differs from the suite"
+    expected_adapter = case["baseline"].get("adapter")
+    if expected_adapter and baseline.get("adapter") != expected_adapter:
+        return "baseline adapter differs from the suite"
     if (
         "model_class" in case["baseline"]
         and baseline.get("model_class") != case["baseline"]["model_class"]
@@ -780,6 +908,19 @@ def _baseline_contract_mismatch(
     digest = candidate.get("workload_digest")
     if not digest or baseline.get("workload_digest") != digest:
         return "candidate and baseline workload differ"
+    if case["baseline"].get("runner") == "task-reference":
+        if baseline.get("resolved_revision") in {None, "", "unresolved"}:
+            return "task reference model revision is unresolved"
+        if baseline.get("timing_scope") not in {
+            "task-model-call-wall",
+            "task-pipeline-call-wall",
+        }:
+            return "task reference timing scope is not recognized"
+        if not isinstance(baseline.get("input_preparation_included"), bool):
+            return "task reference input-preparation scope is missing"
+        if baseline.get("model_load_included") is not False:
+            return "task reference timing includes model loading"
+        return ""
     if expected_mode != "torch-compile":
         return ""
     evidence = baseline.get("compile_evidence")
@@ -891,12 +1032,6 @@ def _run_one(case: Mapping[str, Any], options: RunOptions, work_root: Path) -> d
     digest = _workload_digest(resolved)
     row = _case_row(case, resolved, digest)
     row["commands"]["resolve"] = dry_command
-    if case["baseline"]["runner"] == "unsupported":
-        row["status"] = "unsupported"
-        row["reason"] = str(case["baseline"]["reason"])
-        row["commands"]["resolve"]["argv"] = dry_argv
-        row["finished_at"] = _now()
-        return row
     case_work = work_root / _slug(str(case["id"]))
     if case_work.exists():
         shutil.rmtree(case_work)
@@ -956,8 +1091,16 @@ def _light(status: str) -> str:
 
 def _baseline_label(row: Mapping[str, Any]) -> str:
     contract = row.get("baseline_contract", {})
-    if contract.get("runner") == "unsupported":
-        return "Unavailable"
+    precision = contract.get("precision") or row.get("resolved_settings", {}).get("model", {}).get(
+        "precision", ""
+    )
+    precision_suffix = f" · {precision}" if precision else ""
+    if contract.get("runner") == "task-reference":
+        mode = {
+            "hf-eager": "HF eager",
+            "pytorch-eager": "PyTorch eager",
+        }.get(str(contract.get("mode", "")), str(contract.get("mode", "")))
+        return f"{mode} · {contract.get('adapter', 'task reference')}{precision_suffix}"
     mode = contract.get("mode", "torch-compile")
     scope = contract.get("compile_scope", "model.forward") if mode == "torch-compile" else ""
     details = []
@@ -970,7 +1113,8 @@ def _baseline_label(row: Mapping[str, Any]) -> str:
     if contract.get("generation_method"):
         details.append(f"generate={contract['generation_method']}")
     suffix = f", {', '.join(details)}" if details else ""
-    return f"torch.compile ({scope}{suffix})" if mode == "torch-compile" else f"HF eager{suffix}"
+    label = f"torch.compile ({scope}{suffix})" if mode == "torch-compile" else f"HF eager{suffix}"
+    return label if contract.get("precision") else label + precision_suffix
 
 
 def _report_note(row: Mapping[str, Any]) -> str:
@@ -1026,14 +1170,14 @@ th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-siz
 <p><strong>{summary}</strong></p>
 <table><thead><tr><th>Family</th><th>Operation</th><th>Model</th><th>Baseline</th><th>Light</th><th>Status</th><th>Note</th><th>Reproduce</th></tr></thead>
 <tbody>{"".join(body)}</tbody></table>
-<p class="meta">Green: TRTMC is more than the configured margin faster. Yellow: within the margin. Red: TRTMC is more than the margin slower. White: unsupported, not run, partial, or invalid comparison.</p>
+<p class="meta">Green: TRTMC is more than the configured margin faster. Yellow: within the margin. Red: TRTMC is more than the margin slower. White: not run, partial, or invalid comparison.</p>
 </body></html>"""
 
 
 REPRODUCE_SOURCE = r'''#!/usr/bin/env python3
 """Replay commands recorded by one TRTMC performance release run."""
 from __future__ import annotations
-import argparse, json, os, pathlib, subprocess, sys
+import argparse, json, os, pathlib, shlex, subprocess, sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -1084,7 +1228,7 @@ def main():
         target.parent.mkdir(parents=True, exist_ok=True)
         argv = relocate_repo_paths(command["argv"], original_repo, repo)
         argv = replace_output(argv, target)
-        print(subprocess.list2cmdline(argv), flush=True)
+        print(shlex.join(argv), flush=True)
         if not args.print_only:
             completed = subprocess.run(argv, cwd=repo, env=os.environ.copy(), check=False)
             if completed.returncode:
@@ -1145,6 +1289,7 @@ def run(arguments: argparse.Namespace) -> int:
         trtmc_bench=arguments.trtmc_bench,
         trtmc_worker=arguments.trtmc_worker,
         hf_transformers_runner=arguments.hf_transformers_runner,
+        task_reference_runner=arguments.task_reference_runner,
         bundle_cache=arguments.bundle_cache,
         bundle_roots=tuple(arguments.bundle_root),
         runtime_dirs=tuple(arguments.runtime_dir),

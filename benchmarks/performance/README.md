@@ -58,6 +58,20 @@ python3 artifacts/perf/reproduce.py gpt2.generate trtmc --print
 The generated replay program uses only the Python standard library and directly executes the
 recorded `trtmc-bench` or baseline argv.
 
+For a non-text row the baseline command is equally explicit. For example:
+
+```bash
+python3 tools/perf_release.py benchmarks/performance/release.yaml \
+  --case whisper.transcribe \
+  --output artifacts/perf \
+  --dry-run
+python3 artifacts/perf/reproduce.py whisper.transcribe baseline --print
+```
+
+Remove `--print` to execute that baseline command without the matrix orchestrator. The command
+contains the adapter, model, manifest, exact resolved request JSON, precision, warmup/iteration
+counts, resolved runtime JSON, workload digest, and output path.
+
 ## CI runs
 
 The `TRTMC Performance Matrix` workflow is callable and manually dispatchable. It runs the
@@ -66,9 +80,29 @@ Red and yellow comparisons are valid data and do not fail CI. Unexpected command
 workload/output mismatches, or an eager fallback from a declared `torch.compile` baseline do.
 
 The self-hosted runner configures the executable, worker, runtime directories, bundle roots,
-bundle cache, and Python profile cache through repository variables. Heavy Transformers
-dependencies remain in the existing reference Python profiles; they are not added to
-`trtmc-bench`.
+bundle cache, and Python profile cache through repository variables. Reference dependencies
+stay in the separate baseline process and its selected Python profile or upstream checkout;
+they are not added to `trtmc-bench`.
+
+The baseline process is deliberately separate from `trtmc-bench`. Text rows use the shared
+`hf-transformers` runner. Task rows use one of the explicit `task-reference` adapters for
+Diffusers, ASR, TTS, VLM, embedding, reranking, vision, time series, Qwen3-Omni, PersonaPlex,
+ELF, or Lance. Each task result records whether preprocessing is inside the timed call. Model
+loading and warmup are always outside measured samples.
+
+The complete slow matrix expects the same reference prerequisites as model E2E validation.
+Special upstream code locations are supplied without changing `release.yaml`:
+
+```text
+TRTMC_ELF_REFERENCE_REPO=/path/to/pinned/ELF/checkout
+TRTMC_LANCE_REFERENCE_REPO=/path/to/bytedance/Lance/checkout
+PERSONAPLEX_OFFICIAL_REPO=/path/to/pinned/personaplex/moshi/checkout
+```
+
+The ELF and Lance checkout commits and resolved Hugging Face snapshot revisions are recorded in
+`results.json`. CI should prebuild the declared Python profiles and set
+`TRTMC_PYTHON_PROFILE_PREBUILT_ONLY=1`; this keeps dependency installation out of a measured
+campaign and fails immediately when a required profile is missing.
 
 ## Adding or changing a row
 
@@ -93,7 +127,9 @@ For example, a row can override its manifest input without changing Python code:
     max_new_tokens: 16
 ```
 
-The shared `hf-transformers` runner supports encoder, causal-LM, and seq2seq-LM execution.
-Models that require another task surface remain explicit white `unsupported` rows until an
-aligned runner exists. Do not silently substitute HF eager for a `torch.compile` row; change
-the row's `baseline.mode` to `hf-eager` so the report labels it honestly.
+The shared `hf-transformers` runner supports encoder, causal-LM, and seq2seq-LM execution. All
+other release rows declare a `task-reference` adapter and `reference_backend`; the suite does
+not accept `unsupported` placeholders. When adding a new family operation, either select an
+existing adapter or add a focused adapter and its contract test. Do not silently substitute HF
+eager for a `torch.compile` row; change the row's `baseline.mode` to `hf-eager` so the report
+labels it honestly.

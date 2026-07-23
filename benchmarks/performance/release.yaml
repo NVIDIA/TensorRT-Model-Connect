@@ -30,8 +30,10 @@ cases:
     model: bark-small
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned text_to_audio baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-tts
+      mode: hf-eager
+      reference_backend: hf_transformers
   - id: bart.generate
     family: bart
     operation: generate
@@ -66,16 +68,20 @@ cases:
     model: canary-1b-v2
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned speech_to_text baseline runner is implemented yet.
+      runner: task-reference
+      adapter: nemo-asr
+      mode: pytorch-eager
+      reference_backend: nemo_reference
   - id: chronos_bolt.solve
     family: chronos_bolt
     operation: solve
     model: chronos-bolt-tiny-official
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned neural_operator baseline runner is implemented yet.
+      runner: task-reference
+      adapter: pytorch-timeseries
+      mode: pytorch-eager
+      reference_backend: torch_reference
   - id: codegen.generate
     family: codegen
     operation: generate
@@ -110,8 +116,12 @@ cases:
     model: deepseek-ocr
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned vision_language_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-vlm
+      mode: hf-eager
+      reference_backend: hf_transformers
+      precision: bf16
+      output_contract: exact-text
   - id: deepseek_v2.generate
     family: deepseek_v2
     operation: generate
@@ -145,16 +155,20 @@ cases:
     model: nemotron-embed-vl-1b-v2
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned embedding baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-embedding
+      mode: hf-eager
+      reference_backend: hf_transformers
   - id: eagle_vlm.rerank
     family: eagle_vlm
     operation: rerank
     model: nemotron-rerank-vl-1b-v2
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned reranking baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-reranking
+      mode: hf-eager
+      reference_backend: hf_transformers
   - id: electra.encode
     family: electra
     operation: encode
@@ -170,8 +184,19 @@ cases:
     model: elf-b-de-en-l0
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned diffusion_text_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: upstream-elf
+      mode: pytorch-eager
+      reference_backend: torch_reference
+      python_profile: elf_flow
+      output_contract: exact-text
+      adapter_options:
+        checkpoint: embedded-language-flows/ELF-B-de-en-torch
+        config: src/configs/training_configs/train_de-en_ELF-B.yml
+        sampling_method: ode
+        self_cond_cfg_scale: 1.0
+        sde_gamma: 0.0
+        seed: 42
   - id: falcon.generate
     family: falcon
     operation: generate
@@ -187,8 +212,10 @@ cases:
     model: flux-schnell-l0
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-diffusers
+      mode: hf-eager
+      reference_backend: hf_diffusers
   - id: fnet.encode
     family: fnet
     operation: encode
@@ -279,16 +306,27 @@ cases:
     model: internvl3-2b
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned vision_language_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-vlm
+      mode: hf-eager
+      reference_backend: hf_transformers
+      output_contract: exact-text
   - id: lance.generate
     family: lance
     operation: generate
     model: lance-3b-x2t-image
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned vision_language_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: upstream-lance
+      mode: pytorch-eager
+      reference_backend: upstream_lance
+      output_contract: exact-text
+      adapter_options:
+        reference_commit: 4baeee086648996f6ab12e673cbe461b0b149997
+        model_subdir: Lance_3B
+        vit_subdir: Qwen2.5-VL-ViT
+        resolution: image_768res
   - id: llama.generate
     family: llama
     operation: generate
@@ -304,16 +342,21 @@ cases:
     model: locateanything-3b
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned vision_language_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-vlm
+      mode: hf-eager
+      reference_backend: hf_transformers
+      output_contract: exact-text
   - id: ltx_video.generate_image
     family: ltx_video
     operation: generate_image
     model: ltx-video-l0
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-diffusers
+      mode: hf-eager
+      reference_backend: hf_diffusers
   - id: m2m_100.generate
     family: m2m_100
     operation: generate
@@ -330,8 +373,12 @@ cases:
     model: magpie-tts-357m
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned text_to_audio baseline runner is implemented yet.
+      runner: task-reference
+      adapter: nemo-tts
+      mode: pytorch-eager
+      reference_backend: nemo_reference
+      adapter_options:
+        speaker_encoder_revision: e9124b5364a2c3e9b4f78da429a33cbca8f8c22b
   - id: mamba.generate
     family: mamba
     operation: generate
@@ -421,8 +468,10 @@ cases:
     model: nemotron-3.5-asr-streaming-0.6b
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned speech_to_text baseline runner is implemented yet.
+      runner: task-reference
+      adapter: nemo-asr
+      mode: pytorch-eager
+      reference_backend: nemo_reference
   - id: olmo.generate
     family: olmo
     operation: generate
@@ -458,24 +507,30 @@ cases:
     model: patchtsmixer-granite-official
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned neural_operator baseline runner is implemented yet.
+      runner: task-reference
+      adapter: pytorch-timeseries
+      mode: pytorch-eager
+      reference_backend: torch_reference
   - id: patchtst.solve
     family: patchtst
     operation: solve
     model: patchtst-etth1-regression-distribution
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned neural_operator baseline runner is implemented yet.
+      runner: task-reference
+      adapter: pytorch-timeseries
+      mode: pytorch-eager
+      reference_backend: torch_reference
   - id: personaplex.speak
     family: personaplex
     operation: speak
     model: personaplex-7b-l0
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned speech_to_speech baseline runner is implemented yet.
+      runner: task-reference
+      adapter: pytorch-personaplex
+      mode: pytorch-eager
+      reference_backend: torch_reference
   - id: phi.generate
     family: phi
     operation: generate
@@ -492,8 +547,11 @@ cases:
     model: phi4-multimodal
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned vision_language_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-vlm
+      mode: hf-eager
+      reference_backend: hf_transformers
+      output_contract: exact-text
   - id: phi_moe.generate
     family: phi_moe
     operation: generate
@@ -511,8 +569,10 @@ cases:
     model: pixart-sigma-1024-l0
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-diffusers
+      mode: hf-eager
+      reference_backend: hf_diffusers
   - id: qwen.generate
     family: qwen
     operation: generate
@@ -537,16 +597,25 @@ cases:
     model: qwen3-omni-30b-a3b-instruct
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned omni_multimodal baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-qwen3-omni
+      mode: hf-eager
+      reference_backend: hf_transformers
+      adapter_options:
+        speaker: Ethan
+        talker_max_new_tokens: 32
   - id: qwen_image.generate_image
     family: qwen_image
     operation: generate_image
     model: qwen-image-l0
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-diffusers
+      mode: hf-eager
+      reference_backend: hf_diffusers
+      adapter_options:
+        cpu_offload: true
   - id: qwen_moe.generate
     family: qwen_moe
     operation: generate
@@ -562,8 +631,11 @@ cases:
     model: qwen3-vl-2b
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned vision_language_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-vlm
+      mode: hf-eager
+      reference_backend: hf_transformers
+      output_contract: exact-text
   - id: roberta.encode
     family: roberta
     operation: encode
@@ -587,32 +659,49 @@ cases:
     model: sam-vit-base
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned prompted_segmentation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
   - id: sam3.segment_prompted
     family: sam3
     operation: segment_prompted
     model: sam3
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned prompted_segmentation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
   - id: sana_wm.generate_image
     family: sana_wm
     operation: generate_image
     model: sana-wm-bidirectional
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-diffusers
+      mode: hf-eager
+      reference_backend: hf_diffusers
+      adapter_options:
+        trust_remote_code: true
+        required_call_arguments:
+          - image
+          - action
+          - intrinsics
+          - translation_speed
+          - rotation_speed_deg
+          - num_frames
   - id: segformer.segment
     family: segformer
     operation: segment
     model: segformer-b0-ade
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned segmentation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
   - id: stablelm.generate
     family: stablelm
     operation: generate
@@ -647,32 +736,40 @@ cases:
     model: timesfm-2.0-500m-official
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned neural_operator baseline runner is implemented yet.
+      runner: task-reference
+      adapter: pytorch-timeseries
+      mode: pytorch-eager
+      reference_backend: torch_reference
   - id: timm_vit.classify
     family: timm_vit
     operation: classify
     model: timm-vit-base-p16-224-augreg-in21k-ft-in1k
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned image_classification baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-vision
+      mode: hf-eager
+      reference_backend: hf_transformers
   - id: wan_t2v.generate_image
     family: wan_t2v
     operation: generate_image
     model: wan21-t2v-1.3b-l0
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-diffusers
+      mode: hf-eager
+      reference_backend: hf_diffusers
   - id: whisper.transcribe
     family: whisper
     operation: transcribe
     model: whisper-tiny-fp16
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned speech_to_text baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-transformers-asr
+      mode: hf-eager
+      reference_backend: hf_transformers
   - id: xglm.generate
     family: xglm
     operation: generate
@@ -697,5 +794,7 @@ cases:
     model: z-image-turbo-l0
     priority: slow
     baseline:
-      runner: unsupported
-      reason: No aligned diffusion_media_generation baseline runner is implemented yet.
+      runner: task-reference
+      adapter: hf-diffusers
+      mode: hf-eager
+      reference_backend: hf_diffusers

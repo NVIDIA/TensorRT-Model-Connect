@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import json
+from argparse import Namespace
 from pathlib import Path
 import runpy
+import shlex
 import subprocess
 import sys
 
@@ -16,6 +18,39 @@ from tools import perf_release
 
 REPOSITORY = Path(__file__).resolve().parents[2]
 SUITE = REPOSITORY / "benchmarks/performance/release.yaml"
+TASK_ADAPTERS = {
+    "bark.generate_audio": "hf-transformers-tts",
+    "canary.transcribe": "nemo-asr",
+    "chronos_bolt.solve": "pytorch-timeseries",
+    "deepseek_ocr.generate": "hf-transformers-vlm",
+    "eagle_vlm.embed": "hf-transformers-embedding",
+    "eagle_vlm.rerank": "hf-transformers-reranking",
+    "elf_flow.generate": "upstream-elf",
+    "flux.generate_image": "hf-diffusers",
+    "internvl.generate": "hf-transformers-vlm",
+    "lance.generate": "upstream-lance",
+    "locateanything.generate": "hf-transformers-vlm",
+    "ltx_video.generate_image": "hf-diffusers",
+    "magpie_tts.generate_audio": "nemo-tts",
+    "nemotron_speech_streaming.transcribe": "nemo-asr",
+    "patchtsmixer.solve": "pytorch-timeseries",
+    "patchtst.solve": "pytorch-timeseries",
+    "personaplex.speak": "pytorch-personaplex",
+    "phi4_multimodal.generate": "hf-transformers-vlm",
+    "pixart.generate_image": "hf-diffusers",
+    "qwen3_omni.generate_audio": "hf-qwen3-omni",
+    "qwen_image.generate_image": "hf-diffusers",
+    "qwen_vl.generate": "hf-transformers-vlm",
+    "sam.segment_prompted": "hf-transformers-vision",
+    "sam3.segment_prompted": "hf-transformers-vision",
+    "sana_wm.generate_image": "hf-diffusers",
+    "segformer.segment": "hf-transformers-vision",
+    "timesfm.solve": "pytorch-timeseries",
+    "timm_vit.classify": "hf-transformers-vision",
+    "wan_t2v.generate_image": "hf-diffusers",
+    "whisper.transcribe": "hf-transformers-asr",
+    "z_image.generate_image": "hf-diffusers",
+}
 
 
 def _write_fake_trtmc(path: Path) -> None:
@@ -121,6 +156,19 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     assert by_id["phi_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
     assert by_id["opt.generate"]["request"]["max_new_tokens"] == 10
+    assert by_id["deepseek_ocr.generate"]["baseline"]["precision"] == "bf16"
+    nemotron_baseline = by_id["nemotron_speech_streaming.transcribe"]["baseline"]
+    assert {
+        key: nemotron_baseline[key] for key in ("runner", "adapter", "mode", "reference_backend")
+    } == {
+        "runner": "task-reference",
+        "adapter": "nemo-asr",
+        "mode": "pytorch-eager",
+        "reference_backend": "nemo_reference",
+    }
+    assert by_id["magpie_tts.generate_audio"]["baseline"]["adapter_options"] == {
+        "speaker_encoder_revision": "e9124b5364a2c3e9b4f78da429a33cbca8f8c22b"
+    }
     diffusion_baseline = by_id["nemotron_labs_diffusion.generate"]["baseline"]
     assert diffusion_baseline["mode"] == "hf-eager"
     assert diffusion_baseline["model_class"] == "auto"
@@ -216,8 +264,8 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     report = (output / "report.html").read_text(encoding="utf-8")
     assert "gpt2.generate" in report
     assert "HF eager" in report
-    assert "10.5" not in report
-    assert "20.0" not in report
+    assert ">10.5<" not in report
+    assert ">20.0<" not in report
 
     replay = subprocess.run(
         [sys.executable, output / "reproduce.py", "gpt2.generate", "baseline", "--print"],
@@ -228,9 +276,12 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     assert replay.returncode == 0
     assert str(fake_baseline) in replay.stdout
     assert "tools/perf_release.py" not in replay.stdout
+    printed_argv = shlex.split(replay.stdout.strip())
+    request = printed_argv[printed_argv.index("--request-json") + 1]
+    assert json.loads(request)["prompt"] == "Hello, I'm a language model"
 
 
-def test_suite_has_explicit_eager_rows_and_unsupported_reasons() -> None:
+def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
     raw = yaml.safe_load(SUITE.read_text(encoding="utf-8"))
     rows = {row["id"]: row for row in raw["cases"]}
 
@@ -250,8 +301,15 @@ def test_suite_has_explicit_eager_rows_and_unsupported_reasons() -> None:
     assert rows["gemma.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["phi.generate"]["baseline"]["output_contract"] == "exact-text"
     assert rows["phi_moe.generate"]["baseline"]["output_contract"] == "exact-text"
-    assert rows["flux.generate_image"]["baseline"]["runner"] == "unsupported"
-    assert rows["flux.generate_image"]["baseline"]["reason"]
+    assert not any(row["baseline"]["runner"] == "unsupported" for row in rows.values())
+    assert {
+        case_id: row["baseline"].get("adapter")
+        for case_id, row in rows.items()
+        if row["baseline"]["runner"] == "task-reference"
+    } == TASK_ADAPTERS
+    for case_id in TASK_ADAPTERS:
+        assert rows[case_id]["baseline"]["reference_backend"]
+        assert rows[case_id]["baseline"]["mode"] in {"hf-eager", "pytorch-eager"}
 
 
 def test_resolution_failure_is_recorded_per_case(tmp_path: Path, monkeypatch) -> None:
@@ -261,6 +319,7 @@ def test_resolution_failure_is_recorded_per_case(tmp_path: Path, monkeypatch) ->
         trtmc_bench="trtmc-bench",
         trtmc_worker=None,
         hf_transformers_runner=tmp_path / "baseline.py",
+        task_reference_runner=tmp_path / "task_reference.py",
         bundle_cache=None,
         bundle_roots=(),
         runtime_dirs=(),
@@ -337,3 +396,306 @@ def test_source_revision_can_be_injected_without_git(monkeypatch) -> None:
     monkeypatch.setenv("TRTMC_PERF_SOURCE_REVISION", "tested-commit")
 
     assert perf_release._git_commit() == "tested-commit"
+
+
+def test_task_reference_runner_measures_loaded_public_operation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    calls: list[int] = []
+
+    def load_session(*_args):
+        def invoke():
+            calls.append(1)
+            return {"text": "ok", "output_tokens": 1}
+
+        return runner["Session"](invoke, "revision", "fake-framework")
+
+    runner["LOADERS"]["hf-transformers-asr"] = load_session
+    runner["_synchronize"] = lambda: None
+    runner["_environment"] = lambda: {"gpu": "fake"}
+    output = tmp_path / "baseline.json"
+    arguments = runner["build_parser"]().parse_args(
+        [
+            "--adapter",
+            "hf-transformers-asr",
+            "--family",
+            "whisper",
+            "--operation",
+            "transcribe",
+            "--model",
+            "openai/whisper-tiny",
+            "--manifest",
+            str(SUITE),
+            "--request-json",
+            '{"audio_path":"sample.wav"}',
+            "--precision",
+            "fp16",
+            "--mode",
+            "hf-eager",
+            "--warmup",
+            "1",
+            "--iterations",
+            "2",
+            "--workload-digest",
+            "digest",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert runner["run"](arguments) == 0
+    result = json.loads(output.read_text(encoding="utf-8"))
+    assert len(calls) == 3
+    assert result["adapter"] == "hf-transformers-asr"
+    assert result["timing_scope"] == "task-model-call-wall"
+    assert result["input_preparation_included"] is False
+    assert result["model_load_included"] is False
+    assert result["measurement"] == {"warmup": 1, "iterations": 2}
+    assert len(result["samples_ms"]) == 2
+
+
+def test_vlm_adapter_routes_non_generic_families_to_owned_loaders() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    deepseek = object()
+    locateanything = object()
+    globals_ = runner["_load_vlm"].__globals__
+    globals_["_load_deepseek_ocr"] = lambda *_args: deepseek
+    globals_["_load_locateanything"] = lambda *_args: locateanything
+
+    assert runner["_load_vlm"](Namespace(family="deepseek_ocr"), {}, {}) is deepseek
+    assert runner["_load_vlm"](Namespace(family="locateanything"), {}, {}) is locateanything
+
+
+def test_diffusers_adapter_uses_resolved_sana_runtime_controls(tmp_path: Path) -> None:
+    from PIL import Image
+
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    image = tmp_path / "input.png"
+    Image.new("RGB", (4, 4)).save(image)
+    captured: dict[str, object] = {}
+
+    class FakePipeline:
+        def to(self, _device):
+            return self
+
+        def __call__(
+            self,
+            *,
+            prompt,
+            image,
+            action,
+            intrinsics,
+            translation_speed,
+            rotation_speed_deg,
+            num_frames,
+            fps,
+            flow_shift,
+            step,
+            cfg_scale,
+        ):
+            captured.update(locals())
+            return Namespace(frames=[[object(), object()]])
+
+    def fake_pipeline(_arguments, _torch, options):
+        assert options["trust_remote_code"] is True
+        return FakePipeline()
+
+    globals_ = runner["_load_diffusers"].__globals__
+    globals_["_diffusion_pipeline"] = fake_pipeline
+    globals_["_resolved_revision"] = lambda *_args: "snapshot"
+    arguments = Namespace(
+        family="sana_wm",
+        precision="bf16",
+        resolved_runtime={
+            "config": {
+                "sana_wm.action": "w-80,jw-40",
+                "sana_wm.intrinsics": "1,2,3,4",
+                "sana_wm.translation_speed": 0.055,
+                "sana_wm.rotation_speed_deg": 1.2,
+                "sana_wm.num_frames": 321,
+                "sana_wm.fps": 16,
+                "sana_wm.flow_shift": 9.8,
+            }
+        },
+    )
+    request = {
+        "prompt": "A stationary camera.",
+        "image_path": str(image),
+        "media_type": "video",
+        "num_inference_steps": 60,
+        "cfg_scale": 5.0,
+        "video_num_frames": 321,
+    }
+
+    session = runner["_load_diffusers"](
+        arguments,
+        request,
+        {
+            "trust_remote_code": True,
+            "required_call_arguments": [
+                "image",
+                "action",
+                "intrinsics",
+                "translation_speed",
+                "rotation_speed_deg",
+                "num_frames",
+            ],
+        },
+    )
+    summary = session.invoke()
+
+    assert captured["action"] == "w-80,jw-40"
+    assert captured["intrinsics"] == "1,2,3,4"
+    assert captured["translation_speed"] == 0.055
+    assert captured["rotation_speed_deg"] == 1.2
+    assert captured["num_frames"] == 321
+    assert captured["step"] == 60
+    assert summary == {"media_type": "video", "media_count": 2}
+
+
+def test_lance_reference_builds_repeated_official_x2t_dataset(tmp_path: Path) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
+    image = tmp_path / "input.png"
+    image.write_bytes(b"image")
+
+    payload = runner["_dataset_payload"](
+        image=image,
+        prompt="What color is the vehicle?",
+        instruction="Inspect the image.",
+        count=3,
+    )
+
+    assert list(payload) == ["0000", "0001", "0002"]
+    assert payload["0000"] == {
+        "interleave_array": [
+            str(image.resolve()),
+            ["Inspect the image.", "What color is the vehicle?", ""],
+        ],
+        "element_dtype_array": ["image", "text"],
+        "istarget_in_interleave": [0, 1],
+    }
+
+
+def test_lance_reference_loads_once_then_measures_each_dataset_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import torch
+
+    runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
+    reference_repo = tmp_path / "Lance"
+    reference_repo.mkdir()
+    (reference_repo / "inference_lance.py").write_text(
+        """
+import argparse
+import json
+from types import SimpleNamespace
+
+MAX_GENERATION_LENGTH = 256
+
+def normalize_understanding_answer(value):
+    return value.replace("<|im_end|>", "").strip()
+
+def validate_on_fixed_batch(*, inference_args, sample_id):
+    inference_args.prompt_data_dict[sample_id] = "blue<|im_end|>"
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--val_dataset_config_file")
+    arguments, _ = parser.parse_known_args()
+    rows = json.loads(open(arguments.val_dataset_config_file, encoding="utf-8").read())
+    state = SimpleNamespace(prompt_data_dict={})
+    for sample_id in rows:
+        validate_on_fixed_batch(inference_args=state, sample_id=sample_id)
+""",
+        encoding="utf-8",
+    )
+    dataset = tmp_path / "dataset.json"
+    dataset.write_text('{"0000":{},"0001":{},"0002":{}}', encoding="utf-8")
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    arguments = Namespace(
+        reference_repo=reference_repo,
+        max_new_tokens=10,
+        warmup=1,
+        iterations=2,
+        height=768,
+        width=768,
+        resolution="image_768res",
+    )
+
+    samples, answers = runner["_run_upstream"](
+        arguments,
+        tmp_path / "Lance_3B",
+        tmp_path / "Qwen2.5-VL-ViT",
+        dataset,
+        tmp_path / "results",
+    )
+
+    assert len(samples) == 2
+    assert all(value > 0 for value in samples)
+    assert answers == ["blue", "blue"]
+
+
+def test_lance_adapter_records_pinned_upstream_and_model_revisions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    image = tmp_path / "input.png"
+    image.write_bytes(b"image")
+    reference_repo = tmp_path / "Lance"
+    reference_repo.mkdir()
+    captured: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        command = [str(value) for value in command]
+        captured.append(command)
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "samples_ms": [11.0, 12.0],
+                    "text": "blue",
+                    "model_revision": "hf-snapshot",
+                    "reference_revision": "upstream-commit",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runner["subprocess"], "run", fake_run)
+    arguments = Namespace(
+        precision="bf16",
+        model="bytedance-research/Lance",
+        manifest=SUITE,
+        family="lance",
+        warmup=1,
+        iterations=2,
+        revision=None,
+        local_files_only=False,
+    )
+
+    result = runner["_run_lance"](
+        arguments,
+        {
+            "image_path": str(image),
+            "prompt": "What color is the vehicle?",
+            "max_new_tokens": 10,
+        },
+        {
+            "reference_repo": str(reference_repo),
+            "reference_commit": "upstream-commit",
+        },
+    )
+
+    assert result[:6] == (
+        [11.0, 12.0],
+        {"text": "blue", "output_tokens": None},
+        "hf-snapshot",
+        "lance-pytorch",
+        "task-pipeline-call-wall",
+        True,
+    )
+    assert result[6]["revision"] == "upstream-commit"
+    assert str(REPOSITORY / "tools/lance_reference.py") in captured[0]
+    assert captured[0][captured[0].index("--max-new-tokens") + 1] == "10"
