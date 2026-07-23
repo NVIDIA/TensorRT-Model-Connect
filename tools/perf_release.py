@@ -709,6 +709,7 @@ def _task_reference_argv(
     del profile
     baseline = case["baseline"]
     model = resolved["model"]
+    adapter_options = _resolved_adapter_options(baseline)
     argv = [
         python,
         str(options.task_reference_runner.resolve()),
@@ -727,7 +728,7 @@ def _task_reference_argv(
         "--runtime-json",
         json.dumps(resolved.get("runtime", {}), ensure_ascii=True, separators=(",", ":")),
         "--adapter-options-json",
-        json.dumps(baseline.get("adapter_options", {}), ensure_ascii=True, separators=(",", ":")),
+        json.dumps(adapter_options, ensure_ascii=True, separators=(",", ":")),
         "--precision",
         str(baseline.get("precision", model["precision"])),
         "--mode",
@@ -751,6 +752,23 @@ def _task_reference_argv(
     if options.local_files_only:
         argv.append("--local-files-only")
     return argv
+
+
+def _resolved_adapter_options(baseline: Mapping[str, Any]) -> dict[str, Any]:
+    configured = baseline.get("adapter_options", {})
+    options = dict(configured) if isinstance(configured, Mapping) else {}
+    adapter = str(baseline.get("adapter", ""))
+    external_checkout = {
+        "upstream-elf": ("reference_repo", "TRTMC_ELF_REFERENCE_REPO"),
+        "upstream-lance": ("reference_repo", "TRTMC_LANCE_REFERENCE_REPO"),
+        "pytorch-personaplex": ("official_repo", "PERSONAPLEX_OFFICIAL_REPO"),
+    }.get(adapter)
+    if external_checkout is not None:
+        option_name, environment_name = external_checkout
+        environment_value = os.environ.get(environment_name, "").strip()
+        if option_name not in options and environment_value:
+            options[option_name] = environment_value
+    return options
 
 
 def _run_command(

@@ -133,6 +133,7 @@ def test_family_profile_registry_is_fully_exact_pinned():
         "deepseek_ocr",
         "elf_flow",
         "internlm",
+        "lance_reference",
         "magpie_tts_reference",
         "nemotron_h_reference",
         "personaplex_reference",

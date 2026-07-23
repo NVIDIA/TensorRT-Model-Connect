@@ -252,7 +252,7 @@ def _cached_snapshot_path(
     except (ImportError, OSError, ValueError):
         return None
     if isinstance(cached, str) and Path(cached).is_file():
-        return Path(cached).resolve().parent
+        return Path(cached).parent.resolve()
     return None
 
 

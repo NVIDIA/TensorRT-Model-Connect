@@ -330,6 +330,7 @@ cases:
       mode: pytorch-eager
       reference_backend: upstream_lance
       output_contract: exact-text
+      python_profile: lance_reference
       adapter_options:
         reference_commit: 4baeee086648996f6ab12e673cbe461b0b149997
         model_subdir: Lance_3B

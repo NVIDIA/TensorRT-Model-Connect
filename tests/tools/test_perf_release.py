@@ -11,6 +11,7 @@ import subprocess
 import sys
 from types import ModuleType
 
+import pytest
 import yaml
 
 from tools import perf_release
@@ -152,6 +153,7 @@ def test_release_suite_covers_every_ready_family_operation() -> None:
     by_id = {case["id"]: case for case in cases}
     assert by_id["deberta.encode"]["baseline"]["precision"] == "fp32"
     assert by_id["fnet.encode"]["baseline"]["padding"] == "max-length"
+    assert by_id["lance.generate"]["baseline"]["python_profile"] == "lance_reference"
     assert by_id["mixtral.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["phi_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
     assert by_id["qwen_moe.generate"]["baseline"]["experts_implementation"] == "batched_mm"
@@ -319,6 +321,30 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     baseline_argv = rows["gpt2.generate"]["commands"]["baseline"]["argv"]
     request = baseline_argv[baseline_argv.index("--request-json") + 1]
     assert json.loads(request)["prompt"] == "Hello, I'm a language model"
+
+
+def test_task_reference_commands_record_external_checkout_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRTMC_ELF_REFERENCE_REPO", "/references/ELF")
+    monkeypatch.setenv("TRTMC_LANCE_REFERENCE_REPO", "/references/Lance")
+    monkeypatch.setenv("PERSONAPLEX_OFFICIAL_REPO", "/references/PersonaPlex")
+
+    assert perf_release._resolved_adapter_options({"adapter": "upstream-elf"}) == {
+        "reference_repo": "/references/ELF"
+    }
+    assert perf_release._resolved_adapter_options({"adapter": "upstream-lance"}) == {
+        "reference_repo": "/references/Lance"
+    }
+    assert perf_release._resolved_adapter_options({"adapter": "pytorch-personaplex"}) == {
+        "official_repo": "/references/PersonaPlex"
+    }
+    assert perf_release._resolved_adapter_options(
+        {
+            "adapter": "upstream-elf",
+            "adapter_options": {"reference_repo": "/explicit/ELF"},
+        }
+    ) == {"reference_repo": "/explicit/ELF"}
 
 
 def test_suite_has_explicit_eager_and_task_reference_rows() -> None:
@@ -627,6 +653,23 @@ def test_diffusers_local_mode_loads_resolved_snapshot_path(tmp_path: Path, monke
 
     assert captured["model"] == snapshot
     assert captured["kwargs"]["local_files_only"] is True
+
+
+def test_cached_snapshot_path_keeps_snapshot_parent_for_symlinked_marker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    blob = tmp_path / "blobs" / "model-index"
+    blob.parent.mkdir()
+    blob.write_text("{}", encoding="utf-8")
+    snapshot = tmp_path / "snapshots" / "abc123"
+    snapshot.mkdir(parents=True)
+    marker = snapshot / "model_index.json"
+    marker.symlink_to(blob)
+    fake_hub = Namespace(try_to_load_from_cache=lambda **_kwargs: str(marker))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hub)
+
+    assert runner["_cached_snapshot_path"]("org/model", None, "model_index.json") == snapshot
 
 
 def test_diffusers_adapter_uses_resolved_sana_runtime_controls(tmp_path: Path) -> None:
