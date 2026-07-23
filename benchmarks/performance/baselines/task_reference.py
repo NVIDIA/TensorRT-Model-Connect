@@ -33,6 +33,18 @@ SYSTEM_PROMPT_QWEN3_OMNI = (
     "capable of perceiving auditory and visual inputs, as well as generating "
     "text and speech."
 )
+QWEN3_OMNI_TEXT_CHAT_TEMPLATE = """{%- for message in messages %}
+{{- '<|im_start|>' + message.role + '\n' }}
+{%- if message.content is string %}
+{{- message.content }}
+{%- else %}
+{%- for item in message.content %}
+{%- if item.type == 'text' %}{{- item.text }}{%- endif %}
+{%- endfor %}
+{%- endif %}
+{{- '<|im_end|>\n' }}
+{%- endfor %}
+{%- if add_generation_prompt %}{{- '<|im_start|>assistant\n' }}{%- endif %}"""
 MAGPIE_SPEAKER_ENCODER_REPO = "Edresson/Speaker_Encoder_H_ASP"
 MAGPIE_SPEAKER_ENCODER_FILENAME = "pytorch_model.bin"
 MAGPIE_SPEAKER_ENCODER_URL = (
@@ -1424,6 +1436,29 @@ def _load_vision(
     return Session(invoke, _resolved_revision(arguments, model), "transformers")
 
 
+def _qwen3_omni_chat_inputs(
+    processor: Any, conversation: Sequence[Mapping[str, Any]]
+) -> Any:
+    processor_template = getattr(processor, "chat_template", None)
+    tokenizer_template = getattr(getattr(processor, "tokenizer", None), "chat_template", None)
+    template = (
+        processor_template
+        if isinstance(processor_template, str) and processor_template.strip()
+        else tokenizer_template
+        if isinstance(tokenizer_template, str) and tokenizer_template.strip()
+        else QWEN3_OMNI_TEXT_CHAT_TEMPLATE
+    )
+    return processor.apply_chat_template(
+        conversation,
+        chat_template=template,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors="pt",
+        padding=True,
+    )
+
+
 def _load_qwen3_omni(
     arguments: argparse.Namespace,
     request: Mapping[str, Any],
@@ -1444,14 +1479,7 @@ def _load_qwen3_omni(
         {"role": "system", "content": [{"type": "text", "text": SYSTEM_PROMPT_QWEN3_OMNI}]},
         {"role": "user", "content": [{"type": "text", "text": str(request.get("prompt", ""))}]},
     ]
-    inputs = processor.apply_chat_template(
-        conversation,
-        add_generation_prompt=True,
-        tokenize=True,
-        return_dict=True,
-        return_tensors="pt",
-        padding=True,
-    ).to(model.device)
+    inputs = _qwen3_omni_chat_inputs(processor, conversation).to(model.device)
     thinker_tokens = int(request.get("max_new_tokens", 16))
     talker_tokens = int(options.get("talker_max_new_tokens", 32))
 

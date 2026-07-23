@@ -807,6 +807,35 @@ def test_patchtst_reference_runs_model_under_precision_autocast(monkeypatch) -> 
     assert session.invoke() == {"shape": [1, 1], "element_count": 1, "finite": True}
 
 
+def test_qwen3_omni_supplies_text_chat_template_when_snapshot_omits_it() -> None:
+    runner = runpy.run_path(str(REPOSITORY / "benchmarks/performance/baselines/task_reference.py"))
+    captured: dict[str, object] = {}
+
+    class FakeProcessor:
+        chat_template = None
+        tokenizer = Namespace(chat_template=None)
+
+        def apply_chat_template(self, conversation, **kwargs):
+            captured.update(conversation=conversation, kwargs=kwargs)
+            return "inputs"
+
+    conversation = [
+        {"role": "system", "content": [{"type": "text", "text": "system"}]},
+        {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+    ]
+
+    assert runner["_qwen3_omni_chat_inputs"](FakeProcessor(), conversation) == "inputs"
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    template = kwargs["chat_template"]
+    assert isinstance(template, str)
+    assert "<|im_start|>" in template
+    assert "<|im_end|>" in template
+    assert kwargs["add_generation_prompt"] is True
+    assert kwargs["tokenize"] is True
+    assert kwargs["return_tensors"] == "pt"
+
+
 def test_lance_reference_builds_repeated_official_x2t_dataset(tmp_path: Path) -> None:
     runner = runpy.run_path(str(REPOSITORY / "tools/lance_reference.py"))
     image = tmp_path / "input.png"
