@@ -236,6 +236,24 @@ def test_cli_delegation_preserves_explicit_default_options(monkeypatch) -> None:
     ]
 
 
+def test_cli_delegation_preserves_optimized_precision_default() -> None:
+    import tensorrt_model_connect.build_cli as build_cli
+
+    args = argparse.Namespace(
+        command="build",
+        model="example/model",
+        output="model.trtfb",
+        precision=None,
+        max_cache_length=256,
+        max_batch_size=1,
+    )
+
+    options = build_cli._optimized_cli_public_options(args)
+
+    assert options["precision"] == "fp32"
+    assert args.precision is None
+
+
 def test_cli_treats_model_revision_as_identity_not_plugin_option(monkeypatch) -> None:
     import tensorrt_model_connect.build_cli as build_cli
     import tensorrt_model_connect.engine_builder as engine_builder

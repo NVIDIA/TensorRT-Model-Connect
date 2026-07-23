@@ -1050,7 +1050,7 @@ def test_unqualified_qwen_requests_return_native_fallback_without_adapter_error(
     assert "No qualified Qwen Edge-LLM profile matches" in probe.reason
 
 
-def test_established_mc_defaults_select_the_qualified_profile() -> None:
+def test_native_python_default_leaves_precision_to_the_model_family() -> None:
     import inspect
 
     from tensorrt_model_connect.engine_builder import build
@@ -1061,8 +1061,9 @@ def test_established_mc_defaults_select_the_qualified_profile() -> None:
         if name not in {"model_id_or_path", "output_path"}
     }
 
-    assert {field: defaults[field] for field in MC_DEFAULT_DEPLOYMENT} == MC_DEFAULT_DEPLOYMENT
-    assert _public_reason(defaults) == ""
+    assert defaults["precision"] is None
+    assert defaults["max_cache_length"] == MC_DEFAULT_DEPLOYMENT["max_cache_length"]
+    assert defaults["max_batch_size"] == MC_DEFAULT_DEPLOYMENT["max_batch_size"]
 
 
 def test_public_python_model_id_default_dispatches_without_native_fallback(

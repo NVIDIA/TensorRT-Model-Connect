@@ -52,16 +52,19 @@ def _optimized_cli_public_options(args: argparse.Namespace) -> dict:
 
     The generic router does not interpret these fields. The selected
     model-owned adapter decides whether and how they map to its runtime.
-    Argparse has already applied the public defaults, so omitted and explicit
-    default-valued options intentionally produce the same request.
+    Preserve the established optimized-runtime precision default while native
+    families continue to resolve an omitted precision from ``args``.
     """
 
-    return {
+    public_options = {
         name: value
         for name, value in vars(args).items()
         if not name.startswith("_")
         and name not in _OPTIMIZED_ROUTING_INTERNAL_FIELDS
     }
+    if public_options.get("precision") is None:
+        public_options["precision"] = "fp32"
+    return public_options
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
