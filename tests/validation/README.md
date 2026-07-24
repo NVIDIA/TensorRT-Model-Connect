@@ -27,9 +27,18 @@ python tools/trtmc_validate.py --all
 ```
 
 The command creates a reference environment only when one does not already
-exist, then prints the environment it used. At completion it prints the exact
-HF and TRTMC reproduction commands, the per-model `comparison.json`, and the
-aggregate `report.html`.
+exist, then prints the environment it used. Reference inference runs through
+`tools/trtmc_reference.py`, outside the task-eval CLI. Its result is keyed by
+the prepared inputs and inference settings and reused from the shared reference
+cache when the key already exists.
+
+TRTMC bundles live in one shared validation engine directory. A required
+rebuild removes the existing bundle and writes the replacement at the same
+path; a failed replacement removes any partial bundle. Per-run result
+directories therefore do not retain another copy of the bundle.
+
+At completion the command prints the exact reference and TRTMC reproduction
+commands, the per-model `comparison.json`, and the aggregate `report.html`.
 
 ## Add or extend a model
 

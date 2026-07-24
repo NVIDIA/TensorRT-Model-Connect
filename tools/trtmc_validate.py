@@ -42,6 +42,8 @@ DEFAULT_CATALOG = REPO_ROOT / "tests" / "validation" / "model_workloads.yaml"
 DEFAULT_SUITES = REPO_ROOT / "tests" / "task_eval" / "validation_suites.yaml"
 DEFAULT_MODELS = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_OUTPUT = REPO_ROOT / "artifacts" / "trtmc-validate"
+DEFAULT_ENGINE_DIR = DEFAULT_OUTPUT / "engines"
+DEFAULT_REFERENCE_CACHE = DEFAULT_OUTPUT / "references"
 COMMON_REFERENCE_PROFILE = "reference_common"
 
 
@@ -328,6 +330,9 @@ def _task_eval_command(
         str(arguments.benchmark_binary),
         "--hf-python",
         reference_python,
+        "--reference-cache-dir",
+        str(arguments.reference_cache_dir),
+        "--replace-bundle-on-build",
         "--single-device-only",
         "--include-waived",
         "--fail-fast",
@@ -689,6 +694,17 @@ def _render_reproduction(result: Mapping[str, Any]) -> str:
     )
 
 
+def _reference_result_status(result: Mapping[str, Any]) -> str:
+    raw_result = result.get("raw_result", {})
+    if not isinstance(raw_result, dict):
+        return ""
+    return str(
+        raw_result.get("hf_cache_status")
+        or raw_result.get("hf_reference_status")
+        or ""
+    )
+
+
 def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     result_paths = sorted(output.glob("*/*/comparison.json"))
     results = [json.loads(path.read_text(encoding="utf-8")) for path in result_paths]
@@ -727,6 +743,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
             f"<td>{html.escape(str(result.get('workload', '')))}</td>"
             f'<td class="{html.escape(status)}">{html.escape(status)}</td>'
             f"<td>{html.escape(environments)}</td>"
+            f"<td>{html.escape(_reference_result_status(result))}</td>"
             f"<td>{_render_reproduction(result)}</td>"
             f'<td><a href="{html.escape(str(relative))}">comparison.json</a></td>'
             "</tr>"
@@ -758,7 +775,8 @@ pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
 {counts["passed"]} passed · {counts["failed"]} failed · {counts["skipped"]} skipped<br>
 {html.escape(provenance)}</div>
 <table><thead><tr><th>Model</th><th>Workload</th><th>Status</th>
-<th>Reference environment</th><th>Vanilla reproduction</th><th>Result</th></tr></thead>
+<th>Reference environment</th><th>Reference result</th>
+<th>Vanilla reproduction</th><th>Result</th></tr></thead>
 <tbody>{"".join(rows)}</tbody></table>
 </body></html>
 """
@@ -803,7 +821,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-o", "--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--dataset-root", type=Path)
     parser.add_argument("--dataset", type=Path)
-    parser.add_argument("--engine-dir", type=Path, default=DEFAULT_OUTPUT / "engines")
+    parser.add_argument("--engine-dir", type=Path, default=DEFAULT_ENGINE_DIR)
+    parser.add_argument(
+        "--reference-cache-dir",
+        type=Path,
+        default=DEFAULT_REFERENCE_CACHE,
+    )
     parser.add_argument("--trtmc-binary", type=Path, default=REPO_ROOT / "build" / "trtmc")
     parser.add_argument(
         "--benchmark-binary",
@@ -879,6 +902,7 @@ def _run_bindings(
     e2e_models = _e2e_models(arguments.models_dir)
     arguments.output.mkdir(parents=True, exist_ok=True)
     arguments.engine_dir.mkdir(parents=True, exist_ok=True)
+    arguments.reference_cache_dir.mkdir(parents=True, exist_ok=True)
     write_run_metadata(arguments.output)
     failed = False
     for binding in bindings:

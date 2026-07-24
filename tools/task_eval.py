@@ -52,6 +52,7 @@ from tests.e2e_harness.registry import (  # noqa: E402
 DEFAULT_SUITES = REPO_ROOT / "tests" / "task_eval" / "validation_suites.yaml"
 DEFAULT_MODELS_DIR = REPO_ROOT / "tests" / "e2e" / "models"
 DEFAULT_WAIVES = REPO_ROOT / "tests" / "e2e" / "waives.txt"
+REFERENCE_RUNNER = REPO_ROOT / "tools" / "trtmc_reference.py"
 ERROR_OUTPUT_TEXT = "TensorRT Edge LLM cannot handle this request. Fails."
 CHOICE_LETTERS = set("ABCDEFGHIJ")
 GPT_OSS_MMLU_SYSTEM_PROMPT = "You are a helpful assistant. Answer with only the option letter."
@@ -2964,6 +2965,17 @@ def predictions_file_valid(
             isinstance(row, dict) and _generated_token_ids(row) is not None for row in responses
         )
     return True
+
+
+def reference_cache_metadata(work_dir: Path) -> dict[str, Any]:
+    path = work_dir / "hf_cache.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _parse_generated_token_ids(text: str) -> list[int] | None:
@@ -8322,6 +8334,7 @@ def ensure_bundle(
     trtmc_binary: str,
     max_cache_length: int | None = None,
     force_build: bool = False,
+    replace_existing: bool = False,
     extra_build_args: list[str] | None = None,
     log_path: Path | None = None,
 ) -> tuple[Path, bool]:
@@ -8332,6 +8345,8 @@ def ensure_bundle(
         if existing_cache is None or existing_cache >= max_cache_length:
             return bundle_path, False
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    if replace_existing and bundle_path.exists():
+        bundle_path.unlink()
     cmd = build_bundle_command(
         model,
         trtmc_binary=trtmc_binary,
@@ -8346,6 +8361,8 @@ def ensure_bundle(
         log_f.flush()
         proc = subprocess.run(cmd, check=False, text=True, stdout=log_f, stderr=subprocess.STDOUT)
     if proc.returncode != 0:
+        if replace_existing and bundle_path.exists():
+            bundle_path.unlink()
         raise RuntimeError(
             f"Bundle build failed for {model['name']} rc={proc.returncode}; see {log_path}"
         )
@@ -8479,8 +8496,8 @@ def run_hf_reference_subprocess(
     hf_python = model_reference_python(model, base_python)
     cmd = [
         hf_python,
-        str(Path(__file__).resolve()),
-        "run-hf",
+        str(REFERENCE_RUNNER),
+        "run",
         "--model",
         str(hf_args.model),
         "--family",
@@ -8498,6 +8515,11 @@ def run_hf_reference_subprocess(
         "--device",
         str(hf_args.device),
     ]
+    reference_cache_dir = str(
+        getattr(args, "reference_cache_dir", "") or ""
+    )
+    if reference_cache_dir:
+        cmd.extend(["--cache-dir", reference_cache_dir])
     if hf_args.device_map:
         cmd.extend(["--device-map", str(hf_args.device_map)])
     if hf_args.attn_impl:
@@ -8512,6 +8534,8 @@ def run_hf_reference_subprocess(
         cmd.append("--apply-chat-template")
     if hf_args.elf_reference_repo:
         cmd.extend(["--elf-reference-repo", str(hf_args.elf_reference_repo)])
+    if bool(getattr(args, "force_hf", False)):
+        cmd.append("--force")
     for flag, value in (
         ("--max-new-tokens", hf_args.max_new_tokens),
         ("--temperature", hf_args.temperature),
@@ -9419,20 +9443,14 @@ def eval_one_model(
         )
 
     answers_path = work_dir / "answers.json"
-    hf_predictions = work_dir / "hf_predictions.json"
-    prompts_changed = bool(
-        prompt_normalization and prompt_normalization.get("truncated_count", 0)
-    )
-    hf_reused = (
-        not no_hf_reference
-        and predictions_file_valid(hf_predictions, answers_path)
-        and not args.force_hf
-        and not prompts_changed
-    )
-    if not no_hf_reference and not hf_reused:
+    hf_reused = False
+    if not no_hf_reference:
         # Run HF in its own process so its GPU memory is fully reclaimed before
         # the TRT bundle build and TRTFB inference for this model.
         run_hf_reference_subprocess(args, model, work_dir)
+    hf_cache = reference_cache_metadata(work_dir)
+    if hf_cache.get("status") in {"reused", "adopted"}:
+        hf_reused = True
 
     if args.bundle:
         if len(args.model or []) != 1:
@@ -9491,6 +9509,9 @@ def eval_one_model(
         trtmc_binary=args.trtmc_binary,
         max_cache_length=max_cache_length,
         force_build=args.force_build,
+        replace_existing=bool(
+            getattr(args, "replace_bundle_on_build", False)
+        ),
         extra_build_args=args.extra_build_arg,
         log_path=work_dir / "build.log",
     )
@@ -9514,6 +9535,8 @@ def eval_one_model(
         if hf_reused
         else "ran",
         "hf_reused": hf_reused,
+        "hf_cache_status": str(hf_cache.get("status", "") or ""),
+        "hf_cache_key": str(hf_cache.get("key", "") or ""),
         "bundle_built": built,
         "model_plugin_dir": str(getattr(args, "model_plugin_dir", "") or ""),
     }
@@ -10429,24 +10452,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--subject", default="")
     p.add_argument("--sample-seed", type=int)
 
-    p = sub.add_parser("run-hf")
-    p.add_argument("--model", required=True)
-    p.add_argument("--family", default="")
-    p.add_argument("--reference-family", default="")
-    p.add_argument("--work-dir", required=True)
-    p.add_argument("--predictions")
-    p.add_argument("--raw-output")
-    p.add_argument("--dtype", choices=["auto", "float16", "bfloat16"], default="auto")
-    p.add_argument("--device", default="cuda")
-    p.add_argument("--device-map", default="")
-    p.add_argument("--attn-impl", default="")
-    p.add_argument("--trust-remote-code", action="store_true")
-    p.add_argument("--local-files-only", action="store_true")
-    p.add_argument("--do-sample", action="store_true")
-    p.add_argument("--apply-chat-template", action="store_true")
-    p.add_argument("--elf-reference-repo", default="")
-    add_generation_args(p)
-
     p = sub.add_parser("run-trtfb")
     p.add_argument("--bundle", required=True)
     p.add_argument("--work-dir", required=True)
@@ -10559,7 +10564,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--subject", default="")
     p.add_argument("--sample-seed", type=int)
     p.add_argument("--force-hf", action="store_true", help="Regenerate HF reference outputs.")
+    p.add_argument(
+        "--reference-cache-dir",
+        default="",
+        help="Shared setting-keyed cache managed by tools/trtmc_reference.py.",
+    )
     p.add_argument("--force-build", action="store_true", help="Rebuild the .trtfb bundle.")
+    p.add_argument(
+        "--replace-bundle-on-build",
+        action="store_true",
+        help="Remove the existing bundle before rebuilding it at the same path.",
+    )
     p.add_argument(
         "--require-prebuilt-bundles",
         action="store_true",
@@ -11114,9 +11129,6 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_prepare_media(args)
     if args.cmd == "prepare-ci-dataset":
         return cmd_prepare_ci_dataset(args)
-    if args.cmd == "run-hf":
-        run_hf_reference(args)
-        return 0
     if args.cmd == "run-trtfb":
         run_trtfb(args)
         return 0

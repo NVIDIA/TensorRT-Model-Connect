@@ -275,6 +275,7 @@ def test_run_metadata_records_source_and_exact_command(monkeypatch, tmp_path):
 def test_task_eval_command_is_directly_reproducible(tmp_path):
     arguments = argparse.Namespace(
         engine_dir=tmp_path / "engines",
+        reference_cache_dir=tmp_path / "references",
         trtmc_binary=tmp_path / "trtmc",
         benchmark_binary=tmp_path / "trtmc_dataset_benchmark",
         limit=2,
@@ -303,6 +304,10 @@ def test_task_eval_command_is_directly_reproducible(tmp_path):
     assert command[command.index("--model") + 1] == "model-a"
     assert command[command.index("--suite") + 1] == "workload-a"
     assert command[command.index("--hf-python") + 1] == "/profiles/python"
+    assert command[command.index("--reference-cache-dir") + 1] == str(
+        tmp_path / "references"
+    )
+    assert "--replace-bundle-on-build" in command
     assert "--force-hf" in command
     assert "--require-prebuilt-bundles" in command
     assert "--local-files-only" in command

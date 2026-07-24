@@ -1,0 +1,352 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Run and cache model reference inference independently from task evaluation."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+from typing import Any, Iterable, Mapping, Sequence
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PYTHON_ROOT = REPO_ROOT / "python"
+for import_root in (REPO_ROOT, PYTHON_ROOT):
+    if str(import_root) not in sys.path:
+        sys.path.insert(0, str(import_root))
+
+from tools import task_eval  # noqa: E402
+
+
+CACHE_SCHEMA = "trtmc.reference-cache/v1"
+CACHE_IMPLEMENTATION = 1
+_CACHE_METADATA = "reference.json"
+_WORK_METADATA = "hf_cache.json"
+_TEXT_SUFFIXES = {".json", ".jsonl", ".log", ".md", ".txt"}
+_IGNORED_INPUT_NAMES = {
+    "build.log",
+    "eval_result.json",
+    "hf_cache.json",
+    "hf_run.log",
+    "summary.json",
+    "summary.md",
+    "trtfb_predictions.json",
+    "trtfb_raw.jsonl",
+    "trtfb_run.log",
+    "visual_review.html",
+}
+
+
+class ReferenceError(RuntimeError):
+    """Reference inference or cache materialization failed."""
+
+
+def _is_reference_output(name: str) -> bool:
+    return (
+        (name.startswith("hf_") and name not in {"hf_run.log", _WORK_METADATA})
+        or name == "shared_initial_latents"
+    )
+
+
+def _is_non_input(name: str) -> bool:
+    return (
+        _is_reference_output(name)
+        or name.startswith("trtfb_")
+        or name in _IGNORED_INPUT_NAMES
+    )
+
+
+def _input_files(work_dir: Path) -> Iterable[Path]:
+    for path in sorted(work_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(work_dir)
+        if _is_non_input(relative.parts[0]):
+            continue
+        if relative.name in _IGNORED_INPUT_NAMES:
+            continue
+        yield path
+
+
+def _hash_file(hasher: Any, path: Path, work_dir: Path) -> None:
+    relative = path.relative_to(work_dir)
+    hasher.update(str(relative).encode())
+    if path.suffix.lower() in _TEXT_SUFFIXES and path.stat().st_size <= 32 * 1024 * 1024:
+        content = path.read_text(encoding="utf-8", errors="replace")
+        hasher.update(content.replace(str(work_dir), "<WORK_DIR>").encode())
+        return
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+
+
+def _settings(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "implementation": CACHE_IMPLEMENTATION,
+        "python": str(Path(sys.executable).resolve()),
+        "model": args.model,
+        "family": args.family,
+        "reference_family": args.reference_family,
+        "dtype": args.dtype,
+        "device": args.device,
+        "device_map": args.device_map,
+        "attn_impl": args.attn_impl,
+        "trust_remote_code": args.trust_remote_code,
+        "local_files_only": args.local_files_only,
+        "do_sample": args.do_sample,
+        "apply_chat_template": args.apply_chat_template,
+        "elf_reference_repo": args.elf_reference_repo,
+        "max_new_tokens": args.max_new_tokens,
+        "temperature": args.temperature,
+        "top_k": args.top_k,
+        "top_p": args.top_p,
+        "min_p": args.min_p,
+        "seed": args.seed,
+    }
+
+
+def reference_key(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    work_dir = Path(args.work_dir).resolve()
+    settings = _settings(args)
+    hasher = hashlib.sha256()
+    hasher.update(json.dumps(settings, sort_keys=True, separators=(",", ":")).encode())
+    for path in _input_files(work_dir):
+        _hash_file(hasher, path, work_dir)
+    return hasher.hexdigest(), settings
+
+
+def _cache_entry(cache_dir: Path, key: str) -> Path:
+    return cache_dir / key
+
+
+def _load_cache_metadata(entry: Path, key: str) -> dict[str, Any] | None:
+    path = entry / _CACHE_METADATA
+    if not path.is_file():
+        return None
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        metadata.get("schema_version") != CACHE_SCHEMA
+        or metadata.get("key") != key
+        or not (entry / "files" / "hf_predictions.json").is_file()
+    ):
+        return None
+    return metadata
+
+
+def _remove_path(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _clear_reference_outputs(work_dir: Path) -> None:
+    for path in work_dir.iterdir():
+        if _is_reference_output(path.name):
+            _remove_path(path)
+
+
+def _materialize(entry: Path, work_dir: Path) -> None:
+    files_dir = entry / "files"
+    for source in sorted(files_dir.iterdir()):
+        target = work_dir / source.name
+        if target.exists() or target.is_symlink():
+            _remove_path(target)
+        target.symlink_to(source, target_is_directory=source.is_dir())
+
+
+def _rewrite_cached_paths(root: Path, old: Path, new: Path) -> None:
+    for path in root.rglob("*"):
+        if not path.is_file() or path.suffix.lower() not in _TEXT_SUFFIXES:
+            continue
+        content = path.read_text(encoding="utf-8", errors="replace")
+        updated = content.replace(str(old), str(new))
+        if updated != content:
+            path.write_text(updated, encoding="utf-8")
+
+
+def _reference_outputs(work_dir: Path) -> list[Path]:
+    return [
+        path
+        for path in sorted(work_dir.iterdir())
+        if _is_reference_output(path.name)
+    ]
+
+
+def _restore_moved_outputs(moved: Iterable[tuple[Path, Path]]) -> None:
+    for source, destination in reversed(list(moved)):
+        if source.exists() or source.is_symlink():
+            shutil.move(str(source), str(destination))
+
+
+def _move_outputs_to_cache(
+    *,
+    work_dir: Path,
+    cache_dir: Path,
+    entry: Path,
+    metadata: Mapping[str, Any],
+) -> None:
+    outputs = _reference_outputs(work_dir)
+    if not any(path.name == "hf_predictions.json" for path in outputs):
+        raise ReferenceError("reference inference did not produce hf_predictions.json")
+
+    stage = Path(tempfile.mkdtemp(prefix=f".{entry.name}.", dir=cache_dir))
+    files_dir = stage / "files"
+    files_dir.mkdir()
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for source in outputs:
+            destination = files_dir / source.name
+            shutil.move(str(source), str(destination))
+            moved.append((destination, source))
+        _rewrite_cached_paths(files_dir, work_dir, entry / "files")
+        (stage / _CACHE_METADATA).write_text(
+            json.dumps(dict(metadata), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        stage.rename(entry)
+    except BaseException:
+        _restore_moved_outputs(moved)
+        if stage.exists():
+            shutil.rmtree(stage)
+        raise
+
+
+def _write_work_metadata(
+    work_dir: Path,
+    *,
+    key: str,
+    status: str,
+    entry: Path | None,
+) -> None:
+    payload = {
+        "schema_version": CACHE_SCHEMA,
+        "key": key,
+        "status": status,
+    }
+    if entry is not None:
+        payload["entry"] = str(entry)
+    (work_dir / _WORK_METADATA).write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _run_without_cache(args: argparse.Namespace, key: str) -> str:
+    task_eval.run_hf_reference(args)
+    work_dir = Path(args.work_dir).resolve()
+    if not task_eval.predictions_file_valid(
+        work_dir / "hf_predictions.json",
+        work_dir / "answers.json",
+    ):
+        raise ReferenceError("reference inference produced invalid predictions")
+    _write_work_metadata(work_dir, key=key, status="generated", entry=None)
+    print("Reference result: generated", flush=True)
+    return "generated"
+
+
+def run_reference(args: argparse.Namespace) -> str:
+    work_dir = Path(args.work_dir).resolve()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    key, settings = reference_key(args)
+    if not args.cache_dir:
+        return _run_without_cache(args, key)
+
+    cache_dir = Path(args.cache_dir).resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    entry = _cache_entry(cache_dir, key)
+    cached = None if args.force else _load_cache_metadata(entry, key)
+    if cached is not None:
+        _clear_reference_outputs(work_dir)
+        _materialize(entry, work_dir)
+        _write_work_metadata(work_dir, key=key, status="reused", entry=entry)
+        print(f"Reference result: reused {key[:12]}", flush=True)
+        return "reused"
+
+    if entry.exists():
+        shutil.rmtree(entry)
+
+    adopt = args.adopt_existing and task_eval.predictions_file_valid(
+        work_dir / "hf_predictions.json",
+        work_dir / "answers.json",
+    )
+    if not adopt:
+        _clear_reference_outputs(work_dir)
+        task_eval.run_hf_reference(args)
+    if not task_eval.predictions_file_valid(
+        work_dir / "hf_predictions.json",
+        work_dir / "answers.json",
+    ):
+        raise ReferenceError("reference inference produced invalid predictions")
+
+    status = "adopted" if adopt else "generated"
+    metadata = {
+        "schema_version": CACHE_SCHEMA,
+        "key": key,
+        "settings": settings,
+        "status": status,
+    }
+    _move_outputs_to_cache(
+        work_dir=work_dir,
+        cache_dir=cache_dir,
+        entry=entry,
+        metadata=metadata,
+    )
+    _materialize(entry, work_dir)
+    _write_work_metadata(work_dir, key=key, status=status, entry=entry)
+    print(f"Reference result: {status} {key[:12]}", flush=True)
+    return status
+
+
+def add_generation_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--max-new-tokens", type=int)
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--top-k", type=int)
+    parser.add_argument("--top-p", type=float)
+    parser.add_argument("--min-p", type=float)
+    parser.add_argument("--seed", type=int)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run and cache a model reference.")
+    parser.add_argument("command", choices=("run",))
+    parser.add_argument("--model", required=True)
+    parser.add_argument("--family", default="")
+    parser.add_argument("--reference-family", default="")
+    parser.add_argument("--work-dir", required=True)
+    parser.add_argument("--cache-dir", default="")
+    parser.add_argument("--predictions", default="hf_predictions.json")
+    parser.add_argument("--raw-output", default="hf_raw.jsonl")
+    parser.add_argument("--dtype", choices=("auto", "float16", "bfloat16"), default="auto")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device-map", default="")
+    parser.add_argument("--attn-impl", default="")
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument("--do-sample", action="store_true")
+    parser.add_argument("--apply-chat-template", action="store_true")
+    parser.add_argument("--elf-reference-repo", default="")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--adopt-existing", action="store_true")
+    add_generation_args(parser)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    run_reference(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

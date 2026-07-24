@@ -3162,6 +3162,75 @@ def test_build_bundle_command_omits_fp32_layers_when_absent(tmp_path: Path) -> N
     assert "--fp32-layers" not in cmd
 
 
+def test_ensure_bundle_replaces_existing_file_before_build(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle.parent.mkdir()
+    bundle.write_bytes(b"old")
+
+    class Result:
+        returncode = 0
+
+    def fake_run(command, **_kwargs):
+        output = Path(command[command.index("-o") + 1])
+        assert not output.exists()
+        output.write_bytes(b"new")
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+
+    result, built = task_eval.ensure_bundle(
+        {
+            "name": "model",
+            "hf_id": "org/model",
+            "precision": "fp32",
+        },
+        bundle_path=bundle,
+        trtmc_binary="trtmc",
+        force_build=True,
+        replace_existing=True,
+    )
+
+    assert result == bundle
+    assert built is True
+    assert bundle.read_bytes() == b"new"
+
+
+def test_ensure_bundle_removes_partial_replacement_after_failed_build(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    bundle = tmp_path / "shared" / "model.trtfb"
+    bundle.parent.mkdir()
+    bundle.write_bytes(b"old")
+
+    class Result:
+        returncode = 1
+
+    def fake_run(command, **_kwargs):
+        Path(command[command.index("-o") + 1]).write_bytes(b"partial")
+        return Result()
+
+    monkeypatch.setattr(task_eval.subprocess, "run", fake_run)
+
+    with pytest.raises(RuntimeError, match="Bundle build failed"):
+        task_eval.ensure_bundle(
+            {
+                "name": "model",
+                "hf_id": "org/model",
+                "precision": "fp32",
+            },
+            bundle_path=bundle,
+            trtmc_binary="trtmc",
+            force_build=True,
+            replace_existing=True,
+        )
+
+    assert not bundle.exists()
+
+
 def test_suite_build_cache_minimum_overrides_manifest_cache() -> None:
     suite = {"build": {"min_max_cache_length": 1024}}
     model = {"max_cache_length": 256}
@@ -3208,6 +3277,7 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
 
     args = argparse.Namespace(
         hf_python="/opt/deepseek-hf/bin/python3",
+        reference_cache_dir=str(tmp_path / "references"),
         hf_dtype="auto",
         hf_device="cuda",
         hf_device_map="",
@@ -3228,7 +3298,10 @@ def test_run_hf_reference_subprocess_uses_hf_python(tmp_path: Path, monkeypatch)
     task_eval.run_hf_reference_subprocess(args, model, work_dir)
 
     assert captured["cmd"][0] == "/opt/deepseek-hf/bin/python3"
-    assert captured["cmd"][1:3] == [str(Path(task_eval.__file__).resolve()), "run-hf"]
+    assert captured["cmd"][1:3] == [str(task_eval.REFERENCE_RUNNER), "run"]
+    assert captured["cmd"][captured["cmd"].index("--cache-dir") + 1] == str(
+        tmp_path / "references"
+    )
 
 
 def test_run_hf_reference_subprocess_passes_asr_family_metadata(
@@ -4328,7 +4401,7 @@ def test_run_deepseek_ocr_hf_reference_writes_predictions(tmp_path: Path) -> Non
     assert payload["responses"][0]["generated_token_ids"] == [1, 2]
 
 
-def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
+def test_eval_one_model_reuses_cached_hf_builds_bundle_and_reruns_trtfb(
     tmp_path: Path, monkeypatch
 ) -> None:
     dataset = tmp_path / "mmlu.json"
@@ -4364,9 +4437,12 @@ def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
     )
     calls: list[str] = []
 
-    def fake_run_hf(_args):
-        calls.append("hf")
-        raise AssertionError("HF should be reused")
+    def fake_run_hf(_args, _model, reference_work_dir):
+        calls.append("hf-cache")
+        (reference_work_dir / "hf_cache.json").write_text(
+            json.dumps({"status": "reused", "key": "abc123"}),
+            encoding="utf-8",
+        )
 
     monkeypatch.setattr(task_eval, "max_prompt_token_length", lambda **_kwargs: 405)
 
@@ -4392,7 +4468,7 @@ def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(task_eval, "run_hf_reference", fake_run_hf)
+    monkeypatch.setattr(task_eval, "run_hf_reference_subprocess", fake_run_hf)
     monkeypatch.setattr(task_eval, "ensure_bundle", fake_ensure_bundle)
     monkeypatch.setattr(task_eval, "run_trtfb", fake_run_trtfb)
 
@@ -4437,8 +4513,9 @@ def test_eval_one_model_reuses_hf_builds_bundle_and_reruns_trtfb(
 
     result = task_eval.eval_one_model(suite=suite, model=model, args=args)
 
-    assert calls == ["build", "trtfb-seed=123"]
+    assert calls == ["hf-cache", "build", "trtfb-seed=123"]
     assert result["hf_reused"] is True
+    assert result["hf_cache_key"] == "abc123"
     assert result["bundle_built"] is True
     assert result["trtfb_accuracy"] == 0.5
     assert (work_dir / "summary.json").is_file()
