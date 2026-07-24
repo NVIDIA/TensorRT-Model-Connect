@@ -6,7 +6,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import stat
+from types import SimpleNamespace
 
+from tools.reference import transformers_text
 from tools import trtmc_reference
 
 
@@ -169,3 +171,92 @@ def test_reference_cache_can_adopt_an_existing_result(
 
     assert status == "adopted"
     assert (work_dir / "hf_predictions.json").is_symlink()
+
+
+def test_causal_reference_uses_native_transformers_entrypoint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    cache_dir = tmp_path / "cache"
+    work_dir = tmp_path / "native"
+    _prepare_work(work_dir)
+    arguments = _args(work_dir, cache_dir)
+    arguments.reference_family = "causal_base_continuation"
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        assert kwargs["stderr"] == trtmc_reference.subprocess.STDOUT
+        predictions = Path(command[command.index("--predictions") + 1])
+        raw_output = Path(command[command.index("--raw-output") + 1])
+        metadata = Path(command[command.index("--repro-metadata") + 1])
+        predictions.write_text(
+            json.dumps(
+                {"responses": [{"sample_id": "one", "output_text": "A"}]}
+            ),
+            encoding="utf-8",
+        )
+        raw_output.write_text("{}\n", encoding="utf-8")
+        metadata.write_text(
+            json.dumps(
+                {
+                    "command": [
+                        command[0],
+                        command[1],
+                        "--sample-id",
+                        "{sample_id}",
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(
+        trtmc_reference.task_eval,
+        "run_hf_reference",
+        lambda _args: (_ for _ in ()).throw(AssertionError("wrapper was used")),
+    )
+    monkeypatch.setattr(trtmc_reference.subprocess, "run", fake_run)
+
+    assert trtmc_reference.run_reference(arguments) == "generated"
+
+    command = captured["command"]
+    assert command[1].endswith("tools/reference/transformers_text.py")
+    assert "task_eval.py" not in " ".join(command)
+    assert (work_dir / "hf_native_run.log").is_symlink()
+    assert (work_dir / "hf_native_repro.json").is_symlink()
+
+
+def test_transformers_reference_metadata_is_direct_and_sample_selectable(
+    tmp_path: Path,
+) -> None:
+    metadata = tmp_path / "reproduction.json"
+    arguments = transformers_text.build_parser().parse_args(
+        [
+            "--model",
+            "org/model",
+            "--prompts",
+            str(tmp_path / "prompts.jsonl"),
+            "--answers",
+            str(tmp_path / "answers.json"),
+            "--manifest",
+            str(tmp_path / "manifest.json"),
+            "--predictions",
+            str(tmp_path / "predictions.json"),
+            "--raw-output",
+            str(tmp_path / "raw.jsonl"),
+            "--repro-metadata",
+            str(metadata),
+            "--local-files-only",
+        ]
+    )
+
+    transformers_text._write_reproduction_metadata(arguments)
+
+    payload = json.loads(metadata.read_text(encoding="utf-8"))
+    command = payload["command"]
+    assert command[1].endswith("tools/reference/transformers_text.py")
+    assert command[command.index("--sample-id") + 1] == "{sample_id}"
+    assert command[command.index("--prompts") + 1] == "{work_dir}/prompts.jsonl"
+    assert "task_eval.py" not in " ".join(command)

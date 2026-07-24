@@ -363,6 +363,209 @@ def test_report_bounds_large_sample_commands_and_selects_disagreement(tmp_path):
     assert (tmp_path / "report.json").stat().st_size < 20_000
 
 
+def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    work_dir = case_dir / "validation" / "workload-a" / "model-a"
+    work_dir.mkdir(parents=True)
+    prompt = {"sample_id": "sample-7", "prompt": "Complete this sentence"}
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps(prompt) + "\n",
+        encoding="utf-8",
+    )
+    (work_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "disagreements": [
+                    {
+                        "sample_id": "sample-7",
+                        "hf_prediction": "reference answer",
+                        "trtfb_prediction": "TRTMC answer",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "hf_predictions.json").write_text(
+        json.dumps(
+            {
+                "responses": [
+                    {
+                        "sample_id": "sample-7",
+                        "output_text": "reference answer",
+                        "generated_token_ids": [1, 2],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "trtfb_predictions.json").write_text(
+        json.dumps(
+            {
+                "responses": [
+                    {
+                        "sample_id": "sample-7",
+                        "output_text": "TRTMC answer",
+                        "generated_token_ids": [1, 3],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "hf_native_repro.json").write_text(
+        json.dumps(
+            {
+                "command": [
+                    "/profiles/reference/bin/python",
+                    "/workspace/trtmc/tools/reference/transformers_text.py",
+                    "--prompts",
+                    "{work_dir}/prompts.jsonl",
+                    "--sample-id",
+                    "{sample_id}",
+                    "--predictions",
+                    "{reference_predictions_json}",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "trtfb_repro.json").write_text(
+        json.dumps(
+            {
+                "command": [
+                    "/workspace/build/trtmc_dataset_benchmark",
+                    "model.trtfb",
+                    "{input_jsonl}",
+                    "{trtmc_raw_jsonl}",
+                    "--max-new-tokens",
+                    "8",
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "failed",
+                "raw_result": {"status": "failed", "work_dir": str(work_dir)},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, html_path, report = trtmc_validate.write_report(tmp_path)
+
+    metadata = report["results"][0]["disagreements"]
+    assert metadata["count"] == 1
+    artifact = case_dir / metadata["path"]
+    records = [
+        json.loads(line)
+        for line in artifact.read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[0]["input"] == prompt
+    assert records[0]["reference_result"]["output_text"] == "reference answer"
+    assert records[0]["trtmc_result"]["output_text"] == "TRTMC answer"
+    assert records[0]["reproduce"]["reference"].startswith(
+        "/profiles/reference/bin/python "
+        "/workspace/trtmc/tools/reference/transformers_text.py"
+    )
+    assert records[0]["reproduce"]["trtmc"].startswith(
+        "/workspace/build/trtmc_dataset_benchmark model.trtfb"
+    )
+    assert (case_dir / records[0]["artifacts"]["trtmc_input"]).read_text(
+        encoding="utf-8"
+    ) == json.dumps(prompt, ensure_ascii=False) + "\n"
+    rendered = html_path.read_text(encoding="utf-8")
+    assert "1 failed samples · results and vanilla commands" in rendered
+    assert "Reference result" in rendered
+    assert "TRTMC result" in rendered
+    assert "reference answer" in rendered
+    assert "TRTMC answer" in rendered
+    assert "Reference vanilla command" in rendered
+    assert "TRTMC vanilla command" in rendered
+    for wrapper in (
+        "task_eval.py",
+        "trtmc_compare.py",
+        "trtmc_reference.py",
+        "trtmc_validate.py",
+    ):
+        assert wrapper not in json.dumps(records)
+
+
+def test_report_bounds_inline_failed_samples_but_keeps_full_artifact(tmp_path):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    work_dir = case_dir / "validation" / "workload-a" / "model-a"
+    work_dir.mkdir(parents=True)
+    sample_count = 25
+    prompts = [
+        {"sample_id": f"sample-{index}", "prompt": f"prompt-{index}"}
+        for index in range(sample_count)
+    ]
+    (work_dir / "prompts.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in prompts),
+        encoding="utf-8",
+    )
+    (work_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "disagreements": [
+                    {"sample_id": row["sample_id"], "reason": "token_mismatch"}
+                    for row in prompts
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    for name, prefix in (
+        ("hf_predictions.json", "reference"),
+        ("trtfb_predictions.json", "trtmc"),
+    ):
+        (work_dir / name).write_text(
+            json.dumps(
+                {
+                    "responses": [
+                        {
+                            "sample_id": row["sample_id"],
+                            "output_text": f"{prefix}-{index}",
+                        }
+                        for index, row in enumerate(prompts)
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "failed",
+                "raw_result": {"status": "failed", "work_dir": str(work_dir)},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, html_path, report = trtmc_validate.write_report(tmp_path)
+
+    metadata = report["results"][0]["disagreements"]
+    artifact = case_dir / metadata["path"]
+    assert metadata["count"] == sample_count
+    assert len(artifact.read_text(encoding="utf-8").splitlines()) == sample_count
+    rendered = html_path.read_text(encoding="utf-8")
+    assert "Showing 20 of 25" in rendered
+    assert "sample-19" in rendered
+    assert "sample-20" not in rendered
+    assert "View all in disagreements.jsonl" in rendered
+    assert (case_dir / "comparison.json").stat().st_size < 20_000
+    assert (tmp_path / "report.json").stat().st_size < 20_000
+
+
 def test_report_does_not_treat_shared_task_failure_as_disagreement(tmp_path):
     case_dir = tmp_path / "model-a" / "workload-a"
     work_dir = case_dir / "validation" / "workload-a" / "model-a"

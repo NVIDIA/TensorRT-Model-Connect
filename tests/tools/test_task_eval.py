@@ -3630,6 +3630,30 @@ def test_run_trtfb_dispatches_diffusion_prompt_workdir(
     assert calls == ["diffusion"]
 
 
+def test_dataset_benchmark_reproduction_is_direct_and_uses_single_input(
+    tmp_path: Path,
+) -> None:
+    command = [
+        "/workspace/build/trtmc_dataset_benchmark",
+        "/runs/engines/model.trtfb",
+        "/runs/work/prompts.jsonl",
+        "/runs/work/trtfb_raw.jsonl",
+        "--max-new-tokens",
+        "8",
+    ]
+
+    task_eval._write_dataset_benchmark_reproduction(tmp_path, command)
+
+    payload = json.loads(
+        (tmp_path / "trtfb_repro.json").read_text(encoding="utf-8")
+    )
+    assert payload["backend"] == "trtmc_dataset_benchmark"
+    assert payload["command"][0] == "/workspace/build/trtmc_dataset_benchmark"
+    assert payload["command"][2] == "{input_jsonl}"
+    assert payload["command"][3] == "{trtmc_raw_jsonl}"
+    assert "task_eval.py" not in " ".join(payload["command"])
+
+
 def test_run_diffusion_trtfb_writes_image_artifact_predictions(
     tmp_path: Path, monkeypatch
 ) -> None:

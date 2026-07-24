@@ -46,8 +46,16 @@ The HTML artifact is named **TRTMC Reference Consistency Report** because it
 covers task accuracy as well as token, embedding, and numerical agreement.
 For large datasets it shows one full-dataset command and at most three
 representative commands per backend. The first disagreement is preferred when
-one exists. Complete per-sample commands remain in the run logs and are not
-copied into `comparison.json`, `report.json`, or the HTML report.
+one exists.
+
+When per-sample differences exist, the model row also shows up to 20 affected
+samples. Each sample contains the prepared input, both raw prediction records,
+the comparison evidence, and native single-sample commands when the backends
+provide them. The reference command invokes a standalone upstream-framework
+entrypoint and the TRTMC command invokes the model executable directly; neither
+command re-enters validation, comparison, or task-eval orchestration. The
+complete set is written to `disagreements.jsonl`, while `comparison.json` and
+`report.json` retain only bounded metadata.
 
 The report keeps three statuses separate:
 

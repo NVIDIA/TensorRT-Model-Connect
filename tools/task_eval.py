@@ -3017,6 +3017,24 @@ def _trtmc_binary_from_args(args: argparse.Namespace) -> str:
     return str(getattr(args, "trtmc_binary", "") or "build/trtmc")
 
 
+def _write_dataset_benchmark_reproduction(
+    work_dir: Path,
+    command: list[str],
+) -> None:
+    template = list(command)
+    template[2] = "{input_jsonl}"
+    template[3] = "{trtmc_raw_jsonl}"
+    payload = {
+        "schema_version": "trtmc.native-trtmc-reproduction/v1",
+        "backend": "trtmc_dataset_benchmark",
+        "command": template,
+    }
+    (work_dir / "trtfb_repro.json").write_text(
+        json.dumps(payload, indent=2),
+        encoding="utf-8",
+    )
+
+
 def run_vlm_trtfb(args: argparse.Namespace) -> None:
     work_dir = Path(args.work_dir)
     defaults = generation_defaults(work_dir)
@@ -8185,6 +8203,7 @@ def run_trtfb(args: argparse.Namespace) -> None:
     if not bool(defaults.get("enable_thinking", True)):
         cmd.append("--no-thinking")
 
+    _write_dataset_benchmark_reproduction(work_dir, cmd)
     env = os.environ.copy()
     if args.cuda_visible_devices:
         env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices

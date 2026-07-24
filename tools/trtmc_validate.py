@@ -35,7 +35,7 @@ from tensorrt_model_connect.python_profiles import (  # noqa: E402
     resolve_profile_python,
 )
 from tests.e2e_harness.manifest_loader import load_all_model_manifests  # noqa: E402
-from tools import task_eval  # noqa: E402
+from tools import task_eval, trtmc_disagreements  # noqa: E402
 
 
 DEFAULT_CATALOG = REPO_ROOT / "tests" / "validation" / "model_workloads.yaml"
@@ -536,7 +536,11 @@ def _commands_from_logs(root: Path) -> dict[str, Any]:
     commands: dict[str, list[str]] = {"hf": [], "trtmc": []}
     counts = {"hf": 0, "trtmc": 0}
     logs: dict[str, list[str]] = {"hf": [], "trtmc": []}
-    for path in sorted(root.rglob("*.log")):
+    log_paths = sorted(root.rglob("*.log"))
+    has_native_reference = any(path.name == "hf_native_run.log" for path in log_paths)
+    for path in log_paths:
+        if has_native_reference and path.name == "hf_run.log":
+            continue
         kind = "hf" if "hf" in path.name.lower() else "trtmc"
         count, representative = _summarize_command_log(
             path,
@@ -872,6 +876,10 @@ def _comparison_result(
     if status not in {"passed", "failed", "skipped"}:
         status = "passed" if returncode == 0 else "failed"
     work_dir = case_dir / "validation" / binding.workload / binding.model
+    disagreements = trtmc_disagreements.build_disagreement_artifact(
+        work_dir=work_dir,
+        case_dir=case_dir,
+    )
     return _normalize_result({
         "schema_version": "trtmc.validation-result/v2",
         "model": binding.model,
@@ -888,6 +896,7 @@ def _comparison_result(
         ),
         "raw_result": raw_result,
         "raw_result_path": str(summary_path),
+        "disagreements": disagreements,
         "execution_log": str(case_dir / "execution.log"),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
@@ -1055,6 +1064,20 @@ def _merge_commands_from_result_logs(result: dict[str, Any]) -> None:
     result["reproduce"] = _normalize_reproduction(discovered)
 
 
+def _refresh_disagreement_artifact(
+    result: dict[str, Any],
+    case_dir: Path,
+) -> None:
+    raw_result = result.get("raw_result", {})
+    work_dir = raw_result.get("work_dir") if isinstance(raw_result, dict) else None
+    if not work_dir or not Path(str(work_dir)).is_dir():
+        return
+    result["disagreements"] = trtmc_disagreements.build_disagreement_artifact(
+        work_dir=Path(str(work_dir)),
+        case_dir=case_dir,
+    )
+
+
 def _result_commands(result: Mapping[str, Any], kind: str) -> list[str]:
     reproduce = result.get("reproduce", {})
     if not isinstance(reproduce, dict):
@@ -1134,7 +1157,96 @@ def _representative_note(result: Mapping[str, Any]) -> str:
     )
 
 
-def _render_reproduction(result: Mapping[str, Any]) -> str:
+def _json_preview(value: Any, *, max_characters: int = 2000) -> str:
+    rendered = json.dumps(value, indent=2, ensure_ascii=False)
+    if len(rendered) > max_characters:
+        rendered = rendered[:max_characters] + "\n... see disagreements.jsonl"
+    return f"<pre><code>{html.escape(rendered)}</code></pre>"
+
+
+def _render_vanilla_command(label: str, command: str) -> str:
+    if command:
+        body = f"<pre><code>{html.escape('$ ' + command)}</code></pre>"
+    else:
+        body = (
+            '<span class="unavailable">Native single-sample command unavailable '
+            "for this backend.</span>"
+        )
+    return f"<h5>{html.escape(label)}</h5>{body}"
+
+
+def _render_disagreement_record(record: Mapping[str, Any]) -> str:
+    sample_id = str(record.get("sample_id", "") or "unknown sample")
+    reason = str(record.get("reason", "") or "comparison mismatch").replace("_", " ")
+    reproduce = record.get("reproduce", {})
+    reproduce = reproduce if isinstance(reproduce, dict) else {}
+    return (
+        '<details class="sample-difference">'
+        f"<summary>{html.escape(sample_id)} · {html.escape(reason)}</summary>"
+        '<div class="difference-grid">'
+        f"<section><h5>Input</h5>{_json_preview(record.get('input', {}))}</section>"
+        f"<section><h5>Reference result</h5>{_json_preview(record.get('reference_result', {}))}</section>"
+        f"<section><h5>TRTMC result</h5>{_json_preview(record.get('trtmc_result', {}))}</section>"
+        f"<section><h5>Comparison</h5>{_json_preview(record.get('comparison', {}))}</section>"
+        "</div>"
+        f"{_render_vanilla_command('Reference vanilla command', str(reproduce.get('reference', '') or ''))}"
+        f"{_render_vanilla_command('TRTMC vanilla command', str(reproduce.get('trtmc', '') or ''))}"
+        "</details>"
+    )
+
+
+def _render_disagreements(
+    result: Mapping[str, Any],
+    *,
+    case_dir: Path,
+    artifact_href: str,
+) -> str:
+    metadata = result.get("disagreements", {})
+    if not isinstance(metadata, dict):
+        return ""
+    try:
+        count = int(metadata.get("count", 0) or 0)
+        limit = int(
+            metadata.get(
+                "inline_limit",
+                trtmc_disagreements.INLINE_DISAGREEMENT_LIMIT,
+            )
+        )
+    except (TypeError, ValueError):
+        return ""
+    if count <= 0:
+        return ""
+    artifact_name = str(metadata.get("path", "disagreements.jsonl"))
+    preview = trtmc_disagreements.load_disagreement_preview(
+        case_dir / artifact_name,
+        limit=limit,
+    )
+    comparison = result.get("comparison", {})
+    failed = (
+        isinstance(comparison, dict)
+        and comparison.get("status") == "disagreement"
+    )
+    noun = "failed samples" if failed else "sample differences"
+    records = "".join(_render_disagreement_record(record) for record in preview)
+    more = ""
+    if count > len(preview):
+        more = (
+            f'<div class="detail">Showing {len(preview)} of {count}. '
+            f'<a href="{html.escape(artifact_href)}">View all in disagreements.jsonl</a>.</div>'
+        )
+    return (
+        f'<details class="failure-details"><summary>{count} {noun} · '
+        "results and vanilla commands</summary>"
+        f"{records}{more}</details>"
+    )
+
+
+def _render_reproduction(
+    result: Mapping[str, Any],
+    *,
+    case_dir: Path,
+    artifact_href: str,
+) -> str:
     reference_commands = _result_commands(result, "hf")
     trtmc_commands = _result_commands(result, "trtmc")
     dataset_command, prepared_input_count = _dataset_reproduction(result)
@@ -1151,6 +1263,7 @@ def _render_reproduction(result: Mapping[str, Any]) -> str:
         f"TRTMC {len(trtmc_commands)}/{trtmc_total}"
     )
     return (
+        f"{_render_disagreements(result, case_dir=case_dir, artifact_href=artifact_href)}"
         f"<details><summary>{summary}</summary>"
         '<div class="commands">'
         f"{_render_command_group(dataset_label, [dataset_command] if dataset_command else [])}"
@@ -1293,6 +1406,7 @@ def _normalize_result_files(
     for path in result_paths:
         result = _normalize_result(json.loads(path.read_text(encoding="utf-8")))
         _merge_commands_from_result_logs(result)
+        _refresh_disagreement_artifact(result, path.parent)
         path.write_text(
             json.dumps(result, indent=2, ensure_ascii=False),
             encoding="utf-8",
@@ -1326,6 +1440,13 @@ def _report_rows(
     rows = []
     for result, path in zip(results, result_paths, strict=True):
         relative = path.relative_to(output)
+        metadata = result.get("disagreements", {})
+        artifact_name = (
+            str(metadata.get("path", "disagreements.jsonl"))
+            if isinstance(metadata, dict)
+            else "disagreements.jsonl"
+        )
+        artifact_relative = relative.parent / artifact_name
         rows.append(
             "<tr>"
             f"<td>{html.escape(str(result.get('model', '')))}</td>"
@@ -1335,7 +1456,7 @@ def _report_rows(
             f"<td>{_render_comparison(result)}</td>"
             f"<td>{_render_metrics(result)}</td>"
             f"<td>{_render_validation(result)}</td>"
-            f"<td>{_render_reproduction(result)}</td>"
+            f"<td>{_render_reproduction(result, case_dir=path.parent, artifact_href=str(artifact_relative))}</td>"
             f'<td><a href="{html.escape(str(relative))}">comparison.json</a></td>'
             "</tr>"
         )
@@ -1365,6 +1486,13 @@ details {{ min-width: 210px; }}
 summary {{ cursor: pointer; color: #185abc; }}
 .commands {{ min-width: min(760px, 70vw); padding: 4px 0; }}
 .commands h4 {{ margin: 12px 0 4px; }}
+.failure-details {{ min-width: min(900px, 75vw); margin-bottom: 10px; }}
+.sample-difference {{ margin: 8px 0; padding: 8px; border: 1px solid #dadce0;
+                      border-radius: 4px; }}
+.sample-difference h5 {{ margin: 10px 0 4px; }}
+.difference-grid {{ display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr));
+                    gap: 10px; }}
+.difference-grid pre {{ max-height: 260px; overflow: auto; }}
 pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
        background: #f8f9fa; border: 1px solid #dadce0; border-radius: 4px; }}
 .unavailable {{ color: #5f6368; }}

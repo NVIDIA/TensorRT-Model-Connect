@@ -12,6 +12,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
+import subprocess
 import sys
 import tempfile
 from typing import Any, Iterable, Mapping, Sequence
@@ -30,7 +32,11 @@ CACHE_SCHEMA = "trtmc.reference-cache/v1"
 CACHE_IMPLEMENTATION = 1
 _CACHE_METADATA = "reference.json"
 _WORK_METADATA = "hf_cache.json"
+_NATIVE_RUN_LOG = "hf_native_run.log"
+_NATIVE_REPRO_METADATA = "hf_native_repro.json"
 _TEXT_SUFFIXES = {".json", ".jsonl", ".log", ".md", ".txt"}
+_NATIVE_TEXT_REFERENCE_FAMILIES = {"causal_base_continuation"}
+_TRANSFORMERS_TEXT_RUNNER = REPO_ROOT / "tools" / "reference" / "transformers_text.py"
 _IGNORED_INPUT_NAMES = {
     "build.log",
     "eval_result.json",
@@ -89,8 +95,10 @@ def _hash_file(hasher: Any, path: Path, work_dir: Path) -> None:
 
 
 def _settings(args: argparse.Namespace) -> dict[str, Any]:
+    native_runner = _native_reference_runner(args)
     return {
         "implementation": CACHE_IMPLEMENTATION,
+        "native_runner": _native_runner_identity(native_runner),
         "python": str(Path(sys.executable).resolve()),
         "model": args.model,
         "family": args.family,
@@ -111,6 +119,18 @@ def _settings(args: argparse.Namespace) -> dict[str, Any]:
         "min_p": args.min_p,
         "seed": args.seed,
     }
+
+
+def _native_reference_runner(args: argparse.Namespace) -> Path | None:
+    if str(args.reference_family or "") in _NATIVE_TEXT_REFERENCE_FAMILIES:
+        return _TRANSFORMERS_TEXT_RUNNER
+    return None
+
+
+def _native_runner_identity(path: Path | None) -> str:
+    if path is None:
+        return ""
+    return f"{path.name}:{hashlib.sha256(path.read_bytes()).hexdigest()}"
 
 
 def reference_key(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
@@ -170,6 +190,8 @@ def _materialize(entry: Path, work_dir: Path) -> None:
 def _rewrite_cached_paths(root: Path, old: Path, new: Path) -> None:
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in _TEXT_SUFFIXES:
+            continue
+        if path.name == _NATIVE_RUN_LOG:
             continue
         content = path.read_text(encoding="utf-8", errors="replace")
         updated = content.replace(str(old), str(new))
@@ -254,7 +276,7 @@ def _write_work_metadata(
 
 
 def _run_without_cache(args: argparse.Namespace, key: str) -> str:
-    task_eval.run_hf_reference(args)
+    _run_reference_inference(args)
     work_dir = Path(args.work_dir).resolve()
     if not task_eval.predictions_file_valid(
         work_dir / "hf_predictions.json",
@@ -264,6 +286,79 @@ def _run_without_cache(args: argparse.Namespace, key: str) -> str:
     _write_work_metadata(work_dir, key=key, status="generated", entry=None)
     print("Reference result: generated", flush=True)
     return "generated"
+
+
+def _native_reference_command(
+    args: argparse.Namespace,
+    runner: Path,
+) -> list[str]:
+    work_dir = Path(args.work_dir).resolve()
+    command = [
+        sys.executable,
+        str(runner),
+        "--model",
+        str(args.model),
+        "--prompts",
+        str(work_dir / "prompts.jsonl"),
+        "--answers",
+        str(work_dir / "answers.json"),
+        "--manifest",
+        str(work_dir / "manifest.json"),
+        "--predictions",
+        str(work_dir / args.predictions),
+        "--raw-output",
+        str(work_dir / args.raw_output),
+        "--repro-metadata",
+        str(work_dir / _NATIVE_REPRO_METADATA),
+        "--dtype",
+        str(args.dtype),
+        "--device",
+        str(args.device),
+    ]
+    for flag, value in (
+        ("--device-map", args.device_map),
+        ("--attn-impl", args.attn_impl),
+        ("--max-new-tokens", args.max_new_tokens),
+        ("--temperature", args.temperature),
+        ("--top-k", args.top_k),
+        ("--top-p", args.top_p),
+        ("--seed", args.seed),
+    ):
+        if value not in (None, ""):
+            command.extend([flag, str(value)])
+    for enabled, flag in (
+        (args.trust_remote_code, "--trust-remote-code"),
+        (args.local_files_only, "--local-files-only"),
+        (args.do_sample, "--do-sample"),
+        (args.apply_chat_template, "--apply-chat-template"),
+    ):
+        if enabled:
+            command.append(flag)
+    return command
+
+
+def _run_reference_inference(args: argparse.Namespace) -> None:
+    runner = _native_reference_runner(args)
+    if runner is None:
+        task_eval.run_hf_reference(args)
+        return
+    work_dir = Path(args.work_dir).resolve()
+    command = _native_reference_command(args, runner)
+    log_path = work_dir / _NATIVE_RUN_LOG
+    with log_path.open("w", encoding="utf-8") as log_file:
+        log_file.write(f"$ {shlex.join(command)}\n")
+        log_file.flush()
+        process = subprocess.run(
+            command,
+            check=False,
+            text=True,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+    if process.returncode != 0:
+        raise ReferenceError(
+            f"native reference failed with rc={process.returncode}; see {log_path}"
+        )
 
 
 def run_reference(args: argparse.Namespace) -> str:
@@ -293,7 +388,7 @@ def run_reference(args: argparse.Namespace) -> str:
     )
     if not adopt:
         _clear_reference_outputs(work_dir)
-        task_eval.run_hf_reference(args)
+        _run_reference_inference(args)
     if not task_eval.predictions_file_valid(
         work_dir / "hf_predictions.json",
         work_dir / "answers.json",
