@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -226,3 +227,93 @@ def test_capture_persists_failure_and_post_source_state(
     assert report["passed"] is False
     assert report["commands"][0]["returncode"] == 7
     assert report["source_state_unchanged"] is True
+
+
+def _write_junit(path: Path, testcases: str) -> None:
+    path.write_text(
+        '<?xml version="1.0" encoding="utf-8"?>'
+        f'<testsuites><testsuite name="pytest">{testcases}</testsuite></testsuites>',
+        encoding="utf-8",
+    )
+
+
+def test_pytest_junit_rejects_selected_skip_but_records_collection_skip(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    selected = repo / "tests" / "selected.py"
+    selected.parent.mkdir(parents=True)
+    selected.write_text("", encoding="utf-8")
+    junit = tmp_path / "pytest.xml"
+    _write_junit(
+        junit,
+        (
+            '<testcase classname="" name="tests.unrelated">'
+            '<skipped message="collection skipped" /></testcase>'
+            '<testcase classname="tests.selected" name="test_required">'
+            '<skipped message="runtime unavailable" /></testcase>'
+        ),
+    )
+
+    outcomes = capture._pytest_junit_outcomes(
+        junit,
+        repo_root=repo,
+        expected_entries=["tests/selected.py::test_required"],
+    )
+
+    assert outcomes["passed"] is False
+    assert outcomes["selected_skips"] == [
+        "tests/selected.py::test_required"
+    ]
+    assert outcomes["unselected_collection_skips"] == [
+        {
+            "classname": "",
+            "name": "tests.unrelated",
+            "message": "collection skipped",
+        }
+    ]
+
+
+def test_pytest_junit_requires_every_selected_manifest_entry(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    selected = repo / "tests" / "selected.py"
+    selected.parent.mkdir(parents=True)
+    selected.write_text("", encoding="utf-8")
+    junit = tmp_path / "pytest.xml"
+    _write_junit(
+        junit,
+        '<testcase classname="tests.selected" name="test_one" />',
+    )
+
+    outcomes = capture._pytest_junit_outcomes(
+        junit,
+        repo_root=repo,
+        expected_entries=[
+            "tests/selected.py::test_one",
+            "tests/selected.py::TestGroup::test_two[param]",
+        ],
+    )
+
+    assert outcomes["passed"] is False
+    assert outcomes["missing_selected_tests"] == [
+        "tests/selected.py::TestGroup::test_two[param]"
+    ]
+
+
+def test_junit_node_id_preserves_class_and_parameter_name(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    selected = repo / "tests" / "selected.py"
+    selected.parent.mkdir(parents=True)
+    selected.write_text("", encoding="utf-8")
+    testcase = ET.fromstring(
+        '<testcase classname="tests.selected.TestGroup" '
+        'name="test_value[param]" />'
+    )
+
+    assert capture._junit_node_id(testcase, repo_root=repo) == (
+        "tests/selected.py::TestGroup::test_value[param]"
+    )

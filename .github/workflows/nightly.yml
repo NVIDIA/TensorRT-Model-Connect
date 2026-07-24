@@ -430,6 +430,12 @@ jobs:
         working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
         run: python3 -m tools.ci stage python-builder
 
+      - name: No-flag dynamic model smoke from installed wheel
+        if: ${{ always() && steps.package_build.outcome == 'success' }}
+        timeout-minutes: 60
+        working-directory: ${{ env.TRTMC_CI_WORKSPACE }}
+        run: python3 -m tools.ci stage wheel-model-smoke
+
       - name: C++ platform coverage
         if: ${{ always() }}
         timeout-minutes: 60
@@ -442,8 +448,11 @@ jobs:
         with:
           name: trtmc-pip-package-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 30
-          path: ${{ env.TRTMC_CI_WORKSPACE }}/dist/*.whl
+          path: |
+            ${{ env.TRTMC_CI_WORKSPACE }}/dist/*.whl
+            ${{ env.TRTMC_CI_WORKSPACE }}/.ci/wheel-model-smoke/
 
       - name: Upload nightly coverage artifacts
         if: ${{ always() }}
@@ -1285,8 +1294,15 @@ jobs:
             --parts-dir "${{ runner.temp }}/nightly-wheel-parts-${{ github.run_id }}-${{ github.run_attempt }}" \
             --artifact-prefix "trtmc-pip-package-${{ github.run_id }}-" \
             --max-attempt "${{ github.run_attempt }}" \
-            --required-glob '*.whl' \
+            --required-glob 'dist/*.whl' \
             --github-output "$GITHUB_OUTPUT"
+
+      - name: Recompute certified package evidence
+        env:
+          CERTIFIED_PACKAGE_ROOT: ${{ steps.wheel_select.outputs.selected_dir }}
+        run: >-
+          python3 -m tools.ci package-artifact verify
+          --root "$CERTIFIED_PACKAGE_ROOT"
 
       - name: Publish trtmc pip package to GitHub Release
         env:
@@ -1295,8 +1311,8 @@ jobs:
           WHEEL_DIR: ${{ steps.wheel_select.outputs.selected_dir }}
         run: |
           set -euo pipefail
-          compgen -G "$WHEEL_DIR/*.whl" >/dev/null || {
-            echo "::error::No certified trtmc wheel found under $WHEEL_DIR"
+          compgen -G "$WHEEL_DIR/dist/*.whl" >/dev/null || {
+            echo "::error::No certified trtmc wheel found under $WHEEL_DIR/dist"
             exit 1
           }
           release_payload="$(python3 - <<'PY'
@@ -1329,7 +1345,7 @@ jobs:
           print(json.load(open("release.json"))["upload_url"].split("{", 1)[0])
           PY
           )"
-          for asset in "$WHEEL_DIR"/*.whl; do
+          for asset in "$WHEEL_DIR"/dist/*.whl; do
             name="$(basename "$asset")"
             curl -sSfL \
               -X POST \

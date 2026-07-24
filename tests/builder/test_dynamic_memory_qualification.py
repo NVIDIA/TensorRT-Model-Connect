@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,8 @@ QUALIFIED_STACK = {
     "driver": "580.105.08",
 }
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def _target(
     trt_version: str = "11.2.0.113",
@@ -70,8 +73,8 @@ def test_only_two_exact_qualification_records_are_declared() -> None:
             QWEN_CONFIG_SHA256,
             "qwen",
             40960,
-            2048,
-            (128, 512, 2048, 8192, 32768, 40960),
+            1024,
+            (128, 256, 512, 1024, 2048, 8192, 32768, 40960),
         ),
         (
             TINY_ID,
@@ -80,7 +83,7 @@ def test_only_two_exact_qualification_records_are_declared() -> None:
             "llama",
             2048,
             512,
-            (128, 512, 2048),
+            (128, 256, 512, 2048),
         ),
     ]
     assert all(record.precision == "bf16" for record in records)
@@ -99,6 +102,51 @@ def test_only_two_exact_qualification_records_are_declared() -> None:
         == QUALIFIED_STACK
         for record in records
     )
+
+
+@pytest.mark.parametrize(
+    ("family", "expected_chunk", "expected_buckets"),
+    (
+        (
+            "qwen",
+            1024,
+            (128, 256, 512, 1024, 2048, 8192, 32768, 40960),
+        ),
+        ("llama", 512, (128, 256, 512, 2048)),
+    ),
+)
+def test_native_plugin_allowlist_matches_builder_qualification(
+    family: str,
+    expected_chunk: int,
+    expected_buckets: tuple[int, ...],
+) -> None:
+    """Keep the independently compiled native trust boundary in lockstep."""
+
+    record = next(
+        item
+        for item in load_dynamic_memory_qualifications()
+        if item.family == family
+    )
+    assert record.prefill_chunk_limit == expected_chunk
+    assert record.active_kv_profile_limits == expected_buckets
+
+    source = (
+        REPO_ROOT / "src" / "runtime" / "models" / family / "plugin.cpp"
+    ).read_text(encoding="utf-8")
+    chunk = re.search(r"value\.prefill_chunk_limit\s*=\s*(\d+);", source)
+    buckets = re.search(
+        r"value\.active_kv_profile_limits\s*=\s*\{([^}]+)\};",
+        source,
+        flags=re.DOTALL,
+    )
+    assert chunk is not None
+    assert buckets is not None
+    native_buckets = tuple(
+        int(value)
+        for value in re.findall(r"\d+", buckets.group(1))
+    )
+    assert int(chunk.group(1)) == record.prefill_chunk_limit
+    assert native_buckets == record.active_kv_profile_limits
 
 
 @pytest.mark.parametrize(

@@ -61,11 +61,13 @@ trtmc::RuntimeMemoryQualificationResultV1 result_with_transfer(std::uint64_t d2h
         R"({"kv_allocation_id":9,"runtime_kv_capacity_tokens":128,"kv_bytes_per_token":16,"context_device_memory_bytes":4096})";
     trtmc::RuntimeMemoryInvocationTraceV1 trace;
     trace.role = "prefill";
-    trace.plan_id = "engine_plan:prefill";
+    trace.plan_id = "prefill_engine_plan@engine=0x1234";
     trace.profile_id = 1;
     trace.chunk_end = 1;
+    trace.kv_allocation_id = 9;
     trace.active_tokens = 1;
     trace.bound_tokens = 1;
+    trace.reserved_tokens = 128;
     trace.kv_base_address = 4096;
     trace.context_device_memory_bytes = 4096;
     trace.cuda_graph_status = "uncaptured";
@@ -211,6 +213,16 @@ void test_developer_c_div_2_tuple_requires_exact_opt_in_and_buckets() {
     {
         ScopedEnvironment opt_in("TRTMC_DEVELOPER_CHUNK_VARIANT", "C/2");
         trtmc::validate_runtime_memory_qualified_tuple(contract, expected);
+
+        auto existing_bucket_expected = expected;
+        existing_bucket_expected.prefill_chunk_limit = 1024;
+        existing_bucket_expected.active_kv_profile_limits = {128, 256, 512, 1024, 2048, 40960};
+        auto existing_bucket_variant = contract;
+        existing_bucket_variant.prefill_chunk_limit = 512;
+        existing_bucket_variant.active_kv_profile_limits =
+            existing_bucket_expected.active_kv_profile_limits;
+        trtmc::validate_runtime_memory_qualified_tuple(existing_bucket_variant,
+                                                       existing_bucket_expected);
 
         auto noncanonical = contract;
         noncanonical.active_kv_profile_limits = {128, 512, 1024, 40960};
@@ -398,6 +410,8 @@ void test_non_kv_transfer_is_filtered() {
 void test_measured_current_row_commit_must_match_sq_times_b() {
     auto exact = result_with_transfer(0, 0);
     trtmc::finalize_runtime_memory_invocation_traces(exact);
+    check(exact.invocations[0].kv_allocation_id == 9 && exact.invocations[0].reserved_tokens == 128,
+          "per-invocation allocation sample is preserved after receipt cross-check");
     check(exact.invocations[0].kv_append_bytes == 16,
           "measured exact-Sq append bytes are preserved");
     check(exact.invocations[0].kv_append_events == 2,
@@ -416,6 +430,25 @@ void test_measured_current_row_commit_must_match_sq_times_b() {
                 std::string(error.what()).find("exact current-row commit") != std::string::npos;
         }
         check(rejected, "qualification rejects synthesized or missing current-row commit traffic");
+    }
+}
+
+void test_invocation_must_sample_active_allocation() {
+    for (const auto [allocation_id, reserved_tokens] :
+         {std::pair<std::uint64_t, std::uint64_t>{0, 128},
+          std::pair<std::uint64_t, std::uint64_t>{8, 128},
+          std::pair<std::uint64_t, std::uint64_t>{9, 0},
+          std::pair<std::uint64_t, std::uint64_t>{9, 127}}) {
+        auto invalid = result_with_transfer(0, 0);
+        invalid.invocations[0].kv_allocation_id = allocation_id;
+        invalid.invocations[0].reserved_tokens = reserved_tokens;
+        bool rejected = false;
+        try {
+            trtmc::finalize_runtime_memory_invocation_traces(invalid);
+        } catch (const std::logic_error& error) {
+            rejected = std::string(error.what()).find("active KV allocation") != std::string::npos;
+        }
+        check(rejected, "qualification rejects a synthesized or stale allocation sample");
     }
 }
 
@@ -448,6 +481,7 @@ int main() {
     test_cache_copy_events_are_measured_and_rejected();
     test_non_kv_transfer_is_filtered();
     test_measured_current_row_commit_must_match_sq_times_b();
+    test_invocation_must_sample_active_allocation();
     test_exact_m_observability_does_not_query_m_plus_one();
     if (failures != 0)
         return 1;

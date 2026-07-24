@@ -246,6 +246,28 @@ def test_build_executes_command_and_proves_fresh_source_bound_artifact(
         receipt["prebuild_source_state_sha256"]
         == receipt["postbuild_source_state_sha256"]
     )
+    assert receipt["source_state_pre"]["git_dirty"] is False
+    assert receipt["source_state_post"]["exact_head_gate_satisfied"] is True
+
+
+def test_build_preserves_dirty_source_as_diagnostic_evidence(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+
+    _, receipt_path = _run_fresh_build(repo)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+
+    assert receipt["source_state_pre"]["git_dirty"] is True
+    assert receipt["source_state_post"]["git_dirty"] is True
+    assert (
+        receipt["source_state_pre"]["exact_head_gate_satisfied"] is False
+    )
+    assert (
+        receipt["source_state_post"]["exact_head_gate_satisfied"] is False
+    )
 
 
 def test_build_rejects_preexisting_bundle(tmp_path: Path) -> None:
@@ -423,6 +445,18 @@ cache.mkdir(parents=True, exist_ok=True)
         == result["qualification_provenance"]["source_state_post_sha256"]
     )
     assert result["qualification_evidence"]["source_state_unchanged"] is True
+    boundaries = result["qualification_provenance"][
+        "source_state_boundaries"
+    ]
+    assert set(boundaries) == set(capture.SOURCE_STATE_BOUNDARY_NAMES)
+    assert all(not row["git_dirty"] for row in boundaries.values())
+    assert all(
+        row["exact_head_gate_satisfied"] for row in boundaries.values()
+    )
+    assert all(
+        row["git_head"] == result["qualification_provenance"]["git_head"]
+        for row in boundaries.values()
+    )
     assert result["qualification_evidence"]["runtime_libraries"] == {
         "directory": str(runtime_libraries[0].parent),
         "live_nvrtc_version": "13.3",

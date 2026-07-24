@@ -24,6 +24,7 @@ inline constexpr std::uint32_t kRuntimeMemoryQualificationApiVersionV1 = 1U;
 
 struct RuntimeMemoryContract;
 struct QualifiedRuntimeStack;
+class ITrtModule;
 
 struct RuntimeMemoryQualifiedTuple {
     std::string model_id;
@@ -110,6 +111,13 @@ struct RuntimeMemoryInvocationTraceV1 {
     std::uint64_t full_history_device_to_device_bytes{0};
 };
 
+// Bind a qualification trace to the actual deserialized TensorRT engine, not
+// merely to a caller-supplied role label. The section name is stable bundle
+// identity; the opaque engine identity proves which loaded plan served the
+// invocation inside this process.
+std::string runtime_memory_execution_plan_identity(const std::string& bundle_section_name,
+                                                   const ITrtModule& module);
+
 struct RuntimeMemoryQualificationResultV1 {
     // Greedy tokens selected from step_logits[0..max_new_tokens-1].
     std::vector<std::int32_t> selected_token_ids;
@@ -147,7 +155,7 @@ class IRuntimeMemoryQualificationV1 {
     qualify_runtime_memory(const RuntimeMemoryQualificationRequestV1& request) = 0;
 };
 
-// Complete and validate trace fields whose source of truth is the versioned
+// Cross-check per-invocation observations against the finalized versioned
 // runtime receipt. Model pipelines call this only after the real execution
 // has finished and the receipt has been captured.
 void finalize_runtime_memory_invocation_traces(RuntimeMemoryQualificationResultV1& result);

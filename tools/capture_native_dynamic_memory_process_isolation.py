@@ -94,6 +94,31 @@ _RUN_LABELS = (
     "gpu-a-concurrent",
     "gpu-b-concurrent",
 )
+_QUALIFIED_ENGINE_GRAPH_GATES = (
+    "actual_split_engine_sections",
+    "distinct_prefill_decode_plans",
+    "no_attention_mask_input",
+    "current_rows_only_present_outputs",
+    "native_segmented_attention_covers_full_model",
+    "no_dense_attention_mask_or_scores",
+    "no_cache_concat_fallback",
+)
+_QUALIFIED_ENGINE_SECTIONS = (
+    "prefill_engine_plan",
+    "engine_plan",
+)
+_QUALIFIED_ENGINE_SECTION_FIELDS = (
+    "engine_sha256",
+    "num_optimization_profiles",
+    "inputs",
+    "outputs",
+    "native_contiguous_attention_layer_indices",
+    "dense_attention_layers",
+    "cache_concat_layers",
+    "inspector_path",
+    "inspector_size_bytes",
+    "inspector_sha256",
+)
 
 
 class IsolationError(RuntimeError):
@@ -235,6 +260,302 @@ def _validate_source_snapshot(
     return snapshot
 
 
+def _validate_qualified_engine_graph(
+    value: Any,
+    *,
+    report_path: Path,
+    spec: Any,
+    bundle_path: Path,
+    bundle_header: Mapping[str, Any],
+    live_runtime_stack: Mapping[str, Any],
+) -> dict[str, Any]:
+    graph = _object(value, "correctness report.qualified_engine_graph")
+    if graph.get("passed") is not True:
+        raise IsolationError("correctness qualified engine graph is not passed")
+
+    gates = _object(
+        graph.get("gates"),
+        "correctness report.qualified_engine_graph.gates",
+    )
+    if set(gates) != set(_QUALIFIED_ENGINE_GRAPH_GATES) or any(
+        gates.get(name) is not True for name in _QUALIFIED_ENGINE_GRAPH_GATES
+    ):
+        raise IsolationError(
+            "correctness qualified engine graph gates must contain exactly the "
+            "required true gates"
+        )
+
+    graph_runtime_stack = _object(
+        graph.get("runtime_stack"),
+        "correctness report.qualified_engine_graph.runtime_stack",
+    )
+    normalized_graph_runtime_stack = {
+        "schema": 1,
+        **dict(graph_runtime_stack),
+    }
+    if (
+        "schema" in graph_runtime_stack
+        or normalized_graph_runtime_stack != dict(live_runtime_stack)
+    ):
+        raise IsolationError(
+            "correctness qualified engine graph runtime stack does not match "
+            "the correctness case runtime stack"
+        )
+
+    contract = _object(
+        bundle_header.get("runtime_memory"),
+        "aggregate bundle header.runtime_memory",
+    )
+    if dict(graph_runtime_stack) != contract.get("qualified_runtime_stack"):
+        raise IsolationError(
+            "correctness qualified engine graph runtime stack does not match "
+            "the aggregate bundle contract"
+        )
+    model_contract = _object(
+        graph.get("model_contract"),
+        "correctness report.qualified_engine_graph.model_contract",
+    )
+    expected_model_contract_fields = {
+        "model_context_limit",
+        "prefill_chunk_limit",
+        "active_kv_profile_limits",
+        "num_layers",
+        "vocab_size",
+        "kv_dtype",
+        "kv_bytes_per_token",
+        "kv_width",
+    }
+    if set(model_contract) != expected_model_contract_fields:
+        raise IsolationError(
+            "correctness qualified engine graph model_contract must contain "
+            "exactly the required model fields"
+        )
+    num_layers = bundle_header.get("num_layers")
+    vocab_size = bundle_header.get("vocab_size")
+    kv_dtype = contract.get("kv_dtype")
+    dtype_bytes = {
+        "bfloat16": 2,
+        "float16": 2,
+        "float32": 4,
+    }.get(kv_dtype)
+    kv_bytes_per_token = contract.get("kv_bytes_per_token")
+    if (
+        isinstance(num_layers, bool)
+        or not isinstance(num_layers, int)
+        or num_layers <= 0
+        or isinstance(vocab_size, bool)
+        or not isinstance(vocab_size, int)
+        or vocab_size <= 1
+        or dtype_bytes is None
+        or isinstance(kv_bytes_per_token, bool)
+        or not isinstance(kv_bytes_per_token, int)
+        or kv_bytes_per_token <= 0
+    ):
+        raise IsolationError(
+            "aggregate bundle header has incomplete model/KV accounting"
+        )
+    kv_width_denominator = 2 * num_layers * dtype_bytes
+    if kv_bytes_per_token % kv_width_denominator:
+        raise IsolationError(
+            "aggregate bundle kv_bytes_per_token is not divisible by "
+            "2 * num_layers * dtype_bytes"
+        )
+    kv_width = kv_bytes_per_token // kv_width_denominator
+    if kv_width <= 0:
+        raise IsolationError("aggregate bundle derived KV width is not positive")
+    expected_model_contract = {
+        "model_context_limit": contract.get("model_context_limit"),
+        "prefill_chunk_limit": contract.get("prefill_chunk_limit"),
+        "active_kv_profile_limits": contract.get(
+            "active_kv_profile_limits"
+        ),
+        "num_layers": num_layers,
+        "vocab_size": vocab_size,
+        "kv_dtype": kv_dtype,
+        "kv_bytes_per_token": kv_bytes_per_token,
+        "kv_width": kv_width,
+    }
+    if dict(model_contract) != expected_model_contract:
+        raise IsolationError(
+            "correctness qualified engine graph model_contract does not "
+            "match the aggregate bundle header"
+        )
+
+    sections = _object(
+        graph.get("engine_sections"),
+        "correctness report.qualified_engine_graph.engine_sections",
+    )
+    if set(sections) != set(_QUALIFIED_ENGINE_SECTIONS):
+        raise IsolationError(
+            "correctness qualified engine graph must contain exactly "
+            "prefill_engine_plan and engine_plan sections"
+        )
+
+    try:
+        boundary._validate_qualified_engine_graph_evidence(
+            graph,
+            spec,
+            num_layers=num_layers,
+            expected_runtime_stack=graph_runtime_stack,
+        )
+    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+        raise IsolationError(
+            f"correctness qualified engine graph semantic validation failed: {exc}"
+        ) from exc
+
+    validated_sections: dict[str, Any] = {}
+    inspector_artifacts: list[dict[str, Any]] = []
+    inspector_paths: set[str] = set()
+    engine_shas: set[str] = set()
+    engine_plan_identities: list[dict[str, Any]] = []
+    for section_name in _QUALIFIED_ENGINE_SECTIONS:
+        section = _object(
+            sections[section_name],
+            (
+                "correctness report.qualified_engine_graph.engine_sections."
+                f"{section_name}"
+            ),
+        )
+        missing = [
+            field
+            for field in _QUALIFIED_ENGINE_SECTION_FIELDS
+            if field not in section
+        ]
+        if missing:
+            raise IsolationError(
+                f"correctness qualified engine graph {section_name} is "
+                f"missing fields: {missing}"
+            )
+        engine_sha = _sha_field(
+            section["engine_sha256"],
+            f"correctness qualified engine graph {section_name}.engine_sha256",
+        )
+        try:
+            engine_plan = boundary._read_bundle_section(
+                bundle_path,
+                bundle_header,
+                section_name,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise IsolationError(
+                f"cannot read aggregate bundle {section_name}: {exc}"
+            ) from exc
+        recomputed_engine_sha = hashlib.sha256(engine_plan).hexdigest()
+        if engine_sha != recomputed_engine_sha:
+            raise IsolationError(
+                f"correctness qualified engine graph {section_name} engine "
+                "SHA does not match the aggregate bundle section"
+            )
+        engine_plan_identities.append(
+            {
+                "section_name": section_name,
+                "size_bytes": len(engine_plan),
+                "sha256": recomputed_engine_sha,
+            }
+        )
+        engine_shas.add(engine_sha)
+        inspector_path = _referenced_path(
+            section["inspector_path"],
+            report_path=report_path,
+            where=(
+                "correctness qualified engine graph "
+                f"{section_name}.inspector_path"
+            ),
+        )
+        inspector_identity = _file_identity(inspector_path)
+        inspector_sha = _sha_field(
+            section["inspector_sha256"],
+            (
+                "correctness qualified engine graph "
+                f"{section_name}.inspector_sha256"
+            ),
+        )
+        if (
+            section["inspector_size_bytes"] != inspector_identity["size_bytes"]
+            or inspector_sha != inspector_identity["sha256"]
+        ):
+            raise IsolationError(
+                f"correctness qualified engine graph {section_name} inspector "
+                "artifact identity mismatch"
+            )
+        try:
+            inspector_text = inspector_path.read_text(encoding="utf-8")
+            inspector_json = json.loads(inspector_text)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise IsolationError(
+                f"correctness qualified engine graph {section_name} inspector "
+                f"artifact is not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(inspector_json, (dict, list)) or not inspector_json:
+            raise IsolationError(
+                f"correctness qualified engine graph {section_name} inspector "
+                "artifact contains no layer evidence"
+            )
+        inspector_layer_indices = sorted(
+            {
+                int(index)
+                for index in re.findall(
+                    r"layer\.(\d+)\.attn\."
+                    r"NativeContiguousAttentionV2",
+                    inspector_text,
+                )
+            }
+        )
+        inspector_dense_layers = boundary._dense_attention_layers(
+            inspector_json
+        )
+        inspector_cache_concat_layers = boundary._cache_concat_layers(
+            inspector_json
+        )
+        if (
+            inspector_layer_indices
+            != section[
+                "native_contiguous_attention_layer_indices"
+            ]
+            or inspector_dense_layers != section["dense_attention_layers"]
+            or inspector_cache_concat_layers
+            != section["cache_concat_layers"]
+        ):
+            raise IsolationError(
+                f"correctness qualified engine graph {section_name} "
+                "reported layer evidence does not match its inspector artifact"
+            )
+        if inspector_identity["path"] in inspector_paths:
+            raise IsolationError(
+                "correctness qualified engine graph engine sections reuse one "
+                "inspector artifact path"
+            )
+        inspector_paths.add(inspector_identity["path"])
+        inspector_artifacts.append(inspector_identity)
+        validated_sections[section_name] = {
+            **dict(section),
+            "inspector_artifact": inspector_identity,
+        }
+
+    if len(engine_shas) != len(_QUALIFIED_ENGINE_SECTIONS):
+        raise IsolationError(
+            "correctness qualified engine graph prefill and decode engine SHA "
+            "identities must be different"
+        )
+
+    return {
+        "passed": True,
+        "sha256": _canonical_sha(graph),
+        "gates": dict(gates),
+        "runtime_stack": dict(live_runtime_stack),
+        "runtime_stack_sha256": _canonical_sha(live_runtime_stack),
+        "qualified_engine_runtime_stack": dict(graph_runtime_stack),
+        "qualified_engine_runtime_stack_sha256": _canonical_sha(
+            graph_runtime_stack
+        ),
+        "model_contract": dict(model_contract),
+        "num_layers": num_layers,
+        "engine_sections": validated_sections,
+        "engine_plan_identities": engine_plan_identities,
+        "inspector_artifacts": inspector_artifacts,
+    }
+
+
 def _parse_runtime_stack_log(path: Path, *, where: str) -> dict[str, Any]:
     identity = _file_identity(path)
     text = Path(identity["path"]).read_text(
@@ -333,6 +654,12 @@ def _validate_correctness_report(
         raise IsolationError(
             "correctness report does not identify the aggregate bundle"
         )
+    try:
+        bundle_header = boundary._read_bundle_header(bundle_path)
+    except (OSError, ValueError) as exc:
+        raise IsolationError(
+            f"cannot read aggregate bundle header: {exc}"
+        ) from exc
     if (
         report.get("model_context_limit") != spec.context_limit
         or report.get("prefill_chunk_limit") != spec.chunk_limit
@@ -470,6 +797,15 @@ def _validate_correctness_report(
         raise IsolationError(
             "correctness matrix used more than one live runtime stack"
         )
+    runtime_stack = next(iter(stacks.values()))
+    qualified_engine_graph = _validate_qualified_engine_graph(
+        report.get("qualified_engine_graph"),
+        report_path=path,
+        spec=spec,
+        bundle_path=bundle_path,
+        bundle_header=bundle_header,
+        live_runtime_stack=runtime_stack,
+    )
 
     memory_envelope = _object(
         report.get("context_memory_envelope"),
@@ -484,7 +820,6 @@ def _validate_correctness_report(
         raise IsolationError(
             "correctness report did not pass the full context-memory envelope"
         )
-    runtime_stack = next(iter(stacks.values()))
     return {
         "report": _file_identity(path),
         "model_id": model_id,
@@ -498,6 +833,7 @@ def _validate_correctness_report(
         "runtime_stack_sha256": _canonical_sha(runtime_stack),
         "runner_stderr_logs": log_identities,
         "logit_artifacts": logit_identities,
+        "qualified_engine_graph": qualified_engine_graph,
         "context_memory_envelope": {
             "status": memory_envelope["status"],
             "passed": memory_envelope["passed"],
@@ -1639,6 +1975,9 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
         correctness_evidence["report"],
         *correctness_evidence["runner_stderr_logs"],
         *correctness_evidence["logit_artifacts"],
+        *correctness_evidence["qualified_engine_graph"][
+            "inspector_artifacts"
+        ],
         performance_evidence["report"],
         *performance_evidence["captures"].values(),
         *performance_evidence["runtime_library_files"],
@@ -1659,6 +1998,16 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
             "correctness_context_memory_envelope_passed": (
                 correctness_evidence["context_memory_envelope"]["passed"]
                 is True
+            ),
+            "correctness_qualified_engine_graph_passed": (
+                correctness_evidence["qualified_engine_graph"]["passed"]
+                is True
+                and all(
+                    value is True
+                    for value in correctness_evidence[
+                        "qualified_engine_graph"
+                    ]["gates"].values()
+                )
             ),
             "performance_split_08_09_passed": all(
                 values["decode_throughput_ratio"] >= 0.95
@@ -1725,6 +2074,11 @@ def run_qualification(args: argparse.Namespace) -> dict[str, Any]:
                 (
                     "SPLIT-08 decode and SPLIT-09 prefill gates for the same "
                     "bundle/source/live-runtime-stack/runtime-library tuple"
+                ),
+                (
+                    "source-bound split-engine graph inspection with "
+                    "complete dynamic I/O/profile evidence and no "
+                    "dense-attention or cache-concatenation fallback"
                 ),
             ],
             "does_not_prove": [

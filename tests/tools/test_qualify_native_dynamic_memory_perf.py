@@ -223,8 +223,20 @@ def _write_result(
         "qualification_provenance": {
             "git_head": GIT_HEAD,
             "source_state_sha256": SOURCE_SHA,
+            "source_state_pre_sha256": SOURCE_SHA,
+            "source_state_post_sha256": SOURCE_SHA,
+            "source_state_unchanged": True,
             "prebuild_source_state_sha256": SOURCE_SHA,
             "postbuild_source_state_sha256": SOURCE_SHA,
+            "source_state_boundaries": {
+                name: {
+                    "git_head": GIT_HEAD,
+                    "source_state_sha256": SOURCE_SHA,
+                    "git_dirty": False,
+                    "exact_head_gate_satisfied": True,
+                }
+                for name in perf._SOURCE_STATE_BOUNDARY_NAMES
+            },
             "bundle_sha256": _sha256(bundle),
             "request_sha256": request_sha,
             "model_revision": "revision-pinned",
@@ -349,6 +361,11 @@ def test_passes_all_performance_packaging_and_provenance_gates(
         "dynamic_runtime_attention_plans_present"
     ]
     assert report["gates"]["provenance"]["one_tokenizer_contract"]
+    assert all(
+        report["gates"]["provenance"][
+            "all_source_boundaries_exact_head"
+        ].values()
+    )
     assert report["gates"]["performance"]["short"][
         "same_fixed_length_structural_workload"
     ]
@@ -358,6 +375,139 @@ def test_passes_all_performance_packaging_and_provenance_gates(
     assert not report["diagnostics"]["runtime_attention_plan_scope"][
         "per_invocation_H_A_profile_plan_proved"
     ]
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "source_state_pre_sha256",
+        "source_state_post_sha256",
+        "source_state_unchanged",
+        "source_state_boundaries",
+    ],
+)
+def test_requires_complete_source_boundary_provenance(
+    tmp_path: Path, field: str
+) -> None:
+    paths = _evidence(tmp_path)
+    _edit(
+        paths["dynamic_short"],
+        lambda payload: payload["qualification_provenance"].pop(field),
+    )
+
+    with pytest.raises(
+        perf.QualificationError,
+        match=(
+            "missing field: "
+            f"dynamic-short.qualification_provenance.{field}"
+        ),
+    ):
+        _qualify(paths)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["git_dirty", "exact_head_gate_satisfied"],
+)
+def test_requires_each_source_boundary_gate_field(
+    tmp_path: Path, field: str
+) -> None:
+    paths = _evidence(tmp_path)
+
+    def remove(payload: dict) -> None:
+        payload["qualification_provenance"]["source_state_boundaries"][
+            "benchmark_post"
+        ].pop(field)
+
+    _edit(paths["dynamic_short"], remove)
+    with pytest.raises(
+        perf.QualificationError,
+        match=rf"benchmark_post fields must match capture schema:.*{field}",
+    ):
+        _qualify(paths)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "gate"),
+    [
+        ("git_dirty", True, "all_source_boundaries_clean"),
+        (
+            "exact_head_gate_satisfied",
+            False,
+            "all_source_boundaries_exact_head",
+        ),
+    ],
+)
+def test_dirty_or_non_exact_capture_cannot_pass_qualification(
+    tmp_path: Path,
+    field: str,
+    value: bool,
+    gate: str,
+) -> None:
+    paths = _evidence(tmp_path)
+
+    def tamper(payload: dict) -> None:
+        payload["qualification_provenance"]["source_state_boundaries"][
+            "benchmark_post"
+        ][field] = value
+
+    _edit(paths["dynamic_short"], tamper)
+    report = _qualify(paths)
+
+    assert report["status"] == "failed"
+    assert not report["gates"]["provenance"][gate]["dynamic-short"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "gate"),
+    [
+        (
+            "git_head",
+            "f" * 40,
+            "all_source_boundaries_match_expected_commit",
+        ),
+        (
+            "source_state_sha256",
+            "e" * 64,
+            "all_source_boundaries_match_source_state",
+        ),
+    ],
+)
+def test_tampered_source_boundary_identity_cannot_pass(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    gate: str,
+) -> None:
+    paths = _evidence(tmp_path)
+
+    def tamper(payload: dict) -> None:
+        payload["qualification_provenance"]["source_state_boundaries"][
+            "build_pre"
+        ][field] = value
+
+    _edit(paths["dynamic_short"], tamper)
+    report = _qualify(paths)
+
+    assert report["status"] == "failed"
+    assert not report["gates"]["provenance"][gate]["dynamic-short"]
+
+
+def test_declared_source_change_cannot_pass(tmp_path: Path) -> None:
+    paths = _evidence(tmp_path)
+    _edit(
+        paths["dynamic_short"],
+        lambda payload: payload["qualification_provenance"].__setitem__(
+            "source_state_unchanged", False
+        ),
+    )
+
+    report = _qualify(paths)
+
+    assert report["status"] == "failed"
+    assert not report["gates"]["provenance"][
+        "source_stable_prebuild_to_postbuild"
+    ]["dynamic-short"]
 
 
 @pytest.mark.parametrize(

@@ -337,7 +337,6 @@ def test_github_stage_wrapper_exports_package_smoke_controls() -> None:
         "TRTMC_PACKAGE_BUILD_ROOT",
         "TRTMC_WHEEL_SMOKE_CONFIG",
         "TRTMC_WHEEL_SMOKE_MODEL_ID",
-        "TRTMC_WHEEL_SMOKE_MAX_CACHE",
         "TRTMC_WHEEL_SMOKE_MAX_NEW_TOKENS",
         "TRTMC_WHEEL_SMOKE_OPTIMIZATION_LEVEL",
         "TRTMC_WHEEL_SMOKE_BUILD_TIMEOUT",
@@ -1481,7 +1480,7 @@ def test_etth1_dataset_preparation_imports_the_projected_python_package(tmp_path
     ]
 
 
-def test_nightly_validates_the_installed_wheel_without_a_second_model_build() -> None:
+def test_nightly_validates_the_installed_wheel_with_no_flag_model_smoke() -> None:
     text = (REPO_ROOT / ".github" / "workflows" / "nightly.yml").read_text()
     package = text.split("\n  package:", maxsplit=1)[1].split("\n  model-proof:", maxsplit=1)[0]
     release = text.split("\n  release:", maxsplit=1)[1]
@@ -1490,8 +1489,10 @@ def test_nightly_validates_the_installed_wheel_without_a_second_model_build() ->
     upload_index = package.index("Upload trtmc pip package artifact")
     assert package_index < installed_wheel_index < upload_index
     assert "python3 -m tools.ci stage python-builder" in package
-    assert "python3 -m tools.ci stage wheel-model-smoke" not in package
-    assert "Model smoke test from trtmc pip package" not in package
+    assert "python3 -m tools.ci stage wheel-model-smoke" in package
+    assert "No-flag dynamic model smoke from installed wheel" in package
+    assert ".ci/wheel-model-smoke/" in package
+    assert "include-hidden-files: true" in package
     ci_script = _ci_source("pipeline.py", "package.py")
     assert "_verify_wheel_runtime" in ci_script
     assert "verify_installed" in ci_script
@@ -1502,7 +1503,14 @@ def test_nightly_validates_the_installed_wheel_without_a_second_model_build() ->
     assert "merge-multiple: false" in release
     assert "Select latest certified package attempt" in release
     assert "tools/select_latest_attempt_artifact.py" in release
-    assert 'for asset in "$WHEEL_DIR"/*.whl' in release
+    verify_index = release.index("Recompute certified package evidence")
+    publish_index = release.index("Publish trtmc pip package to GitHub Release")
+    assert release.index("Select latest certified package attempt") < verify_index < publish_index
+    assert "python3 -m tools.ci package-artifact verify" in release
+    assert '--root "$CERTIFIED_PACKAGE_ROOT"' in release
+    assert "--required-glob 'dist/*.whl'" in release
+    assert 'compgen -G "$WHEEL_DIR/dist/*.whl"' in release
+    assert 'for asset in "$WHEEL_DIR"/dist/*.whl' in release
     assert "Publish trtmc pip package to GitHub Release" in release
     assert "target_commitish" in release
     assert 'os.environ["TESTED_SHA"]' in release
@@ -1776,12 +1784,10 @@ def test_package_smoke_default_is_model_owned() -> None:
         "model_id",
         "bundle",
         "timing_cache",
-        "max_cache",
         "max_new_tokens",
         "optimization_level",
         "build_timeout",
         "run_timeout",
-        "precision",
         "prompt",
     ):
         assert data.get(key)
@@ -2166,8 +2172,12 @@ def test_wheel_model_smoke_checks_py312_wheel_only() -> None:
     assert "TRTMC_WHEEL_SMOKE_PYTHON" not in smoke_block
     assert "select_compatible_wheel" not in smoke_block
     assert '"PATH"' not in smoke_block
-    assert 'trtmc,\n                "build"' in smoke_block
+    assert 'build_command = [trtmc, "build", model_id]' in smoke_block
     assert "InstalledWheelValidator.require_elf(trtmc)" in smoke_block
+    assert '"--max-cache-length"' not in smoke_block
+    assert '"--precision"' not in smoke_block
+    assert '"-o"' not in smoke_block
+    assert "WHEEL_MODEL_SMOKE_RECEIPT" in text
 
 
 def test_selective_e2e_zero_model_path_still_generates_report_input_dir() -> None:

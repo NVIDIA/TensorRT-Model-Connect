@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import hashlib
 import json
@@ -18,9 +19,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPO_ROOT / "tools" / "qualify_native_dynamic_memory.py"
-SPEC = importlib.util.spec_from_file_location(
-    "qualify_native_dynamic_memory", MODULE_PATH
-)
+SPEC = importlib.util.spec_from_file_location("qualify_native_dynamic_memory", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 qualify = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = qualify
@@ -96,9 +95,7 @@ def test_dirty_source_provenance_captures_both_patches_and_untracked_hashes(
         }
     ]
     manifest = json.loads(
-        Path(
-            before["artifacts"]["untracked_manifest"]["path"]
-        ).read_text(encoding="utf-8")
+        Path(before["artifacts"]["untracked_manifest"]["path"]).read_text(encoding="utf-8")
     )
     assert manifest == before["untracked_files"]
 
@@ -116,20 +113,37 @@ def test_qwen_matrix_contains_exact_chunk_and_model_boundaries() -> None:
     spec = qualify.SPECS["Qwen/Qwen3-0.6B"]
     cases = {case.name: case for case in qualify._cases_for(spec)}
 
-    assert (cases["c-minus-1"].prompt_tokens,
-            cases["c"].prompt_tokens,
-            cases["c-plus-1"].prompt_tokens) == (2_047, 2_048, 2_049)
-    assert cases["two-c-plus-17"].prompt_tokens == 4_113
-    assert (cases["total-32768"].prompt_tokens,
-            cases["total-32768"].decode_tokens) == (32_760, 8)
-    assert (cases["total-model-limit"].prompt_tokens,
-            cases["total-model-limit"].decode_tokens) == (40_952, 8)
+    assert (
+        cases["c-minus-1"].prompt_tokens,
+        cases["c"].prompt_tokens,
+        cases["c-plus-1"].prompt_tokens,
+    ) == (1_023, 1_024, 1_025)
+    assert cases["two-c-plus-17"].prompt_tokens == 2_065
+    assert (cases["total-32768"].prompt_tokens, cases["total-32768"].decode_tokens) == (32_760, 8)
+    assert (cases["total-model-limit"].prompt_tokens, cases["total-model-limit"].decode_tokens) == (
+        40_952,
+        8,
+    )
     assert cases["prefill-last-position"].prompt_tokens == 40_960
     assert cases["model-limit-plus-1"].prompt_tokens == 40_961
     assert cases["model-limit-plus-1"].expect_admission_rejection
-    for bucket in (128, 512, 2_048, 8_192, 32_768):
+    for bucket in (128, 256, 512, 1_024, 2_048, 8_192, 32_768):
         crossing = cases[f"profile-crossing-{bucket}"]
         assert (crossing.prompt_tokens, crossing.decode_tokens) == (bucket, 2)
+    for index, bucket in enumerate(spec.buckets[:-1]):
+        expected = (
+            ("p-minus-1", bucket - 1, index),
+            ("p", bucket, index),
+            ("p-plus-1", bucket + 1, index + 1),
+        )
+        for label, prompt_tokens, profile_id in expected:
+            boundary = cases[f"decode-bucket-{bucket}-{label}"]
+            assert (boundary.prompt_tokens, boundary.decode_tokens) == (
+                prompt_tokens,
+                1,
+            )
+            assert boundary.expected_decode_profile_ids == (profile_id,)
+            assert boundary.expected_decode_bucket_limits == (spec.buckets[profile_id],)
 
 
 def test_tiny_matrix_covers_every_bucket_neighbor_and_m_plus_one() -> None:
@@ -141,20 +155,551 @@ def test_tiny_matrix_covers_every_bucket_neighbor_and_m_plus_one() -> None:
         assert {bucket - 1, bucket, bucket + 1}.issubset(lengths)
     rejected = [case for case in cases if case.expect_admission_rejection]
     assert [(case.prompt_tokens, case.decode_tokens) for case in rejected] == [(2_049, 0)]
-    assert any(
-        case.prompt_tokens == 2_040 and case.decode_tokens == 8
-        for case in cases
-    )
-    assert any(
-        case.prompt_tokens == 2_048 and case.decode_tokens == 0
-        for case in cases
-    )
+    assert any(case.prompt_tokens == 2_040 and case.decode_tokens == 8 for case in cases)
+    assert any(case.prompt_tokens == 2_048 and case.decode_tokens == 0 for case in cases)
     by_name = {case.name: case for case in cases}
-    for bucket in (128, 512):
+    for bucket in (128, 256, 512):
         assert (
             by_name[f"profile-crossing-{bucket}"].prompt_tokens,
             by_name[f"profile-crossing-{bucket}"].decode_tokens,
         ) == (bucket, 2)
+    for index, bucket in enumerate(spec.buckets[:-1]):
+        for label, prompt_tokens, profile_id in (
+            ("p-minus-1", bucket - 1, index),
+            ("p", bucket, index),
+            ("p-plus-1", bucket + 1, index + 1),
+        ):
+            boundary = by_name[f"decode-bucket-{bucket}-{label}"]
+            assert (boundary.prompt_tokens, boundary.decode_tokens) == (
+                prompt_tokens,
+                1,
+            )
+            assert boundary.expected_decode_profile_ids == (profile_id,)
+            assert boundary.expected_decode_bucket_limits == (spec.buckets[profile_id],)
+
+
+def _qualified_engine_graph_evidence(spec) -> dict:
+    num_layers = spec.num_layers
+    width = spec.kv_bytes_per_token // (
+        2 * num_layers * qualify._KV_DTYPE_BYTES[spec.kv_dtype]
+    )
+
+    def section(role: str) -> dict:
+        is_prefill = role == "prefill"
+        profile_count = 1 if is_prefill else len(spec.buckets)
+        token_profiles = (
+            [
+                {
+                    "min": [1],
+                    "opt": [spec.chunk_limit],
+                    "max": [spec.chunk_limit],
+                }
+            ]
+            if is_prefill
+            else [{"min": [1], "opt": [1], "max": [1]} for _ in spec.buckets]
+        )
+        inputs = {
+            "token_id": {
+                "shape": [-1] if is_prefill else [1],
+                "profiles": token_profiles,
+            },
+            "position_id": {
+                "shape": [-1] if is_prefill else [1],
+                "profiles": copy.deepcopy(token_profiles),
+            },
+            "history_length": {
+                "shape": [1],
+                "profiles": [{"min": [1], "opt": [1], "max": [1]} for _ in range(profile_count)],
+            },
+        }
+        outputs = {
+            "logits": {
+                "shape": [1, spec.vocab_size],
+            },
+        }
+        for layer in range(num_layers):
+            for value_name in ("k", "v"):
+                cache_profiles = (
+                    [
+                        {
+                            "min": [1, width],
+                            "opt": [spec.chunk_limit, width],
+                            "max": [spec.context_limit, width],
+                        }
+                    ]
+                    if is_prefill
+                    else [
+                        {
+                            "min": [1, width],
+                            "opt": [bucket, width],
+                            "max": [bucket, width],
+                        }
+                        for bucket in spec.buckets
+                    ]
+                )
+                inputs[f"cache_{value_name}_{layer}"] = {
+                    "shape": [-1, width],
+                    "profiles": cache_profiles,
+                }
+                outputs[f"present_{value_name}_{layer}"] = {
+                    "shape": [-1 if is_prefill else 1, width],
+                }
+        return {
+            "engine_sha256": ("a" * 64 if is_prefill else "b" * 64),
+            "num_optimization_profiles": profile_count,
+            "inputs": inputs,
+            "outputs": outputs,
+            "native_contiguous_attention_layer_indices": list(range(num_layers)),
+            "dense_attention_layers": [],
+            "cache_concat_layers": [],
+            "inspector_path": f"{role}.engine-inspector.json",
+            "inspector_size_bytes": 128,
+            "inspector_sha256": ("c" * 64 if is_prefill else "d" * 64),
+        }
+
+    return {
+        "runtime_stack": {
+            "sm": "sm103",
+            "tensorrt": "11.2.0.113",
+            "cuda_runtime": "13.3",
+            "driver": "580.105.08",
+        },
+        "model_contract": {
+            "model_context_limit": spec.context_limit,
+            "prefill_chunk_limit": spec.chunk_limit,
+            "active_kv_profile_limits": list(spec.buckets),
+            "num_layers": num_layers,
+            "vocab_size": spec.vocab_size,
+            "kv_dtype": spec.kv_dtype,
+            "kv_bytes_per_token": spec.kv_bytes_per_token,
+            "kv_width": width,
+        },
+        "engine_sections": {
+            "prefill_engine_plan": section("prefill"),
+            "engine_plan": section("decode"),
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_layers", "expected_width"),
+    (
+        ("Qwen/Qwen3-0.6B", 28, 1_024),
+        ("TinyLlama/TinyLlama-1.1B-Chat-v1.0", 22, 256),
+    ),
+)
+def test_full_model_engine_graph_gate_accepts_live_io_contract(
+    model_id: str,
+    expected_layers: int,
+    expected_width: int,
+) -> None:
+    spec = qualify.SPECS[model_id]
+    evidence = _qualified_engine_graph_evidence(spec)
+
+    result = qualify._validate_qualified_engine_graph_evidence(
+        evidence,
+        spec,
+        num_layers=spec.num_layers,
+        expected_runtime_stack=evidence["runtime_stack"],
+    )
+
+    assert result["passed"]
+    assert all(result["gates"].values())
+    assert result["runtime_stack"] == {
+        "sm": "sm103",
+        "tensorrt": "11.2.0.113",
+        "cuda_runtime": "13.3",
+        "driver": "580.105.08",
+    }
+    assert result["model_contract"] == evidence["model_contract"]
+    assert result["model_contract"]["num_layers"] == expected_layers
+    assert result["model_contract"]["kv_width"] == expected_width
+    assert result["engine_sections"]["prefill_engine_plan"]["outputs"]["logits"]["shape"] == [
+        1,
+        spec.vocab_size,
+    ]
+
+
+def test_graph_model_contract_is_derived_from_bundle_header() -> None:
+    spec = qualify.SPECS["Qwen/Qwen3-0.6B"]
+    header = {
+        "num_layers": spec.num_layers,
+        "vocab_size": spec.vocab_size,
+        "runtime_memory": {
+            "model_context_limit": spec.context_limit,
+            "prefill_chunk_limit": spec.chunk_limit,
+            "active_kv_profile_limits": list(spec.buckets),
+            "kv_dtype": spec.kv_dtype,
+            "kv_bytes_per_token": spec.kv_bytes_per_token,
+        },
+    }
+
+    assert qualify._graph_model_contract_from_bundle_header(header) == {
+        "model_context_limit": spec.context_limit,
+        "prefill_chunk_limit": spec.chunk_limit,
+        "active_kv_profile_limits": list(spec.buckets),
+        "num_layers": 28,
+        "vocab_size": 151_936,
+        "kv_dtype": "bfloat16",
+        "kv_bytes_per_token": 114_688,
+        "kv_width": 1_024,
+    }
+
+
+def test_full_model_engine_graph_gate_fails_closed_on_runtime_stack_tamper() -> None:
+    spec = qualify.SPECS["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
+    evidence = _qualified_engine_graph_evidence(spec)
+    expected_stack = copy.deepcopy(evidence["runtime_stack"])
+    evidence["runtime_stack"]["driver"] = "tampered"
+
+    with pytest.raises(RuntimeError, match="runtime stack"):
+        qualify._validate_qualified_engine_graph_evidence(
+            evidence,
+            spec,
+            num_layers=spec.num_layers,
+            expected_runtime_stack=expected_stack,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        ("missing-runtime-stack", "runtime stack"),
+        ("attention-mask-input", "forbidden attention_mask"),
+        ("missing-native-layer", "NativeContiguousAttentionV2"),
+        ("dense-attention-path", "dense attention mask/score"),
+        ("cache-concat", "full-history cache concat"),
+        ("full-history-present", "current-row output"),
+        ("same-plan", "same serialized engine identity"),
+    ),
+)
+def test_full_model_engine_graph_gate_fails_closed(
+    mutation: str,
+    error: str,
+) -> None:
+    spec = qualify.SPECS["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
+    evidence = _qualified_engine_graph_evidence(spec)
+    expected_stack = copy.deepcopy(evidence["runtime_stack"])
+    prefill = evidence["engine_sections"]["prefill_engine_plan"]
+    decode = evidence["engine_sections"]["engine_plan"]
+    if mutation == "missing-runtime-stack":
+        evidence.pop("runtime_stack")
+    elif mutation == "attention-mask-input":
+        decode["inputs"]["attention_mask"] = {
+            "shape": [1, -1],
+            "profiles": [],
+        }
+    elif mutation == "missing-native-layer":
+        decode["native_contiguous_attention_layer_indices"] = [0]
+    elif mutation == "dense-attention-path":
+        prefill["dense_attention_layers"] = ["layer.1.attn.attention_scores"]
+    elif mutation == "cache-concat":
+        decode["cache_concat_layers"] = ["layer.0.cache_concat"]
+    elif mutation == "full-history-present":
+        decode["outputs"]["present_k_0"]["shape"] = [
+            -1,
+            evidence["model_contract"]["kv_width"],
+        ]
+    elif mutation == "same-plan":
+        decode["engine_sha256"] = prefill["engine_sha256"]
+    else:  # pragma: no cover - keeps additions to the table explicit.
+        raise AssertionError(mutation)
+
+    with pytest.raises(RuntimeError, match=error):
+        qualify._validate_qualified_engine_graph_evidence(
+            evidence,
+            spec,
+            num_layers=spec.num_layers,
+            expected_runtime_stack=expected_stack,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        ("token-shape", "token_id shape"),
+        ("position-shape", "position_id shape"),
+        ("token-position-profile", "profiles are not identical"),
+        ("token-profile", "prefill profile does not cover"),
+        ("history-shape", "history_length is not a scalar"),
+        ("history-profile", "history_length profile"),
+        ("logits-row-shape", "logits shape"),
+        ("logits-vocab", "logits shape"),
+        ("cache-width", "source-bound KV width"),
+        ("present-width", "source-bound KV width"),
+        ("cache-profile-width", "does not bind bucket"),
+        ("derived-width", "KV width does not match"),
+        ("nondivisible-b", "not exactly divisible"),
+        ("qualified-b-mismatch", "model_contract mismatch"),
+        ("unknown-dtype", "unsupported KV dtype"),
+    ),
+)
+def test_full_model_engine_graph_gate_rejects_io_or_kv_geometry_mismatch(
+    mutation: str,
+    error: str,
+) -> None:
+    spec = qualify.SPECS["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
+    evidence = _qualified_engine_graph_evidence(spec)
+    expected_stack = copy.deepcopy(evidence["runtime_stack"])
+    prefill = evidence["engine_sections"]["prefill_engine_plan"]
+    decode = evidence["engine_sections"]["engine_plan"]
+    model_contract = evidence["model_contract"]
+    width = model_contract["kv_width"]
+    if mutation == "token-shape":
+        prefill["inputs"]["token_id"]["shape"] = [1]
+    elif mutation == "position-shape":
+        decode["inputs"]["position_id"]["shape"] = [-1]
+    elif mutation == "token-position-profile":
+        prefill["inputs"]["position_id"]["profiles"][0]["opt"] = [1]
+    elif mutation == "token-profile":
+        for name in ("token_id", "position_id"):
+            prefill["inputs"][name]["profiles"][0]["max"] = [spec.chunk_limit - 1]
+    elif mutation == "history-shape":
+        decode["inputs"]["history_length"]["shape"] = [-1]
+    elif mutation == "history-profile":
+        decode["inputs"]["history_length"]["profiles"][0]["max"] = [2]
+    elif mutation == "logits-row-shape":
+        prefill["outputs"]["logits"]["shape"] = [-1, spec.vocab_size]
+    elif mutation == "logits-vocab":
+        decode["outputs"]["logits"]["shape"] = [1, spec.vocab_size + 1]
+    elif mutation == "cache-width":
+        decode["inputs"]["cache_v_1"]["shape"] = [-1, width + 1]
+    elif mutation == "present-width":
+        decode["outputs"]["present_k_1"]["shape"] = [1, width + 1]
+    elif mutation == "cache-profile-width":
+        decode["inputs"]["cache_k_0"]["profiles"][0]["opt"] = [
+            spec.buckets[0],
+            width + 1,
+        ]
+    elif mutation == "derived-width":
+        model_contract["kv_width"] = width + 1
+    elif mutation == "nondivisible-b":
+        model_contract["kv_bytes_per_token"] += 1
+    elif mutation == "qualified-b-mismatch":
+        model_contract["kv_bytes_per_token"] *= 2
+        model_contract["kv_width"] *= 2
+    elif mutation == "unknown-dtype":
+        model_contract["kv_dtype"] = "int8"
+    else:  # pragma: no cover - keeps additions to the table explicit.
+        raise AssertionError(mutation)
+
+    with pytest.raises(RuntimeError, match=error):
+        qualify._validate_qualified_engine_graph_evidence(
+            evidence,
+            spec,
+            num_layers=spec.num_layers,
+            expected_runtime_stack=expected_stack,
+        )
+
+
+@pytest.fixture
+def qualification_outcome_inputs() -> dict:
+    canonical_cases = (
+        qualify.Case("runtime-case", 128, 1),
+        qualify.Case(
+            "admission-case",
+            2_049,
+            0,
+            expect_admission_rejection=True,
+        ),
+    )
+    case_reports = (
+        {
+            "name": "runtime-case",
+            "execution_passed": True,
+            "passed": True,
+            "parity": {
+                "status": "passed",
+                "passed": True,
+            },
+        },
+        {
+            "name": "admission-case",
+            "execution_passed": True,
+            "passed": True,
+            "parity": {
+                "status": "not_applicable",
+            },
+        },
+    )
+    clean_source = {
+        "git_head": "a" * 40,
+        "git_dirty": False,
+        "source_state_sha256": "b" * 64,
+        "exact_head_gate_satisfied": True,
+    }
+    return {
+        "canonical_cases": canonical_cases,
+        "selected_cases": canonical_cases,
+        "case_reports": case_reports,
+        "skip_hf": False,
+        "case_filter_used": False,
+        "source_state_pre": clean_source,
+        "source_state_post": copy.deepcopy(clean_source),
+        "context_memory_envelope": {
+            "status": "passed",
+            "passed": True,
+            "coverage_required": True,
+            "gates": {
+                "all_points_within_o_c_times_a_envelope": True,
+                "all_points_below_materialized_score_bound": True,
+                "coverage": {
+                    "has_prefill_and_decode": True,
+                    "reaches_model_context_limit": True,
+                    "has_at_least_three_active_lengths": True,
+                },
+            },
+        },
+        "qualified_engine_graph": {
+            "passed": True,
+            "runtime_stack": {
+                "sm": "sm103",
+                "tensorrt": "11.2.0.113",
+            },
+            "gates": {
+                "actual_split_engine_sections": True,
+                "native_segmented_attention_covers_full_model": True,
+            },
+        },
+    }
+
+
+def test_qualification_outcome_promotes_only_full_green_matrix(
+    qualification_outcome_inputs: dict,
+) -> None:
+    result = qualify.evaluate_qualification_outcome(**qualification_outcome_inputs)
+
+    assert result["passed"]
+    assert result["diagnostic_passed"]
+    assert result["execution_passed"]
+    assert result["status"] == "passed"
+    assert all(result["qualification_gates"].values())
+    assert result["qualification_blockers"] == []
+
+
+def test_qualification_outcome_marks_skip_hf_as_diagnostic_only(
+    qualification_outcome_inputs: dict,
+) -> None:
+    inputs = copy.deepcopy(qualification_outcome_inputs)
+    inputs["skip_hf"] = True
+    inputs["case_reports"][0]["parity"] = {
+        "status": "not_run",
+        "reason": "--skip-hf was requested",
+    }
+    # A stale case-level flag must never promote a skipped parity run.
+    inputs["case_reports"][0]["passed"] = True
+
+    result = qualify.evaluate_qualification_outcome(**inputs)
+
+    assert not result["passed"]
+    assert result["diagnostic_passed"]
+    assert result["status"] == "diagnostic_passed"
+    assert not result["qualification_gates"]["hf_parity_executed_and_passed"]
+    assert result["parity_execution"]["runtime-case"] == "not_run"
+
+
+def test_qualification_outcome_marks_any_case_filter_as_diagnostic_only(
+    qualification_outcome_inputs: dict,
+) -> None:
+    inputs = copy.deepcopy(qualification_outcome_inputs)
+    # Even an explicit filter that happens to name the complete matrix is not
+    # a canonical unfiltered qualification invocation.
+    inputs["case_filter_used"] = True
+
+    result = qualify.evaluate_qualification_outcome(**inputs)
+
+    assert result["qualification_gates"]["canonical_matrix_complete"]
+    assert not result["qualification_gates"]["case_filter_not_used"]
+    assert not result["passed"]
+    assert result["diagnostic_passed"]
+    assert result["status"] == "diagnostic_passed"
+
+
+def test_qualification_outcome_requires_full_context_memory_coverage(
+    qualification_outcome_inputs: dict,
+) -> None:
+    inputs = copy.deepcopy(qualification_outcome_inputs)
+    envelope = inputs["context_memory_envelope"]
+    envelope["coverage_required"] = False
+    envelope["gates"]["coverage"]["reaches_model_context_limit"] = False
+
+    result = qualify.evaluate_qualification_outcome(**inputs)
+
+    assert not result["qualification_gates"]["full_context_memory_coverage"]
+    assert not result["passed"]
+    assert result["diagnostic_passed"]
+    assert result["status"] == "diagnostic_passed"
+
+
+def test_qualification_outcome_marks_dirty_unchanged_source_diagnostic_only(
+    qualification_outcome_inputs: dict,
+) -> None:
+    inputs = copy.deepcopy(qualification_outcome_inputs)
+    for snapshot in (
+        inputs["source_state_pre"],
+        inputs["source_state_post"],
+    ):
+        snapshot["git_dirty"] = True
+        snapshot["exact_head_gate_satisfied"] = False
+
+    result = qualify.evaluate_qualification_outcome(**inputs)
+
+    assert result["qualification_gates"]["source_state_unchanged"]
+    assert not result["qualification_gates"]["source_clean_exact_head"]
+    assert not result["passed"]
+    assert result["diagnostic_passed"]
+    assert result["status"] == "diagnostic_passed"
+
+
+def test_qualification_outcome_rejects_source_drift(
+    qualification_outcome_inputs: dict,
+) -> None:
+    inputs = copy.deepcopy(qualification_outcome_inputs)
+    inputs["source_state_post"]["source_state_sha256"] = "c" * 64
+
+    result = qualify.evaluate_qualification_outcome(**inputs)
+
+    assert not result["qualification_gates"]["source_state_unchanged"]
+    assert not result["passed"]
+    assert not result["diagnostic_passed"]
+    assert result["status"] == "failed"
+
+
+def test_qualification_outcome_rejects_false_graph_gate(
+    qualification_outcome_inputs: dict,
+) -> None:
+    inputs = copy.deepcopy(qualification_outcome_inputs)
+    inputs["qualified_engine_graph"]["passed"] = False
+    inputs["qualified_engine_graph"]["gates"]["native_segmented_attention_covers_full_model"] = (
+        False
+    )
+
+    result = qualify.evaluate_qualification_outcome(**inputs)
+
+    assert not result["qualification_gates"]["qualified_engine_graph_passed"]
+    assert not result["passed"]
+    assert not result["diagnostic_passed"]
+    assert result["status"] == "failed"
+
+
+def test_inspector_layer_classification_ignores_container_text() -> None:
+    inspector = {
+        "Metadata": "container mentions concat cache_k_0 attention_scores",
+        "Layers": [
+            {
+                "Name": "layer.0.cache_concat",
+                "LayerType": "Concatenation",
+                "Inputs": [{"Name": "cache_k_0"}],
+            },
+            {
+                "Name": "layer.1.attn.attention_scores",
+                "LayerType": "MatrixMultiply",
+            },
+        ],
+    }
+
+    assert qualify._cache_concat_layers(inspector) == ["layer.0.cache_concat"]
+    assert qualify._dense_attention_layers(inspector) == ["layer.1.attn.attention_scores"]
 
 
 def test_c_div_2_variant_may_change_only_internal_chunk_policy() -> None:
@@ -170,8 +715,7 @@ def test_c_div_2_variant_may_change_only_internal_chunk_policy() -> None:
             "tensorrt": "11.2.0.113",
             "cuda_runtime": "13.3",
             "cudnn_backend": "9.20.0",
-            "cudnn_frontend_revision":
-                "7b9b711c22b6823e87150213ecd8449260db8610",
+            "cudnn_frontend_revision": "7b9b711c22b6823e87150213ecd8449260db8610",
             "nvrtc": "13.3",
             "driver": "580.105.08",
         },
@@ -187,18 +731,13 @@ def test_c_div_2_variant_may_change_only_internal_chunk_policy() -> None:
     base = {"vocab_size": 151_936, "runtime_memory": contract}
     variant_contract = dict(contract)
     variant_contract["prefill_chunk_limit"] = spec.chunk_limit // 2
-    variant_contract["active_kv_profile_limits"] = [
-        128, 512, spec.chunk_limit // 2, spec.chunk_limit,
-        8_192, 32_768, spec.context_limit,
-    ]
+    variant_contract["active_kv_profile_limits"] = list(spec.buckets)
     variant = {
         "vocab_size": base["vocab_size"],
         "runtime_memory": variant_contract,
     }
 
-    assert qualify._validate_chunk_variant(
-        base, variant, spec
-    ) == spec.chunk_limit // 2
+    assert qualify._validate_chunk_variant(base, variant, spec) == spec.chunk_limit // 2
 
     variant_contract["qualified_model_revision"] = "3" * 40
     with pytest.raises(ValueError, match="changes qualified model facts"):
@@ -218,8 +757,7 @@ def _qwen_chunk_variant_headers() -> tuple[dict, dict]:
             "tensorrt": "11.2.0.113",
             "cuda_runtime": "13.3",
             "cudnn_backend": "9.20.0",
-            "cudnn_frontend_revision":
-                "7b9b711c22b6823e87150213ecd8449260db8610",
+            "cudnn_frontend_revision": "7b9b711c22b6823e87150213ecd8449260db8610",
             "nvrtc": "13.3",
             "driver": "580.105.08",
         },
@@ -234,9 +772,7 @@ def _qwen_chunk_variant_headers() -> tuple[dict, dict]:
     }
     variant_contract = dict(contract)
     variant_contract["prefill_chunk_limit"] = spec.chunk_limit // 2
-    variant_contract["active_kv_profile_limits"] = sorted(
-        {*spec.buckets, spec.chunk_limit // 2}
-    )
+    variant_contract["active_kv_profile_limits"] = sorted({*spec.buckets, spec.chunk_limit // 2})
     return (
         {"vocab_size": 151_936, "runtime_memory": contract},
         {"vocab_size": 151_936, "runtime_memory": variant_contract},
@@ -261,9 +797,7 @@ def _write_chunk_variant_receipt(
     bundle.write_bytes(b"variant-bundle")
     timing = tmp_path / "timing.json"
     timing.write_text('{"schema_version": 1}\n', encoding="utf-8")
-    producer_path = (
-        REPO_ROOT / "tools" / "build_native_dynamic_memory_chunk_variant.py"
-    )
+    producer_path = REPO_ROOT / "tools" / "build_native_dynamic_memory_chunk_variant.py"
     source_state = {
         "git_head": "a" * 40,
         "source_state_sha256": source_sha,
@@ -280,17 +814,12 @@ def _write_chunk_variant_receipt(
             "value": qualify.DEVELOPER_CHUNK_VARIANT_VALUE,
         },
         "builder_entrypoint": (
-            "tensorrt_model_connect.engine_builder."
-            "_build_native_impl_qualified"
+            "tensorrt_model_connect.engine_builder._build_native_impl_qualified"
         ),
         "qualified_model": {
             "model_id": spec.model_id,
-            "revision": variant["runtime_memory"][
-                "qualified_model_revision"
-            ],
-            "config_sha256": variant["runtime_memory"][
-                "qualified_config_sha256"
-            ],
+            "revision": variant["runtime_memory"]["qualified_model_revision"],
+            "config_sha256": variant["runtime_memory"]["qualified_config_sha256"],
             "target": variant["runtime_memory"]["qualified_target"],
             "model_dir": str(tmp_path / "model"),
         },
@@ -300,9 +829,7 @@ def _write_chunk_variant_receipt(
         },
         "variant_policy": {
             "prefill_chunk_limit": spec.chunk_limit // 2,
-            "active_kv_profile_limits": sorted(
-                {*spec.buckets, spec.chunk_limit // 2}
-            ),
+            "active_kv_profile_limits": sorted({*spec.buckets, spec.chunk_limit // 2}),
         },
         "bundle": _file_identity(bundle),
         "build_timing": _file_identity(timing),
@@ -322,9 +849,7 @@ def _write_chunk_variant_receipt(
 def test_chunk_variant_qualification_consumes_source_bound_build_receipt(
     tmp_path: Path,
 ) -> None:
-    receipt, bundle, base, variant, source_state = (
-        _write_chunk_variant_receipt(tmp_path)
-    )
+    receipt, bundle, base, variant, source_state = _write_chunk_variant_receipt(tmp_path)
 
     validated = qualify._validate_chunk_variant_build_receipt(
         receipt_path=receipt,
@@ -337,17 +862,13 @@ def test_chunk_variant_qualification_consumes_source_bound_build_receipt(
 
     assert validated["sha256"] == qualify._sha256(receipt)
     assert validated["bundle"]["sha256"] == qualify._sha256(bundle)
-    assert validated["source_state_sha256"] == source_state[
-        "source_state_sha256"
-    ]
+    assert validated["source_state_sha256"] == source_state["source_state_sha256"]
 
 
 def test_chunk_variant_receipt_fails_closed_on_source_or_bundle_drift(
     tmp_path: Path,
 ) -> None:
-    receipt, bundle, base, variant, source_state = (
-        _write_chunk_variant_receipt(tmp_path)
-    )
+    receipt, bundle, base, variant, source_state = _write_chunk_variant_receipt(tmp_path)
     changed_source = dict(source_state)
     changed_source["source_state_sha256"] = "c" * 64
 
@@ -384,12 +905,7 @@ def _hf_contract(*, revision: str, config_sha256: str) -> dict:
 def test_hf_reference_rejects_wrong_snapshot_revision(tmp_path: Path) -> None:
     config = b'{"model_type":"llama"}\n'
     expected_revision = "a" * 40
-    snapshot = (
-        tmp_path
-        / "models--TinyLlama--TinyLlama-1.1B-Chat-v1.0"
-        / "snapshots"
-        / ("b" * 40)
-    )
+    snapshot = tmp_path / "models--TinyLlama--TinyLlama-1.1B-Chat-v1.0" / "snapshots" / ("b" * 40)
     snapshot.mkdir(parents=True)
     (snapshot / "config.json").write_bytes(config)
     contract = _hf_contract(
@@ -398,32 +914,23 @@ def test_hf_reference_rejects_wrong_snapshot_revision(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ValueError, match="exact qualified cache snapshot"):
-        qualify.verify_hf_reference(
-            str(snapshot), contract, remote_revision=None
-        )
+        qualify.verify_hf_reference(str(snapshot), contract, remote_revision=None)
 
 
 def test_hf_reference_rejects_wrong_config_fingerprint(tmp_path: Path) -> None:
     expected_revision = "a" * 40
     snapshot = (
-        tmp_path
-        / "models--TinyLlama--TinyLlama-1.1B-Chat-v1.0"
-        / "snapshots"
-        / expected_revision
+        tmp_path / "models--TinyLlama--TinyLlama-1.1B-Chat-v1.0" / "snapshots" / expected_revision
     )
     snapshot.mkdir(parents=True)
-    (snapshot / "config.json").write_text(
-        '{"model_type":"tampered"}\n', encoding="utf-8"
-    )
+    (snapshot / "config.json").write_text('{"model_type":"tampered"}\n', encoding="utf-8")
     contract = _hf_contract(
         revision=expected_revision,
         config_sha256=hashlib.sha256(b'{"model_type":"llama"}\n').hexdigest(),
     )
 
     with pytest.raises(ValueError, match="config fingerprint mismatch"):
-        qualify.verify_hf_reference(
-            str(snapshot), contract, remote_revision=None
-        )
+        qualify.verify_hf_reference(str(snapshot), contract, remote_revision=None)
 
 
 def test_remote_hf_reference_requires_exact_immutable_revision() -> None:
@@ -444,9 +951,7 @@ def test_logits_artifact_reader_checks_version_shape_and_payload(tmp_path: Path)
     path = tmp_path / "logits.bin"
     values = np.arange(12, dtype=np.float32).reshape(3, 4)
     path.write_bytes(
-        qualify.LOGITS_HEADER.pack(
-            qualify.LOGITS_MAGIC, 1, 1, values.shape[0], values.shape[1]
-        )
+        qualify.LOGITS_HEADER.pack(qualify.LOGITS_MAGIC, 1, 1, values.shape[0], values.shape[1])
         + values.astype("<f4").tobytes()
     )
 
@@ -582,15 +1087,23 @@ def _sampled_peak_receipt(context_bytes: int = 4096) -> dict:
     }
 
 
+def _plan_id(role: str) -> str:
+    if role == "prefill":
+        return "prefill_engine_plan@engine=0x1000"
+    if role == "decode":
+        return "engine_plan@engine=0x2000"
+    raise ValueError(role)
+
+
 def test_trace_validation_requires_exact_launch_formula_and_allocation_id() -> None:
     spec = qualify.SPECS["Qwen/Qwen3-0.6B"]
-    case = qualify.Case("c-plus-1", 2_049, 0)
+    case = qualify.Case("c-plus-1", 1_025, 0)
     trace = {
-        "prompt_tokens": 2_049,
-        "prefill_chunk_limit": 2_048,
+        "prompt_tokens": 1_025,
+        "prefill_chunk_limit": 1_024,
         "prefill_launches": 2,
         "decode_launches": 0,
-        "final_kv_position": 2_049,
+        "final_kv_position": 1_025,
         "effective_request_limit": 40_960,
         "runtime_memory_receipt": {
             **_sampled_peak_receipt(),
@@ -602,34 +1115,34 @@ def test_trace_validation_requires_exact_launch_formula_and_allocation_id() -> N
             {
                 "invocation_index": 0,
                 "role": "prefill",
-                "plan_id": "engine_plan:prefill",
+                "plan_id": _plan_id("prefill"),
                 "profile_id": 6,
-                "chunk_range": [0, 2_048],
+                "chunk_range": [0, 1_024],
                 "launch_count": 1,
                 "kv_allocation_id": 7,
                 "kv_base_address": 4096,
                 "H": 0,
-                "A": 2_048,
+                "A": 1_024,
                 "T": 1,
                 "R": 40_960,
                 "context_device_memory_bytes": 2048,
                 "cuda_graph_status": "uncaptured",
                 "kv_device_to_host_bytes": 0,
-                "kv_append_bytes": 2_048 * 114_688,
+                "kv_append_bytes": 1_024 * 114_688,
                 "full_history_device_to_device_bytes": 0,
             },
             {
                 "invocation_index": 1,
                 "role": "prefill",
-                "plan_id": "engine_plan:prefill",
+                "plan_id": _plan_id("prefill"),
                 "profile_id": 6,
-                "chunk_range": [2_048, 2_049],
+                "chunk_range": [1_024, 1_025],
                 "launch_count": 1,
                 "kv_allocation_id": 7,
                 "kv_base_address": 4096,
-                "H": 2_048,
-                "A": 2_049,
-                "T": 2_048,
+                "H": 1_024,
+                "A": 1_025,
+                "T": 1_024,
                 "R": 40_960,
                 "context_device_memory_bytes": 4096,
                 "cuda_graph_status": "uncaptured",
@@ -643,9 +1156,7 @@ def test_trace_validation_requires_exact_launch_formula_and_allocation_id() -> N
     qualify._validate_trace(case, spec, trace, np.zeros((1, 8), dtype=np.float32))
     trace["prefill_launches"] = 1
     with pytest.raises(RuntimeError, match="prefill_launches"):
-        qualify._validate_trace(
-            case, spec, trace, np.zeros((1, 8), dtype=np.float32)
-        )
+        qualify._validate_trace(case, spec, trace, np.zeros((1, 8), dtype=np.float32))
 
 
 def test_trace_validation_rejects_full_history_copy_traffic() -> None:
@@ -668,7 +1179,7 @@ def test_trace_validation_rejects_full_history_copy_traffic() -> None:
             {
                 "invocation_index": 0,
                 "role": "prefill",
-                "plan_id": "engine_plan:prefill",
+                "plan_id": _plan_id("prefill"),
                 "profile_id": 3,
                 "chunk_range": [0, 1],
                 "launch_count": 1,
@@ -693,7 +1204,13 @@ def test_trace_validation_rejects_full_history_copy_traffic() -> None:
 
 def test_profile_crossing_trace_switches_decode_profile_without_reprefill() -> None:
     spec = qualify.SPECS["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
-    case = qualify.Case("profile-crossing-128", 128, 2)
+    case = qualify.Case(
+        "profile-crossing-128",
+        128,
+        2,
+        expected_decode_profile_ids=(0, 1),
+        expected_decode_bucket_limits=(128, 256),
+    )
     b = 22_528
     common = {
         "launch_count": 1,
@@ -710,7 +1227,7 @@ def test_profile_crossing_trace_switches_decode_profile_without_reprefill() -> N
             **common,
             "invocation_index": 0,
             "role": "prefill",
-            "plan_id": "engine_plan:prefill",
+            "plan_id": _plan_id("prefill"),
             "profile_id": 3,
             "chunk_range": [0, 128],
             "H": 0,
@@ -722,7 +1239,7 @@ def test_profile_crossing_trace_switches_decode_profile_without_reprefill() -> N
             **common,
             "invocation_index": 1,
             "role": "decode",
-            "plan_id": "engine_plan:decode",
+            "plan_id": _plan_id("decode"),
             "profile_id": 0,
             "chunk_range": [128, 129],
             "H": 128,
@@ -734,12 +1251,12 @@ def test_profile_crossing_trace_switches_decode_profile_without_reprefill() -> N
             **common,
             "invocation_index": 2,
             "role": "decode",
-            "plan_id": "engine_plan:decode",
+            "plan_id": _plan_id("decode"),
             "profile_id": 1,
             "chunk_range": [129, 130],
             "H": 129,
             "A": 130,
-            "T": 512,
+            "T": 256,
             "kv_append_bytes": b,
         },
     ]
@@ -783,14 +1300,35 @@ def test_profile_crossing_trace_switches_decode_profile_without_reprefill() -> N
             "Sq": 1,
             "H": 129,
             "A": 130,
-            "T": 512,
+            "T": 256,
             "R": 2_048,
             "context_device_memory_bytes": 2048,
         },
     ]
 
     invocations[-1]["profile_id"] = 0
-    with pytest.raises(RuntimeError, match="profile did not switch"):
+    with pytest.raises(RuntimeError, match="decode profiles"):
+        qualify._validate_trace(case, spec, trace, np.zeros((3, 8), dtype=np.float32))
+    invocations[-1]["profile_id"] = 1
+
+    invocations[0]["plan_id"] = "engine_plan:prefill"
+    with pytest.raises(RuntimeError, match="invalid prefill plan identity"):
+        qualify._validate_trace(case, spec, trace, np.zeros((3, 8), dtype=np.float32))
+    invocations[0]["plan_id"] = _plan_id("prefill")
+
+    invocations[0]["plan_id"] = "prefill_engine_plan@engine=0x0"
+    with pytest.raises(RuntimeError, match="invalid prefill plan identity"):
+        qualify._validate_trace(case, spec, trace, np.zeros((3, 8), dtype=np.float32))
+    invocations[0]["plan_id"] = _plan_id("prefill")
+
+    invocations[-1]["plan_id"] = "engine_plan@engine=0x3000"
+    with pytest.raises(RuntimeError, match="share one engine identity"):
+        qualify._validate_trace(case, spec, trace, np.zeros((3, 8), dtype=np.float32))
+    invocations[-1]["plan_id"] = _plan_id("decode")
+
+    for invocation in invocations[1:]:
+        invocation["plan_id"] = "engine_plan@engine=0x1000"
+    with pytest.raises(RuntimeError, match="same engine identity"):
         qualify._validate_trace(case, spec, trace, np.zeros((3, 8), dtype=np.float32))
 
 
@@ -831,12 +1369,7 @@ def test_context_memory_envelope_accepts_linear_full_context_sweep() -> None:
     active_tokens = (128, 8_192, spec.context_limit)
     base_bytes = 2 * 1024 * 1024
     context_bytes = tuple(
-        base_bytes
-        + (
-            spec.chunk_limit
-            * (active - active_tokens[0])
-            * spec.num_query_heads
-        )
+        base_bytes + (spec.chunk_limit * (active - active_tokens[0]) * spec.num_query_heads)
         for active in active_tokens
     )
 
@@ -885,10 +1418,7 @@ def test_context_memory_envelope_accepts_tinyllama_workspace_scaling() -> None:
 def test_context_memory_envelope_rejects_quadratic_growth() -> None:
     spec = qualify.SPECS["Qwen/Qwen3-0.6B"]
     active_tokens = (128, 8_192, spec.context_limit)
-    quadratic_bytes = tuple(
-        spec.num_query_heads * active * active * 2
-        for active in active_tokens
-    )
+    quadratic_bytes = tuple(spec.num_query_heads * active * active * 2 for active in active_tokens)
 
     result = qualify.validate_context_memory_envelope(
         spec,
@@ -949,7 +1479,13 @@ def test_context_memory_envelope_allows_partial_case_qualification() -> None:
 
 def test_trace_validation_rejects_kv_base_change_across_bucket() -> None:
     spec = qualify.SPECS["TinyLlama/TinyLlama-1.1B-Chat-v1.0"]
-    case = qualify.Case("profile-crossing-128", 128, 2)
+    case = qualify.Case(
+        "profile-crossing-128",
+        128,
+        2,
+        expected_decode_profile_ids=(0, 1),
+        expected_decode_bucket_limits=(128, 256),
+    )
     b = 22_528
     receipt = {
         **_sampled_peak_receipt(),
@@ -962,14 +1498,14 @@ def test_trace_validation_rejects_kv_base_change_across_bucket() -> None:
         (
             ("prefill", 0, 128, 1),
             ("decode", 128, 129, 128),
-            ("decode", 129, 130, 512),
+            ("decode", 129, 130, 256),
         )
     ):
         invocations.append(
             {
                 "invocation_index": index,
                 "role": role,
-                "plan_id": f"engine_plan:{role}",
+                "plan_id": _plan_id(role),
                 "profile_id": index,
                 "chunk_range": [begin, end],
                 "launch_count": 1,
@@ -998,9 +1534,7 @@ def test_trace_validation_rejects_kv_base_change_across_bucket() -> None:
     }
 
     with pytest.raises(RuntimeError, match="replaced the KV base address"):
-        qualify._validate_trace(
-            case, spec, trace, np.zeros((3, 8), dtype=np.float32)
-        )
+        qualify._validate_trace(case, spec, trace, np.zeros((3, 8), dtype=np.float32))
 
 
 def test_peak_reconciliation_uses_independent_nvml_process_samples() -> None:
@@ -1017,9 +1551,7 @@ def test_peak_reconciliation_uses_independent_nvml_process_samples() -> None:
             {
                 "runtime_phase_memory_samples": [
                     {
-                        "phase": (
-                            "before runtime-memory Qwen engine deserialization"
-                        ),
+                        "phase": ("before runtime-memory Qwen engine deserialization"),
                         "free_bytes": 800_000_000,
                         "total_bytes": 1_000_000_000,
                         "process_used_bytes": 100_000_000,
@@ -1037,9 +1569,7 @@ def test_peak_reconciliation_uses_independent_nvml_process_samples() -> None:
                         "process_used_bytes": 198_000_000,
                     },
                     {
-                        "phase": (
-                            "after successful runtime-memory request completion"
-                        ),
+                        "phase": ("after successful runtime-memory request completion"),
                         "free_bytes": 705_000_000,
                         "total_bytes": 1_000_000_000,
                         "process_used_bytes": 190_000_000,
@@ -1061,9 +1591,7 @@ def test_peak_reconciliation_uses_independent_nvml_process_samples() -> None:
     with pytest.raises(RuntimeError, match="does not match synchronized"):
         qualify.reconcile_device_peak_with_nvml(trace)
 
-    trace["load_cycles"][0]["runtime_phase_memory_samples"][2][
-        "free_bytes"
-    ] = 600_000_000
+    trace["load_cycles"][0]["runtime_phase_memory_samples"][2]["free_bytes"] = 600_000_000
     with pytest.raises(RuntimeError, match="do not reconcile"):
         qualify.reconcile_device_peak_with_nvml(trace)
 

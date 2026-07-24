@@ -1,7 +1,7 @@
 # Native Runtime Dynamic Sequence Length and KV Memory Implementation Plan
 
-Date: 2026-07-23
-Status: Implementation plan for review; native prototype exists, qualification is incomplete
+Date: 2026-07-24
+Status: Implementation candidate; promotion remains gated by source-bound qualification and nightlies
 Scope: Model Connect native runtime only
 
 ## 中文概要
@@ -307,11 +307,12 @@ choice:
     },
     "native_kv_plugin_abi": 2,
     "model_context_limit": 40960,
-    "prefill_chunk_limit": 2048,
+    "prefill_chunk_limit": 1024,
     "kv_layout": "contiguous_runtime_v1",
     "kv_dtype": "bfloat16",
     "kv_bytes_per_token": 114688,
-    "active_kv_profile_limits": [128, 512, 2048, 8192, 32768, 40960],
+    "active_kv_profile_limits":
+      [128, 256, 512, 1024, 2048, 8192, 32768, 40960],
     "runtime_owned": true
   }
 }
@@ -324,8 +325,8 @@ Initial internal qualification candidates:
 
 | Model | `M` | Initial `C` | `B` | Full one-sequence KV at `M` | Active-KV profile candidates |
 |---|---:|---:|---:|---:|---|
-| Qwen3-0.6B | 40,960 | 2,048 | 114,688 bytes/token | 4,697,620,480 bytes (4.375 GiB) | 128, 512, 2,048, 8,192, 32,768, 40,960 |
-| TinyLlama-1.1B | 2,048 | 512 | 22,528 bytes/token | 46,137,344 bytes (44 MiB) | 128, 512, 2,048 |
+| Qwen3-0.6B | 40,960 | 1,024 | 114,688 bytes/token | 4,697,620,480 bytes (4.375 GiB) | 128, 256, 512, 1,024, 2,048, 8,192, 32,768, 40,960 |
+| TinyLlama-1.1B | 2,048 | 512 | 22,528 bytes/token | 46,137,344 bytes (44 MiB) | 128, 256, 512, 2,048 |
 
 The exact byte values are recomputed from the resolved model config and engine
 bindings; the table records the two pinned qualification candidates rather
@@ -333,6 +334,15 @@ than a family-wide constant. The chunk and bucket values are family-owned
 performance choices, not public knobs. Qualification may remove a bucket if
 it increases engine size/build time without a measurable benefit, but it may
 not reduce `M`.
+
+The revised Qwen candidate uses `C=1,024`. A clean `C=2,048` qualification
+run exposed a deterministic BF16 near-tie at the 2,048-token boundary, while
+the independently built `C/2=1,024` path retained the numerical gates and
+selected the HF top token on the same prefix. The 256-token history bucket is
+also present for both models so a medium prompt does not jump directly from
+`T=128` to `T=512`. Neither change is user-visible or reduces `M`; both must
+still pass the complete fresh-build correctness, plan-size, and performance
+matrix before the candidate is promoted.
 
 The TensorRT profile envelope uses:
 
@@ -931,21 +941,25 @@ in Section 12.
 
 The former `Sq=1` blocker is resolved in the component implementation by
 replacing separate max/sum-exp optional outputs with the standard cuDNN LSE
-statistics path. Cold private-cache plugin execution now reaches Qwen
-`T=40,960, H=40,959, Sq=1` without a compilation failure. The same source
-produces exact dynamic/static greedy tokens for both short cases, passes the
-two-model HF numerical/token gates, and the latest sequential diagnostic
-measured all four short/medium dynamic decode comparisons above 95% of the
-static split baseline.
+statistics path. Cold private-cache plugin execution reaches Qwen
+`T=40,960, H=40,959, Sq=1` without a compilation failure.
 
-This source is still not release-qualified. Those performance runs reused
-older bundles with the current plugin DSO, and one TinyLlama parity receipt
-observed concurrent source drift. Before either model is promoted, freeze one
-source snapshot, rebuild both dynamic bundles and both exact-head static
-baselines from it, then rerun deterministic cold/warm and cross-process token
-parity, full-context boundary tests, memory receipts, and source-bound
-performance receipts. Old bundle receipts remain diagnostic evidence only;
-they do not qualify a different source state.
+The earlier clean `c68729b8` snapshot remains historical evidence only:
+TinyLlama passed its exact-head matrix, while Qwen exposed one deterministic
+BF16 near-tie at the old `C=2,048` boundary and both models exposed concrete
+split-performance regressions. The revised Qwen `C=1,024` candidate and the
+256-token history buckets fix those cases without changing thresholds.
+Dirty-snapshot diagnostics now pass the complete Qwen and TinyLlama
+correctness matrices; short/medium decode ratios are at least 100% of their
+static baselines, and the measured-pressure Qwen run resolves a requested
+8,192-token target from actual NVML/CUDA observations. Those runs still do not
+promote the candidate because their source state is dirty.
+
+One final clean HEAD must therefore regenerate both dynamic bundles, both
+exact-head static baselines, both `C/2` variants, every
+correctness/memory/soak/surface/performance receipt, and the v2
+process-isolation aggregates. Older or dirty receipts remain diagnostic
+evidence only; they do not qualify a different source state.
 
 ## 7. File-level implementation plan
 
@@ -1732,6 +1746,16 @@ post-KV-allocation and successful-request-completion boundaries; the
 device-wide peak reconstructed from those synchronized rows must equal the
 receipt before the CUDA/NVML tolerance is evaluated.
 
+For MEM-07 request-completion headroom, the calibration guard remains
+conservative: it uses the maximum of the synchronized device-wide free-memory
+delta and the current-process NVML delta. The constrained request's hard
+ownership gate, however, compares current-process NVML growth against the
+calibrated current-process growth plus the stated tolerance. A simultaneous
+device-wide delta that is not present in the current process is recorded
+explicitly as external pressure and is not attributed to the pipeline. The
+receipt must include both deltas, their signed difference, and the guard and
+hard-gate bases; omitted attribution fields fail closed.
+
 ### 9.4 Split execution tests
 
 | ID | Required proof |
@@ -1940,7 +1964,7 @@ Example successful load:
 
 ```json
 [trtmc.memory] {"policy":"auto","policy_fraction":0.90,
-"model_context_limit":40960,"prefill_chunk_limit":2048,
+"model_context_limit":40960,"prefill_chunk_limit":1024,
 "post_load_free_bytes":292367106048,"safety_reserve_bytes":67108864,
 "kv_bytes_per_token":114688,"kv_budget_bytes":262798206566,
 "runtime_kv_capacity_tokens":40960,"kv_reserved_bytes":4697620480,
@@ -2053,24 +2077,17 @@ negative proofs, ABI/DSO compatibility, exact long-context qualification, soak
 and provenance tooling were made release gates. Do not use that estimate to
 describe the review snapshot.
 
-Current dirty-snapshot inventory against `HEAD`, before generated receipts and
-excluding no source files:
+Current candidate inventory against `github/main`, before generated receipts:
 
-| Area | Files | Added | Deleted | Churn |
+| State | Files | Added | Deleted | Churn |
 |---|---:|---:|---:|---:|
-| C++ runtime and API | 43 | 7,304 | 304 | 7,608 |
-| Common TensorRT plugin | 11 | 2,173 | 0 | 2,173 |
-| Python product path | 15 | 2,149 | 192 | 2,341 |
-| Build and packaging | 3 | 257 | 1 | 258 |
-| Qualification tools | 8 | 4,372 | 4 | 4,376 |
-| Tests | 46 | 10,395 | 113 | 10,508 |
-| Docs, including this plan/prototype report | 4 | 2,465 | 4 | 2,469 |
-| Total | 130 | 29,115 | 618 | 29,733 |
+| Tracked diff | 145 | 43,551 | 687 | 44,238 |
+| Non-ignored untracked source | 9 | 1,397 | 0 | 1,397 |
+| Total review surface | 154 | 44,948 | 687 | 45,635 |
 
-These numbers include staged, unstaged, and non-ignored untracked source
-because omitting any of those would understate the actual review surface. They
-exclude generated engine plans and hardware receipts under the ignored
-artifact root.
+The final numbers include all tracked, staged, unstaged, and non-ignored
+untracked source. They exclude generated engine plans and hardware receipts
+under the ignored artifact root.
 
 This is not acceptable as one publishable PR. Section 12 is therefore a hard
 land-order, not a suggestion. Before opening PR 1, move each phase to its own
@@ -2141,9 +2158,9 @@ general feature:
 - all EdgeLLM adapter/runtime/test trees remain outside the diff.
 
 One frozen release-candidate source state must produce all of these green
-baselines. The current prototype has not yet passed the final source-bound
-performance line described above. The receipt stores the command, collected
-test manifest, count, and output for each command:
+baselines. A dirty diagnostic, even when every numerical and timing threshold
+passes, cannot satisfy this requirement. The receipt stores the command,
+collected test manifest, count, and output for each command:
 
 ```bash
 python tools/capture_dynamic_memory_test_manifest.py \
@@ -2169,9 +2186,16 @@ ctest --test-dir build-dynkv -L dynamic_memory --output-on-failure
 python -m pytest --collect-only -q -m dynamic_memory \
   tests/builder tests/tools tests/e2e/test_native_dynamic_memory_graph.py
 python -m pytest -q -m dynamic_memory \
-  tests/builder tests/tools tests/e2e/test_native_dynamic_memory_graph.py
-python -m pytest -q tests/e2e/test_native_dynamic_memory_graph.py
+  tests/builder tests/tools tests/e2e/test_native_dynamic_memory_graph.py \
+  --junitxml=<receipt-dir>/pytest_dynamic_memory.junit.xml
+python -m pytest -q tests/e2e/test_native_dynamic_memory_graph.py \
+  --junitxml=<receipt-dir>/pytest_graph_e2e.junit.xml
 ```
+
+The producer matches every collected `dynamic_memory` node ID to its JUnit
+outcome and fails on a missing, failed, errored, or skipped selected test. A
+module-level collection skip outside that selected manifest is retained as a
+diagnostic but cannot substitute for, or reduce, the selected test count.
 
 The same snapshot must then run the live no-flag TinyLlama build/run through
 the complete target guard and fresh source-bound no-flag build, correctness,

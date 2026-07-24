@@ -72,6 +72,9 @@ class LlamaKvCache : public LlamaInferenceState {
     std::uint64_t runtime_kv_base_address() const override {
         return runtime_state_ ? runtime_state_->allocation_base_address() : 0;
     }
+    std::uint64_t runtime_kv_allocation_id() const override {
+        return runtime_state_ ? runtime_state_->allocation_id() : 0;
+    }
     std::uint64_t runtime_context_device_memory_bytes() const override {
         return runtime_state_ ? runtime_state_->last_context_device_memory_bytes() : 0;
     }

@@ -24,19 +24,45 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
 
 using json = nlohmann::json;
+
+std::uint64_t checked_add(std::uint64_t lhs, std::uint64_t rhs, const char* what) {
+    if (rhs > std::numeric_limits<std::uint64_t>::max() - lhs)
+        throw std::overflow_error(std::string(what) + " overflows uint64");
+    return lhs + rhs;
+}
+
+std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment) {
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0)
+        throw std::invalid_argument("alignment must be a power of two");
+    const auto remainder = value % alignment;
+    return remainder == 0 ? value : checked_add(value, alignment - remainder, "aligned bytes");
+}
+
+std::uint64_t ceil_fraction_denominator(std::uint64_t bytes, double fraction) {
+    if (!(std::isfinite(fraction) && fraction > 0.0 && fraction <= 1.0))
+        throw std::invalid_argument("auto policy fraction must be in (0, 1]");
+    const long double quotient =
+        static_cast<long double>(bytes) / static_cast<long double>(fraction);
+    if (quotient > static_cast<long double>(std::numeric_limits<std::uint64_t>::max()))
+        throw std::overflow_error("auto policy safe-byte requirement overflows uint64");
+    return static_cast<std::uint64_t>(std::ceil(quotient));
+}
 
 struct Arguments {
     std::string bundle;
@@ -236,6 +262,32 @@ void append_default_search_paths(const char* argv0, trtmc::LoadOptionsV2& option
     options.model_plugin_search_paths.push_back((build_dir / "models/llama").string());
 }
 
+json invocation_json(const trtmc::RuntimeMemoryQualificationResultV1& result) {
+    auto invocations = json::array();
+    for (const auto& trace : result.invocations) {
+        invocations.push_back({
+            {"invocation_index", trace.invocation_index},
+            {"role", trace.role},
+            {"plan_id", trace.plan_id},
+            {"profile_id", trace.profile_id},
+            {"chunk_range", {trace.chunk_begin, trace.chunk_end}},
+            {"launch_count", trace.launch_count},
+            {"kv_allocation_id", trace.kv_allocation_id},
+            {"kv_base_address", trace.kv_base_address},
+            {"context_device_memory_bytes", trace.context_device_memory_bytes},
+            {"H", trace.history_tokens},
+            {"A", trace.active_tokens},
+            {"T", trace.bound_tokens},
+            {"R", trace.reserved_tokens},
+            {"cuda_graph_status", trace.cuda_graph_status},
+            {"kv_device_to_host_bytes", trace.kv_device_to_host_bytes},
+            {"kv_append_bytes", trace.kv_append_bytes},
+            {"full_history_device_to_device_bytes", trace.full_history_device_to_device_bytes},
+        });
+    }
+    return invocations;
+}
+
 json success_json(const std::string& model_id, const std::string& pipeline_type,
                   const trtmc::RuntimeMemoryQualificationResultV1& result,
                   const std::string& logits_path) {
@@ -264,28 +316,7 @@ json success_json(const std::string& model_id, const std::string& pipeline_type,
              {"vocab_size", result.step_logits.front().size()},
          }},
     };
-    out["invocations"] = json::array();
-    for (const auto& trace : result.invocations) {
-        out["invocations"].push_back({
-            {"invocation_index", trace.invocation_index},
-            {"role", trace.role},
-            {"plan_id", trace.plan_id},
-            {"profile_id", trace.profile_id},
-            {"chunk_range", {trace.chunk_begin, trace.chunk_end}},
-            {"launch_count", trace.launch_count},
-            {"kv_allocation_id", trace.kv_allocation_id},
-            {"kv_base_address", trace.kv_base_address},
-            {"context_device_memory_bytes", trace.context_device_memory_bytes},
-            {"H", trace.history_tokens},
-            {"A", trace.active_tokens},
-            {"T", trace.bound_tokens},
-            {"R", trace.reserved_tokens},
-            {"cuda_graph_status", trace.cuda_graph_status},
-            {"kv_device_to_host_bytes", trace.kv_device_to_host_bytes},
-            {"kv_append_bytes", trace.kv_append_bytes},
-            {"full_history_device_to_device_bytes", trace.full_history_device_to_device_bytes},
-        });
-    }
+    out["invocations"] = invocation_json(result);
     std::vector<std::int32_t> top1;
     top1.reserve(result.step_logits.size());
     for (const auto& logits : result.step_logits) {
@@ -420,18 +451,26 @@ json sample_json(const DeviceMemorySample& sample) {
     };
 }
 
+using RuntimePhaseAfterSnapshot = std::function<void(const char*, const DeviceMemorySample&)>;
+
 class RuntimePhaseMemoryObserverScope {
   public:
-    explicit RuntimePhaseMemoryObserverScope(json& samples) : samples_(samples) {
+    explicit RuntimePhaseMemoryObserverScope(json& samples,
+                                             RuntimePhaseAfterSnapshot after_snapshot = {})
+        : samples_(samples), after_snapshot_(std::move(after_snapshot)) {
         trtmc::set_runtime_device_memory_qualification_observer(
             [this](const char* phase, const trtmc::RuntimeDeviceMemorySnapshot& snapshot) {
                 std::uint64_t process_used_bytes = snapshot.total_bytes - snapshot.free_bytes;
 #if TRTMC_HAS_NVML
                 process_used_bytes = process_memory_sampler().sample_process_used_bytes();
 #endif
+                const DeviceMemorySample sample{snapshot.free_bytes, snapshot.total_bytes,
+                                                process_used_bytes};
                 samples_.push_back(trtmc::qualification::make_runtime_phase_memory_sample(
                     phase, snapshot.device, snapshot.free_bytes, snapshot.total_bytes,
                     process_used_bytes));
+                if (after_snapshot_)
+                    after_snapshot_(phase, sample);
             });
     }
 
@@ -444,6 +483,7 @@ class RuntimePhaseMemoryObserverScope {
 
   private:
     json& samples_;
+    RuntimePhaseAfterSnapshot after_snapshot_;
 };
 
 std::int64_t retained_process_bytes(const DeviceMemorySample& before,
@@ -461,15 +501,25 @@ std::int64_t retained_device_wide_bytes(const DeviceMemorySample& before,
 
 class DeviceReservation {
   public:
-    explicit DeviceReservation(std::uint64_t bytes) : bytes_(bytes) {
+    explicit DeviceReservation(std::uint64_t bytes,
+                               std::uint64_t max_chunk_bytes = 8ULL * 1024ULL * 1024ULL * 1024ULL)
+        : bytes_(0) {
+        reserve_more(bytes, max_chunk_bytes);
+    }
+
+    void reserve_more(std::uint64_t bytes,
+                      std::uint64_t max_chunk_bytes = 8ULL * 1024ULL * 1024ULL * 1024ULL) {
         if (bytes == 0 ||
             bytes > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
             throw std::invalid_argument("controlled reservation byte count is invalid");
         }
-        constexpr std::uint64_t kMaxChunkBytes = 8ULL * 1024ULL * 1024ULL * 1024ULL;
+        if (max_chunk_bytes == 0)
+            throw std::invalid_argument("controlled reservation chunk size is invalid");
+        const auto updated_bytes =
+            checked_add(bytes_, bytes, "controlled reservation accumulated bytes");
         auto remaining = bytes;
         while (remaining != 0) {
-            const auto chunk_bytes = std::min(remaining, kMaxChunkBytes);
+            const auto chunk_bytes = std::min(remaining, max_chunk_bytes);
             void* address = nullptr;
             const auto status = cudaMalloc(&address, static_cast<std::size_t>(chunk_bytes));
             if (status != cudaSuccess) {
@@ -482,6 +532,7 @@ class DeviceReservation {
             chunk_bytes_.push_back(chunk_bytes);
             remaining -= chunk_bytes;
         }
+        bytes_ = updated_bytes;
     }
 
     DeviceReservation(const DeviceReservation&) = delete;
@@ -590,13 +641,40 @@ struct QualificationLifetime {
 };
 
 QualificationLifetime run_lifetime(const Arguments& args, const trtmc::LoadOptionsV2& options,
-                                   const trtmc::RuntimeMemoryQualificationRequestV1& request) {
+                                   const trtmc::RuntimeMemoryQualificationRequestV1& request,
+                                   RuntimePhaseAfterSnapshot after_snapshot = {}) {
     QualificationLifetime lifetime;
-    RuntimePhaseMemoryObserverScope observer(lifetime.runtime_phase_memory_samples);
+    RuntimePhaseMemoryObserverScope observer(lifetime.runtime_phase_memory_samples,
+                                             std::move(after_snapshot));
     lifetime.before_load = sample_device_memory();
     lifetime.cycle = run_cycle(args, options, request);
     lifetime.after_unload = sample_device_memory();
     return lifetime;
+}
+
+DeviceMemorySample require_phase_sample(const QualificationLifetime& lifetime,
+                                        const char* required_phase) {
+    const json* found = nullptr;
+    for (const auto& sample : lifetime.runtime_phase_memory_samples) {
+        if (sample.at("phase").get<std::string>() != required_phase)
+            continue;
+        if (found != nullptr) {
+            throw std::runtime_error(std::string("runtime phase was sampled more than once: ") +
+                                     required_phase);
+        }
+        found = &sample;
+    }
+    if (found == nullptr)
+        throw std::runtime_error(std::string("runtime phase sample is missing: ") + required_phase);
+    return {
+        found->at("free_bytes").get<std::uint64_t>(),
+        found->at("total_bytes").get<std::uint64_t>(),
+        found->at("process_used_bytes").get<std::uint64_t>(),
+    };
+}
+
+std::uint64_t positive_growth(std::uint64_t before, std::uint64_t after) {
+    return after > before ? after - before : 0;
 }
 
 json lifetime_json(const QualificationLifetime& lifetime, std::uint64_t requested_tokens,
@@ -664,19 +742,42 @@ int main(int argc, char** argv) {
         request.max_new_tokens = args.max_new_tokens;
         if (args.controlled_reservation_target_tokens != 0) {
             // The first TensorRT lifetime can retain process-global lazy
-            // initialization state.  It is intentionally excluded from the
-            // controlled-reservation comparison so that baseline and
-            // constrained lifetimes use the same warmed process boundary.
+            // initialization state.  Calibrate the exact target allocation
+            // after that warm-up, then run both auto lifetimes from the same
+            // warmed process boundary.
             const auto warmup = run_lifetime(args, options, request);
+            auto calibration_options = options;
+            calibration_options.max_sequence_length = args.controlled_reservation_target_tokens;
+            calibration_options.max_sequence_length_explicit = 1U;
+            calibration_options.kv_cache_memory_policy = trtmc::KvCacheMemoryPolicy::kAuto;
+            const auto calibration = run_lifetime(args, calibration_options, request);
             const auto baseline = run_lifetime(args, options, request);
+            const auto calibration_receipt =
+                parse_receipt(calibration.cycle.result.runtime_memory_receipt_json);
             const auto baseline_receipt =
                 parse_receipt(baseline.cycle.result.runtime_memory_receipt_json);
+            const auto calibration_r =
+                calibration_receipt.at("runtime_kv_capacity_tokens").get<std::uint64_t>();
             const auto baseline_r =
                 baseline_receipt.at("runtime_kv_capacity_tokens").get<std::uint64_t>();
             const auto bytes_per_token =
                 baseline_receipt.at("kv_bytes_per_token").get<std::uint64_t>();
             const auto baseline_kv_bytes =
                 baseline_receipt.at("kv_reserved_bytes").get<std::uint64_t>();
+            const auto calibration_bytes_per_token =
+                calibration_receipt.at("kv_bytes_per_token").get<std::uint64_t>();
+            const auto calibration_kv_bytes =
+                calibration_receipt.at("kv_reserved_bytes").get<std::uint64_t>();
+            if (calibration_r != args.controlled_reservation_target_tokens) {
+                throw std::runtime_error(
+                    "controlled reservation target calibration did not allocate exact R");
+            }
+            if (calibration_bytes_per_token != bytes_per_token ||
+                calibration_r > std::numeric_limits<std::uint64_t>::max() / bytes_per_token ||
+                calibration_kv_bytes != calibration_r * bytes_per_token) {
+                throw std::runtime_error(
+                    "controlled reservation target calibration has invalid KV accounting");
+            }
             if (args.controlled_reservation_target_tokens >= baseline_r) {
                 throw std::invalid_argument(
                     "controlled reservation target must be below auto baseline R");
@@ -690,6 +791,37 @@ int main(int argc, char** argv) {
                 std::numeric_limits<std::uint64_t>::max() / bytes_per_token) {
                 throw std::overflow_error("controlled reservation target KV bytes overflow");
             }
+
+            constexpr const char* kBeforePlanningPhase = "before runtime KV planning";
+            constexpr const char* kAfterOverheadPhase =
+                "after shared context and output allocation";
+            constexpr const char* kAfterKvPhase = "after runtime KV allocation";
+            constexpr const char* kAfterRequestPhase =
+                "after successful runtime-memory request completion";
+            const auto calibration_before_planning =
+                require_phase_sample(calibration, kBeforePlanningPhase);
+            const auto calibration_after_overhead =
+                require_phase_sample(calibration, kAfterOverheadPhase);
+            const auto calibration_after_kv = require_phase_sample(calibration, kAfterKvPhase);
+            const auto calibration_after_request =
+                require_phase_sample(calibration, kAfterRequestPhase);
+            if (calibration_before_planning.free_bytes < calibration_after_overhead.free_bytes) {
+                throw std::runtime_error(
+                    "target calibration context/output phase increased free memory");
+            }
+            const auto measured_context_output_bytes =
+                calibration_before_planning.free_bytes - calibration_after_overhead.free_bytes;
+            const auto request_completion_device_bytes = positive_growth(
+                calibration_after_kv.total_bytes - calibration_after_kv.free_bytes,
+                calibration_after_request.total_bytes - calibration_after_request.free_bytes);
+            const auto request_completion_process_bytes =
+                positive_growth(calibration_after_kv.process_used_bytes,
+                                calibration_after_request.process_used_bytes);
+            const auto request_completion_headroom_bytes =
+                std::max(request_completion_device_bytes, request_completion_process_bytes);
+            const auto request_completion_external_delta_bytes =
+                static_cast<std::int64_t>(request_completion_device_bytes) -
+                static_cast<std::int64_t>(request_completion_process_bytes);
 
             const auto baseline_process_growth =
                 static_cast<std::uint64_t>(baseline.cycle.after_requests.process_used_bytes -
@@ -705,36 +837,58 @@ int main(int argc, char** argv) {
                 baseline_pre_load_free_bytes > baseline_post_load_free_bytes
                     ? baseline_pre_load_free_bytes - baseline_post_load_free_bytes
                     : 0;
-            const auto target_kv_bytes =
-                args.controlled_reservation_target_tokens * bytes_per_token;
             const auto safety_reserve_bytes =
                 baseline_receipt.at("safety_reserve_bytes").get<std::uint64_t>();
-            const auto context_device_memory_bytes =
-                baseline_receipt.at("context_device_memory_bytes").get<std::uint64_t>();
-            const auto external_device_output_bytes =
-                baseline_receipt.at("external_device_output_bytes").get<std::uint64_t>();
-            const auto graph_private_device_bytes =
-                baseline_receipt.at("graph_private_device_bytes").get<std::uint64_t>();
-            const auto post_load_runtime_overhead_bytes = context_device_memory_bytes +
-                                                          external_device_output_bytes +
-                                                          graph_private_device_bytes;
-            constexpr std::uint64_t kMinimumTargetHeadroomBytes = 8ULL * 1024ULL * 1024ULL;
-            const auto target_fraction_headroom_bytes =
-                target_kv_bytes / 8U + (target_kv_bytes % 8U == 0 ? 0U : 1U);
-            const auto target_headroom_bytes =
-                std::max(kMinimumTargetHeadroomBytes, target_fraction_headroom_bytes);
-            const auto required_post_load_free_bytes = target_kv_bytes + safety_reserve_bytes +
-                                                       post_load_runtime_overhead_bytes +
-                                                       target_headroom_bytes;
+            const auto calibration_safety_reserve_bytes =
+                calibration_receipt.at("safety_reserve_bytes").get<std::uint64_t>();
+            if (calibration_safety_reserve_bytes != safety_reserve_bytes) {
+                throw std::runtime_error("target calibration changed the runtime safety reserve");
+            }
+            const auto auto_fraction = baseline_receipt.at("policy_fraction").get<double>();
+            const auto calibration_auto_fraction =
+                calibration_receipt.at("policy_fraction").get<double>();
+            if (baseline_receipt.at("policy") != "auto" ||
+                calibration_receipt.at("policy") != "auto" ||
+                std::abs(auto_fraction - 0.9) > 1e-12 ||
+                std::abs(calibration_auto_fraction - auto_fraction) > 1e-12) {
+                throw std::runtime_error(
+                    "controlled reservation requires measured auto fraction 0.9");
+            }
+            const auto policy_safe_bytes =
+                ceil_fraction_denominator(calibration_kv_bytes, auto_fraction);
+            const auto policy_fraction_headroom_bytes = policy_safe_bytes - calibration_kv_bytes;
             constexpr std::uint64_t kReservationAlignment = 2ULL * 1024ULL * 1024ULL;
+            const auto required_visible_post_load_free_bytes =
+                checked_add(measured_context_output_bytes,
+                            checked_add(safety_reserve_bytes, policy_safe_bytes,
+                                        "controlled visible post-load bytes"),
+                            "controlled visible post-load bytes");
+            const auto guard_bytes =
+                align_up(checked_add(calibration_kv_bytes, request_completion_headroom_bytes,
+                                     "controlled contiguous guard"),
+                         kReservationAlignment);
+            const auto max_capacity_rounding_rows =
+                (kReservationAlignment + bytes_per_token - 1U) / bytes_per_token;
+
             DeviceMemorySample before_reservation;
+            DeviceMemorySample after_guard_allocation;
             DeviceMemorySample after_reservation;
-            std::uint64_t reservation_bytes = 0;
-            std::unique_ptr<DeviceReservation> reservation;
+            DeviceMemorySample before_guard_release;
+            DeviceMemorySample after_guard_release;
+            std::uint64_t bulk_reservation_bytes = 0;
+            std::uint64_t initial_bulk_reservation_bytes = 0;
+            std::uint64_t bulk_correction_bytes = 0;
+            std::uint64_t bulk_correction_attempts = 0;
+            std::uint64_t guard_address = 0;
+            std::size_t guard_allocation_count = 0;
+            json guard_allocations = json::array();
+            std::unique_ptr<DeviceReservation> guard;
+            std::unique_ptr<DeviceReservation> bulk_reservation;
             bool reservation_action_invoked = false;
+            bool guard_release_action_invoked = false;
             trtmc::set_runtime_device_memory_qualification_pre_snapshot_action(
                 [&](const char* phase) {
-                    if (std::string(phase) != "before runtime KV planning") {
+                    if (std::string(phase) != kBeforePlanningPhase) {
                         return;
                     }
                     if (reservation_action_invoked) {
@@ -742,62 +896,155 @@ int main(int argc, char** argv) {
                                                "ran more than once");
                     }
                     before_reservation = sample_device_memory();
-                    if (before_reservation.free_bytes <=
-                        required_post_load_free_bytes + kReservationAlignment) {
+                    const auto required_before_bulk = checked_add(
+                        guard_bytes,
+                        checked_add(required_visible_post_load_free_bytes, kReservationAlignment,
+                                    "controlled reservation required bytes"),
+                        "controlled reservation required bytes");
+                    if (before_reservation.free_bytes <= required_before_bulk) {
                         throw std::runtime_error("insufficient post-load free memory for "
                                                  "controlled reservation");
                     }
-                    reservation_bytes =
-                        ((before_reservation.free_bytes - required_post_load_free_bytes) /
-                         kReservationAlignment) *
-                        kReservationAlignment;
-                    reservation = std::make_unique<DeviceReservation>(reservation_bytes);
+                    guard = std::make_unique<DeviceReservation>(guard_bytes, guard_bytes);
+                    guard_address = guard->address();
+                    guard_allocation_count = guard->allocation_count();
+                    guard_allocations = guard->allocations_json();
+                    after_guard_allocation = sample_device_memory();
+                    if (after_guard_allocation.free_bytes <=
+                        required_visible_post_load_free_bytes + kReservationAlignment) {
+                        throw std::runtime_error(
+                            "contiguous guard leaves insufficient memory for bulk pressure");
+                    }
+                    initial_bulk_reservation_bytes = ((after_guard_allocation.free_bytes -
+                                                       required_visible_post_load_free_bytes) /
+                                                      kReservationAlignment) *
+                                                     kReservationAlignment;
+                    if (initial_bulk_reservation_bytes == 0) {
+                        throw std::runtime_error(
+                            "controlled bulk reservation resolved to zero bytes");
+                    }
+                    bulk_reservation =
+                        std::make_unique<DeviceReservation>(initial_bulk_reservation_bytes);
+                    bulk_reservation_bytes = initial_bulk_reservation_bytes;
                     after_reservation = sample_device_memory();
+                    constexpr std::uint64_t kMaxBulkCorrectionAttempts = 4;
+                    const auto visible_free_upper_bound =
+                        checked_add(required_visible_post_load_free_bytes, kReservationAlignment,
+                                    "controlled visible free upper bound");
+                    while (after_reservation.free_bytes >= visible_free_upper_bound) {
+                        if (bulk_correction_attempts >= kMaxBulkCorrectionAttempts) {
+                            throw std::runtime_error(
+                                "controlled bulk reservation did not converge on visible free "
+                                "window");
+                        }
+                        const auto excess_bytes =
+                            after_reservation.free_bytes - visible_free_upper_bound + 1U;
+                        const auto correction_bytes = align_up(excess_bytes, kReservationAlignment);
+                        bulk_reservation->reserve_more(correction_bytes);
+                        bulk_reservation_bytes =
+                            checked_add(bulk_reservation_bytes, correction_bytes,
+                                        "controlled bulk reservation bytes");
+                        bulk_correction_bytes = checked_add(bulk_correction_bytes, correction_bytes,
+                                                            "controlled bulk correction bytes");
+                        ++bulk_correction_attempts;
+                        after_reservation = sample_device_memory();
+                    }
+                    if (after_reservation.free_bytes < required_visible_post_load_free_bytes) {
+                        throw std::runtime_error(
+                            "controlled bulk reservation overshot visible free window");
+                    }
                     reservation_action_invoked = true;
                 });
             QualificationLifetime constrained;
             try {
-                constrained = run_lifetime(args, options, request);
+                constrained = run_lifetime(
+                    args, options, request,
+                    [&](const char* phase, const DeviceMemorySample& sample) {
+                        if (std::string(phase) != kAfterOverheadPhase)
+                            return;
+                        if (guard_release_action_invoked) {
+                            throw std::logic_error(
+                                "controlled contiguous guard release ran more than once");
+                        }
+                        if (!guard || guard->allocation_count() != 1) {
+                            throw std::logic_error(
+                                "controlled contiguous guard was not held through final snapshot");
+                        }
+                        before_guard_release = sample;
+                        guard->release();
+                        after_guard_release = sample_device_memory();
+                        guard_release_action_invoked = true;
+                    });
             } catch (...) {
                 trtmc::set_runtime_device_memory_qualification_pre_snapshot_action({});
                 throw;
             }
             trtmc::set_runtime_device_memory_qualification_pre_snapshot_action({});
-            if (!reservation_action_invoked || !reservation) {
+            if (!reservation_action_invoked || !bulk_reservation) {
                 throw std::logic_error("controlled post-load reservation action did not run");
             }
-            const auto reservation_address = reservation->address();
-            const auto reservation_allocation_count = reservation->allocation_count();
-            const auto reservation_allocations = reservation->allocations_json();
+            if (!guard_release_action_invoked || !guard || guard->allocation_count() != 0) {
+                throw std::logic_error(
+                    "controlled contiguous guard was not released after final snapshot");
+            }
+            const auto bulk_reservation_address = bulk_reservation->address();
+            const auto bulk_reservation_allocation_count = bulk_reservation->allocation_count();
+            const auto bulk_reservation_allocations = bulk_reservation->allocations_json();
             const auto constrained_receipt =
                 parse_receipt(constrained.cycle.result.runtime_memory_receipt_json);
             const auto constrained_r =
                 constrained_receipt.at("runtime_kv_capacity_tokens").get<std::uint64_t>();
+            const auto constrained_kv_bytes =
+                constrained_receipt.at("kv_reserved_bytes").get<std::uint64_t>();
             const auto controlled_policy_is_auto = baseline_receipt.at("policy") == "auto" &&
+                                                   calibration_receipt.at("policy") == "auto" &&
                                                    constrained_receipt.at("policy") == "auto";
             const auto controlled_reduced_r = constrained_r < baseline_r;
+            const auto controlled_target_bounded =
+                constrained_r >= calibration_r &&
+                constrained_r - calibration_r <= max_capacity_rounding_rows;
+            const auto controlled_kv_is_exact =
+                constrained_r <= std::numeric_limits<std::uint64_t>::max() / bytes_per_token &&
+                constrained_kv_bytes == constrained_r * bytes_per_token;
+            const auto guard_covers_calibrated_target =
+                guard_bytes >= checked_add(calibration_kv_bytes, request_completion_headroom_bytes,
+                                           "controlled guard coverage");
             const auto controlled_request_fits =
                 constrained.cycle.result.final_kv_position <= constrained_r;
             const auto controlled_passed =
-                controlled_policy_is_auto && controlled_reduced_r && controlled_request_fits;
+                controlled_policy_is_auto && controlled_reduced_r && controlled_target_bounded &&
+                controlled_kv_is_exact && guard_covers_calibrated_target && controlled_request_fits;
             std::string controlled_failure;
             if (!controlled_policy_is_auto) {
                 controlled_failure = "controlled reservation did not use auto policy";
             } else if (!controlled_reduced_r) {
                 controlled_failure = "controlled reservation did not reduce runtime R";
+            } else if (!controlled_target_bounded) {
+                controlled_failure =
+                    "controlled reservation resolved outside target alignment tolerance";
+            } else if (!controlled_kv_is_exact) {
+                controlled_failure = "controlled reservation KV bytes do not equal R times B";
+            } else if (!guard_covers_calibrated_target) {
+                controlled_failure =
+                    "controlled contiguous guard does not cover calibrated target and request";
             } else if (!controlled_request_fits) {
                 controlled_failure = "controlled reservation request did not fit R";
             }
             const auto after_constrained_unload = constrained.after_unload;
-            reservation.reset();
+            bulk_reservation.reset();
             const auto after_release = sample_device_memory();
 
             auto auto_lifetime_json = [](const QualificationLifetime& lifetime, const char* label,
                                          bool measured) {
                 auto out = lifetime_json(lifetime, 0, label, measured);
                 out["policy"] = {{"kind", "auto"}};
+                out["invocations"] = invocation_json(lifetime.cycle.result);
                 return out;
             };
+            auto calibration_json =
+                lifetime_json(calibration, args.controlled_reservation_target_tokens,
+                              "measured-explicit-target-calibration", true);
+            calibration_json["invocations"] = invocation_json(calibration.cycle.result);
             write_logits(args.logits_file, constrained.cycle.result);
             auto output = success_json(constrained.cycle.model_id, constrained.cycle.pipeline_type,
                                        constrained.cycle.result, args.logits_file);
@@ -816,29 +1063,70 @@ int main(int argc, char** argv) {
                       retained_process_bytes(warmup.before_load, warmup.after_unload)},
                      {"warmup_retained_device_wide_bytes",
                       retained_device_wide_bytes(warmup.before_load, warmup.after_unload)},
-                     {"required_free_basis", "post-load runtime overhead before KV planning"},
-                     {"context_device_memory_bytes", context_device_memory_bytes},
-                     {"external_device_output_bytes", external_device_output_bytes},
-                     {"graph_private_device_bytes", graph_private_device_bytes},
-                     {"post_load_runtime_overhead_bytes", post_load_runtime_overhead_bytes},
-                     {"target_kv_bytes", target_kv_bytes},
+                     {"required_free_basis", "measured target context/output delta plus safety and "
+                                             "ceil(target KV / auto fraction)"},
+                     {"auto_fraction", auto_fraction},
+                     {"calibration_context_device_memory_bytes",
+                      calibration_receipt.at("context_device_memory_bytes")},
+                     {"calibration_external_device_output_bytes",
+                      calibration_receipt.at("external_device_output_bytes")},
+                     {"calibration_graph_private_device_bytes",
+                      calibration_receipt.at("graph_private_device_bytes")},
+                     {"measured_context_output_bytes", measured_context_output_bytes},
+                     {"request_completion_device_bytes", request_completion_device_bytes},
+                     {"request_completion_process_bytes", request_completion_process_bytes},
+                     {"request_completion_external_delta_bytes",
+                      request_completion_external_delta_bytes},
+                     {"request_completion_headroom_bytes", request_completion_headroom_bytes},
+                     {"request_completion_guard_basis",
+                      "max(calibration device-wide free delta, calibration per-process NVML "
+                      "delta)"},
+                     {"target_kv_bytes", calibration_kv_bytes},
                      {"safety_reserve_bytes", safety_reserve_bytes},
-                     {"minimum_target_headroom_bytes", kMinimumTargetHeadroomBytes},
-                     {"target_fraction_denominator", 8},
-                     {"target_fraction_headroom_bytes", target_fraction_headroom_bytes},
-                     {"target_headroom_bytes", target_headroom_bytes},
-                     {"margin_formula", "safety_reserve_bytes + "
-                                        "max(8MiB, ceil(target_kv_bytes/8))"},
-                     {"required_post_load_free_bytes", required_post_load_free_bytes},
+                     {"policy_safe_bytes", policy_safe_bytes},
+                     {"policy_fraction_headroom_bytes", policy_fraction_headroom_bytes},
+                     {"reservation_alignment_bytes", kReservationAlignment},
+                     {"max_capacity_rounding_rows", max_capacity_rounding_rows},
+                     {"guard_bytes", guard_bytes},
+                     {"required_visible_post_load_free_bytes",
+                      required_visible_post_load_free_bytes},
+                     {"visible_free_formula",
+                      "measured_context_output_bytes + safety_reserve_bytes + "
+                      "ceil(target_kv_bytes / auto_fraction)"},
                  }},
-                {"reservation_phase", "before runtime KV planning"},
-                {"reservation_bytes", reservation_bytes},
-                {"reservation_address", reservation_address},
-                {"reservation_allocation_count", reservation_allocation_count},
-                {"reservation_allocations", reservation_allocations},
                 {"before_reservation", sample_json(before_reservation)},
                 {"after_reservation", sample_json(after_reservation)},
+                {"guard",
+                 {
+                     {"allocation_phase", kBeforePlanningPhase},
+                     {"release_after_snapshot_phase", kAfterOverheadPhase},
+                     {"bytes", guard_bytes},
+                     {"address", guard_address},
+                     {"allocation_count", guard_allocation_count},
+                     {"allocations", guard_allocations},
+                     {"before_allocation", sample_json(before_reservation)},
+                     {"after_allocation", sample_json(after_guard_allocation)},
+                     {"before_release", sample_json(before_guard_release)},
+                     {"after_release", sample_json(after_guard_release)},
+                 }},
+                {"bulk",
+                 {
+                     {"allocation_phase", kBeforePlanningPhase},
+                     {"release_phase", "after constrained pipeline unload"},
+                     {"bytes", bulk_reservation_bytes},
+                     {"initial_bytes", initial_bulk_reservation_bytes},
+                     {"correction_bytes", bulk_correction_bytes},
+                     {"correction_attempts", bulk_correction_attempts},
+                     {"address", bulk_reservation_address},
+                     {"allocation_count", bulk_reservation_allocation_count},
+                     {"allocations", bulk_reservation_allocations},
+                     {"before_allocation", sample_json(after_guard_allocation)},
+                     {"after_allocation", sample_json(after_reservation)},
+                     {"before_release", sample_json(after_constrained_unload)},
+                     {"after_release", sample_json(after_release)},
+                 }},
                 {"warmup", auto_lifetime_json(warmup, "unmeasured-auto-warmup", false)},
+                {"calibration", std::move(calibration_json)},
                 {"baseline", auto_lifetime_json(baseline, "measured-auto-baseline", true)},
                 {"constrained",
                  auto_lifetime_json(constrained, "measured-auto-with-reservation", true)},
@@ -851,8 +1139,12 @@ int main(int argc, char** argv) {
                  {
                      {"policy_is_auto", controlled_policy_is_auto},
                      {"reduced_r", controlled_reduced_r},
+                     {"target_bounded", controlled_target_bounded},
+                     {"kv_is_exact", controlled_kv_is_exact},
+                     {"guard_covers_calibrated_target", guard_covers_calibrated_target},
                      {"request_fits", controlled_request_fits},
                      {"baseline_r", baseline_r},
+                     {"calibration_r", calibration_r},
                      {"constrained_r", constrained_r},
                      {"kv_bytes_per_token", bytes_per_token},
                      {"safety_reserve_bytes", constrained_receipt.at("safety_reserve_bytes")},

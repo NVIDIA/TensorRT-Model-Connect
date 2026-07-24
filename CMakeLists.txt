@@ -801,6 +801,47 @@ set_target_properties(trtmc_test_optimized_embedding PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/optimized-runtimes/embedding"
 )
 
+# Independently compiled mixed-version ABI fixtures.  The legacy sources use
+# only the frozen github/main declarations under tests/cpp/abi; the current
+# plugin uses the live headers but deliberately does not link libtrtmc_core.
+add_library(trtmc_test_abi_legacy_model_plugin SHARED EXCLUDE_FROM_ALL
+  tests/cpp/abi/legacy_model_plugin.cpp
+)
+target_include_directories(trtmc_test_abi_legacy_model_plugin PRIVATE
+  ${PROJECT_SOURCE_DIR}/tests/cpp/abi
+)
+target_link_libraries(trtmc_test_abi_legacy_model_plugin PRIVATE trtmc_core)
+set_target_properties(trtmc_test_abi_legacy_model_plugin PROPERTIES
+  OUTPUT_NAME trtmc_model_qwen
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/abi/legacy-model-plugin"
+)
+
+add_library(trtmc_test_abi_backend SHARED EXCLUDE_FROM_ALL
+  tests/cpp/abi/fake_backend.cpp
+)
+target_include_directories(trtmc_test_abi_backend PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+target_include_directories(trtmc_test_abi_backend SYSTEM PRIVATE
+  ${TRTMC_CUDA_INCLUDE_DIR}
+)
+target_link_libraries(trtmc_test_abi_backend PRIVATE ${TRTMC_CUDART_LIBRARY})
+set_target_properties(trtmc_test_abi_backend PROPERTIES
+  OUTPUT_NAME trtmc_backend_abi_fixture
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/abi/backend"
+)
+
+add_library(trtmc_test_abi_current_model_plugin SHARED EXCLUDE_FROM_ALL
+  tests/cpp/abi/current_model_plugin.cpp
+)
+target_include_directories(trtmc_test_abi_current_model_plugin PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+set_target_properties(trtmc_test_abi_current_model_plugin PROPERTIES
+  OUTPUT_NAME trtmc_test_current_model_plugin
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests/abi/current-model-plugin"
+)
+
 # --- Test helper function ---
 # Usage:
 #   trtmc_add_test(test_name)               -- links trtmc_core, adds src/ include
@@ -963,6 +1004,57 @@ trtmc_add_test(test_c_abi_entry                NO_SRC_INCLUDE DYNAMIC_MEMORY)
 # real model plugin even though its source lives beside the shared C ABI tests.
 trtmc_add_test(test_c_abi_runtime_regression   NO_SRC_INCLUDE MODEL_OWNED DYNAMIC_MEMORY)
 trtmc_add_test(test_cabi_batch                 NO_SRC_INCLUDE)
+
+# Mixed-version ABI/DSO compatibility.  These are deliberately separate
+# executables/DSOs rather than same-translation-unit interface simulations.
+trtmc_add_test(test_abi_old_consumer
+  SOURCE tests/cpp/abi/old_consumer.cpp
+  NO_SRC_INCLUDE
+  DYNAMIC_MEMORY
+)
+target_include_directories(test_abi_old_consumer PRIVATE
+  ${PROJECT_SOURCE_DIR}/tests/cpp/abi
+)
+
+trtmc_add_test(test_abi_current_core_legacy_plugin
+  SOURCE tests/cpp/abi/current_core_legacy_plugin.cpp
+  NO_SRC_INCLUDE
+  DYNAMIC_MEMORY
+)
+target_link_libraries(test_abi_current_core_legacy_plugin PRIVATE ${CMAKE_DL_LIBS})
+add_dependencies(test_abi_current_core_legacy_plugin
+  trtmc_test_abi_legacy_model_plugin
+  trtmc_test_abi_backend
+)
+target_compile_definitions(test_abi_current_core_legacy_plugin PRIVATE
+  TRTMC_TEST_LEGACY_PLUGIN_DSO="$<TARGET_FILE:trtmc_test_abi_legacy_model_plugin>"
+  TRTMC_TEST_ABI_BACKEND_DSO="$<TARGET_FILE:trtmc_test_abi_backend>"
+)
+
+# This harness represents the old core: it includes only the frozen declarations
+# and links dl, never trtmc_core.  It calls the stable base vtable of a current
+# plugin DSO and proves explicit fail-closed behavior for runtime_memory.
+add_executable(test_abi_legacy_core_current_plugin EXCLUDE_FROM_ALL
+  tests/cpp/abi/legacy_core_current_plugin.cpp
+)
+target_include_directories(test_abi_legacy_core_current_plugin PRIVATE
+  ${PROJECT_SOURCE_DIR}/tests/cpp/abi
+)
+target_link_libraries(test_abi_legacy_core_current_plugin PRIVATE ${CMAKE_DL_LIBS})
+target_compile_definitions(test_abi_legacy_core_current_plugin PRIVATE
+  TRTMC_TEST_CURRENT_PLUGIN_DSO="$<TARGET_FILE:trtmc_test_abi_current_model_plugin>"
+)
+add_dependencies(test_abi_legacy_core_current_plugin
+  trtmc_test_abi_current_model_plugin
+)
+add_dependencies(trtmc_cpp_tests test_abi_legacy_core_current_plugin)
+add_dependencies(trtmc_platform_cpp_tests test_abi_legacy_core_current_plugin)
+add_test(NAME test_abi_legacy_core_current_plugin
+  COMMAND test_abi_legacy_core_current_plugin
+)
+set_tests_properties(test_abi_legacy_core_current_plugin PROPERTIES
+  LABELS "platform;dynamic_memory"
+)
 
 # Config / parsing
 trtmc_add_test(test_text_parsers)

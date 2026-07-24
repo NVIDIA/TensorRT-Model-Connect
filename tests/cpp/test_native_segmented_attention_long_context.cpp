@@ -540,7 +540,7 @@ int main() {
                   << runtime_engine.engine->getDeviceMemorySizeV2() << '\n';
         run_long_cases(*runtime_engine.engine);
     }
-    BuildShape const qwen_production{16, 8, 128, 2048, 512, 1025};
+    BuildShape const qwen_production{16, 8, 128, 1024, 512, 1025};
     auto qwen_engine = build_engine(logger, qwen_production);
     check(qwen_engine.engine != nullptr, "deserialize Qwen production-C engine");
     if (qwen_engine.engine) {

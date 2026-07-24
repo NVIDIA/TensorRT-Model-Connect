@@ -100,6 +100,7 @@ class LlamaInferenceState {
         return 0;
     }
     virtual std::uint64_t runtime_kv_base_address() const { return 0; }
+    virtual std::uint64_t runtime_kv_allocation_id() const { return 0; }
     virtual std::uint64_t runtime_context_device_memory_bytes() const { return 0; }
     // Complete runtime-owned asynchronous state updates before a successful
     // request result is returned. Legacy states have nothing to finalize.

@@ -69,6 +69,18 @@ _SHARED_PROVENANCE_FIELDS = (
     "toolchain_sha256",
     "benchmark_environment_sha256",
 )
+_SOURCE_STATE_BOUNDARY_NAMES = (
+    "build_pre",
+    "build_post",
+    "benchmark_pre",
+    "benchmark_post",
+)
+_SOURCE_STATE_BOUNDARY_FIELDS = (
+    "git_head",
+    "source_state_sha256",
+    "git_dirty",
+    "exact_head_gate_satisfied",
+)
 _RECEIPT_FIELDS = (
     "serialized_plan_bytes",
     "resident_weight_bytes",
@@ -312,6 +324,37 @@ def _positive_int(mapping: Mapping[str, Any], field: str, where: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise QualificationError(f"{where}.{field} must be a positive integer")
     return value
+
+
+def _boolean(mapping: Mapping[str, Any], field: str, where: str) -> bool:
+    value = _required(mapping, field, where)
+    if not isinstance(value, bool):
+        raise QualificationError(f"{where}.{field} must be boolean")
+    return value
+
+
+def _validate_source_state_boundaries(
+    value: Any, *, where: str
+) -> Mapping[str, Mapping[str, Any]]:
+    boundaries = _object(value, where)
+    _exact_fields(boundaries, _SOURCE_STATE_BOUNDARY_NAMES, where)
+    validated: dict[str, Mapping[str, Any]] = {}
+    for name in _SOURCE_STATE_BOUNDARY_NAMES:
+        boundary_where = f"{where}.{name}"
+        boundary = _object(
+            _required(boundaries, name, where), boundary_where
+        )
+        _exact_fields(boundary, _SOURCE_STATE_BOUNDARY_FIELDS, boundary_where)
+        _sha_field(boundary, "git_head", boundary_where, git=True)
+        _sha_field(boundary, "source_state_sha256", boundary_where)
+        _boolean(boundary, "git_dirty", boundary_where)
+        _boolean(
+            boundary,
+            "exact_head_gate_satisfied",
+            boundary_where,
+        )
+        validated[name] = boundary
+    return validated
 
 
 def _nonnegative_int(
@@ -897,6 +940,8 @@ def _read_case(path: Path, label: str, expected_role: str) -> CaseEvidence:
     )
     for field in (
         "source_state_sha256",
+        "source_state_pre_sha256",
+        "source_state_post_sha256",
         "prebuild_source_state_sha256",
         "postbuild_source_state_sha256",
         "bundle_sha256",
@@ -912,6 +957,11 @@ def _read_case(path: Path, label: str, expected_role: str) -> CaseEvidence:
     ):
         _sha_field(provenance, field, provenance_where)
     _sha_field(provenance, "git_head", provenance_where, git=True)
+    _boolean(provenance, "source_state_unchanged", provenance_where)
+    _validate_source_state_boundaries(
+        _required(provenance, "source_state_boundaries", provenance_where),
+        where=f"{provenance_where}.source_state_boundaries",
+    )
     for field in (
         "model_revision",
         "precision",
@@ -925,9 +975,7 @@ def _read_case(path: Path, label: str, expected_role: str) -> CaseEvidence:
             f"{provenance_where}.artifact_role must be {expected_role!r}"
         )
     for field in ("fresh_build", "artifact_reused"):
-        value = _required(provenance, field, provenance_where)
-        if not isinstance(value, bool):
-            raise QualificationError(f"{provenance_where}.{field} must be boolean")
+        _boolean(provenance, field, provenance_where)
 
     receipt_where = f"{label}.runtime_memory_receipt"
     receipt = _object(
@@ -1110,14 +1158,60 @@ def qualify(
     source_stable_gates = {
         case.label: (
             case.provenance["source_state_sha256"]
+            == case.provenance["source_state_pre_sha256"]
+            == case.provenance["source_state_post_sha256"]
             == case.provenance["prebuild_source_state_sha256"]
             == case.provenance["postbuild_source_state_sha256"]
+            and case.provenance["source_state_unchanged"] is True
+        )
+        for case in values
+    }
+    source_commit_gates = {
+        case.label: all(
+            boundary["git_head"] == case.provenance["git_head"]
+            for boundary in case.provenance[
+                "source_state_boundaries"
+            ].values()
+        )
+        for case in values
+    }
+    source_boundary_identity_gates = {
+        case.label: all(
+            boundary["source_state_sha256"]
+            == case.provenance["source_state_sha256"]
+            for boundary in case.provenance[
+                "source_state_boundaries"
+            ].values()
+        )
+        for case in values
+    }
+    clean_source_gates = {
+        case.label: all(
+            boundary["git_dirty"] is False
+            for boundary in case.provenance[
+                "source_state_boundaries"
+            ].values()
+        )
+        for case in values
+    }
+    exact_head_gates = {
+        case.label: all(
+            boundary["exact_head_gate_satisfied"] is True
+            for boundary in case.provenance[
+                "source_state_boundaries"
+            ].values()
         )
         for case in values
     }
     provenance_gates = {
         "shared_fields_match": shared_provenance_gates,
         "source_stable_prebuild_to_postbuild": source_stable_gates,
+        "all_source_boundaries_match_expected_commit": source_commit_gates,
+        "all_source_boundaries_match_source_state": (
+            source_boundary_identity_gates
+        ),
+        "all_source_boundaries_clean": clean_source_gates,
+        "all_source_boundaries_exact_head": exact_head_gates,
         "one_model_id": len({case.model_id for case in values}) == 1,
         "static_bundle_sha_matches_file": all(
             case.provenance["bundle_sha256"] == bundles["static"]["sha256"]

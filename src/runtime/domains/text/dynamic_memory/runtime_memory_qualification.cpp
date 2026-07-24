@@ -6,21 +6,45 @@
 
 #include "runtime/domains/text/dynamic_memory/runtime_memory_qualification.h"
 
+#include "runtime/backend/runtime_memory_backend.h"
 #include "runtime/backend/trt_version.h"
 #include "trtmc/bundle.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <iomanip>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <nvrtc.h>
+#include <sstream>
 #include <string_view>
 
 namespace trtmc {
 
 RuntimeMemoryQualificationAdmissionError::~RuntimeMemoryQualificationAdmissionError() = default;
 IRuntimeMemoryQualificationV1::~IRuntimeMemoryQualificationV1() = default;
+
+std::string runtime_memory_execution_plan_identity(const std::string& bundle_section_name,
+                                                   const ITrtModule& module) {
+    if (bundle_section_name.empty())
+        throw std::invalid_argument("qualification execution-plan section name is empty");
+    const auto* introspection = dynamic_cast<const IRuntimeMemoryEngineIntrospectionV1*>(&module);
+    if (introspection == nullptr) {
+        throw std::logic_error(
+            "qualification execution plan has no runtime-memory engine introspection");
+    }
+    const auto stats = introspection->runtime_memory_engine_stats();
+    if (stats.struct_size < sizeof(RuntimeMemoryEngineStatsV1) ||
+        stats.api_version != kRuntimeMemoryBackendApiVersionV1 || stats.engine_identity == 0) {
+        throw std::logic_error(
+            "qualification execution plan has no valid deserialized-engine identity");
+    }
+    std::ostringstream identity;
+    identity << bundle_section_name << "@engine=0x" << std::hex << std::nouppercase
+             << stats.engine_identity;
+    return identity.str();
+}
 
 namespace {
 
@@ -78,11 +102,6 @@ bool matches_developer_chunk_variant(const RuntimeMemoryContract& contract,
         return false;
     }
     const auto variant_chunk = expected.prefill_chunk_limit / 2;
-    if (std::find(expected.active_kv_profile_limits.begin(),
-                  expected.active_kv_profile_limits.end(),
-                  variant_chunk) != expected.active_kv_profile_limits.end()) {
-        return false;
-    }
     auto variant_buckets = expected.active_kv_profile_limits;
     variant_buckets.push_back(variant_chunk);
     std::sort(variant_buckets.begin(), variant_buckets.end());
@@ -263,8 +282,11 @@ void finalize_runtime_memory_invocation_traces(RuntimeMemoryQualificationResultV
             throw std::logic_error(
                 "qualification invocation has invalid actual-shape context bytes");
         }
-        trace.kv_allocation_id = allocation_id;
-        trace.reserved_tokens = reserved_tokens;
+        if (trace.kv_allocation_id == 0 || trace.kv_allocation_id != allocation_id ||
+            trace.reserved_tokens == 0 || trace.reserved_tokens != reserved_tokens) {
+            throw std::logic_error(
+                "qualification invocation did not sample the active KV allocation");
+        }
         const auto expected_append_bytes = query_tokens * bytes_per_token;
         if (trace.kv_append_bytes != expected_append_bytes || trace.kv_append_events == 0) {
             throw std::logic_error(

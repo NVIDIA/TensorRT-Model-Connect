@@ -89,7 +89,7 @@ const RuntimeMemoryQualifiedTuple& qualified_runtime_memory_tuple() {
         value.driver_version = "580.105.08";
         value.model_context_limit = 2048;
         value.prefill_chunk_limit = 512;
-        value.active_kv_profile_limits = {128, 512, 2048};
+        value.active_kv_profile_limits = {128, 256, 512, 2048};
         return value;
     }();
     return tuple;

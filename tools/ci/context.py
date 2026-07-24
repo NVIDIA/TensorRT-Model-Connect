@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from .process import CiError, CommandRunner
+from .process import CiError, CommandRunner, ObservedProcessResult
 
 
 class CiContext:
@@ -47,6 +48,7 @@ class CiContext:
         unset: Sequence[str] = (),
         check: bool = True,
         capture_output: bool = False,
+        cwd: Path | None = None,
     ):
         environment = dict(self.env)
         environment.update(updates or {})
@@ -60,6 +62,7 @@ class CiContext:
             check=check,
             capture_output=capture_output,
             env=environment,
+            cwd=cwd,
         )
 
     def output(
@@ -69,10 +72,48 @@ class CiContext:
         updates: Mapping[str, str] | None = None,
         unset: Sequence[str] = (),
         check: bool = True,
+        cwd: Path | None = None,
     ) -> str:
         return self.run(
-            command, updates=updates, unset=unset, check=check, capture_output=True
+            command,
+            updates=updates,
+            unset=unset,
+            check=check,
+            capture_output=True,
+            cwd=cwd,
         ).stdout.strip()
+
+    def run_observed(
+        self,
+        command: Sequence[str | Path],
+        *,
+        limit: str | None = None,
+        updates: Mapping[str, str] | None = None,
+        unset: Sequence[str] = (),
+        check: bool = True,
+        cwd: Path | None = None,
+    ) -> ObservedProcessResult:
+        environment = dict(self.env)
+        environment.update(updates or {})
+        for name in unset:
+            environment.pop(name, None)
+        return self.commands.run_observed(
+            [str(item) for item in command],
+            check=check,
+            env=environment,
+            timeout=self._duration_seconds(limit),
+            cwd=cwd,
+        )
+
+    @staticmethod
+    def _duration_seconds(value: str | None) -> int | None:
+        if not value:
+            return None
+        match = re.fullmatch(r"([1-9][0-9]*)([smhd]?)", value)
+        if match is None:
+            raise CiError(f"command timeout must be a positive duration like 30s or 45m: {value}")
+        scale = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2)]
+        return int(match.group(1)) * scale
 
     def executable(self, name: str) -> str:
         path = shutil.which(name, path=self.env.get("PATH"))

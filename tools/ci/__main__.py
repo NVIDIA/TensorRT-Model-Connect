@@ -35,6 +35,16 @@ class CiCommand:
         commands.add_parser("e2e", help="Run the parallel E2E scheduler")
         coverage = commands.add_parser("coverage", help="Run a standalone coverage wrapper")
         coverage.add_argument("language", choices=("all", "cpp", "python"))
+        package_artifact = commands.add_parser(
+            "package-artifact", help="Verify a downloaded package promotion artifact"
+        )
+        package_artifact_commands = package_artifact.add_subparsers(
+            dest="package_artifact_command", required=True
+        )
+        verify_package_artifact = package_artifact_commands.add_parser(
+            "verify", help="Recompute the wheel model-smoke receipt"
+        )
+        verify_package_artifact.add_argument("--root", type=Path, required=True)
         proof = commands.add_parser("model-proof", help="Run one hermetic model certification")
         proof.add_argument("--model", required=True)
         proof.add_argument("--suite", default="premerge")
@@ -116,6 +126,14 @@ class CiCommand:
             ModelReferenceCacheWarmer(CiContext(env=dict(os.environ))).warm(
                 arguments.suite
             )
+            return 0
+        if (
+            arguments.command == "package-artifact"
+            and arguments.package_artifact_command == "verify"
+        ):
+            from .package import WheelPackageManager
+
+            WheelPackageManager.verify_model_smoke_artifact(arguments.root)
             return 0
         if arguments.command == "model-proof":
             from .context import CiContext

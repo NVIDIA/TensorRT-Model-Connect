@@ -627,7 +627,7 @@ bool LlamaTextGenerationPipeline::run_prefill_runtime_chunks(const std::vector<i
         }
 
         state_->advance(sq);
-        append_qualification_invocation("prefill", "engine_plan:prefill", *prefill_, offset,
+        append_qualification_invocation("prefill", "prefill_engine_plan", *prefill_, offset,
                                         offset + static_cast<std::size_t>(sq), history_tokens,
                                         active_tokens, bound_tokens, transfer_before,
                                         commit_before);
@@ -1196,9 +1196,10 @@ LlamaTextGenerationPipeline::qualification_bound_tokens(std::uint64_t history_to
 }
 
 void LlamaTextGenerationPipeline::append_qualification_invocation(
-    const char* role, const char* plan_id, const TrtModule& module, std::uint64_t chunk_begin,
-    std::uint64_t chunk_end, std::uint64_t history_tokens, std::uint64_t active_tokens,
-    std::uint64_t bound_tokens, const RuntimeMemoryTransferSnapshotV1& transfer_before,
+    const char* role, const char* plan_section_name, const TrtModule& module,
+    std::uint64_t chunk_begin, std::uint64_t chunk_end, std::uint64_t history_tokens,
+    std::uint64_t active_tokens, std::uint64_t bound_tokens,
+    const RuntimeMemoryTransferSnapshotV1& transfer_before,
     const RuntimeKvCommitSnapshot& commit_before) {
     if (active_qualification_ == nullptr)
         return;
@@ -1217,14 +1218,16 @@ void LlamaTextGenerationPipeline::append_qualification_invocation(
     RuntimeMemoryInvocationTraceV1 trace;
     trace.invocation_index = qualification_invocation_index_++;
     trace.role = role;
-    trace.plan_id = plan_id;
+    trace.plan_id = runtime_memory_execution_plan_identity(plan_section_name, module);
     trace.profile_id = module.profile_idx();
     trace.chunk_begin = chunk_begin;
     trace.chunk_end = chunk_end;
+    trace.kv_allocation_id = state_->runtime_kv_allocation_id();
     trace.kv_base_address = state_->runtime_kv_base_address();
     trace.history_tokens = history_tokens;
     trace.active_tokens = active_tokens;
     trace.bound_tokens = bound_tokens;
+    trace.reserved_tokens = state_->runtime_kv_capacity_tokens();
     trace.context_device_memory_bytes = state_->runtime_context_device_memory_bytes();
     trace.cuda_graph_status = module.cuda_graph_active() ? "active" : "uncaptured";
     trace.kv_device_to_host_bytes = transfer_delta.runtime_kv_device_to_host_bytes;
@@ -1301,7 +1304,7 @@ void LlamaTextGenerationPipeline::run_step(int32_t token_id, std::vector<float>&
 
     state_->advance();
     append_qualification_invocation(
-        "decode", "engine_plan:decode", decoder, static_cast<std::uint64_t>(position_before),
+        "decode", "engine_plan", decoder, static_cast<std::uint64_t>(position_before),
         static_cast<std::uint64_t>(position_before + 1),
         static_cast<std::uint64_t>(position_before),
         static_cast<std::uint64_t>(position_before + 1), static_cast<std::uint64_t>(rows_before),

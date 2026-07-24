@@ -5,9 +5,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import struct
 import subprocess
 import sys
 
@@ -312,6 +314,194 @@ def _runtime_libraries(inputs: Path) -> dict:
     }
 
 
+def _write_test_bundle(path: Path, spec) -> None:
+    plans = {
+        "prefill_engine_plan": b"qualified-prefill-engine-plan",
+        "engine_plan": b"qualified-decode-engine-plan",
+    }
+    section_offset = 0
+    sections = {}
+    for name, plan in plans.items():
+        sections[name] = {
+            "offset": section_offset,
+            "size": len(plan),
+        }
+        section_offset += len(plan)
+    header = {
+        "model_id": MODEL_ID,
+        "vocab_size": spec.vocab_size,
+        "hidden_size": 64,
+        "num_layers": spec.num_layers,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "max_cache_length": spec.context_limit,
+        "precision": "bf16",
+        "runtime_memory": {
+            "contract_version": 1,
+            "qualified_model_id": MODEL_ID,
+            "qualified_model_revision": MODEL_REVISION,
+            "qualified_config_sha256": "b" * 64,
+            "qualified_target": "linux-x86_64-gb300",
+            "qualified_runtime_stack": {
+                key: value
+                for key, value in RUNTIME_STACK.items()
+                if key != "schema"
+            },
+            "native_kv_plugin_abi": 1,
+            "model_context_limit": spec.context_limit,
+            "prefill_chunk_limit": spec.chunk_limit,
+            "kv_layout": "contiguous",
+            "kv_dtype": spec.kv_dtype,
+            "kv_bytes_per_token": spec.kv_bytes_per_token,
+            "active_kv_profile_limits": list(spec.buckets),
+            "runtime_owned": True,
+        },
+        "sections": sections,
+    }
+    header_bytes = json.dumps(header).encode("utf-8")
+    path.write_bytes(
+        isolation.boundary.BUNDLE_MAGIC
+        + struct.pack("<Q", len(header_bytes))
+        + header_bytes
+        + b"".join(plans.values())
+    )
+
+
+def _qualified_engine_graph(
+    evidence_dir: Path,
+    *,
+    bundle: Path,
+    spec,
+) -> dict:
+    header = isolation.boundary._read_bundle_header(bundle)
+    contract = header["runtime_memory"]
+    num_layers = header["num_layers"]
+    vocab_size = header["vocab_size"]
+    kv_width = (
+        contract["kv_bytes_per_token"]
+        // (2 * num_layers * 2)
+    )
+    sections = {}
+    for section_name in isolation._QUALIFIED_ENGINE_SECTIONS:
+        prefill = section_name == "prefill_engine_plan"
+        if prefill:
+            token_profiles = [
+                {
+                    "min": [1],
+                    "opt": [spec.chunk_limit],
+                    "max": [spec.chunk_limit],
+                }
+            ]
+            cache_profiles = [
+                {
+                    "min": [1, kv_width],
+                    "opt": [spec.chunk_limit, kv_width],
+                    "max": [spec.context_limit, kv_width],
+                }
+            ]
+        else:
+            token_profiles = [
+                {"min": [1], "opt": [1], "max": [1]}
+                for _ in spec.buckets
+            ]
+            cache_profiles = [
+                {
+                    "min": [1, kv_width],
+                    "opt": [bucket, kv_width],
+                    "max": [bucket, kv_width],
+                }
+                for bucket in spec.buckets
+            ]
+        history_profiles = [
+            {"min": [1], "opt": [1], "max": [1]}
+            for _ in token_profiles
+        ]
+        token_shape = [-1] if prefill else [1]
+        inputs = {
+            "token_id": {
+                "shape": token_shape,
+                "profiles": token_profiles,
+            },
+            "position_id": {
+                "shape": token_shape,
+                "profiles": token_profiles,
+            },
+            "history_length": {
+                "shape": [1],
+                "profiles": history_profiles,
+            },
+        }
+        outputs = {"logits": {"shape": [1, vocab_size]}}
+        for layer in range(num_layers):
+            for value_name in ("k", "v"):
+                inputs[f"cache_{value_name}_{layer}"] = {
+                    "shape": [-1, kv_width],
+                    "profiles": cache_profiles,
+                }
+                outputs[f"present_{value_name}_{layer}"] = {
+                    "shape": [-1 if prefill else 1, kv_width]
+                }
+        inspector = (
+            evidence_dir
+            / f"{section_name}.engine-inspector.json"
+        )
+        inspector.write_text(
+            json.dumps(
+                [
+                    {
+                        "Name": (
+                            f"layer.{layer}.attn."
+                            "NativeContiguousAttentionV2"
+                        ),
+                        "LayerType": "PluginV2",
+                    }
+                    for layer in range(num_layers)
+                ]
+            ),
+            encoding="utf-8",
+        )
+        plan = isolation.boundary._read_bundle_section(
+            bundle,
+            header,
+            section_name,
+        )
+        sections[section_name] = {
+            "engine_sha256": hashlib.sha256(plan).hexdigest(),
+            "num_optimization_profiles": len(token_profiles),
+            "inputs": inputs,
+            "outputs": outputs,
+            "native_contiguous_attention_layer_indices": list(
+                range(num_layers)
+            ),
+            "dense_attention_layers": [],
+            "cache_concat_layers": [],
+            "inspector_path": str(inspector),
+            "inspector_size_bytes": inspector.stat().st_size,
+            "inspector_sha256": isolation._sha256(inspector),
+        }
+    return {
+        "passed": True,
+        "gates": {
+            name: True
+            for name in isolation._QUALIFIED_ENGINE_GRAPH_GATES
+        },
+        "runtime_stack": dict(contract["qualified_runtime_stack"]),
+        "model_contract": {
+            "model_context_limit": contract["model_context_limit"],
+            "prefill_chunk_limit": contract["prefill_chunk_limit"],
+            "active_kv_profile_limits": contract[
+                "active_kv_profile_limits"
+            ],
+            "num_layers": num_layers,
+            "vocab_size": vocab_size,
+            "kv_dtype": contract["kv_dtype"],
+            "kv_bytes_per_token": contract["kv_bytes_per_token"],
+            "kv_width": kv_width,
+        },
+        "engine_sections": sections,
+    }
+
+
 def _write_correctness_report(
     inputs: Path,
     *,
@@ -388,6 +578,11 @@ def _write_correctness_report(
         "source_state": source,
         "source_state_post": source,
         "source_state_unchanged": True,
+        "qualified_engine_graph": _qualified_engine_graph(
+            evidence_dir,
+            bundle=bundle,
+            spec=spec,
+        ),
         "cases": cases,
         "context_memory_envelope": {
             "schema_version": 1,
@@ -554,7 +749,10 @@ def _prepare(
     inputs.mkdir()
     _init_repo(repo)
     bundle = inputs / "model.trtfb"
-    bundle.write_bytes(b"bundle")
+    _write_test_bundle(
+        bundle,
+        isolation.boundary.SPECS[MODEL_ID],
+    )
     worker = inputs / "worker"
     worker.write_bytes(b"worker")
     plugin = inputs / "plugin.so"
@@ -674,8 +872,38 @@ def test_produces_cold_warm_and_concurrent_isolation_receipt(
         "correctness_hf_logit_parity_passed"
     ]
     assert report["gates"]["companion_qualification_receipts"][
+        "correctness_qualified_engine_graph_passed"
+    ]
+    assert report["gates"]["companion_qualification_receipts"][
         "performance_split_08_09_passed"
     ]
+    graph = report["companion_qualification_evidence"]["correctness"][
+        "qualified_engine_graph"
+    ]
+    assert graph["passed"] is True
+    assert isolation._SHA256.fullmatch(graph["sha256"])
+    assert graph["runtime_stack"] == RUNTIME_STACK
+    assert graph["runtime_stack_sha256"] == isolation._canonical_sha(
+        RUNTIME_STACK
+    )
+    assert set(graph["engine_sections"]) == set(
+        isolation._QUALIFIED_ENGINE_SECTIONS
+    )
+    assert len(graph["engine_plan_identities"]) == 2
+    bundle_header = isolation.boundary._read_bundle_header(args.bundle)
+    for identity in graph["engine_plan_identities"]:
+        plan = isolation.boundary._read_bundle_section(
+            args.bundle,
+            bundle_header,
+            identity["section_name"],
+        )
+        assert identity["size_bytes"] == len(plan)
+        assert identity["sha256"] == hashlib.sha256(plan).hexdigest()
+    assert len(graph["inspector_artifacts"]) == 2
+    assert all(
+        isolation._file_identity_matches(identity)
+        for identity in graph["inspector_artifacts"]
+    )
     assert report["companion_qualification_evidence"]["correctness"][
         "runtime_stack_sha256"
     ] == report["companion_qualification_evidence"]["performance"][
@@ -745,6 +973,233 @@ def test_rejects_correctness_case_without_hf_parity(
 
     _rewrite_json(args.correctness_report, fail_parity)
     with pytest.raises(isolation.IsolationError, match="did not pass HF parity"):
+        isolation.run_qualification(args)
+
+
+def test_requires_qualified_engine_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+    _rewrite_json(
+        args.correctness_report,
+        lambda report: report.pop("qualified_engine_graph"),
+    )
+
+    with pytest.raises(
+        isolation.IsolationError,
+        match="qualified_engine_graph must be a JSON object",
+    ):
+        isolation.run_qualification(args)
+
+
+def test_rejects_failed_qualified_engine_graph_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+
+    def fail_graph_gate(report: dict) -> None:
+        report["qualified_engine_graph"]["gates"][
+            "no_dense_attention_mask_or_scores"
+        ] = False
+
+    _rewrite_json(args.correctness_report, fail_graph_gate)
+    with pytest.raises(
+        isolation.IsolationError,
+        match="required true gates",
+    ):
+        isolation.run_qualification(args)
+
+
+def test_requires_exact_qualified_engine_sections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+
+    def remove_engine_section(report: dict) -> None:
+        report["qualified_engine_graph"]["engine_sections"].pop(
+            "engine_plan"
+        )
+
+    _rewrite_json(args.correctness_report, remove_engine_section)
+    with pytest.raises(
+        isolation.IsolationError,
+        match="must contain exactly prefill_engine_plan and engine_plan",
+    ):
+        isolation.run_qualification(args)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing", "required file does not exist"),
+        ("tampered", "inspector artifact identity mismatch"),
+    ],
+)
+def test_rejects_missing_or_tampered_engine_inspector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    message: str,
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+    report = json.loads(
+        args.correctness_report.read_text(encoding="utf-8")
+    )
+    inspector = Path(
+        report["qualified_engine_graph"]["engine_sections"][
+            "prefill_engine_plan"
+        ]["inspector_path"]
+    )
+    if mutation == "missing":
+        inspector.unlink()
+    else:
+        inspector.write_text(
+            inspector.read_text(encoding="utf-8") + "\n",
+            encoding="utf-8",
+        )
+
+    with pytest.raises(isolation.IsolationError, match=message):
+        isolation.run_qualification(args)
+
+
+def test_recomputes_engine_plan_sha_from_bundle_section(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+
+    def replace_engine_sha(report: dict) -> None:
+        report["qualified_engine_graph"]["engine_sections"][
+            "prefill_engine_plan"
+        ]["engine_sha256"] = "3" * 64
+
+    _rewrite_json(args.correctness_report, replace_engine_sha)
+    with pytest.raises(
+        isolation.IsolationError,
+        match="engine SHA does not match the aggregate bundle section",
+    ):
+        isolation.run_qualification(args)
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["native_plugin_layers", "dense_attention", "cache_concat"],
+)
+def test_recomputes_layer_evidence_from_engine_inspector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mismatch: str,
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+    report = json.loads(
+        args.correctness_report.read_text(encoding="utf-8")
+    )
+    section = report["qualified_engine_graph"]["engine_sections"][
+        "prefill_engine_plan"
+    ]
+    inspector = Path(section["inspector_path"])
+    inspector_json = json.loads(inspector.read_text(encoding="utf-8"))
+    if mismatch == "native_plugin_layers":
+        inspector_json = inspector_json[:1]
+    elif mismatch == "dense_attention":
+        inspector_json.append(
+            {
+                "Name": "attention_mask",
+                "LayerType": "Constant",
+            }
+        )
+    else:
+        inspector_json.append(
+            {
+                "Name": "cache_k_0.concat",
+                "LayerType": "Concatenation",
+            }
+        )
+    inspector.write_text(
+        json.dumps(inspector_json),
+        encoding="utf-8",
+    )
+    section["inspector_size_bytes"] = inspector.stat().st_size
+    section["inspector_sha256"] = isolation._sha256(inspector)
+    args.correctness_report.write_text(
+        json.dumps(report),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        isolation.IsolationError,
+        match="reported layer evidence does not match its inspector artifact",
+    ):
+        isolation.run_qualification(args)
+
+
+def test_rejects_qualified_engine_runtime_stack_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+
+    def change_graph_stack(report: dict) -> None:
+        report["qualified_engine_graph"]["runtime_stack"][
+            "driver"
+        ] = "580.105.09"
+
+    _rewrite_json(args.correctness_report, change_graph_stack)
+    with pytest.raises(
+        isolation.IsolationError,
+        match="does not match the correctness case runtime stack",
+    ):
+        isolation.run_qualification(args)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda graph: graph["engine_sections"][
+                "prefill_engine_plan"
+            ]["inputs"]["position_id"]["profiles"][0].update(
+                opt=[1]
+            ),
+            "token_id and position_id profiles are not identical",
+        ),
+        (
+            lambda graph: graph["engine_sections"][
+                "engine_plan"
+            ]["inputs"]["history_length"]["profiles"][0].update(
+                max=[2]
+            ),
+            "history_length profile",
+        ),
+        (
+            lambda graph: graph["engine_sections"][
+                "prefill_engine_plan"
+            ]["outputs"]["logits"].update(shape=[-1, 151_936]),
+            "logits shape",
+        ),
+        (
+            lambda graph: graph["engine_sections"][
+                "engine_plan"
+            ]["inputs"]["cache_k_0"].update(shape=[-1, 512]),
+            "does not use the source-bound KV width",
+        ),
+        (
+            lambda graph: graph["model_contract"].update(kv_width=512),
+            "does not match the aggregate bundle header",
+        ),
+    ],
+)
+def test_rejects_incomplete_engine_shape_or_kv_accounting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation,
+    message: str,
+) -> None:
+    args = _prepare(tmp_path, monkeypatch)
+
+    def mutate_graph(report: dict) -> None:
+        mutation(report["qualified_engine_graph"])
+
+    _rewrite_json(args.correctness_report, mutate_graph)
+    with pytest.raises(isolation.IsolationError, match=message):
         isolation.run_qualification(args)
 
 

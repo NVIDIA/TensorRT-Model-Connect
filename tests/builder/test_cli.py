@@ -291,10 +291,13 @@ class TestCmdInspect:
 
     @pytest.mark.dynamic_memory
     def test_inspect_runtime_memory_bundle_reports_only_static_contract(
-        self, tmp_path, capsys
+        self, monkeypatch, tmp_path, capsys
     ):
+        import ctypes
         import json
         import struct
+
+        import tensorrt_model_connect.trt_compat as trt_compat
 
         bundle_path = tmp_path / "dynamic.trtfb"
         header = {
@@ -319,13 +322,15 @@ class TestCmdInspect:
                 },
                 "native_kv_plugin_abi": 2,
                 "model_context_limit": 40960,
-                "prefill_chunk_limit": 2048,
+                "prefill_chunk_limit": 1024,
                 "kv_layout": "contiguous_runtime_v1",
                 "kv_dtype": "bfloat16",
                 "kv_bytes_per_token": 114688,
                 "active_kv_profile_limits": [
                     128,
+                    256,
                     512,
+                    1024,
                     2048,
                     8192,
                     32768,
@@ -336,21 +341,38 @@ class TestCmdInspect:
             "sections": {},
         }
         payload = json.dumps(header).encode("utf-8")
-        bundle_path.write_bytes(
-            b"TRTFB\x00\x01\x00"
-            + struct.pack("<Q", len(payload))
-            + payload
-        )
+        bundle_path.write_bytes(b"TRTFB\x00\x01\x00" + struct.pack("<Q", len(payload)) + payload)
 
         from tensorrt_model_connect.build_cli import _cmd_inspect
 
+        def unexpected_runtime_touch(*_args, **_kwargs):
+            pytest.fail("static bundle inspection must not initialize CUDA or load a backend")
+
+        monkeypatch.setattr(trt_compat, "load_module", unexpected_runtime_touch)
+        monkeypatch.setattr(ctypes, "CDLL", unexpected_runtime_touch)
+        monkeypatch.setattr(subprocess, "run", unexpected_runtime_touch)
+        monkeypatch.setattr(subprocess, "Popen", unexpected_runtime_touch)
+        monkeypatch.setitem(sys.modules, "tensorrt", None)
+        monkeypatch.setitem(sys.modules, "tensorrt_rtx", None)
+        monkeypatch.setitem(sys.modules, "cuda", None)
+
         assert _cmd_inspect(argparse.Namespace(bundle_path=str(bundle_path))) == 0
         output = capsys.readouterr().out
-        assert "Runtime KV contract version:" in output
-        assert "Model context limit:" in output
-        assert "40960" in output
-        assert "KV bytes per token:" in output
-        assert "Active KV profile limits:" in output
+        expected_static_fields = {
+            "Runtime KV contract version": "1",
+            "Qualified model ID": "Qwen/Qwen3-0.6B",
+            "Qualified model revision": "a" * 40,
+            "Qualified config fingerprint": "b" * 64,
+            "Model context limit": "40960",
+            "Prefill chunk limit": "1024",
+            "KV layout": "contiguous_runtime_v1",
+            "KV bytes per token": "114688",
+        }
+        for label, value in expected_static_fields.items():
+            assert f"{label + ':':<32} {value}" in output
+        assert (
+            f"{'Active KV profile limits:':<32} 128, 256, 512, 1024, 2048, 8192, 32768, 40960"
+        ) in output
         assert "Max cache length:" not in output
         assert "runtime_kv_capacity_tokens" not in output
         assert "post_load_free_bytes" not in output

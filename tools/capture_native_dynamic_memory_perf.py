@@ -119,6 +119,12 @@ RUNTIME_LIBRARY_PATTERNS = {
         r"^libnvrtc-builtins\.so\.13(?:\.[0-9]+)*$"
     ),
 }
+SOURCE_STATE_BOUNDARY_NAMES = (
+    "build_pre",
+    "build_post",
+    "benchmark_pre",
+    "benchmark_post",
+)
 
 
 class CaptureError(RuntimeError):
@@ -192,6 +198,38 @@ def _require_nonempty(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise CaptureError(f"{label} must be a non-empty string")
     return value
+
+
+def _source_state_boundary(
+    value: Any, *, label: str
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise CaptureError(f"{label} must be a JSON object")
+    git_head = _require_nonempty(value.get("git_head"), f"{label}.git_head")
+    if re.fullmatch(r"[0-9a-f]{40,64}", git_head) is None:
+        raise CaptureError(f"{label}.git_head must be a Git object ID")
+    source_state_sha256 = _require_nonempty(
+        value.get("source_state_sha256"),
+        f"{label}.source_state_sha256",
+    )
+    if re.fullmatch(r"[0-9a-f]{64}", source_state_sha256) is None:
+        raise CaptureError(
+            f"{label}.source_state_sha256 must be a lowercase SHA-256"
+        )
+    git_dirty = value.get("git_dirty")
+    if not isinstance(git_dirty, bool):
+        raise CaptureError(f"{label}.git_dirty must be boolean")
+    exact_head = value.get("exact_head_gate_satisfied")
+    if not isinstance(exact_head, bool):
+        raise CaptureError(
+            f"{label}.exact_head_gate_satisfied must be boolean"
+        )
+    return {
+        "git_head": git_head,
+        "source_state_sha256": source_state_sha256,
+        "git_dirty": git_dirty,
+        "exact_head_gate_satisfied": exact_head,
+    }
 
 
 def _bundle_header(path: Path) -> tuple[dict[str, Any], int]:
@@ -1147,7 +1185,7 @@ def _validate_build_receipt(
     bundle: Path,
     role: str,
     source_state: Mapping[str, Any],
-) -> None:
+) -> dict[str, dict[str, Any]]:
     if receipt.get("schema_version") != BUILD_SCHEMA:
         raise CaptureError(f"build receipt must use {BUILD_SCHEMA}")
     if receipt.get("artifact_role") != role:
@@ -1170,6 +1208,32 @@ def _validate_build_receipt(
         raise CaptureError("current source differs from the fresh-build source")
     if receipt.get("git_head") != source_state.get("git_head"):
         raise CaptureError("current Git HEAD differs from the fresh-build HEAD")
+    boundaries = {
+        "build_pre": _source_state_boundary(
+            receipt.get("source_state_pre"),
+            label="build receipt.source_state_pre",
+        ),
+        "build_post": _source_state_boundary(
+            receipt.get("source_state_post"),
+            label="build receipt.source_state_post",
+        ),
+    }
+    for name, boundary in boundaries.items():
+        expected_sha_field = (
+            "prebuild_source_state_sha256"
+            if name == "build_pre"
+            else "postbuild_source_state_sha256"
+        )
+        if boundary["source_state_sha256"] != receipt.get(expected_sha_field):
+            raise CaptureError(
+                f"build receipt {name} source state disagrees with "
+                f"{expected_sha_field}"
+            )
+        if boundary["git_head"] != receipt.get("git_head"):
+            raise CaptureError(
+                f"build receipt {name} Git HEAD disagrees with git_head"
+            )
+    return boundaries
 
 
 def _cmd_benchmark(args: argparse.Namespace) -> int:
@@ -1246,7 +1310,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     source_state_pre = _source_state(
         repo_root, source_artifact_dir, label=f"{output.stem}-pre"
     )
-    _validate_build_receipt(
+    build_source_boundaries = _validate_build_receipt(
         build_receipt,
         bundle=bundle,
         role=args.role,
@@ -1388,6 +1452,17 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
     )
     if not source_state_unchanged:
         raise CaptureError("source state changed while running the benchmark")
+    source_state_boundaries = {
+        **build_source_boundaries,
+        "benchmark_pre": _source_state_boundary(
+            source_state_pre, label="benchmark source_state_pre"
+        ),
+        "benchmark_post": _source_state_boundary(
+            source_state_post, label="benchmark source_state_post"
+        ),
+    }
+    if tuple(source_state_boundaries) != SOURCE_STATE_BOUNDARY_NAMES:
+        raise CaptureError("internal source-state boundary order is invalid")
     result["qualification_provenance"] = {
         "git_head": build_receipt["git_head"],
         "source_state_sha256": source_state_pre["source_state_sha256"],
@@ -1398,6 +1473,7 @@ def _cmd_benchmark(args: argparse.Namespace) -> int:
             "source_state_sha256"
         ],
         "source_state_unchanged": source_state_unchanged,
+        "source_state_boundaries": source_state_boundaries,
         "prebuild_source_state_sha256": build_receipt[
             "prebuild_source_state_sha256"
         ],

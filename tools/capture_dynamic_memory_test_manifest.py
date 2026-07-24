@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Mapping, Sequence
+import xml.etree.ElementTree as ET
 
 
 SCHEMA = "trtmc.dynamic-memory-test-manifest/v1"
@@ -173,6 +174,103 @@ def _manifest_entries(label: str, stdout: str) -> list[str]:
     return []
 
 
+def _junit_node_id(
+    testcase: ET.Element,
+    *,
+    repo_root: Path,
+) -> str | None:
+    classname = testcase.get("classname", "")
+    name = testcase.get("name", "")
+    if not classname or not name:
+        return None
+    parts = classname.split(".")
+    module_length = 0
+    module_path: Path | None = None
+    for length in range(len(parts), 0, -1):
+        candidate = repo_root.joinpath(*parts[:length]).with_suffix(".py")
+        if candidate.is_file():
+            module_length = length
+            module_path = candidate
+            break
+    if module_path is None:
+        return None
+    components = [
+        module_path.relative_to(repo_root).as_posix(),
+        *parts[module_length:],
+        name,
+    ]
+    return "::".join(components)
+
+
+def _pytest_junit_outcomes(
+    path: Path,
+    *,
+    repo_root: Path,
+    expected_entries: Sequence[str],
+) -> dict[str, Any]:
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError) as error:
+        raise ManifestError(f"pytest JUnit evidence is invalid: {path}: {error}") from error
+    expected = set(expected_entries)
+    if not expected:
+        raise ManifestError("pytest qualification manifest is empty")
+    selected: dict[str, str] = {}
+    collection_skips: list[dict[str, str]] = []
+    unexpected: list[str] = []
+    for testcase in root.iter("testcase"):
+        node_id = _junit_node_id(testcase, repo_root=repo_root)
+        status = "passed"
+        if testcase.find("failure") is not None:
+            status = "failed"
+        elif testcase.find("error") is not None:
+            status = "error"
+        elif testcase.find("skipped") is not None:
+            status = "skipped"
+        if node_id is None:
+            skipped = testcase.find("skipped")
+            if skipped is not None:
+                collection_skips.append(
+                    {
+                        "classname": testcase.get("classname", ""),
+                        "name": testcase.get("name", ""),
+                        "message": skipped.get("message", ""),
+                    }
+                )
+                continue
+            unexpected.append(
+                f"{testcase.get('classname', '')}::{testcase.get('name', '')}"
+            )
+            continue
+        if node_id not in expected:
+            unexpected.append(node_id)
+            continue
+        if node_id in selected:
+            raise ManifestError(f"pytest JUnit repeats selected test {node_id!r}")
+        selected[node_id] = status
+    missing = sorted(expected - selected.keys())
+    selected_skips = sorted(
+        node_id for node_id, status in selected.items() if status == "skipped"
+    )
+    selected_failures = sorted(
+        node_id
+        for node_id, status in selected.items()
+        if status in {"failed", "error"}
+    )
+    passed = not missing and not unexpected and not selected_skips and not selected_failures
+    return {
+        "expected_count": len(expected),
+        "observed_count": len(selected),
+        "passed_count": sum(status == "passed" for status in selected.values()),
+        "selected_skips": selected_skips,
+        "selected_failures": selected_failures,
+        "missing_selected_tests": missing,
+        "unexpected_tests": sorted(unexpected),
+        "unselected_collection_skips": collection_skips,
+        "passed": passed,
+    }
+
+
 def _run_one(
     label: str,
     argv: Sequence[str],
@@ -180,14 +278,20 @@ def _run_one(
     repo_root: Path,
     output_dir: Path,
     environment_overrides: Mapping[str, str] | None = None,
+    expected_pytest_entries: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     stdout_path = output_dir / f"{label}.stdout.log"
     stderr_path = output_dir / f"{label}.stderr.log"
+    executed_argv = list(argv)
+    junit_path: Path | None = None
+    if expected_pytest_entries is not None:
+        junit_path = output_dir / f"{label}.junit.xml"
+        executed_argv.append(f"--junitxml={junit_path}")
     started_ns = time.time_ns()
     environment = os.environ.copy()
     environment.update(environment_overrides or {})
     completed = subprocess.run(
-        list(argv),
+        executed_argv,
         cwd=repo_root,
         check=False,
         env=environment,
@@ -199,9 +303,21 @@ def _run_one(
     stdout_path.write_text(completed.stdout, encoding="utf-8")
     stderr_path.write_text(completed.stderr, encoding="utf-8")
     entries = _manifest_entries(label, completed.stdout)
-    return {
+    pytest_outcomes = (
+        _pytest_junit_outcomes(
+            junit_path,
+            repo_root=repo_root,
+            expected_entries=expected_pytest_entries,
+        )
+        if junit_path is not None
+        else None
+    )
+    passed = completed.returncode == 0 and (
+        pytest_outcomes is None or pytest_outcomes["passed"]
+    )
+    result = {
         "label": label,
-        "argv": list(argv),
+        "argv": executed_argv,
         "cwd": str(repo_root),
         "environment_overrides": dict(environment_overrides or {}),
         "returncode": completed.returncode,
@@ -213,8 +329,15 @@ def _run_one(
         "stderr_sha256": _sha256(stderr_path),
         "manifest_entries": entries,
         "manifest_count": len(entries),
-        "passed": completed.returncode == 0,
+        "passed": passed,
     }
+    if junit_path is not None:
+        result["pytest_junit"] = {
+            "path": str(junit_path),
+            "sha256": _sha256(junit_path),
+            "outcomes": pytest_outcomes,
+        }
+    return result
 
 
 def capture(
@@ -256,6 +379,7 @@ def capture(
         )
 
     failed_label: str | None = None
+    dynamic_pytest_manifest: list[str] = []
     for label, argv in _commands(build_dir, python):
         environment_overrides = (
             {
@@ -266,13 +390,27 @@ def capture(
             if label.startswith("pytest_")
             else None
         )
+        expected_pytest_entries = None
+        if label == "pytest_dynamic_memory":
+            expected_pytest_entries = dynamic_pytest_manifest
+        elif label == "pytest_graph_e2e":
+            expected_pytest_entries = [
+                entry
+                for entry in dynamic_pytest_manifest
+                if entry.startswith(
+                    "tests/e2e/test_native_dynamic_memory_graph.py::"
+                )
+            ]
         result = _run_one(
             label,
             argv,
             repo_root=repo_root,
             output_dir=output_dir,
             environment_overrides=environment_overrides,
+            expected_pytest_entries=expected_pytest_entries,
         )
+        if label == "pytest_manifest_dynamic_memory":
+            dynamic_pytest_manifest = list(result["manifest_entries"])
         report["commands"].append(result)
         _write_json(report_path, report)
         if not result["passed"]:

@@ -658,11 +658,6 @@ def _c_div_2_record(
             "prefill_chunk_limit"
         )
     variant_chunk_limit = chunk_limit // 2
-    if variant_chunk_limit in base.active_kv_profile_limits:
-        raise DynamicMemoryContractError(
-            "Developer C/2 qualification is no longer a unique profile "
-            "variant"
-        )
     variant_buckets = tuple(
         sorted(
             {

@@ -80,8 +80,8 @@ def _resolved(
     (
         (
             "Qwen/Qwen3-0.6B",
-            1_024,
-            (128, 512, 1_024, 2_048, 8_192, 32_768, 40_960),
+            512,
+            (128, 256, 512, 1_024, 2_048, 8_192, 32_768, 40_960),
         ),
         (
             "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
@@ -342,7 +342,7 @@ def test_producer_calls_existing_qualified_builder_and_writes_receipt(
 
     built = captured["qualification"]
     assert isinstance(built, ResolvedDynamicMemoryQualification)
-    assert built.qualification.prefill_chunk_limit == 1_024
+    assert built.qualification.prefill_chunk_limit == 512
     assert captured["output"] == output.resolve()
     assert captured["build_timing"] == timing.resolve()
     assert captured["verbose"] is True
@@ -350,9 +350,10 @@ def test_producer_calls_existing_qualified_builder_and_writes_receipt(
     assert report["fresh_build"] is True
     assert report["artifact_reused"] is False
     assert report["variant_policy"] == {
-        "prefill_chunk_limit": 1_024,
+        "prefill_chunk_limit": 512,
         "active_kv_profile_limits": [
             128,
+            256,
             512,
             1_024,
             2_048,
@@ -576,7 +577,6 @@ def test_runner_rejects_noncanonical_variant_buckets() -> None:
     variant_contract["prefill_chunk_limit"] = spec.chunk_limit // 2
     variant_contract["active_kv_profile_limits"] = [
         128,
-        256,
         512,
         1_024,
         2_048,

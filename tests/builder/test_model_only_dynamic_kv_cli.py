@@ -70,7 +70,7 @@ def _build_args(model: str) -> argparse.Namespace:
             "qwen3",
             40960,
             40960,
-            (128, 512, 2048, 8192, 32768, 40960),
+            (128, 256, 512, 1024, 2048, 8192, 32768, 40960),
             "qwen3-0.6b.trtfb",
         ),
         (
@@ -79,7 +79,7 @@ def _build_args(model: str) -> argparse.Namespace:
             "llama",
             2048,
             2048,
-            (128, 512, 2048),
+            (128, 256, 512, 2048),
             "tinyllama-1.1b-chat-v1.0.trtfb",
         ),
     ),
@@ -344,31 +344,50 @@ def test_explicit_legacy_qwen_cache_profile_can_still_select_optimized_adapter(
 
 
 @pytest.mark.parametrize(
-    "model_id",
+    ("model_id", "revision", "model_type", "max_positions"),
     (
-        "Qwen/Qwen3-0.6B",
-        "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+        ("Qwen/Qwen3-1.7B", "d" * 40, "qwen3", 40960),
+        (
+            "TinyLlama/TinyLlama-1.1B-intermediate-step-1431k-3T",
+            "e" * 40,
+            "llama",
+            2048,
+        ),
     ),
 )
-def test_unqualified_initial_models_preserve_previous_optimized_routing(
+def test_unqualified_qwen_and_llama_snapshots_preserve_previous_optimized_routing(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     model_id: str,
+    revision: str,
+    model_type: str,
+    max_positions: int,
 ) -> None:
     import tensorrt_model_connect.build_cli as cli
     import tensorrt_model_connect.engine_builder as engine_builder
 
-    optimized_calls: list[tuple[str, str, dict[str, object]]] = []
-    monkeypatch.setattr(
-        cli,
-        "_model_only_native_dynamic_qualification",
-        lambda _args: None,
+    model_dir = tmp_path / "hub" / f"models--{model_id.replace('/', '--')}" / "snapshots" / revision
+    model_dir.parent.mkdir(parents=True)
+    _model_config(
+        model_dir,
+        model_type=model_type,
+        max_positions=max_positions,
     )
+    optimized_calls: list[tuple[str, str, dict[str, object]]] = []
+
+    def select_optimized(
+        model: str,
+        output: str,
+        options: dict[str, object],
+        **_kwargs: object,
+    ) -> object:
+        optimized_calls.append((model, output, options))
+        return object()
+
     monkeypatch.setattr(
         engine_builder,
         "_try_build_optimized_runtime",
-        lambda model, output, options, **_kwargs: (
-            optimized_calls.append((model, output, options)) or object()
-        ),
+        select_optimized,
     )
     monkeypatch.setattr(
         engine_builder,
@@ -377,16 +396,27 @@ def test_unqualified_initial_models_preserve_previous_optimized_routing(
             "an unqualified model must retain the pre-existing optimized route"
         ),
     )
+    monkeypatch.setattr(
+        engine_builder,
+        "_build_native_impl_qualified",
+        lambda **_kwargs: pytest.fail(
+            "an unqualified model must never enter the qualified native builder"
+        ),
+    )
 
-    args = _build_args(model_id)
+    args = _build_args(str(model_dir))
     args.precision = None
 
+    assert cli._model_only_native_dynamic_qualification(args) is None
     assert cli._cmd_build(args) == 0
     assert len(optimized_calls) == 1
-    assert optimized_calls[0][0] == model_id
-    assert optimized_calls[0][1] == cli._default_bundle_output(model_id)
-    assert optimized_calls[0][2]["max_cache_length"] == 256
-    assert optimized_calls[0][2]["dynamic_kv_cache"] is False
+    routed_model, output, options = optimized_calls[0]
+    assert routed_model == str(model_dir)
+    assert output == cli._default_bundle_output(str(model_dir))
+    assert options["max_cache_length"] == 256
+    assert options["dynamic_kv_cache"] is False
+    assert "runtime_memory_qualification" not in options
+    assert "_runtime_memory_contract" not in options
 
 
 def test_model_only_native_preference_is_exact_qualification_gated(
