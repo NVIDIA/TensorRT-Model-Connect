@@ -72,6 +72,7 @@ _HF_ALLOW_PATTERNS = [
     "tokenizer.json",
     "tokenizer_config.json",
     "chat_template.jinja",
+    "vocab.txt",
     "vocab.json",
     "merges.txt",
     "normalizer.json",
