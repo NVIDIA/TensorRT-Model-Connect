@@ -1712,11 +1712,60 @@ class TestUnitTiers:
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "tools/reference/transformers_text.py",
+            "tools/reference/transformers_encoder.py",
+            "tools/reference/transformers_vlm.py",
+            "tools/reference/plugin_reference.py",
+            "tools/reference/speech.py",
+            "tools/reference/elf_prepared.py",
+            "tools/trtmc_compare.py",
+            "tools/trtmc_disagreements.py",
+            "tools/trtmc_reference.py",
+            "tools/trtmc_validate.py",
+        ],
+    )
+    def test_validation_tool_triggers_tools_tier(self, imap, path):
+        """Validation runner edits run tools-tier tests without E2E."""
+        match = test_impact.classify_file(path, imap)
+
+        assert match.rule == "validation_tool"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
     def test_task_eval_suite_config_triggers_tools_tier(self, imap):
         """task_eval suite config edits run tools-tier tests without E2E."""
         match = test_impact.classify_file("tests/task_eval/validation_suites.yaml", imap)
 
         assert match.rule == "task_eval_config"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+    def test_validation_config_triggers_tools_tier(self, imap):
+        """Model-first validation catalog edits run tools-tier tests without E2E."""
+        match = test_impact.classify_file(
+            "tests/validation/model_workloads.yaml",
+            imap,
+        )
+
+        assert match.rule == "validation_config"
+        assert match.models == []
+        assert match.unit_tiers == ["tools"]
+        assert match.rebuild_cpp is False
+
+    def test_validation_reference_requirements_trigger_tools_tier(self, imap):
+        """The shared HF validation environment only affects tools-tier tests."""
+        match = test_impact.classify_file(
+            "python/tensorrt_model_connect/"
+            "python_profile_requirements/reference_common.lock.txt",
+            imap,
+        )
+
+        assert match.rule == "validation_reference_requirements"
         assert match.models == []
         assert match.unit_tiers == ["tools"]
         assert match.rebuild_cpp is False

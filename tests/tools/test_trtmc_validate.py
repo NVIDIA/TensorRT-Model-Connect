@@ -5,11 +5,14 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 import pytest
 
 from tools import task_eval
 from tools import trtmc_compare
+from tools import trtmc_disagreements
+from tools import trtmc_reference
 from tools import trtmc_validate
 
 
@@ -30,6 +33,27 @@ def test_model_workload_catalog_covers_every_ready_model():
     )
 
     assert len(catalog["models"]) == len(trtmc_validate.ready_model_names())
+
+
+def test_every_dataset_backed_validation_binding_has_native_reference_runner():
+    catalog = trtmc_validate.load_catalog()
+    suites = {suite["id"]: suite for suite in task_eval.load_suites()}
+    bindings = [
+        (model_name, workload)
+        for model_name, spec in catalog["models"].items()
+        for workload in spec["workloads"]
+        if workload != "e2e"
+    ]
+    missing = []
+    for model_name, workload in bindings:
+        dataset_kind = str(suites[workload]["dataset"]["kind"])
+        if trtmc_reference.native_reference_runner_for_dataset_kind(
+            dataset_kind
+        ) is None:
+            missing.append((model_name, workload, dataset_kind))
+
+    assert not missing
+    assert len({model for model, _workload in bindings}) == 111
 
 
 def test_resolve_binding_defaults_and_rejects_undeclared_workload():
@@ -367,7 +391,11 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
     case_dir = tmp_path / "model-a" / "workload-a"
     work_dir = case_dir / "validation" / "workload-a" / "model-a"
     work_dir.mkdir(parents=True)
-    prompt = {"sample_id": "sample-7", "prompt": "Complete this sentence"}
+    prompt = {
+        "sample_id": "sample-7",
+        "eval_index": 7,
+        "prompt": "Complete this sentence",
+    }
     (work_dir / "prompts.jsonl").write_text(
         json.dumps(prompt) + "\n",
         encoding="utf-8",
@@ -441,7 +469,10 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
                     "{trtmc_raw_jsonl}",
                     "--max-new-tokens",
                     "8",
-                ]
+                    "--seed",
+                    "{sample_seed}",
+                ],
+                "base_seed": 42,
             }
         ),
         encoding="utf-8",
@@ -477,6 +508,7 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
     assert records[0]["reproduce"]["trtmc"].startswith(
         "/workspace/build/trtmc_dataset_benchmark model.trtfb"
     )
+    assert records[0]["reproduce"]["trtmc"].endswith("--seed 49")
     assert (case_dir / records[0]["artifacts"]["trtmc_input"]).read_text(
         encoding="utf-8"
     ) == json.dumps(prompt, ensure_ascii=False) + "\n"
@@ -495,6 +527,147 @@ def test_report_adds_failed_sample_results_and_native_commands(tmp_path):
         "trtmc_validate.py",
     ):
         assert wrapper not in json.dumps(records)
+
+
+def test_failed_sample_uses_recorded_trtmc_command_and_copies_media(tmp_path):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    work_dir = case_dir / "validation" / "workload-a" / "model-a"
+    frames = work_dir / "reference_frames"
+    frames.mkdir(parents=True)
+    input_image = work_dir / "input.png"
+    reference_image = frames / "000.png"
+    trtmc_audio = work_dir / "output.wav"
+    input_image.write_bytes(b"input-image")
+    reference_image.write_bytes(b"reference-image")
+    trtmc_audio.write_bytes(b"RIFFfake-wave")
+    prompt = {
+        "sample_id": "sample-9",
+        "prompt": "Describe",
+        "images": [str(input_image)],
+    }
+    (work_dir / "prompts.jsonl").write_text(
+        json.dumps(prompt) + "\n",
+        encoding="utf-8",
+    )
+    (work_dir / "answers.json").write_text(
+        json.dumps({"requests": [{"sample_id": "sample-9", "answer": "A"}]}),
+        encoding="utf-8",
+    )
+    (work_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "disagreements": [
+                    {"sample_id": "sample-9", "status": "failed"}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "hf_predictions.json").write_text(
+        json.dumps(
+            {
+                "responses": [
+                    {
+                        "sample_id": "sample-9",
+                        "frames_dir": str(frames),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (work_dir / "trtfb_predictions.json").write_text(
+        json.dumps(
+            {
+                "responses": [
+                    {
+                        "sample_id": "sample-9",
+                        "wav_path": str(trtmc_audio),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    native_command = [
+        "/workspace/build/trtmc",
+        "run",
+        "/runs/engines/model.trtfb",
+        "--prompt",
+        "Describe",
+    ]
+    (work_dir / "trtfb_native_commands.jsonl").write_text(
+        json.dumps({"sample_id": "sample-9", "command": native_command}) + "\n",
+        encoding="utf-8",
+    )
+    reference_command = [
+        "/profiles/reference/bin/python",
+        "/workspace/model/reference.py",
+        "--input",
+        str(input_image),
+    ]
+    (work_dir / "hf_native_commands.jsonl").write_text(
+        json.dumps(
+            {"sample_id": "sample-9", "command": reference_command}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    metadata = trtmc_disagreements.build_disagreement_artifact(
+        work_dir=work_dir,
+        case_dir=case_dir,
+    )
+
+    record = json.loads(
+        (case_dir / metadata["path"]).read_text(encoding="utf-8")
+    )
+    assert record["reproduce"]["trtmc"] == (
+        "/workspace/build/trtmc run /runs/engines/model.trtfb "
+        "--prompt Describe"
+    )
+    assert record["reproduce"]["reference"].startswith(
+        "/profiles/reference/bin/python /workspace/model/reference.py"
+    )
+    media = record["artifacts"]["media"]
+    assert {item["kind"] for item in media} == {"image", "audio"}
+    assert all((case_dir / item["path"]).is_file() for item in media)
+    rendered = trtmc_validate._render_disagreement_record(
+        record,
+        asset_base=Path("model-a/workload-a"),
+    )
+    assert "<img " in rendered
+    assert "<audio " in rendered
+    assert "task_eval.py" not in rendered
+
+
+def test_failed_encoder_pair_expands_to_both_reproducible_samples():
+    rows = [
+        {
+            "pair_id": "sts-4",
+            "passed": False,
+            "cosine_abs_delta": 0.2,
+        }
+    ]
+    prompts = {
+        "sts-4-a": {
+            "sample_id": "sts-4-a",
+            "pair_id": "sts-4",
+            "pair_side": "sentence1",
+        },
+        "sts-4-b": {
+            "sample_id": "sts-4-b",
+            "pair_id": "sts-4",
+            "pair_side": "sentence2",
+        },
+    }
+
+    expanded = trtmc_disagreements._expand_pair_disagreements(rows, prompts)
+
+    assert [row["sample_id"] for row in expanded] == [
+        "sts-4-a",
+        "sts-4-b",
+    ]
 
 
 def test_report_bounds_inline_failed_samples_but_keeps_full_artifact(tmp_path):

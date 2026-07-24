@@ -35,8 +35,30 @@ _WORK_METADATA = "hf_cache.json"
 _NATIVE_RUN_LOG = "hf_native_run.log"
 _NATIVE_REPRO_METADATA = "hf_native_repro.json"
 _TEXT_SUFFIXES = {".json", ".jsonl", ".log", ".md", ".txt"}
-_NATIVE_TEXT_REFERENCE_FAMILIES = {"causal_base_continuation"}
+_NATIVE_TEXT_DATASET_KINDS = {"mmlu_five_shot_json", "text_generation_json"}
+_NATIVE_ENCODER_DATASET_KINDS = {"sts_pair_jsonl"}
+_NATIVE_PLUGIN_DATASET_KINDS = {
+    "diffusion_prompt_json",
+    "image_classification_json",
+    "prompted_segmentation_json",
+    "reranking_json",
+    "semantic_segmentation_json",
+    "time_series_csv",
+}
+_NATIVE_VLM_DATASET_KINDS = {"vlm_chat_json", "vlm_unified_json"}
+_NATIVE_ELF_DATASET_KINDS = {
+    "conditional_text_jsonl",
+    "unconditional_text_json",
+}
+_NATIVE_SPEECH_DATASET_KINDS = {"asr_chat_json", "seedtts_json"}
 _TRANSFORMERS_TEXT_RUNNER = REPO_ROOT / "tools" / "reference" / "transformers_text.py"
+_TRANSFORMERS_ENCODER_RUNNER = (
+    REPO_ROOT / "tools" / "reference" / "transformers_encoder.py"
+)
+_PLUGIN_REFERENCE_RUNNER = REPO_ROOT / "tools" / "reference" / "plugin_reference.py"
+_TRANSFORMERS_VLM_RUNNER = REPO_ROOT / "tools" / "reference" / "transformers_vlm.py"
+_ELF_PREPARED_RUNNER = REPO_ROOT / "tools" / "reference" / "elf_prepared.py"
+_SPEECH_REFERENCE_RUNNER = REPO_ROOT / "tools" / "reference" / "speech.py"
 _IGNORED_INPUT_NAMES = {
     "build.log",
     "eval_result.json",
@@ -121,10 +143,29 @@ def _settings(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _native_reference_runner(args: argparse.Namespace) -> Path | None:
-    if str(args.reference_family or "") in _NATIVE_TEXT_REFERENCE_FAMILIES:
+def native_reference_runner_for_dataset_kind(dataset_kind: str) -> Path | None:
+    if dataset_kind in _NATIVE_TEXT_DATASET_KINDS:
         return _TRANSFORMERS_TEXT_RUNNER
+    if dataset_kind in _NATIVE_ENCODER_DATASET_KINDS:
+        return _TRANSFORMERS_ENCODER_RUNNER
+    if dataset_kind in _NATIVE_PLUGIN_DATASET_KINDS:
+        return _PLUGIN_REFERENCE_RUNNER
+    if dataset_kind in _NATIVE_VLM_DATASET_KINDS:
+        return _TRANSFORMERS_VLM_RUNNER
+    if dataset_kind in _NATIVE_ELF_DATASET_KINDS:
+        return _ELF_PREPARED_RUNNER
+    if dataset_kind in _NATIVE_SPEECH_DATASET_KINDS:
+        return _SPEECH_REFERENCE_RUNNER
     return None
+
+
+def _native_reference_runner(args: argparse.Namespace) -> Path | None:
+    manifest_path = Path(args.work_dir).resolve() / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    dataset_kind = str(manifest.get("dataset_kind", "") or "")
+    return native_reference_runner_for_dataset_kind(dataset_kind)
 
 
 def _native_runner_identity(path: Path | None) -> str:
@@ -315,6 +356,12 @@ def _native_reference_command(
         "--device",
         str(args.device),
     ]
+    if args.reference_family:
+        command.extend(["--reference-family", str(args.reference_family)])
+    if runner == _ELF_PREPARED_RUNNER and args.elf_reference_repo:
+        command.extend(["--elf-reference-repo", str(args.elf_reference_repo)])
+    if runner == _SPEECH_REFERENCE_RUNNER and args.family:
+        command.extend(["--family", str(args.family)])
     for flag, value in (
         ("--device-map", args.device_map),
         ("--attn-impl", args.attn_impl),

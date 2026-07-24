@@ -137,6 +137,8 @@ def _reproduction_command(arguments: argparse.Namespace) -> list[str]:
         "--sample-id",
         "{sample_id}",
     ]
+    if arguments.reference_family:
+        command.extend(["--reference-family", arguments.reference_family])
     for flag, value in (
         ("--device-map", arguments.device_map),
         ("--attn-impl", arguments.attn_impl),
@@ -405,6 +407,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run a text model directly through Transformers."
     )
     parser.add_argument("--model", required=True)
+    parser.add_argument("--reference-family", default="")
     parser.add_argument("--prompts", type=Path, required=True)
     parser.add_argument("--answers", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)

@@ -29,7 +29,7 @@ import warnings
 from collections import Counter, defaultdict
 from itertools import product
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -3024,15 +3024,84 @@ def _write_dataset_benchmark_reproduction(
     template = list(command)
     template[2] = "{input_jsonl}"
     template[3] = "{trtmc_raw_jsonl}"
+    base_seed = None
+    if "--seed" in template:
+        seed_index = template.index("--seed") + 1
+        base_seed = int(template[seed_index])
+        template[seed_index] = "{sample_seed}"
     payload = {
         "schema_version": "trtmc.native-trtmc-reproduction/v1",
         "backend": "trtmc_dataset_benchmark",
         "command": template,
     }
+    if base_seed is not None:
+        payload["base_seed"] = base_seed
     (work_dir / "trtfb_repro.json").write_text(
         json.dumps(payload, indent=2),
         encoding="utf-8",
     )
+
+
+_NATIVE_TRTMC_COMMANDS = "trtfb_native_commands.jsonl"
+
+
+def _reset_native_trtmc_commands(work_dir: Path) -> None:
+    (work_dir / _NATIVE_TRTMC_COMMANDS).write_text("", encoding="utf-8")
+
+
+def _append_native_trtmc_command(
+    work_dir: Path,
+    sample_id: str,
+    command: Sequence[Any],
+) -> None:
+    tokens = [str(token) for token in command]
+    if not tokens:
+        return
+    with (work_dir / _NATIVE_TRTMC_COMMANDS).open("a", encoding="utf-8") as output:
+        output.write(
+            json.dumps(
+                {"sample_id": sample_id, "command": tokens},
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+
+def _command_tokens(value: Any) -> list[str]:
+    if isinstance(value, (list, tuple)) and value and all(
+        isinstance(token, (str, int, float, Path)) for token in value
+    ):
+        return [str(token) for token in value]
+    if isinstance(value, str):
+        tokens = shlex.split(value)
+        if len(tokens) > 1:
+            return tokens
+    return []
+
+
+def _native_command_from_metadata(metadata: Any) -> list[str]:
+    if not isinstance(metadata, Mapping):
+        return []
+    command = _command_tokens(metadata.get("command"))
+    if command:
+        return command
+    for value in metadata.values():
+        nested = _native_command_from_metadata(value)
+        if nested:
+            return nested
+    return []
+
+
+def _record_output_native_command(
+    work_dir: Path,
+    sample_id: str,
+    output: Any,
+) -> None:
+    raw_metadata = getattr(output, "metadata", {})
+    metadata = raw_metadata if isinstance(raw_metadata, Mapping) else {}
+    command = _native_command_from_metadata(metadata)
+    if command:
+        _append_native_trtmc_command(work_dir, sample_id, command)
 
 
 def run_vlm_trtfb(args: argparse.Namespace) -> None:
@@ -3063,6 +3132,7 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
 
     rows: list[dict[str, Any]] = []
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    _reset_native_trtmc_commands(work_dir)
     with (
         raw_output.open("w", encoding="utf-8") as raw_f,
         log_path.open("w", encoding="utf-8") as log_f,
@@ -3107,6 +3177,11 @@ def run_vlm_trtfb(args: argparse.Namespace) -> None:
             if not bool(defaults.get("enable_thinking", True)):
                 cmd.append("--no-thinking")
 
+            _append_native_trtmc_command(
+                work_dir,
+                str(prompt_row.get("sample_id", f"vlm_{idx:06d}")),
+                cmd,
+            )
             log_f.write(f"$ {' '.join(cmd)}\n")
             start = time.perf_counter()
             proc = subprocess.run(
@@ -3166,6 +3241,7 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
 
     rows: list[dict[str, Any]] = []
     prompt_rows = load_jsonl(work_dir / "prompts.jsonl")
+    _reset_native_trtmc_commands(work_dir)
     with (
         raw_output.open("w", encoding="utf-8") as raw_f,
         log_path.open("w", encoding="utf-8") as log_f,
@@ -3187,6 +3263,11 @@ def run_asr_trtfb(args: argparse.Namespace) -> None:
                 cmd.extend(["--hf-python", args.hf_python])
             cmd.extend(_asr_runtime_flags(prompt_row, defaults))
 
+            _append_native_trtmc_command(
+                work_dir,
+                str(prompt_row.get("sample_id", f"asr_{idx:06d}")),
+                cmd,
+            )
             log_f.write(f"$ {' '.join(cmd)}\n")
             start = time.perf_counter()
             proc = subprocess.run(
@@ -6672,6 +6753,7 @@ def run_time_series_trtfb(args: argparse.Namespace) -> None:
     log_path = work_dir / (args.log or "trtfb_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     with (
         raw_path.open("w", encoding="utf-8") as raw_file,
         log_path.open("w", encoding="utf-8") as log_file,
@@ -6689,6 +6771,7 @@ def run_time_series_trtfb(args: argparse.Namespace) -> None:
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
             output = runner.run_stage(case, _time_series_full_inference_stage(case), context)
+            _record_output_native_command(work_dir, case.name, output)
             log_file.write(
                 json.dumps(
                     {
@@ -6893,6 +6976,7 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
     pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     with raw_path.open("w", encoding="utf-8") as raw_file:
         for index, prompt_row in enumerate(prompt_rows):
             case = _vision_case_for_request(template, prompt_row, task_eval_config, index)
@@ -6909,6 +6993,7 @@ def run_vision_trtfb(args: argparse.Namespace) -> None:
             output = runner.run_stage(
                 case, _vision_full_inference_stage(case), context
             )
+            _record_output_native_command(work_dir, case.name, output)
             response = _vision_response(
                 case=case,
                 source="trtfb",
@@ -7067,6 +7152,7 @@ def run_reranking_trtfb(args: argparse.Namespace) -> None:
     metadata_path = work_dir / (args.log or "trtfb_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     with (
         raw_path.open("w", encoding="utf-8") as raw_file,
         metadata_path.open("w", encoding="utf-8") as metadata_file,
@@ -7086,6 +7172,7 @@ def run_reranking_trtfb(args: argparse.Namespace) -> None:
             output = runner.run_stage(
                 case, _reranking_full_inference_stage(case), context
             )
+            _record_output_native_command(work_dir, case.name, output)
             response = _reranking_response(
                 case=case, source="trtfb", output=output, prompt_row=prompt_row
             )
@@ -7652,6 +7739,7 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
     log_path = work_dir / (getattr(args, "log", "") or "trtfb_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     with (
         raw_path.open("w", encoding="utf-8") as raw_file,
         log_path.open("w", encoding="utf-8") as log_file,
@@ -7671,6 +7759,7 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
             output = runner.run_stage(
                 case, _diffusion_end_to_end_stage(case), context
             )
+            _record_output_native_command(work_dir, case.name, output)
             command = (
                 output.metadata.get("command")
                 if isinstance(output.metadata, dict)
@@ -7752,6 +7841,7 @@ def run_diffusion_text_trtfb(args: argparse.Namespace) -> None:
     bundle_path = Path(args.bundle).resolve()
     base_seed = int(generation.get("seed", 42))
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     with raw_path.open("w", encoding="utf-8") as raw_file:
         for index, prompt_row in enumerate(prompt_rows):
             case = copy.deepcopy(template)
@@ -7804,6 +7894,7 @@ def run_diffusion_text_trtfb(args: argparse.Namespace) -> None:
                 model_plugin_dir=str(getattr(args, "model_plugin_dir", "") or ""),
             )
             output = runner.run_stage(case, StageSpec(name="decoded_text", required=True), context)
+            _record_output_native_command(work_dir, sample_id, output)
             generated_samples = output.data.get("generated_samples", [])
             generated = generated_samples[0] if generated_samples else {}
             output_text = str(
@@ -7973,6 +8064,7 @@ def run_tts_trtfb(args: argparse.Namespace) -> None:
     if args.cuda_visible_devices:
         env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     with (
         raw_output.open("w", encoding="utf-8") as raw_f,
         log_path.open("w", encoding="utf-8") as log_f,
@@ -8002,6 +8094,7 @@ def run_tts_trtfb(args: argparse.Namespace) -> None:
                 sample_set_tokens.append(f"audio_bark.seed={seed + idx}")
             for token in sample_set_tokens:
                 cmd.extend(["--set", token])
+            _append_native_trtmc_command(work_dir, sample_id, cmd)
             log_f.write(f"$ {' '.join(cmd)}\n")
             start = time.perf_counter()
             proc = subprocess.run(cmd, check=False, text=True, capture_output=True, env=env)
@@ -8065,6 +8158,7 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
     pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
     log_path = work_dir / (args.log or "trtfb_run.log")
     responses: list[dict[str, Any]] = []
+    _reset_native_trtmc_commands(work_dir)
     env = os.environ.copy()
     if args.cuda_visible_devices:
         env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
@@ -8090,6 +8184,11 @@ def run_encoder_embedding_trtfb(args: argparse.Namespace) -> None:
                 cmd.extend(["--config", args.config])
             for token in args.set or []:
                 cmd.extend(["--set", token])
+            _append_native_trtmc_command(
+                work_dir,
+                str(prompt_row["sample_id"]),
+                cmd,
+            )
             start = time.perf_counter()
             proc = subprocess.run(cmd, check=False, text=True, capture_output=True, env=env)
             wall_ms = (time.perf_counter() - start) * 1000.0

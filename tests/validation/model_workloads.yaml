@@ -359,6 +359,12 @@ models:
   wan21-t2v-1.3b-l0:
     default: vbench_t2v_diffusion_video
     workloads: [vbench_t2v_diffusion_video]
+  wan22-ti2v-5b:
+    default: e2e
+    workloads: [e2e]
+  wan22-ti2v-5b-l0:
+    default: e2e
+    workloads: [e2e]
   whisper-large-v3-turbo:
     default: librispeech_clean_asr
     workloads: [librispeech_clean_asr]

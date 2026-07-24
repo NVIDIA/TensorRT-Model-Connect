@@ -529,28 +529,51 @@ def _summarize_command_log(
     return count, selected or first
 
 
-def _commands_from_logs(root: Path) -> dict[str, Any]:
-    sample_ids = _prepared_sample_ids(root)
-    disagreement_id = _first_disagreement_id(root)
-    representative_id = disagreement_id or (sample_ids[0] if sample_ids else "")
+def _command_log_kind(path: Path, *, has_native_reference: bool) -> str | None:
+    if has_native_reference and path.name == "hf_run.log":
+        return None
+    return "hf" if "hf" in path.name.lower() else "trtmc"
+
+
+def _collect_command_logs(
+    root: Path,
+    *,
+    log_paths: Sequence[Path],
+    sample_ids: Sequence[str],
+    representative_id: str,
+) -> tuple[dict[str, list[str]], dict[str, int], dict[str, list[str]]]:
     commands: dict[str, list[str]] = {"hf": [], "trtmc": []}
     counts = {"hf": 0, "trtmc": 0}
     logs: dict[str, list[str]] = {"hf": [], "trtmc": []}
-    log_paths = sorted(root.rglob("*.log"))
     has_native_reference = any(path.name == "hf_native_run.log" for path in log_paths)
     for path in log_paths:
-        if has_native_reference and path.name == "hf_run.log":
+        kind = _command_log_kind(path, has_native_reference=has_native_reference)
+        if kind is None:
             continue
-        kind = "hf" if "hf" in path.name.lower() else "trtmc"
+        indexed_sample_ids = sample_ids if path.name == "trtfb_run.log" else ()
         count, representative = _summarize_command_log(
             path,
-            sample_ids=sample_ids if path.name == "trtfb_run.log" else (),
+            sample_ids=indexed_sample_ids,
             target_sample_id=representative_id,
         )
         counts[kind] += count
         if count:
             logs[kind].append(str(path.relative_to(root)))
         _append_unique(commands, kind, representative)
+    return commands, counts, logs
+
+
+def _commands_from_logs(root: Path) -> dict[str, Any]:
+    sample_ids = _prepared_sample_ids(root)
+    disagreement_id = _first_disagreement_id(root)
+    representative_id = disagreement_id or (sample_ids[0] if sample_ids else "")
+    log_paths = sorted(root.rglob("*.log"))
+    commands, counts, logs = _collect_command_logs(
+        root,
+        log_paths=log_paths,
+        sample_ids=sample_ids,
+        representative_id=representative_id,
+    )
     for kind in commands:
         commands[kind] = commands[kind][:MAX_REPRO_COMMANDS_PER_BACKEND]
     return {
@@ -1175,7 +1198,50 @@ def _render_vanilla_command(label: str, command: str) -> str:
     return f"<h5>{html.escape(label)}</h5>{body}"
 
 
-def _render_disagreement_record(record: Mapping[str, Any]) -> str:
+def _render_failure_media(
+    record: Mapping[str, Any],
+    *,
+    asset_base: Path,
+) -> str:
+    artifacts = record.get("artifacts", {})
+    media = artifacts.get("media", []) if isinstance(artifacts, dict) else []
+    if not isinstance(media, list):
+        return ""
+    rendered = []
+    for item in media:
+        if not isinstance(item, dict):
+            continue
+        label = html.escape(str(item.get("label", "artifact")))
+        relative_path = str(item.get("path", "") or "")
+        if not relative_path:
+            continue
+        href = html.escape(str(asset_base / relative_path))
+        body = _failure_media_tag(str(item.get("kind", "")), href, label)
+        if not body:
+            continue
+        rendered.append(
+            f'<figure><figcaption>{label}</figcaption>{body}</figure>'
+        )
+    if not rendered:
+        return ""
+    return '<h5>Failure media</h5><div class="failure-media">' + "".join(rendered) + "</div>"
+
+
+def _failure_media_tag(kind: str, href: str, label: str) -> str:
+    if kind == "image":
+        return f'<a href="{href}"><img src="{href}" alt="{label}" loading="lazy"></a>'
+    if kind == "audio":
+        return f'<audio controls preload="metadata" src="{href}"></audio>'
+    if kind == "video":
+        return f'<video controls preload="metadata" src="{href}"></video>'
+    return ""
+
+
+def _render_disagreement_record(
+    record: Mapping[str, Any],
+    *,
+    asset_base: Path,
+) -> str:
     sample_id = str(record.get("sample_id", "") or "unknown sample")
     reason = str(record.get("reason", "") or "comparison mismatch").replace("_", " ")
     reproduce = record.get("reproduce", {})
@@ -1189,6 +1255,7 @@ def _render_disagreement_record(record: Mapping[str, Any]) -> str:
         f"<section><h5>TRTMC result</h5>{_json_preview(record.get('trtmc_result', {}))}</section>"
         f"<section><h5>Comparison</h5>{_json_preview(record.get('comparison', {}))}</section>"
         "</div>"
+        f"{_render_failure_media(record, asset_base=asset_base)}"
         f"{_render_vanilla_command('Reference vanilla command', str(reproduce.get('reference', '') or ''))}"
         f"{_render_vanilla_command('TRTMC vanilla command', str(reproduce.get('trtmc', '') or ''))}"
         "</details>"
@@ -1227,7 +1294,11 @@ def _render_disagreements(
         and comparison.get("status") == "disagreement"
     )
     noun = "failed samples" if failed else "sample differences"
-    records = "".join(_render_disagreement_record(record) for record in preview)
+    asset_base = Path(artifact_href).parent
+    records = "".join(
+        _render_disagreement_record(record, asset_base=asset_base)
+        for record in preview
+    )
     more = ""
     if count > len(preview):
         more = (
@@ -1493,6 +1564,12 @@ summary {{ cursor: pointer; color: #185abc; }}
 .difference-grid {{ display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr));
                     gap: 10px; }}
 .difference-grid pre {{ max-height: 260px; overflow: auto; }}
+.failure-media {{ display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }}
+.failure-media figure {{ margin: 0; max-width: 360px; }}
+.failure-media figcaption {{ color: #5f6368; margin-bottom: 4px; }}
+.failure-media img, .failure-media video {{ display: block; max-width: 360px;
+                                           max-height: 280px; }}
+.failure-media audio {{ width: min(360px, 70vw); }}
 pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
        background: #f8f9fa; border: 1px solid #dadce0; border-radius: 4px; }}
 .unavailable {{ color: #5f6368; }}

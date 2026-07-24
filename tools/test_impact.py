@@ -1369,6 +1369,23 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
             covered_by=("TestSharedModules.test_python_profile_requirements_scope",),
         ),
         ClassificationRule(
+            priority=18,
+            name="validation_reference_requirements",
+            matcher=_path_equals(
+                "python/tensorrt_model_connect/"
+                "python_profile_requirements/reference_common.lock.txt"
+            ),
+            resolver=_match_result(
+                "validation_reference_requirements",
+                _no_models,
+                ["tools"],
+                False,
+            ),
+            covered_by=(
+                "TestUnitTiers.test_validation_reference_requirements_trigger_tools_tier",
+            ),
+        ),
+        ClassificationRule(
             priority=90,
             name="specialized_builder",
             matcher=_regex_rule(
@@ -1906,27 +1923,44 @@ def _classification_rules() -> Tuple[ClassificationRule, ...]:
         ),
         ClassificationRule(
             priority=487,
+            name="validation_tool",
+            matcher=_regex_rule(
+                r"tools/(?:reference/[^/]+\.py|"
+                r"trtmc_(?:compare|disagreements|reference|validate)\.py)$"
+            ),
+            resolver=_match_result("validation_tool", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_validation_tool_triggers_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=488,
             name="task_eval_config",
             matcher=_path_startswith("tests/task_eval/"),
             resolver=_match_result("task_eval_config", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_task_eval_suite_config_triggers_tools_tier",),
         ),
         ClassificationRule(
-            priority=488,
+            priority=489,
+            name="validation_config",
+            matcher=_path_equals("tests/validation/model_workloads.yaml"),
+            resolver=_match_result("validation_config", _no_models, ["tools"], False),
+            covered_by=("TestUnitTiers.test_validation_config_triggers_tools_tier",),
+        ),
+        ClassificationRule(
+            priority=490,
             name="test_impact_tool",
             matcher=_path_equals("tools/test_impact.py"),
             resolver=_match_result("test_impact_tool", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_test_impact_tool_triggers_tools_tier",),
         ),
         ClassificationRule(
-            priority=489,
+            priority=491,
             name="github_ci_config",
             matcher=_path_startswith(".github/"),
             resolver=_match_result("github_ci_config", _no_models, ["tools"], False),
             covered_by=("TestUnitTiers.test_github_ci_config_triggers_tools_tier",),
         ),
         ClassificationRule(
-            priority=490,
+            priority=492,
             name="no_impact",
             matcher=_no_impact_matcher,
             resolver=_no_impact_resolver,

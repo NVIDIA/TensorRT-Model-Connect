@@ -41,6 +41,11 @@ At completion the command prints the exact reference and TRTMC reproduction
 commands, the per-model `comparison.json`, and the aggregate `report.html`.
 Dataset-backed comparison runs through `tools/trtmc_compare.py`; task-eval
 commands are not part of the validation result or its reproduction contract.
+Every non-`e2e` model/workload binding must resolve to an independent reference
+runner selected by the prepared dataset kind. A catalog-wide test rejects new
+bindings that would fall back to `task_eval.py`. Models whose validation
+contract is still only `e2e` continue to use the E2E path and are not presented
+as migrated task-eval workloads.
 
 The HTML artifact is named **TRTMC Reference Consistency Report** because it
 covers task accuracy as well as token, embedding, and numerical agreement.
@@ -56,6 +61,18 @@ entrypoint and the TRTMC command invokes the model executable directly; neither
 command re-enters validation, comparison, or task-eval orchestration. The
 complete set is written to `disagreements.jsonl`, while `comparison.json` and
 `report.json` retain only bounded metadata.
+
+Model-owned reference and TRTMC plugins record the subprocess command they
+actually executed. These per-sample command logs stay in the model work
+directory; the HTML includes only commands for disagreement samples. This
+keeps a 1,000- or 10,000-sample report compact without reconstructing a command
+after the failure.
+
+For failed image, video, or audio samples, the report copies only the relevant
+input/output media into that sample's `repro` directory. Image and video-frame
+previews, playable video files up to the artifact size limit, and WAV/audio
+controls are rendered next to the two result records. Passing samples do not
+duplicate media.
 
 The report keeps three statuses separate:
 

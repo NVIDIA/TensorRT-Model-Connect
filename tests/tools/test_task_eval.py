@@ -3654,6 +3654,61 @@ def test_dataset_benchmark_reproduction_is_direct_and_uses_single_input(
     assert "task_eval.py" not in " ".join(payload["command"])
 
 
+def test_dataset_benchmark_reproduction_preserves_per_sample_seed(
+    tmp_path: Path,
+) -> None:
+    command = [
+        "/workspace/build/trtmc_dataset_benchmark",
+        "/runs/engines/model.trtfb",
+        "/runs/work/prompts.jsonl",
+        "/runs/work/trtfb_raw.jsonl",
+        "--seed",
+        "42",
+    ]
+
+    task_eval._write_dataset_benchmark_reproduction(tmp_path, command)
+
+    payload = json.loads(
+        (tmp_path / "trtfb_repro.json").read_text(encoding="utf-8")
+    )
+    assert payload["base_seed"] == 42
+    assert payload["command"][payload["command"].index("--seed") + 1] == (
+        "{sample_seed}"
+    )
+
+
+def test_native_trtmc_command_recorder_extracts_nested_model_command(
+    tmp_path: Path,
+) -> None:
+    task_eval._reset_native_trtmc_commands(tmp_path)
+    output = SimpleNamespace(
+        metadata={
+            "cpp": {
+                "command": [
+                    "/workspace/build/trtmc",
+                    "run",
+                    "/runs/engines/model.trtfb",
+                    "--prompt",
+                    "hello",
+                ]
+            }
+        }
+    )
+
+    task_eval._record_output_native_command(
+        tmp_path,
+        "sample-7",
+        output,
+    )
+
+    row = json.loads(
+        (tmp_path / "trtfb_native_commands.jsonl").read_text(encoding="utf-8")
+    )
+    assert row["sample_id"] == "sample-7"
+    assert row["command"][0:2] == ["/workspace/build/trtmc", "run"]
+    assert "task_eval.py" not in " ".join(row["command"])
+
+
 def test_run_diffusion_trtfb_writes_image_artifact_predictions(
     tmp_path: Path, monkeypatch
 ) -> None:
