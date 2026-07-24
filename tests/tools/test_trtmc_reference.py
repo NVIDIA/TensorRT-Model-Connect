@@ -97,6 +97,7 @@ def test_reference_cache_reuses_same_settings_across_work_directories(
     assert calls == [first]
     assert (first / "hf_predictions.json").is_symlink()
     assert (second / "hf_predictions.json").is_symlink()
+    assert not (second / "hf_predictions.json").readlink().is_absolute()
     payload = json.loads(
         (second / "hf_predictions.json").read_text(encoding="utf-8")
     )

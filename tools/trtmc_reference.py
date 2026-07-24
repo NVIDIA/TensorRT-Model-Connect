@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -162,7 +163,8 @@ def _materialize(entry: Path, work_dir: Path) -> None:
         target = work_dir / source.name
         if target.exists() or target.is_symlink():
             _remove_path(target)
-        target.symlink_to(source, target_is_directory=source.is_dir())
+        relative_source = os.path.relpath(source, target.parent)
+        target.symlink_to(relative_source, target_is_directory=source.is_dir())
 
 
 def _rewrite_cached_paths(root: Path, old: Path, new: Path) -> None:
