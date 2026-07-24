@@ -527,6 +527,49 @@ def test_plugin_reference_preserves_model_owned_subprocess_command() -> None:
     assert namespace["run_reference_subprocess"] is original
 
 
+def test_plugin_reference_preserves_direct_subprocess_command() -> None:
+    namespace: dict[str, object] = {}
+
+    def fake_subprocess_run(command, **_kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            command_was_run=list(command),
+        )
+
+    subprocess_module = SimpleNamespace(run=fake_subprocess_run)
+    namespace["subprocess"] = subprocess_module
+    exec(
+        "def run_stage(case, stage, context):\n"
+        "    completed = subprocess.run(\n"
+        "        [context.hf_python, '-c', case.script],\n"
+        "        capture_output=True,\n"
+        "    )\n"
+        "    return type('Output', (), {\n"
+        "        'metadata': {'returncode': completed.returncode},\n"
+        "        'command_was_run': completed.command_was_run,\n"
+        "    })()\n",
+        namespace,
+    )
+    reference = SimpleNamespace(run_stage=namespace["run_stage"])
+    case = SimpleNamespace(script="print('direct HF')")
+    context = SimpleNamespace(hf_python="/profiles/reference/bin/python")
+
+    output = plugin_reference._run_reference_stage(
+        reference,
+        case,
+        SimpleNamespace(name="end_to_end"),
+        context,
+    )
+
+    assert output.metadata["command"] == [
+        "/profiles/reference/bin/python",
+        "-c",
+        "print('direct HF')",
+    ]
+    assert output.command_was_run == output.metadata["command"]
+    assert subprocess_module.run is fake_subprocess_run
+
+
 def test_vlm_reference_metadata_is_direct_and_sample_selectable(
     tmp_path: Path,
 ) -> None:

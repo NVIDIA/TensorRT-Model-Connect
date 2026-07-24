@@ -162,12 +162,15 @@ def _run_reference_stage(
     run_stage = reference.run_stage
     function = getattr(run_stage, "__func__", run_stage)
     namespace = getattr(function, "__globals__", {})
-    original = namespace.get("run_reference_subprocess")
-    if not callable(original):
+    helper = namespace.get("run_reference_subprocess")
+    subprocess_module = namespace.get("subprocess")
+    direct_run = getattr(subprocess_module, "run", None)
+    if not callable(helper) and not callable(direct_run):
         return run_stage(case, stage, context)
+    captured_commands: list[list[str]] = []
 
     def run_and_record(*args: Any, **kwargs: Any) -> Any:
-        output = original(*args, **kwargs)
+        output = helper(*args, **kwargs)
         command = _command_tokens(kwargs.get("command"))
         metadata = getattr(output, "metadata", {})
         if command and not _native_command_from_metadata(metadata):
@@ -177,11 +180,31 @@ def _run_reference_stage(
             }
         return output
 
-    namespace["run_reference_subprocess"] = run_and_record
+    def capture_direct_run(*args: Any, **kwargs: Any) -> Any:
+        command_value = args[0] if args else kwargs.get("args")
+        command = _command_tokens(command_value)
+        if command:
+            captured_commands.append(command)
+        return direct_run(*args, **kwargs)
+
+    if callable(helper):
+        namespace["run_reference_subprocess"] = run_and_record
+    if callable(direct_run):
+        subprocess_module.run = capture_direct_run
     try:
-        return run_stage(case, stage, context)
+        output = run_stage(case, stage, context)
     finally:
-        namespace["run_reference_subprocess"] = original
+        if callable(helper):
+            namespace["run_reference_subprocess"] = helper
+        if callable(direct_run):
+            subprocess_module.run = direct_run
+    metadata = getattr(output, "metadata", {})
+    if captured_commands and not _native_command_from_metadata(metadata):
+        output.metadata = {
+            **(metadata if isinstance(metadata, dict) else {}),
+            "command": captured_commands[-1],
+        }
+    return output
 
 
 def _model_manifest_path(manifest: Mapping[str, Any]) -> Path:
