@@ -596,6 +596,45 @@ def _passing_result(model_name: str) -> dict[str, object]:
     }
 
 
+def _recovered_build_record(model_name: str) -> dict[str, object]:
+    return {
+        "identity": model_name,
+        "attempt_count": 2,
+        "command": ["python", "-m", "builder", model_name],
+        "recovery_attempts": [
+            {
+                "attempt": 1,
+                "returncode": -signal.SIGSEGV,
+                "signal": signal.SIGSEGV,
+            }
+        ],
+    }
+
+
+def _recovered_passing_result(model_name: str) -> dict[str, object]:
+    result = _passing_result(model_name)
+    build_record = _recovered_build_record(model_name)
+    build_command = build_record["command"]
+    result["commands"] = [
+        {
+            "label": "build_recovery_attempt_1",
+            "command": build_command,
+            "returncode": -signal.SIGSEGV,
+        },
+        {
+            "label": "build",
+            "command": build_command,
+            "returncode": 0,
+        },
+        {
+            "label": "full_inference_trt",
+            "command": ["trtmc", "run"],
+            "returncode": 0,
+        },
+    ]
+    return result
+
+
 def _write_result(artifacts_dir: Path, model_name: str, result: object) -> None:
     model_dir = artifacts_dir / model_name
     model_dir.mkdir(parents=True)
@@ -624,6 +663,215 @@ def test_verify_results_accepts_complete_passing_result(tmp_path: Path) -> None:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["passed"] is True
     assert report["results"][0]["proof_kind"] == "reference"
+
+
+def test_verify_results_accepts_recovery_matching_verified_build(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    model_name = "decoder-small"
+    _write_result(
+        artifacts_dir,
+        model_name,
+        _recovered_passing_result(model_name),
+    )
+    build_record = _recovered_build_record(model_name)
+    build_report = tmp_path / "engine-build-verification.json"
+    build_report.write_text(
+        json.dumps(
+            {
+                "passed": True,
+                "records": [
+                    {
+                        "identity": model_name,
+                        "passed": True,
+                        "record": build_record,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(
+        "verify-results",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        model_name,
+        "--artifacts-dir",
+        str(artifacts_dir),
+        "--build-verification-report",
+        str(build_report),
+    )
+
+    assert "PASS decoder-small" in result.stdout
+
+
+def test_verify_results_accepts_single_verified_build(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo(tmp_path)
+    artifacts_dir = tmp_path / "artifacts"
+    model_name = "decoder-small"
+    build_record = _recovered_build_record(model_name)
+    build_record["attempt_count"] = 1
+    build_record["recovery_attempts"] = []
+    result_payload = _passing_result(model_name)
+    result_payload["commands"].insert(
+        0,
+        {
+            "label": "build",
+            "command": build_record["command"],
+            "returncode": 0,
+        },
+    )
+    _write_result(artifacts_dir, model_name, result_payload)
+    build_report = tmp_path / "engine-build-verification.json"
+    build_report.write_text(
+        json.dumps(
+            {
+                "passed": True,
+                "records": [
+                    {
+                        "identity": model_name,
+                        "passed": True,
+                        "record": build_record,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(
+        "verify-results",
+        "--repo-root",
+        str(repo_root),
+        "--model",
+        model_name,
+        "--artifacts-dir",
+        str(artifacts_dir),
+        "--build-verification-report",
+        str(build_report),
+    )
+
+    assert "PASS decoder-small" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "failed_report",
+        "records_not_list",
+        "failed_record",
+        "duplicate_identity",
+        "wrapper_identity_mismatch",
+        "unexpected_identity",
+    ],
+)
+def test_verified_build_records_rejects_malformed_report(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    model_name = "decoder-small"
+    raw_record = {
+        "identity": model_name,
+        "passed": True,
+        "record": _recovered_build_record(model_name),
+    }
+    report: dict[str, object] = {
+        "passed": True,
+        "records": [raw_record],
+    }
+    if mutation == "failed_report":
+        report["passed"] = False
+    elif mutation == "records_not_list":
+        report["records"] = {}
+    elif mutation == "failed_record":
+        raw_record["passed"] = False
+    elif mutation == "duplicate_identity":
+        report["records"] = [raw_record, dict(raw_record)]
+    elif mutation == "wrapper_identity_mismatch":
+        raw_record["identity"] = "other-model"
+    else:
+        raw_record["record"] = _recovered_build_record("other-model")
+    report_path = tmp_path / "engine-build-verification.json"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        model_plugin_isolation._load_verified_build_records(
+            report_path,
+            {model_name},
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_recovery_label",
+        "wrong_recovery_signal",
+        "different_recovery_command",
+        "missing_final_build",
+        "wrong_final_label",
+        "failed_final_build",
+        "different_final_command",
+        "duplicate_recovery",
+        "extra_reserved_build_label",
+        "boolean_final_returncode",
+        "ledger_has_no_recovery",
+    ],
+)
+def test_verify_result_rejects_recovery_not_matching_verified_build(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    model_name = "decoder-small"
+    result = _recovered_passing_result(model_name)
+    build_record = _recovered_build_record(model_name)
+    commands = result["commands"]
+    if mutation == "missing_recovery_label":
+        commands[0].pop("label")
+    elif mutation == "wrong_recovery_signal":
+        commands[0]["returncode"] = -signal.SIGABRT
+    elif mutation == "different_recovery_command":
+        commands[0]["command"] = ["python", "-m", "other-builder"]
+    elif mutation == "missing_final_build":
+        commands.pop(1)
+    elif mutation == "wrong_final_label":
+        commands[1]["label"] = "runtime"
+    elif mutation == "failed_final_build":
+        commands[1]["returncode"] = 1
+    elif mutation == "different_final_command":
+        commands[1]["command"] = ["python", "-m", "other-builder"]
+    elif mutation == "duplicate_recovery":
+        commands.insert(1, dict(commands[0]))
+    elif mutation == "extra_reserved_build_label":
+        commands.append(
+            {
+                "label": "build_recovery_attempt_1",
+                "command": build_record["command"],
+                "returncode": 0,
+            }
+        )
+    elif mutation == "boolean_final_returncode":
+        commands[1]["returncode"] = False
+    else:
+        build_record["attempt_count"] = 1
+        build_record["recovery_attempts"] = []
+    _write_result(artifacts_dir, model_name, result)
+
+    verified = model_plugin_isolation._verify_model_result(
+        model_name,
+        model_name,
+        artifacts_dir,
+        build_record,
+    )
+
+    assert verified["passed"] is False
+    assert verified["errors"]
 
 
 @pytest.mark.parametrize(
@@ -819,6 +1067,12 @@ def test_verify_results_uses_first_testcase_when_model_has_no_same_named_case(
                 returncode=1
             ),
             "returncode is 1",
+        ),
+        (
+            lambda result: result["commands"][0].update(
+                returncode=-signal.SIGSEGV
+            ),
+            "returncode is -11",
         ),
     ],
 )

@@ -355,6 +355,7 @@ class FileArtifactSink:
             safe_label = f"cmd_{len(self._commands) + 1}"
 
         entry = {
+            "label": safe_label,
             "command": command,
             "returncode": rc,
             "stdout_len": len(stdout),

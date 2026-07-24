@@ -694,10 +694,129 @@ def _optional_stage_names(result: dict[str, object]) -> set[str]:
     }
 
 
+def _load_verified_build_records(
+    report_path: Path,
+    expected_models: set[str],
+) -> dict[str, dict[str, object]]:
+    try:
+        report = json.loads(_read_text(report_path))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(
+            f"Build verification report could not be read: {report_path}: {exc}"
+        ) from exc
+    if not isinstance(report, dict) or report.get("passed") is not True:
+        raise SystemExit("Build verification report is not a passing object")
+    raw_records = report.get("records")
+    if not isinstance(raw_records, list):
+        raise SystemExit("Build verification report records is not a list")
+
+    records: dict[str, dict[str, object]] = {}
+    for index, raw_record in enumerate(raw_records):
+        if (
+            not isinstance(raw_record, dict)
+            or raw_record.get("passed") is not True
+            or not isinstance(raw_record.get("record"), dict)
+        ):
+            raise SystemExit(
+                f"Build verification report records[{index}] is not a passing record"
+            )
+        record = raw_record["record"]
+        identity = record.get("identity")
+        if (
+            not isinstance(identity, str)
+            or not identity
+            or raw_record.get("identity") != identity
+            or identity in records
+        ):
+            raise SystemExit(
+                f"Build verification report records[{index}] has an invalid identity"
+            )
+        records[identity] = record
+    if set(records) != expected_models:
+        raise SystemExit(
+            "Build verification report identities do not match selected models"
+        )
+    return records
+
+
+def _command_verification_errors(
+    commands: object,
+    build_record: dict[str, object] | None,
+) -> list[str]:
+    if commands is None and build_record is None:
+        return []
+    if not isinstance(commands, list):
+        return ["commands is not a list"]
+
+    errors: list[str] = []
+    verified_prefix_length = 0
+    if build_record is not None:
+        build_command = build_record.get("command")
+        if (
+            not isinstance(build_command, list)
+            or not build_command
+            or not all(isinstance(item, str) and item for item in build_command)
+        ):
+            errors.append("verified build command is not a non-empty string list")
+            build_command = []
+        attempt_count = build_record.get("attempt_count")
+        expected_prefix = (
+            [
+                ("build_recovery_attempt_1", -signal.SIGSEGV),
+                ("build", 0),
+            ]
+            if type(attempt_count) is int and attempt_count == 2
+            else [("build", 0)]
+            if type(attempt_count) is int and attempt_count == 1
+            else []
+        )
+        if not expected_prefix:
+            errors.append(
+                f"verified build attempt_count is {attempt_count!r}, expected 1 or 2"
+            )
+        verified_prefix_length = len(expected_prefix)
+        for index, (expected_label, expected_returncode) in enumerate(expected_prefix):
+            command = commands[index] if index < len(commands) else None
+            valid = (
+                isinstance(command, dict)
+                and command.get("label") == expected_label
+                and command.get("command") == build_command
+                and type(command.get("returncode")) is int
+                and command["returncode"] == expected_returncode
+            )
+            if not valid:
+                errors.append(
+                    f"commands[{index}] does not match verified "
+                    f"{expected_label!r} build evidence"
+                )
+
+    for index, command in enumerate(
+        commands[verified_prefix_length:],
+        start=verified_prefix_length,
+    ):
+        if not isinstance(command, dict):
+            errors.append(f"commands[{index}] is not an object")
+            continue
+        if command.get("label") in {
+            "build",
+            "build_recovery_attempt_1",
+        }:
+            errors.append(
+                f"commands[{index}].label is reserved for verified build evidence"
+            )
+        returncode = command.get("returncode")
+        if type(returncode) is not int or returncode != 0:
+            errors.append(
+                f"commands[{index}].returncode is {returncode!r}, expected 0"
+            )
+    return errors
+
+
 def _verify_model_result(
     model_name: str,
     result_case: str,
     artifacts_dir: Path,
+    build_record: dict[str, object] | None = None,
 ) -> dict[str, object]:
     result_path = artifacts_dir / result_case / "result.json"
     errors: list[str] = []
@@ -762,17 +881,9 @@ def _verify_model_result(
             if not isinstance(metrics, dict):
                 errors.append(f"stage {stage_name!r} metrics is not an object")
 
-    commands = result.get("commands")
-    if commands is not None and not isinstance(commands, list):
-        errors.append("commands is not a list")
-    elif isinstance(commands, list):
-        for index, command in enumerate(commands):
-            if not isinstance(command, dict):
-                errors.append(f"commands[{index}] is not an object")
-            elif command.get("returncode") != 0:
-                errors.append(
-                    f"commands[{index}].returncode is {command.get('returncode')!r}, expected 0"
-                )
+    errors.extend(
+        _command_verification_errors(result.get("commands"), build_record)
+    )
 
     errors.extend(_returncode_failures(result.get("stage_outputs", {}), "stage_outputs"))
     errors = list(dict.fromkeys(errors))
@@ -798,12 +909,21 @@ def command_verify_results(args: argparse.Namespace) -> int:
         raise SystemExit(
             "No E2E manifest found for selected model(s): " + ", ".join(missing_models)
         )
+    build_records = (
+        _load_verified_build_records(
+            args.build_verification_report.resolve(),
+            model_names,
+        )
+        if args.build_verification_report is not None
+        else {}
+    )
 
     results = [
         _verify_model_result(
             model_name,
             manifests[model_name].result_case,
             artifacts_dir,
+            build_records.get(model_name),
         )
         for model_name in sorted(model_names)
     ]
@@ -1128,6 +1248,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_selection_options(verify_results)
     verify_results.add_argument("--artifacts-dir", type=Path, required=True)
+    verify_results.add_argument("--build-verification-report", type=Path)
     verify_results.add_argument("--report", type=Path)
     verify_results.set_defaults(func=command_verify_results)
 

@@ -1981,13 +1981,14 @@ def test_model_proof_enforces_one_full_bundle_build_per_selected_model() -> None
         '"--source-revision"',
         "self.request.revision",
         'self.artifacts / "engine-build-verification.json"',
+        '"--build-verification-report"',
         'self.status.step("engine_build_budget", "passed")',
         '"engine_builds_per_model": verification["builds_per_model"]',
         '"engine_build_count": len(verification["records"])',
     ):
         assert contract in runner
 
-    assert runner.index('"verify-results"') < runner.index('"verify-builds"')
+    assert runner.index('"verify-builds"') < runner.index('"verify-results"')
     assert runner.index('"verify-results"') < runner.index(
         'result.get("proof_kind") for result in e2e_verification.get("results", [])'
     )

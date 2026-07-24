@@ -719,7 +719,14 @@ class ArtifactSink(Protocol):
     results in memory for testing.
     """
 
-    def log_command(self, command: List[str], rc: int, stdout: str, stderr: str) -> None:
+    def log_command(
+        self,
+        command: List[str],
+        rc: int,
+        stdout: str,
+        stderr: str,
+        label: str = "",
+    ) -> None:
         """Record a subprocess invocation and its output."""
         ...
 

@@ -685,12 +685,74 @@ def test_run_preserves_recovered_build_attempt_artifacts(
         -signal.SIGSEGV,
         2,
     ]
+    assert [entry["label"] for entry in data["commands"]] == [
+        "build_recovery_attempt_1",
+        "build",
+    ]
     assert data["artifacts"]["build_recovery_attempt_1_timing_json"] == (
         "build_timing.attempt-1.json"
     )
     log_text = (model_artifacts / "e2e_run.log").read_text(encoding="utf-8")
     assert "[build_recovery_attempt_1] rc=-11" in log_text
     assert "native builder crashed" in log_text
+
+
+def test_run_preserves_recovered_success_for_ledger_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _make_case("recovered-build-success")
+    ctx = _make_ctx(tmp_path, case)
+    bundle_path = Path(ctx.engine_dir) / case.bundle
+    bundle_path.write_bytes(b"bundle")
+    model_artifacts = Path(ctx.artifacts_dir) / case.name
+    model_artifacts.mkdir(parents=True)
+    recovery_timing = model_artifacts / "build_timing.attempt-1.json"
+    recovery_timing.write_text('{"partial": true}\n', encoding="utf-8")
+    command = [sys.executable, "-m", "builder"]
+    build_info = {
+        "command": command,
+        "returncode": 0,
+        "stdout": "",
+        "stderr": "",
+        "recovery_attempts": [
+            {
+                "attempt": 1,
+                "returncode": -signal.SIGSEGV,
+                "stdout": "",
+                "stderr": "native builder crashed",
+                "timing_path": str(recovery_timing),
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        orchestrator,
+        "_resolve_bundle",
+        lambda case, ctx: (str(bundle_path), 0.25, "", build_info),
+    )
+    _patch_plugins(
+        monkeypatch,
+        runner=_FakeRunner(),
+        reference=_FakeReference(),
+        comparator=_FakeComparator(),
+    )
+
+    result = E2EOrchestrator().run(case, ctx)
+
+    assert result.status == E2EStatus.PASS.value
+    data = _read_result_json(ctx, case)
+    assert [
+        (entry["label"], entry["returncode"])
+        for entry in data["commands"]
+    ] == [
+        ("build_recovery_attempt_1", -signal.SIGSEGV),
+        ("build", 0),
+    ]
+    assert data["artifacts"]["build_recovery_attempt_1_timing_json"] == (
+        "build_timing.attempt-1.json"
+    )
+    log_text = (model_artifacts / "e2e_run.log").read_text(encoding="utf-8")
+    assert "[build_recovery_attempt_1] rc=-11" in log_text
 
 
 def test_run_classifies_trt_stage_error(

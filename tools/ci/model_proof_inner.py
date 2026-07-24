@@ -686,6 +686,27 @@ class ModelProofInnerPipeline:
             self.artifacts / "e2e.log",
             updates=environment,
         )
+        self.context.run(
+            [
+                self._python(),
+                self.source / "tools/model_plugin_isolation.py",
+                "verify-builds",
+                "--models-file",
+                models_file,
+                "--ledger-dir",
+                self.artifacts / "engine-builds",
+                "--source-revision",
+                self.request.revision,
+                "--report",
+                self.artifacts / "engine-build-verification.json",
+            ]
+        )
+        verification = json.loads(
+            (self.artifacts / "engine-build-verification.json").read_text(encoding="utf-8")
+        )
+        if verification.get("passed") is not True:
+            raise CiError("engine build verification did not pass")
+        self.status.step("engine_build_budget", "passed")
         self.status.step("result_verification", "running")
         self.context.run(
             [
@@ -698,6 +719,8 @@ class ModelProofInnerPipeline:
                 models_file,
                 "--artifacts-dir",
                 self.artifacts / "e2e",
+                "--build-verification-report",
+                self.artifacts / "engine-build-verification.json",
                 "--report",
                 self.artifacts / "e2e-verification.json",
             ]
@@ -720,27 +743,6 @@ class ModelProofInnerPipeline:
             ),
         )
         self.status.step("result_verification", "passed")
-        self.context.run(
-            [
-                self._python(),
-                self.source / "tools/model_plugin_isolation.py",
-                "verify-builds",
-                "--models-file",
-                models_file,
-                "--ledger-dir",
-                self.artifacts / "engine-builds",
-                "--source-revision",
-                self.request.revision,
-                "--report",
-                self.artifacts / "engine-build-verification.json",
-            ]
-        )
-        self.status.step("engine_build_budget", "passed")
-        verification = json.loads(
-            (self.artifacts / "engine-build-verification.json").read_text(encoding="utf-8")
-        )
-        if verification.get("passed") is not True:
-            raise CiError("engine build verification did not pass")
         verification["e2e_proof_kind"] = e2e_proof_kind
         return verification
 
