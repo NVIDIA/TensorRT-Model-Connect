@@ -192,6 +192,23 @@ void append_video_chunk(ImageResult& result, int32_t& video_frame_offset,
     video_frame_offset += chunk_frames;
 }
 
+void swap_and_rebind_vae_cache_banks(ITrtModule& recurrent, std::vector<void*>& cache_inputs,
+                                     std::vector<void*>& cache_outputs) {
+    std::swap(cache_inputs, cache_outputs);
+    for (int32_t index = 0; index < kVaeCacheCount; ++index) {
+        const auto offset = static_cast<std::size_t>(index);
+        const auto input_name = "cache_" + std::to_string(index);
+        const auto output_name = "cache_out_" + std::to_string(index);
+        recurrent.bind_external(input_name, cache_inputs[offset]);
+        recurrent.bind_external(output_name, cache_outputs[offset]);
+        if (recurrent.device_ptr(input_name) != cache_inputs[offset] ||
+            recurrent.device_ptr(output_name) != cache_outputs[offset]) {
+            throw std::runtime_error("Wan2.2 recurrent VAE cache rebinding failed at index " +
+                                     std::to_string(index));
+        }
+    }
+}
+
 bool same_runtime_shape(const Wan22TI2VRuntimeShape& left, const Wan22TI2VRuntimeShape& right) {
     return std::tie(left.latent_frames, left.latent_height, left.latent_width, left.video_frames,
                     left.video_height, left.video_width, left.latent_count) ==
@@ -432,20 +449,7 @@ ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents,
                                                   kVaeStepOutputFrames, shape, *recurrent),
                                    kVaeStepOutputFrames, shape);
                 if (latent_index + 1 < shape.latent_frames) {
-                    std::swap(cache_inputs, cache_outputs);
-                    for (int32_t index = 0; index < kVaeCacheCount; ++index) {
-                        const auto offset = static_cast<std::size_t>(index);
-                        const auto input_name = "cache_" + std::to_string(index);
-                        const auto output_name = "cache_out_" + std::to_string(index);
-                        recurrent->bind_external(input_name, cache_inputs[offset]);
-                        recurrent->bind_external(output_name, cache_outputs[offset]);
-                        if (recurrent->device_ptr(input_name) != cache_inputs[offset] ||
-                            recurrent->device_ptr(output_name) != cache_outputs[offset]) {
-                            throw std::runtime_error(
-                                "Wan2.2 recurrent VAE cache rebinding failed at index " +
-                                std::to_string(index));
-                        }
-                    }
+                    swap_and_rebind_vae_cache_banks(*recurrent, cache_inputs, cache_outputs);
                 }
                 std::cerr << "[wan2.2-ti2v] VAE latent " << (latent_index + 1) << '/'
                           << shape.latent_frames << '\n';
