@@ -1268,62 +1268,61 @@ def _timing_scope(result: Mapping[str, Any]) -> str | None:
     return str(scope) if scope else None
 
 
-def _timing_path(
-    candidate: Mapping[str, Any], baseline: Mapping[str, Any]
-) -> dict[str, str | None]:
-    candidate_scope = _timing_scope(candidate)
-    baseline_scope = _timing_scope(baseline)
-    public_scopes = {
-        "public_pipeline_call_wall",
-        "public_operation_call_wall",
-        "task-pipeline-call-wall",
-    }
-    if not candidate_scope or not baseline_scope:
-        status = "unavailable"
-    elif candidate_scope == baseline_scope or {
-        candidate_scope,
-        baseline_scope,
-    }.issubset(public_scopes):
-        status = "aligned"
-    else:
-        status = "needs-alignment"
+def _timing_scope_details(result: Mapping[str, Any], side: str) -> dict[str, str]:
+    scope = _timing_scope(result)
+    if not scope:
+        return {
+            "measured": "No timing result",
+            "included": "—",
+            "excluded": "—",
+        }
+    if side == "candidate" and scope == "public_pipeline_call_wall":
+        return {
+            "measured": "public pipeline call",
+            "included": "pipeline-internal preprocessing, inference/generation, returned output",
+            "excluded": "bundle/model load, warmup, request/asset loading, telemetry",
+        }
+    if scope == "public_operation_call_wall":
+        return {
+            "measured": "public operation call",
+            "included": "tokenization, device transfers, model operation, output materialization",
+            "excluded": "model load, compile setup, warmup",
+        }
+    if scope in {"task-model-call-wall", "task-pipeline-call-wall"}:
+        input_scope = (
+            "input preparation included"
+            if result.get("input_preparation_included") is True
+            else "input preparation excluded"
+        )
+        measured = "task model call" if scope == "task-model-call-wall" else "task pipeline call"
+        return {
+            "measured": measured,
+            "included": f"adapter invoke through returned output; {input_scope}",
+            "excluded": "model load, warmup",
+        }
     return {
-        "status": status,
-        "candidate_scope": candidate_scope,
-        "baseline_scope": baseline_scope,
+        "measured": scope,
+        "included": "not declared",
+        "excluded": "not declared",
     }
 
 
-def _timing_scope_label(scope: str | None) -> str:
-    return {
-        "public_pipeline_call_wall": "public pipeline",
-        "public_operation_call_wall": "public operation",
-        "task-pipeline-call-wall": "task pipeline",
-        "task-model-call-wall": "task model only",
-    }.get(scope, scope or "unavailable")
-
-
-def _timing_path_html(row: Mapping[str, Any]) -> str:
-    candidate = row.get("candidate", {})
-    baseline = row.get("baseline", {})
-    if not isinstance(candidate, Mapping):
-        candidate = {}
-    if not isinstance(baseline, Mapping):
-        baseline = {}
-    path = _timing_path(candidate, baseline)
-    status = str(path["status"])
-    label = {
-        "aligned": "Aligned",
-        "needs-alignment": "Needs alignment",
-        "unavailable": "Unavailable",
-    }[status]
-    candidate_label = html.escape(_timing_scope_label(path["candidate_scope"]))
-    baseline_label = html.escape(_timing_scope_label(path["baseline_scope"]))
-    detail = f"TRTMC: {candidate_label}<br>Baseline: {baseline_label}"
-    return (
-        f"<div class='timing-path {status}'>{html.escape(label)}</div>"
-        f"<div class='timing-meta'>{detail}</div>"
-    )
+def _timing_scope_html(row: Mapping[str, Any]) -> str:
+    parts = []
+    for key, label in (("candidate", "TRTMC"), ("baseline", "Baseline")):
+        result = row.get(key, {})
+        if not isinstance(result, Mapping):
+            result = {}
+        details = _timing_scope_details(result, key)
+        parts.append(
+            "<div class='scope-side'>"
+            f"<div class='scope-title'>{label}</div>"
+            f"<div>Measured: {html.escape(details['measured'])}</div>"
+            f"<div>Includes: {html.escape(details['included'])}</div>"
+            f"<div>Excludes: {html.escape(details['excluded'])}</div>"
+            "</div>"
+        )
+    return "".join(parts)
 
 
 def _timing_value_html(result: Any) -> str:
@@ -1386,13 +1385,6 @@ def _report_html(results: Mapping[str, Any]) -> str:
         status: sum(row.get("status") == status for row in rows)
         for status in ("green", "yellow", "red")
     }
-    timing_counts = Counter(
-        _timing_path(
-            row.get("candidate", {}) if isinstance(row.get("candidate"), Mapping) else {},
-            row.get("baseline", {}) if isinstance(row.get("baseline"), Mapping) else {},
-        )["status"]
-        for row in rows
-    )
     body = []
     default_cwd = str(results.get("repository_root", ""))
     for row in rows:
@@ -1401,7 +1393,7 @@ def _report_html(results: Mapping[str, Any]) -> str:
         commands = _raw_commands_html(row, default_cwd)
         candidate_timing = _timing_value_html(row.get("candidate"))
         baseline_timing = _timing_value_html(row.get("baseline"))
-        timing_path = _timing_path_html(row)
+        timing_scope = _timing_scope_html(row)
         body.append(
             "<tr>"
             f"<td>{html.escape(str(row['family']))}</td>"
@@ -1410,9 +1402,8 @@ def _report_html(results: Mapping[str, Any]) -> str:
             f"<td>{html.escape(_baseline_label(row))}</td>"
             f"<td class='timing-value'>{candidate_timing}</td>"
             f"<td class='timing-value'>{baseline_timing}</td>"
-            f"<td>{timing_path}</td>"
+            f"<td>{timing_scope}</td>"
             f"<td class='light'>{_light(status)}</td>"
-            f"<td>{html.escape(status)}</td>"
             f"<td>{reason}</td>"
             f"<td>{commands}</td>"
             "</tr>"
@@ -1424,11 +1415,6 @@ def _report_html(results: Mapping[str, Any]) -> str:
         if repeated_families
         else ""
     )
-    timing_summary = (
-        f"Timing paths: {timing_counts['aligned']} aligned, "
-        f"{timing_counts['needs-alignment']} need alignment, "
-        f"{timing_counts['unavailable']} unavailable."
-    )
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TRTMC release performance matrix</title>
@@ -1439,14 +1425,14 @@ th,td{{border:1px solid #9ca3af;padding:7px;text-align:left;vertical-align:top}}
 th{{background:#e5e7eb}} tr:nth-child(even){{background:#f9fafb}} code{{font-size:12px}}
 .command-label{{font-weight:600;margin-top:8px}} pre{{margin:4px 0 10px;max-width:720px;white-space:pre-wrap;overflow-wrap:anywhere}}
 .light{{font-size:20px;text-align:center}} .timing-value{{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}}
-.timing-meta{{color:#6b7280;font-size:11px;margin-top:2px}} .timing-path{{font-weight:600;white-space:nowrap}}
-.timing-path.aligned{{color:#166534}} .timing-path.needs-alignment{{color:#b45309}} .timing-path.unavailable{{color:#6b7280}}
+.timing-meta{{color:#6b7280;font-size:11px;margin-top:2px}} .scope-side{{font-size:11px;margin-bottom:7px;min-width:270px}}
+.scope-title{{font-size:12px;font-weight:700;margin-bottom:2px}}
 </style></head><body>
 <h1>TRTMC release performance matrix</h1>
 <p class="meta">Generated {generated}. {family_count} families across {len(rows)} family-operation comparisons.{repeated_note}</p>
-<p class="meta">Times are the p50 wall time from the recorded timed samples; model loading and warmup are excluded. {timing_summary} Traffic lights on rows that need timing-path alignment are provisional.</p>
+<p class="meta">Times are the p50 wall time from the recorded timed samples. The measured scope states the recorded timing boundary and the work included and excluded on each side; no alignment judgment is inferred.</p>
 <p><strong>{summary}</strong></p>
-<div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model</th><th>Baseline</th><th>TRTMC p50 (ms)</th><th>Baseline p50 (ms)</th><th>Timing path</th><th>Light</th><th>Status</th><th>Note</th><th>Commands</th></tr></thead>
+<div class="table-wrap"><table><thead><tr><th>Family</th><th>Operation</th><th>Model</th><th>Baseline</th><th>TRTMC p50 (ms)</th><th>Baseline p50 (ms)</th><th>Measured scope</th><th>Light</th><th>Note</th><th>Commands</th></tr></thead>
 <tbody>{"".join(body)}</tbody></table></div>
 <p class="meta">Green: TRTMC is more than the configured margin faster. Yellow: within the margin. Red: TRTMC is more than the margin slower. White: not run, partial, or invalid comparison. Commands are the original recorded argv and must be run from the displayed working directory with the same model cache and dependencies.</p>
 </body></html>"""

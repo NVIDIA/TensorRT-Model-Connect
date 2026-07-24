@@ -45,17 +45,12 @@ artifacts/perf/report.html
 ```
 
 `results.json` is internal evidence and contains raw samples. `report.html` shows the p50
-wall time calculated from those samples, the sample count, the recorded timing scope for both
-sides, and the green/yellow/red/white category. It does not expose the individual raw samples.
-Temporary per-backend files are merged into `results.json` and removed after the run.
-
-Timing-path status is separate from the traffic light:
-
-- `Aligned` means both sides measure the public operation or task-pipeline wall-time class.
-- `Needs alignment` means one side measures only a model call while the other measures a
-  public pipeline call. Its traffic light is provisional until the baseline is moved to the
-  same boundary and rerun.
-- `Unavailable` means one side did not produce timing evidence.
+wall time calculated from those samples, the sample count, the green/yellow/red/white category,
+and a factual timing description for each side. The timing description states the measured
+call boundary and the work included and excluded; it does not infer whether two boundaries are
+aligned. A side without samples is labeled `No timing result`. The report does not expose the
+individual raw samples. Temporary per-backend files are merged into `results.json` and removed
+after the run.
 
 Expand `Commands` for any row in `report.html` to see the original `trtmc-bench` and baseline
 commands exactly as they were executed. The report also shows the recorded working directory;

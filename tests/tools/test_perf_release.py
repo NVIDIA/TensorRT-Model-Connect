@@ -268,31 +268,30 @@ def test_exact_text_contract_is_explicit_and_still_strict() -> None:
     assert status == "green"
 
 
-def test_timing_path_alignment_distinguishes_public_and_model_only_calls() -> None:
-    candidate = {"measurement_policy": {"timing_scope": "public_pipeline_call_wall"}}
-    public_baseline = {"measurement_policy": {"timing_scope": "public_operation_call_wall"}}
-    model_only_baseline = {"timing_scope": "task-model-call-wall"}
-    task_pipeline_baseline = {"timing_scope": "task-pipeline-call-wall"}
+def test_timing_scope_details_state_measured_included_and_excluded_work() -> None:
+    candidate = {
+        "measurement_policy": {
+            "timing_scope": "public_pipeline_call_wall",
+            "load_excluded": True,
+            "warmup_excluded": True,
+            "telemetry_in_timed_path": False,
+        }
+    }
+    model_only_baseline = {
+        "timing_scope": "task-model-call-wall",
+        "input_preparation_included": False,
+        "model_load_included": False,
+    }
 
-    assert perf_release._timing_path(candidate, public_baseline) == {
-        "status": "aligned",
-        "candidate_scope": "public_pipeline_call_wall",
-        "baseline_scope": "public_operation_call_wall",
+    assert perf_release._timing_scope_details(candidate, "candidate") == {
+        "measured": "public pipeline call",
+        "included": "pipeline-internal preprocessing, inference/generation, returned output",
+        "excluded": "bundle/model load, warmup, request/asset loading, telemetry",
     }
-    assert perf_release._timing_path(candidate, model_only_baseline) == {
-        "status": "needs-alignment",
-        "candidate_scope": "public_pipeline_call_wall",
-        "baseline_scope": "task-model-call-wall",
-    }
-    assert perf_release._timing_path(candidate, task_pipeline_baseline) == {
-        "status": "aligned",
-        "candidate_scope": "public_pipeline_call_wall",
-        "baseline_scope": "task-pipeline-call-wall",
-    }
-    assert perf_release._timing_path(candidate, {}) == {
-        "status": "unavailable",
-        "candidate_scope": "public_pipeline_call_wall",
-        "baseline_scope": None,
+    assert perf_release._timing_scope_details(model_only_baseline, "baseline") == {
+        "measured": "task model call",
+        "included": "adapter invoke through returned output; input preparation excluded",
+        "excluded": "model load, warmup",
     }
 
 
@@ -417,9 +416,14 @@ def test_run_consolidates_results_and_records_replayable_commands(tmp_path: Path
     assert "Baseline p50 (ms)" in report
     assert ">10.450<" in report
     assert ">20.450<" in report
-    assert "Aligned" in report
-    assert "public pipeline" in report
-    assert "public operation" in report
+    assert "<th>Status</th>" not in report
+    assert "<td>green</td>" not in report
+    assert "Needs alignment" not in report
+    assert "Measured scope" in report
+    assert "Measured: public pipeline call" in report
+    assert "Measured: public operation call" in report
+    assert "Includes: pipeline-internal preprocessing, inference/generation, returned output" in report
+    assert "Excludes: model load, compile setup, warmup" in report
     assert "Show raw commands" in report
     assert str(fake_trtmc) in report
     assert str(fake_baseline) in report
