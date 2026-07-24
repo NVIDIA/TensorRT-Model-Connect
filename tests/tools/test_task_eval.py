@@ -3514,6 +3514,15 @@ def test_run_diffusion_trtfb_writes_image_artifact_predictions(
                     "frame_stats": {"mean": 0.5, "std": 0.2},
                     "prompt": case.inputs["prompt"],
                 },
+                metadata={
+                    "command": [
+                        "build/trtmc",
+                        "generate-video",
+                        str(tmp_path / "bundles" / "flux-schnell-l0.trtfb"),
+                        "--prompt",
+                        case.inputs["prompt"],
+                    ]
+                },
                 timing_s=0.5,
             )
 
@@ -3546,6 +3555,11 @@ def test_run_diffusion_trtfb_writes_image_artifact_predictions(
     assert seen == [("a red cube", "build/trtmc", "flux-schnell-l0.trtfb")]
     assert predictions["responses"][0]["source"] == "trtfb"
     assert predictions["responses"][0]["num_frames"] == 1
+    assert (work_dir / "trtfb_run.log").read_text(encoding="utf-8") == (
+        "$ build/trtmc generate-video "
+        f"{tmp_path / 'bundles' / 'flux-schnell-l0.trtfb'} "
+        "--prompt 'a red cube'\n"
+    )
 
 
 def test_compare_diffusion_image_predictions_aggregates_model_comparator_metrics(

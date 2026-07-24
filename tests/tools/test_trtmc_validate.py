@@ -182,7 +182,77 @@ def test_write_report_links_each_comparison(tmp_path):
     }
     assert json_path == tmp_path / "report.json"
     assert html_path == tmp_path / "report.html"
-    assert "model-a/workload-a/comparison.json" in html_path.read_text(encoding="utf-8")
+    document = html_path.read_text(encoding="utf-8")
+    assert "model-a/workload-a/comparison.json" in document
+    assert "Vanilla reproduction" in document
+    assert "Reference 1 · TRTMC 1" in document
+    assert "$ python hf.py" in document
+    assert "$ trtmc run" in document
+
+
+def test_write_report_does_not_render_validation_wrapper(tmp_path):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    case_dir.mkdir(parents=True)
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "failed",
+                "reproduce": {
+                    "hf": ["python hf.py --prompt '<hello>'"],
+                    "trtmc": [],
+                    "validation": "python tools/trtmc_validate.py model-a",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, html_path, _ = trtmc_validate.write_report(tmp_path)
+
+    document = html_path.read_text(encoding="utf-8")
+    assert "python hf.py --prompt &#x27;&lt;hello&gt;&#x27;" in document
+    assert "Not reached; see comparison.json." in document
+    assert "python tools/trtmc_validate.py" not in document
+
+
+def test_write_report_recovers_json_logged_runner_command(tmp_path):
+    case_dir = tmp_path / "model-a" / "workload-a"
+    work_dir = case_dir / "task-eval"
+    work_dir.mkdir(parents=True)
+    (work_dir / "trtfb_run.log").write_text(
+        json.dumps(
+            {
+                "sample_id": "sample-1",
+                "command": ["trtmc", "solve", "model.trtfb", "--field-input", "1,2"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (case_dir / "comparison.json").write_text(
+        json.dumps(
+            {
+                "model": "model-a",
+                "workload": "workload-a",
+                "status": "passed",
+                "raw_result": {"work_dir": str(work_dir)},
+                "reproduce": {"hf": ["python hf.py"], "trtmc": ["trtmc build"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    _, html_path, report = trtmc_validate.write_report(tmp_path)
+
+    assert report["results"][0]["reproduce"]["trtmc"] == [
+        "trtmc build",
+        "trtmc solve model.trtfb --field-input 1,2",
+    ]
+    assert "$ trtmc solve model.trtfb --field-input 1,2" in html_path.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_run_metadata_records_source_and_exact_command(monkeypatch, tmp_path):

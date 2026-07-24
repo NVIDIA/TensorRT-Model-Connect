@@ -389,12 +389,27 @@ def _commands_from_logs(root: Path) -> dict[str, list[str]]:
     for path in sorted(root.rglob("*.log")):
         kind = "hf" if "hf" in path.name.lower() else "trtmc"
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if not line.startswith("$ "):
-                continue
-            value = line[2:].strip()
+            value = _command_from_log_line(line)
             if value and value not in commands[kind]:
                 commands[kind].append(value)
     return commands
+
+
+def _command_from_log_line(line: str) -> str:
+    if line.startswith("$ "):
+        return line[2:].strip()
+    try:
+        data = json.loads(line)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    command = data.get("command")
+    if isinstance(command, list) and command:
+        return shlex.join(str(token) for token in command)
+    if isinstance(command, str):
+        return command.strip()
+    return ""
 
 
 def _append_unique(commands: dict[str, list[str]], kind: str, command: str) -> None:
@@ -618,9 +633,67 @@ def _report_provenance(run: Mapping[str, Any]) -> str:
     return " · ".join(f"{name}={value}" for name, value in fields if value)
 
 
+def _merge_commands_from_result_logs(result: dict[str, Any]) -> None:
+    raw_result = result.get("raw_result", {})
+    work_dir = raw_result.get("work_dir") if isinstance(raw_result, dict) else None
+    if not work_dir:
+        return
+    root = Path(str(work_dir))
+    if not root.is_dir():
+        return
+    discovered = _commands_from_logs(root)
+    reproduce = result.setdefault("reproduce", {})
+    if not isinstance(reproduce, dict):
+        return
+    for kind in ("hf", "trtmc"):
+        commands = reproduce.setdefault(kind, [])
+        if not isinstance(commands, list):
+            continue
+        for command in discovered[kind]:
+            if command not in commands:
+                commands.append(command)
+
+
+def _result_commands(result: Mapping[str, Any], kind: str) -> list[str]:
+    reproduce = result.get("reproduce", {})
+    if not isinstance(reproduce, dict):
+        return []
+    commands = reproduce.get(kind, [])
+    if not isinstance(commands, list):
+        return []
+    return [str(command) for command in commands if str(command).strip()]
+
+
+def _render_command_group(label: str, commands: Sequence[str]) -> str:
+    if not commands:
+        body = '<span class="unavailable">Not reached; see comparison.json.</span>'
+    else:
+        shell = "\n".join(f"$ {command}" for command in commands)
+        body = f"<pre><code>{html.escape(shell)}</code></pre>"
+    return f"<h4>{html.escape(label)}</h4>{body}"
+
+
+def _render_reproduction(result: Mapping[str, Any]) -> str:
+    reference_commands = _result_commands(result, "hf")
+    trtmc_commands = _result_commands(result, "trtmc")
+    summary = (
+        f"Reference {len(reference_commands)} · "
+        f"TRTMC {len(trtmc_commands)}"
+    )
+    return (
+        f"<details><summary>{summary}</summary>"
+        '<div class="commands">'
+        f"{_render_command_group('Reference', reference_commands)}"
+        f"{_render_command_group('TRTMC', trtmc_commands)}"
+        "</div></details>"
+    )
+
+
 def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
     result_paths = sorted(output.glob("*/*/comparison.json"))
     results = [json.loads(path.read_text(encoding="utf-8")) for path in result_paths]
+    for result in results:
+        _merge_commands_from_result_logs(result)
     counts = {
         name: sum(result.get("status") == name for result in results)
         for name in ("passed", "failed", "skipped")
@@ -654,6 +727,7 @@ def write_report(output: Path) -> tuple[Path, Path, dict[str, Any]]:
             f"<td>{html.escape(str(result.get('workload', '')))}</td>"
             f'<td class="{html.escape(status)}">{html.escape(status)}</td>'
             f"<td>{html.escape(environments)}</td>"
+            f"<td>{_render_reproduction(result)}</td>"
             f'<td><a href="{html.escape(str(relative))}">comparison.json</a></td>'
             "</tr>"
         )
@@ -668,6 +742,13 @@ h1 {{ margin-bottom: 4px; }}
 table {{ border-collapse: collapse; width: 100%; }}
 th, td {{ border: 1px solid #dadce0; padding: 8px 10px; text-align: left; }}
 th {{ background: #f8f9fa; }}
+details {{ min-width: 210px; }}
+summary {{ cursor: pointer; color: #185abc; }}
+.commands {{ min-width: min(760px, 70vw); padding: 4px 0; }}
+.commands h4 {{ margin: 12px 0 4px; }}
+pre {{ margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere;
+       background: #f8f9fa; border: 1px solid #dadce0; border-radius: 4px; }}
+.unavailable {{ color: #5f6368; }}
 .passed {{ color: #137333; font-weight: 600; }}
 .failed {{ color: #b3261e; font-weight: 600; }}
 .skipped {{ color: #8a4f00; font-weight: 600; }}
@@ -677,7 +758,7 @@ th {{ background: #f8f9fa; }}
 {counts["passed"]} passed · {counts["failed"]} failed · {counts["skipped"]} skipped<br>
 {html.escape(provenance)}</div>
 <table><thead><tr><th>Model</th><th>Workload</th><th>Status</th>
-<th>Reference environment</th><th>Result</th></tr></thead>
+<th>Reference environment</th><th>Vanilla reproduction</th><th>Result</th></tr></thead>
 <tbody>{"".join(rows)}</tbody></table>
 </body></html>
 """

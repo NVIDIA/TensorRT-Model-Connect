@@ -7619,9 +7619,13 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     raw_path = work_dir / (args.raw_output or "trtfb_raw.jsonl")
     pred_path = work_dir / (args.predictions or "trtfb_predictions.json")
+    log_path = work_dir / (getattr(args, "log", "") or "trtfb_run.log")
     bundle_path = Path(args.bundle).resolve()
     responses: list[dict[str, Any]] = []
-    with raw_path.open("w", encoding="utf-8") as raw_file:
+    with (
+        raw_path.open("w", encoding="utf-8") as raw_file,
+        log_path.open("w", encoding="utf-8") as log_file,
+    ):
         for index, prompt_row in enumerate(prompt_rows):
             case = _diffusion_case_for_prompt(template, prompt_row, generation, index)
             case.bundle = bundle_path.name
@@ -7637,6 +7641,18 @@ def run_diffusion_trtfb(args: argparse.Namespace) -> None:
             output = runner.run_stage(
                 case, _diffusion_end_to_end_stage(case), context
             )
+            command = (
+                output.metadata.get("command")
+                if isinstance(output.metadata, dict)
+                else None
+            )
+            if isinstance(command, list) and command:
+                log_file.write(
+                    f"$ {shlex.join(str(token) for token in command)}\n"
+                )
+            elif isinstance(command, str) and command:
+                log_file.write(f"$ {command}\n")
+            log_file.flush()
             response = _diffusion_response(case.name, "trtfb", output, case=case)
             response["prompt"] = str(prompt_row["prompt"])
             if response["returncode"] != 0 or response["num_frames"] < 1:
